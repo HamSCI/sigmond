@@ -613,6 +613,65 @@ def rule_ka9q_python_compat(view: SystemView) -> RuleResult:
     )
 
 
+def rule_data_path_upstream(view: SystemView) -> RuleResult:
+    """CONTRACT-v0.5 §16.3.1: meta-clients name an upstream sibling.
+
+    For every instance whose ``data_path.kind == "file"`` and whose
+    ``details.upstream_client`` is set, verify the named sibling exists
+    in the catalog.  A meta-client that names an unknown upstream is
+    not a hard failure — the meta-client may still function — but it
+    means sigmond cannot cross-reference the upstream's inventory for
+    the radiod-side facts that live there, so we surface a warn.
+    """
+    from .catalog import load_catalog, get_entry
+
+    try:
+        catalog = load_catalog()
+    except Exception:
+        return RuleResult(
+            "data_path_upstream", "pass",
+            "skipped (catalog unavailable)", [],
+        )
+
+    unresolved: list[str] = []
+    affected: list[str] = []
+    checked = 0
+    for cv in view.client_views.values():
+        for iv in cv.instances:
+            dp = iv.data_path
+            if not isinstance(dp, dict):
+                continue
+            if dp.get("kind") != "file":
+                continue
+            details = dp.get("details") or {}
+            upstream = details.get("upstream_client")
+            if not upstream:
+                continue            # replay/test data — no upstream named
+            checked += 1
+            if get_entry(upstream, catalog) is None:
+                unresolved.append(
+                    f"{cv.client_type}@{iv.instance} → {upstream}"
+                )
+                affected.append(cv.client_type)
+
+    if unresolved:
+        return RuleResult(
+            "data_path_upstream", "warn",
+            "meta-client(s) name upstream sibling not in catalog: "
+            + "; ".join(unresolved),
+            sorted(set(affected)),
+        )
+    if checked == 0:
+        return RuleResult(
+            "data_path_upstream", "pass",
+            "skipped (no meta-client instances declare upstream)", [],
+        )
+    return RuleResult(
+        "data_path_upstream", "pass",
+        f"all {checked} meta-client upstream(s) resolved", [],
+    )
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,
@@ -621,6 +680,7 @@ ALL_RULES = [
     rule_disk_budget,
     rule_channel_count,
     rule_ka9q_python_compat,
+    rule_data_path_upstream,
 ]
 
 # Rules that read live /sys, /proc, and systemctl state.  Kept out of

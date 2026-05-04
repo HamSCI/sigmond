@@ -3156,6 +3156,11 @@ def cmd_status(args) -> int:
                     parts.append(f'modes={",".join(str(m) for m in modes)}')
                 elif freqs:
                     parts.append(f'{len(freqs)} freqs')
+                if _HAS_SIGMOND_LIB:
+                    from sigmond.ui import format_data_path_tag
+                    tag = format_data_path_tag(inst.get('data_path'))
+                    if tag:
+                        parts.append(tag)
                 _info(f'{name}: {", ".join(parts)}' if parts else name)
             for issue in issues:
                 sev = issue.get('severity', 'warn') if isinstance(issue, dict) else 'warn'

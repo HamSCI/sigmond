@@ -19,6 +19,7 @@ from sigmond import harmonize
 from sigmond.harmonize import (
     ALL_RULES, ALL_RUNTIME_RULES, _parse_cores,
     rule_cpu_isolation, rule_cpu_isolation_runtime,
+    rule_data_path_upstream,
     rule_frequency_coverage, rule_gpsdo_governor_coverage,
     rule_kernel_rcvbuf_adequate,
     rule_radiod_resolution, rule_timing_chain,
@@ -164,6 +165,60 @@ class TestTimingChain(unittest.TestCase):
             clients=[ClientInstance("hf-timestd", "default", radiod_id="k3lr")],
         )
         r = rule_timing_chain(_make_view(coord))
+        self.assertEqual(r.severity, "pass")
+
+
+class TestDataPathUpstream(unittest.TestCase):
+    """CONTRACT-v0.5 §16.3.1: meta-clients must name a known sibling."""
+
+    def _view_with_meta_client(self, upstream: str | None) -> SystemView:
+        cv = ClientView(client_type="wsprdaemon", installed=True)
+        details = {"spool": "/var/spool/wsprdaemon/recording/X"}
+        if upstream is not None:
+            details["upstream_client"] = upstream
+        cv.instances.append(InstanceView(
+            instance="ka9q_0-20",
+            data_path={"kind": "file", "details": details},
+        ))
+        return _make_view(Coordination(), {"wsprdaemon-client": cv})
+
+    def test_skipped_when_no_meta_client(self):
+        cv = ClientView(client_type="psk-recorder", installed=True)
+        cv.instances.append(InstanceView(
+            instance="default",
+            data_path={"kind": "radiod-ka9q-python", "radiod_id": "k3lr"},
+        ))
+        view = _make_view(Coordination(), {"psk-recorder": cv})
+        r = rule_data_path_upstream(view)
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_skipped_when_file_without_upstream(self):
+        """Replay/test data: kind=file with no upstream_client is fine."""
+        view = self._view_with_meta_client(upstream=None)
+        r = rule_data_path_upstream(view)
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_warns_when_upstream_unknown(self):
+        view = self._view_with_meta_client(upstream="not-a-real-client")
+        r = rule_data_path_upstream(view)
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("not-a-real-client", r.message)
+        self.assertIn("wsprdaemon", r.affected)
+
+    def test_passes_when_upstream_in_catalog(self):
+        # wspr-recorder is a real catalog entry shipped by sigmond.
+        view = self._view_with_meta_client(upstream="wspr-recorder")
+        r = rule_data_path_upstream(view)
+        self.assertEqual(r.severity, "pass")
+        self.assertNotIn("skipped", r.message)
+
+    def test_handles_missing_data_path(self):
+        cv = ClientView(client_type="legacy", installed=True)
+        cv.instances.append(InstanceView(instance="default"))   # no data_path
+        view = _make_view(Coordination(), {"legacy": cv})
+        r = rule_data_path_upstream(view)
         self.assertEqual(r.severity, "pass")
 
 
