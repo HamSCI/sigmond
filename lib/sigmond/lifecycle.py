@@ -1,6 +1,6 @@
 """Sigmond lifecycle management — systemd unit resolution and control.
 
-Implements §5 of CONTRACT-v0.5-DRAFT.md: unit enumeration from deploy.toml,
+Implements §5 of CLIENT-CONTRACT.md: unit enumeration from deploy.toml,
 templated-unit instance discovery, and lifecycle verb scope.
 """
 

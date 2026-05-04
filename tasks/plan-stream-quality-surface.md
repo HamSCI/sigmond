@@ -195,7 +195,7 @@ Consumer-flagged issues (hf-timestd's own significance calls) already flow throu
 
 **Tasks:**
 - [ ] Add a "Consumer-side stream quality" section to [docs/PACKET-LOSS-DIAGNOSTICS.md](sigmond/docs/PACKET-LOSS-DIAGNOSTICS.md) — what `hf-timestd quality --json` shows, how to read the rate fields, what the validate-issue thresholds catch.
-- [ ] Update [docs/CLIENT-CONTRACT.md](sigmond/docs/CLIENT-CONTRACT.md) (or [docs/CONTRACT-v0.5-DRAFT.md](sigmond/docs/CONTRACT-v0.5-DRAFT.md)) with a §16 describing the optional `quality --json` subcommand: shape, cadence, freshness contract.
+- [ ] Update [docs/CLIENT-CONTRACT.md](sigmond/docs/CLIENT-CONTRACT.md) — note: §16 is now occupied by independent data-source clients post-Phase-E fold; the `quality --json` subcommand needs a new section number, likely §17.
 
 ---
 
