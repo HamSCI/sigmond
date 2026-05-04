@@ -37,6 +37,8 @@ smd config edit <c>      Invoke a client's edit flow, or $EDITOR fallback
 smd config init radiod   Sigmond-owned wizard: probe USB, render radiod@<id>.conf
                          per SDR, register in coordination.toml (CONTRACT-v0.5 §14.4)
 smd validate             Cross-client harmonization rules (read-only)
+smd ka9q-watch           Compare pinned ka9q-radio commit vs upstream and
+                         flag changes that would break RTP delivery
 smd update               Pull latest code and re-apply
 smd diag                 Network + deps + client validation diagnostics
 smd tui                  Launch interactive TUI configurator
@@ -95,6 +97,15 @@ smd environment list|probe|describe   Situational awareness of network peers
     `lib/sigmond/discovery/`) — situational awareness of network peers:
     mDNS discovery of KIWISDRs and GPSDOs, IGMP multicast probing, NTP
     client probing, HTTP discovery. Powers `smd environment` and TUI screens.
+
+13. **ka9q-radio drift watcher** (`lib/sigmond/commands/ka9q_watch.py`) —
+    thin wrapper around `ka9q-python/scripts/check_upstream_drift.py`.
+    Compares the pinned ka9q-radio commit against `origin/main` and
+    classifies the delta as pass / warn / fail (red = stream-critical
+    field shifted, RTP delivery to clients would break). Read-only, no
+    sudo. Surfaced as `smd ka9q-watch` and as the TUI Observe →
+    ka9q-watch screen. Operator-triggered; no scheduler installed —
+    rerun manually before deploying a new ka9q-radio build.
 
 ## Implemented TUI screens
 

@@ -49,6 +49,7 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
 
 try:
     from sigmond.commands.validate    import cmd_validate
+    from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
     from sigmond.commands.config      import cmd_config_show, cmd_config_migrate
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
@@ -4539,6 +4540,25 @@ def main() -> int:
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
 
+    # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
+    p = sub.add_parser('ka9q-watch',
+                       help='check ka9q-radio upstream for changes that could '
+                            'break ka9q-python RTP clients')
+    p.add_argument('--ka9q-python', metavar='PATH',
+                   help='path to ka9q-python checkout '
+                        '(default: $KA9Q_PYTHON_PATH or /opt/git/sigmond/ka9q-python)')
+    p.add_argument('--ka9q-radio', metavar='PATH',
+                   help='path to ka9q-radio checkout '
+                        '(default: $KA9Q_RADIO_PATH or /opt/git/sigmond/ka9q-radio)')
+    p.add_argument('--remote', default='origin',
+                   help='git remote to compare against (default: origin)')
+    p.add_argument('--branch', default='main',
+                   help='upstream branch to compare against (default: main)')
+    p.add_argument('--no-fetch', action='store_true',
+                   help="skip 'git fetch' (use local refs as-is)")
+    p.add_argument('--json', action='store_true',
+                   help='emit machine-readable JSON')
+
     # config (Phase 1)
     p_config = sub.add_parser('config',
                               help='inspect or migrate sigmond coordination config')
@@ -4658,13 +4678,15 @@ def main() -> int:
             return cmd_diag_net(args)
         return cmd_diag(args)
 
-    if args.command in ('validate', 'config', 'environment'):
+    if args.command in ('validate', 'config', 'environment', 'ka9q-watch'):
         if not _HAS_SIGMOND_LIB:
             print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
                   file=sys.stderr)
             return 1
         if args.command == 'validate':
             return cmd_validate(args)
+        if args.command == 'ka9q-watch':
+            return cmd_ka9q_watch(args)
         if args.command == 'environment':
             env_cmd = getattr(args, 'env_command', None)
             if env_cmd == 'list':

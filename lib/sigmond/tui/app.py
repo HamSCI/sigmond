@@ -144,6 +144,7 @@ class SigmondApp(App):
         Binding("b", "show_backup", "Backup"),
         Binding("R", "show_restore", "Restore"),
         Binding("C", "show_client_config", "Client config"),
+        Binding("K", "show_ka9q_watch", "ka9q-watch"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -703,6 +704,27 @@ class SigmondApp(App):
             "config file.\n\n"
             "Library-kind catalog entries (e.g. ka9q-python) are "
             "excluded — they have no operator-facing config.",
+        )
+
+    def action_show_ka9q_watch(self) -> None:
+        from .screens.ka9q_watch import Ka9qWatchScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(Ka9qWatchScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "ka9q-watch",
+            "Compare the pinned ka9q-radio commit (ka9q_radio_compat) "
+            "against origin/main.  Read-only — no sudo, no mutation.\n\n"
+            "Severity:\n"
+            "  green  — no upstream change, or no header touched\n"
+            "  yellow — header touched but no stream-critical field\n"
+            "  red    — stream-critical field shifted; advancing the "
+            "pin without updating ka9q-python would break RTP "
+            "delivery to clients.\n\n"
+            "Refresh — re-run with cached refs.\n"
+            "Refresh + git fetch — pull latest from upstream first.\n\n"
+            "CLI equivalent: `smd ka9q-watch`.",
         )
 
     def action_show_update(self) -> None:

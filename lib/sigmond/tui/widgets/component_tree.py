@@ -54,6 +54,7 @@ class ComponentTree(Tree):
         observe.add_leaf("\u2316 Environment",     data={"screen": "environment"})
         observe.add_leaf("\u2261 Logs",        data={"screen": "logs"})
         observe.add_leaf("\u2714 Validate",    data={"screen": "validate"})
+        observe.add_leaf("\u25ce ka9q-watch",  data={"screen": "ka9q_watch"})
         observe.add_leaf("\u2726 Diag: net",   data={"screen": "diag_net"})
 
         operate = self.root.add("Operate", expand=True)
@@ -112,6 +113,8 @@ class ComponentTree(Tree):
             self.app.action_show_config()
         elif screen == "client_config":
             self.app.action_show_client_config()
+        elif screen == "ka9q_watch":
+            self.app.action_show_ka9q_watch()
         elif screen == "diag_net":
             self.app.action_show_diag_net()
         elif screen == "environment":
