@@ -42,12 +42,25 @@ service lifecycle, log aggregation, diagnostics, and resource arbitration.
 ### 1. Install sigmond
 
 ```bash
-sudo git clone https://github.com/mijahauan/sigmond /opt/git/sigmond
-sudo /opt/git/sigmond/bin/smd install
+git clone https://github.com/mijahauan/sigmond ~/sigmond
+bash ~/sigmond/install.sh
 ```
 
 This installs the `smd` command to `/usr/local/sbin/smd` and creates
 `/etc/sigmond/`.
+
+> **Running under Proxmox?** `install.sh` detects KVM guests and offers
+> to configure the Proxmox host (PCIe passthrough, CPU isolation, vfio,
+> hookscript) before installing sigmond — one prompt, one host reboot,
+> automatic resume. See [`docs/installation-guide.md`](docs/installation-guide.md)
+> "Running under Proxmox VE? Read this first."
+
+For the legacy in-place layout under `/opt/git/sigmond`:
+
+```bash
+sudo git clone https://github.com/mijahauan/sigmond /opt/git/sigmond
+sudo /opt/git/sigmond/bin/smd install
+```
 
 ### 2. See what's available
 

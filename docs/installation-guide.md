@@ -22,6 +22,39 @@ SDR receiver.
 
 ---
 
+## Running under Proxmox VE? Read this first
+
+If your station is a Debian 13 VM running under Proxmox VE, sigmond's
+`install.sh` will detect the KVM environment and offer to configure
+the Proxmox **host** automatically — PCIe USB-controller passthrough,
+vfio binding, CPU isolation, hookscript, and one host reboot. After
+the reboot, sigmond resumes itself and finishes the in-VM install.
+
+What you need before starting:
+- BIOS configured per [`docs/proxmox/wsprdaemon-proxmox-bios-checklist.md`](proxmox/wsprdaemon-proxmox-bios-checklist.md). Sigmond does not configure BIOS.
+- Debian 13 VM created in Proxmox with adequate RAM/disk.
+- A non-root user inside the VM with sudo access (see §1.1 below).
+- The Proxmox host's name or IP, and one-time use of its **root**
+  password (for `ssh-copy-id`). After that, all host commands run
+  via SSH key.
+
+Quick start:
+
+```bash
+git clone https://github.com/mijahauan/sigmond ~/sigmond
+bash ~/sigmond/install.sh
+# answer "y" to the "Proxmox passthrough setup?" prompt
+# enter the Proxmox host name/IP when asked
+# enter the host root password once when ssh-copy-id prompts
+# wait through the host reboot — VM auto-resumes, install completes
+```
+
+The full Proxmox flow is documented in [`docs/proxmox/`](proxmox/) and in
+[`tasks/plan-proxmox-vm-bootstrap.md`](../tasks/plan-proxmox-vm-bootstrap.md).
+Bare-metal users see no new prompts and can skip to §1 below.
+
+---
+
 ## 1. Prepare the System
 
 ### 1.1 Ensure sudo access

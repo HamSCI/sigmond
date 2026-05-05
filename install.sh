@@ -37,6 +37,31 @@ ok()   { echo -e "${GREEN}[  ok  ]${NC} $*"; }
 warn() { echo -e "${YELLOW}[ warn ]${NC} $*"; }
 die()  { echo -e "${RED}[error ]${NC} $*" >&2; exit 1; }
 
+# ─── Proxmox VM detection (auto-skip when not applicable) ────────────────────
+# Running in a KVM guest with no prior install state? Offer to run the
+# Proxmox host passthrough bootstrap first. Bare-metal hosts (virt=none)
+# and resume runs (state file present, or env var set, or no TTY) skip
+# this entirely — existing flow is untouched.
+_virt="$(systemd-detect-virt 2>/dev/null || echo none)"
+_state_file="/etc/sigmond/install-state.env"
+if [[ "$_virt" == "kvm" \
+      && -z "${SIGMOND_SKIP_PROXMOX_PROMPT:-}" \
+      && ! -f "$_state_file" \
+      && -e /dev/tty \
+      && -x "$REPO_DIR/scripts/proxmox/bootstrap.sh" ]]; then
+    info "Detected KVM guest. Sigmond can configure the Proxmox host's PCIe USB"
+    info "passthrough, CPU isolation, and vfio binding — required for full"
+    info "bare-metal SDR performance with RX-888 or similar."
+    printf '%b[?]%b Run Proxmox passthrough setup first? [y/N]: ' "$YELLOW" "$NC" >/dev/tty
+    read -r _resp </dev/tty || _resp=""
+    if [[ "$_resp" =~ ^[Yy] ]]; then
+        info "handing off to scripts/proxmox/bootstrap.sh…"
+        exec bash "$REPO_DIR/scripts/proxmox/bootstrap.sh"
+    fi
+    info "skipping Proxmox setup — proceeding with bare-metal install."
+fi
+unset _virt _state_file _resp
+
 echo -e "${BOLD}"
 echo "  ┌─────────────────────────────────────────────┐"
 echo "  │  Dr. SigMonD — HamSCI SDR suite manager     │"

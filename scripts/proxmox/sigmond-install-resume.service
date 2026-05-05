@@ -1,0 +1,16 @@
+[Unit]
+Description=Sigmond — resume Proxmox install after reboot
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/sigmond/install-state.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+EnvironmentFile=/etc/sigmond/install-state.env
+ExecStart=/bin/bash -c 'exec "$SIGMOND_REPO/scripts/proxmox/bootstrap.sh" --resume'
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
