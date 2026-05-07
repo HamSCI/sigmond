@@ -3,22 +3,37 @@
 
 Dr. SigMonD: "Zo... ven did your signals first start to propagate?"
 
-Usage:
-    smd install    [<client>]  [--components COMP,...]  [--dry-run]  [--yes]
-    smd apply      [--dry-run]
-    smd start      [<component> [<instance>]]
-    smd stop       [<component> [<instance>]]
-    smd restart    [<component> [<instance>]]
-    smd reload     [--via=auto|systemd|socket]  [<component>]
-    smd list       [--apply | --catalog]  [--components C1,C2]  [--ref R]
-                   [--fetch]  [--dry-run]  [--json]
-    smd log        [--files | --level LEVEL]  [<client>]
-    smd status     [<component>]
-    smd diag
-    smd environment list|probe|describe    (situational awareness)
+The verbs split into three buckets — the same Configure / Observe / Operate
+groups used by the TUI's left tree:
+
+Configure (what should exist):
+    smd add         <git-url>                                    clone a component repo
+    smd install     [<client>] [--components C1,C2] [--force]    install + configure
+    smd enable      <name>...                                    set enabled=true in topology
+    smd disable     <name>...                                    set enabled=false + stop units
+    smd remove      <name>...                                    remove from topology
+    smd config      show | migrate | init <c> | edit <c>         per-client config
+    smd validate                                                 cross-client harmonization
+
+Observe (what is, read-only):
+    smd list        [--apply | --catalog] [--components C1,C2]   per-component status table
+                    [--ref R] [--fetch] [--dry-run] [--json]
+    smd status      [<component>]                                service health
+    smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
+    smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
+    smd environment list | probe | describe                      discover network peers
+    smd ka9q-watch                                               upstream-drift watcher
+
+Operate (run things now, may need sudo):
+    smd start       [<component> [<instance>]]
+    smd stop        [<component> [<instance>]]
+    smd restart     [<component> [<instance>]]
+    smd reload      [--via=auto|systemd|socket]  [<component>]
+    smd apply       [--dry-run]                                  reconcile services to config
+    smd tui                                                      launch interactive TUI
 
 Topology file (default: /etc/sigmond/topology.toml) controls which
-components are enabled on this host.  All commands respect the topology.
+components are enabled on this host; all commands respect the topology.
 
 Lifecycle verbs (start/stop/restart/reload/list/status):
   Without <component>: operate on all enabled components.
@@ -4674,23 +4689,50 @@ def _reexec_into_tui_venv() -> int:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    # Hide argparse's auto-generated subparser listing — the grouped
+    # epilog covers the same verbs categorised by intent (Configure /
+    # Observe / Operate, mirroring the TUI tree), and the alphabetical
+    # auto-listing was redundant.  Per-verb detail still works via
+    # `smd <verb> --help`.
+    class _GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
+        def _format_action(self, action):
+            if isinstance(action, argparse._SubParsersAction):
+                return ''
+            return super()._format_action(action)
+
     parser = argparse.ArgumentParser(
         prog='smd',
         description='Sigmond — HamSCI suite installer and lifecycle manager',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=_GroupedHelpFormatter,
         epilog=textwrap.dedent('''\
-            commands:
-              install            install and configure all enabled components
-              apply              reconcile running services with current config
-              start              start all managed services
-              stop               stop all managed services
-              status             show service health
-              update             pull latest code and re-apply
-              diag               run diagnostics  (see: smd diag --help)
-              diag cpu-affinity  show CPU affinity of all managed service processes
-              diag cpu-freq      show/apply CPU frequency limits per radiod policy
-              diag net           classify network for multi-host radiod (IGMP/mcast)
-              completion bash    emit bash tab-completion script
+            verbs (grouped by intent — same as the TUI tree):
+
+              Configure (what should exist):
+                add        clone a component repo
+                install    install + configure components (--force to rebuild)
+                enable     enable in topology.toml
+                disable    disable + stop its units
+                remove     remove from topology
+                config     show / migrate / init / edit per-client config
+                validate   cross-client harmonization checks
+
+              Observe (what is — read-only):
+                list       per-component status table  (also: --apply to pull)
+                status     service health
+                log        tail journal or file logs
+                diag       diagnostics  (net | cpu-affinity | cpu-freq)
+                environment   discover network peers
+                ka9q-watch upstream-drift watcher
+
+              Operate (run things now — may need sudo):
+                start / stop / restart / reload    systemd verbs
+                apply      reconcile running services with current config
+                tui        launch interactive TUI
+
+              Other:
+                completion bash    emit bash tab-completion script
+
+            Run  smd <verb> --help  for verb-specific options.
         '''),
     )
     parser.add_argument('--topology', metavar='FILE',
