@@ -169,24 +169,33 @@ def _repo_is_dirty(repo_dir: Path) -> tuple[bool, str | None]:
 
 
 def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
-    """git pull --ff-only, dropping privileges to the repo's owning user when root.
+    """git pull --ff-only, dropping privileges to a user who can talk to the remote.
 
     sigmond's self-update runs under sudo. If the repo has an SSH remote
-    (git@github.com:...), root has no usable key. The repo owner does — so
-    drop privs and let their on-disk SSH key authenticate.
+    (git@github.com:...), root has no usable key.  Drop privs to a user
+    who does, in this preference order:
+
+      1. $SUDO_USER — the human who invoked sudo.  Most likely to have
+         a personal SSH key already registered with the remote.
+      2. The repo's owning user — works when the tree is owned by a
+         human (the legacy single-user setup) but not when ownership
+         is the `sigmond` system user, which has no shell or SSH key.
 
     Output is captured (not streamed) so caller controls display.  Compare
     HEAD ref before/after to decide whether anything changed.
     """
     git_cmd = ['git', '-C', str(repo_dir), 'pull', '--ff-only']
     if os.geteuid() == 0:
-        try:
-            owner_uid = os.stat(repo_dir).st_uid
-            if owner_uid != 0:
-                owner = pwd.getpwuid(owner_uid).pw_name
-                git_cmd = ['sudo', '-u', owner, '-H', '--'] + git_cmd
-        except (OSError, KeyError):
-            pass
+        target_user = os.environ.get('SUDO_USER') or ''
+        if not target_user or target_user == 'root':
+            try:
+                owner_uid = os.stat(repo_dir).st_uid
+                if owner_uid != 0:
+                    target_user = pwd.getpwuid(owner_uid).pw_name
+            except (OSError, KeyError):
+                target_user = ''
+        if target_user and target_user != 'root':
+            git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
     return subprocess.run(git_cmd, stdin=subprocess.DEVNULL,
                           capture_output=True, text=True)
 
