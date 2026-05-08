@@ -28,10 +28,10 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from ..coordination import load_coordination
+from ..coordination import load_coordination, render_env
 from ..discovery import usb_sdr
 from ..environment import Environment
-from ..paths import COORDINATION_PATH, SIGMOND_CONF
+from ..paths import COORDINATION_ENV, COORDINATION_PATH, SIGMOND_CONF
 from ..ui import err, heading, info, ok, warn
 
 
@@ -191,6 +191,21 @@ def cmd_radiod_init(args) -> int:
 
     print()
     _append_coordination(coord_blocks, args)
+
+    # Re-render /etc/sigmond/coordination.env from the freshly-updated
+    # coordination.toml.  Without this, RADIOD_<ID>_STATUS and the
+    # contract's SIGMOND_RADIOD_COUNT / SIGMOND_RADIOD_STATUS shortcut
+    # would be stale until something else triggered a render — services
+    # started before the next render see no value for the new instance.
+    try:
+        fresh_coord = load_coordination(COORDINATION_PATH)
+        env_text = render_env(fresh_coord)
+        COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+        COORDINATION_ENV.write_text(env_text)
+        ok(f"rendered {COORDINATION_ENV}")
+    except (OSError, PermissionError) as exc:
+        warn(f"wrote coordination.toml but could not refresh "
+             f"{COORDINATION_ENV}: {exc}")
 
     # Auto-apply each enabled client's [[radiod.fragment]] block to the
     # freshly-created instances (CONTRACT v0.5 §15).  Operators no longer
