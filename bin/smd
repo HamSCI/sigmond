@@ -5119,6 +5119,14 @@ def main() -> int:
         if sub_cmd == 'restore':
             return cmd_config_restore(args)
         if sub_cmd == 'init':
+            # radiod's wizard writes /etc/radio/ + appends to
+            # /etc/sigmond/coordination.toml + re-renders coordination.env
+            # — needs root.  Other clients shell out to client-owned
+            # scripts that handle their own escalation, so we don't
+            # auto-elevate the general case.
+            if (getattr(args, 'client', None) == 'radiod'
+                    and _need_root('config init radiod')):
+                return 1
             return cmd_config_init(args)
         if sub_cmd == 'edit':
             # `smd config edit <client>` is the new client-aware form

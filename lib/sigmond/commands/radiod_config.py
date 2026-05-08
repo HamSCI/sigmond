@@ -122,6 +122,30 @@ def cmd_radiod_init(args) -> int:
         info(f"  - {s.fields.get('sdr_type')} on bus "
              f"{s.fields.get('bus')}/{s.fields.get('device')}  serial={sn}")
 
+    # Refuse to register SDRs still in DFU (Device Firmware Upgrade) mode.
+    # An RX-888 in DFU advertises a placeholder serial (e.g. 0000000004BE)
+    # and a "RX-888 DFU" product string; once radiod uploads the firmware
+    # and the device re-enumerates, the serial changes to the real value.
+    # Registering the DFU serial would bake a stale `sdr_serial` into
+    # coordination.toml and a wrong instance id (`*-rx888dfu`) into the
+    # radiod conf — fix once the firmware has loaded.
+    dfu_sdrs = [s for s in sdrs
+                if "DFU" in (s.fields.get("sdr_type") or "").upper()]
+    if dfu_sdrs:
+        for s in dfu_sdrs:
+            err(f"{s.fields.get('sdr_type')} on bus "
+                f"{s.fields.get('bus')}/{s.fields.get('device')} is in DFU "
+                f"(firmware-upgrade) mode — its serial {s.fields.get('serial')!r} "
+                f"is a placeholder")
+        info("Recovery:")
+        info("  1. Bring up radiod once so it uploads firmware to the SDR.")
+        info("     For a hand-rolled first run, write a minimal "
+             f"{RADIOD_CONFIG_DIR}/radiod@<id>.conf without `serial=` and")
+        info("     start it via:  systemctl start radiod@<id>.service")
+        info("  2. After the device re-enumerates with its real serial,")
+        info("     re-run:  smd config init radiod")
+        return 1
+
     # Build serial→id and id-set views of already-registered radiods so we
     # can (a) skip SDRs whose USB serial is already in coordination.toml
     # and (b) suggest an instance id that doesn't collide with one that
