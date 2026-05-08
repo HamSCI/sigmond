@@ -3705,7 +3705,7 @@ def _print_status_table(rows: list[dict]) -> None:
     print(
         f'  \033[1m{"NAME":<{W_NAME}}{"LIFECYCLE":<{W_LIFE}}'
         f'{"VERDICT":<{W_VERDICT}}{"INDEX":<{W_INDEX}}{"BEHIND":<{W_BEHIND}}'
-        f'{"DATE":<{W_DATE}}{"POLICY":<{W_POLICY}}\033[0m'
+        f'{"HEAD DATE":<{W_DATE}}{"POLICY":<{W_POLICY}}\033[0m'
     )
     for r in rows:
         name    = r['name']

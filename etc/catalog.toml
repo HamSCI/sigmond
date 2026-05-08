@@ -20,13 +20,14 @@ install_script  = ""                                  # built natively (apt deps
 topology_alias  = "radiod"                            # systemd service name; legacy topology key
 start_priority  = 0                                   # always start first
 
-[client.clickhouse]
+[client.sigmond-clickhouse]
 kind            = "server"
 description     = "Local ClickHouse staging tier (CONTRACT §17 sinks)"
 repo            = "https://github.com/mijahauan/sigmond-clickhouse"
 uses            = []
 contract        = "0.6"
-install_script  = "/opt/git/sigmond/clickhouse/scripts/install.sh"
+install_script  = "/opt/git/sigmond/sigmond-clickhouse/scripts/install.sh"
+topology_alias  = "clickhouse"                        # legacy short name
 start_priority  = 50                                  # after radiod, before clients
 
 [client.wspr-recorder]
