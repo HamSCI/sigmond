@@ -438,8 +438,10 @@ def _enabled_components(topology: dict, only: list = None) -> list:
 COMPONENT_DEPS = {
     'ka9q-radio':          ['ka9q-radio'],
     'radiod':              ['ka9q-radio'],    # legacy alias
-    'wspr':                ['ka9q-python', 'wspr-recorder', 'kiwiclient', 'ftlib-pskreporter'],
-    'wsprdaemon-client':   ['ka9q-python', 'wspr-recorder', 'kiwiclient', 'ftlib-pskreporter'],
+    # FT mode decoders/uploaders moved to psk-recorder in v4 — wsprdaemon-
+    # client now strictly does WSPR (W2/F2/F5/F15/F30) over wsprd/jt9.
+    'wspr':                ['ka9q-python', 'wspr-recorder', 'kiwiclient'],
+    'wsprdaemon-client':   ['ka9q-python', 'wspr-recorder', 'kiwiclient'],
     'ka9q-web':            ['ka9q-web'],
     'grape':               [],   # legacy alias for hf-timestd
     'hf-timestd':          [],   # manages itself
