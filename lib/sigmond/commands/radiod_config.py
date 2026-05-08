@@ -281,10 +281,13 @@ def _collect_per_sdr_values(sdr, args, hostname_short: str,
                               suggested_id, required=True)
         if instance_id == "__abort__":
             return None
-        default_status = f"{instance_id}-status.local" \
-            if instance_id != suggested_id else suggested_status
-        status_dns = _prompt("Status multicast DNS",
-                             default_status, required=True)
+        # Multicast status DNS is, by ka9q-radio convention, the
+        # instance id with `-status.local` appended.  Derived silently —
+        # there's nothing the operator could meaningfully change here
+        # without breaking ka9q-radio's mDNS resolution.
+        status_dns = f"{instance_id}-status.local"
+        info(f"  multicast status DNS: {status_dns}  "
+             f"(derived from instance id)")
         description = _prompt("Antenna description "
                               "(callsign + antenna; written to "
                               f"[{profile['section']}].description)",
