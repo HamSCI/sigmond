@@ -3669,8 +3669,8 @@ def _print_status_table(rows: list[dict]) -> None:
     # shown.  INDEX is the linear depth of HEAD in history (a stable
     # monotonic id); BEHIND is the count of upstream commits not in HEAD.
     # The count moved into BEHIND, so verdict drops it ("3 behind" → "behind").
-    W_NAME, W_LIFE, W_VERDICT, W_INDEX, W_BEHIND, W_DATE, W_POLICY = (
-        22, 18, 14, 7, 8, 12, 8,
+    W_NAME, W_LIFE, W_VERDICT, W_INDEX, W_BEHIND, W_DATE, W_UP_DATE, W_POLICY = (
+        22, 18, 14, 7, 8, 12, 12, 8,
     )
 
     def _short_lifecycle(s: str) -> str:
@@ -3705,7 +3705,8 @@ def _print_status_table(rows: list[dict]) -> None:
     print(
         f'  \033[1m{"NAME":<{W_NAME}}{"LIFECYCLE":<{W_LIFE}}'
         f'{"VERDICT":<{W_VERDICT}}{"INDEX":<{W_INDEX}}{"BEHIND":<{W_BEHIND}}'
-        f'{"HEAD DATE":<{W_DATE}}{"POLICY":<{W_POLICY}}\033[0m'
+        f'{"HEAD DATE":<{W_DATE}}{"UPSTREAM":<{W_UP_DATE}}'
+        f'{"POLICY":<{W_POLICY}}\033[0m'
     )
     for r in rows:
         name    = r['name']
@@ -3718,6 +3719,17 @@ def _print_status_table(rows: list[dict]) -> None:
         index   = str(r['commit_index']) if r['repo_dir'] and r['commit_index'] else ''
         behind  = str(r['behind'])       if r['repo_dir'] else ''
         date    = r['local_date']        if r['repo_dir'] else ''
+        # UPSTREAM DATE column — colour yellow when local HEAD date is
+        # older than upstream, so a stale checkout pops visually even
+        # before the operator reads BEHIND.  When local==upstream the
+        # value is identical to HEAD DATE; we still print it so the
+        # column doesn't go blank on up-to-date rows (a blank field
+        # would read as "missing", not "same as HEAD").
+        up_date_raw = r.get('upstream_date', '') if r['repo_dir'] else ''
+        if up_date_raw and date and up_date_raw > date:
+            up_cell = f'\033[33m{up_date_raw:<{W_UP_DATE}.{W_UP_DATE}}\033[0m'
+        else:
+            up_cell = f'{up_date_raw:<{W_UP_DATE}.{W_UP_DATE}}'
         policy  = r['policy']
 
         print(
@@ -3727,6 +3739,7 @@ def _print_status_table(rows: list[dict]) -> None:
             f'{index:<{W_INDEX}.{W_INDEX}}'
             f'{behind:<{W_BEHIND}.{W_BEHIND}}'
             f'{date:<{W_DATE}.{W_DATE}}'
+            f'{up_cell}'
             f'{policy:<{W_POLICY}.{W_POLICY}}'
         )
 
