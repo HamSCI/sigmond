@@ -307,6 +307,19 @@ def _resolve_only_list(args, topology):
     if not combined or 'all' in combined:
         return None  # operate on every enabled component
 
+    # Canonicalize user-typed names.  topology.py's load_topology rewrites
+    # legacy keys (radiod → ka9q-radio) on read, so the enabled set is
+    # always keyed by canonical names.  An operator typing `smd start
+    # radiod` (the systemd-service name and former canonical name) needs
+    # the same translation applied to their argv before the enabled-set
+    # check, otherwise we reject a perfectly valid alias as "not enabled".
+    if _HAS_SIGMOND_LIB:
+        try:
+            _catalog = load_catalog()
+            combined = [resolve_name(c, _catalog) for c in combined]
+        except (FileNotFoundError, OSError):
+            pass
+
     # Validate: warn (but proceed) for components that aren't enabled,
     # so the operator gets a clear "not enabled" cue rather than silent
     # no-op.

@@ -254,6 +254,19 @@ info "Installing catalog → /etc/sigmond/catalog.toml"
 $SUDO cp "$REPO_DIR/etc/catalog.toml" /etc/sigmond/catalog.toml
 ok "catalog.toml installed"
 
+# ─── fallback lifecycle shims ────────────────────────────────────────────────
+# Non-contract upstream components (ka9q-radio, ka9q-web, …) don't carry
+# their own deploy.toml.  Sigmond's lib/sigmond/lifecycle.py looks for
+# fallback shims at /etc/sigmond/clients/<name>.deploy.toml; ship the
+# repo's etc/clients/ directory there so `smd start <component>` can
+# discover the systemd units.
+if [[ -d "$REPO_DIR/etc/clients" ]]; then
+    info "Installing fallback lifecycle shims → /etc/sigmond/clients/"
+    $SUDO mkdir -p /etc/sigmond/clients
+    $SUDO cp "$REPO_DIR/etc/clients/"*.deploy.toml /etc/sigmond/clients/ 2>/dev/null || true
+    ok "fallback shims installed: $(ls /etc/sigmond/clients/ 2>/dev/null | tr '\n' ' ')"
+fi
+
 # ─── default topology.toml ────────────────────────────────────────────────────
 if [[ ! -f /etc/sigmond/topology.toml ]]; then
     info "Writing default topology → /etc/sigmond/topology.toml"

@@ -1,0 +1,30 @@
+# Fallback lifecycle shim for ka9q-radio.
+#
+# Phil Karn's upstream radiod (https://github.com/ka9q/ka9q-radio) does not
+# carry a sigmond CONTRACT-conformant deploy.toml — it pre-dates the
+# contract and isn't a HamSCI client.  Sigmond ships this shim so the
+# lifecycle helpers (resolve_units, smd start/stop/restart/status) can
+# locate the per-instance services that `smd config init radiod` writes
+# to /etc/radio/radiod@<id>.conf without sigmond having to special-case
+# ka9q-radio in code.
+#
+# Discovery contract used by lib/sigmond/lifecycle.py:_expand_template
+# and _load_fallback_shim:
+#
+#   - templated_units: each entry is a systemd template name; the loader
+#     walks `conf_dir` for `<base>@<instance>.conf` and emits one UnitRef
+#     per discovered instance.
+#   - conf_dir: where instance configs live.
+#
+# So with one /etc/radio/radiod@my-rx888.conf on disk, the result is a
+# UnitRef for radiod@my-rx888.service which `smd start ka9q-radio`
+# (or the alias `smd start radiod`) then enables and starts.
+#
+# Installed by sigmond's install.sh; if you've hand-edited the live
+# copy at /etc/sigmond/clients/ka9q-radio.deploy.toml, your changes
+# survive (install.sh copies only when the source-tree version is newer
+# or the live copy is absent).
+
+[systemd]
+templated_units = ["radiod@.service"]
+conf_dir        = "/etc/radio"
