@@ -4594,6 +4594,134 @@ complete -F _smdt_complete smdt smdtui
 """
 
 
+# ---------------------------------------------------------------------------
+# wisdom — FFTW3 wisdom-file planner
+# ---------------------------------------------------------------------------
+
+def cmd_wisdom_plan(args) -> int:
+    """Run fftwf-wisdom for every transform radiod uses; install /etc/fftw/wisdomf.
+
+    Streams output line-by-line so an operator on a tmux/screen session
+    can watch progress.  Profiles are smallest-first, so the early
+    transforms land in seconds and the operator gets immediate visual
+    confirmation that planning is moving — the multi-hour rof3240000
+    is last.
+
+    Refuses to run if any sigmond-managed services are still active —
+    FFTW's planner picks the fastest implementation by literally
+    benchmarking each candidate, and a busy CPU pollutes those numbers.
+    Pass --no-install to keep the result at /etc/fftw/wisdomf.new
+    instead of swapping it over /etc/fftw/wisdomf (useful when comparing
+    runs).
+    """
+    from sigmond.wisdom import (
+        FFT_WISDOM_PROFILES, WISDOM_FILE, WISDOM_TMP, WISDOM_LOG,
+        install_wisdom,
+    )
+
+    fftwf = shutil.which('fftwf-wisdom')
+    if fftwf is None:
+        _err('fftwf-wisdom not on PATH; install it with: '
+             'sudo apt-get install -y libfftw3-bin')
+        return 1
+
+    # Refuse to plan if anything is running.
+    r = subprocess.run(
+        ['systemctl', 'list-units', '--type=service', '--state=active',
+         '--no-legend', '--no-pager',
+         'radiod@*', 'wd-*', 'timestd-*', 'psk-recorder@*', 'sigmond-clickhouse'],
+        capture_output=True, text=True,
+    )
+    busy = [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
+    if busy:
+        _err(f'{len(busy)} sigmond-managed service(s) still active — '
+             f'planning would benchmark on a busy CPU and produce wrong wisdom.')
+        for u in busy[:6]:
+            print(f'      {u}')
+        if len(busy) > 6:
+            print(f'      … and {len(busy) - 6} more')
+        _info('Run:  sudo smd stop')
+        _info('Then re-run:  sudo smd wisdom plan')
+        return 1
+
+    WISDOM_TMP.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = ['stdbuf', '-oL', fftwf, '-v', '-T', '1',
+           '-o', str(WISDOM_TMP), *FFT_WISDOM_PROFILES]
+    _heading(f'wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)')
+    _info(f'output: {WISDOM_TMP}')
+    _info(f'log:    {WISDOM_LOG}')
+    _info('this will take a long time — the rof3240000 transform alone '
+          'can run for hours.  Open in a tmux/screen session if you '
+          'plan to disconnect.')
+    print()
+    print('  $ ' + ' '.join(cmd))
+    print()
+
+    # Run synchronously in foreground; tee to log so disconnects don't
+    # lose progress.  fftwf-wisdom emits progress lines on stderr; merge.
+    start = time.monotonic()
+    try:
+        with open(WISDOM_LOG, 'a') as logf:
+            logf.write(f'\n# {time.strftime("%Y-%m-%dT%H:%M:%S%z")} '
+                       f'— smd wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)\n')
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                logf.write(line)
+                logf.flush()
+            rc = proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait(timeout=5)
+        _warn('aborted by operator (Ctrl-C)')
+        return 130
+
+    elapsed = time.monotonic() - start
+    if rc != 0:
+        _err(f'fftwf-wisdom exited {rc} after {int(elapsed)}s')
+        _info(f'partial output (if any) at {WISDOM_TMP}; log at {WISDOM_LOG}')
+        return rc
+
+    _ok(f'fftwf-wisdom finished in {int(elapsed // 60)}m {int(elapsed % 60)}s')
+
+    if getattr(args, 'no_install', False):
+        _info(f'--no-install: leaving result at {WISDOM_TMP}')
+        _info(f'to install manually: sudo mv {WISDOM_TMP} {WISDOM_FILE}')
+        return 0
+
+    try:
+        install_wisdom(WISDOM_TMP, WISDOM_FILE)
+    except (FileNotFoundError, OSError) as exc:
+        _err(f'could not install: {exc}')
+        return 1
+    _ok(f'installed → {WISDOM_FILE}')
+    _info('Now: sudo smd start')
+    return 0
+
+
+def cmd_wisdom_status(args) -> int:
+    """Show whether /etc/fftw/wisdomf exists and how recent it is."""
+    from sigmond.wisdom import WISDOM_FILE
+    if not WISDOM_FILE.exists():
+        _warn(f'{WISDOM_FILE} does not exist — radiod will fall back to a '
+              'fast (but suboptimal) "measure"-level plan at startup')
+        _info('To generate:  sudo smd wisdom plan   (after sudo smd stop)')
+        return 1
+    st = WISDOM_FILE.stat()
+    age_s = time.time() - st.st_mtime
+    age_str = (f'{int(age_s / 86400)}d ago' if age_s > 86400
+               else f'{int(age_s / 3600)}h ago' if age_s > 3600
+               else f'{int(age_s / 60)}m ago')
+    _ok(f'{WISDOM_FILE}  ({st.st_size:,} bytes, last updated {age_str})')
+    return 0
+
+
 def cmd_completion(args) -> int:
     sub = getattr(args, 'completion_command', None)
     if sub == 'bash':
@@ -5023,6 +5151,19 @@ def main() -> int:
     p.add_argument('--level', metavar='LEVEL',
                    help='set log level (DEBUG/INFO/WARNING/ERROR/CRITICAL) in coordination.env + SIGHUP')
 
+    # wisdom — FFTW3 wisdom-file planner
+    p_wisdom = sub.add_parser('wisdom',
+                              help='FFTW3 wisdom-file planner (radiod uses /etc/fftw/wisdomf)')
+    wisdom_sub = p_wisdom.add_subparsers(dest='wisdom_command')
+
+    p = wisdom_sub.add_parser('plan',
+                              help='run fftwf-wisdom for every radiod transform; install /etc/fftw/wisdomf')
+    p.add_argument('--no-install', action='store_true',
+                   help='leave the result at /etc/fftw/wisdomf.new without renaming over wisdomf')
+
+    p = wisdom_sub.add_parser('status',
+                              help='show whether /etc/fftw/wisdomf exists and how old it is')
+
     # diag  (with its own sub-commands)
     p_diag = sub.add_parser('diag', help='run cross-component diagnostics')
     p_diag.add_argument('--components', metavar='C1,C2')
@@ -5209,6 +5350,17 @@ def main() -> int:
 
     if args.command == 'completion':
         return cmd_completion(args)
+
+    if args.command == 'wisdom':
+        wis_cmd = getattr(args, 'wisdom_command', None)
+        if wis_cmd == 'plan':
+            if _need_root('wisdom plan'):
+                return 1
+            return cmd_wisdom_plan(args)
+        if wis_cmd == 'status':
+            return cmd_wisdom_status(args)
+        p_wisdom.print_help()
+        return 0
 
     if args.command == 'diag':
         diag_cmd = getattr(args, 'diag_command', None)
