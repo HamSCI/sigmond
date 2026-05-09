@@ -3518,6 +3518,60 @@ def _git_commit_index(repo_dir: Path, ref: str = 'HEAD') -> int:
         return 0
 
 
+def _is_binary_only_component(entry) -> bool:
+    """True when a component's only systemd footprint is a template that
+    no instance has ever materialized for.
+
+    Canonical case: wspr-recorder ships `wspr-recorder@.service`, but
+    wsprdaemon-client never runs an instance — it `os.execv`s the
+    binary as a child of wd-ka9q-record instead.  Without this check,
+    ComponentState labels wspr-recorder "enabled, stopped" forever.
+
+    Detection: deploy.toml declares ONLY templated units (no concrete
+    units), AND `systemctl list-units --type=service '<comp>@*'`
+    returns nothing.  The systemctl query is the reliable signal —
+    instance discovery via filesystem is too brittle (psk-recorder
+    keys instances off `[[radiod]]` blocks in its own toml, with no
+    matching .conf / .env files).  Best-effort: any failure falls
+    through to False so the normal classifier still runs.
+    """
+    try:
+        repo_dir = _resolve_repo_dir(entry.name, entry.repo)
+        if repo_dir is None:
+            return False
+        deploy_path = repo_dir / 'deploy.toml'
+        if not deploy_path.exists():
+            return False
+        import tomllib as _tomllib
+        with open(deploy_path, 'rb') as f:
+            cfg = _tomllib.load(f)
+        sd = cfg.get('systemd', {}) or {}
+        templated = list(sd.get('templated_units', []) or [])
+        # `units` sometimes carries templated names under the deprecated
+        # form (lifecycle.py auto-promotes); treat `<...>@...` names there
+        # as templated for this purpose.
+        for u in (sd.get('units', []) or []):
+            if '@' in u:
+                templated.append(u)
+        concrete = [u for u in (sd.get('units', []) or []) if '@' not in u]
+        if not templated or concrete:
+            return False  # has an always-on service unit — not a tool
+
+        # Ask systemd directly: does any instance of any template exist?
+        for tpl in templated:
+            base = tpl.split('@')[0]
+            r = subprocess.run(
+                ['systemctl', 'list-units', '--type=service',
+                 '--all', '--no-legend', '--no-pager', f'{base}@*'],
+                capture_output=True, text=True,
+            )
+            if r.stdout.strip():
+                return False  # template has at least one instance
+        return True
+    except (OSError, Exception):
+        return False
+
+
 def _component_statuses(args, *, fetch: bool) -> list[dict]:
     """Build a status row per catalog component.
 
@@ -3559,10 +3613,45 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
         comp = topo.components.get(name)
         policy = (comp.version if comp else 'latest') or 'latest'
 
-        # Lifecycle state via existing component_state module.
+        # Lifecycle state — three regimes:
+        #
+        #   library   ka9q-python and friends.  No systemd units, never
+        #             "running" — either importable from the venv or
+        #             not.  ComponentState's cloned/installed/active
+        #             chain doesn't apply; ask the catalog directly.
+        #
+        #   binary    Components whose deploy.toml declares only
+        #             templated units that no other client instantiates
+        #             (e.g. wspr-recorder, exec'd as a child by
+        #             wd-ka9q-record).  ComponentState would label
+        #             these "enabled, stopped"; in reality they're
+        #             pure command-line tools.  Show "binary,
+        #             on-PATH" / "binary, missing" so the operator
+        #             isn't told to start something there's no service
+        #             for.
+        #
+        #   service   The normal case — display_status drives the label.
+        kind = getattr(entry, 'kind', '')
         lifecycle_label = '—'
         lifecycle_color = ''
-        if compute_state is not None:
+
+        if kind == 'library':
+            # Importability depends on which Python interpreter looks —
+            # smd's own interpreter doesn't have client venvs' pip-
+            # installed packages, so find_spec() from here gives a
+            # false-negative on libraries that the running clients
+            # plainly use.  Just label "library" and let the operator
+            # judge by whether downstream clients work.
+            lifecycle_label = 'library'
+            lifecycle_color = '\033[32m'
+        elif _is_binary_only_component(entry):
+            on_path = shutil.which(entry.name) is not None
+            if on_path:
+                lifecycle_label = 'binary, on PATH'
+                lifecycle_color = '\033[32m'
+            else:
+                lifecycle_label = 'binary, missing'
+        elif compute_state is not None:
             try:
                 state = compute_state(
                     name, topo,
