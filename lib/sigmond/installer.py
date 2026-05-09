@@ -171,14 +171,45 @@ def run_install_script(
     if script is None:
         return False
 
-    cmd = ['sudo', 'bash', str(script)]
+    # Pull sigmond's identity bag (STATION_*, SIGMOND_RADIOD_*) into the
+    # env so the client's install.sh and any wizard it spawns see the
+    # CLIENT-CONTRACT v0.5 §14.2 vars.  Without this, install.sh's wizards
+    # (e.g. hf-timestd's setup-station.sh) re-prompt for callsign / grid
+    # / multicast on every fresh install — sudo's env_reset would have
+    # stripped them even if smd's caller had them in its shell.
+    env = dict(os.environ)
+    try:
+        with open('/etc/sigmond/coordination.env') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                k, v = k.strip(), v.strip()
+                if k:
+                    env.setdefault(k, v)
+    except OSError:
+        pass
+
+    # sudo's default env_reset drops everything not on secure_path; the
+    # contract bag has to be explicitly preserved.  Listed exhaustively
+    # rather than `--preserve-env` (which keeps *everything*) to avoid
+    # leaking unrelated user shell state into the install context.
+    preserve = ','.join([
+        'STATION_CALL', 'STATION_GRID', 'STATION_LAT', 'STATION_LON',
+        'SIGMOND_INSTANCE', 'SIGMOND_RADIOD_COUNT',
+        'SIGMOND_RADIOD_INDEX', 'SIGMOND_RADIOD_STATUS',
+        'SIGMOND_TIME_SOURCE', 'SIGMOND_GNSS_VTEC',
+    ])
+
+    cmd = ['sudo', f'--preserve-env={preserve}', 'bash', str(script)]
     if yes:
         cmd.append('--yes')
 
     if dry_run:
         return True
 
-    r = subprocess.run(cmd, capture_output=False)
+    r = subprocess.run(cmd, env=env, capture_output=False)
     return r.returncode == 0
 
 
