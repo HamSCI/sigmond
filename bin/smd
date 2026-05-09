@@ -41,19 +41,51 @@ Lifecycle verbs (start/stop/restart/reload/list/status):
   With <component> <instance>: operate on a single instance only.
 """
 
+import os
+import sys
+from pathlib import Path
+
+# Bootstrap step 1 — re-exec into sigmond's venv Python if we're not
+# already there.
+#
+# Why: install.sh builds /opt/sigmond/venv with sigmond installed
+# editable plus its declared extras (`tui`, `clickhouse`, …).  Our
+# shebang resolves to the system interpreter, which doesn't see those
+# packages — so any feature behind an extra (smd apply's ch_apply,
+# smd tui's textual, …) fails with `ModuleNotFoundError`.  Re-exec into
+# the venv interpreter so smd always runs with sigmond's full dependency
+# closure available.
+#
+# Skipped when:
+#   * the venv doesn't exist yet (install.sh hasn't run / dev checkout)
+#   * we're already running from the venv (no infinite re-exec loop)
+#   * SIGMOND_NO_VENV_REEXEC=1 is set (escape hatch for debugging)
+_VENV_ROOT = Path('/opt/sigmond/venv')
+_VENV_PY = _VENV_ROOT / 'bin' / 'python'
+# sys.prefix is the *interpreter*-side signal of "am I running in this
+# venv?" — the bin/python symlink that uv creates points at the system
+# python3.13, so comparing sys.executable.resolve() to _VENV_PY.resolve()
+# yields a false positive (both resolve to /usr/bin/python3.13) and the
+# re-exec is skipped.  sys.prefix is set per-invocation and isn't
+# resolve-collapsed.
+if (_VENV_PY.is_file()
+        and not Path(sys.prefix).is_relative_to(_VENV_ROOT)
+        and not os.environ.get('SIGMOND_NO_VENV_REEXEC')):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+    # execv only returns on failure; if it does, fall through and let
+    # the rest of bootstrap continue with the system interpreter.
+
 import argparse
 import configparser
-import os
 import pwd
 import shutil
 import subprocess
-import sys
 import textwrap
 import time
-from pathlib import Path
 
-# Bootstrap: add sibling lib/ to sys.path so `import sigmond` works when
-# running from the repo, from /usr/local/sbin/smd, or from a symlink.
+# Bootstrap step 2 — add sibling lib/ to sys.path so `import sigmond`
+# works when running from the repo, from /usr/local/sbin/smd, or from a
+# symlink.
 _SCRIPT = Path(__file__).resolve()
 for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
                    Path('/opt/sigmond/lib'),             # installed layout
