@@ -4487,7 +4487,10 @@ _smd_complete() {
         cword=$COMP_CWORD
     }
 
-    local top_cmds="install apply start stop status restart reload list log diag validate config tui completion"
+    # Keep alphabetical except for grouping by lifecycle/observe/configure.
+    # When adding a new top-level verb, also add it here.  TODO: derive
+    # this list from argparse rather than hand-maintaining it.
+    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate ka9q-watch psk-watch wisdom timestd-tune-storage completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
