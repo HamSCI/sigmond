@@ -125,6 +125,115 @@ def discover_clients_with_ch_schemas(
 
 # ── migration runner ───────────────────────────────────────────────────────
 
+def _has_sql_content(stmt: str) -> bool:
+    """True if `stmt` has anything that isn't whitespace or comments.
+
+    clickhouse-connect rejects whitespace/comment-only payloads with
+    `Code: 62. DB::Exception: Empty query.` — so we have to filter them
+    out before .command() ever sees them.  Mirrors the
+    comment-recognition rules in _split_sql_statements.
+    """
+    i, n = 0, len(stmt)
+    while i < n:
+        c = stmt[i]
+        nxt = stmt[i + 1] if i + 1 < n else ''
+        if c.isspace():
+            i += 1
+            continue
+        if c == '-' and nxt == '-':
+            while i < n and stmt[i] != '\n':
+                i += 1
+            continue
+        if c == '/' and nxt == '*':
+            i += 2
+            while i < n - 1 and not (stmt[i] == '*' and stmt[i + 1] == '/'):
+                i += 1
+            i += 2
+            continue
+        return True  # found a non-comment, non-space character
+    return False
+
+
+def _split_sql_statements(sql: str) -> List[str]:
+    """Split a multi-statement ``.sql`` blob at top-level ``;`` boundaries.
+
+    clickhouse-connect's ``client.command()`` accepts only one statement per
+    call; passing the whole file (which is the ergonomic shape for
+    migrations — ``CREATE TABLE …; ALTER TABLE … ADD COLUMN …;``) yields a
+    SYNTAX_ERROR mid-parse.  We split here so each ``.command()`` sees one
+    well-formed statement.
+
+    Aware of:
+      * ``--`` line comments (terminated by newline)
+      * ``/* … */`` block comments (no nesting)
+      * single-quoted strings ``'…'``  (with ``''`` escape)
+      * double-quoted identifiers ``"…"`` (with ``""`` escape)
+      * backtick-quoted identifiers ``` `…` ``` (no escape)
+
+    Empty statements (whitespace / comments only) are dropped — the driver
+    rejects those with ``Empty query (SYNTAX_ERROR)``.
+    """
+    out: List[str] = []
+    buf: List[str] = []
+    i, n = 0, len(sql)
+
+    while i < n:
+        c = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ''
+
+        # `--` line comment
+        if c == '-' and nxt == '-':
+            while i < n and sql[i] != '\n':
+                buf.append(sql[i])
+                i += 1
+            continue
+
+        # `/* … */` block comment
+        if c == '/' and nxt == '*':
+            buf.append('  ')
+            i += 2
+            while i < n - 1 and not (sql[i] == '*' and sql[i + 1] == '/'):
+                buf.append(' ' if sql[i] != '\n' else '\n')
+                i += 1
+            i += 2  # skip the `*/`
+            continue
+
+        # quoted run — copy verbatim, ignore semicolons inside
+        if c in ("'", '"', '`'):
+            quote = c
+            buf.append(c)
+            i += 1
+            while i < n:
+                ch = sql[i]
+                buf.append(ch)
+                if ch == quote:
+                    # SQL doubles the quote char to escape it
+                    if i + 1 < n and sql[i + 1] == quote:
+                        buf.append(sql[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        if c == ';':
+            stmt = ''.join(buf).strip()
+            if _has_sql_content(stmt):
+                out.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(c)
+        i += 1
+
+    tail = ''.join(buf).strip()
+    if _has_sql_content(tail):
+        out.append(tail)
+    return out
+
+
 def list_migrations(schema_dir: Path) -> List[Path]:
     """Return ``[0-9]*.sql`` files in lexical order — same convention
     used by ``sigmond-clickhouse migrate``."""
@@ -164,10 +273,13 @@ def run_client_migrations(
             error = f"read {sql_file}: {exc}"
             skipped.append(f"{rel} ({exc})")
             break
+        statements = _split_sql_statements(sql)
         try:
-            ch_client.command(sql)
+            for stmt in statements:
+                ch_client.command(stmt)
             applied.append(rel)
-            log.info("ch_apply: applied %s", rel)
+            log.info("ch_apply: applied %s (%d statement(s))",
+                     rel, len(statements))
         except Exception as exc:                 # noqa: BLE001 — surface any driver error
             error = f"{rel}: {exc}"
             skipped.append(f"{rel} ({exc})")
