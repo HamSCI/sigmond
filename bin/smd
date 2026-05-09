@@ -5094,6 +5094,77 @@ def cmd_wisdom_status(args) -> int:
     return 0
 
 
+def cmd_psk_watch(args) -> int:
+    """Live tail of psk-recorder's PSK Reporter upload activity.
+
+    Two log line types are forwarded:
+      * `psk-uploader-ch: queued ft8=N ft4=M (total X)` — per-poll feed
+        rate (every POLL_INTERVAL_SEC, currently 5 s) showing how many
+        spots of each mode were queued INTO the pskreporter library
+        since the last poll.
+      * `INFO:root:uploading N spots using TCP|UDP` — emitted by the
+        pskreporter library when its batch interval (PSKREPORTER_INTERVAL,
+        default 30 s in our deploy) fires and the UDP/TCP datagram
+        actually goes out.
+
+    Together these answer "how fast are we ingesting decodes" and "is
+    the data actually shipping to PSK Reporter".
+    """
+    instance = getattr(args, 'instance', None)
+    log_path = Path(f'/var/log/psk-recorder/{instance}.log') if instance \
+               else None
+    if log_path is None:
+        # Pick the most-recently-modified daemon log if no instance was
+        # specified.  psk-recorder's systemd unit writes stdout/stderr
+        # to /var/log/psk-recorder/<radiod_id>.log via
+        # `StandardOutput=append:`, separately from the per-mode
+        # decode logs (which end in -ft8.log / -ft4.log).
+        candidates = sorted(
+            (p for p in Path('/var/log/psk-recorder').glob('*.log')
+             if not (p.name.endswith('-ft8.log')
+                     or p.name.endswith('-ft4.log'))),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        )
+        if not candidates:
+            _err('no /var/log/psk-recorder/<radiod_id>.log found '
+                 '— is psk-recorder running?')
+            return 1
+        log_path = candidates[0]
+
+    _heading(f'PSK Reporter upload activity ({log_path.name})')
+    _info('   ▸ "queued ft8=N ft4=M"  per 5 s poll  (rate INTO upload batch)')
+    _info('   ▸ "uploading N spots using TCP/UDP"  per 30 s flush  (sent OUT)')
+    _info('   Ctrl-C to exit.')
+    print()
+
+    # The systemd unit routes daemon stdout/stderr to a file via
+    # `StandardOutput=append:`, NOT to journalctl, so tail -F (capital,
+    # follow-by-name to survive logrotate) is the right read path.
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+    pattern = (r'psk-uploader-ch: queued ft8=|'
+               r'uploading [0-9]+ spots using|'
+               r'psk-uploader-ch (started|stopped|disabled)')
+    try:
+        tl = subprocess.Popen(
+            [*sudo_prefix, 'tail', '-n', '50', '-F', str(log_path)],
+            stdout=subprocess.PIPE,
+        )
+        gp = subprocess.Popen(
+            ['grep', '--line-buffered', '-E', pattern],
+            stdin=tl.stdout, stdout=sys.stdout,
+        )
+        tl.stdout.close()  # let grep see SIGPIPE if it dies
+        gp.wait()
+        tl.terminate()
+    except KeyboardInterrupt:
+        return 130
+    except FileNotFoundError as exc:
+        _err(f'tail/grep not found: {exc}')
+        return 1
+    return 0
+
+
 def cmd_completion(args) -> int:
     sub = getattr(args, 'completion_command', None)
     if sub == 'bash':
@@ -5595,6 +5666,14 @@ def main() -> int:
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
 
+    # psk-watch — live tail of psk-recorder's PSK Reporter upload activity
+    p_psk = sub.add_parser('psk-watch',
+                           help='live tail of PSK Reporter upload events '
+                                '(per-poll ft8/ft4 counts + batch flushes)')
+    p_psk.add_argument('--instance', metavar='RADIOD_ID', default=None,
+                       help='specific radiod instance (default: most recently '
+                            'modified /var/log/psk-recorder/<id>.log)')
+
     # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
     p = sub.add_parser('ka9q-watch',
                        help='check ka9q-radio upstream for changes that could '
@@ -5773,6 +5852,9 @@ def main() -> int:
         if diag_cmd == 'net':
             return cmd_diag_net(args)
         return cmd_diag(args)
+
+    if args.command == 'psk-watch':
+        return cmd_psk_watch(args)
 
     if args.command in ('validate', 'config', 'environment', 'ka9q-watch'):
         if not _HAS_SIGMOND_LIB:
