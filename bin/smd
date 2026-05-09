@@ -4646,11 +4646,19 @@ def cmd_wisdom_plan(args) -> int:
 
     WISDOM_TMP.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = ['stdbuf', '-oL', fftwf, '-v', '-T', '1',
+    # Pin to CPU 0 for the entire run.  FFTW's planner picks the
+    # fastest implementation by literally benchmarking each candidate;
+    # if the kernel migrates the process to a different core mid-plan,
+    # cache behaviour shifts and the timings get noisy — leading to
+    # suboptimal plans.  taskset's affinity is inherited by children,
+    # so stdbuf and fftwf-wisdom both stay on CPU 0.
+    cmd = ['taskset', '-c', '0',
+           'stdbuf', '-oL', fftwf, '-v', '-T', '1',
            '-o', str(WISDOM_TMP), *FFT_WISDOM_PROFILES]
     _heading(f'wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)')
-    _info(f'output: {WISDOM_TMP}')
-    _info(f'log:    {WISDOM_LOG}')
+    _info(f'output:   {WISDOM_TMP}')
+    _info(f'log:      {WISDOM_LOG}')
+    _info(f'affinity: CPU 0  (single-core for stable FFTW timing measurements)')
     _info('this will take a long time — the rof3240000 transform alone '
           'can run for hours.  Open in a tmux/screen session if you '
           'plan to disconnect.')
