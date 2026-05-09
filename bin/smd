@@ -4718,9 +4718,14 @@ def _wisdom_boost_cpu0() -> dict:
                'hw_max_khz': hw_max, 'boosted_khz': None}
         if saved < hw_max:
             try:
-                w = _ssh_proxmox_host(
-                    state, 'sh', '-c', f'echo {hw_max} > {sm_path}',
-                )
+                # IMPORTANT: pass the redirect as a single command string,
+                # not as ('sh', '-c', '...').  ssh joins multi-arg remote
+                # commands with bare spaces and the remote shell re-parses;
+                # ('sh', '-c', 'echo X > Y') becomes `sh -c echo X > Y`
+                # which means "run sh -c echo with $0=X, redirect stdout
+                # to Y".  A bare newline gets written to scaling_max_freq
+                # and the kernel rejects with EIO.
+                w = _ssh_proxmox_host(state, f'echo {hw_max} > {sm_path}')
                 if w.returncode == 0:
                     out['boosted_khz'] = hw_max
                 else:
@@ -4757,9 +4762,9 @@ def _wisdom_restore_cpu0(b: dict) -> str | None:
     saved = b['saved_khz']
     if b['mode'] == 'proxmox':
         try:
+            # Single command string — see _wisdom_boost_cpu0 for why.
             r = _ssh_proxmox_host(
-                b['state'], 'sh', '-c',
-                f"echo {saved} > {b['remote_path']}",
+                b['state'], f"echo {saved} > {b['remote_path']}",
                 timeout=10,
             )
         except subprocess.TimeoutExpired:
