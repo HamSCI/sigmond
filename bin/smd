@@ -78,6 +78,7 @@ if (_VENV_PY.is_file()
 import argparse
 import configparser
 import pwd
+import re
 import shutil
 import subprocess
 import textwrap
@@ -4598,6 +4599,182 @@ complete -F _smdt_complete smdt smdtui
 # wisdom — FFTW3 wisdom-file planner
 # ---------------------------------------------------------------------------
 
+# ────────────────────────────────────────────────────────────────────────────
+# Proxmox host SSH — same mechanism install.sh uses to edit grub on the host.
+#
+# When sigmond is installed inside a Proxmox VM, install.sh stashes the host
+# address and VMID in /etc/sigmond/install-state.env and pins an SSH key at
+# /root/.ssh/id_ed25519 (mirroring scripts/proxmox/lib.sh's `ssh_host`).  CPU
+# frequency scaling lives on the host, not the guest, so wisdom-plan boosts
+# the right pCPU by SSHing in.
+# ────────────────────────────────────────────────────────────────────────────
+
+_INSTALL_STATE_PATH = Path('/etc/sigmond/install-state.env')
+
+
+def _read_install_state() -> dict:
+    """Parse /etc/sigmond/install-state.env (KEY='value' lines).  {} on miss."""
+    try:
+        text = _INSTALL_STATE_PATH.read_text()
+    except (FileNotFoundError, PermissionError):
+        return {}
+    out: dict = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, val = line.partition('=')
+        if len(val) >= 2 and val[0] == "'" and val[-1] == "'":
+            val = val[1:-1]
+        out[key] = val
+    return out
+
+
+def _ssh_proxmox_host(state: dict, *cmd: str,
+                      timeout: float = 15) -> subprocess.CompletedProcess:
+    """Run `cmd` on the Proxmox host as root via the install-time SSH key."""
+    target = f"{state.get('PROXMOX_USER', 'root')}@{state['PROXMOX_HOST']}"
+    return subprocess.run(
+        ['ssh',
+         '-o', 'BatchMode=yes',
+         '-o', 'ConnectTimeout=10',
+         '-o', 'StrictHostKeyChecking=accept-new',
+         '-i', '/root/.ssh/id_ed25519',
+         '-o', 'IdentitiesOnly=yes',
+         target, *cmd],
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
+
+
+def _discover_pcpu_for_vcpu0(state: dict) -> int | None:
+    """Return host pCPU id that VM vCPU 0 is pinned to.
+
+    Reads /var/lib/vz/snippets/cpu-pin-<VMID>.sh on the host (rendered by
+    sigmond install.sh from cpu-pin-VMID.sh.template) and grabs the first
+    entry of RADIOD_CPUS.  Sequential vCPU pinning means RADIOD_CPUS[0]
+    is the pCPU running vCPU 0.
+    """
+    vmid = state.get('VMID', '')
+    if not vmid:
+        return None
+    try:
+        r = _ssh_proxmox_host(
+            state, 'cat', f'/var/lib/vz/snippets/cpu-pin-{vmid}.sh',
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        m = re.match(r'^RADIOD_CPUS=\(([^)]+)\)\s*$', line.strip())
+        if m:
+            cpus = m.group(1).split()
+            if cpus:
+                try:
+                    return int(cpus[0])
+                except ValueError:
+                    return None
+    return None
+
+
+def _wisdom_boost_cpu0() -> dict:
+    """Save current scaling_max_freq and boost to cpuinfo_max_freq.
+
+    On a Proxmox-managed VM, operates on the host pCPU pinned to vCPU 0;
+    on bare metal, on local /sys.  Best-effort: failures degrade to a
+    'noop' result and let the wisdom run continue at whatever the OS picks.
+    """
+    state = _read_install_state()
+    if state.get('PROXMOX_HOST'):
+        host = state['PROXMOX_HOST']
+        try:
+            pcpu = _discover_pcpu_for_vcpu0(state)
+        except subprocess.TimeoutExpired:
+            return {'mode': 'noop',
+                    'reason': f'ssh to {host} timed out'}
+        if pcpu is None:
+            return {'mode': 'noop',
+                    'reason': f'could not read cpu-pin hookscript on {host}'}
+        remote_dir = f'/sys/devices/system/cpu/cpufreq/policy{pcpu}'
+        sm_path = f'{remote_dir}/scaling_max_freq'
+        try:
+            r = _ssh_proxmox_host(
+                state, 'cat', sm_path, f'{remote_dir}/cpuinfo_max_freq',
+            )
+        except subprocess.TimeoutExpired:
+            return {'mode': 'noop',
+                    'reason': f'ssh to {host} timed out reading freq'}
+        if r.returncode != 0:
+            return {'mode': 'noop',
+                    'reason': f'ssh {host} freq read failed: '
+                              f'{(r.stderr or r.stdout).strip() or "no output"}'}
+        try:
+            saved, hw_max = (int(x) for x in r.stdout.split())
+        except ValueError:
+            return {'mode': 'noop',
+                    'reason': f'unparseable freq response from {host}: {r.stdout!r}'}
+        out = {'mode': 'proxmox', 'state': state, 'pcpu': pcpu, 'host': host,
+               'remote_path': sm_path, 'saved_khz': saved,
+               'hw_max_khz': hw_max, 'boosted_khz': None}
+        if saved < hw_max:
+            try:
+                w = _ssh_proxmox_host(
+                    state, 'sh', '-c', f'echo {hw_max} > {sm_path}',
+                )
+                if w.returncode == 0:
+                    out['boosted_khz'] = hw_max
+                else:
+                    out['boost_error'] = (w.stderr or 'unknown').strip()
+            except subprocess.TimeoutExpired:
+                out['boost_error'] = f'ssh to {host} timed out writing freq'
+        return out
+
+    # Bare-metal path: write local sysfs.
+    sm = Path('/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq')
+    hw = Path('/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq')
+    if not (sm.exists() and hw.exists()):
+        return {'mode': 'noop', 'reason': 'cpufreq sysfs unavailable'}
+    try:
+        saved = int(sm.read_text().strip())
+        hw_max = int(hw.read_text().strip())
+    except (OSError, ValueError) as exc:
+        return {'mode': 'noop', 'reason': str(exc)}
+    out = {'mode': 'local', 'sm_path': sm, 'saved_khz': saved,
+           'hw_max_khz': hw_max, 'boosted_khz': None}
+    if saved < hw_max:
+        try:
+            sm.write_text(f'{hw_max}\n')
+            out['boosted_khz'] = hw_max
+        except OSError as exc:
+            out['boost_error'] = str(exc)
+    return out
+
+
+def _wisdom_restore_cpu0(b: dict) -> str | None:
+    """Restore the saved scaling_max_freq.  Return error string on failure."""
+    if b.get('boosted_khz') is None:
+        return None
+    saved = b['saved_khz']
+    if b['mode'] == 'proxmox':
+        try:
+            r = _ssh_proxmox_host(
+                b['state'], 'sh', '-c',
+                f"echo {saved} > {b['remote_path']}",
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return f"ssh to {b['host']} timed out"
+        if r.returncode != 0:
+            return (r.stderr or 'ssh failed').strip()
+        return None
+    if b['mode'] == 'local':
+        try:
+            b['sm_path'].write_text(f'{saved}\n')
+        except OSError as exc:
+            return str(exc)
+    return None
+
+
 def cmd_wisdom_plan(args) -> int:
     """Run fftwf-wisdom for every transform radiod uses; install /etc/fftw/wisdomf.
 
@@ -4656,39 +4833,44 @@ def cmd_wisdom_plan(args) -> int:
            'stdbuf', '-oL', fftwf, '-v', '-T', '1',
            '-o', str(WISDOM_TMP), *FFT_WISDOM_PROFILES]
 
-    # Stage CPU 0 at its hardware-max frequency for the duration of the
-    # run, then restore.  The FFTW planner is timing-sensitive — running
-    # at a throttled `scaling_max_freq` produces both slower planning
-    # AND a wisdom plan biased toward implementations that do well at
-    # the throttled rate but not at full clock.  Best-effort: a missing
-    # cpufreq sysfs (VMs, exotic CPUs) or a denied write degrades to
-    # "run at whatever the OS picks" without aborting.
-    _CPUFREQ = Path('/sys/devices/system/cpu/cpu0/cpufreq')
-    _SCALING_MAX = _CPUFREQ / 'scaling_max_freq'
-    _HW_MAX      = _CPUFREQ / 'cpuinfo_max_freq'
-    saved_max_khz = None
-    boosted_to_khz = None
-    if _SCALING_MAX.exists() and _HW_MAX.exists():
-        try:
-            saved_max_khz = int(_SCALING_MAX.read_text().strip())
-            hw_max_khz    = int(_HW_MAX.read_text().strip())
-            if saved_max_khz < hw_max_khz:
-                _SCALING_MAX.write_text(f'{hw_max_khz}\n')
-                boosted_to_khz = hw_max_khz
-        except (OSError, ValueError) as exc:
-            _warn(f'could not raise CPU 0 max freq: {exc}')
+    # Stage the pCPU running vCPU 0 at its hardware-max frequency for the
+    # duration of the run, then restore.  FFTW's planner is timing-sensitive
+    # — running at a throttled `scaling_max_freq` produces both slower
+    # planning AND a wisdom plan biased toward implementations that do well
+    # at the throttled rate but not at full clock.  CPU frequency lives on
+    # the host, not the guest; on a Proxmox VM (detected via /etc/sigmond/
+    # install-state.env), this SSHes to the host using the same key
+    # install.sh used for grub edits and writes the host pCPU's sysfs.
+    # Best-effort: failures degrade to "run at whatever the OS picks".
+    boost = _wisdom_boost_cpu0()
 
     _heading(f'wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)')
     _info(f'output:   {WISDOM_TMP}')
     _info(f'log:      {WISDOM_LOG}')
     _info(f'affinity: CPU 0  (single-core for stable FFTW timing measurements)')
-    if boosted_to_khz is not None and saved_max_khz is not None:
-        _info(f'CPU 0 freq: raised {saved_max_khz/1000:.0f} → '
-              f'{boosted_to_khz/1000:.0f} MHz (will restore on exit)')
-    elif saved_max_khz is not None:
-        _info(f'CPU 0 freq: already at hardware max ({saved_max_khz/1000:.0f} MHz)')
+    if boost['mode'] == 'proxmox':
+        if boost.get('boosted_khz') is not None:
+            _info(f"CPU freq:  host {boost['host']} pCPU {boost['pcpu']} via SSH: "
+                  f"{boost['saved_khz']/1000:.0f} → {boost['boosted_khz']/1000:.0f} MHz "
+                  f"(will restore on exit)")
+        elif boost.get('boost_error'):
+            _warn(f"CPU freq:  could not raise host pCPU {boost['pcpu']} on "
+                  f"{boost['host']}: {boost['boost_error']} — running at host cap")
+        else:
+            _info(f"CPU freq:  host {boost['host']} pCPU {boost['pcpu']} already at "
+                  f"hardware max ({boost['saved_khz']/1000:.0f} MHz)")
+    elif boost['mode'] == 'local':
+        if boost.get('boosted_khz') is not None:
+            _info(f"CPU freq:  raised {boost['saved_khz']/1000:.0f} → "
+                  f"{boost['boosted_khz']/1000:.0f} MHz (will restore on exit)")
+        elif boost.get('boost_error'):
+            _warn(f"CPU freq:  could not raise CPU 0: {boost['boost_error']}")
+        else:
+            _info(f"CPU freq:  already at hardware max "
+                  f"({boost['saved_khz']/1000:.0f} MHz)")
     else:
-        _info('CPU 0 freq: cpufreq sysfs unavailable — running at OS default')
+        _info(f"CPU freq:  not boosted ({boost.get('reason', 'unknown')}) — "
+              f"running at OS default")
     _info('this will take a long time — the rof3240000 transform alone '
           'can run for hours.  Open in a tmux/screen session if you '
           'plan to disconnect.')
@@ -4723,14 +4905,25 @@ def cmd_wisdom_plan(args) -> int:
             _warn('aborted by operator (Ctrl-C)')
             return 130
     finally:
-        if boosted_to_khz is not None and saved_max_khz is not None:
-            try:
-                _SCALING_MAX.write_text(f'{saved_max_khz}\n')
-                _info(f'CPU 0 freq: restored to {saved_max_khz/1000:.0f} MHz')
-            except (OSError, ValueError) as exc:
-                _warn(f'could not restore CPU 0 max freq to '
-                      f'{saved_max_khz/1000:.0f} MHz: {exc} — set manually with '
-                      f'`echo {saved_max_khz} | sudo tee {_SCALING_MAX}`')
+        if boost.get('boosted_khz') is not None:
+            saved_mhz = boost['saved_khz'] / 1000
+            err = _wisdom_restore_cpu0(boost)
+            if err is None:
+                if boost['mode'] == 'proxmox':
+                    _info(f"CPU freq:  restored host pCPU {boost['pcpu']} on "
+                          f"{boost['host']} → {saved_mhz:.0f} MHz")
+                else:
+                    _info(f"CPU freq:  restored to {saved_mhz:.0f} MHz")
+            else:
+                if boost['mode'] == 'proxmox':
+                    _warn(f"could not restore host pCPU {boost['pcpu']} on "
+                          f"{boost['host']} to {saved_mhz:.0f} MHz: {err} — "
+                          f"on host run: echo {boost['saved_khz']} > "
+                          f"{boost['remote_path']}")
+                else:
+                    _warn(f"could not restore CPU 0 freq to {saved_mhz:.0f} MHz: "
+                          f"{err} — set manually with: echo {boost['saved_khz']} "
+                          f"| sudo tee {boost['sm_path']}")
 
     elapsed = time.monotonic() - start
     if rc != 0:
