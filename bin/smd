@@ -5237,18 +5237,12 @@ def cmd_timestd_tune_storage(args) -> int:
 def cmd_psk_watch(args) -> int:
     """Live tail of psk-recorder's PSK Reporter upload activity.
 
-    Two log line types are forwarded:
-      * `psk-uploader-ch: queued ft8=N ft4=M (total X)` — per-poll feed
-        rate (every POLL_INTERVAL_SEC, currently 5 s) showing how many
-        spots of each mode were queued INTO the pskreporter library
-        since the last poll.
-      * `INFO:root:uploading N spots using TCP|UDP` — emitted by the
-        pskreporter library when its batch interval (PSKREPORTER_INTERVAL,
-        default 30 s in our deploy) fires and the UDP/TCP datagram
-        actually goes out.
-
-    Together these answer "how fast are we ingesting decodes" and "is
-    the data actually shipping to PSK Reporter".
+    Annotates each `uploading N` line with the sum of `queued ft8=…
+    ft4=…` events that fed into it, so the per-poll vs per-batch
+    accounting is visible.  Without this annotation the output looks
+    contradictory — a single `queued ft8=63 ft4=1` next to `uploading
+    192` reads as "uploading is much bigger than queued" — when in
+    fact 192 = sum of the last ~3 polls (each ~60 spots).
     """
     instance = getattr(args, 'instance', None)
     log_path = Path(f'/var/log/psk-recorder/{instance}.log') if instance \
@@ -5273,15 +5267,23 @@ def cmd_psk_watch(args) -> int:
         log_path = candidates[0]
 
     _heading(f'PSK Reporter upload activity ({log_path.name})')
-    _info('   ▸ "queued ft8=N ft4=M"  per 5 s poll  (rate INTO upload batch)')
-    _info('   ▸ "uploading N spots using TCP/UDP"  per 30 s flush  (sent OUT)')
+    _info('   ▸ "queued ft8=N ft4=M"   per 5 s poll  (rate INTO library batch)')
+    _info('   ▸ "uploading N spots"    per ~30 s flush  (sent OUT to PSK Reporter)')
+    _info('   ▸ ✓/✗ on each upload     reconciles uploaded count vs sum of polls fed')
     _info('   Ctrl-C to exit.')
     print()
 
-    # The systemd unit routes daemon stdout/stderr to a file via
-    # `StandardOutput=append:`, NOT to journalctl, so tail -F (capital,
-    # follow-by-name to survive logrotate) is the right read path.
+    import re as _re
+    queue_re = _re.compile(r'queued ft8=(\d+) ft4=(\d+)')
+    upload_re = _re.compile(r'uploading (\d+) spots using (\w+)')
+
+    # Per-batch accumulator: sum of queued spots since the last upload.
+    pending_polls: int = 0
+    pending_spots: int = 0
     sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+    # Match all the lines we want to forward; let grep do the prefilter so
+    # the python loop only sees relevant lines (the daemon log includes
+    # ka9q.control LIFETIME chatter we want to suppress).
     pattern = (r'psk-uploader-ch: queued ft8=|'
                r'psk-uploader-ch: batch [0-9]|'
                r'uploading [0-9]+ spots using|'
@@ -5289,13 +5291,53 @@ def cmd_psk_watch(args) -> int:
     try:
         tl = subprocess.Popen(
             [*sudo_prefix, 'tail', '-n', '50', '-F', str(log_path)],
-            stdout=subprocess.PIPE,
+            stdout=subprocess.PIPE, text=True, bufsize=1,
         )
         gp = subprocess.Popen(
             ['grep', '--line-buffered', '-E', pattern],
-            stdin=tl.stdout, stdout=sys.stdout,
+            stdin=tl.stdout, stdout=subprocess.PIPE,
+            text=True, bufsize=1,
         )
-        tl.stdout.close()  # let grep see SIGPIPE if it dies
+        tl.stdout.close()
+        assert gp.stdout is not None
+        for line in gp.stdout:
+            line = line.rstrip('\n')
+            qm = queue_re.search(line)
+            if qm:
+                pending_polls += 1
+                pending_spots += int(qm.group(1)) + int(qm.group(2))
+                print(line)
+                continue
+            um = upload_re.search(line)
+            if um:
+                uploaded = int(um.group(1))
+                # Reconciliation tag: ✓ if uploaded matches sum of fed
+                # polls, ✗ + the absolute delta otherwise.  Library may
+                # batch slightly differently if a poll fires within the
+                # upload() critical section — small drift is expected;
+                # large drift is the "where did my spots go" signal.
+                diff = uploaded - pending_spots
+                if pending_polls == 0:
+                    tag = '⊘ no polls fed before this flush'
+                elif diff == 0:
+                    tag = (
+                        f'✓ matches {pending_polls} poll{"s" if pending_polls != 1 else ""} '
+                        f'feeding {pending_spots} spots'
+                    )
+                else:
+                    sign = '+' if diff > 0 else ''
+                    tag = (
+                        f'✗ {pending_polls} poll{"s" if pending_polls != 1 else ""} '
+                        f'fed {pending_spots} spots (delta {sign}{diff})'
+                    )
+                print(f'{line}  [{tag}]')
+                pending_polls = 0
+                pending_spots = 0
+                continue
+            # Anything else (batch summary, started/stopped) — pass through
+            # untouched, don't reset the accumulator (batch summary fires
+            # AROUND uploads, not in lieu of them).
+            print(line)
         gp.wait()
         tl.terminate()
     except KeyboardInterrupt:
