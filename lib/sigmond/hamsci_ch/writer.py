@@ -121,14 +121,37 @@ class Writer:
         batch_rows: int = 50_000,
         env: Optional[dict] = None,
         client_factory: Optional[Callable[[ConnectionConfig], Any]] = None,
-    ) -> "Writer":
-        """Build a Writer from coordination.env.
+    ) -> Any:
+        """Build a writer from coordination.env.
+
+        Backend selection (in order):
+        1. `SIGMOND_SQLITE_PATH` set → `SqliteWriter` (lightweight local
+           buffer for `hs-uploader`; recommended for client hosts).
+        2. `SIGMOND_CLICKHOUSE_URL` set → ClickHouse `Writer` (this class).
+        3. Neither set → no-op writer (standalone-safe).
 
         `mode` is the per-mode key (`wspr`, `psk`, `hfdl`, `codar`,
         `timestd`).  The actual database name is resolved through
-        `SIGMOND_CLICKHOUSE_DB_<MODE>` so operators can rename per-host
-        without client changes.  Pass `database=` to bypass the alias.
+        `SIGMOND_CLICKHOUSE_DB_<MODE>` (or `SIGMOND_SQLITE_DB_<MODE>` on
+        the SQLite path) so operators can rename per-host without client
+        changes.  Pass `database=` to bypass the alias.
+
+        Returns a `Writer` or `SqliteWriter`; both expose the same
+        `insert/flush/close/health/is_noop/buffered` interface.
         """
+        e = env if env is not None else os.environ
+        if (e.get("SIGMOND_SQLITE_PATH") or "").strip():
+            # Lazy import keeps the CH path free of sqlite3 import cost
+            # and avoids a hard cycle between writer.py and sqlite_writer.py.
+            from .sqlite_writer import SqliteWriter
+            return SqliteWriter.from_env(
+                table=table,
+                mode=mode,
+                database=database,
+                schema_version=schema_version,
+                batch_rows=batch_rows,
+                env=env,
+            )
         cfg = ConnectionConfig.from_env(env)
         actual_db = database or resolve_db_alias(mode, env)
         return cls(

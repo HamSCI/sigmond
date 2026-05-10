@@ -1,0 +1,277 @@
+"""Tests for sigmond.hamsci_ch.SqliteWriter (CONTRACT §17.5 alt backend)."""
+
+import json
+import sqlite3
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from sigmond.hamsci_ch import BufferFull, SqliteConfig, SqliteWriter, Writer
+from sigmond.hamsci_ch.sqlite_writer import (
+    HEALTH_DEGRADED, HEALTH_NOOP, HEALTH_OK, HEALTH_UNREACHABLE,
+    _resolve_db_alias,
+)
+
+
+def _temp_db_path() -> str:
+    """Caller-owned temp file path; we delete in tearDown."""
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    f.close()
+    Path(f.name).unlink()  # let sqlite create the file fresh
+    return f.name
+
+
+class TestNoOpMode(unittest.TestCase):
+    """No env vars → noop. Standalone-safe.  Mirrors the CH writer's contract."""
+
+    def test_from_env_no_path_yields_noop(self):
+        w = SqliteWriter.from_env(table="spots", mode="psk", env={})
+        self.assertTrue(w.is_noop)
+        self.assertEqual(w.health, HEALTH_NOOP)
+
+    def test_noop_insert_does_nothing(self):
+        w = SqliteWriter.from_env(table="spots", mode="psk", env={})
+        w.insert([{"a": 1}, {"a": 2}])
+        self.assertEqual(w.buffered, 0)
+        w.flush()
+        w.close()
+
+
+class TestConfigAndAlias(unittest.TestCase):
+
+    def test_config_from_env_strips_blank(self):
+        self.assertIsNone(SqliteConfig.from_env({"SIGMOND_SQLITE_PATH": ""}))
+        self.assertIsNone(SqliteConfig.from_env({"SIGMOND_SQLITE_PATH": "   "}))
+
+    def test_config_from_env_returns_path(self):
+        cfg = SqliteConfig.from_env({"SIGMOND_SQLITE_PATH": "/tmp/sink.db"})
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg.path, "/tmp/sink.db")
+
+    def test_resolve_db_alias_uses_env_then_falls_back(self):
+        env = {"SIGMOND_SQLITE_DB_PSK": "psk_local"}
+        self.assertEqual(_resolve_db_alias("psk", env), "psk_local")
+        self.assertEqual(_resolve_db_alias("hfdl", env), "hfdl")
+
+
+class TestEnabledWriter(unittest.TestCase):
+
+    def setUp(self):
+        self.db_path = _temp_db_path()
+        self.env = {"SIGMOND_SQLITE_PATH": self.db_path}
+
+    def tearDown(self):
+        p = Path(self.db_path)
+        if p.exists():
+            p.unlink()
+        # WAL/SHM sidecars
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(self.db_path + suffix)
+            if sidecar.exists():
+                sidecar.unlink()
+
+    def _writer(self, **kwargs) -> SqliteWriter:
+        return SqliteWriter.from_env(
+            table="spots", mode="psk", env=self.env, batch_rows=3, **kwargs,
+        )
+
+    def _queue_rows(self) -> list:
+        # Table is created lazily on first flush; treat "not yet" as empty.
+        if not Path(self.db_path).exists():
+            return []
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='pending_uploads'"
+            )
+            if cur.fetchone() is None:
+                return []
+            cur = conn.execute(
+                "SELECT target_db, target_table, schema_version, "
+                "payload_json, queued_at FROM pending_uploads ORDER BY id"
+            )
+            return list(cur.fetchall())
+        finally:
+            conn.close()
+
+    def test_buffers_until_batch_threshold(self):
+        w = self._writer()
+        w.insert([{"a": 1}, {"a": 2}])
+        self.assertEqual(w.buffered, 2)
+        self.assertEqual(self._queue_rows(), [])  # not flushed yet
+        w.insert([{"a": 3}])  # crosses batch_rows=3
+        rows = self._queue_rows()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(w.buffered, 0)
+        self.assertEqual(w.health, HEALTH_OK)
+
+    def test_explicit_flush_drains_buffer(self):
+        w = self._writer()
+        w.insert([{"a": 1}])
+        w.flush()
+        self.assertEqual(len(self._queue_rows()), 1)
+        self.assertEqual(w.buffered, 0)
+
+    def test_payload_is_json_with_target_metadata(self):
+        w = self._writer()
+        w.insert([{"frequency": 14074000, "mode": "ft8", "score": 17}])
+        w.flush()
+        rows = self._queue_rows()
+        self.assertEqual(len(rows), 1)
+        target_db, target_table, schema_version, payload_json, queued_at = rows[0]
+        self.assertEqual(target_db, "psk")
+        self.assertEqual(target_table, "spots")
+        self.assertEqual(schema_version, 0)
+        decoded = json.loads(payload_json)
+        self.assertEqual(decoded["frequency"], 14074000)
+        self.assertEqual(decoded["mode"], "ft8")
+        # queued_at parses as ISO8601 UTC.
+        parsed = datetime.fromisoformat(queued_at)
+        self.assertIsNotNone(parsed.tzinfo)
+
+    def test_datetime_serializes_to_iso(self):
+        w = self._writer()
+        t = datetime(2026, 5, 10, 12, 0, 0, tzinfo=timezone.utc)
+        w.insert([{"time": t}])
+        w.flush()
+        payload = json.loads(self._queue_rows()[0][3])
+        self.assertEqual(payload["time"], t.isoformat())
+
+    def test_alias_overrides_database_from_env(self):
+        env = {**self.env, "SIGMOND_SQLITE_DB_PSK": "psk_alt"}
+        w = SqliteWriter.from_env(
+            table="spots", mode="psk", env=env, batch_rows=1,
+        )
+        w.insert([{"x": 1}])
+        rows = self._queue_rows()
+        self.assertEqual(rows[0][0], "psk_alt")
+
+    def test_close_flushes_and_closes_conn(self):
+        w = self._writer()
+        w.insert([{"a": 1}])
+        w.close()
+        self.assertEqual(len(self._queue_rows()), 1)
+
+    def test_context_manager_flushes(self):
+        with SqliteWriter.from_env(
+            table="spots", mode="psk", env=self.env, batch_rows=10,
+        ) as w:
+            w.insert([{"x": 1}])
+        self.assertEqual(len(self._queue_rows()), 1)
+
+    def test_schema_version_persisted(self):
+        w = SqliteWriter.from_env(
+            table="spots", mode="psk", env=self.env, batch_rows=1,
+            schema_version=7,
+        )
+        w.insert([{"x": 1}])
+        self.assertEqual(self._queue_rows()[0][2], 7)
+
+    def test_multiple_tables_coexist_in_one_db(self):
+        spots = SqliteWriter.from_env(
+            table="spots", mode="psk", env=self.env, batch_rows=1,
+        )
+        noise = SqliteWriter.from_env(
+            table="noise", mode="wspr", env=self.env, batch_rows=1,
+        )
+        spots.insert([{"freq": 14074000}])
+        noise.insert([{"floor": -120}])
+        rows = self._queue_rows()
+        targets = {(r[0], r[1]) for r in rows}
+        self.assertEqual(targets, {("psk", "spots"), ("wspr", "noise")})
+
+
+class TestUnreachableHandling(unittest.TestCase):
+    """SQLite is local, so 'unreachable' means disk-full / readonly /
+    locked-too-long.  We simulate with a connect_factory that fails."""
+
+    def test_transient_failure_keeps_buffer_marks_unreachable(self):
+        attempts = {"n": 0}
+
+        def factory(cfg):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise sqlite3.OperationalError("simulated disk error")
+            return sqlite3.connect(":memory:")
+
+        w = SqliteWriter.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": "/nonexistent/dir/sink.db"},
+            batch_rows=2, connect_factory=factory,
+        )
+        w.insert([{"a": 1}, {"a": 2}])  # triggers flush; first attempt fails
+        self.assertEqual(w.health, HEALTH_UNREACHABLE)
+        self.assertEqual(w.buffered, 2)
+        # Next flush succeeds against the in-memory connection.
+        w.flush()
+        self.assertEqual(w.health, HEALTH_OK)
+        self.assertEqual(w.buffered, 0)
+
+    def test_buffer_overflow_raises_buffer_full(self):
+        def always_fail(cfg):
+            raise sqlite3.OperationalError("simulated disk full")
+
+        w = SqliteWriter.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": "/nonexistent/dir/sink.db"},
+            batch_rows=3, connect_factory=always_fail,
+        )
+        with self.assertRaises(BufferFull):
+            for i in range(7):
+                w.insert([{"i": i}])
+        self.assertEqual(w.health, HEALTH_DEGRADED)
+
+
+class TestWriterFromEnvDispatch(unittest.TestCase):
+    """`Writer.from_env` must hand back a SqliteWriter when SQLITE_PATH set,
+    a ClickHouse Writer when only CLICKHOUSE_URL set, and a noop otherwise."""
+
+    def setUp(self):
+        self.db_path = _temp_db_path()
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(self.db_path + suffix)
+            if p.exists():
+                p.unlink()
+
+    def test_sqlite_path_selects_sqlite_writer(self):
+        w = Writer.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": self.db_path},
+        )
+        self.assertIsInstance(w, SqliteWriter)
+        self.assertFalse(w.is_noop)
+
+    def test_clickhouse_url_selects_clickhouse_writer(self):
+        w = Writer.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_CLICKHOUSE_URL": "http://localhost:8123"},
+        )
+        self.assertIsInstance(w, Writer)
+        self.assertNotIsInstance(w, SqliteWriter)
+        self.assertFalse(w.is_noop)
+
+    def test_sqlite_takes_precedence_over_clickhouse(self):
+        w = Writer.from_env(
+            table="spots", mode="psk",
+            env={
+                "SIGMOND_SQLITE_PATH": self.db_path,
+                "SIGMOND_CLICKHOUSE_URL": "http://localhost:8123",
+            },
+        )
+        self.assertIsInstance(w, SqliteWriter)
+
+    def test_neither_yields_noop_clickhouse_writer(self):
+        w = Writer.from_env(table="spots", mode="psk", env={})
+        self.assertIsInstance(w, Writer)
+        self.assertTrue(w.is_noop)
+
+
+if __name__ == "__main__":
+    unittest.main()
