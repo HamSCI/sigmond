@@ -60,6 +60,92 @@ ok()   { echo -e "${GREEN}[  ok  ]${NC} $*"; }
 warn() { echo -e "${YELLOW}[ warn ]${NC} $*"; }
 die()  { echo -e "${RED}[error ]${NC} $*" >&2; exit 1; }
 
+# ─── sudo / passwordless-sudo bootstrap ──────────────────────────────────────
+# install.sh and the installed `smd` CLI run many commands under sudo.  We
+# set up passwordless sudo once so neither prompts mid-install or
+# mid-operation, and so the script can run unattended (incl. from Claude
+# Code and other non-TTY contexts) on subsequent invocations.
+#
+# Three cases:
+#   1. Running as root              → no sudo needed; SUDO="".
+#   2. Passwordless sudo already on → SUDO="sudo"; continue.
+#   3. Need to bootstrap it         → check sudo group membership; if the
+#      invoking user is in the group, prompt for password once and write a
+#      sudoers drop-in.  Otherwise tell them how to gain sudo first and exit.
+#
+# To revert later: sudo rm /etc/sudoers.d/sigmond-nopasswd
+
+INVOKER="${SUDO_USER:-${USER:-$(id -un)}}"
+SUDOERS_DROPIN="/etc/sudoers.d/sigmond-nopasswd"
+
+if [[ $EUID -eq 0 ]]; then
+    SUDO=""
+    ok "running as root — sudo not required"
+elif sudo -n true 2>/dev/null; then
+    SUDO="sudo"
+    ok "passwordless sudo already active for '$INVOKER'"
+else
+    info "Passwordless sudo is not configured for '$INVOKER'."
+
+    # Check sudo-granting group membership: sudo (Debian/Ubuntu),
+    # wheel (RHEL/Fedora/Arch), admin (some derivatives).
+    if ! id -nG "$INVOKER" 2>/dev/null | tr ' ' '\n' | grep -Eqx 'sudo|wheel|admin'; then
+        cat >&2 <<EOF
+
+${RED}[error]${NC} User '$INVOKER' is not in the sudo (or wheel) group.
+
+Sigmond needs sudo to install system packages, create users, write to
+/etc and /opt, and manage systemd services.
+
+  ${BOLD}To fix:${NC}
+    1. Log in as root (or ask your sysadmin) and run:
+         ${CYAN}usermod -aG sudo $INVOKER${NC}
+    2. Log out of every session for '$INVOKER' and log back in
+       (group membership only applies to new sessions).
+    3. Re-run this installer:
+         ${CYAN}cd $REPO_DIR && ./install.sh${NC}
+
+EOF
+        exit 1
+    fi
+
+    # In sudo group: need a TTY to type the password once.
+    if [[ ! -e /dev/tty ]]; then
+        die "no TTY available — run install.sh from an interactive terminal
+       (real SSH session or local console) so sudo can prompt once.
+       After this one-time setup, future runs won't need a TTY."
+    fi
+
+    info "Will create $SUDOERS_DROPIN granting passwordless sudo to '$INVOKER'."
+    info "You'll be prompted for your password once."
+    printf "%b[?]%b Continue? [Y/n]: " "$YELLOW" "$NC" >/dev/tty
+    read -r _resp </dev/tty || _resp="n"
+    if [[ "$_resp" =~ ^[Nn] ]]; then
+        die "aborted — re-run install.sh when ready."
+    fi
+
+    # Acquire credentials (one prompt), then write/validate/install the drop-in.
+    sudo -v || die "sudo authentication failed"
+    _tmp="$(sudo mktemp /etc/sudoers.d/.sigmond-nopasswd.XXXXXX)" \
+        || die "couldn't create temp sudoers file"
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$INVOKER" | sudo tee "$_tmp" >/dev/null
+    sudo chmod 440 "$_tmp"
+    if ! sudo visudo -c -f "$_tmp" >/dev/null 2>&1; then
+        sudo rm -f "$_tmp"
+        die "sudoers validation failed — drop-in not installed"
+    fi
+    sudo mv "$_tmp" "$SUDOERS_DROPIN"
+
+    if ! sudo -n true 2>/dev/null; then
+        die "drop-in installed but passwordless sudo still inactive —
+       check: sudo cat $SUDOERS_DROPIN  &&  sudo -nl"
+    fi
+
+    ok "passwordless sudo configured at $SUDOERS_DROPIN"
+    SUDO="sudo"
+fi
+unset _resp _tmp
+
 # ─── Proxmox VM detection (auto-skip when not applicable) ────────────────────
 # Running in a KVM guest with no prior install state? Offer to run the
 # Proxmox host passthrough bootstrap first. Bare-metal hosts (virt=none)
@@ -92,31 +178,62 @@ echo "  │  'Zo... ven did your signals first propagate?│"
 echo "  └─────────────────────────────────────────────┘"
 echo -e "${NC}"
 
-# ─── sudo ─────────────────────────────────────────────────────────────────────
-if [[ $EUID -eq 0 ]]; then
-    SUDO=""
-else
-    info "Checking sudo access…"
-    if ! sudo -n true 2>/dev/null; then
-        info "Sigmond needs sudo to write system files (/etc, /opt, /usr/local/sbin)."
-        sudo -v || die "sudo access required — ask your sysadmin or run as root."
+# ─── canonical-path enforcement (auto-relocate if needed) ───────────────────
+# Sigmond's source-of-truth lives at /opt/git/sigmond/sigmond/, peer to the
+# components it manages.  If invoked from anywhere else, relocate the clone
+# in place and re-exec from the canonical path — sudo was acquired above so
+# this should not re-prompt.
+if [[ "$REPO_DIR" != "$CANONICAL_REPO" ]]; then
+    info "Repo is at $REPO_DIR"
+    info "Canonical location is $CANONICAL_REPO — relocating before install."
+    if [[ -d "$CANONICAL_REPO" && -n "$(ls -A "$CANONICAL_REPO" 2>/dev/null)" ]]; then
+        die "$CANONICAL_REPO already exists and is non-empty.
+       Inspect it and remove (or rename) it, then re-run install.sh:
+         sudo ls -la $CANONICAL_REPO"
     fi
-    SUDO="sudo"
+    $SUDO mkdir -p "$(dirname "$CANONICAL_REPO")"
+    [[ -d "$CANONICAL_REPO" ]] && $SUDO rmdir "$CANONICAL_REPO"
+    $SUDO mv "$REPO_DIR" "$CANONICAL_REPO"
+    ok "Relocated → $CANONICAL_REPO; re-execing install.sh"
+    exec "$CANONICAL_REPO/install.sh" "$@"
 fi
 
-# ─── canonical-path enforcement ──────────────────────────────────────────────
-# Sigmond's source-of-truth lives at /opt/git/sigmond/sigmond/, peer to
-# the components it manages.  Refuse to install from any other location;
-# the install would otherwise leave Pattern A symlinks pointing at a
-# non-canonical clone (that's the bug we keep fixing manually).
-if [[ "$REPO_DIR" != "$CANONICAL_REPO" ]]; then
-    die "install.sh must be run from $CANONICAL_REPO (got: $REPO_DIR)
-       To fix:
-         sudo mkdir -p /opt/git/sigmond
-         sudo chown \$USER /opt/git/sigmond
-         git clone https://github.com/mijahauan/sigmond $CANONICAL_REPO
-         cd $CANONICAL_REPO
-         ./install.sh"
+# ─── ensure ka9q-python is at the canonical sibling location ────────────────
+# pyproject.toml declares  ka9q-python = { path = "../ka9q-python" }, which
+# resolves to /opt/git/sigmond/ka9q-python.  If it's not there, relocate from
+# common alternate locations or clone from upstream so the venv install can
+# resolve the path-based dependency.
+KA9Q_CANONICAL="/opt/git/sigmond/ka9q-python"
+KA9Q_REPO_URL="https://github.com/mijahauan/ka9q-python"
+
+if [[ ! -f "$KA9Q_CANONICAL/pyproject.toml" ]]; then
+    info "ka9q-python not at $KA9Q_CANONICAL — searching common locations"
+    _ka9q_src=""
+    for _candidate in \
+        "/home/$INVOKER/ka9q-python" \
+        "/home/$INVOKER/git/ka9q-python" \
+        "/opt/git/ka9q-python"; do
+        if [[ -f "$_candidate/pyproject.toml" ]]; then
+            _ka9q_src="$_candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$_ka9q_src" ]]; then
+        info "Found at $_ka9q_src — relocating to $KA9Q_CANONICAL"
+        if [[ -d "$KA9Q_CANONICAL" && -n "$(ls -A "$KA9Q_CANONICAL" 2>/dev/null)" ]]; then
+            die "$KA9Q_CANONICAL exists and is non-empty — inspect and remove first."
+        fi
+        [[ -d "$KA9Q_CANONICAL" ]] && $SUDO rmdir "$KA9Q_CANONICAL"
+        $SUDO mv "$_ka9q_src" "$KA9Q_CANONICAL"
+        ok "ka9q-python relocated to $KA9Q_CANONICAL"
+    else
+        info "ka9q-python not found locally — cloning from $KA9Q_REPO_URL"
+        $SUDO git clone "$KA9Q_REPO_URL" "$KA9Q_CANONICAL" \
+            || die "failed to clone ka9q-python"
+        ok "ka9q-python cloned to $KA9Q_CANONICAL"
+    fi
+    unset _ka9q_src _candidate
 fi
 
 # ─── sigmond user + group ────────────────────────────────────────────────────
@@ -362,15 +479,9 @@ _pip_install "$VENV_DIR" -e "$REPO_DIR[tui]"
 $SUDO chmod -R a+rX "$VENV_DIR"
 ok "Venv ready at $VENV_DIR"
 
-# ─── optional: ka9q-python editable install ───────────────────────────────────
-for _ka9q in "$REPO_DIR/../ka9q-python" /opt/git/ka9q-python /home/mjh/git/ka9q-python; do
-    if [[ -f "$_ka9q/pyproject.toml" ]]; then
-        info "Installing ka9q-python from $_ka9q…"
-        _pip_install "$VENV_DIR" -e "$_ka9q"
-        ok "ka9q-python installed (editable)"
-        break
-    fi
-done
+# ka9q-python was placed at /opt/git/sigmond/ka9q-python near the top of this
+# script; uv resolves it via [tool.uv.sources] in pyproject.toml during the
+# sigmond[tui] install above, so no separate editable install is needed here.
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────
 info "Installing smd → $INSTALL_SMD"
