@@ -155,9 +155,9 @@ class ClientConfigScreen(Vertical):
         data = event.worker.result
         if not isinstance(data, _ClientView):
             return
-        self._render(data)
+        self._render_view(data)
 
-    def _render(self, view: _ClientView) -> None:
+    def _render_view(self, view: _ClientView) -> None:
         status = self.query_one("#cc-status", Static)
         if view.error:
             status.update(f"[red]{view.error}[/]")

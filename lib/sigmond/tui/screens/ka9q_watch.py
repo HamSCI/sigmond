@@ -148,9 +148,9 @@ class Ka9qWatchScreen(Vertical):
         result = event.worker.result
         if not isinstance(result, _RunResult):
             return
-        self._render(result)
+        self._render_result(result)
 
-    def _render(self, result: _RunResult) -> None:
+    def _render_result(self, result: _RunResult) -> None:
         summary = self.query_one("#kw-summary", Static)
         pins    = self.query_one("#kw-pins",    Static)
         commits = self.query_one("#kw-commits", DataTable)
