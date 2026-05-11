@@ -79,6 +79,8 @@ class DeclaredGnssVtec:
     host: str
     port: int = 8080
     source: str = ""     # "uBlox" | "Septentrio" | "Skytraq" | "generic"
+    protocol: str = "http"   # "http" → GET /api/tec/status JSON
+                             # "tcp"  → liveness: TCP connect + read a few bytes
     expect: dict = field(default_factory=dict)
 
 

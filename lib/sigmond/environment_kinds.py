@@ -311,6 +311,7 @@ def _parse_gnss_vtec(v: dict):
         host=str(v.get('host', '') or ''),
         port=int(v.get('port', 8080) or 8080),
         source=str(v.get('source', '') or ''),
+        protocol=str(v.get('protocol', 'http') or 'http').lower(),
         expect=dict(v.get('expect', {}) or {}),
     )
 

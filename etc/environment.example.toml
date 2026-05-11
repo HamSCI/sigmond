@@ -88,6 +88,14 @@ irq_pin_drift_allowed      = false   # IRQs must land on declared cores
 # port         = 8073
 # gps_expected = true
 
+# [[gnss_vtec]]
+# id       = "gnss-rover"
+# host     = "192.168.1.80"
+# port     = 9000
+# protocol = "tcp"      # "http" (default) GETs /api/tec/status JSON
+#                       # "tcp" liveness: connect + read a few bytes
+# source   = "uBlox"    # "uBlox" | "Septentrio" | "Skytraq" | "generic"
+
 # [discovery]
 # mdns_enabled        = true
 # multicast_enabled   = true
