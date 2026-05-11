@@ -5272,17 +5272,42 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
     plan = plan_clickhouse_removal()
 
     if plan.is_empty:
-        print("No ClickHouse artifacts found on this host — nothing to do.")
+        print("Storage is already migrated and correctly configured — "
+              "nothing to do.")
         return 0
 
-    print("ClickHouse artifacts detected on this host:")
+    # Distinguish "real CH still here" from "post-migration cleanup
+    # (perms / explicit-pin) only" so the dry-run header doesn't lie
+    # about what's about to happen.
+    has_ch_remnant = bool(
+        plan.services_to_stop or plan.services_to_disable
+        or plan.packages_to_purge or plan.paths_to_remove
+        or plan.files_to_remove or plan.env_lines_to_neutralize
+    )
+    if has_ch_remnant:
+        print("ClickHouse artifacts detected on this host:")
+    else:
+        print("Post-migration cleanup pending (group / perms / explicit pin):")
     print()
+    if plan.group_to_create:
+        print(f"  Group to create:  {plan.group_to_create}")
+    if plan.users_to_add_to_group:
+        print("  Users to add to sink group:")
+        for user, group in plan.users_to_add_to_group:
+            print(f"    - {user} → {group}")
+    if plan.sink_dir_to_setup:
+        path, group, mode = plan.sink_dir_to_setup
+        print(f"  Sink dir to configure: {path} ({oct(mode)} root:{group})")
     if plan.env_lines_to_neutralize:
         # Show env neutralization first — it's what unblocks the
         # producers, and surfacing it up top makes the cause-and-effect
         # legible in the dry-run output.
         print("  Env lines to comment out (preserves audit trail):")
         for path, line in plan.env_lines_to_neutralize:
+            print(f"    - {path}: {line}")
+    if plan.env_lines_to_set:
+        print("  Env lines to append (explicit SQLite pin):")
+        for path, line in plan.env_lines_to_set:
             print(f"    - {path}: {line}")
     if plan.consumers_to_restart:
         print("  Producer services to restart (so they switch to SQLite):")
@@ -5311,9 +5336,11 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
     print()
 
     if not apply:
-        print("Dry run.  Re-run with --yes to perform the removal.")
-        print("WARNING: --yes will permanently delete /var/lib/clickhouse "
-              "and any rows it holds.  Drain unsent rows first if needed.")
+        print("Dry run.  Re-run with --yes to apply the changes above.")
+        if plan.paths_to_remove and any(
+                p.startswith("/var/lib/clickhouse") for p in plan.paths_to_remove):
+            print("WARNING: --yes will permanently delete /var/lib/clickhouse "
+                  "and any rows it holds.  Drain unsent rows first if needed.")
         return 0
 
     print("Executing removal...")
@@ -5331,10 +5358,20 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
         _err(str(e))
         return 1
 
+    if report.group_created:
+        print(f"  group created: {report.group_created}")
+    if report.users_added_to_group:
+        print(f"  group adds:    "
+              + ", ".join(f"{u}->{g}" for u, g in report.users_added_to_group))
+    if report.sink_dir_configured:
+        print(f"  sink dir:      {report.sink_dir_configured}")
     if report.env_files_rewritten:
-        print(f"  env rewritten:{' ' * 1}{', '.join(report.env_files_rewritten)}")
+        print(f"  env rewritten: {', '.join(report.env_files_rewritten)}")
+    if report.env_lines_appended:
+        print("  env appended:  "
+              + "; ".join(f"{p}: {l}" for p, l in report.env_lines_appended))
     if report.consumers_restarted:
-        print(f"  restarted:    {', '.join(report.consumers_restarted)}")
+        print(f"  restarted:     {', '.join(report.consumers_restarted)}")
     if report.stopped:
         print(f"  stopped:      {', '.join(report.stopped)}")
     if report.disabled:

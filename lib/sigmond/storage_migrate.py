@@ -66,14 +66,35 @@ DEFAULT_COORD_ENV = "/etc/sigmond/coordination.env"
 # (starting with `#`) won't match, so re-running the verb is a no-op.
 _CH_ENV_RE = re.compile(r"^\s*SIGMOND_CLICKHOUSE_[A-Z_]*\s*=")
 
+# Pattern for the SQLite path var.  Used to detect whether the operator
+# (or a previous run of this verb) has already pinned an explicit path.
+# re.MULTILINE because the line is rarely the first in the file.
+_SQLITE_PATH_ENV_RE = re.compile(r"^\s*SIGMOND_SQLITE_PATH\s*=", re.MULTILINE)
+
 # Prefix we prepend when commenting out a live env-var.  Distinctive
 # enough to spot in a diff, and preserves the audit trail of what was
 # set pre-migration.
 NEUTRALIZED_PREFIX = "# pre-sqlite-migration: "
 
+# Header we append above any auto-inserted SIGMOND_SQLITE_PATH=, so
+# operators can grep "added by smd" and know what wrote it.
+INSERTED_HEADER = "# Added by `smd storage migrate-to-sqlite` to pin the SQLite sink."
+
 # Backup suffix for any file we rewrite.  Operator can `mv` the .bak
 # back if the migration was a mistake.
 BACKUP_SUFFIX = ".bak-pre-sqlite"
+
+# Producer-side sink location.  Producers run as non-root users (pskrec,
+# hf-timestd, wsprdaemon-client, etc.); putting the sink under
+# /var/lib/sigmond with mode 0775 root:sigmond means every producer in
+# the `sigmond` group can write rows here, and a single hs-uploader
+# reader can drain everything from one place.  Don't change the path
+# without also bumping the `hs-uploader` reader's default — they're
+# expected to agree out of the box.
+SINK_DIR = "/var/lib/sigmond"
+SINK_DB_PATH = "/var/lib/sigmond/sink.db"
+SINK_GROUP = "sigmond"
+SINK_DIR_MODE = 0o775
 
 
 @dataclass
@@ -88,19 +109,41 @@ class RemovalPlan:
     # (env_file_path, the_live_line_text) — recorded so the dry-run can
     # show operators exactly which lines will be commented out.
     env_lines_to_neutralize: List[Tuple[str, str]] = field(default_factory=list)
+    # (env_file_path, "KEY=value") — lines to APPEND if not already present.
+    # Currently used to pin SIGMOND_SQLITE_PATH so producers don't depend
+    # on the writability-probe fallback (silent noop trap).
+    env_lines_to_set: List[Tuple[str, str]] = field(default_factory=list)
     # Producer units to restart AFTER the env rewrite, so they reconnect
     # to the default SQLite sink before clickhouse-server is torn down.
     consumers_to_restart: List[str] = field(default_factory=list)
+    # Group name to create (e.g. "sigmond") if missing — needed so
+    # producer users share write access to /var/lib/sigmond/.
+    group_to_create: Optional[str] = None
+    # [(user, group), ...] producer users missing from the sink group.
+    users_to_add_to_group: List[Tuple[str, str]] = field(default_factory=list)
+    # (path, group, mode) — sink dir to create or fix permissions on.
+    # None when the dir already matches expected mode + group.
+    sink_dir_to_setup: Optional[Tuple[str, str, int]] = None
     confirmed: bool = False
 
     @property
     def env_files_to_rewrite(self) -> List[str]:
-        """Distinct env-file paths touched by env_lines_to_neutralize."""
+        """Distinct env-file paths touched by either neutralize or set."""
         seen: List[str] = []
         for path, _line in self.env_lines_to_neutralize:
             if path not in seen:
                 seen.append(path)
+        for path, _line in self.env_lines_to_set:
+            if path not in seen:
+                seen.append(path)
         return seen
+
+    def sqlite_path_for_env(self, env_path: str) -> Optional[str]:
+        """Return the SIGMOND_SQLITE_PATH value queued for env_path, if any."""
+        for path, line in self.env_lines_to_set:
+            if path == env_path and line.startswith("SIGMOND_SQLITE_PATH="):
+                return line.split("=", 1)[1]
+        return None
 
     @property
     def is_empty(self) -> bool:
@@ -111,7 +154,11 @@ class RemovalPlan:
             or self.paths_to_remove
             or self.files_to_remove
             or self.env_lines_to_neutralize
+            or self.env_lines_to_set
             or self.consumers_to_restart
+            or self.group_to_create
+            or self.users_to_add_to_group
+            or self.sink_dir_to_setup
         )
 
 
@@ -194,6 +241,62 @@ class HostProbe:
                 consumers.append(unit)
         return consumers
 
+    def unit_user(self, unit: str) -> Optional[str]:
+        """`User=` from systemd unit metadata; `'root'` when empty."""
+        try:
+            r = subprocess.run(
+                ["systemctl", "show", "-p", "User", unit],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return None
+        for line in r.stdout.splitlines():
+            if line.startswith("User="):
+                user = line[len("User="):].strip()
+                # systemd omits the value when User= isn't set, meaning
+                # the unit runs as root.  Mirror that explicitly.
+                return user or "root"
+        return None
+
+    def group_exists(self, group: str) -> bool:
+        try:
+            r = subprocess.run(
+                ["getent", "group", group],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return False
+        return r.returncode == 0
+
+    def user_groups(self, user: str) -> List[str]:
+        """All groups (primary + supplementary) the user belongs to."""
+        try:
+            r = subprocess.run(
+                ["id", "-Gn", user],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return []
+        if r.returncode != 0:
+            return []
+        return r.stdout.strip().split()
+
+    def dir_meta(self, path: str) -> Optional[Tuple[int, str]]:
+        """(mode_bits, group_name) for `path`, or None if it doesn't exist.
+
+        Used by the plan to decide whether `install -d` is needed.
+        """
+        try:
+            st = Path(path).stat()
+        except (FileNotFoundError, PermissionError):
+            return None
+        import grp
+        try:
+            group_name = grp.getgrgid(st.st_gid).gr_name
+        except KeyError:
+            group_name = str(st.st_gid)
+        return (st.st_mode & 0o777, group_name)
+
 
 def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
     """Enumerate ClickHouse artifacts (and producer-side config) on this host."""
@@ -232,12 +335,79 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
             if _CH_ENV_RE.match(line):
                 plan.env_lines_to_neutralize.append((DEFAULT_COORD_ENV, line))
 
-    if plan.env_lines_to_neutralize:
-        # Only worth restarting consumers when there's actually something
-        # to neutralize — a clean reinvocation should be a no-op.
-        plan.consumers_to_restart = p.find_units_using_env_file(
-            DEFAULT_COORD_ENV,
+    # Discover consumers regardless of whether there's anything to
+    # neutralize — we still need them for group-membership and
+    # sink-dir-perms checks below.  An empty consumer list means there
+    # are no producers needing the sigmond group + writable sink path.
+    consumers = []
+    if env_text is not None:
+        consumers = p.find_units_using_env_file(DEFAULT_COORD_ENV)
+    # Restart decision is made at the very end (after group/perms
+    # planning below) — see _maybe_queue_restarts at the bottom of
+    # this function.
+
+    # Pin SIGMOND_SQLITE_PATH explicitly in coordination.env if (a)
+    # we're actually migrating FROM ClickHouse on this host (CH lines
+    # to neutralize), and (b) no operator override is already in place.
+    # Pinning avoids the silent-noop trap where Writer.from_env's
+    # writability probe (run as the producer user) falls back to
+    # no-op when /var/lib/sigmond isn't readable — silently dropping
+    # every row.  Explicit pin → the SQLite writer tries to open the
+    # path and FAILS LOUDLY if perms are wrong, which is exactly
+    # what we want.
+    if (
+        env_text is not None
+        and consumers
+        and plan.env_lines_to_neutralize
+        and not _SQLITE_PATH_ENV_RE.search(env_text)
+    ):
+        plan.env_lines_to_set.append(
+            (DEFAULT_COORD_ENV, f"SIGMOND_SQLITE_PATH={SINK_DB_PATH}"),
         )
+
+    # Producer users + group membership.  We check perms whenever
+    # there are running consumers — that way the verb is idempotent
+    # AND self-healing: a host that was partially migrated (CH
+    # already gone but sigmond group / sink-dir perms never set up,
+    # which is exactly the state we landed in after the first real
+    # run of this verb) gets fixed on a re-invocation.  On a fresh
+    # sigmond install the perms are already correct (set by the
+    # installer), so this is a no-op.
+    producer_users = set()
+    for unit in consumers:
+        user = p.unit_user(unit)
+        if user and user != "root":
+            producer_users.add(user)
+
+    if producer_users:
+        if not p.group_exists(SINK_GROUP):
+            plan.group_to_create = SINK_GROUP
+        for user in sorted(producer_users):
+            groups = p.user_groups(user)
+            if SINK_GROUP not in groups:
+                plan.users_to_add_to_group.append((user, SINK_GROUP))
+
+        meta = p.dir_meta(SINK_DIR)
+        # We need install -d if the dir is missing OR its mode/group
+        # doesn't match what producers expect.  `install -d` is
+        # idempotent, so this just normalizes whatever was there.
+        if meta is None or meta != (SINK_DIR_MODE, SINK_GROUP):
+            plan.sink_dir_to_setup = (SINK_DIR, SINK_GROUP, SINK_DIR_MODE)
+
+    # Restart consumers whenever ANY of:
+    #   - env lines changed (CH neutralized or SQLite path pinned)
+    #   - group membership changed (need re-exec for new supplementary
+    #     group to take effect)
+    #   - sink dir was just configured (defensive: consumers that
+    #     started with the wrong perms have stale fd state)
+    needs_restart = bool(
+        plan.env_lines_to_neutralize
+        or plan.env_lines_to_set
+        or plan.users_to_add_to_group
+        or plan.sink_dir_to_setup
+    )
+    if needs_restart:
+        plan.consumers_to_restart = list(consumers)
 
     return plan
 
@@ -246,7 +416,11 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
 class _ExecutionReport:
     """What execute_removal actually did, for logging and tests."""
 
+    group_created: Optional[str] = None
+    users_added_to_group: List[Tuple[str, str]] = field(default_factory=list)
+    sink_dir_configured: Optional[str] = None
     env_files_rewritten: List[str] = field(default_factory=list)
+    env_lines_appended: List[Tuple[str, str]] = field(default_factory=list)
     consumers_restarted: List[str] = field(default_factory=list)
     stopped: List[str] = field(default_factory=list)
     disabled: List[str] = field(default_factory=list)
@@ -308,6 +482,55 @@ def _neutralize_clickhouse_lines(text: str) -> str:
     return "\n".join(out) + suffix
 
 
+def _build_env_transform(
+    *, append_lines: Optional[List[str]] = None,
+) -> Callable[[str], str]:
+    """Build a rewrite function that neutralizes CH lines + appends new ones.
+
+    `append_lines` are added only if a line with the same `KEY=` prefix
+    isn't already present, so re-running the verb is a no-op.  Each
+    auto-inserted block gets the `INSERTED_HEADER` comment above it
+    so operators can identify what wrote it.
+    """
+    appends = append_lines or []
+
+    def transform(text: str) -> str:
+        lines = text.splitlines()
+        existing_keys = set()
+        for line in lines:
+            m = re.match(r"^\s*([A-Z_][A-Z0-9_]*)\s*=", line)
+            if m:
+                existing_keys.add(m.group(1))
+
+        out = []
+        for line in lines:
+            if _CH_ENV_RE.match(line):
+                out.append(f"{NEUTRALIZED_PREFIX}{line}")
+            else:
+                out.append(line)
+
+        new_lines = []
+        for entry in appends:
+            key = entry.split("=", 1)[0]
+            if key in existing_keys:
+                continue
+            new_lines.append(entry)
+            existing_keys.add(key)
+
+        if new_lines:
+            # Blank-line gap before the inserted block keeps the file
+            # readable when there are several env-var sections.
+            if out and out[-1].strip():
+                out.append("")
+            out.append(INSERTED_HEADER)
+            out.extend(new_lines)
+
+        suffix = "\n" if text.endswith("\n") else ""
+        return "\n".join(out) + suffix
+
+    return transform
+
+
 def execute_removal(
     plan: RemovalPlan,
     runner: Optional[Runner] = None,
@@ -337,17 +560,68 @@ def execute_removal(
     r = runner or Runner()
     report = _ExecutionReport()
 
-    # 0. Neutralize SIGMOND_CLICKHOUSE_* lines.  One rewrite per distinct
-    # env file (currently just /etc/sigmond/coordination.env; the
-    # structure leaves room for per-client env files later).
+    # 0a. Create the sigmond group if missing.  System groups (--system)
+    # get GIDs below 1000 to keep them out of the human-user range.
+    if plan.group_to_create:
+        res = r.run(["groupadd", "--system", plan.group_to_create])
+        if res.returncode == 0:
+            report.group_created = plan.group_to_create
+        elif res.returncode == 9:
+            # rc=9 from groupadd means "already exists" — idempotent.
+            pass
+        else:
+            report.errors.append(
+                f"groupadd {plan.group_to_create}: rc={res.returncode}"
+            )
+
+    # 0b. Add each producer user to the sink group.  usermod -aG is
+    # idempotent for already-member users (rc=0, no change).
+    for user, group in plan.users_to_add_to_group:
+        res = r.run(["usermod", "-aG", group, user])
+        if res.returncode == 0:
+            report.users_added_to_group.append((user, group))
+        else:
+            report.errors.append(
+                f"usermod -aG {group} {user}: rc={res.returncode}"
+            )
+
+    # 0c. Create/normalize /var/lib/sigmond perms via `install -d`.
+    # `install -d` is the standard Linux idiom for "idempotent mkdir
+    # with mode + owner + group" — one tool, no race between mkdir
+    # and chmod/chgrp.
+    if plan.sink_dir_to_setup:
+        path, group, mode = plan.sink_dir_to_setup
+        res = r.run([
+            "install", "-d", "-m", f"{mode:o}", "-g", group, path,
+        ])
+        if res.returncode == 0:
+            report.sink_dir_configured = path
+        else:
+            report.errors.append(
+                f"install -d {path}: rc={res.returncode} "
+                f"stderr={res.stderr.strip()[:200]}"
+            )
+
+    # 0d. Rewrite env files: neutralize CH lines + append any pinned
+    # SIGMOND_SQLITE_PATH that wasn't already set.  One rewrite per
+    # distinct path, even if there are several queued mutations.
     for env_path in plan.env_files_to_rewrite:
+        appends: List[str] = []
+        for path, line in plan.env_lines_to_set:
+            if path == env_path:
+                appends.append(line)
         try:
-            r.rewrite_file(env_path, _neutralize_clickhouse_lines)
+            r.rewrite_file(env_path, _build_env_transform(append_lines=appends))
             report.env_files_rewritten.append(env_path)
+            for line in appends:
+                report.env_lines_appended.append((env_path, line))
         except Exception as e:
             report.errors.append(f"rewrite {env_path}: {e}")
 
-    # 1. Restart producers so they pick up the new env BEFORE we kill CH.
+    # 1. Restart producers so they pick up the new env + group BEFORE
+    # we kill CH.  Re-exec is what makes them see the new supplementary
+    # group from step 0b; in-process getgroups() reflects creds at
+    # process start, so a SIGHUP wouldn't be enough.
     for unit in plan.consumers_to_restart:
         res = r.run(["systemctl", "restart", unit])
         if res.returncode == 0:

@@ -10,9 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from sigmond.storage_migrate import (
     BACKUP_SUFFIX, CH_DATA_DIRS, CH_PACKAGES, CH_SIGMOND_UNIT_FILE,
-    CH_SIGMOND_VENV, DEFAULT_COORD_ENV, NEUTRALIZED_PREFIX,
+    CH_SIGMOND_VENV, DEFAULT_COORD_ENV, INSERTED_HEADER, NEUTRALIZED_PREFIX,
+    SINK_DB_PATH, SINK_DIR, SINK_DIR_MODE, SINK_GROUP,
     HostProbe, NotConfirmed, RemovalPlan, Runner,
-    _neutralize_clickhouse_lines, execute_removal, plan_clickhouse_removal,
+    _build_env_transform, _neutralize_clickhouse_lines,
+    execute_removal, plan_clickhouse_removal,
 )
 
 
@@ -27,6 +29,10 @@ class FakeProbe(HostProbe):
         paths=(),
         env_files=None,
         consumer_units=None,
+        unit_users=None,
+        existing_groups=(),
+        user_group_membership=None,
+        dirs=None,
     ):
         self._services = set(services)
         self._active = set(active_services)
@@ -36,6 +42,14 @@ class FakeProbe(HostProbe):
         self._env_files = env_files or {}
         # consumer_units: dict mapping env_path -> list of units
         self._consumer_units = consumer_units or {}
+        # unit_users: dict mapping unit name -> running user
+        self._unit_users = unit_users or {}
+        # existing_groups: which groups exist on the "host"
+        self._groups = set(existing_groups)
+        # user_group_membership: dict mapping user -> list of groups
+        self._user_groups = user_group_membership or {}
+        # dirs: dict mapping path -> (mode, group_name); missing path = None
+        self._dirs = dirs or {}
 
     def service_exists(self, unit: str) -> bool:
         return unit in self._services
@@ -54,6 +68,18 @@ class FakeProbe(HostProbe):
 
     def find_units_using_env_file(self, env_path):
         return list(self._consumer_units.get(env_path, []))
+
+    def unit_user(self, unit):
+        return self._unit_users.get(unit)
+
+    def group_exists(self, group):
+        return group in self._groups
+
+    def user_groups(self, user):
+        return list(self._user_groups.get(user, []))
+
+    def dir_meta(self, path):
+        return self._dirs.get(path)
 
 
 class TestPlanBuilding(unittest.TestCase):
@@ -420,6 +446,239 @@ class TestExecuteRemovalOrdering(unittest.TestCase):
         self.assertTrue(report.consumers_restarted)
         self.assertTrue(report.stopped)
         self.assertTrue(report.purged)
+
+
+class TestPlanIncludesGroupAndPermsSetup(unittest.TestCase):
+    """Plan should ensure the sigmond group, producer-user membership,
+    and a writable /var/lib/sigmond — without these the producers fall
+    back to silent-noop after the env neutralization step."""
+
+    def _probe_with_pskrec_consumer(
+        self,
+        *,
+        existing_groups=(),
+        user_group_membership=None,
+        dirs=None,
+        env_text="SIGMOND_CLICKHOUSE_URL=http://localhost:8123\n",
+    ):
+        return FakeProbe(
+            env_files={DEFAULT_COORD_ENV: env_text},
+            consumer_units={DEFAULT_COORD_ENV: [
+                "psk-recorder@my-rx888.service",
+            ]},
+            unit_users={"psk-recorder@my-rx888.service": "pskrec"},
+            existing_groups=existing_groups,
+            user_group_membership=user_group_membership or {},
+            dirs=dirs or {},
+        )
+
+    def test_plan_queues_group_creation_when_missing(self):
+        probe = self._probe_with_pskrec_consumer(existing_groups=())
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.group_to_create, SINK_GROUP)
+
+    def test_plan_skips_group_creation_when_present(self):
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": ["pskrec"]},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertIsNone(plan.group_to_create)
+
+    def test_plan_adds_producer_user_to_group_if_missing(self):
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": ["pskrec"]},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.users_to_add_to_group, [("pskrec", SINK_GROUP)])
+
+    def test_plan_skips_user_add_when_already_member(self):
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": ["pskrec", SINK_GROUP]},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.users_to_add_to_group, [])
+
+    def test_plan_queues_sink_dir_setup_when_missing(self):
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={},  # SINK_DIR doesn't exist
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(
+            plan.sink_dir_to_setup,
+            (SINK_DIR, SINK_GROUP, SINK_DIR_MODE),
+        )
+
+    def test_plan_queues_sink_dir_setup_when_wrong_perms(self):
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={SINK_DIR: (0o750, "root")},  # wrong group, wrong mode
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(
+            plan.sink_dir_to_setup,
+            (SINK_DIR, SINK_GROUP, SINK_DIR_MODE),
+        )
+
+    def test_plan_skips_sink_dir_setup_when_already_correct(self):
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertIsNone(plan.sink_dir_to_setup)
+
+    def test_plan_pins_sqlite_path_when_missing_from_env(self):
+        probe = self._probe_with_pskrec_consumer(
+            env_text="SIGMOND_CLICKHOUSE_URL=http://x\n",
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(
+            plan.env_lines_to_set,
+            [(DEFAULT_COORD_ENV, f"SIGMOND_SQLITE_PATH={SINK_DB_PATH}")],
+        )
+
+    def test_plan_does_not_re_pin_sqlite_path_when_already_set(self):
+        probe = self._probe_with_pskrec_consumer(
+            env_text=(
+                "SIGMOND_CLICKHOUSE_URL=http://x\n"
+                "SIGMOND_SQLITE_PATH=/operator/override/sink.db\n"
+            ),
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.env_lines_to_set, [])
+
+    def test_plan_with_root_unit_does_not_add_to_group(self):
+        # Units running as root don't need group membership.
+        probe = FakeProbe(
+            env_files={DEFAULT_COORD_ENV: "SIGMOND_CLICKHOUSE_URL=x\n"},
+            consumer_units={DEFAULT_COORD_ENV: ["some-root-svc.service"]},
+            unit_users={"some-root-svc.service": "root"},
+            existing_groups=(),
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertIsNone(plan.group_to_create)
+        self.assertEqual(plan.users_to_add_to_group, [])
+
+    def test_plan_no_consumers_no_group_or_perm_work(self):
+        # Fresh host with no producers active → no group/perms churn.
+        probe = FakeProbe(
+            env_files={DEFAULT_COORD_ENV: "SIGMOND_CLICKHOUSE_URL=x\n"},
+            consumer_units={DEFAULT_COORD_ENV: []},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertIsNone(plan.group_to_create)
+        self.assertEqual(plan.users_to_add_to_group, [])
+        self.assertIsNone(plan.sink_dir_to_setup)
+        self.assertEqual(plan.env_lines_to_set, [])  # no consumers ⇒ no pin
+
+
+class TestEnvTransformWithAppends(unittest.TestCase):
+    """`_build_env_transform` neutralizes CH lines AND appends new vars."""
+
+    def test_appends_sqlite_path_when_missing(self):
+        text = "SIGMOND_CLICKHOUSE_URL=http://x\n"
+        transform = _build_env_transform(
+            append_lines=[f"SIGMOND_SQLITE_PATH={SINK_DB_PATH}"],
+        )
+        out = transform(text)
+        self.assertIn(INSERTED_HEADER, out)
+        self.assertIn(f"SIGMOND_SQLITE_PATH={SINK_DB_PATH}", out)
+        # CH line still gets neutralized.
+        self.assertIn(f"{NEUTRALIZED_PREFIX}SIGMOND_CLICKHOUSE_URL=", out)
+
+    def test_does_not_append_when_key_already_present(self):
+        text = (
+            "SIGMOND_CLICKHOUSE_URL=http://x\n"
+            "SIGMOND_SQLITE_PATH=/operator/override/sink.db\n"
+        )
+        transform = _build_env_transform(
+            append_lines=[f"SIGMOND_SQLITE_PATH={SINK_DB_PATH}"],
+        )
+        out = transform(text)
+        # The verb's default path must NOT appear; operator's override
+        # is preserved.
+        self.assertNotIn(SINK_DB_PATH, out)
+        self.assertIn("/operator/override/sink.db", out)
+        # Header also doesn't appear since we appended nothing.
+        self.assertNotIn(INSERTED_HEADER, out)
+
+    def test_empty_appends_just_neutralizes(self):
+        text = "SIGMOND_CLICKHOUSE_URL=x\nOTHER=y\n"
+        transform = _build_env_transform(append_lines=[])
+        out = transform(text)
+        self.assertIn(f"{NEUTRALIZED_PREFIX}SIGMOND_CLICKHOUSE_URL=x", out)
+        self.assertIn("OTHER=y", out)
+        self.assertNotIn(INSERTED_HEADER, out)
+
+
+class TestExecuteGroupAndPermsOrdering(unittest.TestCase):
+
+    def test_group_user_dir_run_before_env_rewrite_and_restart(self):
+        plan = RemovalPlan(
+            group_to_create=SINK_GROUP,
+            users_to_add_to_group=[("pskrec", SINK_GROUP)],
+            sink_dir_to_setup=(SINK_DIR, SINK_GROUP, SINK_DIR_MODE),
+            env_lines_to_neutralize=[(DEFAULT_COORD_ENV, "SIGMOND_CLICKHOUSE_URL=x")],
+            env_lines_to_set=[(DEFAULT_COORD_ENV, f"SIGMOND_SQLITE_PATH={SINK_DB_PATH}")],
+            consumers_to_restart=["psk-recorder@my-rx888.service"],
+            confirmed=True,
+        )
+        runner = FakeRunner()
+        report = execute_removal(plan, runner=runner)
+
+        # Order: groupadd → usermod → install -d → (rewrite) → restart
+        verbs_in_order = [argv[0] for argv in runner.run_calls]
+        self.assertEqual(verbs_in_order[0], "groupadd")
+        self.assertEqual(verbs_in_order[1], "usermod")
+        self.assertEqual(verbs_in_order[2], "install")
+
+        # The rewrite happens between install and restart.  FakeRunner
+        # records rewrite separately, so we just assert the restart
+        # comes after install -d.
+        first_restart_idx = next(
+            i for i, argv in enumerate(runner.run_calls)
+            if argv[0] == "systemctl" and argv[1] == "restart"
+        )
+        install_idx = verbs_in_order.index("install")
+        self.assertLess(install_idx, first_restart_idx)
+        self.assertEqual(len(runner.rewrite_calls), 1)
+
+        # Report mirrors the side effects.
+        self.assertEqual(report.group_created, SINK_GROUP)
+        self.assertEqual(report.users_added_to_group, [("pskrec", SINK_GROUP)])
+        self.assertEqual(report.sink_dir_configured, SINK_DIR)
+        self.assertEqual(
+            report.env_lines_appended,
+            [(DEFAULT_COORD_ENV, f"SIGMOND_SQLITE_PATH={SINK_DB_PATH}")],
+        )
+
+    def test_groupadd_rc9_is_idempotent_not_error(self):
+        plan = RemovalPlan(
+            group_to_create=SINK_GROUP, confirmed=True,
+        )
+        runner = FakeRunner(command_returncodes={("groupadd", "--system"): 9})
+        report = execute_removal(plan, runner=runner)
+        # Even though groupadd returned 9 (exists), report.errors stays
+        # clean and report.group_created stays None (we didn't create it).
+        self.assertEqual(report.errors, [])
+        self.assertIsNone(report.group_created)
+
+    def test_install_d_failure_recorded_as_error(self):
+        plan = RemovalPlan(
+            sink_dir_to_setup=(SINK_DIR, SINK_GROUP, SINK_DIR_MODE),
+            confirmed=True,
+        )
+        runner = FakeRunner(command_returncodes={("install", "-d"): 1})
+        report = execute_removal(plan, runner=runner)
+        self.assertTrue(any("install -d" in err for err in report.errors))
+        self.assertIsNone(report.sink_dir_configured)
 
 
 class TestRunnerRewriteFile(unittest.TestCase):
