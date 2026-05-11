@@ -32,4 +32,9 @@ jobs:
           pip install pytest textual
 
       - name: Run unittest suite
+        # PYTHONPATH=lib lets tests that import `sigmond.catalog` etc.
+        # work without `pip install -e .` (the package layout is
+        # lib/sigmond/, not the conventional src/sigmond/).
+        env:
+          PYTHONPATH: lib
         run: python -m unittest discover tests -v

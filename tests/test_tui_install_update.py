@@ -57,52 +57,16 @@ class InstallScreenTests(unittest.IsolatedAsyncioTestCase):
             argv = captured[0]
             self.assertTrue(argv[0].endswith('smd'))
             self.assertEqual(argv[1], 'install')
-            self.assertEqual(len(argv), 2,
-                             "catalog walk should pass no --components")
+            # "Install all missing" now passes the missing names explicitly
+            # via --components plus --yes, so the operator confirmation in
+            # the screen serves as the install-time confirmation too.
+            self.assertIn('--components', argv)
+            self.assertIn('--yes', argv)
 
 
-@unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
-class UpdateScreenTests(unittest.IsolatedAsyncioTestCase):
-    async def test_mounts(self):
-        from sigmond.tui.app import SigmondApp
-        from sigmond.tui.screens.update import UpdateScreen
-
-        app = SigmondApp()
-        async with app.run_test(size=(120, 50)) as pilot:
-            app.action_show_update()
-            for _ in range(2):
-                await pilot.pause()
-            self.assertTrue(any(isinstance(c, UpdateScreen)
-                                for c in app.query_one("#center").children))
-
-    async def test_update_button_runs_smd_update(self):
-        from sigmond.tui.app import SigmondApp
-
-        captured = []
-        fake = subprocess.CompletedProcess(args=[], returncode=0)
-
-        def fake_runner(app_, cmd):
-            captured.append(cmd)
-            return fake
-
-        app = SigmondApp()
-        async with app.run_test(size=(120, 50)) as pilot:
-            app.action_show_update()
-            for _ in range(2):
-                await pilot.pause()
-
-            with patch("sigmond.tui.mutation.suspend_and_run_sudo",
-                       side_effect=fake_runner):
-                app.query_one("#up-button").press()
-                await pilot.pause()
-                modal = app.screen
-                modal.query_one("#cm-yes").press()
-                await pilot.pause()
-
-        self.assertEqual(len(captured), 1)
-        argv = captured[0]
-        self.assertTrue(argv[0].endswith('smd'))
-        self.assertEqual(argv[1], 'update')
+# UpdateScreenTests removed: the separate Update screen was merged into
+# the List ("Software versions") screen (CLAUDE.md, smd list --apply).
+# sigmond.tui.screens.update no longer exists.
 
 
 if __name__ == '__main__':
