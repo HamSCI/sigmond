@@ -5277,6 +5277,17 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
 
     print("ClickHouse artifacts detected on this host:")
     print()
+    if plan.env_lines_to_neutralize:
+        # Show env neutralization first — it's what unblocks the
+        # producers, and surfacing it up top makes the cause-and-effect
+        # legible in the dry-run output.
+        print("  Env lines to comment out (preserves audit trail):")
+        for path, line in plan.env_lines_to_neutralize:
+            print(f"    - {path}: {line}")
+    if plan.consumers_to_restart:
+        print("  Producer services to restart (so they switch to SQLite):")
+        for u in plan.consumers_to_restart:
+            print(f"    - {u}")
     if plan.services_to_stop:
         print("  Services to stop:")
         for u in plan.services_to_stop:
@@ -5320,6 +5331,10 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
         _err(str(e))
         return 1
 
+    if report.env_files_rewritten:
+        print(f"  env rewritten:{' ' * 1}{', '.join(report.env_files_rewritten)}")
+    if report.consumers_restarted:
+        print(f"  restarted:    {', '.join(report.consumers_restarted)}")
     if report.stopped:
         print(f"  stopped:      {', '.join(report.stopped)}")
     if report.disabled:

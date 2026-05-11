@@ -2,15 +2,17 @@
 
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from sigmond.storage_migrate import (
-    CH_DATA_DIRS, CH_PACKAGES, CH_SIGMOND_UNIT_FILE, CH_SIGMOND_VENV,
+    BACKUP_SUFFIX, CH_DATA_DIRS, CH_PACKAGES, CH_SIGMOND_UNIT_FILE,
+    CH_SIGMOND_VENV, DEFAULT_COORD_ENV, NEUTRALIZED_PREFIX,
     HostProbe, NotConfirmed, RemovalPlan, Runner,
-    execute_removal, plan_clickhouse_removal,
+    _neutralize_clickhouse_lines, execute_removal, plan_clickhouse_removal,
 )
 
 
@@ -23,11 +25,17 @@ class FakeProbe(HostProbe):
         active_services=(),
         packages=(),
         paths=(),
+        env_files=None,
+        consumer_units=None,
     ):
         self._services = set(services)
         self._active = set(active_services)
         self._packages = set(packages)
         self._paths = set(paths)
+        # env_files: dict mapping path -> file contents (None for "missing")
+        self._env_files = env_files or {}
+        # consumer_units: dict mapping env_path -> list of units
+        self._consumer_units = consumer_units or {}
 
     def service_exists(self, unit: str) -> bool:
         return unit in self._services
@@ -40,6 +48,12 @@ class FakeProbe(HostProbe):
 
     def path_exists(self, path: str) -> bool:
         return path in self._paths
+
+    def read_text(self, path):
+        return self._env_files.get(path)
+
+    def find_units_using_env_file(self, env_path):
+        return list(self._consumer_units.get(env_path, []))
 
 
 class TestPlanBuilding(unittest.TestCase):
@@ -104,11 +118,13 @@ class TestPlanBuilding(unittest.TestCase):
 class FakeRunner(Runner):
     """Records calls; never touches the real filesystem or systemd."""
 
-    def __init__(self, command_returncodes=None):
+    def __init__(self, command_returncodes=None, rewrite_should_raise=False):
         self.command_returncodes = command_returncodes or {}
         self.run_calls = []
         self.rmtree_calls = []
         self.unlink_calls = []
+        self.rewrite_calls = []     # list of (path, transform_result)
+        self.rewrite_should_raise = rewrite_should_raise
 
     def run(self, argv: list) -> subprocess.CompletedProcess:
         self.run_calls.append(argv)
@@ -124,6 +140,16 @@ class FakeRunner(Runner):
 
     def unlink(self, path: str) -> None:
         self.unlink_calls.append(path)
+
+    def rewrite_file(self, path, transform):
+        if self.rewrite_should_raise:
+            raise PermissionError(f"simulated EACCES on {path}")
+        # Fake the read by handing transform an empty string — tests
+        # that care about the transform itself test it directly via
+        # _neutralize_clickhouse_lines.
+        result = transform("")
+        self.rewrite_calls.append((path, result))
+        return path + BACKUP_SUFFIX
 
 
 class TestExecuteRemoval(unittest.TestCase):
@@ -215,6 +241,213 @@ class TestExecuteRemoval(unittest.TestCase):
         self.assertEqual(runner.rmtree_calls, [])
         self.assertEqual(runner.unlink_calls, [])
         self.assertEqual(report.errors, [])
+
+
+class TestEnvNeutralizationTransform(unittest.TestCase):
+    """Direct tests for _neutralize_clickhouse_lines (the in-memory transform)."""
+
+    def test_comments_out_live_clickhouse_lines(self):
+        text = (
+            "SIGMOND_CLICKHOUSE_URL=http://localhost:8123\n"
+            "SIGMOND_CLICKHOUSE_USER=sigmond\n"
+            "OTHER_VAR=keep_me\n"
+        )
+        out = _neutralize_clickhouse_lines(text)
+        self.assertIn(
+            f"{NEUTRALIZED_PREFIX}SIGMOND_CLICKHOUSE_URL=http://localhost:8123",
+            out,
+        )
+        self.assertIn(
+            f"{NEUTRALIZED_PREFIX}SIGMOND_CLICKHOUSE_USER=sigmond",
+            out,
+        )
+        # Non-CH lines untouched.
+        self.assertIn("OTHER_VAR=keep_me", out)
+
+    def test_idempotent_on_already_commented_lines(self):
+        # Re-running the verb should be a no-op on the env file.
+        original = (
+            f"{NEUTRALIZED_PREFIX}SIGMOND_CLICKHOUSE_URL=http://localhost:8123\n"
+            "OTHER_VAR=value\n"
+        )
+        self.assertEqual(_neutralize_clickhouse_lines(original), original)
+
+    def test_preserves_trailing_newline(self):
+        with_nl = "SIGMOND_CLICKHOUSE_URL=x\n"
+        without_nl = "SIGMOND_CLICKHOUSE_URL=x"
+        self.assertTrue(_neutralize_clickhouse_lines(with_nl).endswith("\n"))
+        self.assertFalse(_neutralize_clickhouse_lines(without_nl).endswith("\n"))
+
+    def test_only_matches_clickhouse_prefix(self):
+        # SIGMOND_SQLITE_* and other vars must NOT be commented out.
+        text = (
+            "SIGMOND_SQLITE_PATH=/var/lib/sigmond/sink.db\n"
+            "SIGMOND_SOMETHING_ELSE=ok\n"
+        )
+        out = _neutralize_clickhouse_lines(text)
+        self.assertEqual(out, text)
+
+
+class TestPlanIncludesEnvAndConsumers(unittest.TestCase):
+
+    def test_plan_picks_up_env_lines_and_consumers(self):
+        env_text = (
+            "SIGMOND_CLICKHOUSE_URL=http://localhost:8123\n"
+            "SIGMOND_CLICKHOUSE_USER=sigmond\n"
+            "OTHER_VAR=keep\n"
+        )
+        probe = FakeProbe(
+            services=("clickhouse-server.service",),
+            packages=("clickhouse-server",),
+            paths=("/var/lib/clickhouse",),
+            env_files={DEFAULT_COORD_ENV: env_text},
+            consumer_units={DEFAULT_COORD_ENV: [
+                "psk-recorder@my-rx888.service",
+                "hf-timestd.service",
+            ]},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+
+        self.assertEqual(len(plan.env_lines_to_neutralize), 2)
+        paths = {p for p, _l in plan.env_lines_to_neutralize}
+        self.assertEqual(paths, {DEFAULT_COORD_ENV})
+        # Already-commented or non-CH lines NOT in the plan.
+        for _path, line in plan.env_lines_to_neutralize:
+            self.assertTrue(line.startswith("SIGMOND_CLICKHOUSE_"))
+
+        self.assertEqual(
+            set(plan.consumers_to_restart),
+            {"psk-recorder@my-rx888.service", "hf-timestd.service"},
+        )
+
+    def test_plan_omits_consumers_when_no_env_lines(self):
+        # If coordination.env has no CH vars, there's no reason to
+        # bounce the producers — they're already configured correctly.
+        probe = FakeProbe(
+            env_files={DEFAULT_COORD_ENV: "OTHER_VAR=keep\n"},
+            consumer_units={DEFAULT_COORD_ENV: ["psk-recorder@a.service"]},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.env_lines_to_neutralize, [])
+        self.assertEqual(plan.consumers_to_restart, [])
+        self.assertTrue(plan.is_empty)
+
+    def test_plan_handles_missing_env_file(self):
+        # Standalone host with no /etc/sigmond/coordination.env.
+        probe = FakeProbe(env_files={DEFAULT_COORD_ENV: None})
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.env_lines_to_neutralize, [])
+        self.assertEqual(plan.consumers_to_restart, [])
+
+
+class TestExecuteRemovalOrdering(unittest.TestCase):
+
+    def _full_plan_with_env(self) -> RemovalPlan:
+        return RemovalPlan(
+            services_to_stop=["clickhouse-server.service"],
+            services_to_disable=["clickhouse-server.service"],
+            packages_to_purge=["clickhouse-server"],
+            paths_to_remove=["/var/lib/clickhouse"],
+            files_to_remove=[],
+            env_lines_to_neutralize=[
+                (DEFAULT_COORD_ENV, "SIGMOND_CLICKHOUSE_URL=x"),
+                (DEFAULT_COORD_ENV, "SIGMOND_CLICKHOUSE_USER=y"),
+            ],
+            consumers_to_restart=[
+                "psk-recorder@my-rx888.service",
+                "hf-timestd.service",
+            ],
+            confirmed=True,
+        )
+
+    def test_env_rewrite_happens_before_consumer_restart(self):
+        plan = self._full_plan_with_env()
+        runner = FakeRunner()
+        execute_removal(plan, runner=runner)
+
+        # The single rewrite call must come before the first systemctl
+        # restart in the sequence of side effects.
+        self.assertEqual(len(runner.rewrite_calls), 1)
+        rewrite_path = runner.rewrite_calls[0][0]
+        self.assertEqual(rewrite_path, DEFAULT_COORD_ENV)
+
+        # All systemctl restarts must precede the first stop.
+        verbs = [argv[1] for argv in runner.run_calls if argv[0] == "systemctl"]
+        first_restart = verbs.index("restart")
+        first_stop = verbs.index("stop")
+        self.assertLess(first_restart, first_stop,
+                        "consumer restarts must precede CH stop")
+
+    def test_consumer_restart_invokes_each_unit(self):
+        plan = self._full_plan_with_env()
+        runner = FakeRunner()
+        report = execute_removal(plan, runner=runner)
+
+        restart_argvs = [argv for argv in runner.run_calls
+                         if argv[0] == "systemctl" and argv[1] == "restart"]
+        restarted_units = [argv[2] for argv in restart_argvs]
+        self.assertEqual(
+            set(restarted_units),
+            {"psk-recorder@my-rx888.service", "hf-timestd.service"},
+        )
+        self.assertEqual(
+            set(report.consumers_restarted),
+            {"psk-recorder@my-rx888.service", "hf-timestd.service"},
+        )
+
+    def test_env_rewrite_deduplicates_paths(self):
+        # Two env_lines for the same path → still only one rewrite.
+        plan = RemovalPlan(
+            env_lines_to_neutralize=[
+                (DEFAULT_COORD_ENV, "SIGMOND_CLICKHOUSE_URL=x"),
+                (DEFAULT_COORD_ENV, "SIGMOND_CLICKHOUSE_USER=y"),
+                (DEFAULT_COORD_ENV, "SIGMOND_CLICKHOUSE_DB_PSK=z"),
+            ],
+            consumers_to_restart=[],
+            confirmed=True,
+        )
+        runner = FakeRunner()
+        execute_removal(plan, runner=runner)
+        self.assertEqual(len(runner.rewrite_calls), 1)
+
+    def test_env_rewrite_failure_recorded_as_error_and_continues(self):
+        plan = self._full_plan_with_env()
+        runner = FakeRunner(rewrite_should_raise=True)
+        report = execute_removal(plan, runner=runner)
+        self.assertTrue(any("rewrite" in err for err in report.errors))
+        # Despite the rewrite failure, the rest of the migration runs
+        # (consumers still restarted, packages still purged).
+        self.assertTrue(report.consumers_restarted)
+        self.assertTrue(report.stopped)
+        self.assertTrue(report.purged)
+
+
+class TestRunnerRewriteFile(unittest.TestCase):
+    """Direct test of Runner.rewrite_file against the real filesystem."""
+
+    def test_rewrite_writes_backup_and_applies_transform(self):
+        original = (
+            "SIGMOND_CLICKHOUSE_URL=http://localhost:8123\n"
+            "OTHER_VAR=keep\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env",
+                                         delete=False) as f:
+            f.write(original)
+            path = f.name
+        try:
+            runner = Runner()
+            backup = runner.rewrite_file(path, _neutralize_clickhouse_lines)
+
+            self.assertEqual(backup, path + BACKUP_SUFFIX)
+            # Original preserved in backup.
+            self.assertEqual(Path(backup).read_text(), original)
+            # Transform applied to live file.
+            new_text = Path(path).read_text()
+            self.assertIn(NEUTRALIZED_PREFIX, new_text)
+            self.assertIn("OTHER_VAR=keep", new_text)
+        finally:
+            Path(path).unlink(missing_ok=True)
+            Path(path + BACKUP_SUFFIX).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

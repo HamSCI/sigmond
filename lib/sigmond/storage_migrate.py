@@ -11,12 +11,15 @@ Why this exists:
 Surface:
     `plan_clickhouse_removal(probe=...)` → a `RemovalPlan` describing
     every artifact that exists on the host (service units, packages,
-    data dirs, sigmond-clickhouse venv).  Inspection only — no side
-    effects.
+    data dirs, sigmond-clickhouse venv) PLUS any `SIGMOND_CLICKHOUSE_*`
+    lines in `/etc/sigmond/coordination.env` and the producer services
+    that consume that file (so they can be restarted onto SQLite).
+    Inspection only — no side effects.
 
-    `execute_removal(plan, runner=...)` → actually stops services,
-    purges packages, deletes dirs.  Refuses to run unless the caller
-    sets `confirmed=True` on the plan.
+    `execute_removal(plan, runner=...)` → actually rewrites the env
+    file, restarts consumers (so they pick up SQLite before CH dies),
+    stops services, purges packages, deletes dirs.  Refuses to run
+    unless the caller sets `confirmed=True` on the plan.
 
 Caller pattern (`smd storage migrate-to-sqlite`):
     1. Build plan.
@@ -30,11 +33,12 @@ testable without a running ClickHouse on the test host.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger("sigmond.storage_migrate")
 
@@ -50,6 +54,27 @@ CH_SIGMOND_VENV = "/opt/sigmond-clickhouse"
 CH_SIGMOND_UNIT_FILE = "/etc/systemd/system/sigmond-clickhouse.service"
 CH_SIGMOND_SYMLINK = "/usr/local/sbin/sigmond-clickhouse"
 
+# Where sigmond writes its shared producer-side env vars.  Producers
+# (psk-recorder, hf-timestd, wsprdaemon-client, etc.) pull this via
+# systemd EnvironmentFile=, so flipping SIGMOND_CLICKHOUSE_URL off here
+# is what makes them fall through to the default-SQLite dispatch on
+# next restart.
+DEFAULT_COORD_ENV = "/etc/sigmond/coordination.env"
+
+# Pattern for env-var assignments we want to neutralize.  Matches the
+# whole `SIGMOND_CLICKHOUSE_*=...` family; already-commented lines
+# (starting with `#`) won't match, so re-running the verb is a no-op.
+_CH_ENV_RE = re.compile(r"^\s*SIGMOND_CLICKHOUSE_[A-Z_]*\s*=")
+
+# Prefix we prepend when commenting out a live env-var.  Distinctive
+# enough to spot in a diff, and preserves the audit trail of what was
+# set pre-migration.
+NEUTRALIZED_PREFIX = "# pre-sqlite-migration: "
+
+# Backup suffix for any file we rewrite.  Operator can `mv` the .bak
+# back if the migration was a mistake.
+BACKUP_SUFFIX = ".bak-pre-sqlite"
+
 
 @dataclass
 class RemovalPlan:
@@ -60,7 +85,22 @@ class RemovalPlan:
     packages_to_purge: List[str] = field(default_factory=list)
     paths_to_remove: List[str] = field(default_factory=list)
     files_to_remove: List[str] = field(default_factory=list)
+    # (env_file_path, the_live_line_text) — recorded so the dry-run can
+    # show operators exactly which lines will be commented out.
+    env_lines_to_neutralize: List[Tuple[str, str]] = field(default_factory=list)
+    # Producer units to restart AFTER the env rewrite, so they reconnect
+    # to the default SQLite sink before clickhouse-server is torn down.
+    consumers_to_restart: List[str] = field(default_factory=list)
     confirmed: bool = False
+
+    @property
+    def env_files_to_rewrite(self) -> List[str]:
+        """Distinct env-file paths touched by env_lines_to_neutralize."""
+        seen: List[str] = []
+        for path, _line in self.env_lines_to_neutralize:
+            if path not in seen:
+                seen.append(path)
+        return seen
 
     @property
     def is_empty(self) -> bool:
@@ -70,6 +110,8 @@ class RemovalPlan:
             or self.packages_to_purge
             or self.paths_to_remove
             or self.files_to_remove
+            or self.env_lines_to_neutralize
+            or self.consumers_to_restart
         )
 
 
@@ -112,9 +154,49 @@ class HostProbe:
     def path_exists(self, path: str) -> bool:
         return Path(path).exists()
 
+    def read_text(self, path: str) -> Optional[str]:
+        try:
+            return Path(path).read_text()
+        except (FileNotFoundError, PermissionError, IsADirectoryError):
+            return None
+
+    def find_units_using_env_file(self, env_path: str) -> List[str]:
+        """Active service units whose EnvironmentFiles include env_path.
+
+        Two systemctl calls per unit, so this is O(units) — fine for a
+        sigmond host that has a handful of producer services, not for
+        a general-purpose audit tool.
+        """
+        try:
+            r = subprocess.run(
+                ["systemctl", "list-units", "--no-pager", "--no-legend",
+                 "--type=service", "--state=active"],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return []
+        consumers: List[str] = []
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            unit = parts[0]
+            if not unit.endswith(".service"):
+                continue
+            try:
+                r2 = subprocess.run(
+                    ["systemctl", "show", "-p", "EnvironmentFiles", unit],
+                    capture_output=True, text=True, check=False,
+                )
+            except FileNotFoundError:
+                continue
+            if env_path in r2.stdout:
+                consumers.append(unit)
+        return consumers
+
 
 def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
-    """Enumerate ClickHouse artifacts present on this host."""
+    """Enumerate ClickHouse artifacts (and producer-side config) on this host."""
     p = probe or HostProbe()
     plan = RemovalPlan()
 
@@ -139,6 +221,24 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
         if p.path_exists(f):
             plan.files_to_remove.append(f)
 
+    # Producer-side env: comment out SIGMOND_CLICKHOUSE_* lines and
+    # restart anything that depended on them.  Without this step the
+    # producers keep hammering localhost:8123 with retry storms after
+    # ClickHouse is torn down (which is exactly what bit us during the
+    # first real run of this verb — see psk-recorder log fallout).
+    env_text = p.read_text(DEFAULT_COORD_ENV)
+    if env_text is not None:
+        for line in env_text.splitlines():
+            if _CH_ENV_RE.match(line):
+                plan.env_lines_to_neutralize.append((DEFAULT_COORD_ENV, line))
+
+    if plan.env_lines_to_neutralize:
+        # Only worth restarting consumers when there's actually something
+        # to neutralize — a clean reinvocation should be a no-op.
+        plan.consumers_to_restart = p.find_units_using_env_file(
+            DEFAULT_COORD_ENV,
+        )
+
     return plan
 
 
@@ -146,6 +246,8 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
 class _ExecutionReport:
     """What execute_removal actually did, for logging and tests."""
 
+    env_files_rewritten: List[str] = field(default_factory=list)
+    consumers_restarted: List[str] = field(default_factory=list)
     stopped: List[str] = field(default_factory=list)
     disabled: List[str] = field(default_factory=list)
     purged: List[str] = field(default_factory=list)
@@ -169,16 +271,62 @@ class Runner:
         except FileNotFoundError:
             pass
 
+    def rewrite_file(self, path: str, transform: Callable[[str], str]) -> str:
+        """Read, transform, write back.  Returns the backup path.
+
+        Backup is written to `<path>.bak-pre-sqlite` so an operator can
+        revert with a single `mv`.  We deliberately don't preserve mode
+        bits — coordination.env is a root-owned 0644 file by convention,
+        and the new file inherits that.
+        """
+        p = Path(path)
+        original = p.read_text()
+        backup = path + BACKUP_SUFFIX
+        Path(backup).write_text(original)
+        p.write_text(transform(original))
+        return backup
+
 
 class NotConfirmed(Exception):
     """Raised when `execute_removal` is called on an unconfirmed plan."""
+
+
+def _neutralize_clickhouse_lines(text: str) -> str:
+    """Prefix every live `SIGMOND_CLICKHOUSE_*=` line with the comment marker.
+
+    Idempotent: lines already starting with `#` don't match `_CH_ENV_RE`.
+    Trailing newline of the original file is preserved.
+    """
+    lines = text.splitlines()
+    out = []
+    for line in lines:
+        if _CH_ENV_RE.match(line):
+            out.append(f"{NEUTRALIZED_PREFIX}{line}")
+        else:
+            out.append(line)
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(out) + suffix
 
 
 def execute_removal(
     plan: RemovalPlan,
     runner: Optional[Runner] = None,
 ) -> _ExecutionReport:
-    """Execute a confirmed removal plan.  Caller must set plan.confirmed."""
+    """Execute a confirmed removal plan.  Caller must set plan.confirmed.
+
+    Ordering rationale:
+
+    0. Rewrite env file first.  Consumers won't actually see the change
+       until they restart, but doing it before the restarts means the
+       single restart cycle is enough to reconfigure them — no second
+       pass needed if something else (a sigmond auto-restart) trips it.
+
+    1. Restart consumers BEFORE we tear down ClickHouse.  After restart
+       they're using the default-SQLite sink, so subsequent decode
+       cycles don't waste a batch hammering a dying CH instance.
+
+    2-6: Tear down CH itself (stop, disable, purge, remove dirs).
+    """
     if not plan.confirmed:
         raise NotConfirmed(
             "execute_removal refused: plan.confirmed=False.  Set "
@@ -189,7 +337,25 @@ def execute_removal(
     r = runner or Runner()
     report = _ExecutionReport()
 
-    # 1. Stop services first so package purge / data removal doesn't race.
+    # 0. Neutralize SIGMOND_CLICKHOUSE_* lines.  One rewrite per distinct
+    # env file (currently just /etc/sigmond/coordination.env; the
+    # structure leaves room for per-client env files later).
+    for env_path in plan.env_files_to_rewrite:
+        try:
+            r.rewrite_file(env_path, _neutralize_clickhouse_lines)
+            report.env_files_rewritten.append(env_path)
+        except Exception as e:
+            report.errors.append(f"rewrite {env_path}: {e}")
+
+    # 1. Restart producers so they pick up the new env BEFORE we kill CH.
+    for unit in plan.consumers_to_restart:
+        res = r.run(["systemctl", "restart", unit])
+        if res.returncode == 0:
+            report.consumers_restarted.append(unit)
+        else:
+            report.errors.append(f"restart {unit}: rc={res.returncode}")
+
+    # 2. Stop CH services so package purge / data removal doesn't race.
     for unit in plan.services_to_stop:
         res = r.run(["systemctl", "stop", unit])
         if res.returncode == 0:
@@ -206,10 +372,9 @@ def execute_removal(
             logger.debug("disable %s returned rc=%d (ok if not enabled)",
                          unit, res.returncode)
 
-    # 2. Purge Debian packages — `apt-get purge -y` is the only verb
-    # that drops both binaries and conffiles.  We pass DEBIAN_FRONTEND
-    # via the runner's environment by way of `-o Dpkg::Options::=...`
-    # to avoid prompting.  Skip if dpkg isn't present (non-Debian host).
+    # 3. Purge Debian packages — `apt-get purge -y` is the only verb
+    # that drops both binaries and conffiles.  Skip if dpkg isn't
+    # present (non-Debian host).
     if plan.packages_to_purge:
         res = r.run([
             "apt-get", "purge", "-y",
@@ -224,7 +389,7 @@ def execute_removal(
                 f"rc={res.returncode} stderr={res.stderr.strip()[:200]}"
             )
 
-    # 3. Remove data / config / log dirs.  Done after package purge so
+    # 4. Remove data / config / log dirs.  Done after package purge so
     # the postrm scripts can't see (and re-create) directories we
     # intend to delete.
     for path in plan.paths_to_remove:
@@ -235,7 +400,7 @@ def execute_removal(
         r.unlink(path)
         report.removed_files.append(path)
 
-    # 4. Tell systemd we removed unit files.  Best-effort; not fatal.
+    # 5. Tell systemd we removed unit files.  Best-effort; not fatal.
     if plan.services_to_disable:
         r.run(["systemctl", "daemon-reload"])
 
