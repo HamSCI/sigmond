@@ -77,6 +77,7 @@ if (_VENV_PY.is_file()
 
 import argparse
 import configparser
+import math
 import pwd
 import re
 import shutil
@@ -5400,6 +5401,132 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
     return 0
 
 
+def _psk_watch_verbose_loop(log_path: Path, ft8_log: Path, ft4_log: Path) -> int:
+    """Per-cycle verbose mode for `smd psk-watch -v`.
+
+    Every 15 s (FT8 cadence), after a settle window for the decoder
+    to finish, dump every new line that landed in `<instance>-ft8.log`
+    and `<instance>-ft4.log` since the previous fire.  Two FT4 cycles
+    (2 × 7.5 s) fit inside one FT8 cycle, so a 15 s window naturally
+    catches "previous two FT4 cycles + most recent FT8 cycle".
+
+    Loop cadence is wall-clock UTC: fire at the next 15 s boundary
+    plus `SETTLE` seconds (4 s — long enough for decode_ft8 to finish
+    even on a busy slot).  We track byte-position into each log
+    instead of timestamp parsing — append-only, race-free.
+    """
+    SETTLE = 4.0
+    SLOT_SEC = 15.0
+    _heading(f'PSK Reporter per-cycle spots ({log_path.name})')
+    _info(f'   ▸ every {int(SLOT_SEC)} s (FT8 cadence) + {SETTLE:.0f} s settle:')
+    _info(f'     ALL FT8 spots from the last {int(SLOT_SEC)} s cycle')
+    _info(f'     ALL FT4 spots from the last {int(SLOT_SEC)} s (= 2 × 7.5 s)')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+
+    def _file_size(p: Path) -> int:
+        # `stat` via sudo when the daemon's logs are root-readable
+        # only (uncommon but possible if the dir was relocated).
+        try:
+            return p.stat().st_size
+        except (FileNotFoundError, PermissionError):
+            try:
+                r = subprocess.run(
+                    [*sudo_prefix, 'stat', '-c', '%s', str(p)],
+                    capture_output=True, text=True, check=False,
+                )
+                return int(r.stdout.strip()) if r.returncode == 0 else 0
+            except (FileNotFoundError, ValueError):
+                return 0
+
+    def _read_since(p: Path, start: int) -> tuple[int, list]:
+        end = _file_size(p)
+        if end <= start:
+            return start, []
+        try:
+            r = subprocess.run(
+                [*sudo_prefix, 'tail', '-c', f'+{start + 1}', str(p)],
+                capture_output=True, text=True, check=False,
+            )
+            text = r.stdout
+        except FileNotFoundError:
+            return start, []
+        # The chunk we just read can extend a bit past `end` if the
+        # daemon appended while we were reading — accept what we got
+        # and resync `end` for the next pass.
+        new_end = start + len(text.encode())
+        lines = [l for l in text.splitlines() if l.strip()]
+        return new_end, lines
+
+    # Prime positions: start at the current end so we don't dump
+    # historical content on first fire.
+    ft8_pos = _file_size(ft8_log)
+    ft4_pos = _file_size(ft4_log)
+
+    import re as _re
+    # Each spot line: "YYYY/MM/DD HH:MM:SS  SCORE  +DT  FREQ  ~  MSG"
+    spot_re = _re.compile(r'^\d{4}/\d{2}/\d{2}\s+(\d{2}:\d{2}:\d{2})\s')
+
+    def _key(line: str):
+        """(time, freq) for sort.  Lines that don't parse sink to the end."""
+        m = spot_re.match(line)
+        parts = line.split()
+        if not m or len(parts) < 5:
+            return ('zz', 0.0)
+        time_str = m.group(1)
+        try:
+            freq = float(parts[4].replace(',', ''))
+        except ValueError:
+            freq = 0.0
+        return (time_str, freq)
+
+    try:
+        while True:
+            # Next fire: next 15 s UTC boundary + SETTLE.
+            now = time.time()
+            next_boundary = math.ceil(now / SLOT_SEC) * SLOT_SEC
+            fire_at = next_boundary + SETTLE
+            time.sleep(max(0.1, fire_at - time.time()))
+
+            ft8_pos, ft8_lines = _read_since(ft8_log, ft8_pos)
+            ft4_pos, ft4_lines = _read_since(ft4_log, ft4_pos)
+
+            # Sort each mode by (time, freq).  Within one 15 s FT8
+            # window all FT8 timestamps are equal, so the sort is
+            # effectively by frequency.  FT4 has two timestamps (the
+            # two 7.5 s cycles), so the sort groups them naturally.
+            ft8_lines.sort(key=_key)
+            ft4_lines.sort(key=_key)
+
+            # Count FT4 spots per unique timestamp = per FT4 cycle.
+            ft4_by_cycle: dict = {}
+            for line in ft4_lines:
+                m = spot_re.match(line)
+                if m:
+                    ft4_by_cycle[m.group(1)] = ft4_by_cycle.get(m.group(1), 0) + 1
+
+            wall = time.strftime('%H:%M:%S', time.gmtime(next_boundary))
+            print(f'─── slot UTC {wall} ─────────────────────────────────',
+                  flush=True)
+            for line in ft8_lines:
+                print(f'  ft8: {line}', flush=True)
+            for line in ft4_lines:
+                print(f'  ft4: {line}', flush=True)
+            if not ft8_lines and not ft4_lines:
+                print('  (no decodes this cycle)', flush=True)
+            else:
+                # Summary: total ft8 + per-cycle ft4 breakdown.
+                ft4_parts = [f'{ts}: {n}' for ts, n in sorted(ft4_by_cycle.items())]
+                ft4_summary = (' + '.join(ft4_parts)) if ft4_parts else '0'
+                print(f'  → ft8 total={len(ft8_lines)}   '
+                      f'ft4 total={len(ft4_lines)} ({ft4_summary})',
+                      flush=True)
+    except KeyboardInterrupt:
+        return 130
+
+
 def cmd_psk_watch(args) -> int:
     """Live tail of psk-recorder's PSK Reporter upload activity.
 
@@ -5435,12 +5562,16 @@ def cmd_psk_watch(args) -> int:
     # `recent` is the verbose-mode N: how many per-mode decoded
     # spots to print under each "shipped" line.  0 = terse counts only.
     n_recent = int(getattr(args, 'recent', 0) or 0)
+    verbose = bool(getattr(args, 'verbose', False))
     # Per-mode decoded-spot logs.  These are append-only (not deleted
     # on PSKReporter ack like the spool's .spots.txt files), so they
     # always have history we can tail when verbose mode is requested.
     instance_stem = log_path.stem
     ft8_log = log_path.with_name(f'{instance_stem}-ft8.log')
     ft4_log = log_path.with_name(f'{instance_stem}-ft4.log')
+
+    if verbose:
+        return _psk_watch_verbose_loop(log_path, ft8_log, ft4_log)
 
     _heading(f'PSK Reporter upload activity ({log_path.name})')
     _info('   ▸ hs-uploader path (PSK_USE_HS_UPLOADER=1):')
@@ -6127,6 +6258,12 @@ def main() -> int:
                        help='also print the last N decoded spots from each '
                             'per-mode log under each "shipped" line '
                             '(default: 0 = counts only)')
+    p_psk.add_argument('-v', '--verbose', action='store_true',
+                       help='per-cycle mode: every 15 s (after slot decode '
+                            'settles), print ALL FT8 spots from the last '
+                            '15 s cycle and ALL FT4 spots from the last two '
+                            '7.5 s cycles.  Replaces the default '
+                            '"counts + age" line output.')
     p_psk.add_argument('--instance', metavar='RADIOD_ID', default=None,
                        help='specific radiod instance (default: most recently '
                             'modified /var/log/psk-recorder/<id>.log)')
