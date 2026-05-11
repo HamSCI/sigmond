@@ -5478,7 +5478,12 @@ def cmd_psk_watch(args) -> int:
             if qm:
                 pending_polls += 1
                 pending_spots += int(qm.group(1)) + int(qm.group(2))
-                print(line)
+                # flush=True: Python's stdout is block-buffered when
+                # piped (e.g., `smd psk-watch | tee log`); without
+                # this the operator sees no output for minutes until
+                # ~4 KiB has accumulated.  Line-buffered is the right
+                # mode for a live-tail tool.
+                print(line, flush=True)
                 continue
             um = upload_re.search(line)
             if um:
@@ -5502,14 +5507,14 @@ def cmd_psk_watch(args) -> int:
                         f'✗ {pending_polls} poll{"s" if pending_polls != 1 else ""} '
                         f'fed {pending_spots} spots (delta {sign}{diff})'
                     )
-                print(f'{line}  [{tag}]')
+                print(f'{line}  [{tag}]', flush=True)
                 pending_polls = 0
                 pending_spots = 0
                 continue
             # Anything else (batch summary, started/stopped) — pass through
             # untouched, don't reset the accumulator (batch summary fires
             # AROUND uploads, not in lieu of them).
-            print(line)
+            print(line, flush=True)
         gp.wait()
         tl.terminate()
     except KeyboardInterrupt:
