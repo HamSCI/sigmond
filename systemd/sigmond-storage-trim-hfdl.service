@@ -1,0 +1,25 @@
+# /etc/systemd/system/sigmond-storage-trim-hfdl.service
+[Unit]
+Description=Sigmond storage trim — hfdl.spots @ 24h
+Documentation=https://github.com/mijahauan/sigmond
+# Don't run if the sink db isn't there yet.  ConditionPathExists is
+# evaluated at each timer fire so a freshly-deployed host that hasn't
+# done first-flush yet stays cleanly inactive.
+ConditionPathExists=/var/lib/sigmond/sink.db
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+
+# dumphfdl already ships HFDL frames live to feed.airframes.io:5556
+# via its --output decoded:json:tcp; the local SQLite copy is a
+# 24-hour archive only.  This trim bounds disk growth while
+# preserving the most-recent day for diagnostics and replay.
+# Other producers (timestd.events, codar.*, ...) are NOT touched —
+# operator runs separate trim units for those.
+ExecStart=/usr/local/bin/smd storage trim --target-db hfdl --max-age 24h --yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-storage-trim-hfdl

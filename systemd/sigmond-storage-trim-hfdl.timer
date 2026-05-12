@@ -1,0 +1,20 @@
+# /etc/systemd/system/sigmond-storage-trim-hfdl.timer
+[Unit]
+Description=Sigmond storage trim timer — hfdl.spots @ 24h
+Documentation=https://github.com/mijahauan/sigmond
+
+[Timer]
+# Run once a day at 03:15 local time — low-activity window for most
+# HamSCI stations, after the bulk of overnight propagation studies
+# are complete.  Sliding the time off the hour avoids piling up on
+# other top-of-hour cron-style tasks.
+OnCalendar=*-*-* 03:15:00
+
+# Catch up on a missed run if the system was off briefly (laptop /
+# Proxmox host pause).  AccuracySec=1h tolerates the host being a
+# bit off — we don't need sub-minute precision for a daily janitor.
+Persistent=true
+AccuracySec=1h
+
+[Install]
+WantedBy=timers.target
