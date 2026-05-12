@@ -5718,7 +5718,9 @@ def cmd_wspr_watch(args) -> int:
 
     import re as _re
     import datetime as _datetime
-    # DONE summary line emitted once per cycle.  Format examples:
+    # DONE summary line emitted once per cycle (a single WSPR cycle
+    # can produce multiple DONE events when spots arrive in waves —
+    # we annotate each separately rather than merge).  Examples:
     #   "DIAG DONE     cycle=260512 0200  accepted=65/66  rejected=1  errors=0"
     #   "DIAG DONE     cycle=260512 0202  accepted=10/10"
     done_re = _re.compile(
@@ -5727,13 +5729,20 @@ def cmd_wspr_watch(args) -> int:
         r'(?:\s+rejected=(\d+))?'
         r'(?:\s+errors=(\d+))?'
     )
-    # SIMILAR per-spot line.  Format from wd-upload-wsprnet:
-    #   "DIAG SIMILAR    YYMMDD HHMM   <num> <SNR> <drift> <freq_MHz> <CALL> <GRID> <pwr> <rest>"
-    similar_re = _re.compile(
-        r'DIAG SIMILAR\s+(\d{6})\s+(\d{4})\s+'
-        r'\S+\s+(-?\d+)\s+(\S+)\s+'
-        r'(\d+\.\d+)\s+(\S+)\s+(\S+)'
-    )
+    # SIMILAR per-spot line preamble — we lift the part after
+    # "DIAG SIMILAR" and parse positionally.  Standard wsprdaemon
+    # ALL.TXT field order (post-DIAG-prefix):
+    #
+    #   YYMMDD HHMM SYNC SNR DT FREQ_MHZ CALL [GRID] PWR DRIFT MODE
+    #
+    # GRID is omitted for compound callsigns (e.g. "K5JAZ/1") that
+    # didn't include a Maidenhead locator in their transmission, so
+    # we detect it via regex instead of trusting positional index.
+    similar_prefix_re = _re.compile(r'DIAG SIMILAR\s+(\d{6}\s+\d{4}\s.*)$')
+    # Maidenhead locator: 4 or 6 alphanum chars, [A-R][A-R][0-9][0-9]
+    # optionally followed by 2 lowercase letters.  Used to distinguish
+    # the grid field from the pwr field (both short tokens otherwise).
+    grid_re = _re.compile(r'^[A-R]{2}[0-9]{2}([a-x]{2})?$')
 
     _heading(f'WSPRnet upload activity ({unit})')
     _info('   ▸ one annotated line per ~2-min WSPR upload cycle')
@@ -5773,9 +5782,28 @@ def cmd_wspr_watch(args) -> int:
         for line in proc.stdout:
             line = line.rstrip('\n')
 
-            sm = similar_re.search(line)
+            sm = similar_prefix_re.search(line)
             if sm:
-                date, hhmm, snr, drift, freq_mhz, call, grid = sm.groups()
+                # tokens: YYMMDD HHMM SYNC SNR DT FREQ CALL [GRID] PWR DRIFT MODE
+                toks = sm.group(1).split()
+                if len(toks) < 9:
+                    continue  # malformed; skip
+                date, hhmm = toks[0], toks[1]
+                # toks[2] = sync (skipped — internal decoder metric,
+                # not useful for the operator-facing display)
+                snr = toks[3]
+                dt  = toks[4]
+                freq_mhz = toks[5]
+                call = toks[6]
+                # Grid is optional.  If toks[7] looks like a Maidenhead
+                # locator, it's the grid; otherwise the call had no grid
+                # and toks[7] is actually the pwr field — shift down.
+                if len(toks) >= 11 and grid_re.match(toks[7]):
+                    grid, pwr, drift, mode = toks[7], toks[8], toks[9], toks[10]
+                else:
+                    grid = ''
+                    pwr, drift, mode = toks[7], toks[8], toks[9] if len(toks) > 9 else ''
+
                 this_cycle = (date, hhmm)
                 if this_cycle != current_cycle:
                     # New cycle starting — reset the buffer.  We don't
@@ -5787,8 +5815,9 @@ def cmd_wspr_watch(args) -> int:
                 except ValueError:
                     freq_f = 0.0
                 cycle_spots.append({
-                    'snr': snr, 'drift': drift, 'freq': freq_mhz,
-                    'freq_f': freq_f, 'call': call, 'grid': grid,
+                    'snr': snr, 'dt': dt, 'drift': drift, 'pwr': pwr,
+                    'mode': mode, 'freq': freq_mhz, 'freq_f': freq_f,
+                    'call': call, 'grid': grid,
                 })
                 continue
 
@@ -5801,21 +5830,41 @@ def cmd_wspr_watch(args) -> int:
                 # cycle UTC formatted as HH:MM for readability
                 cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
 
-                if show_spots and cycle_spots:
-                    print(f'─── cycle UTC {cycle_hm} ────────────────────────────────',
+                if show_spots:
+                    mode_tag = (f'WSPR-{cycle_spots[0]["mode"]}'
+                                if cycle_spots else 'WSPR')
+                    print(f'─── cycle UTC {cycle_hm}  {mode_tag} '
+                          f'────────────────────────────────',
                           flush=True)
-                    sorted_spots = sorted(cycle_spots, key=lambda s: s['freq_f'])
-                    to_show = sorted_spots if cap is None else sorted_spots[:cap]
-                    for s in to_show:
-                        print(
-                            f'  {s["freq"]:>12} MHz  '
-                            f'{s["call"]:>10}  {s["grid"]}  '
-                            f'SNR {int(s["snr"]):+3} dB  drift {s["drift"]}',
-                            flush=True,
-                        )
-                    if cap is not None and len(sorted_spots) > len(to_show):
-                        print(f'  … ({len(sorted_spots) - len(to_show)} more)',
-                              flush=True)
+                    if cycle_spots:
+                        sorted_spots = sorted(cycle_spots,
+                                              key=lambda s: s['freq_f'])
+                        to_show = (sorted_spots if cap is None
+                                   else sorted_spots[:cap])
+                        for s in to_show:
+                            # Display fields (left-to-right):
+                            #   freq, call/grid, SNR, DT, drift (Hz/min), pwr
+                            grid_disp = s['grid'] if s['grid'] else '----'
+                            print(
+                                f'  {s["freq"]:>12} MHz  '
+                                f'{s["call"]:>10}  {grid_disp:<6}  '
+                                f'SNR {int(s["snr"]):+3} dB  '
+                                f'DT {float(s["dt"]):+5.2f}s  '
+                                f'drift {s["drift"]:>3} Hz  '
+                                f'{s["pwr"]:>2} dBm',
+                                flush=True,
+                            )
+                        if cap is not None and len(sorted_spots) > len(to_show):
+                            print(f'  … ({len(sorted_spots) - len(to_show)} '
+                                  f'more)', flush=True)
+                    else:
+                        # Clean cycle — WSPRnet flagged nothing.  Per-spot
+                        # detail isn't logged for accepted-only uploads;
+                        # the source decode lines live in wd-post's
+                        # output files (~/wsprdaemon/wsprdaemon.d/.../...
+                        # ALL_WSPR.TXT), outside this verb's scope.
+                        print('  (clean cycle — no per-spot diagnostics '
+                              'from WSPRnet)', flush=True)
                     print(
                         f'  → cycle UTC {cycle_hm}  '
                         f'accepted={accepted}/{total}  '
