@@ -4551,7 +4551,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
                     ;;
                 storage)
-                    COMPREPLY=($(compgen -W "migrate-to-sqlite" -- "$cur"))
+                    COMPREPLY=($(compgen -W "migrate-to-sqlite trim" -- "$cur"))
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
@@ -4567,6 +4567,9 @@ _smd_complete() {
                     case "${words[2]}" in
                         migrate-to-sqlite)
                             COMPREPLY=($(compgen -W "--yes" -- "$cur"))
+                            ;;
+                        trim)
+                            COMPREPLY=($(compgen -W "--max-age --db --yes" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -5405,6 +5408,79 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
         return 2
     print()
     print("ClickHouse removal complete.")
+    return 0
+
+
+def cmd_storage_trim(args) -> int:
+    """Delete pending_uploads rows older than `--max-age`.
+
+    The SQLite sink is a FIFO queue: producers append, the
+    `hs-uploader` source `commit()`s acked rows.  Producers without a
+    consumer wired (currently hfdl.spots and timestd.events — no
+    external upload destination is configured for them) leave rows
+    queued indefinitely; this verb provides a TTL-based cleanup.
+
+    Default is dry-run: report what WOULD be deleted, do not touch
+    the sink.  `--yes` actually runs the DELETE (requires root + the
+    lifecycle lock so it can't race with `apply` / migrate).
+    """
+    try:
+        from sigmond.storage_trim import (
+            plan_trim, execute_trim, parse_duration, NotConfirmed,
+            DEFAULT_DB_PATH,
+        )
+    except ImportError as e:
+        _err(f"storage trim module not available: {e}")
+        return 1
+
+    try:
+        max_age_seconds = parse_duration(args.max_age)
+    except ValueError as exc:
+        _err(f"--max-age {args.max_age!r}: {exc}")
+        return 2
+
+    db_path = getattr(args, "db", None) or DEFAULT_DB_PATH
+    apply = getattr(args, "yes", False)
+    if apply and _need_root("storage trim --yes"):
+        return 1
+
+    plan = plan_trim(db_path, max_age_seconds)
+    print(f"Trim from {plan.db_path}")
+    print(f"  cutoff:  rows queued_at < {plan.cutoff_iso}")
+    print(f"  max-age: {args.max_age}  ({max_age_seconds:.0f} s)")
+    print()
+    if plan.is_empty:
+        print("  No rows older than threshold.")
+        return 0
+    for target_db, target_table, count in plan.rows_per_target:
+        print(f"  {target_db}.{target_table}: {count} rows")
+    print(f"  Total: {plan.total_rows} rows")
+
+    if not apply:
+        print()
+        print("Dry run.  Re-run with --yes to apply the DELETE above.")
+        return 0
+
+    print()
+    print("Executing trim...")
+    plan.confirmed = True
+    try:
+        if _HAS_SIGMOND_LIB:
+            with lifecycle_lock(reason="storage trim"):
+                report = execute_trim(plan)
+        else:
+            report = execute_trim(plan)
+    except NotConfirmed as e:  # belt-and-braces; we just set confirmed
+        _err(str(e))
+        return 1
+
+    if report.errors:
+        print()
+        print("Errors:")
+        for err in report.errors:
+            print(f"  - {err}")
+        return 2
+    print(f"  deleted: {report.rows_deleted} rows")
     return 0
 
 
@@ -6330,6 +6406,26 @@ def main() -> int:
                             'and delete /var/lib/clickhouse '
                             '(destructive; requires root)')
 
+    p_trim = storage_sub.add_parser(
+        'trim',
+        help='delete pending_uploads rows older than --max-age '
+             '(janitor for queues without an external consumer; '
+             'default: dry-run; --yes to apply)',
+    )
+    p_trim.add_argument(
+        '--max-age', metavar='DURATION', default='24h',
+        help='delete rows with queued_at older than this (default: 24h). '
+             'Suffixes: s/m/h/d; bare number = seconds.',
+    )
+    p_trim.add_argument(
+        '--db', metavar='PATH', default=None,
+        help='sink db path (default: /var/lib/sigmond/sink.db)',
+    )
+    p_trim.add_argument(
+        '--yes', action='store_true',
+        help='actually run the DELETE (destructive; requires root)',
+    )
+
     p_psk = sub.add_parser('psk-watch',
                            help='live tail of PSK Reporter upload events '
                                 '(per-poll ft8/ft4 counts + batch flushes)')
@@ -6530,6 +6626,8 @@ def main() -> int:
         storage_cmd = getattr(args, 'storage_command', None)
         if storage_cmd == 'migrate-to-sqlite':
             return cmd_storage_migrate_to_sqlite(args)
+        if storage_cmd == 'trim':
+            return cmd_storage_trim(args)
         p_storage.print_help()
         return 0
 
