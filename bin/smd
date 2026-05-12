@@ -23,6 +23,8 @@ Observe (what is, read-only):
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
     smd ka9q-watch                                               upstream-drift watcher
+    smd psk-watch   [N | -v]                                     PSK Reporter upload events
+    smd wspr-watch  [N | -v]                                     WSPRnet upload events
 
 Operate (run things now, may need sudo):
     smd start       [<component> [<instance>]]
@@ -4493,7 +4495,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate ka9q-watch psk-watch wisdom timestd-tune-storage storage completion"
+    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate ka9q-watch psk-watch wspr-watch wisdom timestd-tune-storage storage completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -5668,6 +5670,181 @@ def _psk_watch_cycle_loop(
         return 130
 
 
+def cmd_wspr_watch(args) -> int:
+    """Live tail of wsprdaemon-client's WSPRnet upload activity.
+
+    Watches the `wd-upload-wsprnet@<call_grid>.service` journal for
+    `DIAG DONE` lines (one per ~2-min WSPR cycle, with accepted /
+    rejected / errors counts) and, when verbose mode is requested,
+    the `DIAG SIMILAR` per-spot lines that fed each cycle.
+
+    Three display modes parallel `smd psk-watch`:
+      * default      — one annotated line per cycle (counts only)
+      * `N`          — first N shipped spots per cycle + summary
+      * `-v`         — every shipped spot per cycle + summary
+
+    Source is journalctl, not a log file: wd-upload-wsprnet writes
+    to systemd's journal via `StandardOutput=journal`, so there is
+    no `/var/log/wsprdaemon/<id>.log` to tail.
+    """
+    instance = getattr(args, 'instance', None)
+    if instance is None:
+        try:
+            r = subprocess.run(
+                ['systemctl', 'list-units', '--no-legend', '--no-pager',
+                 '--type=service', '--state=active',
+                 'wd-upload-wsprnet@*.service'],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            _err('systemctl not available')
+            return 1
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        if not lines:
+            _err('no active wd-upload-wsprnet@* service — is '
+                 'wsprdaemon-client running? (smd status wsprdaemon-client)')
+            return 1
+        unit = lines[0].split()[0]
+    else:
+        unit = f'wd-upload-wsprnet@{instance}.service'
+
+    n_recent = int(getattr(args, 'recent', 0) or 0)
+    verbose = bool(getattr(args, 'verbose', False))
+    if verbose:
+        cap: Optional[int] = None
+    else:
+        cap = n_recent if n_recent > 0 else 0
+    show_spots = cap != 0
+
+    import re as _re
+    import datetime as _datetime
+    # DONE summary line emitted once per cycle.  Format examples:
+    #   "DIAG DONE     cycle=260512 0200  accepted=65/66  rejected=1  errors=0"
+    #   "DIAG DONE     cycle=260512 0202  accepted=10/10"
+    done_re = _re.compile(
+        r'DIAG DONE\s+cycle=(\d{6})\s+(\d{4})\s+'
+        r'accepted=(\d+)/(\d+)'
+        r'(?:\s+rejected=(\d+))?'
+        r'(?:\s+errors=(\d+))?'
+    )
+    # SIMILAR per-spot line.  Format from wd-upload-wsprnet:
+    #   "DIAG SIMILAR    YYMMDD HHMM   <num> <SNR> <drift> <freq_MHz> <CALL> <GRID> <pwr> <rest>"
+    similar_re = _re.compile(
+        r'DIAG SIMILAR\s+(\d{6})\s+(\d{4})\s+'
+        r'\S+\s+(-?\d+)\s+(\S+)\s+'
+        r'(\d+\.\d+)\s+(\S+)\s+(\S+)'
+    )
+
+    _heading(f'WSPRnet upload activity ({unit})')
+    _info('   ▸ one annotated line per ~2-min WSPR upload cycle')
+    if cap is None:
+        _info('     + ALL shipped spots sorted by frequency')
+    elif cap > 0:
+        _info(f'     + first {cap} shipped spot{"s" if cap != 1 else ""} sorted by frequency')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+    try:
+        proc = subprocess.Popen(
+            [*sudo_prefix, 'journalctl', '-fu', unit, '-o', 'cat',
+             '--since', 'now'],
+            stdout=subprocess.PIPE, text=True, bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        _err(f'journalctl not available: {exc}')
+        return 1
+
+    # Spots accumulate by cycle key (date + HHMM); we drain a cycle's
+    # buffer when its DONE arrives.  Keyed on the full (date, hhmm) so
+    # a wrap across midnight UTC is handled naturally.
+    current_cycle: tuple = ('', '')
+    cycle_spots: list = []
+    last_shipped_at: Optional[float] = None
+
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            line = line.rstrip('\n')
+
+            sm = similar_re.search(line)
+            if sm:
+                date, hhmm, snr, drift, freq_mhz, call, grid = sm.groups()
+                this_cycle = (date, hhmm)
+                if this_cycle != current_cycle:
+                    # New cycle starting — reset the buffer.  We don't
+                    # print anything yet; that happens on DONE.
+                    current_cycle = this_cycle
+                    cycle_spots = []
+                try:
+                    freq_f = float(freq_mhz)
+                except ValueError:
+                    freq_f = 0.0
+                cycle_spots.append({
+                    'snr': snr, 'drift': drift, 'freq': freq_mhz,
+                    'freq_f': freq_f, 'call': call, 'grid': grid,
+                })
+                continue
+
+            dm = done_re.search(line)
+            if dm:
+                date, hhmm, accepted, total, rejected, errors = dm.groups()
+                rejected = rejected or '0'
+                errors = errors or '0'
+                wall = _datetime.datetime.now().strftime('%H:%M:%S')
+                # cycle UTC formatted as HH:MM for readability
+                cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
+
+                if show_spots and cycle_spots:
+                    print(f'─── cycle UTC {cycle_hm} ────────────────────────────────',
+                          flush=True)
+                    sorted_spots = sorted(cycle_spots, key=lambda s: s['freq_f'])
+                    to_show = sorted_spots if cap is None else sorted_spots[:cap]
+                    for s in to_show:
+                        print(
+                            f'  {s["freq"]:>12} MHz  '
+                            f'{s["call"]:>10}  {s["grid"]}  '
+                            f'SNR {int(s["snr"]):+3} dB  drift {s["drift"]}',
+                            flush=True,
+                        )
+                    if cap is not None and len(sorted_spots) > len(to_show):
+                        print(f'  … ({len(sorted_spots) - len(to_show)} more)',
+                              flush=True)
+                    print(
+                        f'  → cycle UTC {cycle_hm}  '
+                        f'accepted={accepted}/{total}  '
+                        f'rejected={rejected}  errors={errors}',
+                        flush=True,
+                    )
+                else:
+                    # Counts-only line, annotated with wall-clock + age.
+                    now = time.time()
+                    if last_shipped_at is None:
+                        gap = '—'
+                    else:
+                        gap = f'{int(now - last_shipped_at)}s'
+                    last_shipped_at = now
+                    print(
+                        f'[{wall} +{gap}] cycle UTC {cycle_hm}  '
+                        f'accepted={accepted:>3}/{total:<3}  '
+                        f'rejected={rejected}  errors={errors}',
+                        flush=True,
+                    )
+                # Cycle is done — drop the buffer.
+                cycle_spots = []
+                current_cycle = ('', '')
+                continue
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+    return 0
+
+
 def cmd_psk_watch(args) -> int:
     """Live tail of psk-recorder's PSK Reporter upload activity.
 
@@ -6440,6 +6617,21 @@ def main() -> int:
                        help='specific radiod instance (default: most recently '
                             'modified /var/log/psk-recorder/<id>.log)')
 
+    # wspr-watch — live tail of wsprdaemon-client's WSPRnet upload activity
+    p_wspr = sub.add_parser('wspr-watch',
+                            help='live tail of WSPRnet upload events '
+                                 '(per-2-min cycle accepted/rejected counts)')
+    p_wspr.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                        help='per-WSPR-cycle mode (2 min cadence): print up to '
+                             'N shipped spots per cycle under the summary '
+                             '(default 0 = counts only; -v = print all)')
+    p_wspr.add_argument('-v', '--verbose', action='store_true',
+                        help='per-cycle mode showing ALL spots — same '
+                             'cadence as N, no per-cycle cap')
+    p_wspr.add_argument('--instance', metavar='CALL_GRID', default=None,
+                        help='specific station instance, e.g. AC0G-B4_EM38ww '
+                             '(default: first active wd-upload-wsprnet@*)')
+
     # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
     p = sub.add_parser('ka9q-watch',
                        help='check ka9q-radio upstream for changes that could '
@@ -6621,6 +6813,9 @@ def main() -> int:
 
     if args.command == 'psk-watch':
         return cmd_psk_watch(args)
+
+    if args.command == 'wspr-watch':
+        return cmd_wspr_watch(args)
 
     if args.command == 'storage':
         storage_cmd = getattr(args, 'storage_command', None)
