@@ -4559,7 +4559,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "migrate-to-sqlite trim" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk ka9q" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar ka9q" -- "$cur"))
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
@@ -4583,10 +4583,7 @@ _smd_complete() {
                     ;;
                 watch)
                     case "${words[2]}" in
-                        wspr)
-                            COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
-                            ;;
-                        psk)
+                        wspr|psk|hfdl|codar)
                             COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
                             ;;
                         ka9q)
