@@ -5894,6 +5894,113 @@ def cmd_wspr_watch(args) -> int:
             return _datetime.datetime.now().strftime('%H:%M:%S')
         return m.group(1)[11:]  # "HH:MM:SS"
 
+    # Per-band tag derivation.  wsprdaemon-client writes a per-cycle
+    # diagnostic report at /var/log/wsprdaemon/wsprnet-partial/
+    # containing every spot from this batch.  We use that as the
+    # source of truth for both the per-band annotation on the "done"
+    # line and the optional -v / N per-spot dump.
+    _PARTIAL_DIR = Path('/var/log/wsprdaemon/wsprnet-partial')
+    _BAND_RANGES = [
+        (2.0, '160m'), (4.0, '80m'), (5.5, '60m'), (10.0, '40m'),
+        (14.0, '30m'), (18.0, '20m'), (21.0, '17m'),
+        (24.5, '15m'), (28.0, '12m'), (50.0, '10m'), (54.0, '6m'),
+    ]
+    _BAND_ORDER = {label: idx
+                   for idx, (_hi, label) in enumerate(_BAND_RANGES)}
+
+    def _band(freq_mhz: float) -> str:
+        for hi, label in _BAND_RANGES:
+            if freq_mhz < hi:
+                return label
+        return f'{freq_mhz:.0f}MHz'
+
+    def _load_partial(date: str, hhmm: str, accepted: int,
+                      rejected: int, *, retry: bool = True):
+        """Find and parse the partial-report file for one upload batch.
+
+        Filename: `{ISOTIME}_cycle{date}{hhmm}_diag_accepted{N}_rejected{R}.txt`
+        wsprdaemon writes this file at roughly the same moment the
+        DIAG DONE line lands in the journal.  For live events we
+        retry briefly to handle the race; for backlog the file is
+        either already present or absent (rotated/older than the
+        partial-report feature), so a single check is enough.
+        Returns a list of {freq_mhz, line} dicts for the accepted
+        spots, or None if the file isn't found.
+        """
+        pattern = (f'*_cycle{date}{hhmm}_diag_accepted'
+                   f'{accepted}_rejected{rejected}.txt')
+        deadline = time.time() + (1.5 if retry else 0.0)
+        target = None
+        while True:
+            try:
+                matches = sorted(_PARTIAL_DIR.glob(pattern))
+            except OSError:
+                matches = []
+            if matches:
+                target = matches[-1]  # most recent if multiple
+                break
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.2)
+        try:
+            text = target.read_text(errors='replace')
+        except OSError:
+            return None
+        spots = []
+        in_accepted = False
+        for txt_line in text.splitlines():
+            if txt_line.startswith('--- ACCEPTED SPOTS'):
+                in_accepted = True
+                continue
+            if txt_line.startswith('---'):
+                in_accepted = False
+                continue
+            if not in_accepted:
+                continue
+            toks = txt_line.split()
+            # ALL.TXT row: YYMMDD HHMM SYNC SNR DT FREQ CALL [GRID] PWR DRIFT MODE
+            if len(toks) < 9:
+                continue
+            try:
+                freq_f = float(toks[5])
+            except ValueError:
+                continue
+            spots.append({'freq_f': freq_f, 'toks': toks, 'raw': txt_line})
+        return spots
+
+    def _bands_summary(spots) -> str:
+        counts: dict = {}
+        for s in spots:
+            counts[_band(s['freq_f'])] = counts.get(_band(s['freq_f']), 0) + 1
+        if not counts:
+            return ''
+        ordered = sorted(counts, key=lambda b: _BAND_ORDER.get(b, 99))
+        return ' '.join(f'{b}:{counts[b]}' for b in ordered)
+
+    def _format_spot(s) -> str:
+        toks = s['toks']
+        freq_mhz = toks[5]
+        call = toks[6]
+        if len(toks) >= 11 and grid_re.match(toks[7]):
+            grid, pwr, drift = toks[7], toks[8], toks[9]
+        else:
+            grid = ''
+            pwr, drift = toks[7], toks[8]
+        try:
+            snr_i = int(toks[3])
+            dt_f = float(toks[4])
+        except ValueError:
+            return f'           {s["raw"]}'
+        grid_disp = grid if grid else '----'
+        return (
+            f'           {freq_mhz:>12} MHz  '
+            f'{call:>10}  {grid_disp:<6}  '
+            f'SNR {snr_i:+3} dB  '
+            f'DT {dt_f:+5.2f}s  '
+            f'drift {drift:>3} Hz  '
+            f'{pwr:>2} dBm'
+        )
+
     assert proc.stdout is not None
     import select as _select
     fd = proc.stdout.fileno()
@@ -5963,13 +6070,43 @@ def cmd_wspr_watch(args) -> int:
                 hms = _hms_of(line)
                 cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
                 cum = f'  (cycle total: {tot[0]}/{tot[1]})'
+                # Per-band annotation (+ spot dump in verbose modes)
+                # comes from the partial-report file wsprdaemon writes
+                # for every batch.  Cheap to load, gracefully degrades
+                # if the file isn't accessible.  Retry only for live
+                # events; backlog files either exist already or never
+                # will (older than the partial-report feature).
+                is_live = (event_ts is None
+                           or (time.time() - event_ts) < 30.0)
+                spots = _load_partial(date, hhmm, accepted_i,
+                                      rejected_i, retry=is_live)
+                bands_part = ''
+                if spots:
+                    bs = _bands_summary(spots)
+                    if bs:
+                        bands_part = f'  ({bs})'
                 print(
                     f'[{hms}] cycle UTC {cycle_hm}  '
                     f'upload done in {dur:>3}: '
                     f'accepted={accepted_i:>3}/{total_i:<3}  '
-                    f'rejected={rejected_i}  errors={errors_i}{cum}',
+                    f'rejected={rejected_i}  errors={errors_i}{cum}'
+                    f'{bands_part}',
                     flush=True,
                 )
+                # Verbose / N modes: dump spots sorted by frequency
+                # underneath the "done" line.
+                if show_spots and spots:
+                    spots_sorted = sorted(spots, key=lambda s: s['freq_f'])
+                    to_show = (spots_sorted if cap is None
+                               else spots_sorted[:cap])
+                    for s in to_show:
+                        print(_format_spot(s), flush=True)
+                    if cap is not None and len(spots_sorted) > len(to_show):
+                        print(
+                            f'           … '
+                            f'({len(spots_sorted) - len(to_show)} more)',
+                            flush=True,
+                        )
                 continue
 
             if show_spots:
