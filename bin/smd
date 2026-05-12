@@ -5774,10 +5774,16 @@ def cmd_wspr_watch(args) -> int:
         # uploader emits no DONE line for them) — 30 min spans enough
         # cycles to give a sense of activity regardless of band
         # conditions.  `-f` keeps following past that backlog.
+        # Binary pipe + raw os.read; using text=True + readline()
+        # interacts badly with select.select — Python's
+        # TextIOWrapper buffers data internally, so after the first
+        # readline() select reports "no data on fd" even though more
+        # lines are sitting in the wrapper's buffer.  Symptom: only
+        # one line ever appears.  We split into lines ourselves.
         proc = subprocess.Popen(
             [*sudo_prefix, 'journalctl', '-fu', unit, '-o', 'cat',
              '--since', '30 min ago'],
-            stdout=subprocess.PIPE, text=True, bufsize=1,
+            stdout=subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         _err(f'journalctl not available: {exc}')
@@ -5796,12 +5802,23 @@ def cmd_wspr_watch(args) -> int:
     #   {accepted, total, rejected, errors, last_ts, spots: list}
     pending: dict = {}
     last_shipped_at: Optional[float] = None
-    # Last observed journal-event timestamp.  During backlog ingestion
-    # this advances by event_ts; wall-clock time runs far ahead of these
-    # values and must not be used for age-based flushing (it would prune
-    # half-built cycles mid-burst).  We only trust wall-clock for flushes
-    # once we've caught up to live tail.
+    # We can't compare cycle age against wall-clock during backlog
+    # drain — journal events are minutes/hours in the past, so any
+    # wall-clock-based flush would prune half-built cycles.  Instead,
+    # track journal-time progression via an offset: when we observe an
+    # event at journal-time J at wall-clock W, freeze (J, W).  Between
+    # events, advance "effective now" in journal-time at wall-clock
+    # rate: effective_now = J + (time.time() - W).  This Just Works
+    # for both backlog (effective_now stays in backlog era) and live
+    # tail (effective_now ≈ time.time() since journal events ARE
+    # real-time), with no hardcoded threshold.
     last_event_ts: float = 0.0
+    wall_at_last_event: float = 0.0
+
+    def _effective_now() -> float:
+        if not last_event_ts:
+            return 0.0
+        return last_event_ts + (time.time() - wall_at_last_event)
 
     # Leading ISO timestamp in each journal message ("2026-05-11T21:08:58Z").
     ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z?\s')
@@ -5893,26 +5910,37 @@ def cmd_wspr_watch(args) -> int:
 
     assert proc.stdout is not None
     import select as _select
+    fd = proc.stdout.fileno()
+    buf = b''
+    pending_lines: list = []
+
+    def _next_line():
+        """Pop the next complete line from buf, or None if buffer empty."""
+        nonlocal buf
+        if b'\n' in buf:
+            line, _, buf = buf.partition(b'\n')
+            return line.decode('utf-8', errors='replace')
+        return None
+
     try:
         while True:
-            # Wait up to 1 s for a new line; lets us periodically
-            # check pending cycles for time-based flush even when the
-            # journal is quiet.
-            rlist, _w, _x = _select.select([proc.stdout], [], [], 1.0)
-            if not rlist:
-                # Only fall back to wall-clock if we've caught up to
-                # live tail (newest observed event is within 5 min of
-                # now — slack for WSPR's 2-min cycle cadence).  During
-                # backlog drain, wall-clock runs far ahead of journal
-                # timestamps; using it would prematurely flush
-                # half-built cycles.
-                if last_event_ts and (time.time() - last_event_ts) < 300.0:
-                    _flush_aged(time.time())
+            line: Optional[str] = _next_line()
+            if line is None:
+                # No complete line buffered — wait for more bytes.
+                rlist, _w, _x = _select.select([fd], [], [], 1.0)
+                if not rlist:
+                    en = _effective_now()
+                    if en:
+                        _flush_aged(en)
+                    continue
+                try:
+                    chunk = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
                 continue
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.rstrip('\n')
             event_ts = _parse_ts(line)
             if event_ts == 0.0:
                 # Continuation of a multi-line HTML chunk from WSPRnet's
@@ -5922,6 +5950,7 @@ def cmd_wspr_watch(args) -> int:
                 continue
             if event_ts > last_event_ts:
                 last_event_ts = event_ts
+                wall_at_last_event = time.time()
             _flush_aged(event_ts)
 
             sm = similar_prefix_re.search(line)
