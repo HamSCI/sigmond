@@ -5681,15 +5681,28 @@ def _psk_watch_cycle_loop(
 def cmd_wspr_watch(args) -> int:
     """Live tail of wsprdaemon-client's WSPRnet upload activity.
 
-    Watches the `wd-upload-wsprnet@<call_grid>.service` journal for
-    `DIAG DONE` lines (one per ~2-min WSPR cycle, with accepted /
-    rejected / errors counts) and, when verbose mode is requested,
-    the `DIAG SIMILAR` per-spot lines that fed each cycle.
+    Watches the `wd-upload-wsprnet@<call_grid>.service` journal and
+    streams two lines per upload batch:
 
-    Three display modes parallel `smd psk-watch`:
-      * default      — one annotated line per cycle (counts only)
-      * `N`          — first N shipped spots per cycle + summary
-      * `-v`         — every shipped spot per cycle + summary
+      [HH:MM:SS] cycle UTC 12:08  upload start:  7 spots in  5 files
+      [HH:MM:SS] cycle UTC 12:08  upload done in 2s:  accepted=  7/7   rejected=0  errors=0  (cycle total: 7/7)
+
+    `UPLOAD START` fires when wd-upload-wsprnet has buffered a batch
+    long enough that the queue went idle (its internal settle gate);
+    this is equivalent to "decodes done for these spots".  `DIAG DONE`
+    fires when WSPRnet's HTTP response comes back.  The gap between
+    them is the round-trip upload time.
+
+    A single WSPR cycle commonly produces several upload batches as
+    different bands finish decoding; each batch gets its own pair of
+    lines.  `(cycle total: X/Y)` shows the cumulative-across-batches
+    count for that cycle so far.
+
+    Display modes:
+      * default — start/done pair per batch, no per-spot detail
+      * `N`     — same, plus first N `DIAG SIMILAR` per-spot rows
+                  (near-frequency duplicates flagged by WSPRnet)
+      * `-v`    — same, with all SIMILAR rows printed
 
     Source is journalctl, not a log file: wd-upload-wsprnet writes
     to systemd's journal via `StandardOutput=journal`, so there is
@@ -5726,11 +5739,13 @@ def cmd_wspr_watch(args) -> int:
 
     import re as _re
     import datetime as _datetime
-    # DONE summary line emitted once per cycle (a single WSPR cycle
-    # can produce multiple DONE events when spots arrive in waves —
-    # we annotate each separately rather than merge).  Examples:
-    #   "DIAG DONE     cycle=260512 0200  accepted=65/66  rejected=1  errors=0"
-    #   "DIAG DONE     cycle=260512 0202  accepted=10/10"
+    # Two events define each upload batch:
+    #   UPLOAD START  cycle=260512 1208  spots=7  files=5
+    #   DIAG DONE     cycle=260512 1208  accepted=7/7  rejected=N  errors=N
+    upload_start_re = _re.compile(
+        r'UPLOAD START\s+cycle=(\d{6})\s+(\d{4})\s+spots=(\d+)'
+        r'(?:\s+files=(\d+))?'
+    )
     done_re = _re.compile(
         r'DIAG DONE\s+cycle=(\d{6})\s+(\d{4})\s+'
         r'accepted=(\d+)/(\d+)'
@@ -5756,13 +5771,18 @@ def cmd_wspr_watch(args) -> int:
     # "<KB0VYG/P> EN21BE 23 0 3" don't fall through to the no-grid
     # branch and shift "EN21BE" into the pwr column.
     grid_re = _re.compile(r'^[A-R]{2}[0-9]{2}([A-Xa-x]{2})?$')
+    # Leading ISO-ish timestamp on each journal-message line.  The
+    # uploader's Python logger emits "YYYY-MM-DDTHH:MM:SSZ" prefixes;
+    # we keep them for both delta-computation and display.
+    ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z?\s')
 
     _heading(f'WSPRnet upload activity ({unit})')
-    _info('   ▸ one annotated line per ~2-min WSPR upload cycle')
+    _info('   ▸ two lines per upload batch: "start" when decodes are done,')
+    _info('     "done" when WSPRnet acknowledges')
     if cap is None:
-        _info('     + ALL shipped spots sorted by frequency')
+        _info('   + ALL flagged SIMILAR per-spot rows')
     elif cap > 0:
-        _info(f'     + first {cap} shipped spot{"s" if cap != 1 else ""} sorted by frequency')
+        _info(f'   + first {cap} SIMILAR per-spot row{"s" if cap != 1 else ""} per batch')
     _info('   Ctrl-C to exit.')
     print(flush=True)
 
@@ -5789,130 +5809,47 @@ def cmd_wspr_watch(args) -> int:
         _err(f'journalctl not available: {exc}')
         return 1
 
-    # Aggregation: a single WSPR cycle can produce several DIAG DONE
-    # events (uploads happen in waves as decoders finish bands at
-    # different times within the 60-90 s post-cycle window).  We buffer
-    # each cycle's DONE counts and flush when no new DONE has arrived
-    # for that cycle in `FLUSH_AGE_SEC` seconds (real time, parsed from
-    # the journal entry's ISO timestamp so backlog from --since works
-    # the same way live tail does).
-    FLUSH_AGE_SEC = 60.0
+    # Per-cycle state we keep across batches:
+    #   batch_start[cycle_key] = unix ts of the most recent UPLOAD START
+    #     for this cycle.  Popped when its DIAG DONE arrives so we can
+    #     report the upload's round-trip duration.
+    #   cycle_total[cycle_key] = [running accepted, running total,
+    #                              running rejected, running errors]
+    #     across all batches we've seen for this cycle.  Useful as
+    #     context when a cycle's spots arrive in multiple waves.
+    batch_start: dict = {}
+    cycle_total: dict = {}
 
-    # Each cycle_key (date, hhmm) maps to:
-    #   {accepted, total, rejected, errors, last_ts, spots: list}
-    pending: dict = {}
-    last_shipped_at: Optional[float] = None
-    # We can't compare cycle age against wall-clock during backlog
-    # drain — journal events are minutes/hours in the past, so any
-    # wall-clock-based flush would prune half-built cycles.  Instead,
-    # track journal-time progression via an offset: when we observe an
-    # event at journal-time J at wall-clock W, freeze (J, W).  Between
-    # events, advance "effective now" in journal-time at wall-clock
-    # rate: effective_now = J + (time.time() - W).  This Just Works
-    # for both backlog (effective_now stays in backlog era) and live
-    # tail (effective_now ≈ time.time() since journal events ARE
-    # real-time), with no hardcoded threshold.
-    last_event_ts: float = 0.0
-    wall_at_last_event: float = 0.0
+    def _ts_of(line: str):
+        """Parse leading ISO ts from a journal line; None if absent.
 
-    def _effective_now() -> float:
-        if not last_event_ts:
-            return 0.0
-        return last_event_ts + (time.time() - wall_at_last_event)
-
-    # Leading ISO timestamp in each journal message ("2026-05-11T21:08:58Z").
-    ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z?\s')
-
-    def _parse_ts(s: str) -> float:
-        """Parse leading ISO ts from a journal line; 0.0 if absent.
-
-        The uploader dumps multi-line HTML response bodies from
-        WSPRnet's API (<body>, <h1>Processing Log Upload</h1>, etc.)
-        with no per-line ISO prefix.  Returning 0.0 lets callers skip
-        such lines for age-based flush decisions rather than letting
-        wall-clock leak in and prune half-built cycles.
+        wd-upload-wsprnet's Python logger writes "YYYY-MM-DDTHH:MM:SSZ"
+        but the value is actually local-time (the Z is a misnomer).
+        That's fine for our use — we only need consistent ts deltas
+        between events on the same host.  WSPRnet's HTML response bodies
+        are interleaved as continuation lines with no ts; for those
+        we return None and skip.
         """
-        m = ts_re.match(s)
+        m = ts_re.match(line)
         if not m:
-            return 0.0
+            return None
         try:
             return _datetime.datetime.fromisoformat(
                 m.group(1)
             ).replace(tzinfo=_datetime.timezone.utc).timestamp()
         except ValueError:
-            return 0.0
+            return None
 
-    def _flush_cycle(key, info):
-        """Emit one aggregated line/block for a fully-arrived cycle."""
-        nonlocal last_shipped_at
-        date, hhmm = key
-        cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
-        accepted = info['accepted']
-        total = info['total']
-        rejected = info['rejected']
-        errors = info['errors']
-        spots = info['spots']
-        if show_spots and spots:
-            mode_tag = f'WSPR-{spots[0]["mode"]}'
-            print(f'─── cycle UTC {cycle_hm}  {mode_tag} '
-                  f'────────────────────────────────',
-                  flush=True)
-            sorted_spots = sorted(spots, key=lambda s: s['freq_f'])
-            to_show = sorted_spots if cap is None else sorted_spots[:cap]
-            for s in to_show:
-                grid_disp = s['grid'] if s['grid'] else '----'
-                print(
-                    f'  {s["freq"]:>12} MHz  '
-                    f'{s["call"]:>10}  {grid_disp:<6}  '
-                    f'SNR {int(s["snr"]):+3} dB  '
-                    f'DT {float(s["dt"]):+5.2f}s  '
-                    f'drift {s["drift"]:>3} Hz  '
-                    f'{s["pwr"]:>2} dBm',
-                    flush=True,
-                )
-            if cap is not None and len(sorted_spots) > len(to_show):
-                print(f'  … ({len(sorted_spots) - len(to_show)} more)',
-                      flush=True)
-            print(
-                f'  → cycle UTC {cycle_hm}  '
-                f'accepted={accepted}/{total}  '
-                f'rejected={rejected}  errors={errors}',
-                flush=True,
-            )
-        else:
-            # Default / clean-cycle path: one summary line.  Verbose
-            # mode also lands here when WSPRnet didn't flag any spots
-            # (no SIMILAR lines for this cycle), since the heading
-            # block with "(clean cycle...)" added no information that
-            # the summary line doesn't already convey.
-            wall = _datetime.datetime.now().strftime('%H:%M:%S')
-            now = time.time()
-            if last_shipped_at is None:
-                gap = '—'
-            else:
-                gap = f'{int(now - last_shipped_at)}s'
-            last_shipped_at = now
-            print(
-                f'[{wall} +{gap}] cycle UTC {cycle_hm}  '
-                f'accepted={accepted:>3}/{total:<3}  '
-                f'rejected={rejected}  errors={errors}',
-                flush=True,
-            )
-
-    def _flush_aged(now_ts: float):
-        """Flush any pending cycle that hasn't seen a new DONE recently."""
-        if not pending:
-            return
-        # Sort by cycle key so output is in time order (date, hhmm).
-        for key in sorted(pending):
-            if now_ts - pending[key]['last_ts'] > FLUSH_AGE_SEC:
-                _flush_cycle(key, pending.pop(key))
+    def _hms_of(line: str):
+        m = ts_re.match(line)
+        if not m:
+            return _datetime.datetime.now().strftime('%H:%M:%S')
+        return m.group(1)[11:]  # "HH:MM:SS"
 
     assert proc.stdout is not None
     import select as _select
     fd = proc.stdout.fileno()
     buf = b''
-    pending_lines: list = []
 
     def _next_line():
         """Pop the next complete line from buf, or None if buffer empty."""
@@ -5926,12 +5863,10 @@ def cmd_wspr_watch(args) -> int:
         while True:
             line: Optional[str] = _next_line()
             if line is None:
-                # No complete line buffered — wait for more bytes.
+                # Wait for more bytes; no idle-flush work needed since
+                # every event is printed inline.
                 rlist, _w, _x = _select.select([fd], [], [], 1.0)
                 if not rlist:
-                    en = _effective_now()
-                    if en:
-                        _flush_aged(en)
                     continue
                 try:
                     chunk = os.read(fd, 65536)
@@ -5941,84 +5876,93 @@ def cmd_wspr_watch(args) -> int:
                     break
                 buf += chunk
                 continue
-            event_ts = _parse_ts(line)
-            if event_ts == 0.0:
-                # Continuation of a multi-line HTML chunk from WSPRnet's
-                # API response — no ISO ts, no useful state, skip it
-                # entirely so we don't pollute last_event_ts or trigger
-                # premature flushes.
-                continue
-            if event_ts > last_event_ts:
-                last_event_ts = event_ts
-                wall_at_last_event = time.time()
-            _flush_aged(event_ts)
 
-            sm = similar_prefix_re.search(line)
-            if sm:
-                # tokens: YYMMDD HHMM SYNC SNR DT FREQ CALL [GRID] PWR DRIFT MODE
-                toks = sm.group(1).split()
-                if len(toks) < 9:
-                    continue  # malformed; skip
-                date, hhmm = toks[0], toks[1]
-                # toks[2] = sync (skipped — internal decoder metric,
-                # not useful for the operator-facing display)
-                snr = toks[3]
-                dt  = toks[4]
-                freq_mhz = toks[5]
-                call = toks[6]
-                # Grid is optional.  If toks[7] looks like a Maidenhead
-                # locator, it's the grid; otherwise the call had no grid
-                # and toks[7] is actually the pwr field — shift down.
-                if len(toks) >= 11 and grid_re.match(toks[7]):
-                    grid, pwr, drift, mode = toks[7], toks[8], toks[9], toks[10]
-                else:
-                    grid = ''
-                    pwr, drift, mode = toks[7], toks[8], toks[9] if len(toks) > 9 else ''
-
-                cycle_key = (date, hhmm)
-                info = pending.setdefault(cycle_key, {
-                    'accepted': 0, 'total': 0, 'rejected': 0, 'errors': 0,
-                    'last_ts': event_ts, 'spots': [],
-                })
-                info['last_ts'] = event_ts
-                try:
-                    freq_f = float(freq_mhz)
-                except ValueError:
-                    freq_f = 0.0
-                info['spots'].append({
-                    'snr': snr, 'dt': dt, 'drift': drift, 'pwr': pwr,
-                    'mode': mode, 'freq': freq_mhz, 'freq_f': freq_f,
-                    'call': call, 'grid': grid,
-                })
+            us = upload_start_re.search(line)
+            if us:
+                date, hhmm, spots_n, files_n = us.groups()
+                event_ts = _ts_of(line)
+                if event_ts is not None:
+                    batch_start[(date, hhmm)] = event_ts
+                hms = _hms_of(line)
+                cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
+                files_part = f' in {int(files_n):>2} files' if files_n else ''
+                print(
+                    f'[{hms}] cycle UTC {cycle_hm}  '
+                    f'upload start: {int(spots_n):>3} spots{files_part}',
+                    flush=True,
+                )
                 continue
 
             dm = done_re.search(line)
             if dm:
                 date, hhmm, accepted, total, rejected, errors = dm.groups()
-                rejected = int(rejected or 0)
-                errors = int(errors or 0)
+                accepted_i = int(accepted)
+                total_i = int(total)
+                rejected_i = int(rejected or 0)
+                errors_i = int(errors or 0)
                 cycle_key = (date, hhmm)
-                info = pending.setdefault(cycle_key, {
-                    'accepted': 0, 'total': 0, 'rejected': 0, 'errors': 0,
-                    'last_ts': event_ts, 'spots': [],
-                })
-                # Sum across multiple DONE waves for the same cycle.
-                info['accepted'] += int(accepted)
-                info['total']    += int(total)
-                info['rejected'] += rejected
-                info['errors']   += errors
-                info['last_ts']   = event_ts
+                event_ts = _ts_of(line)
+                start_ts = batch_start.pop(cycle_key, None)
+                if event_ts is not None and start_ts is not None:
+                    dur = f'{event_ts - start_ts:.0f}s'
+                else:
+                    dur = '? '
+                tot = cycle_total.setdefault(cycle_key, [0, 0, 0, 0])
+                tot[0] += accepted_i
+                tot[1] += total_i
+                tot[2] += rejected_i
+                tot[3] += errors_i
+                hms = _hms_of(line)
+                cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
+                cum = f'  (cycle total: {tot[0]}/{tot[1]})'
+                print(
+                    f'[{hms}] cycle UTC {cycle_hm}  '
+                    f'upload done in {dur:>3}: '
+                    f'accepted={accepted_i:>3}/{total_i:<3}  '
+                    f'rejected={rejected_i}  errors={errors_i}{cum}',
+                    flush=True,
+                )
                 continue
 
+            if show_spots:
+                sm = similar_prefix_re.search(line)
+                if sm:
+                    # YYMMDD HHMM SYNC SNR DT FREQ CALL [GRID] PWR DRIFT MODE
+                    toks = sm.group(1).split()
+                    if len(toks) < 9:
+                        continue
+                    _, hhmm = toks[0], toks[1]
+                    snr = toks[3]
+                    dt  = toks[4]
+                    freq_mhz = toks[5]
+                    call = toks[6]
+                    if len(toks) >= 11 and grid_re.match(toks[7]):
+                        grid, pwr, drift, _mode = toks[7], toks[8], toks[9], toks[10]
+                    else:
+                        grid = ''
+                        pwr, drift = toks[7], toks[8]
+                    grid_disp = grid if grid else '----'
+                    cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
+                    try:
+                        snr_i = int(snr)
+                        dt_f = float(dt)
+                    except ValueError:
+                        continue
+                    print(
+                        f'           cycle {cycle_hm}  '
+                        f'{freq_mhz:>12} MHz  '
+                        f'{call:>10}  {grid_disp:<6}  '
+                        f'SNR {snr_i:+3} dB  '
+                        f'DT {dt_f:+5.2f}s  '
+                        f'drift {drift:>3} Hz  '
+                        f'{pwr:>2} dBm',
+                        flush=True,
+                    )
+                    continue
+
             # Anything else is silently dropped.
-            continue
 
     except KeyboardInterrupt:
-        # Flush whatever's still pending on exit so the operator sees
-        # all observed cycles, not just the aged-out ones.
-        for key in sorted(pending):
-            _flush_cycle(key, pending[key])
-        pending.clear()
         return 130
     finally:
         try:
@@ -6816,14 +6760,14 @@ def main() -> int:
     # wspr-watch — live tail of wsprdaemon-client's WSPRnet upload activity
     p_wspr = sub.add_parser('wspr-watch',
                             help='live tail of WSPRnet upload events '
-                                 '(per-2-min cycle accepted/rejected counts)')
+                                 '(two lines per batch: "start" + "done")')
     p_wspr.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
-                        help='per-WSPR-cycle mode (2 min cadence): print up to '
-                             'N shipped spots per cycle under the summary '
-                             '(default 0 = counts only; -v = print all)')
+                        help='also print up to N DIAG SIMILAR per-spot rows '
+                             'per batch (default 0 = no SIMILAR rows; '
+                             '-v = print all)')
     p_wspr.add_argument('-v', '--verbose', action='store_true',
-                        help='per-cycle mode showing ALL spots — same '
-                             'cadence as N, no per-cycle cap')
+                        help='also print ALL DIAG SIMILAR per-spot rows '
+                             '(near-frequency duplicates flagged by WSPRnet)')
     p_wspr.add_argument('--instance', metavar='CALL_GRID', default=None,
                         help='specific station instance, e.g. AC0G-B4_EM38ww '
                              '(default: first active wd-upload-wsprnet@*)')
