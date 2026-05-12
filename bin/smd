@@ -5302,6 +5302,9 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
     if plan.sink_dir_to_setup:
         path, group, mode = plan.sink_dir_to_setup
         print(f"  Sink dir to configure: {path} ({oct(mode)} root:{group})")
+    if plan.sink_db_to_pre_create:
+        path, group, mode = plan.sink_db_to_pre_create
+        print(f"  Sink db to pre-create: {path} ({oct(mode)} root:{group})")
     if plan.sandbox_dropins_to_write:
         print("  systemd sandbox drop-ins to write (ReadWritePaths fix):")
         for dropin_path, unit in plan.sandbox_dropins_to_write:
@@ -5373,6 +5376,8 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
               + ", ".join(f"{u}->{g}" for u, g in report.users_added_to_group))
     if report.sink_dir_configured:
         print(f"  sink dir:      {report.sink_dir_configured}")
+    if report.sink_db_pre_created:
+        print(f"  sink db:       {report.sink_db_pre_created}")
     if report.sandbox_dropins_written:
         print(f"  drop-ins:      {', '.join(report.sandbox_dropins_written)}")
     if report.env_files_rewritten:

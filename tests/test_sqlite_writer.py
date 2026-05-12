@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
@@ -401,6 +402,78 @@ class TestDispatchScalesBatchRowsForSqlite(unittest.TestCase):
         )
         self.assertIsInstance(w, SqliteWriter)
         self.assertEqual(w.batch_rows, 42)
+
+
+class TestGroupWritablePerms(unittest.TestCase):
+    """SqliteWriter must make sink.db (+WAL/SHM) group-writable after
+    schema init so OTHER producers in the same supplementary group
+    can write to the same sink.  Without this, the first producer to
+    flush owns the files at mode 0644 and the rest hit
+    "attempt to write a readonly database" — observed on bee1
+    2026-05-12.
+    """
+
+    def setUp(self):
+        self.db_path = _temp_db_path()
+        self.env = {"SIGMOND_SQLITE_PATH": self.db_path}
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(self.db_path + suffix)
+            if p.exists():
+                p.unlink()
+
+    def test_main_db_is_group_writable_after_first_flush(self):
+        import stat
+        w = SqliteWriter.from_env(
+            table="spots", mode="psk", env=self.env, batch_rows=1,
+        )
+        w.insert([{"x": 1}])  # triggers flush
+        mode = Path(self.db_path).stat().st_mode
+        self.assertTrue(
+            mode & stat.S_IWGRP,
+            f"main db mode {oct(mode & 0o7777)} missing group-write bit",
+        )
+
+    def test_wal_and_shm_sidecars_are_group_writable_after_first_flush(self):
+        import stat
+        w = SqliteWriter.from_env(
+            table="spots", mode="psk", env=self.env, batch_rows=1,
+        )
+        w.insert([{"x": 1}])
+        # journal_mode=WAL creates the -wal file at first write commit;
+        # -shm appears alongside.  Both inherit the producer's umask
+        # at create time, which is what _chmod_group_writable
+        # remediates.
+        for suffix in ("-wal", "-shm"):
+            p = Path(self.db_path + suffix)
+            if not p.exists():
+                continue  # SQLite version may not have created one yet
+            mode = p.stat().st_mode
+            self.assertTrue(
+                mode & stat.S_IWGRP,
+                f"{p.name} mode {oct(mode & 0o7777)} missing group-write bit",
+            )
+
+    def test_chmod_failure_is_silent_no_raise(self):
+        """A non-owner caller that lacks chmod permission must not
+        crash the flush — every sigmond-group writer would otherwise
+        hit a hard error on every flush after the first producer
+        creates the file."""
+        from sigmond.hamsci_ch.sqlite_writer import SqliteWriter as SW
+        with patch("os.chmod", side_effect=PermissionError("not owner")):
+            w = SqliteWriter.from_env(
+                table="spots", mode="psk", env=self.env, batch_rows=1,
+            )
+            # No raise — flush completes despite chmod's failure.
+            w.insert([{"x": 1}])
+        # And the row landed on disk.
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM pending_uploads")
+            self.assertEqual(cur.fetchone()[0], 1)
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

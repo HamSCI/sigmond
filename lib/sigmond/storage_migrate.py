@@ -94,7 +94,17 @@ BACKUP_SUFFIX = ".bak-pre-sqlite"
 SINK_DIR = "/var/lib/sigmond"
 SINK_DB_PATH = "/var/lib/sigmond/sink.db"
 SINK_GROUP = "sigmond"
-SINK_DIR_MODE = 0o775
+# 0o2775 = setgid (g+s) so files created inside inherit group=sigmond
+# regardless of the producer's primary group.  Without setgid, the
+# first producer's group (e.g. hfdlrec) would own sink.db's group,
+# locking out other sigmond-group producers — observed in practice
+# during the bee1 migration on 2026-05-12.
+SINK_DIR_MODE = 0o2775
+# Pre-create the sink db itself so it doesn't end up owned by whoever
+# happens to flush first.  0o664 = sigmond-group-writable matching
+# SqliteWriter's expectation; root:sigmond so any producer in the
+# group can write but nobody else can read the queue.
+SINK_DB_MODE = 0o664
 
 # systemd drop-in template that grants a sandboxed consumer write
 # access to the sink dir.  Producer units use ProtectSystem=strict
@@ -140,6 +150,11 @@ class RemovalPlan:
     # (path, group, mode) — sink dir to create or fix permissions on.
     # None when the dir already matches expected mode + group.
     sink_dir_to_setup: Optional[Tuple[str, str, int]] = None
+    # (path, group, mode) — sink db file to pre-create so the first
+    # producer to flush doesn't inherit ownership and lock other
+    # producers in the same group out.  None when the file already
+    # exists with the expected group + mode.
+    sink_db_to_pre_create: Optional[Tuple[str, str, int]] = None
     # [(dropin_path, unit_name), ...] systemd drop-ins to write so each
     # sandboxed consumer can see /var/lib/sigmond as read-write.
     # Required because producer units run with ProtectSystem=strict,
@@ -181,6 +196,7 @@ class RemovalPlan:
             or self.group_to_create
             or self.users_to_add_to_group
             or self.sink_dir_to_setup
+            or self.sink_db_to_pre_create
             or self.sandbox_dropins_to_write
         )
 
@@ -308,6 +324,9 @@ class HostProbe:
         """(mode_bits, group_name) for `path`, or None if it doesn't exist.
 
         Used by the plan to decide whether `install -d` is needed.
+        Mode is masked with 0o7777 so setgid/sticky bits are visible —
+        callers compare against SINK_DIR_MODE (0o2775) and a missing
+        setgid bit triggers a remediation install -d.
         """
         try:
             st = Path(path).stat()
@@ -318,7 +337,29 @@ class HostProbe:
             group_name = grp.getgrgid(st.st_gid).gr_name
         except KeyError:
             group_name = str(st.st_gid)
-        return (st.st_mode & 0o777, group_name)
+        return (st.st_mode & 0o7777, group_name)
+
+    def file_meta(self, path: str) -> Optional[Tuple[int, str]]:
+        """(mode_bits, group_name) for a regular file at `path`.
+
+        Returns None if the file doesn't exist OR exists but is not a
+        regular file (the caller is expected to treat both cases as
+        "pre-create needed").  Mode is masked with 0o7777 like
+        dir_meta so setuid/setgid bits are visible to comparisons.
+        """
+        try:
+            st = Path(path).stat()
+        except (FileNotFoundError, PermissionError):
+            return None
+        import stat as _stat
+        if not _stat.S_ISREG(st.st_mode):
+            return None
+        import grp
+        try:
+            group_name = grp.getgrgid(st.st_gid).gr_name
+        except KeyError:
+            group_name = str(st.st_gid)
+        return (st.st_mode & 0o7777, group_name)
 
     def unit_sandbox_blocks_sink(self, unit: str, sink_dir: str) -> bool:
         """True iff this unit's sandbox would make `sink_dir` read-only.
@@ -451,6 +492,20 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
         if meta is None or meta != (SINK_DIR_MODE, SINK_GROUP):
             plan.sink_dir_to_setup = (SINK_DIR, SINK_GROUP, SINK_DIR_MODE)
 
+        # Pre-create sink.db itself with root:sigmond mode 0664 so the
+        # first producer to flush doesn't own the file and lock other
+        # producers in the group out.  Without this, on a fresh deploy
+        # the first race-winner's UID owns sink.db and the default
+        # umask (0022 → mode 0644) means group members can read but
+        # not write — every other producer hits "attempt to write a
+        # readonly database" until a human chmods the file.  Observed
+        # on bee1 2026-05-12 during the production migration.
+        db_meta = p.file_meta(SINK_DB_PATH)
+        if db_meta is None or db_meta != (SINK_DB_MODE, SINK_GROUP):
+            plan.sink_db_to_pre_create = (
+                SINK_DB_PATH, SINK_GROUP, SINK_DB_MODE,
+            )
+
         # systemd sandbox: any consumer with ProtectSystem=strict/full
         # needs /var/lib/sigmond in its ReadWritePaths.  Write a drop-in
         # per unit instead of patching the base unit, so the producer
@@ -478,6 +533,7 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
         or plan.env_lines_to_set
         or plan.users_to_add_to_group
         or plan.sink_dir_to_setup
+        or plan.sink_db_to_pre_create
         or plan.sandbox_dropins_to_write
     )
     if needs_restart:
@@ -493,6 +549,7 @@ class _ExecutionReport:
     group_created: Optional[str] = None
     users_added_to_group: List[Tuple[str, str]] = field(default_factory=list)
     sink_dir_configured: Optional[str] = None
+    sink_db_pre_created: Optional[str] = None
     sandbox_dropins_written: List[str] = field(default_factory=list)
     env_files_rewritten: List[str] = field(default_factory=list)
     env_lines_appended: List[Tuple[str, str]] = field(default_factory=list)
@@ -674,7 +731,10 @@ def execute_removal(
     # 0c. Create/normalize /var/lib/sigmond perms via `install -d`.
     # `install -d` is the standard Linux idiom for "idempotent mkdir
     # with mode + owner + group" — one tool, no race between mkdir
-    # and chmod/chgrp.
+    # and chmod/chgrp.  Mode is 0o2775 (setgid), so files producers
+    # create inside inherit group=sigmond — protects against the
+    # WAL/SHM ownership trap (those sidecar files are created by the
+    # first producer to flush, not pre-created by us).
     if plan.sink_dir_to_setup:
         path, group, mode = plan.sink_dir_to_setup
         res = r.run([
@@ -685,6 +745,31 @@ def execute_removal(
         else:
             report.errors.append(
                 f"install -d {path}: rc={res.returncode} "
+                f"stderr={res.stderr.strip()[:200]}"
+            )
+
+    # 0c-bis. Pre-create sink.db with root:sigmond mode 0664.  Without
+    # this, the first producer to flush owns the file and other
+    # producers in the sigmond group can't write to it (default umask
+    # 0022 → mode 0644).  `install -m -g /dev/null target` is the
+    # one-shot atomic idiom: creates an empty regular file with the
+    # declared mode + group + owner=root, idempotent against re-runs.
+    # SqliteWriter's CREATE TABLE IF NOT EXISTS populates the schema
+    # on first flush — opening an existing 0-byte file is a valid
+    # SQLite startup state (the WAL/SHM files come into existence
+    # only after the journal_mode=WAL pragma, and inherit setgid from
+    # the parent dir per step 0c above).
+    if plan.sink_db_to_pre_create:
+        db_path, group, mode = plan.sink_db_to_pre_create
+        res = r.run([
+            "install", "-m", f"{mode:o}", "-g", group,
+            "/dev/null", db_path,
+        ])
+        if res.returncode == 0:
+            report.sink_db_pre_created = db_path
+        else:
+            report.errors.append(
+                f"install {db_path}: rc={res.returncode} "
                 f"stderr={res.stderr.strip()[:200]}"
             )
 

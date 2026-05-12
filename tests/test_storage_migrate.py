@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from sigmond.storage_migrate import (
     BACKUP_SUFFIX, CH_DATA_DIRS, CH_PACKAGES, CH_SIGMOND_UNIT_FILE,
     CH_SIGMOND_VENV, DEFAULT_COORD_ENV, INSERTED_HEADER, NEUTRALIZED_PREFIX,
-    SINK_DB_PATH, SINK_DIR, SINK_DIR_MODE, SINK_GROUP,
+    SINK_DB_MODE, SINK_DB_PATH, SINK_DIR, SINK_DIR_MODE, SINK_GROUP,
     SYSTEMD_DROPIN_BASENAME, SYSTEMD_DROPIN_CONTENT,
     HostProbe, NotConfirmed, RemovalPlan, Runner,
     _build_env_transform, _neutralize_clickhouse_lines,
@@ -34,6 +34,7 @@ class FakeProbe(HostProbe):
         existing_groups=(),
         user_group_membership=None,
         dirs=None,
+        files=None,
         sandboxed_units=(),
     ):
         self._services = set(services)
@@ -52,6 +53,10 @@ class FakeProbe(HostProbe):
         self._user_groups = user_group_membership or {}
         # dirs: dict mapping path -> (mode, group_name); missing path = None
         self._dirs = dirs or {}
+        # files: dict mapping path -> (mode, group_name); missing = None.
+        # Distinct from dirs so file_meta and dir_meta stay separate;
+        # used by the sink-db pre-create plan tests.
+        self._files = files or {}
         # sandboxed_units: set of units whose ProtectSystem=strict
         # blocks the sink dir.  Membership = needs a drop-in.
         self._sandboxed_units = set(sandboxed_units)
@@ -85,6 +90,9 @@ class FakeProbe(HostProbe):
 
     def dir_meta(self, path):
         return self._dirs.get(path)
+
+    def file_meta(self, path):
+        return self._files.get(path)
 
     def unit_sandbox_blocks_sink(self, unit, sink_dir):
         return unit in self._sandboxed_units
@@ -471,6 +479,7 @@ class TestPlanIncludesGroupAndPermsSetup(unittest.TestCase):
         existing_groups=(),
         user_group_membership=None,
         dirs=None,
+        files=None,
         env_text="SIGMOND_CLICKHOUSE_URL=http://localhost:8123\n",
     ):
         return FakeProbe(
@@ -482,6 +491,7 @@ class TestPlanIncludesGroupAndPermsSetup(unittest.TestCase):
             existing_groups=existing_groups,
             user_group_membership=user_group_membership or {},
             dirs=dirs or {},
+            files=files or {},
         )
 
     def test_plan_queues_group_creation_when_missing(self):
@@ -545,6 +555,62 @@ class TestPlanIncludesGroupAndPermsSetup(unittest.TestCase):
         )
         plan = plan_clickhouse_removal(probe=probe)
         self.assertIsNone(plan.sink_dir_to_setup)
+
+    def test_plan_queues_sink_db_pre_create_when_missing(self):
+        """The sink db must be pre-created with root:sigmond mode 0664
+        so producers don't race to be the first writer (whose UID would
+        own the file and lock everyone else out — observed on bee1
+        2026-05-12)."""
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+            files={},  # sink.db doesn't exist
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(
+            plan.sink_db_to_pre_create,
+            (SINK_DB_PATH, SINK_GROUP, SINK_DB_MODE),
+        )
+
+    def test_plan_queues_sink_db_pre_create_when_wrong_group(self):
+        """Existing sink.db owned by, say, hfdlrec must be re-created
+        root:sigmond — the symptom that triggered this fix in the first
+        place."""
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+            files={SINK_DB_PATH: (0o644, "hfdlrec")},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(
+            plan.sink_db_to_pre_create,
+            (SINK_DB_PATH, SINK_GROUP, SINK_DB_MODE),
+        )
+
+    def test_plan_queues_sink_db_pre_create_when_wrong_mode(self):
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+            files={SINK_DB_PATH: (0o644, SINK_GROUP)},  # mode wrong (no g+w)
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(
+            plan.sink_db_to_pre_create,
+            (SINK_DB_PATH, SINK_GROUP, SINK_DB_MODE),
+        )
+
+    def test_plan_skips_sink_db_pre_create_when_already_correct(self):
+        probe = self._probe_with_pskrec_consumer(
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+            files={SINK_DB_PATH: (SINK_DB_MODE, SINK_GROUP)},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertIsNone(plan.sink_db_to_pre_create)
 
     def test_plan_pins_sqlite_path_when_missing_from_env(self):
         probe = self._probe_with_pskrec_consumer(
@@ -691,6 +757,56 @@ class TestExecuteGroupAndPermsOrdering(unittest.TestCase):
         report = execute_removal(plan, runner=runner)
         self.assertTrue(any("install -d" in err for err in report.errors))
         self.assertIsNone(report.sink_dir_configured)
+
+    def test_execute_pre_creates_sink_db_after_dir_before_restart(self):
+        """Pre-create must happen AFTER install -d (so the parent dir
+        exists with the right perms) and BEFORE any producer restart
+        (so the file is in place before they race to flush)."""
+        plan = RemovalPlan(
+            sink_dir_to_setup=(SINK_DIR, SINK_GROUP, SINK_DIR_MODE),
+            sink_db_to_pre_create=(SINK_DB_PATH, SINK_GROUP, SINK_DB_MODE),
+            consumers_to_restart=["psk-recorder@my-rx888.service"],
+            confirmed=True,
+        )
+        runner = FakeRunner()
+        report = execute_removal(plan, runner=runner)
+
+        # Two install calls: the dir (-d) and the file (no -d).
+        install_calls = [argv for argv in runner.run_calls if argv[0] == "install"]
+        self.assertEqual(len(install_calls), 2)
+        self.assertIn("-d", install_calls[0])
+        self.assertNotIn("-d", install_calls[1])
+        # File install reads /dev/null (empty payload) into SINK_DB_PATH.
+        self.assertIn("/dev/null", install_calls[1])
+        self.assertEqual(install_calls[1][-1], SINK_DB_PATH)
+        # ...and uses the requested mode + group.
+        self.assertIn(f"{SINK_DB_MODE:o}", install_calls[1])
+        self.assertIn(SINK_GROUP, install_calls[1])
+
+        # Ordering: dir install before file install before any restart.
+        verbs_in_order = [argv[0] for argv in runner.run_calls]
+        idx_dir = verbs_in_order.index("install")
+        idx_file = verbs_in_order.index("install", idx_dir + 1)
+        idx_restart = next(
+            i for i, argv in enumerate(runner.run_calls)
+            if argv[0] == "systemctl" and argv[1] == "restart"
+        )
+        self.assertLess(idx_dir, idx_file)
+        self.assertLess(idx_file, idx_restart)
+
+        self.assertEqual(report.sink_db_pre_created, SINK_DB_PATH)
+
+    def test_sink_db_install_failure_recorded_as_error(self):
+        plan = RemovalPlan(
+            sink_db_to_pre_create=(SINK_DB_PATH, SINK_GROUP, SINK_DB_MODE),
+            confirmed=True,
+        )
+        # FakeRunner key is the (argv[0], argv[1]) tuple; for the pre-create
+        # install the second token is `-m`.
+        runner = FakeRunner(command_returncodes={("install", "-m"): 1})
+        report = execute_removal(plan, runner=runner)
+        self.assertTrue(any(SINK_DB_PATH in err for err in report.errors))
+        self.assertIsNone(report.sink_db_pre_created)
 
 
 class TestPlanQueuesSandboxDropins(unittest.TestCase):

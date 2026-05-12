@@ -310,7 +310,47 @@ class SqliteWriter:
         conn.execute(_QUEUE_DDL)
         conn.execute(_QUEUE_INDEX_DDL)
         conn.commit()
+        # Ensure the main db + WAL/SHM sidecars are group-writable so
+        # OTHER producers in the same supplementary group can write to
+        # the same sink.  Multiple HamSCI clients (psk-recorder,
+        # hf-timestd, hfdl-recorder, ...) share /var/lib/sigmond/sink.db
+        # via the `sigmond` group; whichever client flushes first
+        # creates the WAL/SHM files with the producer's umask, which
+        # default to 0644 — locking everyone else out with "attempt to
+        # write a readonly database".  chmod g+w idempotently fixes
+        # that.  Best-effort: a non-owner caller can't chmod, so we
+        # swallow PermissionError (the next sigmond-group producer
+        # to flush gets the same chance, and the storage_migrate
+        # verb pre-creates the main db root-owned with 0o664 anyway).
+        if self._config is not None:
+            self._chmod_group_writable(self._config.path)
         self._schema_initialized = True
+
+    @staticmethod
+    def _chmod_group_writable(path: str) -> None:
+        """Add group-write bit to `path` and its SQLite sidecar files.
+
+        SQLite manages the -wal / -shm files alongside the main db
+        when journal_mode=WAL is set; their default umask-driven mode
+        (0644) blocks group writes.  Idempotent and best-effort: a
+        non-owner caller silently no-ops.
+        """
+        import stat
+        for suffix in ("", "-wal", "-shm"):
+            target = f"{path}{suffix}"
+            try:
+                st = os.stat(target)
+            except FileNotFoundError:
+                continue
+            new_mode = st.st_mode | stat.S_IWGRP | stat.S_IRGRP
+            if new_mode == st.st_mode:
+                continue
+            try:
+                os.chmod(target, new_mode & 0o7777)
+            except (PermissionError, OSError):
+                # Not the owner — that's fine; whoever owns the file
+                # already did this, or will the next time they flush.
+                pass
 
 
 def _default_connect_factory(config: SqliteConfig) -> sqlite3.Connection:
