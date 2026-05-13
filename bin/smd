@@ -22,7 +22,7 @@ Observe (what is, read-only):
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|codar|ka9q> [args...]         unified service watcher
+    smd watch       <wspr|psk|hfdl|codar|ka9q|uploads> [args...] unified service watcher
     smd ka9q-watch                                               upstream-drift watcher (alias)
     smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
     smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
@@ -4559,7 +4559,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "migrate-to-sqlite trim" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar ka9q" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar ka9q uploads" -- "$cur"))
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
@@ -5723,6 +5723,207 @@ def _psk_watch_cycle_loop(
                 )
     except KeyboardInterrupt:
         return 130
+
+
+def cmd_uploads_watch(args) -> int:
+    """Live tail of all spot-uploader services on this host.
+
+    Two log sources are followed and tagged:
+
+      * `journalctl -u wd-upload-hs@*` → WSPRnet (+ wsprdaemon.org SFTP
+        when WD_SFTP_SERVERS is set).  Lines look like:
+            `wspr-uploader-hs: shipped wsprdaemon=N wsprnet=M
+                                       (total wsprdaemon=A wsprnet=B, work=W)`
+
+      * `tail -F /var/log/psk-recorder/<id>.log` → PSK Reporter.  The
+        uploader runs inside the recorder process and logs to a file,
+        not the journal:
+            `INFO:psk_recorder.core.hs_uploader_shim: psk-uploader-hs:
+              shipped ft8=N ft4=M (total ft8=A ft4=B, work=W)`
+
+    The two sources are followed by separate subprocesses and merged
+    via select() — neither blocks the other.  Output is one line per
+    shipped event, tagged with the target, plus running totals straight
+    from the log payload so the operator can answer "is my call
+    actually being reported?" without checking three web UIs.
+    """
+    backlog_min = max(0, int(getattr(args, 'backlog', 10) or 0))
+
+    import re as _re
+    import datetime as _datetime
+
+    wspr_re = _re.compile(
+        r'wspr-uploader-hs:\s+shipped\s+'
+        r'wsprdaemon=(\d+)\s+wsprnet=(\d+)\s+'
+        r'\(total\s+wsprdaemon=(\d+)\s+wsprnet=(\d+),\s+work=(\d+)\)'
+    )
+    psk_re = _re.compile(
+        r'psk-uploader-hs:\s+shipped\s+'
+        r'ft8=(\d+)\s+ft4=(\d+)\s+'
+        r'\(total\s+ft8=(\d+)\s+ft4=(\d+),\s+work=(\d+)\)'
+    )
+    # WSPR-side log lines lead with the Python logger's
+    # "YYYY-MM-DD HH:MM:SS,uuu" prefix; PSK-side lines do not (the
+    # file logger uses the default Python format which omits time).
+    # For PSK lines we substitute wall_now at the moment of receipt
+    # — the lag is at most a few-hundred-ms tail buffering jitter.
+    ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}),')
+
+    _heading('Upload activity (WSPRnet + PSK Reporter)')
+    _info('   ▸ one line per shipped batch — every ~60 s for WSPR,')
+    _info('     every few seconds during a busy FT8 minute for PSK')
+    if backlog_min > 0:
+        _info(f'   ▸ replaying last {backlog_min} min of history')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+
+    # --- WSPR side: journalctl follower ----------------------------------
+    since_arg = ['--since', f'{backlog_min} min ago'] if backlog_min > 0 \
+        else ['--since', 'now']
+    try:
+        jproc = subprocess.Popen(
+            [*sudo_prefix, 'journalctl', '-f',
+             '-u', 'wd-upload-hs@*',
+             '-o', 'cat', *since_arg],
+            stdout=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        _err(f'journalctl not available: {exc}')
+        return 1
+
+    # --- PSK side: file tail follower ------------------------------------
+    # psk-recorder writes to /var/log/psk-recorder/<radiod_id>.log; the
+    # SAME shipped events appear in the per-mode files too but the main
+    # log is the canonical surface.  Glob accepts all configured
+    # radiod_ids on this host.
+    _PSK_LOG_GLOB = '/var/log/psk-recorder/*-rx888.log'
+    psk_log_paths = sorted(Path('/var/log/psk-recorder').glob('*.log'))
+    # Exclude the per-mode files — they contain decode_ft8 output, not
+    # uploader lines, so they'd just be noise on the tail.
+    psk_log_paths = [
+        p for p in psk_log_paths
+        if not (p.name.endswith('-ft8.log') or p.name.endswith('-ft4.log'))
+    ]
+    pproc = None
+    if psk_log_paths:
+        # `tail -F` follows by name (handles log rotation) and accepts
+        # multiple files.  Backlog from `--backlog MIN` is deliberately
+        # NOT replayed for the PSK side: the file log has no embedded
+        # timestamps, so we can't accurately label old batches — every
+        # backlog line would carry the same wall_now stamp.  WSPR
+        # backlog through journalctl IS accurately timestamped and DOES
+        # replay.  PSK batches arrive every few minutes so live-only is
+        # enough to confirm "PSK reporter is being fed".
+        try:
+            pproc = subprocess.Popen(
+                ['tail', '-F', '-n', '0', *map(str, psk_log_paths)],
+                stdout=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            _err(f'tail not available: {exc}')
+
+    # --- merged read loop ------------------------------------------------
+    import select as _select
+    assert jproc.stdout is not None
+    j_fd = jproc.stdout.fileno()
+    p_fd = pproc.stdout.fileno() if (pproc and pproc.stdout) else None
+
+    j_buf = b''
+    p_buf = b''
+
+    def _emit_wspr(line: str) -> bool:
+        m = wspr_re.search(line)
+        if not m:
+            return False
+        wd_n, wn_n, wd_total, wn_total, work = m.groups()
+        wd_n_i, wn_n_i = int(wd_n), int(wn_n)
+        wd_total_i, wn_total_i = int(wd_total), int(wn_total)
+        work_i = int(work)
+        ts = ts_re.match(line)
+        hms = ts.group(2) if ts else _datetime.datetime.now().strftime('%H:%M:%S')
+        print(
+            f'[{hms}] WSPRnet         '
+            f'+{wn_n_i:>4} spots   '
+            f'total={wn_total_i:>6}   '
+            f'batch={work_i}',
+            flush=True,
+        )
+        if wd_n_i > 0 or wd_total_i > 0:
+            print(
+                f'[{hms}] wsprdaemon.org  '
+                f'+{wd_n_i:>4} spots   '
+                f'total={wd_total_i:>6}   '
+                f'batch={work_i}',
+                flush=True,
+            )
+        return True
+
+    def _emit_psk(line: str) -> bool:
+        m = psk_re.search(line)
+        if not m:
+            return False
+        ft8_n, ft4_n, ft8_total, ft4_total, work = m.groups()
+        # PSK lines have no timestamp prefix in the file log — substitute
+        # wall_now.  For backlog replay this means the displayed time is
+        # "when the operator started watching", not "when the batch
+        # actually shipped".  Acceptable: the running totals carry the
+        # historical record.
+        hms = _datetime.datetime.now().strftime('%H:%M:%S')
+        print(
+            f'[{hms}] PSKReporter     '
+            f'+{int(ft8_n):>3} FT8 +{int(ft4_n):>3} FT4   '
+            f'total={int(ft8_total):>5} FT8 {int(ft4_total):>4} FT4   '
+            f'batch={int(work)}',
+            flush=True,
+        )
+        return True
+
+    def _drain(buf: bytes, emit) -> bytes:
+        """Pop complete lines from buf, dispatch each to emit()."""
+        while b'\n' in buf:
+            line_bytes, _, buf = buf.partition(b'\n')
+            emit(line_bytes.decode('utf-8', errors='replace'))
+        return buf
+
+    try:
+        while True:
+            fds = [j_fd] + ([p_fd] if p_fd is not None else [])
+            rlist, _w, _x = _select.select(fds, [], [], 1.0)
+            if j_fd in rlist:
+                try:
+                    chunk = os.read(j_fd, 65536)
+                except OSError:
+                    chunk = b''
+                if not chunk:
+                    # journalctl died; bail
+                    break
+                j_buf += chunk
+                j_buf = _drain(j_buf, _emit_wspr)
+            if p_fd is not None and p_fd in rlist:
+                try:
+                    chunk = os.read(p_fd, 65536)
+                except OSError:
+                    chunk = b''
+                if not chunk:
+                    p_fd = None  # tail died; carry on with journalctl
+                else:
+                    p_buf += chunk
+                    p_buf = _drain(p_buf, _emit_psk)
+
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        for proc in (jproc, pproc):
+            if proc is None:
+                continue
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+    return 0
 
 
 def cmd_wspr_watch(args) -> int:
@@ -7119,6 +7320,15 @@ def _reexec_into_tui_venv() -> int:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _add_uploads_watch_args(p) -> None:
+    """Argument spec shared by `smd uploads-watch` and `smd watch uploads`."""
+    p.add_argument('--backlog', metavar='MIN', type=int, default=10,
+                   help='start by replaying this many minutes of journal '
+                        'history for WSPR uploads (default 10).  PSK '
+                        'uploads are live-only because the psk-recorder '
+                        'file log lacks embedded timestamps.')
+
+
 def _add_wspr_watch_args(p) -> None:
     """Argument spec shared by `smd wspr-watch` and `smd watch wspr`."""
     p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
@@ -7530,7 +7740,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | hfdl | codar | ka9q)')
+                                  '(smd watch wspr | psk | hfdl | codar | ka9q | uploads)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -7567,6 +7777,13 @@ def main() -> int:
              'break ka9q-python RTP clients',
     )
     _add_ka9q_watch_args(p_w_ka9q)
+
+    p_w_uploads = watch_sub.add_parser(
+        'uploads',
+        help='live tail of WSPRnet / wsprdaemon.org / PSK Reporter '
+             'upload activity (per-batch shipped counts + totals)',
+    )
+    _add_uploads_watch_args(p_w_uploads)
 
     # config (Phase 1)
     p_config = sub.add_parser('config',
@@ -7756,6 +7973,8 @@ def main() -> int:
                       'lib/sigmond alongside bin/smd', file=sys.stderr)
                 return 1
             return cmd_ka9q_watch(args)
+        if target == 'uploads':
+            return cmd_uploads_watch(args)
         p_watch.print_help()
         return 0
 
