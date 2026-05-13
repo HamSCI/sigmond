@@ -5726,55 +5726,39 @@ def _psk_watch_cycle_loop(
 
 
 def cmd_wspr_watch(args) -> int:
-    """Live tail of wsprdaemon-client's WSPRnet upload activity.
+    """Per-cycle live view of wsprdaemon-client's WSPR pipeline.
 
-    Watches the `wd-upload-wsprnet@<call_grid>.service` journal and
-    streams two lines per upload batch:
+    Watches `wd-ka9q-record@<id>.service` journals for the
+    CycleBatcher's atomic per-cycle write event:
 
-      [HH:MM:SS] cycle UTC 12:08  upload start:  7 spots in  5 files
-      [HH:MM:SS] cycle UTC 12:08  upload done in 2s:  accepted=  7/7   rejected=0  errors=0  (cycle total: 7/7)
+        cycle UTC HH:MM → N spots in wspr.spots (B bands, write Tms)
 
-    `UPLOAD START` fires when wd-upload-wsprnet has buffered a batch
-    long enough that the queue went idle (its internal settle gate);
-    this is equivalent to "decodes done for these spots".  `DIAG DONE`
-    fires when WSPRnet's HTTP response comes back.  The gap between
-    them is the round-trip upload time.
+    This event fires exactly once per WSPR cycle (every 2 min),
+    the instant after CycleBatcher commits a single transaction
+    containing all bands' decoded spots into sigmond's
+    `pending_uploads` table.  It IS the wake-up — no polling.
 
-    A single WSPR cycle commonly produces several upload batches as
-    different bands finish decoding; each batch gets its own pair of
-    lines.  `(cycle total: X/Y)` shows the cumulative-across-batches
-    count for that cycle so far.
+    On each cycle event we emit a one-line summary, then query
+    sqlite directly for per-band counts (and per-spot detail in
+    `-v` / N modes).  Rows are deleted by `wd-upload-hs` ~18 s
+    after CycleBatcher writes, so the read happens in that window;
+    for replayed backlog cycles the rows are already gone and we
+    emit the journal-line summary only.
 
     Display modes:
-      * default — start/done pair per batch, no per-spot detail
-      * `N`     — same, plus first N `DIAG SIMILAR` per-spot rows
-                  (near-frequency duplicates flagged by WSPRnet)
-      * `-v`    — same, with all SIMILAR rows printed
+      * default — one line per cycle: spots / bands / per-band counts
+      * `N`     — same, + first N spots per band underneath
+      * `-v`    — same, with ALL spots per band
 
-    Source is journalctl, not a log file: wd-upload-wsprnet writes
-    to systemd's journal via `StandardOutput=journal`, so there is
-    no `/var/log/wsprdaemon/<id>.log` to tail.
+    No more polling.  The CycleBatcher journal line is the only
+    edge we care about — the producer tells us exactly when the
+    decode cycle has fully landed.
     """
     instance = getattr(args, 'instance', None)
     if instance is None:
-        try:
-            r = subprocess.run(
-                ['systemctl', 'list-units', '--no-legend', '--no-pager',
-                 '--type=service', '--state=active',
-                 'wd-upload-wsprnet@*.service'],
-                capture_output=True, text=True, check=False,
-            )
-        except FileNotFoundError:
-            _err('systemctl not available')
-            return 1
-        lines = [l for l in r.stdout.splitlines() if l.strip()]
-        if not lines:
-            _err('no active wd-upload-wsprnet@* service — is '
-                 'wsprdaemon-client running? (smd status wsprdaemon-client)')
-            return 1
-        unit = lines[0].split()[0]
+        unit_pattern = 'wd-ka9q-record@*'
     else:
-        unit = f'wd-upload-wsprnet@{instance}.service'
+        unit_pattern = f'wd-ka9q-record@{instance}.service'
 
     n_recent = int(getattr(args, 'recent', 0) or 0)
     verbose = bool(getattr(args, 'verbose', False))
@@ -5783,230 +5767,168 @@ def cmd_wspr_watch(args) -> int:
     else:
         cap = n_recent if n_recent > 0 else 0
     show_spots = cap != 0
+    backlog_min = max(0, int(getattr(args, 'backlog', 10) or 0))
 
     import re as _re
     import datetime as _datetime
-    # Two events define each upload batch:
-    #   UPLOAD START  cycle=260512 1208  spots=7  files=5
-    #   DIAG DONE     cycle=260512 1208  accepted=7/7  rejected=N  errors=N
-    upload_start_re = _re.compile(
-        r'UPLOAD START\s+cycle=(\d{6})\s+(\d{4})\s+spots=(\d+)'
-        r'(?:\s+files=(\d+))?'
+    # Cycle-write event line as emitted by wspr_recorder.spot_sink._flush().
+    # With `journalctl -o cat` the systemd prefix is stripped and we see
+    # the Python logger's own format:
+    #   2026-05-12 21:42:31,897 - wspr_recorder.spot_sink - INFO -
+    #     cycle UTC 02:40 → 62 spots in wspr.spots (9 bands, write 4 ms)
+    cycle_re = _re.compile(
+        r'cycle\s+UTC\s+(\d{2}):(\d{2})\s+\S+\s+'
+        r'(\d+)\s+spots\s+in\s+wspr\.spots\s+'
+        r'\((\d+)\s+bands?,\s+write\s+(\d+)\s*ms\)'
     )
-    done_re = _re.compile(
-        r'DIAG DONE\s+cycle=(\d{6})\s+(\d{4})\s+'
-        r'accepted=(\d+)/(\d+)'
-        r'(?:\s+rejected=(\d+))?'
-        r'(?:\s+errors=(\d+))?'
-    )
-    # SIMILAR per-spot line preamble — we lift the part after
-    # "DIAG SIMILAR" and parse positionally.  Standard wsprdaemon
-    # ALL.TXT field order (post-DIAG-prefix):
-    #
-    #   YYMMDD HHMM SYNC SNR DT FREQ_MHZ CALL [GRID] PWR DRIFT MODE
-    #
-    # GRID is omitted for compound callsigns (e.g. "K5JAZ/1") that
-    # didn't include a Maidenhead locator in their transmission, so
-    # we detect it via regex instead of trusting positional index.
-    similar_prefix_re = _re.compile(r'DIAG SIMILAR\s+(\d{6}\s+\d{4}\s.*)$')
-    # Maidenhead locator: 4 or 6 alphanum chars, [A-R][A-R][0-9][0-9]
-    # optionally followed by 2 letters.  Used to distinguish the grid
-    # field from the pwr field (both short tokens otherwise).
-    # WSPR's ALL.TXT renders extended (6-char) grids in UPPERCASE
-    # (e.g. "EN21BE"), while the formal Maidenhead convention uses
-    # lowercase.  Accept both so Type 3 hashed-call spots like
-    # "<KB0VYG/P> EN21BE 23 0 3" don't fall through to the no-grid
-    # branch and shift "EN21BE" into the pwr column.
-    grid_re = _re.compile(r'^[A-R]{2}[0-9]{2}([A-Xa-x]{2})?$')
-    # Leading ISO-ish timestamp on each journal-message line.  The
-    # uploader's Python logger emits "YYYY-MM-DDTHH:MM:SSZ" prefixes;
-    # we keep them for both delta-computation and display.
-    ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z?\s')
+    # Python logger's ISO-ish datetime prefix on the same line.  Local
+    # wallclock (the logger format is %Y-%m-%d %H:%M:%S,%f).  We use
+    # it only for the displayed [HH:MM:SS] tag; the cycle's UTC time
+    # is the authoritative key for sqlite lookups.
+    ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}),')
 
-    _heading(f'WSPRnet upload activity ({unit})')
-    _info('   ▸ two lines per upload batch: "start" when decodes are done,')
-    _info('     "done" when WSPRnet acknowledges')
+    _heading(f'WSPR cycle activity ({unit_pattern})')
+    _info('   ▸ one line per WSPR cycle, fired by wspr-recorder\'s')
+    _info('     CycleBatcher the instant all bands\' spots are committed')
     if cap is None:
-        _info('   + ALL flagged SIMILAR per-spot rows')
+        _info('   + ALL spots per band')
     elif cap > 0:
-        _info(f'   + first {cap} SIMILAR per-spot row{"s" if cap != 1 else ""} per batch')
+        _info(f'   + first {cap} spot{"s" if cap != 1 else ""} per band')
+    if backlog_min > 0:
+        _info(f'   ▸ replaying last {backlog_min} min of cycle events '
+              '(per-band detail unavailable — rows already shipped)')
     _info('   Ctrl-C to exit.')
     print(flush=True)
 
     sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+    since_arg = ['--since', f'{backlog_min} min ago'] if backlog_min > 0 \
+        else ['--since', 'now']
     try:
-        # `--since "30 min ago"` so the operator sees a meaningful
-        # backlog immediately.  10 min was tight on quiet bands
-        # (several cycles per WSPR period produce zero spots, so the
-        # uploader emits no DONE line for them) — 30 min spans enough
-        # cycles to give a sense of activity regardless of band
-        # conditions.  `-f` keeps following past that backlog.
-        # Binary pipe + raw os.read; using text=True + readline()
-        # interacts badly with select.select — Python's
-        # TextIOWrapper buffers data internally, so after the first
-        # readline() select reports "no data on fd" even though more
-        # lines are sitting in the wrapper's buffer.  Symptom: only
-        # one line ever appears.  We split into lines ourselves.
+        # See cmd_psk_watch / cmd_hfdl_watch for the binary-pipe +
+        # raw os.read rationale: select.select + TextIOWrapper interact
+        # badly — buffered bytes hide from select after the first read.
         proc = subprocess.Popen(
-            [*sudo_prefix, 'journalctl', '-fu', unit, '-o', 'cat',
-             '--since', '30 min ago'],
+            [*sudo_prefix, 'journalctl', '-f', '-u', unit_pattern,
+             '-o', 'cat', *since_arg],
             stdout=subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         _err(f'journalctl not available: {exc}')
         return 1
 
-    # Per-cycle state we keep across batches:
-    #   batch_start[cycle_key] = unix ts of the most recent UPLOAD START
-    #     for this cycle.  Popped when its DIAG DONE arrives so we can
-    #     report the upload's round-trip duration.
-    #   cycle_total[cycle_key] = [running accepted, running total,
-    #                              running rejected, running errors]
-    #     across all batches we've seen for this cycle.  Useful as
-    #     context when a cycle's spots arrive in multiple waves.
-    batch_start: dict = {}
-    cycle_total: dict = {}
+    # --- per-cycle sqlite lookup helpers ----------------------------------
+    _SINK_DB = Path('/var/lib/sigmond/sink.db')
 
-    def _ts_of(line: str):
-        """Parse leading ISO ts from a journal line; None if absent.
+    def _cycle_iso(hh: str, mm: str) -> str:
+        """Map cycle UTC HH:MM → ISO time matching the sink payload."""
+        now = _datetime.datetime.now(_datetime.timezone.utc)
+        cycle = now.replace(hour=int(hh), minute=int(mm),
+                            second=0, microsecond=0)
+        # Cycle just past UTC midnight may appear in a journal line
+        # logged a few minutes later; if our "today UTC" cycle lies in
+        # the future, roll back one day.
+        if cycle > now + _datetime.timedelta(minutes=5):
+            cycle -= _datetime.timedelta(days=1)
+        return cycle.strftime('%Y-%m-%dT%H:%M:00Z')
 
-        wd-upload-wsprnet's Python logger writes "YYYY-MM-DDTHH:MM:SSZ"
-        but the value is actually local-time (the Z is a misnomer).
-        That's fine for our use — we only need consistent ts deltas
-        between events on the same host.  WSPRnet's HTML response bodies
-        are interleaved as continuation lines with no ts; for those
-        we return None and skip.
-        """
-        m = ts_re.match(line)
-        if not m:
+    def _query_cycle(cycle_iso: str):
+        """Return [(band, callsign, grid, snr_db, dt, drift_hz_s,
+        freq_hz, pwr_dbm), ...] for one cycle, or None on error / no rows.
+
+        We open read-only so this never contends with the producer's
+        writer thread.  Empty result (rows already shipped + deleted)
+        is normal for backlog cycles."""
+        if not _SINK_DB.exists():
             return None
         try:
-            return _datetime.datetime.fromisoformat(
-                m.group(1)
-            ).replace(tzinfo=_datetime.timezone.utc).timestamp()
-        except ValueError:
+            import sqlite3 as _sqlite3
+            uri = f'file:{_SINK_DB}?mode=ro'
+            con = _sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                cur = con.execute(
+                    "SELECT json_extract(payload_json,'$.band'),"
+                    "       json_extract(payload_json,'$.callsign'),"
+                    "       json_extract(payload_json,'$.grid'),"
+                    "       json_extract(payload_json,'$.snr_db'),"
+                    "       json_extract(payload_json,'$.dt'),"
+                    "       json_extract(payload_json,'$.drift_hz_per_s'),"
+                    "       json_extract(payload_json,'$.frequency_hz'),"
+                    "       json_extract(payload_json,'$.pwr_dbm') "
+                    "FROM pending_uploads "
+                    "WHERE target_db='wspr' AND target_table='spots' "
+                    "  AND json_extract(payload_json,'$.time')=? "
+                    "ORDER BY 1, 7, 2",
+                    (cycle_iso,),
+                )
+                rows = cur.fetchall()
+            finally:
+                con.close()
+            return rows
+        except Exception:
             return None
 
-    def _hms_of(line: str):
-        m = ts_re.match(line)
-        if not m:
-            return _datetime.datetime.now().strftime('%H:%M:%S')
-        return m.group(1)[11:]  # "HH:MM:SS"
+    # Band display order: low → high, with the 17 default bands first
+    # so the per-band counts read naturally.  Unknown bands fall to end.
+    _BAND_ORDER = {b: i for i, b in enumerate([
+        '2200', '630', '160', '80', '80eu', '60', '60eu',
+        '40', '30', '22', '20', '17', '15', '12', '10', '8', '6',
+    ])}
 
-    # Per-band tag derivation.  wsprdaemon-client writes a per-cycle
-    # diagnostic report at /var/log/wsprdaemon/wsprnet-partial/
-    # containing every spot from this batch.  We use that as the
-    # source of truth for both the per-band annotation on the "done"
-    # line and the optional -v / N per-spot dump.
-    _PARTIAL_DIR = Path('/var/log/wsprdaemon/wsprnet-partial')
-    _BAND_RANGES = [
-        (2.0, '160m'), (4.0, '80m'), (5.5, '60m'), (10.0, '40m'),
-        (14.0, '30m'), (18.0, '20m'), (21.0, '17m'),
-        (24.5, '15m'), (28.0, '12m'), (50.0, '10m'), (54.0, '6m'),
-    ]
-    _BAND_ORDER = {label: idx
-                   for idx, (_hi, label) in enumerate(_BAND_RANGES)}
+    def _band_sort_key(b: str):
+        return (_BAND_ORDER.get(b, 999), b)
 
-    def _band(freq_mhz: float) -> str:
-        for hi, label in _BAND_RANGES:
-            if freq_mhz < hi:
-                return label
-        return f'{freq_mhz:.0f}MHz'
-
-    def _load_partial(date: str, hhmm: str, accepted: int,
-                      rejected: int, *, retry: bool = True):
-        """Find and parse the partial-report file for one upload batch.
-
-        Filename: `{ISOTIME}_cycle{date}{hhmm}_diag_accepted{N}_rejected{R}.txt`
-        wsprdaemon writes this file at roughly the same moment the
-        DIAG DONE line lands in the journal.  For live events we
-        retry briefly to handle the race; for backlog the file is
-        either already present or absent (rotated/older than the
-        partial-report feature), so a single check is enough.
-        Returns a list of {freq_mhz, line} dicts for the accepted
-        spots, or None if the file isn't found.
-        """
-        pattern = (f'*_cycle{date}{hhmm}_diag_accepted'
-                   f'{accepted}_rejected{rejected}.txt')
-        deadline = time.time() + (1.5 if retry else 0.0)
-        target = None
-        while True:
-            try:
-                matches = sorted(_PARTIAL_DIR.glob(pattern))
-            except OSError:
-                matches = []
-            if matches:
-                target = matches[-1]  # most recent if multiple
-                break
-            if time.time() >= deadline:
-                return None
-            time.sleep(0.2)
-        try:
-            text = target.read_text(errors='replace')
-        except OSError:
-            return None
-        spots = []
-        in_accepted = False
-        for txt_line in text.splitlines():
-            if txt_line.startswith('--- ACCEPTED SPOTS'):
-                in_accepted = True
-                continue
-            if txt_line.startswith('---'):
-                in_accepted = False
-                continue
-            if not in_accepted:
-                continue
-            toks = txt_line.split()
-            # ALL.TXT row: YYMMDD HHMM SYNC SNR DT FREQ CALL [GRID] PWR DRIFT MODE
-            if len(toks) < 9:
-                continue
-            try:
-                freq_f = float(toks[5])
-            except ValueError:
-                continue
-            spots.append({'freq_f': freq_f, 'toks': toks, 'raw': txt_line})
-        return spots
-
-    def _bands_summary(spots) -> str:
+    def _per_band_counts(rows):
         counts: dict = {}
-        for s in spots:
-            counts[_band(s['freq_f'])] = counts.get(_band(s['freq_f']), 0) + 1
+        for r in rows:
+            band = r[0] or '?'
+            counts[band] = counts.get(band, 0) + 1
+        return counts
+
+    def _format_band_counts(counts: dict) -> str:
         if not counts:
             return ''
-        ordered = sorted(counts, key=lambda b: _BAND_ORDER.get(b, 99))
-        return ' '.join(f'{b}:{counts[b]}' for b in ordered)
+        ordered = sorted(counts, key=_band_sort_key)
+        return ' '.join(f'{b}m:{counts[b]}' for b in ordered)
 
-    def _format_spot(s) -> str:
-        toks = s['toks']
-        freq_mhz = toks[5]
-        call = toks[6]
-        if len(toks) >= 11 and grid_re.match(toks[7]):
-            grid, pwr, drift = toks[7], toks[8], toks[9]
-        else:
-            grid = ''
-            pwr, drift = toks[7], toks[8]
+    def _format_spot(row) -> str:
+        band, call, grid, snr_db, dt, drift, freq_hz, pwr = row
         try:
-            snr_i = int(toks[3])
-            dt_f = float(toks[4])
-        except ValueError:
-            return f'           {s["raw"]}'
-        grid_disp = grid if grid else '----'
-        return (
-            f'           {freq_mhz:>12} MHz  '
-            f'{call:>10}  {grid_disp:<6}  '
-            f'SNR {snr_i:+3} dB  '
-            f'DT {dt_f:+5.2f}s  '
-            f'drift {drift:>3} Hz  '
-            f'{pwr:>2} dBm'
-        )
+            freq_mhz = f'{float(freq_hz) / 1_000_000:.6f}'
+        except (TypeError, ValueError):
+            freq_mhz = '----.------'
+        try:
+            snr_i = int(snr_db)
+        except (TypeError, ValueError):
+            snr_i = 0
+        try:
+            dt_f = float(dt)
+        except (TypeError, ValueError):
+            dt_f = 0.0
+        try:
+            drift_f = float(drift)
+        except (TypeError, ValueError):
+            drift_f = 0.0
+        try:
+            pwr_i = int(pwr)
+        except (TypeError, ValueError):
+            pwr_i = 0
+        grid_disp = (grid or '----')[:6]
+        call_disp = (call or '?')[:12]
+        return (f'           {(band or "?"):>4}m  '
+                f'{freq_mhz:>11} MHz  '
+                f'{call_disp:>12}  {grid_disp:<6}  '
+                f'SNR {snr_i:+3} dB  '
+                f'DT {dt_f:+5.2f}s  '
+                f'drift {drift_f:+5.2f} Hz/s  '
+                f'{pwr_i:>2} dBm')
 
+    # --- main read loop ---------------------------------------------------
     assert proc.stdout is not None
     import select as _select
     fd = proc.stdout.fileno()
     buf = b''
 
     def _next_line():
-        """Pop the next complete line from buf, or None if buffer empty."""
         nonlocal buf
         if b'\n' in buf:
             line, _, buf = buf.partition(b'\n')
@@ -6015,10 +5937,8 @@ def cmd_wspr_watch(args) -> int:
 
     try:
         while True:
-            line: Optional[str] = _next_line()
+            line = _next_line()
             if line is None:
-                # Wait for more bytes; no idle-flush work needed since
-                # every event is printed inline.
                 rlist, _w, _x = _select.select([fd], [], [], 1.0)
                 if not rlist:
                     continue
@@ -6031,120 +5951,60 @@ def cmd_wspr_watch(args) -> int:
                 buf += chunk
                 continue
 
-            us = upload_start_re.search(line)
-            if us:
-                date, hhmm, spots_n, files_n = us.groups()
-                event_ts = _ts_of(line)
-                if event_ts is not None:
-                    batch_start[(date, hhmm)] = event_ts
-                hms = _hms_of(line)
-                cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
-                files_part = f' in {int(files_n):>2} files' if files_n else ''
-                print(
-                    f'[{hms}] cycle UTC {cycle_hm}  '
-                    f'upload start: {int(spots_n):>3} spots{files_part}',
-                    flush=True,
-                )
+            cm = cycle_re.search(line)
+            if not cm:
                 continue
+            hh, mm, spots_n_s, bands_n_s, write_ms_s = cm.groups()
+            cycle_iso = _cycle_iso(hh, mm)
+            tm = ts_re.match(line)
+            hms = tm.group(2) if tm else _datetime.datetime.now().strftime('%H:%M:%S')
+            spots_n = int(spots_n_s)
+            bands_n = int(bands_n_s)
+            write_ms = int(write_ms_s)
 
-            dm = done_re.search(line)
-            if dm:
-                date, hhmm, accepted, total, rejected, errors = dm.groups()
-                accepted_i = int(accepted)
-                total_i = int(total)
-                rejected_i = int(rejected or 0)
-                errors_i = int(errors or 0)
-                cycle_key = (date, hhmm)
-                event_ts = _ts_of(line)
-                start_ts = batch_start.pop(cycle_key, None)
-                if event_ts is not None and start_ts is not None:
-                    dur = f'{event_ts - start_ts:.0f}s'
-                else:
-                    dur = '? '
-                tot = cycle_total.setdefault(cycle_key, [0, 0, 0, 0])
-                tot[0] += accepted_i
-                tot[1] += total_i
-                tot[2] += rejected_i
-                tot[3] += errors_i
-                hms = _hms_of(line)
-                cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
-                cum = f'  (cycle total: {tot[0]}/{tot[1]})'
-                # Per-band annotation (+ spot dump in verbose modes)
-                # comes from the partial-report file wsprdaemon writes
-                # for every batch.  Cheap to load, gracefully degrades
-                # if the file isn't accessible.  Retry only for live
-                # events; backlog files either exist already or never
-                # will (older than the partial-report feature).
-                is_live = (event_ts is None
-                           or (time.time() - event_ts) < 30.0)
-                spots = _load_partial(date, hhmm, accepted_i,
-                                      rejected_i, retry=is_live)
-                bands_part = ''
-                if spots:
-                    bs = _bands_summary(spots)
-                    if bs:
-                        bands_part = f'  ({bs})'
-                print(
-                    f'[{hms}] cycle UTC {cycle_hm}  '
-                    f'upload done in {dur:>3}: '
-                    f'accepted={accepted_i:>3}/{total_i:<3}  '
-                    f'rejected={rejected_i}  errors={errors_i}{cum}'
-                    f'{bands_part}',
-                    flush=True,
-                )
-                # Verbose / N modes: dump spots sorted by frequency
-                # underneath the "done" line.
-                if show_spots and spots:
-                    spots_sorted = sorted(spots, key=lambda s: s['freq_f'])
-                    to_show = (spots_sorted if cap is None
-                               else spots_sorted[:cap])
-                    for s in to_show:
-                        print(_format_spot(s), flush=True)
-                    if cap is not None and len(spots_sorted) > len(to_show):
+            # Query rows immediately — race window is ~18 s before
+            # wd-upload-hs sweeps, so live events always succeed.
+            rows = _query_cycle(cycle_iso) or []
+            counts_part = ''
+            if rows:
+                counts_part = '  [' + _format_band_counts(
+                    _per_band_counts(rows)) + ']'
+            elif backlog_min > 0:
+                # Backlog cycle: rows already shipped + deleted.
+                # Still useful to show the journal-line counts.
+                counts_part = '  [shipped]'
+
+            print(
+                f'[{hms}] cycle UTC {hh}:{mm}  '
+                f'{spots_n:>3} spots / {bands_n} bands  '
+                f'(write {write_ms} ms){counts_part}',
+                flush=True,
+            )
+
+            # Per-spot detail under the summary line.  Only available
+            # when rows are still in pending_uploads (live cycles).
+            if show_spots and rows:
+                # Group rows by band so the per-band cap (N) applies
+                # to each band independently — otherwise a 40m flood
+                # could starve the display of any 30m / 20m detail.
+                from itertools import groupby as _groupby
+                rows_sorted = sorted(rows, key=lambda r: (
+                    _band_sort_key(r[0] or '?'),
+                    (r[6] if r[6] is not None else 0),
+                ))
+                for band, group in _groupby(rows_sorted,
+                                             key=lambda r: r[0] or '?'):
+                    group_list = list(group)
+                    to_show = (group_list if cap is None
+                               else group_list[:cap])
+                    for r in to_show:
+                        print(_format_spot(r), flush=True)
+                    if cap is not None and len(group_list) > len(to_show):
                         print(
-                            f'           … '
-                            f'({len(spots_sorted) - len(to_show)} more)',
+                            f'           … ({len(group_list) - len(to_show)} '
+                            f'more on {band}m)',
                             flush=True,
                         )
-                continue
-
-            if show_spots:
-                sm = similar_prefix_re.search(line)
-                if sm:
-                    # YYMMDD HHMM SYNC SNR DT FREQ CALL [GRID] PWR DRIFT MODE
-                    toks = sm.group(1).split()
-                    if len(toks) < 9:
-                        continue
-                    _, hhmm = toks[0], toks[1]
-                    snr = toks[3]
-                    dt  = toks[4]
-                    freq_mhz = toks[5]
-                    call = toks[6]
-                    if len(toks) >= 11 and grid_re.match(toks[7]):
-                        grid, pwr, drift, _mode = toks[7], toks[8], toks[9], toks[10]
-                    else:
-                        grid = ''
-                        pwr, drift = toks[7], toks[8]
-                    grid_disp = grid if grid else '----'
-                    cycle_hm = f'{hhmm[:2]}:{hhmm[2:]}'
-                    try:
-                        snr_i = int(snr)
-                        dt_f = float(dt)
-                    except ValueError:
-                        continue
-                    print(
-                        f'           cycle {cycle_hm}  '
-                        f'{freq_mhz:>12} MHz  '
-                        f'{call:>10}  {grid_disp:<6}  '
-                        f'SNR {snr_i:+3} dB  '
-                        f'DT {dt_f:+5.2f}s  '
-                        f'drift {drift:>3} Hz  '
-                        f'{pwr:>2} dBm',
-                        flush=True,
-                    )
-                    continue
-
-            # Anything else is silently dropped.
 
     except KeyboardInterrupt:
         return 130
@@ -6155,8 +6015,6 @@ def cmd_wspr_watch(args) -> int:
         except Exception:
             pass
     return 0
-
-
 def _hfdl_band_num(name: str):
     """Extract the band number from 'HFDL13' / 'HFDL13.json' → 13.
 
@@ -7264,15 +7122,20 @@ def _reexec_into_tui_venv() -> int:
 def _add_wspr_watch_args(p) -> None:
     """Argument spec shared by `smd wspr-watch` and `smd watch wspr`."""
     p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
-                   help='also print up to N DIAG SIMILAR per-spot rows '
-                        'per batch (default 0 = no SIMILAR rows; '
+                   help='also print up to N spots per band under each '
+                        'cycle summary (default 0 = counts only; '
                         '-v = print all)')
     p.add_argument('-v', '--verbose', action='store_true',
-                   help='also print ALL DIAG SIMILAR per-spot rows '
-                        '(near-frequency duplicates flagged by WSPRnet)')
-    p.add_argument('--instance', metavar='CALL_GRID', default=None,
-                   help='specific station instance, e.g. AC0G-B4_EM38ww '
-                        '(default: first active wd-upload-wsprnet@*)')
+                   help='per-cycle mode showing ALL spots — same '
+                        'cadence as N, no per-band cap')
+    p.add_argument('--instance', metavar='RADIOD_ID', default=None,
+                   help='specific wd-ka9q-record@<id> instance '
+                        '(default: all wd-ka9q-record@* journal events)')
+    p.add_argument('--backlog', metavar='MIN', type=int, default=10,
+                   help='start by replaying this many minutes of journal '
+                        'history (default 10; rows for those cycles have '
+                        'usually been shipped + deleted so per-band '
+                        'detail will be missing)')
 
 
 def _add_psk_watch_args(p) -> None:
