@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_DB = Path('/var/lib/sigmond/decode_health.db')
 PSK_LOG_GLOB = '/var/log/psk-recorder/*.log'
 UPLOAD_UNIT_GLOB = 'wd-upload-hs@*.service'
+WSPR_SPOOL_ROOT = Path('/var/spool/wsprdaemon/recording')
 DEFAULT_LOOKBACK_HOURS = 2  # safe overlap window for cron @ hourly
 
 SCHEMA = """
@@ -60,6 +61,32 @@ CREATE TABLE IF NOT EXISTS cycle_snapshot (
 
 CREATE INDEX IF NOT EXISTS idx_cycle_ts ON cycle_snapshot(ts);
 CREATE INDEX IF NOT EXISTS idx_cycle_source_mode ON cycle_snapshot(source, mode);
+
+-- Per-WAV-file capture-health snapshot.  wspr-recorder writes a rich
+-- JSON sidecar alongside every WAV (drift, completeness, RTP/wall-clock
+-- mapping, GPSDO + chrony state).  We slurp the fields most useful for
+-- spotting slow degradation into a flat table; the original JSON stays
+-- on disk for forensic deep-dives.
+CREATE TABLE IF NOT EXISTS wav_snapshot (
+    filename            TEXT    NOT NULL PRIMARY KEY,
+    ts                  TEXT    NOT NULL,    -- ISO wallclock_start
+    band_name           TEXT,
+    frequency_hz        INTEGER,
+    sample_rate         INTEGER,
+    period_seconds      INTEGER,
+    samples             INTEGER,
+    total_gaps_filled   INTEGER,
+    completeness_pct    REAL,
+    drift_delta_ms      REAL,                -- drift at this WAV's close
+    drift_cumulative_ms REAL,                -- drift_tracker running total
+    gpsdo_locked        INTEGER,             -- 0/1 from radiod
+    hf_locked           INTEGER,             -- 0/1 from hf-timestd
+    system_offset_ms    REAL,                -- chrony's view of UTC offset
+    chrony_stratum      INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_wav_ts ON wav_snapshot(ts);
+CREATE INDEX IF NOT EXISTS idx_wav_band ON wav_snapshot(band_name);
 """
 
 
@@ -213,6 +240,70 @@ def _scrape_upload_journal(unit_glob: str, since: datetime) -> Iterator[dict]:
         }
 
 
+def _scrape_wspr_sidecars(root: Path, since: datetime) -> Iterator[dict]:
+    """Yield per-WAV-snapshot dicts from wspr-recorder's JSON sidecars.
+
+    Every WAV file produced by wspr-recorder carries a peer ``.json``
+    file in the same directory containing the recorder's own view of
+    drift, completeness, GPSDO state, and timing.  We flatten the
+    fields most useful for trend detection into ``wav_snapshot``.
+
+    Walks ``root/<RX>/<band>/`` looking for ``*.json`` files modified
+    after ``since`` — much cheaper than parsing everything every run.
+    """
+    if not root.exists():
+        return
+    cutoff = since.timestamp()
+    for json_path in root.rglob('*.json'):
+        try:
+            if json_path.stat().st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        # Skip the recorder's status file, which is in the recording root,
+        # not under a per-band subdir.
+        if json_path.name in ('wspr-recorder-status.json',):
+            continue
+        try:
+            data = json.loads(json_path.read_text(errors='replace'))
+        except (OSError, json.JSONDecodeError) as e:
+            logger.debug("skip %s: %s", json_path, e)
+            continue
+        try:
+            ts_iso = data.get('wallclock_start') or data.get('written_at')
+            if not ts_iso:
+                continue
+            # Normalise to "YYYY-MM-DDTHH:MM:SSZ" — strip the +00:00
+            # offset wspr-recorder writes, since the rest of the
+            # cycle_snapshot rows use the Z suffix and we want
+            # lexically-sortable timestamps that compare cleanly.
+            ts = datetime.fromisoformat(ts_iso.replace('Z', '+00:00'))
+            ts_str = ts.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+            drift = data.get('drift') or {}
+            timing = data.get('timing') or {}
+            yield {
+                'filename':            data['filename'],
+                'ts':                  ts_str,
+                'band_name':           data.get('band_name'),
+                'frequency_hz':        data.get('frequency_hz'),
+                'sample_rate':         data.get('sample_rate'),
+                'period_seconds':      data.get('period_seconds'),
+                'samples':             data.get('samples'),
+                'total_gaps_filled':   data.get('total_gaps_filled'),
+                'completeness_pct':    data.get('completeness_pct'),
+                'drift_delta_ms':      drift.get('delta_ms'),
+                'drift_cumulative_ms': drift.get('cumulative_drift_ms'),
+                'gpsdo_locked':        1 if timing.get('gpsdo_locked') else 0,
+                'hf_locked':           1 if timing.get('hf_locked') else 0,
+                'system_offset_ms':    timing.get('system_clock_offset_ms'),
+                'chrony_stratum':      timing.get('chrony_stratum'),
+            }
+        except (KeyError, TypeError, ValueError) as e:
+            logger.debug("skip %s: parse error %s", json_path, e)
+            continue
+
+
 # ---- main --------------------------------------------------------------------
 
 def collect(db_path: Path, since: datetime) -> dict:
@@ -221,7 +312,11 @@ def collect(db_path: Path, since: datetime) -> dict:
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
 
-    counts = {'psk-recorder': 0, 'wd-upload-hs': 0, 'inserted': 0, 'duplicate': 0}
+    counts = {
+        'psk-recorder': 0, 'wd-upload-hs': 0, 'wspr-wav': 0,
+        'inserted': 0, 'duplicate': 0,
+        'wav_inserted': 0, 'wav_duplicate': 0,
+    }
 
     events: list[dict] = []
     for path in Path('/var/log/psk-recorder').glob('*.log'):
@@ -249,6 +344,29 @@ def collect(db_path: Path, since: datetime) -> dict:
         except sqlite3.IntegrityError:
             counts['duplicate'] += 1
 
+    # WSPR WAV sidecars — separate table so the schema stays clean.
+    for wav in _scrape_wspr_sidecars(WSPR_SPOOL_ROOT, since):
+        counts['wspr-wav'] += 1
+        try:
+            conn.execute(
+                """
+                INSERT INTO wav_snapshot
+                    (filename, ts, band_name, frequency_hz, sample_rate,
+                     period_seconds, samples, total_gaps_filled,
+                     completeness_pct, drift_delta_ms, drift_cumulative_ms,
+                     gpsdo_locked, hf_locked, system_offset_ms, chrony_stratum)
+                VALUES
+                    (:filename, :ts, :band_name, :frequency_hz, :sample_rate,
+                     :period_seconds, :samples, :total_gaps_filled,
+                     :completeness_pct, :drift_delta_ms, :drift_cumulative_ms,
+                     :gpsdo_locked, :hf_locked, :system_offset_ms, :chrony_stratum)
+                """,
+                wav,
+            )
+            counts['wav_inserted'] += 1
+        except sqlite3.IntegrityError:
+            counts['wav_duplicate'] += 1
+
     conn.commit()
     conn.close()
     return counts
@@ -273,9 +391,11 @@ def main() -> int:
     logger.info("scraping since %s into %s", since.isoformat(), args.db)
     stats = collect(args.db, since)
     logger.info(
-        "done: psk-recorder=%d  wd-upload-hs=%d  inserted=%d  duplicate=%d",
-        stats['psk-recorder'], stats['wd-upload-hs'],
+        "done: psk-recorder=%d  wd-upload-hs=%d  wspr-wav=%d  "
+        "cycle_inserted=%d (dup=%d)  wav_inserted=%d (dup=%d)",
+        stats['psk-recorder'], stats['wd-upload-hs'], stats['wspr-wav'],
         stats['inserted'], stats['duplicate'],
+        stats['wav_inserted'], stats['wav_duplicate'],
     )
     return 0
 
