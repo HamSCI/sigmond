@@ -5977,9 +5977,17 @@ def cmd_wspr_watch(args) -> int:
     # the Python logger's own format:
     #   2026-05-12 21:42:31,897 - wspr_recorder.spot_sink - INFO -
     #     cycle UTC 02:40 → 62 spots in wspr.spots (9 bands, write 4 ms)
+    # As of 2026-05-14 Phase 2 (in-process noise capture), spot_sink
+    # also emits an optional ", N noise rows in wspr.noise" clause
+    # between the spots count and the (B bands, write Tms) tail:
+    #     cycle UTC 17:08 → 30 spots in wspr.spots, 15 noise rows in
+    #         wspr.noise (4 bands, write 2 ms)
+    # The noise clause is captured optionally so pre-Phase-2 hosts
+    # without noise plumbing still parse correctly.
     cycle_re = _re.compile(
         r'cycle\s+UTC\s+(\d{2}):(\d{2})\s+\S+\s+'
-        r'(\d+)\s+spots\s+in\s+wspr\.spots\s+'
+        r'(\d+)\s+spots\s+in\s+wspr\.spots'
+        r'(?:,\s+(\d+)\s+noise\s+rows\s+in\s+wspr\.noise)?\s+'
         r'\((\d+)\s+bands?,\s+write\s+(\d+)\s*ms\)'
     )
     # Python logger's ISO-ish datetime prefix on the same line.  Local
@@ -6155,11 +6163,12 @@ def cmd_wspr_watch(args) -> int:
             cm = cycle_re.search(line)
             if not cm:
                 continue
-            hh, mm, spots_n_s, bands_n_s, write_ms_s = cm.groups()
+            hh, mm, spots_n_s, noise_n_s, bands_n_s, write_ms_s = cm.groups()
             cycle_iso = _cycle_iso(hh, mm)
             tm = ts_re.match(line)
             hms = tm.group(2) if tm else _datetime.datetime.now().strftime('%H:%M:%S')
             spots_n = int(spots_n_s)
+            noise_n = int(noise_n_s) if noise_n_s else 0
             bands_n = int(bands_n_s)
             write_ms = int(write_ms_s)
 
@@ -6175,9 +6184,10 @@ def cmd_wspr_watch(args) -> int:
                 # Still useful to show the journal-line counts.
                 counts_part = '  [shipped]'
 
+            noise_part = f' / {noise_n} noise' if noise_n else ''
             print(
                 f'[{hms}] cycle UTC {hh}:{mm}  '
-                f'{spots_n:>3} spots / {bands_n} bands  '
+                f'{spots_n:>3} spots{noise_part} / {bands_n} bands  '
                 f'(write {write_ms} ms){counts_part}',
                 flush=True,
             )
