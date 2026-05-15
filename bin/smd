@@ -5988,7 +5988,7 @@ def cmd_wspr_watch(args) -> int:
         r'cycle\s+UTC\s+(\d{2}):(\d{2})\s+\S+\s+'
         r'(\d+)\s+spots\s+in\s+wspr\.spots'
         r'(?:,\s+(\d+)\s+noise\s+rows\s+in\s+wspr\.noise)?\s+'
-        r'\((\d+)\s+bands?,\s+write\s+(\d+)\s*ms\)'
+        r'\((\d+)\s+bands?,\s+(?:sqlite\s+)?write\s+(\d+)\s*ms\)'
     )
     # wd-upload-hs's per-pump line.  Two shapes — the simple one when
     # posted==added, and the "posted:N/added:M" shape when wsprnet
