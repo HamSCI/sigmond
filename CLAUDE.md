@@ -33,8 +33,9 @@ Other design discussions in `docs/`:
 ## Core commands (implemented)
 
 ```
-smd install [<client>]   Install a client from catalog, or full-suite (legacy)
-smd apply                Reconcile running services with current config
+smd software install [<client>]  Install a client from catalog, or full-suite
+smd software apply               Reconcile running services with current config
+                                 (`smd install` / `smd apply` remain as aliases)
 smd start                Start all managed services
 smd stop                 Stop all managed services
 smd restart              Restart managed services (with reset-failed)

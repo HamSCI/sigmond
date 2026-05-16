@@ -8,12 +8,14 @@ groups used by the TUI's left tree:
 
 Configure (what should exist):
     smd add         <git-url>                                    clone a component repo
-    smd install     [<client>] [--components C1,C2] [--force]    install + configure
+    smd software    install [<client>] [--force] |               install + configure, or
+                    apply [--dry-run]                            reconcile to current config
     smd enable      <name>...                                    set enabled=true in topology
     smd disable     <name>...                                    set enabled=false + stop units
     smd remove      <name>...                                    remove from topology
     smd config      show | migrate | init <c> | edit <c>         per-client config
     smd validate                                                 cross-client harmonization
+    (smd install / smd apply are kept as aliases for the software subverbs.)
 
 Observe (what is, read-only):
     smd list        [--update | --catalog] [--components C1,C2]  per-component status table
@@ -34,7 +36,6 @@ Operate (run things now, may need sudo):
     smd stop        [<component> [<instance>]]
     smd restart     [<component> [<instance>]]
     smd reload      [--via=auto|systemd|socket]  [<component>]
-    smd apply       [--dry-run]                                  reconcile services to config
     smd tui                                                      launch interactive TUI
 
 Topology file (default: /etc/sigmond/topology.toml) controls which
@@ -4563,7 +4564,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage public-ip completion"
+    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage public-ip completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -4626,6 +4627,9 @@ _smd_complete() {
                 storage)
                     COMPREPLY=($(compgen -W "migrate-to-sqlite trim" -- "$cur"))
                     ;;
+                software)
+                    COMPREPLY=($(compgen -W "install apply" -- "$cur"))
+                    ;;
                 watch)
                     COMPREPLY=($(compgen -W "wspr psk hfdl codar ka9q uploads" -- "$cur"))
                     ;;
@@ -4659,6 +4663,16 @@ _smd_complete() {
                             ;;
                         ka9q)
                             COMPREPLY=($(compgen -W "--ka9q-python --ka9q-radio --remote --branch --no-fetch --json" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                software)
+                    case "${words[2]}" in
+                        install)
+                            COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --force --topology" -- "$cur"))
+                            ;;
+                        apply)
+                            COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -7845,25 +7859,46 @@ def main() -> int:
     p = sub.add_parser('remove', help='remove component section from topology and stop its units')
     p.add_argument('names', nargs='+', help='one or more component names')
 
-    # install
-    p = sub.add_parser('install', help='install and configure components')
-    p.add_argument('client', nargs='?', default=None,
-                   help='specific client to install from catalog (e.g. psk-recorder)')
-    p.add_argument('--components', metavar='C1,C2',
-                   help='comma-separated subset (default: all enabled in topology)')
-    p.add_argument('--client-dir', metavar='DIR',
-                   help='path to wsprdaemon-client (overrides topology)')
-    p.add_argument('--dry-run', action='store_true',
-                   help='show what would be done without making changes')
-    p.add_argument('--yes', '-y', action='store_true',
-                   help='accept defaults, no interactive prompts')
-    p.add_argument('--force', '-f', action='store_true',
-                   help='rebuild/reinstall even if the binary appears current '
-                        '(skips SHA short-circuits and `make` rebuild gating)')
+    # install + apply share their option set between the top-level form
+    # (`smd install`, `smd apply` — kept for muscle memory) and the
+    # grouped form (`smd software install`, `smd software apply` — the
+    # preferred form going forward; "software" reads as a noun verb-pair
+    # the way operators already think about it).
+    def _add_install_args(p):
+        p.add_argument('client', nargs='?', default=None,
+                       help='specific client to install from catalog (e.g. psk-recorder)')
+        p.add_argument('--components', metavar='C1,C2',
+                       help='comma-separated subset (default: all enabled in topology)')
+        p.add_argument('--client-dir', metavar='DIR',
+                       help='path to wsprdaemon-client (overrides topology)')
+        p.add_argument('--dry-run', action='store_true',
+                       help='show what would be done without making changes')
+        p.add_argument('--yes', '-y', action='store_true',
+                       help='accept defaults, no interactive prompts')
+        p.add_argument('--force', '-f', action='store_true',
+                       help='rebuild/reinstall even if the binary appears current '
+                            '(skips SHA short-circuits and `make` rebuild gating)')
 
-    # apply
-    p = sub.add_parser('apply', help='reconcile services with current config')
-    p.add_argument('--dry-run', action='store_true')
+    def _add_apply_args(p):
+        p.add_argument('--dry-run', action='store_true')
+
+    _add_install_args(sub.add_parser(
+        'install', help='install and configure components '
+                       '(alias for `smd software install`)'))
+    _add_apply_args(sub.add_parser(
+        'apply', help='reconcile services with current config '
+                      '(alias for `smd software apply`)'))
+
+    # software — grouped parent for the install/apply pair.  Both
+    # subverbs accept the exact same flags as the top-level forms.
+    p_software = sub.add_parser(
+        'software',
+        help='install or reconcile sigmond-managed software components')
+    software_sub = p_software.add_subparsers(dest='software_command')
+    _add_install_args(software_sub.add_parser(
+        'install', help='install and configure components'))
+    _add_apply_args(software_sub.add_parser(
+        'apply', help='reconcile services with current config'))
 
     # start
     # All four lifecycle verbs accept positional component names (systemctl
@@ -8485,6 +8520,20 @@ def main() -> int:
             return cmd_config_edit(args)
         p_config.print_help()
         return 0
+
+    # `smd software <install|apply>` — rewrite into the corresponding
+    # top-level command so the rest of the dispatch (mutating-lock,
+    # root check, sigmond-lib gate) and the cmd_install/cmd_apply
+    # handlers themselves can stay unaware of the new grouping.  The
+    # arg namespaces are identical because both forms share the same
+    # _add_install_args / _add_apply_args definitions.
+    if args.command == 'software':
+        sub_cmd = getattr(args, 'software_command', None)
+        if sub_cmd in ('install', 'apply'):
+            args.command = sub_cmd  # fall through to dispatch below
+        else:
+            p_software.print_help()
+            return 0
 
     # Mutating verbs require root and acquire the lifecycle lock (CONTRACT §5.5).
     _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload', 'update'}
