@@ -44,11 +44,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_DB = Path('/var/lib/sigmond/decode_health.db')
 PSK_LOG_GLOB = '/var/log/psk-recorder/*.log'
 # v3 Phase A (2026-05-16) moved the uploader in-process from the
-# retired wd-upload-hs@.service into wspr-recorder.  We now scan
-# wspr-recorder's journal for the same per-pump shipping line that
-# the old standalone unit emitted (logger name was updated from
-# wdlib.hs_uploader_shim to wspr_recorder.hs_uploader_shim).
-UPLOAD_UNIT_GLOB = 'wspr-recorder@*.service'
+# retired wd-upload-hs@.service into wspr-recorder.  The shipping
+# log line is emitted by ``wspr_recorder.hs_uploader_shim`` from
+# inside whichever systemd unit hosts the wspr-recorder process.
+# On bee1-style deployments that's ``wd-ka9q-record@*`` (wspr-recorder
+# launched as a child of wsprdaemon-client's launcher); on a standalone
+# install it's ``wspr-recorder@*`` directly.  We scan both — the
+# logger-name regex disambiguates and either set may be empty.
+UPLOAD_UNIT_GLOBS = (
+    'wspr-recorder@*.service',
+    'wd-ka9q-record@*.service',
+)
 WSPR_SPOOL_ROOT = Path('/var/spool/wsprdaemon/recording')
 DEFAULT_LOOKBACK_HOURS = 2  # safe overlap window for cron @ hourly
 
@@ -119,15 +125,21 @@ PSK_TS_RE = re.compile(
     r'^(?P<date>\d{4}-\d{2}-\d{2})[T ](?P<time>\d{2}:\d{2}:\d{2})(?:[,\.]\d+)?'
 )
 
-# hs-uploader shipping line (journal, post-v3-Phase-A 2026-05-16):
-#   2026-05-16 02:30:12 INFO wspr_recorder.hs_uploader_shim: wspr-uploader-hs: shipped
-#     wsprdaemon=7 wsprnet=900 (total wsprdaemon=2346 wsprnet=9000, work=10)
-# The logger-name prefix is matched permissively (``wdlib`` or
-# ``wspr_recorder``) so pre-Phase-A archived journals still parse
-# cleanly when an operator runs the collector with a wide lookback.
+# hs-uploader shipping line.  Two log formats coexist depending on
+# which producer emitted the line:
+#
+#   legacy (wsprdaemon-client/bin/wd-upload-hs basicConfig):
+#     2026-05-14 02:30:12,123 INFO wdlib.hs_uploader_shim: wspr-uploader-hs: shipped wsprdaemon=7 wsprnet=900 ...
+#   post-Phase-A (wspr-recorder basicConfig):
+#     2026-05-16 02:30:12,123 - wspr_recorder.hs_uploader_shim - INFO - wspr-uploader-hs: shipped wsprdaemon=7 wsprnet=900 ...
+#
+# Skip everything between the timestamp and the literal
+# ``wspr-uploader-hs: shipped`` marker so both styles parse.  The
+# logger-name disambiguator is no longer needed — the message text
+# itself is unique enough.
 UPLOAD_SHIPPED_RE = re.compile(
-    r'(?P<date>\d{4}-\d{2}-\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2}),\d+\s+INFO\s+'
-    r'(?:wdlib|wspr_recorder)\.hs_uploader_shim:\s+wspr-uploader-hs:\s+shipped\s+'
+    r'(?P<date>\d{4}-\d{2}-\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2}),\d+'
+    r'.*?wspr-uploader-hs:\s+shipped\s+'
     r'wsprdaemon=(?P<wd>\d+)\s+wsprnet=(?P<wn>\d+)'
 )
 
@@ -194,20 +206,28 @@ def _scrape_psk_log(path: Path, since: datetime) -> Iterator[dict]:
         return
 
 
-def _scrape_upload_journal(unit_glob: str, since: datetime) -> Iterator[dict]:
+def _scrape_upload_journal(unit_globs, since: datetime) -> Iterator[dict]:
     """Yield event dicts from journalctl for the in-process uploader.
 
     Prior to v3 Phase A (2026-05-16) the uploader lived in
     ``wd-upload-hs@*.service``; from that point on it runs inside
-    ``wspr-recorder@*.service``.  The same per-pump "shipped"
-    log line is matched in either journal.
+    whichever systemd unit hosts the wspr-recorder process
+    (``wd-ka9q-record@*`` on bee1-style installs, ``wspr-recorder@*``
+    when launched directly).  ``unit_globs`` may be a single string
+    or an iterable of patterns; we pass each as a separate ``-u``
+    flag.  journalctl returns rc=1 with "No data available" when no
+    units match a given glob — non-fatal as long as at least one
+    pattern matches.
     """
+    if isinstance(unit_globs, str):
+        unit_globs = (unit_globs,)
     cmd = [
         'journalctl',
         '--since', since.strftime('%Y-%m-%d %H:%M:%S'),
-        '-u', unit_glob,
         '--no-pager', '--output=short-iso-precise',
     ]
+    for glob in unit_globs:
+        cmd.extend(['-u', glob])
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=60, check=False,
@@ -217,7 +237,14 @@ def _scrape_upload_journal(unit_glob: str, since: datetime) -> Iterator[dict]:
         return
 
     if proc.returncode != 0:
-        logger.warning("journalctl rc=%d: %s", proc.returncode, proc.stderr[:200])
+        # Common on a clean host: globs that match no installed unit
+        # produce "No data available" with rc=1.  Demote to debug; the
+        # parse loop below still runs on whatever stdout did arrive.
+        msg = proc.stderr[:200] if proc.stderr else ""
+        if "No data available" in msg:
+            logger.debug("journalctl rc=%d: %s", proc.returncode, msg)
+        else:
+            logger.warning("journalctl rc=%d: %s", proc.returncode, msg)
 
     for raw in proc.stdout.splitlines():
         m = UPLOAD_SHIPPED_RE.search(raw)
@@ -339,7 +366,7 @@ def collect(db_path: Path, since: datetime) -> dict:
         for ev in _scrape_psk_log(path, since):
             events.append(ev)
             counts['psk-recorder'] += 1
-    for ev in _scrape_upload_journal(UPLOAD_UNIT_GLOB, since):
+    for ev in _scrape_upload_journal(UPLOAD_UNIT_GLOBS, since):
         events.append(ev)
         counts['wspr-upload'] += 1
 
