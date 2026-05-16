@@ -6196,9 +6196,9 @@ def cmd_uploads_watch(args) -> int:
 
 
 def cmd_wspr_watch(args) -> int:
-    """Per-cycle live view of wsprdaemon-client's WSPR pipeline.
+    """Per-cycle live view of wspr-recorder's WSPR pipeline.
 
-    Watches `wd-ka9q-record@<id>.service` journals for the
+    Watches `wspr-recorder@<id>.service` journals for the
     CycleBatcher's atomic per-cycle write event:
 
         cycle UTC HH:MM → N spots in wspr.spots (B bands, write Tms)
@@ -6226,9 +6226,9 @@ def cmd_wspr_watch(args) -> int:
     """
     instance = getattr(args, 'instance', None)
     if instance is None:
-        unit_pattern = 'wd-ka9q-record@*'
+        unit_pattern = 'wspr-recorder@*'
     else:
-        unit_pattern = f'wd-ka9q-record@{instance}.service'
+        unit_pattern = f'wspr-recorder@{instance}.service'
 
     n_recent = int(getattr(args, 'recent', 0) or 0)
     verbose = bool(getattr(args, 'verbose', False))
@@ -7719,8 +7719,8 @@ def _add_wspr_watch_args(p) -> None:
                    help='per-cycle mode showing ALL spots — same '
                         'cadence as N, no per-band cap')
     p.add_argument('--instance', metavar='RADIOD_ID', default=None,
-                   help='specific wd-ka9q-record@<id> instance '
-                        '(default: all wd-ka9q-record@* journal events)')
+                   help='specific wspr-recorder@<id> instance '
+                        '(default: all wspr-recorder@* journal events)')
     p.add_argument('--backlog', metavar='MIN', type=int, default=10,
                    help='start by replaying this many minutes of journal '
                         'history (default 10; rows for those cycles have '
