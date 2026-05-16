@@ -2,7 +2,9 @@
 """sigmond-decode-health-collect — hourly trend collector for decode/upload events.
 
 Scrapes per-cycle decode events from psk-recorder + per-pump shipping events
-from wd-upload-hs and appends them to ``/var/lib/sigmond/decode_health.db``.
+from wspr-recorder's in-process hs-uploader (was wd-upload-hs@.service before
+v3 Phase A 2026-05-16) and appends them to
+``/var/lib/sigmond/decode_health.db``.
 Designed to be cron/timer-driven, idempotent on overlapping windows
 (primary key dedupes), and small enough that the sqlite file stays
 manageable for years.
@@ -41,7 +43,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB = Path('/var/lib/sigmond/decode_health.db')
 PSK_LOG_GLOB = '/var/log/psk-recorder/*.log'
-UPLOAD_UNIT_GLOB = 'wd-upload-hs@*.service'
+# v3 Phase A (2026-05-16) moved the uploader in-process from the
+# retired wd-upload-hs@.service into wspr-recorder.  We now scan
+# wspr-recorder's journal for the same per-pump shipping line that
+# the old standalone unit emitted (logger name was updated from
+# wdlib.hs_uploader_shim to wspr_recorder.hs_uploader_shim).
+UPLOAD_UNIT_GLOB = 'wspr-recorder@*.service'
 WSPR_SPOOL_ROOT = Path('/var/spool/wsprdaemon/recording')
 DEFAULT_LOOKBACK_HOURS = 2  # safe overlap window for cron @ hourly
 
@@ -112,12 +119,15 @@ PSK_TS_RE = re.compile(
     r'^(?P<date>\d{4}-\d{2}-\d{2})[T ](?P<time>\d{2}:\d{2}:\d{2})(?:[,\.]\d+)?'
 )
 
-# wd-upload-hs shipping line (journal):
-#   2026-05-14 02:30:12 INFO wdlib.hs_uploader_shim: wspr-uploader-hs: shipped
+# hs-uploader shipping line (journal, post-v3-Phase-A 2026-05-16):
+#   2026-05-16 02:30:12 INFO wspr_recorder.hs_uploader_shim: wspr-uploader-hs: shipped
 #     wsprdaemon=7 wsprnet=900 (total wsprdaemon=2346 wsprnet=9000, work=10)
+# The logger-name prefix is matched permissively (``wdlib`` or
+# ``wspr_recorder``) so pre-Phase-A archived journals still parse
+# cleanly when an operator runs the collector with a wide lookback.
 UPLOAD_SHIPPED_RE = re.compile(
     r'(?P<date>\d{4}-\d{2}-\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2}),\d+\s+INFO\s+'
-    r'wdlib\.hs_uploader_shim:\s+wspr-uploader-hs:\s+shipped\s+'
+    r'(?:wdlib|wspr_recorder)\.hs_uploader_shim:\s+wspr-uploader-hs:\s+shipped\s+'
     r'wsprdaemon=(?P<wd>\d+)\s+wsprnet=(?P<wn>\d+)'
 )
 
@@ -185,7 +195,13 @@ def _scrape_psk_log(path: Path, since: datetime) -> Iterator[dict]:
 
 
 def _scrape_upload_journal(unit_glob: str, since: datetime) -> Iterator[dict]:
-    """Yield event dicts from journalctl for wd-upload-hs."""
+    """Yield event dicts from journalctl for the in-process uploader.
+
+    Prior to v3 Phase A (2026-05-16) the uploader lived in
+    ``wd-upload-hs@*.service``; from that point on it runs inside
+    ``wspr-recorder@*.service``.  The same per-pump "shipped"
+    log line is matched in either journal.
+    """
     cmd = [
         'journalctl',
         '--since', since.strftime('%Y-%m-%d %H:%M:%S'),
@@ -218,7 +234,7 @@ def _scrape_upload_journal(unit_glob: str, since: datetime) -> Iterator[dict]:
         # the count; decode_ok/decode_total/slots_empty unused for uploads.
         yield {
             'ts':            ts_str,
-            'source':        'wd-upload-hs',
+            'source':        'wspr-recorder',
             'mode':          'wsprdaemon',
             'spots':         int(m.group('wd')),
             'decodes_ok':    None,
@@ -229,7 +245,7 @@ def _scrape_upload_journal(unit_glob: str, since: datetime) -> Iterator[dict]:
         }
         yield {
             'ts':            ts_str,
-            'source':        'wd-upload-hs',
+            'source':        'wspr-recorder',
             'mode':          'wsprnet',
             'spots':         int(m.group('wn')),
             'decodes_ok':    None,
@@ -313,7 +329,7 @@ def collect(db_path: Path, since: datetime) -> dict:
     conn.executescript(SCHEMA)
 
     counts = {
-        'psk-recorder': 0, 'wd-upload-hs': 0, 'wspr-wav': 0,
+        'psk-recorder': 0, 'wspr-upload': 0, 'wspr-wav': 0,
         'inserted': 0, 'duplicate': 0,
         'wav_inserted': 0, 'wav_duplicate': 0,
     }
@@ -325,7 +341,7 @@ def collect(db_path: Path, since: datetime) -> dict:
             counts['psk-recorder'] += 1
     for ev in _scrape_upload_journal(UPLOAD_UNIT_GLOB, since):
         events.append(ev)
-        counts['wd-upload-hs'] += 1
+        counts['wspr-upload'] += 1
 
     for ev in events:
         try:
@@ -391,9 +407,9 @@ def main() -> int:
     logger.info("scraping since %s into %s", since.isoformat(), args.db)
     stats = collect(args.db, since)
     logger.info(
-        "done: psk-recorder=%d  wd-upload-hs=%d  wspr-wav=%d  "
+        "done: psk-recorder=%d  wspr-upload=%d  wspr-wav=%d  "
         "cycle_inserted=%d (dup=%d)  wav_inserted=%d (dup=%d)",
-        stats['psk-recorder'], stats['wd-upload-hs'], stats['wspr-wav'],
+        stats['psk-recorder'], stats['wspr-upload'], stats['wspr-wav'],
         stats['inserted'], stats['duplicate'],
         stats['wav_inserted'], stats['wav_duplicate'],
     )
