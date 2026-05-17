@@ -1,6 +1,6 @@
 # /etc/systemd/system/sigmond-storage-trim-timestd.service
 [Unit]
-Description=Sigmond storage trim — timestd.events @ 30d
+Description=Sigmond storage trim — timestd.events @ 7d
 Documentation=https://github.com/mijahauan/sigmond
 ConditionPathExists=/var/lib/sigmond/sink.db
 
@@ -11,13 +11,13 @@ Group=root
 
 # timestd.events is L2 calibration / metrology data (TOA,
 # clock_offset, doppler, propagation_mode, hop count, quality
-# grade).  Real science data — no live external consumer exists
-# yet, so we retain locally for retrospective analysis.  30 days at
-# ~45k rows/day ≈ 1.4M rows / few-hundred MB in pending_uploads —
-# well within disk budget on bee1.  Easy to upgrade to a real
-# consumer pipeline later without changing this timer; just stop
-# the timer if a consumer starts draining the queue itself.
-ExecStart=/usr/local/bin/smd storage trim --target-db timestd --max-age 30d --yes
+# grade).  No live external consumer drains this queue yet, and
+# retention here is low priority — it must not crowd out
+# higher-priority data on disk.  7 days at ~45k rows/day ≈ 315k
+# rows keeps a useful recent window while bounding sink.db growth
+# (the hfdl/wspr trims run at 24h).  If a real consumer pipeline
+# starts draining the queue itself, stop this timer.
+ExecStart=/usr/local/bin/smd storage trim --target-db timestd --max-age 7d --yes
 
 StandardOutput=journal
 StandardError=journal
