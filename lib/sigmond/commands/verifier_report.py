@@ -411,6 +411,114 @@ def _format_cadence(c: dict) -> List[str]:
     return out
 
 
+def _rejected_query(
+    conn: sqlite3.Connection,
+    rx_call: Optional[str],
+    since_iso: str,
+) -> List[tuple]:
+    """Spots wsprnet explicitly rejected at upload time.
+
+    Only meaningful when ``WSPRNET_BATCH_SIZE=1`` is set on the
+    uploading host — that's the only mode where wsprnet's
+    aggregate "M out of N added" response answers per-spot.  When
+    the upload batch's ``(n_posted=1, n_added=0)`` tuple holds,
+    the spot tied to that batch was the one wsprnet rejected.
+
+    For larger batches the rejection is unattributable to a
+    specific spot and rows here return empty even if the batch
+    aggregate shows some rejections.
+    """
+    where_clauses = [
+        "a.uploaded_at >= ?",
+        "b.n_posted = 1",
+        "b.n_added = 0",
+    ]
+    params: list = [since_iso]
+    if rx_call:
+        where_clauses.append("a.rx_call = ?")
+        params.append(rx_call)
+    where = " AND ".join(where_clauses)
+    return list(conn.execute(
+        f"""
+        SELECT a.spot_key, a.uploaded_at, a.dropped_at
+          FROM wsprnet_audit a
+          JOIN wsprnet_audit_batch b ON a.batch_id = b.id
+         WHERE {where}
+      ORDER BY a.uploaded_at, a.spot_key
+        """,
+        params,
+    ))
+
+
+def _silent_drop_query(
+    conn: sqlite3.Connection,
+    rx_call: Optional[str],
+    since_iso: str,
+) -> List[tuple]:
+    """Spots wsprnet ACK'd as added (``n_added=1``) but never indexed
+    into ``wspr.rx``.  The smoking-gun cohort for "wsprnet is
+    silently dropping accepted spots".
+
+    Per-spot meaningful only with ``WSPRNET_BATCH_SIZE=1`` (same
+    reason as :func:`_rejected_query`).  For larger batches we can't
+    say which specific spot wsprnet ack'd-but-didn't-index, only
+    that some did.
+    """
+    where_clauses = [
+        "a.uploaded_at >= ?",
+        "b.n_posted = 1",
+        "b.n_added = 1",
+        "a.verified_at IS NULL",
+        "a.dropped_at IS NOT NULL",
+    ]
+    params: list = [since_iso]
+    if rx_call:
+        where_clauses.append("a.rx_call = ?")
+        params.append(rx_call)
+    where = " AND ".join(where_clauses)
+    return list(conn.execute(
+        f"""
+        SELECT a.spot_key, a.uploaded_at, a.dropped_at
+          FROM wsprnet_audit a
+          JOIN wsprnet_audit_batch b ON a.batch_id = b.id
+         WHERE {where}
+      ORDER BY a.uploaded_at, a.spot_key
+        """,
+        params,
+    ))
+
+
+def _per_spot_breakdown_available(
+    conn: sqlite3.Connection,
+    rx_call: Optional[str],
+    since_iso: str,
+) -> bool:
+    """True iff every batch in the window has ``n_posted <= 1``.
+    Used to decide whether to surface the rejected / silent_drop
+    distinction in the default summary — otherwise the wsprnet
+    aggregate response can't be attributed to individual spots.
+    """
+    where_clauses = ["uploaded_at >= ?"]
+    params: list = [since_iso]
+    if rx_call:
+        where_clauses.append("rx_call = ?")
+        params.append(rx_call)
+    where = " AND ".join(where_clauses)
+    row = conn.execute(
+        f"""
+        SELECT COUNT() AS total,
+               SUM(CASE WHEN n_posted <= 1 THEN 1 ELSE 0 END) AS singles
+          FROM wsprnet_audit_batch
+         WHERE {where}
+        """,
+        params,
+    ).fetchone()
+    if not row or not row[0]:
+        return False
+    total, singles = row[0], row[1] or 0
+    return singles == total
+
+
 def _delivered_query(
     conn: sqlite3.Connection,
     rx_call: Optional[str],
@@ -513,12 +621,21 @@ def cmd_verifier_report(args) -> int:
         want_in_flight = getattr(args, 'in_flight', False) or args.json
         want_delivered = getattr(args, 'delivered', False) or args.json
         want_cadence = getattr(args, 'cadence', False) or args.json
+        want_rejected = getattr(args, 'rejected', False) or args.json
+        want_silent_drop = getattr(args, 'silent_drop', False) or args.json
         lost_rows = _lost_query(conn, rx_call, since_iso) \
             if want_lost else []
         in_flight_rows = _in_flight_query(conn, rx_call, since_iso) \
             if want_in_flight else []
         delivered_rows = _delivered_query(conn, rx_call, since_iso) \
             if want_delivered else []
+        rejected_rows = _rejected_query(conn, rx_call, since_iso) \
+            if want_rejected else []
+        silent_drop_rows = _silent_drop_query(conn, rx_call, since_iso) \
+            if want_silent_drop else []
+        per_spot_mode = _per_spot_breakdown_available(
+            conn, rx_call, since_iso,
+        )
         cadence = None
         if want_cadence:
             cycle_counts = _per_cycle_counts(conn, rx_call, since_iso)
@@ -555,6 +672,21 @@ def cmd_verifier_report(args) -> int:
             }
             if cadence is not None:
                 payload["cadence"] = cadence
+            payload["per_spot_mode"] = per_spot_mode
+            payload["rejected"] = [
+                {
+                    "spot_key": row[0],
+                    "uploaded_at": row[1],
+                    "dropped_at": row[2],
+                } for row in rejected_rows
+            ]
+            payload["silent_drop"] = [
+                {
+                    "spot_key": row[0],
+                    "uploaded_at": row[1],
+                    "dropped_at": row[2],
+                } for row in silent_drop_rows
+            ]
             print(json.dumps(payload, indent=2))
             return 0
 
@@ -567,6 +699,14 @@ def cmd_verifier_report(args) -> int:
             lost=summary["lost"],
             in_flight=summary["in_flight"],
         ))
+        if not per_spot_mode:
+            print()
+            print(
+                "note: set WSPRNET_BATCH_SIZE=1 in the wsprnet uploader's "
+                "env to distinguish rejected-at-upload from silent-drop "
+                "(today's batches mix many spots per POST; wsprnet's "
+                "aggregate response can't be attributed to specific spots)"
+            )
         if cadence is not None:
             print()
             for line in _format_cadence(cadence):
@@ -595,6 +735,40 @@ def cmd_verifier_report(args) -> int:
                     print(line)
             else:
                 print("delivered spots: (none in window)")
+        if getattr(args, 'rejected', False):
+            print()
+            if rejected_rows:
+                print(
+                    f"rejected spots ({len(rejected_rows)}) — "
+                    "wsprnet explicitly said 'not added':"
+                )
+                for line in _format_lost_lines(rejected_rows):
+                    print(line)
+            else:
+                msg = "rejected spots: (none in window)"
+                if not per_spot_mode:
+                    msg = (
+                        "rejected spots: (per-spot mode not enabled — "
+                        "set WSPRNET_BATCH_SIZE=1 to attribute rejection)"
+                    )
+                print(msg)
+        if getattr(args, 'silent_drop', False):
+            print()
+            if silent_drop_rows:
+                print(
+                    f"silently-dropped spots ({len(silent_drop_rows)}) — "
+                    "wsprnet ack'd as added, then never indexed:"
+                )
+                for line in _format_lost_lines(silent_drop_rows):
+                    print(line)
+            else:
+                msg = "silently-dropped spots: (none in window)"
+                if not per_spot_mode:
+                    msg = (
+                        "silently-dropped spots: (per-spot mode not "
+                        "enabled — set WSPRNET_BATCH_SIZE=1 to detect)"
+                    )
+                print(msg)
         return 0
     finally:
         conn.close()
