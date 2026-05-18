@@ -4564,7 +4564,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage public-ip completion"
+    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage public-ip completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -4631,7 +4631,10 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "install apply" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar ka9q uploads" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar ka9q uploads verifier" -- "$cur"))
+                    ;;
+                verifier)
+                    COMPREPLY=($(compgen -W "report" -- "$cur"))
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
@@ -4742,6 +4745,16 @@ _smd_complete() {
                             ;;
                         *)
                             COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                verifier)
+                    case "${words[2]}" in
+                        report)
+                            COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --json --db" -- "$cur"))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "report" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -8397,6 +8410,18 @@ def main() -> int:
         help='list each lost spot under the summary (time, tx_sign, '
              'frequency); these are the spots that wsprnet either '
              'rejected at upload or accepted-then-silently-dropped',
+    )
+    p_v_report.add_argument(
+        '--in-flight', action='store_true',
+        help='list each in-flight spot under the summary — those '
+             'uploaded but not yet matched in wspr.rx by the '
+             'verifier (still inside the 2 h wait window)',
+    )
+    p_v_report.add_argument(
+        '--delivered', action='store_true',
+        help='list each delivered spot under the summary (verified '
+             'present in wspr.rx); useful for sanity-checking but '
+             'usually noisy on a busy site',
     )
     p_v_report.add_argument(
         '--json', action='store_true',

@@ -115,6 +115,60 @@ def _format_lost_lines(rows: List[tuple]) -> List[str]:
     return out
 
 
+def _format_in_flight_lines(rows: List[tuple]) -> List[str]:
+    """One line per in-flight spot, sorted by uploaded_at desc so the
+    most-recent batches are at the top (those are most-likely-pending
+    waiting for the next verifier pass; older ones are nearer the 2 h
+    timeout and more likely to flip to lost soon).
+    """
+    out = []
+    for spot_key, uploaded_at in rows:
+        parts = spot_key.split("|", 2)
+        if len(parts) != 3:
+            continue
+        t, tx, freq = parts
+        try:
+            ts_hhmm = t[11:16]
+        except IndexError:
+            ts_hhmm = t
+        out.append(
+            f"  {ts_hhmm}  {tx:<10}  {freq:>10} Hz  "
+            f"uploaded={uploaded_at[:19]}"
+        )
+    return out
+
+
+def _format_delivered_lines(rows: List[tuple]) -> List[str]:
+    """One line per delivered spot, sorted by spot time.  Shows the
+    lag between upload and verification so the operator can spot
+    abnormally slow wsprnet indexing.
+    """
+    out = []
+    for spot_key, uploaded_at, verified_at in rows:
+        parts = spot_key.split("|", 2)
+        if len(parts) != 3:
+            continue
+        t, tx, freq = parts
+        try:
+            ts_hhmm = t[11:16]
+        except IndexError:
+            ts_hhmm = t
+        # Compute lag (verified_at - uploaded_at) in seconds — useful
+        # signal when one server's indexing is slower than another's.
+        lag_part = ""
+        try:
+            u = datetime.fromisoformat(uploaded_at.replace("Z", "+00:00"))
+            v = datetime.fromisoformat(verified_at.replace("Z", "+00:00"))
+            lag = int((v - u).total_seconds())
+            lag_part = f"  lag={lag:>4}s"
+        except (ValueError, AttributeError):
+            pass
+        out.append(
+            f"  {ts_hhmm}  {tx:<10}  {freq:>10} Hz{lag_part}"
+        )
+    return out
+
+
 def _summary_query(
     conn: sqlite3.Connection,
     rx_call: Optional[str],
@@ -200,6 +254,65 @@ def _lost_query(
     ))
 
 
+def _in_flight_query(
+    conn: sqlite3.Connection,
+    rx_call: Optional[str],
+    since_iso: str,
+) -> List[tuple]:
+    """Spots uploaded in the window that haven't been verified at
+    wspr.rx yet and haven't aged out either — typically the most
+    recent few WSPR cycles waiting for the next verifier pass.
+    """
+    where_clauses = [
+        "uploaded_at >= ?",
+        "verified_at IS NULL",
+        "dropped_at IS NULL",
+    ]
+    params: list = [since_iso]
+    if rx_call:
+        where_clauses.append("rx_call = ?")
+        params.append(rx_call)
+    where = " AND ".join(where_clauses)
+    return list(conn.execute(
+        f"""
+        SELECT spot_key, uploaded_at
+        FROM wsprnet_audit
+        WHERE {where}
+        ORDER BY uploaded_at DESC, spot_key
+        """,
+        params,
+    ))
+
+
+def _delivered_query(
+    conn: sqlite3.Connection,
+    rx_call: Optional[str],
+    since_iso: str,
+) -> List[tuple]:
+    """Spots that round-tripped successfully: uploaded then matched
+    in wspr.rx by the WsprnetVerifier.  Returned with both timestamps
+    so the formatter can compute upload→verify lag.
+    """
+    where_clauses = [
+        "uploaded_at >= ?",
+        "verified_at IS NOT NULL",
+    ]
+    params: list = [since_iso]
+    if rx_call:
+        where_clauses.append("rx_call = ?")
+        params.append(rx_call)
+    where = " AND ".join(where_clauses)
+    return list(conn.execute(
+        f"""
+        SELECT spot_key, uploaded_at, verified_at
+        FROM wsprnet_audit
+        WHERE {where}
+        ORDER BY spot_key
+        """,
+        params,
+    ))
+
+
 def _detect_default_rx_call(conn: sqlite3.Connection) -> Optional[str]:
     """If exactly one rx_call appears in the audit, return it.
     Otherwise return None so the caller falls back to all-reporters.
@@ -267,8 +380,17 @@ def cmd_verifier_report(args) -> int:
         since_iso = since.isoformat(timespec="seconds")
 
         summary = _summary_query(conn, rx_call, since_iso)
+        # Fetch each cohort's per-spot list when the flag asks for it
+        # OR when --json is on (so the JSON document is complete).
+        want_lost = args.lost or args.json
+        want_in_flight = getattr(args, 'in_flight', False) or args.json
+        want_delivered = getattr(args, 'delivered', False) or args.json
         lost_rows = _lost_query(conn, rx_call, since_iso) \
-            if (args.lost or args.json) else []
+            if want_lost else []
+        in_flight_rows = _in_flight_query(conn, rx_call, since_iso) \
+            if want_in_flight else []
+        delivered_rows = _delivered_query(conn, rx_call, since_iso) \
+            if want_delivered else []
 
         if args.json:
             print(json.dumps({
@@ -281,6 +403,19 @@ def cmd_verifier_report(args) -> int:
                         "uploaded_at": row[1],
                         "dropped_at": row[2],
                     } for row in lost_rows
+                ],
+                "in_flight": [
+                    {
+                        "spot_key": row[0],
+                        "uploaded_at": row[1],
+                    } for row in in_flight_rows
+                ],
+                "delivered": [
+                    {
+                        "spot_key": row[0],
+                        "uploaded_at": row[1],
+                        "verified_at": row[2],
+                    } for row in delivered_rows
                 ],
             }, indent=2))
             return 0
@@ -295,14 +430,29 @@ def cmd_verifier_report(args) -> int:
             in_flight=summary["in_flight"],
         ))
         if args.lost:
+            print()
             if lost_rows:
-                print()
                 print(f"lost spots ({len(lost_rows)}):")
                 for line in _format_lost_lines(lost_rows):
                     print(line)
             else:
-                print()
                 print("lost spots: (none in window)")
+        if getattr(args, 'in_flight', False):
+            print()
+            if in_flight_rows:
+                print(f"in-flight spots ({len(in_flight_rows)}):")
+                for line in _format_in_flight_lines(in_flight_rows):
+                    print(line)
+            else:
+                print("in-flight spots: (none in window)")
+        if getattr(args, 'delivered', False):
+            print()
+            if delivered_rows:
+                print(f"delivered spots ({len(delivered_rows)}):")
+                for line in _format_delivered_lines(delivered_rows):
+                    print(line)
+            else:
+                print("delivered spots: (none in window)")
         return 0
     finally:
         conn.close()
