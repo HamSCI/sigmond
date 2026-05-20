@@ -4690,8 +4690,19 @@ def cmd_diag_sftp(args) -> int:
                 auth_rc = ssh.returncode
                 attempt['auth_ms'] = int((_time.monotonic() - t0) * 1000)
                 attempt['auth_rc'] = auth_rc
+                # SFTP-only accounts (the wsprdaemon-server gateway
+                # convention) reject the post-auth ``true`` exec with
+                # "This service allows sftp connections only.", and
+                # ssh exits non-zero.  But auth itself SUCCEEDED —
+                # which is all this probe is testing.  Detect that
+                # signature on stdout/stderr and treat it as ok.
+                combined = ((ssh.stdout or '') + (ssh.stderr or '')).lower()
+                sftp_only = 'sftp connections only' in combined
                 if auth_rc == 0:
                     attempt['auth'] = 'ok'
+                elif sftp_only:
+                    attempt['auth'] = 'ok'
+                    attempt['auth_note'] = 'sftp-only account (auth verified)'
                 else:
                     err = (ssh.stderr or '').strip().splitlines()
                     attempt['auth'] = 'fail'
@@ -4711,11 +4722,13 @@ def cmd_diag_sftp(args) -> int:
                     if tcp_err is None else f'tcp FAIL ({tcp_err})'
                 )
                 fp_tag = (fp_lines[0].split()[1][:16] if fp_lines else '<no keys>')
-                auth_part = (
-                    f'auth {attempt.get("auth"):<7}'
-                    + (f' ({attempt.get("auth_stderr","")})'
-                       if attempt.get('auth') != 'ok' else '')
-                )
+                auth_state = attempt.get('auth', '')
+                note = attempt.get('auth_note') or attempt.get('auth_stderr', '')
+                auth_part = f'auth {auth_state:<7}'
+                if auth_state == 'ok' and note:
+                    auth_part += f' ({note})'
+                elif auth_state != 'ok' and note:
+                    auth_part += f' ({note})'
                 print(f'  {tag} attempt {i}/{repeat}: {tcp_part}  key={fp_tag}  {auth_part}')
 
         # Per-server cross-attempt summary.  The genuine flap signal

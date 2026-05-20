@@ -43,11 +43,15 @@ def derive_sftp_user(reporter_call: str) -> str:
 
     Gateways can't use ``/`` in Unix usernames (it'd be a path
     separator), so the reporter ID's slashes are replaced with
-    ``=``.  Examples::
+    ``_``.  Verified directly against gw2.wsprdaemon.org on
+    2026-05-20 — the live accounts there are ``AC0G_B1``,
+    ``AC0G_B2``, ``AC0G_B4``, ``AC0G_ND`` (matching the production
+    ``WsprdaemonTarSftp`` transport's derivation in hs-uploader).
+    Examples::
 
-      derive_sftp_user("AC0G/B4")    →  "AC0G=B4"
+      derive_sftp_user("AC0G/B4")    →  "AC0G_B4"
       derive_sftp_user("W1ABC")      →  "W1ABC"
-      derive_sftp_user("VE3/QRP/MM") →  "VE3=QRP=MM"
+      derive_sftp_user("VE3/QRP/MM") →  "VE3_QRP_MM"
 
     See ``reference_wsprdaemon_gw_bootstrap`` in the sigmond memory
     notes for the bootstrap path that registers a new reporter's
@@ -59,7 +63,7 @@ def derive_sftp_user(reporter_call: str) -> str:
     call = (reporter_call or "").strip()
     if not call:
         raise ValueError("empty reporter call")
-    return call.replace("/", "=")
+    return call.replace("/", "_")
 
 
 def parse_server(entry: str, *, default_user: str = DEFAULT_USER,

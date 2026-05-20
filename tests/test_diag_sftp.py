@@ -38,15 +38,17 @@ class DeriveSftpUserTests(unittest.TestCase):
         self.assertEqual(derive_sftp_user("W1ABC"), "W1ABC")
 
     def test_compound_call(self):
-        # The B4-100 case that motivated this fix.
-        self.assertEqual(derive_sftp_user("AC0G/B4"), "AC0G=B4")
+        # The B4-100 case that motivated this fix.  Verified against
+        # gw2.wsprdaemon.org on 2026-05-20 — the live account is
+        # ``AC0G_B4`` (underscore, not equals).
+        self.assertEqual(derive_sftp_user("AC0G/B4"), "AC0G_B4")
 
     def test_multi_slash(self):
         # Some compound forms (region/portable/mobile) chain slashes.
-        self.assertEqual(derive_sftp_user("VE3/QRP/MM"), "VE3=QRP=MM")
+        self.assertEqual(derive_sftp_user("VE3/QRP/MM"), "VE3_QRP_MM")
 
     def test_whitespace_stripped(self):
-        self.assertEqual(derive_sftp_user("  AC0G/B4  "), "AC0G=B4")
+        self.assertEqual(derive_sftp_user("  AC0G/B4  "), "AC0G_B4")
 
     def test_empty_rejected(self):
         with self.assertRaises(ValueError):
