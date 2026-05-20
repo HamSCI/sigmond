@@ -1,0 +1,31 @@
+# wspr-recorder config.toml — disable one source without losing it
+#
+# WHEN TO USE: a multi-source wspr-recorder config has TWO (or more)
+# [[source]] sections, one of them is misbehaving (e.g. radiod won't
+# tune the LOW WSPR bands, see Task #46), and you want the recorder
+# to listen only to the healthy source while preserving the wedged
+# source's parameters for later.
+#
+# HOW: comment out the wedged source's block.  wspr-recorder skips
+# commented [[source]] sections at startup, so the remaining source
+# is the only one provisioned.  No memory pressure from the unused
+# source, no flap storms when its radiod hiccups.  Restart with
+# ``sudo systemctl restart wspr-recorder@<instance>.service``.
+#
+# REVERT: uncomment the lines (a backup of the original is typically
+# at ``/etc/wspr-recorder/config.toml.pre-bee1only`` if you used the
+# pattern recorded in CLAUDE memory ``b4-100-low-band-tune-failure``).
+#
+# Example below shows B4-100 disabled, bee1 active — the layout
+# deployed on B4-100 host on 2026-05-20 while the LOW-band-tune
+# wedge was being investigated.
+
+#[[source]]
+#key = "radiod:B4-100-rx888mk2-status.local"
+#status_address = "B4-100-rx888mk2-status.local"
+#label = "AC0G/B4 Dipole"
+
+[[source]]
+key = "radiod:bee1-status.local"
+status_address = "bee1-status.local"
+label = "AC0G @EM38ww B1 T3FD"
