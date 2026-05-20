@@ -4456,17 +4456,38 @@ def cmd_diag_sftp(args) -> int:
     import subprocess as _sub
     import time as _time
     from sigmond.diag_sftp import (
-        DEFAULT_PORT, DEFAULT_USER, DEFAULT_KEY_ENV, DEFAULT_SERVERS_ENV,
+        DEFAULT_PORT, DEFAULT_USER_FALLBACK,
+        DEFAULT_KEY_ENV, DEFAULT_SERVERS_ENV, DEFAULT_CALL_ENV,
         classify_flapping,
+        derive_sftp_user,
         find_env_var,
         parse_servers_list,
         parse_ssh_keygen_l_line,
     )
 
     # --- collect servers --------------------------------------------------
-    default_user = getattr(args, 'user', None) or DEFAULT_USER
-    default_port = int(getattr(args, 'port', None) or DEFAULT_PORT)
     env_dir = Path('/etc/wspr-recorder/env')
+    # Default SFTP user is the gateway-side Linux account name derived
+    # from this station's reporter ID — that's what the production
+    # wspr-recorder service uses, NOT a generic ``wsprdaemon``.  Slash
+    # becomes ``=`` because Unix usernames can't contain ``/``.
+    explicit_user = getattr(args, 'user', None)
+    if explicit_user:
+        default_user = explicit_user
+    else:
+        receiver_call = find_env_var(env_dir, DEFAULT_CALL_ENV) or ''
+        try:
+            default_user = derive_sftp_user(receiver_call)
+        except ValueError:
+            _warn(
+                f'no {DEFAULT_CALL_ENV} in {env_dir}/*.env — falling '
+                f'back to {DEFAULT_USER_FALLBACK!r} (the production '
+                f'wspr-recorder service derives its SFTP login from '
+                f'this env var; without it the probe is using the '
+                f'wrong username)'
+            )
+            default_user = DEFAULT_USER_FALLBACK
+    default_port = int(getattr(args, 'port', None) or DEFAULT_PORT)
 
     servers_csv = getattr(args, 'servers', None)
     if not servers_csv:
@@ -4492,8 +4513,72 @@ def cmd_diag_sftp(args) -> int:
     if key_file is None:
         key_file = find_env_var(env_dir, DEFAULT_KEY_ENV)
 
+    # Execution-context wrapper: by default, run the SSH probes as
+    # the wspr-recorder service user (``wsprrec``) so the probe sees
+    # the same world the live service does — same SSH key access
+    # (the key is mode 0640 root:sigmond, readable by wsprrec), same
+    # known_hosts, same HOME.  When ``--as-user`` is set to the
+    # current user (or no service user is detected), the wrapper is
+    # skipped.
+    as_user = getattr(args, 'as_user', None)
+    if as_user is None:
+        # Best-effort autodetect: read the wspr-recorder@*.service unit's
+        # User= directive.  Falls back to running as the current user.
+        try:
+            sysd = _sub.run(
+                ['systemctl', 'show', '-p', 'User',
+                 'wspr-recorder@AC0G-B4.service'],
+                capture_output=True, text=True, timeout=5,
+            )
+            if sysd.returncode == 0:
+                for line in sysd.stdout.splitlines():
+                    if line.startswith('User='):
+                        as_user = line.split('=', 1)[1].strip() or None
+                        break
+        except (FileNotFoundError, _sub.TimeoutExpired):
+            pass
+        if not as_user:
+            try:
+                import pwd as _pwd
+                pw_test = _pwd.getpwnam('wsprrec')
+                as_user = 'wsprrec'
+            except KeyError:
+                as_user = ''
+
+    import os as _os
+    current_user = _os.environ.get('USER') or ''
+    use_sudo = bool(as_user) and as_user != current_user
+
+    # ``sudo -n`` fails fast if NOPASSWD isn't configured — better
+    # than hanging the probe waiting for a password.
+    sudo_prefix: list[str] = []
+    if use_sudo:
+        sudo_prefix = ['sudo', '-n', '-u', as_user]
+        # Probe sudo right now so we surface a permission failure
+        # before running N attempts × M servers worth of timeouts.
+        sudo_check = _sub.run(
+            sudo_prefix + ['true'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if sudo_check.returncode != 0:
+            _warn(
+                f'cannot run as {as_user!r} via sudo '
+                f'({(sudo_check.stderr or "").strip() or "no NOPASSWD?"}) '
+                f'— falling back to current user ({current_user!r}).  '
+                f'For an accurate probe of the production wspr-recorder '
+                f'service, either run ``sudo smd diag sftp`` or grant '
+                f'``{current_user} ALL=(wsprrec) NOPASSWD: /usr/bin/ssh, '
+                f'/usr/bin/ssh-keyscan, /usr/bin/ssh-keygen`` in sudoers.'
+            )
+            sudo_prefix = []
+            as_user = current_user
+            use_sudo = False
+
     want_json = bool(getattr(args, 'json', False))
-    report: dict = {'servers': [], 'key_file': key_file, 'repeat': repeat}
+    report: dict = {
+        'servers': [], 'key_file': key_file, 'repeat': repeat,
+        'as_user': as_user, 'sudo_wrapped': use_sudo,
+    }
 
     if not want_json:
         _heading('SFTP probe')
@@ -4503,6 +4588,10 @@ def cmd_diag_sftp(args) -> int:
             _info(f'identity: {key_file}')
         else:
             _info('identity: (default ~/.ssh/id_*)')
+        if use_sudo:
+            _info(f'run-as: {as_user} (via sudo)')
+        else:
+            _info(f'run-as: {as_user or current_user} (no sudo)')
 
     overall_ok = True
     for (user, host, port) in parsed:
@@ -4548,7 +4637,10 @@ def cmd_diag_sftp(args) -> int:
             # key type so the cross-attempt check only flags when the
             # SAME type returns DIFFERENT fingerprints — that's the
             # genuine load-balancer / rekey signature.
-            ks_cmd = ['ssh-keyscan', '-T', '5', '-p', str(port), '-t', 'ed25519,rsa', host]
+            ks_cmd = sudo_prefix + [
+                'ssh-keyscan', '-T', '5', '-p', str(port),
+                '-t', 'ed25519,rsa', host,
+            ]
             ks = _sub.run(ks_cmd, capture_output=True, text=True, timeout=10)
             fp_lines = []
             this_attempt_by_type: dict[str, str] = {}
@@ -4572,7 +4664,11 @@ def cmd_diag_sftp(args) -> int:
 
             # Auth attempt: ssh -o BatchMode=yes; capture exit code +
             # any stderr (PermissionDenied / Connection refused / etc.)
-            ssh_cmd = [
+            # Wrap in ``sudo -n -u <service-user>`` so the probe uses
+            # the same identity context as the live wspr-recorder
+            # service (it owns the key file's group; its known_hosts
+            # is what the running unit actually consults).
+            ssh_cmd = sudo_prefix + [
                 'ssh', '-n',
                 '-o', 'BatchMode=yes',
                 '-o', 'ConnectTimeout=5',
@@ -4956,7 +5052,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
                             ;;
                         sftp)
-                            COMPREPLY=($(compgen -W "--servers --user --port --repeat --key --json --topology" -- "$cur"))
+                            COMPREPLY=($(compgen -W "--servers --user --port --repeat --key --as-user --json --topology" -- "$cur"))
                             ;;
                         *)
                             COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net sftp --components --topology" -- "$cur"))
@@ -9443,8 +9539,12 @@ def main() -> int:
                    help='comma-separated user@host[:port] (default: '
                         'WD_SFTP_SERVERS from /etc/wspr-recorder/env/*.env)')
     p.add_argument('--user', metavar='USER',
-                   help='SSH user when a server entry has none (default: '
-                        'wsprdaemon)')
+                   help='SSH login user on the gateways.  Default: '
+                        'derived from WD_RECEIVER_CALL in '
+                        '/etc/wspr-recorder/env/*.env by replacing '
+                        '``/`` with ``=`` — e.g. AC0G/B4 → AC0G=B4 '
+                        '(the per-reporter Linux account wsprdaemon-'
+                        'server provisions on the gateway side).')
     p.add_argument('--port', type=int, metavar='PORT',
                    help='SSH port when a server entry has none (default: 22)')
     p.add_argument('--repeat', type=int, default=3, metavar='N',
@@ -9453,6 +9553,14 @@ def main() -> int:
     p.add_argument('--key', metavar='PATH',
                    help='SSH identity file (default: HS_UPLOADER_SSH_KEY_FILE '
                         'from env files; else system default)')
+    p.add_argument('--as-user', metavar='USER', dest='as_user',
+                   help='Local user to run the ssh probes as.  Default: '
+                        'auto-detected from wspr-recorder@*.service\'s '
+                        'User= directive (typically ``wsprrec``), so the '
+                        'probe sees the same key-file access + known_hosts '
+                        'the live service does.  Set to your own username '
+                        'to skip the sudo wrapper.  Sudo NOPASSWD is '
+                        'required when the current user differs.')
     p.add_argument('--json', action='store_true',
                    help='emit full report as JSON')
 

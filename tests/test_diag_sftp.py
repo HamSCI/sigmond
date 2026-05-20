@@ -17,13 +17,50 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from sigmond.diag_sftp import (
     DEFAULT_PORT,
     DEFAULT_USER,
+    DEFAULT_USER_FALLBACK,
     classify_flapping,
+    derive_sftp_user,
     extract_env_var,
     find_env_var,
     parse_server,
     parse_servers_list,
     parse_ssh_keygen_l_line,
 )
+
+
+class DeriveSftpUserTests(unittest.TestCase):
+    """The gateway-side Linux username convention: reporter ID with
+    ``/`` → ``=`` because Unix usernames can't contain a slash.  The
+    previous DEFAULT_USER (``wsprdaemon``) was wrong — this is the
+    correct per-station derivation."""
+
+    def test_simple_call(self):
+        self.assertEqual(derive_sftp_user("W1ABC"), "W1ABC")
+
+    def test_compound_call(self):
+        # The B4-100 case that motivated this fix.
+        self.assertEqual(derive_sftp_user("AC0G/B4"), "AC0G=B4")
+
+    def test_multi_slash(self):
+        # Some compound forms (region/portable/mobile) chain slashes.
+        self.assertEqual(derive_sftp_user("VE3/QRP/MM"), "VE3=QRP=MM")
+
+    def test_whitespace_stripped(self):
+        self.assertEqual(derive_sftp_user("  AC0G/B4  "), "AC0G=B4")
+
+    def test_empty_rejected(self):
+        with self.assertRaises(ValueError):
+            derive_sftp_user("")
+        with self.assertRaises(ValueError):
+            derive_sftp_user("   ")
+        with self.assertRaises(ValueError):
+            derive_sftp_user(None)  # type: ignore[arg-type]
+
+    def test_fallback_constant_preserved(self):
+        # Compat alias for any out-of-tree code that imported the
+        # old constant.  Don't break it accidentally.
+        self.assertTrue(DEFAULT_USER_FALLBACK)
+        self.assertEqual(DEFAULT_USER, DEFAULT_USER_FALLBACK)
 
 
 class ParseServerTests(unittest.TestCase):

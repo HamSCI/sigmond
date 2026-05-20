@@ -18,10 +18,48 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-DEFAULT_USER = "wsprdaemon"
 DEFAULT_PORT = 22
 DEFAULT_KEY_ENV = "HS_UPLOADER_SSH_KEY_FILE"
 DEFAULT_SERVERS_ENV = "WD_SFTP_SERVERS"
+DEFAULT_CALL_ENV = "WD_RECEIVER_CALL"
+# Last-resort SFTP user when no WD_RECEIVER_CALL is in the env files.
+# Should almost never be hit on a real station — wspr-recorder won't
+# even start without WD_RECEIVER_CALL set.
+DEFAULT_USER_FALLBACK = "wsprdaemon"
+
+# Compat alias.  The previous default ("wsprdaemon") was wrong:
+# wsprdaemon-server gateways provision per-reporter Linux accounts
+# named after the station's reporter ID (with ``/`` → ``=``), and
+# that's the username the production wspr-recorder service uses for
+# its SFTP push.  Kept as ``DEFAULT_USER`` so out-of-tree imports
+# still resolve, but new code should derive via
+# ``derive_sftp_user(reporter_call)``.
+DEFAULT_USER = DEFAULT_USER_FALLBACK
+
+
+def derive_sftp_user(reporter_call: str) -> str:
+    """Linux username on a wsprdaemon-server gateway for this
+    reporter's per-station account.
+
+    Gateways can't use ``/`` in Unix usernames (it'd be a path
+    separator), so the reporter ID's slashes are replaced with
+    ``=``.  Examples::
+
+      derive_sftp_user("AC0G/B4")    →  "AC0G=B4"
+      derive_sftp_user("W1ABC")      →  "W1ABC"
+      derive_sftp_user("VE3/QRP/MM") →  "VE3=QRP=MM"
+
+    See ``reference_wsprdaemon_gw_bootstrap`` in the sigmond memory
+    notes for the bootstrap path that registers a new reporter's
+    account on the gateway (first-cycle SFTP fails, FTP fallback
+    ships ``client_upload_info.txt`` with the reporter_id + pubkey,
+    gateway auto-provisions the Linux user, next cycle's SFTP
+    succeeds with this derived username).
+    """
+    call = (reporter_call or "").strip()
+    if not call:
+        raise ValueError("empty reporter call")
+    return call.replace("/", "=")
 
 
 def parse_server(entry: str, *, default_user: str = DEFAULT_USER,
