@@ -7437,10 +7437,16 @@ def cmd_wspr_watch(args) -> int:
         """
         if ship_line:
             print(ship_line, flush=True)
-        # Pending's only job now is deadline tracking + correlating
-        # cycle UTC for the upload line.  Any extras (per-spot detail)
-        # were already printed inline under the cycle line, so no
-        # extras list to drain here.
+        # Drain any rejected-spot extras the pump-event handler
+        # accumulated for this cycle.  They print under the upload
+        # line so the operator sees which spots got bounced.
+        for extra in pending.get('rejected_extras', []):
+            print(extra, flush=True)
+        # Pending's only job is deadline tracking + correlating
+        # cycle UTC for the upload line + accumulating rejected
+        # extras across pump events.  Per-spot detail (the regular
+        # extras list) prints inline under the cycle line and isn't
+        # buffered here.
         pending.clear()
 
     try:
@@ -7448,10 +7454,30 @@ def cmd_wspr_watch(args) -> int:
             line = _next_line()
             if line is None:
                 rlist, _w, _x = _select.select([fd], [], [], 1.0)
-                # Idle tick — if a pending cycle has waited too long
-                # for its shipped event, flush it as-is.
+                # Idle tick — if a pending cycle has waited its full
+                # deadline window, query the audit table for its
+                # final delivered count and emit the upload line.
+                # The deadline (90 s from cycle commit) is chosen so
+                # ALL uploader pump batches for the cycle have
+                # finished posting and writing their audit rows by
+                # the time we read it.  Per-pump audit reads would
+                # see only batch #1's slice and undercount.
                 if pending and time.monotonic() > pending['deadline']:
-                    _flush_pending()
+                    cy_hh, cy_mm = pending.get('cycle_hhmm', ('--', '--'))
+                    cycle_iso = pending.get('cycle_iso', '')
+                    hms_now = _datetime.datetime.utcnow().strftime('%H:%M:%S')
+                    uploaded, _verified, _dropped = (
+                        _query_audit_uploaded_for_cycle(cycle_iso)
+                        if cycle_iso else (0, 0, 0)
+                    )
+                    if uploaded > 0:
+                        _flush_pending(
+                            f'[{hms_now}] cycle UTC {cy_hh}:{cy_mm}'
+                            f'                    '
+                            f'  uploaded {uploaded} to wsprnet'
+                        )
+                    else:
+                        _flush_pending()
                 if not rlist:
                     continue
                 try:
@@ -7510,34 +7536,16 @@ def cmd_wspr_watch(args) -> int:
                     _query_rejected_since(limit=0)
 
                 if pending:
-                    # The pump's per-batch count (``pump_field``) is
-                    # MISLEADING for per-cycle attribution: one cycle's
-                    # spots can split across multiple pumps, and a
-                    # single pump can carry spots from backlog cycles
-                    # too.  Query wsprnet_audit for the cycle's actual
-                    # uploaded count — that's the source of truth
-                    # (one row per spot at upload time, keyed by
-                    # spot_key=<cycle>|<call>|<freq>).  If a later
-                    # pump bumps that count, we'll re-print the line
-                    # then; if no spots from this cycle were uploaded,
-                    # we suppress entirely so empty pump events don't
-                    # produce misleading "uploaded +0" lines.
-                    cy_hh, cy_mm = pending.get('cycle_hhmm', ('--', '--'))
-                    cycle_iso = pending.get('cycle_iso') or _cycle_iso(cy_hh, cy_mm)
-                    uploaded, verified, dropped = (
-                        _query_audit_uploaded_for_cycle(cycle_iso)
-                    )
-                    if uploaded > 0:
-                        ship_delta_s = int(time.monotonic() - pending['ts'])
-                        _flush_pending(
-                            f'[{hms}] cycle UTC {cy_hh}:{cy_mm}'
-                            f'                    '
-                            f'  uploaded {uploaded} to wsprnet  '
-                            f'in {ship_delta_s}s '
-                            f'(total {tot_field}, batch {work_n})'
-                        )
-                        for extra in rejected_extras:
-                            print(extra, flush=True)
+                    # Don't print on pump events — the audit table
+                    # only has a slice of the cycle's spots at this
+                    # point (the first batch's), and reading it now
+                    # gives a misleading low count.  Let the deadline
+                    # flush (idle-tick handler above) query the audit
+                    # once all pump batches have posted their rows.
+                    # We still capture this pump's rejected_extras so
+                    # they're emitted alongside the final upload line.
+                    if rejected_extras:
+                        pending.setdefault('rejected_extras', []).extend(rejected_extras)
                 else:
                     # Standalone — no cycle is waiting (e.g. backlog
                     # drain across multiple cycles, or signal-wake
