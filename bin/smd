@@ -7423,99 +7423,25 @@ def cmd_wspr_watch(args) -> int:
     # order whenever the front entry's deadline has passed.  The drain
     # check runs on every main-loop iteration (not just idle-tick) so
     # busy hours don't block the upload line from rendering.
-    # ── Per-cycle upload-line trigger ─────────────────────────────────
-    # The audit-table-after-deadline approach was the wrong architecture:
-    # it queried AFTER the pump completed uploading, requiring a multi-
-    # minute wait for the audit rows to land.  What we actually want is
-    # to print "uploading N to wsprnet" at the MOMENT the last expected
-    # rx commits a cycle — because that's when the cross-rx-sync wake
-    # fires the pump.  At that moment, ``pending_uploads`` has all the
-    # raw rows for the cycle, and counting unique (band, callsign)
-    # tuples gives the EXACT number wsprnet will accept after the
-    # client-side dedup.
-    #
-    # ``known_rx_sources``: accumulates over time as we observe new rx
-    #   commit; this is the inferred "configured set" we wait for.
-    # ``cycle_rx_seen``: maps cycle_iso → set of rx_sources committed.
-    # When seen == known, fire the query + emit the line, exactly once
-    # per cycle.
-    known_rx_sources: set = set()
-    cycle_rx_seen: dict = {}    # cycle_iso -> set of rx_source strings
-    cycle_rx_uploaded: set = set()  # cycle_iso strings we've already emitted for
+    # Event-driven upload display: the wsprnet transport (in
+    # ``hs_uploader.transports.wsprnet``) logs two events per POST:
+    #   ``wsprnet POST start: N spots (cycles: HH:MM=X, HH:MM=Y, ..., Z KB)``
+    #   ``wsprnet POST done:  N spots (cycles: ...) in Ts (R spots/s); server: M/N added``
+    # smd watch wspr matches these and reformats them aligned with the
+    # cycle commit lines above.  No heuristics, no DB queries, no timing
+    # delays — just relay the events the transport emits.
+    upload_start_re = _re.compile(
+        r'wsprnet POST start: (\d+) spots \(cycles: ([^,)]+(?:, [^,)]+)*), ([\d.]+) KB\)'
+    )
+    upload_done_re = _re.compile(
+        r'wsprnet POST done: (\d+) spots \(cycles: ([^,)]+(?:, [^,)]+)*)\) in ([\d.]+)s '
+        r'\(([\d.]+) spots/s\); server: (.*)'
+    )
     # Track the last cycle's HH:MM so we can emit a blank line between
     # blocks of cycle output for visual separation (two source lines
     # per cycle were getting mashed together with the prior cycle's
     # rejected-spot tail).
     last_cycle_hhmm: list = [None]
-
-    def _query_pending_upload_count(cycle_iso: str) -> int:
-        """Count unique (band, callsign) tuples in ``pending_uploads``
-        for a cycle — this is what wsprnet will accept after the
-        client-side cross-rx dedup.
-
-        Read-only query.  Fires at the moment of the last-rx commit
-        when the pump is about to start; the rows are still in the
-        queue (not yet shipped), so the answer is deterministic.
-        """
-        if not _SINK_DB.exists():
-            return 0
-        try:
-            import sqlite3 as _sqlite3
-            uri = f'file:{_SINK_DB}?mode=ro'
-            con = _sqlite3.connect(uri, uri=True, timeout=2.0)
-            try:
-                cur = con.execute(
-                    "SELECT COUNT(DISTINCT "
-                    "json_extract(payload_json,'$.band')||'|'||"
-                    "json_extract(payload_json,'$.callsign'))"
-                    " FROM pending_uploads"
-                    " WHERE target_db='wspr' AND target_table='spots'"
-                    "   AND json_extract(payload_json,'$.time') = ?",
-                    (cycle_iso,),
-                )
-                row = cur.fetchone()
-            finally:
-                con.close()
-            return int(row[0]) if row and row[0] else 0
-        except Exception:
-            return 0
-
-    def _maybe_emit_upload_line(cycle_iso: str, hh: str, mm: str,
-                                 rx_source: str) -> None:
-        """Track per-cycle rx commits and emit ``uploading N to wsprnet``
-        the moment the last expected rx commits a cycle.
-
-        Idempotent — once a cycle has emitted, further rx commits for
-        it are silently ignored.  Cleans up the per-cycle seen set
-        after emit so memory doesn't grow.
-        """
-        known_rx_sources.add(rx_source)
-        if cycle_iso in cycle_rx_uploaded:
-            return
-        seen = cycle_rx_seen.setdefault(cycle_iso, set())
-        seen.add(rx_source)
-        # Fire when seen set covers all known rx (cross-rx sync just
-        # fired the upload pump — pending_uploads has the answer NOW).
-        if not seen >= known_rx_sources:
-            return
-        count = _query_pending_upload_count(cycle_iso)
-        hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
-        if count > 0:
-            print(
-                f'[{hms_now}] cycle UTC {hh}:{mm} '
-                f'uploading {count} to wsprnet',
-                flush=True,
-            )
-        cycle_rx_uploaded.add(cycle_iso)
-        cycle_rx_seen.pop(cycle_iso, None)
-        # Prune the uploaded-set so it doesn't grow unbounded — keep
-        # last 50 cycle_isos (covers > 1.5 h of cycles, enough that a
-        # late-arriving rx commit for an already-emitted cycle still
-        # gets correctly suppressed).
-        if len(cycle_rx_uploaded) > 50:
-            stale = sorted(cycle_rx_uploaded)[: len(cycle_rx_uploaded) - 50]
-            for k in stale:
-                cycle_rx_uploaded.discard(k)
 
     def _flush_pending(ship_line: str = '') -> None:
         """Print the upload-event line + clear pending state.
@@ -7558,6 +7484,41 @@ def cmd_wspr_watch(args) -> int:
                 if not chunk:
                     break
                 buf += chunk
+                continue
+
+            # Match the new transport-side wsprnet POST events FIRST
+            # (the START line tells us a POST is in flight; the DONE
+            # line tells us how it landed).  Both come from
+            # ``hs_uploader.transports.wsprnet`` directly — no
+            # inference or DB query needed on smd watch wspr side.
+            usm = upload_start_re.search(line)
+            if usm:
+                n_spots, cycles, kb = usm.group(1), usm.group(2), usm.group(3)
+                hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
+                # Render with the same indentation as the cycle
+                # commit lines so it stacks visually under the cycles
+                # whose spots are being uploaded.
+                print(
+                    f'[{hms_now}]                          '
+                    f'wsprnet POST start: {n_spots} spots '
+                    f'(cycles {cycles}, {kb} KB)',
+                    flush=True,
+                )
+                continue
+            udm = upload_done_re.search(line)
+            if udm:
+                n_spots, cycles, secs, rate, server = (
+                    udm.group(1), udm.group(2), udm.group(3),
+                    udm.group(4), udm.group(5),
+                )
+                hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
+                print(
+                    f'[{hms_now}]                          '
+                    f'wsprnet POST done:  {n_spots} spots '
+                    f'(cycles {cycles}) in {secs}s '
+                    f'({rate} spots/s); server {server}',
+                    flush=True,
+                )
                 continue
 
             um = upload_re.search(line)
@@ -7776,15 +7737,11 @@ def cmd_wspr_watch(args) -> int:
             print(cycle_text, flush=True)
             for extra in extras:
                 print(extra, flush=True)
-            # Trigger the per-cycle upload line at LAST-rx-commit time.
-            # ``rx`` here is the rx_source ("radiod:..."); the helper
-            # accumulates known rx and per-cycle commit sets, and emits
-            # ``uploading N to wsprnet`` (read from pending_uploads, the
-            # raw source-of-truth) the moment the last expected rx
-            # finishes.  Replaces the prior audit-table-after-deadline
-            # approach which gave inconsistent counts because pumps
-            # finish asynchronously over ~2 min.
-            _maybe_emit_upload_line(cycle_iso, hh, mm, rx)
+            # Upload activity now displays purely from the transport's
+            # journal events (``wsprnet POST start/done``) matched by
+            # ``upload_start_re`` / ``upload_done_re`` above — no
+            # heuristics, no DB queries, no timing delays.  The cycle
+            # commit handler's job is just to render the per-rx line.
 
     except KeyboardInterrupt:
         return 130
