@@ -7491,17 +7491,38 @@ def cmd_wspr_watch(args) -> int:
             # line tells us how it landed).  Both come from
             # ``hs_uploader.transports.wsprnet`` directly — no
             # inference or DB query needed on smd watch wspr side.
+            # Format POST start/done to match the cycle commit lines
+            # above them: same ``[hms] cycle UTC HH:MM`` prefix, then
+            # ``POST start`` / ``POST done`` in the rx= column, then
+            # the spot count in the same column as the cycle line's
+            # spots — so the operator's eye tracks one column of
+            # counts down the page.  ``cycle UTC HH:MM`` shows the
+            # LATEST cycle in the POST (the one whose commits
+            # triggered this pump); the redundant ``(cycles HH:MM=N)``
+            # tail is dropped for single-cycle POSTs (the normal
+            # case after the explicit-flush fix landed).
+            def _post_header_cycle(cycles_str):
+                cl = [c.strip() for c in cycles_str.split(',')]
+                last = cl[-1].split('=')[0].strip()
+                try:
+                    hh_, mm_ = last.split(':')
+                except ValueError:
+                    hh_, mm_ = '??', '??'
+                return hh_, mm_, cl
             usm = upload_start_re.search(line)
             if usm:
                 n_spots, cycles, kb = usm.group(1), usm.group(2), usm.group(3)
                 hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
-                # Render with the same indentation as the cycle
-                # commit lines so it stacks visually under the cycles
-                # whose spots are being uploaded.
+                hh_, mm_, cl = _post_header_cycle(cycles)
+                if len(cl) == 1:
+                    tail = f'({kb} KB)'
+                else:
+                    tail = f'(cycles {" + ".join(cl)}, {kb} KB)'
                 print(
-                    f'[{hms_now}]                          '
-                    f'wsprnet POST start: {n_spots} spots '
-                    f'(cycles {cycles}, {kb} KB)',
+                    f'[{hms_now}] cycle UTC {hh_}:{mm_}'
+                    f'{" POST start":<20}  '
+                    f'{int(n_spots):>3} spots  '
+                    f'{tail}',
                     flush=True,
                 )
                 continue
@@ -7512,11 +7533,21 @@ def cmd_wspr_watch(args) -> int:
                     udm.group(4), udm.group(5),
                 )
                 hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
+                hh_, mm_, cl = _post_header_cycle(cycles)
+                # ``server`` capture group is `.*` — already includes
+                # the trailing word ``added`` (e.g. "49/49 added").
+                if len(cl) == 1:
+                    tail = f'in {secs}s ({rate} spots/s); server {server}'
+                else:
+                    tail = (
+                        f'(cycles {" + ".join(cl)}) in {secs}s '
+                        f'({rate} spots/s); server {server}'
+                    )
                 print(
-                    f'[{hms_now}]                          '
-                    f'wsprnet POST done:  {n_spots} spots '
-                    f'(cycles {cycles}) in {secs}s '
-                    f'({rate} spots/s); server {server}',
+                    f'[{hms_now}] cycle UTC {hh_}:{mm_}'
+                    f'{" POST done":<20}  '
+                    f'{int(n_spots):>3} spots  '
+                    f'{tail}',
                     flush=True,
                 )
                 continue
