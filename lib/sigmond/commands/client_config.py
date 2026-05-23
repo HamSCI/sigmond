@@ -94,6 +94,25 @@ def _read_contract_config(deploy_path: Path) -> dict:
 # Run the client's advertised entry point
 # ---------------------------------------------------------------------------
 
+def _maybe_elevate(argv: list, env: Optional[dict] = None) -> list:
+    """Wrap `argv` with `sudo --preserve-env=...` when not running as root.
+
+    Client wizards (and the `$EDITOR` fallback) read/write config files
+    owned by the client's service user (e.g. `wsprrec:wsprrec` for
+    wspr-recorder), so the smd CLI must self-elevate the same way the TUI
+    path does — see `tui/screens/client_config.py:218` which invokes
+    with `sudo=True`.  The contract env-var bag is preserved explicitly
+    (matching installer.py's pattern) rather than via `-E`, to avoid
+    leaking unrelated shell state into the wizard process.
+    """
+    if os.geteuid() == 0:
+        return argv
+    if env:
+        preserve = ','.join(sorted(env.keys()))
+        return ['sudo', f'--preserve-env={preserve}', '--', *argv]
+    return ['sudo', '--', *argv]
+
+
 def _run_client_entrypoint(client: str, deploy_path: Path,
                             entry, verb: str,
                             *, instance: Optional[str] = None) -> int:
@@ -132,12 +151,15 @@ def _run_client_entrypoint(client: str, deploy_path: Path,
     argv = [str(exe), *extra_args]
     info(f"invoking: {' '.join(argv)}")
     info(f"vars: {', '.join(sorted(env_keys_set(env))) or '(none)'}")
+    elevated = _maybe_elevate(argv, env)
+    if elevated is not argv:
+        info("elevating: sudo (config file is service-user-owned)")
     print()
 
     full_env = os.environ.copy()
     full_env.update(env)
     try:
-        proc = subprocess.run(argv, env=full_env, check=False)
+        proc = subprocess.run(elevated, env=full_env, check=False)
     except OSError as e:
         err(f"failed to invoke {exe}: {e}")
         return 1
@@ -178,9 +200,12 @@ def _fallback(client: str, deploy_path: Path, verb: str,
     heading(f"config edit {client}")
     info(f"editing: {config_path}")
     info(f"editor:  {editor}")
+    argv = _maybe_elevate([editor, str(config_path)])
+    if argv[0] == "sudo":
+        info("elevating: sudo (config file is service-user-owned)")
     print()
     try:
-        proc = subprocess.run([editor, str(config_path)], check=False)
+        proc = subprocess.run(argv, check=False)
     except (OSError, FileNotFoundError) as e:
         err(f"failed to invoke {editor}: {e}")
         return 1
