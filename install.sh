@@ -10,7 +10,7 @@
 #   ./install.sh
 #
 # Sigmond installs at /opt/git/sigmond/sigmond/, peer to its managed
-# components (hf-timestd, ka9q-python, wsprdaemon-client, etc., all of
+# components (hf-timestd, ka9q-python, etc., all of
 # which live at /opt/git/sigmond/<name>/).  This script will refuse to
 # run from any other location.
 #
@@ -410,9 +410,6 @@ enabled = false
 
 [component.wspr-recorder]
 enabled = false
-
-[component.wsprdaemon-client]
-enabled = false
 TOML
     ok "topology.toml installed (all components off by default)"
 else
@@ -517,7 +514,6 @@ echo -e "    sudo smd install radiod"
 echo -e "    sudo smd install wspr-recorder"
 echo -e "    sudo smd install psk-recorder"
 echo -e "    sudo smd install hf-timestd"
-echo -e "    sudo smd install wsprdaemon-client"
 echo
 echo -e "  ${BOLD}Option 3 — install all catalog components:${NC}"
 echo -e "    sudo smd install"
@@ -527,5 +523,4 @@ echo -e "    radiod             — ka9q-radio SDR daemon (server)"
 echo -e "    wspr-recorder      — WSPR/FST4W audio recorder"
 echo -e "    psk-recorder       — FT4/FT8 spot recorder"
 echo -e "    hf-timestd         — HF time-standard analyzer (WWV/WWVH/CHU)"
-echo -e "    wsprdaemon-client  — WSPR decoder + poster + uploader"
 echo
