@@ -313,6 +313,27 @@ if ! command -v git &>/dev/null; then
 fi
 ok "git: $(git --version)"
 
+# ─── avahi-browse (mDNS discovery) ───────────────────────────────────────────
+# sigmond's discovery/mdns.py and ka9q-python's discover_radiod_services
+# both shell out to avahi-browse to enumerate radiod instances on the LAN
+# (service type `_ka9q-ctl._udp`).  When avahi-browse is missing both probes
+# silently return zero hits, which then mis-informs `smd install`'s
+# pre-flight check (lib/sigmond/preflight.py) into reporting "no radiod
+# on LAN" on a host where several are advertising.  Install the utility
+# so discovery works out of the box.
+if ! command -v avahi-browse &>/dev/null; then
+    info "Installing avahi-browse (for mDNS radiod discovery)…"
+    case "$_PKG_MGR" in
+        apt)      _pkg_install avahi-utils ;;
+        dnf|yum)  _pkg_install avahi-tools ;;
+        pacman)   _pkg_install avahi ;;
+        *)        warn "no known package providing avahi-browse for this package manager — mDNS discovery will be unavailable" ;;
+    esac
+fi
+if command -v avahi-browse &>/dev/null; then
+    ok "avahi-browse: $(avahi-browse --version 2>&1 | head -1)"
+fi
+
 # ─── Python 3.11+ ─────────────────────────────────────────────────────────────
 PYTHON3=""
 for _py in python3.13 python3.12 python3.11 python3; do
