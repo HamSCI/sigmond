@@ -1740,6 +1740,14 @@ def _install_single_client(args) -> int:
                   f"use: smd install --components ka9q-radio --yes")
         return 1
 
+    # Pre-flight: declared `requires` aren't enforced anywhere else in the
+    # install flow.  Warn the operator before doing real work if any are
+    # missing — see lib/sigmond/preflight.py for the message templates and
+    # ka9q-radio-specific mDNS/USB-SDR context.
+    from sigmond.preflight import check_requires
+    if not check_requires(entry.name, catalog, yes=yes):
+        return 1
+
     _heading(f'install {entry.name}')
     _info(f'repo:   {entry.repo}')
     _info(f'script: {entry.install_script}')
