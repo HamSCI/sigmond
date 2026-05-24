@@ -72,6 +72,7 @@ warrant a separate row.
 
 | Screen module | Action | One-line role |
 |---|---|---|
+| `annotation_quality` | `action_show_annotation_quality` | Per-consumer science verdict: each running recorder + the global σ/tier attached + green/yellow/red threshold + substrate explanation |
 | `apply` | `action_show_apply` | Reconcile services with topology/coordination (`sudo smd apply`) |
 | `authority` | `action_show_authority` | Substrate view: live `authority.json` (active tier, σ, witnesses) |
 | `backup` | `action_show_backup` | Snapshot all config to `sigmond-config-*.tar.gz` |
@@ -215,6 +216,7 @@ Debugging                      [diagnose + watch when something looks wrong]
 Routine monitoring             [day-to-day "is it working" surfaces]
     Overview                   (landing)
     Authority                  (substrate view of authority.json)
+    Annotation Quality         (per-consumer science verdict)
     Timing                     (chrony facade)
     GPSDO live                 (per-device PLL / GPS / antenna)
     ka9q-radio live            (per-radiod channels + SNR)

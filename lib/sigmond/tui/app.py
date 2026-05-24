@@ -386,6 +386,36 @@ class SigmondApp(App):
             "Refresh: 1 s.  authority.json itself ticks every ~30 s.",
         )
 
+    def action_show_annotation_quality(self) -> None:
+        from .screens.annotation_quality import AnnotationQualityScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(AnnotationQualityScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Annotation Quality — per-consumer science verdict",
+            "Per-stream view of how the global RTP→UTC authority is "
+            "currently labelling each running science consumer's data.\n\n"
+            "One row per running consumer instance (timestd-metrology@*, "
+            "wspr-recorder@*, psk-recorder@*, hfdl-recorder@*, "
+            "codar-sounder@*, mag-recorder) with the active tier, "
+            "honest σ, and verdict colour attached.\n\n"
+            "Verdict thresholds (per the 2026-05-24 substrate eval):\n"
+            "  GREEN  σ < 100 µs   — science-grade annotation\n"
+            "  YELLOW σ < 10 ms    — degraded but usable for envelope-\n"
+            "                         detection science (WWV-class)\n"
+            "  RED    σ ≥ 10 ms    — V1 anchor-staleness regime; \n"
+            "                         downstream consumers should gate\n\n"
+            "The substrate panel beneath explains *why* the verdict is "
+            "what it is: local-minus-source residual, breach state, and "
+            "recapture history from the core-recorder drift monitor.\n\n"
+            "Companion screens:\n"
+            "  Monitoring / Authority — substrate view of authority.json\n"
+            "  Monitoring / Timing    — chrony facade (downstream)\n\n"
+            "Refresh: 1 s.  Authority publishes every ~30 s; substrate "
+            "drift-monitor block updates every ~1 s.",
+        )
+
     def action_show_timing(self) -> None:
         from .screens.timing import TimingScreen
         center = self.query_one("#center")

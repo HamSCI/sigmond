@@ -448,3 +448,331 @@ def format_timing_line(inst) -> Optional[str]:
                 "(no §18 authority applied)")
 
     return None
+
+
+# --- Annotation Quality: per-consumer science-verdict view ---------------
+#
+# Companion to the Authority screen.  Authority shows the substrate
+# state in metrology terms; Annotation Quality answers the
+# operator-facing question "is each science consumer being given a
+# usable RTP→UTC label right now?" by attaching the global authority
+# σ/tier to each running consumer instance and applying a verdict
+# threshold.
+#
+# Today every consumer on a single host sees the same global authority
+# (one hf-timestd per host).  When CLIENT-CONTRACT v0.7 §18.4 per-
+# instance retrofits land, the per-row σ may vary; this code already
+# pivots on per-instance data so adding instance-level overrides later
+# is mechanical.
+
+
+CORE_RECORDER_STATUS_PATH = Path("/var/lib/timestd/status/core-recorder-status.json")
+
+
+@dataclass
+class CoreRecorderStatus:
+    """Substrate-side detail published by timestd-core-recorder, beyond
+    what authority.json carries.  Sourced from
+    /var/lib/timestd/status/core-recorder-status.json — the same file
+    BpskPpsProbe polls.  Only the fields the screen renders are
+    surfaced; raw block kept for forward-compat.
+    """
+    utc_published:              Optional[datetime]
+    local_minus_source_ns:      Optional[int] = None
+    chain_delay_ns:             Optional[int] = None
+    chain_delay_ns_std_ns:      Optional[float] = None
+    pps_consecutive:            Optional[int] = None
+    locked:                     Optional[bool] = None
+    sustained_breach:           Optional[bool] = None
+    anchor_discontinuity:       Optional[bool] = None
+    breach_duration_sec:        Optional[float] = None
+    recapture_count:            Optional[int] = None
+    last_recapture_reason:      Optional[str] = None
+    last_recapture_age_sec:     Optional[float] = None
+    raw:                        Optional[dict] = None
+
+
+def read_core_recorder_status(
+    path: Path = CORE_RECORDER_STATUS_PATH,
+) -> tuple[Optional[CoreRecorderStatus], Optional[str]]:
+    """Read core-recorder-status.json with the same sentinel-error
+    discipline as read_authority_snapshot.  Returns ``(status, error)``.
+    """
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None, ERR_NOT_FOUND
+    except (OSError, PermissionError):
+        return None, ERR_UNREADABLE
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        return None, ERR_MALFORMED
+    if not isinstance(raw, dict):
+        return None, ERR_MALFORMED
+
+    l6 = raw.get("l6_pps") or {}
+    dm = l6.get("drift_monitor") or {}
+    status = CoreRecorderStatus(
+        utc_published=_parse_iso8601_utc(raw.get("timestamp")),
+        local_minus_source_ns=_safe_int(l6.get("local_minus_source_ns")),
+        chain_delay_ns=_safe_int(l6.get("chain_delay_ns")),
+        chain_delay_ns_std_ns=_safe_float(l6.get("chain_delay_ns_std_ns")),
+        pps_consecutive=_safe_int(l6.get("pps_consecutive")),
+        locked=bool(l6["locked"]) if "locked" in l6 else None,
+        sustained_breach=bool(dm["sustained_breach"]) if "sustained_breach" in dm else None,
+        anchor_discontinuity=bool(dm["anchor_discontinuity"]) if "anchor_discontinuity" in dm else None,
+        breach_duration_sec=_safe_float(dm.get("breach_duration_sec")),
+        recapture_count=_safe_int(dm.get("recapture_count")),
+        last_recapture_reason=dm.get("last_recapture_reason") or None,
+        last_recapture_age_sec=_safe_float(dm.get("last_recapture_age_sec")),
+        raw=raw,
+    )
+    return status, None
+
+
+def _safe_int(v) -> Optional[int]:
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(v) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class TimingConsumerUnit:
+    """One running systemd unit that records science data and inherits
+    the host's RTP→UTC authority.  ``instance`` is the systemd template
+    instance (e.g. ``WWV_20000`` or empty for non-templated units);
+    ``client`` is the package (e.g. ``timestd-metrology``)."""
+    client:   str
+    instance: str          # empty string for non-templated units
+    unit:     str          # full unit name e.g. "timestd-metrology@WWV_20000.service"
+
+
+# Patterns sigmond looks for to populate the per-stream view.  Order is
+# preserved in the output (Metrology first because it's the bulk; then
+# per-band recorders; mag last because it's recorder-shaped but
+# non-radiod per project_mag_recorder).  Tuple of (client_name, glob).
+_TIMING_CONSUMER_PATTERNS: tuple = (
+    ("timestd-metrology",  "timestd-metrology@*.service"),
+    ("wspr-recorder",      "wspr-recorder@*.service"),
+    ("psk-recorder",       "psk-recorder@*.service"),
+    ("hfdl-recorder",      "hfdl-recorder@*.service"),
+    ("codar-sounder",      "codar-sounder@*.service"),
+    ("mag-recorder",       "mag-recorder.service"),
+)
+
+
+def enumerate_timing_consumer_units(
+    runner=None,
+) -> list:
+    """List running systemd units that consume the host's RTP→UTC
+    authority for science data labelling.
+
+    The ``runner`` parameter is the subprocess.run-shaped callable used
+    to invoke systemctl; tests inject a fake so the function stays
+    pure.  In production, defaults to subprocess.run.
+
+    Empty list on any error (no consumers, systemctl missing, no
+    matches) — the screen renders "(no running timing consumers)"
+    rather than surfacing internal subprocess details.
+    """
+    import subprocess
+    if runner is None:
+        runner = subprocess.run
+    units: list = []
+    for client, pattern in _TIMING_CONSUMER_PATTERNS:
+        try:
+            r = runner(
+                ['systemctl', 'list-units', '--type=service',
+                 '--state=running', '--no-legend', '--plain', pattern],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
+            continue
+        if r.returncode != 0:
+            continue
+        for line in (r.stdout or '').splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            unit_name = parts[0]
+            if not unit_name.endswith('.service'):
+                continue
+            # Templated form "name@instance.service" → instance = part
+            # between '@' and '.service'.  Non-templated → empty.
+            instance = ""
+            if '@' in unit_name:
+                instance = unit_name.split('@', 1)[1].rsplit('.', 1)[0]
+            units.append(TimingConsumerUnit(
+                client=client, instance=instance, unit=unit_name,
+            ))
+    return units
+
+
+# Verdict thresholds informed by the 2026-05-24 substrate evaluation
+# (hf-timestd/docs/T6-ANNOTATION-VALUE-2026-05-24.md).  Green is
+# tight enough to support sub-sample science work at the HF
+# processing rate; yellow is degraded-but-usable for envelope-
+# detection science (WWV-class detection precision is already ms);
+# red is alarming and means the V1 anchor-staleness regime is firing.
+ANNOTATION_VERDICT_GREEN_NS  =     100_000      # < 100 µs
+ANNOTATION_VERDICT_YELLOW_NS =  10_000_000      # < 10 ms
+
+
+def _annotation_verdict(sigma_ns: Optional[int]) -> tuple:
+    """Return ``(label, colour)`` for a per-stream σ.
+
+    ``sigma_ns`` of None (authority unknown) renders as a muted '?'.
+    """
+    if sigma_ns is None:
+        return ("?", "dim")
+    s = abs(int(sigma_ns))
+    if s < ANNOTATION_VERDICT_GREEN_NS:
+        return ("GREEN", "green")
+    if s < ANNOTATION_VERDICT_YELLOW_NS:
+        return ("YELLOW", "yellow")
+    return ("RED", "red")
+
+
+def render_annotation_quality_body(
+    auth_snap: Optional[AuthoritySnapshot],
+    auth_error: Optional[str],
+    auth_age_s: Optional[float],
+    recorder_status: Optional[CoreRecorderStatus],
+    recorder_error: Optional[str],
+    consumer_units: list,
+) -> str:
+    """Render the Annotation Quality screen body.
+
+    Layout:
+
+    - Header: global authority (tier + σ + verdict colour + age).
+    - Per-stream table: one row per running consumer with the global
+      tier + σ + verdict attached.  Today every row shares the same
+      values; the per-instance shape is preserved for the v0.7 §18.4
+      per-instance retrofit.
+    - Substrate panel: drift-monitor state from core-recorder-status
+      (lms_ns, breach, recapture context).  Explains *why* the verdict
+      is what it is.
+
+    Pure function — no Textual, no I/O — for unit testability.
+    """
+    lines: list = []
+
+    # --- Header --------------------------------------------------------
+    if auth_error == ERR_NOT_FOUND:
+        lines.append(
+            f"[red]hf-timestd authority unavailable at {AUTHORITY_JSON_PATH}[/]"
+        )
+        lines.append("Per-stream σ cannot be rendered without it.")
+        lines.append("")
+        lines.append("[dim]Check: sudo systemctl status timestd-fusion.service[/]")
+        return "\n".join(lines)
+    if auth_error == ERR_UNREADABLE:
+        lines.append(
+            f"[red]{AUTHORITY_JSON_PATH} exists but is not readable[/]"
+        )
+        return "\n".join(lines)
+    if auth_error == ERR_MALFORMED:
+        lines.append(
+            f"[red]{AUTHORITY_JSON_PATH} is unparseable[/] "
+            f"[dim](mid-write race; retry next poll)[/]"
+        )
+        return "\n".join(lines)
+    if auth_snap is None:
+        lines.append("[red]internal error: no authority snapshot and no error[/]")
+        return "\n".join(lines)
+
+    tier = auth_snap.t_level_active or "—"
+    tcol = _tier_colour(auth_snap.t_level_active)
+    sigma_str = format_sigma_ns(auth_snap.sigma_ns)
+    verdict_label, verdict_colour = _annotation_verdict(auth_snap.sigma_ns)
+    age_str = format_age_seconds(auth_age_s)
+    age_dim = (
+        " [red](stale)[/]"
+        if auth_age_s is not None and auth_age_s > AUTHORITY_STALE_THRESHOLD_S
+        else ""
+    )
+    lines.append(
+        f"Active: [bold {tcol}]{tier}[/]   σ = [bold]{sigma_str}[/]"
+        f"   verdict [bold {verdict_colour}]{verdict_label}[/]"
+        f"   [dim](authority age {age_str}{age_dim})[/]"
+    )
+
+    # --- Per-stream table ----------------------------------------------
+    lines.append("")
+    lines.append("[bold]Per-consumer annotation quality[/]")
+    if not consumer_units:
+        lines.append("  [dim](no running timing consumers on this host)[/]")
+    else:
+        # Group by client for readable output (metrology is 9-row block).
+        last_client = None
+        for u in consumer_units:
+            if u.client != last_client:
+                lines.append(f"  [cyan]{u.client}[/]")
+                last_client = u.client
+            label = u.instance or "(default)"
+            lines.append(
+                f"    {label:<20s}  [{tcol}]{tier}[/]"
+                f"   σ={sigma_str}   [{verdict_colour}]{verdict_label}[/]"
+            )
+
+    # --- Substrate panel -----------------------------------------------
+    lines.append("")
+    lines.append("[bold]Substrate detail[/] [dim](explains the verdict above)[/]")
+    if recorder_error or recorder_status is None:
+        lines.append(
+            f"  [yellow]core-recorder status unavailable[/] "
+            f"[dim]({recorder_error or 'no data'})[/]"
+        )
+    else:
+        rs = recorder_status
+        lines.append(
+            f"  local_minus_source = "
+            f"[bold]{_fmt_signed_ns(rs.local_minus_source_ns)}[/]   "
+            f"chain_delay = {_fmt_signed_ns(rs.chain_delay_ns)}   "
+            f"locked = {_fmt_bool(rs.locked)}"
+        )
+        breach_str = "[red]yes[/]" if rs.sustained_breach else "no"
+        bdur = (
+            f" ({format_age_seconds(rs.breach_duration_sec)})"
+            if rs.sustained_breach and rs.breach_duration_sec else ""
+        )
+        recap_age = (
+            format_age_seconds(rs.last_recapture_age_sec)
+            if rs.last_recapture_age_sec is not None else "?"
+        )
+        lines.append(
+            f"  sustained_breach = {breach_str}{bdur}   "
+            f"recaptures = {rs.recapture_count or 0}"
+            f"   last = {recap_age} ago "
+            f"({rs.last_recapture_reason or '—'})"
+        )
+
+    # --- Disagreement flags --------------------------------------------
+    if auth_snap.disagreement_flags:
+        lines.append("")
+        flags = ", ".join(auth_snap.disagreement_flags)
+        lines.append(f"[yellow]disagreement flags:[/] {flags}")
+
+    return "\n".join(lines)
+
+
+def _fmt_signed_ns(ns: Optional[int]) -> str:
+    if ns is None:
+        return "?"
+    return format_offset_ns(ns)
+
+
+def _fmt_bool(b: Optional[bool]) -> str:
+    if b is None:
+        return "?"
+    return "yes" if b else "[red]no[/]"

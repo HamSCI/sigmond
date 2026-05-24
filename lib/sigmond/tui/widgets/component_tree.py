@@ -43,6 +43,7 @@ class ComponentTree(Tree):
 
         monitoring = self.root.add("Monitoring", expand=True)
         monitoring.add_leaf("\u2737 Authority",         data={"screen": "authority"})
+        monitoring.add_leaf("\u2299 Annotation Quality", data={"screen": "annotation_quality"})
         monitoring.add_leaf("\u29b5 Timing",            data={"screen": "timing"})
         monitoring.add_leaf("\u25d0 GPSDO live",        data={"screen": "gpsdo"})
         monitoring.add_leaf("\u25c9 ka9q-radio live",   data={"screen": "radiod"})
@@ -94,6 +95,8 @@ class ComponentTree(Tree):
             self.app.action_show_gpsdo()
         elif screen == "authority":
             self.app.action_show_authority()
+        elif screen == "annotation_quality":
+            self.app.action_show_annotation_quality()
         elif screen == "timing":
             self.app.action_show_timing()
         elif screen == "kiwisdr":
