@@ -361,6 +361,31 @@ class SigmondApp(App):
             "gpsdo-monitor's full TUI focused on that device.",
         )
 
+    def action_show_authority(self) -> None:
+        from .screens.authority import AuthorityScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(AuthorityScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Authority — substrate view",
+            "Live view of hf-timestd's /run/hf-timestd/authority.json — "
+            "the per-cycle (A, T) annotation that drives every §18 "
+            "consumer's notion of UTC.\n\n"
+            "Shows the active tier (T6 / T5 / T4 / T3 / …) with its "
+            "rtp_to_utc offset and σ, the snapshot's publication "
+            "age (red when stale beyond 60 s), the governor radiod, "
+            "available tiers + witnesses, and any cross-check "
+            "disagreement flags.\n\n"
+            "This is the substrate view: what hf-timestd thinks the "
+            "timing budget is.  For what chrony's selection algorithm "
+            "does with this information, see Observe / Timing.\n\n"
+            "Per ARCHITECTURE-FIRST-PRINCIPLES.md §5: chrony is a "
+            "downstream consumer, not the architectural design "
+            "centre.\n\n"
+            "Refresh: 1 s.  authority.json itself ticks every ~30 s.",
+        )
+
     def action_show_timing(self) -> None:
         from .screens.timing import TimingScreen
         center = self.query_one("#center")
@@ -369,15 +394,19 @@ class SigmondApp(App):
 
         self.query_one(ContextPanel).show_help(
             "Timing — chrony sources",
-            "Live chrony source comparison with TSL3 (BPSK PPS) as "
-            "the reference.\n\n"
-            "Each row shows Δ-from-TSL3 (not from the system clock, "
+            "Live chrony source comparison with HPPS (T6 path: TS-1 "
+            "BPSK-PPS via the RX-888 ADC) as the reference.\n\n"
+            "Each row shows Δ-from-HPPS (not from the system clock, "
             "which is what 'chronyc sources' shows by default), reach "
             "as N/8, sample age, sigma, and a Unicode sparkline of "
             "the last 60 seconds.\n\n"
             "The header shows kernel-clock-vs-UTC plus root "
             "dispersion (chrony's conservative bound on its UTC "
             "estimate).\n\n"
+            "This is the chrony-facade view (one downstream "
+            "consumer's selection algorithm).  For the underlying "
+            "substrate state — what hf-timestd thinks the timing "
+            "budget is — see Observe / Authority.\n\n"
             "Refresh: 1 s.  History: 60 s.",
         )
 
