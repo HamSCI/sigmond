@@ -1,0 +1,274 @@
+# sigmond function inventory + TUI alignment audit
+
+Snapshot of every capability sigmond exposes, mapped to the CLI verbs
+that drive it and the TUI screens that surface it. Produced as
+preparation for re-shaping the TUI left-tree navigation around four
+operator mental-model categories (Installation / Maintenance /
+Debugging / Routine monitoring) instead of the three current ones
+(Configure / Observe / Operate).
+
+Source state: commit `01d6bb7` (2026-05-24).
+
+---
+
+## 1. CLI verb surface (`bin/smd`)
+
+Top-level subparsers — 33 in total, alphabetical. Sub-groups indented.
+
+| Verb | Subverbs | Handler | Mutating? |
+|---|---|---|---|
+| `add` | | `cmd_add` | yes |
+| `apply` | | `cmd_apply` | yes |
+| `codar-watch` | | `cmd_codar_watch` | no |
+| `completion` | `bash` | `cmd_completion` | no |
+| `config` | `show / identity / refresh / migrate / backup / restore / init / edit` | `cmd_config_*` | mixed (identity/refresh/init/edit/restore mutate) |
+| `cpu` | (shortcut to `diag cpu-freq`) | `cmd_diag_cpu_freq` | no (read-only without `--apply`) |
+| `diag` | `cpu-affinity / cpu-freq / net` | `cmd_diag*` | no (`--apply` opt-in) |
+| `disable` | | `cmd_disable` | yes |
+| `enable` | | `cmd_enable` | yes |
+| `environment` | `list / probe / describe` | `cmd_environment_*` | no |
+| `hfdl-watch` | | `cmd_hfdl_watch` | no |
+| `install` | | `cmd_install` | yes |
+| `ka9q-watch` | | `cmd_ka9q_watch` | no |
+| `list` | (`--update` / `--apply` opt) | `cmd_list` | optional |
+| `log` | | `cmd_log` | optional (`--level` writes) |
+| `psk-watch` | | `cmd_psk_watch` | no |
+| `public-ip` | | `cmd_public_ip` | no |
+| `reload` | (`--via=auto\|systemd\|socket`) | `cmd_reload` | yes |
+| `remove` | | `cmd_remove` | yes |
+| `restart` | | `cmd_restart` | yes |
+| `software` | `install / apply` (aliases) | rewrites to top-level | yes |
+| `sources` | `list / add / remove / apply` | `cmd_sources_*` | apt mutating |
+| `start` | | `cmd_start` | yes |
+| `status` | | `cmd_status` | no |
+| `stop` | | `cmd_stop` | yes |
+| `storage` | `migrate-to-sqlite / trim` | `cmd_storage_*` | yes |
+| `timestd-tune-storage` | | `cmd_timestd_tune_storage` | yes |
+| `tui` | | `cmd_tui` | n/a |
+| `validate` | | `cmd_validate` | no |
+| `verifier` | `report [--target wspr\|psk] / rehabilitate` | `cmd_verifier_*` | rehabilitate mutates |
+| `watch` | `wspr / psk / hfdl / codar / ka9q / uploads / verifier` | dispatches into the matching `cmd_*_watch` | no |
+| `wisdom` | `plan / status` | `cmd_wisdom_*` | plan mutates |
+| `wspr-watch` | | `cmd_wspr_watch` | no |
+
+Notes / leftovers:
+
+- The `_MUTATING` set in `main()` includes `'update'` but there is
+  no `update` subparser. Dead entry — safe to remove.
+- `software install` / `software apply` rewrite into the top-level
+  `install` / `apply` so the lock + root-check path stays single-keyed.
+- The legacy single-target watch verbs (`psk-watch`, `wspr-watch`,
+  `hfdl-watch`, `codar-watch`, `ka9q-watch`) coexist with the unified
+  `watch <target>` family. Both call the same `cmd_*_watch` handlers.
+
+---
+
+## 2. TUI screen surface (`lib/sigmond/tui/screens/`)
+
+26 screen modules. Each maps to exactly one `action_show_*` in
+`lib/sigmond/tui/app.py`. `action_show_update` is a kept-for-back-compat
+alias that re-dispatches to `action_show_components`, so it doesn't
+warrant a separate row.
+
+| Screen module | Action | One-line role |
+|---|---|---|
+| `apply` | `action_show_apply` | Reconcile services with topology/coordination (`sudo smd apply`) |
+| `authority` | `action_show_authority` | Substrate view: live `authority.json` (active tier, σ, witnesses) |
+| `backup` | `action_show_backup` | Snapshot all config to `sigmond-config-*.tar.gz` |
+| `client_config` | `action_show_client_config` | Run a client's first-run wizard / edit its config |
+| `components` | `action_show_components` | Catalog: install status, git ref, version policy per component |
+| `config_show` | `action_show_config` | Read-only coordination + client-config snapshot (`smd config show`) |
+| `cpu_affinity` | `action_show_cpu_affinity` | Hardware topology + affinity plan + observed state |
+| `cpu_freq` | `action_show_cpu_freq` | Per-CPU `scaling_max_freq` view against `[cpu_freq]` policy |
+| `diag_net` | `action_show_diag_net` | IGMP classification for multicast safety |
+| `environment` | `action_show_environment` | Declared vs observed peers (mDNS / ka9q / NTP / KiwiSDR / GPSDO) |
+| `fft_wisdom` | `action_show_fft_wisdom` | FFTW wisdom planning (one-time per host, hours on first run) |
+| `gpsdo` | `action_show_gpsdo` | Live GPSDO status from `/run/gpsdo/` |
+| `install` | `action_show_install` | Catalog install picker (single / all-missing) |
+| `ka9q_watch` | `action_show_ka9q_watch` | Compare pinned ka9q-radio commit vs `origin/main` |
+| `kiwisdr` | `action_show_kiwisdr` | Live KiwiSDR status + GPS |
+| `lifecycle` | `action_show_lifecycle` | Start / stop / restart / reload managed units |
+| `logs` | `action_show_logs` | Follow journal or tail log_paths per component |
+| `overview` | `action_show_overview` | Service health + clients + CPU affinity summary (landing) |
+| `placeholder` | (helper) | Generic placeholder screen for stubs |
+| `rac` | `action_show_rac` | Configure frpc reverse tunnel to vpn.wsprdaemon.org |
+| `radiod` | `action_show_radiod` | Live ka9q-python status (channels, frontend, SNR) |
+| `restore` | `action_show_restore` | Browse + extract a backup tar over the live system |
+| `sdr_inventory` | `action_show_sdr_inventory` | SDR labelling (USB enumeration + assignment) |
+| `timing` | `action_show_timing` | Chrony-facade view: source comparison vs HPPS, root dispersion |
+| `topology` | `action_show_topology` | Enable / disable catalog components for this host |
+| `validate` | `action_show_validate` | Cross-client harmonization rules (radiod / freq / CPU / disk) |
+
+---
+
+## 3. Capability → CLI → TUI mapping (gap audit)
+
+| Capability | CLI verb(s) | TUI screen | Gap |
+|---|---|---|---|
+| First-time install (catalog walk) | `install`, `software install` | `install` | — |
+| Software update / git pull per policy | `list --update`, `list --apply` | `components` | — |
+| Topology enable/disable | `enable`, `disable`, `add`, `remove` | `topology` | `add` (clone repo) is CLI-only |
+| Apply reconciliation | `apply`, `software apply` | `apply` | — |
+| Lifecycle (start/stop/restart/reload) | `start / stop / restart / reload` | `lifecycle` | — |
+| Service health snapshot | `status` | `overview` | — |
+| Config view | `config show` | `config_show` | — |
+| Config edit (per client) | `config edit <client>` | `client_config` | — |
+| Config wizard (first-run, per client) | `config init <client>` | `client_config` | — |
+| Coordination identity bootstrap | `config identity` | — | **Gap** — CLI-only |
+| Coordination schema migration | `config migrate` | (button on `config_show`) | minor |
+| Coordination refresh | `config refresh` | — | **Gap** — CLI-only |
+| Backup / restore | `config backup / restore` | `backup`, `restore` | — |
+| CPU affinity plan | `diag cpu-affinity [--apply]` | `cpu_affinity` | apply still CLI-only |
+| CPU frequency plan | `diag cpu-freq [--apply]`, `cpu` | `cpu_freq` | apply still CLI-only |
+| Network / IGMP diagnostics | `diag net [--listen]` | `diag_net` | — |
+| FFTW wisdom (plan / status) | `wisdom plan / status` | `fft_wisdom` | one screen serves both verbs |
+| apt + pip source management | `sources list/add/remove/apply` | — | **Gap** — CLI-only |
+| ka9q-radio pin / compat watch | `ka9q-watch`, `watch ka9q` | `ka9q_watch` | — |
+| Activity watch (wspr/psk/hfdl/codar) | `wspr-watch`, `psk-watch`, `hfdl-watch`, `codar-watch`, `watch <t>` | — | **Gap** — no TUI surface; CLI-only despite five verbs |
+| Uploads activity watch | `watch uploads` | — | **Gap** — CLI-only |
+| Verifier watch | `watch verifier` | — | **Gap** — CLI-only |
+| Verifier report / rehabilitate | `verifier report / rehabilitate` | — | **Gap** — CLI-only |
+| Storage migration (CH → SQLite) | `storage migrate-to-sqlite` | — | one-shot; CLI-fine |
+| Storage trim (daily janitor) | `storage trim`, `timestd-tune-storage` | — | runs via systemd timers per `project_ch_to_sqlite_migration`; CLI-fine |
+| Live radiod (ka9q-python) | (none — TUI-only) | `radiod` | — |
+| Live GPSDO | (none — TUI-only) | `gpsdo` | — |
+| Live KiwiSDR | (none — TUI-only) | `kiwisdr` | — |
+| Authority substrate live view | (none — TUI-only) | `authority` | — |
+| Timing (chrony facade) live view | `chronyc sources` (external) | `timing` | — |
+| Environment (peers) | `environment list/probe/describe` | `environment` | — |
+| SDR labelling | (handled inside `config init radiod`) | `sdr_inventory` | — |
+| Logs | `log` | `logs` | log-level change still CLI-only |
+| Validation | `validate` | `validate` | — |
+| RAC tunnel | (manual frpc today) | `rac` | sudo path was fixed in `01d6bb7` |
+| Public IP probe | `public-ip` | — | trivial; CLI-fine |
+| TUI launch | `tui` | n/a | — |
+| Bash completion | `completion bash` | n/a | — |
+
+### Gap summary
+
+Five real surface gaps where CLI exposes a routine-monitoring or
+maintenance capability with no TUI representation:
+
+1. **Activity watches** — `wspr-watch / psk-watch / hfdl-watch /
+   codar-watch / watch uploads / watch verifier`. The richest gap;
+   five+ verbs and no live surface in the TUI.
+2. **apt / pip sources** — `sources` four-verb group; routine on a
+   fresh host or after an upstream change. No TUI.
+3. **Verifier report / rehabilitate** — `verifier report / rehabilitate`.
+   Reporting is monitoring; rehabilitation is maintenance.
+4. **Coordination identity / refresh** — `config identity`,
+   `config refresh`. Installation-adjacent (identity is first-run)
+   and maintenance-adjacent (refresh after coordination changes).
+5. **CPU affinity / cpu-freq apply** — read views exist, but the
+   `--apply` mutation still requires dropping to the CLI.
+
+These map cleanly to the four-category proposal:
+
+- Gap 1 → **Debugging** (live activity surfaces)
+- Gap 2 → **Installation** (sources are usually first-run / mirror swaps)
+- Gap 3 → **Debugging** (report) + **Maintenance** (rehabilitate)
+- Gap 4 → **Installation** (identity) + **Maintenance** (refresh)
+- Gap 5 → **Maintenance** (mutation buttons on existing screens)
+
+Closing the gaps is *not* in scope for the reorganization commit
+itself — the reorganization places empty slots where they belong, and
+the follow-up backlog fills them.
+
+---
+
+## 4. Proposed 4-way reorganization
+
+The current three groups (Configure / Observe / Operate) blur two
+distinct operator workflows: setting up a host the first time vs.
+keeping it healthy day-to-day. The four-way scheme separates them.
+
+```
+Overview                       [landing — Monitoring landing pane]
+
+Installation                   [first-time setup, infrequent]
+    Topology                   (enable components for this host)
+    Software versions          (catalog: install + policy per component)
+    Install                    (catalog walk / per-entry installer)
+    SDR inventory              (USB enumeration + labelling)
+    FFT Wisdom                 (one-time per host; hours on first run)
+    Sources                    [planned — apt+pip mirror management]
+    Identity                   [planned — config identity bootstrap]
+
+Maintenance / Updating         [routine operator actions]
+    Lifecycle                  (start / stop / restart / reload)
+    Apply                      (reconcile services with config)
+    Client config              (edit / re-run wizard)
+    CPU affinity               (apply plan)
+    CPU frequency              (apply plan)
+    Backup                     (snapshot config)
+    Restore                    (browse + extract backup)
+
+Debugging                      [diagnose + watch when something looks wrong]
+    Logs                       (journal / log_paths follow)
+    Validate                   (cross-client harmonization rules)
+    Environment                (declared vs observed peers)
+    Diag: net                  (IGMP + multicast)
+    ka9q-watch                 (pin vs upstream compat)
+    RAC tunnel                 (remote-access for vendor debug)
+    Activity watches           [planned — wspr / psk / hfdl / codar / uploads / verifier]
+
+Routine monitoring             [day-to-day "is it working" surfaces]
+    Overview                   (landing)
+    Authority                  (substrate view of authority.json)
+    Timing                     (chrony facade)
+    GPSDO live                 (per-device PLL / GPS / antenna)
+    ka9q-radio live            (per-radiod channels + SNR)
+    KiwiSDR live               (per-KiwiSDR status)
+    Config view                (read-only coordination snapshot)
+```
+
+### Screens that span categories — resolved
+
+| Screen | Resolution | Reason |
+|---|---|---|
+| `sdr_inventory` | **Installation** | The label-write workflow is what makes it load-bearing; routine browsing of "which SDRs are here" is already in `overview` / `radiod`. |
+| `rac` | **Debugging** | RAC is a vendor reverse-tunnel for support sessions, not a routinely-touched config. |
+| `fft_wisdom` | **Installation** | One-time per host (hours-long planning on RX-888). The "status" view is rare enough that surfacing it in Installation is fine. |
+| `lifecycle` | **Maintenance** | Start/stop/restart is the most frequently invoked maintenance action; Overview already covers monitoring of running/not-running. |
+| `client_config` | **Maintenance** | View is already in `config_show`; this screen is the edit path. |
+| `components` (Software versions) | **Installation** | Confusable with Maintenance (updates), but the primary mental model is "what catalog do I have, at what pins" — close-coupled to fresh install. The `--update / --apply` mutating path is a maintenance use-case; the *list* view is installation. Keep here; follow-up can split if it becomes annoying. |
+| `topology` | **Installation** | Enable/disable is mostly first-time and rarely revisited after a host stabilises. |
+| `config_show` | **Monitoring** | Read-only. The "Migrate" button on it is rare-enough that we don't split. |
+
+### Renames
+
+- "Configure" group → split into **Installation** + bits of
+  **Maintenance** + **Debugging** as above.
+- "Observe" group → **Monitoring** (5 screens) + **Debugging** (5
+  screens). Live SDR/timing screens are Monitoring; environment /
+  validate / diag-net / ka9q-watch / logs are Debugging.
+- "Operate" group → folded into **Installation** (FFT Wisdom) +
+  **Maintenance** (Lifecycle, Apply).
+
+### Landing
+
+Overview stays the default landing screen, under Monitoring. A
+"summarise each category's health" dashboard could come later but
+isn't worth the complexity until the four-way structure proves itself.
+
+### Keybindings
+
+All existing key bindings keep working — the reorganization changes
+the *visual grouping only*, not the action names. No `action_show_*`
+gets renamed, so `BINDINGS`, `component_tree.on_tree_node_selected`,
+and the navigation test all keep functioning with one-line label /
+group swaps.
+
+---
+
+## 5. Out of scope for this reorganization
+
+- Filling the five gaps above with new screens. The reorganization
+  creates space for them by category; new screens are follow-ups.
+- The `'update'` entry in `_MUTATING`. Dead-code cleanup, not IA.
+- Splitting `components` into install-time browse vs maintenance-time
+  update. Possible follow-up if the combined screen feels wrong.
+- §13 socket reload route in clients. Status per
+  `project_sigmond_tui_gaps` — ready, no client implements yet.
+- `authority.json` schema v2 (§18.4 anchor-pair + rate). See
+  `project_authority_json_v18_gap`.

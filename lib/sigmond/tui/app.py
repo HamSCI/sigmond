@@ -111,7 +111,7 @@ class SigmondApp(App):
     """Dr. SigMonD TUI configurator."""
 
     TITLE = "Dr. SigMonD"
-    SUB_TITLE = "Signal Monitor Daemon — Install / Configure / Monitor"
+    SUB_TITLE = "Signal Monitor Daemon — Monitor / Maintain / Debug / Install"
 
     CSS = """
     #main {
@@ -160,7 +160,7 @@ class SigmondApp(App):
 
     def on_mount(self) -> None:
         self.sub_title = (
-            "Signal Monitor Daemon — Install / Configure / Monitor"
+            "Signal Monitor Daemon — Monitor / Maintain / Debug / Install"
             f"    {_sigmond_version_string()}"
         )
         self._load_system_view()
@@ -179,13 +179,13 @@ class SigmondApp(App):
         ver_tag = f"v{__import__('sigmond').__version__} (#{current})" if current else f"v{__import__('sigmond').__version__}"
         if behind > 0:
             self.sub_title = (
-                "Signal Monitor Daemon — Install / Configure / Monitor"
+                "Signal Monitor Daemon — Monitor / Maintain / Debug / Install"
                 f"    {ver_tag}  ⚠ {behind} update(s) available"
             )
             self._prompt_sigmond_update(info)
         elif info:
             self.sub_title = (
-                "Signal Monitor Daemon — Install / Configure / Monitor"
+                "Signal Monitor Daemon — Monitor / Maintain / Debug / Install"
                 f"    {ver_tag}  ✔ up to date"
             )
 
@@ -497,8 +497,8 @@ class SigmondApp(App):
             "Overview",
             "Service health, client inventory, and the CPU-affinity "
             "summary — everything `smd status` shows, in one place.\n\n"
-            "Read-only.  Use the Configure, Observe, and Operate "
-            "sections in the tree for specifics.",
+            "Read-only.  Use the Monitoring, Maintenance, Debugging, "
+            "and Installation sections in the tree for specifics.",
         )
 
     def action_show_cpu_freq(self) -> None:

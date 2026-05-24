@@ -1,10 +1,17 @@
-"""Left-panel navigation tree — grouped by intent (Configure/Observe/Operate).
+"""Left-panel navigation tree — grouped by operator workflow.
 
 The tree is the TUI's primary navigation surface.  Groups mirror the
-operator's mental model: "I want to see what's running" (Observe),
-"I want to change something" (Configure), "I want to do something"
-(Operate).  Components do not appear as top-level entries — they show
-up inside screens (Overview rollup, Radiod live, Lifecycle, Logs).
+four mental-model phases an operator moves through:
+
+  Installation — first-time setup, rarely revisited.
+  Maintenance — routine changes that keep the install healthy.
+  Debugging   — diagnose + watch when something looks wrong.
+  Monitoring  — day-to-day "is it working" surfaces.
+
+Components do not appear as top-level entries — they show up inside
+screens (Overview rollup, Radiod live, Lifecycle, Logs).  See
+docs/TUI-FUNCTION-INVENTORY.md for the capability → screen mapping
+that drove this layout.
 """
 
 from __future__ import annotations
@@ -34,34 +41,37 @@ class ComponentTree(Tree):
 
         self.root.add_leaf("\u25a3 Overview", data={"screen": "overview"})
 
-        configure = self.root.add("Configure", expand=True)
-        configure.add_leaf("\u2630 Topology",          data={"screen": "topology"})
-        configure.add_leaf("\u2691 Software versions", data={"screen": "components"})
-        configure.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
-        configure.add_leaf("\u2699 Client config",     data={"screen": "client_config"})
-        configure.add_leaf("\u2261 Config view",       data={"screen": "config_show"})
-        configure.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
-        configure.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
-        configure.add_leaf("\u21c6 RAC tunnel",        data={"screen": "rac"})
-        configure.add_leaf("\u2193 Backup",            data={"screen": "backup"})
-        configure.add_leaf("\u2191 Restore",           data={"screen": "restore"})
+        monitoring = self.root.add("Monitoring", expand=True)
+        monitoring.add_leaf("\u2737 Authority",         data={"screen": "authority"})
+        monitoring.add_leaf("\u29b5 Timing",            data={"screen": "timing"})
+        monitoring.add_leaf("\u25d0 GPSDO live",        data={"screen": "gpsdo"})
+        monitoring.add_leaf("\u25c9 ka9q-radio live",   data={"screen": "radiod"})
+        monitoring.add_leaf("\u25b6 KiwiSDR live",      data={"screen": "kiwisdr"})
+        monitoring.add_leaf("\u2261 Config view",       data={"screen": "config_show"})
 
-        observe = self.root.add("Observe", expand=True)
-        observe.add_leaf("\u25c9 ka9q-radio live", data={"screen": "radiod"})
-        observe.add_leaf("\u25d0 GPSDO live",      data={"screen": "gpsdo"})
-        observe.add_leaf("\u2737 Authority",        data={"screen": "authority"})
-        observe.add_leaf("\u29b5 Timing",          data={"screen": "timing"})
-        observe.add_leaf("\u25b6 KiwiSDR live",    data={"screen": "kiwisdr"})
-        observe.add_leaf("\u2316 Environment",     data={"screen": "environment"})
-        observe.add_leaf("\u2261 Logs",        data={"screen": "logs"})
-        observe.add_leaf("\u2714 Validate",    data={"screen": "validate"})
-        observe.add_leaf("\u25ce ka9q-watch",  data={"screen": "ka9q_watch"})
-        observe.add_leaf("\u2726 Diag: net",   data={"screen": "diag_net"})
+        maintenance = self.root.add("Maintenance", expand=True)
+        maintenance.add_leaf("\u21bb Lifecycle",        data={"screen": "lifecycle"})
+        maintenance.add_leaf("\u21c4 Apply",            data={"screen": "apply"})
+        maintenance.add_leaf("\u2699 Client config",    data={"screen": "client_config"})
+        maintenance.add_leaf("\u2699 CPU affinity",     data={"screen": "cpu_affinity"})
+        maintenance.add_leaf("\u21f5 CPU frequency",    data={"screen": "cpu_freq"})
+        maintenance.add_leaf("\u2193 Backup",           data={"screen": "backup"})
+        maintenance.add_leaf("\u2191 Restore",          data={"screen": "restore"})
 
-        operate = self.root.add("Operate", expand=True)
-        operate.add_leaf("\u21bb Lifecycle", data={"screen": "lifecycle"})
-        operate.add_leaf("\u21c4 Apply",     data={"screen": "apply"})
-        operate.add_leaf("\u2a09 FFT Wisdom", data={"screen": "fft_wisdom"})
+        debugging = self.root.add("Debugging", expand=True)
+        debugging.add_leaf("\u2261 Logs",               data={"screen": "logs"})
+        debugging.add_leaf("\u2714 Validate",           data={"screen": "validate"})
+        debugging.add_leaf("\u2316 Environment",        data={"screen": "environment"})
+        debugging.add_leaf("\u2726 Diag: net",          data={"screen": "diag_net"})
+        debugging.add_leaf("\u25ce ka9q-watch",         data={"screen": "ka9q_watch"})
+        debugging.add_leaf("\u21c6 RAC tunnel",         data={"screen": "rac"})
+
+        installation = self.root.add("Installation", expand=False)
+        installation.add_leaf("\u2630 Topology",          data={"screen": "topology"})
+        installation.add_leaf("\u2691 Software versions", data={"screen": "components"})
+        installation.add_leaf("\u2795 Install",           data={"screen": "install"})
+        installation.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
+        installation.add_leaf("\u2a09 FFT Wisdom",        data={"screen": "fft_wisdom"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data

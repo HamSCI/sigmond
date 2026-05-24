@@ -77,9 +77,11 @@ class OverviewScreenMountTests(unittest.IsolatedAsyncioTestCase):
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
 class ComponentTreeStructureTests(unittest.TestCase):
     def test_tree_has_grouped_categories(self):
-        """The tree exposes Configure / Observe / Operate groups plus
-        Overview.  This pins the IA so category drift is visible in
-        diffs."""
+        """The tree exposes the four operator-workflow groups
+        (Monitoring / Maintenance / Debugging / Installation) plus
+        Overview as a root-level leaf.  This pins the IA so category
+        drift is visible in diffs.  See docs/TUI-FUNCTION-INVENTORY.md
+        for the category rationale."""
         from sigmond.tui.widgets.component_tree import ComponentTree
         from sigmond.topology import load_topology
 
@@ -87,9 +89,10 @@ class ComponentTreeStructureTests(unittest.TestCase):
         tree.populate(load_topology(), {})
 
         labels = [str(n.label) for n in tree.root.children]
-        self.assertIn("Configure", labels)
-        self.assertIn("Observe", labels)
-        self.assertIn("Operate", labels)
+        self.assertIn("Monitoring", labels)
+        self.assertIn("Maintenance", labels)
+        self.assertIn("Debugging", labels)
+        self.assertIn("Installation", labels)
         # Overview is a leaf at root level, not a group.
         self.assertTrue(any("Overview" in lbl for lbl in labels))
 
