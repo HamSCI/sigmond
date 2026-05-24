@@ -2,15 +2,42 @@
 
 from __future__ import annotations
 
-import asyncio
 import configparser
 import json
+import os
+import shutil
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Static
+
+from ..mutation import ConfirmModal, confirm_and_run, suspend_and_run_sudo
+
+
+def _smd_binary() -> str:
+    """Resolve the smd CLI binary, matching the helper used in every
+    other mutation screen (backup.py, apply.py, config_show.py, …).
+
+    Preference order:
+      1. ``sys.argv[0]`` when it points at an executable named ``smd``
+         (the operator's actual invocation path; cleanest match in
+         dev-install and /opt/git/sigmond production layouts both).
+      2. ``shutil.which('smd')`` (anywhere on PATH).
+      3. ``/usr/local/sbin/smd`` as the install-script default.
+
+    The previous RAC implementation used
+    ``Path(__file__).resolve().parents[4] / 'bin' / 'smd'`` which broke
+    on /opt/git/sigmond production installs because the parents-walk
+    landed at the wrong filesystem position.  Per
+    project_sigmond_tui_gaps.
+    """
+    argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
+        return argv0
+    return shutil.which('smd') or '/usr/local/sbin/smd'
 
 
 _FRPC_CONFIG = Path('/etc/sigmond/frpc.toml')
@@ -256,13 +283,27 @@ class RacScreen(Vertical):
             pass
 
     # ------------------------------------------------------------------
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
+    def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == 'rac-apply':
-            await self._do_apply()
+            self._do_apply()
         elif event.button.id == 'rac-disable':
             self._do_disable()
 
-    async def _do_apply(self) -> None:
+    def _do_apply(self) -> None:
+        """Operator clicked Apply.  Validate inputs, then show a
+        confirmation modal.  On confirm: write topology.toml, then run
+        ``sudo smd install --components wd-rac --yes`` under
+        suspend_and_run_sudo so the operator sees the live install
+        output in the terminal.
+
+        Topology write happens AFTER confirmation but BEFORE the smd
+        install — if the operator cancels, /etc/sigmond/topology.toml
+        is not touched; if the topology write fails, the install never
+        runs.  This is why we push ConfirmModal directly rather than
+        using confirm_and_run (which would invoke the smd subprocess
+        in a single step, leaving no place to slot the topology write
+        in between).
+        """
         rac_id         = self.query_one('#rac-id-input', Input).value.strip()
         rac_number_str = self.query_one('#rac-number-input', Input).value.strip()
         result_widget  = self.query_one('#rac-result', Static)
@@ -278,48 +319,76 @@ class RacScreen(Vertical):
             result_widget.update("[red]RAC number must be a non-negative integer.[/red]")
             return
 
-        try:
-            self._write_rac_to_topology(rac_id, rac_number)
-        except Exception as exc:
-            result_widget.update(f"[red]Failed to update topology.toml: {exc}[/red]")
-            return
+        cmd = [_smd_binary(), 'install', '--components', 'wd-rac', '--yes']
+        cmd_preview = 'sudo ' + ' '.join(cmd)
 
-        result_widget.update("[dim]Applying…[/dim]")
-        smd_bin = str(Path(__file__).resolve().parents[4] / 'bin' / 'smd')
-        loop = asyncio.get_event_loop()
-        r = await loop.run_in_executor(None, lambda: subprocess.run(
-            ['sudo', 'python3', smd_bin, 'install', '--components', 'wd-rac', '--yes'],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL,
-        ))
-        if r.returncode == 0:
-            result_widget.update(
-                f"[green]✓ configured: {rac_id}, channel {rac_number}[/green]"
-            )
-        else:
-            result_widget.update(
-                f"[red]Install failed:\n{(r.stderr or r.stdout)[-400:]}[/red]"
-            )
-        # Refresh status immediately — service may have just restarted.
-        self._refresh_status()
+        def _on_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                return
+            try:
+                self._write_rac_to_topology(rac_id, rac_number)
+            except Exception as exc:
+                result_widget.update(
+                    f"[red]Failed to update topology.toml: {exc}[/red]"
+                )
+                return
+            result_widget.update("[dim]Applying…[/dim]")
+            r = suspend_and_run_sudo(self.app, cmd)
+            if r.returncode == 0:
+                result_widget.update(
+                    f"[green]✓ configured: {rac_id}, channel {rac_number}[/]"
+                )
+            else:
+                result_widget.update(
+                    f"[red]✘ smd install exited {r.returncode}[/]"
+                )
+            self._refresh_status()
+
+        self.app.push_screen(
+            ConfirmModal(
+                title="Apply WD-RAC configuration?",
+                body=(
+                    f"Will write rac_id={rac_id!r} / rac_number={rac_number} "
+                    f"to /etc/sigmond/topology.toml, then install + enable "
+                    f"the wd-rac component (frpc reverse tunnel)."
+                ),
+                cmd_preview=cmd_preview,
+            ),
+            _on_confirm,
+        )
 
     def _do_disable(self) -> None:
+        """Operator clicked Disable.  Route through confirm_and_run."""
         result_widget = self.query_one('#rac-result', Static)
-        result_widget.update("[dim]Disabling…[/dim]")
-        r = subprocess.run(
-            ['sudo', 'systemctl', 'disable', '--now', 'wd-rac'],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+
+        def _on_complete(r: subprocess.CompletedProcess) -> None:
+            if r.returncode == 0:
+                result_widget.update("[yellow]○ wd-rac disabled and stopped.[/yellow]")
+                try:
+                    self._set_topology_enabled(False)
+                except Exception as exc:
+                    result_widget.update(
+                        f"[yellow]○ wd-rac stopped, but topology.toml "
+                        f"update failed: {exc}[/]"
+                    )
+            else:
+                result_widget.update(
+                    f"[red]✘ systemctl disable exited {r.returncode}[/]"
+                )
+            self._refresh_status()
+
+        confirm_and_run(
+            self.app,
+            title="Disable WD-RAC?",
+            body=(
+                "Will stop wd-rac.service and disable it from auto-start.\n"
+                "Remote SSH / Web access via the frpc tunnel will no longer\n"
+                "be available."
+            ),
+            cmd=['systemctl', 'disable', '--now', 'wd-rac'],
+            sudo=True,
+            on_complete=_on_complete,
         )
-        if r.returncode == 0:
-            result_widget.update("[yellow]○ wd-rac disabled and stopped.[/yellow]")
-        else:
-            result_widget.update(
-                f"[red]Disable failed:\n{(r.stderr or r.stdout)[-400:]}[/red]"
-            )
-        try:
-            self._set_topology_enabled(False)
-        except Exception:
-            pass
-        self._refresh_status()
 
     def _set_topology_enabled(self, enabled: bool) -> None:
         """Flip the enabled flag in topology.toml for wd-rac."""

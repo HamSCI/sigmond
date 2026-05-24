@@ -3328,21 +3328,90 @@ def cmd_reload(args) -> int:
         coord = load_coordination()
         units = order_units(units, coordination=coord)
 
+    # Honor --via.  CLIENT-CONTRACT §13 socket route + legacy systemd
+    # route, with --via=auto preferring socket when reachable.  No
+    # client has implemented the §13 server yet (CONTRACT v0.7); auto
+    # therefore behaves like systemd in practice until clients land.
+    via = getattr(args, 'via', 'auto')
+    if via not in ('auto', 'systemd', 'socket'):
+        _err(f"unknown --via value: {via!r}")
+        return 1
+
+    try:
+        from sigmond.control_socket import resolve_control_socket, reload_via_socket
+        _socket_helpers_available = True
+    except ImportError:
+        # _HAS_SIGMOND_LIB false: fall through to systemd unconditionally.
+        # --via=socket explicitly errors below.
+        _socket_helpers_available = False
+
+    inventory_cache: dict = {}
+
+    def _resolve_socket(unit) -> Optional[str]:
+        """Lookup unit's control_socket via cached inventory + §13.1 default."""
+        if not _socket_helpers_available:
+            return None
+        comp = unit.component
+        if comp not in inventory_cache:
+            inventory_cache[comp] = _get_client_inventory(comp)
+        return resolve_control_socket(comp, unit.instance, inventory_cache.get(comp))
+
+    def _reload_systemd(unit) -> tuple[int, str]:
+        """Legacy path: systemctl reload + try-restart fallback."""
+        r = _run(['systemctl', 'reload', unit.unit], sudo=True)
+        if r.returncode == 0:
+            return 0, 'systemctl reload'
+        r = _run(['systemctl', 'try-restart', unit.unit], sudo=True)
+        if r.returncode == 0:
+            return 0, 'systemctl try-restart'
+        return 1, (r.stderr or '').strip() or f'exit {r.returncode}'
+
     _heading('reload')
     any_failed = False
     for unit in units:
-        # Try systemctl reload first; fall back to try-restart
-        r = _run(['systemctl', 'reload', unit.unit], sudo=True)
-        if r.returncode == 0:
-            _ok(f'{unit.unit}')
-        else:
-            # Fall back to try-restart
-            r = _run(['systemctl', 'try-restart', unit.unit], sudo=True)
-            if r.returncode == 0:
-                _ok(f'{unit.unit} (via try-restart)')
+        if via == 'systemd':
+            rc, msg = _reload_systemd(unit)
+            if rc == 0:
+                _ok(f'{unit.unit} ({msg})')
             else:
-                _err(f'{unit.unit}: {r.stderr.strip()}')
+                _err(f'{unit.unit}: {msg}')
                 any_failed = True
+            continue
+
+        if via == 'socket':
+            socket_path = _resolve_socket(unit)
+            if not socket_path:
+                _err(f'{unit.unit}: --via=socket but sigmond library '
+                     f'not loaded; cannot resolve control socket')
+                any_failed = True
+                continue
+            rc, msg = reload_via_socket(socket_path)
+            if rc == 0:
+                _ok(f'{unit.unit} (via socket {socket_path}: {msg})')
+            else:
+                _err(f'{unit.unit}: socket reload failed at '
+                     f'{socket_path}: {msg}')
+                any_failed = True
+            continue
+
+        # via == 'auto'
+        socket_path = _resolve_socket(unit)
+        if socket_path and Path(socket_path).exists():
+            rc, msg = reload_via_socket(socket_path)
+            if rc == 0:
+                _ok(f'{unit.unit} (via socket: {msg})')
+                continue
+            # Socket reachable but reload failed — fall through to systemd
+            # silently per --via=auto semantics ("do whatever works").
+            _info(f'{unit.unit}: socket reload failed ({msg}), '
+                  f'falling back to systemd')
+        # No socket present (or socket failed under auto) → systemd.
+        rc, msg = _reload_systemd(unit)
+        if rc == 0:
+            _ok(f'{unit.unit} ({msg})')
+        else:
+            _err(f'{unit.unit}: {msg}')
+            any_failed = True
     return 1 if any_failed else 0
 
 
