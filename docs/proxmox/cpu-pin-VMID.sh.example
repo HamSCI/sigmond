@@ -1,6 +1,6 @@
 #!/bin/bash
-# /var/lib/vz/snippets/cpu-pin-101.sh
-# Per-vCPU pinning + per-pCPU frequency caps for VM 101 (sigmond).
+# /var/lib/vz/snippets/cpu-pin-VMID.sh
+# Per-vCPU pinning + per-pCPU frequency pin for VM <VMID> (sigmond).
 #
 # ---- How to adapt for YOUR station ----
 #
@@ -19,36 +19,63 @@
 #
 # WORKER_CPUS         Host pCPUs that back the guest's worker pool —
 #                     everything assigned to this VM minus RADIOD_CPUS.
-#                     Capped lower to limit memory-bandwidth contention
-#                     when the workers all wake at WSPR minute boundaries
-#                     (without this they steal memory bandwidth from radiod).
+#                     Pinned at the same freq as radiod CPUs.  Capping
+#                     workers lower (e.g. 1.4 GHz) was an earlier design
+#                     to limit memory-bandwidth contention; on 1-radiod
+#                     deployments the worker pool needs full clock so it
+#                     finishes WSPR-minute-boundary work in time.
 #
-# Frequencies are kHz.  Adjust to fit your CPU's supported range
+# Frequencies are kHz.  Pin at the hardware max for radiod-class workloads
 # (see /sys/devices/system/cpu/cpufreq/policy0/cpuinfo_{min,max}_freq).
+#
+# ---- Why we pin min == max instead of just setting a max cap ----
+#
+# The VM-assigned pCPUs run with nohz_full set (host grub: nohz_full=0-9),
+# which suppresses the periodic scheduler tick on those CPUs when only one
+# task is running.  amd-pstate-epp (the default cpufreq driver on Proxmox
+# 8/9) uses tick-driven load samples to decide when to raise frequency.
+# Without ticks it never sees load — and parks the pCPU at scaling_min_freq
+# forever, even at 100% sustained CPU and even with governor=performance,
+# EPP=performance.  Observed live on a 5560U: radiod FFT at 99% sustained
+# CPU while the pCPU was running at 1101 MHz (the floor).
+#
+# Pinning min == max bypasses load detection entirely: the driver has only
+# one frequency to choose, so it always picks it.  See Part 12c of
+# wsprdaemon-proxmox-cpu-clock-tuning.md.
 
 VMID=101
 RADIOD_CPUS=(0 1)
-RADIOD_FREQ_KHZ=3200000      # 3.2 GHz cap for radiod CPUs
+RADIOD_FREQ_KHZ=4063000      # HW max (use cpuinfo_max_freq for your CPU)
 WORKER_CPUS=(2 3 4 5 6 7 8 9)
-WORKER_FREQ_KHZ=1400000      # 1.4 GHz cap for worker CPUs
+WORKER_FREQ_KHZ=4063000      # HW max — workers need full clock to keep up
 
 # ---- end of operator-tunable section ----
 
 EVT_VMID=$1
 PHASE=$2
 
+# Pin a single pCPU to a single frequency.  Writes max first then min so the
+# kernel never sees a transient min>max (which would fail the write).
+pin_freq() {
+    local cpu=$1 khz=$2 role=$3
+    local sysmax=/sys/devices/system/cpu/cpufreq/policy${cpu}/scaling_max_freq
+    local sysmin=/sys/devices/system/cpu/cpufreq/policy${cpu}/scaling_min_freq
+    if echo "$khz" > "$sysmax" 2>/dev/null \
+       && echo "$khz" > "$sysmin" 2>/dev/null; then
+        echo "cpu-cap: pCPU ${cpu} pinned at $((khz/1000)) MHz (${role})"
+    else
+        echo "cpu-cap: pCPU ${cpu} FAILED to pin at $((khz/1000)) MHz (${role})"
+    fi
+}
+
 if [ "$PHASE" = "post-start" ] && [ "$EVT_VMID" = "$VMID" ]; then
-    # Per-pCPU frequency caps — apply first, independent of QEMU readiness.
+    # Per-pCPU frequency pin — apply first, independent of QEMU readiness.
     {
         for c in "${RADIOD_CPUS[@]}"; do
-            echo "$RADIOD_FREQ_KHZ" \
-                > /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq \
-                && echo "cpu-cap: pCPU ${c} max=$((RADIOD_FREQ_KHZ/1000)) MHz (radiod)"
+            pin_freq "$c" "$RADIOD_FREQ_KHZ" radiod
         done
         for c in "${WORKER_CPUS[@]}"; do
-            echo "$WORKER_FREQ_KHZ" \
-                > /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq \
-                && echo "cpu-cap: pCPU ${c} max=$((WORKER_FREQ_KHZ/1000)) MHz (worker)"
+            pin_freq "$c" "$WORKER_FREQ_KHZ" worker
         done
     } | logger -t cpu-pin-${VMID}
 

@@ -1083,6 +1083,163 @@ If sibling lists look correct but radiod still complains, the issue may be in ra
 
 ---
 
+## Part 12 — VM-specific gotchas (the FFT-pegged-at-100% expedition)
+
+If you do everything in Parts 1–11 and radiod's FFT thread *still* pegs at ~100% (vs. the ~50% you saw on bare-metal with the same hardware), one or more of these four QEMU/KVM-specific issues is biting. Each was found by a separate diagnostic and each contributed ~5–35 percentage points of unexplained CPU.
+
+### 12a — QEMU emulates a **fake cache topology** unless you ask for the real one
+
+This is the headline finding. By default, `-cpu host` exposes the host's CPU **model name** and **flags** to the guest, but **not** its cache topology. QEMU substitutes a generic Zen-class layout — which on the 5560U / 5825U / 5560U class of host falsely advertises a **16 MB L3** to the guest when the real L3 is only **8 MB**.
+
+This matters because FFTW's wisdom planner reads `/sys/devices/system/cpu/cpu0/cache/index*/size` to choose codelet block sizes. With a fake 16 MB L3 reported, the planner picks "fits in L3" plans whose working set (e.g. a 13 MB FFT block) actually exceeds the real 8 MB L3 by 60%. Every FFT pass then evicts and refetches half the working set from DRAM. Net effect: **~2× slowdown vs. bare-metal**, even though every other layer of the configuration is correct.
+
+#### Detection
+
+```bash
+# Inside the VM:
+lscpu | grep -i 'l3 cache'
+# Compare to what the host shows:
+ssh root@<proxmox-host> 'lscpu | grep -i "l3 cache"'
+```
+
+If the guest reports a larger L3 than the host (or different L1 ways, or different L2 associativity), you have the bug.
+
+#### Fix
+
+Add `host-cache-info=on` to the `-cpu` line in your VM's `args:`:
+
+```
+args: -smp 10,sockets=1,cores=5,threads=2,maxcpus=10 -cpu host,host-cache-info=on,topoext=on,+kvm_pv_eoi,+kvm_pv_unhalt,-svm
+```
+
+Then **regenerate the FFTW wisdom** (Part 12g) — the existing wisdom was planned against the fake cache and is wrong for the real one.
+
+### 12b — `args: -cpu` silently drops Proxmox's KVM paravirt flags
+
+When `cpu: host` is set in the VM conf, Proxmox emits `-cpu host,+kvm_pv_eoi,+kvm_pv_unhalt` to QEMU. These two paravirt features eliminate VM exits on every interrupt EOI and on every spinlock wait — measurable overhead for interrupt-heavy SDR workloads.
+
+When you also set `args: ... -cpu host,topoext=on` (which Part 9e told you to do, since Proxmox's `cpu:` field can't set `topoext`), QEMU sees **two** `-cpu` lines and uses the **last** one — which is yours, and which **omits** the kvm_pv flags. You lose them silently.
+
+#### Detection
+
+```bash
+ssh root@<proxmox-host> 'cat /proc/$(cat /run/qemu-server/<VMID>.pid)/cmdline | tr "\0" "\n" | grep -E "^-cpu|^host"'
+```
+
+If you see `-cpu` twice and your second `-cpu` doesn't include `+kvm_pv_eoi,+kvm_pv_unhalt`, you've lost them.
+
+#### Fix
+
+Include them in your args' `-cpu`. Example for the 5560U with one radiod:
+
+```
+args: -smp 10,sockets=1,cores=5,threads=2,maxcpus=10 -cpu host,host-cache-info=on,topoext=on,+kvm_pv_eoi,+kvm_pv_unhalt,-svm
+```
+
+### 12c — `amd-pstate-epp` + `nohz_full` keeps the CPU at scaling_min_freq under 100% load
+
+This is a subtle interaction discovered on Linux 6.17 kernels. The Proxmox host uses the `amd-pstate-epp` cpufreq driver by default. `amd-pstate-epp` decides when to raise frequency by reading **scheduler tick-driven load samples**. But the radiod pCPUs have `nohz_full=` set (Part 4), which **suppresses the scheduler tick** when only one task is running on the CPU — exactly the configuration we engineered.
+
+Result: with the tick suppressed, `amd-pstate-epp` never sees load. The CPU **parks at `scaling_min_freq`** (typically 1101 MHz on the 5560U) and stays there forever, even at 100% sustained CPU, even with `governor=performance`, even with `EPP=performance`. **The hookscript's `scaling_max_freq=` cap is a ceiling — it doesn't force the CPU upward.**
+
+#### Detection
+
+```bash
+# On the host, while the VM is busy:
+ssh root@<proxmox-host> 'for c in 0 1 2 3 4 5; do
+    cur=$(cat /sys/devices/system/cpu/cpufreq/policy${c}/scaling_cur_freq)
+    printf "  pCPU %d live=%d MHz\n" "$c" "$((cur/1000))"
+done'
+```
+
+If you see `live=1101 MHz` (or any value at the bottom of the chip's range) while the guest is running radiod at 99% — that's it.
+
+#### Fix
+
+In the hookscript, **pin `scaling_min_freq` == `scaling_max_freq`** at the desired frequency (typically the hardware max). With min == max, `amd-pstate-epp` has only one frequency to pick, so it always picks it regardless of load signal. See the updated `cpu-pin-VMID.sh.example` in this directory.
+
+### 12d — Nested-virt overhead from exposed `svm` flag
+
+`-cpu host` exposes the host's `svm` (AMD-V) flag to the guest unconditionally. This enables nested-virtualization support inside KVM, which means every guest mode-switch maintains nested-VMCS state machinery — even though our Linux SDR guest never runs its own VMs. The overhead is small per operation but cumulative.
+
+#### Detection
+
+```bash
+# Inside the guest:
+grep -o svm /proc/cpuinfo | head -1
+```
+
+If `svm` is present and you're not running nested KVM (you aren't), it's adding overhead for nothing.
+
+#### Fix
+
+Add `-svm` to your args' `-cpu` to drop the flag from the guest's view. See the complete recommended args in 12a / 12b.
+
+### 12e — Even with everything fixed, **8 MB L3 only supports one radiod per VM**
+
+After 12a–12d are all in place and a fresh wisdom is computed against the real 8 MB L3:
+
+| Configuration | NW FFT% |
+|---|---|
+| 1 radiod, isolated (nothing else running) | ~47% |
+| 1 radiod, full sigmond decoder stack (wsprdaemon, grape, psk-recorder) | ~65% |
+| 3 radiods, full sigmond decoder stack | NW ~51%, OMNI ~99%, SW ~71% |
+
+On bare-metal Debian 13 with the same 5560U, the same 8 MB L3, three radiods all run at ~50%. The reason the VM can't match this: KVM's address translation (nested page tables, TLB structures) consumes some of the L1/L2 cache space, leaving less effective cache for the FFT working set. The shortfall is small per CPU but compounds when multiple radiods share the L3.
+
+**Practical recommendation:** for SDR appliances on the 5560U / 5825U / 5560U class of mini PC, plan for **one radiod per VM**. The 16 MB L3 parts (Ryzen 5600U non-Cezanne, desktop Ryzen) can handle more.
+
+### 12f — The complete recommended `args:` line (5560U, one radiod)
+
+```
+args: -smp 10,sockets=1,cores=5,threads=2,maxcpus=10 -cpu host,host-cache-info=on,topoext=on,+kvm_pv_eoi,+kvm_pv_unhalt,-svm
+```
+
+Each token does:
+- `-smp 10,sockets=1,cores=5,threads=2,maxcpus=10` — 5 physical cores × 2 threads to the guest (Part 3).
+- `-cpu host` — start with host CPU model.
+- `host-cache-info=on` — expose real cache topology (12a).
+- `topoext=on` — enable AMD topology extensions so guest sees real SMT (Part 9e).
+- `+kvm_pv_eoi,+kvm_pv_unhalt` — restore Proxmox's KVM paravirt features dropped by the args override (12b).
+- `-svm` — disable nested-virt to reduce VM-exit overhead (12d).
+
+### 12g — Reproducing the fix on an existing deployment
+
+If you're applying these gotcha fixes to a VM that's already been running, you must regenerate FFTW wisdom after each `host-cache-info=on` change. The wisdom file is keyed to the cache topology the planner saw; if it was planned with the fake topology and you fix the topology, the plans are stale.
+
+```bash
+# Inside the VM:
+sudo /usr/local/bin/smd stop
+sudo rm /etc/fftw/wisdomf
+sudo systemd-run --unit=smd-wisdom-plan --collect /usr/local/bin/smd wisdom plan
+# Monitor:  sudo journalctl -fu smd-wisdom-plan
+# Wait ~90 min on the 5560U (the rof3240000 transform alone runs ~60 min).
+# When done:
+sudo /usr/local/bin/smd start
+```
+
+### 12h — Smoking-gun checklist if you only have 5 minutes
+
+```bash
+# 1. Cache topology fake?
+diff <(ssh root@<host> 'lscpu | grep -i cache') <(lscpu | grep -i cache)
+#    → If anything differs, add host-cache-info=on.
+
+# 2. KVM paravirt dropped?
+ssh root@<host> 'cat /proc/$(cat /run/qemu-server/<VMID>.pid)/cmdline' | tr '\0' '\n' | grep -c '^-cpu'
+#    → If "2", your args' -cpu replaced the Proxmox one. Add +kvm_pv_eoi,+kvm_pv_unhalt.
+
+# 3. Frequency stuck low under load?
+ssh root@<host> 'cat /sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq'
+#    → If < the cap and guest is busy: pin scaling_min == scaling_max.
+
+# 4. Nested virt exposed?
+grep -c svm /proc/cpuinfo
+#    → If > 0: add -svm.
+```
+
+---
+
 ## Companion documents
 
 - `wsprdaemon-proxmox-vm-setup.md` — PCIe USB passthrough setup (do this first)

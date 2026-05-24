@@ -42,6 +42,7 @@ CPU isolation, hyperthread pair exposure, and clock accuracy. Covers:
 - Validation tests for each layer
 - Operational observations under load and IRQ affinity hygiene (Part 10)
 - Known operational gotchas surfaced by guest reboots (Part 11): chrony auto-start blocked by hf-timestd ordering bug, psk-recorder `Type=notify` timeout
+- **VM-specific gotchas that explain why FFT pegs at 100% (Part 12)**: QEMU emulates a fake cache topology unless `host-cache-info=on` is set; `args: -cpu` silently drops Proxmox's KVM paravirt flags; amd-pstate-epp + nohz_full parks CPUs at scaling_min_freq under sustained 100% load; nested-virt overhead from exposed `svm` flag; 8 MB L3 only supports one radiod per VM on Cezanne U-series.
 
 This is the **second** document, addressing tuning work that follows the basic passthrough setup.
 
@@ -63,6 +64,16 @@ These are non-negotiable based on the working configuration. If a future change 
 - **`-cpu host,topoext=on` is required in `args:`** for AMD Ryzen guests. Without `topoext`, QEMU emits a hyperthreading warning at start and the guest CPU doesn't properly advertise SMT to the OS, even though Linux accepts the topology. Proxmox's `cpu:` field cannot set `topoext` (security restriction), so it must go in `args:`.
 - **Per-vCPU pinning hookscript is REQUIRED** (`/var/lib/vz/snippets/cpu-pin-VMID.sh` attached via `--hookscript`). Without it, all vCPU threads bunch on a single host CPU under the Linux scheduler with `isolcpus=` in effect — a silent ~10x performance failure. The `affinity:` field is process-level, not per-vCPU, and does not prevent this. See Part 9 of the tuning doc.
 - **Guest kernel needs its own `isolcpus=` covering radiod's HT pairs.** Inside the VM, `GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=0-(2N-1) nohz_full=0-(2N-1) rcu_nocbs=0-(2N-1)"` where N is the number of radiod instances. On AI6VN-1 with 3 radiods (KFS-NW, KFS-OMNI, KFS-SW), this is `isolcpus=0-5`. The host-side isolcpus alone doesn't keep the guest kernel off radiod's HT pair — that's what the second layer is for. See Part 4b.
+- **`args: -cpu` must include `host-cache-info=on`.** Without it, QEMU advertises a fictional cache topology to the guest (typically claiming a 16 MB L3 on a host with an 8 MB L3). FFTW's wisdom planner reads that and picks codelet block sizes for the fake cache, causing constant DRAM evictions on every FFT pass. Symptom: radiod FFT thread sustains ~100% CPU when it should be ~50%. See Part 12a.
+- **`args: -cpu` must include `+kvm_pv_eoi,+kvm_pv_unhalt`.** Proxmox normally adds these from `cpu: host`, but when `args:` also has a `-cpu` line QEMU uses the LAST one — silently dropping the paravirt flags. They reduce VM exits on interrupt EOI and spinlock waits. See Part 12b.
+- **`args: -cpu` should include `-svm`** to disable nested-virt overhead for SDR guests that never run their own VMs. See Part 12d.
+- **Hookscript must pin `scaling_min_freq == scaling_max_freq`** for VM-assigned pCPUs, not just set `scaling_max_freq`. `amd-pstate-epp` + `nohz_full` interaction parks the CPU at scaling_min_freq under sustained load (no scheduler tick → driver never sees load → never boosts), even with `governor=performance` and `EPP=performance`. See Part 12c and `cpu-pin-VMID.sh.example`.
+- **One radiod per VM on Cezanne U-series mini PCs.** 8 MB L3 is enough for one radiod's FFT pipeline plus the wsprdaemon decoder/uploader workload but cannot support 2 or 3 radiods concurrently (FFT threads peg at 99% from L3 contention). Bare-metal Debian 13 on the same 5560U fits 3 radiods because KVM's address-translation tables don't compete for L1/L2 cache. See Part 12e.
+
+### Complete recommended `args:` line (5560U / one radiod / sequential HT pairs)
+```
+args: -smp 10,sockets=1,cores=5,threads=2,maxcpus=10 -cpu host,host-cache-info=on,topoext=on,+kvm_pv_eoi,+kvm_pv_unhalt,-svm
+```
 
 ### Time synchronization
 - **Use chrony, not ntpd or systemd-timesyncd** inside the VM. chrony tolerates virtualized clocks much better.
