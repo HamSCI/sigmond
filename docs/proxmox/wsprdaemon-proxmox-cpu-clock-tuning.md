@@ -242,6 +242,65 @@ Those non-isolated CPUs will be running everything else: pveproxy, sshd, systemd
 
 ---
 
+## Part 4b — Isolate the guest kernel off radiod's HT pairs (second layer, inside the VM)
+
+The host-side `isolcpus=0-9` from Part 4 keeps the *Proxmox kernel* off the CPUs assigned to the VM. But inside the VM, the *guest kernel* still schedules its own work — systemd, network softirqs, kworkers, other services — across all 10 vCPUs by default, including the HT pair where radiod is pinned. That preemption shows up as small but real latency in radiod's fast path.
+
+The second layer of `isolcpus`, applied inside the VM, fences the guest kernel off radiod's HT pairs.
+
+### How many vCPUs to isolate
+
+Match the count of radiod instances (one HT pair each):
+
+| Radiods | Guest `isolcpus=` |
+|---|---|
+| 1 | `0,1` |
+| 2 | `0-3` |
+| 3 | `0-5` |
+| N | `0-(2N-1)` |
+
+The remaining vCPUs (e.g. 6-9 for three radiods) carry the guest kernel, sigmond, hf-timestd, wd-decode, ka9q-web, psk-recorder, and so on. Sigmond's `smd diag cpu-affinity --apply` already separates radiod from the "other" pool with cgroup `AllowedCPUs=` drop-ins, so the kernel-level `isolcpus=` reinforces what sigmond already enforces at the cgroup level — defense in depth.
+
+### Apply
+
+Edit `/etc/default/grub` **inside the VM** (e.g. with `sudoedit /etc/default/grub`):
+
+```
+GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=0-5 nohz_full=0-5 rcu_nocbs=0-5"
+```
+
+(Replace `0-5` with the matching range for your radiod count.)
+
+Then:
+
+```bash
+sudo update-grub
+sudo reboot
+```
+
+### Verify after VM reboot
+
+```bash
+cat /proc/cmdline                                     # should include the three params
+cat /sys/devices/system/cpu/isolated                  # should print 0-5
+ps -eo psr,comm | awk '$1 <= 5' | sort -u | head -20  # only radiod + unmovable per-CPU kthreads
+sudo smd validate                                     # cpu_isolation_runtime should pass
+```
+
+`smd validate cpu_isolation_runtime` is the canonical pass/fail signal — it confirms radiod has its assigned CPUs uncontested. Expected output line:
+
+```
+✓  cpu_isolation_runtime: radiod cores [0, 1, 2, 3, 4, 5] uncontested
+```
+
+### What stays on the isolated vCPUs (expected, harmless)
+
+The same per-CPU kernel threads as on the host side will appear inside the guest on each isolated vCPU: `kworker/N`, `ksoftirqd/N`, `migration/N`, `rcuop/N`, `rcuog/N`, `idle_inject/N`, `cpuhp/N`, `irq/N-...`. These are unmovable infrastructure threads tied to specific CPUs and consume essentially no CPU at idle.
+
+Additionally, radiod's spawned helpers — `avahi-publish-service` and `avahi-publish-address` — inherit radiod's CPU affinity and therefore land on the same HT pair as radiod itself. They're harmless background mDNS publishers, not significant load.
+
+---
+
 ## Part 5 — Migrate VM from ntpd/systemd-timesyncd to chrony
 
 chrony handles virtualized clocks much better than ntpd. It tolerates stepwise jumps, slews faster after suspend/resume, and copes with the inevitable hiccups of running on top of an unstable host TSC.
@@ -894,6 +953,72 @@ The expected steady-state performance of this VM configuration is essentially id
 - Slightly higher TLB miss cost due to nested page tables (typically <2% overhead, often unmeasurable)
 
 The configuration is therefore suitable for production SDR deployments where bare-metal performance is required but the management benefits of virtualization (snapshots, easy migration, consolidation with other VMs) are desirable.
+
+---
+
+## Part 11 — Known operational issues (not caused by the tuning, but visible after a guest reboot)
+
+Two pre-existing software bugs in adjacent components became visible immediately after the guest reboot that applied Part 4b's `isolcpus=0-5`. Documenting them here so future debugging doesn't blame the isolation work.
+
+### Issue 11a — `chrony.service` does not auto-start when `timestd-fusion.service` is failing
+
+**Symptom (post-reboot):**
+```
+$ chronyc tracking
+506 Cannot talk to daemon
+$ systemctl is-active chrony
+inactive
+$ journalctl -u chrony.service --since '5 minutes ago'
+-- No entries --
+```
+
+The journal shows zero entries for chrony.service — systemd never even tried to start it.
+
+**Cause:** the hf-timestd integration drop-in `/etc/systemd/system/chronyd.service.d/timestd-shm.conf` declares:
+
+```
+[Unit]
+After=timestd-metrology.service timestd-l2-calibration.service timestd-fusion.service
+Wants=timestd-metrology.service timestd-l2-calibration.service timestd-fusion.service
+```
+
+When `timestd-fusion.service` is in an exit-code restart loop (commonly due to a `PermissionError: [Errno 13]` on `/var/lib/timestd/state/broadcast_kalmans` — an hf-timestd install bug where the directory isn't created with correct ownership), systemd hits the start-limit on timestd-fusion. With chrony's `After=timestd-fusion.service` ordering and `Wants=timestd-fusion.service` soft dep, chrony's startup is deferred and effectively skipped under some failure paths.
+
+**Workaround:**
+```bash
+sudo systemctl start chrony.service
+```
+
+chrony then comes up and syncs normally. Add this to a checklist after every guest reboot until the underlying `timestd-fusion` permission bug is fixed upstream.
+
+**Real fix (upstream — track separately):** hf-timestd's installer needs to create `/var/lib/timestd/state/broadcast_kalmans` with the correct service-user ownership at install time, or `timestd-fusion` needs to fall back gracefully if the directory cannot be created.
+
+### Issue 11b — `psk-recorder@*.service` fails systemd `Type=notify` protocol
+
+**Symptom (post-reboot):**
+```
+$ systemctl status psk-recorder@my-rx888.service
+Active: activating (start) since ... ; restart counter is at 9
+$ journalctl -u psk-recorder@my-rx888.service --no-pager
+... psk-recorder@my-rx888.service: Failed with result 'protocol'.
+... Scheduled restart job, restart counter is at N.
+```
+
+The daemon itself is healthy — running it manually shows it connects to radiod, discovers multicast channels, and starts recording. But the systemd unit declares `Type=notify` with `TimeoutStartSec=60`, and the daemon does not call `sd_notify(READY=1)` within that window.
+
+**Cause:** the psk-recorder daemon's main loop doesn't send the notify-ready signal at the point systemd expects. The discovery / channel-provisioning phase takes longer than 60 s when many SSRCs need to be discovered against a freshly-started radiod, especially when the radiod is restricting multicast to localhost (`TTL=0`).
+
+**Workaround for now:** the cgroup `AllowedCPUs=` drop-in stays in place across restart attempts, so when psk-recorder finally does come up under load it lands on the right CPUs. The restart loop is wasteful but not directly harmful.
+
+**Real fix (upstream — track separately):** either change `Type=notify` to `Type=simple` in the unit file (giving up the readiness signal), bump `TimeoutStartSec=` to a value that covers the discovery phase (e.g. 300 s), or add the `sd_notify(READY=1)` call in `psk-recorder` after the initial radiod connection succeeds but before channel discovery completes.
+
+---
+
+## Companion documents
+
+- `wsprdaemon-proxmox-vm-setup.md` — PCIe USB passthrough (prerequisite to this doc).
+- `wsprdaemon-proxmox-bios-checklist.md` — offline reference for BIOS visits. **Note**: on the validated KAMRUI / Beelink / Minisforum class of mini PC the BIOS is locked and we use Part 6b's kernel parameters instead; the BIOS doc remains useful for hosts where the BIOS does expose the relevant controls.
+- `cpu-pin-VMID.sh.example` — parametrized hookscript template (per-vCPU pinning + per-pCPU frequency caps).
 
 ---
 

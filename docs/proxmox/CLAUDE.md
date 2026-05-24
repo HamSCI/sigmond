@@ -33,12 +33,15 @@ CPU isolation, hyperthread pair exposure, and clock accuracy. Covers:
 - Identifying host hyperthread pairs (sequential vs split pairing)
 - Choosing VM CPU affinity that preserves hyperthread pair topology (worked example for Ryzen 5 5560U)
 - Exposing hyperthread topology to the guest via QEMU `args:` (Proxmox's `qm` CLI does not expose `threads` directly)
-- Isolating VM CPUs from the host scheduler with `isolcpus`, `nohz_full`, `rcu_nocbs`
+- Isolating VM CPUs from the host scheduler with `isolcpus`, `nohz_full`, `rcu_nocbs` (Part 4 — host side)
+- **Isolating guest kernel work off radiod's HT pairs with in-VM `isolcpus=0-(2N-1)` for N radiod instances (Part 4b — second layer)**
 - Migrating from ntpd / systemd-timesyncd to chrony inside the VM with low-latency stratum-1 servers
 - Addressing the AMD APU "TSC found unstable" warning via `tsc=reliable processor.max_cstate=1` (works around BIOS-locked mini PCs)
 - **Per-vCPU pinning via Proxmox hookscript (Part 9) — required for SMT to actually work end-to-end on AMD Ryzen guests**
+- **Per-pCPU frequency caps for multi-radiod stations (Part 9b) — limits memory-bandwidth contention when workers wake at WSPR minute boundaries**
 - Validation tests for each layer
 - Operational observations under load and IRQ affinity hygiene (Part 10)
+- Known operational gotchas surfaced by guest reboots (Part 11): chrony auto-start blocked by hf-timestd ordering bug, psk-recorder `Type=notify` timeout
 
 This is the **second** document, addressing tuning work that follows the basic passthrough setup.
 
@@ -59,6 +62,7 @@ These are non-negotiable based on the working configuration. If a future change 
 - **Guest topology requires `args: -smp ...,threads=2`** in the conf file because Proxmox's `qm` CLI does not expose the threads parameter. Without this, the guest sees a flat topology and radiod's hyperthread pair detection fails.
 - **`-cpu host,topoext=on` is required in `args:`** for AMD Ryzen guests. Without `topoext`, QEMU emits a hyperthreading warning at start and the guest CPU doesn't properly advertise SMT to the OS, even though Linux accepts the topology. Proxmox's `cpu:` field cannot set `topoext` (security restriction), so it must go in `args:`.
 - **Per-vCPU pinning hookscript is REQUIRED** (`/var/lib/vz/snippets/cpu-pin-VMID.sh` attached via `--hookscript`). Without it, all vCPU threads bunch on a single host CPU under the Linux scheduler with `isolcpus=` in effect — a silent ~10x performance failure. The `affinity:` field is process-level, not per-vCPU, and does not prevent this. See Part 9 of the tuning doc.
+- **Guest kernel needs its own `isolcpus=` covering radiod's HT pairs.** Inside the VM, `GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=0-(2N-1) nohz_full=0-(2N-1) rcu_nocbs=0-(2N-1)"` where N is the number of radiod instances. On AI6VN-1 with 3 radiods (KFS-NW, KFS-OMNI, KFS-SW), this is `isolcpus=0-5`. The host-side isolcpus alone doesn't keep the guest kernel off radiod's HT pair — that's what the second layer is for. See Part 4b.
 
 ### Time synchronization
 - **Use chrony, not ntpd or systemd-timesyncd** inside the VM. chrony tolerates virtualized clocks much better.
@@ -90,8 +94,11 @@ If working on completely different hardware (Intel, older AMD, server-class), re
 
 ### When asked to debug VM performance issues
 1. First check whether the basic setup in `wsprdaemon-proxmox-vm-setup.md` is intact: `lspci -nnk -s 05:00.3` should show `vfio-pci` as kernel driver in use
-2. Then check CPU isolation per `wsprdaemon-proxmox-cpu-clock-tuning.md` Part 8
-3. Don't suggest USB device passthrough as an alternative — it cannot meet the bandwidth requirement
+2. Then check CPU isolation per `wsprdaemon-proxmox-cpu-clock-tuning.md` Part 8 (validation tests for each layer)
+3. Verify per-vCPU pinning fired on the host: `journalctl -t cpu-pin-101 --since '1 hour ago'` should show 10 `cpu-pin: VM 101 vCPU N -> host pCPU N` entries plus 10 `cpu-cap: pCPU N max=... MHz` entries on every VM start
+4. Inside the VM, run `sudo smd diag cpu-affinity` and `sudo smd validate` — `cpu_isolation_runtime` should report `radiod cores [...] uncontested`
+5. After any guest reboot, also check Part 11: chrony may need a manual `systemctl start chrony.service` until the hf-timestd ordering bug is fixed
+6. Don't suggest USB device passthrough as an alternative — it cannot meet the bandwidth requirement
 
 ### When asked to add a new VM or migrate to new hardware
 1. Re-verify IOMMU groups on the new hardware
