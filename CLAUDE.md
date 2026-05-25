@@ -83,19 +83,24 @@ only required for tests and the TUI extras.
 ## Core commands (implemented)
 
 ```
-smd software install [<client>]  Install a client from catalog, or full-suite
-smd software apply               Reconcile running services with current config
-                                 (`smd install` / `smd apply` remain as aliases)
+smd component install [<client>]    Install a client from catalog, or full-suite
+                         (bare `smd install` kept as alias; `smd software install`
+                         deprecated in CLI v2 — see docs/CLI-V2-SPEC.md §5)
+smd apply                Reconcile running services with current config
+                         (`smd software apply` deprecated in v2)
 smd start                Start all managed services
 smd stop                 Stop all managed services
 smd restart              Restart managed services (with reset-failed)
 smd reload               Reload via signal or restart (auto-routing)
-smd list                 Per-component status: lifecycle + git ref + upstream
+smd component list       Per-component status: lifecycle + git ref + upstream
                          divergence + version policy + verdict.
-smd list --update         Pull and reconcile per topology version policy
-                         (was the separate `smd update`). Requires root.
-smd list --catalog       Show catalog of known clients (was --available).
-smd log <client>         Follow journal, tail file logs, or set log level
+                         (bare `smd list` kept as alias)
+smd component update [<name>]       Pull and reconcile per topology version policy
+                         (was `smd list --update`/`--apply`). Requires root.
+smd component list --catalog        Show catalog of known clients (was `--available`).
+smd log <client>         Follow journal, tail file logs
+smd log set-level [<client>] <lvl>  Set per-client (+ SIGHUP) or global default log
+                         level (was `smd log --level`).
 smd status               Service health + client inventory enrichment
 smd config show|migrate  Inspect or migrate coordination config
 smd config init <c>      Invoke a client's first-run wizard (CONTRACT-v0.5 §14)
@@ -103,8 +108,9 @@ smd config edit <c>      Invoke a client's edit flow, or $EDITOR fallback
 smd config init radiod   Sigmond-owned wizard: probe USB, render radiod@<id>.conf
                          per SDR, register in coordination.toml (CONTRACT-v0.5 §14.4)
 smd validate             Cross-client harmonization rules (read-only)
-smd ka9q-watch           Compare pinned ka9q-radio commit vs upstream and
+smd watch ka9q           Compare pinned ka9q-radio commit vs upstream and
                          flag changes that would break RTP delivery
+                         (was `smd ka9q-watch`)
 smd diag                 Network + deps + client validation diagnostics
 smd tui                  Launch interactive TUI configurator
 smd environment list|probe|describe   Situational awareness of network peers
@@ -197,7 +203,8 @@ ClickHouse install, use `smd storage migrate-to-sqlite` to clean it up.
     Compares the pinned ka9q-radio commit against `origin/main` and
     classifies the delta as pass / warn / fail (red = stream-critical
     field shifted, RTP delivery to clients would break). Read-only, no
-    sudo. Surfaced as `smd ka9q-watch` and as the TUI Observe →
+    sudo. Surfaced as `smd watch ka9q` (legacy `smd ka9q-watch` still
+    works during the v2 deprecation window) and as the TUI Observe →
     ka9q-watch screen. Operator-triggered; no scheduler installed —
     rerun manually before deploying a new ka9q-radio build.
 
@@ -355,12 +362,12 @@ The consequence — and the deliberate design payoff — is that **a
 venv with zero further action**.  Every venv sees the new source on
 disk; every venv's `importlib.metadata.version()` reflects the bumped
 `pyproject.toml` immediately; no per-venv `pip install --upgrade` or
-re-run of `install.sh` is needed.  `smd list --update` exploits this
+re-run of `install.sh` is needed.  `smd component update` exploits this
 to drive fleet upgrades.
 
 ### The two layers to consider
 
-1. **Source on disk.**  `git pull` (or `smd list --update`).  Editable
+1. **Source on disk.**  `git pull` (or `smd component update`).  Editable
    installs auto-track.  If a consumer ever ends up with a wheel-style
    install of a sibling (e.g. someone hand-ran `uv pip install ka9q-python`
    from PyPI rather than `uv sync`), it stops auto-tracking until the
@@ -376,7 +383,7 @@ to drive fleet upgrades.
 
 ```bash
 # Canonical, restarts everything enabled:
-sudo smd list --update          # pulls all repos per topology version policy
+sudo smd component update       # pulls all repos per topology version policy
 sudo smd restart                # restarts every enabled component
 
 # Surgical (only what's stale; less disruption to already-fresh services):

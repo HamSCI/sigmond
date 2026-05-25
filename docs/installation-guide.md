@@ -279,7 +279,7 @@ enabled = false        # set true if you want WSPR audio capture
 | `sudo smd diag` | Run cross-component diagnostics |
 | `sudo smd validate` | Check cross-client harmonization rules |
 | `smd list` | Show per-component status (git ref, upstream divergence, version policy) |
-| `smd list --update` | Pull latest code per topology version policy and reapply (root) |
+| `smd component update [<name>]` | Pull latest code per topology version policy and reapply (was `smd list --update`; root) |
 | `smd list --catalog` | Show full component catalog (what could be installed) |
 
 ---

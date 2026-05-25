@@ -124,7 +124,7 @@ v0.3 adds:
   new `log_paths` object.
 - **§11 (new) — runtime log level controlled by sigmond.**  Sigmond
   publishes `<CLIENT>_LOG_LEVEL` in `coordination.env`; clients honor
-  it on startup and on SIGHUP.  Enables `smd log --level=DEBUG <client>`
+  it on startup and on SIGHUP.  Enables `smd log set-level <client> DEBUG`
   without config edits or restarts.
 
 Previous v0.2 additions (unchanged):
@@ -909,7 +909,7 @@ on startup using this precedence (highest-priority first):
 Clients running as long-lived daemons MUST install a `SIGHUP` handler
 that re-reads the environment variables (steps 2 and 3) and re-applies
 the resolved level to the root logger without restarting RTP streams
-or other active work.  This makes `smd log --level=DEBUG <client>` a
+or other active work.  This makes `smd log set-level <client> DEBUG` a
 one-step operation: sigmond rewrites `coordination.env` and sends
 `SIGHUP` to the unit.
 
@@ -1845,7 +1845,7 @@ Documenting the trade so the choice is informed:
 - **Coordinated evolution.** When `ka9q-python` tracks an upstream
   ka9q-radio change in control protocol, multicast derivation, or
   teardown semantics, Path A clients get the fix for free.  Path
-  B clients become a maintenance island.  `smd ka9q-watch` flags
+  B clients become a maintenance island.  `smd watch ka9q` flags
   upstream drift but cannot patch your client.
 - **PyPI version discipline (§12.6).** The `ka9q-python` PyPI-lag
   check doesn't help a client that doesn't depend on

@@ -112,7 +112,7 @@ The cluster header says "shaped," not "aligned," on purpose:
 status                           # service health snapshot
 watch <wspr|psk|hfdl|codar|ka9q|uploads|verifier>
 log [<client>]                   # bare = tail recent log lines (read)
-log set-level <client> <level>   # mutates coordination.env + SIGHUP (was: log --level)
+log set-level [<client>] <level> # mutates coordination.env (+ SIGHUP if <client>); was: log --level
 public-ip                        # external IP probe
 validate                         # cross-client harmonization check
 ```
@@ -120,11 +120,15 @@ validate                         # cross-client harmonization check
 `log` is a small namespace: bare invocation tails recent log lines
 (today's default behavior, minus the `--level` flag); `log set-level`
 is the mutating sub-verb that writes the log level into
-`coordination.env` and signals the running client. The split mirrors
-the v2 stance against mutating flags on read verbs — same reason
-`list --update` became `component update`. `log set-level` is the
-one Observation member that mutates; the cluster header is
-"primarily" read-only for this reason.
+`coordination.env` and (when a client is named) sends SIGHUP. Two
+argv shapes are accepted: `log set-level <level>` sets the global
+`CLIENT_LOG_LEVEL` default with no SIGHUP (operator restarts /
+SIGHUPs clients individually to apply); `log set-level <client>
+<level>` writes a per-client override and SIGHUPs that client's
+units. The split mirrors the v2 stance against mutating flags on
+read verbs — same reason `list --update` became `component update`.
+`log set-level` is the one Observation member that mutates; the
+cluster header is "primarily" read-only for this reason.
 
 `validate` is read-only — it reports inconsistencies across clients
 (radiod / freq / CPU / disk harmonization rules). The operator's

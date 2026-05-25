@@ -188,11 +188,12 @@ and any issues.
 | `smd reload [--components X]` | Reload via SIGHUP or restart |
 | `smd status [--components X]` | Service health + client inventory |
 | `smd list` | Per-component status: lifecycle + git ref + upstream divergence + version policy |
-| `smd list --update` | Pull and reapply per topology version policy (was `smd update` / `smd list --apply`; root) |
+| `smd component update [<name>]` | Pull and reapply per topology version policy (was `smd list --update` / `--apply`; root) |
 | `smd list --catalog` | Catalog of known clients (what could be installed) |
 | `smd log <client>` | Follow systemd journal for a client |
 | `smd log <client> --files` | Tail the client's file logs |
-| `smd log --level DEBUG <client>` | Set log level + SIGHUP (no restart) |
+| `smd log set-level <client> DEBUG` | Set per-client log level + SIGHUP (no restart) |
+| `smd log set-level WARNING` | Set global `CLIENT_LOG_LEVEL` default (no SIGHUP; restart/SIGHUP clients to apply) |
 | `smd diag` | Network, dependencies, and client validation |
 | `smd validate` | Cross-client harmonization rules |
 | `smd config show` | Dump effective coordination config |
@@ -233,17 +234,18 @@ smd log psk-recorder --files
 Change a client's verbosity without restarting:
 
 ```bash
-sudo smd log --level DEBUG psk-recorder
+sudo smd log set-level psk-recorder DEBUG
 ```
 
 This writes `PSK_RECORDER_LOG_LEVEL=DEBUG` to `/etc/sigmond/coordination.env`
 and sends SIGHUP to the client's systemd units.  The client re-reads the
 environment and adjusts its logger.
 
-To set a default level for all clients:
+To set a default level for all clients (no SIGHUP — restart or SIGHUP each
+client to apply):
 
 ```bash
-sudo smd log --level WARNING
+sudo smd log set-level WARNING
 ```
 
 ## Debugging

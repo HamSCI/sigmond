@@ -9305,27 +9305,39 @@ def _add_ka9q_watch_args(p) -> None:
 
 
 def main() -> int:
-    # v2 canonical `smd log set-level <client> <level>` — pre-argparse
+    # v2 canonical `smd log set-level [<client>] <level>` — pre-argparse
     # intercept because argparse can't cleanly mix a sub-verb with the
     # legacy positional-client shape (`smd log [<client>]`), which must
     # keep working.  Routes the same write semantics as the legacy
-    # `smd log <client> --level <level>` path.
+    # `smd log [<client>] --level <level>` path.
     # Narrow intercept: only matches when `log` is the FIRST positional
     # (no `--topology` etc. before it).  Operators needing a topology
     # override should use the legacy `log <client> --level X` shape
     # during the deprecation window.
+    # Two argv shapes:
+    #   smd log set-level <level>            — global CLIENT_LOG_LEVEL default
+    #   smd log set-level <client> <level>   — per-client override + SIGHUP
     if len(sys.argv) >= 3 and sys.argv[1] == 'log' and sys.argv[2] == 'set-level':
-        if len(sys.argv) < 5:
-            print('smd log set-level: requires <client> <level>',
-                  file=sys.stderr)
-            return 2
-        return cmd_log(argparse.Namespace(
-            command='log',
-            client=sys.argv[3],
-            level=sys.argv[4],
-            files=False,
-            topology=None,
-        ))
+        if len(sys.argv) == 4:
+            return cmd_log(argparse.Namespace(
+                command='log',
+                client=None,
+                level=sys.argv[3],
+                files=False,
+                topology=None,
+            ))
+        if len(sys.argv) >= 5:
+            return cmd_log(argparse.Namespace(
+                command='log',
+                client=sys.argv[3],
+                level=sys.argv[4],
+                files=False,
+                topology=None,
+            ))
+        print('smd log set-level: requires <level> (global default) '
+              'or <client> <level> (per-client)',
+              file=sys.stderr)
+        return 2
 
     # Hide argparse's auto-generated subparser listing — the grouped
     # epilog covers the same verbs categorised by intent (Configure /
