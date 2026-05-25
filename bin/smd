@@ -4779,7 +4779,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion component"
+    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion component instance"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -4844,6 +4844,9 @@ _smd_complete() {
                     ;;
                 component)
                     COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
+                    ;;
+                instance)
+                    COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate" -- "$cur"))
                     ;;
                 software)
                     COMPREPLY=($(compgen -W "install apply" -- "$cur"))
@@ -5013,6 +5016,39 @@ _smd_complete() {
                             ;;
                         *)
                             COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                instance)
+                    case "${words[2]}" in
+                        list)
+                            COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                            ;;
+                        show|edit|enable|disable)
+                            # Position 3 = client; position 4 = reporter ID (operator-typed).
+                            if [[ $cword -eq 3 ]]; then
+                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                            fi
+                            ;;
+                        add)
+                            if [[ $cword -eq 3 ]]; then
+                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                            elif [[ $cword -ge 5 ]]; then
+                                COMPREPLY=($(compgen -W "--force --dry-run" -- "$cur"))
+                            fi
+                            ;;
+                        remove)
+                            if [[ $cword -eq 3 ]]; then
+                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                            elif [[ $cword -ge 5 ]]; then
+                                COMPREPLY=($(compgen -W "--purge --yes --dry-run" -- "$cur"))
+                            fi
+                            ;;
+                        migrate)
+                            COMPREPLY=()
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -9024,6 +9060,326 @@ def cmd_config_edit(args) -> int:
     return cmd_tui(args)
 
 
+# ---------------------------------------------------------------------------
+# smd instance — per-reporter client instance lifecycle
+# (MULTI-INSTANCE-ARCHITECTURE.md §6)
+# ---------------------------------------------------------------------------
+
+def _instance_module():
+    """Lazy import — only when an `instance` verb actually runs."""
+    if not _HAS_SIGMOND_LIB:
+        _err('instance: sigmond library not importable')
+        return None
+    from sigmond import instance as _inst
+    return _inst
+
+
+def _check_systemd_template(client: str) -> bool:
+    """Return True if `<client>@.service` template is installed on this host."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['systemctl', 'cat', f'{client}@.service'],
+            capture_output=True, text=True, check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _check_catalog_client(client: str) -> bool:
+    """Return True if `client` appears in the catalog."""
+    if not _HAS_SIGMOND_LIB:
+        return True   # can't check — be permissive
+    try:
+        from sigmond.catalog import load_catalog
+        return client in load_catalog()
+    except Exception:
+        return True   # catalog unreadable — don't block instance ops
+
+
+def cmd_instance_list(args) -> int:
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    client_filter = getattr(args, 'client', None)
+    clients = [client_filter] if client_filter else None
+    instances = inst.list_instances(catalog_clients=clients)
+    if not instances:
+        if client_filter:
+            _info(f'no instances of {client_filter} on this host')
+        else:
+            _info('no per-reporter instances on this host yet '
+                  '(see `smd instance add --help`)')
+        return 0
+    _heading('instances')
+    print(f'  {"CLIENT":<22} {"REPORTER ID":<18} '
+          f'{"CONFIG":>7} {"ENV":>5} {"SOURCES":>8}')
+    for i in instances:
+        c = '✓' if i.has_config else '-'
+        e = '✓' if i.has_env else '-'
+        s = '✓' if i.has_sources else '-'
+        print(f'  {i.client:<22} {i.reporter_id:<18} '
+              f'{c:>7} {e:>5} {s:>8}')
+    return 0
+
+
+def cmd_instance_show(args) -> int:
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    try:
+        i = inst.get_instance(args.client, args.reporter_id)
+    except inst.InvalidReporterId as exc:
+        _err(str(exc))
+        return 1
+    if i is None:
+        _err(f'{args.client}@{args.reporter_id}: no per-instance files '
+             f'(use `smd instance add` to create)')
+        return 1
+    _heading(f'instance: {args.client}@{args.reporter_id}')
+    print(f'  reporter_id (WSPRnet form):  {inst.to_wsprnet_form(args.reporter_id)}')
+    print(f'  config:   {i.paths.config}  {"[ok]" if i.has_config else "[MISSING]"}')
+    print(f'  env:      {i.paths.env}  {"[ok]" if i.has_env else "[MISSING]"}')
+    print(f'  sources:  {i.paths.sources}  {"[ok]" if i.has_sources else "[MISSING]"}')
+    print(f'  state:    {i.paths.state_dir}  (systemd-managed)')
+    print(f'  log:      {i.paths.log_dir}  (systemd-managed)')
+    print(f'  run:      {i.paths.run_dir}  (systemd-managed)')
+    print(f'  unit:     {i.paths.unit_name}')
+
+    # Best-effort unit status
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['systemctl', 'is-active', i.paths.unit_name],
+            capture_output=True, text=True, check=False,
+        )
+        active = result.stdout.strip() or 'unknown'
+        result2 = subprocess.run(
+            ['systemctl', 'is-enabled', i.paths.unit_name],
+            capture_output=True, text=True, check=False,
+        )
+        enabled = result2.stdout.strip() or 'unknown'
+        print(f'  status:   active={active}  enabled={enabled}')
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return 0
+
+
+def cmd_instance_add(args) -> int:
+    dry_run = getattr(args, 'dry_run', False)
+    if not dry_run and _need_root('instance add'):
+        return 1
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    client = args.client
+    reporter_id = args.reporter_id
+    if not _check_catalog_client(client):
+        _err(f'{client!r}: not a known client in the catalog '
+             f'(run `smd component list --catalog`)')
+        return 1
+    if not _check_systemd_template(client):
+        _warn(f'{client}@.service systemd template is NOT installed; '
+              f'`smd instance enable` will fail until it is')
+        _info(f'  install with: sudo smd component install {client}')
+    try:
+        paths = inst.create_instance(client, reporter_id,
+                                      force=getattr(args, 'force', False),
+                                      dry_run=getattr(args, 'dry_run', False))
+    except inst.InvalidReporterId as exc:
+        _err(str(exc))
+        return 1
+    except inst.InstanceExists as exc:
+        _err(str(exc))
+        return 1
+    verb = '(dry-run) would create' if getattr(args, 'dry_run', False) else 'created'
+    _ok(f'{verb} instance {client}@{reporter_id}')
+    _info(f'  config:   {paths.config}')
+    _info(f'  env:      {paths.env}')
+    _info(f'  sources:  {paths.sources}')
+    if not getattr(args, 'dry_run', False):
+        _info('')
+        _info(f'next: wire sources and edit the config, then enable:')
+        _info(f'  smd sources add {client}@{reporter_id} <kind>:<id>')
+        _info(f'  smd instance edit {client} {reporter_id}')
+        _info(f'  sudo smd instance enable {client} {reporter_id}')
+    return 0
+
+
+def cmd_instance_remove(args) -> int:
+    dry_run = getattr(args, 'dry_run', False)
+    if not dry_run and _need_root('instance remove'):
+        return 1
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    try:
+        i = inst.get_instance(args.client, args.reporter_id)
+    except inst.InvalidReporterId as exc:
+        _err(str(exc))
+        return 1
+    if i is None:
+        _err(f'{args.client}@{args.reporter_id}: no per-instance files found')
+        return 1
+    purge = getattr(args, 'purge', False)
+    dry_run = getattr(args, 'dry_run', False)
+    if not getattr(args, 'yes', False) and not dry_run:
+        _warn(f'about to remove {args.client}@{args.reporter_id} '
+              f'{"(+ purge data/log dirs)" if purge else "(config + env + sources only)"}')
+        try:
+            ans = input('  proceed? [y/N] ')
+        except (EOFError, KeyboardInterrupt):
+            ans = ''
+        if ans.strip().lower() not in ('y', 'yes'):
+            _info('aborted')
+            return 1
+    removed = inst.remove_instance(args.client, args.reporter_id,
+                                    purge=purge, dry_run=dry_run)
+    verb = '(dry-run) would remove' if dry_run else 'removed'
+    if removed:
+        _ok(f'{verb} {len(removed)} path(s):')
+        for r in removed:
+            _info(f'  {r}')
+    else:
+        _info('nothing to remove')
+    if not dry_run:
+        _info('')
+        _info(f'unit {i.paths.unit_name} is NOT touched; '
+              f'run `sudo smd instance disable {args.client} {args.reporter_id}` '
+              f'separately if needed')
+    return 0
+
+
+def cmd_instance_enable(args) -> int:
+    if _need_root('instance enable'):
+        return 1
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    try:
+        paths = inst.instance_paths(args.client, args.reporter_id)
+    except inst.InvalidReporterId as exc:
+        _err(str(exc))
+        return 1
+    if not _check_systemd_template(args.client):
+        _err(f'{args.client}@.service systemd template not installed; '
+             f'cannot enable')
+        return 1
+    if not paths.config.exists():
+        _err(f'{paths.config} missing — run `smd instance add` first')
+        return 1
+    import subprocess
+    for action in ('enable', 'start'):
+        result = subprocess.run(
+            ['systemctl', action, paths.unit_name],
+            capture_output=False, check=False,
+        )
+        if result.returncode != 0:
+            _err(f'systemctl {action} {paths.unit_name} failed '
+                 f'(exit {result.returncode})')
+            return result.returncode
+    _ok(f'{paths.unit_name} enabled and started')
+    return 0
+
+
+def cmd_instance_disable(args) -> int:
+    if _need_root('instance disable'):
+        return 1
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    try:
+        paths = inst.instance_paths(args.client, args.reporter_id)
+    except inst.InvalidReporterId as exc:
+        _err(str(exc))
+        return 1
+    import subprocess
+    for action in ('stop', 'disable'):
+        result = subprocess.run(
+            ['systemctl', action, paths.unit_name],
+            capture_output=False, check=False,
+        )
+        if result.returncode != 0:
+            _warn(f'systemctl {action} {paths.unit_name} exited '
+                  f'{result.returncode} (may be already stopped)')
+    _ok(f'{paths.unit_name} stopped and disabled')
+    return 0
+
+
+def cmd_instance_edit(args) -> int:
+    """Phase 2: delegate to the client's config-edit flow.
+
+    Today the per-instance file is a stub; the client still loads
+    from its shared config.  After the per-client refactor (Phases
+    3-5), this verb will invoke the client's config-edit flow with
+    the per-instance config path injected via env.
+    """
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    try:
+        paths = inst.instance_paths(args.client, args.reporter_id)
+    except inst.InvalidReporterId as exc:
+        _err(str(exc))
+        return 1
+    if not paths.config.exists():
+        _err(f'{paths.config} missing — run `smd instance add` first')
+        return 1
+    _warn('Phase-2 stub: clients have not yet been refactored to read '
+          'per-instance config.  Edit the per-instance config directly:')
+    _info(f'  $EDITOR {paths.config}')
+    _info('After Phase 3+ (per-client refactor), this verb will invoke '
+          'the client\'s edit flow with the per-instance config injected.')
+    return 0
+
+
+def cmd_instance_migrate(args) -> int:
+    """Phase 2 stub — full migration is Phase 8.
+
+    Scans existing radiod-keyed env files
+    (/etc/<client>/env/<not-a-reporter-id>.env) and reports what
+    *would* be migrated under Phase 8.  No filesystem changes.
+    """
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    _heading('migration candidates (dry-run; full migration is Phase 8)')
+
+    found_any = False
+    etc = Path('/etc')
+    if not etc.exists():
+        _info('no /etc; nothing to scan')
+        return 0
+    for client_dir in sorted(etc.iterdir()):
+        if not client_dir.is_dir():
+            continue
+        env_subdir = client_dir / 'env'
+        if not env_subdir.is_dir():
+            continue
+        for env_file in sorted(env_subdir.glob('*.env')):
+            stem = env_file.stem
+            try:
+                inst.validate_reporter_id(stem)
+                continue   # already reporter-keyed
+            except inst.InvalidReporterId:
+                pass
+            found_any = True
+            _info(f'  {client_dir.name}@{stem}:  '
+                  f'env at {env_file} (not reporter-ID-shaped)')
+    if not found_any:
+        _ok('no migration candidates found — all env files are '
+            'reporter-ID-shaped already (or no env subdirs exist).')
+    else:
+        _info('')
+        _info('Phase 2 status: detection only.  Phase 8 will:')
+        _info('  - prompt for the reporter ID per candidate')
+        _info('  - rename env/config/sources files')
+        _info('  - reconfigure systemctl enable/disable')
+        _info('  - restart units under the new name')
+    return 0
+
+
 def cmd_config_catalog_prune(args) -> int:
     """Trim /etc/sigmond/catalog.toml so it carries only the entries
     that diverge from the in-repo catalog.
@@ -9373,6 +9729,8 @@ def main() -> int:
 
               Installer / maintenance:
                 component  catalog (list | install | update | add | remove | enable | disable)
+                instance   per-reporter client instance lifecycle
+                           (list | show | add | remove | edit | enable | disable | migrate)
                 config     show / migrate / init / edit per-client config
                 sources    per-client sensor feed selection (radiod / KiwiSDR / mag / vlf)
                 environment    declared vs observed network peers (list | probe | describe)
@@ -9537,6 +9895,74 @@ def main() -> int:
         'disable',
         help='disable component(s) and stop their units')
     p_c_disable.add_argument('names', nargs='+', help='one or more component names')
+
+    # instance — v2 per-reporter client instances
+    # (MULTI-INSTANCE-ARCHITECTURE.md §6)
+    p_instance = sub.add_parser(
+        'instance',
+        help='per-reporter client instance lifecycle '
+             '(list / show / add / remove / edit / enable / disable / migrate)')
+    instance_sub = p_instance.add_subparsers(dest='instance_command')
+
+    p_i_list = instance_sub.add_parser(
+        'list',
+        help='list all per-reporter instances on this host')
+    p_i_list.add_argument('client', nargs='?', default=None,
+                          help='restrict to one client (e.g. wspr-recorder)')
+
+    p_i_show = instance_sub.add_parser(
+        'show',
+        help='show paths + unit status for one instance')
+    p_i_show.add_argument('client', help='client name (e.g. wspr-recorder)')
+    p_i_show.add_argument('reporter_id',
+                          help='reporter ID (e.g. AC0G-B1)')
+
+    p_i_add = instance_sub.add_parser(
+        'add',
+        help='create per-instance config/env/sources files for a new '
+             'reporter (requires root; does NOT enable the unit)')
+    p_i_add.add_argument('client', help='client name')
+    p_i_add.add_argument('reporter_id',
+                         help='reporter ID; must match [A-Z0-9][A-Z0-9-]*[A-Z0-9]')
+    p_i_add.add_argument('--force', action='store_true',
+                         help='create only missing files; leave existing ones in place')
+    p_i_add.add_argument('--dry-run', action='store_true',
+                         help='show what would be created without touching the filesystem')
+
+    p_i_remove = instance_sub.add_parser(
+        'remove',
+        help='remove per-instance files (requires root)')
+    p_i_remove.add_argument('client', help='client name')
+    p_i_remove.add_argument('reporter_id', help='reporter ID')
+    p_i_remove.add_argument('--purge', action='store_true',
+                            help='also remove state/log/run dirs')
+    p_i_remove.add_argument('--yes', '-y', action='store_true',
+                            help='skip the interactive confirmation prompt')
+    p_i_remove.add_argument('--dry-run', action='store_true',
+                            help='show what would be removed')
+
+    p_i_edit = instance_sub.add_parser(
+        'edit',
+        help='edit per-instance config (Phase-2: stub that points at $EDITOR)')
+    p_i_edit.add_argument('client', help='client name')
+    p_i_edit.add_argument('reporter_id', help='reporter ID')
+
+    p_i_enable = instance_sub.add_parser(
+        'enable',
+        help='systemctl enable + start the instance unit (requires root)')
+    p_i_enable.add_argument('client', help='client name')
+    p_i_enable.add_argument('reporter_id', help='reporter ID')
+
+    p_i_disable = instance_sub.add_parser(
+        'disable',
+        help='systemctl stop + disable the instance unit (requires root)')
+    p_i_disable.add_argument('client', help='client name')
+    p_i_disable.add_argument('reporter_id', help='reporter ID')
+
+    p_i_migrate = instance_sub.add_parser(
+        'migrate',
+        help='scan for legacy radiod-keyed deployments to migrate '
+             '(Phase-2: detect only; Phase-8: actual migration)')
 
     # start
     # All four lifecycle verbs accept positional component names (systemctl
@@ -10416,6 +10842,30 @@ def main() -> int:
                 return cmd_config_edit_client(args)
             return cmd_config_edit(args)
         p_config.print_help()
+        return 0
+
+    # `smd instance <verb>` — v2 per-reporter client instance lifecycle
+    # (MULTI-INSTANCE-ARCHITECTURE.md §6).  All verbs handle their own
+    # root-check via _need_root in the handler.
+    if args.command == 'instance':
+        ic = getattr(args, 'instance_command', None)
+        if ic == 'list':
+            return cmd_instance_list(args)
+        if ic == 'show':
+            return cmd_instance_show(args)
+        if ic == 'add':
+            return cmd_instance_add(args)
+        if ic == 'remove':
+            return cmd_instance_remove(args)
+        if ic == 'edit':
+            return cmd_instance_edit(args)
+        if ic == 'enable':
+            return cmd_instance_enable(args)
+        if ic == 'disable':
+            return cmd_instance_disable(args)
+        if ic == 'migrate':
+            return cmd_instance_migrate(args)
+        p_instance.print_help()
         return 0
 
     # `smd component <verb>` — v2 canonical catalog namespace
