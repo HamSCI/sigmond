@@ -65,7 +65,7 @@ Notes / leftovers:
 
 ## 2. TUI screen surface (`lib/sigmond/tui/screens/`)
 
-26 screen modules. Each maps to exactly one `action_show_*` in
+27 screen modules. Each maps to exactly one `action_show_*` in
 `lib/sigmond/tui/app.py`. `action_show_update` is a kept-for-back-compat
 alias that re-dispatches to `action_show_components`, so it doesn't
 warrant a separate row.
@@ -96,6 +96,7 @@ warrant a separate row.
 | `radiod` | `action_show_radiod` | Live ka9q-python status (channels, frontend, SNR) |
 | `restore` | `action_show_restore` | Browse + extract a backup tar over the live system |
 | `sdr_inventory` | `action_show_sdr_inventory` | SDR labelling (USB enumeration + assignment) |
+| `sources` | `action_show_sources` | Per-client sensor-feed selection (radiod / KiwiSDR; future mag / vlf) — list / apply; add/remove still CLI-only |
 | `timing` | `action_show_timing` | Chrony-facade view: source comparison vs HPPS, root dispersion |
 | `topology` | `action_show_topology` | Enable / disable catalog components for this host |
 | `validate` | `action_show_validate` | Cross-client harmonization rules (radiod / freq / CPU / disk) |
@@ -123,7 +124,7 @@ warrant a separate row.
 | CPU frequency plan | `diag cpu-freq [--apply]`, `cpu` | `cpu_freq` | apply still CLI-only |
 | Network / IGMP diagnostics | `diag net [--listen]` | `diag_net` | — |
 | FFTW wisdom (plan / status) | `wisdom plan / status` | `fft_wisdom` | one screen serves both verbs |
-| Per-client SDR source selection (radiod / KiwiSDR feeds) | `sources list/add/remove/apply` | — | **Gap** — CLI-only |
+| Per-client SDR source selection (radiod / KiwiSDR feeds) | `sources list/add/remove/apply` | `sources` | list + apply paths surfaced; add/remove still CLI-only |
 | ka9q-radio pin / compat watch | `ka9q-watch`, `watch ka9q` | `ka9q_watch` | — |
 | Activity watch (wspr/psk/hfdl/codar) | `wspr-watch`, `psk-watch`, `hfdl-watch`, `codar-watch`, `watch <t>` | — | **Gap** — no TUI surface; CLI-only despite five verbs |
 | Uploads activity watch | `watch uploads` | — | **Gap** — CLI-only |
@@ -147,33 +148,29 @@ warrant a separate row.
 
 ### Gap summary
 
-Five real surface gaps where CLI exposes a routine-monitoring or
-maintenance capability with no TUI representation:
+Four real surface gaps where CLI exposes a routine-monitoring or
+maintenance capability with no TUI representation (originally five;
+the **sources** gap closed in the `sources` screen — list + apply
+buttons are wired, though per-selection add/remove still routes to
+the CLI):
 
 1. **Activity watches** — `wspr-watch / psk-watch / hfdl-watch /
    codar-watch / watch uploads / watch verifier`. The richest gap;
    five+ verbs and no live surface in the TUI.
-2. **Per-client SDR source selection** — `sources` four-verb group;
-   wires each recorder to its RF feed (radiod control plane or
-   KiwiSDR). Touched any time an SDR moves on the LAN, a new
-   RX-888 is added, or a recorder needs repointing. Not an
-   apt/pip mirror manager despite the verb name. No TUI.
-3. **Verifier report / rehabilitate** — `verifier report / rehabilitate`.
+2. **Verifier report / rehabilitate** — `verifier report / rehabilitate`.
    Reporting is monitoring; rehabilitation is maintenance.
-4. **Coordination identity / refresh** — `config identity`,
+3. **Coordination identity / refresh** — `config identity`,
    `config refresh`. Installation-adjacent (identity is first-run)
    and maintenance-adjacent (refresh after coordination changes).
-5. **CPU affinity / cpu-freq apply** — read views exist, but the
+4. **CPU affinity / cpu-freq apply** — read views exist, but the
    `--apply` mutation still requires dropping to the CLI.
 
 These map cleanly to the four-category proposal:
 
 - Gap 1 → **Debugging** (live activity surfaces)
-- Gap 2 → **Maintenance** (operator re-wires feeds whenever LAN
-  topology changes; first-run wire-up is also installer-touched)
-- Gap 3 → **Debugging** (report) + **Maintenance** (rehabilitate)
-- Gap 4 → **Installation** (identity) + **Maintenance** (refresh)
-- Gap 5 → **Maintenance** (mutation buttons on existing screens)
+- Gap 2 → **Debugging** (report) + **Maintenance** (rehabilitate)
+- Gap 3 → **Installation** (identity) + **Maintenance** (refresh)
+- Gap 4 → **Maintenance** (mutation buttons on existing screens)
 
 Closing the gaps is *not* in scope for the reorganization commit
 itself — the reorganization places empty slots where they belong, and
@@ -202,8 +199,9 @@ Maintenance / Updating         [routine operator actions]
     Lifecycle                  (start / stop / restart / reload)
     Apply                      (reconcile services with config)
     Client config              (edit / re-run wizard)
-    Sources                    [planned — per-client SDR feed selection
-                                (radiod / KiwiSDR), touched on LAN changes]
+    Sources                    (per-client SDR feed selection
+                                (radiod / KiwiSDR); list + apply
+                                in TUI, add/remove via CLI)
     CPU affinity               (apply plan)
     CPU frequency              (apply plan)
     Backup                     (snapshot config)

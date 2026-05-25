@@ -54,6 +54,7 @@ class ComponentTree(Tree):
         maintenance.add_leaf("\u21bb Lifecycle",        data={"screen": "lifecycle"})
         maintenance.add_leaf("\u21c4 Apply",            data={"screen": "apply"})
         maintenance.add_leaf("\u2699 Client config",    data={"screen": "client_config"})
+        maintenance.add_leaf("\u2604 Sources",          data={"screen": "sources"})
         maintenance.add_leaf("\u2699 CPU affinity",     data={"screen": "cpu_affinity"})
         maintenance.add_leaf("\u21f5 CPU frequency",    data={"screen": "cpu_freq"})
         maintenance.add_leaf("\u2193 Backup",           data={"screen": "backup"})
@@ -119,6 +120,8 @@ class ComponentTree(Tree):
             self.app.action_show_restore()
         elif screen == "apply":
             self.app.action_show_apply()
+        elif screen == "sources":
+            self.app.action_show_sources()
         elif screen == "fft_wisdom":
             self.app.action_show_fft_wisdom()
         elif screen == "config_show":

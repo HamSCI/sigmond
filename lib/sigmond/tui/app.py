@@ -671,6 +671,27 @@ class SigmondApp(App):
             "Safe to re-run — the CLI is idempotent.",
         )
 
+    def action_show_sources(self) -> None:
+        from .screens.sources import SourcesScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(SourcesScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Sources",
+            "Per-client sensor-feed selection — which radiod control "
+            "plane or KiwiSDR (future: magnetometer, VLF) each recorder "
+            "consumes from.\n\n"
+            "Selections live at /etc/sigmond/clients/<client>.sources.toml. "
+            "Refresh re-runs `smd sources list`; Apply (dry-run) previews "
+            "what would be written; Apply runs `sudo smd sources apply` "
+            "to render the selections into each client's config.\n\n"
+            "Add/remove of individual selections is CLI-only for now:\n"
+            "  smd sources add <client> <kind>:<id>\n"
+            "  smd sources remove <client> <kind>:<id>\n"
+            "Then return here and press Apply.",
+        )
+
     def action_show_fft_wisdom(self) -> None:
         from .screens.fft_wisdom import FFTWisdomScreen
         center = self.query_one("#center")
