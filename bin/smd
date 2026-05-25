@@ -8968,6 +8968,35 @@ def cmd_config_edit(args) -> int:
     return cmd_tui(args)
 
 
+def cmd_config_catalog_prune(args) -> int:
+    """Trim /etc/sigmond/catalog.toml so it carries only the entries
+    that diverge from the in-repo catalog.
+
+    Run automatically by install.sh at the end of an upgrade; safe to
+    re-run manually anytime.  Requires root because it writes
+    /etc/sigmond/.
+    """
+    dry_run = getattr(args, 'dry_run', False)
+    if not dry_run and _need_root('config catalog-prune'):
+        return 1
+    if not _HAS_SIGMOND_LIB:
+        _err('config catalog-prune: sigmond library not importable')
+        return 1
+    from sigmond.catalog_prune import (
+        OPERATOR_CATALOG, REPO_CATALOG,
+        prune_operator_catalog, format_report,
+    )
+    if not REPO_CATALOG.exists():
+        _err(f'repo catalog not found: {REPO_CATALOG}')
+        return 1
+    report = prune_operator_catalog(OPERATOR_CATALOG, REPO_CATALOG,
+                                     dry_run=dry_run)
+    print(format_report(report))
+    if dry_run and (report.pruned_keys or report.dropped_blocks):
+        _info('(dry-run — re-run without --dry-run to apply)')
+    return 0
+
+
 # Paths archived by `smd config backup`.  Missing paths are silently skipped.
 _BACKUP_PATHS = [
     Path('/etc/sigmond'),
@@ -9906,6 +9935,13 @@ def main() -> int:
     p.add_argument('--dry-run', action='store_true',
                    help='print the rendered env file to stdout, do not write')
 
+    p = config_sub.add_parser(
+        'catalog-prune',
+        help='trim /etc/sigmond/catalog.toml down to only the entries '
+             'that diverge from the in-repo catalog')
+    p.add_argument('--dry-run', action='store_true',
+                   help='show what would change without writing')
+
     p = config_sub.add_parser('migrate',
                               help='extract coordination.toml from wsprdaemon.conf')
     p.add_argument('--from', dest='from_', metavar='FILE',
@@ -10171,6 +10207,8 @@ def main() -> int:
             if not getattr(args, 'dry_run', False) and _need_root('config refresh'):
                 return 1
             return cmd_config_refresh(args)
+        if sub_cmd == 'catalog-prune':
+            return cmd_config_catalog_prune(args)
         if sub_cmd == 'migrate':
             return cmd_config_migrate(args)
         if sub_cmd == 'backup':

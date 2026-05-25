@@ -401,10 +401,14 @@ $SUDO chmod 2770 /var/lib/sigmond /var/log/sigmond
 ok "System directories ready"
 
 # ─── catalog.toml ─────────────────────────────────────────────────────────────
-# Always refresh from repo — catalog is Sigmond-managed and not user-edited.
-info "Installing catalog → /etc/sigmond/catalog.toml"
-$SUDO cp "$REPO_DIR/etc/catalog.toml" /etc/sigmond/catalog.toml
-ok "catalog.toml installed"
+# Catalog now ships as a sparse-overlay layer: the in-repo etc/catalog.toml
+# is read directly by sigmond.catalog.load_catalog() and any
+# /etc/sigmond/catalog.toml carries only host-specific overrides.  We
+# defer prune-to-minimal until after the venv + smd binary are in place
+# (see the "catalog prune" block near the end of this script).  No
+# unconditional copy happens here — on a fresh install we'd just be
+# writing a file we'd immediately prune to nothing, and on an upgrade
+# we'd silently clobber operator overrides.
 
 # ─── fallback lifecycle shims ────────────────────────────────────────────────
 # Non-contract upstream components (ka9q-radio, ka9q-web, …) don't carry
@@ -527,6 +531,23 @@ ok "smd installed at $INSTALL_SMD"
 if [[ -L "$LEGACY_INSTALL_SMD" ]]; then
     info "Removing legacy symlink $LEGACY_INSTALL_SMD"
     $SUDO rm -f "$LEGACY_INSTALL_SMD"
+fi
+
+# ─── catalog prune ────────────────────────────────────────────────────────────
+# Trim /etc/sigmond/catalog.toml so it carries only entries that diverge
+# from the in-repo catalog.  On a fresh install (file doesn't exist) this
+# is a no-op.  On an upgrade where the operator file is a stale full copy,
+# every duplicate block is dropped and the file may end up being removed
+# entirely — sigmond's sparse-overlay reads the repo file directly when
+# no operator file is present.  Non-fatal: a failed prune leaves the
+# operator file as-is.
+if [[ -f /etc/sigmond/catalog.toml ]]; then
+    info "Pruning /etc/sigmond/catalog.toml against repo catalog…"
+    if $SUDO "$INSTALL_SMD" config catalog-prune; then
+        ok "catalog pruned"
+    else
+        warn "catalog prune failed (non-fatal — operator file left intact)"
+    fi
 fi
 
 # ─── done ─────────────────────────────────────────────────────────────────────
