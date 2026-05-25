@@ -395,10 +395,33 @@ Phase 3 in favor of per-process-per-reporter. Specifically:
   instance path can take effect once the operator migrates.
 - 380/380 tests passing (19 new, 0 regressions).
 
-**Phase 5 — hfdl-recorder / codar-sounder / mag-recorder per-instance refactor.**
-Same pattern. Order chosen by which has the fewest config
-peculiarities; mag-recorder likely first since it has the simplest
-config today.
+**Phase 5 — hfdl-recorder / codar-sounder / mag-recorder per-instance refactor. DONE (2026-05-25).**
+Three commits across three repos:
+
+- **codar-sounder commit `20f0c8e`** — full Phase 3/4 pattern: new
+  resolve_config_path + extract_reporter_id, --instance flag,
+  reporter_id plumbed through SounderDaemon → _TransmitterPipeline,
+  systemd template passes --instance %i; 233 tests pass.
+- **hfdl-recorder commit `72296cd`** — same pattern: --instance,
+  resolvers, reporter_id through HfdlRecorder → ChTailer, systemd
+  template passes --instance %i; 88 tests pass.
+- **mag-recorder commit `8fb48ff`** — code-level plumbing only.
+  mag-recorder is singleton (`mag-recorder.service`, not
+  templated), so --instance is currently dormant.  Per-instance
+  config resolution falls through to the legacy shared path; the
+  supervisor stamps each spooled sample with reporter_id when set
+  (None today, so the field is omitted on legacy deployments).
+  Template conversion is deferred to the Phase 8 migration tool;
+  the code is ready for that conversion when it happens.
+
+Cutover-fallback fix applied separately to psk-recorder (commit
+`4d2ebf8`) and wspr-recorder (commit `7b31a3b`) during this same
+phase: removed the daemon-side `reporter_id = args.instance`
+fallback that wrongly used radiod-id values as reporter_ids during
+the deprecation window.  Both daemons now leave reporter_id None
+when no [instance] block exists; row-construction layers fall back
+to radiod_id (matching the legacy `instance` field semantic).
+Same fix baked into the Phase 5 commits from the start.
 
 **Phase 6 — TUI screen revisits.** Add instance selectors to
 activity / verifier / logs / lifecycle / sources / client_config
