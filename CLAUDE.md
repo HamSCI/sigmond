@@ -90,9 +90,10 @@ ClickHouse install, use `smd storage migrate-to-sqlite` to clean it up.
 
 ## Architecture layers
 
-1. **Catalog** (`etc/catalog.toml`, `lib/sigmond/catalog.py`) — static
-   registry of known clients.  Answers "what could be installed?"
-   Includes topology-alias bridge (grape → hf-timestd).
+1. **Catalog** (`etc/catalog.toml`, `lib/sigmond/catalog.py`) — registry
+   of known clients.  Answers "what could be installed?"  Three layers
+   merged via sparse per-field overlay; deprecation list excludes
+   retired clients from discovery.  See "Catalog layering" below.
 
 2. **Installer** (`lib/sigmond/installer.py`) — catalog-driven install:
    clone repo to `/opt/git/sigmond/<name>`, run the client's canonical `install.sh`.
@@ -199,6 +200,73 @@ enabled = false
 
 Old topology names (`grape`, `wspr`) are accepted as aliases with deprecation
 warnings.  The canonical names match `etc/catalog.toml`.
+
+## Catalog layering
+
+`load_catalog()` merges three layers, lowest precedence first, via
+*sparse per-field overlay* — only the keys present in a higher layer
+override the same keys from earlier layers; missing keys fall through:
+
+1. **Discovery** — synthesized from each `/opt/git/sigmond/<name>/deploy.toml`.
+   This is Wave 2's "drop-in client" path: clone a contract-conformant
+   repo, no sigmond-side edits required.
+2. **Repo default** — `etc/catalog.toml` shipped with sigmond.  Adds
+   entries that can't be discovered (`ka9q-radio` has no
+   `/opt/git/sigmond/` checkout), source-only dep declarations
+   (`mag-usb`, `hs-uploader`), and `[deprecated.<name>]` blocks.
+3. **Operator override** — `/etc/sigmond/catalog.toml` (per-host).
+   Should contain *only* the fields a host genuinely overrides —
+   e.g. `repo = "git@my-fork:foo"`.
+
+### Why sparse overlay (and not first-file-wins)
+
+The pre-`7d172b4` design read the first existing file and replaced
+whole `CatalogEntry` objects.  An operator file that predated a new
+repo-side entry silently shadowed the whole catalog, so new clients
+(and source-only deps like `mag-usb`) stayed invisible until each
+host manually re-synced `/etc/sigmond/catalog.toml`.  Sparse overlay
+makes new repo entries propagate on `git pull` with zero per-host
+sync work.
+
+### `[deprecated.<name>]` blocks
+
+Names listed here are *excluded* from the catalog returned by
+`load_catalog()`, so a stale `/opt/git/sigmond/<name>/deploy.toml`
+cannot revive a removed client through discovery.  `smd list` shows
+deprecated entries in a separate section when their checkout still
+lingers on disk.  `smd remove <name>` is a full purge for these
+names — stop+disable units, remove the deploy.toml link symlinks,
+`rm -rf` source / venv / `/etc/<name>/`, plus any paths in the
+block's `extra_paths = [...]` list (legacy dirs that don't follow
+the `<name>`-suffix convention — e.g. wsprdaemon-client's config
+lived at `/etc/wsprdaemon/`, not `/etc/wsprdaemon-client/`).
+
+### `smd config catalog-prune`
+
+Trims `/etc/sigmond/catalog.toml` to only the fields that diverge
+from the repo file.  If the operator file ends up empty, it's
+removed (sparse overlay reads the repo file directly when no
+operator file exists).  A `.bak` snapshot is written before any
+destructive change.
+
+Runs automatically at the end of `install.sh` (after the smd
+symlink is in place) so each upgrade trims any drift.  Safe to
+re-run manually: `sudo smd config catalog-prune` (add `--dry-run`
+to preview).
+
+### Where to edit which file
+
+* **New entry that all hosts should see** — `etc/catalog.toml` in
+  the repo.  Commit + push; other hosts pick it up on `git pull`
+  thanks to sparse overlay (re-running `install.sh` not required,
+  though it's also the trigger for the next prune).
+* **Deprecate a retired client** — `[deprecated.<name>]` block in
+  the repo's `etc/catalog.toml`.  Include `extra_paths` if the
+  legacy install put files under a non-conventional name.
+* **Host-specific override** — `/etc/sigmond/catalog.toml`.  Write
+  *only* the diverging fields; everything else falls through to
+  discovery + the repo file.  The next prune leaves your edits
+  alone (it only drops keys that re-duplicate the repo value).
 
 ## Fleet upgrade pattern
 
