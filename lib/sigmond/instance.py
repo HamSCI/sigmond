@@ -370,3 +370,286 @@ def remove_instance(
                     pass
 
     return removed
+
+
+# ---------------------------------------------------------------------------
+# Migration (`smd instance migrate`)
+# (MULTI-INSTANCE-ARCHITECTURE.md §6 + §10 Phase 8)
+# ---------------------------------------------------------------------------
+
+# Clients that are templated (`<client>@.service`) and need migration.
+# mag-recorder is intentionally excluded (singleton service, not a template);
+# its template conversion happens out-of-band.
+_TEMPLATED_RECORDER_CLIENTS = (
+    "psk-recorder",
+    "wspr-recorder",
+    "hfdl-recorder",
+    "codar-sounder",
+)
+
+
+@dataclass(frozen=True)
+class MigrationCandidate:
+    """A legacy <client>@<old>.service that needs migration.
+
+    `old_instance` is the systemd `%i` (typically a radiod id like
+    `my-rx888`).  `signals` lists which evidence sources flagged this
+    candidate ("env_file", "systemd_unit", or both).
+    """
+    client: str
+    old_instance: str
+    has_env_file: bool
+    has_systemd_unit: bool
+    unit_active: bool
+
+    @property
+    def unit_name(self) -> str:
+        return f"{self.client}@{self.old_instance}.service"
+
+
+def detect_migration_candidates() -> list[MigrationCandidate]:
+    """Walk env files + systemctl-listed units; surface candidates.
+
+    Combines two signals:
+      1. /etc/<client>/env/<name>.env where <name> isn't a valid
+         reporter_id and <client> is a templated recorder.
+      2. systemctl-loaded `<client>@<name>.service` units where
+         <name> isn't a valid reporter_id.
+
+    Returns a deduped + sorted list.
+    """
+    import subprocess
+
+    found: dict[tuple[str, str], MigrationCandidate] = {}
+
+    # Source 1 — per-instance env files
+    for client in _TEMPLATED_RECORDER_CLIENTS:
+        env_dir = Path("/etc") / client / "env"
+        if not env_dir.is_dir():
+            continue
+        for env_file in sorted(env_dir.glob("*.env")):
+            name = env_file.stem
+            try:
+                validate_reporter_id(name)
+                continue                # already reporter-keyed; skip
+            except InvalidReporterId:
+                pass
+            key = (client, name)
+            found[key] = MigrationCandidate(
+                client=client, old_instance=name,
+                has_env_file=True,
+                has_systemd_unit=False,
+                unit_active=False,
+            )
+
+    # Source 2 — systemctl loaded units (templated `<client>@<name>.service`)
+    try:
+        result = subprocess.run(
+            ["systemctl", "list-units", "--all", "--no-legend",
+             "--no-pager", "--plain", "--type=service"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+
+    if result is not None and result.returncode == 0:
+        for line in (result.stdout or "").splitlines():
+            cols = line.split(None, 4)
+            if len(cols) < 4:
+                continue
+            unit_name, load, active, _sub = cols[0], cols[1], cols[2], cols[3]
+            if not unit_name.endswith(".service"):
+                continue
+            base = unit_name[:-len(".service")]
+            if "@" not in base:
+                continue
+            client, _, name = base.partition("@")
+            if client not in _TEMPLATED_RECORDER_CLIENTS:
+                continue
+            if not name:
+                continue
+            try:
+                validate_reporter_id(name)
+                continue                # already reporter-keyed
+            except InvalidReporterId:
+                pass
+            key = (client, name)
+            existing = found.get(key)
+            unit_active = (active == "active")
+            if existing:
+                found[key] = MigrationCandidate(
+                    client=client, old_instance=name,
+                    has_env_file=existing.has_env_file,
+                    has_systemd_unit=True,
+                    unit_active=unit_active,
+                )
+            else:
+                found[key] = MigrationCandidate(
+                    client=client, old_instance=name,
+                    has_env_file=False,
+                    has_systemd_unit=True,
+                    unit_active=unit_active,
+                )
+
+    return sorted(found.values(),
+                  key=lambda c: (c.client, c.old_instance))
+
+
+# ---------------------------------------------------------------------------
+# Per-candidate migration
+# ---------------------------------------------------------------------------
+
+# Legacy shared config path per client (matches the resolve_config_path
+# DEFAULT_CONFIG_PATH in each client repo's config.py).
+_LEGACY_SHARED_CONFIG = {
+    "psk-recorder":   Path("/etc/psk-recorder/psk-recorder-config.toml"),
+    "wspr-recorder":  Path("/etc/wspr-recorder/config.toml"),
+    "hfdl-recorder":  Path("/etc/hfdl-recorder/hfdl-recorder-config.toml"),
+    "codar-sounder":  Path("/etc/codar-sounder/codar-sounder-config.toml"),
+}
+
+
+def _migration_config_header(client: str, old: str, reporter_id: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    legacy = _LEGACY_SHARED_CONFIG.get(client, Path("(unknown legacy path)"))
+    return (
+        f"# Per-instance config for {client}@{reporter_id}\n"
+        f"# Created by `smd instance migrate` on {ts}\n"
+        f"# (migrated from legacy unit {client}@{old}.service).\n"
+        f"#\n"
+        f"# This file is a copy of {legacy} with an [instance]\n"
+        f"# block prepended.  Per-instance config currently contains the\n"
+        f"# FULL shared content; operators may trim unrelated\n"
+        f"# [[radiod]] / [[band]] / [[source]] blocks that don't apply\n"
+        f"# to this reporter.  See docs/MULTI-INSTANCE-ARCHITECTURE.md\n"
+        f"# for the canonical layout.\n"
+        f"\n"
+        f"[instance]\n"
+        f'reporter_id = "{reporter_id}"\n'
+        f"\n"
+        f"[instance.metadata]\n"
+        f'# antenna  = "loop"            # operator description\n'
+        f'# sdr      = "rx888-mk2"       # SDR model / serial / friendly name\n'
+        f"\n"
+        f"# --- Original shared-config content follows ---\n"
+        f"\n"
+    )
+
+
+def migrate_one_instance(
+    client: str,
+    old_instance: str,
+    reporter_id: str,
+    *,
+    dry_run: bool = True,
+) -> list[str]:
+    """Perform the per-candidate migration steps in order.
+
+    Returns a list of step descriptions for the operator's log.
+    With `dry_run=True`, no filesystem or systemd changes happen —
+    just reports what WOULD be done.
+
+    Steps (per spec §6):
+      1. stop + disable old <client>@<old>.service
+      2. create per-instance config (copy shared + prepend [instance])
+      3. mv env file
+      4. mv data dir (/var/lib/<client>/<old> → /var/lib/<client>/<reporter>)
+      5. mv log dir (/var/log/<client>/<old> → /var/log/<client>/<reporter>)
+      6. mv systemd drop-in dir
+      7. daemon-reload
+      8. enable + start new unit
+
+    Raises InvalidReporterId on bad reporter_id; all other failures
+    are accumulated into the returned step list (best-effort).
+    """
+    import subprocess
+
+    validate_reporter_id(reporter_id)
+    new_paths = instance_paths(client, reporter_id)
+    old_unit = f"{client}@{old_instance}.service"
+    new_unit = new_paths.unit_name
+
+    old_env = Path("/etc") / client / "env" / f"{old_instance}.env"
+    old_state = Path("/var/lib") / client / old_instance
+    old_log = Path("/var/log") / client / old_instance
+    old_dropin = Path("/etc/systemd/system") / f"{old_unit}.d"
+    new_dropin = Path("/etc/systemd/system") / f"{new_unit}.d"
+
+    steps: list[str] = []
+
+    def _do(desc: str, func) -> None:
+        steps.append(("would " if dry_run else "") + desc)
+        if dry_run:
+            return
+        try:
+            func()
+        except Exception as exc:
+            steps.append(f"  ERROR: {exc}")
+
+    def _run(*cmd: str) -> None:
+        result = subprocess.run(
+            list(cmd), capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"{' '.join(cmd)} exit {result.returncode}: "
+                f"{(result.stderr or '').strip()}"
+            )
+
+    # 1. Stop + disable old unit
+    _do(f"systemctl stop {old_unit}",
+        lambda: _run("systemctl", "stop", old_unit))
+    _do(f"systemctl disable {old_unit}",
+        lambda: _run("systemctl", "disable", old_unit))
+
+    # 2. Create per-instance config from shared (if not already present)
+    if new_paths.config.exists():
+        steps.append(f"per-instance config {new_paths.config} already exists; skip")
+    else:
+        legacy_shared = _LEGACY_SHARED_CONFIG.get(client)
+        if legacy_shared is None or not legacy_shared.exists():
+            steps.append(
+                f"WARN: no legacy shared config for {client} at "
+                f"{legacy_shared} — per-instance config not created. "
+                f"Operator must create {new_paths.config} manually."
+            )
+        else:
+            def _write_config():
+                new_paths.config.parent.mkdir(parents=True, exist_ok=True)
+                header = _migration_config_header(client, old_instance, reporter_id)
+                body = legacy_shared.read_text()
+                new_paths.config.write_text(header + body)
+            _do(f"create {new_paths.config} from {legacy_shared} + [instance] block",
+                _write_config)
+
+    # 3. mv env file
+    if old_env.exists():
+        def _mv_env():
+            new_paths.env.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old_env), str(new_paths.env))
+        _do(f"mv {old_env} → {new_paths.env}", _mv_env)
+
+    # 4. mv data dir
+    if old_state.exists():
+        _do(f"mv {old_state} → {new_paths.state_dir}",
+            lambda: shutil.move(str(old_state), str(new_paths.state_dir)))
+
+    # 5. mv log dir
+    if old_log.exists():
+        _do(f"mv {old_log} → {new_paths.log_dir}",
+            lambda: shutil.move(str(old_log), str(new_paths.log_dir)))
+
+    # 6. mv systemd drop-in dir
+    if old_dropin.exists():
+        _do(f"mv {old_dropin} → {new_dropin}",
+            lambda: shutil.move(str(old_dropin), str(new_dropin)))
+
+    # 7. systemctl daemon-reload
+    _do("systemctl daemon-reload",
+        lambda: _run("systemctl", "daemon-reload"))
+
+    # 8. Enable + start new unit
+    _do(f"systemctl enable --now {new_unit}",
+        lambda: _run("systemctl", "enable", "--now", new_unit))
+
+    return steps

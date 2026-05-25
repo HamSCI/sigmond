@@ -9335,48 +9335,103 @@ def cmd_instance_edit(args) -> int:
 
 
 def cmd_instance_migrate(args) -> int:
-    """Phase 2 stub — full migration is Phase 8.
+    """Phase-8 (MULTI-INSTANCE-ARCHITECTURE.md §6 + §10): one-shot
+    interactive migration from legacy radiod-keyed unit names to
+    reporter-keyed names.
 
-    Scans existing radiod-keyed env files
-    (/etc/<client>/env/<not-a-reporter-id>.env) and reports what
-    *would* be migrated under Phase 8.  No filesystem changes.
+    Dry-run by default — prints the plan without changing anything.
+    `--yes` performs the migration; root required.  Per-candidate
+    prompt for the new reporter_id; skip is non-destructive.
     """
     inst = _instance_module()
     if inst is None:
         return 1
-    _heading('migration candidates (dry-run; full migration is Phase 8)')
 
-    found_any = False
-    etc = Path('/etc')
-    if not etc.exists():
-        _info('no /etc; nothing to scan')
+    dry_run = not getattr(args, 'yes', False)
+    if not dry_run and _need_root('instance migrate'):
+        return 1
+
+    candidates = inst.detect_migration_candidates()
+    if not candidates:
+        _ok('no migration candidates found — all units / env files '
+            'are reporter-ID-shaped already.')
         return 0
-    for client_dir in sorted(etc.iterdir()):
-        if not client_dir.is_dir():
+
+    _heading('Migration candidates')
+    print(f'  {"CLIENT":<18} {"OLD INSTANCE":<32} ENV  UNIT  ACTIVE')
+    for c in candidates:
+        e = ' ✓ ' if c.has_env_file else ' - '
+        u = ' ✓ ' if c.has_systemd_unit else ' - '
+        a = ' ✓ ' if c.unit_active else ' - '
+        print(f'  {c.client:<18} {c.old_instance:<32}{e}{u}{a}')
+    print()
+    if dry_run:
+        _info('Dry-run mode.  Re-run with `--yes` to actually migrate '
+              '(requires root).')
+        _info('You will be prompted per-candidate for the new reporter ID; '
+              'leaving it blank skips that candidate.')
+        return 0
+
+    # Live mode: per-candidate interactive prompt + execute.
+    _warn('Live migration mode.  This will stop/restart services and '
+          'move files.  Per-candidate skip is non-destructive.')
+    migrated = 0
+    skipped = 0
+    failed = 0
+    for c in candidates:
+        print()
+        _heading(f'{c.client}@{c.old_instance}')
+        prompt = (f'  new reporter ID (e.g. AC0G-B1) '
+                  f'[blank to skip]: ')
+        try:
+            reporter_id = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            _info('aborted')
+            return 1
+        if not reporter_id:
+            _info(f'  skipped {c.client}@{c.old_instance}')
+            skipped += 1
             continue
-        env_subdir = client_dir / 'env'
-        if not env_subdir.is_dir():
+        try:
+            inst.validate_reporter_id(reporter_id)
+        except inst.InvalidReporterId as exc:
+            _err(f'  {exc}')
+            skipped += 1
             continue
-        for env_file in sorted(env_subdir.glob('*.env')):
-            stem = env_file.stem
-            try:
-                inst.validate_reporter_id(stem)
-                continue   # already reporter-keyed
-            except inst.InvalidReporterId:
-                pass
-            found_any = True
-            _info(f'  {client_dir.name}@{stem}:  '
-                  f'env at {env_file} (not reporter-ID-shaped)')
-    if not found_any:
-        _ok('no migration candidates found — all env files are '
-            'reporter-ID-shaped already (or no env subdirs exist).')
-    else:
-        _info('')
-        _info('Phase 2 status: detection only.  Phase 8 will:')
-        _info('  - prompt for the reporter ID per candidate')
-        _info('  - rename env/config/sources files')
-        _info('  - reconfigure systemctl enable/disable')
-        _info('  - restart units under the new name')
+        confirm = input(
+            f'  migrate {c.client}@{c.old_instance} → '
+            f'{c.client}@{reporter_id}? [y/N] '
+        ).strip().lower()
+        if confirm not in ('y', 'yes'):
+            _info('  skipped')
+            skipped += 1
+            continue
+        steps = inst.migrate_one_instance(
+            c.client, c.old_instance, reporter_id, dry_run=False,
+        )
+        had_error = False
+        for step in steps:
+            if step.startswith('  ERROR') or step.startswith('WARN'):
+                _err(f'  {step.strip()}')
+                had_error = True
+            else:
+                _info(f'  {step}')
+        if had_error:
+            failed += 1
+        else:
+            migrated += 1
+            _ok(f'migrated {c.client}@{c.old_instance} → '
+                f'{c.client}@{reporter_id}')
+
+    print()
+    _heading('Summary')
+    _info(f'  migrated: {migrated}')
+    _info(f'  skipped:  {skipped}')
+    if failed:
+        _err(f'  failed:   {failed}  '
+             '(operator must resolve manually — see logs above)')
+        return 1
     return 0
 
 
@@ -9961,8 +10016,12 @@ def main() -> int:
 
     p_i_migrate = instance_sub.add_parser(
         'migrate',
-        help='scan for legacy radiod-keyed deployments to migrate '
-             '(Phase-2: detect only; Phase-8: actual migration)')
+        help='one-shot interactive migration from legacy radiod-keyed '
+             'unit names to reporter-keyed names (dry-run by default)')
+    p_i_migrate.add_argument(
+        '--yes', action='store_true',
+        help='actually perform the migration (requires root); '
+             'without this, only the candidate list is printed')
 
     # start
     # All four lifecycle verbs accept positional component names (systemctl

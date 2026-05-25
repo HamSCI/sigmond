@@ -435,9 +435,47 @@ to render the WSPRnet form `AC0G/B1` at the wsprnet boundary).
 Verifier and `wsprnet_audit`/`wsprnet_reject_cache` schema bumps
 land here.
 
-**Phase 8 — Migration tool.** `smd instance migrate` per §6, with a
-companion section in installation-guide.md. Ship after at least one
-real host (bee1) has been used to validate the migration manually.
+**Phase 8 — Migration tool. DONE (sigmond pending commit, 2026-05-25).**
+`smd instance migrate` per §6 — replaces the Phase-2 detect-only
+stub with a one-shot interactive migration.
+
+Detection (`detect_migration_candidates()` in `lib/sigmond/instance.py`)
+unions two signals:
+- per-instance env files at `/etc/<client>/env/<name>.env` whose
+  stem isn't a valid reporter_id
+- systemctl-loaded `<client>@<name>.service` units (templated
+  recorders only — `_TEMPLATED_RECORDER_CLIENTS` set) whose
+  instance name isn't a valid reporter_id
+
+mag-recorder is intentionally excluded from the templated-recorder
+set (singleton service, not a template); its conversion is
+out-of-band.
+
+Per-candidate migration (`migrate_one_instance()`) runs eight steps
+in order: stop + disable old unit, create per-instance config (copy
+legacy shared + prepend `[instance]` block), mv env / data / log /
+drop-in directories, daemon-reload, enable + start new unit.
+
+Dry-run is the default; `--yes` opts into the live destructive
+path (requires root).  Per-candidate prompt for the new reporter
+ID; blank input or invalid format skips that candidate.
+
+**Smoke-tested on bee1:** dry-run detected the expected 5
+candidates (psk/wspr/hfdl @ my-rx888, codar @ ac0g-bee1-rx888, an
+inactive anomaly psk @ sigmond-decode-health-collect).  Live
+migration NOT exercised yet on bee1 — that requires an explicit
+operator-driven run with the four real reporter IDs settled.
+
+**v1 per-instance config strategy:** the migration COPIES the
+legacy shared config into the new per-instance config file and
+prepends an `[instance]` block.  The new file contains the FULL
+legacy content; operators may trim irrelevant `[[radiod]]` /
+`[[band]]` blocks afterwards.  This trades a one-time cleanup
+chore for migration-tool simplicity (no TOML splitting logic
+required).  Documented in the migration-config header.
+
+**installation-guide.md** companion section is deferred to the
+operator-rollout follow-up; the tool itself is shipped.
 
 **Phase 9 — Remove the deprecated radiod-keyed unit names.** One
 release after Phase 8 lands. CLIENT-CONTRACT.md gains a §19
