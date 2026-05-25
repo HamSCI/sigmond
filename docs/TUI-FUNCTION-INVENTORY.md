@@ -65,7 +65,7 @@ Notes / leftovers:
 
 ## 2. TUI screen surface (`lib/sigmond/tui/screens/`)
 
-28 screen modules. Each maps to exactly one `action_show_*` in
+29 screen modules. Each maps to exactly one `action_show_*` in
 `lib/sigmond/tui/app.py`. `action_show_update` is a kept-for-back-compat
 alias that re-dispatches to `action_show_components`, so it doesn't
 warrant a separate row.
@@ -101,6 +101,7 @@ warrant a separate row.
 | `timing` | `action_show_timing` | Chrony-facade view: source comparison vs HPPS, root dispersion |
 | `topology` | `action_show_topology` | Enable / disable catalog components for this host |
 | `validate` | `action_show_validate` | Cross-client harmonization rules (radiod / freq / CPU / disk) |
+| `verifier` | `action_show_verifier` | Wsprnet upload audit (`verifier report`) + per-callsign suppression clear (`verifier rehabilitate`); one screen, two sections |
 
 ---
 
@@ -130,7 +131,7 @@ warrant a separate row.
 | Activity watch (wspr/psk/hfdl/codar) | `wspr-watch`, `psk-watch`, `hfdl-watch`, `codar-watch`, `watch <t>` | `activity` | live-tail screen with target selector covers all four |
 | Uploads activity watch | `watch uploads` | `activity` | reachable via the same screen's target selector |
 | Verifier watch | `watch verifier` | `activity` | reachable via the same screen's target selector |
-| Verifier report / rehabilitate | `verifier report / rehabilitate` | — | **Gap** — CLI-only |
+| Verifier report / rehabilitate | `verifier report / rehabilitate` | `verifier` | both surfaced on one screen (report top, rehabilitate bottom) |
 | Storage migration (CH → SQLite) | `storage migrate-to-sqlite` | — | one-shot; CLI-fine |
 | Storage trim (daily janitor) | `storage trim`, `timestd-tune-storage` | — | runs via systemd timers per `project_ch_to_sqlite_migration`; CLI-fine |
 | Live radiod (ka9q-python) | (none — TUI-only) | `radiod` | — |
@@ -149,25 +150,25 @@ warrant a separate row.
 
 ### Gap summary
 
-Three real surface gaps where CLI exposes a routine-monitoring or
+Two real surface gaps where CLI exposes a routine-monitoring or
 maintenance capability with no TUI representation (originally five;
-the **sources** gap closed in the `sources` screen, and the
-**activity watches** gap closed in the `activity` screen — one
-screen with a target selector covers all seven `smd watch` targets):
+closed so far: **sources**, **activity watches**, **verifier**
+report+rehabilitate. The verifier screen combines what the
+inventory mapping split between Debugging and Maintenance — they
+share a single operator workflow ("see a dropped spot in report →
+rehabilitate that callsign"), so persona purity gave way to
+workflow cohesion):
 
-1. **Verifier report / rehabilitate** — `verifier report / rehabilitate`.
-   Reporting is monitoring; rehabilitation is maintenance.
-2. **Coordination identity / refresh** — `config identity`,
+1. **Coordination identity / refresh** — `config identity`,
    `config refresh`. Installation-adjacent (identity is first-run)
    and maintenance-adjacent (refresh after coordination changes).
-3. **CPU affinity / cpu-freq apply** — read views exist, but the
+2. **CPU affinity / cpu-freq apply** — read views exist, but the
    `--apply` mutation still requires dropping to the CLI.
 
 These map cleanly to the four-category proposal:
 
-- Gap 1 → **Debugging** (report) + **Maintenance** (rehabilitate)
-- Gap 2 → **Installation** (identity) + **Maintenance** (refresh)
-- Gap 3 → **Maintenance** (mutation buttons on existing screens)
+- Gap 1 → **Installation** (identity) + **Maintenance** (refresh)
+- Gap 2 → **Maintenance** (mutation buttons on existing screens)
 
 Closing the gaps is *not* in scope for the reorganization commit
 itself — the reorganization places empty slots where they belong, and

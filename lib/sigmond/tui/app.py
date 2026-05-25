@@ -712,6 +712,29 @@ class SigmondApp(App):
             "subprocesses.",
         )
 
+    def action_show_verifier(self) -> None:
+        from .screens.verifier import VerifierScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(VerifierScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Verifier",
+            "Wsprnet upload audit (report) + per-callsign suppression "
+            "clear (rehabilitate).\n\n"
+            "Report shows the cohort of spots that uploaded but never "
+            "appeared in wspr.rx — broken down into lost / in-flight / "
+            "delivered / rejected. Toggle the detail checkboxes to list "
+            "individual spots under the summary. Window accepts s/m/h/d "
+            "suffix (default 1h). Target switches between the WSPRnet "
+            "upload path (wspr) and the FT8/FT4 SQLite forwarding queue "
+            "(psk).\n\n"
+            "Rehabilitate clears the wsprnet_reject_cache suppression "
+            "for one (rx_call, call) pair so wsprd/jt9 are re-fed the "
+            "callsign on the next decode cycle. Requires root; "
+            "confirm-modal-gated.",
+        )
+
     def action_show_fft_wisdom(self) -> None:
         from .screens.fft_wisdom import FFTWisdomScreen
         center = self.query_one("#center")
