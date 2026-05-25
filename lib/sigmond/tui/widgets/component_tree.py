@@ -42,9 +42,9 @@ class ComponentTree(Tree):
         self.root.add_leaf("\u25a3 Overview", data={"screen": "overview"})
 
         monitoring = self.root.add("Monitoring", expand=True)
-        monitoring.add_leaf("\u2737 Authority",         data={"screen": "authority"})
+        monitoring.add_leaf("\u29b5 Timing & Authority", data={"screen": "timing_authority"})
         monitoring.add_leaf("\u2299 Annotation Quality", data={"screen": "annotation_quality"})
-        monitoring.add_leaf("\u29b5 Timing",            data={"screen": "timing"})
+        monitoring.add_leaf("\u26a1 Activity",          data={"screen": "activity"})
         monitoring.add_leaf("\u25d0 GPSDO live",        data={"screen": "gpsdo"})
         monitoring.add_leaf("\u25c9 ka9q-radio live",   data={"screen": "radiod"})
         monitoring.add_leaf("\u25b6 KiwiSDR live",      data={"screen": "kiwisdr"})
@@ -62,7 +62,6 @@ class ComponentTree(Tree):
 
         debugging = self.root.add("Debugging", expand=True)
         debugging.add_leaf("\u2261 Logs",               data={"screen": "logs"})
-        debugging.add_leaf("\u26a1 Activity",          data={"screen": "activity"})
         debugging.add_leaf("\u2697 Verifier",           data={"screen": "verifier"})
         debugging.add_leaf("\u2714 Validate",           data={"screen": "validate"})
         debugging.add_leaf("\u2316 Environment",        data={"screen": "environment"})
@@ -98,6 +97,8 @@ class ComponentTree(Tree):
             self.app.action_show_gpsdo()
         elif screen == "authority":
             self.app.action_show_authority()
+        elif screen == "timing_authority":
+            self.app.action_show_timing_authority()
         elif screen == "annotation_quality":
             self.app.action_show_annotation_quality()
         elif screen == "timing":

@@ -712,6 +712,25 @@ class SigmondApp(App):
             "subprocesses.",
         )
 
+    def action_show_timing_authority(self) -> None:
+        from .screens.timing_authority import TimingAuthorityScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(TimingAuthorityScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Timing & Authority",
+            "Combined monitoring view: hf-timestd's substrate "
+            "authority (active tier / σ / witnesses, read from "
+            "/run/hf-timestd/authority.json) on top, plus chrony's "
+            "facade view (sources vs HPPS, root dispersion) below.\n\n"
+            "The natural reading order is top-down: what hf-timestd "
+            "thinks the timing budget is, then what chrony does with "
+            "that information. Operators gating hard-deadline captures "
+            "should consult the Authority section; operators tracking "
+            "host-clock health watch the Timing section.",
+        )
+
     def action_show_verifier(self) -> None:
         from .screens.verifier import VerifierScreen
         center = self.query_one("#center")

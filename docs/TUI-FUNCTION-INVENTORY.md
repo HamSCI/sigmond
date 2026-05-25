@@ -65,7 +65,7 @@ Notes / leftovers:
 
 ## 2. TUI screen surface (`lib/sigmond/tui/screens/`)
 
-29 screen modules. Each maps to exactly one `action_show_*` in
+30 screen modules. Each maps to exactly one `action_show_*` in
 `lib/sigmond/tui/app.py`. `action_show_update` is a kept-for-back-compat
 alias that re-dispatches to `action_show_components`, so it doesn't
 warrant a separate row.
@@ -75,7 +75,7 @@ warrant a separate row.
 | `activity` | `action_show_activity` | Live tail of `smd watch <target>` for wspr / psk / hfdl / codar / ka9q / uploads / verifier; one subprocess per screen, Stop/Clear, Start re-targets |
 | `annotation_quality` | `action_show_annotation_quality` | Per-consumer science verdict: each running recorder + the global σ/tier attached + green/yellow/red threshold + substrate explanation |
 | `apply` | `action_show_apply` | Reconcile services with topology/coordination (`sudo smd apply`) |
-| `authority` | `action_show_authority` | Substrate view: live `authority.json` (active tier, σ, witnesses) |
+| `authority` | `action_show_authority` | Substrate view: live `authority.json` (active tier, σ, witnesses) (also composed into `timing_authority`) |
 | `backup` | `action_show_backup` | Snapshot all config to `sigmond-config-*.tar.gz` |
 | `client_config` | `action_show_client_config` | Run a client's first-run wizard / edit its config |
 | `components` | `action_show_components` | Catalog: install status, git ref, version policy per component |
@@ -98,7 +98,8 @@ warrant a separate row.
 | `restore` | `action_show_restore` | Browse + extract a backup tar over the live system |
 | `sdr_inventory` | `action_show_sdr_inventory` | SDR labelling (USB enumeration + assignment) |
 | `sources` | `action_show_sources` | Per-client sensor-feed selection (radiod / KiwiSDR; future mag / vlf) — list / apply; add/remove still CLI-only |
-| `timing` | `action_show_timing` | Chrony-facade view: source comparison vs HPPS, root dispersion |
+| `timing` | `action_show_timing` | Chrony-facade view: source comparison vs HPPS, root dispersion (also composed into `timing_authority`) |
+| `timing_authority` | `action_show_timing_authority` | Combined nav entry: AuthorityScreen on top + TimingScreen below (authority + chrony together for "is timing healthy?" monitoring) |
 | `topology` | `action_show_topology` | Enable / disable catalog components for this host |
 | `validate` | `action_show_validate` | Cross-client harmonization rules (radiod / freq / CPU / disk) |
 | `verifier` | `action_show_verifier` | Wsprnet upload audit (`verifier report`) + per-callsign suppression clear (`verifier rehabilitate`); one screen, two sections |
@@ -202,10 +203,7 @@ Maintenance / Updating         [routine operator actions]
 
 Debugging                      [diagnose + watch when something looks wrong]
     Logs                       (journal / log_paths follow)
-    Activity                   (live tail of `smd watch <target>` —
-                                wspr / psk / hfdl / codar / ka9q /
-                                uploads / verifier; one screen, target
-                                selector)
+    Verifier                   (wsprnet upload audit + rehabilitate)
     Validate                   (cross-client harmonization rules)
     Environment                (declared vs observed peers)
     Diag: net                  (IGMP + multicast)
@@ -214,9 +212,17 @@ Debugging                      [diagnose + watch when something looks wrong]
 
 Routine monitoring             [day-to-day "is it working" surfaces]
     Overview                   (landing)
-    Authority                  (substrate view of authority.json)
+    Timing & Authority         (combined: authority substrate view on
+                                top + chrony facade view below — the
+                                natural reading order for "is timing
+                                healthy?")
     Annotation Quality         (per-consumer science verdict)
-    Timing                     (chrony facade)
+    Activity                   (live tail of `smd watch <target>` —
+                                wspr / psk / hfdl / codar / ka9q /
+                                uploads / verifier; one screen, target
+                                selector. Moved here from Debugging:
+                                operators watch activity continuously,
+                                not only when something looks wrong.)
     GPSDO live                 (per-device PLL / GPS / antenna)
     ka9q-radio live            (per-radiod channels + SNR)
     KiwiSDR live               (per-KiwiSDR status)
