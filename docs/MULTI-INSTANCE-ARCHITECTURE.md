@@ -310,11 +310,27 @@ release of the sigmond suite (matching CLI-V2-SPEC §5 cadence).
 One PR per phase, smallest viable slice. None of these are in scope
 for the spec commit itself.
 
-**Phase 1 — SQLite contention sanity check.** ~30 min. Benchmark
-N=4 simultaneous writers on `sink.db` (WAL mode) at WSPR-cycle and
-FT8-cycle cadences. Confirm the per-process model is viable for the
-expected reporter counts (typically 1-4 per host). Block the rest of
-the phases on a green result.
+**Phase 1 — SQLite contention sanity check. DONE.** Benchmark in
+`scripts/bench_sqlite_contention.py` spawns N writer processes, each
+owning a real `hamsci_sink.Writer` to a shared temp `sink.db`, all
+synchronizing burst start via `multiprocessing.Barrier`.  Detects
+silent-retry events (the Writer catches lock failures, logs, and
+retains the buffer) by checking `writer.buffered` post-flush.
+
+Results on the host this spec was written on (2026-05-25):
+
+| Scenario | N | Spots/burst | p50 | p95 | p99 | Errors | Verdict |
+|---|---|---|---|---|---|---|---|
+| WSPR burst | 4 | 170 | 6 ms | 22 ms | 22 ms | 0 | **GREEN** (threshold 50 ms) |
+| FT8 burst  | 4 |  80 | 4 ms | 11 ms | 21 ms | 0 | **GREEN** (threshold 25 ms) |
+| WSPR burst | 8 | 170 | 10 ms | 59 ms | 60 ms | 0 | RED (over threshold; informational stretch test) |
+| FT8 burst  | 8 |  80 |  6 ms | 56 ms | 57 ms | 0 | RED (over threshold; informational stretch test) |
+
+**Verdict: GREEN for the typical case (N ≤ 4 per host).** Phase 2+
+unblocked.  N=8 shows linear contention from SQLite's writer-
+serialization — tolerable for WSPR (120 s cycles) but pushes FT8's
+15 s SLA; treat 6-8 reporters per host as a soft ceiling that warrants
+re-benchmarking before committing.
 
 **Phase 2 — `smd instance` CLI namespace.** Implements the seven
 verbs from §6 with the per-instance file-layout actions. Does NOT
