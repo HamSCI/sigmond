@@ -75,6 +75,108 @@ class TestLoadCatalog:
         assert entries['example'].contract == '0.5'
 
 
+class TestSparseOverlay:
+    """The no-path ``load_catalog()`` should layer discovery + repo
+    catalog + operator catalog so a *partial* operator block overrides
+    only the fields it sets, and so a new entry in the repo file
+    propagates without needing to be copied into /etc/sigmond/."""
+
+    def _install_layers(self, monkeypatch, tmp_path, *, repo_toml='',
+                        operator_toml=None, discovery=None):
+        """Stub discovery + DEFAULT_CATALOG_PATHS so load_catalog()
+        reads tmp files only.  Returns the final merged catalog."""
+        monkeypatch.setattr(
+            'sigmond.catalog.discover_catalog_entries' if False else
+            'sigmond.discover.discover_catalog_entries',
+            lambda base=None: dict(discovery or {}),
+        )
+        repo_path = tmp_path / 'repo_catalog.toml'
+        repo_path.write_text(repo_toml)
+        layer_paths = [repo_path]
+        if operator_toml is not None:
+            op_path = tmp_path / 'operator_catalog.toml'
+            op_path.write_text(operator_toml)
+            # DEFAULT_CATALOG_PATHS is highest→lowest precedence, so
+            # operator first, repo second.
+            layer_paths = [op_path, repo_path]
+        else:
+            layer_paths = [repo_path]
+        monkeypatch.setattr('sigmond.catalog.DEFAULT_CATALOG_PATHS',
+                            tuple(layer_paths))
+        return load_catalog()
+
+    def test_operator_partial_overrides_only_named_fields(
+            self, monkeypatch, tmp_path):
+        repo = (
+            '[client.foo]\n'
+            'kind = "client"\n'
+            'description = "from repo"\n'
+            'repo = "https://repo/foo"\n'
+            'uses = ["ka9q-python"]\n'
+            'requires = ["bar"]\n'
+            'contract = "0.6"\n'
+            'install_script = "/from/repo.sh"\n'
+        )
+        op = (
+            '[client.foo]\n'
+            'repo = "git@my-fork:foo"\n'   # only this field overridden
+        )
+        entries = self._install_layers(monkeypatch, tmp_path,
+                                       repo_toml=repo, operator_toml=op)
+        foo = entries['foo']
+        assert foo.repo == 'git@my-fork:foo'      # operator override wins
+        assert foo.description == 'from repo'      # falls through
+        assert foo.requires == ('bar',)            # falls through
+        assert foo.install_script == '/from/repo.sh'
+
+    def test_repo_only_entry_propagates_through_operator_layer(
+            self, monkeypatch, tmp_path):
+        """The original bug: a new entry added to the repo catalog
+        was invisible if the operator had its own /etc/ override file
+        (since the operator file shadowed the repo file entirely)."""
+        repo = (
+            '[client.new-dep]\n'
+            'kind = "library"\n'
+            'description = "added in a later sigmond release"\n'
+            'repo = "https://github.com/example/new-dep"\n'
+        )
+        op = (
+            '[client.unrelated]\n'
+            'kind = "client"\n'
+            'description = "operator-only entry"\n'
+            'repo = ""\n'
+        )
+        entries = self._install_layers(monkeypatch, tmp_path,
+                                       repo_toml=repo, operator_toml=op)
+        assert 'new-dep' in entries
+        assert entries['new-dep'].repo == 'https://github.com/example/new-dep'
+        assert 'unrelated' in entries     # operator entry still present
+
+    def test_discovery_field_overridden_by_repo(
+            self, monkeypatch, tmp_path):
+        """A field set by discovery (from deploy.toml) is overridden
+        by the repo catalog, but other discovery fields still show."""
+        discovered = CatalogEntry(
+            name='disc', kind='client',
+            description='from deploy.toml',
+            repo='https://github.com/discovered/disc',
+            requires=('lib-a',),
+            install_script='/opt/git/sigmond/disc/install.sh',
+        )
+        repo = (
+            '[client.disc]\n'
+            'requires = ["lib-a", "lib-b"]\n'      # adds lib-b at repo layer
+        )
+        entries = self._install_layers(
+            monkeypatch, tmp_path,
+            discovery={'disc': discovered}, repo_toml=repo,
+        )
+        disc = entries['disc']
+        assert disc.requires == ('lib-a', 'lib-b')  # overridden by repo
+        assert disc.description == 'from deploy.toml'  # discovery falls through
+        assert disc.install_script == '/opt/git/sigmond/disc/install.sh'
+
+
 class TestIsInstalled:
     def test_script_exists(self, tmp_path):
         script = tmp_path / 'install.sh'

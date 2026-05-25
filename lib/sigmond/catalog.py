@@ -3,19 +3,29 @@
 Answers "what clients could be installed on this host?" — independent of
 topology (what IS enabled) and lifecycle (what units resolve to what).
 
-Wave 2 architecture: the catalog has two sources.
+Wave 2 architecture: the catalog has three layers, applied in order of
+increasing precedence.  Each layer is a *sparse overlay* — fields
+present in a higher layer override the same field from a lower layer;
+fields absent in a higher layer fall through unchanged.
 
-* **Primary — discovery.** ``load_catalog()`` (no path) globs every
-  ``/opt/git/sigmond/*/deploy.toml`` and synthesizes a ``CatalogEntry`` from each
-  client's own manifest.  This is how a drop-in client author gets sigmond
-  to know about their client without editing any sigmond-side file.
-* **Override — etc/catalog.toml.** Layered on top of discovery so operators
-  can pin descriptions, repo URLs, or policy fields without editing a
-  clone.  Pre-clone descriptions (the "what could I install?" question) also
-  live here.
+1. **Discovery (lowest).** ``load_catalog()`` (no path) globs every
+   ``/opt/git/sigmond/*/deploy.toml`` and synthesizes a base entry from
+   each client's own manifest.  Drop-in clients work with zero sigmond-
+   side edits.
+2. **Repo default — ``etc/catalog.toml`` shipped with sigmond.** Adds
+   entries that can't be discovered (e.g. ``ka9q-radio`` which has no
+   ``/opt/git/sigmond/`` checkout) and overrides specific fields.
+3. **Operator override — ``/etc/sigmond/catalog.toml`` (highest).** Per-
+   host pins.  New entries in the repo file propagate automatically;
+   they no longer require copying the file into ``/etc``.
 
-Tests pass an explicit ``path=`` to read a single file; the
-``/opt/git/sigmond`` glob only fires for the no-arg call.
+The shift from "first-file-wins, whole-entry-replacement" to layered
+sparse overlay was driven by silent drift: an operator file that
+predated a repo-side entry would shadow the whole catalog, hiding new
+clients (and source-only deps like mag-usb) until manually re-synced.
+
+Tests pass an explicit ``path=`` to read a single file as-is; the
+discovery glob and overlay logic only fire for the no-arg call.
 """
 
 from __future__ import annotations
@@ -115,11 +125,24 @@ def find_client_binary(name: str) -> Optional[str]:
 
 
 def find_catalog_file() -> Optional[Path]:
-    """Locate the catalog file. Operator override beats repo default."""
+    """Locate the highest-precedence existing catalog file.
+
+    Kept for backward compatibility with callers that want a single path
+    (e.g. for display).  ``load_catalog()`` itself now layers every
+    existing file rather than reading just one.
+    """
     for p in DEFAULT_CATALOG_PATHS:
         if p.exists():
             return p
     return None
+
+
+def _layer_paths_in_application_order() -> list[Path]:
+    """Return every existing catalog file in lowest→highest precedence
+    order (repo file first, operator override last)."""
+    # DEFAULT_CATALOG_PATHS is in highest→lowest precedence; reverse for
+    # application order so each subsequent layer overrides the previous.
+    return [p for p in reversed(DEFAULT_CATALOG_PATHS) if p.exists()]
 
 
 def _entry_from_toml_block(name: str, cfg: dict) -> CatalogEntry:
@@ -139,13 +162,47 @@ def _entry_from_toml_block(name: str, cfg: dict) -> CatalogEntry:
     )
 
 
-def _load_catalog_file(path: Path) -> dict[str, CatalogEntry]:
+def _entry_to_block(entry: CatalogEntry) -> dict:
+    """Inverse of ``_entry_from_toml_block`` — convert a CatalogEntry
+    back to the same dict shape that a TOML block produces.  Used to
+    feed discovery-synthesized entries through the same per-field
+    overlay code path as file-loaded entries."""
+    block: dict = {
+        'kind': entry.kind,
+        'description': entry.description,
+        'repo': entry.repo,
+        'uses': list(entry.uses),
+        'requires': list(entry.requires),
+    }
+    if entry.contract is not None:
+        block['contract'] = entry.contract
+    if entry.install_script is not None:
+        block['install_script'] = entry.install_script
+    if entry.topology_alias is not None:
+        block['topology_alias'] = entry.topology_alias
+    if entry.start_priority is not None:
+        block['start_priority'] = entry.start_priority
+    return block
+
+
+def _load_raw_blocks(path: Path) -> dict[str, dict]:
+    """Read a catalog file and return its ``[client.<name>]`` blocks as
+    raw dicts (no CatalogEntry conversion).  Returning the raw blocks
+    is what makes per-field overlay across layers possible — keys
+    absent from the block stay absent so the lower layer's value
+    shows through."""
     with open(path, 'rb') as f:
         data = tomllib.load(f)
-    entries: dict[str, CatalogEntry] = {}
-    for name, cfg in (data.get('client') or {}).items():
-        entries[name] = _entry_from_toml_block(name, cfg)
-    return entries
+    return dict((data.get('client') or {}).items())
+
+
+def _load_catalog_file(path: Path) -> dict[str, CatalogEntry]:
+    """Single-file load (used by the explicit-path branch of
+    ``load_catalog`` and by tests).  No layering."""
+    return {
+        name: _entry_from_toml_block(name, block)
+        for name, block in _load_raw_blocks(path).items()
+    }
 
 
 def _synthesized_library_entries() -> dict[str, CatalogEntry]:
@@ -170,14 +227,29 @@ def _synthesized_library_entries() -> dict[str, CatalogEntry]:
 def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
     """Load the catalog, keyed by client name.
 
-    With an explicit ``path``: reads that single TOML file (single source).
-    With no path: discovers entries from /opt/git/sigmond/*/deploy.toml, then
-    layers ``etc/catalog.toml`` on top as an operator override, and
-    finally adds synthesized library entries (ka9q-python).
+    With an explicit ``path``: reads that single TOML file as-is, no
+    layering (preserves the single-source semantics tests rely on).
+
+    With no path: builds the merged catalog by sparse per-field overlay
+    across three layers, lowest precedence first:
+
+        1. Discovery — synthesized from each
+           ``/opt/git/sigmond/<name>/deploy.toml``.
+        2. ``etc/catalog.toml`` shipped with sigmond.
+        3. ``/etc/sigmond/catalog.toml`` operator override.
+
+    For each layer, only the keys present in the block override the
+    same keys from earlier layers — missing keys fall through.  New
+    entries at any layer are added; entries at higher layers always
+    win on the fields they declare.
+
+    Synthesized library entries (e.g. ka9q-python) are added at the
+    end if no layer declared them.
 
     Raises:
-        FileNotFoundError: An explicit path was given but does not exist,
-        or no catalog file is reachable in the default search locations.
+        FileNotFoundError: An explicit path was given but does not
+        exist, or no catalog file is reachable in the default search
+        locations.
     """
     if path is not None:
         if not path.exists():
@@ -186,21 +258,35 @@ def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
             )
         return _load_catalog_file(path)
 
-    # Discovery primary.
+    # Layer 1 (lowest): discovery.  Convert to raw-block form so the
+    # overlay logic below treats every layer uniformly.
     from .discover import discover_catalog_entries
-    entries = discover_catalog_entries()
+    merged: dict[str, dict] = {
+        name: _entry_to_block(entry)
+        for name, entry in discover_catalog_entries().items()
+    }
 
-    # catalog.toml override (entries here win against discovery).
-    catalog_file = find_catalog_file()
-    if catalog_file is None:
+    # Layers 2+: each catalog file in application order (lowest→highest
+    # precedence).  Per-key dict merge so a sparse operator block
+    # overrides only the fields it sets.
+    layer_paths = _layer_paths_in_application_order()
+    if not layer_paths and not merged:
         raise FileNotFoundError(
             "sigmond catalog not found in any of: "
             + ", ".join(str(p) for p in DEFAULT_CATALOG_PATHS)
         )
-    entries.update(_load_catalog_file(catalog_file))
+    for layer_path in layer_paths:
+        for name, block in _load_raw_blocks(layer_path).items():
+            existing = merged.get(name) or {}
+            merged[name] = {**existing, **block}
+
+    entries: dict[str, CatalogEntry] = {
+        name: _entry_from_toml_block(name, block)
+        for name, block in merged.items()
+    }
 
     # Synthesized library entries — only added if not already declared
-    # by discovery or override.
+    # by discovery or any layer.
     for name, entry in _synthesized_library_entries().items():
         entries.setdefault(name, entry)
 

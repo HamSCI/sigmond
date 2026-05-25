@@ -158,11 +158,16 @@ class TestInstallClient:
                 m.return_value = mock.Mock(returncode=0)
                 assert install_client(entry) is True
 
-    def test_source_only_dep_is_auto_cloned(self, tmp_path):
+    def test_source_only_dep_is_auto_cloned(self, tmp_path, monkeypatch):
         """A consumer's `requires` entry that is a pure source dep
         (repo set, no install_script, not yet on disk) is cloned to
         /opt/git/sigmond/<dep> before the consumer's install.sh runs.
-        Mirrors the mag-recorder → mag-usb relationship."""
+        Mirrors the mag-recorder → mag-usb relationship.
+
+        Pins GIT_BASE to tmp_path so the dep-already-on-disk check
+        doesn't see a real /opt/git/sigmond/mag-usb on a host where
+        mag-recorder is actually installed."""
+        monkeypatch.setattr('sigmond.installer.GIT_BASE', tmp_path)
         repo = tmp_path / 'mag-recorder'
         repo.mkdir()
         script = repo / 'install.sh'

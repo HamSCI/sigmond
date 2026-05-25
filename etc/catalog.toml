@@ -1,14 +1,24 @@
 # /etc/sigmond/catalog.toml
 # Sigmond catalog of known HamSCI SDR clients and servers.
 #
-# Wave 2 reduced this file to an *operator-override* layer: ``load_catalog()``
-# primarily discovers entries from each installed client's ``deploy.toml`` at
-# ``/opt/git/sigmond/<name>/``.  Entries here are layered on top so operators can
-# pin descriptions, repo URLs, or policy fields without editing a clone.
+# This is the repo-default catalog layer.  ``load_catalog()`` applies
+# three layers in order of increasing precedence:
 #
-# Add a new ``[client.<name>]`` section only when a client cannot be
-# auto-discovered (e.g. a server with no /opt/git/sigmond/ checkout) or to record
-# an operator-specific override.
+#   1. Discovery from each installed client's ``/opt/git/sigmond/<name>/deploy.toml``
+#   2. This file (repo default — ships with sigmond)
+#   3. ``/etc/sigmond/catalog.toml`` (per-host operator override, if present)
+#
+# Each layer is a *sparse overlay*: only the fields explicitly set in a
+# block override the same field from earlier layers.  Missing fields
+# fall through.  New entries propagate from this file to every host on
+# `git pull` — operators no longer need to copy the file into /etc to
+# pick up new clients or new sibling deps.
+#
+# Add a new ``[client.<name>]`` section when a client cannot be auto-
+# discovered (e.g. ka9q-radio has no /opt/git/sigmond checkout) or when
+# the discovered defaults need a repo-wide override.  Operator-specific
+# pins belong in /etc/sigmond/catalog.toml, where you should declare
+# *only the fields you want to override* — everything else inherits.
 
 [client.ka9q-radio]
 kind            = "server"

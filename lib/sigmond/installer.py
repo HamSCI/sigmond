@@ -421,7 +421,7 @@ def _clone_source_only_deps(
     entry: CatalogEntry,
     catalog: Optional[dict],
     *,
-    base: Path = GIT_BASE,
+    base: Optional[Path] = None,
     dry_run: bool = False,
 ) -> None:
     """Auto-clone source-only deps declared in ``entry.requires``.
@@ -435,9 +435,15 @@ def _clone_source_only_deps(
 
     No-op when ``catalog`` is None (test paths / older callers).
     Already-cloned deps are left alone.
+
+    Resolves ``base`` at call time (not via a default-arg binding) so
+    tests can monkeypatch ``GIT_BASE`` to keep the dep-already-on-disk
+    check away from a real ``/opt/git/sigmond/`` on the host.
     """
     if not catalog:
         return
+    if base is None:
+        base = GIT_BASE
     for dep_name in entry.requires:
         dep = catalog.get(dep_name)
         if dep is None or not dep.repo or dep.install_script:
