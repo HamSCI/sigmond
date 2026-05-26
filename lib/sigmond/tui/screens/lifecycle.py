@@ -34,41 +34,84 @@ def _list_templated_units() -> list[tuple[str, str]]:
 
     Returns a list of (unit_label, unit_name) suitable for a Select
     widget, sorted by client then instance.  Includes both active
-    and inactive units so the operator can start a stopped instance.
+    and currently-stopped-but-enabled units so the operator can
+    start a stopped instance.
+
+    Excludes transient inactive entries that systemd loaded as a
+    side-effect of `systemctl status <typo>@<bogus>` — those have no
+    persistent enable state and don't reflect anything actually
+    configured.  list-units (without --all) excludes dead inactive
+    units; list-unit-files contributes the persistently-enabled
+    instances that may currently be stopped.
     """
-    out: list[tuple[str, str]] = []
+    # Templated services we recognise.  The first four are the
+    # reporter-keyed recorder clients (instance == reporter_id —
+    # mirrors sigmond.instance._TEMPLATED_RECORDER_CLIENTS).  The
+    # last is hf-timestd's per-radio-frequency metrology template
+    # (instance == channel name like WWV_25000) — structurally
+    # different from a reporter id, but the user still wants to
+    # start/stop/restart individual channels from this screen.
+    known = ("psk-recorder", "wspr-recorder", "hfdl-recorder",
+             "codar-sounder", "timestd-metrology")
+
+    states: dict[tuple[str, str], str] = {}
+
+    # Currently-loaded units (active / failed; not dead inactive
+    # transients).
     try:
         result = subprocess.run(
-            ["systemctl", "list-units", "--all", "--no-legend",
-             "--no-pager", "--plain", "--type=service"],
+            ["systemctl", "list-units", "--no-legend", "--no-pager",
+             "--plain", "--type=service"],
             capture_output=True, text=True, check=False, timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
-        return out
-    if result.returncode != 0:
-        return out
-    # Templated recorder clients we recognise — mirrors the set in
-    # sigmond.instance._TEMPLATED_RECORDER_CLIENTS.
-    known = ("psk-recorder", "wspr-recorder", "hfdl-recorder",
-             "codar-sounder")
-    rows: list[tuple[str, str, str]] = []
-    for line in (result.stdout or "").splitlines():
-        cols = line.split(None, 4)
-        if len(cols) < 4:
-            continue
-        unit_name = cols[0]
-        active = cols[2]
-        if not unit_name.endswith(".service"):
-            continue
-        base = unit_name[:-len(".service")]
-        if "@" not in base:
-            continue
-        client, _, instance = base.partition("@")
-        if client not in known or not instance:
-            continue
-        rows.append((client, instance, active))
-    rows.sort()
-    for client, instance, active in rows:
+        result = None
+    if result and result.returncode == 0:
+        for line in (result.stdout or "").splitlines():
+            cols = line.split(None, 4)
+            if len(cols) < 4:
+                continue
+            unit_name = cols[0]
+            active = cols[2]
+            if not unit_name.endswith(".service"):
+                continue
+            base = unit_name[:-len(".service")]
+            if "@" not in base:
+                continue
+            client, _, instance = base.partition("@")
+            if client not in known or not instance:
+                continue
+            states[(client, instance)] = active
+
+    # Persistently-enabled instances that may currently be stopped.
+    try:
+        result = subprocess.run(
+            ["systemctl", "list-unit-files", "--no-legend", "--no-pager",
+             "--type=service"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result and result.returncode == 0:
+        for line in (result.stdout or "").splitlines():
+            cols = line.split(None, 3)
+            if len(cols) < 2:
+                continue
+            unit_name, state = cols[0], cols[1]
+            if state != 'enabled':
+                continue
+            if not unit_name.endswith(".service"):
+                continue
+            base = unit_name[:-len(".service")]
+            if "@" not in base:
+                continue
+            client, _, instance = base.partition("@")
+            if client not in known or not instance:
+                continue
+            states.setdefault((client, instance), "inactive")
+
+    out: list[tuple[str, str]] = []
+    for (client, instance), active in sorted(states.items()):
         label = f"{client}@{instance}  [{active}]"
         unit_name = f"{client}@{instance}.service"
         out.append((label, unit_name))
