@@ -119,14 +119,24 @@ units = ["psk-recorder@.service"]
 
 
 def _mock_path(path_str, env_dir=None):
-    """Helper to mock Path for env dir existence checks."""
+    """Helper to mock Path for env dir existence checks.
+
+    The env_dir mock returns matching env files.  Every other path
+    starting with ``/etc/`` is returned as a non-existent Mock so
+    real-filesystem entries on the test host (e.g. /etc/psk-recorder/
+    when bee1 is the runner) don't leak in as discovered instances.
+    """
     if env_dir and 'env' in str(path_str):
         p = mock.Mock(spec=Path)
         p.exists.return_value = True
         p.glob.return_value = list(env_dir.glob('*.env'))
         return p
-    else:
-        return Path(path_str)
+    if str(path_str).startswith('/etc/'):
+        p = mock.Mock(spec=Path)
+        p.exists.return_value = False
+        p.glob.return_value = []
+        return p
+    return Path(path_str)
 
 
 # ---------------------------------------------------------------------------

@@ -166,11 +166,44 @@ def _expand_template(
                     if instance_name:
                         configured.add(instance_name)
 
-    # Discover known instances from systemctl
+    # Discover configured instances from per-instance TOML files at
+    # /etc/<component>/<instance>.toml.  This is the per-instance
+    # config layout used by psk-recorder / wspr-recorder /
+    # hfdl-recorder / codar-sounder (MULTI-INSTANCE-ARCHITECTURE.md §4)
+    # — the per-component CLI reads <instance>.toml first, falling
+    # back to the legacy shared <component>-config.toml / config.toml.
+    # We filter those legacy template-name files out so they don't
+    # masquerade as instance configs.
+    etc_dir = Path(f"/etc/{component}")
+    if etc_dir.exists():
+        legacy_names = {
+            "config.toml",
+            f"{component}-config.toml",
+        }
+        for cfg in etc_dir.glob("*.toml"):
+            if cfg.is_file() and cfg.name not in legacy_names:
+                stem = cfg.stem
+                if stem:
+                    configured.add(stem)
+
+    # Discover known instances from systemctl.  Use `list-units`
+    # (without --all) + `list-unit-files` together:
+    #   list-units      — currently-loaded, NOT-dead units (active
+    #                     or failed; excludes inactive transients
+    #                     that systemd has loaded as a side-effect
+    #                     of `systemctl status psk-recorder@<typo>`).
+    #   list-unit-files — persistently enabled instances, even when
+    #                     currently stopped.
+    # Pre-fix this query used `list-units --all` which also returned
+    # the transient-inactive entries; that surfaced phantom instances
+    # like `psk-recorder@sigmond-decode-health-collect.service` in
+    # the TUI even though nothing on the system actually configures
+    # such an instance.
     known = set(configured)
+    pattern = template.replace('@.', '@*.')
     try:
         result = subprocess.run(
-            ["systemctl", "list-units", template.replace('@.', '@*.'), "--all", "--output=json"],
+            ["systemctl", "list-units", pattern, "--output=json"],
             capture_output=True,
             text=True,
             check=False,
@@ -179,11 +212,26 @@ def _expand_template(
             units_json = json.loads(result.stdout) if result.stdout.strip() else []
             for unit_info in units_json:
                 unit_name = unit_info.get('unit') or unit_info.get('name', '')
-                # Extract instance from unit name, e.g., 'psk-recorder@default.service' → 'default'
                 if '@' in unit_name and unit_name.endswith(f".{kind}"):
                     instance_name = unit_name.split('@')[1].rsplit('.', 1)[0]
                     known.add(instance_name)
     except (json.JSONDecodeError, subprocess.SubprocessError):
+        pass
+    try:
+        result = subprocess.run(
+            ["systemctl", "list-unit-files", pattern, "--no-legend",
+             "--no-pager"],
+            capture_output=True, text=True, check=False,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == 'enabled':
+                unit_name = parts[0]
+                if '@' in unit_name and unit_name.endswith(f".{kind}"):
+                    instance_name = unit_name.split('@')[1].rsplit('.', 1)[0]
+                    if instance_name:    # skip the bare template "@"
+                        known.add(instance_name)
+    except subprocess.SubprocessError:
         pass
 
     # Create UnitRef for each known instance
