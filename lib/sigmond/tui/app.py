@@ -361,6 +361,34 @@ class SigmondApp(App):
             "gpsdo-monitor's full TUI focused on that device.",
         )
 
+    def action_show_resources(self) -> None:
+        from .screens.resources import ResourcesScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(ResourcesScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Resources",
+            "System + sigmond storage summary.  Four sections:\n\n"
+            "• System — memory / load / uptime from /proc.\n"
+            "• Filesystems — mountpoint capacity for the FS roots "
+            "sigmond writes into (/var, /tmp, /dev/shm) with free "
+            "space.\n"
+            "• Sigmond data — per-client spool / log sizes, and "
+            "where a daily-rotated file pattern can be detected "
+            "(mag-recorder samples-YYYY-MM-DD.jsonl; codar "
+            "<station>/YYYY/MM/DD.jsonl), an average daily growth "
+            "figure and a 'days @ growth' estimate against the "
+            "owning mount's free space.\n"
+            "• SQLite sink — per-(db, table) row counts in sink.db's "
+            "pending_uploads queue, with oldest/newest queued "
+            "timestamps and a lag column so the operator can spot a "
+            "stalled consumer (e.g. wspr verifier behind on its "
+            "sweep).\n\n"
+            "Read-only, no sudo.  Permission-denied subtrees are "
+            "silently counted in the Notes column.",
+        )
+
     def action_show_receiver_channels(self) -> None:
         from .screens.receiver_channels import ReceiverChannelsScreen
         center = self.query_one("#center")

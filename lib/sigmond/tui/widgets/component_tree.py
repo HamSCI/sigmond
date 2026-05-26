@@ -51,6 +51,7 @@ class ComponentTree(Tree):
         monitoring.add_leaf("\u25b6 KiwiSDR live",      data={"screen": "kiwisdr"})
         monitoring.add_leaf("\u2316 Receiver channels", data={"screen": "receiver_channels"})
         monitoring.add_leaf("\u21c6 RAC tunnel",        data={"screen": "rac"})
+        monitoring.add_leaf("\u2b22 Resources",         data={"screen": "resources"})
 
         maintenance = self.root.add("Maintenance", expand=True)
         maintenance.add_leaf("\u21bb Lifecycle",        data={"screen": "lifecycle"})
@@ -97,6 +98,8 @@ class ComponentTree(Tree):
             self.app.action_show_radiod()
         elif screen == "receiver_channels":
             self.app.action_show_receiver_channels()
+        elif screen == "resources":
+            self.app.action_show_resources()
         elif screen == "gpsdo":
             self.app.action_show_gpsdo()
         elif screen == "authority":
