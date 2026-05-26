@@ -11145,13 +11145,17 @@ def main() -> int:
         '--db', metavar='PATH', default='/var/lib/sigmond/sink.db',
         help='sink.db path (default /var/lib/sigmond/sink.db)',
     )
-    # PR 7: target switch — same verb covers wspr (default) and psk side.
+    # PR 7: target switch — same verb covers wspr (default), psk, and
+    # timestd.  timestd audits the local product DB (not the sink),
+    # because hf-timestd bypasses pending_uploads.
     p_v_report.add_argument(
-        '--target', choices=('wspr', 'psk'), default='wspr',
-        help='which delivery path to verify. "wspr" (default) audits '
-             'the wsprnet upload via the local wsprnet_audit table. '
+        '--target', choices=('wspr', 'psk', 'timestd'), default='wspr',
+        help='which path to verify. "wspr" (default) audits the '
+             'wsprnet upload via the local wsprnet_audit table. '
              '"psk" audits the FT8/FT4 forwarding queue in the local '
-             'SQLite sink (rows still pending vs stale).',
+             'SQLite sink (rows still pending vs stale). "timestd" '
+             'audits per-channel cadence in hf-timestd\'s product DB '
+             '(/var/lib/timestd/phase2/timestd.db) — no upload queue.',
     )
     p_v_report.add_argument(
         '--psk-in-flight-sec', metavar='SECONDS', type=int,
@@ -11159,6 +11163,19 @@ def main() -> int:
         help='--target=psk only: queue-age window after which a row '
              'still in the local queue counts as stale rather than '
              'in_flight (default 300s = 5 min).',
+    )
+    p_v_report.add_argument(
+        '--timestd-db', metavar='PATH', default=None, dest='timestd_db',
+        help='--target=timestd only: path to hf-timestd product DB '
+             '(default /var/lib/timestd/phase2/timestd.db).',
+    )
+    p_v_report.add_argument(
+        '--timestd-dark-after-sec', metavar='SECONDS', type=int,
+        default=None, dest='timestd_dark_after_sec',
+        help='--target=timestd only: a channel that has not written '
+             'a row for this many seconds is flagged DARK '
+             '(default 300s = 5 min — generous against the 1/min '
+             'metrology cadence).',
     )
 
     # rehabilitate — operator override to clear a negative-cache
@@ -11596,6 +11613,15 @@ def main() -> int:
                 _err(f"verifier report --target psk unavailable: {exc}")
                 return 1
             return cmd_verifier_report_psk(args)
+        if verifier_cmd == 'report' and getattr(args, 'target', 'wspr') == 'timestd':
+            try:
+                from sigmond.commands.verifier_report_timestd import (
+                    cmd_verifier_report_timestd,
+                )
+            except ImportError as exc:
+                _err(f"verifier report --target timestd unavailable: {exc}")
+                return 1
+            return cmd_verifier_report_timestd(args)
         if verifier_cmd == 'report':
             if not _HAS_SIGMOND_LIB:
                 print(
