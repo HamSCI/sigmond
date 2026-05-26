@@ -361,6 +361,25 @@ class SigmondApp(App):
             "gpsdo-monitor's full TUI focused on that device.",
         )
 
+    def action_show_receiver_channels(self) -> None:
+        from .screens.receiver_channels import ReceiverChannelsScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(ReceiverChannelsScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Receiver channels",
+            "For a chosen <client>@<reporter_id>, shows the radiod "
+            "the client is consuming from and every live channel "
+            "(unique SSRC) on that radiod whose frequency matches "
+            "the client's per-instance config.\n\n"
+            "Useful for confirming that every WSPR / FT8 / FT4 / "
+            "HFDL / CODAR sub-band the client expects has an "
+            "active receiver SSRC, and for spotting orphans or "
+            "frequency mismatches between config and live state.\n\n"
+            "Read-only: this screen never mutates radiod state.",
+        )
+
     def action_show_authority(self) -> None:
         from .screens.authority import AuthorityScreen
         center = self.query_one("#center")
