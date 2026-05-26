@@ -150,6 +150,47 @@ class TestFrequencyCoverage(unittest.TestCase):
         ))
         r = rule_frequency_coverage(_make_view(coord, {"grape": cv}))
         self.assertEqual(r.severity, "pass")
+        self.assertIn("samprate_hz not declared", r.message)
+
+    def test_no_local_radiod_skipped(self):
+        # Only a remote radiod declared → distinct skip message.
+        coord = Coordination(
+            radiods={"k3lr": Radiod(id="k3lr", host="remote.example.com",
+                                    samprate_hz=64_800_000)},
+        )
+        r = rule_frequency_coverage(_make_view(coord))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("no local radiod declared", r.message)
+
+    def test_no_consumers_bound_skipped(self):
+        # Local radiod with samprate, but no client bound to it.
+        coord = Coordination(
+            radiods={"k3lr": Radiod(id="k3lr", host="localhost",
+                                    samprate_hz=64_800_000)},
+        )
+        r = rule_frequency_coverage(_make_view(coord))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("no client instances bound", r.message)
+
+    def test_consumers_without_frequencies_skipped(self):
+        # Local radiod + samprate + a bound client, but the client's
+        # inventory doesn't publish frequencies_hz (the CLIENT-CONTRACT
+        # inventory gap).  Distinct skip message so operators know to
+        # look at the client's inventory, not coordination.toml.
+        coord = Coordination(
+            radiods={"k3lr": Radiod(id="k3lr", host="localhost",
+                                    samprate_hz=64_800_000)},
+        )
+        cv = ClientView(client_type="psk-recorder", installed=True)
+        cv.instances.append(InstanceView(
+            instance="AC0G-B1",
+            radiod_id="k3lr",
+            frequencies_hz=[],  # no frequencies published
+        ))
+        r = rule_frequency_coverage(_make_view(coord, {"psk-recorder": cv}))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("inventory", r.message)
+        self.assertIn("CLIENT-CONTRACT", r.message)
 
 
 class TestTimingChain(unittest.TestCase):

@@ -116,16 +116,36 @@ def rule_frequency_coverage(view: SystemView) -> RuleResult:
     the radiod's tuning range.  Phase 1 uses a coarse heuristic — we just
     check that requested frequencies are below samprate_hz (Nyquist
     envelope) since we don't know radiod's RF tuning without a full conf
-    parse."""
+    parse.
+
+    The rule needs three things to actually check anything:
+      1. At least one local radiod declared in coordination.toml
+      2. That radiod has a samprate_hz declared
+      3. At least one bound client publishes frequencies_hz via its
+         client-inventory (today: hf-timestd's `provides_timing_*`
+         block; psk/wspr/hfdl/codar would need to add inventory
+         entries listing the bands they consume — CLIENT-CONTRACT
+         work, not coordination.toml work).
+
+    Skip diagnostics differentiate which of the three is missing so
+    operators know whether to edit coordination.toml or the client's
+    own config / inventory.
+    """
     coord = view.coordination
     violations = []
     checked = 0
+    local_radiods = 0
+    local_radiods_with_samprate = 0
+    total_consumers = 0
     for rid, radiod in coord.radiods.items():
         if not radiod.is_local:
             continue    # remote radiod — someone else's problem
+        local_radiods += 1
         if not radiod.samprate_hz:
-            continue    # no coverage info, skip quietly
+            continue    # operator hasn't declared coverage info
+        local_radiods_with_samprate += 1
         consumers = _consumers_of(view, rid)
+        total_consumers += len(consumers)
         for ctype, iv in consumers:
             for hz in iv.frequencies_hz:
                 checked += 1
@@ -137,11 +157,25 @@ def rule_frequency_coverage(view: SystemView) -> RuleResult:
             "; ".join(violations),
             [],
         )
-    if checked == 0:
+    if checked > 0:
         return RuleResult("frequency_coverage", "pass",
-                          "skipped (no local radiod samprate declared)", [])
-    return RuleResult("frequency_coverage", "pass",
-                      f"{checked} frequency claim(s) within samprate", [])
+                          f"{checked} frequency claim(s) within samprate", [])
+    # checked == 0 — diagnose which of the three preconditions is missing.
+    if local_radiods == 0:
+        msg = "skipped (no local radiod declared)"
+    elif local_radiods_with_samprate == 0:
+        msg = "skipped (local radiod samprate_hz not declared)"
+    elif total_consumers == 0:
+        msg = "skipped (no client instances bound to local radiod)"
+    else:
+        # Consumers exist but none publish frequencies_hz.  This is the
+        # CLIENT-CONTRACT inventory gap: psk/wspr/hfdl/codar daemons
+        # would need to expose their band list via the client-view
+        # inventory mechanism for this check to fire.  Until then the
+        # rule passes-via-skip rather than warning.
+        msg = ("skipped (no client publishes frequencies_hz via "
+               "inventory — CLIENT-CONTRACT enhancement)")
+    return RuleResult("frequency_coverage", "pass", msg, [])
 
 
 def rule_cpu_isolation(view: SystemView) -> RuleResult:
