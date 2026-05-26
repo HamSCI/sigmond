@@ -344,6 +344,10 @@ class TestPlanIncludesEnvAndConsumers(unittest.TestCase):
         )
         probe = FakeProbe(
             services=("clickhouse-server.service",),
+            active_services=(
+                "psk-recorder@my-rx888.service",
+                "hf-timestd.service",
+            ),
             packages=("clickhouse-server",),
             paths=("/var/lib/clickhouse",),
             env_files={DEFAULT_COORD_ENV: env_text},
@@ -842,9 +846,14 @@ class TestPlanQueuesSandboxDropins(unittest.TestCase):
         self.assertEqual(len(plan.sandbox_dropins_to_write), 1)
         path, unit = plan.sandbox_dropins_to_write[0]
         self.assertEqual(unit, "psk-recorder@my-rx888.service")
+        # Templated unit → drop-in lands in the TEMPLATE dir
+        # (psk-recorder@.service.d/) so all current AND future
+        # instances of the client inherit it.  This is the fix for
+        # the codar-sounder@AC0G-B1 bee1 incident (2026-05-26).
         self.assertEqual(
             path,
-            f"/etc/systemd/system/{unit}.d/{SYSTEMD_DROPIN_BASENAME}",
+            "/etc/systemd/system/psk-recorder@.service.d/"
+            + SYSTEMD_DROPIN_BASENAME,
         )
 
     def test_plan_skips_dropin_for_non_sandboxed_unit(self):
@@ -853,7 +862,10 @@ class TestPlanQueuesSandboxDropins(unittest.TestCase):
         self.assertEqual(plan.sandbox_dropins_to_write, [])
 
     def test_plan_idempotent_when_dropin_already_exists(self):
-        # Existing drop-in at the expected path → no new write queued.
+        # Legacy per-instance drop-in (e.g. from a prior storage-
+        # migrate run that wrote per-instance instead of template
+        # level) → no new write queued.  Operators who hand-rolled
+        # something are left alone.
         dropin = (
             "/etc/systemd/system/psk-recorder@my-rx888.service.d/"
             + SYSTEMD_DROPIN_BASENAME
@@ -865,12 +877,86 @@ class TestPlanQueuesSandboxDropins(unittest.TestCase):
         plan = plan_clickhouse_removal(probe=probe)
         self.assertEqual(plan.sandbox_dropins_to_write, [])
 
+    def test_plan_idempotent_when_template_dropin_already_exists(self):
+        # Drop-in already at the new template path → no new write.
+        dropin = (
+            "/etc/systemd/system/psk-recorder@.service.d/"
+            + SYSTEMD_DROPIN_BASENAME
+        )
+        probe = self._probe(
+            sandboxed_units={"psk-recorder@my-rx888.service"},
+            existing_paths=(dropin,),
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.sandbox_dropins_to_write, [])
+
+    def test_plan_deduplicates_dropin_across_sibling_instances(self):
+        # Two instances of the same templated client both qualify as
+        # sandboxed consumers — both point at the same template
+        # drop-in path, so the plan should queue exactly one write.
+        # Prevents the codar-sounder@AC0G-B1 incident from spawning a
+        # duplicate template-level drop-in when a host later runs
+        # additional reporters (e.g. psk@AC0G-B1 + psk@AC0G-B2).
+        probe = FakeProbe(
+            env_files={DEFAULT_COORD_ENV: ""},
+            consumer_units={DEFAULT_COORD_ENV: [
+                "psk-recorder@AC0G-B1.service",
+                "psk-recorder@AC0G-B2.service",
+            ]},
+            unit_users={
+                "psk-recorder@AC0G-B1.service": "pskrec",
+                "psk-recorder@AC0G-B2.service": "pskrec",
+            },
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+            sandboxed_units={
+                "psk-recorder@AC0G-B1.service",
+                "psk-recorder@AC0G-B2.service",
+            },
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(len(plan.sandbox_dropins_to_write), 1)
+        path, _unit = plan.sandbox_dropins_to_write[0]
+        self.assertEqual(
+            path,
+            "/etc/systemd/system/psk-recorder@.service.d/"
+            + SYSTEMD_DROPIN_BASENAME,
+        )
+
+    def test_plan_non_templated_unit_uses_unit_dropin_dir(self):
+        # Non-templated units (no `@<instance>` in the name) target
+        # the unit's own drop-in dir, unchanged from pre-fix behavior.
+        probe = FakeProbe(
+            env_files={DEFAULT_COORD_ENV: ""},
+            consumer_units={DEFAULT_COORD_ENV: [
+                "timestd-core-recorder.service",
+            ]},
+            unit_users={"timestd-core-recorder.service": "timestd"},
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"timestd": [SINK_GROUP]},
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+            sandboxed_units={"timestd-core-recorder.service"},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(len(plan.sandbox_dropins_to_write), 1)
+        path, unit = plan.sandbox_dropins_to_write[0]
+        self.assertEqual(unit, "timestd-core-recorder.service")
+        self.assertEqual(
+            path,
+            "/etc/systemd/system/timestd-core-recorder.service.d/"
+            + SYSTEMD_DROPIN_BASENAME,
+        )
+
     def test_plan_dropin_triggers_consumer_restart(self):
         # Even without env / group / perm work, a sandbox drop-in
         # requires the unit to be restarted to remap its namespace.
+        # Only ACTIVE units are restarted — inactive ones pick up the
+        # drop-in on next start.
         probe = FakeProbe(
             env_files={DEFAULT_COORD_ENV: ""},  # no CH env at all
             consumer_units={DEFAULT_COORD_ENV: ["psk-recorder@a.service"]},
+            active_services=("psk-recorder@a.service",),
             unit_users={"psk-recorder@a.service": "pskrec"},
             existing_groups=(SINK_GROUP,),
             user_group_membership={"pskrec": [SINK_GROUP]},

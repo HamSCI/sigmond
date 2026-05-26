@@ -247,16 +247,21 @@ class HostProbe:
             return None
 
     def find_units_using_env_file(self, env_path: str) -> List[str]:
-        """Active service units whose EnvironmentFiles include env_path.
+        """Loaded service units whose EnvironmentFiles include env_path.
 
         Two systemctl calls per unit, so this is O(units) — fine for a
         sigmond host that has a handful of producer services, not for
         a general-purpose audit tool.
+
+        Includes inactive-but-loaded units (--all) so a producer that
+        happens to be stopped at discovery time still gets the sink
+        drop-in / group membership.  Restart planning re-checks
+        active-state separately so we don't bounce stopped units.
         """
         try:
             r = subprocess.run(
                 ["systemctl", "list-units", "--no-pager", "--no-legend",
-                 "--type=service", "--state=active"],
+                 "--type=service", "--all"],
                 capture_output=True, text=True, check=False,
             )
         except FileNotFoundError:
@@ -508,17 +513,44 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
 
         # systemd sandbox: any consumer with ProtectSystem=strict/full
         # needs /var/lib/sigmond in its ReadWritePaths.  Write a drop-in
-        # per unit instead of patching the base unit, so the producer
-        # client's own systemd file stays untouched.
+        # in the consumer's drop-in dir instead of patching the base
+        # unit, so the client's own systemd file stays untouched.
+        #
+        # For templated units (`<client>@<instance>.service`) the
+        # drop-in target is the TEMPLATE dir (`<client>@.service.d/`)
+        # so all current AND future instances of the client inherit
+        # it.  Without this, an instance created post-migration via
+        # `smd instance migrate` would silently miss the drop-in and
+        # producer flushes would fail with "attempt to write a
+        # readonly database" (the codar-sounder@AC0G-B1 incident on
+        # bee1, 2026-05-26).
+        planned_paths: set = set()
         for unit in consumers:
-            if p.unit_sandbox_blocks_sink(unit, SINK_DIR):
-                dropin_dir = f"/etc/systemd/system/{unit}.d"
-                dropin_path = f"{dropin_dir}/{SYSTEMD_DROPIN_BASENAME}"
-                # Idempotent: only queue if the drop-in file doesn't
-                # already exist with the expected content.  Operators
-                # who hand-rolled their own drop-in are left alone.
-                if not p.path_exists(dropin_path):
-                    plan.sandbox_dropins_to_write.append((dropin_path, unit))
+            if not p.unit_sandbox_blocks_sink(unit, SINK_DIR):
+                continue
+            target_unit = _template_unit_name(unit)
+            dropin_path = (
+                f"/etc/systemd/system/{target_unit}.d/"
+                f"{SYSTEMD_DROPIN_BASENAME}"
+            )
+            # Idempotent across three sources:
+            #   1. drop-in already written at the template path
+            #   2. legacy per-instance drop-in from a prior storage-
+            #      migrate run on this host (leave it alone; additive
+            #      merge is harmless and operators who hand-rolled
+            #      something keep it)
+            #   3. already queued in this same plan from an earlier
+            #      iteration over a sibling instance of the same
+            #      template
+            legacy_path = (
+                f"/etc/systemd/system/{unit}.d/{SYSTEMD_DROPIN_BASENAME}"
+            )
+            if (dropin_path in planned_paths
+                    or p.path_exists(dropin_path)
+                    or p.path_exists(legacy_path)):
+                continue
+            plan.sandbox_dropins_to_write.append((dropin_path, unit))
+            planned_paths.add(dropin_path)
 
     # Restart consumers whenever ANY of:
     #   - env lines changed (CH neutralized or SQLite path pinned)
@@ -537,9 +569,35 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
         or plan.sandbox_dropins_to_write
     )
     if needs_restart:
-        plan.consumers_to_restart = list(consumers)
+        # Restart only currently-active consumers: an inactive unit's
+        # drop-in takes effect on next start (and `systemctl restart`
+        # of an inactive unit would start it, surprising operators
+        # who stopped it deliberately).
+        plan.consumers_to_restart = [
+            u for u in consumers if p.service_active(u)
+        ]
 
     return plan
+
+
+def _template_unit_name(unit: str) -> str:
+    """Return the template unit for a templated systemd service.
+
+    ``"psk-recorder@AC0G-B1.service"`` → ``"psk-recorder@.service"``.
+    Non-templated units (no ``@<instance>`` segment) are returned
+    unchanged.
+
+    Used by the sink-drop-in planner so a templated client gets a
+    single drop-in at the template level that all current AND future
+    instances inherit, rather than one drop-in per active instance.
+    """
+    if not unit.endswith(".service"):
+        return unit
+    base = unit[:-len(".service")]
+    head, sep, _instance = base.partition("@")
+    if not sep:
+        return unit
+    return f"{head}@.service"
 
 
 @dataclass
