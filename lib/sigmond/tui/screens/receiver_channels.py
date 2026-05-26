@@ -54,14 +54,25 @@ def _decode_encoding(enc: int | None) -> str:
 # HFDL band center frequencies (Hz).  Mirrors
 # hfdl_recorder.bands.HFDL_BANDS; we duplicate it here because the
 # sigmond TUI runs in its own venv and can't import from the
-# hfdl-recorder package.  The HFDL band plan is stable
-# (ICAO/ARINC 635) — these are well-known frequencies that have
-# not changed in a decade and aren't expected to.
+# hfdl-recorder package.  These are the IQ band CENTERS the radiod
+# fragment tunes (matches the `freq` field in
+# ka9q-radio/config/fragments/hfdl.conf), NOT individual HFDL
+# sub-channel frequencies within each band — radiod publishes one
+# wide IQ channel per band and dumphfdl demodulates the in-band
+# slots from it.
 _HFDL_BAND_CENTERS_HZ = {
-    "HFDL2":  2998000,    "HFDL3":  4654000,    "HFDL4":  5544000,
-    "HFDL5":  5814000,    "HFDL6":  6529000,    "HFDL8":  8927000,
-    "HFDL10": 10027000,   "HFDL11": 10081000,   "HFDL13": 11184000,
-    "HFDL15": 13264000,   "HFDL17": 15025000,   "HFDL21": 21997000,
+    "HFDL2":   2_980_000,
+    "HFDL3":   3_477_000,
+    "HFDL4":   4_672_000,
+    "HFDL5":   5_587_000,
+    "HFDL6":   6_622_000,
+    "HFDL8":   8_902_500,
+    "HFDL10": 10_061_500,
+    "HFDL11": 11_287_000,
+    "HFDL13": 13_310_000,
+    "HFDL15": 15_025_000,
+    "HFDL17": 17_944_000,
+    "HFDL21": 21_964_000,
 }
 
 
