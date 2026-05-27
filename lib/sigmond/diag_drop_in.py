@@ -33,11 +33,14 @@ except ModuleNotFoundError:  # py<3.11
 # and client_features.REPO_ROOT.  Override in tests via run_checks().
 REPO_ROOT = Path("/opt/git/sigmond")
 
-# Inventory/validate subprocess deadline.  Inventory should be near-
-# instant; if a client takes longer it's probably scanning the
-# filesystem or talking to the daemon, both of which are red flags
-# for a contract subcommand.
-SUBPROCESS_TIMEOUT_SEC = 5.0
+# Inventory/validate subprocess deadline.  Originally set to 5s on the
+# "inventory should be near-instant" assumption; in practice a Python
+# client with a heavy import graph (hf-timestd: numpy, scipy, soundfile,
+# digital_rf, pandas, etc.) needs 3-5s just for interpreter cold-start
+# before its inventory builder runs.  10s gives that headroom while
+# still catching genuinely stuck inventory (network reads, control
+# socket hangs) which the original 5s aim at.
+SUBPROCESS_TIMEOUT_SEC = 10.0
 
 
 Status = str  # 'ok' | 'warn' | 'fail' | 'info'
