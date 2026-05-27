@@ -36,19 +36,39 @@ def _smd_binary() -> str:
 # Sentinel for the "no instance filter" Select value.
 _INSTANCE_ALL = "__all__"
 
-# verifier target → templated recorder client (the spot rows come from
-# its instances).  Used to populate the per-instance dropdown.
-# hf-timestd is a singleton (one PSWS station_id per host), so timestd
-# has no entry here — its instance dropdown stays at "(all instances)".
-_TARGET_TO_CLIENT = {
-    "wspr": "wspr-recorder",
-    "psk":  "psk-recorder",
-}
 
-# Targets whose CLI accepts the wspr/psk delivery-audit flags
-# (--rx-call, --lost, --in-flight, --delivered, --cadence).  timestd
-# audits a local product DB instead, so those flags don't apply.
-_SPOT_QUEUE_TARGETS = {"wspr", "psk"}
+def _build_target_tables() -> tuple[list[tuple[str, str]], dict[str, str], frozenset[str]]:
+    """Resolve (VERIFIER_TARGETS, _TARGET_TO_CLIENT, _SPOT_QUEUE_TARGETS)
+    from per-client `[client_features.verifier]` declarations.
+
+    Drop-in seam: every contract-conformant client whose deploy.toml
+    ships a `[client_features.verifier]` block appears in the Verifier
+    dropdown automatically — no edits here required for a new client.
+    See lib/sigmond/client_features.py.
+
+    Resolved once at module import (TUI restart picks up new clients);
+    if the loader fails for any reason we degrade to an empty target
+    list rather than crash the screen.
+    """
+    targets: list[tuple[str, str]] = []
+    target_to_client: dict[str, str] = {}
+    spot_queue: set[str] = set()
+    try:
+        from ...client_features import load_verifier_features
+        for f in load_verifier_features():
+            # Dropdown shows verb as both label and value (matches the
+            # pre-refactor shape: [("wspr", "wspr"), ...]).
+            targets.append((f.verb, f.verb))
+            if f.per_instance:
+                target_to_client[f.verb] = f.client
+            if f.kind == "spot_queue":
+                spot_queue.add(f.verb)
+    except Exception:
+        pass
+    return targets, target_to_client, frozenset(spot_queue)
+
+
+VERIFIER_TARGETS, _TARGET_TO_CLIENT, _SPOT_QUEUE_TARGETS = _build_target_tables()
 
 
 class VerifierScreen(Vertical):
@@ -125,12 +145,14 @@ class VerifierScreen(Vertical):
         with Horizontal(classes="vf-field-row"):
             yield Label("Target")
             yield Select(
-                [("wspr", "wspr"), ("psk", "psk"), ("timestd", "timestd")],
-                value="wspr", id="vf-target", allow_blank=False,
+                VERIFIER_TARGETS or [("(no verifier targets)", "")],
+                value=(VERIFIER_TARGETS[0][1] if VERIFIER_TARGETS else ""),
+                id="vf-target", allow_blank=False,
             )
             yield Label("Instance")
             yield Select(
-                self._instance_options_for("wspr"),
+                self._instance_options_for(
+                    VERIFIER_TARGETS[0][1] if VERIFIER_TARGETS else ""),
                 value=_INSTANCE_ALL, id="vf-instance",
                 allow_blank=False,
             )

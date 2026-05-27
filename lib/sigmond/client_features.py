@@ -18,13 +18,21 @@ A client now declares its UI hooks in its own ``deploy.toml``:
     verbose      = true           # CLI accepts `-v` / `--verbose`
     per_instance = true           # CLI accepts `--instance REPORTER_ID`
 
-Omitting ``[client_features.watch]`` means the client has no watch
-target; it stays out of the dropdown.
+    [client_features.verifier]
+    verb         = "wspr"         # `smd verifier report --target <verb>`
+    description  = "WSPRnet upload audit (lost / in-flight / delivered)"
+    kind         = "spot_queue"   # "spot_queue" (--rx-call / --lost / --in-flight
+                                  # / --delivered / --cadence flags apply) or
+                                  # "local_db" (audits a per-client product DB,
+                                  # flags don't apply — e.g. hf-timestd)
+    per_instance = true           # adds the instance dropdown row
+
+Omitting a block means the client doesn't appear in that screen.
 
 Lookup is best-effort and never raises: a missing repo, an unreadable
 ``deploy.toml``, a malformed block — each silently drops that client
-from the result.  The screens that consume this fall back to the
-hardcoded meta-watchers (``ka9q``, ``uploads``, ``verifier``) regardless.
+from the result.  The TUI screens that consume this fall back to their
+hardcoded meta rows regardless.
 """
 
 from __future__ import annotations
@@ -58,6 +66,26 @@ class WatchFeature:
     per_instance: bool   # CLI accepts --instance REPORTER_ID
 
 
+# Recognised values for `[client_features.verifier].kind`.  spot_queue
+# is the wspr/psk shape (audit a remote upload queue with --rx-call /
+# --lost / --in-flight / --delivered / --cadence flags); local_db is
+# the hf-timestd shape (audit a per-client product DB on disk; flags
+# don't apply).  Anything else → rejected at parse time.
+VERIFIER_KINDS = frozenset({"spot_queue", "local_db"})
+
+
+@dataclass(frozen=True)
+class VerifierFeature:
+    """One client's `smd verifier report` surface, as declared in its
+    deploy.toml."""
+
+    client: str          # catalog name (e.g. "wspr-recorder")
+    verb: str            # `smd verifier report --target <verb>`
+    description: str
+    kind: str            # one of VERIFIER_KINDS
+    per_instance: bool   # CLI accepts --instance REPORTER_ID
+
+
 def _read_deploy_toml(client: str, repo_root: Path) -> Optional[dict]:
     """Parse <repo_root>/<client>/deploy.toml; None on any failure."""
     p = repo_root / client / "deploy.toml"
@@ -88,6 +116,47 @@ def _parse_watch_feature(client: str, deploy: dict) -> Optional[WatchFeature]:
     )
 
 
+def _parse_verifier_feature(client: str, deploy: dict) -> Optional[VerifierFeature]:
+    """Extract a VerifierFeature from a parsed deploy.toml dict, or None
+    if the block is absent / malformed."""
+    block = deploy.get("client_features", {}).get("verifier")
+    if not isinstance(block, dict):
+        return None
+    description = block.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return None
+    kind = block.get("kind")
+    if kind not in VERIFIER_KINDS:
+        # Unknown kind → silently skip rather than expose half-wired
+        # behavior in the dropdown.
+        return None
+    return VerifierFeature(
+        client=client,
+        verb=str(block.get("verb", client)),
+        description=description,
+        kind=str(kind),
+        per_instance=bool(block.get("per_instance", False)),
+    )
+
+
+def _walk_enabled_installed(repo_root: Path):
+    """Yield (client_name, parsed_deploy_dict) for every enabled+installed
+    client whose deploy.toml parses.  Shared by the per-feature loaders."""
+    try:
+        topo = load_topology()
+        catalog = load_catalog()
+    except OSError:
+        return
+    for client in topo.enabled_components():
+        entry = catalog.get(client)
+        if entry is None or not entry.is_installed():
+            continue
+        deploy = _read_deploy_toml(client, repo_root)
+        if deploy is None:
+            continue
+        yield client, deploy
+
+
 def load_watch_features(repo_root: Path = REPO_ROOT) -> list[WatchFeature]:
     """Return every enabled+installed client's WatchFeature, in topology
     order (matches the order the orchestrator already uses for listings).
@@ -101,24 +170,28 @@ def load_watch_features(repo_root: Path = REPO_ROOT) -> list[WatchFeature]:
     The returned list is safe to render directly; callers add their own
     meta-watcher rows (ka9q / uploads / verifier) alongside it.
     """
-    try:
-        topo = load_topology()
-        catalog = load_catalog()
-    except OSError:
-        return []
-
     out: list[WatchFeature] = []
-    for client in topo.enabled_components():
-        entry = catalog.get(client)
-        if entry is None or not entry.is_installed():
-            continue
-        deploy = _read_deploy_toml(client, repo_root)
-        if deploy is None:
-            continue
+    for client, deploy in _walk_enabled_installed(repo_root):
         feature = _parse_watch_feature(client, deploy)
         if feature is not None:
             out.append(feature)
     return out
 
 
-__all__ = ["WatchFeature", "load_watch_features"]
+def load_verifier_features(repo_root: Path = REPO_ROOT) -> list[VerifierFeature]:
+    """Return every enabled+installed client's VerifierFeature, in
+    topology order.  Same filtering rules as load_watch_features; the
+    verifier screen has no meta-rows so the loader output IS the
+    dropdown content."""
+    out: list[VerifierFeature] = []
+    for client, deploy in _walk_enabled_installed(repo_root):
+        feature = _parse_verifier_feature(client, deploy)
+        if feature is not None:
+            out.append(feature)
+    return out
+
+
+__all__ = [
+    "WatchFeature", "load_watch_features",
+    "VerifierFeature", "VERIFIER_KINDS", "load_verifier_features",
+]

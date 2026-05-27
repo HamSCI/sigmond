@@ -20,9 +20,13 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from sigmond.client_features import (  # noqa: E402
+    VERIFIER_KINDS,
+    VerifierFeature,
     WatchFeature,
+    _parse_verifier_feature,
     _parse_watch_feature,
     _read_deploy_toml,
+    load_verifier_features,
     load_watch_features,
 )
 
@@ -245,6 +249,143 @@ class LoadWatchFeaturesTests(unittest.TestCase):
         """)
         out = self._run(
             enabled=["bravo", "alpha"],          # bravo first in topology
+            catalog={"bravo": _StubEntry(installed=True),
+                     "alpha": _StubEntry(installed=True)},
+        )
+        self.assertEqual([f.verb for f in out], ["bravo", "alpha"])
+
+
+# ---------------------------------------------------------------------------
+# _parse_verifier_feature — same shape as watch, plus a kind enum.
+# ---------------------------------------------------------------------------
+
+class ParseVerifierFeatureTests(unittest.TestCase):
+
+    def test_happy_path_spot_queue(self):
+        deploy = {"client_features": {"verifier": {
+            "verb": "wspr",
+            "description": "WSPRnet upload audit",
+            "kind": "spot_queue",
+            "per_instance": True,
+        }}}
+        f = _parse_verifier_feature("wspr-recorder", deploy)
+        self.assertEqual(f, VerifierFeature(
+            client="wspr-recorder",
+            verb="wspr",
+            description="WSPRnet upload audit",
+            kind="spot_queue",
+            per_instance=True,
+        ))
+
+    def test_happy_path_local_db_singleton(self):
+        # hf-timestd shape: audits a product DB, no per-instance dim.
+        deploy = {"client_features": {"verifier": {
+            "verb": "timestd",
+            "description": "hf-timestd cadence audit",
+            "kind": "local_db",
+            "per_instance": False,
+        }}}
+        f = _parse_verifier_feature("hf-timestd", deploy)
+        self.assertIsNotNone(f)
+        self.assertEqual(f.kind, "local_db")
+        self.assertFalse(f.per_instance)
+
+    def test_verb_defaults_to_client_name(self):
+        deploy = {"client_features": {"verifier": {
+            "description": "x", "kind": "spot_queue",
+        }}}
+        f = _parse_verifier_feature("wspr-recorder", deploy)
+        self.assertIsNotNone(f)
+        self.assertEqual(f.verb, "wspr-recorder")
+
+    def test_unknown_kind_is_rejected(self):
+        # An unknown kind would surface as a dropdown row whose
+        # downstream behaviour is undefined — silently skip instead.
+        deploy = {"client_features": {"verifier": {
+            "description": "x", "kind": "newfangled",
+        }}}
+        self.assertIsNone(_parse_verifier_feature("foo", deploy))
+
+    def test_missing_kind_is_rejected(self):
+        deploy = {"client_features": {"verifier": {"description": "x"}}}
+        self.assertIsNone(_parse_verifier_feature("foo", deploy))
+
+    def test_description_required(self):
+        deploy = {"client_features": {"verifier": {"kind": "spot_queue"}}}
+        self.assertIsNone(_parse_verifier_feature("foo", deploy))
+
+    def test_missing_block_returns_none(self):
+        self.assertIsNone(_parse_verifier_feature("foo", {}))
+        self.assertIsNone(_parse_verifier_feature("foo", {"client_features": {}}))
+
+    def test_recognised_kinds_pinned(self):
+        # Pin the schema enum so a future contributor doesn't silently
+        # add a third kind without thinking through the screen impact.
+        self.assertEqual(VERIFIER_KINDS, frozenset({"spot_queue", "local_db"}))
+
+
+# ---------------------------------------------------------------------------
+# load_verifier_features — integration mirror of load_watch_features.
+# ---------------------------------------------------------------------------
+
+class LoadVerifierFeaturesTests(unittest.TestCase):
+
+    def setUp(self):
+        self.td_ctx = tempfile.TemporaryDirectory()
+        self.root = Path(self.td_ctx.name)
+        self.addCleanup(self.td_ctx.cleanup)
+
+    def _run(self, enabled, catalog):
+        with mock.patch(
+            "sigmond.client_features.load_topology",
+            return_value=_StubTopology(enabled),
+        ), mock.patch(
+            "sigmond.client_features.load_catalog",
+            return_value=catalog,
+        ):
+            return load_verifier_features(repo_root=self.root)
+
+    def test_picks_up_drop_in_client(self):
+        _write_deploy(self.root, "newaudit", """
+            [client_features.verifier]
+            description = "live tail of newaudit deliveries"
+            kind = "spot_queue"
+            per_instance = true
+        """)
+        out = self._run(
+            enabled=["newaudit"],
+            catalog={"newaudit": _StubEntry(installed=True)},
+        )
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].verb, "newaudit")
+        self.assertEqual(out[0].kind, "spot_queue")
+
+    def test_skips_watch_only_client(self):
+        # A client with only [client_features.watch] but no .verifier
+        # must not appear in the verifier dropdown.
+        _write_deploy(self.root, "watchonly", """
+            [client_features.watch]
+            description = "watch-only client"
+        """)
+        out = self._run(
+            enabled=["watchonly"],
+            catalog={"watchonly": _StubEntry(installed=True)},
+        )
+        self.assertEqual(out, [])
+
+    def test_preserves_topology_order(self):
+        _write_deploy(self.root, "alpha", """
+            [client_features.verifier]
+            description = "alpha"
+            kind = "spot_queue"
+        """)
+        _write_deploy(self.root, "bravo", """
+            [client_features.verifier]
+            description = "bravo"
+            kind = "local_db"
+        """)
+        out = self._run(
+            enabled=["bravo", "alpha"],
             catalog={"bravo": _StubEntry(installed=True),
                      "alpha": _StubEntry(installed=True)},
         )
