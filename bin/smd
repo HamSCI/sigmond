@@ -1886,8 +1886,11 @@ def _install_full_suite(args) -> int:
     For each enabled component in the topology:
     - If the catalog entry has an install_script, install via the catalog
       (clone repo + run the client's own install.sh).
-    - For C projects without install_scripts (radiod, ka9q-web), delegate
-      to ka9q-update's install-ka9q.sh.
+    - For C projects without install_scripts (radiod, ka9q-web), use
+      sigmond's native builder (_install_radiod_native): apt deps +
+      radio user/group + clone + make install + systemd-tmpfiles --create.
+      Sigmond used to delegate to ka9q-update's install-ka9q.sh, but the
+      recipe is now owned in-tree so the catalog drives the build.
     """
     if _need_root('install'):
         return 1
@@ -2097,14 +2100,64 @@ def _install_radiod_deps() -> bool:
     return True
 
 
-def _install_radiod_native(catalog, *, force: bool = False) -> bool:
-    """Install ka9q-radio natively under /opt/git/sigmond/radiod.
+def _ensure_radio_user() -> bool:
+    """Ensure the `radio` system user/group exists.
 
-    Recipe (mirrors github.com/ka9q/ka9q-radio docs/INSTALL.md):
+    Upstream's aux/Makefile chowns paths to radio:radio but never creates
+    the user — that's handled only by debian/ka9q-radio-common.preinst,
+    which native (non-deb) installs never invoke.  Without this, the
+    chown silently fails and radiod@*.service later errors on ExecStart
+    user resolution.
+
+    Handles three cases:
+      - user already exists → no-op
+      - user missing, group missing → useradd --user-group (creates both)
+      - user missing, group present (leftover from a prior install or
+        another package) → useradd --gid radio (use existing group;
+        --user-group would fail with "group radio exists")
+    """
+    r = _run(['getent', 'passwd', 'radio'], capture=True, sudo=False)
+    if r is not None and r.returncode == 0:
+        return True
+    _info('creating system user/group: radio')
+    g = _run(['getent', 'group', 'radio'], capture=True, sudo=False)
+    if g is not None and g.returncode == 0:
+        # Group already exists; reuse it rather than creating a colliding one.
+        useradd_cmd = ['useradd', '--system', '--no-create-home',
+                       '--home-dir', '/var/lib/ka9q-radio',
+                       '--shell', '/usr/sbin/nologin',
+                       '--gid', 'radio', 'radio']
+    else:
+        useradd_cmd = ['useradd', '--system', '--user-group',
+                       '--no-create-home',
+                       '--home-dir', '/var/lib/ka9q-radio',
+                       '--shell', '/usr/sbin/nologin', 'radio']
+    r = _run(useradd_cmd, sudo=True)
+    if r is None or r.returncode != 0:
+        _err('failed to create radio user')
+        return False
+    _ok('radio user/group created')
+    return True
+
+
+def _install_radiod_native(catalog, *, force: bool = False) -> bool:
+    """Install ka9q-radio natively under /opt/git/sigmond/ka9q-radio.
+
+    Recipe (mirrors github.com/ka9q/ka9q-radio docs/INSTALL.md plus the
+    user setup that the deb packaging normally handles):
       1. apt-install the build deps in _RADIOD_APT_DEPS
-      2. clone (or pull if cloned) ka9q-radio via the catalog
-      3. make -j<nproc>  +  sudo make install   (via _build_ka9q_radio)
-      4. start any radiod@ instances declared in /etc/systemd
+      2. ensure the `radio` system user/group exists — upstream's
+         aux/Makefile chowns to radio:radio but only debian/preinst
+         creates the user, so native (non-deb) installs need this
+         explicit step or chowns silently fail and radiod@*.service
+         later errors on ExecStart user resolution.
+      3. clone (or pull if cloned) ka9q-radio via the catalog
+      4. make -j<nproc>  +  sudo make install   (via _build_ka9q_radio).
+         The Makefile creates /etc/radio, /var/lib/ka9q-radio, and
+         /usr/local/share/ka9q-radio directly via `install -d` — no
+         tmpfiles.d indirection — and writes the radiod binary to
+         /usr/local/sbin/radiod.
+      5. start any radiod@ instances declared in /etc/systemd
 
     `force=True` triggers a `make clean` and bypasses the
     "binary already current" short-circuit so the operator can rebuild
@@ -2115,6 +2168,8 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
         _err('ka9q-radio not in catalog — cannot determine repo URL')
         return False
     if not _install_radiod_deps():
+        return False
+    if not _ensure_radio_user():
         return False
     try:
         src_dir = _clone_repo(entry, pull_if_exists=True)
