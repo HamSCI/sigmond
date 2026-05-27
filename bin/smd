@@ -9088,6 +9088,243 @@ def cmd_codar_watch(args) -> int:
         return 130
 
 
+# ---------------------------------------------------------------------------
+# hf-gps-tec watch — PRN-beacon detection records
+# ---------------------------------------------------------------------------
+
+
+def _format_hf_gps_tec_codeless_record(rec: dict) -> str:
+    """Render one codeless-mode JSONL record as a single line.
+
+    Codeless records have no transmitter identity (the 100-ms
+    autocorrelation can't separate co-band Tx).  Surface the
+    statistic, the detection flag, Doppler, SNR estimate, band power.
+    """
+    ts = rec.get('time', '')
+    try:
+        time_part = ts.split('T', 1)[1].split('+', 1)[0].split('Z', 1)[0]
+        if '.' in time_part:
+            sec, frac = time_part.split('.', 1)
+            time_part = f'{sec}.{frac[:3]}'
+    except (IndexError, AttributeError):
+        time_part = '--:--:--.---'
+    freq_mhz = rec.get('frequency_hz', 0) / 1e6
+    ac = rec.get('autocorr_db', 0.0)
+    det = 'DETECT' if rec.get('detection') else '——    '
+    dop = rec.get('doppler_hz', 0.0)
+    snr = rec.get('snr_estimate_db', 0.0)
+    bp = rec.get('band_power_db', 0.0)
+    return (f'{time_part}  {freq_mhz:>6.3f} MHz  '
+            f'autocorr={ac:+6.1f} dB  {det}  '
+            f'doppler={dop:+6.2f} Hz  snr≈{snr:+5.1f} dB  '
+            f'band={bp:+6.1f} dB')
+
+
+def _format_hf_gps_tec_locked_record(rec: dict) -> str:
+    """Render one locked-mode JSONL record as a single line.
+
+    Locked records carry a per-Tx pseudorange (km) — the
+    GPS-TEC-equivalent observable that the inversion pipeline
+    ultimately consumes.
+    """
+    ts = rec.get('time', '')
+    try:
+        time_part = ts.split('T', 1)[1].split('+', 1)[0].split('Z', 1)[0]
+        if '.' in time_part:
+            sec, frac = time_part.split('.', 1)
+            time_part = f'{sec}.{frac[:3]}'
+    except (IndexError, AttributeError):
+        time_part = '--:--:--.---'
+    freq_mhz = rec.get('frequency_hz', 0) / 1e6
+    tx = rec.get('tx_id', '?')
+    pr = rec.get('pseudorange_km', 0.0)
+    dop = rec.get('doppler_hz', 0.0)
+    amp = rec.get('amplitude_db', 0.0)
+    snr = rec.get('snr_db', 0.0)
+    return (f'{time_part}  {tx:<10} @ {freq_mhz:>6.3f} MHz  '
+            f'pseudorange={pr:>7.1f} km  doppler={dop:+6.2f} Hz  '
+            f'amp={amp:+5.1f} dB  SNR={snr:+5.1f} dB')
+
+
+def cmd_hf_gps_tec_watch(args) -> int:
+    """Live tail of hf-gps-tec PRN-beacon detection records.
+
+    hf-gps-tec writes one JSONL record per (frequency, integration
+    window) to
+    ``/var/lib/hf-gps-tec/<instance>/{codeless,locked}/YYYY/MM/DD.jsonl``.
+    The codeless and locked streams have different schemas; this
+    watcher tails whichever subdirectory(s) the daemon is currently
+    producing and formats each record on its own line as it lands.
+
+    Polling cadence: 30 s — half the daemon's default 60-s codeless
+    integration window, so the operator sees each new record within
+    a small fraction of the cadence.
+
+    Date rollover (UTC) is handled per the codar-watch pattern.
+    """
+    instance = getattr(args, 'instance', None)
+    if instance is None:
+        try:
+            r = subprocess.run(
+                ['systemctl', 'list-units', '--no-legend', '--no-pager',
+                 '--type=service', '--state=active',
+                 'hf-gps-tec@*.service'],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            _err('systemctl not available')
+            return 1
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        if not lines:
+            data_root = Path('/var/lib/hf-gps-tec')
+            if not data_root.is_dir():
+                _err('no active hf-gps-tec@* service and no '
+                     f'{data_root} directory — is hf-gps-tec '
+                     'installed? (smd status hf-gps-tec)')
+                return 1
+            candidates = sorted(
+                (p for p in data_root.iterdir() if p.is_dir()),
+                key=lambda p: p.stat().st_mtime, reverse=True,
+            )
+            if not candidates:
+                _err(f'{data_root} is empty — has any instance '
+                     'recorded yet?')
+                return 1
+            instance = candidates[0].name
+            _warn(f'hf-gps-tec@{instance} not active — tailing '
+                  f'data dir anyway (records will only update once '
+                  f'the service starts)')
+        else:
+            unit = lines[0].split()[0]
+            try:
+                instance = unit.split('@', 1)[1].rsplit('.', 1)[0]
+            except IndexError:
+                _err(f'unexpected unit name: {unit}')
+                return 1
+
+    data_dir = Path(f'/var/lib/hf-gps-tec/{instance}')
+    if not data_dir.is_dir():
+        _err(f'no data directory at {data_dir} — wrong instance?')
+        return 1
+
+    # Which sub-streams exist?  The daemon writes to one of:
+    #   <data_dir>/codeless/YYYY/MM/DD.jsonl
+    #   <data_dir>/locked/YYYY/MM/DD.jsonl
+    # (or both — locked-mode upgrade leaves the codeless stream
+    # intact for historical comparison).  Tail whichever exist.
+    sub_streams: list = []
+    for mode in ('codeless', 'locked'):
+        if (data_dir / mode).is_dir():
+            sub_streams.append(mode)
+    if not sub_streams:
+        # Pre-first-window: directories aren't created until the
+        # writer opens its first file.  Show both as candidates and
+        # the loop below will pick them up once they appear.
+        sub_streams = ['codeless', 'locked']
+
+    verbose = bool(getattr(args, 'verbose', False))
+
+    WIN_SEC = 30.0  # half the default codeless integration window
+
+    _heading(f'HF GPS-TEC beacon detections ({instance})')
+    _info(f'   ▸ tailing: {", ".join(sub_streams)} subdir(s) of {data_dir}')
+    _info(f'   ▸ polls every {int(WIN_SEC)} s; one line per record as it lands')
+    if verbose:
+        _info('   ▸ -v: full record JSON dumped under each line')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+
+    def _file_size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except (FileNotFoundError, PermissionError):
+            try:
+                r = subprocess.run(
+                    [*sudo_prefix, 'stat', '-c', '%s', str(p)],
+                    capture_output=True, text=True, check=False,
+                )
+                return int(r.stdout.strip()) if r.returncode == 0 else 0
+            except (FileNotFoundError, ValueError):
+                return 0
+
+    def _read_since(p: Path, start: int) -> tuple[int, str]:
+        end = _file_size(p)
+        if end <= start:
+            return start, ''
+        try:
+            r = subprocess.run(
+                [*sudo_prefix, 'tail', '-c', f'+{start + 1}', str(p)],
+                capture_output=True, text=True, check=False,
+            )
+            text = r.stdout
+        except FileNotFoundError:
+            return start, ''
+        new_end = start + len(text.encode())
+        return new_end, text
+
+    def _today_path(mode: str) -> Path:
+        d = time.gmtime()
+        return (data_dir / mode
+                / f'{d.tm_year:04d}'
+                / f'{d.tm_mon:02d}'
+                / f'{d.tm_mday:02d}.jsonl')
+
+    # Prime each existing today-file at EOF.
+    positions: dict = {}
+    for mode in sub_streams:
+        p = _today_path(mode)
+        positions[mode] = _file_size(p) if p.exists() else 0
+    current_date = time.gmtime().tm_yday
+
+    import json as _json
+
+    try:
+        while True:
+            now = time.time()
+            next_fire = math.ceil(now / WIN_SEC) * WIN_SEC
+            time.sleep(max(0.1, next_fire - time.time()))
+
+            new_yday = time.gmtime().tm_yday
+            if new_yday != current_date:
+                current_date = new_yday
+                positions = {mode: 0 for mode in sub_streams}
+
+            # Re-check for newly-appeared sub-streams (e.g. PRN spec
+            # landed and locked mode started up alongside codeless).
+            for mode in ('codeless', 'locked'):
+                if (data_dir / mode).is_dir() and mode not in positions:
+                    p = _today_path(mode)
+                    positions[mode] = _file_size(p) if p.exists() else 0
+                    sub_streams.append(mode) if mode not in sub_streams else None
+
+            for mode in sorted(positions):
+                p = _today_path(mode)
+                new_pos, text = _read_since(p, positions[mode])
+                positions[mode] = new_pos
+                lines = [l for l in text.splitlines() if l.strip()]
+                if lines and not lines[-1].rstrip().endswith('}'):
+                    bad = lines[-1].encode() + b'\n'
+                    positions[mode] = new_pos - len(bad)
+                    lines = lines[:-1]
+                for raw in lines:
+                    try:
+                        rec = _json.loads(raw)
+                    except _json.JSONDecodeError:
+                        continue
+                    if mode == 'codeless':
+                        print(f'  {_format_hf_gps_tec_codeless_record(rec)}',
+                              flush=True)
+                    else:
+                        print(f'  {_format_hf_gps_tec_locked_record(rec)}',
+                              flush=True)
+                    if verbose:
+                        print(f'    {raw}', flush=True)
+    except KeyboardInterrupt:
+        return 130
+
+
 def cmd_psk_watch(args) -> int:
     """Live tail of psk-recorder's PSK Reporter upload activity.
 
@@ -10448,6 +10685,16 @@ def _add_codar_watch_args(p) -> None:
                         'most-recently-modified data dir if no service)')
 
 
+def _add_hf_gps_tec_watch_args(p) -> None:
+    """Argument spec for `smd watch hf-gps-tec`."""
+    p.add_argument('-v', '--verbose', action='store_true',
+                   help='dump the full record JSON under each formatted line')
+    p.add_argument('--instance', metavar='REPORTER_ID', default=None,
+                   help='reporter ID (= systemd @<instance> suffix, e.g. '
+                        'AC0G-B1).  Default: first active hf-gps-tec@*, '
+                        'or most-recently-modified data dir if no service.')
+
+
 def _add_ka9q_watch_args(p) -> None:
     """Argument spec shared by `smd ka9q-watch` and `smd watch ka9q`."""
     p.add_argument('--ka9q-python', metavar='PATH',
@@ -11335,6 +11582,13 @@ def main() -> int:
     )
     _add_codar_watch_args(p_w_codar)
 
+    p_w_hfgpstec = watch_sub.add_parser(
+        'hf-gps-tec',
+        help='live tail of hf-gps-tec PRN-beacon detection records '
+             '(one line per (frequency, integration window))',
+    )
+    _add_hf_gps_tec_watch_args(p_w_hfgpstec)
+
     p_w_mag = watch_sub.add_parser(
         'mag',
         help='live tail of mag-recorder RM3100 magnetometer activity '
@@ -11576,6 +11830,8 @@ def main() -> int:
             return cmd_hfdl_watch(args)
         if target == 'codar':
             return cmd_codar_watch(args)
+        if target == 'hf-gps-tec':
+            return cmd_hf_gps_tec_watch(args)
         if target == 'mag':
             return cmd_mag_watch(args)
         if target == 'ka9q':
