@@ -28,7 +28,7 @@ from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
 # inventory reports a different version stays operational: minor-version
 # skew is reported as a warn-level issue, never a hard fail — the
 # contract is designed for minor-version forward/backward compatibility.
-SUPPORTED_CONTRACT_VERSION = "0.7"
+SUPPORTED_CONTRACT_VERSION = "0.8"
 
 # Threshold above which a quality-snapshot's age is reported as a
 # warn-level validate issue.  6× the snapshot writer's 5 s cadence —
