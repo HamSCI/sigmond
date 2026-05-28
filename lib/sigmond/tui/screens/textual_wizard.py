@@ -41,6 +41,7 @@ try:
 except ModuleNotFoundError:  # py<3.11
     import tomli as tomllib  # type: ignore[no-redef]
 
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
@@ -161,6 +162,25 @@ def help_label(help_data: dict, section: str, key: str) -> str:
     return key
 
 
+def help_entry(help_data: dict, section: str, key: str) -> dict:
+    """Look up the full per-key help block for one (section, key).
+
+    Returns the help.toml subtable as a dict (with keys ``title``,
+    ``help``, ``example``, ``validator_hint``, ``required``) when the
+    client ships a help sidecar entry; an empty dict otherwise.
+    Used so the wizard can surface placeholder text, required-field
+    markers, validator hints, and focus-driven help bodies — every
+    piece of operator guidance the help.toml authors put in is
+    consumed by the form.
+    """
+    block = help_data.get(section, {})
+    if isinstance(block, dict):
+        entry = block.get(key, {})
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Widget identifiers.  Per-leaf widgets get a deterministic id so we can
 # query them back on Save without holding references to every widget.
@@ -222,30 +242,33 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
         width: 88%;
         height: 88%;
         padding: 1 2;
-        background: $panel;
-        border: thick $primary;
+        background: $surface;
+        color: $text;
+        border: thick $accent;
     }
     TextualConfigWizardScreen #tw-title {
         text-style: bold;
+        color: $text;
         margin-bottom: 0;
     }
     TextualConfigWizardScreen #tw-subtitle {
-        color: $text-muted;
+        color: $text 60%;
         margin-bottom: 1;
     }
     TextualConfigWizardScreen #tw-scroll {
         height: 1fr;
-        border: solid $surface;
+        border: solid $accent 40%;
         padding: 0 1;
-        background: $background;
+        background: $boost;
+        color: $text;
     }
     TextualConfigWizardScreen .tw-section {
         text-style: bold;
-        color: $primary;
+        color: $accent;
         margin-top: 1;
     }
     TextualConfigWizardScreen .tw-readonly {
-        color: $text-muted;
+        color: $text 60%;
         margin-top: 1;
     }
     TextualConfigWizardScreen .tw-row {
@@ -254,14 +277,34 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
     }
     TextualConfigWizardScreen .tw-label {
         width: 32;
+        color: $text;
         padding-top: 1;
     }
     TextualConfigWizardScreen .tw-input {
         width: 1fr;
     }
-    TextualConfigWizardScreen #tw-status {
+    TextualConfigWizardScreen .tw-hint {
+        height: 1;
+        color: $text 50%;
+        margin-left: 32;
+        margin-bottom: 1;
+    }
+    TextualConfigWizardScreen #tw-help-footer-title {
+        text-style: bold;
+        color: $accent;
         margin-top: 1;
-        color: $text-muted;
+    }
+    TextualConfigWizardScreen #tw-help-footer {
+        height: 6;
+        margin-bottom: 1;
+        padding: 0 1;
+        color: $text;
+        background: $boost;
+        border: solid $accent 50%;
+    }
+    TextualConfigWizardScreen #tw-status {
+        margin-top: 0;
+        color: $text 60%;
     }
     TextualConfigWizardScreen #tw-buttons {
         height: 3;
@@ -272,6 +315,15 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
         margin-left: 1;
     }
     """
+
+    # Default text shown in the help footer before the operator focuses
+    # any field, OR when focus lands on a field that has no help body
+    # (e.g. clients without a help.toml sidecar).
+    _HELP_FOOTER_IDLE = (
+        "[dim italic]Click any field to see its description here. "
+        "Required fields are marked with [bold red]*[/].  "
+        "Hints under fields show input format.[/]"
+    )
 
     def __init__(
         self,
@@ -299,6 +351,11 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
         # arrays, so we MUST send the whole list — partial would drop
         # any block the operator didn't touch).
         self._original_arrays: dict[str, list[dict]] = {}
+        # widget_id → help body string.  Populated by _mount_leaf when
+        # the field's help.toml entry has a non-empty `help` field.
+        # on_descendant_focus reads this on every focus change to update
+        # the wizard's footer panel.
+        self._field_help: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # compose / mount
@@ -322,6 +379,8 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
             yield Static(sub, id="tw-subtitle")
             with ScrollableContainer(id="tw-scroll"):
                 yield Static("[dim]loading…[/]", id="tw-placeholder")
+            yield Static("Help", id="tw-help-footer-title")
+            yield Static(self._HELP_FOOTER_IDLE, id="tw-help-footer", markup=True)
             yield Static("", id="tw-status")
             with Horizontal(id="tw-buttons"):
                 yield Button("Cancel", id="tw-cancel", variant="default")
@@ -331,6 +390,32 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
 
     def on_mount(self) -> None:
         self.run_worker(self._load_data, thread=True, name="tw-load")
+
+    @on(events.DescendantFocus)
+    def _on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        """Update the help footer whenever focus lands on a descendant.
+
+        Looks up the focused widget's id in ``self._field_help`` (built
+        by ``_mount_leaf`` from help.toml's ``help`` field per leaf).
+        Falls back to the idle prompt when the field has no body —
+        clients without a help sidecar at all, or operators tabbing
+        through the Cancel / Save buttons (whose ids aren't in
+        ``self._field_help``).
+
+        The ``@on`` decorator path is used in preference to the
+        ``on_descendant_focus`` method-name convention because
+        DescendantFocus is registered ``verbose=True`` in Textual
+        8.x, and the decorator dispatch handles verbose events more
+        reliably than the method-name lookup.
+        """
+        widget = getattr(event, "widget", None)
+        widget_id = getattr(widget, "id", None) if widget else None
+        try:
+            footer = self.query_one("#tw-help-footer", Static)
+        except Exception:
+            return
+        body = self._field_help.get(widget_id, "") if widget_id else ""
+        footer.update(body if body else self._HELP_FOOTER_IDLE)
 
     def _load_data(self) -> tuple[Optional[dict], str]:
         return load_config_via_show(self._client_bin, self._config_path)
@@ -522,43 +607,84 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
         )
         label_text = help_label(self._help, section, key)
 
+        # Pull every other piece of help.toml guidance for this leaf,
+        # so the form can surface placeholder text, required markers,
+        # validator hints, and focus-driven body text without changing
+        # any per-client code (the help sidecar authors do that work).
+        entry = help_entry(self._help, section, key)
+        example = entry.get("example")
+        validator_hint = entry.get("validator_hint")
+        required = bool(entry.get("required", False))
+        help_body = entry.get("help")
+
+        # Required-field marker on the label.  Use rich markup so the
+        # asterisk visually pops (operator immediately sees the must-fill
+        # set when scanning the form).
+        if required:
+            display_label = f"{label_text} [red bold]*[/]"
+        else:
+            display_label = label_text
+
+        # Stash the help body keyed by widget id so on_descendant_focus
+        # can look it up without walking the tree.  Switches and reads-
+        # only Statics still register here (the lookup is harmless when
+        # the body is empty).
+        if isinstance(help_body, str) and help_body.strip():
+            self._field_help[widget_id] = help_body
+
+        # Build the editable widget, with placeholder text drawn from
+        # the help.toml example.  Booleans don't have a placeholder
+        # surface; ints/floats need string-cast since Textual's Input
+        # placeholder is plain text.
         kind: str
+        placeholder = ""
+        if example is not None:
+            placeholder = str(example)
         if isinstance(value, bool):
             kind = "bool"
             widget = Switch(value=value, id=widget_id)
         elif isinstance(value, int):
             kind = "int"
             widget = Input(
-                value=str(value), id=widget_id,
-                type="integer", classes="tw-input",
+                value=str(value), id=widget_id, type="integer",
+                placeholder=placeholder, classes="tw-input",
             )
         elif isinstance(value, float):
             kind = "float"
             widget = Input(
-                value=repr(value), id=widget_id,
-                type="number", classes="tw-input",
+                value=repr(value), id=widget_id, type="number",
+                placeholder=placeholder, classes="tw-input",
             )
         elif isinstance(value, str):
             kind = "str"
             widget = Input(
                 value=value, id=widget_id,
-                classes="tw-input",
+                placeholder=placeholder, classes="tw-input",
             )
         else:
             # None or some other type — render disabled so the operator
             # sees it exists but can't break it.
             scroll.mount(Horizontal(
-                Static(f"{label_text}", classes="tw-label"),
+                Static(display_label, classes="tw-label", markup=True),
                 Static(f"[dim]({type(value).__name__})[/]"),
                 classes="tw-row",
             ))
             return
 
         scroll.mount(Horizontal(
-            Static(f"{label_text}", classes="tw-label"),
+            Static(display_label, classes="tw-label", markup=True),
             widget,
             classes="tw-row",
         ))
+        # Validator hint sits on its own dim line under the input,
+        # indented past the label column so it visually associates with
+        # the field above it.  Skipped when the help.toml didn't author one.
+        if isinstance(validator_hint, str) and validator_hint.strip():
+            scroll.mount(Static(
+                f"[dim]({validator_hint})[/]",
+                classes="tw-hint", markup=True,
+            ))
+
         self._leaves.append(_Leaf(
             section=section, key=key, original=value, kind=kind,
             array_index=array_index,

@@ -132,6 +132,20 @@ class SigmondApp(App):
         width: 36;
         padding: 0 1;
     }
+
+    /* App-wide Switch colour convention: ON = green, OFF = red.
+       Textual's default already paints the ON-state slider with
+       `$success` (green) — we just override the OFF-state slider
+       (default `$panel`, a mid-grey that disappears on dark themes)
+       to use `$error` so disabled/false reads as a clear "no".
+       Applies to every Switch in the TUI: wizard, Activity verbose
+       toggle, radiod deep-dive AGC, etc. */
+    Switch > .switch--slider {
+        color: $error;
+    }
+    Switch:hover > .switch--slider {
+        color: $error 80%;
+    }
     """
 
     BINDINGS = [
