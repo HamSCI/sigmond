@@ -51,8 +51,10 @@ class TopologyScreen(Vertical):
     def on_mount(self) -> None:
         table = self.query_one("#topo-table", DataTable)
         # Capture column keys so update_cell can reference them by key, not label.
-        _comp_col, self._enabled_col, _mgd_col, _desc_col = table.add_columns(
-            "Component", "Enabled", "Managed", "Description"
+        (_comp_col, self._enabled_col, _mgd_col,
+         _req_col, _reqby_col, _det_col, _desc_col) = table.add_columns(
+            "Component", "Enabled", "Managed",
+            "Requires", "Required by", "Detected", "Description"
         )
 
         # Merge catalog entries not yet in topology so new clients are visible.
@@ -66,14 +68,46 @@ class TopologyScreen(Vertical):
                     description=entry.description,
                 )
 
-        for name in sorted(self._topology.components):
+        # Precompute the inverse-of-requires map: for each catalog name X,
+        # which other components list X in their `requires`?  This is what
+        # the "Required by" column shows — the downstream consumers the
+        # operator should consider before disabling X.
+        required_by: dict[str, list[str]] = {}
+        for name, entry in self._catalog.items():
+            for dep in entry.requires:
+                required_by.setdefault(dep, []).append(name)
+
+        # Run hardware-presence probes once for every component the table
+        # will render — cheaper than calling per-row inside the loop.
+        from ...hardware_detect import detect_all, Presence
+        component_names = sorted(self._topology.components)
+        presence = detect_all(component_names)
+
+        det_glyph = {
+            Presence.YES:     "[green]●[/]",
+            Presence.NO:      "[red]○[/]",
+            Presence.NA:      "[dim]—[/]",
+            Presence.UNKNOWN: "[yellow]?[/]",
+        }
+
+        for name in component_names:
             comp = self._topology.components[name]
             desc = comp.description or ""
             if not desc and name in self._catalog:
                 desc = self._catalog[name].description
             enabled_str = "✔ yes" if comp.enabled else "✘ no"
             managed_str = "yes" if comp.managed else "no"
-            table.add_row(name, enabled_str, managed_str, desc, key=name)
+            entry = self._catalog.get(name)
+            req_str = ", ".join(entry.requires) if entry and entry.requires \
+                else "[dim]—[/]"
+            reqby_str = ", ".join(sorted(required_by.get(name, []))) \
+                or "[dim]—[/]"
+            det_str = det_glyph[presence.get(name, Presence.NA)]
+            table.add_row(
+                name, enabled_str, managed_str,
+                req_str, reqby_str, det_str, desc,
+                key=name,
+            )
 
     def _set_enabled(self, name: str, enabled: bool) -> None:
         """Enable or disable a single component and refresh its table row."""

@@ -611,28 +611,71 @@ if [[ -f /etc/sigmond/catalog.toml ]]; then
     fi
 fi
 
+# ─── proactive catalog repo clone ─────────────────────────────────────────────
+# Download is universal; install is selective.  Clone every catalog
+# entry's repo under /opt/git/sigmond/<name>/ so the operator can
+# enable/disable components freely from the TUI later without waiting
+# on a network round-trip every time they change their mind.  Clones
+# are shallow (--depth 1) — full history is a `git fetch --unshallow`
+# away when needed.  Non-fatal: any failure here just defers the
+# clone to `smd install <name>`.
+info "Pre-cloning catalog repos under /opt/git/sigmond/ (fast switch-on later)…"
+to_clone=$(/usr/bin/env python3 - <<'PY' 2>/dev/null
+import sys
+from pathlib import Path
+sys.path.insert(0, '/opt/git/sigmond/sigmond/lib')
+try:
+    from sigmond.catalog import load_catalog
+    for n, e in load_catalog().items():
+        if e.repo and not Path('/opt/git/sigmond') .joinpath(n).exists():
+            print(f"{n}\t{e.repo}")
+except Exception as exc:
+    sys.stderr.write(f"catalog read failed: {exc}\n")
+PY
+)
+if [[ -n "$to_clone" ]]; then
+    while IFS=$'\t' read -r name url; do
+        [[ -z "$name" || -z "$url" ]] && continue
+        if git clone --quiet --depth 1 "$url" "/opt/git/sigmond/$name" 2>/dev/null; then
+            ok "  cloned $name"
+        else
+            warn "  $name: git clone $url failed (non-fatal)"
+        fi
+    done <<< "$to_clone"
+    # Make sure the sigmond group owns + can write the new trees, same
+    # pattern as the initial setgid setup.
+    $SUDO chown -R sigmond:sigmond /opt/git/sigmond
+    $SUDO find /opt/git/sigmond -maxdepth 1 -type d -exec chmod g+s {} \;
+else
+    ok "  every catalog repo already cloned"
+fi
+
 # ─── done ─────────────────────────────────────────────────────────────────────
 echo
 echo -e "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${GREEN}║   Sigmond is installed!  Next steps:                  ║${NC}"
+echo -e "${BOLD}${GREEN}║   Sigmond is installed!  Next: open the TUI.          ║${NC}"
 echo -e "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════╝${NC}"
 echo
-echo -e "  ${BOLD}Option 1 — interactive TUI (recommended):${NC}"
+echo -e "  ${BOLD}Open the configuration workflow:${NC}"
 echo -e "    sudo smd tui"
-echo -e "    Then use the Install screen to browse and install components."
 echo
-echo -e "  ${BOLD}Option 2 — install a specific component:${NC}"
-echo -e "    sudo smd install radiod"
-echo -e "    sudo smd install wspr-recorder"
-echo -e "    sudo smd install psk-recorder"
-echo -e "    sudo smd install hf-timestd"
+echo -e "  Walk the Installation section top to bottom — that's the"
+echo -e "  greenfield workflow:"
+echo -e "    1. ${BOLD}Topology${NC}        — pick which catalog components to deploy"
+echo -e "                            on this host.  The Detected column"
+echo -e "                            says yes/no/— per row to inform you."
+echo -e "    2. ${BOLD}Software versions${NC} — check what's installed and at which commit."
+echo -e "    3. ${BOLD}Install${NC}         — build + install the enabled components."
+echo -e "    4. ${BOLD}SDR inventory${NC}   — verify hardware enumeration before"
+echo -e "                            radiod runs against it."
+echo -e "    5. ${BOLD}Configuration${NC}   — create per-reporter instances for each"
+echo -e "                            client (reporter ID, source, …)."
+echo -e "    6. ${BOLD}CPU affinity${NC}    — pin radiod to dedicated cores (only if"
+echo -e "                            this host is running radiod)."
+echo -e "    7. ${BOLD}CPU frequency${NC}   — same — cap non-radiod cores to save power."
 echo
-echo -e "  ${BOLD}Option 3 — install all catalog components:${NC}"
-echo -e "    sudo smd install"
-echo
-echo -e "  Available components:"
-echo -e "    radiod             — ka9q-radio SDR daemon (server)"
-echo -e "    wspr-recorder      — WSPR/FST4W audio recorder"
-echo -e "    psk-recorder       — FT4/FT8 spot recorder"
-echo -e "    hf-timestd         — HF time-standard analyzer (WWV/WWVH/CHU)"
+echo -e "  ${BOLD}CLI shortcuts${NC} (power users):"
+echo -e "    sudo smd install                  install everything topology-enabled"
+echo -e "    sudo smd install <component>      install one"
+echo -e "    sudo smd list --catalog           browse the catalog"
 echo
