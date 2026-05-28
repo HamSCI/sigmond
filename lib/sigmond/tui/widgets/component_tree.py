@@ -56,8 +56,11 @@ class ComponentTree(Tree):
         maintenance = self.root.add("Maintenance", expand=True)
         maintenance.add_leaf("\u21bb Lifecycle",        data={"screen": "lifecycle"})
         maintenance.add_leaf("\u21c4 Apply",            data={"screen": "apply"})
-        maintenance.add_leaf("\u2699 Client config",    data={"screen": "client_config"})
-        maintenance.add_leaf("\u2261 Config view",      data={"screen": "config_show"})
+        maintenance.add_leaf("\u2699 Configuration",    data={"screen": "configuration"})
+        # Legacy screens kept while the consolidated Configuration screen
+        # (above) is in prototype.  Remove once the operator confirms.
+        maintenance.add_leaf("\u2699 Client config (legacy)",    data={"screen": "client_config"})
+        maintenance.add_leaf("\u2261 Config view (legacy)",      data={"screen": "config_show"})
         maintenance.add_leaf("\u2604 Sources",          data={"screen": "sources"})
         maintenance.add_leaf("\u2699 CPU affinity",     data={"screen": "cpu_affinity"})
         maintenance.add_leaf("\u21f5 CPU frequency",    data={"screen": "cpu_freq"})
@@ -134,6 +137,8 @@ class ComponentTree(Tree):
             self.app.action_show_sources()
         elif screen == "instance":
             self.app.action_show_instance()
+        elif screen == "configuration":
+            self.app.action_show_configuration()
         elif screen == "activity":
             self.app.action_show_activity()
         elif screen == "verifier":

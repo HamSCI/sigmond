@@ -731,6 +731,44 @@ class SigmondApp(App):
             "Safe to re-run — the CLI is idempotent.",
         )
 
+    def action_show_configuration(self) -> None:
+        from .screens.configuration import ConfigurationScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(ConfigurationScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Configuration",
+            "Per-instance setup, in one place.  Replaces the legacy "
+            "Client config + Config view + Instance screens during the "
+            "prototype window.\n\n"
+            "Each row is one configured `<client>@<reporter-id>` "
+            "instance.  The Client column says which recorder; Reporter "
+            "ID is operator-meaningful and path-safe (e.g. AC0G-B1, "
+            "shown in user-facing AC0G/B1 form); Sources is the per-"
+            "instance sources file's first entry; Cfg/Env/Srcs is a "
+            "✓/- triple for the three files that make up an instance; "
+            "Unit is the systemctl ActiveState.\n\n"
+            "Workflow for a fresh instance:\n"
+            "  1. Fill the [bold]Client[/] + [bold]Reporter[/] inputs "
+            "in the Add row and click Add.  Sigmond creates the per-"
+            "instance config / env / sources skeletons.  Reporter ID is "
+            "parsed leniently — `AC0G/B1` becomes `AC0G-B1` internally.\n"
+            "  2. Click Edit on the new row to open the client's "
+            "config wizard (whiptail, or `$EDITOR` fallback).  Fill in "
+            "antenna / SDR / per-mode settings.\n"
+            "  3. Enable + start the unit from the Lifecycle screen "
+            "(or `sudo smd instance enable <client> <reporter>` from "
+            "the CLI).\n\n"
+            "Edit existing: select a row, click Edit.  Remove: select a "
+            "row, click Remove (does NOT stop the unit — "
+            "`smd instance disable` is a separate step).\n\n"
+            "Migrate: scans for legacy radiod-keyed deployments and "
+            "shows what would convert.  The actual interactive "
+            "migration prompts per candidate and is CLI-only — run "
+            "`sudo smd instance migrate --yes` in a terminal.",
+        )
+
     def action_show_instance(self) -> None:
         from .screens.instance import InstanceScreen
         center = self.query_one("#center")
