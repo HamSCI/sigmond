@@ -287,10 +287,6 @@ class LifecycleScreen(Vertical):
         text-style: bold;
         margin-bottom: 1;
     }
-    LifecycleScreen .lc-body {
-        color: $text-muted;
-        margin-bottom: 1;
-    }
     LifecycleScreen #lc-status {
         color: $text-muted;
         margin-bottom: 1;
@@ -332,21 +328,6 @@ class LifecycleScreen(Vertical):
 
     def compose(self):
         yield Static("Lifecycle — managed instances", classes="lc-title")
-        yield Static(
-            "Pick targets and apply [bold]Start[/], [bold]Stop[/], or "
-            "[bold]Restart[/] in a single batched action.\n"
-            "[dim]• Click a checkbox cell once to highlight it, again to "
-            "toggle (Textual's default 2-click model).\n"
-            "• Click the [bold]□[/] header cell to select-all / clear-all "
-            "(▣ when partial).\n"
-            "• [bold]instance[/] rows run via [italic]sudo systemctl <verb> <unit>[/]; "
-            "[bold]component[/] rows (hf-timestd, singletons) run via "
-            "[italic]sudo smd <verb> --components <name>[/] so sigmond's "
-            "lifecycle CLI orders the sub-units.\n"
-            "• Reload was dropped — none of the sigmond units define "
-            "[italic]ExecReload=[/], so it either no-ops or silently runs "
-            "restart anyway.[/]",
-            classes="lc-body")
         yield Static("[dim]loading…[/]", id="lc-status")
 
         # Refresh at top (read-only, small).

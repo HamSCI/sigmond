@@ -619,13 +619,26 @@ class SigmondApp(App):
 
         self.query_one(ContextPanel).show_help(
             "Lifecycle",
-            "Start, stop, restart, or reload managed services.\n\n"
-            "Every action pops a confirmation dialog with the exact "
-            "command that will run.  On accept, the TUI suspends and "
-            "`sudo smd <verb>` runs in the real terminal — you'll see "
-            "the password prompt and live output there.  Returns to "
-            "the TUI with the exit code.\n\n"
-            "The CLI holds the lifecycle lock; the TUI does not.",
+            "Pick one or more targets with the checkboxes, then click "
+            "Start / Stop / Restart at the bottom.  Each action button "
+            "shows the current selection count.\n\n"
+            "Selection (Textual's native 2-click model):\n"
+            "  • Click a checkbox cell once to highlight it, again to "
+            "toggle.\n"
+            "  • Click the column header (□ / ▣ / ■) to select-all or "
+            "clear-all.  ▣ = some-but-not-all checked.\n"
+            "  • Keyboard: Tab to focus the table, arrows to move the "
+            "cursor, Enter to toggle the cursored row (single keystroke).\n\n"
+            "Row types:\n"
+            "  • instance rows (psk-recorder@AC0G-B1 etc.) act via "
+            "`sudo systemctl <verb> <unit>` direct — single-unit actions "
+            "don't need the cross-component lifecycle lock.\n"
+            "  • component rows (hf-timestd, mag-recorder, gpsdo-monitor) "
+            "act via `sudo smd <verb> --components <name>` so sigmond's "
+            "lifecycle CLI orders the sub-units.  Component rows show "
+            "an active/total fraction (e.g. partial 21/24).\n\n"
+            "Mixed selections chain: one confirm dialog up front, then "
+            "the instance batch runs, then the component batch.",
         )
 
     def action_show_install(self) -> None:
