@@ -23,7 +23,7 @@ If you're _operating_ sigmond rather than authoring a client, you want
 | 3 | A templated systemd unit `(your-client)@.service`                                      | `<repo>/systemd/`                                    |
 | 4 | Contract subcommands `version` / `inventory` / `validate` / `daemon` (+ JSON output)   | your CLI entry point                                 |
 | 5 | A config template + default-config render step in `deploy.toml`                        | `<repo>/config/` + `[[install.steps]] kind=render`   |
-| 6 | A `[client_features]` block in `deploy.toml` for any TUI surface you want             | same file                                            |
+| 6 | A `[client_features.{watch,verifier,receiver_channels}]` block per TUI surface you want | same file (+ matching parser module — see §5.1)      |
 | 7 | (When ready) a catalog entry in sigmond's `etc/catalog.toml` or per-host override     | sigmond repo                                          |
 
 After (1)–(6), `smd install <your-client>` and `smd tui` work.  After
@@ -186,11 +186,66 @@ verb         = "your-client"
 description  = "<what your audit does>"
 kind         = "spot_queue"    # or "local_db"
 per_instance = true
+
+# Monitoring → Receiver Channels
+# (sigmond loads your parser at TUI time and asks it to extract
+# (status_dns, configured_freqs_hz, encoding_int) from your parsed
+# per-instance config — see §5.1)
+[client_features.receiver_channels]
+description     = "<one line shown in dropdown>"
+per_instance    = true                              # false → singleton client
+parser_file     = "src/your_client/sigmond_tui.py"  # path relative to repo root
+parser_attr     = "parse_receiver_channels"         # callable name in that file
+# Singleton-only (per_instance = false):
+singleton_label = "(singleton)"                     # suffix on dropdown label
+config_path     = "/etc/your-client/your-config.toml"   # absolute config path
 ```
 
 The loader (`lib/sigmond/client_features.py`) walks every
 enabled+installed client's `deploy.toml` at TUI launch — no edits to
 sigmond required.
+
+### 5.1 Receiver Channels parser
+
+If you declared `[client_features.receiver_channels]` above, ship a
+matching parser module in your repo (the file at `parser_file`).  It
+exports a pure function over a parsed TOML dict:
+
+```python
+# src/your_client/sigmond_tui.py
+from typing import Optional
+
+from sigmond.ka9q_encoding import ENCODING_INTS, encoding_to_int
+
+
+def parse_receiver_channels(
+    cfg: dict,
+) -> tuple[str, set[int], Optional[int]]:
+    """Return (status_dns, configured_freqs_hz, encoding_int).
+
+    status_dns           — radiod mDNS status name (e.g. "bee1-status.local")
+    configured_freqs_hz  — set of frequencies the client tunes
+    encoding_int         — ka9q-radio Encoding int (1=s16le, 2=s16be,
+                           4=f32, 8=f32be) or None to match any encoding
+    """
+    ...
+```
+
+Sigmond imports the module by file path (`importlib.util.spec_from_
+file_location`), so it does NOT need to be importable by package name
+from sigmond's venv — only the on-disk file needs to resolve.  Your
+parser runs inside sigmond's Python runtime, so it can
+`from sigmond.ka9q_encoding import ...` for the shared encoding
+lookup table (and any other sigmond utility module).
+
+See the five committed parsers under
+`/opt/git/sigmond/{psk,wspr,hfdl}-recorder/{src,}/<pkg>/sigmond_tui.py`,
+`/opt/git/sigmond/codar-sounder/src/codar_sounder/sigmond_tui.py`,
+`/opt/git/sigmond/hf-timestd/src/hf_timestd/sigmond_tui.py`,
+`/opt/git/sigmond/hf-gps-tec/src/hf_gps_tec/sigmond_tui.py` for
+working examples covering the full range of config shapes
+(multi-radiod, band-name lookup table, per-transmitter array,
+per-channel-group hierarchy, singleton config).
 
 ---
 

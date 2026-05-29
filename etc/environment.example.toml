@@ -96,6 +96,19 @@ irq_pin_drift_allowed      = false   # IRQs must land on declared cores
 #                       # "tcp" liveness: connect + read a few bytes
 # source   = "uBlox"    # "uBlox" | "Septentrio" | "Skytraq" | "generic"
 
+# A USB magnetometer sensor consumed by mag-recorder.  Health rolls up
+# device-node presence, freshest sample age, and pending upload-queue
+# depth — a queue stuck above max signals the PSWS path is broken.
+# [[magnetometer]]
+# id          = "bee1-rm3100"
+# kind        = "rm3100"           # sensor model
+# adapter     = "pololu-usb-i2c"
+# host        = "localhost"        # remote sensors not in v1
+# device      = "/dev/ttyMAG0"     # udev-stable symlink
+# i2c_address = 0x23
+# consumer    = "mag-recorder"     # client owning /var/lib/<consumer>/
+# expect      = { sample_age_sec_max = 90, upload_queue_depth_max = 3 }
+
 # [discovery]
 # mdns_enabled        = true
 # multicast_enabled   = true
