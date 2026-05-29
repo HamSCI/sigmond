@@ -266,6 +266,79 @@ the fix).
 
 ---
 
+## 8. Author `config/help.toml` (three-tier audit)
+
+Sigmond's in-TUI Textual config wizard reads `config/help.toml`
+sidecar files to drive per-field labels, examples, validator
+hints, and focus-driven help bodies.  Authoring this file well is
+what turns "raw TOML editor in a modal" into "guided wizard."
+
+**Three-tier classification for every field you put in the config
+TOML:**
+
+| Tier | Examples                                                | Action |
+|------|---------------------------------------------------------|--------|
+| 1    | install-canonical paths (`dumphfdl`, `/var/lib/...`),  | mark `hidden = true` |
+|      | FHS dirs, protocol constants (sample rate, blocktime), |        |
+|      | PSWS endpoint hostnames, radiod-internal tunables      |        |
+| 2    | host-level operator knobs (callsign, grid_square,      | author full help body |
+|      | mDNS host, sink opt-ins, antenna tuning gain)          |        |
+| 3    | per-instance differentiators (`reporter_id`,           | wizard-locked by sigmond |
+|      | `instance.metadata`)                                   | — no help.toml entry needed |
+
+For multi-instance clients tier 3 is real; for singletons
+(hf-timestd, mag-recorder) tiers 2 and 3 collapse — the whole
+config is host-level.
+
+**Schema** (per-key subtable):
+
+```toml
+[<section>.<key>]
+title          = "Short label (≤40 chars)"
+help           = """Multi-line operator-facing body.
+Explain when to change it and what the implications are."""
+example        = "what a valid value looks like"
+validator_hint = "one-line constraint summary"
+required       = true       # tier-2 must-fills
+hidden         = true       # tier-1 invariants — wizard skips entirely
+```
+
+Setting `hidden = true` keeps the field in the on-disk TOML
+(`config apply` uses deep-merge, so untouched keys survive) but
+the wizard never surfaces it.  Emergency override remains
+available via `smd config edit <client>`.
+
+**Quick audit workflow:**
+
+```bash
+# 1. dump every field the wizard would surface today
+<client> config show --json | jq 'keys[]'
+
+# 2. for each field, ask "tier 1, 2, or 3?"
+#    tier 1 → add `[<section>.<key>] hidden = true` to help.toml
+#    tier 2 → author title / help / example / validator_hint
+#    tier 3 → handled by sigmond directly (no entry)
+
+# 3. launch the wizard and confirm only tier-2 fields appear
+smd tui   # Installation → ⚙ Configuration → Edit selected
+```
+
+**Living examples (2026-05-29 audit pass — all five client repos):**
+
+* `psk-recorder/config/help.toml` — the canonical reference,
+  three-tier audit applied (paths × 6 hidden, station/decoder_kind
+  surfaced).
+* `wspr-recorder/config/help.toml` — aggressive tier-1 hiding;
+  WSPR-protocol constants (12 kHz / USB / float / 1300–1700 Hz
+  passband) all hidden.
+* `hf-timestd/config/help.toml` — singleton client, ~40 internal
+  fields hidden, 17 operator knobs surfaced.
+
+`feedback-config-invariants` in the auto-memory store records the
+principle and why it matters.
+
+---
+
 ## Reference: living examples
 
 | Client          | Use it as a reference for…                                            |
