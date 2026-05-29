@@ -37,6 +37,7 @@ DEFAULT_CADENCE = {
     "snmp":             300.0,
     "usb_sdr":          60.0,
     "local_resources":  60.0,
+    "magnetometer":     60.0,
 }
 
 # Minimum gap between two probes of the same (source, target) even when
@@ -46,9 +47,9 @@ HARD_FLOOR = 5.0
 
 ALL_SOURCES = ("mdns", "multicast", "ntp", "http_kiwisdr", "gpsdo",
                "http_ka9q", "http_gnss", "snmp", "usb_sdr",
-               "local_resources")
+               "local_resources", "magnetometer")
 ACTIVE_SOURCES = ("ntp", "http_kiwisdr", "http_ka9q", "http_gnss",
-                  "snmp", "usb_sdr", "local_resources")
+                  "snmp", "usb_sdr", "local_resources", "magnetometer")
 PASSIVE_SOURCES = ("mdns", "multicast", "gpsdo")
 
 
@@ -89,6 +90,9 @@ def module_for_source(src: str):
     if src == "local_resources":
         from . import local_resources
         return local_resources
+    if src == "magnetometer":
+        from . import magnetometer
+        return magnetometer
     return None
 
 
@@ -116,6 +120,8 @@ def targets_for_source(src: str, env: "Environment") -> list:
         return ["localhost"]                     # local-only probe
     if src == "local_resources":
         return ["localhost"]                     # local-only probe
+    if src == "magnetometer":
+        return [m.id for m in env.magnetometers] # one probe target per declared sensor
     return []
 
 

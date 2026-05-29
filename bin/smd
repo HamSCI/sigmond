@@ -11868,18 +11868,27 @@ def main() -> int:
                            help='inventory peers declared in environment.toml vs what is observed')
     env_sub = p_env.add_subparsers(dest='env_command')
 
+    # Argparse choices are derived from the same registries the loader
+    # and dispatch tables use, so a new kind/source added in
+    # environment_kinds.REGISTRY or discovery.ALL_SOURCES is callable
+    # from the CLI with no further edits here.
+    from sigmond.environment_kinds import REGISTRY as _ENV_KINDS
+    from sigmond.discovery import ALL_SOURCES as _ENV_SOURCES
+    _KIND_CHOICES = sorted(_ENV_KINDS.keys())
+    _SOURCE_CHOICES = list(_ENV_SOURCES) + ['all']
+
     p = env_sub.add_parser('list',
                            help='show declared peers + latest cached delta status')
     p.add_argument('--json', action='store_true')
-    p.add_argument('--kind', choices=['radiod', 'kiwisdr', 'gpsdo', 'time_source'],
+    p.add_argument('--kind', choices=_KIND_CHOICES,
                    help='restrict output to one kind')
 
     p = env_sub.add_parser('probe',
                            help='run discovery, reconcile, write cache')
     p.add_argument('--source',
-                   choices=['mdns', 'multicast', 'ntp', 'http_kiwisdr', 'gpsdo', 'all'],
+                   choices=_SOURCE_CHOICES,
                    default='all')
-    p.add_argument('--kind', choices=['radiod', 'kiwisdr', 'gpsdo', 'time_source'])
+    p.add_argument('--kind', choices=_KIND_CHOICES)
     p.add_argument('--force', action='store_true',
                    help='ignore per-source cadence (still honours 5s hard floor)')
     p.add_argument('--timeout', type=float, default=3.0,

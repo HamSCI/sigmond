@@ -95,6 +95,26 @@ class DeclaredNetworkDevice:
 
 
 @dataclass
+class DeclaredMagnetometer:
+    """A USB magnetometer sensor (e.g. RM3100 via Pololu USB-I2C).
+
+    Site inventory of the *hardware*, not of the recorder daemon — the
+    daemon is a sigmond client, the sensor is a peer of radiods and
+    GPSDOs at the inventory level.  Health is observed by the
+    ``magnetometer`` probe (device-node present, samples recent,
+    upload queue draining).
+    """
+    id: str
+    kind: str = ""               # sensor model: "rm3100" | future others
+    adapter: str = ""            # "pololu-usb-i2c" | future others
+    host: str = "localhost"      # always localhost in v1 (USB)
+    device: str = ""             # udev-stable symlink, e.g. "/dev/ttyMAG0"
+    i2c_address: int = 0         # 7-bit I2C address (0 = unspecified)
+    consumer: str = ""           # sigmond client owning the spool, e.g. "mag-recorder"
+    expect: dict = field(default_factory=dict)
+
+
+@dataclass
 class DeclaredLocalSystem:
     """Local system resources (CPU, SDR hardware, etc.)."""
     id: str = "localhost"
@@ -147,6 +167,7 @@ class Environment:
     network_devices: list = field(default_factory=list)   # DeclaredNetworkDevice
     igmp_queriers: list = field(default_factory=list)     # DeclaredIgmpQuerier
     igmp_snoopers: list = field(default_factory=list)     # DeclaredIgmpSnooper
+    magnetometers: list = field(default_factory=list)     # DeclaredMagnetometer
     local_system: DeclaredLocalSystem = field(default_factory=DeclaredLocalSystem)
     discovery: DiscoveryCfg = field(default_factory=DiscoveryCfg)
     source_path: Optional[Path] = None

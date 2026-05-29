@@ -91,6 +91,43 @@ def _gpsdo_classifier(declared, good_obs: list) -> tuple:
     return "healthy", ""
 
 
+def _magnetometer_classifier(declared, good_obs: list) -> tuple:
+    """Classify a magnetometer against ``expect.*`` hints.
+
+    Recognised keys (all optional):
+
+      sample_age_sec_max     Most recent samples file must be at most N
+                             seconds old.  Default 90 (1.5× the expected
+                             ~1 Hz cadence with some leeway for the
+                             daily packager run).
+      upload_queue_depth_max Zip files queued for upload may not exceed
+                             this count.  Default 3 (one bad day's worth);
+                             a queue stuck at 4+ usually means the PSWS
+                             SFTP path is broken.
+    """
+    expect = declared.expect or {}
+    merged: dict = {}
+    for o in good_obs:
+        merged.update(o.fields)
+    if merged.get("device_present") is False:
+        return "degraded", f"device {declared.device or '?'} not present"
+    max_age = expect.get("sample_age_sec_max", 90)
+    age = merged.get("last_sample_age_sec")
+    if age is None:
+        return "degraded", "no samples file written yet"
+    if age > max_age:
+        return "degraded", (
+            f"last sample {int(age)}s old (max {max_age})"
+        )
+    max_queue = expect.get("upload_queue_depth_max", 3)
+    queue = merged.get("upload_queue_depth", 0)
+    if queue > max_queue:
+        return "degraded", (
+            f"upload queue depth {queue} exceeds max {max_queue}"
+        )
+    return "healthy", ""
+
+
 def _local_system_classifier(declared, good_obs: list) -> tuple:
     """Compare local_resources observations against declared expectations.
 
@@ -231,6 +268,15 @@ def _igmp_snooper_extra(d) -> str:
     return d.interface or "—"
 
 
+def _magnetometer_extra(d) -> str:
+    bits = []
+    if d.kind:
+        bits.append(d.kind)
+    if d.device:
+        bits.append(d.device)
+    return " ".join(bits) or "—"
+
+
 def _local_system_extra(d) -> str:
     bits = []
     if d.cpu_governor:
@@ -352,6 +398,21 @@ def _parse_igmp_snooper(s: dict):
     )
 
 
+def _parse_magnetometer(m: dict):
+    if not m.get('id'):
+        return None
+    return _env_mod.DeclaredMagnetometer(
+        id=str(m.get('id', '') or ''),
+        kind=str(m.get('kind', '') or ''),
+        adapter=str(m.get('adapter', '') or ''),
+        host=str(m.get('host', 'localhost') or 'localhost'),
+        device=str(m.get('device', '') or ''),
+        i2c_address=int(m.get('i2c_address', 0) or 0),
+        consumer=str(m.get('consumer', '') or ''),
+        expect=dict(m.get('expect', {}) or {}),
+    )
+
+
 def _parse_local_system(raw: dict):
     """Single-table form — never returns None; the iter_filter decides
     whether the result is operator-declared enough to surface."""
@@ -451,6 +512,12 @@ REGISTRY: dict = {
         parse=_parse_igmp_snooper,
         tui_extra=_igmp_snooper_extra,
     ),
+    "magnetometer": KindSpec(
+        name="magnetometer", plural="magnetometers", toml_key="magnetometer",
+        parse=_parse_magnetometer,
+        expect_classifier=_magnetometer_classifier,
+        tui_extra=_magnetometer_extra,
+    ),
     "local_system": KindSpec(
         name="local_system", plural="local_system", toml_key="local_system",
         parse=_parse_local_system,
@@ -477,6 +544,7 @@ ITER_ORDER: tuple = (
     "network_device",
     "igmp_querier",
     "igmp_snooper",
+    "magnetometer",
 )
 
 
@@ -493,5 +561,6 @@ DISPLAY_ORDER: tuple = (
     "network_device",
     "igmp_querier",
     "igmp_snooper",
+    "magnetometer",
     "local_system",
 )
