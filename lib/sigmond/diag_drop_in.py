@@ -225,7 +225,9 @@ def _check_validate_subcommand(client: str, binary: str) -> Check:
                  "(non-zero is OK for transient state)")
 
 
-def _check_client_features(deploy: dict, screen: str) -> Check:
+def _check_client_features(deploy: dict, screen: str,
+                           client: str = "", repo_root: Optional[Path] = None,
+                           ) -> Check:
     block = deploy.get("client_features", {}).get(screen)
     name = f"[client_features.{screen}]"
     if not isinstance(block, dict):
@@ -239,6 +241,38 @@ def _check_client_features(deploy: dict, screen: str) -> Check:
         if kind not in {"spot_queue", "local_db"}:
             return Check(name, "fail",
                          f"kind={kind!r} — must be 'spot_queue' or 'local_db'")
+    if screen == "receiver_channels":
+        # parser_file must resolve to a real file on disk, and
+        # parser_attr must be a non-empty string.  We do NOT exec
+        # the module here (too easy to import-error during diag);
+        # the TUI itself surfaces import errors with a clear path.
+        parser_file = block.get("parser_file")
+        parser_attr = block.get("parser_attr")
+        if not isinstance(parser_file, str) or not parser_file.strip():
+            return Check(name, "fail",
+                         "missing required `parser_file` (path relative to "
+                         "repo root, e.g. \"src/foo/sigmond_tui.py\")")
+        if not isinstance(parser_attr, str) or not parser_attr.strip():
+            return Check(name, "fail",
+                         "missing required `parser_attr` (callable name in "
+                         "parser_file)")
+        if client and repo_root is not None:
+            target = repo_root / client / parser_file
+            if not target.is_file():
+                return Check(name, "fail",
+                             f"parser_file does not resolve: {target}",
+                             "create the parser module, or fix parser_file "
+                             "in deploy.toml")
+        per_instance = bool(block.get("per_instance", True))
+        if not per_instance:
+            config_path = block.get("config_path")
+            if not isinstance(config_path, str) or not config_path.strip():
+                return Check(name, "fail",
+                             "per_instance=false requires an absolute "
+                             "`config_path` to the singleton config")
+        return Check(name, "ok",
+                     f"parser={parser_file}:{parser_attr}, "
+                     f"per_instance={per_instance}")
     return Check(name, "ok", f"verb={block.get('verb')!r}, "
                  f"description={desc[:60]!r}")
 
@@ -365,6 +399,8 @@ def run_checks(client: str, repo_root: Path = REPO_ROOT,
 
     checks.append(_check_client_features(deploy, "watch"))
     checks.append(_check_client_features(deploy, "verifier"))
+    checks.append(_check_client_features(deploy, "receiver_channels",
+                                         client=client, repo_root=repo_root))
 
     catalog_check, entry = _check_catalog_entry(client)
     checks.append(catalog_check)

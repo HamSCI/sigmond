@@ -7,9 +7,9 @@ frequencies.  The point: "what is wspr-recorder@AC0G-B1 actually
 processing right now, and are all expected channels up?"
 
 Filtering strategy:
-  * Read the client's per-instance config (or the hf-timestd
-    singleton config) to extract the radiod status address and the
-    set of configured frequencies.
+  * Read the client's per-instance config (or the singleton config a
+    client like hf-timestd declares) to extract the radiod status
+    address and the set of configured frequencies.
   * Run ka9q-python's ``discover_channels(status, ...)`` to fetch
     every live channel on that radiod.
   * Match by frequency: each client uses a distinct frequency set
@@ -19,6 +19,15 @@ Filtering strategy:
     shown so the operator can also see the per-client RTP grouping.
 
 This is purely read-only; the screen never mutates radiod state.
+
+Per-client config parsing lives in each client repo, not here:
+``<client>/<parser_file>`` is loaded at TUI time via
+``importlib.util.spec_from_file_location``, with the path + callable
+name declared in the client's
+``[client_features.receiver_channels]`` deploy.toml block.  Adding
+a new client to this screen is zero sigmond edits.  See
+``sigmond/lib/sigmond/client_features.py`` for the schema and
+``sigmond/docs/ADD-A-CLIENT.md`` for the operator-side checklist.
 """
 
 from __future__ import annotations
@@ -30,103 +39,14 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Select, Static
 from textual.worker import Worker, WorkerState
 
+from ...client_features import (
+    ReceiverChannelsFeature,
+    load_receiver_channels_features,
+    load_receiver_channels_parser,
+)
 from ...instance import display_reporter_id as _display_reporter_id
 from ...instance import list_instances
-
-
-# Map encoding int ↔ human-friendly name.  Authoritative values come
-# from ka9q-python's Encoding enum (S16LE=1, S16BE=2, OPUS=3, F32=4,
-# AX25=5, F32BE=8).  We duplicate the table here because the sigmond
-# TUI runs in its own venv without ka9q-python always importable
-# from worker context.
-_ENCODING_NAMES = {
-    1: "s16le",
-    2: "s16be",
-    3: "opus",
-    4: "f32",
-    5: "ax25",
-    8: "f32be",
-}
-
-# Reverse lookup: case-insensitive string → numeric.  Used to compare
-# what a client's config declares against the encoding ka9q-python
-# reports on the live channel.
-_ENCODING_INTS = {
-    "s16le": 1,
-    "s16be": 2,
-    "opus":  3,
-    "f32":   4,
-    "f32le": 4,
-    "float": 4,     # wspr-recorder config alias for f32
-    "ax25":  5,
-    "f32be": 8,
-}
-
-
-def _decode_encoding(enc: int | None) -> str:
-    if enc is None:
-        return "?"
-    return _ENCODING_NAMES.get(int(enc), str(enc))
-
-
-def _encoding_to_int(enc: str | None) -> Optional[int]:
-    if not enc:
-        return None
-    return _ENCODING_INTS.get(str(enc).strip().lower())
-
-
-# HFDL band center frequencies (Hz).  Mirrors
-# hfdl_recorder.bands.HFDL_BANDS; we duplicate it here because the
-# sigmond TUI runs in its own venv and can't import from the
-# hfdl-recorder package.  These are the IQ band CENTERS the radiod
-# fragment tunes (matches the `freq` field in
-# ka9q-radio/config/fragments/hfdl.conf), NOT individual HFDL
-# sub-channel frequencies within each band — radiod publishes one
-# wide IQ channel per band and dumphfdl demodulates the in-band
-# slots from it.
-_HFDL_BAND_CENTERS_HZ = {
-    "HFDL2":   2_980_000,
-    "HFDL3":   3_477_000,
-    "HFDL4":   4_672_000,
-    "HFDL5":   5_587_000,
-    "HFDL6":   6_622_000,
-    "HFDL8":   8_902_500,
-    "HFDL10": 10_061_500,
-    "HFDL11": 11_287_000,
-    "HFDL13": 13_310_000,
-    "HFDL15": 15_025_000,
-    "HFDL17": 17_944_000,
-    "HFDL21": 21_964_000,
-}
-
-
-def _parse_wspr_freq(token: str) -> Optional[int]:
-    """Parse a WSPR frequency token in plain-Hz, MHz, or kHz notation.
-
-    Examples:
-        "14095600"   → 14095600
-        "14m095600"  → 14095600
-        "474k200"    → 474200
-    Returns None on malformed input.
-    """
-    if not isinstance(token, str):
-        return None
-    s = token.strip().replace("_", "")
-    try:
-        if "m" in s:
-            mhz, _, rest = s.partition("m")
-            return int(mhz) * 1_000_000 + (int(rest) if rest else 0)
-        if "k" in s:
-            khz, _, rest = s.partition("k")
-            return int(khz) * 1_000 + (int(rest) if rest else 0)
-        return int(s)
-    except (TypeError, ValueError):
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Per-instance config readers — extract (status_dns, configured_freqs_hz).
-# ---------------------------------------------------------------------------
+from ...ka9q_encoding import decode_encoding as _decode_encoding
 
 
 def _read_toml(path: Path) -> dict:
@@ -135,193 +55,67 @@ def _read_toml(path: Path) -> dict:
         return tomllib.load(f)
 
 
-def _client_config_path(client: str, instance: str) -> Optional[Path]:
-    """Return the canonical per-instance config path, or fall back to
-    the singleton config for hf-timestd."""
-    if client == "hf-timestd":
-        return Path("/etc/hf-timestd/timestd-config.toml")
-    per_instance = Path(f"/etc/{client}/{instance}.toml")
-    if per_instance.exists():
-        return per_instance
-    return None
+# Module-level cache so the worker thread, which can't easily reach
+# the screen's instance attributes safely, can rebuild a feature lookup
+# without re-walking the catalog on every refresh.
+_FEATURES_BY_CLIENT: dict[str, ReceiverChannelsFeature] = {}
 
 
-def _extract_status_and_freqs(
-    client: str, cfg: dict,
-) -> tuple[str, set[int], Optional[int]]:
-    """Return ``(status_dns, configured_freqs_hz, encoding_int)`` for
-    the given client.
-
-    Each client lays out its config differently; the canonical mDNS
-    status name and the frequencies it tunes are at different keys.
-    ``encoding_int`` is the ka9q-python Encoding numeric value the
-    client expects on its channels (e.g. 2 for s16be, 4 for f32) —
-    used as an additional filter so stale channels at the same
-    frequency but a no-longer-used encoding don't show up as if they
-    were the live ones.  None means "don't filter by encoding".
-
-    Returns ("", set(), None) on parse failure so the caller can
-    degrade gracefully.
-    """
-    if client == "psk-recorder":
-        blocks = cfg.get("radiod") or []
-        if isinstance(blocks, dict):
-            blocks = [blocks]
-        status = ""
-        freqs: set[int] = set()
-        encoding: Optional[int] = None
-        for b in blocks:
-            if not status:
-                status = str(b.get("status") or "")
-            for mode in ("ft8", "ft4"):
-                m = b.get(mode) or {}
-                for hz in m.get("freqs_hz", []) or []:
-                    freqs.add(int(hz))
-                if encoding is None and m.get("encoding"):
-                    encoding = _encoding_to_int(m["encoding"])
-        # psk-recorder defaults to s16be when not overridden.
-        if encoding is None and freqs:
-            encoding = _ENCODING_INTS["s16be"]
-        return status, freqs, encoding
-
-    if client == "wspr-recorder":
-        rad = cfg.get("radiod") or {}
-        status = str(rad.get("status") or "")
-        freqs = set()
-        # The wsprdaemon-style config keeps frequencies as a list of
-        # strings under [frequencies].bands (each string in plain-Hz
-        # / MHz / kHz notation).  The newer [[band]] array-of-tables
-        # form is also accepted in case a host uses that layout.
-        for tok in (cfg.get("frequencies") or {}).get("bands", []) or []:
-            hz = _parse_wspr_freq(tok)
-            if hz is not None:
-                freqs.add(hz)
-        for band in cfg.get("band", []) or []:
-            hz = _parse_wspr_freq(str(band.get("frequency", "")))
-            if hz is not None:
-                freqs.add(hz)
-        defaults = cfg.get("channel_defaults") or {}
-        encoding = _encoding_to_int(defaults.get("encoding")) or \
-            _ENCODING_INTS["s16be"]
-        return status, freqs, encoding
-
-    if client == "hfdl-recorder":
-        blocks = cfg.get("radiod") or []
-        if isinstance(blocks, dict):
-            blocks = [blocks]
-        status = ""
-        freqs = set()
-        for b in blocks:
-            if not status:
-                status = str(b.get("status") or "")
-            bands_block = (b.get("bands") or {}).get("enabled", []) or []
-            for name in bands_block:
-                hz = _HFDL_BAND_CENTERS_HZ.get(name)
-                if hz is not None:
-                    freqs.add(hz)
-        # dumphfdl consumes complex f32 IQ (--sample-format cf32);
-        # hfdl-recorder hardcodes HFDL_ENCODING = 4 (F32LE) in
-        # core/radiod.py and there's no operator-facing override.
-        return status, freqs, _ENCODING_INTS["f32"]
-
-    if client == "codar-sounder":
-        blocks = cfg.get("radiod") or []
-        if isinstance(blocks, dict):
-            blocks = [blocks]
-        status = ""
-        freqs = set()
-        encoding = None
-        for b in blocks:
-            if not status:
-                status = str(b.get("status") or "")
-            for tx in (b.get("transmitter") or []):
-                hz = tx.get("center_freq_hz")
-                if hz is not None:
-                    try:
-                        freqs.add(int(hz))
-                    except (TypeError, ValueError):
-                        pass
-            if encoding is None and b.get("encoding"):
-                encoding = _encoding_to_int(b["encoding"])
-        # codar-sounder hardcodes encoding=4 (F32LE) in
-        # codar_sounder/core/stream.py: the dechirper consumes
-        # complex F32 IQ and there's no operator-facing override.
-        # Trust the source-of-truth here, just like hfdl-recorder.
-        if encoding is None:
-            encoding = _ENCODING_INTS["f32"]
-        return status, freqs, encoding
-
-    if client == "hf-timestd":
-        ka9q = cfg.get("ka9q") or {}
-        status = str(ka9q.get("status") or "")
-        freqs = set()
-        recorder = cfg.get("recorder") or {}
-        # Encoding can be set per channel_group, or once on
-        # [recorder.channel_defaults].  Per-group wins when present;
-        # we take the FIRST group's encoding (hosts typically use one
-        # uniform encoding across all groups — and the alternative
-        # would be per-channel encoding tracking, which is a lot more
-        # plumbing for negligible benefit).
-        encoding: Optional[int] = None
-        for group in (recorder.get("channel_group") or {}).values():
-            if encoding is None:
-                encoding = _encoding_to_int(group.get("encoding"))
-            for ch in (group.get("channels") or []):
-                hz = ch.get("frequency_hz")
-                if hz is not None:
-                    try:
-                        freqs.add(int(hz))
-                    except (TypeError, ValueError):
-                        pass
-        if encoding is None:
-            encoding = _encoding_to_int(
-                (recorder.get("channel_defaults") or {}).get("encoding")
-            )
-        return status, freqs, encoding
-
-    return "", set(), None
+def _refresh_feature_cache() -> list[ReceiverChannelsFeature]:
+    """Reload the receiver-channels features and rebuild the by-client
+    map.  Called once per TUI session (on screen construction) and on
+    explicit refresh; cheap (< 10 ms) but not free, so don't call from
+    the worker hot path."""
+    features = load_receiver_channels_features()
+    _FEATURES_BY_CLIENT.clear()
+    for f in features:
+        _FEATURES_BY_CLIENT[f.client] = f
+    return features
 
 
-# ---------------------------------------------------------------------------
-# Screen
-# ---------------------------------------------------------------------------
+def _client_config_path(feature: ReceiverChannelsFeature,
+                        instance: str) -> Optional[Path]:
+    """Return the config path for one (client, instance) selection.
+
+    Singleton features use their declared ``config_path``.
+    Per-instance features resolve ``/etc/<client>/<instance>.toml``
+    and require it to exist."""
+    if not feature.per_instance:
+        p = Path(feature.config_path)
+        return p if p.exists() else None
+    per_instance = Path(f"/etc/{feature.client}/{instance}.toml")
+    return per_instance if per_instance.exists() else None
 
 
-_SUPPORTED_CLIENTS = (
-    "psk-recorder",
-    "wspr-recorder",
-    "hfdl-recorder",
-    "codar-sounder",
-    "hf-timestd",
-)
-
-
-def _instance_options() -> list[tuple[str, str]]:
+def _instance_options(
+    features: list[ReceiverChannelsFeature],
+) -> list[tuple[str, str]]:
     """Build (label, value) pairs for the client@instance Select.
 
-    Values are encoded as ``<client>|<reporter_id>`` so the screen
-    can split them on dispatch.  hf-timestd is special-cased (one
-    singleton entry) since it doesn't currently follow the
-    reporter-keyed templated pattern.
-    """
+    Values are encoded as ``<client>|<reporter_id>`` (or just
+    ``<client>|`` for singletons) so the screen can split them on
+    dispatch.  Drop-in: the list is built entirely from features
+    discovered in deploy.toml — nothing in this module mentions
+    client names by hand."""
     options: list[tuple[str, str]] = []
-
-    for client in ("psk-recorder", "wspr-recorder",
-                   "hfdl-recorder", "codar-sounder"):
-        try:
-            for inst in list_instances(catalog_clients=[client]):
-                # Slash form for human-readable label; storage form in
-                # the value so downstream parsing stays path-safe.
-                label = f"{client}@{_display_reporter_id(inst.reporter_id)}"
-                value = f"{client}|{inst.reporter_id}"
-                options.append((label, value))
-        except Exception:
-            continue
-
-    # hf-timestd singleton — one entry, no reporter suffix.
-    if Path("/etc/hf-timestd/timestd-config.toml").exists():
-        options.append(("hf-timestd (singleton)", "hf-timestd|"))
-
+    for feature in features:
+        if feature.per_instance:
+            try:
+                for inst in list_instances(catalog_clients=[feature.client]):
+                    label = (
+                        f"{feature.client}@"
+                        f"{_display_reporter_id(inst.reporter_id)}"
+                    )
+                    value = f"{feature.client}|{inst.reporter_id}"
+                    options.append((label, value))
+            except Exception:
+                continue
+        else:
+            if Path(feature.config_path).exists():
+                label = feature.client
+                if feature.singleton_label:
+                    label = f"{feature.client} {feature.singleton_label}"
+                options.append((label, f"{feature.client}|"))
     return options
 
 
@@ -355,7 +149,8 @@ class ReceiverChannelsScreen(Vertical):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._options = _instance_options()
+        self._features = _refresh_feature_cache()
+        self._options = _instance_options(self._features)
 
     def compose(self):
         yield Static("Receiver channels — per-client view of live radiod state",
@@ -417,16 +212,45 @@ class ReceiverChannelsScreen(Vertical):
             result["client"] = client
             result["reporter"] = reporter
 
-            cfg_path = _client_config_path(client, reporter)
-            if cfg_path is None or not cfg_path.exists():
+            feature = _FEATURES_BY_CLIENT.get(client)
+            if feature is None:
                 result["error"] = (
-                    f"no per-instance config at /etc/{client}/{reporter}.toml"
+                    f"no [client_features.receiver_channels] block "
+                    f"declared in {client}/deploy.toml"
                 )
+                return result
+
+            cfg_path = _client_config_path(feature, reporter)
+            if cfg_path is None:
+                if feature.per_instance:
+                    where = f"/etc/{client}/{reporter}.toml"
+                else:
+                    where = feature.config_path
+                result["error"] = f"config missing: {where}"
                 return result
             result["config_path"] = str(cfg_path)
             cfg = _read_toml(cfg_path)
-            status_dns, configured_freqs, configured_encoding = \
-                _extract_status_and_freqs(client, cfg)
+
+            parser = load_receiver_channels_parser(feature)
+            if parser is None:
+                result["error"] = (
+                    f"could not load parser "
+                    f"{feature.parser_file}:{feature.parser_attr} from "
+                    f"{client} (check `smd diag drop-in {client}`)"
+                )
+                return result
+            try:
+                status_dns, configured_freqs, configured_encoding = parser(cfg)
+            except Exception as exc:                     # noqa: BLE001
+                result["error"] = (
+                    f"client parser raised "
+                    f"{exc.__class__.__name__}: {exc}"
+                )
+                return result
+            # Normalize: parser may legitimately return any iterable
+            # of ints for freqs; coerce so downstream code can rely on
+            # a set[int].
+            configured_freqs = {int(f) for f in (configured_freqs or [])}
             result["status_dns"] = status_dns
             result["configured_freqs"] = sorted(configured_freqs)
             result["configured_encoding"] = configured_encoding

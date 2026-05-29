@@ -27,6 +27,15 @@ A client now declares its UI hooks in its own ``deploy.toml``:
                                   # flags don't apply — e.g. hf-timestd)
     per_instance = true           # adds the instance dropdown row
 
+    [client_features.receiver_channels]
+    description     = "FT4/FT8 spot channels"
+    per_instance    = true                              # per-instance vs singleton
+    parser_file     = "src/psk_recorder/sigmond_tui.py" # path relative to repo root
+    parser_attr     = "parse_receiver_channels"         # callable in that file
+    # Singleton-only (per_instance = false) extras:
+    singleton_label = "(singleton)"                     # suffix on dropdown label
+    config_path     = "/etc/hf-timestd/timestd-config.toml"  # absolute config path
+
 Omitting a block means the client doesn't appear in that screen.
 
 Lookup is best-effort and never raises: a missing repo, an unreadable
@@ -37,9 +46,10 @@ hardcoded meta rows regardless.
 
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 try:
     import tomllib
@@ -113,6 +123,62 @@ def _parse_watch_feature(client: str, deploy: dict) -> Optional[WatchFeature]:
         description=description,
         verbose=bool(block.get("verbose", False)),
         per_instance=bool(block.get("per_instance", False)),
+    )
+
+
+@dataclass(frozen=True)
+class ReceiverChannelsFeature:
+    """One client's Receiver Channels TUI surface, as declared in its
+    deploy.toml.  The parser is a function pointer into client-owned
+    code; sigmond never knows the client's config schema directly."""
+
+    client: str               # catalog name (e.g. "psk-recorder")
+    description: str
+    per_instance: bool        # True → instance dropdown; False → singleton entry
+    parser_file: str          # path relative to repo root (e.g. "src/foo/sigmond_tui.py")
+    parser_attr: str          # callable name in that file
+    singleton_label: str      # suffix on dropdown label (only used when per_instance=False)
+    config_path: str          # absolute config path (only used when per_instance=False)
+
+
+def _parse_receiver_channels_feature(
+    client: str, deploy: dict,
+) -> Optional[ReceiverChannelsFeature]:
+    """Extract a ReceiverChannelsFeature from a parsed deploy.toml
+    dict, or None if the block is absent / malformed.
+
+    Required keys: description, per_instance, parser_file, parser_attr.
+    Singleton clients additionally need config_path.  parser_file is
+    validated for existence here so a typo surfaces in
+    `smd diag drop-in` instead of as a TUI-time KeyError.
+    """
+    block = deploy.get("client_features", {}).get("receiver_channels")
+    if not isinstance(block, dict):
+        return None
+    description = block.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return None
+    parser_file = block.get("parser_file")
+    parser_attr = block.get("parser_attr")
+    if not isinstance(parser_file, str) or not parser_file.strip():
+        return None
+    if not isinstance(parser_attr, str) or not parser_attr.strip():
+        return None
+    per_instance = bool(block.get("per_instance", True))
+    singleton_label = str(block.get("singleton_label", "") or "")
+    config_path = str(block.get("config_path", "") or "")
+    if not per_instance and not config_path:
+        # Singleton clients must point at an absolute config file —
+        # there's no /etc/<client>/<instance>.toml fallback for them.
+        return None
+    return ReceiverChannelsFeature(
+        client=client,
+        description=description,
+        per_instance=per_instance,
+        parser_file=parser_file,
+        parser_attr=parser_attr,
+        singleton_label=singleton_label,
+        config_path=config_path,
     )
 
 
@@ -191,7 +257,72 @@ def load_verifier_features(repo_root: Path = REPO_ROOT) -> list[VerifierFeature]
     return out
 
 
+def load_receiver_channels_features(
+    repo_root: Path = REPO_ROOT,
+) -> list[ReceiverChannelsFeature]:
+    """Return every enabled+installed client's ReceiverChannelsFeature,
+    in topology order.  Same filtering rules as load_watch_features.
+    The Receiver Channels TUI screen uses this list as the *complete*
+    set of supported clients — no hardcoded allowlist anywhere."""
+    out: list[ReceiverChannelsFeature] = []
+    for client, deploy in _walk_enabled_installed(repo_root):
+        feature = _parse_receiver_channels_feature(client, deploy)
+        if feature is not None:
+            out.append(feature)
+    return out
+
+
+# Per-(repo_root, parser_file) cache of loaded parsers.  Refreshing the
+# Receiver Channels screen is the hot path; avoid re-parsing the same
+# parser module on every click.
+_PARSER_CACHE: dict[tuple, Callable[[dict], Any]] = {}
+
+
+def load_receiver_channels_parser(
+    feature: ReceiverChannelsFeature,
+    repo_root: Path = REPO_ROOT,
+) -> Optional[Callable[[dict], Any]]:
+    """Import the parser declared in ``feature`` and return the callable.
+
+    Uses ``importlib.util.spec_from_file_location`` so the client's
+    parser doesn't need to be importable by package name from sigmond's
+    venv — only the path on disk needs to resolve.  Cached per
+    (repo_root, parser_file).
+
+    Returns None on any failure: missing file, import error, missing
+    attribute, attribute not callable.  Callers degrade gracefully —
+    the TUI shows an error row, never crashes.
+    """
+    cache_key = (str(repo_root), feature.client, feature.parser_file, feature.parser_attr)
+    cached = _PARSER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    parser_path = repo_root / feature.client / feature.parser_file
+    if not parser_path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        # Unique module name per client so two clients with the same
+        # filename don't collide in sys.modules.
+        f"_sigmond_receiver_channels_parser_{feature.client}".replace("-", "_"),
+        parser_path,
+    )
+    if spec is None or spec.loader is None:
+        return None
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception:                                    # noqa: BLE001
+        return None
+    fn = getattr(module, feature.parser_attr, None)
+    if not callable(fn):
+        return None
+    _PARSER_CACHE[cache_key] = fn
+    return fn
+
+
 __all__ = [
     "WatchFeature", "load_watch_features",
     "VerifierFeature", "VERIFIER_KINDS", "load_verifier_features",
+    "ReceiverChannelsFeature", "load_receiver_channels_features",
+    "load_receiver_channels_parser",
 ]
