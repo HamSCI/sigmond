@@ -170,6 +170,139 @@ def get_physical_cores() -> list[set]:
     return cores
 
 
+def parse_ht_pairs(s: str) -> "list[list[int]]":
+    """Parse the HT_PAIRS string emitted by host-discover.sh.
+
+    Format: space-separated sibling pairs, each ``a,b`` (or a single
+    ``a`` for a non-SMT core), ordered by physical core — e.g.
+    ``"0,1 2,3 4,5"`` (sequential) or ``"0,8 1,9 2,10"`` (split).
+    Returns an ordered list of sorted int lists.
+    """
+    pairs: "list[list[int]]" = []
+    for tok in s.split():
+        cpus: set = set()
+        for part in tok.split(','):
+            if not part:
+                continue
+            if '-' in part:
+                lo, hi = part.split('-')
+                cpus.update(range(int(lo), int(hi) + 1))
+            else:
+                cpus.add(int(part))
+        if cpus:
+            pairs.append(sorted(cpus))
+    return pairs
+
+
+def compute_host_cpu_layout(
+    pairs: "list[list[int]]",
+    *,
+    local_radiod_count: int = 1,
+    reserve_host_pairs: int = 1,
+) -> dict:
+    """Compute the Proxmox-host CPU layout for the sigmond VM.
+
+    ``pairs`` is the ordered list of host hyperthread sibling pairs (each
+    the two host logical-CPU numbers of one physical core), ordered by
+    physical core — a sequential-HT host gives ``[[0,1],[2,3],…]`` and a
+    split-HT host (AMD/Intel where cpu0's sibling is cpuN/2) gives
+    ``[[0,8],[1,9],…]``.
+
+    The last ``reserve_host_pairs`` physical cores stay with the Proxmox
+    host; the rest become the VM's vCPUs.  The first
+    ``local_radiod_count`` of the VM's pairs are radiod cores (kept at
+    full clock); the remainder are decode/worker cores (clock-capped).
+
+    The crucial output is ``vcpu_to_pcpu``: the *pair-order* flattening
+    of the VM's pairs.  The guest always presents consecutive sibling
+    pairs (guest core k = guest vCPUs 2k, 2k+1), so mapping guest vCPU i
+    to ``vcpu_to_pcpu[i]`` places guest core k onto host physical core
+    k's two real siblings.  radiod — pinned guest-side to guest cores
+    0..R-1 — therefore lands on real host sibling pairs and its FFT /
+    block threads share L1/L2.  On a sequential host this reduces to the
+    identity map; on a split host it is the non-trivial interleave the
+    old "sequential-only" path could not express.
+
+    Returns a dict: ``vm_pairs, radiod_pairs, worker_pairs`` (lists of
+    pairs), ``radiod_cpus, worker_cpus, vcpu_to_pcpu`` (flat host-CPU
+    lists in pair order), ``isolcpus`` (sorted host CPUs the VM owns),
+    ``vm_cores, vm_threads, vm_vcpu_count``.
+    """
+    pairs = [sorted(p) for p in pairs]
+    if local_radiod_count < 1:
+        raise ValueError("local_radiod_count must be >= 1")
+    widths = {len(p) for p in pairs}
+    if widths != {2}:
+        raise ValueError(
+            f"host CPU layout requires uniform 2-way SMT pairs; got pair "
+            f"widths {sorted(widths)} — non-SMT or asymmetric host, "
+            f"configure manually"
+        )
+    total = len(pairs)
+    need = reserve_host_pairs + local_radiod_count + 1  # +1 worker pair min
+    if total < need:
+        raise ValueError(
+            f"need >= {need} HT pairs ({2 * need} CPUs) for "
+            f"{local_radiod_count} radiod instance(s) + workers + "
+            f"{reserve_host_pairs} reserved host pair(s); host has {total}"
+        )
+    vm_pairs = pairs[: total - reserve_host_pairs]
+    radiod_pairs = vm_pairs[:local_radiod_count]
+    worker_pairs = vm_pairs[local_radiod_count:]
+
+    def flat(ps: "list[list[int]]") -> "list[int]":
+        return [c for p in ps for c in p]
+
+    vcpu_to_pcpu = flat(vm_pairs)
+    return {
+        "vm_pairs": vm_pairs,
+        "radiod_pairs": radiod_pairs,
+        "worker_pairs": worker_pairs,
+        "radiod_cpus": flat(radiod_pairs),
+        "worker_cpus": flat(worker_pairs),
+        "vcpu_to_pcpu": vcpu_to_pcpu,
+        "isolcpus": sorted(vcpu_to_pcpu),
+        "vm_cores": len(vm_pairs),
+        "vm_threads": 2,
+        "vm_vcpu_count": len(vcpu_to_pcpu),
+    }
+
+
+def _cpus_to_range_str(cpus: "list[int]") -> str:
+    """Compact a sorted CPU list to a kernel range string: ``0-6,8-14``."""
+    out: "list[str]" = []
+    cpus = sorted(cpus)
+    i = 0
+    while i < len(cpus):
+        j = i
+        while j + 1 < len(cpus) and cpus[j + 1] == cpus[j] + 1:
+            j += 1
+        out.append(str(cpus[i]) if i == j else f"{cpus[i]}-{cpus[j]}")
+        i = j + 1
+    return ",".join(out)
+
+
+def layout_shell_vars(layout: dict) -> str:
+    """Render ``compute_host_cpu_layout`` output as shell assignments.
+
+    Consumed by bootstrap.sh via ``eval`` so the bash side doesn't have
+    to parse JSON.  Frequency-cap lists (RADIOD_CPUS/WORKER_CPUS) and the
+    vCPU→pCPU map are space-separated (the hookscript reads them as bash
+    arrays); ISOLCPUS is a compact kernel range string for
+    ``isolcpus=`` / ``qm --affinity``.
+    """
+    sp = lambda xs: " ".join(str(x) for x in xs)
+    return "\n".join([
+        f'RADIOD_CPUS="{sp(layout["radiod_cpus"])}"',
+        f'WORKER_CPUS="{sp(layout["worker_cpus"])}"',
+        f'VCPU_TO_PCPU="{sp(layout["vcpu_to_pcpu"])}"',
+        f'ISOLCPUS_RANGE="{_cpus_to_range_str(layout["isolcpus"])}"',
+        f'VM_CORES="{layout["vm_cores"]}"',
+        f'VM_THREADS="{layout["vm_threads"]}"',
+        f'VM_VCPU_COUNT="{layout["vm_vcpu_count"]}"',
+    ])
+
+
 def read_proc_cpus(pid_or_tid: str) -> Optional[str]:
     """Return Cpus_allowed_list string for a PID or TID, or None on error."""
     try:

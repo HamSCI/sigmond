@@ -8,7 +8,7 @@
 # Required env vars (passed via ssh):
 #   VMID, USB_VID_DID, CPU_VENDOR, HOST_CPU_COUNT, VM_VCPU_COUNT,
 #   VM_CORES, VM_THREADS, ISOLCPUS_RANGE, RADIOD_CPUS, WORKER_CPUS,
-#   RADIOD_FREQ_KHZ, WORKER_FREQ_KHZ
+#   VCPU_TO_PCPU, RADIOD_FREQ_KHZ, WORKER_FREQ_KHZ
 #
 # Reads the cpu-pin template from /tmp/cpu-pin-VMID.sh.template (also scp'd).
 #
@@ -28,6 +28,7 @@ set -euo pipefail
 : "${ISOLCPUS_RANGE:?ISOLCPUS_RANGE required}"
 : "${RADIOD_CPUS:?RADIOD_CPUS required}"
 : "${WORKER_CPUS:?WORKER_CPUS required}"
+: "${VCPU_TO_PCPU:?VCPU_TO_PCPU required}"
 : "${RADIOD_FREQ_KHZ:=3200000}"
 : "${WORKER_FREQ_KHZ:=1400000}"
 
@@ -101,12 +102,13 @@ update-initramfs -u -k all >/dev/null
 mkdir -p /var/lib/vz/snippets
 
 # Render the hookscript by parameter substitution. The template uses sentinel
-# placeholders: @@VMID@@, @@RADIOD_CPUS@@, @@WORKER_CPUS@@, @@RADIOD_FREQ_KHZ@@,
-# @@WORKER_FREQ_KHZ@@.
+# placeholders: @@VMID@@, @@RADIOD_CPUS@@, @@WORKER_CPUS@@, @@VCPU_TO_PCPU@@,
+# @@RADIOD_FREQ_KHZ@@, @@WORKER_FREQ_KHZ@@.
 sed \
     -e "s|@@VMID@@|${VMID}|g" \
     -e "s|@@RADIOD_CPUS@@|${RADIOD_CPUS}|g" \
     -e "s|@@WORKER_CPUS@@|${WORKER_CPUS}|g" \
+    -e "s|@@VCPU_TO_PCPU@@|${VCPU_TO_PCPU}|g" \
     -e "s|@@RADIOD_FREQ_KHZ@@|${RADIOD_FREQ_KHZ}|g" \
     -e "s|@@WORKER_FREQ_KHZ@@|${WORKER_FREQ_KHZ}|g" \
     "$TEMPLATE" > "$SNIPPET"

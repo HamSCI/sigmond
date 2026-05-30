@@ -110,7 +110,10 @@ done
 # ─── CPU layout ───────────────────────────────────────────────────────────────
 HOST_CPU_COUNT="$(nproc)"
 SIBLINGS_LIST="$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null || echo 0)"
-# Sequential pairing: "0,1" or "0-1". Split: "0,N/2".
+# Sequential pairing: "0,1" or "0-1". Split: "0,N/2". HT_PATTERN is kept for
+# logging/back-compat; HT_PAIRS below is the authoritative input to the generic
+# layout computation (sigmond.cpu.compute_host_cpu_layout), which handles
+# sequential, split, and any uniform 2-way SMT topology.
 HT_PATTERN="unknown"
 if [[ "$SIBLINGS_LIST" =~ ^0[,-]1$ ]]; then
     HT_PATTERN="sequential"
@@ -118,6 +121,21 @@ elif [[ "$SIBLINGS_LIST" =~ ^0[,-]([0-9]+)$ ]]; then
     sib="${BASH_REMATCH[1]}"
     [[ "$sib" -eq $((HOST_CPU_COUNT/2)) ]] && HT_PATTERN="split"
 fi
+
+# Ordered, de-duplicated HT sibling pairs (one token per physical core, in
+# physical-core order). Each token is that core's kernel thread_siblings_list
+# ("0,1"/"0-1" sequential, "0,8" split). Walk logical CPUs in order, keeping
+# each distinct sibling group the first time it appears.
+HT_PAIRS=""
+declare -A _seen_sib
+for ((c=0; c<HOST_CPU_COUNT; c++)); do
+    sl="$(cat /sys/devices/system/cpu/cpu${c}/topology/thread_siblings_list 2>/dev/null || echo "$c")"
+    if [[ -z "${_seen_sib[$sl]:-}" ]]; then
+        _seen_sib[$sl]=1
+        HT_PAIRS+="${sl} "
+    fi
+done
+HT_PAIRS="${HT_PAIRS% }"
 
 # CPU vendor (for grub iommu flag).
 CPU_VENDOR="$(awk -F: '/^vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')"
@@ -130,4 +148,5 @@ emit USB_ADDRS_FOR_ID "${USB_ADDRS_FOR_ID## }"
 emit IOMMU_OK "$IOMMU_OK"
 emit HOST_CPU_COUNT "$HOST_CPU_COUNT"
 emit HT_PATTERN "$HT_PATTERN"
+emit HT_PAIRS "$HT_PAIRS"
 emit CPU_VENDOR "$CPU_VENDOR"

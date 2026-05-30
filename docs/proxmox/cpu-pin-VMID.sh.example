@@ -9,13 +9,26 @@
 # RADIOD_CPUS         Host pCPUs that back the guest's radiod instance(s).
 #                     One HT pair (2 logical CPUs) per radiod instance.
 #                     Examples:
+#                     A pair = one physical core's two SMT siblings, which
+#                     on a SEQUENTIAL host are consecutive (cpu0,cpu1) but on
+#                     a SPLIT host (many AMD/Intel parts: cpu0's sibling is
+#                     cpuN/2) are NOT — e.g. {0,8},{1,9}.  Check yours with
+#                     `cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list`.
+#                     Examples (sequential):
 #                       1 radiod  → RADIOD_CPUS=(0 1)
 #                       2 radiods → RADIOD_CPUS=(0 1 2 3)
-#                       3 radiods → RADIOD_CPUS=(0 1 2 3 4 5)
-#                     The vCPU pinning below is 1:1, so guest vCPUs 0,1
-#                     run on host pCPUs 0,1; etc.  Sigmond's affinity logic
-#                     then pins radiod inside the guest to vCPU 0,1
-#                     (or vCPU 0..3 for two radiods, etc.).
+#                     Split host, 1 radiod → RADIOD_CPUS=(0 8).
+#
+# VCPU_TO_PCPU        Guest vCPU i → host pCPU map (array index = vCPU).
+#                     The guest always presents consecutive sibling pairs, so
+#                     this map must send each guest pair to a real host pair:
+#                     identity on a sequential host (0 1 2 3 …); the interleave
+#                     (0 8 1 9 2 10 …) on a split host.  Sigmond computes both
+#                     automatically — see `sigmond.cpu.compute_host_cpu_layout`
+#                     and `scripts/proxmox/bootstrap.sh`.  Inside the guest,
+#                     sigmond pins radiod to guest vCPUs 0,1 (0..3 for two
+#                     radiods, etc.), which this map lands on the right host
+#                     sibling pair.
 #
 # WORKER_CPUS         Host pCPUs that back the guest's worker pool —
 #                     everything assigned to this VM minus RADIOD_CPUS.
@@ -44,10 +57,11 @@
 # wsprdaemon-proxmox-cpu-clock-tuning.md.
 
 VMID=101
-RADIOD_CPUS=(0 1)
+RADIOD_CPUS=(0 1)            # split host → (0 8)
 RADIOD_FREQ_KHZ=4063000      # HW max (use cpuinfo_max_freq for your CPU)
 WORKER_CPUS=(2 3 4 5 6 7 8 9)
 WORKER_FREQ_KHZ=4063000      # HW max — workers need full clock to keep up
+VCPU_TO_PCPU=(0 1 2 3 4 5 6 7 8 9)   # identity (sequential); split → (0 8 1 9 2 10 3 11 4 12)
 
 # ---- end of operator-tunable section ----
 
@@ -79,7 +93,9 @@ if [ "$PHASE" = "post-start" ] && [ "$EVT_VMID" = "$VMID" ]; then
         done
     } | logger -t cpu-pin-${VMID}
 
-    # vCPU pinning — wait for QEMU to bring up vCPU threads, then 1:1 pin.
+    # vCPU pinning — wait for QEMU to bring up vCPU threads, then map each
+    # guest vCPU to its host pCPU via VCPU_TO_PCPU (identity on a sequential
+    # host, interleaved on a split host).
     sleep 2
     QEMU_PID=$(cat /var/run/qemu-server/${VMID}.pid 2>/dev/null)
     if [ -z "$QEMU_PID" ]; then
@@ -90,8 +106,10 @@ if [ "$PHASE" = "post-start" ] && [ "$EVT_VMID" = "$VMID" ]; then
         comm=$(cat /proc/$tid/comm 2>/dev/null)
         if [[ "$comm" =~ ^CPU\ ([0-9]+)/KVM$ ]]; then
             vcpu=${BASH_REMATCH[1]}
-            taskset -pc $vcpu $tid > /dev/null 2>&1
-            echo "cpu-pin: VM $VMID vCPU $vcpu (tid $tid) -> host pCPU $vcpu"
+            pcpu=${VCPU_TO_PCPU[$vcpu]}
+            [ -z "$pcpu" ] && { echo "cpu-pin: vCPU $vcpu has no pCPU mapping — skipped"; continue; }
+            taskset -pc "$pcpu" "$tid" > /dev/null 2>&1
+            echo "cpu-pin: VM $VMID vCPU $vcpu (tid $tid) -> host pCPU $pcpu"
         fi
     done | logger -t cpu-pin-${VMID}
 fi

@@ -21,13 +21,17 @@ from sigmond.cpu import (
     PREFERRED_RADIOD_GOVERNORS,
     SystemCapabilities,
     UnitAffinity,
+    _cpus_to_range_str,
     _is_kernel_thread,
     affinity_report_to_dict,
     build_affinity_report,
+    compute_host_cpu_layout,
     expand_template_instances,
     gather_capabilities,
+    layout_shell_vars,
     parse_cmdline_cpu_param,
     parse_cpu_mask,
+    parse_ht_pairs,
 )
 
 
@@ -326,6 +330,119 @@ class AffinityReportToDictTests(unittest.TestCase):
         for unit in d['units']:
             self.assertIsInstance(unit['thread_group_count'], int)
             self.assertNotIn('thread_groups', unit)
+
+
+class ParseHtPairsTests(unittest.TestCase):
+    def test_sequential(self):
+        self.assertEqual(parse_ht_pairs('0,1 2,3 4,5'), [[0, 1], [2, 3], [4, 5]])
+
+    def test_split(self):
+        self.assertEqual(parse_ht_pairs('0,8 1,9 2,10'), [[0, 8], [1, 9], [2, 10]])
+
+    def test_range_form(self):
+        self.assertEqual(parse_ht_pairs('0-1 2-3'), [[0, 1], [2, 3]])
+
+    def test_singletons(self):
+        self.assertEqual(parse_ht_pairs('0 1 2'), [[0], [1], [2]])
+
+    def test_empty(self):
+        self.assertEqual(parse_ht_pairs(''), [])
+
+
+def _seq_pairs(n_cpus):
+    return [[i, i + 1] for i in range(0, n_cpus, 2)]
+
+
+def _split_pairs(n_cpus):
+    half = n_cpus // 2
+    return [[i, i + half] for i in range(half)]
+
+
+class ComputeHostCpuLayoutTests(unittest.TestCase):
+    def test_sequential_16cpu_matches_legacy(self):
+        """Sequential host, 1 radiod: must reproduce the old hardcoded
+        layout (radiod 0,1; workers 2..13; identity vCPU map; 7 cores)."""
+        lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=1)
+        self.assertEqual(lay['radiod_cpus'], [0, 1])
+        self.assertEqual(lay['worker_cpus'], list(range(2, 14)))
+        self.assertEqual(lay['vcpu_to_pcpu'], list(range(14)))  # identity
+        self.assertEqual(lay['isolcpus'], list(range(14)))
+        self.assertEqual(lay['vm_cores'], 7)
+        self.assertEqual(lay['vm_vcpu_count'], 14)
+
+    def test_split_16cpu_interleaves(self):
+        """Split host (cpu0<->cpu8): radiod must get a REAL sibling pair
+        {0,8}, and the vCPU map must interleave so guest pairs land on
+        host pairs."""
+        lay = compute_host_cpu_layout(_split_pairs(16), local_radiod_count=1)
+        self.assertEqual(lay['radiod_cpus'], [0, 8])           # real sibling pair
+        self.assertEqual(lay['vcpu_to_pcpu'][:2], [0, 8])      # guest core0 -> host core0
+        self.assertEqual(lay['vcpu_to_pcpu'][2:4], [1, 9])     # guest core1 -> host core1
+        self.assertEqual(
+            lay['vcpu_to_pcpu'],
+            [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14],
+        )
+        self.assertEqual(lay['worker_cpus'], [1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14])
+        self.assertEqual(lay['isolcpus'], [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14])
+        self.assertEqual(lay['vm_cores'], 7)
+
+    def test_two_local_radiods_sequential(self):
+        """Second local radiod gets the next physical core's pair."""
+        lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=2)
+        self.assertEqual(lay['radiod_pairs'], [[0, 1], [2, 3]])
+        self.assertEqual(lay['radiod_cpus'], [0, 1, 2, 3])
+        self.assertEqual(lay['worker_cpus'], list(range(4, 14)))
+
+    def test_two_local_radiods_split(self):
+        lay = compute_host_cpu_layout(_split_pairs(16), local_radiod_count=2)
+        self.assertEqual(lay['radiod_pairs'], [[0, 8], [1, 9]])
+        self.assertEqual(lay['radiod_cpus'], [0, 8, 1, 9])
+
+    def test_reserves_last_pair_for_host(self):
+        lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=1)
+        # host CPUs 14,15 (last physical core) are NOT in the VM set.
+        self.assertNotIn(14, lay['isolcpus'])
+        self.assertNotIn(15, lay['isolcpus'])
+
+    def test_rejects_non_smt(self):
+        with self.assertRaises(ValueError):
+            compute_host_cpu_layout([[0], [1], [2], [3]], local_radiod_count=1)
+
+    def test_rejects_too_few_pairs(self):
+        # 2 pairs, 1 radiod, 1 reserved host -> 0 worker pairs -> error.
+        with self.assertRaises(ValueError):
+            compute_host_cpu_layout(_seq_pairs(4), local_radiod_count=1)
+
+
+class CpuRangeStrTests(unittest.TestCase):
+    def test_contiguous(self):
+        self.assertEqual(_cpus_to_range_str([0, 1, 2, 3]), '0-3')
+
+    def test_split(self):
+        self.assertEqual(
+            _cpus_to_range_str([0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14]),
+            '0-6,8-14',
+        )
+
+    def test_singletons_and_runs(self):
+        self.assertEqual(_cpus_to_range_str([0, 2, 3, 4, 7]), '0,2-4,7')
+
+
+class LayoutShellVarsTests(unittest.TestCase):
+    def test_sequential_render(self):
+        lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=1)
+        out = layout_shell_vars(lay)
+        self.assertIn('RADIOD_CPUS="0 1"', out)
+        self.assertIn('WORKER_CPUS="2 3 4 5 6 7 8 9 10 11 12 13"', out)
+        self.assertIn('VCPU_TO_PCPU="0 1 2 3 4 5 6 7 8 9 10 11 12 13"', out)
+        self.assertIn('ISOLCPUS_RANGE="0-13"', out)
+        self.assertIn('VM_CORES="7"', out)
+
+    def test_split_render_isolcpus_is_noncontiguous(self):
+        lay = compute_host_cpu_layout(_split_pairs(16), local_radiod_count=1)
+        out = layout_shell_vars(lay)
+        self.assertIn('ISOLCPUS_RANGE="0-6,8-14"', out)
+        self.assertIn('VCPU_TO_PCPU="0 8 1 9 2 10 3 11 4 12 5 13 6 14"', out)
 
 
 if __name__ == '__main__':

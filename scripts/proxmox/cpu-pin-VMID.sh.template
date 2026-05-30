@@ -11,6 +11,11 @@ RADIOD_CPUS=(@@RADIOD_CPUS@@)
 RADIOD_FREQ_KHZ=@@RADIOD_FREQ_KHZ@@
 WORKER_CPUS=(@@WORKER_CPUS@@)
 WORKER_FREQ_KHZ=@@WORKER_FREQ_KHZ@@
+# Guest vCPU i -> host pCPU map (index = guest vCPU). On a sequential-HT
+# host this is the identity; on a split-HT host ({0,8},{1,9}…) it is the
+# interleave that keeps each guest sibling pair on a real host sibling pair
+# (so radiod's FFT/block threads actually share L1/L2).
+VCPU_TO_PCPU=(@@VCPU_TO_PCPU@@)
 
 EVT_VMID=$1
 PHASE=$2
@@ -39,8 +44,13 @@ if [ "$PHASE" = "post-start" ] && [ "$EVT_VMID" = "$VMID" ]; then
         comm=$(cat /proc/$tid/comm 2>/dev/null)
         if [[ "$comm" =~ ^CPU\ ([0-9]+)/KVM$ ]]; then
             vcpu=${BASH_REMATCH[1]}
-            taskset -pc $vcpu $tid > /dev/null 2>&1
-            echo "cpu-pin: VM $VMID vCPU $vcpu (tid $tid) -> host pCPU $vcpu"
+            pcpu=${VCPU_TO_PCPU[$vcpu]}
+            if [ -z "$pcpu" ]; then
+                echo "cpu-pin: VM $VMID vCPU $vcpu has no pCPU mapping — skipped"
+                continue
+            fi
+            taskset -pc "$pcpu" "$tid" > /dev/null 2>&1
+            echo "cpu-pin: VM $VMID vCPU $vcpu (tid $tid) -> host pCPU $pcpu"
         fi
     done | logger -t cpu-pin-${VMID}
 fi

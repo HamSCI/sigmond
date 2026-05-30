@@ -192,25 +192,39 @@ phase_pre_host() {
     iommu_ok="${KV[IOMMU_OK]}"
     host_cpu_count="${KV[HOST_CPU_COUNT]}"
     ht_pattern="${KV[HT_PATTERN]}"
+    local ht_pairs="${KV[HT_PAIRS]}"
     cpu_vendor="${KV[CPU_VENDOR]}"
 
     [[ "$iommu_ok" == "1" ]] || die "USB controllers share IOMMU group with non-USB devices. Manual config required — see docs/proxmox/wsprdaemon-proxmox-vm-setup.md Step 2."
-    [[ "$ht_pattern" == "sequential" ]] || die "host HT pairing is '$ht_pattern' — only 'sequential' is supported in this version. Configure manually per docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md."
 
-    ok "VMID=${vmid} USB=${usb_vid_did} (addrs:${usb_addrs}) host_cpus=${host_cpu_count} HT=${ht_pattern} CPU=${cpu_vendor}"
+    # Number of LOCAL radiod instances — one host HT sibling pair each.
+    # Defaults to 1; set LOCAL_RADIOD_COUNT=N for a host with multiple local
+    # RX888 triplets. Remote receivers' radiods run on other hosts and are not
+    # counted here.
+    local radiod_count="${LOCAL_RADIOD_COUNT:-1}"
+
+    ok "VMID=${vmid} USB=${usb_vid_did} (addrs:${usb_addrs}) host_cpus=${host_cpu_count} HT=${ht_pattern} pairs='${ht_pairs}' local_radiods=${radiod_count} CPU=${cpu_vendor}"
 
     # ─── compute CPU layout ───────────────────────────────────────────────────
-    # Leave one HT pair for the host. Sequential pairing → cores 0..N-3 to VM,
-    # cores N-2,N-1 to host.
-    local vm_vcpu_count=$((host_cpu_count - 2))
-    [[ $vm_vcpu_count -ge 4 ]] || die "host has only $host_cpu_count CPUs; need at least 6 for sigmond"
-    local vm_threads=2
-    local vm_cores=$((vm_vcpu_count / vm_threads))
-    local isolcpus_range="0-$((vm_vcpu_count - 1))"
-    # radiod gets first HT pair (vCPUs 0,1); workers get the rest.
-    local radiod_cpus="0 1"
-    local worker_cpus
-    worker_cpus="$(seq -s ' ' 2 $((vm_vcpu_count - 1)))"
+    # Topology-aware: place each local radiod on a real host HT sibling pair
+    # (so its FFT/block threads share L1/L2), pin decode workers to the
+    # remaining pairs, reserve the last physical core for the Proxmox host.
+    # Handles sequential ({0,1},{2,3}…) AND split ({0,8},{1,9}…) hosts. The
+    # computation lives in sigmond.cpu (unit-tested); bootstrap evals the
+    # shell-var block it emits (RADIOD_CPUS WORKER_CPUS VCPU_TO_PCPU
+    # ISOLCPUS_RANGE VM_CORES VM_THREADS VM_VCPU_COUNT).
+    [[ -n "$ht_pairs" ]] || die "host-discover did not report HT_PAIRS (stale host-discover.sh on host?)"
+    local RADIOD_CPUS WORKER_CPUS VCPU_TO_PCPU ISOLCPUS_RANGE VM_CORES VM_THREADS VM_VCPU_COUNT
+    local layout_vars
+    layout_vars="$(PYTHONPATH="$SIGMOND_REPO/lib" python3 -c '
+import sys
+from sigmond.cpu import parse_ht_pairs, compute_host_cpu_layout, layout_shell_vars
+pairs = parse_ht_pairs(sys.argv[1])
+lay = compute_host_cpu_layout(pairs, local_radiod_count=int(sys.argv[2]))
+print(layout_shell_vars(lay))
+' "$ht_pairs" "$radiod_count")" \
+        || die "CPU layout computation failed (HT_PAIRS='$ht_pairs' local_radiods=$radiod_count). Non-SMT/asymmetric host or too few cores — configure manually per docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md."
+    eval "$layout_vars"
 
     state_set VMID "$vmid" \
               USB_VID_DID "$usb_vid_did" \
@@ -218,12 +232,14 @@ phase_pre_host() {
               CPU_VENDOR "$cpu_vendor" \
               HOST_CPU_COUNT "$host_cpu_count" \
               HT_PATTERN "$ht_pattern" \
-              VM_VCPU_COUNT "$vm_vcpu_count" \
-              VM_CORES "$vm_cores" \
-              VM_THREADS "$vm_threads" \
-              ISOLCPUS_RANGE "$isolcpus_range" \
-              RADIOD_CPUS "$radiod_cpus" \
-              WORKER_CPUS "$worker_cpus" \
+              LOCAL_RADIOD_COUNT "$radiod_count" \
+              VM_VCPU_COUNT "$VM_VCPU_COUNT" \
+              VM_CORES "$VM_CORES" \
+              VM_THREADS "$VM_THREADS" \
+              ISOLCPUS_RANGE "$ISOLCPUS_RANGE" \
+              RADIOD_CPUS "$RADIOD_CPUS" \
+              WORKER_CPUS "$WORKER_CPUS" \
+              VCPU_TO_PCPU "$VCPU_TO_PCPU" \
               RADIOD_FREQ_KHZ "3200000" \
               WORKER_FREQ_KHZ "1400000"
 
@@ -233,10 +249,11 @@ phase_pre_host() {
 
     info "running host-apply on host (this can take ~30s for initramfs)…"
     ssh_host "VMID='$vmid' USB_VID_DID='$usb_vid_did' CPU_VENDOR='$cpu_vendor' \
-              HOST_CPU_COUNT='$host_cpu_count' VM_VCPU_COUNT='$vm_vcpu_count' \
-              VM_CORES='$vm_cores' VM_THREADS='$vm_threads' \
-              ISOLCPUS_RANGE='$isolcpus_range' \
-              RADIOD_CPUS='$radiod_cpus' WORKER_CPUS='$worker_cpus' \
+              HOST_CPU_COUNT='$host_cpu_count' VM_VCPU_COUNT='$VM_VCPU_COUNT' \
+              VM_CORES='$VM_CORES' VM_THREADS='$VM_THREADS' \
+              ISOLCPUS_RANGE='$ISOLCPUS_RANGE' \
+              RADIOD_CPUS='$RADIOD_CPUS' WORKER_CPUS='$WORKER_CPUS' \
+              VCPU_TO_PCPU='$VCPU_TO_PCPU' \
               RADIOD_FREQ_KHZ='3200000' WORKER_FREQ_KHZ='1400000' \
               bash /tmp/host-apply.sh"
 

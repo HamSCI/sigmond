@@ -69,12 +69,15 @@ this shapes the CPU strategy in ways not visible from inside the guest:
   (`taskset` per `CPU N/KVM` QEMU thread). The hookscript is the single
   source of truth for host-side freq caps and pinning; **do not add a
   separate systemd freq service** — it just duplicates the hookscript.
-- **Only "sequential" HT pairing is auto-configured.** bootstrap.sh
-  *dies* if the host's sibling layout isn't consecutive
-  (`{0,1},{2,3},…`), because the hookscript's identity vCPU→pCPU map only
-  preserves sibling pairs on such hosts. On a host where the sibling of
-  cpu0 is cpu8, configure manually per
-  `docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md`.
+- **Any uniform 2-way-SMT pairing is auto-configured** — sequential
+  (`{0,1},{2,3},…`) *and* split (`{0,8},{1,9},…`, common on AMD/Intel).
+  `host-discover.sh` emits the real sibling pairs (`HT_PAIRS`);
+  `sigmond.cpu.compute_host_cpu_layout` (unit-tested) maps each local
+  radiod onto a real host sibling pair and emits the vCPU→pCPU map
+  (identity for sequential, interleaved for split). Set
+  `LOCAL_RADIOD_COUNT=N` for a host with multiple local RX888 triplets;
+  each gets its own sibling pair. Non-SMT / asymmetric hosts still fall
+  back to manual config (`docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md`).
 
 Verify on a host: `cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list`
 (the real pairing), `qm config <VMID> | grep hookscript`, and the live
