@@ -2860,6 +2860,24 @@ def cmd_stop(args) -> int:
         return 0  # operator named only not-enabled components; already warned
     enabled = _enabled_components(topology, only)
 
+    # Never stop operator-managed (managed=false) components during a BULK
+    # stop (only is None).  Their lifecycle belongs to the operator, not smd
+    # — e.g. the wd-rac RAC remote-access tunnel must stay up so the station
+    # is always reachable, and is only ever stopped by an explicit
+    # `smd stop wd-rac`.  An explicit name (only is not None) is honored.
+    if only is None:
+        unmanaged = sorted(
+            c for c in enabled
+            if not topology['components'].get(c, {}).get('managed', True)
+        )
+        if unmanaged:
+            enabled = [c for c in enabled if c not in unmanaged]
+            _info(
+                "keeping operator-managed (managed=false) components up: "
+                f"{', '.join(unmanaged)} — stop one explicitly by name "
+                "(e.g. `smd stop wd-rac`) if you really mean to"
+            )
+
     try:
         units = resolve_units(enabled, enabled)
     except ValueError as exc:

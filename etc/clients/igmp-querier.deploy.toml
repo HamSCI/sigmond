@@ -1,0 +1,11 @@
+# Fallback lifecycle shim for igmp-querier.
+#
+# The IGMPv2 querier daemon keeps multicast snoop tables alive on LANs
+# without a router-side querier.  It has no CONTRACT-conformant deploy.toml,
+# so without this shim `smd stop` silently skips it and the daemon keeps
+# running.  Ships its single concrete service to the lifecycle helpers.
+#
+# Installed by sigmond's install.sh into /etc/sigmond/clients/.
+
+[systemd]
+units = ["igmp-querier.service"]

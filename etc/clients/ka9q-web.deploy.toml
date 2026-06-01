@@ -1,0 +1,12 @@
+# Fallback lifecycle shim for ka9q-web.
+#
+# ka9q-web (https://github.com/fventuri/ka9q-web) is an upstream component
+# that does not carry a sigmond CONTRACT-conformant deploy.toml.  Sigmond
+# ships this shim so the lifecycle helpers (resolve_units, smd
+# start/stop/restart/status) can find its single concrete service —
+# without which `smd stop` silently skips ka9q-web and leaves it running.
+#
+# Installed by sigmond's install.sh into /etc/sigmond/clients/.
+
+[systemd]
+units = ["ka9q-web.service"]
