@@ -128,6 +128,50 @@ contract        = "0.8"
 install_script  = "/opt/git/sigmond/hf-gps-tec/scripts/install.sh"
 
 # ---------------------------------------------------------------------------
+# Servers & infrastructure (not contract-conformant decode clients)
+# ---------------------------------------------------------------------------
+
+[client.ka9q-web]
+kind            = "server"
+description     = "Web interface for ka9q-radio (radiod status UI)"
+repo            = "https://github.com/ka9q/ka9q-web"
+uses            = []
+requires        = ["ka9q-radio"]
+contract        = ""                                  # C project — not contract-conformant
+install_script  = ""                                  # built natively (_build_ka9q_web_with_onion)
+start_priority  = 200
+# Build pulls in davidmoreno/onion; the recipe lives in-tree (bin/smd
+# _build_ka9q_web_with_onion), not in a per-repo install.sh.
+
+[client.gpsdo-monitor]
+kind            = "infra"
+description     = "Leo Bodnar GPSDO health monitor + mDNS advertiser"
+repo            = "https://github.com/mijahauan/gpsdo-monitor"
+uses            = []
+requires        = []
+install_script  = "/opt/git/sigmond/gpsdo-monitor/install.sh"
+# Richer metadata is auto-discovered from the repo's own deploy.toml once cloned.
+
+[client.igmp-querier]
+kind            = "infra"
+description     = "Robust IGMP querier so radiod multicast survives on home-network switches"
+repo            = "https://github.com/mijahauan/igmp-querier"
+uses            = []
+requires        = []
+install_script  = "/opt/git/sigmond/igmp-querier/install.sh"
+
+[client.ka9q-update]
+kind            = "infra"
+description     = "Standalone ka9q-radio / ka9q-web install + update utility"
+repo            = "https://github.com/mijahauan/ka9q-update"
+uses            = []
+requires        = []
+# No install_script: sigmond now owns the radiod/ka9q-web build recipe in-tree
+# (_install_radiod_native / _build_ka9q_web_with_onion) and no longer delegates
+# to ka9q-update's install-ka9q.sh.  Cataloged so the standalone updater is
+# cloned + tracked; run install-ka9q.sh by hand if you want it directly.
+
+# ---------------------------------------------------------------------------
 # Deprecations
 #
 # Names listed here are excluded from discovery so a stale checkout cannot
