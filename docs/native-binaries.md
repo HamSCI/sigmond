@@ -80,12 +80,17 @@ provenance moves out of the (un-ownable) upstream repo and into sigmond:
 | Component | Native dep | Source | Pinned? | Provenance? | Gap to close |
 |---|---|---|---|---|---|
 | `ka9q-radio` | radiod + `fobos` driver | `ka9q/ka9q-radio` (fobos in-tree) | tracks upstream | no | `fobos` disabled by default; `libfobos` is proprietary/external, so it stays opt-in |
-| `ka9q-web` | `onion` | `davidmoreno/onion` | **no** — `_ONION_COMMIT = ''` | no | pin to a known-good SHA + emit a build manifest |
+| `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ migrated; remaining: a `smd diag` rule comparing installed vs pinned |
 
-Closing these gaps — pinning `onion` to a known-good commit and emitting
-a build manifest from the `_build_*` helpers — is the standardization
-work tracked against this doc. The principles are identical to mag-usb;
-only the storage location differs because we don't own the source repo.
+`onion` was the first migration: it is pinned (`_ONION_COMMIT`) and
+`_build_ka9q_web_with_onion` writes
+`/var/lib/sigmond/build-manifest/ka9q-web.toml` after each build. The
+remaining standardization work is a `smd diag` rule that compares the
+installed build manifest against the current pins (the upstream-built
+analogue of `install.sh`'s provenance check), and applying the same
+pin + manifest treatment to any future upstream-built dep. The
+principles are identical to mag-usb; only the storage location differs
+because we don't own the source repo.
 
 ## The `.provenance` sidecar
 
