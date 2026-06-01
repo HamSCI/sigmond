@@ -8183,6 +8183,14 @@ def cmd_wspr_watch(args) -> int:
         r'wsprnet POST done: (\d+) spots \(cycles: ([^,)]+(?:, [^,)]+)*)\) in ([\d.]+)s '
         r'\(([\d.]+) spots/s\); server: (.*)'
     )
+    # ``wsprnet POST rejections (N, nonce X): {'line': '<mept>', 'reason': '<why>'}; ...``
+    # The transport logs this immediately after POST done whenever the
+    # server bounced spots (e.g. no_grid for type-2/compound calls).  We
+    # render it as an indented sub-line under the POST done so the
+    # operator sees WHICH spots bounced, not just the count.
+    upload_rej_re = _re.compile(
+        r'wsprnet POST rejections \((\d+), nonce \S+\): (.*)'
+    )
     # Track the last cycle's HH:MM so we can emit a blank line between
     # blocks of cycle output for visual separation (two source lines
     # per cycle were getting mashed together with the prior cycle's
@@ -8296,6 +8304,25 @@ def cmd_wspr_watch(args) -> int:
                     f'{tail}',
                     flush=True,
                 )
+                continue
+
+            rjm = upload_rej_re.search(line)
+            if rjm:
+                n_rej, detail = rjm.group(1), rjm.group(2)
+                # Parse each {'line': <mept>, 'reason': <why>} entry into a
+                # readable "CALL (why)"; fall back to raw detail on any
+                # surprise in the server-defined shape.
+                items = []
+                for entry in _re.finditer(r'\{[^{}]*\}', detail):
+                    txt = entry.group(0)
+                    rm = _re.search(r"'reason':\s*'([^']*)'", txt)
+                    reason = rm.group(1) if rm else '?'
+                    cm = _re.search(r'\d+\.\d{3,}\s+(\S+)', txt)
+                    call = cm.group(1) if cm else '?'
+                    items.append(f'{call} ({reason})')
+                summary = '; '.join(items) if items else detail
+                # Indent ~26 cols so the ↳ sits under the POST done text.
+                print(f'{"":>26}↳ {n_rej} rejected: {summary}', flush=True)
                 continue
 
             um = upload_re.search(line)
