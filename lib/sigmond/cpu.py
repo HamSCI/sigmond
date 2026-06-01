@@ -353,9 +353,14 @@ def get_radiod_instances() -> list[str]:
     are NOT used as a source because they are artifacts of past smd runs and
     will persist after an instance is removed, creating ghost entries.
 
-    systemctl list-units is checked as a secondary source for units that
-    are currently loaded in systemd (e.g. active or recently stopped) but
-    whose conf file may have been removed mid-session.
+    systemctl list-units is checked as a secondary source ONLY for units
+    that are currently active/activating but whose conf file may have been
+    removed mid-session.  Loaded-but-inactive units are deliberately
+    excluded: a disabled, dead, conf-less instance (e.g. one left resident
+    in systemd's memory from a past reference) is a ghost, not a real
+    instance — counting it would consume a CPU core in the affinity plan
+    and, because uppercase names sort first, could steal CPU 0's hyperthread
+    pair from the actually-running radiod.
     """
     found: set[str] = set()
 
@@ -368,13 +373,16 @@ def get_radiod_instances() -> list[str]:
                 if instance:
                     found.add(f'radiod@{instance}.service')
 
-    # Source 2: loaded units (active, failed, inactive-but-loaded)
+    # Source 2: units currently ACTIVE in systemd whose conf file may have
+    # been removed mid-session.  We filter on active state so that loaded-
+    # but-dead ghosts (disabled, conf-less, lingering in systemd memory) are
+    # NOT mistaken for real instances and allocated a CPU core.
     r = _run_capture(['systemctl', 'list-units', '--no-legend', '--no-pager',
                       '--all', '--output=json', 'radiod@*.service'])
     try:
         for u in json.loads(r.stdout):
             name = u.get('unit', '')
-            if name:
+            if name and u.get('active', '') in ('active', 'activating'):
                 found.add(name)
     except Exception:
         pass
