@@ -6994,7 +6994,7 @@ def _radiod_status_from_per_instance_config(client: str, instance: str) -> Optio
 
 
 def _psk_watch_cycle_loop(
-    log_path: Path, ft8_log: Path, ft4_log: Path,
+    receivers: list,
     *, max_lines_per_mode: Optional[int],
 ) -> int:
     """Per-FT8-cycle psk-watch loop — default, N, and -v all share this.
@@ -7019,7 +7019,9 @@ def _psk_watch_cycle_loop(
     SETTLE = 4.0
     SLOT_SEC = 15.0
     show_spots = max_lines_per_mode != 0
-    _heading(f'PSK Reporter per-cycle activity ({log_path.name})')
+    _rx_labels = ', '.join(lbl for lbl, _f8, _f4 in receivers)
+    _heading(f'PSK Reporter per-cycle activity '
+             f'({len(receivers)} rx: {_rx_labels})')
     _info('   stage: decoder (decode_ft8) → per-mode log (pre-SQLite, pre-upload)')
     _info(f'   ▸ every {int(SLOT_SEC)} s (FT8 cadence) + {SETTLE:.0f} s settle:')
     if max_lines_per_mode is None:
@@ -7071,10 +7073,12 @@ def _psk_watch_cycle_loop(
         lines = [l for l in text.splitlines() if l.strip()]
         return new_end, lines
 
-    # Prime positions: start at the current end so we don't dump
-    # historical content on first fire.
-    ft8_pos = _file_size(ft8_log)
-    ft4_pos = _file_size(ft4_log)
+    # Prime positions per receiver: start at the current end so we
+    # don't dump historical content on first fire.  Keyed by (label, mode).
+    pos: dict = {}
+    for _lbl, _f8, _f4 in receivers:
+        pos[(_lbl, 'ft8')] = _file_size(_f8)
+        pos[(_lbl, 'ft4')] = _file_size(_f4)
 
     import re as _re
     # Each spot line: "YYYY/MM/DD HH:MM:SS  SCORE  +DT  FREQ  ~  MSG"
@@ -7138,73 +7142,78 @@ def _psk_watch_cycle_loop(
             fire_at = next_boundary + SETTLE
             time.sleep(max(0.1, fire_at - time.time()))
 
-            ft8_pos, ft8_lines = _read_since(ft8_log, ft8_pos)
-            ft4_pos, ft4_lines = _read_since(ft4_log, ft4_pos)
-
-            # Sort each mode by (time, freq).  Within one 15 s FT8
-            # window all FT8 timestamps are equal, so the sort is
-            # effectively by frequency.  FT4 has two timestamps (the
-            # two 7.5 s cycles), so the sort groups them naturally.
-            ft8_lines.sort(key=_key)
-            ft4_lines.sort(key=_key)
-
             wall = time.strftime('%H:%M:%S', time.gmtime(next_boundary))
             now_str = time.strftime('%H:%M:%S')
-
-            # Slice to max_lines_per_mode if requested.  None = no cap.
             cap = max_lines_per_mode
-            ft8_show = ft8_lines if cap is None else ft8_lines[:cap]
-            ft4_show = ft4_lines if cap is None else ft4_lines[:cap]
 
-            # Per-band counts come from the FULL list — the cap only
-            # affects what we PRINT, not what we COUNT.
-            ft8_bands = _bands_summary(ft8_lines)
-            ft4_bands = _bands_summary(ft4_lines)
-            ft8_bands_part = f' ({ft8_bands})' if ft8_bands else ''
-            ft4_bands_part = f' ({ft4_bands})' if ft4_bands else ''
+            # One block (detail) or line (summary) per receiver, so a
+            # multi-rx host shows EVERY FT upload — not just the
+            # freshest receiver's.  Positions are tracked per (label, mode).
+            for label, ft8_log, ft4_log in receivers:
+                pos[(label, 'ft8')], ft8_lines = _read_since(
+                    ft8_log, pos[(label, 'ft8')])
+                pos[(label, 'ft4')], ft4_lines = _read_since(
+                    ft4_log, pos[(label, 'ft4')])
 
-            if show_spots:
-                # Detail path (cap=N or no-cap with -v): per-spot dump
-                # bracketed by a slot heading, summary at the end.
-                print(f'─── slot UTC {wall} ─────────────────────────────────',
-                      flush=True)
-                for line in ft8_show:
-                    print(f'  ft8: {line}', flush=True)
-                if cap is not None and len(ft8_lines) > len(ft8_show):
-                    print(f'  ft8: … ({len(ft8_lines) - len(ft8_show)} more)',
+                # Sort each mode by (time, freq).  Within one 15 s FT8
+                # window all FT8 timestamps are equal, so the sort is
+                # effectively by frequency.  FT4 has two timestamps (the
+                # two 7.5 s cycles), so the sort groups them naturally.
+                ft8_lines.sort(key=_key)
+                ft4_lines.sort(key=_key)
+
+                # Slice to max_lines_per_mode if requested.  None = no cap.
+                ft8_show = ft8_lines if cap is None else ft8_lines[:cap]
+                ft4_show = ft4_lines if cap is None else ft4_lines[:cap]
+
+                # Per-band counts come from the FULL list — the cap only
+                # affects what we PRINT, not what we COUNT.
+                ft8_bands = _bands_summary(ft8_lines)
+                ft4_bands = _bands_summary(ft4_lines)
+                ft8_bands_part = f' ({ft8_bands})' if ft8_bands else ''
+                ft4_bands_part = f' ({ft4_bands})' if ft4_bands else ''
+
+                if show_spots:
+                    # Detail path (cap=N or no-cap with -v): per-spot dump
+                    # bracketed by a slot heading, summary at the end.
+                    print(f'─── slot UTC {wall}  rx={label} ──────────────────',
                           flush=True)
-                # Blank line between the FT8 block and the FT4 block
-                # when both have content, and another blank between
-                # the two FT4 cycle blocks.  Lines are already sorted
-                # by (timestamp, freq), so a timestamp change marks a
-                # cycle boundary.
-                if ft8_show and ft4_show:
-                    print(flush=True)
-                prev_ts: str = ''
-                for line in ft4_show:
-                    m = spot_re.match(line)
-                    this_ts = m.group(1) if m else ''
-                    if prev_ts and this_ts and this_ts != prev_ts:
+                    for line in ft8_show:
+                        print(f'  ft8: {line}', flush=True)
+                    if cap is not None and len(ft8_lines) > len(ft8_show):
+                        print(f'  ft8: … ({len(ft8_lines) - len(ft8_show)} more)',
+                              flush=True)
+                    # Blank line between the FT8 block and the FT4 block
+                    # when both have content; another blank between the
+                    # two FT4 cycle blocks (a timestamp change marks a
+                    # cycle boundary in the already-sorted lines).
+                    if ft8_show and ft4_show:
                         print(flush=True)
-                    print(f'  ft4: {line}', flush=True)
-                    prev_ts = this_ts
-                if cap is not None and len(ft4_lines) > len(ft4_show):
-                    print(f'  ft4: … ({len(ft4_lines) - len(ft4_show)} more)',
-                          flush=True)
-                if not ft8_lines and not ft4_lines:
-                    print('  (no decodes this cycle)', flush=True)
+                    prev_ts = ''
+                    for line in ft4_show:
+                        m = spot_re.match(line)
+                        this_ts = m.group(1) if m else ''
+                        if prev_ts and this_ts and this_ts != prev_ts:
+                            print(flush=True)
+                        print(f'  ft4: {line}', flush=True)
+                        prev_ts = this_ts
+                    if cap is not None and len(ft4_lines) > len(ft4_show):
+                        print(f'  ft4: … ({len(ft4_lines) - len(ft4_show)} more)',
+                              flush=True)
+                    if not ft8_lines and not ft4_lines:
+                        print('  (no decodes this cycle)', flush=True)
+                    else:
+                        print(f'  → ft8 total={len(ft8_lines)}{ft8_bands_part}   '
+                              f'ft4 total={len(ft4_lines)}{ft4_bands_part}',
+                              flush=True)
                 else:
-                    print(f'  → ft8 total={len(ft8_lines)}{ft8_bands_part}   '
-                          f'ft4 total={len(ft4_lines)}{ft4_bands_part}',
-                          flush=True)
-            else:
-                # Summary path (no args, cap=0): one line per cycle.
-                print(
-                    f'[{now_str}] slot UTC {wall}  '
-                    f'ft8={len(ft8_lines):>3}{ft8_bands_part}  '
-                    f'ft4={len(ft4_lines):>3}{ft4_bands_part}',
-                    flush=True,
-                )
+                    # Summary path (no args, cap=0): one line per rx/cycle.
+                    print(
+                        f'[{now_str}] slot UTC {wall}  rx={label:<22} '
+                        f'ft8={len(ft8_lines):>3}{ft8_bands_part}  '
+                        f'ft4={len(ft4_lines):>3}{ft4_bands_part}',
+                        flush=True,
+                    )
     except KeyboardInterrupt:
         return 130
 
@@ -9489,6 +9498,13 @@ def cmd_psk_watch(args) -> int:
     # The daemon's own stdout goes to the journal
     # (StandardOutput=journal in the systemd unit), so there is no
     # `<radiod_id>.log` to tail.
+    def _short_rx(rid: str) -> str:
+        # Compact receiver label for the watch columns: drop the
+        # canonical '-status.local' suffix (B4-100-rx888mk2-status.local
+        # → B4-100-rx888mk2, bee2-status.local → bee2).
+        suf = '-status.local'
+        return rid[: -len(suf)] if rid.endswith(suf) else rid
+
     if instance:
         radiod_id = _radiod_status_from_per_instance_config(
             'psk-recorder', instance,
@@ -9500,8 +9516,12 @@ def cmd_psk_watch(args) -> int:
                  f'(radiod_id={radiod_id!r}) in {log_dir}.  '
                  f'Looked for {ft8_log.name}, {ft4_log.name}.')
             return 1
+        receivers = [(_short_rx(radiod_id), ft8_log, ft4_log)]
     else:
-        # Pick the freshest -ft8.log; derive the matching -ft4.log.
+        # No --instance: show EVERY receiver's logs (one (label, ft8,
+        # ft4) tuple per `*-ft8.log`), so multi-receiver hosts see all
+        # FT uploads — not just the freshest receiver's.  Sorted
+        # freshest-first for a stable, intuitive order.
         ft8_candidates = sorted(
             log_dir.glob('*-ft8.log'),
             key=lambda p: p.stat().st_mtime if p.exists() else 0,
@@ -9511,15 +9531,12 @@ def cmd_psk_watch(args) -> int:
             _err('no /var/log/psk-recorder/*-ft8.log found '
                  '— is psk-recorder running?')
             return 1
-        ft8_log = ft8_candidates[0]
-        # Strip the `-ft8` suffix to get the radiod_id stem; FT4 log
-        # may not exist if no FT4 freqs are configured, which is fine.
-        radiod_id = ft8_log.stem[: -len('-ft8')]
-        ft4_log = log_dir / f'{radiod_id}-ft4.log'
-
-    # `log_path` is used only for the heading display; show the FT8 log
-    # name since it's the canonical per-cycle artifact.
-    log_path = ft8_log
+        receivers = []
+        for f8 in ft8_candidates:
+            # Strip the `-ft8` suffix to get the radiod_id stem; the FT4
+            # log may not exist if no FT4 freqs are configured (fine).
+            rid = f8.stem[: -len('-ft8')]
+            receivers.append((_short_rx(rid), f8, log_dir / f'{rid}-ft4.log'))
 
     # `recent` is the verbose-mode N: how many per-mode decoded
     # spots to print under each "shipped" line.  0 = terse counts only.
@@ -9534,7 +9551,7 @@ def cmd_psk_watch(args) -> int:
     else:
         cap = n_recent if n_recent > 0 else 0
     return _psk_watch_cycle_loop(
-        log_path, ft8_log, ft4_log, max_lines_per_mode=cap,
+        receivers, max_lines_per_mode=cap,
     )
 
     # NOTE: the legacy `psk-uploader-ch:` pump-event tail mode used to
