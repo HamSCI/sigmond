@@ -49,10 +49,13 @@ Current sigmond clients:
 | `hfdl-recorder` | `dumphfdl` (+ libacars, liquid-dsp) | **both** (prebuilt + script) | ~15 min build, 3 upstream clones, 10+ apt deps |
 | `wspr-recorder` | `wsprd`, `jt9` | **both** (prebuilt + script) | Qt + boost + fftw, ~5 min build |
 | `mag-recorder` | `mag-usb` | **both** (prebuilt + script) | small build but likely RPi target (ARM); ship x86_64 prebuilt, build-fresh covers ARM |
-| `hf-timestd` | PHaRLAP / pyLAP | **external only** | closed-source, MCR-dependent, can't redistribute |
+| `hf-timestd` | PHaRLAP | **external only** | closed-source, MCR-dependent, can't redistribute |
+| `hf-timestd` | pyLAP | **build-on-install (pinned)** | git clone built into the venv; pinned via `PYLAP_REF` in its `install.sh` |
 
-`iri2020` is a pip-installable git dep and is handled by `uv`; it doesn't
-fit this contract.
+`iri2020` is a pip-installable git dep handled by `uv` — it doesn't fit
+the binary `.provenance` contract, but the same *pin the source* principle
+applies: it's pinned via `@<sha>` in hf-timestd's `pyproject.toml` and
+locked in its `uv.lock`.
 
 ## Upstream C projects sigmond builds itself
 
