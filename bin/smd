@@ -522,14 +522,18 @@ BUILD_STEPS = {
 }
 
 
-def _load_deps_conf(client_dir: Path) -> configparser.ConfigParser:
+def _load_deps_conf(client_dir: Path, required: bool = True) -> configparser.ConfigParser:
     candidates = [client_dir / 'deps.conf', Path('/opt/git/sigmond/wsprdaemon-client/deps.conf')]
     for deps_file in candidates:
         if deps_file.exists():
             cfg = configparser.ConfigParser()
             cfg.read(deps_file)
             return cfg
-    _err(f'deps.conf not found at {candidates[0]}')
+    # deps.conf belongs to the deprecated wsprdaemon-client; on a greenfield
+    # host it is legitimately absent.  Only surface an error for callers that
+    # actually need it (install paths); diagnostics pass required=False.
+    if required:
+        _err(f'deps.conf not found at {candidates[0]}')
     return None
 
 
@@ -4941,8 +4945,9 @@ def cmd_diag(args) -> int:
         else:
             _warn(f'network: {host} unreachable')
 
-    # Deps commit check
-    dcfg = _load_deps_conf(client_dir)
+    # Deps commit check (deps.conf is legacy wsprdaemon-client only — absent
+    # on greenfield, so don't flag it as an error here).
+    dcfg = _load_deps_conf(client_dir, required=False)
     if dcfg:
         print()
         _info('Dependency versions:')
