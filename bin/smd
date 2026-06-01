@@ -707,15 +707,19 @@ def _build_onion(src_dir: Path) -> bool:
     return True
 
 
+# onion (davidmoreno/onion) — ka9q-web's sole non-apt build dependency.  It is a
+# C library, NOT a Python package, so it cannot live in pyproject.toml; sigmond
+# owns the recipe in-tree rather than reading wsprdaemon-client/deps.conf.  Pin a
+# commit here if upstream ever breaks the build.
+_ONION_REPO   = 'https://github.com/davidmoreno/onion.git'
+_ONION_COMMIT = ''                                  # '' = upstream default branch
+_ONION_SRC    = Path('/opt/git/sigmond/onion')      # sibling checkout (was /home/wsprdaemon/onion)
+
+
 def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
-    # onion is a build-time dependency of ka9q-web
-    dcfg = configparser.ConfigParser()
-    deps_conf = src_dir.parent / 'wsprdaemon-client' / 'deps.conf'
-    if deps_conf.exists():
-        dcfg.read(deps_conf)
-    onion_url    = dcfg.get('ka9q-web', 'onion_url', fallback='https://github.com/davidmoreno/onion.git')
-    onion_commit = dcfg.get('ka9q-web', 'onion_commit', fallback='')
-    onion_src    = Path(dcfg.get('ka9q-web', 'onion_src', fallback='/home/wsprdaemon/onion'))
+    onion_url    = _ONION_REPO
+    onion_commit = _ONION_COMMIT
+    onion_src    = _ONION_SRC
 
     if not onion_src.exists():
         _info(f'Cloning onion → {onion_src} ...')
