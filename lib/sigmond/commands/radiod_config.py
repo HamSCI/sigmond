@@ -97,6 +97,28 @@ _FRONTEND_PROFILES: dict[str, dict] = {
             "# antenna   = \"A\"\n"
         ),
     },
+    # Synthetic front-end for hardware-free testing.  Not a USB device, so it
+    # is never auto-detected by usb_sdr.probe — reached only via
+    # `smd config init radiod --siggen` (see _init_siggen).  The defaults
+    # generate a 10 MHz CW carrier + noise AND a built-in demod channel so the
+    # rendered config is immediately runnable and observable; sig_gen has no
+    # client that would drop a channel fragment of its own.
+    "sig_gen": {
+        "section": "sig_gen",
+        "defaults": (
+            "samprate    = 30m0          # 30 Msps real -> 0..15 MHz synthetic coverage\n"
+            "real        = y\n"
+            "carrier     = 10m0          # 10 MHz CW test carrier\n"
+            "amplitude   = -20           # dBFS\n"
+            "noise       = -40           # dBFS\n"
+            "modulation  = CW            # bare carrier (no audio source needed)\n"
+            "\n"
+            "# built-in demod channel so the instance is observable out of the box\n"
+            "[wwv10]\n"
+            "mode        = am\n"
+            "freq        = 10m0          # demod the 10 MHz synthetic carrier\n"
+        ),
+    },
 }
 
 
@@ -225,8 +247,62 @@ def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
 # Public entry points
 # ---------------------------------------------------------------------------
 
+def _init_siggen(args) -> int:
+    """`smd config init radiod --siggen`: render a synthetic sig_gen instance
+    for hardware-free testing.  No USB SDR is probed; sig_gen generates an
+    internal carrier + noise plus a built-in demod channel, so the full radiod
+    multicast chain can be exercised on any host (loopback, ttl=0)."""
+    profile = _FRONTEND_PROFILES["sig_gen"]
+    host = socket.gethostname().split(".")[0]
+    instance_id = getattr(args, "instance", None) or f"{host}-siggen"
+    status_dns = f"{instance_id}-status.local"
+    target = RADIOD_CONFIG_DIR / f"radiod@{instance_id}.conf"
+
+    plan = {
+        "instance_id":       instance_id,
+        "status_dns":        status_dns,
+        "description":       "Synthetic signal generator (hardware-free test)",
+        "frontend":          profile["section"],
+        "frontend_defaults": profile["defaults"].rstrip(),
+        "serial":            "",
+        "serial_line":       "# sig_gen is synthetic — no hardware serial to bind",
+        "iface":             _suggest_iface(),
+        "target":            target,
+        "sdr_type":          "sig_gen",
+    }
+
+    if _refuse_overwrite(target, args):
+        return 1
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_render(plan))
+    except (OSError, PermissionError) as exc:
+        err(f"could not write {target}: {exc}")
+        return 1
+    ok(f"wrote {target}")
+    (target.parent / f"{target.name}.d").mkdir(parents=True, exist_ok=True)
+
+    _append_coordination([_coord_block(plan)], args)
+    try:
+        fresh = load_coordination(COORDINATION_PATH)
+        COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+        COORDINATION_ENV.write_text(render_env(fresh))
+        ok(f"rendered {COORDINATION_ENV}")
+    except (OSError, PermissionError) as exc:
+        warn(f"wrote coordination.toml but could not refresh {COORDINATION_ENV}: {exc}")
+
+    print()
+    ok(f"sig_gen radiod ready: {target}")
+    info(f"Start:  sudo systemctl start radiod@{instance_id}.service")
+    info("Generates a 10 MHz carrier on loopback (ttl=0) — no SDR and no LAN")
+    info("traffic.  Exercise it with a multicast listener on the wwv10 channel.")
+    return 0
+
+
 def cmd_radiod_init(args) -> int:
     heading("config init radiod")
+    if getattr(args, "siggen", False):
+        return _init_siggen(args)
     sdrs = _discover_sdrs()
     if not sdrs:
         err("no recognised SDRs detected on the USB bus")

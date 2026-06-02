@@ -11936,6 +11936,11 @@ def main() -> int:
     p.add_argument('--reconfig', action='store_true',
                    help='overwrite the existing radiod@<id>.conf instead '
                         'of erroring out.')
+    p.add_argument('--siggen', action='store_true',
+                   help='radiod only: render a synthetic sig_gen instance for '
+                        'hardware-free testing (no USB SDR required).  Generates '
+                        'a 10 MHz carrier + a built-in demod channel on loopback '
+                        'so the radiod multicast chain can be exercised anywhere.')
 
     p = config_sub.add_parser('edit',
                               help="invoke a client's config edit flow, "
