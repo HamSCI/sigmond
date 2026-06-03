@@ -70,6 +70,43 @@ def resolve_units(
     return units
 
 
+def _resolve_optional_units(
+    component: str, optional_units: list, source: str,
+) -> list[UnitRef]:
+    """Resolve host-local *singleton* concrete units (deploy.toml
+    ``[systemd] optional_units``).
+
+    Unlike plain ``units``, these are only managed on hosts where they are
+    actually enabled — e.g. the WSPR merge-uploader (``wspr-uploader.service``)
+    runs on one host while every host runs ``wspr-recorder@*`` decoders.
+    Gating on ``systemctl is-enabled`` keeps decode-only hosts from
+    false-alarming the unit as down in ``smd status`` or starting it via a
+    component-wide ``smd start``.
+    """
+    refs: list[UnitRef] = []
+    for unit in optional_units:
+        try:
+            r = subprocess.run(
+                ['systemctl', 'is-enabled', unit],
+                capture_output=True, text=True,
+            )
+        except OSError:
+            continue
+        if r.returncode != 0:        # disabled / not-found / masked → not this host's
+            continue
+        refs.append(
+            UnitRef(
+                component=component,
+                unit=unit,
+                template=None,
+                instance=None,
+                kind=_unit_kind(unit),
+                source=source,
+            )
+        )
+    return refs
+
+
 def _resolve_component_units(component: str) -> list[UnitRef]:
     """Resolve all lifecycle-managed units for a single component."""
     units: list[UnitRef] = []
@@ -127,6 +164,10 @@ def _resolve_component_units(component: str) -> list[UnitRef]:
         expanded = _expand_template(component, template, source, kind,
                                     conf_dir=conf_dir)
         units.extend(expanded)
+
+    # Host-local singletons: only where enabled on this host.
+    units.extend(_resolve_optional_units(
+        component, systemd_config.get('optional_units', []), source))
 
     return units
 
@@ -351,6 +392,10 @@ def _load_fallback_shim(component: str) -> list[UnitRef]:
         expanded = _expand_template(component, template, source, kind,
                                     conf_dir=conf_dir)
         units.extend(expanded)
+
+    # Host-local singletons: only where enabled on this host.
+    units.extend(_resolve_optional_units(
+        component, systemd_config.get('optional_units', []), source))
 
     return units
 
