@@ -7671,10 +7671,11 @@ def cmd_uploads_watch(args) -> int:
             return True   # can't probe → don't block
         return bool([l for l in r.stdout.splitlines() if l.strip()])
     if not any(_any_active(p) for p in
-               ('wspr-recorder@*', 'psk-recorder@*', 'wd-upload-hs@*')):
+               ('wspr-uploader.service', 'wspr-recorder@*',
+                'psk-recorder@*', 'wd-upload-hs@*')):
         _err('uploads-watch: no active uploader on this host '
-             '(wspr-recorder@*, psk-recorder@*, wd-upload-hs@* '
-             'all inactive).')
+             '(wspr-uploader.service, wspr-recorder@*, psk-recorder@*, '
+             'wd-upload-hs@* all inactive).')
         return 1
 
     backlog_min = max(0, int(getattr(args, 'backlog', 10) or 0))
@@ -7736,12 +7737,12 @@ def cmd_uploads_watch(args) -> int:
 
     # --- WSPR side: journalctl follower (recorder + optional legacy) -----
     wspr_units: list = []
-    for pat in ('wspr-recorder@*', 'wd-upload-hs@*'):
+    for pat in ('wspr-uploader.service', 'wspr-recorder@*', 'wd-upload-hs@*'):
         if _journal_has_data(pat):
             wspr_units.extend(['-u', pat])
     if not wspr_units:
-        _warn('no wspr upload journal data found (wspr-recorder@* '
-              'and wd-upload-hs@* both empty)')
+        _warn('no wspr upload journal data found (wspr-uploader.service, '
+              'wspr-recorder@* and wd-upload-hs@* all empty)')
         jproc = None
     else:
         try:
