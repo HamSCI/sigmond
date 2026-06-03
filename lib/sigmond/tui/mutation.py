@@ -12,7 +12,7 @@ reuses:
      not an intermediary.  This is the pattern Deep Dive (radiod
      screen) already uses for ka9q's own TUI.
 
-Net effect: mutations run as `sudo smd <verb>` exactly as they would
+Net effect: mutations run as `smd <verb>` exactly as they would
 from the shell, with the TUI providing the confirmation gate and an
 after-the-fact exit-code readout.  No parallel Python lifecycle-lock
 management — the `smd` subprocess acquires the lock per CONTRACT
@@ -222,15 +222,29 @@ class UpdateOutputModal(ModalScreen):
             self.dismiss(True)
 
 
-def suspend_and_run_sudo(app: App, cmd: list) -> subprocess.CompletedProcess:
-    """Suspend the TUI, run ``sudo <cmd>`` in the real terminal, resume.
+def _is_self_elevating(cmd: list) -> bool:
+    """True when ``cmd`` is an ``smd`` invocation.
 
-    The operator can enter their password and watch progress as they
+    smd auto-elevates via its own ``_need_root`` (re-exec under sudo), so
+    the TUI must NOT prepend ``sudo`` to smd commands — that's redundant
+    and trains operators to type ``sudo smd``.  Non-smd commands
+    (systemctl, …) still need the sudo prepend.
+    """
+    return bool(cmd) and os.path.basename(str(cmd[0])) == 'smd'
+
+
+def suspend_and_run_sudo(app: App, cmd: list) -> subprocess.CompletedProcess:
+    """Suspend the TUI, run ``cmd`` elevated in the real terminal, resume.
+
+    For ``smd`` commands we run them directly — smd re-execs itself under
+    sudo, prompting for a password in the (now foreground) terminal.  For
+    everything else (systemctl, …) we prepend ``sudo``.  Either way the
+    operator can enter their password and watch live progress as they
     would from the shell.  Returns the CompletedProcess; callers can
     inspect returncode without parsing output (the CLI already did the
     rendering).
     """
-    argv = ['sudo', *cmd]
+    argv = list(cmd) if _is_self_elevating(cmd) else ['sudo', *cmd]
     with app.suspend():
         result = subprocess.run(argv, check=False)
     return result
@@ -250,7 +264,8 @@ def confirm_and_run(
 
     Non-blocking — returns immediately after pushing the modal.
     """
-    cmd_preview = ' '.join(('sudo', *cmd) if sudo else cmd)
+    elevated = sudo and not _is_self_elevating(cmd)
+    cmd_preview = ' '.join(('sudo', *cmd) if elevated else cmd)
 
     def _after_confirm(confirmed: bool) -> None:
         if not confirmed:

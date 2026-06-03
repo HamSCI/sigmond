@@ -2,7 +2,7 @@
 
 Read-only modes: per-component `journalctl --follow` or `tail -f` of
 inventory file-logs.  Streams subprocess output live into a RichLog
-widget.  Mutation mode: set CLIENT_LOG_LEVEL via `sudo smd log
+widget.  Mutation mode: set CLIENT_LOG_LEVEL via `smd log
 set-level <client> <level>`, gated by a confirm modal.
 """
 
@@ -286,7 +286,7 @@ class LogsScreen(Vertical):
         if self._install_state.get(comp, True) is False:
             self._set_status(
                 f"[yellow]{comp}: enabled in topology but not installed. "
-                f"Install first:  [cyan]sudo smd install {comp}[/][/]"
+                f"Install first:  [cyan]smd install {comp}[/][/]"
             )
             return
 

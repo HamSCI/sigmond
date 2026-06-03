@@ -37,7 +37,7 @@ Saved to  ~/sigmond-config-<hostname>-<date>.tar.gz
 Restore after OS reinstall:
   ./install.sh
   sudo tar xzf sigmond-config-*.tar.gz -C /
-  sudo smd apply
+  smd apply
 """
 
 

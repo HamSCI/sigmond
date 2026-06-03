@@ -123,7 +123,7 @@ class RestoreScreen(Vertical):
                 "  /etc/hf-timestd/   /etc/psk-recorder/\n"
                 "  systemd units, sudoers, cron, logrotate\n\n"
                 "Services are [bold]not[/] restarted automatically —\n"
-                "run  [bold]sudo smd apply[/]  afterwards."
+                "run  [bold]smd apply[/]  afterwards."
             ),
             cmd=[_smd_binary(), 'config', 'restore', '--input', str(self._selected)],
             sudo=True,
@@ -134,7 +134,7 @@ class RestoreScreen(Vertical):
         last = self.query_one("#rs-last", Static)
         if result.returncode == 0:
             last.update(
-                "[green]✔ restore complete[/]  —  run [bold]sudo smd apply[/] "
+                "[green]✔ restore complete[/]  —  run [bold]smd apply[/] "
                 "to restart services"
             )
         else:

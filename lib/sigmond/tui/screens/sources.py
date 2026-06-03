@@ -78,7 +78,7 @@ class SourcesScreen(Vertical):
         yield Static(
             "Equivalent to:  [cyan]smd sources list[/]  /  "
             "[cyan]smd sources apply --dry-run[/]  /  "
-            "[cyan bold]sudo smd sources apply[/]",
+            "[cyan bold]smd sources apply[/]",
             classes="sc-body")
         with Horizontal(id="sc-controls"):
             yield Button("Refresh list", id="sc-list", variant="primary")

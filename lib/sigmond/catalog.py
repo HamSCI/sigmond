@@ -458,7 +458,7 @@ def next_steps(
             # Internally-managed infra has neither and is handled by smd
             # outside the normal catalog install path.
             if entry.repo or entry.install_script:
-                items.append(('install', comp, f'sudo smd install {comp}'))
+                items.append(('install', comp, f'smd install {comp}'))
 
         for dep in transitive_requires(comp, catalog):
             key = (comp, dep)
@@ -477,7 +477,7 @@ def next_steps(
                         and dep not in seen_lib_install):
                     seen_lib_install.add(dep)
                     items.append(('install', dep,
-                                  f'sudo smd install {dep}'))
+                                  f'smd install {dep}'))
                 continue
 
             if dep not in enabled_set:

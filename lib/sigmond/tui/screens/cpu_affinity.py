@@ -1,7 +1,7 @@
 """CPU affinity screen — hardware topology, plan, observed state, contention.
 
 Read view from ``build_affinity_report()``; mutation via an in-TUI
-Apply button that runs ``sudo smd diag cpu-affinity --apply``
+Apply button that runs ``smd diag cpu-affinity --apply``
 (confirm-modal-gated, auto-refresh on success).
 
 Motivation: help operators see whether radiod's USB3/FFT path is actually

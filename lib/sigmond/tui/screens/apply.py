@@ -11,7 +11,7 @@ config.  The screen surfaces three things:
 
   * **Dry-run button**: re-runs the full preview into the log pane.
 
-  * **Apply button**: ``sudo smd apply`` gated by a confirm modal.
+  * **Apply button**: ``smd apply`` gated by a confirm modal.
     On success, invalidates the pending cache and re-renders.
 
 The Pending pane uses the classifier in ``sigmond.apply_pending`` —
@@ -115,7 +115,7 @@ class ApplyScreen(Vertical):
 
         yield Static(
             "Equivalent to:  [cyan]smd apply --dry-run[/]  /  "
-            "[cyan bold]sudo smd apply[/]",
+            "[cyan bold]smd apply[/]",
             classes="ap-body")
         with Horizontal(id="ap-controls"):
             yield Button("Refresh pending", id="ap-refresh", variant="default")

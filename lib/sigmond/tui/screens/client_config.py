@@ -3,8 +3,8 @@
 Lists installed clients/servers and shells out to the CLI's per-client
 configuration verbs (CONTRACT-v0.5 §14):
 
-  - Init wizard  → `sudo smd config init <client>`
-  - Edit config  → `sudo smd config edit <client>`
+  - Init wizard  → `smd config init <client>`
+  - Edit config  → `smd config edit <client>`
 
 The CLI handles dispatch to the client's advertised entry point (or to
 the sigmond-owned wizard for radiod), the env-var bag, and the
@@ -316,7 +316,7 @@ class ClientConfigScreen(Vertical):
         cmd = [_smd_binary(), 'config', verb, entry.name]
         title = "Run first-run wizard?" if verb == "init" else "Edit config?"
         body = (
-            f"Run [bold]sudo smd config {verb} {entry.name}[/]\n\n"
+            f"Run [bold]smd config {verb} {entry.name}[/]\n\n"
             "The TUI will suspend so the wizard / editor owns the "
             "terminal.  When it exits you'll return here with the exit "
             "code shown below."

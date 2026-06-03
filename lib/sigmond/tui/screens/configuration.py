@@ -368,7 +368,7 @@ class ConfigurationScreen(Vertical):
              Polished, consistent look-and-feel under sigmond; doesn't
              suspend the TUI.  Probed via a short ``config show --json``
              call with the per-instance config path.
-          2. Whiptail / $EDITOR via ``sudo smd config edit`` — fall back
+          2. Whiptail / $EDITOR via ``smd config edit`` — fall back
              when the client doesn't expose the contract yet (most
              pre-existing clients today).  TUI suspends, the client's
              own wizard owns the terminal.
@@ -413,7 +413,7 @@ class ConfigurationScreen(Vertical):
             body=(
                 f"{client} doesn't expose the JSON config-roundtrip "
                 f"contract yet, so we fall back to its native wizard.\n\n"
-                f"Run [bold]sudo smd config edit {client} {reporter}[/]\n\n"
+                f"Run [bold]smd config edit {client} {reporter}[/]\n\n"
                 "The TUI suspends so the client's whiptail wizard (or its "
                 "$EDITOR fallback) owns the terminal.  Returns here with "
                 "the exit code when the editor exits."
@@ -490,7 +490,7 @@ class ConfigurationScreen(Vertical):
             self.app,
             title=f"Remove {client}@{_display(reporter)}?",
             body=(
-                f"Run [bold]sudo smd instance remove {client} {reporter} "
+                f"Run [bold]smd instance remove {client} {reporter} "
                 f"--yes[/]\n\n"
                 "Removes the per-instance config / env / sources files.  "
                 "Does NOT stop the running unit — `smd instance disable` "
@@ -528,7 +528,7 @@ class ConfigurationScreen(Vertical):
             self.app,
             title=f"Add instance {client}@{_display(reporter)}?",
             body=(
-                f"Run [bold]sudo smd instance add {client} {reporter}[/]\n\n"
+                f"Run [bold]smd instance add {client} {reporter}[/]\n\n"
                 "Creates per-instance config / env / sources skeletons.  "
                 "Does NOT enable or start the systemd unit — that's a "
                 "follow-up step (Edit the config, then "

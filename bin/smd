@@ -708,7 +708,7 @@ def _diag_build_manifests() -> int:
                 _ok(f'{component}: {dep} built at pinned {want[:12]}')
             else:
                 _warn(f'  {component}: {dep} built at {have[:12]}, pin is now '
-                      f'{want[:12]} — rebuild: sudo smd install {component} --force')
+                      f'{want[:12]} — rebuild: smd install {component} --force')
                 warns += 1
     return warns
 
@@ -1788,9 +1788,9 @@ def cmd_add(args) -> int:
         return 1
 
     _ok(f'{name}: added')
-    _info(f'  next: sudo smd install {name}')
-    _info(f'        sudo smd config init {name}')
-    _info(f'        sudo smd enable {name}')
+    _info(f'  next: smd install {name}')
+    _info(f'        smd config init {name}')
+    _info(f'        smd enable {name}')
     return 0
 
 
@@ -1819,7 +1819,7 @@ def cmd_enable(args) -> int:
     rc = 0
     for name in names:
         if name not in catalog:
-            _err(f'{name}: not in catalog (clone it first with: sudo smd add <url>)')
+            _err(f'{name}: not in catalog (clone it first with: smd add <url>)')
             rc = 1
             continue
         changed = set_component_enabled(name, True, TOPOLOGY_PATH,
@@ -1829,7 +1829,7 @@ def cmd_enable(args) -> int:
         else:
             _info(f'{name}: already enabled')
     if rc == 0:
-        _info('  start with: sudo smd start')
+        _info('  start with: smd start')
     return rc
 
 
@@ -2637,7 +2637,7 @@ def cmd_apply(args) -> int:
                 else:
                     _warn('radiod not started — FFT wisdom not yet ready')
                     _warn('wd-decode, wd-post, wd-upload will have no data until '
-                          'wisdom completes and you re-run: sudo smd apply')
+                          'wisdom completes and you re-run: smd apply')
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
@@ -2758,7 +2758,7 @@ def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
     if _wisdom_already_running():
         _warn('FFT wisdom: generation still in progress from a previous run')
         _info(f'  Monitor:  tail -f {_WISDOM_LOG}')
-        _info(f'  Re-run    sudo smd apply   when it completes.')
+        _info(f'  Re-run    smd apply   when it completes.')
         return False
 
     # Stop all managed services so they don't compete for CPU during planning.
@@ -2844,7 +2844,7 @@ def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
     # Ctrl+C — wisdom still running in background
     _warn('Ctrl+C: wisdom planning continues in background.')
     _info(f'  Monitor:  tail -f {_WISDOM_LOG}')
-    _info(f'  Re-run:   sudo smd apply   once complete to start radiod and decoders.')
+    _info(f'  Re-run:   smd apply   once complete to start radiod and decoders.')
     return False
 
 
@@ -3344,6 +3344,11 @@ def cmd_diag_cpu_affinity(args) -> int:
     powers the TUI CPU affinity screen and smd status's summary block.
     With --json, emits the full report for programmatic consumers.
     """
+    # --apply mutates /sys cpufreq state — needs root.  Auto-elevate up
+    # front (re-exec under sudo) so the report isn't printed twice; the
+    # read-only/--json paths never trigger it.
+    if getattr(args, 'apply', False) and _need_root('diag cpu-affinity --apply'):
+        return 1
     import json as _json
     from sigmond.cpu import build_affinity_report, affinity_report_to_dict
 
@@ -3412,10 +3417,7 @@ def cmd_diag_cpu_affinity(args) -> int:
         _info('No active managed service processes found.')
 
     if getattr(args, 'apply', False):
-        if os.geteuid() != 0:
-            _err('--apply requires root  (sudo smd diag cpu-affinity --apply)')
-            return 1
-
+        # root already ensured at the top via _need_root auto-elevation
         plan = _compute_affinity_plan(topology.get('cpu_affinity'))
         radiod_plan = plan.radiod
         other_cpus = plan.other_cpus
@@ -3528,6 +3530,10 @@ def cmd_diag_cpu_affinity(args) -> int:
 
 def cmd_diag_cpu_freq(args) -> int:
     """Show and optionally apply per-CPU scaling_max_freq based on radiod CPU assignment."""
+    # --apply writes /sys scaling_max_freq — needs root.  Auto-elevate up
+    # front (re-exec under sudo) so the report isn't printed twice.
+    if getattr(args, 'apply', False) and _need_root('diag cpu-freq --apply'):
+        return 1
     topology  = getattr(args, '_topology_override', None) or \
                 _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     cfg       = topology.get('cpu_freq', {})
@@ -3537,10 +3543,7 @@ def cmd_diag_cpu_freq(args) -> int:
 
     _heading('diag: CPU frequencies')
 
-    if do_apply and os.geteuid() != 0:
-        _err('--apply requires root  (sudo smd diag cpu-freq --apply)')
-        return 1
-
+    # root already ensured at the top via _need_root auto-elevation
     radiod_cpus = _get_radiod_cpus()
     cpu_count   = os.cpu_count() or 1
 
@@ -4089,7 +4092,7 @@ def cmd_status(args) -> int:
             if unenforced:
                 warnings.append(
                     f'{len(unenforced)} radiod unit(s) unenforced — run '
-                    f'sudo smd diag cpu-affinity --apply')
+                    f'smd diag cpu-affinity --apply')
             if foreign_count:
                 warnings.append(f'{foreign_count} foreign drop-in(s) present')
             if pinned:
@@ -4197,7 +4200,7 @@ def cmd_log(args) -> int:
             entry = None
         if entry is not None and not entry.is_installed():
             _err(f'{client}: enabled in topology but not installed. '
-                 f'Install first:  sudo smd install {client}')
+                 f'Install first:  smd install {client}')
         else:
             _err(f'{client}: no systemd units resolved (no deploy.toml or '
                  f'fallback shim).  Is it fully installed?')
@@ -4625,7 +4628,7 @@ def _print_action_hint(rows: list[dict]) -> None:
         names = ', '.join(r['name'] for r in needs_apply)
         print()
         _info(f'{len(needs_apply)} component(s) have updates available: {names}')
-        _info('run: sudo smd list --update  (preview: sudo smd list --update --dry-run)')
+        _info('run: smd list --update  (preview: smd list --update --dry-run)')
 
 
 def _print_deprecated_hint() -> None:
@@ -4656,7 +4659,7 @@ def _print_deprecated_hint() -> None:
         _info(f'  {name}{suffix}')
         if dep.reason:
             _info(f'    {dep.reason}')
-        _info(f'    purge: sudo smd remove {name}')
+        _info(f'    purge: smd remove {name}')
 
 
 def _emit_status_json(rows: list[dict]) -> int:
@@ -4978,7 +4981,7 @@ def _netdiag_status_line() -> None:
     cache = net_diag.load_cache()
     print('\n  network:')
     if cache is None:
-        _info('no cached diagnosis — run: sudo smd diag net')
+        _info('no cached diagnosis — run: smd diag net')
         return
     report = net_diag._report_from_dict(cache['report'])
     age_min = int(cache['age_s'] / 60)
@@ -5229,7 +5232,7 @@ _smd_complete() {
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
     local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier rac ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion component instance"
-    local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
+    local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web wd-rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
     if [[ "$prev" == "--components" ]]; then
@@ -5964,8 +5967,8 @@ def cmd_wisdom_plan(args) -> int:
             print(f'      {u}')
         if len(busy) > 6:
             print(f'      … and {len(busy) - 6} more')
-        _info('Run:  sudo smd stop')
-        _info('Then re-run:  sudo smd wisdom plan')
+        _info('Run:  smd stop')
+        _info('Then re-run:  smd wisdom plan')
         return 1
 
     WISDOM_TMP.parent.mkdir(parents=True, exist_ok=True)
@@ -6092,7 +6095,7 @@ def cmd_wisdom_plan(args) -> int:
         _err(f'could not install: {exc}')
         return 1
     _ok(f'installed → {WISDOM_FILE}')
-    _info('Now: sudo smd start')
+    _info('Now: smd start')
     return 0
 
 
@@ -6102,7 +6105,7 @@ def cmd_wisdom_status(args) -> int:
     if not WISDOM_FILE.exists():
         _warn(f'{WISDOM_FILE} does not exist — radiod will fall back to a '
               'fast (but suboptimal) "measure"-level plan at startup')
-        _info('To generate:  sudo smd wisdom plan   (after sudo smd stop)')
+        _info('To generate:  smd wisdom plan   (after smd stop)')
         return 1
     st = WISDOM_FILE.stat()
     age_s = time.time() - st.st_mtime
@@ -10196,7 +10199,7 @@ def cmd_completion(args) -> int:
     print('  smd completion bash --install')
     print()
     print('To install system-wide:')
-    print('  sudo smd completion bash > /etc/bash_completion.d/smd')
+    print('  smd completion bash | sudo tee /etc/bash_completion.d/smd >/dev/null')
     print()
     print('The completion script also defines short aliases:')
     print('  smdt   →  smd tui')
@@ -10463,7 +10466,7 @@ def cmd_instance_add(args) -> int:
     if not _check_systemd_template(client):
         _warn(f'{client}@.service systemd template is NOT installed; '
               f'`smd instance enable` will fail until it is')
-        _info(f'  install with: sudo smd component install {client}')
+        _info(f'  install with: smd component install {client}')
     try:
         paths = inst.create_instance(client, reporter_id,
                                       force=getattr(args, 'force', False),
@@ -10484,7 +10487,7 @@ def cmd_instance_add(args) -> int:
         _info(f'next: wire sources and edit the config, then enable:')
         _info(f'  smd sources add {client}@{display_rid} <kind>:<id>')
         _info(f'  smd instance edit {client} {display_rid}')
-        _info(f'  sudo smd instance enable {client} {display_rid}')
+        _info(f'  smd instance enable {client} {display_rid}')
     return 0
 
 
@@ -10530,7 +10533,7 @@ def cmd_instance_remove(args) -> int:
     if not dry_run:
         _info('')
         _info(f'unit {i.paths.unit_name} is NOT touched; '
-              f'run `sudo smd instance disable {args.client} {display_rid}` '
+              f'run `smd instance disable {args.client} {display_rid}` '
               f'separately if needed')
     return 0
 
@@ -10740,7 +10743,7 @@ def cmd_radiod_migrate(args) -> int:
 
     Dry-run by default; `--yes` to apply.  Idempotent — runs that
     find nothing to change exit 0 without writing.  No services are
-    restarted; operator runs `sudo smd restart <component>` after
+    restarted; operator runs `smd restart <component>` after
     reviewing the diff.
     """
     try:
@@ -10810,12 +10813,12 @@ def cmd_radiod_migrate(args) -> int:
               '(requires root).')
         _info('After applying, restart affected components to reload '
               'the new schema:')
-        _info('  sudo smd restart <component>')
+        _info('  smd restart <component>')
     else:
         _ok(f'migrated {len(candidates)} client config(s)' +
             (' + coordination.toml' if coord_rewrite else ''))
         _info('Restart affected components to pick up the new schema:')
-        _info('  sudo smd restart <component>  (or systemctl restart per unit)')
+        _info('  smd restart <component>  (or systemctl restart per unit)')
     return 0
 
 
@@ -10873,7 +10876,7 @@ def cmd_config_restore(args) -> int:
     src = Path(getattr(args, 'input', None) or '')
     if not src or not src.exists():
         _err('--input FILE is required and must exist')
-        _info('Usage:  sudo smd config restore --input ~/sigmond-config-*.tar.gz')
+        _info('Usage:  smd config restore --input ~/sigmond-config-*.tar.gz')
         return 1
     if not tarfile.is_tarfile(src):
         _err(f'{src} is not a valid tar archive')
@@ -10902,14 +10905,14 @@ def cmd_config_restore(args) -> int:
             tar.extractall('/')
     except PermissionError as exc:
         _err(f'Permission denied: {exc}')
-        _info('Re-run with sudo:  sudo smd config restore --input ...')
+        _info('Re-run with sudo:  smd config restore --input ...')
         return 1
     except Exception as exc:
         _err(str(exc))
         return 1
 
     _ok('Restore complete')
-    _info('Reconcile running services:  sudo smd apply')
+    _info('Reconcile running services:  smd apply')
     return 0
 
 
@@ -10949,7 +10952,7 @@ def cmd_config_backup(args) -> int:
                 tar.add(path, recursive=True)
     except PermissionError as exc:
         _err(f'Permission denied: {exc}')
-        _info('Re-run with sudo:  sudo smd config backup')
+        _info('Re-run with sudo:  smd config backup')
         return 1
     except Exception as exc:
         _err(str(exc))
@@ -10960,7 +10963,7 @@ def cmd_config_backup(args) -> int:
     _info(f'Copy off this machine:')
     _info(f'  scp {output} user@workstation:.')
     _info(f'Restore after OS reinstall:')
-    _info(f'  ./install.sh && sudo tar xzf {output.name} -C / && sudo smd apply')
+    _info(f'  ./install.sh && sudo tar xzf {output.name} -C / && smd apply')
     return 0
 
 
@@ -10970,7 +10973,7 @@ def _reexec_into_tui_venv() -> int:
     if Path(sys.prefix) == SIGMOND_VENV:
         # Already running inside the prod venv and textual still can't import.
         _err(f'TUI venv at {SIGMOND_VENV} is missing sigmond[tui]')
-        _info('Rebuild with:  sudo smd install')
+        _info('Rebuild with:  smd install')
         return 1
 
     if not venv_python.exists():
@@ -10979,7 +10982,7 @@ def _reexec_into_tui_venv() -> int:
                 return 1
         else:
             _err(f'TUI venv not found at {SIGMOND_VENV}')
-            _info('Create it with:  sudo smd tui')
+            _info('Create it with:  smd tui')
             _info('(first run creates the venv; subsequent runs do not need sudo)')
             return 1
 
@@ -11204,7 +11207,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest='command')
 
     # add — clone (or pull) a component repo into /opt/git/sigmond/<name>/
-    p = sub.add_parser('add', help='clone a component repo (run sudo smd install + enable to bring it online)')
+    p = sub.add_parser('add', help='clone a component repo (run smd install + enable to bring it online)')
     p.add_argument('url', help='git URL of the component repo (e.g. git@github.com:owner/foo.git)')
 
     # enable — set [component.<name>].enabled = true in topology.toml
@@ -11578,8 +11581,8 @@ def main() -> int:
         epilog=(
             'Examples:\n'
             '  smd cpu                  # show live table (no changes)\n'
-            '  sudo smd cpu --apply     # bare-metal: write the caps to /sys\n'
-            '  sudo smd cpu --reapply   # VM: re-run the host hookscript\n'
+            '  smd cpu --apply     # bare-metal: write the caps to /sys\n'
+            '  smd cpu --reapply   # VM: re-run the host hookscript\n'
             '\n'
             'Policy comes from /etc/sigmond/topology.toml [cpu_freq]:\n'
             '  radiod_max_mhz (default 3200)  applied to CPUs running radiod\n'

@@ -1,7 +1,7 @@
 """Config screen — TUI counterpart to `smd config show` and `smd config migrate`.
 
 Pulls JSON from `smd config show --json`, renders coordination + client
-summaries, and offers a Migrate button for `sudo smd config migrate`.
+summaries, and offers a Migrate button for `smd config migrate`.
 """
 
 from __future__ import annotations

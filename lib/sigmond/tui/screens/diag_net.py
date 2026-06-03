@@ -2,7 +2,7 @@
 
 Classifies the host's network environment for multi-host radiod safety.
 Tier 1 checks run unprivileged; Tier 2 (raw-socket IGMP listen) needs
-root.  This screen runs `sudo smd diag net --json` in a worker.
+root.  This screen runs `smd diag net --json` in a worker.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def _run_diag(listen_s: int, use_sudo: bool) -> dict:
         msg = (r.stderr or r.stdout or "").strip()[:400]
         if 'sudo: a password is required' in msg or 'sudo:' in msg[:10]:
             return {"error": "sudo requires a password — "
-                    "run `sudo smd diag net` in a terminal for Tier-2 listen"}
+                    "run `smd diag net` in a terminal for Tier-2 listen"}
         return {"error": msg or f"exit {r.returncode}"}
     try:
         return {"payload": json.loads(r.stdout)}

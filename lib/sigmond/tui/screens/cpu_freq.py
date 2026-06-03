@@ -1,7 +1,7 @@
 """CPU frequency screen — view + apply for `smd diag cpu-freq`.
 
 Shows the [cpu_freq] policy from topology.toml and each CPU's current
-scaling_max_freq against it.  Apply runs `sudo smd diag cpu-freq
+scaling_max_freq against it.  Apply runs `smd diag cpu-freq
 --apply` via a confirm-modal-gated button (auto-refresh on success).
 
 Motivation sits in the CPU-affinity memory: radiod cores need high

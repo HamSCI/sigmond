@@ -275,7 +275,7 @@ class FFTWisdomScreen(Vertical):
         # Step 1 — stop all managed services
         emit("─── Stopping all managed services ──────────────────────────")
         r = subprocess.run(
-            ['sudo', smd_bin, 'stop'],
+            [smd_bin, 'stop'],   # smd self-elevates; no sudo prefix needed
             capture_output=True, text=True,
         )
         for line in (r.stdout + r.stderr).splitlines():

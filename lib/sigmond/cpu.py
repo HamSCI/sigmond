@@ -577,7 +577,7 @@ def render_drop_in(cpus: set, label: str) -> str:
     return textwrap.dedent(f"""\
         # CPU affinity managed by smd — do not edit manually.
         # Role: {label}
-        # Regenerate: sudo smd diag cpu-affinity --apply
+        # Regenerate: smd diag cpu-affinity --apply
         [Service]
         CPUAffinity=
         CPUAffinity={cpu_str}
@@ -1221,14 +1221,14 @@ def build_affinity_report(
         if len(affected_names) == 1:
             warnings.append(
                 f"foreign drop-in on {affected_names[0]}: {path} "
-                "— run: sudo smd apply"
+                "— run: smd apply"
             )
         else:
             dir_name = Path(path).parent.name
             tmpl = dir_name[:-2] if dir_name.endswith('.d') else dir_name
             warnings.append(
                 f"foreign drop-in affects {len(affected_names)} {tmpl} instances: "
-                f"{path} — run: sudo smd apply"
+                f"{path} — run: smd apply"
             )
 
     for ua in units:

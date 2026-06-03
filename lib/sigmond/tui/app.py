@@ -301,8 +301,8 @@ class SigmondApp(App):
             "Select a row to see the recent git history for that "
             "component, then use the buttons to change its policy.\n\n"
             "Changes are written to /etc/sigmond/topology.toml "
-            "(requires write permission — run sudo smd tui if needed).\n\n"
-            "CLI equivalent: `smd list` (status); `sudo smd component update` "
+            "(requires write permission — run smd tui if needed).\n\n"
+            "CLI equivalent: `smd list` (status); `smd component update` "
             "(pull + reapply per policy).",
         )
 
@@ -565,7 +565,7 @@ class SigmondApp(App):
             "processes — one physical core (HT pair) per radiod "
             "instance, everything else shares the rest.\n\n"
             "Read-only. To apply the plan, run:\n"
-            "  sudo smd diag cpu-affinity --apply",
+            "  smd diag cpu-affinity --apply",
         )
 
     def _mount_placeholder(self, title: str, description: str,
@@ -605,7 +605,7 @@ class SigmondApp(App):
             "Radiod cores get high clock to keep the USB3/FFT path "
             "fed; the rest stay power-efficient.\n\n"
             "Read-only.  To apply:\n"
-            "  sudo smd diag cpu-freq --apply",
+            "  smd diag cpu-freq --apply",
         )
 
     def action_show_logs(self) -> None:
@@ -648,7 +648,7 @@ class SigmondApp(App):
             "`sudo systemctl <verb> <unit>` direct — single-unit actions "
             "don't need the cross-component lifecycle lock.\n"
             "  • component rows (hf-timestd, mag-recorder, gpsdo-monitor) "
-            "act via `sudo smd <verb> --components <name>` so sigmond's "
+            "act via `smd <verb> --components <name>` so sigmond's "
             "lifecycle CLI orders the sub-units.  Component rows show "
             "an active/total fraction (e.g. partial 21/24).\n\n"
             "Mixed selections chain: one confirm dialog up front, then "
@@ -667,7 +667,7 @@ class SigmondApp(App):
             "per-entry install status.\n\n"
             "Arrow to a row → 'Install selected' to install one, or "
             "'Install all missing' to run a catalog walk via "
-            "`sudo smd install`.\n\n"
+            "`smd install`.\n\n"
             "Each entry is installed via its own canonical install.sh; "
             "sigmond delegates, not duplicates.",
         )
@@ -689,7 +689,7 @@ class SigmondApp(App):
             "Restore workflow:\n"
             "  ./install.sh\n"
             "  sudo tar xzf sigmond-config-*.tar.gz -C /\n"
-            "  sudo smd apply",
+            "  smd apply",
         )
 
     def action_show_restore(self) -> None:
@@ -706,7 +706,7 @@ class SigmondApp(App):
             "sigmond backup archives.\n\n"
             "Navigate with arrow keys, expand folders with Enter, "
             "select a file with Enter or double-click.\n\n"
-            "After restore, run  sudo smd apply  to reconcile any "
+            "After restore, run  smd apply  to reconcile any "
             "service state changes.",
         )
 
@@ -740,7 +740,7 @@ class SigmondApp(App):
             "Reconciles running services with the current topology + "
             "coordination config.\n\n"
             "Dry-run prints the plan without touching the system.  "
-            "Apply performs it via `sudo smd apply` — services may "
+            "Apply performs it via `smd apply` — services may "
             "restart.\n\n"
             "Safe to re-run — the CLI is idempotent.",
         )
@@ -772,7 +772,7 @@ class SigmondApp(App):
             "config wizard (whiptail, or `$EDITOR` fallback).  Fill in "
             "antenna / SDR / per-mode settings.\n"
             "  3. Enable + start the unit from the Lifecycle screen "
-            "(or `sudo smd instance enable <client> <reporter>` from "
+            "(or `smd instance enable <client> <reporter>` from "
             "the CLI).\n\n"
             "Edit existing: select a row, click Edit.  Remove: select a "
             "row, click Remove (does NOT stop the unit — "
@@ -780,7 +780,7 @@ class SigmondApp(App):
             "Migrate: scans for legacy radiod-keyed deployments and "
             "shows what would convert.  The actual interactive "
             "migration prompts per candidate and is CLI-only — run "
-            "`sudo smd instance migrate --yes` in a terminal.",
+            "`smd instance migrate --yes` in a terminal.",
         )
 
     def action_show_instance(self) -> None:
@@ -803,13 +803,13 @@ class SigmondApp(App):
             "(does NOT enable or start the unit — that's `smd instance "
             "enable` after editing the config).\n\n"
             "Remove: deletes per-instance files.  Doesn't touch the "
-            "systemd unit (run `sudo smd instance disable` first if "
+            "systemd unit (run `smd instance disable` first if "
             "the unit is running) or state/log/run dirs (use `--purge` "
             "from the CLI for that).\n\n"
             "Migrate: scans for legacy radiod-keyed deployments "
             "(`<client>@<radiod-id>.service`).  Dry-run lists "
             "candidates here; the actual interactive migration is "
-            "CLI-only — run `sudo smd instance migrate --yes` in a "
+            "CLI-only — run `smd instance migrate --yes` in a "
             "terminal.",
         )
 
@@ -826,7 +826,7 @@ class SigmondApp(App):
             "consumes from.\n\n"
             "Selections live at /etc/sigmond/clients/<client>.sources.toml. "
             "Refresh re-runs `smd sources list`; Apply (dry-run) previews "
-            "what would be written; Apply runs `sudo smd sources apply` "
+            "what would be written; Apply runs `smd sources apply` "
             "to render the selections into each client's config.\n\n"
             "Add/remove of individual selections is CLI-only for now:\n"
             "  smd sources add <client> <kind>:<id>\n"
@@ -929,7 +929,7 @@ class SigmondApp(App):
             "their scope (local/remote), and which clients have "
             "declared contract-compliant inventory.\n\n"
             "'Migrate config' upgrades coordination to the latest "
-            "schema (`sudo smd config migrate`).",
+            "schema (`smd config migrate`).",
         )
 
     def action_show_diag_net(self) -> None:
@@ -943,7 +943,7 @@ class SigmondApp(App):
             "Classifies IGMP behavior so radiod multicast stays safe.\n\n"
             "Fast scan: unprivileged enumeration of interfaces + "
             "/proc/net/igmp (no wait).\n\n"
-            "Full listen: runs `sudo smd diag net --listen <s>` to "
+            "Full listen: runs `smd diag net --listen <s>` to "
             "observe IGMP queries on the wire.  Requires passwordless "
             "sudo or you'll see an error here — fall back to a terminal "
             "if so.",
@@ -979,11 +979,11 @@ class SigmondApp(App):
         self.query_one(ContextPanel).show_help(
             "Client config",
             "Run a client's first-run wizard or edit its config file.\n\n"
-            "Init wizard — `sudo smd config init <client>` — invokes "
+            "Init wizard — `smd config init <client>` — invokes "
             "the entry point each client advertises in its deploy.toml "
             "[contract.config].init.  radiod uses the sigmond-owned "
             "wizard (probe USB SDRs, render radiod@<id>.conf).\n\n"
-            "Edit config — `sudo smd config edit <client>` — invokes "
+            "Edit config — `smd config edit <client>` — invokes "
             "the client's edit hook, or falls back to $EDITOR on the "
             "config file.\n\n"
             "Library-kind catalog entries (e.g. ka9q-python) are "

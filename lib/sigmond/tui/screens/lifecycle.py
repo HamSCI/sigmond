@@ -30,7 +30,7 @@ Dispatch rules:
   * instance rows → ``sudo systemctl <verb> <unit> [<unit> ...]``
     direct (single-unit and small-batch actions don't need sigmond's
     cross-component lifecycle lock).
-  * component rows → ``sudo smd <verb> --components <name>`` so
+  * component rows → ``smd <verb> --components <name>`` so
     sigmond's lifecycle CLI (which holds the lock per CONTRACT v0.5
     §5.5) orders the sub-units of multi-unit components like hf-timestd.
 
@@ -573,7 +573,7 @@ class LifecycleScreen(Vertical):
             )
         if components:
             preview_lines.append(
-                "[bold]sudo smd " + verb + " --components "
+                "[bold]smd " + verb + " --components "
                 + ",".join(components) + "[/]"
             )
         n = len(self._checked)

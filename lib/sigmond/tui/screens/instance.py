@@ -141,7 +141,7 @@ class InstanceScreen(Vertical):
             "migration to `<client>@<reporter-id>.service`.  Dry-run "
             "lists candidates without changing anything; running the "
             "migration is currently CLI-only (interactive prompts per "
-            "candidate) — invoke `sudo smd instance migrate --yes` in "
+            "candidate) — invoke `smd instance migrate --yes` in "
             "a terminal.",
             classes="in-body")
         with Horizontal():
@@ -184,7 +184,7 @@ class InstanceScreen(Vertical):
         if not instances:
             self.query_one("#in-last", Static).update(
                 "[dim]no per-reporter instances yet — add one below, or "
-                "run `sudo smd instance migrate` to convert legacy "
+                "run `smd instance migrate` to convert legacy "
                 "radiod-keyed deployments[/]")
             return
         for i in instances:
@@ -254,7 +254,7 @@ class InstanceScreen(Vertical):
             title=f"Remove instance {client}@{_display(reporter)}?",
             body=("Removes per-instance config / env / sources files. "
                   "Does NOT stop or disable the systemd unit — run "
-                  "`sudo smd instance disable` first if the unit is "
+                  "`smd instance disable` first if the unit is "
                   "running.  Use `--purge` from the CLI for state/log "
                   "dirs."),
             cmd=cmd, sudo=True,

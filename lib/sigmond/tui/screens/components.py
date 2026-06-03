@@ -726,7 +726,7 @@ class ComponentDetailModal(ModalScreen):
             self.app.push_screen(
                 UpdateOutputModal(
                     title=f"Installing {row.name}",
-                    cmd=['sudo', smd, 'install', row.name],
+                    cmd=[smd, 'install', row.name],
                 ),
                 _after_modal,
             )
@@ -735,7 +735,7 @@ class ComponentDetailModal(ModalScreen):
             ConfirmModal(
                 title=f"Install {row.name}?",
                 body="\n".join(body_lines),
-                cmd_preview=f"sudo {smd} install {row.name}",
+                cmd_preview=f"{smd} install {row.name}",
             ),
             _after_confirm,
         )
@@ -772,7 +772,7 @@ class ComponentDetailModal(ModalScreen):
             self.app.push_screen(
                 UpdateOutputModal(
                     title=f"Updating {row.name}",
-                    cmd=['sudo', smd, 'component', 'update', '--components', row.name],
+                    cmd=[smd, 'component', 'update', '--components', row.name],
                 ),
                 _after_modal,
             )
@@ -784,7 +784,7 @@ class ComponentDetailModal(ModalScreen):
                     f"Pull the latest commits for [bold]{row.name}[/] and re-apply.\n\n"
                     f"Current ref: {row.current_ref}{behind_str}"
                 ),
-                cmd_preview=f"sudo {smd} update --components {row.name}",
+                cmd_preview=f"{smd} update --components {row.name}",
             ),
             _after_confirm,
         )
@@ -1182,7 +1182,7 @@ class ComponentsScreen(Vertical):
         smd = _smd_binary()
         names = [r.name for r in targets]
         names_csv = ','.join(names)
-        cmd = ['sudo', smd, 'install', '--components', names_csv, '--yes']
+        cmd = [smd, 'install', '--components', names_csv, '--yes']
         skipped = len(self._selected) - len(targets)
         skipped_note = (
             f"\n\n[dim]{skipped} other selected row(s) skipped — already installed.[/]"
@@ -1239,7 +1239,7 @@ class ComponentsScreen(Vertical):
         smd = _smd_binary()
         names = [r.name for r in targets]
         names_csv = ','.join(names)
-        cmd = ['sudo', smd, 'component', 'update', '--components', names_csv]
+        cmd = [smd, 'component', 'update', '--components', names_csv]
         skipped = len(self._selected) - len(targets)
         skipped_note = (
             f"\n\n[dim]{skipped} other selected row(s) skipped (dirty / up-to-date / missing).[/]"

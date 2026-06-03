@@ -9,7 +9,7 @@ Report section:
   smd verifier report --window <DUR> --target <wspr|psk> [--lost ...]
                       [--rx-call CALL]
 Rehabilitate section:
-  sudo smd verifier rehabilitate <rx_call> <call>
+  smd verifier rehabilitate <rx_call> <call>
 """
 
 from __future__ import annotations

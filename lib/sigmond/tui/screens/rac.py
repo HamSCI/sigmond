@@ -292,7 +292,7 @@ class RacScreen(Vertical):
     def _do_apply(self) -> None:
         """Operator clicked Apply.  Validate inputs, then show a
         confirmation modal.  On confirm: write topology.toml, then run
-        ``sudo smd install --components wd-rac --yes`` under
+        ``smd install --components wd-rac --yes`` under
         suspend_and_run_sudo so the operator sees the live install
         output in the terminal.
 
@@ -320,7 +320,8 @@ class RacScreen(Vertical):
             return
 
         cmd = [_smd_binary(), 'install', '--components', 'wd-rac', '--yes']
-        cmd_preview = 'sudo ' + ' '.join(cmd)
+        # smd self-elevates; no `sudo` prefix needed in the preview.
+        cmd_preview = ' '.join(cmd)
 
         def _on_confirm(confirmed: bool) -> None:
             if not confirmed:
