@@ -7451,15 +7451,21 @@ def cmd_verifier_watch(args) -> int:
     disappear.
     """
     instance = getattr(args, 'instance', None)
-    if instance is None:
-        unit_pattern = 'wspr-recorder@*'
-    else:
+    if instance is not None:
         unit_pattern = f'wspr-recorder@{instance}.service'
+    else:
+        # Post-split the verifiers + wsprnet audit run in the standalone
+        # wspr-uploader.service; on in-process hosts they run in the decoders.
+        _up = _run(['systemctl', 'is-active', 'wspr-uploader.service'])
+        if _up.returncode == 0 and _up.stdout.strip() == 'active':
+            unit_pattern = 'wspr-uploader.service'
+        else:
+            unit_pattern = 'wspr-recorder@*'
 
     if _watch_preflight(
             'verifier-watch', unit_pattern,
-            hint='Verifiers run inside wspr-recorder.  Start one with '
-                 '`smd start wspr-recorder`.') != 0:
+            hint='Verifiers run in wspr-uploader.service (or in-process in '
+                 'wspr-recorder).  Start with `smd start wspr-recorder`.') != 0:
         return 1
 
     backlog_min = max(0, int(getattr(args, 'backlog', 60) or 0))
@@ -8021,7 +8027,7 @@ def cmd_wspr_watch(args) -> int:
     # cryptic error, so `smd wspr-watch` can be started ahead of
     # wspr-recorder and springs to life when it comes up.
     import time as _time
-    watch_units = [unit_pattern, 'wd-upload-hs@*']
+    watch_units = [unit_pattern, 'wspr-uploader.service', 'wd-upload-hs@*']
 
     def _journal_has_data() -> bool:
         probe = subprocess.run(
