@@ -510,7 +510,8 @@ def _ensure_venv(venv_dir: Path) -> bool:
 def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     binary = Path('/usr/local/sbin/radiod')
     built = src_dir / 'src' / 'radiod'
-    if not force and binary.exists() and built.exists():
+    if (not force and not _source_advanced_past_build(src_dir, 'ka9q-radio')
+            and binary.exists() and built.exists()):
         import hashlib
         def _sha(p):
             return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -541,6 +542,13 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
         _err(f'ka9q-radio install failed: {r.stderr.strip()}')
         return False
     _ok('ka9q-radio: built and installed')
+    # Record the source commit so the freshness check above can tell when a
+    # later clone_repo pull has advanced the tree past this build.
+    _write_build_manifest('ka9q-radio', [
+        {'name': 'ka9q-radio', 'ref': 'main', 'pin': '',
+         'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-radio',
+         'sha': _git_head(src_dir)},
+    ], builder='_build_ka9q_radio')
     return True
 
 
@@ -599,6 +607,44 @@ def _git_remote_url(repo: Path) -> str:
     r = _run(['git', '-c', f'safe.directory={repo}', '-C', str(repo),
               'remote', 'get-url', 'origin'])
     return r.stdout.strip() if r.returncode == 0 else ''
+
+
+def _manifest_source_sha(component: str) -> str:
+    """Return the source sha recorded in <component>'s build manifest for the
+    upstream whose name matches the component, or '' if no manifest / not
+    recorded."""
+    mf = _BUILD_MANIFEST_DIR / f'{component}.toml'
+    if not mf.exists():
+        return ''
+    try:
+        import tomllib
+        data = tomllib.loads(mf.read_text())
+    except Exception:
+        return ''
+    for u in data.get('upstream', []):
+        if u.get('name') == component:
+            return (u.get('sha') or '').strip()
+    return ''
+
+
+def _source_advanced_past_build(src_dir: Path, component: str) -> bool:
+    """True iff a build manifest exists AND records a source sha different
+    from the current HEAD — i.e. clone_repo fast-forwarded the tree to a
+    newer upstream commit since the last build, so the installed binary is
+    stale and must be rebuilt.
+
+    The native-build freshness checks below compare the INSTALLED binary
+    against the leftover BUILT binary in the source tree — both are the
+    previous build, so a source tree clone_repo has since advanced still
+    reads as 'current' and never rebuilds (the bug behind "smd thinks a stale
+    component is up to date"). Returns False when there is no manifest or HEAD
+    is unknown, so the existing binary-sha check still governs those cases
+    (no needless rebuilds)."""
+    want = _manifest_source_sha(component)
+    head = _git_head(src_dir)
+    if not want or not head:
+        return False
+    return not (head.startswith(want) or want.startswith(head))
 
 
 def _tool_version(argv: list) -> str:
@@ -739,7 +785,8 @@ def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
     binary = Path('/usr/local/sbin/ka9q-web')
     built  = src_dir / 'ka9q-web'
     rebuilt = True
-    if binary.exists() and built.exists():
+    if (not _source_advanced_past_build(src_dir, 'ka9q-web')
+            and binary.exists() and built.exists()):
         import hashlib
         def _sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
         if _sha(binary) == _sha(built):
