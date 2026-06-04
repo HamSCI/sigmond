@@ -2384,6 +2384,31 @@ def _ensure_fftw_dir() -> bool:
     return True
 
 
+def _reload_udev_for_sdrs() -> None:
+    """Reload udev rules + replay USB add events so radiod's freshly-installed
+    SDR rules apply to already-connected devices.
+
+    `make install` ships /etc/udev/rules.d/*rx888*.rules (and friends): they
+    set GROUP=radio on the device and, for an RX888 in DFU mode, fire
+    rx888_boot.service to upload firmware.  udev only applies a rule on the
+    device's add event, so a SDR plugged in *before* this install never picks
+    them up — leaving e.g. an RX888 stuck in DFU and owned root:root, which
+    radiod (running as `radio`) then can't open (rx888_usb_init failed).
+    Reload and re-trigger the add action for the USB subsystem so the rules
+    take effect now (this also fires rx888_boot.service for a DFU device).
+    Best-effort: a missing udevadm (e.g. in a container) is non-fatal.
+    """
+    import shutil as _sh
+    if not _sh.which('udevadm'):
+        return
+    _info('reloading udev rules for SDR access (applies to already-connected SDRs)…')
+    _run(['udevadm', 'control', '--reload-rules'], sudo=True)
+    # --action=add (not the default "change") so ACTION=="add" rules —
+    # GROUP/MODE and the rx888_boot.service SYSTEMD_WANTS — actually fire.
+    _run(['udevadm', 'trigger', '--action=add', '--subsystem-match=usb'], sudo=True)
+    _ok('udev rules reloaded + triggered')
+
+
 def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     """Install ka9q-radio natively under /opt/git/sigmond/ka9q-radio.
 
@@ -2424,6 +2449,9 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
         return False
     if not _build_ka9q_radio(src_dir, force=force):
         return False
+    # Apply the just-installed SDR udev rules to already-connected devices
+    # (loads RX888 firmware if it was plugged in before this install).
+    _reload_udev_for_sdrs()
     _ensure_radiod_running()
     return True
 
