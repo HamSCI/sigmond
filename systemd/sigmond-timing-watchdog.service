@@ -1,0 +1,8 @@
+[Unit]
+Description=Sigmond timing watchdog — detect & auto re-anchor timing-broken psk-recorder streams
+After=multi-user.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/local/bin/sigmond-timing-watchdog

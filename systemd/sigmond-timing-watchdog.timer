@@ -1,0 +1,10 @@
+[Unit]
+Description=Run sigmond timing watchdog every ~90s
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=90
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

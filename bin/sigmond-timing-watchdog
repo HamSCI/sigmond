@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""sigmond timing watchdog — detect 'alive but timing-broken' psk-recorder
+streams and auto re-anchor by restarting the affected instance.
+
+Background (B4 incident 2026-06-02): psk-recorder anchors RTP->wallclock
+ONCE at startup and never re-anchors.  A transient radiod 'RX888 measured
+sample rate error' glitch shifts that mapping and silently kills FT8/FT4
+(decoder keeps running on a now-invalid time map), while WSPR's
+continuously-correlating RtpSyncStrategy rides through.  Restarting the
+psk-recorder instance re-anchors it.
+
+Two detectors:
+  1. BROKEN (catastrophic): FT8 stats spots=0 with decodes=N/N and
+     slots_empty=0 for K consecutive 60 s windows -- AND a peer is
+     decoding FT8 (not a dead band) OR a real RX888 glitch was logged.
+  2. DRIFTED (partial, added 2026-06-03): the anchor steps a second or two
+     so FT8 still emits a FEW spots (spots>0, so #1 misses it) but the
+     dt-center shifts off its peers and decode yield collapses.  Observed
+     on B4: ~5 spots/min, FT8 dt-center -1.46s vs peers +0.8s, FT4 dead.
+     Flag when an instance's FT8 dt-center (read from the sink) diverges
+     from the peer median by > DT_DRIFT_SEC AND its spot count is a small
+     fraction of the peer median -- confirmed across two runs.
+
+Guards against restart storms: warm-up grace after (re)start + per-instance
+cooldown + two-run persistence on the drift path.  Runs from a ~90 s
+systemd timer.  Covers psk-recorder (FT8) AND wspr-recorder.  Env knobs:
+TWD_BROKEN_WINDOWS, TWD_PEER_MIN_SPOTS, TWD_COOLDOWN_SEC, TWD_WARMUP_SEC,
+TWD_GLITCH_FRAC, TWD_DT_DRIFT_SEC, TWD_DT_ABS_SEC, TWD_DT_MIN_SPOTS,
+TWD_SPOT_FRAC, TWD_SINK, TWD_DRY_RUN.
+"""
+import datetime, json, os, re, sqlite3, subprocess, sys, time
+
+K_BROKEN   = int(os.environ.get("TWD_BROKEN_WINDOWS", "3"))
+PEER_MIN   = int(os.environ.get("TWD_PEER_MIN_SPOTS", "5"))
+COOLDOWN   = int(os.environ.get("TWD_COOLDOWN_SEC", "900"))
+WARMUP     = int(os.environ.get("TWD_WARMUP_SEC", "180"))
+GLITCH_FRAC= float(os.environ.get("TWD_GLITCH_FRAC", "0.005"))   # 0.5% rate deviation = real glitch
+LOOKBACK   = os.environ.get("TWD_LOOKBACK", "5 min ago")
+STATE      = os.environ.get("TWD_STATE", "/run/sigmond-timing-watchdog.state")
+DRY_RUN    = os.environ.get("TWD_DRY_RUN", "0").lower() in ("1","true","yes","on")
+# dt-drift detector
+DT_DRIFT   = float(os.environ.get("TWD_DT_DRIFT_SEC", "1.2"))  # FT8 dt divergence from peer median
+DT_ABS     = float(os.environ.get("TWD_DT_ABS_SEC", "2.5"))    # single-instance fallback (no peers)
+DT_MIN     = int(os.environ.get("TWD_DT_MIN_SPOTS", "15"))     # min FT8 spots to trust a dt-center
+SPOT_FRAC  = float(os.environ.get("TWD_SPOT_FRAC", "0.25"))    # yield must be <frac*peer-median to act
+SINK       = os.environ.get("TWD_SINK", "/var/lib/sigmond/sink.db")
+DT_WINDOW_MIN = int(os.environ.get("TWD_DT_WINDOW_MIN", "8"))
+# wspr detector (added 2026-06-04): a radiod restart can leave wspr-recorder
+# recording clean audio but decoding 0 WSPR spots (2-min window misaligned)
+# while FT8 rides through; WSPR does NOT always self-heal, so cover it too.
+K_WSPR        = int(os.environ.get("TWD_WSPR_WINDOWS", "3"))     # consecutive 0-spot WSPR cycles
+WSPR_PEER     = int(os.environ.get("TWD_WSPR_PEER_MIN", "3"))    # peer spots to call the band open
+WSPR_LOOKBACK = os.environ.get("TWD_WSPR_LOOKBACK", "15 min ago")
+
+STATS_RE = re.compile(
+    r"stats FT8 rx=(?P<rx>\S+): spots=(?P<spots>\d+) "
+    r"decodes=(?P<dec>\d+)/\d+ slots_empty=(?P<empty>\d+)")
+GLITCH_RE = re.compile(
+    r"RX888 measured sample rate error: ([\d,.]+) Hz vs nominal ([\d,.]+)")
+WSPR_RE = re.compile(r"\b(?P<spots>\d+) spots in wspr\.spots")
+
+def sh(args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return ""
+
+def running_instances():
+    out = sh(["systemctl","list-units","psk-recorder@*","--state=running",
+              "--no-legend","--plain"])
+    inst=[]
+    for line in out.splitlines():
+        parts=line.split()
+        if parts:
+            m=re.match(r"psk-recorder@(.+)\.service", parts[0])
+            if m: inst.append(m.group(1))
+    return inst
+
+def recent_ft8(inst):
+    out = sh(["journalctl","-u",f"psk-recorder@{inst}","--since",LOOKBACK,
+              "--no-pager","-o","cat"])
+    wins=[]
+    for line in out.splitlines():
+        m=STATS_RE.search(line)
+        if m: wins.append((int(m["spots"]),int(m["dec"]),int(m["empty"])))
+    return wins
+
+def running_wspr_instances():
+    out = sh(["systemctl","list-units","wspr-recorder@*","--state=running",
+              "--no-legend","--plain"])
+    inst=[]
+    for line in out.splitlines():
+        parts=line.split()
+        if parts:
+            m=re.match(r"wspr-recorder@(.+)\.service", parts[0])
+            if m: inst.append(m.group(1))
+    return inst
+
+def recent_wspr(inst):
+    """List of WSPR spot counts (one per completed cycle) from this instance's
+    wspr-recorder journal over WSPR_LOOKBACK."""
+    out = sh(["journalctl","-u",f"wspr-recorder@{inst}","--since",WSPR_LOOKBACK,
+              "--no-pager","-o","cat"])
+    cyc=[]
+    for line in out.splitlines():
+        m=WSPR_RE.search(line)
+        if m: cyc.append(int(m["spots"]))
+    return cyc
+
+def ft8_dt(inst):
+    """(count, avg_dt) of this instance's recent FT8 spots from the sink, or
+    (0, None).  Anchor drift shows up directly as a shifted dt-center even
+    while a few strong signals still decode (so spots>0).  Read-only; the
+    instance's sink radiod_id is '<inst>-status.local'."""
+    rid = f"{inst}-status.local"
+    since = (datetime.datetime.now(datetime.timezone.utc)
+             - datetime.timedelta(minutes=DT_WINDOW_MIN)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        con = sqlite3.connect(f"file:{SINK}?mode=ro", uri=True, timeout=5.0)
+        try:
+            n, avg_dt = con.execute(
+                "SELECT count(*), avg(json_extract(payload_json,'$.dt')) "
+                "FROM pending_uploads WHERE target_db='psk' AND target_table='spots' "
+                "AND json_extract(payload_json,'$.mode')='ft8' "
+                "AND json_extract(payload_json,'$.radiod_id')=? "
+                "AND json_extract(payload_json,'$.time')>?",
+                (rid, since)).fetchone()
+        finally:
+            con.close()
+        n = int(n or 0)
+        return (n, float(avg_dt) if (n and avg_dt is not None) else None)
+    except Exception:
+        return (0, None)
+
+def _median(xs):
+    xs = sorted(xs)
+    if not xs: return None
+    m = len(xs)//2
+    return xs[m] if len(xs)%2 else (xs[m-1]+xs[m])/2.0
+
+def started_secs_ago(inst, svc="psk-recorder"):
+    v=sh(["systemctl","show",f"{svc}@{inst}",
+          "-p","ActiveEnterTimestampMonotonic","--value"]).strip()
+    try:
+        aet=int(v)/1e6
+        with open("/proc/uptime") as f: up=float(f.read().split()[0])
+        return max(0.0, up-aet)
+    except Exception:
+        return 1e9
+
+def real_glitches():
+    out=sh(["journalctl","-u","radiod@*","--since",LOOKBACK,"--no-pager",
+            "-o","cat","-g","RX888 measured sample rate"])
+    hits=[]
+    for line in out.splitlines():
+        m=GLITCH_RE.search(line)
+        if not m: continue
+        try:
+            meas=float(m.group(1).replace(",","")); nom=float(m.group(2).replace(",",""))
+        except ValueError: continue
+        if nom>0 and abs(meas-nom)/nom > GLITCH_FRAC:
+            hits.append(line.strip())
+    return hits
+
+def load_state():
+    try:
+        with open(STATE) as f: return json.load(f)
+    except Exception: return {}
+
+def save_state(s):
+    try:
+        with open(STATE,"w") as f: json.dump(s,f)
+    except Exception: pass
+
+def main():
+    inst=running_instances()
+    if not inst:
+        print("timing-watchdog: no running psk-recorder instances"); return 0
+    state=load_state(); now=time.time()
+    acted_at=state.get("acted",{}) if isinstance(state.get("acted"),dict) else {}
+
+    # --- detector 1: spots=0 (catastrophic) ---
+    latest={}; broken={}
+    for i in inst:
+        w=recent_ft8(i)
+        latest[i]=w[-1] if w else None
+        tail=w[-K_BROKEN:] if len(w)>=K_BROKEN else []
+        broken[i]=(len(tail)==K_BROKEN and all(s==0 and d>0 and e==0 for (s,d,e) in tail))
+    band_open=any(latest[i] and latest[i][0]>=PEER_MIN for i in inst)
+    glitches=real_glitches()
+    for g in glitches[-3:]:
+        print(f"timing-watchdog: REAL RX888 sample-rate glitch: {g}")
+
+    # --- detector 2: peer-relative dt-drift (partial, alive-but-skewed) ---
+    dt={i:ft8_dt(i) for i in inst}
+    eligible=[i for i in inst if dt[i][0]>=DT_MIN and dt[i][1] is not None]
+    peer_med_dt=_median([dt[i][1] for i in eligible])
+    peer_med_n =_median([dt[i][0] for i in eligible])
+    drifted={}
+    for i in inst:
+        n,c=dt[i]
+        if n<DT_MIN or c is None:
+            drifted[i]=False
+        elif len(eligible)>=2 and peer_med_dt is not None:
+            # drift must BOTH skew the dt-center AND collapse yield vs peers,
+            # so a merely-different-but-fine chain delay isn't re-anchored.
+            drifted[i]=(abs(c-peer_med_dt)>DT_DRIFT
+                        and n < SPOT_FRAC*(peer_med_n or 0))
+        else:
+            drifted[i]=abs(c)>DT_ABS
+    prev=set(state.get("drift_prev",[]))   # confirmed across 2 runs
+
+    healthy=[i for i in inst if not broken[i] and not drifted[i]]
+    dt_str=", ".join(
+        f"{i}:{('%+.2f'%dt[i][1]) if dt[i][1] is not None else 'na'}/{dt[i][0]}"
+        for i in inst)
+    print(f"timing-watchdog: instances={inst} healthy={healthy} band_open={band_open} "
+          f"glitches={len(glitches)} ft8_dt/n=[{dt_str}] "
+          f"peer_med_dt={('%+.2f'%peer_med_dt) if peer_med_dt is not None else 'na'}")
+
+    acted=False
+    for i in inst:
+        reason=None
+        if broken[i] and (band_open or glitches):
+            reason=("FT8=0 x%d, decoder running, audio present (%s)"
+                    % (K_BROKEN,'glitch seen' if glitches else 'peers OK'))
+        elif broken[i]:
+            print(f"timing-watchdog: {i} FT8=0 x{K_BROKEN} but no peer decoding and "
+                  "no glitch -> likely dead band, NOT acting"); continue
+        elif drifted[i] and i in prev:
+            reason=("FT8 dt-center %+.2fs drifted >%.1fs from peer median %+.2fs "
+                    "and yield %d<<peers (anchor stale)"
+                    % (dt[i][1], DT_DRIFT, peer_med_dt, dt[i][0]))
+        elif drifted[i]:
+            print(f"timing-watchdog: {i} dt-drift {dt[i][1]:+.2f}s seen once -> "
+                  "waiting for confirmation next run"); continue
+        else:
+            continue
+        warm=started_secs_ago(i)
+        if warm<WARMUP:
+            print(f"timing-watchdog: {i} flagged but {int(warm)}s since start "
+                  f"(<{WARMUP}) -> warming up"); continue
+        if now-acted_at.get(i,0)<COOLDOWN:
+            print(f"timing-watchdog: {i} flagged but in cooldown "
+                  f"({int(now-acted_at.get(i,0))}s/{COOLDOWN}s)"); continue
+        print(f"timing-watchdog: {i} ALIVE-BUT-TIMING-BROKEN ({reason}) -> "
+              f"{'DRY-RUN ' if DRY_RUN else ''}re-anchor via restart")
+        if not DRY_RUN:
+            sh(["systemctl","restart",f"psk-recorder@{i}"])
+            acted_at[i]=now; acted=True
+
+    # --- detector 3: WSPR spots=0 while a peer decodes WSPR (wspr-recorder) ---
+    winst=running_wspr_instances()
+    acted_wspr=state.get("acted_wspr",{}) if isinstance(state.get("acted_wspr"),dict) else {}
+    if winst:
+        wlatest={}; wbroken={}
+        for i in winst:
+            c=recent_wspr(i)
+            wlatest[i]=c[-1] if c else None
+            wtail=c[-K_WSPR:] if len(c)>=K_WSPR else []
+            wbroken[i]=(len(wtail)==K_WSPR and all(s==0 for s in wtail))
+        wspr_open=any((wlatest[i] or 0)>=WSPR_PEER for i in winst)
+        whealthy=[i for i in winst if not wbroken[i]]
+        wstr=", ".join(f"{i}:{wlatest[i] if wlatest[i] is not None else 'na'}" for i in winst)
+        print(f"timing-watchdog[wspr]: instances={winst} healthy={whealthy} "
+              f"band_open={wspr_open} spots=[{wstr}]")
+        for i in winst:
+            if not wbroken[i]:
+                continue
+            if not wspr_open:
+                print(f"timing-watchdog[wspr]: {i} WSPR=0 x{K_WSPR} but no peer "
+                      "decoding -> dead band, NOT acting"); continue
+            warm=started_secs_ago(i,"wspr-recorder")
+            if warm<WARMUP:
+                print(f"timing-watchdog[wspr]: {i} flagged but {int(warm)}s since "
+                      f"start (<{WARMUP}) -> warming up"); continue
+            if now-acted_wspr.get(i,0)<COOLDOWN:
+                print(f"timing-watchdog[wspr]: {i} flagged but in cooldown "
+                      f"({int(now-acted_wspr.get(i,0))}s/{COOLDOWN}s)"); continue
+            print(f"timing-watchdog[wspr]: {i} WSPR=0 x{K_WSPR} while peers decode -> "
+                  f"{'DRY-RUN ' if DRY_RUN else ''}re-anchor via wspr-recorder restart")
+            if not DRY_RUN:
+                sh(["systemctl","restart",f"wspr-recorder@{i}"])
+                acted_wspr[i]=now
+    state["acted_wspr"]=acted_wspr
+
+    state["acted"]=acted_at
+    state["drift_prev"]=[i for i in inst if drifted[i]]
+    save_state(state)
+    return 0
+
+if __name__=="__main__":
+    sys.exit(main())
