@@ -1803,7 +1803,7 @@ def cmd_enable(args) -> int:
         return 1
 
     from sigmond.topology import set_component_enabled
-    from sigmond.catalog import load_catalog
+    from sigmond.catalog import load_catalog, get_entry
 
     names = getattr(args, 'names', []) or []
     if not names:
@@ -1818,16 +1818,20 @@ def cmd_enable(args) -> int:
 
     rc = 0
     for name in names:
-        if name not in catalog:
+        # Resolve aliases (e.g. the legacy `radiod` topology key -> ka9q-radio)
+        # and always write the canonical component name, so `smd enable radiod`
+        # works and never appends a duplicate [component.*] block.
+        entry = get_entry(name, catalog)
+        if entry is None:
             _err(f'{name}: not in catalog (clone it first with: smd add <url>)')
             rc = 1
             continue
-        changed = set_component_enabled(name, True, TOPOLOGY_PATH,
-                                         description=catalog[name].description)
+        changed = set_component_enabled(entry.name, True, TOPOLOGY_PATH,
+                                        description=entry.description)
         if changed:
-            _ok(f'{name}: enabled in topology')
+            _ok(f'{entry.name}: enabled in topology')
         else:
-            _info(f'{name}: already enabled')
+            _info(f'{entry.name}: already enabled')
     if rc == 0:
         _info('  start with: smd start')
     return rc
@@ -1842,7 +1846,7 @@ def cmd_disable(args) -> int:
         return 1
 
     from sigmond.topology import set_component_enabled
-    from sigmond.catalog import load_catalog
+    from sigmond.catalog import load_catalog, get_entry
 
     names = getattr(args, 'names', []) or []
     if not names:
@@ -1857,17 +1861,21 @@ def cmd_disable(args) -> int:
 
     rc = 0
     for name in names:
-        if name not in catalog:
+        # Resolve aliases (legacy `radiod` -> ka9q-radio) so the unit lookup
+        # and topology flag both use the canonical component name.
+        entry = get_entry(name, catalog)
+        canonical = entry.name if entry is not None else name
+        if entry is None:
             _warn(f'{name}: not in catalog — proceeding to stop any leftover units')
         # Always try to stop units first (matches the operator's intent
         # "I want this off").  Then flip the topology flag.
-        _stop_component_units(name)
-        if name in catalog:
-            changed = set_component_enabled(name, False, TOPOLOGY_PATH)
+        _stop_component_units(canonical)
+        if entry is not None:
+            changed = set_component_enabled(canonical, False, TOPOLOGY_PATH)
             if changed:
-                _ok(f'{name}: disabled in topology + units stopped')
+                _ok(f'{canonical}: disabled in topology + units stopped')
             else:
-                _ok(f'{name}: already disabled (units stopped)')
+                _ok(f'{canonical}: already disabled (units stopped)')
     return rc
 
 

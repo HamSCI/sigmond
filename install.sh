@@ -447,7 +447,7 @@ if [[ ! -f /etc/sigmond/topology.toml ]]; then
 # All components start disabled.  Use  sudo smd tui  (Install screen)
 # or  sudo smd install <name>  to enable and install them.
 
-[component.radiod]
+[component.ka9q-radio]
 enabled = false
 managed = true
 
