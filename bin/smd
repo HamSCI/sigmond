@@ -2674,6 +2674,73 @@ def _restart_upload_services_last() -> None:
             _err(f'{unit}: {r2.stderr.strip()}')
 
 
+def _ensure_multicast_rcvbuf(dry_run: bool = False) -> bool:
+    """Ensure net.core.rmem_max is large enough for ka9q-python multicast.
+
+    ka9q-python requests an 8 MiB SO_RCVBUF per multicast socket; Linux
+    doubles it on success, so the kernel ceiling (net.core.rmem_max) must be
+    >= 16 MiB or every subscriber silently drops packets.  Stock Debian ships
+    ~208 KiB.  We install a sigmond-owned sysctl drop-in pinning the ceiling
+    to the recommended 64 MiB (headroom for a multi-client station) and load
+    it immediately.  This is the write-side companion to harmonize.py's
+    rule_kernel_rcvbuf_adequate check.
+
+    On a greenfield install cmd_apply runs this before the recorders are first
+    started, so they allocate against the raised ceiling automatically.  On a
+    host whose subscribers are *already* running, restart them once after the
+    ceiling is raised — an established socket keeps its clamped buffer.
+
+    Idempotent: no-op once the drop-in is present with the right value and the
+    live ceiling already meets the floor.  Returns True if anything changed.
+    """
+    try:
+        from sigmond.harmonize import (
+            RCVBUF_PROC_PATH, RCVBUF_RECOMMENDED_BYTES, RCVBUF_FLOOR_BYTES,
+        )
+    except Exception:
+        RCVBUF_PROC_PATH = Path('/proc/sys/net/core/rmem_max')
+        RCVBUF_RECOMMENDED_BYTES = 64 * 1024 * 1024
+        RCVBUF_FLOOR_BYTES = 16 * 1024 * 1024
+
+    conf_path = Path('/etc/sysctl.d/99-sigmond-multicast.conf')
+    mib = RCVBUF_RECOMMENDED_BYTES // (1024 * 1024)
+    desired = (
+        "# Managed by sigmond (smd apply).  Raises the kernel socket-buffer\n"
+        "# ceiling so ka9q-python's 8 MiB SO_RCVBUF multicast request is not\n"
+        "# clamped — stock Debian's ~208 KiB drops every multicast subscriber.\n"
+        f"net.core.rmem_max = {RCVBUF_RECOMMENDED_BYTES}\n"
+    )
+    try:
+        live = int(RCVBUF_PROC_PATH.read_text().strip())
+    except Exception:
+        live = -1
+
+    have_conf = conf_path.exists() and conf_path.read_text() == desired
+    if have_conf and live >= RCVBUF_FLOOR_BYTES:
+        return False  # drop-in present and ceiling already effective
+
+    if dry_run:
+        if not have_conf:
+            _info(f'(dry-run) would write {conf_path} (net.core.rmem_max={mib} MiB)')
+        if live < RCVBUF_FLOOR_BYTES:
+            _info(f'(dry-run) would load {conf_path} (live rmem_max={live} B)')
+        return False
+
+    if not have_conf:
+        try:
+            conf_path.write_text(desired)
+            _ok(f'multicast tuning: wrote {conf_path.name} (net.core.rmem_max={mib} MiB)')
+        except OSError as exc:
+            _warn(f'multicast tuning: could not write {conf_path}: {exc}')
+            return False
+    r = _run(['sysctl', '--quiet', f'--load={conf_path}'], sudo=True)
+    if r.returncode == 0:
+        _ok(f'multicast tuning: net.core.rmem_max raised to {mib} MiB')
+    else:
+        _warn(f'multicast tuning: sysctl load failed — {r.stderr.strip()}')
+    return True
+
+
 def cmd_apply(args) -> int:
     if _need_root('apply'):
         return 1
@@ -2688,6 +2755,12 @@ def cmd_apply(args) -> int:
     # the decision to restart wd-upload-* at the end: a fully no-op apply
     # leaves them alone instead of cycling them every time.
     something_changed = False
+
+    # Host-level multicast tuning: raise net.core.rmem_max so ka9q-python's
+    # 8 MiB SO_RCVBUF request is not clamped (stock Debian ~208 KiB drops
+    # every subscriber).  Runs before recorders start on a greenfield apply
+    # so they bind against the raised ceiling; harmonize.py checks it.
+    something_changed |= _ensure_multicast_rcvbuf(dry_run=dry_run)
 
     # Reconcile Proxmox VM `onboot` flag — silent no-op on bare-metal
     # hosts.  Catches the "host rebooted, VM didn't come back" failure

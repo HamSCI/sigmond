@@ -35,7 +35,7 @@ include = ["sigmond*"]
 testpaths = ["tests"]
 
 [tool.uv.sources]
-ka9q-python = { path = "../ka9q-python" }
+ka9q-python = { path = "../ka9q-python", editable = true }
 
 [dependency-groups]
 dev = [
