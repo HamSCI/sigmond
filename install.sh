@@ -593,6 +593,14 @@ $SUDO ln -sf "$REPO_DIR/scripts/sigmond-decode-health-collect.py" \
         /usr/local/sbin/sigmond-decode-health-collect
 ok "sigmond-decode-health-collect symlink installed"
 
+# Timing-chain SHM pre-create (docs/timing-chain-architecture.md, step 2): give
+# the chrony/gpsd/hf-timestd refclock SHM segments a stable owner+perm before any
+# of them start, so a chrony/gpsd/fusion restart can never flip ownership and
+# lock a producer out (the cascade that put the GPS reference on internet NTP).
+info "Installing sigmond-shm-precreate → /usr/local/sbin/"
+$SUDO ln -sf "$REPO_DIR/scripts/sigmond-shm-precreate" /usr/local/sbin/sigmond-shm-precreate
+ok "sigmond-shm-precreate symlink installed"
+
 $SUDO systemctl daemon-reload
 # Enable just the unified trim timer.  ConditionPathExists=/var/lib/sigmond/sink.db
 # in the service unit keeps it inactive until a producer writes — and even
@@ -605,6 +613,10 @@ $SUDO systemctl daemon-reload
 # OnBootSec/OnUnitActiveSec have no anchor until reboot or a manual
 # service run).  Observed on B4-100 2026-05-30.
 $SUDO systemctl enable --now sigmond-storage-trim-all.timer
+# Enable the timing SHM pre-create oneshot (idempotent; creates NTP0-3 at boot
+# before gpsd/chrony/hf-timestd).  Only meaningful on a host running radiod +
+# a local GPS, but harmless otherwise.
+$SUDO systemctl enable sigmond-shm-precreate.service 2>/dev/null || true
 ok "sigmond-storage-trim-all.timer enabled + started (15-min cadence)"
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────

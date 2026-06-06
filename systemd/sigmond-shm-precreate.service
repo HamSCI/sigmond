@@ -1,0 +1,13 @@
+[Unit]
+Description=sigmond: pre-create timing SHM refclock segments (chrony/gpsd/hf-timestd)
+Documentation=file:///opt/git/sigmond/sigmond/docs/timing-chain-architecture.md
+After=sysinit.target
+Before=gpsd.service chrony.service timestd-fusion.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sigmond-shm-precreate
+
+[Install]
+WantedBy=multi-user.target

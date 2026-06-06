@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Pre-create the chrony/gpsd/hf-timestd SHM refclock segments at a stable
+owner+perm so neither a chrony restart nor a gpsd/hf-timestd restart can flip
+ownership and lock a producer out (docs/timing-chain-architecture.md, step 2).
+
+Creates NTP0..3 (keys 0x4e545030..33), each sizeof(struct shmTime)=96 bytes,
+mode 0666, owned by root.  Idempotent: shmget without IPC_EXCL returns an
+existing segment unchanged, so run this BEFORE gpsd/chrony/hf-timestd at boot.
+A pre-existing segment with the wrong perms must be ipcrm'd first to be remade.
+"""
+import ctypes, sys
+
+SHM_KEY_BASE = 0x4e545030
+SHM_SIZE = 96               # sizeof(struct shmTime) — x86-64 chrony/gpsd/ntpd ABI
+IPC_CREAT = 0o1000
+N_UNITS = 4
+
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+libc.shmget.restype = ctypes.c_int
+libc.shmget.argtypes = [ctypes.c_int, ctypes.c_size_t, ctypes.c_int]
+
+rc = 0
+for unit in range(N_UNITS):
+    key = SHM_KEY_BASE + unit
+    shmid = libc.shmget(key, SHM_SIZE, IPC_CREAT | 0o666)
+    if shmid < 0:
+        print(f"shm-precreate: unit {unit} key 0x{key:08x} FAILED (errno {ctypes.get_errno()})",
+              file=sys.stderr)
+        rc = 1
+    else:
+        print(f"shm-precreate: unit {unit} key 0x{key:08x} ready (shmid {shmid})")
+sys.exit(rc)
