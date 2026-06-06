@@ -174,8 +174,11 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
   `smd install --profile`; nav reorder so Installation leads + greenfield-aware
   landing + profile-driven one-shot install buttons; start-ordering fixes
   (igmp/gpsdo=0, hf-timestd=50).
-- **Phase B (medium):** the `smd bringup` engine — stage runner, local/remote
-  branch, background wisdom, checkpoints — with a thin TUI flow over it.
+- **Phase B (DONE, commit `f31fa85`):** `lib/sigmond/bringup.py` pure plan
+  builder + `smd bringup --profile [--remote-radiod] [--with-optional] [--dry-run]`
+  executor (local/remote branch, background wisdom + wisdom-gated start,
+  checkpoint probes); TUI greenfield landing offers per-profile guided bring-up
+  buttons (suspend → `smd bringup`); `tests/test_bringup.py` (6 tests).
 - **Phase C (config coverage):** ensure every DASI2 client exposes a clean
   `--non-interactive` config path the engine can drive end-to-end; TUI surfaces
   the commons defaults so no field is typed twice.
