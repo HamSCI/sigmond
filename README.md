@@ -87,6 +87,11 @@ smd list --catalog
     ·  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS
 ```
 
+> **Setting up a new host end to end?** See the
+> [greenfield install runbook](docs/greenfield-runbook.md) for the
+> full ordered walkthrough (identity → radiod → wisdom → tuning →
+> clients → validate).
+
 ### 3. Install clients
 
 Install whichever clients you need.  Each client's installer handles

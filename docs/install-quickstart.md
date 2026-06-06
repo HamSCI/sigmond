@@ -141,6 +141,12 @@ sudo userdel -r sigmond                      # only if no human user shares the 
 
 ## Next steps after install
 
+> **For the full operational bring-up** — identity, radiod + RX888 config,
+> FFT wisdom, CPU/governor/isolcpus tuning, per-client reporter setup, and
+> the validate-driven checklist — follow the
+> [greenfield runbook](greenfield-runbook.md). The commands below are just
+> the first move.
+
 ```bash
 sudo smd tui                          # interactive configurator
 # or, headless:
