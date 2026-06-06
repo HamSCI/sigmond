@@ -67,12 +67,14 @@ def _dispatch(args, *, verb: str) -> int:
         return 1
 
     non_interactive = bool(getattr(args, "non_interactive", False))
+    reconfig = bool(getattr(args, "reconfig", False))
     cfg_block = _read_contract_config(deploy)
     entry = cfg_block.get(verb)
     if entry:
         return _run_client_entrypoint(client, deploy, entry, verb,
                                        instance=instance,
-                                       non_interactive=non_interactive)
+                                       non_interactive=non_interactive,
+                                       reconfig=reconfig)
 
     # Fallback paths (CONTRACT-v0.5 §14.4)
     return _fallback(client, deploy, verb, instance=instance)
@@ -118,7 +120,8 @@ def _maybe_elevate(argv: list, env: Optional[dict] = None) -> list:
 def _run_client_entrypoint(client: str, deploy_path: Path,
                             entry, verb: str,
                             *, instance: Optional[str] = None,
-                            non_interactive: bool = False) -> int:
+                            non_interactive: bool = False,
+                            reconfig: bool = False) -> int:
     """`entry` is either a string (single executable, optionally relative
     to the repo root) or a list (argv form: [exe, arg1, arg2, ...])."""
     repo_root = deploy_path.parent
@@ -156,6 +159,10 @@ def _run_client_entrypoint(client: str, deploy_path: Path,
     # TUI / `smd bringup` can drive the same configurator without a TTY.
     if non_interactive:
         argv.append("--non-interactive")
+    # --reconfig only makes sense for init; lets the configurator overwrite
+    # an existing config (e.g. the install-rendered placeholder).
+    if reconfig and verb == "init":
+        argv.append("--reconfig")
     info(f"invoking: {' '.join(argv)}")
     info(f"vars: {', '.join(sorted(env_keys_set(env))) or '(none)'}")
     elevated = _maybe_elevate(argv, env)
