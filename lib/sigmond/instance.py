@@ -391,6 +391,31 @@ def _config_stub(client: str, reporter_id: str) -> str:
     )
 
 
+def _config_from_shared(client: str, reporter_id: str, shared_body: str) -> str:
+    """Seed a per-instance config from the client's shared config.toml.
+
+    The per-instance config is the complete source of truth (no inheritance,
+    MULTI-INSTANCE-ARCHITECTURE.md §5), so we keep the full shared body
+    (bands, radiod status, channel defaults, …) and prepend the [instance]
+    block — the same shape the migration path produces.  Guards against a
+    shared config that already carries its own [instance] table.
+    """
+    if "[instance]" in shared_body:
+        return shared_body
+    instance_block = (
+        "[instance]\n"
+        f'reporter_id = "{reporter_id}"\n'
+        "sources = []\n"
+        "\n"
+    )
+    return (
+        _stub_header(client, reporter_id, "Per-instance config")
+        + f"# Seeded from /etc/{client}/config.toml (the shared config).\n\n"
+        + instance_block
+        + shared_body
+    )
+
+
 def _env_stub(client: str, reporter_id: str) -> str:
     return (
         _stub_header(client, reporter_id, "Per-instance env")
@@ -463,7 +488,16 @@ def create_instance(
     paths.sources.parent.mkdir(parents=True, exist_ok=True)
 
     if not paths.config.exists():
-        paths.config.write_text(_config_stub(client, reporter_id))
+        # Prefer seeding from the client's shared config so the per-instance
+        # file is complete (bands, radiod binding, …) — a bare stub fails the
+        # client's "no frequencies configured" check.  Falls back to the stub
+        # when no shared config exists yet.
+        shared = Path("/etc") / client / "config.toml"
+        if shared.exists():
+            paths.config.write_text(
+                _config_from_shared(client, reporter_id, shared.read_text()))
+        else:
+            paths.config.write_text(_config_stub(client, reporter_id))
     if not paths.env.exists():
         paths.env.write_text(_env_stub(client, reporter_id))
     if not paths.sources.exists():

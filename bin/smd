@@ -6789,6 +6789,34 @@ def cmd_sources_apply(args) -> int:
                 f'sudo systemctl restart wspr-recorder@AC0G-B4)'
             )
 
+    # Per-instance source selections (CLIENT-CONTRACT §19.5): render each
+    # /etc/sigmond/clients/<client>@<reporter>.sources.toml into its own
+    # per-instance config /etc/<client>/<reporter>.toml (the source of truth),
+    # not the shared config.  Only wspr-recorder is multi-source aware today.
+    from sigmond.sources import ClientSources as _ClientSources
+    from pathlib import Path as _IP
+    _clients_dir = _IP('/etc/sigmond/clients')
+    for sel_file in (sorted(_clients_dir.glob('*@*.sources.toml'))
+                     if _clients_dir.is_dir() else []):
+        stem = sel_file.name[: -len('.sources.toml')]   # <client>@<reporter>
+        base, _at, rid = stem.partition('@')
+        sel = _ClientSources.load(stem).selected
+        if base != 'wspr-recorder':
+            if sel:
+                _info(f'  ⊘ {stem}: not yet multi-source aware (deferred)')
+            continue
+        inst_config = _IP('/etc/wspr-recorder') / f'{rid}.toml'
+        if not inst_config.exists():
+            _info(f'  ⚠ {stem}: no per-instance config at {inst_config} — '
+                  f'run `smd instance add wspr-recorder {rid}` first')
+            continue
+        changed, message = _apply_sources_to_wspr_recorder(
+            sel, inventory_rows, inst_config, dry_run=dry_run)
+        print(message, flush=True)
+        if changed:
+            any_changed = True
+            restart_hints.append(f'wspr-recorder@{rid}.service')
+
     if not any_changed:
         _info('  nothing to do; every client already in sync with its selection')
         return 0
