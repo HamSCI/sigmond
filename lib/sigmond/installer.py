@@ -414,6 +414,36 @@ def apply_deploy_toml_links(repo_dir: Path, dry_run: bool = False) -> list[str]:
             msgs.append(f"  linked {dst.name} → {src}")
         except OSError as exc:
             msgs.append(f"  warning: could not link {dst}: {exc}")
+
+    # Also link EVERY systemd unit file shipped in the repo's systemd/ dir
+    # (services, timers, targets, ...), not just the ones with an explicit
+    # [[install.steps]] link.  The [systemd] lifecycle list and the unit deps
+    # (a .timer triggers its .service, a .service has OnFailure=, etc.) assume
+    # all the component's units are installed; authors routinely ship a unit
+    # without a link step (e.g. hf-timestd's grape-*.timer AND the
+    # grape-*.service they trigger), so `smd start` fails 'Unit not found'.
+    # Drop-in *.conf files are not units (handled by their own steps); skip.
+    _UNIT_EXTS = ('.service', '.timer', '.target', '.socket', '.path',
+                  '.mount', '.slice')
+    systemd_dir = repo_dir / 'systemd'
+    for src in (sorted(systemd_dir.iterdir()) if systemd_dir.is_dir() else []):
+        if not src.is_file() or src.suffix not in _UNIT_EXTS:
+            continue
+        src = src.resolve()
+        dst = Path('/etc/systemd/system') / src.name
+        if dst.is_symlink() and dst.resolve() == src:
+            continue
+        if dry_run:
+            msgs.append(f"  (dry-run) would link {dst} → {src}")
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+            dst.symlink_to(src)
+            msgs.append(f"  linked {dst.name} → {src}")
+        except OSError as exc:
+            msgs.append(f"  warning: could not link {dst}: {exc}")
     return msgs
 
 
