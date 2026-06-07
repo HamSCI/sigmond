@@ -194,6 +194,10 @@ class InstallScreen(Vertical):
             self._install_selected()
         elif bid == "is-all":
             self._install_all_missing()
+        elif bid and bid.startswith("is-profile-"):
+            self._install_profile(bid[len("is-profile-"):])
+        elif bid and bid.startswith("is-bringup-"):
+            self._bringup_profile(bid[len("is-bringup-"):])
 
     def _refresh(self) -> None:
         self.query_one("#is-status", Static).update("[dim]loading\u2026[/]")
