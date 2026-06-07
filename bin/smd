@@ -2016,6 +2016,46 @@ def cmd_disable(args) -> int:
     return rc
 
 
+def cmd_uninstall(args) -> int:
+    """Whole-host uninstall (lib/sigmond/uninstall.py).  Plan-first: prints the
+    plan and stops unless --yes.  Modes: --keep-config vs full (bare-metal)."""
+    try:
+        from sigmond.uninstall import plan_uninstall, execute_uninstall, render_plan
+    except Exception as exc:  # noqa: BLE001
+        print(f'smd uninstall: sigmond.uninstall unavailable: {exc}', file=sys.stderr)
+        return 1
+    keep_config = bool(getattr(args, 'keep_config', False))
+    full = not keep_config
+
+    def _resolve(default, on_flag, off_flag):
+        if getattr(args, on_flag, False):
+            return True
+        if getattr(args, off_flag, False):
+            return False
+        return default
+
+    plan = plan_uninstall(
+        keep_config=keep_config,
+        wipe_data=_resolve(full, 'wipe_data', 'keep_data'),
+        revert_host=_resolve(full, 'revert_host', 'keep_host'),
+        remove_users=_resolve(full, 'remove_users', 'keep_users'),
+        remove_source=_resolve(full, 'remove_source', 'keep_source'),
+    )
+    for line in render_plan(plan):
+        print(line)
+    if getattr(args, 'dry_run', False) or not getattr(args, 'yes', False):
+        print()
+        print('  DRY RUN — nothing removed.  Re-run with --yes (as root) to execute.')
+        return 0
+    if os.geteuid() != 0:
+        print('smd uninstall: must run as root to execute '
+              '(sudo smd uninstall --yes)', file=sys.stderr)
+        return 1
+    print()
+    print('  EXECUTING uninstall ...')
+    return execute_uninstall(plan, dry_run=False)
+
+
 def cmd_remove(args) -> int:
     """Remove a component.
 
@@ -12326,6 +12366,21 @@ def main() -> int:
     p_timing.add_argument('--dry-run', action='store_true',
                           help='reconcile: show the actions without applying them')
 
+    p_uninstall = sub.add_parser('uninstall',
+        help='tear down the whole sigmond install (plan-first; --yes to execute)')
+    p_uninstall.add_argument('--keep-config', action='store_true',
+        help='preserve /etc config + /var/lib data + source checkouts + users')
+    p_uninstall.add_argument('--wipe-data', action='store_true', help='remove /var/lib data')
+    p_uninstall.add_argument('--keep-data', action='store_true', help='keep /var/lib data')
+    p_uninstall.add_argument('--revert-host', action='store_true', help='revert sysctl/grub/chrony tunables')
+    p_uninstall.add_argument('--keep-host', action='store_true', help='keep host tunables')
+    p_uninstall.add_argument('--remove-users', action='store_true', help='userdel the service users')
+    p_uninstall.add_argument('--keep-users', action='store_true', help='keep the service users')
+    p_uninstall.add_argument('--remove-source', action='store_true', help='rm /opt/git/sigmond checkouts')
+    p_uninstall.add_argument('--keep-source', action='store_true', help='keep the source checkouts')
+    p_uninstall.add_argument('--yes', action='store_true', help='execute (default: plan only)')
+    p_uninstall.add_argument('--dry-run', action='store_true', help='print plan and exit')
+
     # psk-watch — live tail of psk-recorder's PSK Reporter upload activity
     p_tts = sub.add_parser('timestd-tune-storage',
                            help='size hf-timestd retention policy to local '
@@ -13002,7 +13057,7 @@ def main() -> int:
         _deprecated('timestd-tune-storage', 'storage tune-timestd')
         return cmd_timestd_tune_storage(args)
 
-    if args.command in ('validate', 'config', 'environment', 'ka9q-watch', 'timing'):
+    if args.command in ('validate', 'config', 'environment', 'ka9q-watch', 'timing', 'uninstall'):
         if not _HAS_SIGMOND_LIB:
             print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
                   file=sys.stderr)
@@ -13011,6 +13066,8 @@ def main() -> int:
             return cmd_validate(args)
         if args.command == 'timing':
             return cmd_timing(args)
+        if args.command == 'uninstall':
+            return cmd_uninstall(args)
         if args.command == 'ka9q-watch':
             _deprecated('ka9q-watch', 'watch ka9q')
             return cmd_ka9q_watch(args)

@@ -1,0 +1,602 @@
+"""Whole-host uninstall — tear down a complete sigmond install.
+
+``smd <client> --purge`` (see ``purge.py``) removes ONE client.  This module
+removes the *whole* install: every client/library, the non-contract upstream
+components (ka9q-radio, ka9q-web — whose ``make install`` footprint we track
+ourselves), plus sigmond's own host footprint (host-level systemd units,
+cpu-affinity drop-ins incl. orphans, the multicast sysctl, the chrony refclock
+drop-in, the grub isolcpus edit, the service users, ``/usr/local/bin``
+symlinks, ``/var/lib/sigmond`` data, and the ``/opt/git/sigmond`` checkouts).
+
+Two modes, plus orthogonal toggles, so the plan is always explicit:
+
+  full / bare-metal (default)
+      Remove everything: client artifacts, /etc config, /var data, venvs,
+      source checkouts, host units + drop-ins, host tunables (sysctl/grub/
+      chrony), /usr/local/bin symlinks, and service users.  True clean slate.
+
+  --keep-config
+      Preserve the things a reinstall would otherwise force you to redo:
+      /etc/<client> + /etc/sigmond + /etc/radio config, /var/lib data, the
+      service users, and the /opt/git/sigmond checkouts.  Everything else
+      (units, drop-ins, venvs, binaries, /var/log, host tunables) is removed.
+
+Toggles (defaults follow the chosen mode; flags override):
+  --keep-data / --wipe-data      keep or remove /var/lib/* (data)
+  --keep-host  / --revert-host   keep or revert sysctl/grub/chrony tunables
+  --keep-users / --remove-users  keep or remove the service users
+  --keep-source/ --remove-source keep or remove /opt/git/sigmond/* checkouts
+
+ka9q-radio / ka9q-web are upstream C projects with no uninstall of their own.
+We capture their footprint from their OWN build system — ``make -n install
+DESTDIR=<sentinel>`` per subdir (pure dry-run, zero side effects) — and parse
+the destinations.  Component-owned dirs (/etc/radio, /var/lib/ka9q-radio,
+/usr/local/{lib,share}/ka9q-*) are removed wholesale; individual files in
+shared dirs (/usr/local/{bin,sbin}, /etc/systemd/system, udev/sysctl/...) are
+removed one by one so the shared dir itself is never touched.
+
+Plan-first ALWAYS.  ``smd uninstall`` prints the plan and stops; ``--yes``
+executes.  ``--dry-run`` is the explicit no-op form.  Refuses non-root.
+"""
+
+from __future__ import annotations
+
+import glob as globmod
+import os
+import pwd
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import purge
+
+GIT_BASE = Path("/opt/git/sigmond")
+ETC_BASE = Path("/etc")
+VAR_LIB = Path("/var/lib")
+VAR_LOG = Path("/var/log")
+RUN = Path("/run")
+DEV_SHM = Path("/dev/shm")
+SYSTEMD_SYSTEM = Path("/etc/systemd/system")
+USR_LOCAL_BIN = Path("/usr/local/bin")
+
+SYSCTL_FILE = Path("/etc/sysctl.d/99-sigmond-multicast.conf")
+CHRONY_REFCLOCKS = Path("/etc/chrony/conf.d/timestd-refclocks.conf")
+GRUB_FILE = Path("/etc/default/grub")
+GRUB_TOKENS = ("isolcpus", "rcu_nocbs")
+CPU_AFFINITY_DROPIN = "smd-cpu-affinity.conf"
+
+SERVICE_USERS = ("sigmond", "wsprrec", "pskrec", "timestd", "magrec")
+
+_LIBRARY_NAMES = frozenset({
+    "ka9q-python", "callhash", "hs-uploader", "ft8_lib", "onion",
+})
+
+# --- non-contract upstream components: footprint tracked via `make -n install` #
+# Map component -> (subdirs to walk).  "." means the repo root Makefile.
+_EXTERNAL_COMPONENTS = {
+    "ka9q-radio": ["src", "aux", "share", "service", "rules", "docs", "config"],
+    "ka9q-web": ["."],
+}
+# Component-owned dirs removed wholesale, and how each is classified for the
+# keep-config / wipe-data toggles.
+_KA9Q_COMPONENT_DIRS = {
+    "/etc/radio": "config",
+    "/var/lib/ka9q-radio": "data",
+    "/usr/local/lib/hfdl": "asset",
+    "/usr/local/lib/ka9q-radio": "asset",
+    "/usr/local/share/ka9q-radio": "asset",
+    "/usr/local/share/ka9q-web": "asset",
+}
+# Shared system dirs: only the individual installed files get removed.
+_KA9Q_SHARED_DIRS = frozenset({
+    "/usr/local/bin", "/usr/local/sbin",
+    "/usr/local/share/man/man1", "/usr/local/share/man/man8",
+    "/etc/systemd/system", "/etc/udev/rules.d", "/etc/sysctl.d",
+    "/etc/cron.d", "/etc/modprobe.d", "/etc/logrotate.d", "/etc/sysusers.d",
+})
+# Extra binaries a client built outside its deploy.toml (psk-recorder Phase 1.6).
+_EXTRA_BINARIES = (Path("/usr/local/bin/decode_ft8"),)
+
+_FLAG_WITH_VAL = frozenset({"-m", "-o", "-g", "-t"})
+_SENTINEL = "/__SIGMOND_UNINSTALL_SENTINEL__"
+
+
+@dataclass
+class UninstallPlan:
+    keep_config: bool
+    wipe_data: bool
+    revert_host: bool
+    remove_users: bool
+    remove_source: bool
+    client_plans: list = field(default_factory=list)
+    host_units: list = field(default_factory=list)
+    host_unit_files: list = field(default_factory=list)
+    dropins: list = field(default_factory=list)
+    bin_links: list = field(default_factory=list)
+    data_dirs: list = field(default_factory=list)
+    log_dirs: list = field(default_factory=list)
+    config_dirs: list = field(default_factory=list)
+    checkouts: list = field(default_factory=list)
+    venvs: list = field(default_factory=list)
+    host_files: list = field(default_factory=list)
+    grub_revert: bool = False
+    users: list = field(default_factory=list)
+    ext_files: list = field(default_factory=list)        # individual files, always rm
+    ext_asset_dirs: list = field(default_factory=list)   # component asset dirs, always rm
+
+
+# --------------------------------------------------------------------------- #
+# discovery — sigmond clients
+# --------------------------------------------------------------------------- #
+def _client_names() -> list:
+    if not GIT_BASE.is_dir():
+        return []
+    return sorted(
+        p.name for p in GIT_BASE.iterdir()
+        if p.is_dir() and not p.name.startswith(".") and p.name != "sigmond"
+    )
+
+
+def _deploy_extras(name: str) -> dict:
+    repo = GIT_BASE / name
+    deploy = purge._read_deploy_toml(repo) if repo.exists() else None
+    units: list = []
+    link_dsts: list = []
+    if deploy is not None:
+        sysd = deploy.get("systemd", {}) or {}
+        units += list(sysd.get("units", []))
+        units += list(sysd.get("templated_units", []))
+        units += list(sysd.get("optional_units", []))
+        for step in deploy.get("install", {}).get("steps", []):
+            dst = step.get("dst")
+            if step.get("kind") == "link" and dst:
+                link_dsts.append(Path(dst))
+    state_dirs = [d / name for d in (VAR_LIB, VAR_LOG, RUN, DEV_SHM)
+                  if (d / name).exists()]
+    return {"units": units, "link_dsts": link_dsts, "state_dirs": state_dirs}
+
+
+def _bin_links_into_repos() -> list:
+    out: list = []
+    if not USR_LOCAL_BIN.is_dir():
+        return out
+    for entry in sorted(USR_LOCAL_BIN.iterdir()):
+        try:
+            if entry.is_symlink() and str(GIT_BASE) in os.readlink(entry):
+                out.append(entry)
+        except OSError:
+            continue
+    return out
+
+
+def _sigmond_host_units() -> tuple:
+    names: list = []
+    files: list = []
+    if SYSTEMD_SYSTEM.is_dir():
+        for f in sorted(SYSTEMD_SYSTEM.iterdir()):
+            if f.is_file() and (f.name.startswith("sigmond-")
+                                or f.name.startswith("smd-")):
+                files.append(f)
+                if f.suffix in (".service", ".timer"):
+                    names.append(f.name)
+    return names, files
+
+
+def _affinity_dropins() -> list:
+    out: list = []
+    if not SYSTEMD_SYSTEM.is_dir():
+        return out
+    for d in sorted(SYSTEMD_SYSTEM.glob("*.service.d")):
+        dropin = d / CPU_AFFINITY_DROPIN
+        if dropin.exists():
+            out.append(dropin)
+    return out
+
+
+def _grub_has_sigmond_tokens() -> bool:
+    try:
+        text = GRUB_FILE.read_text()
+    except OSError:
+        return False
+    return any(tok + "=" in text for tok in GRUB_TOKENS)
+
+
+def _existing_users(names: tuple) -> list:
+    out: list = []
+    for u in names:
+        try:
+            pwd.getpwnam(u)
+            out.append(u)
+        except KeyError:
+            continue
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# discovery — non-contract upstream components (ka9q-radio / ka9q-web)
+# --------------------------------------------------------------------------- #
+def _split_install_args(toks: list) -> tuple:
+    """Return (srcs, tdir) for an `install` argv, skipping flags + flag-values
+    (e.g. the mode after -m) and DESTDIR-prefixed dest args."""
+    srcs, tdir, i = [], None, 1
+    while i < len(toks):
+        t = toks[i]
+        if t == "-t" and i + 1 < len(toks):
+            tdir = toks[i + 1]
+            i += 2
+            continue
+        if t in _FLAG_WITH_VAL:
+            i += 2
+            continue
+        if t.startswith("-"):
+            i += 1
+            continue
+        if not t.startswith(_SENTINEL):
+            srcs.append(t)
+        i += 1
+    return srcs, tdir
+
+
+def _make_install_manifest(repo: Path, subdirs: list) -> tuple:
+    """Parse `make -n install DESTDIR=<sentinel>` (a side-effect-free dry run)
+    for each subdir.  Returns (component_dirs, files): component-owned dirs to
+    remove wholesale, and individual files that land in shared system dirs."""
+    declared: set = set()
+    files: set = set()
+    comp: set = set()
+
+    def emit(path: str) -> None:
+        for c in _KA9Q_COMPONENT_DIRS:
+            if path == c or path.startswith(c + "/"):
+                comp.add(c)
+                return
+        if os.path.dirname(path) in _KA9Q_SHARED_DIRS:
+            files.add(path)
+
+    for d in subdirs:
+        sub = repo / d if d != "." else repo
+        if not (sub / "Makefile").is_file():
+            continue
+        try:
+            out = subprocess.run(
+                ["make", "-C", str(sub), "-n", "install",
+                 f"DESTDIR={_SENTINEL}"],
+                capture_output=True, text=True, check=False, timeout=60,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for raw in out.splitlines():
+            line = raw.strip()
+            if not line.startswith(("install ", "ln ", "cp ")):
+                continue
+            try:
+                toks = shlex.split(line)
+            except ValueError:
+                continue
+            dest_args = [t for t in toks if t.startswith(_SENTINEL)]
+            if not dest_args:
+                continue
+            if "-d" in toks:
+                for dp in dest_args:
+                    declared.add(dp[len(_SENTINEL):])
+                continue
+            srcs, tdir = _split_install_args(toks)
+            dest = (tdir[len(_SENTINEL):] if tdir
+                    else dest_args[-1][len(_SENTINEL):])
+            dest_is_dir = (dest in declared or tdir is not None
+                           or dest in _KA9Q_COMPONENT_DIRS
+                           or dest in _KA9Q_SHARED_DIRS)
+            if not dest_is_dir and len(srcs) <= 1:
+                emit(dest)
+                continue
+            for s in srcs:
+                if "*" in s or "?" in s:
+                    for m in globmod.glob(str(sub / s)):
+                        emit(os.path.join(dest, os.path.basename(m)))
+                else:
+                    emit(os.path.join(dest, os.path.basename(s)))
+
+    for c in _KA9Q_COMPONENT_DIRS:
+        if c in declared or os.path.isdir(c):
+            comp.add(c)
+    files = {f for f in files
+             if not any(f == c or f.startswith(c + "/") for c in comp)}
+    return sorted(comp), sorted(files)
+
+
+# --------------------------------------------------------------------------- #
+# plan
+# --------------------------------------------------------------------------- #
+def plan_uninstall(*, keep_config: bool, wipe_data: bool, revert_host: bool,
+                   remove_users: bool, remove_source: bool) -> UninstallPlan:
+    plan = UninstallPlan(
+        keep_config=keep_config, wipe_data=wipe_data, revert_host=revert_host,
+        remove_users=remove_users, remove_source=remove_source,
+    )
+
+    for name in _client_names():
+        cp = purge.plan_purge(name)
+        extra = _deploy_extras(name)
+        merged_units = list(dict.fromkeys(cp["declared_units"] + extra["units"]))
+        cp["declared_units"] = merged_units
+        cp["expanded_units"] = purge._expand_units(merged_units)
+        cp["link_dsts"] = list(dict.fromkeys(cp["link_dsts"] + extra["link_dsts"]))
+        cp["state_dirs"] = extra["state_dirs"]
+        plan.client_plans.append(cp)
+        if cp["venv_dir"]:
+            plan.venvs.append(cp["venv_dir"])
+        if cp["config_dir"]:
+            plan.config_dirs.append(cp["config_dir"])
+        if cp["repo_dir"] and name not in _LIBRARY_NAMES:
+            plan.checkouts.append(cp["repo_dir"])
+        for sd in extra["state_dirs"]:
+            if sd.parent == VAR_LIB:
+                plan.data_dirs.append(sd)
+            elif sd.parent == VAR_LOG:
+                plan.log_dirs.append(sd)
+    for name in _client_names():
+        if name in _LIBRARY_NAMES and (GIT_BASE / name).is_dir():
+            plan.checkouts.append(GIT_BASE / name)
+
+    # non-contract upstream components — capture their make-install footprint
+    seen_ext: set = set()
+    for comp, subdirs in _EXTERNAL_COMPONENTS.items():
+        repo = GIT_BASE / comp
+        if not repo.is_dir():
+            continue
+        comp_dirs, files = _make_install_manifest(repo, subdirs)
+        for d in comp_dirs:
+            cls = _KA9Q_COMPONENT_DIRS.get(d, "asset")
+            p = Path(d)
+            if cls == "config" and p not in plan.config_dirs:
+                plan.config_dirs.append(p)
+            elif cls == "data" and p not in plan.data_dirs:
+                plan.data_dirs.append(p)
+            elif cls == "asset" and p not in plan.ext_asset_dirs:
+                plan.ext_asset_dirs.append(p)
+        for f in files:
+            if f in seen_ext:
+                continue
+            seen_ext.add(f)
+            fp = Path(f)
+            plan.ext_files.append(fp)
+            # stop+disable any unit we're about to delete
+            if fp.parent == SYSTEMD_SYSTEM and fp.suffix in (".service", ".timer"):
+                plan.host_units.append(fp.name)
+    for b in _EXTRA_BINARIES:
+        if b.exists() and b not in plan.ext_files:
+            plan.ext_files.append(b)
+
+    # RAC (frpc remote-access tunnel) — staged host-side, not a client repo
+    rac_unit = SYSTEMD_SYSTEM / "wd-rac.service"
+    rac_files = []
+    if rac_unit.exists():
+        rac_files.append(rac_unit)
+        plan.host_units.append("wd-rac.service")
+    frpc_bin = Path("/usr/local/sbin/frpc")
+    if frpc_bin.exists() and frpc_bin not in plan.ext_files:
+        plan.ext_files.append(frpc_bin)
+
+    # sigmond host layer
+    host_units, host_files = _sigmond_host_units()
+    plan.host_unit_files = host_files + rac_files
+    plan.host_units = list(dict.fromkeys(plan.host_units + host_units))
+    plan.dropins = _affinity_dropins()
+    plan.bin_links = _bin_links_into_repos()
+    if (ETC_BASE / "sigmond").exists():
+        plan.config_dirs.append(ETC_BASE / "sigmond")
+    if (VAR_LIB / "sigmond").exists():
+        plan.data_dirs.append(VAR_LIB / "sigmond")
+    if (VAR_LOG / "sigmond").exists():
+        plan.log_dirs.append(VAR_LOG / "sigmond")
+    if (GIT_BASE / "sigmond").is_dir():
+        plan.checkouts.append(GIT_BASE / "sigmond")
+    if (GIT_BASE / "sigmond" / "venv").is_dir():
+        plan.venvs.append(GIT_BASE / "sigmond" / "venv")
+
+    for f in (SYSCTL_FILE, CHRONY_REFCLOCKS):
+        if f.exists():
+            plan.host_files.append(f)
+    plan.grub_revert = _grub_has_sigmond_tokens()
+    plan.users = _existing_users(SERVICE_USERS)
+
+    for attr in ("checkouts", "venvs", "config_dirs", "data_dirs", "log_dirs",
+                 "ext_asset_dirs", "ext_files"):
+        seen, uniq = set(), []
+        for p in getattr(plan, attr):
+            if p not in seen:
+                seen.add(p)
+                uniq.append(p)
+        setattr(plan, attr, uniq)
+    return plan
+
+
+# --------------------------------------------------------------------------- #
+# render
+# --------------------------------------------------------------------------- #
+def render_plan(plan: UninstallPlan) -> list:
+    out: list = []
+    mode = "keep-config" if plan.keep_config else "full (bare-metal)"
+    out.append(f"sigmond uninstall — mode: {mode}")
+    out.append("")
+
+    all_units = []
+    for cp in plan.client_plans:
+        all_units += cp["expanded_units"]
+    all_units += plan.host_units
+    all_units = list(dict.fromkeys(all_units))
+    if all_units:
+        out.append(f"  systemd:   stop+disable {len(all_units)} unit(s)")
+
+    rm = []
+    for cp in plan.client_plans:
+        for dst in cp["link_dsts"]:
+            if dst.is_symlink() or dst.exists():
+                rm.append(("unit-link", dst, True))
+    for f in plan.host_unit_files:
+        rm.append(("host-unit", f, True))
+    for d in plan.dropins:
+        rm.append(("drop-in", d, True))
+    for b in plan.bin_links:
+        rm.append(("bin-link", b, True))
+    for f in plan.ext_files:
+        rm.append(("ext-file", f, True))
+    for d in plan.ext_asset_dirs:
+        rm.append(("ext-asset", d, True))
+    for v in plan.venvs:
+        rm.append(("venv", v, True))
+    for lg in plan.log_dirs:
+        rm.append(("log", lg, True))
+    for c in plan.config_dirs:
+        rm.append(("config", c, not plan.keep_config))
+    for d in plan.data_dirs:
+        rm.append(("data", d, plan.wipe_data))
+    for c in plan.checkouts:
+        rm.append(("source", c, plan.remove_source))
+    for f in plan.host_files:
+        rm.append(("host-tunable", f, plan.revert_host))
+
+    counts = {}
+    for label, path, removed in rm:
+        counts.setdefault(label, [0, 0])
+        counts[label][0 if removed else 1] += 1
+    out.append(f"  files/dirs: {sum(c[0] for c in counts.values())} to remove, "
+               f"{sum(c[1] for c in counts.values())} kept")
+    for label, path, removed in rm:
+        verb = "rm  " if removed else "KEEP"
+        out.append(f"  {label:12} {verb} {path}")
+
+    if plan.grub_revert:
+        verb = "revert" if plan.revert_host else "KEEP  "
+        tail = "(needs reboot)" if plan.revert_host else ""
+        out.append(f"  {'grub':12} {verb} {GRUB_FILE} ({'/'.join(GRUB_TOKENS)}) {tail}")
+    if plan.users:
+        verb = "userdel" if plan.remove_users else "KEEP   "
+        out.append(f"  {'users':12} {verb} {', '.join(plan.users)}")
+
+    out.append("")
+    if plan.keep_config:
+        out.append("  (keep-config: /etc configs preserved for reinstall)")
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# execute
+# --------------------------------------------------------------------------- #
+def _rmtree(path: Path) -> None:
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        else:
+            return
+        print(f"  removed {path}")
+    except OSError as exc:
+        print(f"  warning: rm {path}: {exc}", file=sys.stderr)
+
+
+def execute_uninstall(plan: UninstallPlan, *, dry_run: bool = False) -> int:
+    if dry_run:
+        for line in render_plan(plan):
+            print(line)
+        return 0
+    if os.geteuid() != 0:
+        print("error: uninstall must run as root", file=sys.stderr)
+        return 1
+
+    all_expanded, all_declared = [], []
+    for cp in plan.client_plans:
+        all_expanded += cp["expanded_units"]
+        all_declared += cp["declared_units"]
+    all_expanded += plan.host_units
+    all_declared += plan.host_units
+    for unit in dict.fromkeys(all_expanded):
+        subprocess.run(["systemctl", "stop", unit], capture_output=True, check=False)
+    for unit in dict.fromkeys(all_declared):
+        subprocess.run(["systemctl", "disable", unit], capture_output=True, check=False)
+
+    for cp in plan.client_plans:
+        for dst in cp["link_dsts"]:
+            if dst.is_symlink() or dst.exists():
+                _rmtree(dst)
+    for f in plan.host_unit_files:
+        _rmtree(f)
+    for d in plan.dropins:
+        _rmtree(d)
+        try:
+            if d.parent.is_dir() and not any(d.parent.iterdir()):
+                d.parent.rmdir()
+        except OSError:
+            pass
+    for b in plan.bin_links:
+        _rmtree(b)
+    for f in plan.ext_files:
+        _rmtree(f)
+    for d in plan.ext_asset_dirs:
+        _rmtree(d)
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True, check=False)
+
+    for v in plan.venvs:
+        _rmtree(v)
+    for lg in plan.log_dirs:
+        _rmtree(lg)
+
+    if not plan.keep_config:
+        for c in plan.config_dirs:
+            _rmtree(c)
+    if plan.wipe_data:
+        for d in plan.data_dirs:
+            _rmtree(d)
+    if plan.remove_source:
+        for c in plan.checkouts:
+            _rmtree(c)
+
+    if plan.revert_host:
+        for f in plan.host_files:
+            _rmtree(f)
+        subprocess.run(["sysctl", "--system"], capture_output=True, check=False)
+        if plan.grub_revert:
+            _revert_grub()
+
+    if plan.remove_users:
+        for u in plan.users:
+            r = subprocess.run(["userdel", u], capture_output=True,
+                               text=True, check=False)
+            if r.returncode == 0:
+                print(f"  userdel {u}")
+            else:
+                print(f"  warning: userdel {u}: {r.stderr.strip()}", file=sys.stderr)
+
+    return 0
+
+
+def _revert_grub() -> None:
+    try:
+        lines = GRUB_FILE.read_text().splitlines()
+    except OSError as exc:
+        print(f"  warning: read {GRUB_FILE}: {exc}", file=sys.stderr)
+        return
+    changed = False
+    out = []
+    for line in lines:
+        new = line
+        for tok in GRUB_TOKENS:
+            words = [w for w in new.split()
+                     if not w.startswith(tok + "=") and not w.startswith('"' + tok + "=")]
+            rebuilt = " ".join(words)
+            if rebuilt != new:
+                new = rebuilt
+                changed = True
+        out.append(new)
+    if changed:
+        GRUB_FILE.write_text("\n".join(out) + "\n")
+        print(f"  reverted grub tokens in {GRUB_FILE}")
+        r = subprocess.run(["update-grub"], capture_output=True, text=True, check=False)
+        if r.returncode != 0:
+            subprocess.run(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
+                           capture_output=True, check=False)
+        print("  update-grub done (reboot to fully clear isolcpus)")
