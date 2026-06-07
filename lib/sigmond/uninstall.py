@@ -68,7 +68,8 @@ GRUB_FILE = Path("/etc/default/grub")
 GRUB_TOKENS = ("isolcpus", "rcu_nocbs")
 CPU_AFFINITY_DROPIN = "smd-cpu-affinity.conf"
 
-SERVICE_USERS = ("sigmond", "wsprrec", "pskrec", "timestd", "magrec")
+# radio = ka9q-radio's sysusers account; the rest are sigmond/client users.
+SERVICE_USERS = ("sigmond", "wsprrec", "pskrec", "timestd", "magrec", "radio")
 
 _LIBRARY_NAMES = frozenset({
     "ka9q-python", "callhash", "hs-uploader", "ft8_lib", "onion",
