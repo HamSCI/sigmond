@@ -118,8 +118,15 @@ cascades into its neighbours.
     HPPS=SHM2) to `/etc/chrony/conf.d/` instead of the `TSL1`-on-SHM-0 append,
     and no longer installs the backwards `chronyd-timestd-shm.conf` ordering
     drop-in. A fresh hf-timestd install no longer reintroduces the cascade.
-- **Step 3 — the reconciler:** `smd timing` (validate + reconcile) replacing the
-  per-component watchdogs as the single owner of chain recovery.
+- **Step 3 — the reconciler (DONE 2026-06-06, sigmond `2ae05d2`):**
+  `smd timing [status|reconcile] [--dry-run]` — `lib/sigmond/commands/timing.py`
+  probes the chain (shm/gpsd/gps-feed/chrony/fuse/metrology) and `reconcile()`
+  applies OWN-ONLY remediation (gps-feed broken→restart gpsd; chrony dead→restart
+  chrony, the ONLY allowed chrony-restarter; FUSE down via metrology→start the
+  metrology writers, never chrony). `sigmond-timing-reconcile.timer` runs it every
+  3 min (ConditionFileIsExecutable=/usr/sbin/gpsd). 7 hermetic tests. Replaces the
+  hf-timestd watchdogs (which stay disabled). Verified on sigma: status 6/6
+  healthy, reconcile a clean no-op.
 - **Step 4 — observability:** wire the timing chain into `smd validate`.
 
 This spans sigmond + hf-timestd but uses the same reconcile philosophy sigmond
