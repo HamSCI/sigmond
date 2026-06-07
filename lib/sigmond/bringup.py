@@ -57,7 +57,7 @@ class Plan:
 def build_plan(profile, *, local_radiod: bool,
                remote_status_dns: Optional[str] = None,
                smd: str = 'smd', with_optional: bool = False,
-               non_interactive: bool = False) -> Plan:
+               non_interactive: bool = False, skip=frozenset()) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
     ``local_radiod`` gates the entire radiod stack (infra, ka9q-radio, tuning,
@@ -104,14 +104,15 @@ def build_plan(profile, *, local_radiod: bool,
                           'stack, gpsdo-monitor, and FFT wisdom', 'note'))
 
     # --- Stage 2: hf-timestd (timing authority; radiod-bound) ---
-    if _TIMING_AUTHORITY in profile.clients:
+    if _TIMING_AUTHORITY in profile.clients and _TIMING_AUTHORITY not in skip:
         install(STAGE2, _TIMING_AUTHORITY)
         configure(STAGE2, _TIMING_AUTHORITY)
         checkpoint(STAGE2, 'hf-timestd configured', check=f'configured:{_TIMING_AUTHORITY}')
 
     # --- Stage 3a: radiod-bound spot clients ---
     for client in profile.clients:
-        if client == _TIMING_AUTHORITY or client in _INDEPENDENT:
+        if (client == _TIMING_AUTHORITY or client in _INDEPENDENT
+                or client in skip):
             continue
         install(STAGE3A, client)
         configure(STAGE3A, client)
@@ -119,7 +120,7 @@ def build_plan(profile, *, local_radiod: bool,
 
     # --- Stage 3b: independent clients (no radiod, no wisdom wait) ---
     for client in profile.clients:
-        if client in _INDEPENDENT:
+        if client in _INDEPENDENT and client not in skip:
             install(STAGE3B, client)
             configure(STAGE3B, client)
             checkpoint(STAGE3B, f'{client} configured', check=f'configured:{client}')

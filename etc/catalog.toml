@@ -215,8 +215,8 @@ extra_paths = ["/etc/wsprdaemon"]
 [profile.dasi2]
 description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer)"
 clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder"]
-local_radiod_infra = ["igmp-querier", "gpsdo-monitor"]
-optional           = ["ka9q-web"]
+local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
+optional           = []
 
 [profile.base]
 description        = "Base SDR station — local radiod + web + timing, no recording clients"

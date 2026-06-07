@@ -2173,6 +2173,29 @@ def _detect_local_radiod() -> bool:
     return False
 
 
+def _lsusb() -> str:
+    try:
+        return subprocess.run(['lsusb'], capture_output=True, text=True,
+                              timeout=5).stdout
+    except Exception:
+        return ''
+
+
+def _detect_local_sdr() -> bool:
+    """True when a radiod-capable SDR is on the USB bus.  The upfront check for
+    a local-radiod profile — hardware, not whether ka9q-radio is built yet.
+    RX888 / RX888mk2 present as a Cypress FX3 (04b4:00f0/00f1/00f3)."""
+    return bool(re.search(r'rx888|04b4:00f[013]', _lsusb(), re.I))
+
+
+def _detect_magnetometer() -> bool:
+    """True when the RM3100's Pololu USB-I2C adapter (1ffb:2502/2503) is on the
+    bus (or its udev symlink exists).  mag-recorder can't run without it."""
+    if os.path.exists('/dev/ttyMAG0'):
+        return True
+    return bool(re.search(r'1ffb:250[23]|pololu', _lsusb(), re.I))
+
+
 def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -> bool:
     """Block until FFT wisdom exists (radiod won't start cleanly without it).
 
@@ -2255,16 +2278,19 @@ def cmd_bringup(args) -> int:
     remote_dns = getattr(args, 'remote_radiod', None)
     if remote_dns is not None:
         local = False                     # explicit remote override
+    elif prof.local_radiod_infra:
+        # Local-radiod profile: the upfront check is the SDR HARDWARE on the USB
+        # bus, NOT whether ka9q-radio is built yet (bringup builds it).
+        if not _detect_local_sdr():
+            _err('bringup: this is a local-radiod profile but no RX888/SDR was '
+                 'found on the USB bus.  Attach the SDR, or use the "client" '
+                 'profile / --remote-radiod to bind a remote radiod.')
+            return 1
+        local = True
     else:
-        # The PROFILE SHAPE decides local-vs-remote, not whether radiod is
-        # installed yet: a profile with local_radiod_infra is a LOCAL radiod
-        # station, and bringup's job is to INSTALL ka9q-radio (it won't exist
-        # on a greenfield host with the RX888 freshly on the bus).  Don't
-        # mistake "not built yet" for "remote".  Only a client-shaped profile
-        # (no local radiod infra, none already configured) is remote.
-        local = bool(prof.local_radiod_infra) or _detect_local_radiod()
-        if (not local and not getattr(args, 'non_interactive', False)
-                and sys.stdin.isatty()):
+        # Client-shaped profile (no local radiod infra) — runs against a remote.
+        local = False
+        if (not getattr(args, 'non_interactive', False) and sys.stdin.isatty()):
             entered = input(
                 'This profile is decode-only (no local radiod).  Remote radiod '
                 'status DNS (e.g. bee3-status.local), or blank to abort: ').strip()
@@ -2272,11 +2298,21 @@ def cmd_bringup(args) -> int:
                 _err('bringup: no radiod available (local or remote) — aborting')
                 return 1
             remote_dns = entered
+
+    # Environment-aware preflight: hardware-gated clients that can't run on this
+    # host are skipped (not scaffolded into a broken state) with a clear note.
+    skip = set()
+    if 'mag-recorder' in prof.clients and not _detect_magnetometer():
+        _warn('no magnetometer found (RM3100 / Pololu USB-I2C adapter not on the '
+              'bus) — skipping mag-recorder')
+        skip.add('mag-recorder')
+
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
 
     plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
-                      non_interactive=getattr(args, 'non_interactive', False))
+                      non_interactive=getattr(args, 'non_interactive', False),
+                      skip=frozenset(skip))
 
     _heading(f'bringup: {prof.name}  ({"LOCAL" if local else "REMOTE"} radiod)')
     if prof.description:

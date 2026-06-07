@@ -72,3 +72,13 @@ def test_non_interactive_appends_flag_to_config_steps():
     p2 = build_plan(_dasi2(), local_radiod=True, non_interactive=False)
     assert all('--non-interactive' not in s.argv
                for s in p2.steps if s.kind == 'config')
+
+
+def test_skip_excludes_hardware_gated_client():
+    # Environment-aware: a client whose hardware is absent (e.g. mag-recorder
+    # with no magnetometer) is skipped, not scaffolded.
+    p = build_plan(_dasi2(), local_radiod=True, skip=frozenset({'mag-recorder'}))
+    assert 'install mag-recorder' not in _labels(p, 'install')
+    assert 'configure mag-recorder' not in _labels(p, 'config')
+    # the other clients are unaffected
+    assert 'install wspr-recorder' in _labels(p, 'install')
