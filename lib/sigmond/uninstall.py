@@ -68,6 +68,25 @@ GRUB_FILE = Path("/etc/default/grub")
 GRUB_TOKENS = ("isolcpus", "rcu_nocbs")
 CPU_AFFINITY_DROPIN = "smd-cpu-affinity.conf"
 
+# Shared system directories the uninstaller must NEVER remove wholesale, even
+# if a client deploy.toml link-step or manifest mistakenly points a dst at one.
+# (A deploy.toml with dst=/etc/systemd/system once caused `rmtree` to wipe every
+# host service's enable-symlinks.)  Individual files inside these are still
+# removable; the directory itself is protected.
+_PROTECTED_DIRS = frozenset(Path(x) for x in (
+    "/", "/etc", "/etc/systemd", "/etc/systemd/system", "/etc/systemd/user",
+    "/etc/udev", "/etc/udev/rules.d", "/etc/sysctl.d", "/etc/cron.d",
+    "/etc/modprobe.d", "/etc/logrotate.d", "/etc/sysusers.d", "/etc/default",
+    "/etc/chrony", "/etc/chrony/conf.d", "/etc/init.d",
+    "/usr", "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/share",
+    "/usr/local", "/usr/local/bin", "/usr/local/sbin", "/usr/local/lib",
+    "/usr/local/share", "/usr/local/share/man",
+    "/usr/local/share/man/man1", "/usr/local/share/man/man8",
+    "/var", "/var/lib", "/var/log", "/var/cache", "/run", "/tmp",
+    "/dev", "/dev/shm", "/opt", "/opt/git", "/opt/git/sigmond",
+    "/bin", "/sbin", "/lib", "/lib64", "/home", "/root", "/boot",
+))
+
 # radio = ka9q-radio's sysusers account; the rest are sigmond/client users.
 SERVICE_USERS = ("sigmond", "wsprrec", "pskrec", "timestd", "magrec", "radio")
 
@@ -366,7 +385,11 @@ def plan_uninstall(*, keep_config: bool, wipe_data: bool, revert_host: bool,
             plan.ext_files.append(fp)
             # stop+disable any unit we're about to delete
             if fp.parent == SYSTEMD_SYSTEM and fp.suffix in (".service", ".timer"):
-                plan.host_units.append(fp.name)
+                if fp.stem.endswith("@"):       # template e.g. radiod@.service
+                    plan.host_units.extend(
+                        purge._running_template_instances(fp.name))
+                else:
+                    plan.host_units.append(fp.name)
     for b in _EXTRA_BINARIES:
         if b.exists() and b not in plan.ext_files:
             plan.ext_files.append(b)
@@ -488,6 +511,10 @@ def render_plan(plan: UninstallPlan) -> list:
 # execute
 # --------------------------------------------------------------------------- #
 def _rmtree(path: Path) -> None:
+    if path in _PROTECTED_DIRS:
+        print(f"  REFUSED — protected system dir, not removed: {path}",
+              file=sys.stderr)
+        return
     try:
         if path.is_symlink() or path.is_file():
             path.unlink()
@@ -529,7 +556,8 @@ def execute_uninstall(plan: UninstallPlan, *, dry_run: bool = False) -> int:
     for d in plan.dropins:
         _rmtree(d)
         try:
-            if d.parent.is_dir() and not any(d.parent.iterdir()):
+            if (d.parent.is_dir() and d.parent not in _PROTECTED_DIRS
+                    and not any(d.parent.iterdir())):
                 d.parent.rmdir()
         except OSError:
             pass
@@ -540,6 +568,14 @@ def execute_uninstall(plan: UninstallPlan, *, dry_run: bool = False) -> int:
     for d in plan.ext_asset_dirs:
         _rmtree(d)
     subprocess.run(["systemctl", "daemon-reload"], capture_output=True, check=False)
+
+    # systemctl stop can return before a daemon exits, and non-conformant units
+    # (radiod@) may be missed — so make sure nothing survives unit removal,
+    # else userdel later fails with "user is currently used by process".
+    for u in _existing_users(SERVICE_USERS):
+        subprocess.run(["pkill", "-TERM", "-u", u], capture_output=True, check=False)
+    for u in _existing_users(SERVICE_USERS):
+        subprocess.run(["pkill", "-KILL", "-u", u], capture_output=True, check=False)
 
     for v in plan.venvs:
         _rmtree(v)
@@ -571,6 +607,18 @@ def execute_uninstall(plan: UninstallPlan, *, dry_run: bool = False) -> int:
                 print(f"  userdel {u}")
             else:
                 print(f"  warning: userdel {u}: {r.stderr.strip()}", file=sys.stderr)
+            # Remove the matching group too — a lingering group (with the
+            # operator left as a member) blocks the next install's useradd.
+            g = subprocess.run(["getent", "group", u],
+                               capture_output=True, text=True, check=False)
+            if g.returncode == 0:
+                members = g.stdout.strip().split(":")[-1] if ":" in g.stdout else ""
+                for m in (x for x in members.split(",") if x):
+                    subprocess.run(["gpasswd", "-d", m, u],
+                                   capture_output=True, check=False)
+                if subprocess.run(["groupdel", u], capture_output=True,
+                                  check=False).returncode == 0:
+                    print(f"  groupdel {u}")
 
     return 0
 

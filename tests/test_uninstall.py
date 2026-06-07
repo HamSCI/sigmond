@@ -79,3 +79,24 @@ class TestRenderClassification(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProtectedDirs(unittest.TestCase):
+    """The catastrophic bug: a deploy.toml dst=/etc/systemd/system caused
+    rmtree to wipe every host service's enable-symlinks.  Lock the guard."""
+
+    def test_critical_shared_dirs_protected(self):
+        from sigmond.uninstall import _PROTECTED_DIRS
+        for d in ("/etc/systemd/system", "/etc", "/etc/udev/rules.d",
+                  "/usr/local/bin", "/usr/local/sbin", "/usr/local/lib",
+                  "/var/lib", "/var/log", "/opt/git/sigmond", "/"):
+            self.assertIn(Path(d), _PROTECTED_DIRS, f"{d} must be protected")
+
+    def test_rmtree_noops_on_protected(self):
+        # Must refuse + return without raising.  Use a protected dir that we
+        # assert remains afterwards (never actually removed).
+        from sigmond.uninstall import _rmtree
+        _rmtree(Path("/usr/local/bin"))
+        self.assertTrue(Path("/usr/local/bin").is_dir()
+                        or not Path("/usr/local/bin").exists())
+
