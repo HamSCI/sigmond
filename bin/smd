@@ -24,7 +24,7 @@ Observe (what is, read-only):
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|codar|ka9q|uploads|verifier> [args...] unified service watcher
+    smd watch       <wspr|psk|radiod|hfdl|codar|ka9q|uploads|verifier> [args...] unified service watcher
     smd ka9q-watch                                               upstream-drift watcher (alias)
     smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
     smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
@@ -5380,6 +5380,13 @@ _smd_complete() {
         return
     fi
 
+    if [[ "$prev" == "--host" ]]; then
+        # `smd watch radiod --host`: localhost + recorder-instance ssh aliases
+        local _rhosts="localhost $(systemctl list-units --plain --no-legend 'wspr-recorder@*' 'psk-recorder@*' 2>/dev/null | sed -E 's/^(wspr|psk)-recorder@(.+)\.service.*/\2/' | sort -u)"
+        COMPREPLY=($(compgen -W "$_rhosts" -- "$cur"))
+        return
+    fi
+
     case $cword in
         1)
             COMPREPLY=($(compgen -W "$top_cmds" -- "$cur"))
@@ -5429,7 +5436,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "install apply" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar ka9q uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk radiod hfdl codar ka9q uploads verifier" -- "$cur"))
                     ;;
                 verifier)
                     COMPREPLY=($(compgen -W "report" -- "$cur"))
@@ -5482,6 +5489,9 @@ _smd_complete() {
                             ;;
                         ka9q)
                             COMPREPLY=($(compgen -W "--ka9q-python --ka9q-radio --remote --branch --no-fetch --json" -- "$cur"))
+                            ;;
+                        radiod)
+                            COMPREPLY=($(compgen -W "--host -n --lines --all-lines" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -11417,6 +11427,93 @@ def _add_radiod_watch_args(p) -> None:
                         'clock / sample-loss / USB diagnostics')
 
 
+def _radiod_watch_candidate_hosts() -> list:
+    """Hosts whose radiod we can follow: 'localhost' (this box's radiod)
+    plus ssh-alias peers inferred from the wspr/psk recorder instances that
+    are NOT the local radiod.  A remote recorder instance is named for its
+    ssh alias (e.g. ``wspr-recorder@bee1`` -> ``ssh bee1``), so the instance
+    name doubles as the --host value.  Returns ['localhost'] when no peers
+    are found."""
+    import re as _re2
+    local = set()
+    try:
+        for unit in _get_radiod_instances():            # 'radiod@<inst>.service'
+            m = _re2.match(r'radiod@(.+)\.service$', unit)
+            if m:
+                local.add(m.group(1))
+    except Exception:
+        pass
+    peers = []
+    seen = set()
+    try:
+        r = subprocess.run(
+            ['systemctl', 'list-units', '--plain', '--no-legend',
+             'wspr-recorder@*', 'psk-recorder@*'],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            m = _re2.match(r'(?:wspr|psk)-recorder@(.+)\.service$', parts[0])
+            if not m:
+                continue
+            inst = m.group(1)
+            if inst in local or inst in seen:
+                continue
+            seen.add(inst)
+            peers.append(inst)
+    except Exception:
+        pass
+    return ['localhost'] + sorted(peers)
+
+
+def _radiod_watch_pick_hosts() -> list:
+    """Interactive host picker used when `smd watch radiod` is run without
+    --host.  Lists localhost + discovered peers and prompts for a choice.
+    Falls back to ['localhost'] when only one candidate exists or when not
+    attached to a terminal (so cron / piped runs never hang)."""
+    cands = _radiod_watch_candidate_hosts()
+    if len(cands) <= 1:
+        return cands or ['localhost']
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return ['localhost']
+    import re as _re2
+    print("Which radiod host(s) do you want to watch?")
+    for i, h in enumerate(cands, 1):
+        tag = "   (this host)" if h == 'localhost' else ""
+        print(f"  {i}) {h}{tag}")
+    print("  a) all of them")
+    prompt = (f"Select 1-{len(cands)} "
+              f"(comma-separated for several, 'a' for all) [default 1]: ")
+    while True:
+        try:
+            sel = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ['localhost']
+        if sel == '':
+            return [cands[0]]
+        if sel.lower() in ('a', 'all'):
+            return cands
+        picks = []
+        ok = True
+        for tok in _re2.split(r'[,\s]+', sel):
+            if not tok:
+                continue
+            if tok.isdigit() and 1 <= int(tok) <= len(cands):
+                h = cands[int(tok) - 1]
+                if h not in picks:
+                    picks.append(h)
+            else:
+                ok = False
+                break
+        if ok and picks:
+            return picks
+        print(f"  '{sel}' is not a valid choice — enter numbers 1-{len(cands)}, "
+              f"or 'a' for all.")
+
+
 def cmd_radiod_watch(args) -> int:
     """Live-tail radiod's RX888 clock / sample-loss diagnostics AND the kernel
     USB log across one or more hosts.
@@ -11439,7 +11536,7 @@ def cmd_radiod_watch(args) -> int:
     import shutil
     import re as _re
 
-    hosts = args.host or ['localhost']
+    hosts = args.host or _radiod_watch_pick_hosts()
     lines = max(0, getattr(args, 'lines', 20) or 0)
     show_all = getattr(args, 'all_lines', False)
     is_tty = sys.stdout.isatty()
