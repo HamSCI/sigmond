@@ -1453,7 +1453,8 @@ WantedBy=multi-user.target
 
 
 def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False,
-                    cli_rac_id=None, cli_rac_number=None) -> bool:
+                    cli_rac_id=None, cli_rac_number=None,
+                    reconfigure=False) -> bool:
     """Full wd-rac install: frpc binary + frpc.toml + systemd service.
 
     Resolves (rac_id, rac_number) by precedence:
@@ -1487,42 +1488,58 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False,
     id_committed     = bool(rac_id)        # came from CLI or already on disk
     number_committed = rac_number >= 0
 
-    # 3. Interactive prompts — RAC number first, RAC ID only when unset.
+    # 3. Interactive prompts — RAC number first, then RAC ID.  Normally we
+    #    prompt only for a value that is not already set; ``reconfigure``
+    #    forces both prompts, showing the current values as editable defaults
+    #    so the operator can change them.
     if (not yes and sys.stdin.isatty()
-            and (not number_committed or not id_committed)):
+            and (reconfigure or not number_committed or not id_committed)):
+        import socket
         import readline  # noqa: F401 — enables line editing on input()
         print()
         print('  wd-rac (Remote Access Channel) — reverse tunnel for '
               'remote SSH/web access.')
 
-        # RAC number — always operator-supplied; ask first; loop until valid.
-        while not number_committed:
-            try:
-                val = input('  RAC number (integer, assigned by the RAC '
-                            'administrator — Ctrl-C to abort): ').strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                _err('wd-rac: aborted — RAC number is required')
-                return False
-            if not val:
-                _warn('  RAC number is required (it sets your ssh tunnel '
-                      'port); enter the integer from the admin email.')
-                continue
-            try:
-                n = int(val)
-            except ValueError:
-                _warn(f'  "{val}" is not an integer — try again.')
-                continue
-            if n < 0:
-                _warn('  RAC number must be non-negative.')
-                continue
-            rac_number, number_committed = n, True
+        # RAC number — always operator-supplied; ask first.  When a value
+        # already exists (reconfigure) show it as a default that Enter keeps;
+        # otherwise it is required and we loop until a valid integer.
+        if reconfigure or not number_committed:
+            cur = rac_number if rac_number >= 0 else None
+            while True:
+                prompt = (f'  RAC number [{cur}]: ' if cur is not None
+                          else '  RAC number (integer, assigned by the RAC '
+                               'administrator — Ctrl-C to abort): ')
+                try:
+                    val = input(prompt).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    if cur is not None:
+                        break                         # keep current value
+                    _err('wd-rac: aborted — RAC number is required')
+                    return False
+                if not val:
+                    if cur is not None:
+                        rac_number = cur
+                        break
+                    _warn('  RAC number is required (it sets your ssh tunnel '
+                          'port); enter the integer from the admin email.')
+                    continue
+                try:
+                    n = int(val)
+                except ValueError:
+                    _warn(f'  "{val}" is not an integer — try again.')
+                    continue
+                if n < 0:
+                    _warn('  RAC number must be non-negative.')
+                    continue
+                rac_number = n
+                break
+            number_committed = rac_number >= 0
 
-        # RAC ID — only prompt when not already entered; default to a
-        # detected receiver id, else this host's name.  Enter accepts it.
-        if not id_committed:
-            import socket
-            default_id = (_detect_rac_defaults()[0]
+        # RAC ID — default to the current value, else a detected receiver
+        # id, else this host's name.  Enter accepts the default.
+        if reconfigure or not id_committed:
+            default_id = (rac_id or _detect_rac_defaults()[0]
                           or socket.gethostname().split('.')[0])
             try:
                 val = input(f'  RAC ID [{default_id}]: ').strip()
@@ -1615,77 +1632,129 @@ def rac_status() -> dict:
     return result
 
 
-def cmd_rac(args) -> int:
-    """Day-to-day lifecycle for the wd-rac (frpc) remote-access tunnel.
+def _rac_show_status() -> int:
+    """Print the wd-rac tunnel config + service + gateway status."""
+    unit = f'{_RAC_SERVICE}.service'
+    unit_path = Path(f'/etc/systemd/system/{unit}')
+    st = rac_status()
+    _heading('wd-rac (frpc) remote-access tunnel')
+    if not st['frpc_installed']:
+        _warn('frpc binary not installed')
+        _info('provision with:  smd rac install')
+        return 0
+    _ok(f"frpc binary : {_FRPC_BIN} "
+        f"({st['frpc_version'] or 'unknown version'})")
+    if not st['config_exists'] or not unit_path.exists():
+        _warn(f'not configured on this host ({_FRPC_CONFIG} / {unit} missing)')
+        _info('provision with:  smd rac install'
+              '   (or  smd tui  → RAC screen)')
+        return 0
+    rnum = st['rac_number']
+    frps_host = (_FRPS_URL_HAMSCI if isinstance(rnum, int)
+                 and 200 <= rnum <= 299 else _FRPS_URL)
+    _ok(f"config      : {_FRPC_CONFIG}")
+    if st.get('config_unreadable'):
+        _warn(f"            : not readable as {os.getenv('USER', 'this user')} "
+              f"— re-run as root, or  smd rac install  to fix group perms")
+    else:
+        _info(f"rac_id      : {st['rac_id'] or '(unset)'}")
+        _info(f"rac_number  : {rnum if rnum >= 0 else '(unset)'}")
+        _info(f"ssh tunnel  : {frps_host}:"
+              f"{st['ssh_port'] if st['ssh_port'] > 0 else '?'}")
+    if st['service_active']:
+        _ok(f"service     : {unit} active")
+        if st['tunnel_ok']:
+            _ok(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} reachable")
+        else:
+            _warn(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} UNREACHABLE "
+                  f"— service up but tunnel not established")
+    else:
+        _warn(f"service     : {unit} inactive  "
+              f"(bring up with  smd rac start)")
+    r = _run(['systemctl', 'is-enabled', unit])
+    _info(f"boot        : {r.stdout.strip() or 'unknown'}")
+    return 0
 
-    Subverbs: ``status`` (default), ``start``, ``stop``, ``restart`` —
-    thin wrappers over ``wd-rac.service``; and ``install``, which aliases
-    ``smd install --components wd-rac`` (download frpc, write frpc.toml,
-    keypair, register with the gateway, install the unit — same as the
-    TUI RAC screen).  The lifecycle verbs just bring an already-installed
-    tunnel up/down and report it.
+
+def _rac_configure(reconfigure: bool, args) -> int:
+    """Provision / (re)configure the wd-rac tunnel, then show its status.
+
+    ``reconfigure=True`` re-prompts for the RAC number and ID even when they
+    are already set (current values shown as editable defaults); otherwise
+    only missing values are prompted.  Elevates to root first (the frpc
+    install steps need it); the prompts then run in the elevated process.
     """
-    action = getattr(args, 'rac_command', None) or 'status'
+    if _need_root('rac reconfigure' if reconfigure else 'rac install'):
+        return 1
+    _netdiag_auto_refresh('install')
+    _heading('wd-rac (Remote Access Channel)')
+    topology = _load_topology(TOPOLOGY_PATH)
+    ok = _install_wd_rac(
+        topology,
+        getattr(args, 'dry_run', False),
+        yes=getattr(args, 'yes', False),
+        cli_rac_id=getattr(args, 'rac_id', None),
+        cli_rac_number=getattr(args, 'rac_number', None),
+        reconfigure=reconfigure,
+    )
+    if ok and not getattr(args, 'dry_run', False):
+        print()
+        _rac_show_status()
+    return 0 if ok else 1
+
+
+def cmd_rac(args) -> int:
+    """State-aware lifecycle for the wd-rac (frpc) remote-access tunnel.
+
+    Bare ``smd rac`` dispatches on the current state of the service:
+      * not installed          → offer to install + configure, then status
+      * installed, unconfigured → configure, then status
+      * installed + configured  → show status
+
+    Explicit subverbs: ``status``; ``configure`` / ``reconfigure`` (always
+    re-prompt, current values as editable defaults); ``install`` (one-shot
+    provision, accepts ``NUMBER`` / ``--id``); ``start`` / ``stop`` /
+    ``restart`` (thin wrappers over wd-rac.service).
+    """
+    action = getattr(args, 'rac_command', None)
     unit = f'{_RAC_SERVICE}.service'
     unit_path = Path(f'/etc/systemd/system/{unit}')
 
-    if action == 'status':
+    # --- bare `smd rac`: do the right thing for the current state --------
+    if action is None:
         st = rac_status()
-        _heading('wd-rac (frpc) remote-access tunnel')
-        if not st['frpc_installed']:
-            _warn('frpc binary not installed')
-            _info('provision with:  smd rac install')
-            return 0
-        _ok(f"frpc binary : {_FRPC_BIN} "
-            f"({st['frpc_version'] or 'unknown version'})")
-        if not st['config_exists'] or not unit_path.exists():
-            _warn(f'not configured on this host ({_FRPC_CONFIG} / {unit} missing)')
-            _info('provision with:  smd rac install'
-                  '   (or  smd tui  → RAC screen)')
-            return 0
-        rnum = st['rac_number']
-        frps_host = (_FRPS_URL_HAMSCI if isinstance(rnum, int)
-                     and 200 <= rnum <= 299 else _FRPS_URL)
-        _ok(f"config      : {_FRPC_CONFIG}")
-        if st.get('config_unreadable'):
-            _warn(f"            : not readable as {os.getenv('USER', 'this user')} "
-                  f"— re-run as root, or  smd rac install  to fix group perms")
-        else:
-            _info(f"rac_id      : {st['rac_id'] or '(unset)'}")
-            _info(f"rac_number  : {rnum if rnum >= 0 else '(unset)'}")
-            _info(f"ssh tunnel  : {frps_host}:"
-                  f"{st['ssh_port'] if st['ssh_port'] > 0 else '?'}")
-        if st['service_active']:
-            _ok(f"service     : {unit} active")
-            if st['tunnel_ok']:
-                _ok(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} reachable")
-            else:
-                _warn(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} UNREACHABLE "
-                      f"— service up but tunnel not established")
-        else:
-            _warn(f"service     : {unit} inactive  "
-                  f"(bring up with  smd rac start)")
-        r = _run(['systemctl', 'is-enabled', unit])
-        _info(f"boot        : {r.stdout.strip() or 'unknown'}")
-        return 0
+        installed  = st['frpc_installed']
+        configured = (st['config_exists'] and unit_path.exists()
+                      and (st.get('config_unreadable')
+                           or (st['rac_id'] and st['rac_number'] >= 0)))
+        # Up-and-configured, or no terminal to prompt on → just report.
+        if (installed and configured) or not sys.stdin.isatty():
+            return _rac_show_status()
+        if not installed and os.geteuid() != 0:
+            # State A — confirm once, before elevating.  After the sudo
+            # re-exec (geteuid 0) we skip straight to configuring so the
+            # operator is not asked twice.
+            _heading('wd-rac (Remote Access Channel)')
+            _warn('RAC tunnel is not installed on this host.')
+            try:
+                ans = input('  Install and configure it now? [y/N]: ').strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                ans = ''
+            if ans not in ('y', 'yes'):
+                _info('Nothing changed.  Install later with:  '
+                      'smd rac install <number>')
+                return 0
+        # State A (confirmed) or State B (installed-but-unconfigured): go
+        # configure.  _install_wd_rac prompts for whatever is still missing.
+        return _rac_configure(False, args)
 
-    if action == 'install':
-        # Alias for `smd install --components wd-rac` — call the native
-        # provisioner directly.  (wd-rac is NOT a catalog *client*, so the
-        # single-positional `smd component install wd-rac` path fails its
-        # get_entry() lookup; the working path is the frpc-native one.)
-        if _need_root('rac install'):
-            return 1
-        _netdiag_auto_refresh('install')
-        _heading('wd-rac (Remote Access Channel)')
-        topology = _load_topology(TOPOLOGY_PATH)
-        return 0 if _install_wd_rac(
-            topology,
-            getattr(args, 'dry_run', False),
-            yes=getattr(args, 'yes', False),
-            cli_rac_id=getattr(args, 'rac_id', None),
-            cli_rac_number=getattr(args, 'rac_number', None),
-        ) else 1
+    if action == 'status':
+        return _rac_show_status()
+
+    if action in ('install', 'configure', 'reconfigure'):
+        # install: prompt only missing values.  (re)configure: re-prompt both.
+        return _rac_configure(action != 'install', args)
 
     if action in ('start', 'stop', 'restart'):
         if not unit_path.exists():
@@ -13099,8 +13168,10 @@ def main() -> int:
 
     p_rac = sub.add_parser(
         'rac',
-        help='wd-rac (frpc) remote-access tunnel lifecycle '
-             '(status | start | stop | restart)',
+        help='wd-rac (frpc) remote-access tunnel — bare `smd rac` is '
+             'state-aware (installs/configures/shows status); also: '
+             'status | configure | reconfigure | install | start | stop | '
+             'restart',
     )
     rac_sub = p_rac.add_subparsers(dest='rac_command')
     rac_sub.add_parser(
@@ -13117,34 +13188,45 @@ def main() -> int:
     rac_sub.add_parser(
         'restart', help='restart wd-rac.service (elevates automatically)',
     )
-    p_rac_install = rac_sub.add_parser(
+    def _add_rac_provision_args(p):
+        p.add_argument(
+            'rac_number', nargs='?', type=int, default=None, metavar='NUMBER',
+            help='RAC number assigned by the administrator (sets the ssh '
+                 'tunnel port = 35800 + NUMBER); prompted first if omitted',
+        )
+        p.add_argument(
+            '--id', dest='rac_id', metavar='ID', default=None,
+            help='RAC ID (default: detected receiver id, else this host '
+                 'name); only prompted when not already configured',
+        )
+        p.add_argument(
+            '--dry-run', action='store_true',
+            help='show what would be done without making changes',
+        )
+        p.add_argument(
+            '--yes', '-y', action='store_true',
+            help='accept defaults, no interactive prompts',
+        )
+        p.add_argument(
+            '--force', '-f', action='store_true',
+            help='reinstall even if frpc appears current',
+        )
+
+    _add_rac_provision_args(rac_sub.add_parser(
         'install',
         help='provision the tunnel (frpc binary + frpc.toml + keypair + '
              'gateway registration + unit) — alias for '
              '`smd install --components wd-rac`',
-    )
-    p_rac_install.add_argument(
-        'rac_number', nargs='?', type=int, default=None, metavar='NUMBER',
-        help='RAC number assigned by the administrator (sets the ssh tunnel '
-             'port = 35800 + NUMBER); prompted first if omitted',
-    )
-    p_rac_install.add_argument(
-        '--id', dest='rac_id', metavar='ID', default=None,
-        help='RAC ID (default: detected receiver id, else this host name); '
-             'only prompted when not already configured',
-    )
-    p_rac_install.add_argument(
-        '--dry-run', action='store_true',
-        help='show what would be done without making changes',
-    )
-    p_rac_install.add_argument(
-        '--yes', '-y', action='store_true',
-        help='accept defaults, no interactive prompts',
-    )
-    p_rac_install.add_argument(
-        '--force', '-f', action='store_true',
-        help='reinstall even if frpc appears current',
-    )
+    ))
+    _add_rac_provision_args(rac_sub.add_parser(
+        'configure',
+        help='(re)configure the tunnel — prompt for RAC number and ID with '
+             'the current values as editable defaults, then re-apply',
+    ))
+    _add_rac_provision_args(rac_sub.add_parser(
+        'reconfigure',
+        help='alias for `smd rac configure`',
+    ))
 
     p_storage = sub.add_parser('storage',
                                help='manage the local sink backend '
