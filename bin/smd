@@ -24,7 +24,7 @@ Observe (what is, read-only):
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|codar|ka9q|uploads|verifier> [args...] unified service watcher
+    smd watch       <wspr|psk|radiod|hfdl|codar|ka9q|uploads|verifier> [args...] unified service watcher
     smd ka9q-watch                                               upstream-drift watcher (alias)
     smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
     smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
@@ -1855,8 +1855,42 @@ def _derive_component_name_from_url(url: str) -> str:
     return stem
 
 
+def _augment_stop_list_with_timer_services(stop_list: list) -> list:
+    """For each ``*.timer`` in ``stop_list``, insert the matching
+    ``*.service`` just before it when that service is currently
+    active/activating/reloading.
+
+    ``systemctl stop foo.timer`` does NOT stop a ``foo.service`` the timer
+    already triggered (e.g. a grape-daily catch-up run still processing,
+    or a oneshot watchdog mid-run) — and such timer-driven oneshots are
+    frequently absent from deploy.toml's unit list (only the ``.timer`` is
+    declared).  Mutates and returns ``stop_list`` (order preserved)."""
+    seen = set(stop_list)
+    for u in stop_list[:]:  # iterate a snapshot
+        if not u.endswith('.timer'):
+            continue
+        paired_service = u[:-len('.timer')] + '.service'
+        if paired_service in seen:
+            continue
+        # "active"/"activating"/"reloading" => a run we must interrupt.
+        r = _run(['systemctl', 'is-active', paired_service])
+        if r.stdout.strip() in ('active', 'activating', 'reloading'):
+            stop_list.insert(stop_list.index(u), paired_service)
+            seen.add(paired_service)
+    return stop_list
+
+
 def _stop_component_units(component: str) -> None:
-    """systemctl-stop everything declared by component's deploy.toml."""
+    """systemctl-stop everything a component owns — in reverse-dependency
+    order, and including the ``.service`` behind each ``.timer``.
+
+    Used by ``smd disable``; mirrors the robustness of ``cmd_stop`` so a
+    disable leaves nothing running.  Previously this stopped only the units
+    literally declared in deploy.toml, so a timer-triggered oneshot that
+    was mid-run (its ``.service`` often isn't listed — only the ``.timer``)
+    or a Restart=always service still Wanted by a not-yet-stopped consumer
+    (e.g. metrology@ instances keeping core-recorder alive) could survive
+    the disable."""
     if not _HAS_SIGMOND_LIB:
         return
     try:
@@ -1878,11 +1912,21 @@ def _stop_component_units(component: str) -> None:
                         unit_names.extend(_expand_running_instances(u))
                     else:
                         unit_names.append(u)
-            for u in unit_names:
-                _run(['systemctl', 'stop', u], sudo=True)
+            for unit_name in _augment_stop_list_with_timer_services(unit_names):
+                _run(['systemctl', 'stop', unit_name], sudo=True)
             return
-        for unit in [u for u in units if not u.orphaned]:
-            _run(['systemctl', 'stop', unit.unit], sudo=True)
+        units = [u for u in units if not u.orphaned]
+        # Reverse-dependency order: stop consumers before the services they
+        # depend on, so a Restart=always service isn't revived by a still-
+        # running dependent.
+        try:
+            units = order_units(units, coordination=load_coordination())
+        except Exception:
+            pass
+        stop_list = _augment_stop_list_with_timer_services(
+            [u.unit for u in reversed(units)])
+        for unit_name in stop_list:
+            _run(['systemctl', 'stop', unit_name], sudo=True)
     except Exception as exc:
         _warn(f'{component}: stop units skipped — {exc}')
 
@@ -3719,29 +3763,13 @@ def cmd_stop(args) -> int:
         coord = load_coordination()
         units = order_units(units, coordination=coord)
 
-    # Build the full stop list:
-    #   1. Every declared unit (services, targets, timers).
-    #   2. For each .timer, also the matching .service if it's currently
-    #      running.  systemctl stop foo.timer doesn't kill a foo.service
-    #      that the timer triggered earlier — e.g. a grape-daily catch-up
-    #      run that's still chewing on yesterday's data when we stop.
-    stop_list: list[str] = [u.unit for u in reversed(units)]
-    seen = set(stop_list)
-    for u in stop_list[:]:  # iterate a snapshot
-        if u.endswith('.timer'):
-            paired_service = u[:-len('.timer')] + '.service'
-            if paired_service in seen:
-                continue
-            # `is-active --quiet` returns 0 ONLY for "active"; it returns
-            # non-zero for "activating".  We want both — a long-running
-            # oneshot triggered by the timer (e.g. grape-daily mid-
-            # processing) is exactly what we need to interrupt on stop.
-            r = _run(['systemctl', 'is-active', paired_service])
-            state = r.stdout.strip()
-            if state in ('active', 'activating', 'reloading'):
-                idx = stop_list.index(u)
-                stop_list.insert(idx, paired_service)
-                seen.add(paired_service)
+    # Build the full stop list: every declared unit (reverse-dependency
+    # order), plus the .service behind each .timer if it's mid-run — a
+    # `systemctl stop foo.timer` doesn't kill a foo.service the timer
+    # triggered earlier (e.g. a grape-daily catch-up still chewing on
+    # yesterday's data).  Shared with `smd disable` via the helper.
+    stop_list: list[str] = _augment_stop_list_with_timer_services(
+        [u.unit for u in reversed(units)])
 
     _heading('stop')
     stopped = 0
@@ -5873,6 +5901,13 @@ _smd_complete() {
         return
     fi
 
+    if [[ "$prev" == "--host" ]]; then
+        # `smd watch radiod --host`: localhost + recorder-instance ssh aliases
+        local _rhosts="localhost $(systemctl list-units --plain --no-legend 'wspr-recorder@*' 'psk-recorder@*' 2>/dev/null | sed -E 's/^(wspr|psk)-recorder@(.+)\.service.*/\2/' | sort -u)"
+        COMPREPLY=($(compgen -W "$_rhosts" -- "$cur"))
+        return
+    fi
+
     case $cword in
         1)
             COMPREPLY=($(compgen -W "$top_cmds" -- "$cur"))
@@ -5922,7 +5957,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "install apply" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar ka9q uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk radiod hfdl codar ka9q uploads verifier" -- "$cur"))
                     ;;
                 verifier)
                     COMPREPLY=($(compgen -W "report" -- "$cur"))
@@ -5975,6 +6010,9 @@ _smd_complete() {
                             ;;
                         ka9q)
                             COMPREPLY=($(compgen -W "--ka9q-python --ka9q-radio --remote --branch --no-fetch --json" -- "$cur"))
+                            ;;
+                        radiod)
+                            COMPREPLY=($(compgen -W "--host -n --lines --all-lines" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -7935,6 +7973,8 @@ def _psk_watch_cycle_loop(
     for _lbl, _f8, _f4 in receivers:
         pos[(_lbl, 'ft8')] = _file_size(_f8)
         pos[(_lbl, 'ft4')] = _file_size(_f4)
+        pos[(_lbl, 'timing')] = _file_size(
+            _f8.with_name(_f8.name.replace('-ft8.log', '-timing.log')))
 
     import re as _re
     # Each spot line: "YYYY/MM/DD HH:MM:SS  SCORE  +DT  FREQ  ~  MSG"
@@ -7990,6 +8030,88 @@ def _psk_watch_cycle_loop(
                          key=lambda b: _BAND_ORDER.get(b, 99))
         return ' '.join(f'{b}:{counts[b]}' for b in ordered)
 
+    def _avg_dt(lines: list):
+        """Mean decoder dt (seconds) over a cycle's spot lines, or None.
+        Averaged over many spots the transmitters' own timing errors cancel,
+        so this approximates the recorder's slot-anchor offset from true UTC
+        plus any uncompensated chain delay (the 'why is dt ~0.8s' lens).
+        dt is the 4th whitespace field: 'YYYY/MM/DD HH:MM:SS SNR dt freq ~ msg'."""
+        dts = []
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    dts.append(float(parts[3]))
+                except ValueError:
+                    pass
+        return (sum(dts) / len(dts)) if dts else None
+
+    # FT8 carries many bands, so render it with fixed-width per-band
+    # columns: every band seen this session holds the same column in
+    # canonical order, blank in cycles where it had no spots, so the FT8
+    # breakdown lines up vertically across cycles and receivers.  FT4
+    # (usually one band) keeps the compact _bands_summary above.
+    _BAND_CELL_W_FT8 = 9
+    _known_ft8_bands: list = []
+
+    def _note_ft8_bands(bands) -> None:
+        added = False
+        for b in bands:
+            if b and b != '??' and b not in _known_ft8_bands:
+                _known_ft8_bands.append(b)
+                added = True
+        if added:
+            _known_ft8_bands.sort(key=lambda b: _BAND_ORDER.get(b, 99))
+
+    def _bands_summary_ft8(lines: list) -> str:
+        counts: dict = {}
+        for line in lines:
+            b = _band(line)
+            counts[b] = counts.get(b, 0) + 1
+        if not counts:
+            return ''
+        _note_ft8_bands(counts.keys())
+        return ''.join(
+            (f'{b}:{counts[b]}'.ljust(_BAND_CELL_W_FT8) if b in counts
+             else ' ' * _BAND_CELL_W_FT8)
+            for b in _known_ft8_bands
+        )
+
+    # Pre-seed FT8 columns from each receiver's recent log tail so the
+    # fixed-width breakdown is aligned from the very first rendered cycle.
+    for _lbl, _f8, _f4 in receivers:
+        try:
+            _sz = _file_size(_f8)
+            _, _tail = _read_since(_f8, max(0, _sz - 65536))
+            _note_ft8_bands(_band(_l) for _l in _tail)
+        except Exception:
+            pass
+
+    # Separate each 15 s slot's block of receiver lines with a blank line.
+    _prev_wall = [None]
+    # decode_ft8 (ka9q/ft8_lib) reports a fixed ~0.65 s dt offset vs
+    # WSJT-X/jt9 — verified 2026-06-05 by decoding the same on-time WAV with
+    # both (jt9 +0.17, decode_ft8 +0.82). The recording is on-time; this is a
+    # decoder-convention offset. Subtract it so the FT8 dt column reads true
+    # (matching WSPR and WSJT-X). Display-only; spot data/uploads untouched.
+    # FT4 carries its own offset and is left raw. Tunable via env.
+    _ft8_dt_cal = float(os.environ.get('PSK_WATCH_FT8_DT_CAL_SEC', '0.65'))
+    # FT4 has its own decode_ft8 offset (~0.6, see psk-recorder ch_tailer).
+    _ft4_dt_cal = float(os.environ.get('PSK_WATCH_FT4_DT_CAL_SEC', '0.6'))
+
+    def _cal_spot_line(spot_line, cal):
+        """Subtract the decode_ft8 dt offset from a raw decoder spot line for
+        verbose display (reformats only the dt field; leaves the rest)."""
+        head, sep, msg = spot_line.partition('~')
+        parts = head.split()
+        if sep and len(parts) >= 4:
+            try:
+                parts[3] = f'{float(parts[3]) - cal:+.2f}'
+                return ' '.join(parts) + ' ~' + msg
+            except ValueError:
+                pass
+        return spot_line
+
     try:
         while True:
             # Next fire: next 15 s UTC boundary + SETTLE.
@@ -8001,6 +8123,12 @@ def _psk_watch_cycle_loop(
             wall = time.strftime('%H:%M:%S', time.gmtime(next_boundary))
             now_str = time.strftime('%H:%M:%S')
             cap = max_lines_per_mode
+            # Blank line between consecutive slot blocks (one fire per
+            # 15 s FT8 cadence) so each slot's receiver lines read as a
+            # distinct block.
+            if _prev_wall[0] is not None and _prev_wall[0] != wall:
+                print(flush=True)
+            _prev_wall[0] = wall
 
             # One block (detail) or line (summary) per receiver, so a
             # multi-rx host shows EVERY FT upload — not just the
@@ -8010,6 +8138,18 @@ def _psk_watch_cycle_loop(
                     ft8_log, pos[(label, 'ft8')])
                 pos[(label, 'ft4')], ft4_lines = _read_since(
                     ft4_log, pos[(label, 'ft4')])
+                # Timing-fault alarms: psk-recorder writes #TIMINGFAULT lines
+                # to <rid>-timing.log when it detects an anchor divergence (and
+                # re-anchors).  Surface them LOUD inline so the operator sees
+                # the fault and goes to investigate — recovery is never silent.
+                _timing_log = ft8_log.with_name(
+                    ft8_log.name.replace('-ft8.log', '-timing.log'))
+                pos[(label, 'timing')], _fault_lines = _read_since(
+                    _timing_log, pos.get((label, 'timing'), 0))
+                for _fl in _fault_lines:
+                    if _fl.startswith('#TIMINGFAULT'):
+                        print('  ⚠⚠ TIMING FAULT  '
+                              + _fl[len('#TIMINGFAULT'):].strip(), flush=True)
 
                 # Sort each mode by (time, freq).  Within one 15 s FT8
                 # window all FT8 timestamps are equal, so the sort is
@@ -8024,10 +8164,20 @@ def _psk_watch_cycle_loop(
 
                 # Per-band counts come from the FULL list — the cap only
                 # affects what we PRINT, not what we COUNT.
-                ft8_bands = _bands_summary(ft8_lines)
+                ft8_bands = _bands_summary_ft8(ft8_lines)
                 ft4_bands = _bands_summary(ft4_lines)
                 ft8_bands_part = f' ({ft8_bands})' if ft8_bands else ''
                 ft4_bands_part = f' ({ft4_bands})' if ft4_bands else ''
+                # Average decoder dt for the cycle's spots (fixed-width so the
+                # column lines up; '----' when no spots to average).
+                _d8 = _avg_dt(ft8_lines)
+                if _d8 is not None:
+                    _d8 -= _ft8_dt_cal   # decode_ft8 → WSJT-X dt convention
+                _d4 = _avg_dt(ft4_lines)
+                if _d4 is not None:
+                    _d4 -= _ft4_dt_cal
+                ft8_dt_part = f' dt={_d8:+.2f}' if _d8 is not None else ' dt= ----'
+                ft4_dt_part = f' dt={_d4:+.2f}' if _d4 is not None else ''
 
                 if show_spots:
                     # Detail path (cap=N or no-cap with -v): per-spot dump
@@ -8035,7 +8185,7 @@ def _psk_watch_cycle_loop(
                     print(f'─── slot UTC {wall}  rx={label} ──────────────────',
                           flush=True)
                     for line in ft8_show:
-                        print(f'  ft8: {line}', flush=True)
+                        print(f'  ft8: {_cal_spot_line(line, _ft8_dt_cal)}', flush=True)
                     if cap is not None and len(ft8_lines) > len(ft8_show):
                         print(f'  ft8: … ({len(ft8_lines) - len(ft8_show)} more)',
                               flush=True)
@@ -8051,7 +8201,7 @@ def _psk_watch_cycle_loop(
                         this_ts = m.group(1) if m else ''
                         if prev_ts and this_ts and this_ts != prev_ts:
                             print(flush=True)
-                        print(f'  ft4: {line}', flush=True)
+                        print(f'  ft4: {_cal_spot_line(line, _ft4_dt_cal)}', flush=True)
                         prev_ts = this_ts
                     if cap is not None and len(ft4_lines) > len(ft4_show):
                         print(f'  ft4: … ({len(ft4_lines) - len(ft4_show)} more)',
@@ -8059,15 +8209,15 @@ def _psk_watch_cycle_loop(
                     if not ft8_lines and not ft4_lines:
                         print('  (no decodes this cycle)', flush=True)
                     else:
-                        print(f'  → ft8 total={len(ft8_lines)}{ft8_bands_part}   '
-                              f'ft4 total={len(ft4_lines)}{ft4_bands_part}',
+                        print(f'  → ft8 total={len(ft8_lines)}{ft8_dt_part}{ft8_bands_part}   '
+                              f'ft4 total={len(ft4_lines)}{ft4_dt_part}{ft4_bands_part}',
                               flush=True)
                 else:
                     # Summary path (no args, cap=0): one line per rx/cycle.
                     print(
                         f'[{now_str}] slot UTC {wall}  rx={label:<22} '
-                        f'ft8={len(ft8_lines):>3}{ft8_bands_part}  '
-                        f'ft4={len(ft4_lines):>3}{ft4_bands_part}',
+                        f'ft8={len(ft8_lines):>3}{ft8_dt_part}{ft8_bands_part}  '
+                        f'ft4={len(ft4_lines):>3}{ft4_dt_part}{ft4_bands_part}',
                         flush=True,
                     )
     except KeyboardInterrupt:
@@ -8663,6 +8813,10 @@ def cmd_wspr_watch(args) -> int:
     # it only for the displayed [HH:MM:SS] tag; the cycle's UTC time
     # is the authoritative key for sqlite lookups.
     ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}),')
+    # Average decoder dt emitted inline by wspr-recorder's cycle commit
+    # (`… ms) dt=+0.84 bands=[…]`).  Parsed with its own regex so cycle_re's
+    # group numbering stays untouched; absent on older recorder builds.
+    dt_re = _re.compile(r'\bdt=([+\-][\d.]+)')
 
     _heading(f'WSPR cycle activity ({unit_pattern})')
     _info('   stage: decoder (wsprd) → SQLite (wspr.spots) → upload (wsprdaemon.org / wsprnet)')
@@ -8982,11 +9136,33 @@ def cmd_wspr_watch(args) -> int:
             counts[band] = counts.get(band, 0) + 1
         return counts
 
+    # Fixed-width per-band columns so the breakdown lines up vertically
+    # across cycles AND across receivers: every band seen this session
+    # holds the same column in canonical order, rendered blank in cycles
+    # where it had no spots.  Width holds "2200m:999" with a gap.
+    _BAND_CELL_W = 10
+    _known_bands: list = []  # canonical-ordered union of bands seen
+
+    def _note_bands(counts: dict) -> None:
+        added = False
+        for b in counts:
+            if b not in _known_bands:
+                _known_bands.append(b)
+                added = True
+        if added:
+            _known_bands.sort(key=_band_sort_key)
+
     def _format_band_counts(counts: dict) -> str:
         if not counts:
             return ''
-        ordered = sorted(counts, key=_band_sort_key)
-        return ' '.join(f'{b}m:{counts[b]}' for b in ordered)
+        _note_bands(counts)
+        # Emit EVERY known band so the closing ']' and each band column
+        # land at the same offset on every line; absent bands are spaces.
+        return ''.join(
+            (f'{b}m:{counts[b]}'.ljust(_BAND_CELL_W) if b in counts
+             else ' ' * _BAND_CELL_W)
+            for b in _known_bands
+        )
 
     def _format_spot(row) -> str:
         band, call, grid, snr_db, dt, drift, freq_hz, pwr = row
@@ -9101,6 +9277,25 @@ def cmd_wspr_watch(args) -> int:
         # buffered here.
         pending.clear()
 
+    # Pre-seed the per-band columns from recent history so the fixed-width
+    # breakdown is aligned from the very first rendered line (without this
+    # the column set grows over the first cycle as new bands first appear,
+    # so the earliest lines render with fewer columns than later ones).
+    try:
+        _seed = subprocess.run(
+            [*sudo_prefix, 'journalctl', '--no-pager', '-o', 'cat',
+             '-u', unit_pattern, '--since', f'{max(backlog_min, 15)} min ago'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        _seed_counts = {
+            tok.split(':')[0]: 1
+            for m in _re.finditer(r'bands=\[([^\]]*)\]', _seed.stdout or '')
+            for tok in m.group(1).split() if tok.split(':')[0]
+        }
+        _note_bands(_seed_counts)
+    except Exception:
+        pass
+
     try:
         while True:
             line = _next_line()
@@ -9115,6 +9310,14 @@ def cmd_wspr_watch(args) -> int:
                 if not chunk:
                     break
                 buf += chunk
+                continue
+
+            # Timing-fault alarms from wspr-recorder's anchor detector
+            # (frozen-bad-anchor divergence or a radiod RTP↔GPS offset step).
+            # Surface them LOUD inline so recovery/attribution is visible.
+            if 'TIMING FAULT' in line and 'mode=wspr' in line:
+                _i = line.find('TIMING FAULT')
+                print('  ⚠⚠ ' + line[_i:].strip(), flush=True)
                 continue
 
             # Match the new transport-side wsprnet POST events FIRST
@@ -9369,9 +9572,13 @@ def cmd_wspr_watch(args) -> int:
                 rx_part = f' rx={short:<16}'
             reporter_part = (f' reporter={_display_reporter(resolved_reporter)}'
                              if resolved_reporter else '')
+            # Average decoder dt for the cycle (recorder-supplied, inline).
+            dtm = dt_re.search(line)
+            _avgdt = float(dtm.group(1)) if dtm else None
+            dt_part = f' dt={_avgdt:+.2f}' if _avgdt is not None else ' dt= ----'
             cycle_text = (
                 f'[{hms}] cycle UTC {hh}:{mm}{reporter_part}{rx_part}  '
-                f'{spots_n:>3} spots{noise_part} / {bands_n:>2} bands  '
+                f'{spots_n:>3} spots{noise_part} / {bands_n:>2} bands{dt_part}  '
                 f'(write {write_ms:>3} ms){counts_part}'
             )
             # If a previous cycle is still pending (no shipped event
@@ -11763,6 +11970,245 @@ def _add_hf_gps_tec_watch_args(p) -> None:
                         'or most-recently-modified data dir if no service.')
 
 
+def _add_radiod_watch_args(p) -> None:
+    """Argument spec for `smd watch radiod`."""
+    p.add_argument('--host', action='append', metavar='HOST', default=None,
+                   help='host whose radiod + kernel journal to follow '
+                        '(repeatable); default is this host.  Use ssh aliases '
+                        'for peers, e.g. --host bee1 --host bee2 --host localhost')
+    p.add_argument('-n', '--lines', type=int, default=20, metavar='N',
+                   help='replay the last N matching lines before following '
+                        '(default: 20)')
+    p.add_argument('--all-lines', action='store_true',
+                   help='show every radiod journal line, not just the RX888 '
+                        'clock / sample-loss / USB diagnostics')
+
+
+def _radiod_watch_candidate_hosts() -> list:
+    """Hosts whose radiod we can follow: 'localhost' (this box's radiod)
+    plus ssh-alias peers inferred from the wspr/psk recorder instances that
+    are NOT the local radiod.  A remote recorder instance is named for its
+    ssh alias (e.g. ``wspr-recorder@bee1`` -> ``ssh bee1``), so the instance
+    name doubles as the --host value.  Returns ['localhost'] when no peers
+    are found."""
+    import re as _re2
+    local = set()
+    try:
+        for unit in _get_radiod_instances():            # 'radiod@<inst>.service'
+            m = _re2.match(r'radiod@(.+)\.service$', unit)
+            if m:
+                local.add(m.group(1))
+    except Exception:
+        pass
+    peers = []
+    seen = set()
+    try:
+        r = subprocess.run(
+            ['systemctl', 'list-units', '--plain', '--no-legend',
+             'wspr-recorder@*', 'psk-recorder@*'],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            m = _re2.match(r'(?:wspr|psk)-recorder@(.+)\.service$', parts[0])
+            if not m:
+                continue
+            inst = m.group(1)
+            if inst in local or inst in seen:
+                continue
+            seen.add(inst)
+            peers.append(inst)
+    except Exception:
+        pass
+    return ['localhost'] + sorted(peers)
+
+
+def _radiod_watch_pick_hosts() -> list:
+    """Interactive host picker used when `smd watch radiod` is run without
+    --host.  Lists localhost + discovered peers and prompts for a choice.
+    Falls back to ['localhost'] when only one candidate exists or when not
+    attached to a terminal (so cron / piped runs never hang)."""
+    cands = _radiod_watch_candidate_hosts()
+    if len(cands) <= 1:
+        return cands or ['localhost']
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return ['localhost']
+    import re as _re2
+    print("Which radiod host(s) do you want to watch?")
+    for i, h in enumerate(cands, 1):
+        tag = "   (this host)" if h == 'localhost' else ""
+        print(f"  {i}) {h}{tag}")
+    print("  a) all of them")
+    prompt = (f"Select 1-{len(cands)} "
+              f"(comma-separated for several, 'a' for all) [default 1]: ")
+    while True:
+        try:
+            sel = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ['localhost']
+        if sel == '':
+            return [cands[0]]
+        if sel.lower() in ('a', 'all'):
+            return cands
+        picks = []
+        ok = True
+        for tok in _re2.split(r'[,\s]+', sel):
+            if not tok:
+                continue
+            if tok.isdigit() and 1 <= int(tok) <= len(cands):
+                h = cands[int(tok) - 1]
+                if h not in picks:
+                    picks.append(h)
+            else:
+                ok = False
+                break
+        if ok and picks:
+            return picks
+        print(f"  '{sel}' is not a valid choice — enter numbers 1-{len(cands)}, "
+              f"or 'a' for all.")
+
+
+def cmd_radiod_watch(args) -> int:
+    """Live-tail radiod's RX888 clock / sample-loss diagnostics AND the kernel
+    USB log across one or more hosts.
+
+    Two journals per host:
+      1. radiod@* — rx888.c instrumentation:
+         - "RTP<->GPS offset STEPPED ..."  -> sample LOSS (USB drop / xhci
+           reset): host wallclock advanced but the ADC sample count did not.
+         - "measured sample rate ... ppm"  -> per-minute rate (noisy on the
+           NTP-disciplined sysclock; converges to ~0 ppm long-term because
+           the ADC clock is GPSDO-disciplined).
+         - "ADC clock not locked", "No rx888 data".
+      2. kernel — USB/xhci faults (e.g. "reset SuperSpeed USB device ...
+         xhci_hcd"): the root cause of RX888 sample loss.  Rendered in bold
+         red with a ⚠ USB RESET banner so it can't be missed.
+
+    radiods run on each receiver host, so peers are followed over ssh (the
+    local host needs no ssh)."""
+    import threading
+    import shutil
+    import re as _re
+
+    hosts = args.host or _radiod_watch_pick_hosts()
+    lines = max(0, getattr(args, 'lines', 20) or 0)
+    show_all = getattr(args, 'all_lines', False)
+    is_tty = sys.stdout.isatty()
+
+    def _col(s, code):
+        return f'\033[{code}m{s}\033[0m' if (is_tty and code) else s
+
+    # radiod@* severity colouring
+    SEV = [
+        (_re.compile(r'STEPPED|SAMPLE LOSS', _re.I), '31'),                  # red
+        (_re.compile(r'not locked|No rx888 data|aborted|disappeared|'
+                     r'Transfer .*status', _re.I), '33'),                    # yellow
+        (_re.compile(r'measured sample rate', _re.I), '36'),                 # cyan
+    ]
+    KEEP = _re.compile(r'RX888|rx888|Transfer .*callback|No rx888 data',
+                       _re.I)
+    # kernel USB faults — the smoking gun for sample loss.  Highly visible.
+    USB_FAULT = _re.compile(
+        r'reset (?:SuperSpeed|high-speed|full-speed)? ?USB device|'
+        r'\bxhci|USB disconnect|over[- ]?current|cannot enable port|'
+        r'device descriptor read|not accepting address|'
+        r'device not accepting|ep0?_? ?(?:halt|stall)', _re.I)
+    TAG_COLOURS = ['35', '32', '34', '36', '33', '31']
+
+    def build_cmd(host, kernel):
+        if kernel:
+            flags = ['-fk', '-o', 'short-iso', '--no-hostname']
+            remote = "sudo journalctl -fk -o short-iso --no-hostname"
+        else:
+            flags = ['-f', '-u', 'radiod@*', '-o', 'short-iso', '--no-hostname']
+            remote = "sudo journalctl -f -u 'radiod@*' -o short-iso --no-hostname"
+        if lines:
+            flags += ['-n', str(lines)]
+            remote += f' -n {lines}'
+        if host in ('localhost', '', None):
+            jc = ['journalctl'] + flags
+            if os.geteuid() != 0 and shutil.which('sudo'):
+                return ['sudo'] + jc
+            return jc
+        return ['ssh', host, remote]
+
+    procs = []
+
+    def pump(host, tag, tag_code, kernel):
+        try:
+            p = subprocess.Popen(build_cmd(host, kernel),
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True,
+                                 bufsize=1)
+        except Exception as e:  # noqa: BLE001
+            _err(f'{host}: cannot start '
+                 f'{"kernel" if kernel else "radiod"} journal follow: {e}')
+            return
+        procs.append(p)
+        for raw in p.stdout:
+            line = raw.rstrip('\n')
+            if not line:
+                continue
+            if kernel:
+                if not USB_FAULT.search(line):
+                    continue
+                # Make USB faults unmissable: bold-red banner line.
+                banner = _col('⚠⚠ USB FAULT (RX888 sample loss likely) ⚠⚠',
+                              '1;37;41')
+                print(f'{_col(tag, tag_code)} {banner} '
+                      f'{_col(line, "1;31")}', flush=True)
+                continue
+            if not show_all and not KEEP.search(line):
+                continue
+            code = None
+            for pat, c in SEV:
+                if pat.search(line):
+                    code = c
+                    break
+            print(f'{_col(tag, tag_code)} '
+                  f'{_col(line, code) if code else line}', flush=True)
+
+    print(_col('━━━ radiod RX888 clock / sample-loss / USB watch ━━━', '1'))
+    print('        radiod@* + kernel USB log across: ' + ', '.join(hosts))
+    print('        ' + _col('⚠⚠ USB FAULT', '1;37;41')
+          + ' = kernel USB/xhci reset (the cause)   '
+          + _col('red', '31') + ' = offset STEP / sample loss   '
+          + _col('yellow', '33') + ' = clock-lock / no-data   '
+          + _col('cyan', '36') + ' = rate (ppm)')
+    print('        ▸ a STEP means host wallclock advanced but the ADC sample '
+          'count did not = LOST samples')
+    print('        ▸ rate ppm is noisy on the NTP sysclock; it converges to '
+          '~0 ppm long-term (the ADC is GPSDO-disciplined)')
+    print('        Ctrl-C to exit.\n')
+    sys.stdout.flush()
+
+    threads = []
+    for i, h in enumerate(hosts):
+        code = TAG_COLOURS[i % len(TAG_COLOURS)]
+        for kernel in (False, True):
+            t = threading.Thread(target=pump,
+                                 args=(h, f'[{h}]', code, kernel),
+                                 daemon=True)
+            t.start()
+            threads.append(t)
+    try:
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                t.join(timeout=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for p in procs:
+            try:
+                p.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+    return 0
+
+
 def _add_ka9q_watch_args(p) -> None:
     """Argument spec shared by `smd ka9q-watch` and `smd watch ka9q`."""
     p.add_argument('--ka9q-python', metavar='PATH',
@@ -12790,6 +13236,14 @@ def main() -> int:
     )
     _add_verifier_watch_args(p_w_verifier)
 
+    p_w_radiod = watch_sub.add_parser(
+        'radiod',
+        help='live tail of radiod RX888 clock / sample-loss diagnostics + '
+             'kernel USB faults across hosts (offset STEPs = lost samples; '
+             'USB/xhci resets highlighted as the cause)',
+    )
+    _add_radiod_watch_args(p_w_radiod)
+
     # config (Phase 1)
     p_config = sub.add_parser('config',
                               help='inspect or migrate sigmond coordination config')
@@ -13044,6 +13498,8 @@ def main() -> int:
             return cmd_hf_gps_tec_watch(args)
         if target == 'mag':
             return cmd_mag_watch(args)
+        if target == 'radiod':
+            return cmd_radiod_watch(args)
         if target == 'ka9q':
             if not _HAS_SIGMOND_LIB:
                 print('smd: sigmond library not found; install '
