@@ -2634,6 +2634,21 @@ def cmd_bringup(args) -> int:
             continue
         # install / tune / config / wisdom / start
         if st.kind == 'config':
+            # Idempotency: bringup is bring-up, not reconfigure.  Re-running
+            # `config init` on an already-configured host regenerates the file —
+            # some clients' non-interactive configurators don't preserve
+            # operator edits/comments (observed: hf-timestd lost its comments on
+            # a live re-run).  Skip when already configured; `--reconfigure`
+            # forces it.  (radiod has its own _refuse_overwrite guard.)
+            client = (st.argv[st.argv.index('init') + 1]
+                      if 'init' in st.argv else None)
+            if client and not getattr(args, 'reconfigure', False):
+                done, detail = _bringup_probe(f'configured:{client}', smd_bin)
+                if done:
+                    _info(f'» {st.label} — already configured ({detail}); '
+                          f'skipping (smd config edit {client}, or '
+                          f'bringup --reconfigure to force)')
+                    continue
             _heading(st.label)
         else:
             _info(f'» {st.label}')
@@ -12571,6 +12586,8 @@ def main() -> int:
                            help='also install the profile optional add-ons (e.g. ka9q-web)')
     p_bringup.add_argument('--non-interactive', action='store_true', dest='non_interactive',
                            help='drive each client config interview non-interactively, applying the §14 commons defaults (unattended bring-up)')
+    p_bringup.add_argument('--reconfigure', action='store_true',
+                           help='re-run config init even for already-configured clients (default: skip them — bringup is idempotent and preserves existing config)')
     p_bringup.add_argument('--dry-run', action='store_true',
                            help='print the staged plan without running it')
 
