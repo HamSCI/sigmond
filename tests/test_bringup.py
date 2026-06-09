@@ -48,6 +48,19 @@ def test_stage_assignment_timing_authority_and_independent():
     assert stage['configure psk-recorder'] == STAGE3A
 
 
+def test_plan_provisions_hs_uploader_dir_before_start():
+    # Recorder units need /var/lib/hs-uploader (ReadWritePaths + ProtectSystem
+    # strict) to exist or they fail 226/NAMESPACE; bring-up must create it
+    # before any start.
+    p = build_plan(_dasi2(), local_radiod=True)
+    prov = next((i for i, s in enumerate(p.steps)
+                 if '/var/lib/hs-uploader' in s.argv), None)
+    first_start = next((i for i, s in enumerate(p.steps)
+                        if s.kind == 'start'), None)
+    assert prov is not None, 'no hs-uploader provisioning step'
+    assert first_start is not None and prov < first_start
+
+
 def test_plan_runs_radiod_migrate_after_configs_before_start():
     # A leftover legacy config that `config init` skipped is healed by a
     # `radiod migrate` step that runs after all configs and before any start.

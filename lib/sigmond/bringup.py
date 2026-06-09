@@ -143,6 +143,18 @@ def build_plan(profile, *, local_radiod: bool,
             configure(STAGE3B, client)
             checkpoint(STAGE3B, f'{client} configured', check=f'configured:{client}')
 
+    # Provision the shared hs-uploader watermark dir.  Recorder units list
+    # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it
+    # MUST exist before they start or systemd aborts the sandbox with
+    # 226/NAMESPACE.  It's normally created by hs-uploader/install.sh, which
+    # bring-up doesn't invoke (hs-uploader is a source-only sibling), so create
+    # it here — root:sigmond, setgid + group-writable like /var/lib/sigmond, so
+    # every HamSCI recorder user (in the sigmond group) can write.  `install -d`
+    # is idempotent.
+    steps.append(Step(STAGE4, 'provision shared hs-uploader watermark dir', 'tune',
+                      argv=['install', '-d', '-m', '2775', '-o', 'root',
+                            '-g', 'sigmond', '/var/lib/hs-uploader']))
+
     # Heal any leftover legacy config before starting: a stale client config
     # from a prior install (e.g. the legacy `status_address` field) that
     # `config init` refused to overwrite would otherwise fail to load.  This
