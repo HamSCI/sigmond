@@ -6310,7 +6310,7 @@ _smd_complete() {
                             esac
                             ;;
                         wisdom)
-                            COMPREPLY=($(compgen -W "plan status" -- "$cur"))
+                            COMPREPLY=($(compgen -W "plan status help" -- "$cur"))
                             ;;
                         public-ip)
                             COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
@@ -12828,7 +12828,10 @@ def main() -> int:
                    help='leave the result at /etc/fftw/wisdomf.new without renaming over wisdomf')
 
     p = wisdom_sub.add_parser('status',
-                              help='show whether /etc/fftw/wisdomf exists and how old it is')
+                              help='show whether /etc/fftw/wisdomf exists and how old it is '
+                                   '(default for bare `smd admin wisdom`)')
+
+    wisdom_sub.add_parser('help', help='show this help')
 
     # diag  (with its own sub-commands)
     p_diag = admin_sub.add_parser('diag', help='run cross-component diagnostics')
@@ -13548,7 +13551,12 @@ def main() -> int:
             if _need_root('wisdom plan'):
                 return 1
             return cmd_wisdom_plan(args)
-        if wis_cmd == 'status':
+        if wis_cmd == 'help':
+            p_wisdom.print_help()
+            return 0
+        # Bare `smd admin wisdom` (or explicit `status`) defaults to status;
+        # `smd admin wisdom help` (above) prints help.
+        if wis_cmd in (None, 'status'):
             return cmd_wisdom_status(args)
         p_wisdom.print_help()
         return 0
