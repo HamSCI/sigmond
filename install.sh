@@ -637,6 +637,36 @@ if [[ -L "$LEGACY_INSTALL_SMD" ]]; then
     $SUDO rm -f "$LEGACY_INSTALL_SMD"
 fi
 
+# ─── operator shell aliases ───────────────────────────────────────────────────
+# Ensure the invoking user's ~/.bash_aliases sources sigmond's curated alias
+# file (ll / lrt / cds / tm).  Sourcing — not copying — keeps the repo file the
+# single source of truth, so `git pull` updates the aliases with no per-host
+# re-sync.  Idempotent: guarded by a marker block, so re-running install.sh is a
+# no-op once present.
+_ensure_operator_aliases() {
+    local user="$1"
+    [[ -z "$user" || "$user" == "root" ]] && return 0
+    local home
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [[ -z "$home" || ! -d "$home" ]] && return 0
+    local rc="$home/.bash_aliases"
+    if [[ -f "$rc" ]] && grep -q '>>> sigmond aliases >>>' "$rc"; then
+        ok "operator aliases already wired in $rc"
+        return 0
+    fi
+    info "Wiring sigmond aliases (ll/lrt/cds/tm) into $rc…"
+    {
+        echo '# >>> sigmond aliases >>>'
+        echo '# Curated sigmond shell aliases/functions (ll, lrt, cds, tm).'
+        echo "# Source of truth: $CANONICAL_REPO/etc/aliases.sh — edits there propagate on \`git pull\`."
+        echo "[ -r $CANONICAL_REPO/etc/aliases.sh ] && . $CANONICAL_REPO/etc/aliases.sh"
+        echo '# <<< sigmond aliases <<<'
+    } | $SUDO tee -a "$rc" >/dev/null
+    $SUDO chown "$user:$(id -gn "$user" 2>/dev/null || echo "$user")" "$rc"
+    ok "operator aliases wired (new shells pick them up; source ~/.bashrc for this one)"
+}
+_ensure_operator_aliases "$INVOKER"
+
 # ─── catalog prune ────────────────────────────────────────────────────────────
 # Trim /etc/sigmond/catalog.toml so it carries only entries that diverge
 # from the in-repo catalog.  On a fresh install (file doesn't exist) this
