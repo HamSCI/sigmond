@@ -6222,10 +6222,10 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
                 config)
-                    COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
+                    COMPREPLY=($(compgen -W "show migrate backup restore init edit help" -- "$cur"))
                     ;;
                 component)
-                    COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
+                    COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                     ;;
                 watch)
                     COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-gps-tec mag ka9q radiod uploads verifier" -- "$cur"))
@@ -6289,7 +6289,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "$components radiod" -- "$cur"))
                             ;;
                         *)
-                            COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
+                            COMPREPLY=($(compgen -W "show migrate backup restore init edit help" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6311,7 +6311,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "$components" -- "$cur"))
                             ;;
                         *)
-                            COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
+                            COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6394,7 +6394,7 @@ _smd_complete() {
                             esac
                             ;;
                         environment)
-                            COMPREPLY=($(compgen -W "list probe describe" -- "$cur"))
+                            COMPREPLY=($(compgen -W "list probe describe help" -- "$cur"))
                             ;;
                         log)
                             case "${words[3]}" in
@@ -6440,7 +6440,7 @@ _smd_complete() {
                                     COMPREPLY=($(compgen -W "--yes" -- "$cur"))
                                     ;;
                                 *)
-                                    COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate" -- "$cur"))
+                                    COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate help" -- "$cur"))
                                     ;;
                             esac
                             ;;
@@ -6477,7 +6477,7 @@ _smd_complete() {
                                     COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
                                     ;;
                                 *)
-                                    COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
+                                    COMPREPLY=($(compgen -W "list add remove apply help" -- "$cur"))
                                     ;;
                             esac
                             ;;
@@ -12646,6 +12646,7 @@ def main() -> int:
         help='catalog operations (v2 canonical namespace; '
              'list / install / update / add / remove / enable / disable)')
     component_sub = p_component.add_subparsers(dest='component_command')
+    component_sub.add_parser('help', help='show this help')
 
     p_c_list = component_sub.add_parser(
         'list',
@@ -12716,6 +12717,7 @@ def main() -> int:
         help='per-reporter client instance lifecycle '
              '(list / show / add / remove / edit / enable / disable / migrate)')
     instance_sub = p_instance.add_subparsers(dest='instance_command')
+    instance_sub.add_parser('help', help='show this help')
 
     p_i_list = instance_sub.add_parser(
         'list',
@@ -12992,6 +12994,7 @@ def main() -> int:
         ),
     )
     sources_sub = p_sources.add_subparsers(dest='sources_command')
+    sources_sub.add_parser('help', help='show this help')
     p_src_list = sources_sub.add_parser(
         'list',
         help='show current selections and discovered inventory',
@@ -13411,6 +13414,7 @@ def main() -> int:
     p_config = sub.add_parser('config',
                               help='inspect or migrate sigmond coordination config')
     config_sub = p_config.add_subparsers(dest='config_command')
+    config_sub.add_parser('help', help='show this help')
 
     p = config_sub.add_parser('show',
                               help='dump effective coordination + client view')
@@ -13508,6 +13512,7 @@ def main() -> int:
     p_env = admin_sub.add_parser('environment',
                            help='inventory peers declared in environment.toml vs what is observed')
     env_sub = p_env.add_subparsers(dest='env_command')
+    env_sub.add_parser('help', help='show this help')
 
     # Argparse choices are derived from the same registries the loader
     # and dispatch tables use, so a new kind/source added in
@@ -13592,6 +13597,12 @@ def main() -> int:
 
     if args.command == 'sources':
         sub_cmd = getattr(args, 'sources_command', None)
+        if sub_cmd == 'help':
+            p_sources.print_help()
+            return 0
+        if sub_cmd is None:                 # bare `smd admin sources` -> list
+            p_src_list.parse_args([], namespace=args)
+            sub_cmd = 'list'
         if sub_cmd == 'list':
             return cmd_sources_list(args)
         if sub_cmd == 'add':
@@ -13755,6 +13766,15 @@ def main() -> int:
             return cmd_uninstall(args)
         if args.command == 'environment':
             env_cmd = getattr(args, 'env_command', None)
+            if env_cmd == 'help':
+                p_env.print_help()
+                return 0
+            if env_cmd is None:             # bare `smd admin environment` -> list
+                if not hasattr(args, 'json'):
+                    args.json = False
+                if not hasattr(args, 'kind'):
+                    args.kind = None
+                env_cmd = 'list'
             if env_cmd == 'list':
                 return cmd_environment_list(args)
             if env_cmd == 'probe':
@@ -13765,6 +13785,13 @@ def main() -> int:
             return 0
         # config
         sub_cmd = getattr(args, 'config_command', None)
+        if sub_cmd == 'help':
+            p_config.print_help()
+            return 0
+        if sub_cmd is None:                 # bare `smd config` -> show
+            if not hasattr(args, 'json'):
+                args.json = False
+            sub_cmd = 'show'
         if sub_cmd == 'show':
             return cmd_config_show(args)
         if sub_cmd == 'identity':
@@ -13819,6 +13846,12 @@ def main() -> int:
     # root-check via _need_root in the handler.
     if args.command == 'instance':
         ic = getattr(args, 'instance_command', None)
+        if ic == 'help':
+            p_instance.print_help()
+            return 0
+        if ic is None:                      # bare `smd admin instance` -> list
+            p_i_list.parse_args([], namespace=args)
+            ic = 'list'
         if ic == 'list':
             return cmd_instance_list(args)
         if ic == 'show':
@@ -13854,6 +13887,12 @@ def main() -> int:
     # do their own root checks.
     if args.command == 'component':
         cc = getattr(args, 'component_command', None)
+        if cc == 'help':
+            p_component.print_help()
+            return 0
+        if cc is None:                      # bare `smd component` -> list
+            p_c_list.parse_args([], namespace=args)
+            cc = 'list'
         if cc == 'list':
             # Read-only catalog view — synthesize the flags cmd_list
             # expects but that aren't on the `component list` parser.
@@ -13883,9 +13922,6 @@ def main() -> int:
             return cmd_enable(args)
         elif cc == 'disable':
             return cmd_disable(args)
-        elif cc is None:
-            p_component.print_help()
-            return 0
 
     # v2 deprecations for mutating-flag-on-read.
     if args.command == 'list' and getattr(args, 'update', False):
