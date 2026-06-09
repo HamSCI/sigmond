@@ -2377,6 +2377,15 @@ def _detect_magnetometer() -> bool:
     return hardware_ready('mag-recorder') is True
 
 
+def _detect_gpsdo() -> bool:
+    """True when a Leo Bodnar GPSDO is attached, per gpsdo-monitor's own
+    `inventory --json hardware_present` self-describe (CONTRACT §3 / Phase D),
+    falling back to the `1dd2:` USB/HID lsusb probe.  Unknown (None) is treated
+    as absent — don't scaffold gpsdo-monitor for hardware we can't confirm."""
+    from sigmond.hardware import hardware_ready
+    return hardware_ready('gpsdo-monitor') is True
+
+
 def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -> bool:
     """Block until FFT wisdom exists (radiod won't start cleanly without it).
 
@@ -2480,7 +2489,7 @@ def _bringup_probe(check: str, smd_bin: str):
         ok = Path(f'/etc/{name}').is_dir()
         return (ok, f"/etc/{name} {'present' if ok else 'missing'} (no inventory CLI)")
     if check == 'validate':
-        r = _run([smd_bin, 'validate'], capture=False)
+        r = _run([smd_bin, 'admin', 'validate'], capture=False)
         return (getattr(r, 'returncode', 1) == 0, 'see validate output above')
     return (True, 'no probe')
 
@@ -2495,6 +2504,12 @@ def cmd_bringup(args) -> int:
     """
     from sigmond.catalog import load_profiles
     from sigmond.bringup import build_plan, WISDOM_FILE
+
+    # Profile resolution: positional arg wins, then the back-compat --profile
+    # alias, else the basic `daisy` station.  So `smd bringup` == daisy and
+    # `smd bringup dasi2` selects DASI2.
+    args.profile = (getattr(args, 'profile', None)
+                    or getattr(args, 'profile_flag', None) or 'daisy')
 
     try:
         profiles = load_profiles()
@@ -2531,13 +2546,24 @@ def cmd_bringup(args) -> int:
                 return 1
             remote_dns = entered
 
-    # Environment-aware preflight: hardware-gated clients that can't run on this
-    # host are skipped (not scaffolded into a broken state) with a clear note.
+    # Environment-aware preflight: hardware-gated components that can't run on
+    # this host are skipped (not scaffolded into a broken state) with a clear
+    # note.  Even the `dasi2` profile, which "expects" the magnetometer + GPSDO,
+    # warns-and-continues rather than aborting (operator's choice).
     skip = set()
     if 'mag-recorder' in prof.clients and not _detect_magnetometer():
         _warn('no magnetometer found (RM3100 / Pololu USB-I2C adapter not on the '
               'bus) — skipping mag-recorder')
         skip.add('mag-recorder')
+    if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
+        _warn('no Leo Bodnar GPSDO found on the USB bus — skipping gpsdo-monitor')
+        skip.add('gpsdo-monitor')
+
+    # Suggest the fuller profile when basic `daisy` is chosen but a magnetometer
+    # is actually attached (autodetect-driven nudge, not an auto-add).
+    if prof.name == 'daisy' and _detect_magnetometer():
+        _info('magnetometer detected — for the full station including it, '
+              'run `smd bringup dasi2`')
 
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
 
@@ -2567,9 +2593,9 @@ def cmd_bringup(args) -> int:
         _info('(dry-run — no changes made)')
         return 0
 
-    if _need_root('bringup'):
-        return 1
-
+    # No root gate: bringup runs as the operator.  Each `smd ...` sub-step runs
+    # as the operator too and self-elevates its own privileged operations (so we
+    # never `sudo smd`); only the raw `systemctl` steps are run via sudo here.
     for st in plan.steps:
         if st.kind == 'note':
             _info(st.label)
@@ -2590,7 +2616,7 @@ def cmd_bringup(args) -> int:
             elif st.hard:
                 _err(f'{st.label} FAILED — {detail}')
                 _err(f'aborting (hard checkpoint). Fix, then re-run: '
-                     f'{os.path.basename(smd_bin)} bringup --profile {prof.name}')
+                     f'{os.path.basename(smd_bin)} bringup {prof.name}')
                 return 1
             else:
                 _warn(f'{st.label} — {detail} (advisory; continuing)')
@@ -2600,7 +2626,10 @@ def cmd_bringup(args) -> int:
             _heading(st.label)
         else:
             _info(f'» {st.label}')
-        r = _run(st.argv, capture=False, sudo=False)
+        # `smd ...` steps run as the operator (they self-elevate internally);
+        # raw steps (e.g. `systemctl start sigmond-wisdom.service`) need sudo.
+        is_smd_step = bool(st.argv) and str(st.argv[0]) == smd_bin
+        r = _run(st.argv, capture=False, sudo=not is_smd_step)
         if getattr(r, 'returncode', 0) != 0 and not st.background:
             _warn(f'step exited {r.returncode}: {" ".join(st.argv)}')
         if st.settle_s:
@@ -5796,7 +5825,7 @@ def _netdiag_auto_refresh(verb: str) -> None:
                 smd_bin = sys.argv[0] if (sys.argv and
                                           os.path.isfile(sys.argv[0])) else 'smd'
                 subprocess.Popen(
-                    [smd_bin, 'diag', 'net'],
+                    [smd_bin, 'admin', 'diag', 'net'],
                     stdout=lf, stderr=lf,
                     start_new_session=True,
                     close_fds=True,
@@ -12519,9 +12548,14 @@ def main() -> int:
         p.add_argument('--dry-run', action='store_true')
 
     p_bringup = sub.add_parser(
-        'bringup', help='guided station bring-up from a catalog profile')
-    p_bringup.add_argument('--profile', required=True, metavar='NAME',
-                           help='catalog [profile.<name>] to bring up (e.g. dasi2)')
+        'bringup', help='guided station bring-up (default: the basic `daisy` station; '
+                        '`smd bringup dasi2` adds the magnetometer)')
+    p_bringup.add_argument('profile', nargs='?', default=None, metavar='PROFILE',
+                           help='catalog [profile.<name>] to bring up '
+                                '(default: daisy — local radiod + WSPR + FT8 + timing + web; '
+                                'e.g. dasi2 to also bring up the magnetometer)')
+    p_bringup.add_argument('--profile', dest='profile_flag', metavar='NAME',
+                           help=argparse.SUPPRESS)   # back-compat alias for the positional
     p_bringup.add_argument('--remote-radiod', metavar='STATUS_DNS', dest='remote_radiod',
                            help='bind a remote radiod by status DNS instead of installing '
                                 'one locally (skips the radiod stack + FFT wisdom)')
@@ -13440,6 +13474,20 @@ def main() -> int:
     sub.add_parser('tui', help='launch the sigmond TUI')
 
     args = parser.parse_args()
+
+    # smd self-elevates each privileged step on its own (see _run sudo=True), so
+    # it is designed to run AS THE OPERATOR, never wrapped in sudo.  Refuse a
+    # sudo-wrapped invocation (EUID 0 with SUDO_USER set) so config files,
+    # interactive prompts, and station identity land under the operator and not
+    # root.  Internal callers that must run smd in a genuine root context
+    # (install.sh) set SIGMOND_ALLOW_SUDO=1 to bypass; systemd units run as root
+    # without SUDO_USER and are unaffected.
+    if (os.geteuid() == 0 and os.environ.get('SUDO_USER')
+            and not os.environ.get('SIGMOND_ALLOW_SUDO')):
+        _err("don't run smd under sudo — it elevates each privileged step itself. "
+             "Re-run as yourself:  " + ' '.join(['smd', *sys.argv[1:]]))
+        return 1
+
     if not args.command:
         print(BANNER)
         parser.print_help()

@@ -45,13 +45,19 @@ def _sdr_present() -> bool:
     return bool(re.search(r"rx888|04b4:00f[013]", _lsusb(), re.I))
 
 
+def _gpsdo_present() -> bool:
+    """Leo Bodnar GPSDO (USB/HID) — VID 1dd2 (LBE-1420/1421/mini) on the bus."""
+    return bool(re.search(r"1dd2:|leo bodnar", _lsusb(), re.I))
+
+
 # Legacy lsusb fallbacks, keyed by client/component name.  Consulted ONLY when
 # the client's `inventory --json` does not report `hardware_present` (or has no
 # inventory CLI — e.g. upstream ka9q-radio, whose SDR sigmond must detect
 # itself).  As each client emits the field, its entry here becomes vestigial.
 _LEGACY_PROBES: dict[str, Callable[[], bool]] = {
-    "mag-recorder": _magnetometer_present,
-    "ka9q-radio":   _sdr_present,
+    "mag-recorder":  _magnetometer_present,
+    "gpsdo-monitor": _gpsdo_present,
+    "ka9q-radio":    _sdr_present,
 }
 
 

@@ -31,9 +31,9 @@
 #  11. Symlinks bin/smd into /usr/local/bin/smd (on every user's PATH)
 #
 # After this script completes, run:
-#   sudo smd install               — CLI: install all catalog components
-#   sudo smd install wspr-recorder — CLI: install one component
-#   sudo smd tui                   — TUI: browse and install components
+#   smd install               — CLI: install all catalog components
+#   smd install wspr-recorder — CLI: install one component
+#   smd tui                   — TUI: browse and install components
 #
 # Note: the sigmond group membership applies to sessions started AFTER
 # install.sh.  Open a new shell (or `newgrp sigmond`) before editing
@@ -464,8 +464,8 @@ if [[ ! -f /etc/sigmond/topology.toml ]]; then
     $SUDO tee /etc/sigmond/topology.toml >/dev/null <<'TOML'
 # /etc/sigmond/topology.toml — which components are enabled on this host.
 #
-# All components start disabled.  Use  sudo smd tui  (Install screen)
-# or  sudo smd install <name>  to enable and install them.
+# All components start disabled.  Use  smd tui  (Install screen)
+# or  smd install <name>  to enable and install them.
 
 [component.ka9q-radio]
 enabled = false
@@ -677,7 +677,7 @@ _ensure_operator_aliases "$INVOKER"
 # operator file as-is.
 if [[ -f /etc/sigmond/catalog.toml ]]; then
     info "Pruning /etc/sigmond/catalog.toml against repo catalog…"
-    if $SUDO "$INSTALL_SMD" config catalog-prune; then
+    if $SUDO env SIGMOND_ALLOW_SUDO=1 "$INSTALL_SMD" config catalog-prune; then
         ok "catalog pruned"
     else
         warn "catalog prune failed (non-fatal — operator file left intact)"
@@ -765,7 +765,7 @@ echo -e "${BOLD}${GREEN}║   Sigmond is installed!  Next: open the TUI.        
 echo -e "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════╝${NC}"
 echo
 echo -e "  ${BOLD}Open the configuration workflow:${NC}"
-echo -e "    sudo smd tui"
+echo -e "    smd tui"
 echo
 echo -e "  Walk the Installation section top to bottom — that's the"
 echo -e "  greenfield workflow:"
@@ -783,7 +783,7 @@ echo -e "                            this host is running radiod)."
 echo -e "    7. ${BOLD}CPU frequency${NC}   — same — cap non-radiod cores to save power."
 echo
 echo -e "  ${BOLD}CLI shortcuts${NC} (power users):"
-echo -e "    sudo smd install                  install everything topology-enabled"
-echo -e "    sudo smd install <component>      install one"
-echo -e "    sudo smd list --catalog           browse the catalog"
+echo -e "    smd install                  install everything topology-enabled"
+echo -e "    smd install <component>      install one"
+echo -e "    smd list --catalog           browse the catalog"
 echo

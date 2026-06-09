@@ -740,7 +740,7 @@ def rule_timing_reference(view: SystemView) -> RuleResult:
     if fails:
         detail = "; ".join(f"{l.name}: {l.detail}" for l in fails)
         return RuleResult("timing_reference", "fail",
-                          f"{detail}.  Remediate: sudo smd admin timing reconcile",
+                          f"{detail}.  Remediate: smd admin timing reconcile",
                           [l.name for l in fails])
     if warns:
         return RuleResult("timing_reference", "warn",

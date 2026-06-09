@@ -394,7 +394,7 @@ destructive change.
 
 Runs automatically at the end of `install.sh` (after the smd
 symlink is in place) so each upgrade trims any drift.  Safe to
-re-run manually: `sudo smd config catalog-prune` (add `--dry-run`
+re-run manually: `smd config catalog-prune` (add `--dry-run`
 to preview).
 
 ### Where to edit which file
@@ -469,8 +469,8 @@ to drive fleet upgrades.
 
 ```bash
 # Canonical, restarts everything enabled:
-sudo smd component update       # pulls all repos per topology version policy
-sudo smd restart                # restarts every enabled component
+smd component update       # pulls all repos per topology version policy
+smd restart                # restarts every enabled component
 
 # Surgical (only what's stale; less disruption to already-fresh services):
 sudo -u sigmond git -C /opt/git/sigmond/<lib> pull --ff-only

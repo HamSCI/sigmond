@@ -284,7 +284,7 @@ sudo reboot
 cat /proc/cmdline                                     # should include the three params
 cat /sys/devices/system/cpu/isolated                  # should print 0-5
 ps -eo psr,comm | awk '$1 <= 5' | sort -u | head -20  # only radiod + unmovable per-CPU kthreads
-sudo smd admin validate                                     # cpu_isolation_runtime should pass
+smd admin validate                                     # cpu_isolation_runtime should pass
 ```
 
 `smd admin validate cpu_isolation_runtime` is the canonical pass/fail signal — it confirms radiod has its assigned CPUs uncontested. Expected output line:
@@ -846,7 +846,7 @@ done
 There is no `/sys/devices/system/cpu/cpufreq/` inside the guest, but **`/proc/cpuinfo` does report the host pCPU's current running frequency** for each vCPU. So you can verify the cap is in effect by watching the `cpu MHz` field under load:
 
 ```bash
-sudo smd admin diag cpu-freq            # sigmond reads /proc/cpuinfo and shows running MHz per vCPU
+smd admin diag cpu-freq            # sigmond reads /proc/cpuinfo and shows running MHz per vCPU
 ```
 
 When workers are bursting at a minute boundary, the worker vCPUs (2-9) should top out at ~1400 MHz; radiod's vCPUs (0-1) should top out at ~3200 MHz.

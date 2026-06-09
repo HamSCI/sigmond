@@ -82,7 +82,7 @@ warrant a separate row.
 |---|---|---|
 | `activity` | `action_show_activity` | Live tail of `smd watch <target>` for wspr / psk / hfdl / codar / ka9q / uploads / verifier; one subprocess per screen, Stop/Clear, Start re-targets |
 | `annotation_quality` | `action_show_annotation_quality` | Per-consumer science verdict: each running recorder + the global σ/tier attached + green/yellow/red threshold + substrate explanation |
-| `apply` | `action_show_apply` | Reconcile services with topology/coordination (`sudo smd apply`) |
+| `apply` | `action_show_apply` | Reconcile services with topology/coordination (`smd apply`) |
 | `authority` | `action_show_authority` | Substrate view: live `authority.json` (active tier, σ, witnesses) (also composed into `timing_authority`) |
 | `backup` | `action_show_backup` | Snapshot all config to `sigmond-config-*.tar.gz` |
 | `client_config` | `action_show_client_config` | Run a client's first-run wizard / edit its config |
@@ -95,7 +95,7 @@ warrant a separate row.
 | `fft_wisdom` | `action_show_fft_wisdom` | FFTW wisdom planning (one-time per host, hours on first run) |
 | `gpsdo` | `action_show_gpsdo` | Live GPSDO status from `/run/gpsdo/` |
 | `install` | `action_show_install` | Catalog install picker (single / all-missing) |
-| `instance` | `action_show_instance` | Per-reporter client instance lifecycle — list / add / remove + dry-run scan of legacy radiod-keyed deployments (full migration is CLI-only via `sudo smd admin instance migrate --yes`) |
+| `instance` | `action_show_instance` | Per-reporter client instance lifecycle — list / add / remove + dry-run scan of legacy radiod-keyed deployments (full migration is CLI-only via `smd admin instance migrate --yes`) |
 | `ka9q_watch` | `action_show_ka9q_watch` | Compare pinned ka9q-radio commit vs `origin/main` |
 | `kiwisdr` | `action_show_kiwisdr` | Live KiwiSDR status + GPS |
 | `lifecycle` | `action_show_lifecycle` | Start / stop / restart / reload managed units |

@@ -231,7 +231,7 @@ def cmd_timing(args) -> int:
 
     if verb == 'reconcile':
         if os.geteuid() != 0:
-            err('reconcile needs root — run: sudo smd admin timing reconcile')
+            err('reconcile needs root — run: smd admin timing reconcile')
             return 1
         heading('reconcile (own-only)')
         for a in reconcile(facts, dry_run=getattr(args, 'dry_run', False)):
@@ -239,7 +239,7 @@ def cmd_timing(args) -> int:
         return 0
 
     if fails:
-        warn(f'{len(fails)} link(s) failing — fix: sudo smd admin timing reconcile')
+        warn(f'{len(fails)} link(s) failing — fix: smd admin timing reconcile')
         return 1
     ok('timing chain healthy')
     return 0

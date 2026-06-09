@@ -214,6 +214,16 @@ extra_paths = ["/etc/wsprdaemon"]
 # host runs radiod locally.  Other grants add their own [profile.<name>].
 # ---------------------------------------------------------------------------
 
+# `smd bringup` with no profile name brings up `daisy` (the basic station).
+# `smd bringup dasi2` adds the magnetometer.  Hardware-gated components in
+# either profile (gpsdo-monitor, mag-recorder) install only when their device
+# is on the USB bus and are skipped-with-a-warning otherwise.
+[profile.daisy]
+description        = "Basic daisy station — local radiod + WSPR + FT8 + timing + web (GPSDO auto-detected; no magnetometer)"
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder"]
+local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
+optional           = []
+
 [profile.dasi2]
 description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer)"
 clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder"]

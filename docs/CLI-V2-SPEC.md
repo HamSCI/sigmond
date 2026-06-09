@@ -387,7 +387,7 @@ Decisions the migration commit can make without re-opening §3:
   target selector), the `verifier` screen (report + rehabilitate
   combined because they share an operator workflow), and Apply
   buttons on the `cpu_affinity` and `cpu_freq` screens (each runs
-  the matching `sudo smd admin diag cpu-* --apply` via confirm modal,
+  the matching `smd admin diag cpu-* --apply` via confirm modal,
   auto-refreshes on success). v2 cleans up the CLI; the remaining
   TUI gap-fill is a separate track.
 - A `pkg` synonym for `component`. Considered, rejected — `component`

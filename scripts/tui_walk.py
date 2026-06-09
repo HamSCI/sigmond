@@ -291,7 +291,7 @@ async def walk() -> None:
                             for i in range(table.row_count)]
                     if table.row_count == 0:
                         record("instance: DataTable populated", SKIP,
-                               "no instances on host (run `sudo smd admin instance "
+                               "no instances on host (run `smd admin instance "
                                "migrate --yes` to populate)")
                     else:
                         record("instance: DataTable populated", PASS,

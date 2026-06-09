@@ -93,6 +93,8 @@ def build_plan(profile, *, local_radiod: bool,
     # --- Stage 1: radiod stack (local only) ---
     if local_radiod:
         for infra in profile.local_radiod_infra:
+            if infra in skip:           # hardware-gated infra absent (e.g. no GPSDO)
+                continue
             install(STAGE1, infra)
         install(STAGE1, 'ka9q-radio')
         if with_optional:

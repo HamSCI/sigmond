@@ -30,7 +30,7 @@ No querier = no refresh = streams die.
 
 ```
 smd admin diag net              # unprivileged; uses /proc/net/igmp state
-sudo smd admin diag net         # adds a passive raw-socket listen for queries
+smd admin diag net         # adds a passive raw-socket listen for queries
 ```
 
 The command classifies your host into one of these environments:
@@ -122,7 +122,7 @@ sudo systemctl enable --now igmp-querier
 Verify it's active from another host on the same segment:
 
 ```
-sudo smd admin diag net --listen 130          # should now report a querier
+smd admin diag net --listen 130          # should now report a querier
 ```
 
 Uninstall:
@@ -136,7 +136,7 @@ sudo /opt/git/sigmond/igmp-querier/uninstall.sh
 - **Enterprise / campus LANs.** Your IT already has one; running
   another can cause querier-election churn or violate policy.
 - **Home networks with an existing L3 router that queries.** Check
-  `sudo smd admin diag net` first; if a querier is reported, don't add
+  `smd admin diag net` first; if a querier is reported, don't add
   another.
 - **Hosts that reboot often.** Pick a host that stays up — if the
   querier disappears for longer than the snoop timeout (~260 s),

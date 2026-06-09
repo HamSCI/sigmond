@@ -430,7 +430,7 @@ Three of the seven §8 deliverables shipped this round:
   screens/instance.py`.  DataTable listing of per-reporter
   instances; add (with --dry-run option) + remove + dry-run scan of
   legacy radiod-keyed deployments.  Full interactive migration
-  stays CLI-only (`sudo smd admin instance migrate --yes`) — the TUI
+  stays CLI-only (`smd admin instance migrate --yes`) — the TUI
   doesn't have a sensible interactive multi-prompt flow for that.
 - **Activity screen** — added a second-stage instance dropdown.
   Selecting a per-recorder target (wspr/psk/hfdl/codar) populates
