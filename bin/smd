@@ -182,12 +182,18 @@ BANNER = r"""
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list, *, cwd=None, capture=True, sudo=False, env=None) -> subprocess.CompletedProcess:
+def _run(cmd: list, *, cwd=None, capture=True, sudo=False, env=None,
+         interactive=False) -> subprocess.CompletedProcess:
     if sudo and os.geteuid() != 0:
         cmd = ['sudo'] + cmd
-    # When not capturing output, redirect stdin from /dev/null so interactive
-    # prompts (read -p) in sub-scripts return immediately rather than hanging.
-    stdin_arg = subprocess.DEVNULL if not capture else None
+    # When not capturing output we normally redirect stdin from /dev/null so a
+    # non-interactive sub-script's `read -p` returns immediately rather than
+    # hanging.  But a step that legitimately prompts the operator (e.g. a
+    # `config init` wizard) must inherit the real terminal — interactive=True.
+    if capture or interactive:
+        stdin_arg = None
+    else:
+        stdin_arg = subprocess.DEVNULL
     return subprocess.run(cmd, cwd=cwd,
                           capture_output=capture, text=True,
                           stdin=stdin_arg, env=env)
@@ -2683,7 +2689,10 @@ def cmd_bringup(args) -> int:
             _heading(st.label)
         else:
             _info(f'» {st.label}')
-        r = _run(st.argv, capture=False, sudo=False)
+        # `config` steps run the per-client wizards, which prompt the operator
+        # — they must inherit the terminal's stdin (not /dev/null).
+        r = _run(st.argv, capture=False, sudo=False,
+                 interactive=(st.kind == 'config'))
         if getattr(r, 'returncode', 0) != 0 and not st.background:
             _warn(f'step exited {r.returncode}: {" ".join(st.argv)}')
         if st.settle_s:
@@ -6172,6 +6181,7 @@ _smd_complete() {
     local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing radiod instance uninstall completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web wd-rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
+    local profiles="daisy dasi2 base client"
 
     if [[ "$prev" == "--components" ]]; then
         COMPREPLY=($(compgen -W "$components" -- "$cur"))
@@ -6208,6 +6218,9 @@ _smd_complete() {
             case "${words[1]}" in
                 install)
                     COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --topology" -- "$cur"))
+                    ;;
+                bringup)
+                    COMPREPLY=($(compgen -W "$profiles --remote-radiod --with-optional --non-interactive --dry-run" -- "$cur"))
                     ;;
                 apply)
                     COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
