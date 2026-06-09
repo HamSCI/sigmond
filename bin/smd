@@ -510,6 +510,35 @@ def _ensure_venv(venv_dir: Path) -> bool:
     return True
 
 
+def _ka9q_radio_pin() -> Optional[str]:
+    """The ka9q-radio commit ka9q-python was validated against — the same pin
+    ``rule_ka9q_python_compat`` checks (``ka9q.compat.KA9Q_RADIO_COMMIT``, with
+    the ``ka9q-python/ka9q_radio_compat`` file as fallback).
+
+    Installs check out THIS commit rather than bare ``main`` so radiod is built
+    against the wire-protocol headers the Python clients decode against;
+    advancing ka9q-radio is a deliberate step (bump the pin via
+    ``scripts/sync_types.py --apply``, then rebuild).  Returns None when no pin
+    is discoverable (caller falls back to current HEAD)."""
+    try:
+        from ka9q.compat import KA9Q_RADIO_COMMIT
+        if KA9Q_RADIO_COMMIT and KA9Q_RADIO_COMMIT != 'unknown':
+            return KA9Q_RADIO_COMMIT
+    except Exception:                                  # noqa: BLE001
+        pass
+    for base in (Path('/opt/git/sigmond/ka9q-python'),
+                 Path('/opt/git/ka9q-python'), Path.home() / 'ka9q-python'):
+        f = base / 'ka9q_radio_compat'
+        try:
+            if f.is_file():
+                v = f.read_text().strip()
+                if v:
+                    return v
+        except Exception:                              # noqa: BLE001
+            pass
+    return None
+
+
 def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     binary = Path('/usr/local/sbin/radiod')
     built = src_dir / 'src' / 'radiod'
@@ -547,8 +576,10 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     _ok('ka9q-radio: built and installed')
     # Record the source commit so the freshness check above can tell when a
     # later clone_repo pull has advanced the tree past this build.
+    _pin = _ka9q_radio_pin() or ''
     _write_build_manifest('ka9q-radio', [
-        {'name': 'ka9q-radio', 'ref': 'main', 'pin': '',
+        {'name': 'ka9q-radio', 'ref': 'ka9q-python-pin' if _pin else 'main',
+         'pin': _pin,
          'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-radio',
          'sha': _git_head(src_dir)},
     ], builder='_build_ka9q_radio')
@@ -3177,8 +3208,18 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
         return False
     if not _ensure_fftw_dir():
         return False
+    # Pin the checkout to ka9q-python's compat commit, not bare `main` — a plain
+    # pull silently advances ka9q-radio past the pin every install, drifting the
+    # wire-protocol headers (rule_ka9q_python_compat then warns).  Advancing is
+    # a deliberate sync_types.py step, never a side effect of install.
+    pin = _ka9q_radio_pin()
     try:
-        src_dir = _clone_repo(entry, pull_if_exists=True)
+        if pin:
+            _info(f'ka9q-radio: pinning to ka9q-python compat commit {pin[:12]}')
+            src_dir = _clone_repo(entry, pull_if_exists=True, ref=pin)
+        else:
+            _warn('ka9q-radio: no ka9q-python pin found — building current HEAD')
+            src_dir = _clone_repo(entry, pull_if_exists=True)
     except RuntimeError as exc:
         _err(f'ka9q-radio clone failed: {exc}')
         return False
