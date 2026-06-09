@@ -815,6 +815,84 @@ def rule_wspr_decode_enabled(view: SystemView) -> RuleResult:
                       f"decode enabled on {len(active)} active instance(s)", [])
 
 
+def _magnetometer_present() -> bool:
+    """True when the RM3100's Pololu USB-I2C adapter is on the bus (or its udev
+    symlink exists).  Mirrors smd's bringup-side ``_detect_magnetometer`` —
+    Phase D will unify both on the client's own ``inventory --json``
+    self-describe (see docs/install-orchestration-design.md)."""
+    import re as _re
+    import subprocess
+    if Path("/dev/ttyMAG0").exists():
+        return True
+    try:
+        out = subprocess.run(["lsusb"], capture_output=True, text=True,
+                             timeout=10).stdout
+    except Exception:                                  # noqa: BLE001
+        return False
+    return bool(_re.search(r"1ffb:250[23]|pololu", out, _re.I))
+
+
+# Core components that require host-specific hardware to run.  Each maps to a
+# (human hardware label, presence-probe) pair.  Probes are hardcoded today;
+# Phase D ("environment-aware preflight") replaces them with the client's own
+# `inventory --json hardware_present` self-describe.  Tests monkeypatch this
+# dict (and _unit_active) to stay hermetic.
+_HARDWARE_GATED = {
+    "mag-recorder": ("magnetometer (RM3100 / Pololu USB-I2C)", _magnetometer_present),
+}
+
+
+def _unit_active(pattern: str) -> bool:
+    """True when at least one active service unit matches ``pattern``."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-units", "--type=service", "--state=active",
+             "--no-legend", "--plain", pattern],
+            capture_output=True, text=True, timeout=10).stdout
+    except Exception:                                  # noqa: BLE001
+        return False
+    return any(ln.strip() for ln in out.splitlines())
+
+
+def rule_hardware_gated_core(view: SystemView) -> RuleResult:
+    """Runtime: a hardware-gated core component (e.g. mag-recorder) that is
+    ENABLED in topology — i.e. expected on this host — but whose hardware is
+    absent is legitimately *dormant*, not broken.
+
+    Without this rule such a component simply vanishes from ``validate``: a
+    dasi2 host with no magnetometer reads as silently incomplete.  This rule
+    makes it visible as "core-but-gated (expected, dormant)" so the host reads
+    as complete-with-one-client-dormant.  When the hardware IS present but the
+    component isn't running, that's an actionable gap (warn).  Components not
+    enabled here (e.g. under the base/client profiles) are skipped."""
+    dormant: list = []
+    not_running: list = []
+    affected: list = []
+    for comp, (hw_label, probe) in _HARDWARE_GATED.items():
+        if not view.is_enabled(comp):
+            continue                       # not expected on this host
+        if not probe():
+            dormant.append(f"{comp} (no {hw_label})")
+        elif not _unit_active(f"{comp}.service"):
+            not_running.append(f"{comp} ({hw_label} present)")
+            affected.append(comp)
+    if not_running:
+        return RuleResult(
+            "hardware_gated_core", "warn",
+            "hardware present but core component not running: "
+            + "; ".join(not_running)
+            + " — configure + start it (smd config init <name>; smd start)",
+            sorted(set(affected)))
+    if dormant:
+        return RuleResult(
+            "hardware_gated_core", "pass",
+            "core-but-gated (expected, dormant — hardware absent): "
+            + "; ".join(dormant), [])
+    return RuleResult("hardware_gated_core", "pass",
+                      "skipped (no hardware-gated core components enabled)", [])
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,
@@ -834,6 +912,7 @@ ALL_RUNTIME_RULES = [
     rule_kernel_rcvbuf_adequate,
     rule_timing_reference,
     rule_wspr_decode_enabled,
+    rule_hardware_gated_core,
 ]
 
 

@@ -349,8 +349,60 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
                 "rule_kernel_rcvbuf_adequate",
                 "rule_timing_reference",
                 "rule_wspr_decode_enabled",
+                "rule_hardware_gated_core",
             ],
         )
+
+
+class TestRuleHardwareGatedCore(unittest.TestCase):
+    """A hardware-gated core component (mag-recorder) that is enabled in
+    topology but whose hardware is absent should read as core-but-gated
+    (pass, visible), not vanish; present-but-not-running is an actionable warn."""
+
+    def _view(self, enabled: bool) -> SystemView:
+        from sigmond.topology import Component
+        comps = {}
+        if enabled:
+            comps["mag-recorder"] = Component("mag-recorder", enabled=True)
+        topo = Topology(client_dir=None, smd_bin=None, components=comps)
+        return SystemView(coordination=Coordination(), topology=topo,
+                          client_views={})
+
+    def _patch(self, *, present: bool, running: bool) -> None:
+        """Swap the gated registry + unit probe for hermetic ones."""
+        orig_reg = harmonize._HARDWARE_GATED
+        orig_active = harmonize._unit_active
+        harmonize._HARDWARE_GATED = {
+            "mag-recorder": ("magnetometer (test)", lambda: present),
+        }
+        harmonize._unit_active = lambda pattern: running
+        self.addCleanup(lambda: setattr(harmonize, "_HARDWARE_GATED", orig_reg))
+        self.addCleanup(lambda: setattr(harmonize, "_unit_active", orig_active))
+
+    def test_not_enabled_is_skipped(self):
+        self._patch(present=False, running=False)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=False))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_enabled_hardware_absent_is_dormant_pass(self):
+        self._patch(present=False, running=False)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("core-but-gated", r.message)
+        self.assertIn("mag-recorder", r.message)
+
+    def test_enabled_hardware_present_not_running_warns(self):
+        self._patch(present=True, running=False)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("mag-recorder", r.affected)
+
+    def test_enabled_hardware_present_running_passes(self):
+        self._patch(present=True, running=True)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
+        self.assertEqual(r.severity, "pass")
+        self.assertNotIn("core-but-gated", r.message)
 
 
 class TestRuleGpsdoGovernorCoverage(unittest.TestCase):
