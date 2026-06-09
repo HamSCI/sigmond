@@ -204,9 +204,11 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
   and `smd validate`'s `rule_hardware_gated_core` marks an enabled-but-absent
   core client **core-but-dormant** instead of letting it vanish. `None`
   (not gated / unknown) is never treated as absent.
-  *Still to do:* extend `hardware_present` to gpsdo-monitor→GPSDO; surface the
-  gated state in the TUI; let profiles declare which components are
-  hardware-gated rather than the registry being keyed in code.
+  `hardware_present` now covers **mag-recorder** (→RM3100) and
+  **gpsdo-monitor** (→Leo Bodnar GPSDO; a minimal `inventory --json` on an
+  otherwise infra/v0.4 client). *Still to do:* surface the gated state in the
+  TUI; let profiles declare which components are hardware-gated rather than the
+  registry being keyed in code.
 
 ## 10. Validation status
 

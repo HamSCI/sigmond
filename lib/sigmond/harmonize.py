@@ -830,7 +830,8 @@ def _hardware_ready(component: str):
 # emit it.  Tests monkeypatch _hardware_ready (and _unit_active) to stay
 # hermetic.
 _HARDWARE_GATED = {
-    "mag-recorder": "magnetometer (RM3100 / Pololu USB-I2C)",
+    "mag-recorder":  "magnetometer (RM3100 / Pololu USB-I2C)",
+    "gpsdo-monitor": "GPSDO (Leo Bodnar, USB/HID)",
 }
 
 

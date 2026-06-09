@@ -359,11 +359,11 @@ class TestRuleHardwareGatedCore(unittest.TestCase):
     topology but whose hardware is absent should read as core-but-gated
     (pass, visible), not vanish; present-but-not-running is an actionable warn."""
 
-    def _view(self, enabled: bool) -> SystemView:
+    def _view(self, enabled: bool, comp: str = "mag-recorder") -> SystemView:
         from sigmond.topology import Component
         comps = {}
         if enabled:
-            comps["mag-recorder"] = Component("mag-recorder", enabled=True)
+            comps[comp] = Component(comp, enabled=True)
         topo = Topology(client_dir=None, smd_bin=None, components=comps)
         return SystemView(coordination=Coordination(), topology=topo,
                           client_views={})
@@ -411,6 +411,17 @@ class TestRuleHardwareGatedCore(unittest.TestCase):
         self.assertEqual(r.severity, "pass")
         self.assertIn("skipped", r.message)
         self.assertNotIn("core-but-gated", r.message)
+
+    def test_gpsdo_monitor_is_registered_and_gated(self):
+        # gpsdo-monitor is hardware-gated too (Leo Bodnar GPSDO).  Enabled
+        # with hardware absent -> core-but-gated dormant, like mag-recorder.
+        self.assertIn("gpsdo-monitor", harmonize._HARDWARE_GATED)
+        self._patch(ready=False, running=True)   # daemon runs but no device
+        r = harmonize.rule_hardware_gated_core(
+            self._view(enabled=True, comp="gpsdo-monitor"))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("core-but-gated", r.message)
+        self.assertIn("gpsdo-monitor", r.message)
 
 
 class TestRuleGpsdoGovernorCoverage(unittest.TestCase):
