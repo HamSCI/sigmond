@@ -2409,6 +2409,57 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     return wisdom_file.exists()
 
 
+def _radiod_streaming(unit: str) -> bool:
+    """True when the radiod process behind ``unit`` has logged 'rx888 running'
+    — i.e. it's actually streaming samples, not merely forked/active.  The
+    marker is matched against the CURRENT MainPID so a stale 'rx888 running'
+    from a prior run doesn't count."""
+    pid = _run(['systemctl', 'show', '-p', 'MainPID', '--value', unit],
+               capture=True).stdout.strip()
+    if not pid or pid == '0':
+        return False
+    r = _run(['journalctl', f'_PID={pid}', '-g', 'rx888 running',
+              '--no-pager', '-q'], capture=True, sudo=True)
+    return 'rx888 running' in (getattr(r, 'stdout', '') or '')
+
+
+def _bringup_wait_streaming(timeout_s: int = 300, settle_s: int = 15,
+                            poll_s: int = 5) -> bool:
+    """Block until every local radiod is actually streaming ('rx888 running'),
+    then sleep a settle margin so clients don't provision against a radiod whose
+    RX888/threads are still stabilizing.  Returns True once all are streaming,
+    False on timeout (advisory — the caller continues either way)."""
+    import time, glob
+    confs = glob.glob('/etc/radio/radiod@*.conf')
+    ids = [os.path.basename(c)[len('radiod@'):-len('.conf')] for c in confs]
+    if not ids:
+        _warn('wait-streaming: no /etc/radio/radiod@*.conf found — skipping '
+              'the streaming gate')
+        return False
+    ok_all = True
+    for rid in ids:
+        unit = f'radiod@{rid}.service'
+        _info(f'waiting for {unit} to stream (rx888 running)...')
+        waited, streaming = 0, False
+        while waited < timeout_s:
+            active = _run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0
+            if active and _radiod_streaming(unit):
+                streaming = True
+                break
+            time.sleep(poll_s)
+            waited += poll_s
+            if waited % 60 == 0:
+                _info(f'  ... still warming up ({waited // 60} min elapsed)')
+        if streaming:
+            _ok(f'{unit} streaming (~{waited}s); settling {settle_s}s before clients')
+            time.sleep(settle_s)
+        else:
+            _warn(f'{unit} never logged "rx888 running" within {timeout_s}s — '
+                  'clients may fail channel provisioning; continuing')
+            ok_all = False
+    return ok_all
+
+
 def _bringup_probe(check: str, smd_bin: str):
     """Run a lightweight checkpoint probe.  Returns (ok, detail)."""
     if check == 'radiod-configured':
@@ -2512,8 +2563,10 @@ def cmd_bringup(args) -> int:
             _info(st.stage)
             cur = st.stage
         mark = {'checkpoint': '  ✓', 'wisdom': '  ⟳', 'wait-wisdom': '  ⏳',
-                'note': '  …', 'start': '  ▶'}.get(st.kind, '  •')
+                'wait-streaming': '  ⏳', 'note': '  …', 'start': '  ▶'}.get(st.kind, '  •')
         extra = ' [HARD]' if st.hard else (' (background)' if st.background else '')
+        if st.settle_s:
+            extra += f' (+{st.settle_s}s settle)'
         print(f"{mark} {st.label}{extra}")
     print()
 
@@ -2532,6 +2585,10 @@ def cmd_bringup(args) -> int:
             if not _bringup_wait_wisdom(WISDOM_FILE):
                 _warn('FFT wisdom not ready — radiod may not start cleanly yet; '
                       'continuing (it will start once wisdom finishes).')
+            continue
+        if st.kind == 'wait-streaming':
+            _info(f'» {st.label}')
+            _bringup_wait_streaming()
             continue
         if st.kind == 'checkpoint':
             ok, detail = _bringup_probe(st.check, smd_bin)
@@ -2553,6 +2610,10 @@ def cmd_bringup(args) -> int:
         r = _run(st.argv, capture=False, sudo=False)
         if getattr(r, 'returncode', 0) != 0 and not st.background:
             _warn(f'step exited {r.returncode}: {" ".join(st.argv)}')
+        if st.settle_s:
+            import time
+            _info(f'  settling {st.settle_s}s before the next client...')
+            time.sleep(st.settle_s)
 
     print()
     _ok(f"bringup '{prof.name}' complete")

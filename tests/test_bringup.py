@@ -1,6 +1,8 @@
 """Unit tests for the bring-up plan builder (pure; no I/O)."""
 from sigmond.catalog import Profile
-from sigmond.bringup import build_plan, STAGE2, STAGE3A, STAGE3B
+from sigmond.bringup import (
+    build_plan, STAGE2, STAGE3A, STAGE3B, STAGE4, CLIENT_STAGGER_S,
+)
 
 
 def _dasi2():
@@ -82,3 +84,56 @@ def test_skip_excludes_hardware_gated_client():
     assert 'configure mag-recorder' not in _labels(p, 'config')
     # the other clients are unaffected
     assert 'install wspr-recorder' in _labels(p, 'install')
+
+
+def _stage4(plan):
+    return [s for s in plan.steps if s.stage == STAGE4]
+
+
+def test_stage4_streaming_gate_between_radiod_and_clients():
+    # Local radiod: the radiod stack starts, THEN a streaming gate, THEN the
+    # first radiod-bound client.  A client must never provision against a
+    # not-yet-streaming radiod.
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
+    kinds = [s.kind for s in s4]
+    assert kinds.count('wait-streaming') == 1
+    gate = next(i for i, s in enumerate(s4) if s.kind == 'wait-streaming')
+    radiod_start = next(i for i, s in enumerate(s4)
+                        if s.kind == 'start' and 'radiod' in s.label)
+    first_client = next(i for i, s in enumerate(s4) if '(staggered)' in s.label)
+    assert radiod_start < gate < first_client
+
+
+def test_stage4_radiod_bound_clients_are_staggered():
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
+    staggered = [s for s in s4 if '(staggered)' in s.label]
+    # hf-timestd, wspr, psk (mag is independent); hf-timestd first.
+    assert [s.argv[-1] for s in staggered] == [
+        'hf-timestd', 'wspr-recorder', 'psk-recorder']
+    assert all(s.settle_s == CLIENT_STAGGER_S for s in staggered)
+
+
+def test_stage4_independent_client_started_unstaggered_after_bound():
+    # mag-recorder present (not skipped): started on the independent track,
+    # not gated/staggered against radiod.
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
+    indep = [s for s in s4 if '(independent)' in s.label]
+    assert [s.argv[-1] for s in indep] == ['mag-recorder']
+    assert all(s.settle_s == 0 for s in indep)
+
+
+def test_stage4_remote_has_no_streaming_gate_but_still_staggers():
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=False,
+                            remote_status_dns='x-status.local'))
+    assert not any(s.kind == 'wait-streaming' for s in s4)
+    assert not any('radiod' in s.label and s.kind == 'start' for s in s4)
+    staggered = [s for s in s4 if '(staggered)' in s.label]
+    assert staggered and all(s.settle_s == CLIENT_STAGGER_S for s in staggered)
+
+
+def test_stage4_final_sweep_start_then_validate():
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
+    # last two stage-4 steps: an argument-less `smd start` sweep, then validate.
+    assert s4[-1].kind == 'checkpoint' and s4[-1].check == 'validate'
+    sweep = s4[-2]
+    assert sweep.kind == 'start' and '--components' not in sweep.argv

@@ -18,6 +18,12 @@ from typing import Optional
 # FFT wisdom artifact radiod imports at startup; Stage 4 waits on it (local).
 WISDOM_FILE = Path('/etc/fftw/wisdomf')
 
+# Settle inserted after each radiod-bound client starts, so it finishes
+# provisioning its channels before the next client contends for radiod's
+# control plane.  Simultaneous provisioning starves radiod and yields 0
+# channels (see docs/install-orchestration-design.md / greenfield notes).
+CLIENT_STAGGER_S = 20
+
 # Stage labels (also the progress-group headers the executor prints).
 STAGE1 = 'Stage 1 — radiod + host tuning'
 STAGE2 = 'Stage 2 — hf-timestd (timing authority)'
@@ -39,11 +45,12 @@ class Step:
     executor handles specially."""
     stage: str
     label: str
-    kind: str                       # install|config|tune|wisdom|start|checkpoint|note|wait-wisdom
+    kind: str                       # install|config|tune|wisdom|start|checkpoint|note|wait-wisdom|wait-streaming
     argv: list = field(default_factory=list)
     hard: bool = False              # checkpoint: abort the run on failure
     background: bool = False         # fire-and-don't-wait
     check: str = ''                 # checkpoint probe id (see executor._probe)
+    settle_s: int = 0               # executor sleeps this long after the step
 
 
 @dataclass
@@ -125,11 +132,39 @@ def build_plan(profile, *, local_radiod: bool,
             configure(STAGE3B, client)
             checkpoint(STAGE3B, f'{client} configured', check=f'configured:{client}')
 
-    # --- Stage 4: start (wait for wisdom first on a local radiod) ---
+    # --- Stage 4: start, ORDERED so clients never provision against a cold
+    # radiod.  radiod reaches systemd 'active' (forked) ~10 s — and on a cold
+    # start up to ~3 min — before it logs 'rx888 running' (actually streaming);
+    # a client started in that window provisions 0 channels.  So on a local
+    # radiod: start the radiod stack, WAIT for streaming + a settle margin,
+    # THEN start the radiod-bound clients staggered.  Independent clients (mag)
+    # aren't gated on radiod.  A final idempotent `smd start` sweeps up anything
+    # enabled-but-unstarted (e.g. inert rac stays inert). ---
+    radiod_bound = [c for c in profile.clients
+                    if c not in skip and c not in _INDEPENDENT]
+    independent = [c for c in profile.clients
+                   if c not in skip and c in _INDEPENDENT]
+
     if local_radiod:
         steps.append(Step(STAGE4, 'wait for FFT wisdom before starting radiod',
                           'wait-wisdom'))
-    steps.append(Step(STAGE4, 'start all components (priority-ordered)', 'start',
+        radiod_stack = ['ka9q-radio'] + [i for i in profile.local_radiod_infra
+                                         if i not in skip]
+        steps.append(Step(STAGE4, 'start radiod + local-radiod infra', 'start',
+                          argv=[smd, 'start', '--components', ','.join(radiod_stack)]))
+        steps.append(Step(STAGE4,
+                          'wait for radiod streaming (rx888 running) + settle',
+                          'wait-streaming'))
+
+    for client in radiod_bound:
+        steps.append(Step(STAGE4, f'start {client} (staggered)', 'start',
+                          argv=[smd, 'start', '--components', client],
+                          settle_s=CLIENT_STAGGER_S))
+    for client in independent:
+        steps.append(Step(STAGE4, f'start {client} (independent)', 'start',
+                          argv=[smd, 'start', '--components', client]))
+
+    steps.append(Step(STAGE4, 'start any remaining enabled components', 'start',
                       argv=[smd, 'start']))
     checkpoint(STAGE4, 'final validate', check='validate')
 
