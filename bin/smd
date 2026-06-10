@@ -4044,6 +4044,15 @@ def cmd_start(args) -> int:
     _netdiag_auto_refresh('start')
     rc = 0
     for unit in units:
+        # No-op on already-active units.  `systemctl start` is a no-op for a
+        # plain long-running service, but some units re-trigger work on start
+        # (hf-timestd's templated metrology instances re-derive and restart,
+        # re-warming the timing chain).  Skipping active units keeps `smd start`
+        # — and a `smd bringup` re-run — idempotent.  Use `smd restart` to force.
+        chk = _run(['systemctl', 'is-active', '--quiet', unit.unit])
+        if getattr(chk, 'returncode', 1) == 0:
+            _ok(f'{unit.unit} (already running)')
+            continue
         r = _run(['systemctl', 'start', unit.unit], sudo=True)
         if r.returncode == 0:
             _ok(f'{unit.unit}')
