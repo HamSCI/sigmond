@@ -175,5 +175,75 @@ class TestRevertGrub(unittest.TestCase):
         self.assertEqual(self._revert(src), src)
 
 
+class TestDeployExtrasStateDirs(unittest.TestCase):
+    """sigmond#11: a data/log dir whose name differs from the component (e.g.
+    hf-timestd → /var/lib/timestd) must be captured from the deploy.toml's
+    mkdir step, not only the VAR_LIB/<name> convention (which would look for the
+    non-existent /var/lib/hf-timestd and leave /var/lib/timestd behind)."""
+
+    def test_captures_declared_mkdir_state_dir(self):
+        import shutil
+        import tempfile
+        from sigmond import purge
+        d = Path(tempfile.mkdtemp())
+        try:
+            var_lib = d / "var-lib"
+            (var_lib / "timestd").mkdir(parents=True)   # the real data dir
+            git = d / "git"
+            (git / "hf-timestd").mkdir(parents=True)     # repo must exist
+            fake = {"systemd": {}, "install": {"steps": [
+                {"kind": "mkdir", "dst": str(var_lib / "timestd")},
+                {"kind": "render", "dst": "/etc/hf-timestd/x"},   # not a state root
+                {"kind": "link", "dst": "/usr/local/bin/timestd"},  # link, not state
+            ]}}
+            saved = (purge._read_deploy_toml, uninstall.VAR_LIB, uninstall.GIT_BASE)
+            try:
+                purge._read_deploy_toml = lambda repo: fake
+                uninstall.VAR_LIB = var_lib
+                uninstall.GIT_BASE = git
+                extras = uninstall._deploy_extras("hf-timestd")
+            finally:
+                (purge._read_deploy_toml, uninstall.VAR_LIB,
+                 uninstall.GIT_BASE) = saved
+            self.assertIn(var_lib / "timestd", extras["state_dirs"])
+            # the link dst goes to link_dsts, not state_dirs
+            self.assertIn(Path("/usr/local/bin/timestd"), extras["link_dsts"])
+            self.assertNotIn(Path("/etc/hf-timestd/x"), extras["state_dirs"])
+        finally:
+            shutil.rmtree(d)
+
+
+class TestSweepOrphanUnits(unittest.TestCase):
+    """sigmond#11: after unit files are deleted, their `*.wants` enable-symlinks
+    dangle and linger in systemctl forever — sweep removes the dead links while
+    leaving still-valid ones (other software) alone."""
+
+    def test_removes_dangling_keeps_valid(self):
+        import shutil
+        import subprocess
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        try:
+            sysd = d / "system"
+            wants = sysd / "multi-user.target.wants"
+            wants.mkdir(parents=True)
+            (sysd / "keepme.service").write_text("[Unit]\n")
+            (wants / "keepme.service").symlink_to(sysd / "keepme.service")     # valid
+            (wants / "wspr-recorder@AC0G=S.service").symlink_to(
+                sysd / "gone.service")                                          # dangling
+            saved = (uninstall.SYSTEMD_SYSTEM, uninstall.subprocess.run)
+            try:
+                uninstall.SYSTEMD_SYSTEM = sysd
+                uninstall.subprocess.run = lambda *a, **k: \
+                    subprocess.CompletedProcess(a[0] if a else [], 0, "", "")
+                uninstall._sweep_orphan_units()
+            finally:
+                uninstall.SYSTEMD_SYSTEM, uninstall.subprocess.run = saved
+            remaining = sorted(p.name for p in wants.iterdir())
+            self.assertEqual(remaining, ["keepme.service"])
+        finally:
+            shutil.rmtree(d)
+
+
 if __name__ == "__main__":
     unittest.main()

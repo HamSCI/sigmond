@@ -2292,6 +2292,16 @@ def cmd_uninstall(args) -> int:
             return False
         return default
 
+    # Self-elevate like every other mutating verb (sigmond#11): when actually
+    # executing (--yes, not --dry-run), re-exec under sudo up front so the plan
+    # is built + shown + executed once, as root, and the operator never types
+    # `sudo` (uninstall used to just error "must run as root").  The planning /
+    # dry-run path stays unprivileged.  _need_root carries SIGMOND_ALLOW_SUDO=1
+    # so the top-of-main guard lets the elevated re-exec through.
+    will_execute = getattr(args, 'yes', False) and not getattr(args, 'dry_run', False)
+    if will_execute and _need_root('admin uninstall'):
+        return 1
+
     plan = plan_uninstall(
         keep_config=keep_config,
         wipe_data=_resolve(full, 'wipe_data', 'keep_data'),
@@ -2301,14 +2311,11 @@ def cmd_uninstall(args) -> int:
     )
     for line in render_plan(plan):
         print(line)
-    if getattr(args, 'dry_run', False) or not getattr(args, 'yes', False):
+    if not will_execute:
         print()
-        print('  DRY RUN — nothing removed.  Re-run with --yes (as root) to execute.')
+        print('  DRY RUN — nothing removed.  Re-run with --yes to execute '
+              '(smd self-elevates; no sudo needed).')
         return 0
-    if os.geteuid() != 0:
-        print('smd admin uninstall: must run as root to execute '
-              '(sudo smd admin uninstall --yes)', file=sys.stderr)
-        return 1
     print()
     print('  EXECUTING uninstall ...')
     return execute_uninstall(plan, dry_run=False)
