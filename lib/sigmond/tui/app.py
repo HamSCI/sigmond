@@ -179,14 +179,15 @@ class SigmondApp(App):
         )
         self._load_system_view()
         # Greenfield-aware landing: a host with nothing enabled yet is
-        # mid-install — lead with the Install screen rather than an empty
-        # Overview.  Once any component is enabled, land on Overview.
+        # mid-install — lead with the guided Greenfield bring-up wizard
+        # rather than an empty Overview.  Once any component is enabled,
+        # land on Overview.
         try:
             greenfield = not self.topology.enabled_components()
         except Exception:
             greenfield = False
         if greenfield:
-            self.action_show_install()
+            self.action_show_greenfield()
         else:
             self.action_show_overview()
         self.run_worker(_check_sigmond_version, thread=True,
@@ -663,6 +664,31 @@ class SigmondApp(App):
             "an active/total fraction (e.g. partial 21/24).\n\n"
             "Mixed selections chain: one confirm dialog up front, then "
             "the instance batch runs, then the component batch.",
+        )
+
+    def action_show_greenfield(self) -> None:
+        from .screens.greenfield import GreenfieldScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(GreenfieldScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Guided bring-up",
+            "The CLI-free path from a blank host to a running station.\n\n"
+            "Pick a station profile, enter your identity once (reporter id "
+            "+ grid are required; callsign + PSWS id optional), and press "
+            "Begin.  Sigmond installs the software, configures every "
+            "component, builds FFT wisdom, and starts the station — "
+            "streaming live progress.\n\n"
+            "Profiles:\n"
+            "  daisy  — full local station (RX888 + WSPR + PSK + timing)\n"
+            "  dasi2  — daisy + magnetometer (DASI2)\n"
+            "  client — decode-only against a REMOTE radiod\n"
+            "  base   — local radiod + timing only\n\n"
+            "radiod is configured with antenna defaults; fine-tune the "
+            "antenna afterwards with the verdict's Edit antenna action "
+            "(`smd config edit radiod`).\n\n"
+            "CLI equivalent: `smd bringup <profile>`.",
         )
 
     def action_show_install(self) -> None:
