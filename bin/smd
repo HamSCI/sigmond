@@ -2614,26 +2614,14 @@ def _bringup_env_blockers(local_radiod: bool) -> list:
                 '— apt installs will fail until repaired',
                 'sudo apt-get -f install   (or: sudo dpkg --configure -a)'))
 
-    # Shallow ka9q-radio clone vs. the build pin — precise: only a blocker when
-    # the pinned commit is genuinely unreachable (no false positive when a
-    # shallow clone happens to contain the pin).
-    ka9q = Path('/opt/git/sigmond/ka9q-radio')
-    if (ka9q / '.git').exists():
-        pin = _ka9q_radio_pin()
-        if pin:
-            seen = subprocess.run(['git', '-C', str(ka9q), 'cat-file', '-t', pin],
-                                  capture_output=True, text=True)
-            if seen.returncode != 0:
-                shallow = subprocess.run(
-                    ['git', '-C', str(ka9q), 'rev-parse',
-                     '--is-shallow-repository'], capture_output=True, text=True)
-                why = ('shallow clone' if shallow.stdout.strip() == 'true'
-                       else 'commit not fetched')
-                blockers.append((
-                    f'ka9q-radio cannot reach its build pin {pin[:12]} ({why}) — '
-                    'install would fail with "unable to read tree"',
-                    f'sg sigmond -c "git -C {ka9q} fetch --unshallow"  '
-                    f'(or: git -C {ka9q} fetch origin {pin})'))
+    # NOTE: a shallow ka9q-radio clone that can't reach its build pin used to be
+    # flagged here as a FATAL blocker (b504e14).  sigmond#13 made the install
+    # self-healing — installer._checkout_ref deepens a shallow clone via
+    # `git fetch --unshallow` to reach the pin before building (or fails loudly
+    # there if the pin genuinely doesn't exist upstream).  So it's no longer a
+    # pre-run blocker: flagging it here was a FALSE POSITIVE that aborted a run
+    # the install would have completed (caught live on the first greenfield
+    # reinstall, where install.sh's --depth 1 clone always tripped it).
 
     return blockers
 
