@@ -111,6 +111,35 @@ def rule_radiod_resolution(view: SystemView) -> RuleResult:
                       f"all {len(coord.clients)} client instance(s) resolve", [])
 
 
+# The install-rendered placeholder recorder configs ship for the radiod status;
+# `config init` replaces it.  A config that still carries it is unconfigured.
+_RADIOD_STATUS_PLACEHOLDER = "<configure-via-config-init>"
+
+
+def rule_radiod_status_configured(view: SystemView) -> RuleResult:
+    """A recorder whose radiod status is still the install-rendered
+    ``<configure-via-config-init>`` placeholder is UNCONFIGURED — it can't
+    resolve radiod and won't decode.  This used to pass silently (validate skips
+    an inactive instance), so a half-configured station read green; flag it so
+    that can't happen again.  Caught live on the first greenfield reinstall:
+    wspr-recorder came up with a placeholder radiod address."""
+    bad = []
+    affected = []
+    for cv in view.client_views.values():
+        for iv in cv.instances:
+            if iv.radiod_id and _RADIOD_STATUS_PLACEHOLDER in iv.radiod_id:
+                bad.append(f"{cv.client_type}@{iv.instance}")
+                affected.append(cv.client_type)
+    if bad:
+        return RuleResult(
+            "radiod_status_configured", "fail",
+            f"unconfigured radiod status (placeholder) in {', '.join(sorted(bad))}"
+            f" — run `smd config init <client> --reconfig`",
+            sorted(set(affected)))
+    return RuleResult("radiod_status_configured", "pass",
+                      "no placeholder radiod addresses", [])
+
+
 def rule_frequency_coverage(view: SystemView) -> RuleResult:
     """Per-radiod: any consumed frequency must fit within samprate/2 of
     the radiod's tuning range.  Phase 1 uses a coarse heuristic — we just
@@ -923,6 +952,7 @@ def dormant_reason(component: str, *, enabled: bool):
 
 ALL_RULES = [
     rule_radiod_resolution,
+    rule_radiod_status_configured,
     rule_frequency_coverage,
     rule_cpu_isolation,
     rule_timing_chain,

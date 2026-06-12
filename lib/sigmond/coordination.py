@@ -45,6 +45,21 @@ class Radiod:
     sdr_serial: str = ""
 
     @property
+    def effective_status_dns(self) -> str:
+        """The radiod's status/control mDNS name.
+
+        Normally the ``status_dns`` field.  But coordination keys radiods two
+        ways: ``smd config register-radiod`` writes a short ``id`` WITH a
+        ``status_dns`` field, while the bring-up path keys the block by the full
+        status DNS and leaves the field empty.  In that second form the ``id``
+        IS the status DNS — fall back to it.  Without this, single-radiod
+        ``_resolve_radiod_status`` returned '' and config-init never learned the
+        radiod address (greenfield: wspr-recorder came up with a placeholder)."""
+        if self.status_dns:
+            return self.status_dns
+        return self.id if self.id.endswith(".local") else ""
+
+    @property
     def is_local(self) -> bool:
         return self.host in ("localhost", "127.0.0.1", "::1", "")
 
@@ -371,8 +386,8 @@ def render_env(coord: Coordination,
     for rid, r in sorted(coord.radiods.items()):
         prefix = _env_key('RADIOD', rid)
         lines.append(f'{prefix}_HOST={r.host}')
-        if r.status_dns:
-            lines.append(f'{prefix}_STATUS={r.status_dns}')
+        if r.effective_status_dns:
+            lines.append(f'{prefix}_STATUS={r.effective_status_dns}')
         if r.samprate_hz:
             lines.append(f'{prefix}_SAMPRATE={r.samprate_hz}')
         # CLIENT-CONTRACT §18.3 per-radiod scope.  Per-radiod overrides
@@ -413,8 +428,8 @@ def render_env(coord: Coordination,
         lines.append(f'SIGMOND_RADIOD_COUNT={len(coord.radiods)}')
         if len(coord.radiods) == 1:
             only = next(iter(coord.radiods.values()))
-            if only.status_dns:
-                lines.append(f'SIGMOND_RADIOD_STATUS={only.status_dns}')
+            if only.effective_status_dns:
+                lines.append(f'SIGMOND_RADIOD_STATUS={only.effective_status_dns}')
         lines.append('')
 
     for c in coord.clients:

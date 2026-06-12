@@ -2544,6 +2544,18 @@ def _bringup_wait_streaming(timeout_s: int = 300, settle_s: int = 15,
     return ok_all
 
 
+# Sentinel that recorder config templates ship for the radiod status address;
+# `config init` replaces it.  A config that still contains it is unconfigured.
+_CONFIG_PLACEHOLDER = '<configure-via-config-init>'
+
+
+def _read_text_safe(p) -> str:
+    try:
+        return Path(p).read_text()
+    except OSError:
+        return ''
+
+
 def _bringup_probe(check: str, smd_bin: str):
     """Run a lightweight checkpoint probe.  Returns (ok, detail)."""
     if check == 'radiod-configured':
@@ -2566,9 +2578,26 @@ def _bringup_probe(check: str, smd_bin: str):
             except Exception:
                 cfgp = None
             if cfgp:
-                present = Path(cfgp).exists()
+                p = Path(cfgp)
+                present = p.exists()
+                # An install-rendered placeholder config (the `if_absent` render
+                # of a *.example/.template that ships the
+                # "<configure-via-config-init>" sentinel) EXISTS but is NOT
+                # configured.  Report it as unconfigured so bring-up runs
+                # config-init (with --reconfig) instead of skipping — else the
+                # radiod status stays the sentinel and the recorder can't resolve
+                # radiod (sigmond#15; greenfield: wspr came up with a placeholder).
+                if present and _CONFIG_PLACEHOLDER in _read_text_safe(p):
+                    return (False,
+                            f"{name}: {cfgp} present but UNCONFIGURED (placeholder)")
                 return (present, f"{name}: {cfgp} {'present' if present else 'MISSING'}")
-        ok = Path(f'/etc/{name}').is_dir()
+        etc = Path(f'/etc/{name}')
+        ok = etc.is_dir()
+        if ok:
+            tomls = list(etc.glob('*.toml'))
+            if tomls and all(_CONFIG_PLACEHOLDER in _read_text_safe(f)
+                             for f in tomls):
+                return (False, f"/etc/{name} present but UNCONFIGURED (placeholder)")
         return (ok, f"/etc/{name} {'present' if ok else 'missing'} (no inventory CLI)")
     if check == 'validate':
         r = _run([smd_bin, 'admin', 'validate'], capture=False)
@@ -2864,6 +2893,14 @@ def cmd_bringup(args) -> int:
                           f'skipping (smd config edit {client}, or '
                           f'bringup --reconfigure to force)')
                     continue
+                # An install-rendered placeholder config EXISTS but isn't really
+                # configured.  config init refuses to overwrite an existing file
+                # without --reconfig, so force it — else the placeholder survives
+                # and the hard 'configured' checkpoint below would abort the run.
+                if 'placeholder' in detail and '--reconfig' not in st.argv:
+                    st.argv = st.argv + ['--reconfig']
+                    _info(f'» {st.label} — {client} config is an unconfigured '
+                          f'placeholder; reconfiguring (--reconfig)')
             _heading(st.label)
         else:
             _info(f'» {st.label}')

@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
 
 from sigmond.coordination import (
-    Coordination, TimingAuthority, load_coordination, parse_coordination,
+    Coordination, Radiod, TimingAuthority, load_coordination, parse_coordination,
     render_env, write_host_identity, _env_key,
 )
 
@@ -431,6 +431,24 @@ class WriteHostIdentityTests(unittest.TestCase):
         p = self._tmp()
         self.assertFalse(write_host_identity(path=p))
         self.assertFalse(p.exists())
+
+
+class TestEffectiveStatusDns(unittest.TestCase):
+    """Radiod.effective_status_dns falls back to the id when the radiod is keyed
+    by its status DNS with the status_dns field left empty (so single-radiod
+    resolution works for config-init — sigmond greenfield wspr placeholder)."""
+
+    def test_uses_field_when_set(self):
+        r = Radiod(id="sigma-rx888mk2", status_dns="sigma-rx888mk2-status.local")
+        self.assertEqual(r.effective_status_dns, "sigma-rx888mk2-status.local")
+
+    def test_falls_back_to_id_when_id_is_status_dns(self):
+        r = Radiod(id="sigma-rx888mk2-status.local")   # field empty
+        self.assertEqual(r.effective_status_dns, "sigma-rx888mk2-status.local")
+
+    def test_empty_when_field_empty_and_id_not_a_dns(self):
+        r = Radiod(id="sigma-rx888mk2")                # short id, no field
+        self.assertEqual(r.effective_status_dns, "")
 
 
 if __name__ == "__main__":

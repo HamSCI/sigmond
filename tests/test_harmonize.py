@@ -22,7 +22,7 @@ from sigmond.harmonize import (
     rule_data_path_upstream,
     rule_frequency_coverage, rule_gpsdo_governor_coverage,
     rule_kernel_rcvbuf_adequate,
-    rule_radiod_resolution, rule_timing_chain,
+    rule_radiod_resolution, rule_radiod_status_configured, rule_timing_chain,
     run_all, worst_severity,
 )
 from sigmond.sysview import SystemView
@@ -849,6 +849,32 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
             (repo / '.git').mkdir(parents=True)
             (repo / '.git' / 'HEAD').write_text(self.PIN + "\n")
             self.assertEqual(_git_head(repo), self.PIN)
+
+
+class TestRadiodStatusConfigured(unittest.TestCase):
+    """A recorder config still carrying the <configure-via-config-init>
+    placeholder is unconfigured — validate must FAIL on it, not mask it."""
+
+    def _view(self, addr):
+        cv = ClientView(client_type="wspr-recorder",
+                        instances=[InstanceView(instance="AC0G-S",
+                                                radiod_id=addr)])
+        return _make_view(Coordination(), {"wspr-recorder": cv})
+
+    def test_fails_on_placeholder(self):
+        r = rule_radiod_status_configured(
+            self._view("<configure-via-config-init>"))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("wspr-recorder", r.message)
+
+    def test_passes_on_real_address(self):
+        r = rule_radiod_status_configured(
+            self._view("sigma-rx888mk2-status.local"))
+        self.assertEqual(r.severity, "pass")
+
+    def test_passes_when_no_instances(self):
+        r = rule_radiod_status_configured(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
 
 
 if __name__ == "__main__":
