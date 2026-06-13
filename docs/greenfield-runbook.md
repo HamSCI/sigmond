@@ -90,6 +90,18 @@ emitted), installs the client's venv, and runs `smd apply`.
 > `python /opt/git/sigmond/ka9q-python/scripts/sync_types.py --apply --ka9q-radio /opt/git/sigmond/ka9q-radio`
 > (header-only re-stamp when `--check` already says "in sync").
 
+> **hf-timestd raytracing (PHaRLAP/pyLAP) is optional.** `smd install hf-timestd`
+> builds pyLAP automatically *if* PHaRLAP is present, and otherwise installs fine
+> with the geometric fallback. PHaRLAP is licence-restricted (DST, Australia) and
+> is never bundled in the repo:
+> - **DASI2 golden-image** clones already carry PHaRLAP + a built pyLAP — nothing
+>   to do (a venv rebuild self-heals via `hf-timestd/scripts/ensure-pylap.sh`,
+>   run by its `deploy.toml` build steps). The image is licence-controlled: don't
+>   share it outside the grant.
+> - **General operators** supply their own PHaRLAP archive once:
+>   `sudo bash /opt/git/sigmond/hf-timestd/scripts/install.sh --pharlap-zip /path/pharlap_4.7.4.zip`
+>   See `hf-timestd/docs/EXTERNAL_PREREQUISITES.md` §3.
+
 ## Phase 4 — radiod config (RX888)
 
 ```bash
