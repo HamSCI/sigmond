@@ -39,7 +39,7 @@ The "kind" column in the tables below uses **S** (shareable), **I** (identity),
 | Input | Component(s) | Required? | Source |
 |---|---|---|---|
 | Callsign | sigmond `STATION_CALL` → hf-timestd, psk, mag, wspr | Required for any upload/report | wizard; published once via `coordination.env` |
-| Maidenhead grid **or** precise lat/lon (+ elevation) | same | Required | wizard (grid *or* decimal degrees) |
+| Maidenhead grid **or** precise lat/lon (+ elevation) | same | Required | **auto-detected** from a GPS fix via gpsd (the GPSDO/Bodnar feeds gpsd) — offered as the wizard default; grid derived from lat/lon. Falls back to manual entry. |
 | Station description / antenna text | hf-timestd `[station].description` | Optional | wizard |
 | PSWS **station id** (`Sxxxxxx`) | hf-timestd, mag-recorder, psk-recorder | Required if uploading | assigned by PSWS at account creation (§3) |
 | PSWS **instrument id** | hf-timestd, mag-recorder | Required if uploading | assigned by PSWS |
@@ -77,7 +77,7 @@ The "kind" column in the tables below uses **S** (shareable), **I** (identity),
 |---|---|---|
 | SDR device + **serial / identifier**, sample rate, gain | ka9q-radio / radiod | Required |
 | Antenna / front-end description, calibration | radiod / station | Opt |
-| **radiod status (mDNS) address** to consume | every consuming client (`SIGMOND_RADIOD_STATUS`) | Required |
+| **radiod status (mDNS) address** to consume | every consuming client (`SIGMOND_RADIOD_STATUS`) | Required — **auto-discovered** via mDNS (`_ka9q-ctl._udp`, matched on this host's `source=<hostname>` record; names carry a hardware suffix e.g. `sigma-rx888mk2-status.local`). Offered as the wizard default. |
 | Timing-authority mode + **GPS/PPS** wiring | hf-timestd | Required-ish |
 | BPSK **PPS injector frequency** | hf-timestd L6 | Opt |
 | **GNSS VTEC receiver** host/IP (ZED-F9P / ser2net) | hf-timestd `[gnss_vtec].host` | Opt |
@@ -105,6 +105,20 @@ PSWS enable + station/instrument id, ka9q-radio status address, source mode,
 timing-authority mode, GPS+PPS accuracy, BPSK PPS injector, GNSS VTEC presence,
 IQ archive + compression. It does **not** (and cannot) perform the §3 external
 actions or install the §4 secrets — those remain operator responsibilities.
+
+**Auto-detection (2026-06-13).** The wizard now fills two of the most-prompted
+fields automatically, offering them as confirmable defaults (and applying them
+directly in `--non-interactive` / headless installs):
+- **Location** — a GPS fix from gpsd (the GPSDO/Bodnar feeds gpsd) seeds
+  latitude/longitude; the grid square is derived from them.
+- **radiod status** — mDNS discovery of this host's own radiod
+  (`_ka9q-ctl._udp`, matched on `source=<hostname>`).
+
+Both degrade silently to manual entry when gpsd has no fix / no radiod is
+advertised, so the contract is unchanged. Separately, `gpsdo-monitor` now parses
+position from the Bodnar's NMEA and exposes a Maidenhead locator
+(`NmeaState.maidenhead()`), so a host that reads the Bodnar directly (no gpsd)
+can also surface its grid.
 
 ---
 
