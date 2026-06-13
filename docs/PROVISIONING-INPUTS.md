@@ -203,8 +203,7 @@ oneshot (or a documented runbook) should perform, in order:
 - [ ] Regenerate **SSH host keys** (`dpkg-reconfigure openssh-server` / `ssh-keygen -A`).
 - [ ] Confirm network / IP / DNS.
 - [ ] Drop in the site's **`site-profile.toml`** (identity + reporter ids).
-- [ ] Install per-site **secrets** from the secure channel (§4) — see "secrets
-      delivery" below.
+- [ ] Install per-site **secrets** — `smd secrets install secrets.age` (§10).
 - [ ] `smd config render` (or `setup-station.sh --from-profile`) to re-render all
       client configs and refresh `coordination.env`.
 - [ ] Regenerate **FFT wisdom** (per-CPU; slow).
@@ -216,18 +215,83 @@ oneshot (or a documented runbook) should perform, in order:
 + public-key registration, Earthdata account, PHaRLAP request/download (only if
 not already in the image), RAC token issuance.
 
-**Secrets delivery (to decide):** options for getting §4 secrets onto a clone
-without baking them into the shared image — e.g. an encrypted per-site bundle
-(age/sops) unlocked at first boot, an operator USB drop, or `smd` pulling from a
-secrets store. This is the main open design decision for the image model.
+**Secrets delivery:** see §10 — the per-site secrets install step.
 
 ---
 
-## 10. Open items to decide
+## 10. Secrets delivery (recommended design)
 
-1. **Secrets delivery channel** for the image model (§9).
-2. Whether to build `site-profile.toml` + `smd config render` (§8), or keep
+**Status (2026-06-13):** design accepted; **not yet implemented** (`smd secrets`
+is a proposal). Decided: default channel = an `age`-encrypted per-site bundle.
+
+### The surface is small — most "secrets" generate themselves
+
+The crucial realisation: the SSH-key secrets are **generated on the host**, so
+they are never delivered and are already image-clone-safe:
+
+- **PSWS SSH key** — `setup-psws-keys.sh` runs `ssh-keygen` on the host; the
+  private key never leaves. Per-host. Only the *public* key is registered via
+  the PSWS portal (the un-automatable human step, §3).
+- **hs-uploader SSH key** — auto-generated (`ed25519`) on first use at
+  `/etc/hs-uploader/keys/`. Per-host.
+
+So the genuinely **delivered** secrets reduce to **two, both optional**:
+
+| Secret | Scope | Issued by | Bake into image? |
+|---|---|---|---|
+| Earthdata netrc (login/password) | **fleet-shared** (one NASA account serves all hosts) | operator's NASA account | No — real password |
+| RAC `user`/`token`/`remotePort` (frpc.toml) | **per-station** | Rob / wd-admin | No |
+| `frps-ca.crt` | fleet-shared | wd-admin | Yes — it's a CA cert, not secret |
+
+Because the surface is two optional files, no heavy infra (Vault/sops
+pipelines) is warranted — a thin installer plus a simple encrypted bundle.
+
+### `smd secrets` — standardise placement, perms, validation (channel-agnostic)
+
+- `smd secrets template` — write placeholder files at the canonical paths.
+- `smd secrets install <dir | bundle.age>` — copy operator-supplied secrets to
+  their canonical paths (`/etc/hf-timestd/earthdata-netrc`, `frpc.toml`, …),
+  `chown` the service user + `chmod 0600`, and **validate format** (netrc has a
+  `machine urs.earthdata.nasa.gov` line; frpc token is non-placeholder). Never
+  echo contents.
+- presence + perms surfaced by `smd admin validate` via the site-profile
+  `[secrets].require` list (§8). It checks *presence*, never contents.
+
+### Default channel: `age`-encrypted per-site bundle
+
+Per-site `secrets.age` = `{earthdata-netrc, frpc.toml}` encrypted with
+[`age`](https://github.com/FiloSottile/age) (single static binary, no key
+server — well-matched to a small fleet):
+
+- **Safe to ship anywhere** (USB, scp, or even *beside the image*) because it is
+  encrypted. First boot runs `smd secrets install secrets.age`; the operator
+  supplies the `age` identity once — a passphrase, or a key on removable media.
+- Plain `smd secrets install <usbdir>` remains available for the trivial case
+  (trusted local transport, no crypto).
+
+### Rules
+
+1. Generated-on-host secrets (SSH keys) are **never delivered** — let them
+   self-generate per clone.
+2. True secrets **never ride an *exported* image**; deliver via the bundle. Even
+   fleet-shared Earthdata (which is optional) is delivered, not baked.
+3. Fleet-shared **non-secret** material (`frps-ca.crt`) *may* be baked into the
+   controlled image.
+
+### Optional hardening (later)
+
+`systemd-creds encrypt` + `LoadCredentialEncrypted=` so the placed secrets are
+host-bound-encrypted at rest and a clone cannot reuse them (a feature). Adds
+complexity; defer until the basic installer is in use.
+
+---
+
+## 11. Open items to decide
+
+1. Whether to build `site-profile.toml` + `smd config render` (§8), or keep
    per-client wizards as the only path.
+2. Build the `smd secrets` helper + `age` bundle flow (§10), or keep secrets a
+   documented manual placement step for now.
 3. A `smd personalize` first-boot oneshot vs. a manual runbook (§9).
 4. Whether PHaRLAP rides in the DASI2 image (single-licensee, controlled) or is
    staged per host even for image clones — see EXTERNAL_PREREQUISITES.md §3.
