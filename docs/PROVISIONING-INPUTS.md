@@ -203,7 +203,7 @@ oneshot (or a documented runbook) should perform, in order:
 - [ ] Regenerate **SSH host keys** (`dpkg-reconfigure openssh-server` / `ssh-keygen -A`).
 - [ ] Confirm network / IP / DNS.
 - [ ] Drop in the site's **`site-profile.toml`** (identity + reporter ids).
-- [ ] Install per-site **secrets** — `smd secrets install secrets.age` (§10).
+- [ ] Install per-site **secrets** — `smd admin secrets install secrets.age` (§10).
 - [ ] `smd config render` (or `setup-station.sh --from-profile`) to re-render all
       client configs and refresh `coordination.env`.
 - [ ] Regenerate **FFT wisdom** (per-CPU; slow).
@@ -221,8 +221,9 @@ not already in the image), RAC token issuance.
 
 ## 10. Secrets delivery (recommended design)
 
-**Status (2026-06-13):** design accepted; **not yet implemented** (`smd secrets`
-is a proposal). Decided: default channel = an `age`-encrypted per-site bundle.
+**Status (2026-06-13):** **IMPLEMENTED** as `smd admin secrets`
+(status / template / install / bundle). Default channel = an `age`-encrypted
+per-site bundle. (`age` is required only for the bundle channel: `apt install age`.)
 
 ### The surface is small — most "secrets" generate themselves
 
@@ -246,16 +247,23 @@ So the genuinely **delivered** secrets reduce to **two, both optional**:
 Because the surface is two optional files, no heavy infra (Vault/sops
 pipelines) is warranted — a thin installer plus a simple encrypted bundle.
 
-### `smd secrets` — standardise placement, perms, validation (channel-agnostic)
+### `smd admin secrets` — standardise placement, perms, validation (channel-agnostic)
 
-- `smd secrets template` — write placeholder files at the canonical paths.
-- `smd secrets install <dir | bundle.age>` — copy operator-supplied secrets to
-  their canonical paths (`/etc/hf-timestd/earthdata-netrc`, `frpc.toml`, …),
-  `chown` the service user + `chmod 0600`, and **validate format** (netrc has a
-  `machine urs.earthdata.nasa.gov` line; frpc token is non-placeholder). Never
-  echo contents.
-- presence + perms surfaced by `smd admin validate` via the site-profile
-  `[secrets].require` list (§8). It checks *presence*, never contents.
+- `smd admin secrets template` — write placeholder files at the canonical paths
+  (root; never clobbers an existing file).
+- `smd admin secrets install <dir | bundle.age>` — copy operator-supplied
+  secrets to their canonical paths (`/etc/hf-timestd/earthdata-netrc`,
+  `/etc/sigmond/frpc.toml`), `chown` the owning user + `chmod 0600`, and
+  **validate format** (netrc has a `machine urs.earthdata.nasa.gov` line + real
+  login/password; frpc token is non-placeholder). Root; never echoes contents.
+  A `.age` source is decrypted (`-i <identity>`, or prompt for a passphrase) and
+  extracted to a 0700 temp dir, then placed.
+- `smd admin secrets bundle <dir> -o secrets.age {-R recipients | -p}` —
+  operator-side helper: tar the known secret files found in `<dir>` and
+  age-encrypt them into the per-site bundle.
+- `smd admin secrets status` — presence / perms / validity, **never contents**.
+  (Intended to also be surfaced by `smd admin validate` via the site-profile
+  `[secrets].require` list once §8 lands.)
 
 ### Default channel: `age`-encrypted per-site bundle
 
@@ -264,9 +272,9 @@ Per-site `secrets.age` = `{earthdata-netrc, frpc.toml}` encrypted with
 server — well-matched to a small fleet):
 
 - **Safe to ship anywhere** (USB, scp, or even *beside the image*) because it is
-  encrypted. First boot runs `smd secrets install secrets.age`; the operator
+  encrypted. First boot runs `smd admin secrets install secrets.age`; the operator
   supplies the `age` identity once — a passphrase, or a key on removable media.
-- Plain `smd secrets install <usbdir>` remains available for the trivial case
+- Plain `smd admin secrets install <usbdir>` remains available for the trivial case
   (trusted local transport, no crypto).
 
 ### Rules
@@ -290,8 +298,10 @@ complexity; defer until the basic installer is in use.
 
 1. Whether to build `site-profile.toml` + `smd config render` (§8), or keep
    per-client wizards as the only path.
-2. Build the `smd secrets` helper + `age` bundle flow (§10), or keep secrets a
-   documented manual placement step for now.
+2. ✅ DONE — `smd admin secrets` (status/template/install/bundle) + age-bundle
+   flow implemented and verified (§10). Remaining sub-item: wire
+   `smd admin secrets status` into `smd admin validate` once site-profile
+   `[secrets].require` (§8) lands.
 3. A `smd personalize` first-boot oneshot vs. a manual runbook (§9).
 4. Whether PHaRLAP rides in the DASI2 image (single-licensee, controlled) or is
    staged per host even for image clones — see EXTERNAL_PREREQUISITES.md §3.

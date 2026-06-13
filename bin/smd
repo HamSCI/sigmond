@@ -12769,6 +12769,255 @@ def _add_ka9q_watch_args(p) -> None:
                    help='emit machine-readable JSON')
 
 
+# ===========================================================================
+# secrets — provision per-site delivered credentials (smd admin secrets)
+#
+# Most station secrets generate themselves on-host (PSWS / hs-uploader SSH
+# keys), so the *delivered* surface is small: the Earthdata netrc (fleet-
+# shared) and the RAC frpc token (per-station). This command standardises
+# placement / perms / validation and supports an age-encrypted per-site
+# bundle as the default delivery channel.
+# See sigmond/docs/PROVISIONING-INPUTS.md §10.
+# ===========================================================================
+
+def _validate_earthdata(path: Path):
+    try:
+        text = path.read_text()
+    except OSError as e:
+        return False, f'unreadable ({e.__class__.__name__})'
+    if 'urs.earthdata.nasa.gov' not in text:
+        return False, "missing 'machine urs.earthdata.nasa.gov'"
+    if 'YOUR_' in text:
+        return False, 'still contains placeholder values'
+    has_login = any(l.split()[:1] == ['login'] and len(l.split()) >= 2
+                    for l in text.splitlines())
+    has_pw = any(l.split()[:1] == ['password'] and len(l.split()) >= 2
+                 for l in text.splitlines())
+    if not (has_login and has_pw):
+        return False, 'login/password incomplete'
+    return True, 'ok'
+
+
+def _validate_frpc(path: Path):
+    try:
+        text = path.read_text()
+    except OSError as e:
+        return False, f'unreadable ({e.__class__.__name__})'
+    m = re.search(r'token\s*=\s*"([^"]*)"', text)
+    if not m:
+        return False, 'no token field'
+    tok = m.group(1)
+    if not tok or 'FROM_WD_ADMIN' in tok or tok.startswith('<'):
+        return False, 'token is a placeholder'
+    return True, 'ok'
+
+
+# Registry of the few *delivered* secrets. SSH-key secrets are intentionally
+# absent — they self-generate on-host (setup-psws-keys.sh / hs-uploader).
+_SECRETS = [
+    {
+        'name': 'earthdata',
+        'dest': Path('/etc/hf-timestd/earthdata-netrc'),
+        'owner': 'timestd', 'group': 'timestd', 'mode': 0o600,
+        'scope': 'fleet',
+        'used_by': 'hf-timestd IONEX/DCB',
+        'aliases': ('earthdata-netrc', 'earthdata', 'earthdata.netrc'),
+        'placeholder': ('machine urs.earthdata.nasa.gov\n'
+                        '    login YOUR_EARTHDATA_USERNAME\n'
+                        '    password YOUR_EARTHDATA_PASSWORD\n'),
+        'validate': _validate_earthdata,
+    },
+    {
+        'name': 'rac',
+        'dest': _FRPC_CONFIG,                  # /etc/sigmond/frpc.toml
+        'owner': 'root', 'group': 'root', 'mode': 0o600,
+        'scope': 'station',
+        'used_by': 'rac (frpc reverse tunnel)',
+        'aliases': ('frpc.toml', 'rac', 'rac.toml'),
+        'placeholder': None,                   # rac/install.sh renders a template
+        'validate': _validate_frpc,
+    },
+]
+
+
+def _secrets_find(workdir: Path, entry):
+    for cand in entry['aliases']:
+        p = workdir / cand
+        if p.is_file():
+            return p
+    return None
+
+
+def _secrets_place(src_file: Path, entry):
+    dest = entry['dest']
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(src_file.read_bytes())
+    try:
+        shutil.chown(dest, entry['owner'], entry['group'])
+    except (LookupError, PermissionError) as e:
+        _warn(f"{entry['name']}: chown {entry['owner']}:{entry['group']} failed ({e})")
+    dest.chmod(entry['mode'])
+
+
+def _age_available() -> bool:
+    return shutil.which('age') is not None
+
+
+def cmd_secrets_status(args) -> int:
+    _info('Delivered secrets (SSH keys self-generate and are not shown here):')
+    for e in _SECRETS:
+        dest = e['dest']
+        label = f"{e['name']} [{e['scope']}, {e['used_by']}] -> {dest}"
+        if not dest.exists():
+            _warn(f"{label}: MISSING")
+            continue
+        mode = dest.stat().st_mode & 0o777
+        if not os.access(dest, os.R_OK):
+            _info(f"{label}: present (run as root to validate)")
+            continue
+        ok, msg = e['validate'](dest)
+        if ok and mode == e['mode']:
+            _ok(f"{label}: valid")
+        elif ok:
+            _warn(f"{label}: valid but perms {oct(mode)} (want {oct(e['mode'])})")
+        else:
+            _warn(f"{label}: {msg}")
+    return 0
+
+
+def cmd_secrets_template(args) -> int:
+    if os.geteuid() != 0:
+        _err('secrets template must run as root (writes under /etc)')
+        return 1
+    made = 0
+    for e in _SECRETS:
+        if e['placeholder'] is None:
+            _info(f"{e['name']}: get user/token/remotePort from wd-admin and fill "
+                  f"{e['dest']} (rac/install.sh renders a template)")
+            continue
+        dest = e['dest']
+        if dest.exists():
+            _info(f"{e['name']}: {dest} already exists — left unchanged")
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(e['placeholder'])
+        try:
+            shutil.chown(dest, e['owner'], e['group'])
+        except (LookupError, PermissionError):
+            pass
+        dest.chmod(e['mode'])
+        _ok(f"{e['name']}: wrote placeholder {dest} — fill in real values")
+        made += 1
+    _info(f"{made} placeholder(s) written.")
+    return 0
+
+
+def cmd_secrets_install(args) -> int:
+    if os.geteuid() != 0:
+        _err('secrets install must run as root (writes under /etc)')
+        return 1
+    import tempfile
+    src = Path(args.source)
+    if not src.exists():
+        _err(f'source not found: {src}')
+        return 1
+
+    tmp = None
+    try:
+        if src.is_file() and src.suffix == '.age':
+            if not _age_available():
+                _err('age not installed — run: sudo apt install age '
+                     '(see PROVISIONING-INPUTS.md §10)')
+                return 1
+            tmp = Path(tempfile.mkdtemp(prefix='smd-secrets-'))
+            tmp.chmod(0o700)
+            age_cmd = ['age', '--decrypt']
+            if getattr(args, 'identity', None):
+                age_cmd += ['-i', args.identity]
+            age_cmd += [str(src)]
+            ap = subprocess.Popen(age_cmd, stdout=subprocess.PIPE)
+            tar = subprocess.run(['tar', '-xf', '-', '-C', str(tmp)],
+                                 stdin=ap.stdout)
+            if ap.stdout:
+                ap.stdout.close()
+            ap.wait()
+            if ap.returncode != 0 or tar.returncode != 0:
+                _err('failed to decrypt/extract bundle '
+                     '(wrong identity/passphrase, or not an smd secrets bundle?)')
+                return 1
+            workdir = tmp
+        elif src.is_dir():
+            workdir = src
+        else:
+            _err(f'source must be a directory or a .age bundle: {src}')
+            return 1
+
+        placed = 0
+        for e in _SECRETS:
+            f = _secrets_find(workdir, e)
+            if f is None:
+                _info(f"{e['name']}: not in source — skipped")
+                continue
+            _secrets_place(f, e)
+            ok, msg = e['validate'](e['dest'])
+            if ok:
+                _ok(f"{e['name']}: installed -> {e['dest']} "
+                    f"({oct(e['mode'])} {e['owner']}:{e['group']})")
+            else:
+                _warn(f"{e['name']}: installed but validation failed: {msg}")
+            placed += 1
+        if placed == 0:
+            _warn('no known secret files found in source '
+                  '(expected e.g. earthdata-netrc, frpc.toml)')
+        else:
+            _info('Done. Verify with: smd admin secrets status')
+        return 0
+    finally:
+        if tmp and tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def cmd_secrets_bundle(args) -> int:
+    src = Path(args.source)
+    if not src.is_dir():
+        _err(f'bundle source must be a directory of secret files: {src}')
+        return 1
+    if not _age_available():
+        _err('age not installed — run: sudo apt install age')
+        return 1
+    if not args.recipients_file and not args.passphrase:
+        _err('specify -R/--recipients-file FILE or -p/--passphrase')
+        return 1
+    files = []
+    for e in _SECRETS:
+        f = _secrets_find(src, e)
+        if f is not None:
+            files.append(f.name)
+    if not files:
+        _err('no known secret files in source '
+             '(expected e.g. earthdata-netrc, frpc.toml)')
+        return 1
+    out = Path(args.out)
+    age_enc = ['age', '--encrypt']
+    if args.recipients_file:
+        age_enc += ['-R', args.recipients_file]
+    else:
+        age_enc += ['--passphrase']
+    age_enc += ['-o', str(out)]
+    tarp = subprocess.Popen(['tar', '-cf', '-', '-C', str(src)] + files,
+                            stdout=subprocess.PIPE)
+    enc = subprocess.run(age_enc, stdin=tarp.stdout)
+    if tarp.stdout:
+        tarp.stdout.close()
+    tarp.wait()
+    if tarp.returncode != 0 or enc.returncode != 0:
+        _err('bundle creation failed')
+        return 1
+    _ok(f'wrote {out} containing: {", ".join(files)}')
+    _info(f'Deliver it, then on the host: sudo smd admin secrets install {out.name}')
+    return 0
+
+
 def main() -> int:
     # v2 canonical `smd admin log set-level [<client>] <level>` — pre-argparse
     # intercept because argparse can't cleanly mix a sub-verb with the
@@ -13345,6 +13594,37 @@ def main() -> int:
                        help='run cross-client harmonization rules (read-only)')
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
+
+    # secrets — install/validate the few *delivered* per-site secrets
+    # (Earthdata netrc, RAC token). SSH-key secrets self-generate on-host and
+    # are not handled here. See PROVISIONING-INPUTS.md §10.
+    p_secrets = admin_sub.add_parser('secrets',
+        help='install/validate delivered per-site secrets (Earthdata netrc, RAC token)',
+        description=('Standardises placement + perms + validation of the few '
+                     'delivered station secrets; default delivery channel is an '
+                     'age-encrypted per-site bundle. SSH-key secrets generate '
+                     'on-host and are not handled here.'))
+    secrets_sub = p_secrets.add_subparsers(dest='secrets_command')
+    secrets_sub.add_parser('help', help='show this help')
+    secrets_sub.add_parser('status',
+        help='show presence / perms / validity of delivered secrets (no contents)')
+    secrets_sub.add_parser('template',
+        help='write placeholder secret files at canonical paths (root)')
+    p_sec_install = secrets_sub.add_parser('install',
+        help='install secrets from a directory or an age bundle (root)')
+    p_sec_install.add_argument('source',
+        help='directory of secret files, or a .age bundle')
+    p_sec_install.add_argument('-i', '--identity',
+        help='age identity file (for .age bundles; omit to be prompted for a passphrase)')
+    p_sec_bundle = secrets_sub.add_parser('bundle',
+        help='create an age-encrypted secrets bundle from a directory')
+    p_sec_bundle.add_argument('source', help='directory containing the secret files')
+    p_sec_bundle.add_argument('-o', '--out', required=True, help='output .age bundle path')
+    p_sec_bundle.add_argument('-R', '--recipients-file',
+        help='age recipients file (public keys) to encrypt to')
+    p_sec_bundle.add_argument('-p', '--passphrase', action='store_true',
+        help='encrypt with a passphrase instead of recipient keys')
+
     p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
     p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
@@ -13897,6 +14177,22 @@ def main() -> int:
         'tui':     cmd_tui,
         'public-ip': cmd_public_ip,
     }
+
+    if args.command == 'secrets':
+        sub_cmd = getattr(args, 'secrets_command', None)
+        if sub_cmd in (None, 'help'):
+            p_secrets.print_help()
+            return 0
+        if sub_cmd == 'status':
+            return cmd_secrets_status(args)
+        if sub_cmd == 'template':
+            return cmd_secrets_template(args)
+        if sub_cmd == 'install':
+            return cmd_secrets_install(args)
+        if sub_cmd == 'bundle':
+            return cmd_secrets_bundle(args)
+        p_secrets.print_help()
+        return 0
 
     if args.command == 'sources':
         sub_cmd = getattr(args, 'sources_command', None)
