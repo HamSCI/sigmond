@@ -210,33 +210,43 @@ per-client wizard remains the fallback (contract unchanged).
 
 ---
 
-## 9. PROPOSED: first-boot personalization checklist (image model)
+## 9. First-boot personalization (image model)
 
 A golden image carries **shareable** state only (software, PHaRLAP/pyLAP, units).
 The reference host's **identity** and any baked **secrets** must be wiped from the
-image before capture, and re-applied per clone on first boot. A `smd personalize`
-oneshot (or a documented runbook) should perform, in order:
+image before capture, and re-applied per clone on first boot.
+
+**`smd admin personalize`** (IMPLEMENTED) orchestrates the per-clone first-boot
+steps — plan-first, `--yes` to execute (self-elevates), idempotent:
+
+```bash
+sudo smd admin personalize --hostname dasi2-em38 --reset-identity --yes
+```
+
+It: sets the **hostname** (from `--hostname` or site-profile `[host].hostname`;
+radiod mDNS names follow); with `--reset-identity`, regenerates `/etc/machine-id`
++ **SSH host keys** (destructive, clone-only, opt-in); runs **`smd config render`**
+(coordination from `site-profile.toml`, scaffolding it if absent); then reports
+**`smd admin secrets status`** + **`smd admin validate`**; writes a
+`/etc/sigmond/.personalized` sentinel; and prints the remaining manual steps. Run
+without `--yes` to preview the plan.
 
 **Before capturing the image (on the reference host):**
 - [ ] Remove all §4 secrets (PSWS key, earthdata-netrc, RAC token).
-- [ ] Clear identity: truncate `/etc/machine-id`; remove `/etc/ssh/ssh_host_*`.
+- [ ] Clear identity: truncate `/etc/machine-id`; remove `/etc/ssh/ssh_host_*`;
+      remove `/etc/sigmond/.personalized`.
 - [ ] Reset `site-profile.toml` to placeholders (or remove it).
 - [ ] Clear logs / data roots / FFT wisdom that are host-specific.
 - [ ] Leave PHaRLAP + built pyLAP in place (shareable, controlled image).
 
-**On first boot of each clone:**
-- [ ] Set **hostname** (drives radiod instance/mDNS names).
-- [ ] Generate `/etc/machine-id` (`systemd-machine-id-setup`).
-- [ ] Regenerate **SSH host keys** (`dpkg-reconfigure openssh-server` / `ssh-keygen -A`).
-- [ ] Confirm network / IP / DNS.
-- [ ] Drop in the site's **`site-profile.toml`** (identity + reporter ids).
-- [ ] Install per-site **secrets** — `smd admin secrets install secrets.age` (§10).
-- [ ] `smd config render` (or `setup-station.sh --from-profile`) to re-render all
-      client configs and refresh `coordination.env`.
-- [ ] Regenerate **FFT wisdom** (per-CPU; slow).
-- [ ] Apply host tuning (`isolcpus`, grub) and **reboot** if changed.
-- [ ] `smd admin validate` + `hf-timestd data sources` to confirm identity,
-      secrets presence, radiod consumption, and raytracing/data feeds.
+**On first boot of each clone** — `smd admin personalize --reset-identity --yes`
+does the automatable steps; the operator still:
+- [ ] supplies the site's **`site-profile.toml`** (or fills the scaffold) before/at render;
+- [ ] installs per-site **secrets** — `smd admin secrets install secrets.age` (§10)
+      (personalize reports which are missing);
+- [ ] regenerates **FFT wisdom** (per-CPU; slow — see `smd admin wisdom`);
+- [ ] applies host tuning (`isolcpus`, grub) and **reboots** if changed (also to
+      activate new SSH host keys).
 
 **Still requires a human, out of band (cannot be automated — §3):** PSWS account
 + public-key registration, Earthdata account, PHaRLAP request/download (only if
@@ -333,7 +343,7 @@ complexity; defer until the basic installer is in use.
    flow implemented and verified (§10), and surfaced in `smd admin validate`
    via a `secrets` harmonization rule (gated on enabled components; no
    site-profile dependency).
-3. A `smd personalize` first-boot oneshot vs. a manual runbook (§9).
+3. ✅ DONE — `smd admin personalize` first-boot oneshot implemented (§9).
 4. Whether PHaRLAP rides in the DASI2 image (single-licensee, controlled) or is
    staged per host even for image clones — see EXTERNAL_PREREQUISITES.md §3.
 
