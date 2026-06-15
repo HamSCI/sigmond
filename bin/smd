@@ -5569,6 +5569,56 @@ def _is_binary_only_component(entry) -> bool:
         return False
 
 
+def _git_current_branch(repo_dir: Path) -> str:
+    """Checked-out branch name, or 'detached@<sha>' when not on a branch."""
+    sd = f'safe.directory={repo_dir}'
+    b = subprocess.run(['git', '-c', sd, '-C', str(repo_dir),
+                        'branch', '--show-current'],
+                       capture_output=True, text=True).stdout.strip()
+    if b:
+        return b
+    h = subprocess.run(['git', '-c', sd, '-C', str(repo_dir),
+                        'rev-parse', '--short', 'HEAD'],
+                       capture_output=True, text=True).stdout.strip()
+    return f'detached@{h}' if h else '(detached)'
+
+
+def _git_default_ref(repo_dir: Path) -> str:
+    """Remote default-branch ref ('origin/main' etc.), '' if undeterminable.
+
+    BEHIND should be measured against the canonical line of development, not
+    the checked-out branch's own tracking ref — otherwise a repo parked on a
+    stale feature branch (level with its own remote) falsely reads 'BEHIND 0'
+    while being many commits behind main.
+    """
+    sd = f'safe.directory={repo_dir}'
+    ref = subprocess.run(['git', '-c', sd, '-C', str(repo_dir), 'symbolic-ref',
+                          '-q', 'refs/remotes/origin/HEAD'],
+                         capture_output=True, text=True).stdout.strip()
+    if ref:
+        return ref.replace('refs/remotes/', '', 1)
+    for cand in ('origin/main', 'origin/master'):
+        if subprocess.run(['git', '-c', sd, '-C', str(repo_dir), 'rev-parse',
+                           '--verify', '-q', cand],
+                          capture_output=True, text=True).returncode == 0:
+            return cand
+    return ''
+
+
+def _git_behind_ahead(repo_dir: Path, ref: str) -> tuple[int, int]:
+    """(behind, ahead) of HEAD relative to ref; (0, 0) if ref empty/invalid."""
+    if not ref:
+        return 0, 0
+    sd = f'safe.directory={repo_dir}'
+    out = subprocess.run(['git', '-c', sd, '-C', str(repo_dir), 'rev-list',
+                          '--left-right', '--count', f'{ref}...HEAD'],
+                         capture_output=True, text=True).stdout.split()
+    try:
+        return int(out[0]), int(out[1])
+    except (IndexError, ValueError):
+        return 0, 0
+
+
 def _component_statuses(args, *, fetch: bool) -> list[dict]:
     """Build a status row per catalog component.
 
@@ -5705,12 +5755,20 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 upstream_date = _git_commit_date(repo_dir, up_ref)
         dirty, reason = _repo_is_dirty(repo_dir)
 
-        # Verdict ladder — first match wins.  Distinguish a working-tree-dirty
-        # repo (uncommitted edits) from one merely ahead of upstream (unpushed
-        # local commits): _repo_is_dirty flags BOTH as dirty (both are unsafe
-        # to ff-pull), but they are materially different to an operator — only
-        # uncommitted edits show as "dirty" here; unpushed-ahead falls through
-        # to the ahead branch below and shows as "unpushed".
+        # Branch + canonical divergence.  BEHIND is measured against the remote
+        # default branch (origin/main), NOT the checked-out branch's own
+        # tracking ref — else a repo parked on a stale feature branch (level
+        # with its own remote) falsely reads "BEHIND 0" while being many commits
+        # behind main.
+        branch = _git_current_branch(repo_dir)
+        default_ref = _git_default_ref(repo_dir)            # e.g. 'origin/main'
+        default_branch = default_ref.split('/', 1)[-1] if default_ref else ''
+        behind_main, _ahead_main = _git_behind_ahead(repo_dir, default_ref)
+        on_feature = bool(default_branch) and branch != default_branch
+
+        # Verdict ladder — first match wins.  Separate the materially-different
+        # states: working-tree-dirty (uncommitted edits) / unpushed local
+        # commits / behind the canonical branch / parked on a feature branch.
         wt_dirty = dirty and (reason or '').startswith('uncommitted')
         if wt_dirty:
             verdict = f'dirty: {reason}'
@@ -5721,10 +5779,13 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             verdict = (f'pinned to {policy}'
                        if local.startswith(policy[:7]) or local == policy
                        else f'pinned drift: at {local} (want {policy})')
-        elif behind > 0:
-            verdict = f'{behind} commit{"s" if behind != 1 else ""} behind upstream'
         elif ahead > 0:
             verdict = f'{ahead} unpushed commit{"s" if ahead != 1 else ""}'
+        elif behind_main > 0:
+            verdict = (f'{behind_main} commit'
+                       f'{"s" if behind_main != 1 else ""} behind main')
+        elif on_feature:
+            verdict = f'on branch {branch}'
         else:
             verdict = 'up to date'
 
@@ -5736,9 +5797,12 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             'repo_dir': str(repo_dir),
             'local': local,
             'local_date': local_date,
+            'branch': branch,
+            'default_branch': default_branch,
             'upstream': upstream,
             'upstream_date': upstream_date,
-            'behind': behind,
+            'behind': behind_main,
+            'behind_upstream': behind,
             'ahead': ahead,
             'commit_index': commit_index,
             'dirty': dirty,
@@ -5774,14 +5838,21 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 if s_up_ref:
                     s_up_date = _git_commit_date(sigmond_dir, s_up_ref)
             s_dirty, s_reason = _repo_is_dirty(sigmond_dir)
+            s_branch = _git_current_branch(sigmond_dir)
+            s_default_ref = _git_default_ref(sigmond_dir)
+            s_default = s_default_ref.split('/', 1)[-1] if s_default_ref else ''
+            s_behind_main, _sa = _git_behind_ahead(sigmond_dir, s_default_ref)
+            s_on_feature = bool(s_default) and s_branch != s_default
             if s_dirty and (s_reason or '').startswith('uncommitted'):
                 s_verdict = f'dirty: {s_reason}'
-            elif s_behind > 0:
-                s_verdict = (f'{s_behind} commit'
-                             f'{"s" if s_behind != 1 else ""} behind upstream')
             elif s_ahead > 0:
                 s_verdict = (f'{s_ahead} unpushed commit'
                              f'{"s" if s_ahead != 1 else ""}')
+            elif s_behind_main > 0:
+                s_verdict = (f'{s_behind_main} commit'
+                             f'{"s" if s_behind_main != 1 else ""} behind main')
+            elif s_on_feature:
+                s_verdict = f'on branch {s_branch}'
             else:
                 s_verdict = 'up to date'
             rows.insert(0, {
@@ -5792,9 +5863,12 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 'repo_dir': str(sigmond_dir),
                 'local': s_local,
                 'local_date': _git_commit_date(sigmond_dir, 'HEAD'),
+                'branch': s_branch,
+                'default_branch': s_default,
                 'upstream': s_upstream,
                 'upstream_date': s_up_date,
-                'behind': s_behind,
+                'behind': s_behind_main,
+                'behind_upstream': s_behind,
                 'ahead': s_ahead,
                 'commit_index': _git_commit_index(sigmond_dir, 'HEAD'),
                 'dirty': s_dirty,
@@ -5817,8 +5891,8 @@ def _print_status_table(rows: list[dict]) -> None:
     # shown.  INDEX is the linear depth of HEAD in history (a stable
     # monotonic id); BEHIND is the count of upstream commits not in HEAD.
     # The count moved into BEHIND, so verdict drops it ("3 behind" → "behind").
-    W_NAME, W_LIFE, W_VERDICT, W_INDEX, W_BEHIND, W_DATE, W_UP_DATE, W_POLICY = (
-        22, 18, 14, 7, 8, 12, 12, 8,
+    W_NAME, W_LIFE, W_BRANCH, W_VERDICT, W_INDEX, W_BEHIND, W_DATE, W_POLICY = (
+        20, 17, 26, 15, 6, 8, 11, 7,
     )
 
     def _short_lifecycle(s: str) -> str:
@@ -5831,10 +5905,12 @@ def _print_status_table(rows: list[dict]) -> None:
             return 'pinned'
         if v.startswith('dirty:'):
             return 'dirty'
-        if 'behind upstream' in v:
+        if 'behind main' in v or 'behind upstream' in v:
             return 'behind'
         if 'unpushed commit' in v:
             return 'unpushed'
+        if v.startswith('on branch '):
+            return 'on branch'
         if v == 'ignored (developer mode)':
             return 'ignored'
         return v
@@ -5848,13 +5924,15 @@ def _print_status_table(rows: list[dict]) -> None:
             return '\033[31m'
         if 'behind' in v or 'unpushed' in v:
             return '\033[33m'
+        if v.startswith('on branch '):
+            return '\033[36m'
         return ''
 
     print(
         f'  \033[1m{"NAME":<{W_NAME}}{"LIFECYCLE":<{W_LIFE}}'
-        f'{"VERDICT":<{W_VERDICT}}{"INDEX":<{W_INDEX}}{"BEHIND":<{W_BEHIND}}'
-        f'{"HEAD DATE":<{W_DATE}}{"UPSTREAM":<{W_UP_DATE}}'
-        f'{"POLICY":<{W_POLICY}}\033[0m'
+        f'{"BRANCH":<{W_BRANCH}}{"VERDICT":<{W_VERDICT}}'
+        f'{"INDEX":<{W_INDEX}}{"BEHIND":<{W_BEHIND}}'
+        f'{"HEAD DATE":<{W_DATE}}{"POLICY":<{W_POLICY}}\033[0m'
     )
     for r in rows:
         name    = r['name']
@@ -5865,29 +5943,31 @@ def _print_status_table(rows: list[dict]) -> None:
         vcol    = _verdict_color(r['verdict'])
         vreset  = '\033[0m' if vcol else ''
         index   = str(r['commit_index']) if r['repo_dir'] and r['commit_index'] else ''
-        behind  = str(r['behind'])       if r['repo_dir'] else ''
+        behind_n = r['behind'] if r['repo_dir'] else 0
+        behind  = str(behind_n) if r['repo_dir'] else ''
+        bcol    = '\033[33m' if (r['repo_dir'] and behind_n) else ''
+        breset  = '\033[0m' if bcol else ''
         date    = r['local_date']        if r['repo_dir'] else ''
-        # UPSTREAM DATE column — colour yellow when local HEAD date is
-        # older than upstream, so a stale checkout pops visually even
-        # before the operator reads BEHIND.  When local==upstream the
-        # value is identical to HEAD DATE; we still print it so the
-        # column doesn't go blank on up-to-date rows (a blank field
-        # would read as "missing", not "same as HEAD").
-        up_date_raw = r.get('upstream_date', '') if r['repo_dir'] else ''
-        if up_date_raw and date and up_date_raw > date:
-            up_cell = f'\033[33m{up_date_raw:<{W_UP_DATE}.{W_UP_DATE}}\033[0m'
-        else:
-            up_cell = f'{up_date_raw:<{W_UP_DATE}.{W_UP_DATE}}'
         policy  = r['policy']
+        # BRANCH column — yellow when parked off the default branch (a feature
+        # branch), so a non-main checkout is visible at a glance.  BEHIND is
+        # measured against the default branch (origin/main), so the two together
+        # show both WHERE the checkout is and how far it trails canonical.
+        br      = r.get('branch', '') if r['repo_dir'] else ''
+        dflt    = r.get('default_branch', '')
+        if len(br) > W_BRANCH - 1:      # keep ≥1 trailing space before VERDICT
+            br = br[:W_BRANCH - 2] + '…'
+        brcol   = '\033[33m' if (br and dflt and br != dflt) else ''
+        brreset = '\033[0m' if brcol else ''
 
         print(
             f'  {ncol}{name:<{W_NAME}.{W_NAME}}{nreset}'
             f'{life:<{W_LIFE}.{W_LIFE}}'
+            f'{brcol}{br:<{W_BRANCH}.{W_BRANCH}}{brreset}'
             f'{vcol}{verdict:<{W_VERDICT}.{W_VERDICT}}{vreset}'
             f'{index:<{W_INDEX}.{W_INDEX}}'
-            f'{behind:<{W_BEHIND}.{W_BEHIND}}'
+            f'{bcol}{behind:<{W_BEHIND}.{W_BEHIND}}{breset}'
             f'{date:<{W_DATE}.{W_DATE}}'
-            f'{up_cell}'
             f'{policy:<{W_POLICY}.{W_POLICY}}'
         )
 
@@ -5899,12 +5979,14 @@ def _print_status_table(rows: list[dict]) -> None:
                                    '\033[31m', '\033[90m', '\033[1m', '\033[0m')
     print()
     print(f'  {_B}colours are per-column{_X} — NAME = run-state, '
-          f'VERDICT = git-state (independent):')
+          f'BRANCH/VERDICT = git-state; BEHIND = commits behind origin/main:')
     print(f'    {_B}NAME{_X}     {_G}running / present{_X}   '
           f'{_Y}configured, not running{_X}   {_C}sigmond (this tool){_X}   '
           f'not installed')
+    print(f'    {_B}BRANCH{_X}   {_Y}yellow = on a feature branch (not the '
+          f'default){_X};  default branch shown plain')
     print(f'    {_B}VERDICT{_X}  {_G}up to date{_X}   '
-          f'{_Y}behind / unpushed{_X}   '
+          f'{_Y}behind main / unpushed{_X}   '
           f'{_R}dirty (uncommitted) / drift{_X}   {_K}ignored{_X}')
 
 
