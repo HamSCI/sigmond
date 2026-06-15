@@ -5884,6 +5884,28 @@ def _print_status_table(rows: list[dict]) -> None:
         _info('(no components)')
         return
 
+    # Group by lifecycle state, not by name — the operator scans for "what's
+    # running / configured / not installed", and alphabetical-by-name buried
+    # that.  Order: sigmond (self) first, then library, configured,
+    # enabled/running, binary tools, anything else, and not-installed last;
+    # within a group, by name.
+    def _lc_rank(r: dict) -> int:
+        if r.get('kind') == 'self':
+            return 0
+        lc = (r.get('lifecycle') or '').lower()
+        if lc.startswith('library'):
+            return 1
+        if lc.startswith('configured'):
+            return 2
+        if lc.startswith('enabled'):
+            return 3
+        if lc.startswith('binary'):
+            return 4
+        if lc.startswith('available') or 'not installed' in lc:
+            return 6
+        return 5
+    rows = sorted(rows, key=lambda r: (_lc_rank(r), r.get('name', '')))
+
     # Fixed-width tabular layout — one line per component.  Columns are
     # sized so the common cases (enabled/stopped, up to date, latest) fit
     # without truncation; verbose hints in lifecycle (e.g. "missing — repo
