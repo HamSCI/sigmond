@@ -16,6 +16,11 @@ The CLI entry point is **`smd`**.
 
 ## Architecture reference
 
+For the whole-suite picture (DASI2 hardware → radiod → core/additional
+clients → shared sink → uploaders, under sigmond oversight) see
+`docs/architecture.svg` / `docs/architecture.png` (rendered in
+`README.md`).
+
 See `tui-configurator.md` for the full design — three-panel Textual TUI,
 topology registry, harmonization rules, screen flow, and open questions.
 

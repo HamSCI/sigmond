@@ -3,11 +3,43 @@
 **Dr. SigMonD** (Signal Monitor Daemon) is the installer, lifecycle manager,
 and coordinator for the [HamSCI](https://hamsci.org/) SDR observation suite.
 
-Sigmond manages a family of independent clients that share a
-[ka9q-radio](https://github.com/ka9q/ka9q-radio) SDR receiver.  Each client
-records a different signal type — WSPR, FT8/FT4, HF time standards — and
-sigmond handles the parts that require coordination between them: installation,
-service lifecycle, log aggregation, diagnostics, and resource arbitration.
+Sigmond manages a family of independent clients that share the DASI2
+station hardware — a [ka9q-radio](https://github.com/ka9q/ka9q-radio)
+receiver on an RX888 SDR (GPSDO-disciplined, TS-1 time-injected) plus a
+magnetometer.  Each client records a different signal type — WSPR,
+FT8/FT4, HF time standards, magnetic field, CODAR, HFDL, beacon TEC,
+meteor scatter — and sigmond handles the parts that require coordination
+between them: installation, service lifecycle, log aggregation,
+diagnostics, timing-authority distribution, the shared SQLite sink, and
+resource (CPU) arbitration.
+
+## Architecture at a glance
+
+![Sigmond / DASI2 station architecture](docs/architecture.png)
+
+The **DASI2 hardware kit** (DXE antenna → RX888 SDR, disciplined by an
+LB-GPSDO and time-injected by a TS-1, plus a magnetometer) feeds
+**ka9q-radio** (`radiod`), which multicasts per-channel RTP streams.
+Every RF client subscribes via [ka9q-python](https://github.com/mijahauan/ka9q-python);
+**mag-recorder** is the one client that reads its sensor directly (USB-I²C)
+rather than through radiod.
+
+- **Core clients:** `hf-timestd` (timing authority — publishes the
+  RTP↔UTC offset and tier that the other RF clients label against),
+  `wspr-recorder`, `psk-recorder`, `mag-recorder`.
+- **Additional clients:** `codar-sounder`, `hfdl-recorder`,
+  `hf-gps-tec`, `meteor-scatter`.
+
+Decoded spots / products land in a **shared SQLite sink**
+(`/var/lib/sigmond/sink.db`) and are shipped upstream by `hs-uploader`
+to wsprnet.org, wsprdaemon.org, pskreporter.info, and PSWS / HamSCI
+(HFDL feeds airframes.io directly via `dumphfdl`).  Sigmond is the
+oversight layer wrapping the whole software stack: install, configure,
+lifecycle, CPU-pinning, and the shared sink.
+
+> The diagram source is [`docs/architecture.svg`](docs/architecture.svg)
+> (editable vector, drops straight into slides); a raster copy is at
+> [`docs/architecture.png`](docs/architecture.png).
 
 ```
           .---.
@@ -76,14 +108,19 @@ smd list --catalog
   Servers (1)
     ·  radiod                 ka9q-radio SDR daemon
 
-  Clients (3)
+  Clients (8)
     ·  hf-timestd             HF time-standard analyzer (WWV/WWVH/CHU/BPM)
-    ·  psk-recorder           FT4/FT8 spot recorder for PSKReporter
     ·  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)
+    ·  psk-recorder           FT4/FT8 spot recorder for PSKReporter
+    ·  mag-recorder           RM3100 magnetometer recorder + PSWS uploader
+    ·  codar-sounder          Opportunistic ionospheric sounder (CODAR chirps)
+    ·  hfdl-recorder          HFDL recorder (one dumphfdl subprocess per band)
+    ·  hf-gps-tec             HF PRN-beacon recorder for ionospheric TEC
+    ·  meteor-scatter         Meteor-scatter ping decoder (jt9 --msk144)
 
   Infrastructure (3)
     ·  igmp-querier           IGMPv2 querier daemon for multicast LANs
-    ·  wd-rac                 WsprDaemon Remote Access Channel (frpc tunnel)
+    ·  rac                    Remote Access Channel (frpc reverse tunnel)
     ·  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS
 ```
 
@@ -120,6 +157,11 @@ for your station:
 | hf-timestd | `/etc/hf-timestd/timestd-config.toml` |
 | psk-recorder | `/etc/psk-recorder/psk-recorder-config.toml` |
 | wspr-recorder | `/etc/wspr-recorder/wspr-recorder.toml` |
+| mag-recorder | `/etc/mag-recorder/mag-recorder-config.toml` |
+| codar-sounder | `/etc/codar-sounder/codar-sounder-config.toml` |
+| hfdl-recorder | `/etc/hfdl-recorder/hfdl-recorder-config.toml` |
+| hf-gps-tec | `/etc/hf-gps-tec/hf-gps-tec-config.toml` |
+| meteor-scatter | `/etc/meteor-scatter/meteor-scatter-config.toml` |
 
 Sigmond's own coordination config lives at `/etc/sigmond/topology.toml`.
 Copy the example to get started:
@@ -313,24 +355,39 @@ smd status
 
 ## Available clients
 
-| Client | What it does | Repo |
+Clients fall into two groups. **Core clients** are the DASI2 grant
+station's primary instruments; **additional clients** extend the same
+station to other HF science.
+
+| Core client | What it does | Repo |
 |--------|-------------|------|
 | **radiod** | ka9q-radio SDR daemon — receives RF and multicasts IQ channels | [ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio) |
-| **hf-timestd** | HF time-standard analyzer — extracts clock offsets from WWV/WWVH/CHU/BPM | [mijahauan/hf-timestd](https://github.com/mijahauan/hf-timestd) |
+| **hf-timestd** | HF time-standard analyzer (WWV/WWVH/CHU/BPM) — also the suite's **timing authority** (publishes the RTP↔UTC offset + tier other clients label against) | [mijahauan/hf-timestd](https://github.com/mijahauan/hf-timestd) |
+| **wspr-recorder** | WSPR/FST4W recorder + decoder — uploads to wsprnet.org / wsprdaemon.org | [mijahauan/wspr-recorder](https://github.com/mijahauan/wspr-recorder) |
 | **psk-recorder** | FT4/FT8 spot recorder — decodes and uploads to PSKReporter | [mijahauan/psk-recorder](https://github.com/mijahauan/psk-recorder) |
-| **wspr-recorder** | WSPR/FST4W audio recorder — produces period-aligned WAVs for WSPR decoding | [mijahauan/wspr-recorder](https://github.com/mijahauan/wspr-recorder) |
+| **mag-recorder** | RM3100 magnetometer recorder (USB-I²C, non-radiod) — daily datasets to PSWS | [mijahauan/mag-recorder](https://github.com/mijahauan/mag-recorder) |
+
+| Additional client | What it does | Repo |
+|--------|-------------|------|
+| **codar-sounder** | Opportunistic ionospheric sounder using CODAR chirp transmissions | [mijahauan/codar-sounder](https://github.com/mijahauan/codar-sounder) |
+| **hfdl-recorder** | HFDL (High Frequency Data Link) recorder — one `dumphfdl` subprocess per band (→ airframes.io) | [mijahauan/hfdl-recorder](https://github.com/mijahauan/hfdl-recorder) |
+| **hf-gps-tec** | HF PRN-coded beacon recorder for ionospheric specification (TEC) | [mijahauan/hf-gps-tec](https://github.com/mijahauan/hf-gps-tec) |
+| **meteor-scatter** | Meteor-scatter ping decoder (`jt9 --msk144`) → local sink + hs-uploader | [mijahauan/meteor-scatter](https://github.com/mijahauan/meteor-scatter) |
 
 ### Infrastructure components
 
 | Component | What it does | Repo |
 |-----------|-------------|------|
 | **igmp-querier** | IGMPv2 querier daemon — keeps multicast streams alive on LANs without a router | [mijahauan/igmp-querier](https://github.com/mijahauan/igmp-querier) |
-| **wd-rac** | WsprDaemon Remote Access Channel — frpc reverse tunnel for remote SSH | Managed by sigmond |
+| **rac** | Remote Access Channel — frpc reverse tunnel to gw2.wsprdaemon.org for admin SSH/web behind NAT | [mijahauan/rac](https://github.com/mijahauan/rac) |
 | **gpsdo-monitor** | Leo Bodnar GPSDO health monitor + mDNS advertiser | [mijahauan/gpsdo-monitor](https://github.com/mijahauan/gpsdo-monitor) |
 
-All clients use [ka9q-python](https://github.com/mijahauan/ka9q-python) to
-receive RTP streams from radiod.  Each client runs in its own Python venv
-and manages its own systemd services.
+The RF clients use [ka9q-python](https://github.com/mijahauan/ka9q-python)
+to receive RTP streams from radiod; `mag-recorder` is the exception — it
+reads its magnetometer directly over USB-I²C, not through radiod.  Each
+client runs in its own Python venv and manages its own systemd services.
+Decoded spots / products are written to the shared SQLite sink
+(`/var/lib/sigmond/sink.db`) and shipped upstream by `hs-uploader`.
 
 ## How it works
 
