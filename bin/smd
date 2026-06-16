@@ -270,6 +270,31 @@ def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
                           capture_output=True, text=True)
 
 
+def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
+    """git fetch --quiet, dropping privileges to a user who can talk to the
+    remote — mirrors _git_pull_as_owner.  smd auto-elevates to root, which has
+    no SSH key for the sigmond-owned repos' git@github.com remotes; a plain
+    fetch as root silently fails, leaving origin/* stale so `component list`
+    falsely reports 'up to date' when origin/main has actually advanced.  Drop
+    to $SUDO_USER (the human who ran smd, who has a registered key), else the
+    repo's owning user."""
+    git_cmd = ['git', '-c', f'safe.directory={repo_dir}', '-C', str(repo_dir),
+               'fetch', '--quiet']
+    if os.geteuid() == 0:
+        target_user = os.environ.get('SUDO_USER') or ''
+        if not target_user or target_user == 'root':
+            try:
+                owner_uid = os.stat(repo_dir).st_uid
+                if owner_uid != 0:
+                    target_user = pwd.getpwuid(owner_uid).pw_name
+            except (OSError, KeyError):
+                target_user = ''
+        if target_user and target_user != 'root':
+            git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
+    return subprocess.run(git_cmd, stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True)
+
+
 def _ok(msg):   print(f'  \033[32m✓\033[0m  {msg}')
 def _warn(msg): print(f'  \033[33m⚠\033[0m  {msg}')
 def _err(msg):  print(f'  \033[31m✗\033[0m  {msg}', file=sys.stderr)
@@ -5735,11 +5760,11 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             continue
 
         if fetch:
-            subprocess.run(
-                ['git', '-c', f'safe.directory={repo_dir}', '-C',
-                 str(repo_dir), 'fetch', '--quiet'],
-                capture_output=True, text=True,
-            )
+            fr = _git_fetch_as_owner(repo_dir)
+            if fr.returncode != 0:
+                last = (fr.stderr or '').strip().splitlines()
+                _warn(f"{name}: git fetch failed — BEHIND/divergence below may "
+                      f"be STALE ({last[-1] if last else 'see git'})")
 
         local, upstream, behind, ahead = _git_divergence(repo_dir)
         local_date  = _git_commit_date(repo_dir, 'HEAD')
@@ -5822,11 +5847,11 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
         sigmond_dir = Path(__file__).resolve().parent.parent
         if (sigmond_dir / '.git').exists():
             if fetch:
-                subprocess.run(
-                    ['git', '-c', f'safe.directory={sigmond_dir}', '-C',
-                     str(sigmond_dir), 'fetch', '--quiet'],
-                    capture_output=True, text=True,
-                )
+                fr = _git_fetch_as_owner(sigmond_dir)
+                if fr.returncode != 0:
+                    last = (fr.stderr or '').strip().splitlines()
+                    _warn(f"sigmond: git fetch failed — divergence below may "
+                          f"be STALE ({last[-1] if last else 'see git'})")
             s_local, s_upstream, s_behind, s_ahead = _git_divergence(sigmond_dir)
             s_up_date = ''
             if s_upstream:
@@ -6258,7 +6283,9 @@ def cmd_list(args) -> int:
       --update    Pull + reconcile (the old `smd update` / `--apply`).
                   Requires root.  `--apply` kept as a hidden alias.
       --catalog   Show the catalog of known clients (was `smd list --available`).
-      --fetch     Run `git fetch` per repo before computing divergence.
+      --fetch     Run `git fetch` before divergence (update path).  `list`
+                  now fetches by DEFAULT (live divergence); use --no-fetch
+                  to skip and compare against cached refs.
       --json      Machine-readable output of the chosen mode.
       --components C1,C2  Restrict to these components.
       --ref R     With --update: force a specific ref.
@@ -6273,7 +6300,10 @@ def cmd_list(args) -> int:
     if getattr(args, 'update', False) and _need_root('list --update'):
         return 1
 
-    fetch = getattr(args, 'fetch', False)
+    # Fetch by default so divergence is LIVE; --no-fetch opts out for speed.
+    # (Previously default-off, which compared against stale cached origin/*
+    # refs and falsely reported 'up to date' when origin/main had advanced.)
+    fetch = not getattr(args, 'no_fetch', False)
     rows = _component_statuses(args, fetch=fetch)
 
     if getattr(args, 'json', False):
@@ -6761,7 +6791,7 @@ _smd_complete() {
                 component)
                     case "${words[2]}" in
                         list)
-                            COMPREPLY=($(compgen -W "--components --catalog --fetch --json --topology" -- "$cur"))
+                            COMPREPLY=($(compgen -W "--components --catalog --no-fetch --json --topology" -- "$cur"))
                             ;;
                         install)
                             COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --force --topology" -- "$cur"))
@@ -13820,8 +13850,9 @@ def main() -> int:
                           help='comma-separated subset of components')
     p_c_list.add_argument('--catalog', action='store_true',
                           help='show catalog of known clients')
-    p_c_list.add_argument('--fetch', action='store_true',
-                          help='run `git fetch` per repo before computing divergence')
+    p_c_list.add_argument('--no-fetch', action='store_true',
+                          help='skip `git fetch`; compare against cached refs '
+                               '(faster, but may report a stale "up to date")')
     p_c_list.add_argument('--json', action='store_true',
                           help='emit machine-readable JSON')
 
