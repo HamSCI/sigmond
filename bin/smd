@@ -6820,7 +6820,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-tec mag ka9q radiod uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-tec mag ka9q radiod gpsdo uploads verifier" -- "$cur"))
                     ;;
                 admin)
                     COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
@@ -11901,6 +11901,150 @@ def _add_mag_watch_args(p) -> None:
                         'always live-only — too noisy to replay)')
 
 
+def cmd_gpsdo_watch(args) -> int:
+    """Live per-device GPSDO status from gpsdo-monitor's reports.
+
+    gpsdo-monitor writes one schema-v1 JSON snapshot per device to
+    ``/run/gpsdo/<serial>.json`` (refreshed each probe interval).  This
+    renders them as a per-device table refreshed in place every
+    ``--interval`` seconds (like ``watch(1)``); ``--once`` prints a single
+    snapshot and exits (scripting-friendly).  Read-only — GPSDO state is
+    set with the Leo Bodnar tool, not sigmond (same contract as the TUI
+    GPSDO screen, which reads the identical reports).
+    """
+    import json as _json
+    import time as _time
+    import datetime as _dt
+
+    run_dir = Path('/run/gpsdo')
+    interval = max(0.2, float(getattr(args, 'interval', 2.0) or 2.0))
+    once = bool(getattr(args, 'once', False))
+
+    GREEN = '\033[32m'; RED = '\033[31m'; DIM = '\033[2m'
+    BOLD = '\033[1m'; RST = '\033[0m'
+
+    def _cell(text, width, align='<', color=''):
+        # Pad the PLAIN text first, THEN colorize, so ANSI codes don't
+        # corrupt column alignment.
+        s = f'{str(text):{align}{width}}'
+        return f'{color}{s}{RST}' if color else s
+
+    def _yncell(v, width):
+        if v is True:
+            return _cell('yes', width, '<', GREEN)
+        if v is False:
+            return _cell('no', width, '<', RED)
+        return _cell('—', width, '<', DIM)
+
+    def _mhz(hz):
+        return f'{hz / 1e6:.6f}' if isinstance(hz, (int, float)) and hz else '—'
+
+    def _age(sec):
+        if not isinstance(sec, (int, float)) or sec < 0:
+            return '—'
+        if sec < 60:
+            return f'{sec:.0f}s'
+        if sec < 3600:
+            return f'{sec / 60:.1f}m'
+        if sec < 86400:
+            return f'{sec / 3600:.1f}h'
+        return f'{sec / 86400:.1f}d'
+
+    def _load():
+        if not run_dir.is_dir():
+            return []
+        out = []
+        for p in sorted(run_dir.glob('*.json')):
+            if p.name == 'index.json':
+                continue
+            try:
+                d = _json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(d, dict) and d.get('schema') == 'v1':
+                out.append(d)
+        return out
+
+    def _service_active():
+        try:
+            return subprocess.run(
+                ['systemctl', 'is-active', '--quiet', 'gpsdo-monitor.service'],
+                check=False).returncode == 0
+        except FileNotFoundError:
+            return False
+
+    def _render():
+        reports = _load()
+        now = _dt.datetime.now().strftime('%H:%M:%S')
+        out = [f'{BOLD}GPSDO live{RST}  {DIM}gpsdo-monitor → /run/gpsdo/*.json'
+               f'   {now}{RST}']
+        if not reports:
+            if _service_active():
+                out.append(f'  {DIM}gpsdo-monitor running, no schema-v1 reports '
+                           f'yet…{RST}')
+            else:
+                out.append(f'  {DIM}no GPSDO reports — gpsdo-monitor not '
+                           f'installed/running here.{RST}')
+                out.append(f'  {DIM}install: smd install --components '
+                           f'gpsdo-monitor   (or smd bringup dasi2){RST}')
+            return '\n'.join(out)
+        hdr = (f'  {"SERIAL":<14}{"MODEL":<16}{"A":<4}{"PLL":<6}{"FIX":<8}'
+               f'{"SATS":<6}{"ANT":<6}{"OUT1 MHz":<13}{"OUT2 MHz":<13}'
+               f'{"PPS":<6}{"AGE":<6}GOVERNS')
+        out.append(f'{DIM}{hdr}{RST}')
+        for r in reports:
+            dev = r.get('device') or {}
+            health = r.get('health') or {}
+            outs = r.get('outputs') or {}
+            governs = ', '.join(r.get('governs') or []) or f'{DIM}—{RST}'
+            out.append(
+                '  '
+                + _cell(dev.get('serial', '?'), 14)
+                + _cell(dev.get('model', '?'), 16)
+                + _cell(r.get('a_level_hint', '?'), 4)
+                + _yncell(health.get('pll_locked'), 6)
+                + _cell(health.get('gps_fix') or '—', 8)
+                + _cell(health.get('sats_used') if health.get('sats_used') is not None else '—', 6)
+                + _yncell(health.get('antenna_ok'), 6)
+                + _cell(_mhz(outs.get('out1_hz')), 13)
+                + _cell(_mhz(outs.get('out2_hz')), 13)
+                + _yncell(outs.get('pps_enabled'), 6)
+                + _cell(_age(health.get('fix_age_sec')), 6)
+                + governs
+            )
+            reason = r.get('a_level_reason')
+            if reason:
+                out.append(f'      {DIM}A-level {r.get("a_level_hint", "?")}: '
+                           f'{reason}{RST}')
+            adv = r.get('firmware_advisory')
+            if adv:
+                out.append(f'      \033[33m⚠ firmware: {adv}{RST}')
+        return '\n'.join(out)
+
+    try:
+        if once:
+            print(_render(), flush=True)
+            return 0
+        while True:
+            # clear + home, then redraw — watch(1)-style in-place refresh
+            sys.stdout.write('\033[2J\033[H' + _render())
+            sys.stdout.write(f'\n\n{DIM}  refresh every {interval:g}s — '
+                             f'Ctrl-C to exit{RST}\n')
+            sys.stdout.flush()
+            _time.sleep(interval)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
+def _add_gpsdo_watch_args(p) -> None:
+    """Argument spec for `smd watch gpsdo`."""
+    p.add_argument('--interval', type=float, default=2.0, metavar='SEC',
+                   help='refresh cadence in seconds (default: 2)')
+    p.add_argument('--once', action='store_true',
+                   help='print one snapshot and exit (scripting-friendly)')
+
+
 def cmd_completion(args) -> int:
     sub = getattr(args, 'completion_command', None)
     if sub == 'bash':
@@ -14646,7 +14790,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | hfdl | codar | mag | ka9q | uploads | verifier)')
+                                  '(smd watch wspr | psk | hfdl | codar | mag | ka9q | radiod | gpsdo | uploads | verifier)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -14720,6 +14864,14 @@ def main() -> int:
              'USB/xhci resets highlighted as the cause)',
     )
     _add_radiod_watch_args(p_w_radiod)
+
+    p_w_gpsdo = watch_sub.add_parser(
+        'gpsdo',
+        help='live per-device GPSDO status from gpsdo-monitor '
+             '(PLL lock / GPS fix / sats / antenna, OUT1+OUT2 freqs, PPS, '
+             'governed radiod) — refresh in place, or --once to snapshot',
+    )
+    _add_gpsdo_watch_args(p_w_gpsdo)
 
     # notify — site fault producer (queues fault reports into the upload tar)
     p_notify = sub.add_parser(
@@ -15037,6 +15189,8 @@ def main() -> int:
             return cmd_mag_watch(args)
         if target == 'radiod':
             return cmd_radiod_watch(args)
+        if target == 'gpsdo':
+            return cmd_gpsdo_watch(args)
         if target == 'ka9q':
             if not _HAS_SIGMOND_LIB:
                 print('smd: sigmond library not found; install '
