@@ -41,53 +41,79 @@ def cmd_config_show(args) -> int:
         sys.stdout.write("\n")
         return 0
 
+    # All rows go to stderr to match heading()/info() — otherwise stdout
+    # (block-buffered when piped) reorders relative to the headings.
+    def _row(s=''):
+        print(s, file=sys.stderr)
+
+    # ── coordination — the shared map every client reads ─────────────────────
     heading('coordination')
-    if coord.source_path:
-        info(f'source: {coord.source_path}')
-    else:
-        info('source: (none — using defaults)')
-    if coord.host.call or coord.host.grid:
-        info(f'host: {coord.host.call} / {coord.host.grid}')
-
+    info(str(coord.source_path) if coord.source_path
+         else '(defaults — no coordination.toml)')
+    info('cross-client settings every client reads: station identity + the '
+         'radiod instance(s) clients bind to.')
+    _call, _grid = coord.host.call or '', coord.host.grid or ''
+    _row(f'    station   {(_call + " / " + _grid) if (_call or _grid) else "(not set)"}')
     if coord.radiods:
-        print()
-        print('  \033[1mradiod instances\033[0m')
         for rid, r in sorted(coord.radiods.items()):
-            loc = 'local' if r.is_local else f'remote ({r.host})'
-            print(f'    - {rid}  [{loc}]  samprate={r.samprate_hz or "?"}  status_dns={r.status_dns or "?"}')
+            loc = 'local' if r.is_local else f'remote {r.host}'
+            sr = f'{r.samprate_hz} Hz' if r.samprate_hz else 'samprate ?'
+            _row(f'    radiod    {rid}  [{loc}]  {sr}  →  {r.status_dns or "?"}')
     else:
-        info('radiod instances: (none declared)')
+        _row('    radiod    (none declared)')
 
-    if coord.clients:
-        print()
-        print('  \033[1mclient instances\033[0m')
-        for c in coord.clients:
-            bind = f' → {c.radiod_id}' if c.radiod_id else ''
-            print(f'    - {c.client_type}@{c.instance}{bind}')
-
-    if view.client_views:
-        heading('clients (read-only)')
-        for name, cv in view.client_views.items():
-            state = 'installed' if cv.installed else 'not installed'
-            print(f'\n  \033[1m{name}\033[0m  [{state}]')
-            if cv.config_path:
-                info(f'config: {cv.config_path}')
-            for issue in cv.issues:
-                warn(issue)
-            for iv in cv.instances:
-                bits = [f'instance={iv.instance}']
-                if iv.radiod_id:
-                    bits.append(f'radiod={iv.radiod_id}')
-                if iv.ka9q_channels:
-                    bits.append(f'channels={iv.ka9q_channels}')
-                if iv.frequencies_hz:
-                    bits.append(f'freqs={len(iv.frequencies_hz)}')
-                if iv.radiod_samprate_hz:
-                    bits.append(f'samprate={iv.radiod_samprate_hz}')
-                if iv.radiod_status_dns:
-                    bits.append(f'status_dns={iv.radiod_status_dns}')
-                print(f'    - {", ".join(bits)}')
+    # ── clients — ordered foundation → no-config → needs-config ──────────────
+    if not view.client_views:
+        return 0
+    try:
+        from .. import psws
+        _ps = {r: psws.read_state(r) for r in ('hf-timestd', 'mag-recorder')}
+    except Exception:
+        _ps = {}
+    # ka9q-radio is fundamental (runs the radiod); wspr/psk auto-configure;
+    # hf-timestd + mag-recorder need operator-supplied PSWS info → listed last.
+    _ORDER = {'ka9q-radio': 0, 'wspr-recorder': 1, 'psk-recorder': 2,
+              'hf-timestd': 3, 'mag-recorder': 4}
+    names = sorted(view.client_views, key=lambda n: (_ORDER.get(n, 9), n))
+    heading('clients')
+    info('each binds to the radiod above; foundation first, the two that need '
+         'PSWS info (same format) last.')
+    W = max(len(n) for n in names)
+    for name in names:
+        cv = view.client_views[name]
+        state = 'installed' if cv.installed else 'not installed'
+        summary = _client_summary(name, cv)
+        _row(f'    {name.ljust(W)}  [{state}]'
+             + (f'   {summary}' if summary else ''))
+        pad = ' ' * (W + 6)
+        st = _ps.get(name)
+        if st is not None and st.config_exists:
+            # PSWS recorders: ONE consistent format for hf-timestd AND
+            # mag-recorder (what the upload needs, or "ready").
+            if st.configured:
+                _row(f'    {pad}\033[32m✓\033[0m PSWS upload configured')
+            else:
+                _row(f'    {pad}\033[33m⚠\033[0m PSWS upload needs: '
+                     f'{", ".join(st.issues)}')
+                _row(f'    {pad}  → smd config {name} edit')
+        else:
+            for iss in cv.issues:
+                txt = iss.split('] ', 1)[-1] if '] ' in iss[:8] else iss
+                _row(f'    {pad}\033[33m⚠\033[0m {txt}')
     return 0
+
+
+def _client_summary(name: str, cv) -> str:
+    """One compact phrase per client for `smd config show`."""
+    if not cv.installed:
+        return ''
+    if name == 'ka9q-radio':
+        rids = sorted({iv.radiod_id for iv in cv.instances if iv.radiod_id})
+        return f'runs radiod {", ".join(rids)}' if rids else 'runs the local radiod'
+    if name == 'mag-recorder':
+        return 'RM3100 magnetometer (no radiod)'
+    ch = sum((iv.ka9q_channels or 0) for iv in cv.instances)
+    return f'{ch} channels' if ch else ''
 
 
 # ---------------------------------------------------------------------------
