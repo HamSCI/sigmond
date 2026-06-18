@@ -5763,6 +5763,24 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 lifecycle_color = '\033[32m'
             else:
                 lifecycle_label = 'binary, missing'
+        elif kind == 'server':
+            # server-kind (e.g. ka9q-web) runs as a single <name>.service but
+            # isn't in the topology, so compute_state can't map it and falls
+            # back to a misleading 'configured'.  Read the unit state directly.
+            unit = f'{entry.name}.service'
+            active  = _run(['systemctl', 'is-active', '--quiet', unit],
+                           sudo=False).returncode == 0
+            enabled = _run(['systemctl', 'is-enabled', '--quiet', unit],
+                           sudo=False).returncode == 0
+            if active:
+                lifecycle_label = 'enabled, running' if enabled else 'running'
+                lifecycle_color = '\033[32m'
+            elif enabled:
+                lifecycle_label = 'enabled, stopped'
+                lifecycle_color = '\033[33m'
+            else:
+                lifecycle_label = 'configured'
+                lifecycle_color = '\033[33m'
         elif compute_state is not None:
             try:
                 state = compute_state(
@@ -6733,7 +6751,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="install apply enable disable start stop restart reload status list config tui watch bringup component admin"
+    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin"
     local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing radiod instance uninstall completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web wd-rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
@@ -6787,9 +6805,6 @@ _smd_complete() {
                 reload)
                     COMPREPLY=($(compgen -W "$components --components --via --topology" -- "$cur"))
                     ;;
-                list)
-                    COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
-                    ;;
                 config)
                     COMPREPLY=($(compgen -W "show migrate backup restore init edit help" -- "$cur"))
                     ;;
@@ -6836,9 +6851,6 @@ _smd_complete() {
                     ;;
                 reload)
                     COMPREPLY=($(compgen -W "$components --components --via --topology" -- "$cur"))
-                    ;;
-                list)
-                    COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
                 config)
                     case "${words[2]}" in
