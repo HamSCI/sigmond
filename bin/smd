@@ -15069,6 +15069,21 @@ def main() -> int:
     p.add_argument('instance', nargs='?', default=None,
                    help='optional instance name for multi-source clients')
 
+    # Recorder-first PSWS config: `smd config <recorder> {status|validate|edit}`.
+    # Guided, runnable-anytime upload-credential setup for the PSWS recorders.
+    for _rec in ('hf-timestd', 'mag-recorder'):
+        p_rec = config_sub.add_parser(
+            _rec, help=f'PSWS upload config for {_rec} '
+                       f'(status | validate | edit)')
+        rec_sub = p_rec.add_subparsers(dest='psws_verb')
+        rec_sub.add_parser('status',
+                           help='show PSWS upload config (read-only)')
+        rec_sub.add_parser('validate',
+                           help='live SFTP login test against PSWS')
+        rec_sub.add_parser('edit',
+                           help='guided wizard: SSH key → station/device id '
+                                '→ validate')
+
     # environment — situational awareness (site inventory + reconciliation).
     p_env = admin_sub.add_parser('environment',
                            help='inventory peers declared in environment.toml vs what is observed')
@@ -15372,6 +15387,15 @@ def main() -> int:
         if sub_cmd == 'help':
             p_config.print_help()
             return 0
+        # Recorder-first PSWS config: smd config <recorder> {status|validate|edit}
+        if sub_cmd in ('hf-timestd', 'mag-recorder'):
+            from sigmond import psws
+            verb = getattr(args, 'psws_verb', None) or 'status'
+            if verb == 'validate':
+                return psws.cmd_validate(sub_cmd)
+            if verb == 'edit':
+                return psws.cmd_edit(sub_cmd)
+            return psws.cmd_status(sub_cmd)
         if sub_cmd is None:                 # bare `smd config` -> show
             if not hasattr(args, 'json'):
                 args.json = False
