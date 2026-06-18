@@ -42,6 +42,23 @@ PSK_ETC            = Path("/etc/psk-recorder")
 _PLACEHOLDER_PREFIX = "<YOUR"
 
 
+# Per-recorder remediation for a missing PSWS / SFTP upload identity — the
+# concrete command(s) the operator runs to enter the values.  Surfaced
+# verbatim next to "what's missing" so the message is self-documenting.
+_FIX = {
+    "wspr-recorder":
+        "the hs-uploader key self-generates on first upload; "
+        "force it with `smd admin secrets`",
+    "hf-timestd":
+        "smd config edit hf-timestd  (set [station] id + instrument_id),  then  "
+        "sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh  "
+        "(prints the public key to register at https://pswsnetwork.caps.ua.edu/)",
+    "mag-recorder":
+        "smd config edit mag-recorder  (set [station] psws_station_id; "
+        "instrument_id defaults RM3100)",
+}
+
+
 @dataclass
 class UploadPath:
     """Credential readiness for one (recorder → destination) upload path."""
@@ -50,6 +67,7 @@ class UploadPath:
     needs_creds: bool   # does this path require any credentials/identity?
     ready: bool         # are the required credentials/identity present?
     missing: str        # what's missing (empty when ready or no creds needed)
+    fix: str = ""       # how to provide the missing creds (concrete command)
 
 
 def _is_placeholder(v: object) -> bool:
@@ -121,7 +139,8 @@ def upload_paths_status() -> list[UploadPath]:
         ready = _exists(HS_UPLOADER_KEY)
         out.append(UploadPath(
             "wsprdaemon.org", "wspr-recorder", needs_creds=True, ready=ready,
-            missing="" if ready else f"hs-uploader SSH key {HS_UPLOADER_KEY}"))
+            missing="" if ready else f"hs-uploader SSH key {HS_UPLOADER_KEY}",
+            fix="" if ready else _FIX["wspr-recorder"]))
 
     # psk-recorder → PSKReporter (no creds)
     if PSK_ETC.is_dir():
@@ -142,7 +161,8 @@ def upload_paths_status() -> list[UploadPath]:
             miss.append(f"SFTP key {key}")
         out.append(UploadPath("PSWS (hf-timestd)", "hf-timestd",
                               needs_creds=True, ready=not miss,
-                              missing=", ".join(miss)))
+                              missing=", ".join(miss),
+                              fix="" if not miss else _FIX["hf-timestd"]))
 
     # mag-recorder → PSWS (psws_station_id + instrument id)
     if MAG_CONFIG.exists():
@@ -155,7 +175,8 @@ def upload_paths_status() -> list[UploadPath]:
             miss.append("instrument id")
         out.append(UploadPath("PSWS (mag-recorder)", "mag-recorder",
                               needs_creds=True, ready=not miss,
-                              missing=", ".join(miss)))
+                              missing=", ".join(miss),
+                              fix="" if not miss else _FIX["mag-recorder"]))
 
     return out
 

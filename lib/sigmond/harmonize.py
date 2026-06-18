@@ -1188,13 +1188,13 @@ def rule_upload_credentials(view: SystemView) -> RuleResult:
             "upload_credentials", "pass",
             "all upload paths that need credentials have them "
             "(or no uploading components installed)", [])
-    detail = "; ".join(f"{p.path}: missing {p.missing}" for p in missing)
+    detail = "; ".join(
+        f"{p.path}: missing {p.missing}" + (f" [fix: {p.fix}]" if p.fix else "")
+        for p in missing)
     return RuleResult(
         "upload_credentials", "warn",
         "upload information missing — these paths can't ship until configured "
-        "(the recorders still record to the local sink): " + detail
-        + ".  Provision the station id / SFTP key when available "
-          "(e.g. `smd config edit <recorder>`; hf-timestd: PSWS key setup).",
+        "(the recorders still record to the local sink): " + detail,
         sorted({p.recorder for p in missing}))
 
 

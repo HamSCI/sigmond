@@ -6181,6 +6181,8 @@ def _print_upload_readiness() -> None:
           f'the recorder still records locally:')
     for p in missing:
         print(f'    {_Y}⚠{_X}  {p.path} — {_Y}missing {p.missing}{_X}')
+        if p.fix:
+            print(f'        {_K}↳ fix: {p.fix}{_X}')
     if ready:
         print(f'    {_G}✓{_X}  ready: {", ".join(p.path for p in ready)}')
 
