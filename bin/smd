@@ -14083,7 +14083,7 @@ def main() -> int:
 
               Operator (daily, read-mostly):
                 status     service health snapshot
-                watch      live tail (wspr | psk | hfdl | codar | ka9q | uploads | verifier)
+                watch      live tail (wspr | psk | hfdl | codar | hf-tec | mag | ka9q | radiod | uploads | verifier)
                 tui        launch interactive TUI
 
               Operator (mutating — needs sudo):
@@ -14093,8 +14093,7 @@ def main() -> int:
 
               Installer / maintenance:
                 install    install and configure components
-                list       per-component status (lifecycle + git + version policy)
-                component  catalog (list | install | update | add | remove | enable | disable)
+                component  per-component status + catalog (list | install | update | add | remove | enable | disable)
                 config     show / migrate / init / edit per-client config
                 bringup    guided station bring-up from a catalog profile
 
