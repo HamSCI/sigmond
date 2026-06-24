@@ -89,6 +89,16 @@ repo            = "https://github.com/mijahauan/hs-uploader"
 # `smd install hs-uploader` still works thanks to find_install_script's post-clone
 # discovery (the cloned repo carries its own install.sh).
 
+[client.hamsci-dsp]
+kind            = "library"                           # source-only dep: sibling Python pkg
+description     = "Shared DSP / timing utilities for the sigmond suite (superdarn-sounder dep)"
+repo            = "https://github.com/mijahauan/hamsci-dsp"
+# No install_script: consumers (superdarn-sounder, eventually hf-tec/codar/etc)
+# declare hamsci-dsp in their pyproject.toml [tool.uv.sources] as
+# `path = "../hamsci-dsp", editable = true`.  Sigmond clones it to
+# /opt/git/sigmond/hamsci-dsp before invoking a consumer's install.sh, the same
+# way callhash is handled.
+
 [client.callhash]
 kind            = "library"                           # source-only dep: sibling Python pkg
 description     = "WSPR/FST4W callsign-hash resolution library (wspr-recorder + psk-recorder dep)"
@@ -144,6 +154,17 @@ contract        = "0.8"                               # matches meteor-scatter/d
 install_script  = "/opt/git/sigmond/meteor-scatter/scripts/install.sh"
 # Previously surfaced only via discovery (its deploy.toml); pinned here so
 # the repo-default catalog lists it even when the checkout is absent.
+
+[client.superdarn-sounder]
+kind            = "client"
+description     = "Passive SuperDARN coherent-radar monitor (detection / identification)"
+repo            = "https://github.com/mijahauan/superdarn-sounder"
+uses            = ["ka9q-python", "hamsci-dsp"]
+requires        = ["ka9q-python", "ka9q-radio"]
+contract        = "0.8"
+install_script  = "/opt/git/sigmond/superdarn-sounder/scripts/install.sh"
+# Imports the shared hamsci-dsp library (timing-authority client) — sigmond
+# clones that sibling before this client's install.sh runs uv sync.
 
 # ---------------------------------------------------------------------------
 # Servers & infrastructure (not contract-conformant decode clients)
@@ -236,7 +257,7 @@ local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
 # Discretionary HF-science clients: NOT installed by default.  `smd bringup
 # dasi2 --with-optional` adds them; `smd install <name>` installs+enables one
 # on demand (install implies enable — see bin/smd _enable_after_install).
-optional           = ["codar-sounder", "hf-tec", "hfdl-recorder", "meteor-scatter"]
+optional           = ["codar-sounder", "hf-tec", "hfdl-recorder", "meteor-scatter", "superdarn-sounder"]
 
 [profile.base]
 description        = "Base SDR station — local radiod + web + timing, no recording clients"
@@ -248,4 +269,4 @@ optional           = ["gpsdo-monitor"]
 description        = "Decode-only station — clients against a REMOTE radiod (no local ka9q-radio/web)"
 clients            = ["hf-timestd", "wspr-recorder", "psk-recorder"]
 local_radiod_infra = []
-optional           = ["mag-recorder", "codar-sounder", "hfdl-recorder", "hf-tec"]
+optional           = ["mag-recorder", "codar-sounder", "hfdl-recorder", "hf-tec", "superdarn-sounder"]
