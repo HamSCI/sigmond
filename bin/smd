@@ -24,7 +24,7 @@ Observe (what is, read-only):
     smd admin log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd admin diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd admin environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|codar|hf-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
+    smd watch       <wspr|psk|hfdl|codar|superdarn|hf-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
     smd admin sources     list | add | remove | apply                  per-client SDR source selection
 
 Operate (run things now, may need sudo):
@@ -7013,7 +7013,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-tec mag ka9q radiod gpsdo uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar superdarn hf-tec mag ka9q radiod gpsdo uploads verifier" -- "$cur"))
                     ;;
                 admin)
                     COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
@@ -11348,6 +11348,294 @@ def cmd_codar_watch(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# superdarn watch — passive SuperDARN multi-pulse detection records
+# ---------------------------------------------------------------------------
+
+
+def _format_superdarn_record(rec: dict) -> str:
+    """Render one superdarn-sounder detection record as a single line.
+
+    Order matches how an operator scans a passive radar catch: time
+    (sub-second matters — beam dwells are ~3.75 s and a burst's pulses
+    share a timestamp prefix), candidate radar, operating frequency, the
+    multi-pulse sequence ID + match score + estimated lag (τ), pulse
+    count, predicted beam, and SNR.
+    """
+    ts = rec.get('timestamp', '')
+    # ISO-8601 → HH:MM:SS.fff (trim sub-second to 3 digits).
+    try:
+        time_part = ts.split('T', 1)[1].split('+', 1)[0].split('Z', 1)[0]
+        if '.' in time_part:
+            sec, frac = time_part.split('.', 1)
+            time_part = f'{sec}.{frac[:3]}'
+    except (IndexError, AttributeError):
+        time_part = '--:--:--.---'
+
+    radar = rec.get('candidate_radar') or '?'
+    freq_mhz = (rec.get('center_freq_hz') or 0) / 1e6
+    seq = rec.get('sequence') or {}
+    seq_name = seq.get('sequence_name') or '—'
+    score = seq.get('score')
+    tau = seq.get('tau_us_est')
+    score_str = f'{score:.2f}' if isinstance(score, (int, float)) else '—'
+    tau_str = f'{tau:.0f}' if isinstance(tau, (int, float)) else '—'
+    n = rec.get('n_pulses', 0)
+    beam = rec.get('beam_index_est')
+    beam_str = str(beam) if beam is not None else '—'
+    snr = rec.get('snr_db', 0.0)
+
+    return (f'{time_part}  {radar:<5} {freq_mhz:>7.3f} MHz  '
+            f'{seq_name:<11} score={score_str} τ={tau_str}µs  '
+            f'n={n:<3} beam={beam_str:<3} SNR={snr:+5.1f} dB')
+
+
+def cmd_superdarn_watch(args) -> int:
+    """Live tail of superdarn-sounder's passive SuperDARN detections.
+
+    superdarn-sounder writes one JSONL record per detected multi-pulse
+    burst to ``/var/lib/superdarn-sounder/<instance>/YYYY/MM/DD.jsonl``,
+    rotated daily, where <instance> is the systemd instance (= reporter id
+    after migration).  Unlike codar-sounder there is no per-station subdir —
+    the radar identity is the per-record ``candidate_radar`` field — so we
+    tail a single daily file and roll up by radar within each window.
+
+    We poll on a 15 s window and emit a per-window rollup: total
+    detections, radars seen (with per-radar counts), sequence IDs
+    identified (eight_pulse / seven_pulse), SNR range, and
+    operating-frequency range.  ``N`` adds the first-N records this
+    window; ``-v`` dumps every record on its own line.
+
+    Detections are sparse — the radars hop frequency and sweep their
+    beams past the receiver, so quiet windows are normal and shown as
+    ``det=0`` so the operator sees the watch is alive.  UTC date rollover
+    resets the cursor against the new day's file (codar-watch pattern).
+    """
+    instance = getattr(args, 'instance', None)
+    if instance is None:
+        try:
+            r = subprocess.run(
+                ['systemctl', 'list-units', '--no-legend', '--no-pager',
+                 '--type=service', '--state=active',
+                 'superdarn-sounder@*.service'],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            _err('systemctl not available')
+            return 1
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        if not lines:
+            # No active service — fall back to the most-recently-modified
+            # data dir so a stopped service's recent records still tail.
+            data_root = Path('/var/lib/superdarn-sounder')
+            if not data_root.is_dir():
+                _err('no active superdarn-sounder@* service and no '
+                     f'{data_root} directory — is superdarn-sounder '
+                     'installed? (smd status superdarn-sounder)')
+                return 1
+            candidates = sorted(
+                (p for p in data_root.iterdir() if p.is_dir()),
+                key=lambda p: p.stat().st_mtime, reverse=True,
+            )
+            if not candidates:
+                _err(f'{data_root} is empty — has any radiod instance '
+                     'recorded yet?')
+                return 1
+            instance = candidates[0].name
+            _warn(f'superdarn-sounder@{instance} not active — tailing '
+                  f'data dir anyway (records will only update once '
+                  f'the service starts)')
+        else:
+            unit = lines[0].split()[0]
+            try:
+                instance = unit.split('@', 1)[1].rsplit('.', 1)[0]
+            except IndexError:
+                _err(f'unexpected unit name: {unit}')
+                return 1
+
+    # superdarn-sounder spools on the systemd instance (%i) — the reporter id
+    # after `smd instance migrate` — matching the unit's ExecStartPre mkdir %i
+    # (the hf-tec scheme).  So the instance name IS the data-dir key; a legacy
+    # single-instance host names the service after its radiod status, which is
+    # both the instance and the spool key, so this is correct there too.
+    data_dir = Path(f'/var/lib/superdarn-sounder/{instance}')
+    if not data_dir.is_dir():
+        _err(f'no data directory at {data_dir} — wrong instance?')
+        return 1
+
+    n_recent = int(getattr(args, 'recent', 0) or 0)
+    verbose = bool(getattr(args, 'verbose', False))
+    if verbose:
+        cap: Optional[int] = None
+    else:
+        cap = n_recent if n_recent > 0 else 0
+    show_records = cap != 0
+
+    WIN_SEC = 15.0  # a quarter of the ~60 s UT-locked scan period
+
+    _heading(f'SuperDARN passive detections ({instance})')
+    _info('   stage: decoder (superdarn-sounder) → JSONL spool (pre-SQLite)')
+    _info(f'   ▸ data: {data_dir}')
+    _info(f'   ▸ every {int(WIN_SEC)} s — per-window rollup by radar')
+    if cap is None:
+        _info('     + ALL records in this window, one line each')
+    elif cap > 0:
+        _info(f'     + first {cap} record{"s" if cap != 1 else ""} '
+              f'this window')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+
+    def _file_size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except (FileNotFoundError, PermissionError):
+            try:
+                r = subprocess.run(
+                    [*sudo_prefix, 'stat', '-c', '%s', str(p)],
+                    capture_output=True, text=True, check=False,
+                )
+                return int(r.stdout.strip()) if r.returncode == 0 else 0
+            except (FileNotFoundError, ValueError):
+                return 0
+
+    def _read_since(p: Path, start: int) -> tuple[int, str]:
+        end = _file_size(p)
+        if end <= start:
+            return start, ''
+        try:
+            r = subprocess.run(
+                [*sudo_prefix, 'tail', '-c', f'+{start + 1}', str(p)],
+                capture_output=True, text=True, check=False,
+            )
+            text = r.stdout
+        except FileNotFoundError:
+            return start, ''
+        new_end = start + len(text.encode())
+        return new_end, text
+
+    def _today_path() -> Path:
+        # Mirrors JsonlWriter._path_for: <data_dir>/YYYY/MM/DD.jsonl
+        d = time.gmtime()
+        return (data_dir
+                / f'{d.tm_year:04d}'
+                / f'{d.tm_mon:02d}'
+                / f'{d.tm_mday:02d}.jsonl')
+
+    import json as _json
+
+    # Prime the cursor at EOF so we don't dump the day's backlog on the
+    # first fire; a missing file (nothing today yet) starts at 0.
+    p0 = _today_path()
+    pos = _file_size(p0) if p0.exists() else 0
+    current_date = time.gmtime().tm_yday
+
+    try:
+        while True:
+            now = time.time()
+            next_fire = math.ceil(now / WIN_SEC) * WIN_SEC
+            time.sleep(max(0.1, next_fire - time.time()))
+
+            # Midnight UTC rollover: reset against the new day's file.
+            new_yday = time.gmtime().tm_yday
+            if new_yday != current_date:
+                current_date = new_yday
+                pos = 0
+
+            p = _today_path()
+            new_pos, text = _read_since(p, pos)
+            pos = new_pos
+
+            lines = [l for l in text.splitlines() if l.strip()]
+            # Trailing-line robustness: drop+rewind a partial last line
+            # (SIGKILL mid-write) so we never half-parse it.
+            if lines and not lines[-1].rstrip().endswith('}'):
+                bad = lines[-1].encode() + b'\n'
+                pos = new_pos - len(bad)
+                lines = lines[:-1]
+
+            recs: list = []
+            for raw in lines:
+                try:
+                    recs.append(_json.loads(raw))
+                except _json.JSONDecodeError:
+                    continue
+
+            total = len(recs)
+            radar_counts: dict = {}
+            seqs: set = set()
+            snr_min: Optional[float] = None
+            snr_max: Optional[float] = None
+            f_min: Optional[float] = None
+            f_max: Optional[float] = None
+            for rec in recs:
+                radar = rec.get('candidate_radar') or '?'
+                radar_counts[radar] = radar_counts.get(radar, 0) + 1
+                seq = (rec.get('sequence') or {}).get('sequence_name')
+                if seq:
+                    seqs.add(seq)
+                snr = rec.get('snr_db')
+                if isinstance(snr, (int, float)):
+                    snr_min = snr if snr_min is None else min(snr_min, snr)
+                    snr_max = snr if snr_max is None else max(snr_max, snr)
+                f = rec.get('center_freq_hz')
+                if isinstance(f, (int, float)) and f:
+                    fm = f / 1e6
+                    f_min = fm if f_min is None else min(f_min, fm)
+                    f_max = fm if f_max is None else max(f_max, fm)
+
+            wall = time.strftime('%H:%M:%S', time.gmtime(next_fire))
+            now_str = time.strftime('%H:%M:%S')
+
+            if snr_min is None:
+                snr_str = '—'
+            elif snr_min == snr_max:
+                snr_str = f'SNR={snr_min:+.1f} dB'
+            else:
+                snr_str = f'SNR={snr_min:+.1f}/{snr_max:+.1f} dB'
+
+            if f_min is None:
+                freq_str = ''
+            elif f_min == f_max:
+                freq_str = f'  f={f_min:.3f} MHz'
+            else:
+                freq_str = f'  f={f_min:.3f}-{f_max:.3f} MHz'
+
+            radars_str = ('{' + ','.join(
+                f'{r}:{c}' for r, c in sorted(radar_counts.items())) + '}'
+                if radar_counts else '—')
+            seq_str = ('{' + ','.join(sorted(seqs)) + '}') if seqs else '—'
+
+            if show_records:
+                print(f'─── win UTC {wall} ({int(WIN_SEC)}s) '
+                      f'──────────────────────────────────',
+                      flush=True)
+                if total == 0:
+                    print('  (no detections this window)', flush=True)
+                else:
+                    to_show = recs if cap is None else recs[:cap]
+                    for rec in to_show:
+                        print(f'  {_format_superdarn_record(rec)}', flush=True)
+                    if cap is not None and total > len(to_show):
+                        print(f'  … ({total - len(to_show)} more)', flush=True)
+                    print(f'  → det={total}  radars={radars_str}  '
+                          f'seq={seq_str}  {snr_str}{freq_str}',
+                          flush=True)
+            else:
+                if total == 0:
+                    print(f'[{now_str}] win UTC {wall} ({int(WIN_SEC)}s)  '
+                          f'det=  0  radars=—',
+                          flush=True)
+                else:
+                    print(f'[{now_str}] win UTC {wall} ({int(WIN_SEC)}s)  '
+                          f'det={total:>3}  radars={radars_str}  '
+                          f'seq={seq_str}  {snr_str}{freq_str}',
+                          flush=True)
+    except KeyboardInterrupt:
+        return 130
+
+
+# ---------------------------------------------------------------------------
 # hf-tec watch — PRN-beacon detection records
 # ---------------------------------------------------------------------------
 
@@ -13174,6 +13462,19 @@ def _add_codar_watch_args(p) -> None:
                         'most-recently-modified data dir if no service)')
 
 
+def _add_superdarn_watch_args(p) -> None:
+    """Argument spec for `smd watch superdarn`."""
+    p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                   help='per-15s-window mode: print up to N records under '
+                        'the summary (default 0 = counts only; -v = all)')
+    p.add_argument('-v', '--verbose', action='store_true',
+                   help='per-window mode showing ALL records, one per line')
+    p.add_argument('--instance', metavar='RADIOD_ID', default=None,
+                   help='specific radiod instance (default: first active '
+                        'superdarn-sounder@*, or most-recently-modified '
+                        'data dir if no service)')
+
+
 def _add_hf_tec_watch_args(p) -> None:
     """Argument spec for `smd watch hf-tec`."""
     p.add_argument('-v', '--verbose', action='store_true',
@@ -14175,7 +14476,7 @@ def main() -> int:
 
               Operator (daily, read-mostly):
                 status     service health snapshot
-                watch      live tail (wspr | psk | hfdl | codar | hf-tec | mag | ka9q | radiod | uploads | verifier)
+                watch      live tail (wspr | psk | hfdl | codar | superdarn | hf-tec | mag | ka9q | radiod | uploads | verifier)
                 tui        launch interactive TUI
 
               Operator (mutating — needs sudo):
@@ -15018,7 +15319,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | hfdl | codar | mag | ka9q | radiod | gpsdo | uploads | verifier)')
+                                  '(smd watch wspr | psk | hfdl | codar | superdarn | mag | ka9q | radiod | gpsdo | uploads | verifier)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -15048,6 +15349,13 @@ def main() -> int:
              '(per-station peak counts + layer + SNR rollup)',
     )
     _add_codar_watch_args(p_w_codar)
+
+    p_w_superdarn = watch_sub.add_parser(
+        'superdarn',
+        help='live tail of superdarn-sounder passive SuperDARN detections '
+             '(per-window rollup by radar: sequence ID + score + SNR)',
+    )
+    _add_superdarn_watch_args(p_w_superdarn)
 
     p_w_hftec = watch_sub.add_parser(
         'hf-tec',
@@ -15426,6 +15734,8 @@ def main() -> int:
             return cmd_hfdl_watch(args)
         if target == 'codar':
             return cmd_codar_watch(args)
+        if target == 'superdarn':
+            return cmd_superdarn_watch(args)
         if target == 'hf-tec':
             return cmd_hf_tec_watch(args)
         if target == 'mag':
