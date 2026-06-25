@@ -158,7 +158,7 @@ install_script  = "/opt/git/sigmond/meteor-scatter/scripts/install.sh"
 [client.superdarn-sounder]
 kind            = "client"
 description     = "Passive SuperDARN coherent-radar monitor (detection / identification)"
-repo            = "https://github.com/mijahauan/superdarn-sounder"
+repo            = "https://github.com/HamSCI/superdarn-sounder"
 uses            = ["ka9q-python", "hamsci-dsp"]
 requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"
