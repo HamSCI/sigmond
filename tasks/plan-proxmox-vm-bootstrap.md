@@ -2,7 +2,7 @@
 
 **Author:** Rob Robinett (AI6VN / W0DAS) + Claude
 **Date:** 2026-05-05
-**Goal:** A user can `git clone https://github.com/mijahauan/sigmond ~/sigmond && bash ~/sigmond/install.sh` on a fresh Debian 13 VM running under Proxmox, answer one prompt, and end up with a fully configured station — including all host-side PCIe passthrough, CPU isolation, vfio binding, hookscript, and Sigmond itself installed and ready to run `smd install <client>`.
+**Goal:** A user can `git clone https://github.com/HamSCI/sigmond ~/sigmond && bash ~/sigmond/install.sh` on a fresh Debian 13 VM running under Proxmox, answer one prompt, and end up with a fully configured station — including all host-side PCIe passthrough, CPU isolation, vfio binding, hookscript, and Sigmond itself installed and ready to run `smd install <client>`.
 
 ## Non-goals
 

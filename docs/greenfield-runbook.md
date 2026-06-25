@@ -321,7 +321,7 @@ them if they recur.
 
 ```bash
 # 0. bootstrap (see install-quickstart.md)
-git clone https://github.com/mijahauan/sigmond ~/sigmond && cd ~/sigmond && ./install.sh
+git clone https://github.com/HamSCI/sigmond ~/sigmond && cd ~/sigmond && ./install.sh
 
 # 1-3. identity + install (install enables each component; topology is automatic)
 smd config identity                       # AC0G / EM38ww

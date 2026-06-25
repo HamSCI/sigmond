@@ -325,7 +325,7 @@ def _synthesized_library_entries() -> dict[str, CatalogEntry]:
             name='ka9q-python',
             kind='library',
             description='Python interface for ka9q-radio control and monitoring',
-            repo='https://github.com/mijahauan/ka9q-python',
+            repo='https://github.com/HamSCI/ka9q-python',
             uses=(),
             requires=(),
             contract=None,

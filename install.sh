@@ -5,7 +5,7 @@
 #
 #   sudo mkdir -p /opt/git/sigmond
 #   sudo chown $USER /opt/git/sigmond
-#   git clone https://github.com/mijahauan/sigmond /opt/git/sigmond/sigmond
+#   git clone https://github.com/HamSCI/sigmond /opt/git/sigmond/sigmond
 #   cd /opt/git/sigmond/sigmond
 #   ./install.sh
 #
@@ -205,7 +205,7 @@ fi
 # common alternate locations or clone from upstream so the venv install can
 # resolve the path-based dependency.
 KA9Q_CANONICAL="/opt/git/sigmond/ka9q-python"
-KA9Q_REPO_URL="https://github.com/mijahauan/ka9q-python"
+KA9Q_REPO_URL="https://github.com/HamSCI/ka9q-python"
 
 if [[ ! -f "$KA9Q_CANONICAL/pyproject.toml" ]]; then
     info "ka9q-python not at $KA9Q_CANONICAL — searching common locations"

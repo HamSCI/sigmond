@@ -1,7 +1,7 @@
 # /etc/systemd/system/sigmond-storage-trim-wspr.service
 [Unit]
 Description=Sigmond storage trim — wspr.spots @ 24h
-Documentation=https://github.com/mijahauan/sigmond
+Documentation=https://github.com/HamSCI/sigmond
 ConditionPathExists=/var/lib/sigmond/sink.db
 
 [Service]

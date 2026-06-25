@@ -22,7 +22,7 @@ resource (CPU) arbitration.
 The **DASI2 hardware kit** (DXE antenna → RX888 SDR, disciplined by an
 LB-GPSDO and time-injected by a TS-1, plus a magnetometer) feeds
 **ka9q-radio** (`radiod`), which multicasts per-channel RTP streams.
-Every RF client subscribes via [ka9q-python](https://github.com/mijahauan/ka9q-python);
+Every RF client subscribes via [ka9q-python](https://github.com/HamSCI/ka9q-python);
 **mag-recorder** is the one client that reads its sensor directly (USB-I²C)
 rather than through radiod.
 
@@ -67,7 +67,7 @@ components. Clone and install from there:
 ```bash
 sudo mkdir -p /opt/git/sigmond
 sudo chown $USER /opt/git/sigmond
-git clone https://github.com/mijahauan/sigmond /opt/git/sigmond/sigmond
+git clone https://github.com/HamSCI/sigmond /opt/git/sigmond/sigmond
 cd /opt/git/sigmond/sigmond
 ./install.sh
 ```
@@ -393,14 +393,14 @@ bring-up (`smd bringup dasi2 --with-optional`) or one at a time
 | Core client | What it does | Repo |
 |--------|-------------|------|
 | **radiod** | ka9q-radio SDR daemon — receives RF and multicasts IQ channels | [ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio) |
-| **hf-timestd** | HF time-standard analyzer (WWV/WWVH/CHU/BPM) — also the suite's **timing authority** (publishes the RTP↔UTC offset + tier other clients label against) | [mijahauan/hf-timestd](https://github.com/mijahauan/hf-timestd) |
+| **hf-timestd** | HF time-standard analyzer (WWV/WWVH/CHU/BPM) — also the suite's **timing authority** (publishes the RTP↔UTC offset + tier other clients label against) | [HamSCI/hf-timestd](https://github.com/HamSCI/hf-timestd) |
 | **wspr-recorder** | WSPR/FST4W recorder + decoder — uploads to wsprnet.org / wsprdaemon.org | [mijahauan/wspr-recorder](https://github.com/mijahauan/wspr-recorder) |
 | **psk-recorder** | FT4/FT8 spot recorder — decodes and uploads to PSKReporter | [mijahauan/psk-recorder](https://github.com/mijahauan/psk-recorder) |
 | **mag-recorder** | RM3100 magnetometer recorder (USB-I²C, non-radiod) — daily datasets to PSWS | [mijahauan/mag-recorder](https://github.com/mijahauan/mag-recorder) |
 
 | Additional client | What it does | Repo |
 |--------|-------------|------|
-| **codar-sounder** | Opportunistic ionospheric sounder using CODAR chirp transmissions | [mijahauan/codar-sounder](https://github.com/mijahauan/codar-sounder) |
+| **codar-sounder** | Opportunistic ionospheric sounder using CODAR chirp transmissions | [HamSCI/codar-sounder](https://github.com/HamSCI/codar-sounder) |
 | **hfdl-recorder** | HFDL (High Frequency Data Link) recorder — one `dumphfdl` subprocess per band (→ airframes.io) | [mijahauan/hfdl-recorder](https://github.com/mijahauan/hfdl-recorder) |
 | **hf-tec** | HF PRN-coded beacon recorder for ionospheric specification (TEC) | [mijahauan/hf-tec](https://github.com/mijahauan/hf-tec) |
 | **meteor-scatter** | Meteor-scatter ping decoder (`jt9 --msk144`) → local sink + hs-uploader | [mijahauan/meteor-scatter](https://github.com/mijahauan/meteor-scatter) |
@@ -413,7 +413,7 @@ bring-up (`smd bringup dasi2 --with-optional`) or one at a time
 | **rac** | Remote Access Channel — frpc reverse tunnel to gw2.wsprdaemon.org for admin SSH/web behind NAT | [mijahauan/rac](https://github.com/mijahauan/rac) |
 | **gpsdo-monitor** | Leo Bodnar GPSDO health monitor + mDNS advertiser | [mijahauan/gpsdo-monitor](https://github.com/mijahauan/gpsdo-monitor) |
 
-The RF clients use [ka9q-python](https://github.com/mijahauan/ka9q-python)
+The RF clients use [ka9q-python](https://github.com/HamSCI/ka9q-python)
 to receive RTP streams from radiod; `mag-recorder` is the exception — it
 reads its magnetometer directly over USB-I²C, not through radiod.  Each
 client runs in its own Python venv and manages its own systemd services.
@@ -512,5 +512,5 @@ stdlib-only is what lets that pre-venv bootstrap and the escape hatch work.
 
 - **Authors:** Michael Hauan (AC0G), Rob Robinett (AI6VN)
 - **License:** TBD
-- **Repo:** https://github.com/mijahauan/sigmond
+- **Repo:** https://github.com/HamSCI/sigmond
 - **Part of:** [HamSCI](https://hamsci.org/) — Ham Radio Science Citizen Investigation

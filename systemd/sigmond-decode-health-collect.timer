@@ -1,6 +1,6 @@
 [Unit]
 Description=Hourly decode-health snapshot
-Documentation=https://github.com/mijahauan/sigmond
+Documentation=https://github.com/HamSCI/sigmond
 
 [Timer]
 # Every hour on the hour, with a small random delay so multiple

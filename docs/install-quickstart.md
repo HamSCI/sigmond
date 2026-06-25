@@ -49,7 +49,7 @@ Hardware (for an actual SDR install, not just `smd`):
    `ka9q-python` as a sibling at `/opt/git/sigmond/ka9q-python`.
    The script searches `~/ka9q-python`, `~/git/ka9q-python`,
    `/opt/git/ka9q-python`; if found, relocates; otherwise clones
-   from <https://github.com/mijahauan/ka9q-python>.
+   from <https://github.com/HamSCI/ka9q-python>.
 5. **System user + group.** Creates the `sigmond` system user/group
    that owns `/opt/git/sigmond/*`. Adds your invoking user to the
    `sigmond` group so you can edit sources as yourself. Sets
@@ -71,7 +71,7 @@ Hardware (for an actual SDR install, not just `smd`):
 ```bash
 # 1. Clone anywhere you like.  install.sh will move it to the canonical
 #    location for you.
-git clone https://github.com/mijahauan/sigmond ~/sigmond
+git clone https://github.com/HamSCI/sigmond ~/sigmond
 cd ~/sigmond
 
 # 2. Run the installer.  Will prompt for password ONCE if passwordless

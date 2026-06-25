@@ -1,6 +1,6 @@
 [Unit]
 Description=Decode-health snapshot collector (sigmond)
-Documentation=https://github.com/mijahauan/sigmond
+Documentation=https://github.com/HamSCI/sigmond
 After=psk-recorder@.service wd-upload-hs@.service
 
 [Service]

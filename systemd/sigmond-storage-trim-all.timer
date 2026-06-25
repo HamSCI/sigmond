@@ -6,7 +6,7 @@
 #
 [Unit]
 Description=Sigmond storage trim timer — all retention policies
-Documentation=https://github.com/mijahauan/sigmond
+Documentation=https://github.com/HamSCI/sigmond
 
 [Timer]
 # OnActiveSec fires 10 min after the TIMER itself becomes active

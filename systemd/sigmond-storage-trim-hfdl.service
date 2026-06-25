@@ -1,7 +1,7 @@
 # /etc/systemd/system/sigmond-storage-trim-hfdl.service
 [Unit]
 Description=Sigmond storage trim — hfdl.spots @ 24h
-Documentation=https://github.com/mijahauan/sigmond
+Documentation=https://github.com/HamSCI/sigmond
 # Don't run if the sink db isn't there yet.  ConditionPathExists is
 # evaluated at each timer fire so a freshly-deployed host that hasn't
 # done first-flush yet stays cleanly inactive.

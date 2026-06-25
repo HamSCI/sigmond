@@ -94,7 +94,7 @@ phase_pre_host() {
     if [[ ! -d "$kp_dir" ]]; then
         info "ka9q-python not found at $kp_dir — cloning…"
         require_cmd git
-        run_as_user "$INVOKING_USER" git clone https://github.com/mijahauan/ka9q-python "$kp_dir"
+        run_as_user "$INVOKING_USER" git clone https://github.com/HamSCI/ka9q-python "$kp_dir"
         ok "ka9q-python cloned"
     else
         ok "ka9q-python present at $kp_dir"

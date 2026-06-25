@@ -1,7 +1,7 @@
 # /etc/systemd/system/sigmond-storage-trim-timestd.timer
 [Unit]
 Description=Sigmond storage trim timer — timestd.events @ 30d
-Documentation=https://github.com/mijahauan/sigmond
+Documentation=https://github.com/HamSCI/sigmond
 
 [Timer]
 # 03:30 UTC — 15 minutes after the hfdl trim so they don't both

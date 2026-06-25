@@ -1,7 +1,7 @@
 # /etc/systemd/system/sigmond-storage-trim-wspr.timer
 [Unit]
 Description=Sigmond storage trim timer — wspr.spots @ 24h
-Documentation=https://github.com/mijahauan/sigmond
+Documentation=https://github.com/HamSCI/sigmond
 
 [Timer]
 # 03:20 UTC — 5 min after hfdl @ 03:15, 10 min before timestd @ 03:30.

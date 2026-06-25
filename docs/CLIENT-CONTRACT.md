@@ -976,15 +976,15 @@ takes priority.
 ### 9. Reference implementations
 
 **v0.2 reference: hf-timestd v7.0.0.**
-[`hf-timestd` v7.0.0](https://github.com/mijahauan/hf-timestd/releases/tag/v7.0.0)
+[`hf-timestd` v7.0.0](https://github.com/HamSCI/hf-timestd/releases/tag/v7.0.0)
 is the first full v0.2-conformant client. It remains the reference for
 §1–§6, §8, and the stdout-cleanliness guard in §3.
 
 Concrete pointers:
 
 - **`inventory` / `validate` subcommands** —
-  [cli.py](https://github.com/mijahauan/hf-timestd/blob/v7.0.0/src/hf_timestd/cli.py),
-  commit [`339dec4`](https://github.com/mijahauan/hf-timestd/commit/339dec4).
+  [cli.py](https://github.com/HamSCI/hf-timestd/blob/v7.0.0/src/hf_timestd/cli.py),
+  commit [`339dec4`](https://github.com/HamSCI/hf-timestd/commit/339dec4).
   Note the stdout-cleanliness guard at the top of `main()`.
 - **`deploy.toml`** — at repo root; real worked example of `[build]`,
   `[install.steps]`, `[systemd]`, and `[deps]`.
@@ -2118,7 +2118,7 @@ Two orthogonal axes motivate this section.
   stream — typically via the host's monotonic clock as a bridge.
 
 Both axes compose to four cases, all addressed below.  Per
-[`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
+[`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
 the *substrate* (radiod RTP, magnetometer sample-clock, KiwiSDR
 time-tag, host monotonic) is whatever the client's data plane
 provides; the *annotation* is the UTC mapping a timing authority
@@ -2127,7 +2127,7 @@ publishes onto that substrate.
 This section names what a *consuming client* may rely on without
 specifying the wire protocol.  The producer-side reference for what
 a timing authority *is* lives in
-[`hf-timestd/docs/ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md).
+[`hf-timestd/docs/ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md).
 
 #### 18.2 Two modes
 
@@ -2140,7 +2140,7 @@ a timing authority *is* lives in
   authority (hf-timestd is the reference implementation) and uses
   the authority's published snapshot for its sample↔UTC math.
   Optional.  Per
-  [`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
+  [`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
   §2, the tier system ranks authority quality (T0 worst, T5 best,
   T6 cross-check).
 
@@ -2226,7 +2226,7 @@ minimum:
 | Field                       | Meaning                                                                 | Used by                       |
 |-----------------------------|-------------------------------------------------------------------------|-------------------------------|
 | `utc_anchor_ns`             | The UTC time corresponding to the anchor moment, in ns since the epoch. | All subscribers.              |
-| `tier`                      | Authority tier from [`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md) §2. | All subscribers.              |
+| `tier`                      | Authority tier from [`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md) §2. | All subscribers.              |
 | `sigma_ns`                  | 1-σ uncertainty of `utc_anchor_ns` at the time of measurement.          | All subscribers.              |
 | `snapshot_age_s`            | Wall time since the last successful authority observation.              | All subscribers.              |
 | `host_monotonic_at_anchor`  | Authority host's `CLOCK_MONOTONIC_RAW` (ns) at the anchor moment.       | Non-radiod subscribers.       |
@@ -2329,7 +2329,7 @@ start/stop decisions in authority-corrected mode MUST additionally:
 authority-corrected timestamps to downstream consumers (sinks,
 spots, archives, peer clients) without also recording the tier and
 σ that produced them.  This preserves
-[`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
+[`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
 §3: the annotation travels with the sample, regardless of
 substrate.
 

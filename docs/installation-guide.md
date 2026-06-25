@@ -42,7 +42,7 @@ Quick start:
 ```bash
 sudo mkdir -p /opt/git/sigmond
 sudo chown $USER /opt/git/sigmond
-git clone https://github.com/mijahauan/sigmond /opt/git/sigmond/sigmond
+git clone https://github.com/HamSCI/sigmond /opt/git/sigmond/sigmond
 cd /opt/git/sigmond/sigmond
 ./install.sh
 # answer "y" to the "Proxmox passthrough setup?" prompt
@@ -117,8 +117,8 @@ is at the canonical `/opt/git/sigmond/sigmond` location.
 ```bash
 sudo mkdir -p /opt/git/sigmond
 sudo chown $USER /opt/git/sigmond
-git clone https://github.com/mijahauan/sigmond.git     /opt/git/sigmond/sigmond
-git clone https://github.com/mijahauan/ka9q-python.git /opt/git/sigmond/ka9q-python
+git clone https://github.com/HamSCI/sigmond.git     /opt/git/sigmond/sigmond
+git clone https://github.com/HamSCI/ka9q-python.git /opt/git/sigmond/ka9q-python
 ```
 
 The directory layout must look like this:
