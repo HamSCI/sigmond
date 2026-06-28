@@ -19,7 +19,8 @@ def _healthy():
     return {'shm': t.parse_shm(SHM), 'gpsd_active': True, 'gps_fix': True,
             'chrony_active': True, 'sources': t.parse_sources(SOURCES),
             'tracking': {'stratum': '1', 'ref': 'PPS'},
-            'metrology': {'expected': 9, 'running': 9}}
+            'metrology': {'expected': 9, 'running': 9},
+            'radiod': {'fresh': True, 'lag_s': 1.0, 'instance': 'radiod@test.service'}}
 
 
 def test_parse_sources():
@@ -62,3 +63,104 @@ def test_gpsd_dead_restarts_gpsd_only():
     acts = t.reconcile(f, dry_run=True, run=_ok_run)
     assert any('restart gpsd' in a for a in acts)
     assert not any('restart chrony' in a for a in acts)        # own-only
+
+
+# --- radiod RTP-substrate slide detection + guarded restart ----------------
+
+import json
+
+
+def _status(wall_iso, last_sample_times):
+    """A core-recorder-status.json string with the given channel sample times."""
+    return json.dumps({
+        'timestamp': wall_iso,
+        'channels': {f'c{i}': {'last_sample_time': s}
+                     for i, s in enumerate(last_sample_times)},
+    })
+
+
+def test_radiod_rtp_facts_measures_lag():
+    # most-behind channel 900s behind wall; file fresh (now ≈ wall)
+    import datetime as _dt
+    wall = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    wall_iso, wall_ep = wall.isoformat(), wall.timestamp()
+    txt = _status(wall_iso, [wall_ep - 900.0, wall_ep - 5.0])
+    f = t.radiod_rtp_facts(txt, now=wall_ep + 10.0)
+    assert f['fresh'] is True
+    assert abs(f['lag_s'] - 900.0) < 0.01          # most-behind channel wins
+
+
+def test_radiod_rtp_facts_stale_file_not_fresh():
+    import datetime as _dt
+    wall = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    txt = _status(wall.isoformat(), [wall.timestamp() - 1.0])
+    f = t.radiod_rtp_facts(txt, now=wall.timestamp() + 999.0)   # 999s old file
+    assert f['fresh'] is False
+
+
+def test_radiod_rtp_facts_ignores_warming_up_channels():
+    import datetime as _dt
+    wall = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    ep = wall.timestamp()
+    txt = _status(wall.isoformat(), [0, None, ep - 2.0])        # only the real one counts
+    f = t.radiod_rtp_facts(txt, now=ep + 1.0)
+    assert abs(f['lag_s'] - 2.0) < 0.01
+
+
+def test_radiod_rtp_facts_bad_json():
+    f = t.radiod_rtp_facts('not json', now=1.0)
+    assert f == {'fresh': False, 'lag_s': None, 'file_age_s': None}
+
+
+def _radiod(fresh=True, lag=1.0, instance='radiod@test.service'):
+    return {'fresh': fresh, 'lag_s': lag, 'instance': instance}
+
+
+def test_assess_radiod_slide_is_fail_with_restart_action():
+    f = _healthy(); f['radiod'] = _radiod(lag=5510.0)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-rtp')
+    assert link.status == 'fail' and link.action == 'restart-radiod'
+
+
+def test_assess_radiod_warn_no_action():
+    f = _healthy(); f['radiod'] = _radiod(lag=90.0)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-rtp')
+    assert link.status == 'warn' and link.action == ''
+
+
+def test_assess_radiod_stale_status_never_acts():
+    f = _healthy(); f['radiod'] = _radiod(fresh=False, lag=None)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-rtp')
+    assert link.status == 'warn' and link.action == ''         # down recorder ≠ restart radiod
+
+
+def test_reconcile_radiod_slide_restarts_radiod(monkeypatch):
+    monkeypatch.setattr(t, '_read_restart_state', lambda: {})   # no cooldown
+    f = _healthy(); f['radiod'] = _radiod(lag=5510.0)
+    acts = t.reconcile(f, dry_run=True, run=_ok_run)
+    assert any('would restart radiod@test.service' in a for a in acts)
+    assert not any('restart chrony' in a for a in acts)
+    assert not any('restart gpsd' in a for a in acts)
+
+
+def test_radiod_restart_decision_restart_when_clear():
+    d, _ = t.radiod_restart_decision({}, 'radiod@x.service', now=10_000.0)
+    assert d == 'restart'
+
+
+def test_radiod_restart_decision_cooldown():
+    state = {'last_restart': 10_000.0, 'history': [10_000.0]}
+    d, _ = t.radiod_restart_decision(state, 'radiod@x.service', now=10_060.0)  # 60s < 600s
+    assert d == 'cooldown'
+
+
+def test_radiod_restart_decision_escalates_after_cap():
+    # 3 restarts within the last hour, last one >cooldown ago
+    state = {'last_restart': 9000.0, 'history': [7300.0, 8000.0, 9000.0]}
+    d, _ = t.radiod_restart_decision(state, 'radiod@x.service', now=10_000.0)
+    assert d == 'escalate'
+
+
+def test_radiod_restart_decision_no_instance():
+    d, _ = t.radiod_restart_decision({}, None, now=10_000.0)
+    assert d == 'no-instance'
