@@ -10307,6 +10307,11 @@ def cmd_wspr_watch(args) -> int:
     # per cycle were getting mashed together with the prior cycle's
     # rejected-spot tail).
     last_cycle_hhmm: list = [None]
+    # Distinct rx sources seen this session.  The blank-line separator between
+    # cycle blocks only earns its keep when >1 receiver groups multiple rows
+    # per cycle; with a single receiver every cycle is one row and the blank
+    # lines are just noise — so suppress them until a 2nd receiver appears.
+    _seen_rx: set = set()
 
     def _flush_pending(ship_line: str = '') -> None:
         """Print the upload-event line + clear pending state.
@@ -10643,11 +10648,15 @@ def cmd_wspr_watch(args) -> int:
             # ever arrived) flush it before starting the new one.
             _flush_pending()
 
-            # Visual separator between cycle blocks — print a blank
-            # line each time we cross from one HH:MM to the next.
-            # Within a single cycle (multi-source), both rx lines stay
-            # together with no separator.
-            if last_cycle_hhmm[0] is not None and last_cycle_hhmm[0] != (hh, mm):
+            # Visual separator between cycle blocks — print a blank line each
+            # time we cross from one HH:MM to the next, but ONLY once more than
+            # one receiver has appeared (multi-source groups several rx rows per
+            # cycle, which need separating).  With a single receiver each cycle
+            # is one row, so the blank lines are pure noise — suppress them.
+            _seen_rx.add(rx)
+            if (len(_seen_rx) > 1
+                    and last_cycle_hhmm[0] is not None
+                    and last_cycle_hhmm[0] != (hh, mm)):
                 print(flush=True)
             last_cycle_hhmm[0] = (hh, mm)
 
