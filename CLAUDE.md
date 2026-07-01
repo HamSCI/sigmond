@@ -227,6 +227,14 @@ smd admin verifier report      Windowed audit of upload delivery. Default
                          cohorts + cadence). `--target psk` audits the
                          local SQLite sink for FT8/FT4 spot delivery,
                          with cadence on the 15s / 7.5s FT cycles.
+smd admin uploader manifest    Generate /etc/hs-uploader/pipelines.toml (the
+                         single-host uploader daemon's manifest) from every
+                         enabled client's deploy.toml [[hs_uploader.pipeline]]
+                         declarations, substituting per-site identity from the
+                         current configs. `--check` (read-only drift diff) /
+                         `--write` (render, root) / `--enable` (write +
+                         install/refresh hs-uploader.service). Also run
+                         automatically during bring-up and `smd apply`.
 ```
 
 ## Sink backend selection

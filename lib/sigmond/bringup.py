@@ -202,6 +202,16 @@ def build_plan(profile, *, local_radiod: bool,
                       argv=['install', '-d', '-m', '2775', '-o', 'root',
                             '-g', 'sigmond', '/var/lib/hs-uploader']))
 
+    # Generate the single-host uploader manifest from each enabled client's
+    # deploy.toml [[hs_uploader.pipeline]] declarations (identity substituted
+    # from coordination + per-client configs), then enable + start the daemon.
+    # Runs after clients are installed+configured (stages 1-3), so PSWS ids /
+    # reporter ids exist; idempotent (a no-op restart when nothing changed).
+    steps.append(Step(STAGE4, 'generate hs-uploader manifest + enable daemon',
+                      'tune',
+                      argv=[smd, 'admin', 'uploader', 'manifest',
+                            '--write', '--enable']))
+
     # Heal any leftover legacy config before starting: a stale client config
     # from a prior install (e.g. the legacy `status_address` field) that
     # `config init` refused to overwrite would otherwise fail to load.  This

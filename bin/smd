@@ -4060,6 +4060,20 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal
 
+    # Regenerate the single-host uploader manifest from each client's
+    # deploy.toml [[hs_uploader.pipeline]] declarations and refresh the daemon
+    # if it drifted.  Best-effort / non-fatal: an apply must not fail because
+    # the optional uploader isn't set up on this host.
+    if not dry_run and _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.commands.uploader import cmd_uploader_manifest
+            class _A:  # minimal args shim: write + enable/refresh
+                write = True
+                enable = True
+            cmd_uploader_manifest(_A())
+        except Exception as exc:
+            _warn(f'uploader manifest: skipped ({exc})')
+
     # Restart wd-upload-* services AFTER everything else — they depend on
     # decoders being active and fail with "unavailable resources" if started
     # too early. Skip the cycle entirely on a no-op apply.  Also restart any
@@ -6953,7 +6967,7 @@ _smd_complete() {
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
     local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin"
-    local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing radiod instance uninstall completion"
+    local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing uploader radiod instance uninstall completion"
     local components="ka9q-radio radiod ka9q-web hf-timestd wspr-recorder psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter gpsdo-monitor igmp-querier rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter"
     local profiles="dasi2 base client"
@@ -15014,6 +15028,24 @@ def main() -> int:
     p_sec_bundle.add_argument('-p', '--passphrase', action='store_true',
         help='encrypt with a passphrase instead of recipient keys')
 
+    p_uploader = admin_sub.add_parser(
+        'uploader',
+        help='single-host uploader manifest (generate /etc/hs-uploader/pipelines.toml '
+             'from each client deploy.toml)')
+    uploader_sub = p_uploader.add_subparsers(dest='uploader_command')
+    uploader_sub.add_parser('help', help='show this help')
+    p_u_manifest = uploader_sub.add_parser(
+        'manifest',
+        help='render the uploader manifest from enabled clients\' '
+             '[[hs_uploader.pipeline]] declarations')
+    p_u_manifest.add_argument('--check', action='store_true',
+        help='(default) render and diff against the installed manifest; '
+             'non-zero exit on drift. Read-only.')
+    p_u_manifest.add_argument('--write', action='store_true',
+        help='write /etc/hs-uploader/pipelines.toml (root; backs up to .bak)')
+    p_u_manifest.add_argument('--enable', action='store_true',
+        help='write, then enable + (re)start hs-uploader.service')
+
     p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
     p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
@@ -15660,6 +15692,26 @@ def main() -> int:
         if sub_cmd == 'bundle':
             return cmd_secrets_bundle(args)
         p_secrets.print_help()
+        return 0
+
+    if args.command == 'uploader':
+        up_cmd = getattr(args, 'uploader_command', None)
+        if up_cmd in (None, 'help'):
+            p_uploader.print_help()
+            return 0
+        if up_cmd == 'manifest':
+            # --write / --enable mutate /etc + systemd; self-elevate like every
+            # other mutating verb.  Bare --check is read-only (no root).
+            if (getattr(args, 'write', False) or getattr(args, 'enable', False)) \
+                    and _need_root('admin uploader manifest'):
+                return 1
+            try:
+                from sigmond.commands.uploader import cmd_uploader_manifest
+            except Exception as exc:
+                _err(f"uploader manifest unavailable: {exc}")
+                return 1
+            return cmd_uploader_manifest(args)
+        p_uploader.print_help()
         return 0
 
     if args.command == 'personalize':
