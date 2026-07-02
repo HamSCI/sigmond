@@ -35,6 +35,11 @@ class Station:
     identity path (config identity/refresh) never touches this block."""
     psws_id: str = ""
     instrument_id: str = ""
+    # Site-wide reporter identity (e.g. "AC0G/S") — the ONE id every
+    # upload path (wsprdaemon rx_sign, PSKReporter receiver, wsprnet)
+    # defaults to.  Clients read STATION_REPORTER_ID; the per-service
+    # *_call keys below remain narrower overrides.  HamSCI/sigmond#38.
+    reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
 
@@ -190,6 +195,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
     station = Station(
         psws_id=str(station_raw.get('psws_id', '') or ''),
         instrument_id=str(station_raw.get('instrument_id', '') or ''),
+        reporter_id=str(station_raw.get('reporter_id', '') or ''),
         wsprnet_call=str(station_raw.get('wsprnet_call', '') or ''),
         pskreporter_call=str(station_raw.get('pskreporter_call', '') or ''),
     )
@@ -416,6 +422,8 @@ def render_env(coord: Coordination,
     # Names match what clients already read (mag-recorder reads
     # STATION_PSWS_STATION_ID); reporter-call keys are an override hook for
     # clients whose reporter call differs from STATION_CALL.
+    if st.reporter_id:
+        st_lines.append(f'STATION_REPORTER_ID={st.reporter_id}')
     if st.psws_id:
         st_lines.append(f'STATION_PSWS_STATION_ID={st.psws_id}')
     if st.instrument_id:

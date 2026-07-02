@@ -561,6 +561,7 @@ def cmd_config_render(args) -> int:
         psws_id=profile.psws_station_id if profile.psws_enabled else '',
         instrument_id=(profile.instrument_for('hf-timestd')
                        if profile.psws_enabled else ''),
+        reporter_id=profile.effective_reporter_id,
         wsprnet_call=profile.effective_wsprnet_call,
         pskreporter_call=profile.effective_pskreporter_call,
     )
@@ -707,6 +708,8 @@ def _patch_station_block(path: Path, station: Station) -> None:
         body.append(f'psws_id = "{station.psws_id}"')
     if station.instrument_id:
         body.append(f'instrument_id = "{station.instrument_id}"')
+    if station.reporter_id:
+        body.append(f'reporter_id = "{station.reporter_id}"')
     if station.wsprnet_call:
         body.append(f'wsprnet_call = "{station.wsprnet_call}"')
     if station.pskreporter_call:
