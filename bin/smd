@@ -5575,6 +5575,18 @@ def cmd_status(args) -> int:
             _info(f'       finish:  smd config {_rec} edit   '
                   f'(records locally regardless)')
 
+    # Site-level enrollment: ids configured but the station key has not
+    # passed a live login yet (two-phase appliance flow).
+    try:
+        _psws_pending = psws.site_pending()
+    except Exception:
+        _psws_pending = ''
+    if _psws_pending:
+        _heading('PSWS key not verified')
+        _warn(f'station {_psws_pending}: upload key not confirmed at the '
+              f'portal yet (data queues locally)')
+        _info('       finish:  smd psws enroll   then   smd psws verify')
+
     print()
     return 1 if any_bad else 0
 
@@ -15851,6 +15863,25 @@ def main() -> int:
                            help='guided wizard: SSH key → station/device id '
                                 '→ validate')
 
+    # psws — site-level two-phase enrollment.  Station/instrument ids are
+    # collected at install time (appliance wizard → site-profile.toml); the
+    # key handshake happens later from a real terminal: enroll prints the
+    # station pubkey to paste into the portal, verify proves the login live.
+    p_psws = sub.add_parser('psws',
+        help='PSWS enrollment: status | enroll (print key + portal steps) | '
+             'verify (live SFTP login test)')
+    psws_site_sub = p_psws.add_subparsers(dest='psws_site_verb')
+    psws_site_sub.add_parser('status',
+        help='enrollment state (read-only, offline)')
+    psws_site_sub.add_parser('enroll',
+        help='ensure the station key exists; print the public key to '
+             'register at the PSWS portal')
+    psws_site_sub.add_parser('verify',
+        help='live SFTP login test as the station id; success is recorded '
+             'in /etc/sigmond/.psws-verified')
+    psws_site_sub.add_parser('motd',
+        help='login-banner hook (invoked from /etc/update-motd.d)')
+
     # environment — situational awareness (site inventory + reconciliation).
     p_env = admin_sub.add_parser('environment',
                            help='inventory peers declared in environment.toml vs what is observed')
@@ -15952,6 +15983,21 @@ def main() -> int:
             return cmd_secrets_bundle(args)
         p_secrets.print_help()
         return 0
+
+    if args.command == 'psws':
+        from sigmond import psws
+        verb = getattr(args, 'psws_site_verb', None) or 'status'
+        # enroll creates the key, verify writes the marker — root work;
+        # status/motd stay unprivileged (motd runs at every login).
+        if verb in ('enroll', 'verify') and _need_root(f'psws {verb}'):
+            return 1
+        if verb == 'enroll':
+            return psws.cmd_site_enroll()
+        if verb == 'verify':
+            return psws.cmd_site_verify()
+        if verb == 'motd':
+            return psws.cmd_site_motd()
+        return psws.cmd_site_status()
 
     if args.command == 'uploader':
         up_cmd = getattr(args, 'uploader_command', None)

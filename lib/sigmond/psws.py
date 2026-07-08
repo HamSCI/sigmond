@@ -341,6 +341,268 @@ def cmd_validate(recorder: str) -> int:
     return 1
 
 
+# ---------------------------------------------------------------------------
+# Site-level two-phase enrollment — `smd psws {status|enroll|verify|motd}`
+#
+# The appliance wizard (console, no copy-paste) collects the PSWS station +
+# instrument ids into site-profile.toml at install time; the KEY handshake is
+# deferred until the operator has a real terminal: an update-motd.d banner on
+# SSH login shows the station public key to paste into the PSWS portal, and
+# `smd psws verify` proves the login live and records it in a marker.  Uploads
+# are never gated on this — recorders queue locally and drain once the key is
+# registered; verify is a check + state flip, not a switch.
+# ---------------------------------------------------------------------------
+STATION_KEY = Path("/etc/hs-uploader/keys/id_ed25519_host")
+VERIFIED_MARKER = Path("/etc/sigmond/.psws-verified")
+MOTD_HOOK = Path("/etc/update-motd.d/70-sigmond-psws")
+
+
+def _load_profile():
+    from .site_profile import SITE_PROFILE_PATH, load_site_profile
+    try:
+        return load_site_profile(SITE_PROFILE_PATH)
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def _write_root_file(path: Path, content: str, mode: str = "644") -> bool:
+    if os.geteuid() == 0:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+            os.chmod(path, int(mode, 8))
+            return True
+        except OSError:
+            return False
+    with _tempfile.NamedTemporaryFile("w", delete=False) as tf:
+        tf.write(content)
+        tmp = tf.name
+    try:
+        r = subprocess.run(["sudo", "-n", "install", "-D", "-m", mode,
+                            tmp, str(path)], check=False)
+        return r.returncode == 0
+    finally:
+        os.unlink(tmp)
+
+
+def ensure_station_key() -> tuple:
+    """Ensure the station host key exists (one key per SITE — the SFTP
+    username is the station id, so the portal registers ONE pubkey per
+    station regardless of how many instruments upload).  Returns
+    (key_path, pubkey); pubkey is '' when the key can't be read/created."""
+    pub = Path(str(STATION_KEY) + ".pub")
+    if not _exists(STATION_KEY):
+        import socket as _socket
+        subprocess.run([*_sudo(), "install", "-d", "-m", "755",
+                        str(STATION_KEY.parent)], check=False)
+        r = subprocess.run([*_sudo(), "ssh-keygen", "-q", "-t", "ed25519",
+                            "-f", str(STATION_KEY), "-N", "",
+                            "-C", f"hs-uploader@{_socket.gethostname()}"],
+                           capture_output=True, text=True, check=False)
+        if r.returncode != 0:
+            return str(STATION_KEY), ""
+        subprocess.run([*_sudo(), "chown", "hsupload:hsupload",
+                        str(STATION_KEY), str(pub)], check=False)
+        subprocess.run([*_sudo(), "chmod", "600", str(STATION_KEY)],
+                       check=False)
+    return str(STATION_KEY), _pubkey(str(STATION_KEY))
+
+
+def install_motd_hook() -> bool:
+    """Install the login-banner drop-in (idempotent).  The hook itself is
+    inert once enrollment is verified — cmd_site_motd prints nothing."""
+    content = ("#!/bin/sh\n"
+               "# Sigmond PSWS enrollment reminder (installed by smd; safe to"
+               " leave in place —\n# prints nothing once enrollment is"
+               " verified).\n"
+               "command -v smd >/dev/null 2>&1 && smd psws motd 2>/dev/null\n"
+               "exit 0\n")
+    existing = _read_text(MOTD_HOOK)
+    if existing == content:
+        return True
+    return _write_root_file(MOTD_HOOK, content, mode="755")
+
+
+def _read_marker() -> dict:
+    out = {}
+    for ln in (_read_text(VERIFIED_MARKER) or "").splitlines():
+        if "=" in ln:
+            k, v = ln.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def is_verified(station: str) -> bool:
+    """Verified means: marker present AND recorded for THIS station id (a
+    re-personalized box with a new station id needs a fresh verify)."""
+    m = _read_marker()
+    return bool(station) and m.get("station") == station
+
+
+def site_pending() -> str:
+    """Station id awaiting key verification, or '' (also '' when PSWS is
+    disabled / no site profile).  Cheap + offline: safe for status/motd."""
+    p = _load_profile()
+    if not p or not getattr(p, "psws_enabled", False):
+        return ""
+    station = getattr(p, "psws_station_id", "") or ""
+    if not station or is_verified(station):
+        return ""
+    return station
+
+
+def sftp_station_login_ok(station: str,
+                          key_path: str = "") -> tuple:
+    """Live probe: SFTP login to PSWS as the STATION id with the station
+    host key.  Root reads the key directly; non-root goes through sudo -n."""
+    key_path = key_path or str(STATION_KEY)
+    if not _exists(Path(key_path)):
+        return False, f"station SSH key not found: {key_path}"
+    if not tcp_reachable():
+        return False, f"cannot reach {PSWS_HOST}:{PSWS_PORT} (network/firewall?)"
+    cmd = [*_sudo(), "sftp", "-i", key_path,
+           "-o", "BatchMode=yes",
+           "-o", "ConnectTimeout=10",
+           "-o", "StrictHostKeyChecking=accept-new",
+           f"{station}@{PSWS_HOST}"]
+    try:
+        r = subprocess.run(cmd, input="quit\n", capture_output=True,
+                           text=True, timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        return False, f"SFTP login timed out to {PSWS_HOST}"
+    except FileNotFoundError:
+        return False, "sftp client not installed"
+    if r.returncode == 0:
+        return True, f"SFTP login OK as {station}@{PSWS_HOST}"
+    err = (r.stderr or r.stdout or "").strip().splitlines()
+    tail = err[-1] if err else "unknown error"
+    return False, (f"SFTP login FAILED as {station}@{PSWS_HOST} — "
+                   f"public key not registered at the portal yet? "
+                   f"({tail[:160]})")
+
+
+def cmd_site_status() -> int:
+    p = _load_profile()
+    print(f"{_B}PSWS enrollment — site{_X}")
+    if not p:
+        print(f"  {_Y}⚠{_X} no site profile (/etc/sigmond/site-profile.toml) — "
+              f"scaffold with `smd config render --init`")
+        return 1
+    if not getattr(p, "psws_enabled", False):
+        print(f"  {_K}[psws] disabled in site-profile.toml — nothing to do{_X}")
+        return 0
+    station = p.psws_station_id or ""
+    verified = is_verified(station)
+    def row(label, val, good):
+        mark = f"{_G}✓{_X}" if good else f"{_Y}⚠{_X}"
+        print(f"  {mark} {label:18} {val if val else f'{_Y}(not set){_X}'}")
+    row("station id", station, bool(station))
+    for rec in RECORDERS:
+        inst = p.instrument_for(rec)
+        if inst:
+            row(f"{rec} id", inst, True)
+    key_ok = _exists(STATION_KEY)
+    row("station key", str(STATION_KEY)
+        + ("" if key_ok else f"  {_Y}(missing — run `smd psws enroll`){_X}"),
+        key_ok)
+    if verified:
+        m = _read_marker()
+        row("key verified", m.get("verified_at", "yes"), True)
+        return 0
+    row("key verified", f"{_Y}NOT YET{_X} — register the key, then "
+        f"`smd psws verify`", False)
+    return 1
+
+
+def cmd_site_enroll() -> int:
+    p = _load_profile()
+    if not p or not getattr(p, "psws_enabled", False) or not p.psws_station_id:
+        print(f"{_Y}PSWS is not set up in site-profile.toml{_X} — set "
+              f"[psws] enabled/station_id (or re-run the setup wizard), then "
+              f"`smd config render`.")
+        return 1
+    key_path, pubkey = ensure_station_key()
+    if not pubkey:
+        print(f"{_R}✗ could not create/read the station key {key_path}{_X} — "
+              f"run as root (or with passwordless sudo).")
+        return 1
+    install_motd_hook()
+    print(f"{_B}PSWS enrollment — station {p.psws_station_id}{_X}\n")
+    print(f"  1. Log into the PSWS portal: {_B}{PSWS_PORTAL}{_X}")
+    print(f"     (account for station {p.psws_station_id})")
+    print(f"  2. Paste this PUBLIC key into the station's SSH-key field:\n")
+    print(f"     {pubkey}\n")
+    print(f"  3. Back here, confirm the handshake:  {_B}smd psws verify{_X}\n")
+    print(f"  {_K}Recorders queue data locally in the meantime — everything "
+          f"uploads once the key is registered.{_X}")
+    return 0
+
+
+def cmd_site_verify() -> int:
+    """Exit codes: 0 verified, 1 not configured, 2 network, 3 login failed."""
+    import datetime
+    p = _load_profile()
+    if not p or not getattr(p, "psws_enabled", False) or not p.psws_station_id:
+        print(f"{_Y}PSWS is not set up in site-profile.toml{_X} — nothing to "
+              f"verify.  See `smd psws status`.")
+        return 1
+    station = p.psws_station_id
+    print(f"{_B}PSWS verify — station {station}@{PSWS_HOST}{_X}")
+    print(f"  … testing SFTP login (this can take a few s)")
+    ok_, detail = sftp_station_login_ok(station)
+    if not ok_:
+        net = "cannot reach" in detail or "timed out" in detail
+        print(f"  {_R}✗ {detail}{_X}")
+        if net:
+            return 2
+        print(f"  {_K}register the public key first — `smd psws enroll` "
+              f"prints it and the portal steps.{_X}")
+        return 3
+    print(f"  {_G}✓ {detail}{_X}")
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    if _write_root_file(VERIFIED_MARKER,
+                        f"verified_at={stamp}\nstation={station}\n"):
+        print(f"  {_G}✓ recorded in {VERIFIED_MARKER}{_X} — the login banner "
+              f"stops nagging.")
+    else:
+        print(f"  {_Y}⚠ could not write {VERIFIED_MARKER} (need root/sudo) — "
+              f"verification succeeded but the banner will keep nagging.{_X}")
+    # Per-recorder legacy keys (hf-timestd's own sftp key etc.) are separate
+    # from the station host key — surface their state so a mixed-model host
+    # isn't left half-working silently.
+    for rec, st in installed_unconfigured():
+        print(f"  {_Y}⚠ {rec}: {', '.join(st.issues)}{_X} — "
+              f"`smd config {rec} edit`")
+    print(f"  {_K}note: instrument ids ride in upload paths and can't be "
+          f"checked by login — a wrong id shows up as misfiled data on the "
+          f"portal.{_X}")
+    return 0
+
+
+def cmd_site_motd() -> int:
+    """Login banner (update-motd.d hook).  Fast + offline by design."""
+    station = site_pending()
+    if not station:
+        # enrollment done (or PSWS off) — fall through to the per-recorder
+        # unfinished-config nag, which covers the legacy key model.
+        print_motd_banner()
+        return 0
+    _, pubkey = ensure_station_key() if os.geteuid() == 0 else \
+        ("", _pubkey(str(STATION_KEY)))
+    print(f"\n{_Y}⚠  PSWS enrollment for station {station} is not finished"
+          f"{_X} — data records + queues locally,")
+    print(f"   but uploads to PSWS will start only after you register this "
+          f"station public key:\n")
+    if pubkey:
+        print(f"     {pubkey}\n")
+    else:
+        print(f"     {_Y}(key not created yet — run `smd psws enroll`){_X}\n")
+    print(f"   → paste it at {_B}{PSWS_PORTAL}{_X} (station {station}), "
+          f"then run:  {_B}smd psws verify{_X}\n")
+    return 0
+
+
 def _prompt(label: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
     try:

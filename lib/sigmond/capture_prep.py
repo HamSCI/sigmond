@@ -63,6 +63,9 @@ DATA_FILES = (
     '/var/lib/sigmond/net-diag.json',
     '/var/lib/hs-uploader/watermarks.db',
     '/var/lib/hs-uploader/known_hosts',
+    # PSWS key-verified marker pairs with the scrubbed station key — a clone
+    # must re-verify with its own freshly generated key.
+    '/etc/sigmond/.psws-verified',
     # FFT wisdom is per-CPU — a clone on different silicon must regenerate.
     '/etc/fftw/wisdomf',
 )

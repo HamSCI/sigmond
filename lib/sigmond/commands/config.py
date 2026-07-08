@@ -669,35 +669,24 @@ def _report_station_key(profile) -> None:
     One host key serves every SFTP destination (single-host uploader
     model); hs-uploader also self-generates it on first ship, but
     generating it HERE gives the operator the pubkey to register
-    BEFORE the first upload attempt."""
-    import subprocess
+    BEFORE the first upload attempt.  Also arms the login-banner hook
+    so an SSH session keeps nagging until `smd psws verify` passes."""
     from .. import psws
-    key = Path('/etc/hs-uploader/keys/id_ed25519_host')
-    pub = Path(str(key) + '.pub')
-    if not key.exists():
-        try:
-            key.parent.mkdir(parents=True, exist_ok=True)
-            import socket
-            subprocess.run(
-                ['ssh-keygen', '-q', '-t', 'ed25519', '-f', str(key),
-                 '-N', '', '-C', f'hs-uploader@{socket.gethostname()}'],
-                check=True)
-            subprocess.run(['chown', 'hsupload:hsupload', str(key),
-                            str(pub)], check=False)
-            os.chmod(key, 0o600)
-            ok(f'generated station SSH key {key}')
-        except Exception as exc:                          # noqa: BLE001
-            warn(f'could not generate station key {key}: {exc} — '
-                 'hs-uploader will self-generate on first upload')
-            return
-    try:
-        pubkey = pub.read_text().strip()
-    except OSError:
+    key_path, pubkey = psws.ensure_station_key()
+    if not pubkey:
+        warn(f'could not generate station key {key_path} — '
+             'hs-uploader will self-generate on first upload')
+        return
+    if not psws.install_motd_hook():
+        warn(f'could not install {psws.MOTD_HOOK} (login reminder) — '
+             'enrollment still works via `smd psws enroll/verify`')
+    if psws.is_verified(profile.psws_station_id):
         return
     print()
     info(f'REGISTER this public key for station {profile.psws_station_id} '
          f'at {psws.PSWS_PORTAL}:')
     print(f'    {pubkey}')
+    info('then confirm the handshake with:  smd psws verify')
 
 
 def _patch_station_block(path: Path, station: Station) -> None:
