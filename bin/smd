@@ -1416,9 +1416,15 @@ def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False) -> bool:
         _info('  The frpc tunnel will connect on its next retry (≤30 s).')
         return True
     except Exception as exc:
-        _warn(f'bootstrap: FTP upload failed: {exc}')
-        _warn('  Tunnel will retry — registration will complete after the first spot upload.')
-        return False   # non-fatal: frpc retries; registration completes via spot upload
+        _err(f'bootstrap: registration upload to {ftp_server} FAILED: {exc}')
+        _err('  The gateway does not know this station\'s SSH key — the RAC '
+             'tunnel cannot come up until it is registered.')
+        _warn('  Fix: re-run  smd admin rac install  when the network allows '
+              'FTP (a spot-uploading station also self-registers on its '
+              'first upload),')
+        _warn(f'  or send this public key ({pub_path}) to the WsprDaemon admin:')
+        _info(f'    {pubkey}')
+        return False   # non-fatal to the rest of the install; frpc retries
 
 
 def _fetch_frps_ca_cert(dry_run: bool = False) -> bool:
