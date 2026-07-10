@@ -713,15 +713,30 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
 # ka9q-web and its onion dependency are native C builds (cmake/make).  A fresh
 # host may lack the toolchain, so ensure it up front rather than dying with a
 # cryptic FileNotFoundError on `cmake` mid-build.
-_NATIVE_BUILD_DEPS = ['cmake', 'build-essential', 'libssl-dev', 'pkg-config']
+# libgnutls28-dev + libgcrypt20-dev are load-bearing beyond TLS: onion
+# computes the websocket Sec-WebSocket-Accept SHA1 via gnutls/gcrypt and
+# ABORTS the process at runtime when compiled without them (cmake's
+# ONION_USE_SSL=ON silently degrades if either dev package is absent at
+# configure time — GCRYPT_LIBRARY-NOTFOUND still "succeeds").
+_NATIVE_BUILD_DEPS = ['cmake', 'build-essential', 'libssl-dev',
+                      'libgnutls28-dev', 'libgcrypt20-dev', 'pkg-config']
 
 
 def _ensure_native_build_deps(label: str = 'build') -> bool:
     """Ensure the apt toolchain for native C builds (cmake, a C compiler,
-    pkg-config, SSL headers) is present; install it via apt-get if not.
-    Returns False only when it's missing AND can't be installed."""
+    pkg-config, SSL/gnutls/gcrypt headers) is present; install it via
+    apt-get if not.  Returns False only when it's missing AND can't be
+    installed."""
+    def _have_crypto_headers() -> bool:
+        for pc in ('gnutls', 'libgcrypt'):
+            r = subprocess.run(['pkg-config', '--exists', pc],
+                               capture_output=True)
+            if r.returncode != 0:
+                return False
+        return True
     if (shutil.which('cmake') and shutil.which('pkg-config')
-            and (shutil.which('cc') or shutil.which('gcc'))):
+            and (shutil.which('cc') or shutil.which('gcc'))
+            and _have_crypto_headers()):
         return True
     apt = shutil.which('apt-get')
     if not apt:
@@ -740,9 +755,20 @@ def _ensure_native_build_deps(label: str = 'build') -> bool:
 
 
 def _build_onion(src_dir: Path) -> bool:
-    if Path('/usr/local/lib/libonion.so').exists():
-        _ok('onion: already installed')
-        return True
+    lib = Path('/usr/local/lib/libonion.so')
+    if lib.exists():
+        # A libonion built without gnutls cannot do websocket handshakes —
+        # the first ws upgrade crashes the whole server ("Cant calculate
+        # SHA1 if gnutls is not compiled in! Aborting", observed on Shack2
+        # 2026-07-10).  Treat such a build as stale and rebuild now that
+        # _ensure_native_build_deps guarantees the gnutls headers.
+        r = _run(['ldd', str(lib)])
+        if 'gnutls' in (r.stdout or ''):
+            _ok('onion: already installed (gnutls-linked)')
+            return True
+        _warn('onion: installed libonion lacks gnutls — websocket upgrades '
+              'would crash ka9q-web; rebuilding')
+        _run(['rm', '-rf', str(src_dir / 'build')], sudo=True)
     build_dir = src_dir / 'build'
     build_dir.mkdir(exist_ok=True)
     _info('Configuring onion ...')
@@ -8365,11 +8391,19 @@ def _render_source_block(key_str: str,
                          status_address: str,
                          label: str = "") -> str:
     """Format one ``[[source]]`` TOML table for the wspr-recorder
-    config schema (matches ``wspr_recorder.config.load_config``)."""
+    config schema (matches ``wspr_recorder.config.load_config``).
+
+    The recorder's loader takes the address from the ``status`` key
+    (its internal dataclass field is named status_address, but the
+    TOML surface is ``status``) and SKIPS any block without it — a
+    block rendered with a ``status_address`` key is silently ignored
+    and the recorder falls back to the legacy [radiod] section
+    (observed on Shack2 2026-07-10).
+    """
     lines = [
         "[[source]]",
         f'key = "{key_str}"',
-        f'status_address = "{status_address}"',
+        f'status = "{status_address}"',
     ]
     if label:
         # Escape any embedded double quotes so the operator-edited
