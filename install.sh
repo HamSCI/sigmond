@@ -82,7 +82,28 @@ SUDOERS_DROPIN="/etc/sudoers.d/sigmond-nopasswd"
 if [[ $EUID -eq 0 ]]; then
     SUDO=""
     ok "running as root — sudo not required"
-elif sudo -n true 2>/dev/null; then
+    # Invoked via `sudo ./install.sh`: the invoking user still needs the
+    # NOPASSWD drop-in for every later `smd` operation.  We are already
+    # root, so write it now — no prompt needed.
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" \
+          && ! -f "$SUDOERS_DROPIN" ]]; then
+        _tmp="$(mktemp /etc/sudoers.d/.sigmond-nopasswd.XXXXXX)" \
+            || die "couldn't create temp sudoers file"
+        printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$SUDO_USER" > "$_tmp"
+        chmod 440 "$_tmp"
+        if visudo -c -f "$_tmp" >/dev/null 2>&1; then
+            mv "$_tmp" "$SUDOERS_DROPIN"
+            ok "passwordless sudo configured for '$SUDO_USER' at $SUDOERS_DROPIN"
+        else
+            rm -f "$_tmp"
+            warn "sudoers validation failed — drop-in not installed"
+        fi
+    fi
+# `-k` makes this probe ignore cached sudo credentials: a bare `sudo -n true`
+# also succeeds for ~15 min after any earlier sudo command (e.g. the
+# runbook's own `sudo mkdir/chown/git clone` steps), which used to skip the
+# drop-in and leave every later `smd` operation prompting for a password.
+elif sudo -k -n true 2>/dev/null; then
     SUDO="sudo"
     ok "passwordless sudo already active for '$INVOKER'"
 else
@@ -137,7 +158,7 @@ EOF
     fi
     sudo mv "$_tmp" "$SUDOERS_DROPIN"
 
-    if ! sudo -n true 2>/dev/null; then
+    if ! sudo -k -n true 2>/dev/null; then
         die "drop-in installed but passwordless sudo still inactive —
        check: sudo cat $SUDOERS_DROPIN  &&  sudo -nl"
     fi
@@ -333,6 +354,27 @@ if ! command -v git &>/dev/null; then
     _pkg_install git
 fi
 ok "git: $(git --version)"
+
+# ─── core operator tools (curl, tmux, btop) ──────────────────────────────────
+# Minimal server images (Ubuntu 24.04 among them) ship without curl.  curl is
+# load-bearing for sigmond (RAC key registration, ad-hoc fetches in docs and
+# component installs); tmux and btop are the fleet-standard session manager
+# and process monitor every operator/support session assumes.  Install any
+# that are missing; a distro without one of them (e.g. btop on older
+# releases) degrades to a warning, not a failed install.
+for _tool in curl tmux btop; do
+    if command -v "$_tool" &>/dev/null; then
+        ok "$_tool: present"
+        continue
+    fi
+    info "Installing $_tool…"
+    if _pkg_install "$_tool"; then
+        ok "$_tool: installed"
+    else
+        warn "$_tool could not be installed via $_PKG_MGR — install it manually"
+    fi
+done
+unset _tool
 
 # ─── avahi-browse (mDNS discovery) ───────────────────────────────────────────
 # sigmond's discovery/mdns.py and ka9q-python's discover_radiod_services
