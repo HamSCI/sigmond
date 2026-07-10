@@ -1448,6 +1448,25 @@ def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False,
         return False   # non-fatal to the rest of the install; frpc retries
 
 
+def _station_reporter_id() -> str:
+    """The station's configured reporter ID — the unique identity it uploads
+    to wsprnet.org under, and therefore the identity for everything
+    gateway-facing (RAC included).  Site-wide STATION_REPORTER_ID wins over
+    the [host] callsign.  Returns '' when identity is not configured yet.
+    """
+    vals = {}
+    try:
+        for line in Path('/etc/sigmond/coordination.env').read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, _, v = line.partition('=')
+            vals[k.strip()] = v.strip().strip('"\'')
+    except OSError:
+        return ''
+    return vals.get('STATION_REPORTER_ID') or vals.get('STATION_CALL') or ''
+
+
 def _rac_register(cli_rac_id=None, force: bool = False) -> int:
     """``smd admin rac register`` — ensure the station SSH keypair exists and
     its public key is registered on the gateway (idempotent via the marker).
@@ -1455,18 +1474,25 @@ def _rac_register(cli_rac_id=None, force: bool = False) -> int:
     This is the one entry point for greenfield self-registration:
     sigmond-rac/install.sh delegates here after rendering the template, so a
     fresh host's tunnel can come up without the admin hand-installing keys.
+
+    The identity registered is the station's REPORTER ID, exactly — reporter
+    ids are already fleet-unique (wsprnet.org identity), so no host/instance
+    suffix.  The configured identity is consulted before any name found in
+    frpc.toml, which may carry an unconfigured template default; with no
+    identity at all we refuse rather than invent a gateway account.
     """
     if _need_root('rac register'):
         return 1
-    rac_id = (cli_rac_id or '').strip()
+    rac_id = (cli_rac_id or '').strip() or _station_reporter_id()
     if not rac_id:
         stored_id, _ = _read_rac_topology(_load_topology(TOPOLOGY_PATH))
         rac_id = stored_id or _read_rac_frpc()[0] or _detect_rac_defaults()[0]
     if not rac_id:
-        import socket
-        rac_id = socket.gethostname().split('.')[0]
-        _warn(f'rac register: no receiver identity found — using host name '
-              f'{rac_id!r} as the reporter id (override with --id)')
+        _err('rac register: the station reporter ID is not configured — '
+             'refusing to register a made-up identity on the gateway.')
+        _info('  Configure identity first (smd config identity, or the TUI '
+              'Configuration screen), then re-run:  smd admin rac register')
+        return 1
     if not _ensure_frpc_keypair():
         return 1
     return 0 if _bootstrap_rac_registration(rac_id, force=force) else 1
@@ -15570,8 +15596,8 @@ def main() -> int:
     )
     p_rac_register.add_argument(
         '--id', dest='rac_id', metavar='ID', default=None,
-        help='reporter id to register (default: detected receiver id, '
-             'else this host name)',
+        help='reporter ID to register (default: the configured station '
+             'reporter ID; errors when no identity is configured)',
     )
     p_rac_register.add_argument(
         '--force', '-f', action='store_true',
