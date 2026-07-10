@@ -1347,7 +1347,11 @@ def _frpc_user_field() -> str:
     return hashlib.sha256(pub.read_bytes()).hexdigest()[:16]
 
 
-def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False) -> bool:
+_RAC_REG_MARKER = Path('/etc/sigmond/.rac-registered')  # sha256[:16] of last-registered pubkey
+
+
+def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False,
+                                force: bool = False) -> bool:
     """Upload a spots-free .tbz to the gateway FTP so the server auto-provisions
     the station's SFTP/frpc account before any spots have been sent.
 
@@ -1359,10 +1363,13 @@ def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False) -> bool:
     the reporter, and adds the public key to authorized_keys — making the frps
     auth plugin accept the frpc connection on the next attempt.
 
+    Idempotent: a marker file records the fingerprint of the last key
+    registered, so re-installs don't re-upload (``force`` overrides).
+
     FTP is used here because SFTP requires the account to already exist.
     FTP accepts anonymous uploads (noisegraphs:xahFie6g) on gw2 only.
     """
-    import ftplib, io, tarfile, time as _time
+    import ftplib, hashlib, io, tarfile, time as _time
 
     pub_path = _find_wd_pubkey() or Path(str(_FRPC_KEY) + '.pub')
     if not pub_path.exists():
@@ -1370,6 +1377,15 @@ def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False) -> bool:
         return False
 
     pubkey   = pub_path.read_text().strip()
+    key_fp   = hashlib.sha256(pub_path.read_bytes()).hexdigest()[:16]
+    if not force and _RAC_REG_MARKER.exists():
+        try:
+            if _RAC_REG_MARKER.read_text().strip() == key_fp:
+                _ok(f'bootstrap: key already registered on gateway '
+                    f'(marker {_RAC_REG_MARKER}; --force re-uploads)')
+                return True
+        except OSError:
+            pass
     upload_id = rac_id.replace('/', '_')
     ts        = _time.strftime('%y%m%d_%H%M_%S', _time.gmtime())
     tar_name  = f'{upload_id}_{ts}.tbz'
@@ -1414,6 +1430,11 @@ def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False) -> bool:
         _ok(f'bootstrap: registration uploaded  →  {ftp_server}/upload/{tar_name}')
         _info('  Server will create the gateway account and authorize the SSH key.')
         _info('  The frpc tunnel will connect on its next retry (≤30 s).')
+        # Record what was registered so re-installs skip the re-upload.
+        try:
+            _RAC_REG_MARKER.write_text(key_fp + '\n')
+        except OSError as exc:
+            _warn(f'bootstrap: could not write {_RAC_REG_MARKER}: {exc}')
         return True
     except Exception as exc:
         _err(f'bootstrap: registration upload to {ftp_server} FAILED: {exc}')
@@ -1425,6 +1446,30 @@ def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False) -> bool:
         _warn(f'  or send this public key ({pub_path}) to the WsprDaemon admin:')
         _info(f'    {pubkey}')
         return False   # non-fatal to the rest of the install; frpc retries
+
+
+def _rac_register(cli_rac_id=None, force: bool = False) -> int:
+    """``smd admin rac register`` — ensure the station SSH keypair exists and
+    its public key is registered on the gateway (idempotent via the marker).
+
+    This is the one entry point for greenfield self-registration:
+    sigmond-rac/install.sh delegates here after rendering the template, so a
+    fresh host's tunnel can come up without the admin hand-installing keys.
+    """
+    if _need_root('rac register'):
+        return 1
+    rac_id = (cli_rac_id or '').strip()
+    if not rac_id:
+        stored_id, _ = _read_rac_topology(_load_topology(TOPOLOGY_PATH))
+        rac_id = stored_id or _read_rac_frpc()[0] or _detect_rac_defaults()[0]
+    if not rac_id:
+        import socket
+        rac_id = socket.gethostname().split('.')[0]
+        _warn(f'rac register: no receiver identity found — using host name '
+              f'{rac_id!r} as the reporter id (override with --id)')
+    if not _ensure_frpc_keypair():
+        return 1
+    return 0 if _bootstrap_rac_registration(rac_id, force=force) else 1
 
 
 def _fetch_frps_ca_cert(dry_run: bool = False) -> bool:
@@ -1978,6 +2023,10 @@ def cmd_rac(args) -> int:
 
     if action == 'status':
         return _rac_show_status()
+
+    if action == 'register':
+        return _rac_register(getattr(args, 'rac_id', None),
+                             force=getattr(args, 'force', False))
 
     if action in ('install', 'configure', 'reconfigure'):
         # install: prompt only missing values.  (re)configure: re-prompt both.
@@ -15512,6 +15561,21 @@ def main() -> int:
     )
     rac_sub.add_parser(
         'restart', help='restart wd-rac.service (elevates automatically)',
+    )
+    p_rac_register = rac_sub.add_parser(
+        'register',
+        help='ensure the station SSH keypair exists and its public key is '
+             'registered on the gateway (idempotent — used by '
+             'sigmond-rac/install.sh for greenfield self-registration)',
+    )
+    p_rac_register.add_argument(
+        '--id', dest='rac_id', metavar='ID', default=None,
+        help='reporter id to register (default: detected receiver id, '
+             'else this host name)',
+    )
+    p_rac_register.add_argument(
+        '--force', '-f', action='store_true',
+        help='re-upload even when the marker says this key is registered',
     )
     rac_sub.add_parser('help', help='show this help')
     def _add_rac_provision_args(p):
