@@ -355,14 +355,15 @@ if ! command -v git &>/dev/null; then
 fi
 ok "git: $(git --version)"
 
-# ─── core operator tools (curl, tmux, btop) ──────────────────────────────────
-# Minimal server images (Ubuntu 24.04 among them) ship without curl.  curl is
-# load-bearing for sigmond (RAC key registration, ad-hoc fetches in docs and
-# component installs); tmux and btop are the fleet-standard session manager
-# and process monitor every operator/support session assumes.  Install any
-# that are missing; a distro without one of them (e.g. btop on older
-# releases) degrades to a warning, not a failed install.
-for _tool in curl tmux btop; do
+# ─── core operator tools (curl, tmux, btop, vim) ─────────────────────────────
+# Minimal server images (Ubuntu 24.04 among them) ship without curl and with
+# only vim-tiny.  curl is load-bearing for sigmond (RAC key registration,
+# ad-hoc fetches in docs and component installs); tmux, btop, and full vim
+# are the fleet-standard session manager, process monitor, and editor every
+# operator/support session assumes.  Install any that are missing; a distro
+# without one of them (e.g. btop on older releases) degrades to a warning,
+# not a failed install.
+for _tool in curl tmux btop vim; do
     if command -v "$_tool" &>/dev/null; then
         ok "$_tool: present"
         continue
@@ -375,6 +376,32 @@ for _tool in curl tmux btop; do
     fi
 done
 unset _tool
+
+# ─── tmux mouse support for the operator ─────────────────────────────────────
+# Support sessions run inside tmux; mouse mode (scroll, pane select, resize)
+# is the fleet convention.  Ensure the invoking user's ~/.tmux.conf turns it
+# on — append rather than overwrite, and leave any existing mouse setting
+# (on or off) alone: an operator who deliberately disabled it stays in
+# charge of their own config.
+_invoker_home="$(getent passwd "$INVOKER" | cut -d: -f6)"
+if [[ -n "$_invoker_home" && -d "$_invoker_home" ]]; then
+    _tmux_conf="$_invoker_home/.tmux.conf"
+    if ! grep -Eq '^[[:space:]]*set(-option)?[[:space:]]+(-g[[:space:]]+)?mouse[[:space:]]' \
+            "$_tmux_conf" 2>/dev/null; then
+        {
+            echo '# added by sigmond install.sh — tmux mouse support'
+            echo 'set -g mouse on'
+        } >> "$_tmux_conf"
+        # When running as root (sudo ./install.sh) a freshly created file
+        # must still belong to the operator.
+        [[ $EUID -eq 0 ]] && chown "$INVOKER": "$_tmux_conf" || true
+        ok "tmux: enabled mouse support in $_tmux_conf"
+    else
+        ok "tmux: mouse setting already present in $_tmux_conf"
+    fi
+    unset _tmux_conf
+fi
+unset _invoker_home
 
 # ─── avahi-browse (mDNS discovery) ───────────────────────────────────────────
 # sigmond's discovery/mdns.py and ka9q-python's discover_radiod_services
