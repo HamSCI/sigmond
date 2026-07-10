@@ -2191,6 +2191,47 @@ def _install_timing_watchdog(sigmond_dir: Path) -> bool:
     return ok
 
 
+def _install_radiod_watchdog(sigmond_dir: Path) -> bool:
+    """Deploy the radiod watchdog (script + units) and enable its 2-min timer.
+
+    Restarts a radiod instance that is 'active' but wedged — on an RX888
+    USB stall radiod logs "No rx888 data ... quitting" then hangs in
+    libusb shutdown, so systemd's Restart= never fires and the station
+    silently loses every consumer until a human notices (Shack2 lost two
+    multi-hour stretches to this on 2026-07-10/11).  Same packaging as
+    the timing watchdog; harmless on hosts with no radiod (no-op)."""
+    script = sigmond_dir / 'bin' / 'sigmond-radiod-watchdog'
+    if not script.exists():
+        return True
+    ok = _symlink(script, Path('/usr/local/bin/sigmond-radiod-watchdog'),
+                  'radiod-watchdog')
+    changed = False
+    for name in ('sigmond-radiod-watchdog.service',
+                 'sigmond-radiod-watchdog.timer'):
+        src = sigmond_dir / 'systemd' / name
+        if not src.exists():
+            continue
+        dst = Path('/etc/systemd/system') / name
+        if dst.is_symlink() and dst.resolve() == src.resolve():
+            continue
+        r = _run(['ln', '-sf', str(src.resolve()), str(dst)], sudo=True)
+        if r.returncode != 0:
+            _err(f'radiod-watchdog: could not symlink {name}: {r.stderr.strip()}')
+            ok = False
+        else:
+            changed = True
+    if changed:
+        _run(['systemctl', 'daemon-reload'], sudo=True)
+    r = _run(['systemctl', 'enable', '--now',
+              'sigmond-radiod-watchdog.timer'], sudo=True)
+    if r.returncode == 0:
+        _ok('radiod-watchdog: timer enabled (restarts a wedged radiod)')
+    else:
+        _err(f'radiod-watchdog: enable failed: {r.stderr.strip()}')
+        ok = False
+    return ok
+
+
 def _install_wrapper_scripts(client_dir: Path) -> None:
     sbin = Path('/usr/local/sbin')
     scripts = ['wd-ka9q-record', 'wd-kiwi-record', 'wd-kiwi-cleanup',
@@ -3570,6 +3611,7 @@ def _install_full_suite(args) -> int:
     sigmond_dir = Path(__file__).resolve().parent.parent
     _install_smd_itself(sigmond_dir, smd_bin)
     _install_timing_watchdog(sigmond_dir)
+    _install_radiod_watchdog(sigmond_dir)
     if not _ensure_sigmond_venv():
         _warn('TUI venv setup failed — smd tui will not work')
         errors += 1

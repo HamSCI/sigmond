@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the sigmond radiod watchdog every 2 minutes
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

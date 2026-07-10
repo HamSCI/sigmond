@@ -1,0 +1,7 @@
+[Unit]
+Description=sigmond radiod watchdog — restart a wedged radiod (USB-stall zombie)
+Documentation=https://github.com/HamSCI/sigmond
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sigmond-radiod-watchdog
