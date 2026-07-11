@@ -103,13 +103,53 @@ def _mark_restarted(unit: str, now: float) -> None:
     (STATE_DIR / f'{unit}.last-restart').write_text(f'{now}\n')
 
 
+# USB ids to hard-reset between stop and start.  A plain restart leaves
+# the RX888's FX3 in a stale streaming state and the next radiod start
+# trips the driver's 5 s no-data timeout ("No rx888 data ... quitting"),
+# re-creating the very condition the watchdog fired on — every plain
+# restart on Shack2 2026-07-11 stalled this way, while starts following
+# a USBDEVFS_RESET (or a re-plug) came up clean.
+RESET_USB_IDS = [s.strip() for s in
+                 os.environ.get('RWD_USB_RESET_IDS', '04b4:00f1').split(',')
+                 if s.strip()]
+_USBDEVFS_RESET = 21780
+
+
+def _reset_usb_devices() -> None:
+    import fcntl
+    root = Path('/sys/bus/usb/devices')
+    for dev in root.glob('*'):
+        try:
+            vid = (dev / 'idVendor').read_text().strip()
+            pid = (dev / 'idProduct').read_text().strip()
+        except OSError:
+            continue
+        if f'{vid}:{pid}' not in RESET_USB_IDS:
+            continue
+        try:
+            bus = int((dev / 'busnum').read_text())
+            num = int((dev / 'devnum').read_text())
+            node = f'/dev/bus/usb/{bus:03d}/{num:03d}'
+            with open(node, 'wb') as f:
+                fcntl.ioctl(f, _USBDEVFS_RESET, 0)
+            print(f'  usb-reset {vid}:{pid} at {node}')
+        except OSError as exc:
+            # A device that dropped off and re-enumerated mid-walk is fine —
+            # the disconnect itself is the reset.
+            print(f'  usb-reset {vid}:{pid}: {exc} (continuing)')
+
+
 def _restart(unit: str, reason: str, now: float) -> None:
     print(f'{unit}: {reason} — '
           f'{"DRY-RUN (would restart)" if DRY_RUN else "restarting"}')
     if DRY_RUN:
         return
     _mark_restarted(unit, now)
-    _run(['systemctl', 'restart', unit])
+    # stop → USB reset → settle → start: see RESET_USB_IDS above.
+    _run(['systemctl', 'stop', unit])
+    _reset_usb_devices()
+    time.sleep(3)
+    _run(['systemctl', 'start', unit])
 
 
 def check_unit(unit: str, now: float) -> None:
@@ -129,18 +169,21 @@ def check_unit(unit: str, now: float) -> None:
     quit_ts = max((_line_ts(l) for l in lines if QUIT_RE.search(l)),
                   default=0.0)
 
-    # Detector 1: declared quitting AND has logged nothing since for the
-    # grace window — a hung shutdown.  The quitting line alone is NOT
-    # evidence of a wedge: radiod can log it on a startup transient (no
-    # data for the first seconds after a restart) and then recover, with
-    # sample-rate lines resuming.  Restarting on the line alone makes the
-    # watchdog itself the outage: each restart re-triggers the startup
-    # transient and the loop repeats every cooldown interval (observed on
-    # Shack2 2026-07-11, exact 10-min periodicity).  Requiring silence
-    # since the quitting line distinguishes hung from recovered.
-    if quit_ts and now - last > GRACE_SEC:
-        _restart(unit, 'declared "no rx888 data, quitting" and silent for '
-                       f'{int(now - last)}s (hung shutdown)', now)
+    # Detector 1: declared quitting but still active past the grace
+    # window.  A radiod that logged the quitting line is ALWAYS
+    # compromised, even when sample-rate logging resumes: the rx888
+    # thread's shutdown tears down the control/status plane, so the
+    # process streams on half-alive with every consumer's channel
+    # commands going unanswered (observed on Shack2 2026-07-10 22:10 —
+    # 2 h of sample-rate lines with dead control — and again on every
+    # post-restart instance of 2026-07-11).  Do NOT require log silence
+    # here; the restart path below resets the USB device so the next
+    # start doesn't re-trip the 5 s no-data transient that caused the
+    # earlier restart loop.
+    if quit_ts and now - quit_ts > GRACE_SEC:
+        _restart(unit, 'declared "no rx888 data, quitting" '
+                       f'{int(now - quit_ts)}s ago but still active '
+                       '(half-alive: control plane down)', now)
         return
 
     # Detector 2: total log silence from a long-running unit.
