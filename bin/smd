@@ -2232,6 +2232,60 @@ def _install_radiod_watchdog(sigmond_dir: Path) -> bool:
     return ok
 
 
+def _install_loopback_multicast_route(sigmond_dir: Path) -> bool:
+    """Route 239.0.0.0/8 via loopback on single-host stations.
+
+    ka9q's ttl=0 model keeps every stream on-host, but the kernel still
+    routes multicast sends out the default interface — on a WiFi-only
+    host (Shack2) that ties the whole radiod→consumer path to wlp4s0's
+    up-state and hides the traffic from `tcpdump -i lo` (classic
+    wsprdaemon installs add this exact route; sigmond never did).
+    Installs + enables sigmond-loopback-multicast.service (idempotent
+    `ip route replace`), and applies the route immediately.
+
+    Skipped when coordination declares any NON-local radiod: sends to a
+    remote radiod's control group would be swallowed by a blanket
+    239/8→lo route, so multi-host topologies must manage multicast
+    routing per-site instead.
+    """
+    coord = Path('/etc/sigmond/coordination.toml')
+    if coord.exists():
+        try:
+            import tomllib as _toml
+            import socket as _sock
+            with open(coord, 'rb') as f:
+                data = _toml.load(f)
+            host_short = _sock.gethostname().split('.')[0]
+            local_hosts = {'', 'localhost', '127.0.0.1', '::1',
+                           _sock.gethostname(), host_short}
+            for inst, cfg in (data.get('radiod') or {}).items():
+                if str((cfg or {}).get('host', '')).strip() not in local_hosts:
+                    _info('loopback-multicast: coordination declares remote '
+                          f'radiod {inst!r} — skipping the 239/8→lo route '
+                          '(multi-host topology)')
+                    return True
+        except Exception:
+            pass                      # unreadable coordination → treat as local
+    src = sigmond_dir / 'systemd' / 'sigmond-loopback-multicast.service'
+    if not src.exists():
+        return True
+    dst = Path('/etc/systemd/system/sigmond-loopback-multicast.service')
+    if not (dst.is_symlink() and dst.resolve() == src.resolve()):
+        r = _run(['ln', '-sf', str(src.resolve()), str(dst)], sudo=True)
+        if r.returncode != 0:
+            _err(f'loopback-multicast: symlink failed: {r.stderr.strip()}')
+            return False
+        _run(['systemctl', 'daemon-reload'], sudo=True)
+    r = _run(['systemctl', 'enable', '--now',
+              'sigmond-loopback-multicast.service'], sudo=True)
+    if r.returncode == 0:
+        _ok('loopback-multicast: 239.0.0.0/8 routed via lo '
+            '(on-host radiod delivery independent of the LAN link)')
+        return True
+    _err(f'loopback-multicast: enable failed: {r.stderr.strip()}')
+    return False
+
+
 def _install_wrapper_scripts(client_dir: Path) -> None:
     sbin = Path('/usr/local/sbin')
     scripts = ['wd-ka9q-record', 'wd-kiwi-record', 'wd-kiwi-cleanup',
@@ -3612,6 +3666,7 @@ def _install_full_suite(args) -> int:
     _install_smd_itself(sigmond_dir, smd_bin)
     _install_timing_watchdog(sigmond_dir)
     _install_radiod_watchdog(sigmond_dir)
+    _install_loopback_multicast_route(sigmond_dir)
     if not _ensure_sigmond_venv():
         _warn('TUI venv setup failed — smd tui will not work')
         errors += 1

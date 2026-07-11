@@ -1,0 +1,17 @@
+[Unit]
+Description=Route site-local multicast (239.0.0.0/8) via loopback for on-host radiod delivery
+Documentation=https://github.com/HamSCI/sigmond
+# Only lo is needed; run before radiod and the recorders come up so their
+# first sends already take the loopback path.
+DefaultDependencies=no
+After=systemd-sysctl.service
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ip link set lo multicast on
+ExecStart=/usr/sbin/ip route replace 239.0.0.0/8 dev lo
+
+[Install]
+WantedBy=multi-user.target
