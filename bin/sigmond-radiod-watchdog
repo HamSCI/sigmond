@@ -125,17 +125,25 @@ def check_unit(unit: str, now: float) -> None:
         return
 
     lines = _journal_since_invocation(unit, inv_id)
+    last = max((_line_ts(l) for l in lines), default=active_since)
+    quit_ts = max((_line_ts(l) for l in lines if QUIT_RE.search(l)),
+                  default=0.0)
 
-    # Detector 1: declared quitting but still active past the grace window.
-    for line in lines:
-        if QUIT_RE.search(line) and now - _line_ts(line) > GRACE_SEC:
-            _restart(unit, 'declared "no rx888 data, quitting" '
-                           f'{int(now - _line_ts(line))}s ago but still '
-                           'active (hung shutdown)', now)
-            return
+    # Detector 1: declared quitting AND has logged nothing since for the
+    # grace window — a hung shutdown.  The quitting line alone is NOT
+    # evidence of a wedge: radiod can log it on a startup transient (no
+    # data for the first seconds after a restart) and then recover, with
+    # sample-rate lines resuming.  Restarting on the line alone makes the
+    # watchdog itself the outage: each restart re-triggers the startup
+    # transient and the loop repeats every cooldown interval (observed on
+    # Shack2 2026-07-11, exact 10-min periodicity).  Requiring silence
+    # since the quitting line distinguishes hung from recovered.
+    if quit_ts and now - last > GRACE_SEC:
+        _restart(unit, 'declared "no rx888 data, quitting" and silent for '
+                       f'{int(now - last)}s (hung shutdown)', now)
+        return
 
     # Detector 2: total log silence from a long-running unit.
-    last = max((_line_ts(l) for l in lines), default=active_since)
     if now - last > SILENCE_SEC:
         _restart(unit, f'no journal output for {int(now - last)}s '
                        '(heartbeat lost)', now)
