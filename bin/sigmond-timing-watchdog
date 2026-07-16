@@ -41,6 +41,13 @@ DRY_RUN    = os.environ.get("TWD_DRY_RUN", "0").lower() in ("1","true","yes","on
 # dt-drift detector
 DT_DRIFT   = float(os.environ.get("TWD_DT_DRIFT_SEC", "1.2"))  # FT8 dt divergence from peer median
 DT_ABS     = float(os.environ.get("TWD_DT_ABS_SEC", "2.5"))    # single-instance fallback (no peers)
+# Single-instance persistent-moderate gate: chronic radiod output-stall walks
+# plateau just UNDER DT_ABS and sit there for hours (B4 observed -1.9s on
+# 2026-07-15 and -2.0s on 2026-07-16 — both under the 2.5 gate, both real
+# anchor faults degrading FT8 yield).  |dt| beyond DT_PERSIST for
+# DT_PERSIST_RUNS consecutive runs (~90s apart) ⇒ drifted.
+DT_PERSIST      = float(os.environ.get("TWD_DT_PERSIST_SEC", "1.5"))
+DT_PERSIST_RUNS = int(os.environ.get("TWD_DT_PERSIST_RUNS", "4"))
 DT_MIN     = int(os.environ.get("TWD_DT_MIN_SPOTS", "15"))     # min FT8 spots to trust a dt-center
 SPOT_FRAC  = float(os.environ.get("TWD_SPOT_FRAC", "0.25"))    # yield must be <frac*peer-median to act
 SINK       = os.environ.get("TWD_SINK", "/var/lib/sigmond/sink.db")
@@ -209,18 +216,41 @@ def main():
     eligible=[i for i in inst if dt[i][0]>=DT_MIN and dt[i][1] is not None]
     peer_med_dt=_median([dt[i][1] for i in eligible])
     peer_med_n =_median([dt[i][0] for i in eligible])
-    drifted={}
+    drifted={}; drift_why={}
+    persist=state.get("dt_persist",{}) if isinstance(state.get("dt_persist"),dict) else {}
     for i in inst:
         n,c=dt[i]
         if n<DT_MIN or c is None:
             drifted[i]=False
+            persist[i]=0
         elif len(eligible)>=2 and peer_med_dt is not None:
             # drift must BOTH skew the dt-center AND collapse yield vs peers,
             # so a merely-different-but-fine chain delay isn't re-anchored.
             drifted[i]=(abs(c-peer_med_dt)>DT_DRIFT
                         and n < SPOT_FRAC*(peer_med_n or 0))
+            drift_why[i]=("FT8 dt-center %+.2fs drifted >%.1fs from peer median "
+                          "%+.2fs and yield %d<<peers (anchor stale)"
+                          % (c, DT_DRIFT, peer_med_dt or 0.0, n))
         else:
-            drifted[i]=abs(c)>DT_ABS
+            # Single-instance: no peers, so gate on ABSOLUTE dt vs true UTC
+            # (FT8 transmitters are UTC-aligned).  Two gates: a fast one at
+            # DT_ABS, and a persistent-moderate one for the chronic
+            # output-stall walks that plateau just under it.
+            runs=persist.get(i,0)+1 if abs(c)>DT_PERSIST else 0
+            persist[i]=runs
+            if abs(c)>DT_ABS:
+                drifted[i]=True
+                drift_why[i]=("FT8 dt-center %+.2fs beyond abs gate %.1fs "
+                              "(single-instance; anchor off true UTC)"
+                              % (c, DT_ABS))
+            elif runs>=DT_PERSIST_RUNS:
+                drifted[i]=True
+                drift_why[i]=("FT8 dt-center %+.2fs beyond %.1fs for %d "
+                              "consecutive runs (single-instance; persistent "
+                              "moderate anchor walk)"
+                              % (c, DT_PERSIST, runs))
+            else:
+                drifted[i]=False
     prev=set(state.get("drift_prev",[]))   # confirmed across 2 runs
 
     healthy=[i for i in inst if not broken[i] and not drifted[i]]
@@ -241,9 +271,7 @@ def main():
             print(f"timing-watchdog: {i} FT8=0 x{K_BROKEN} but no peer decoding and "
                   "no glitch -> likely dead band, NOT acting"); continue
         elif drifted[i] and i in prev:
-            reason=("FT8 dt-center %+.2fs drifted >%.1fs from peer median %+.2fs "
-                    "and yield %d<<peers (anchor stale)"
-                    % (dt[i][1], DT_DRIFT, peer_med_dt, dt[i][0]))
+            reason=drift_why.get(i, "FT8 dt-center drifted (anchor stale)")
         elif drifted[i]:
             print(f"timing-watchdog: {i} dt-drift {dt[i][1]:+.2f}s seen once -> "
                   "waiting for confirmation next run"); continue
@@ -261,6 +289,7 @@ def main():
         if not DRY_RUN:
             sh(["systemctl","restart",f"psk-recorder@{i}"])
             acted_at[i]=now; acted=True
+            persist[i]=0   # clean slate after the re-anchor
 
     # --- detector 3: WSPR yield collapsed vs peers (wspr-recorder) ---
     # Catches both dead (0) AND alive-but-degraded: a slow RTP-window drift
@@ -309,6 +338,7 @@ def main():
 
     state["acted"]=acted_at
     state["drift_prev"]=[i for i in inst if drifted[i]]
+    state["dt_persist"]=persist
     save_state(state)
     return 0
 
