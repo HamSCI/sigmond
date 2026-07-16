@@ -120,13 +120,24 @@ def ft8_dt(inst):
     try:
         con = sqlite3.connect(f"file:{SINK}?mode=ro", uri=True, timeout=5.0)
         try:
+            # Window by queued_at (server write time) + an indexed id range,
+            # NEVER by the payload's own '$.time': a timing-broken recorder
+            # writes wrong spot times (observed 2026-07-16: 1.19M rows dated
+            # up to +14 days by RTP wrap slips), so a '$.time' window either
+            # misses the faulty stream or drowns in its backlog — and the
+            # unindexed json scan took 47 s per run against a grown sink.
+            # The id range keeps the scan on the (target_db,target_table,id)
+            # index (~ms); 60k >> any real 8-min psk volume.
             n, avg_dt = con.execute(
                 "SELECT count(*), avg(json_extract(payload_json,'$.dt')) "
-                "FROM pending_uploads WHERE target_db='psk' AND target_table='spots' "
-                "AND json_extract(payload_json,'$.mode')='ft8' "
-                "AND json_extract(payload_json,'$.radiod_id')=? "
-                "AND json_extract(payload_json,'$.time')>?",
-                (rid, since)).fetchone()
+                "FROM (SELECT payload_json FROM pending_uploads "
+                "      WHERE target_db='psk' AND target_table='spots' "
+                "        AND id > (SELECT COALESCE(max(id),0) "
+                "                  FROM pending_uploads) - 60000 "
+                "        AND queued_at > ?) "
+                "WHERE json_extract(payload_json,'$.mode')='ft8' "
+                "  AND json_extract(payload_json,'$.radiod_id')=?",
+                (since, rid)).fetchone()
         finally:
             con.close()
         n = int(n or 0)
