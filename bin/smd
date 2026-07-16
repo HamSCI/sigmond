@@ -9576,8 +9576,12 @@ def _psk_watch_cycle_loop(
             cap = max_lines_per_mode
             # Blank line between consecutive slot blocks (one fire per
             # 15 s FT8 cadence) so each slot's receiver lines read as a
-            # distinct block.
-            if _prev_wall[0] is not None and _prev_wall[0] != wall:
+            # distinct block.  With a single receiver in summary mode each
+            # slot is ONE row, so the separator would blank-line every row —
+            # suppress it (same rationale as watch wspr, 5931457).  Detail
+            # mode keeps the separator: its slots are multi-line blocks.
+            if (len(receivers) > 1 or show_spots) \
+                    and _prev_wall[0] is not None and _prev_wall[0] != wall:
                 print(flush=True)
             _prev_wall[0] = wall
 
