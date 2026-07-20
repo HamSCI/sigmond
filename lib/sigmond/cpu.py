@@ -78,6 +78,16 @@ AFFINITY_UNITS = {
     'timestd-prune.service':             'other',
     'timestd-raw-cleanup.service':       'other',
     'grape-daily.service':               'other',
+    'grape-upload-retry.service':        'other',
+    'timestd-web-api.service':           'other',
+    # sibling uploader + decoders + our own watchdogs — found unconfined on
+    # B4-100 2026-07-20 (running on radiod's HT pair 0-1, the exact L1/L2
+    # cache contention that walks radiod's RTP output; radiod is
+    # cache-hit-rate limited, so ALL non-radiod work must stay off its pair).
+    'meteor-scatter@.service':           'other',
+    'hs-uploader.service':               'other',
+    'sigmond-timing-watchdog.service':   'other',
+    'sigmond-radiod-watchdog.service':   'other',
 }
 
 
