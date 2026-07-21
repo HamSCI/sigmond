@@ -9401,6 +9401,16 @@ def _psk_watch_cycle_loop(
 
     def _read_since(p: Path, start: int) -> tuple[int, list]:
         end = _file_size(p)
+        if end < start:
+            # File was truncated or recreated out from under us: a
+            # psk-recorder restart (e.g. the timing-watchdog re-anchor,
+            # which fires by design whenever the anchor walks) recreates
+            # <rx>-ft8.log, so our byte offset now points past the new
+            # file's EOF.  Without this we'd silently read nothing forever
+            # and show ft8=0 every slot while decoding is actually fine
+            # (observed 2026-07-21).  Resync to the new file's live end and
+            # resume on the next slot.
+            start = end
         if end <= start:
             return start, []
         try:
