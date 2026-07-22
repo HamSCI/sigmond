@@ -815,6 +815,10 @@ _WSJTX_REPO   = 'https://github.com/WSJTX/wsjtx.git'
 _WSJTX_TAG    = 'v3.0.2'
 _WSJTX_COMMIT = 'ccdfaf3c1c109010d15399674ce278167cfde848'   # v3.0.2 GA, 18 Jun 2026; B3-validated 2026-07-22
 _WSJTX_SRC    = Path('/opt/git/sigmond/wsjtx')      # sibling checkout, like /opt/git/sigmond/onion
+# jt9_decode: psk-recorder's resident FT8/FT4 decoder driver (a triggered-mode
+# fork of madpsy/jt9-decode), vendored in the psk-recorder checkout.  Built as a
+# cheap add-on to the WSJT-X toolchain (needs jt9 at runtime, Qt5Core at build).
+_JT9_DECODE_SRC = Path('/opt/git/sigmond/psk-recorder/vendor/jt9-decode')
 
 # Build provenance for upstream C projects sigmond builds itself (the
 # upstream-built analogue of native-binaries.md's committed .provenance
@@ -1127,6 +1131,7 @@ def _build_wsjtx_decoders() -> bool:
         try:
             if _WSJTX_COMMIT in marker.read_text():
                 _ok(f'wsjtx-decoders: already installed from {_WSJTX_TAG}')
+                _build_jt9_decode()   # best-effort; own idempotency + logging
                 return True
         except OSError:
             pass
@@ -1214,6 +1219,86 @@ def _build_wsjtx_decoders() -> bool:
          'pin': _WSJTX_COMMIT, 'sha': _git_head(src)},
     ], builder='_build_wsjtx_decoders')
     _ok('wsjtx-decoders: built and installed (jt9, wsprd → /usr/local/bin)')
+    # jt9_decode wrapper (psk-recorder's resident FT8/FT4 driver): a cheap C++
+    # add-on to the toolchain we just built.  Best-effort — a wrapper failure
+    # must not fail wspr-recorder, which needs only jt9/wsprd (both installed).
+    _build_jt9_decode()
+    return True
+
+
+def _build_jt9_decode() -> bool:
+    """Build the vendored jt9_decode wrapper — psk-recorder's resident FT8/FT4
+    decoder driver — and install to /usr/local/bin/jt9_decode.
+
+    A triggered-mode fork of madpsy/jt9-decode (GPLv3; it embeds WSJT-X's
+    commons.h and drives jt9 over WSJT-X's shmem protocol — provenance in the
+    source tree's PROVENANCE.md).  Needs jt9 (built by _build_wsjtx_decoders)
+    only at RUNTIME; at build time just Qt5Core + moc + a C++ compiler, so it is
+    a cheap add-on to that toolchain.  Skipped (returns True) when psk-recorder's
+    vendored source isn't checked out — e.g. a wspr-recorder-only host, which has
+    no use for it.  Built out-of-tree (in a tempdir) so the psk-recorder checkout
+    stays clean.  Idempotent via a marker keyed on the source hash.
+    """
+    import hashlib
+    import tempfile
+
+    src = _JT9_DECODE_SRC
+    binpath = Path('/usr/local/bin/jt9_decode')
+    if not (src / 'jt9_decode.cpp').exists():
+        _info('jt9_decode: vendored source absent — skipping '
+              '(only needed for psk-recorder jt9 decoding)')
+        return True
+
+    marker = Path('/usr/local/bin/.jt9_decode.provenance')
+    try:
+        h = hashlib.sha256()
+        for p in ('jt9_decode.cpp', 'Makefile', 'wsjtx/commons.h'):
+            h.update((src / p).read_bytes())
+        srchash = h.hexdigest()[:16]
+    except OSError:
+        srchash = ''
+    if binpath.exists() and srchash:
+        try:
+            if srchash in marker.read_text():
+                _ok('jt9_decode: already installed (source unchanged)')
+                return True
+        except OSError:
+            pass
+
+    _info('jt9_decode: installing build deps (Qt5Core + moc) ...')
+    r = _run(['apt-get', 'install', '-y', '--no-install-recommends',
+              'g++', 'make', 'pkg-config', 'qtbase5-dev', 'qtbase5-dev-tools'],
+             sudo=True)
+    if r.returncode != 0:
+        _warn(f'jt9_decode: build-dep install failed: {r.stderr.strip()}')
+        return False
+
+    build = Path(tempfile.mkdtemp(prefix='jt9_decode-'))
+    try:
+        for item in ('jt9_decode.cpp', 'Makefile', 'wsjtx'):
+            _run(['cp', '-r', str(src / item), str(build / item)], sudo=True)
+        _info('jt9_decode: building (make) ...')
+        r = _run(['make', '-C', str(build)], sudo=True)
+        if r.returncode != 0:
+            _warn(f'jt9_decode build failed: {r.stderr[-400:]}')
+            return False
+        _run(['install', '-m755', str(build / 'jt9_decode'), str(binpath)], sudo=True)
+    finally:
+        _run(['rm', '-rf', str(build)], sudo=True)
+
+    docdir = Path('/usr/local/share/doc/wsjtx-decoders-sigmond')
+    _run(['install', '-d', str(docdir)], sudo=True)
+    if (src / 'PROVENANCE.md').exists():
+        _run(['install', '-m644', str(src / 'PROVENANCE.md'),
+              str(docdir / 'jt9_decode-PROVENANCE.md')], sudo=True)
+    if srchash:
+        with tempfile.NamedTemporaryFile('w', delete=False) as tf:
+            tf.write(f'jt9_decode src={srchash} '
+                     '(triggered-mode fork of madpsy/jt9-decode)\n')
+            tmp = tf.name
+        _run(['install', '-m644', tmp, str(marker)], sudo=True)
+        os.unlink(tmp)
+    _ok('jt9_decode: built and installed (→ /usr/local/bin/jt9_decode)')
     return True
 
 
@@ -3683,8 +3768,12 @@ def _install_single_client(args) -> int:
     # from pinned WSJT-X source, optimized for this host, BEFORE install.sh —
     # the onion analogue (a from-source native dependency, not a catalog
     # component).  Idempotent, so a no-op on reinstalls once the pin is built.
-    if entry.name == 'wspr-recorder' and not _build_wsjtx_decoders():
-        _err('wspr-recorder: wsjtx-decoders (jt9/wsprd) build failed')
+    # psk-recorder is included so its jt9 decoder option (and the jt9_decode
+    # wrapper) is available regardless of install order.  NOTE (mjh): this makes
+    # every psk-recorder install build the WSJT-X toolchain even for the common
+    # decode_ft8 case — consider gating on the configured decoder_kind=jt9.
+    if entry.name in ('wspr-recorder', 'psk-recorder') and not _build_wsjtx_decoders():
+        _err(f'{entry.name}: wsjtx-decoders (jt9/wsprd/jt9_decode) build failed')
         return 1
 
     try:
@@ -3832,10 +3921,14 @@ def _install_full_suite(args) -> int:
         if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)):
             errors += 1
 
-    # --- 2c. wsjtx-decoders (jt9/wsprd, sigmond-native) — wspr-recorder's
-    # from-source dependency, built before its install.sh (onion analogue).
-    if any(getattr(e, 'name', None) == 'wspr-recorder' for e in catalog_queue):
-        _heading('wsjtx-decoders (jt9, wsprd — from pinned WSJT-X source)')
+    # --- 2c. wsjtx-decoders (jt9/wsprd + jt9_decode, sigmond-native) — the
+    # from-source decoder dependency, built before install.sh (onion analogue).
+    # wspr-recorder needs jt9/wsprd; psk-recorder's jt9 option needs jt9 +
+    # jt9_decode.  (mjh: consider gating the psk-recorder trigger on
+    # decoder_kind=jt9 so decode_ft8-only sites skip the WSJT-X build.)
+    if any(getattr(e, 'name', None) in ('wspr-recorder', 'psk-recorder')
+           for e in catalog_queue):
+        _heading('wsjtx-decoders (jt9, wsprd, jt9_decode — from pinned source)')
         if not _build_wsjtx_decoders():
             errors += 1
 
