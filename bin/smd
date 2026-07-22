@@ -804,6 +804,18 @@ _ONION_REPO   = 'https://github.com/davidmoreno/onion.git'
 _ONION_COMMIT = 'de8ea938342b36c28024fd8393ebc27b8442a161'   # master, build-validated 2026-06-01 (libonion.so.0.8.191)
 _ONION_SRC    = Path('/opt/git/sigmond/onion')      # sibling checkout (was /home/wsprdaemon/onion)
 
+# WSJT-X weak-signal DECODERS (jt9, wsprd) — wspr-recorder's from-source native
+# dependency, the onion analogue: sigmond builds them optimized for this host's
+# CPU and installs to /usr/local/bin (shadowing the generic Debian `wsjtx`
+# package), NOT a catalog component.  WSJT-X is GPLv3; building on-host from the
+# retained, pinned source keeps the corresponding source present, retains the
+# license, and marks our build-only modifications (see _build_wsjtx_decoders).
+# Pinned to a known-good commit (never a bare branch) per docs/native-binaries.md.
+_WSJTX_REPO   = 'https://github.com/WSJTX/wsjtx.git'
+_WSJTX_TAG    = 'v3.0.2'
+_WSJTX_COMMIT = 'ccdfaf3c1c109010d15399674ce278167cfde848'   # v3.0.2 GA, 18 Jun 2026; B3-validated 2026-07-22
+_WSJTX_SRC    = Path('/opt/git/sigmond/wsjtx')      # sibling checkout, like /opt/git/sigmond/onion
+
 # Build provenance for upstream C projects sigmond builds itself (the
 # upstream-built analogue of native-binaries.md's committed .provenance
 # sidecar, which we can't write into a repo we don't own).
@@ -1076,6 +1088,132 @@ def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
         {'name': 'onion', 'url': _ONION_REPO, 'ref': 'master',
          'pin': _ONION_COMMIT, 'sha': _git_head(onion_src)},
     ], builder='_build_ka9q_web_with_onion')
+    return True
+
+
+def _build_wsjtx_decoders() -> bool:
+    """Build the WSJT-X decoders (jt9, wsprd) from pinned upstream source,
+    optimized for this host's CPU, and install to /usr/local/bin — shadowing
+    the generic Debian `wsjtx` package binaries.
+
+    Treated like onion (a from-source native dependency, not a catalog
+    component): wspr-recorder runs `jt9` (FST4W) and `wsprd` (WSPR) by name off
+    PATH, and /usr/local/bin leads /usr/bin, so this shadow takes effect with no
+    binary-selection probe.  Two build-only changes vs upstream (marked in a
+    dated MODIFICATIONS note for GPLv3 §5): strip -fbounds-check from the release
+    Fortran flags (upstream ships debug bounds-checking in the optimized build)
+    and add -march=native -O3.  No decoder source logic is changed.  WSJT-X is
+    GPLv3; building on-host from the retained pinned source keeps the
+    corresponding source present and the license intact — cleaner than
+    redistributing a modified upstream binary.  Idempotent via the provenance
+    marker.  Measured gain (2026-07-22): ~1.5x on jt9 DEEP decode only; the case
+    is reproducibility / current-version (3.0.2 vs Debian 2.7.0) / licensing.
+    """
+    import tempfile
+
+    def _install_text(content: str, dest: Path, mode: str = '644') -> None:
+        # _run has no stdin-input path; stage the text then install as root.
+        with tempfile.NamedTemporaryFile('w', delete=False) as tf:
+            tf.write(content)
+            tmp = tf.name
+        _run(['install', f'-m{mode}', tmp, str(dest)], sudo=True)
+        os.unlink(tmp)
+
+    prefix = Path('/usr/local')
+    jt9, wsprd = prefix / 'bin' / 'jt9', prefix / 'bin' / 'wsprd'
+    marker = prefix / 'bin' / '.wsjtx-decoders.provenance'
+    # Idempotency: the installed build already matches this pin.
+    if jt9.exists() and wsprd.exists():
+        try:
+            if _WSJTX_COMMIT in marker.read_text():
+                _ok(f'wsjtx-decoders: already installed from {_WSJTX_TAG}')
+                return True
+        except OSError:
+            pass
+
+    if not _ensure_native_build_deps(label='wsjtx-decoders'):
+        return False
+    # WSJT-X cmake needs the full Qt5/boost/hamlib/fftw set beyond the base
+    # native toolchain (a superset of onion's deps).
+    _info('wsjtx-decoders: installing WSJT-X build deps ...')
+    r = _run(['apt-get', 'install', '-y', '--no-install-recommends',
+              'gfortran', 'qtbase5-dev', 'qttools5-dev', 'qttools5-dev-tools',
+              'libqt5serialport5-dev', 'qtmultimedia5-dev',
+              'libqt5websockets5-dev', 'libboost-all-dev', 'libhamlib-dev',
+              'libfftw3-dev', 'libusb-1.0-0-dev'], sudo=True)
+    if r.returncode != 0:
+        _err(f'wsjtx-decoders: build-dep install failed: {r.stderr.strip()}')
+        return False
+
+    src = _WSJTX_SRC
+    if not src.exists():
+        _info(f'Cloning WSJT-X → {src} ...')
+        r = _run(['git', 'clone', _WSJTX_REPO, str(src)])
+        if r.returncode != 0:
+            _err(f'git clone wsjtx failed: {r.stderr.strip()}')
+            return False
+    if not _git_head(src).startswith(_WSJTX_COMMIT):
+        _run(['git', '-C', str(src), 'fetch', '--quiet', '--tags', 'origin'])
+        r = _run(['git', '-C', str(src), 'checkout', '--quiet', _WSJTX_COMMIT])
+        if r.returncode != 0:
+            _err(f'wsjtx: checkout {_WSJTX_COMMIT[:12]} failed: {r.stderr.strip()}')
+            return False
+
+    # Build-only modification (GPLv3 §5: marked): strip -fbounds-check.
+    cml = src / 'CMakeLists.txt'
+    try:
+        needs_patch = ' -fbounds-check' in cml.read_text()
+    except OSError:
+        needs_patch = False
+    if needs_patch:
+        _info('wsjtx: stripping -fbounds-check from release flags')
+        _run(['cp', '-n', str(cml), str(src / 'CMakeLists.txt.upstream')], sudo=True)
+        _run(['sed', '-i', 's/ -fbounds-check//g', str(cml)], sudo=True)
+    mods = (f'Sigmond build modifications to WSJT-X {_WSJTX_TAG} '
+            f'({_WSJTX_COMMIT}):\n'
+            '  - CMakeLists.txt: removed -fbounds-check from '
+            'CMAKE_Fortran_FLAGS_RELEASE (upstream ships debug bounds-checking '
+            'in the optimized build).\n'
+            '  - configured with -march=native -mtune=native -O3.\n'
+            'No decoder source logic was changed. Upstream source retained at '
+            f'{src}; license in COPYING. Built targets: jt9, wsprd only.\n')
+    _install_text(mods, src / 'MODIFICATIONS.sigmond.txt')
+
+    build = src / 'build-sigmond'
+    _run(['rm', '-rf', str(build)], sudo=True)
+    _run(['mkdir', '-p', str(build)], sudo=True)
+    native = '-march=native -mtune=native -O3'
+    _info('wsjtx: configure (Release, -march=native -O3, docs/manpages off)')
+    r = _run(['cmake', '-S', str(src), '-B', str(build),
+              '-DCMAKE_BUILD_TYPE=Release', '-DWSJT_GENERATE_DOCS=OFF',
+              '-DWSJT_SKIP_MANPAGES=ON',
+              f'-DCMAKE_Fortran_FLAGS={native}',
+              f'-DCMAKE_C_FLAGS={native}', f'-DCMAKE_CXX_FLAGS={native}'],
+             sudo=True)
+    if r.returncode != 0:
+        _err(f'wsjtx cmake failed: {r.stderr[-400:]}')
+        return False
+    nproc = str(max(1, (os.cpu_count() or 2) - 1))
+    _info(f'wsjtx: building jt9 + wsprd (make -j{nproc}) ...')
+    r = _run(['make', '-C', str(build), f'-j{nproc}', 'jt9', 'wsprd'], sudo=True)
+    if r.returncode != 0:
+        _err(f'wsjtx build failed: {r.stderr[-400:]}')
+        return False
+
+    docdir = prefix / 'share' / 'doc' / 'wsjtx-decoders-sigmond'
+    _run(['install', '-m755', str(build / 'jt9'), str(jt9)], sudo=True)
+    _run(['install', '-m755', str(build / 'wsprd'), str(wsprd)], sudo=True)
+    _run(['install', '-d', str(docdir)], sudo=True)
+    _run(['install', '-m644', str(src / 'COPYING'), str(docdir / 'COPYING')], sudo=True)
+    _run(['install', '-m644', str(src / 'MODIFICATIONS.sigmond.txt'),
+          str(docdir / 'MODIFICATIONS.txt')], sudo=True)
+    _install_text(f'wsjtx-decoders {_WSJTX_TAG} {_WSJTX_COMMIT} '
+                  'flags=-march=native -O3 -fbounds-check-stripped\n', marker)
+    _write_build_manifest('wsjtx-decoders', [
+        {'name': 'wsjtx', 'url': _WSJTX_REPO, 'ref': _WSJTX_TAG,
+         'pin': _WSJTX_COMMIT, 'sha': _git_head(src)},
+    ], builder='_build_wsjtx_decoders')
+    _ok('wsjtx-decoders: built and installed (jt9, wsprd → /usr/local/bin)')
     return True
 
 
@@ -3526,6 +3664,9 @@ def _install_single_client(args) -> int:
     _info(f'script: {entry.install_script or "(discover in repo post-clone)"}')
 
     if dry_run:
+        if entry.name == 'wspr-recorder':
+            _info(f'(dry-run) would build WSJT-X decoders (jt9, wsprd) from '
+                  f'{_WSJTX_TAG} source (-march=native -O3) → /usr/local/bin')
         _info('(dry-run) would clone repo and run install.sh')
         if getattr(args, 'no_enable', False):
             _info('(dry-run) --no-enable: would leave it disabled in topology')
@@ -3537,6 +3678,14 @@ def _install_single_client(args) -> int:
         return 1
 
     _netdiag_auto_refresh('install')
+
+    # wspr-recorder runs jt9 (FST4W) + wsprd (WSPR) by name off PATH; build them
+    # from pinned WSJT-X source, optimized for this host, BEFORE install.sh —
+    # the onion analogue (a from-source native dependency, not a catalog
+    # component).  Idempotent, so a no-op on reinstalls once the pin is built.
+    if entry.name == 'wspr-recorder' and not _build_wsjtx_decoders():
+        _err('wspr-recorder: wsjtx-decoders (jt9/wsprd) build failed')
+        return 1
 
     try:
         result = _do_install_client(entry, dry_run=dry_run, yes=yes, pull=True,
@@ -3681,6 +3830,13 @@ def _install_full_suite(args) -> int:
     if ka9q_web_needed:
         _heading('ka9q-web (onion + make install)')
         if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)):
+            errors += 1
+
+    # --- 2c. wsjtx-decoders (jt9/wsprd, sigmond-native) — wspr-recorder's
+    # from-source dependency, built before its install.sh (onion analogue).
+    if any(getattr(e, 'name', None) == 'wspr-recorder' for e in catalog_queue):
+        _heading('wsjtx-decoders (jt9, wsprd — from pinned WSJT-X source)')
+        if not _build_wsjtx_decoders():
             errors += 1
 
     # --- 3. Catalog-driven clients ---
