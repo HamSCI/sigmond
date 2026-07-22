@@ -1103,10 +1103,11 @@ def _build_wsjtx_decoders() -> bool:
     Treated like onion (a from-source native dependency, not a catalog
     component): wspr-recorder runs `jt9` (FST4W) and `wsprd` (WSPR) by name off
     PATH, and /usr/local/bin leads /usr/bin, so this shadow takes effect with no
-    binary-selection probe.  Two build-only changes vs upstream (marked in a
-    dated MODIFICATIONS note for GPLv3 §5): strip -fbounds-check from the release
-    Fortran flags (upstream ships debug bounds-checking in the optimized build)
-    and add -march=native -O3.  No decoder source logic is changed.  WSJT-X is
+    binary-selection probe.  One build-only change vs upstream (noted in a dated
+    MODIFICATIONS file): configure with -march=native -O3.  Upstream's release
+    -fbounds-check is RETAINED — stripping it miscompiles wsprd under -O3/native
+    (0 spots, ~70s spin; proven by live parity 2026-07-22).  No source logic is
+    changed.  WSJT-X is
     GPLv3; building on-host from the retained pinned source keeps the
     corresponding source present and the license intact — cleaner than
     redistributing a modified upstream binary.  Idempotent via the provenance
@@ -1164,23 +1165,18 @@ def _build_wsjtx_decoders() -> bool:
             _err(f'wsjtx: checkout {_WSJTX_COMMIT[:12]} failed: {r.stderr.strip()}')
             return False
 
-    # Build-only modification (GPLv3 §5: marked): strip -fbounds-check.
-    cml = src / 'CMakeLists.txt'
-    try:
-        needs_patch = ' -fbounds-check' in cml.read_text()
-    except OSError:
-        needs_patch = False
-    if needs_patch:
-        _info('wsjtx: stripping -fbounds-check from release flags')
-        _run(['cp', '-n', str(cml), str(src / 'CMakeLists.txt.upstream')], sudo=True)
-        _run(['sed', '-i', 's/ -fbounds-check//g', str(cml)], sudo=True)
-    mods = (f'Sigmond build modifications to WSJT-X {_WSJTX_TAG} '
-            f'({_WSJTX_COMMIT}):\n'
-            '  - CMakeLists.txt: removed -fbounds-check from '
-            'CMAKE_Fortran_FLAGS_RELEASE (upstream ships debug bounds-checking '
-            'in the optimized build).\n'
+    # NO source modification.  We deliberately KEEP upstream's -fbounds-check in
+    # the Release Fortran flags.  Stripping it (as an earlier draft did) silently
+    # miscompiles wsprd's WSPR decoder under -O3 -march=native: 0 spots and a
+    # ~70s spin where the stock build decodes in <1s.  Proven by 3-way parity on
+    # live 20m audio 2026-07-22 (jt9's FT8 path was unaffected, but wsprd broke).
+    # -fbounds-check inhibits the offending vectorization at ~no cost (native +
+    # bounds-check decoded a real window in 0.73s vs Debian 2.7.0's 2.71s).
+    mods = (f'Sigmond build note for WSJT-X {_WSJTX_TAG} ({_WSJTX_COMMIT}):\n'
             '  - configured with -march=native -mtune=native -O3.\n'
-            'No decoder source logic was changed. Upstream source retained at '
+            '  - upstream -fbounds-check RETAINED (required: stripping it '
+            'miscompiles wsprd under -O3/native).\n'
+            'No source logic was changed. Upstream source retained at '
             f'{src}; license in COPYING. Built targets: jt9, wsprd only.\n')
     _install_text(mods, src / 'MODIFICATIONS.sigmond.txt')
 
@@ -1213,7 +1209,7 @@ def _build_wsjtx_decoders() -> bool:
     _run(['install', '-m644', str(src / 'MODIFICATIONS.sigmond.txt'),
           str(docdir / 'MODIFICATIONS.txt')], sudo=True)
     _install_text(f'wsjtx-decoders {_WSJTX_TAG} {_WSJTX_COMMIT} '
-                  'flags=-march=native -O3 -fbounds-check-stripped\n', marker)
+                  'flags=-march=native -O3 (-fbounds-check retained)\n', marker)
     _write_build_manifest('wsjtx-decoders', [
         {'name': 'wsjtx', 'url': _WSJTX_REPO, 'ref': _WSJTX_TAG,
          'pin': _WSJTX_COMMIT, 'sha': _git_head(src)},
