@@ -414,6 +414,120 @@ def _looks_like_grid(s: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# smd config location --from-gps
+# ---------------------------------------------------------------------------
+
+def _gpsdo_location() -> Optional[dict]:
+    """The GPSDO's published health from /run/gpsdo as
+    {fix, grid, lat, lon, altitude_m}, or None when no device state exists
+    (gpsdo-monitor not running / no GPSDO)."""
+    import glob
+    for f in sorted(glob.glob('/run/gpsdo/*.json')):
+        if f.endswith('index.json'):
+            continue
+        try:
+            with open(f) as fh:
+                h = json.load(fh).get('health', {})
+        except (OSError, ValueError):
+            continue
+        return {'fix': h.get('gps_fix'), 'grid': h.get('grid'),
+                'lat': h.get('latitude'), 'lon': h.get('longitude'),
+                'altitude_m': h.get('altitude_m')}
+    return None
+
+
+def _restart_location_consumers() -> int:
+    """Restart the services that consume the station location so a freshly
+    seeded GPS grid takes effect immediately: the reporting recorders
+    (wspr/psk/meteor → wsprnet/PSKReporter), hf-timestd, and mag-recorder.
+    Only currently-active units are touched."""
+    import subprocess
+    patterns = ['wspr-recorder@*', 'psk-recorder@*', 'meteor-scatter@*',
+                'hf-timestd.service', 'mag-recorder.service']
+    units: list[str] = []
+    for pat in patterns:
+        try:
+            out = subprocess.run(
+                ['systemctl', 'list-units', '--state=active', '--plain',
+                 '--no-legend', pat],
+                capture_output=True, text=True, check=False).stdout
+        except OSError:
+            out = ''
+        units += [ln.split()[0] for ln in out.splitlines() if ln.strip()]
+    if not units:
+        warn('no active location-consuming units found to restart.')
+        return 0
+    info('restarting: ' + ' '.join(units))
+    rc = subprocess.run(['systemctl', 'restart', *units], check=False).returncode
+    if rc == 0:
+        ok('restarted; clients now report the GPS-derived grid.')
+    else:
+        err('some units failed to restart — check `smd status`.')
+    return rc
+
+
+def cmd_config_location(args) -> int:
+    """Derive the station location from the GPSDO's live GPS fix and seed it
+    into coordination [host].
+
+    The GPS is the station location, so this replaces hand-entered grid/lat/lon
+    with the receiver's own disciplining fix.  grid flows to STATION_GRID and
+    thence every reporting client (wspr/psk → wsprnet/PSKReporter, hf-timestd);
+    lat/lon go to any client that reads them.  mag-recorder additionally reads
+    lat/lon/elevation from /run/gpsdo directly, so its position tracks the same
+    source without needing coordination.
+    """
+    loc = _gpsdo_location()
+    if loc is None:
+        err('no GPSDO position in /run/gpsdo — is gpsdo-monitor running with a '
+            'GPSDO attached?')
+        return 1
+    fix, grid = loc['fix'], loc['grid']
+    lat, lon, alt = loc['lat'], loc['lon'], loc['altitude_m']
+    if fix not in ('2D', '3D') or lat is None or lon is None or not grid:
+        err(f'GPSDO has no usable fix (gps_fix={fix or "none"}) — connect the '
+            'GPS antenna and wait for lock, then re-run.')
+        return 1
+
+    old = load_coordination(COORDINATION_PATH).host
+    heading('station location from GPS')
+    info(f'GPSDO fix: {fix}   grid {grid}   lat {lat:.6f}   lon {lon:.6f}'
+         + (f'   alt {alt:.1f} m' if alt is not None else ''))
+    info(f'current [host]:   grid {old.grid or "—"}   '
+         f'lat {old.lat or 0.0:.6f}   lon {old.lon or 0.0:.6f}')
+    if getattr(args, 'dry_run', False):
+        info('--dry-run: nothing written.')
+        return 0
+
+    try:
+        changed = write_host_identity(grid=grid, lat=lat, lon=lon)
+    except PermissionError:
+        err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
+        return 1
+    if changed:
+        ok(f'seeded coordination [host]: grid={grid} lat={lat:.6f} lon={lon:.6f}')
+    else:
+        info('coordination [host] already matched the GPS — no change.')
+
+    try:
+        COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+        COORDINATION_ENV.write_text(render_env(load_coordination(COORDINATION_PATH)))
+        ok(f'rendered {COORDINATION_ENV}')
+    except PermissionError:
+        warn(f'wrote coordination.toml but could not refresh {COORDINATION_ENV} '
+             '(permission denied) — re-run as root')
+        return 0
+
+    print()
+    if getattr(args, 'restart', False):
+        return _restart_location_consumers()
+    info('clients pick up the GPS grid on next service restart. To apply now:')
+    info('  smd config location --from-gps --restart')
+    info('mag-recorder already tracks lat/lon/elevation from /run/gpsdo live.')
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # smd config refresh
 # ---------------------------------------------------------------------------
 

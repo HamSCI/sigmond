@@ -110,7 +110,7 @@ try:
     from sigmond.commands.readiness   import cmd_readiness
     from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_upload
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_upload, cmd_config_location
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -16447,6 +16447,17 @@ def main() -> int:
     p.add_argument('--json', action='store_true',
                    help='emit current identity as JSON, no prompts')
 
+    p = config_sub.add_parser('location',
+                              help='derive station location (grid/lat/lon) from '
+                                   'the GPSDO GPS fix and seed coordination [host]')
+    p.add_argument('--from-gps', action='store_true',
+                   help='read the live GPS fix from /run/gpsdo (required)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='show the GPS-derived location, write nothing')
+    p.add_argument('--restart', action='store_true',
+                   help='restart the recorders / hf-timestd / mag-recorder so '
+                        'the new grid takes effect immediately')
+
     p = config_sub.add_parser('refresh',
                               help='re-render /etc/sigmond/coordination.env '
                                    'from coordination.toml (after a hand-edit)')
@@ -16948,6 +16959,14 @@ def main() -> int:
             if not getattr(args, 'json', False) and _need_root('config identity'):
                 return 1
             return cmd_config_identity(args)
+        if sub_cmd == 'location':
+            if not getattr(args, 'from_gps', False):
+                _err('smd config location: pass --from-gps (the only source today).')
+                return 2
+            # --dry-run is read-only; the writing path needs root.
+            if not getattr(args, 'dry_run', False) and _need_root('config location'):
+                return 1
+            return cmd_config_location(args)
         if sub_cmd == 'refresh':
             # --dry-run is read-only; only the writing path needs root.
             if not getattr(args, 'dry_run', False) and _need_root('config refresh'):
