@@ -743,6 +743,7 @@ _LEGACY_SHARED_CONFIG = {
     "wspr-recorder":  Path("/etc/wspr-recorder/config.toml"),
     "hfdl-recorder":  Path("/etc/hfdl-recorder/hfdl-recorder-config.toml"),
     "codar-sounder":  Path("/etc/codar-sounder/codar-sounder-config.toml"),
+    "meteor-scatter": Path("/etc/meteor-scatter/meteor-scatter-config.toml"),
 }
 
 
