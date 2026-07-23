@@ -5670,6 +5670,36 @@ def cmd_diag_cpu_affinity(args) -> int:
         _ok('daemon-reload done') if r.returncode == 0 else _warn('daemon-reload reported errors')
         print()
 
+        # daemon-reload does NOT re-read system.conf.d — the [Manager]
+        # CPUAffinity default (the pair-exclusion backstop for processes
+        # with no per-unit drop-in) only takes effect after daemon-reexec.
+        # systemd doesn't expose the manager's CPUAffinity as a show
+        # property, so observe PID 1's actual mask in /proc.
+        def _pid1_cpus() -> set:
+            try:
+                for line in Path('/proc/1/status').read_text().splitlines():
+                    if line.startswith('Cpus_allowed_list:'):
+                        return _parse_cpu_mask(line.split(':', 1)[1].strip())
+            except OSError:
+                pass
+            return set()
+
+        want_mgr = _cpu_list_str(other_cpus)
+        if _pid1_cpus() != other_cpus:
+            _info(f'Manager pair exclusion not active (PID 1 on '
+                  f'{_cpu_list_str(_pid1_cpus()) or "?"}, want {want_mgr}) '
+                  '— running systemctl daemon-reexec ...')
+            r = _run(['systemctl', 'daemon-reexec'], sudo=True)
+            if r.returncode == 0 and _pid1_cpus() == other_cpus:
+                _ok(f'manager CPUAffinity now {want_mgr} (pair exclusion live)')
+            else:
+                _warn(f'PID 1 still on {_cpu_list_str(_pid1_cpus()) or "?"} '
+                      'after daemon-reexec — pair exclusion not enforced for '
+                      'unpinned processes until reboot')
+        else:
+            _info(f'manager CPUAffinity already {want_mgr}')
+        print()
+
         _info('Applying to running units via systemctl set-property --runtime ...')
         for unit, cpus in radiod_plan.items():
             if _apply_cpu_affinity_runtime(unit, cpus):
