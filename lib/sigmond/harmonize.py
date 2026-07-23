@@ -563,6 +563,60 @@ def rule_kernel_rcvbuf_adequate(view: SystemView) -> RuleResult:
     )
 
 
+# ka9q-web's systemd unit.  ka9q-web is an upstream component whose
+# ``make install`` writes this unit with a hardcoded ``-m <status-dns>``
+# argument; sigmond never regenerates it, so a radiod rename (or a
+# reinstall that keeps /etc/systemd) leaves ka9q-web serving an empty UI
+# against a radiod that no longer exists.  Module-level so tests can
+# redirect it to a tmp file.
+KA9Q_WEB_UNIT_PATH = Path("/etc/systemd/system/ka9q-web.service")
+
+
+def rule_ka9q_web_target(view: SystemView) -> RuleResult:
+    """Check ka9q-web's ``-m`` target names a coordinated local radiod.
+
+    Observed on B4 (2026-07-23): the greenfield flush+reinstall renamed
+    the radiod instance, but the surviving ka9q-web.service still carried
+    the pre-flush ``-m`` name, so the web UI came up empty with no error
+    anywhere sigmond looks.
+    """
+    try:
+        unit_text = KA9Q_WEB_UNIT_PATH.read_text()
+    except OSError:
+        return RuleResult("ka9q_web_target", "pass",
+                          "skipped: ka9q-web.service not installed", [])
+
+    m = re.search(r'^ExecStart=.*\s-m\s+(\S+)', unit_text, re.MULTILINE)
+    if not m:
+        return RuleResult("ka9q_web_target", "pass",
+                          "skipped: no -m argument in ka9q-web ExecStart", [])
+    target = m.group(1)
+
+    local_dns = sorted({r.effective_status_dns
+                        for r in view.coordination.radiods.values()
+                        if r.is_local and r.effective_status_dns})
+    if not local_dns:
+        return RuleResult("ka9q_web_target", "pass",
+                          "skipped: no local radiod in coordination", [])
+
+    if target in local_dns:
+        return RuleResult("ka9q_web_target", "pass",
+                          f"ka9q-web -m {target} matches a local radiod", [])
+
+    remediation = (
+        f"sudo sed -i 's|-m {target}|-m {local_dns[0]}|' "
+        f"{KA9Q_WEB_UNIT_PATH} && sudo systemctl daemon-reload "
+        f"&& sudo systemctl restart ka9q-web"
+    )
+    return RuleResult(
+        "ka9q_web_target", "fail",
+        f"ka9q-web ExecStart targets '{target}' which is not a local "
+        f"coordinated radiod ({', '.join(local_dns)}) — the web UI will "
+        f"serve an empty page.  Remediate: {remediation}",
+        ["ka9q-web"],
+    )
+
+
 def _ka9q_radio_source_dir() -> Optional[Path]:
     """Locate a ka9q-radio source checkout on the local host.
 
@@ -1216,6 +1270,7 @@ ALL_RUNTIME_RULES = [
     rule_cpu_isolation_runtime,
     rule_gpsdo_governor_coverage,
     rule_kernel_rcvbuf_adequate,
+    rule_ka9q_web_target,
     rule_timing_reference,
     rule_wspr_decode_enabled,
     rule_hardware_gated_core,

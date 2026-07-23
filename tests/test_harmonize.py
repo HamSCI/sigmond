@@ -22,7 +22,7 @@ from sigmond.harmonize import (
     rule_cpu_isolation, rule_cpu_isolation_runtime,
     rule_data_path_upstream,
     rule_frequency_coverage, rule_gpsdo_governor_coverage,
-    rule_kernel_rcvbuf_adequate,
+    rule_ka9q_web_target, rule_kernel_rcvbuf_adequate,
     rule_radiod_resolution, rule_radiod_status_configured, rule_timing_chain,
     run_all, worst_severity,
 )
@@ -348,6 +348,7 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
                 "rule_cpu_isolation_runtime",
                 "rule_gpsdo_governor_coverage",
                 "rule_kernel_rcvbuf_adequate",
+                "rule_ka9q_web_target",
                 "rule_timing_reference",
                 "rule_wspr_decode_enabled",
                 "rule_hardware_gated_core",
@@ -978,3 +979,70 @@ class TestSecretsHsUploaderKey(unittest.TestCase):
         r = self._run(k)
         self.assertEqual(r.severity, "warn")
         self.assertIn("hs-uploader key", r.message)
+
+
+class TestRuleKa9qWebTarget(unittest.TestCase):
+    """ka9q-web -m target must name a coordinated local radiod.
+
+    Tests redirect KA9Q_WEB_UNIT_PATH at a tmp unit file so the verdict
+    is deterministic regardless of host state.
+    """
+
+    def _redirect_unit(self, contents: str | None) -> None:
+        original = harmonize.KA9Q_WEB_UNIT_PATH
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: setattr(
+            harmonize, "KA9Q_WEB_UNIT_PATH", original))
+        unit = d / "ka9q-web.service"
+        if contents is not None:
+            unit.write_text(contents)
+        harmonize.KA9Q_WEB_UNIT_PATH = unit
+
+    def _coord(self) -> Coordination:
+        return Coordination(radiods={
+            "AC0G-B4-status.local": Radiod(id="AC0G-B4-status.local",
+                                           host="localhost"),
+        })
+
+    def _unit(self, target: str) -> str:
+        return (
+            "[Service]\n"
+            f"ExecStart=/usr/local/sbin/ka9q-web -m {target} -p 8081\n"
+        )
+
+    def test_pass_when_target_matches(self):
+        self._redirect_unit(self._unit("AC0G-B4-status.local"))
+        r = rule_ka9q_web_target(_make_view(self._coord()))
+        self.assertEqual(r.severity, "pass")
+
+    def test_fail_on_stale_target(self):
+        self._redirect_unit(self._unit("B4-100-rx888mk2-status.local"))
+        r = rule_ka9q_web_target(_make_view(self._coord()))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("B4-100-rx888mk2-status.local", r.message)
+        # Remediation names the correct radiod and is copy-paste-able.
+        self.assertIn("-m AC0G-B4-status.local", r.message)
+        self.assertIn("systemctl restart ka9q-web", r.message)
+        self.assertEqual(r.affected, ["ka9q-web"])
+
+    def test_skipped_when_unit_absent(self):
+        self._redirect_unit(None)
+        r = rule_ka9q_web_target(_make_view(self._coord()))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_skipped_when_no_m_argument(self):
+        self._redirect_unit(
+            "[Service]\nExecStart=/usr/local/sbin/ka9q-web -p 8081\n")
+        r = rule_ka9q_web_target(_make_view(self._coord()))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_skipped_when_no_local_radiod(self):
+        self._redirect_unit(self._unit("somewhere-status.local"))
+        coord = Coordination(radiods={
+            "remote": Radiod(id="remote-status.local", host="bee1.local"),
+        })
+        r = rule_ka9q_web_target(_make_view(coord))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
