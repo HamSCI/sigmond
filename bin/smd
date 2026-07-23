@@ -3266,13 +3266,17 @@ def _bringup_wait_streaming(timeout_s: int = 300, settle_s: int = 15,
                 streaming = True
                 break
             # RX888 first-start firmware-load race: radiod's first start loads the
-            # FX3 firmware, the device re-enumerates (00f3→00f1) and radiod aborts
-            # (NOINPUT / exit 66), which can exhaust the unit's start-limit so
-            # Restart=always stops retrying.  The device is now in SDR mode, so a
-            # ONE-TIME reset-failed + restart recovers it (the manual kick, automated).
-            if not kicked and _run(['systemctl', 'is-failed', '--quiet', unit]).returncode == 0:
-                _info(f'  {unit} failed (RX888 firmware-load race) — reset-failed + '
-                      'restart now the FX3 is in SDR mode')
+            # FX3 firmware and the device re-enumerates (00f3→00f1); radiod dies
+            # mid-open and — whether it lands in 'failed' (start-limit) or 'inactive'
+            # (SIGTERM) — Restart=always doesn't bring it back.  A radiod that is
+            # legitimately slow to stream stays *active* (planning FFTs), so
+            # NOT-active after a short grace means it died: the device is in SDR
+            # mode by now, so a ONE-TIME reset-failed + restart recovers it (exactly
+            # the manual kick, automated).  Grace is short because a healthy radiod
+            # is active within seconds even when it needs minutes to start streaming.
+            if not kicked and not active and waited >= 15:
+                _info(f'  {unit} not running after {waited}s (RX888 first-start '
+                      'firmware-load abort) — reset-failed + restart')
                 _run(['systemctl', 'reset-failed', unit], sudo=False)
                 _run(['systemctl', 'restart', unit], sudo=False)
                 kicked = True
