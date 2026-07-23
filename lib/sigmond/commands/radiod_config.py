@@ -60,6 +60,11 @@ _FRONTEND_PROFILES: dict[str, dict] = {
             "                           # CPU-limited hosts where wisdom rof1620000 was\n"
             "                           # planned instead.\n"
             "gainmode    = high\n"
+            # Fork clock monitor: the per-minute measured-sample-rate line is
+            # radiod's only steady-state journal output — sigmond-radiod-watchdog's
+            # HEARTBEAT-LOST detector depends on it (silence >10 min ⇒ USB reset).
+            "clock-step-logging = yes\n"
+            "clock-rate-log     = yes\n"
             "# gain      = 1.5            # dB; uncomment to override default\n"
         ),
     },
@@ -68,6 +73,11 @@ _FRONTEND_PROFILES: dict[str, dict] = {
         "defaults": (
             "samprate    = 129600000\n"
             "gainmode    = high\n"
+            # Fork clock monitor: the per-minute measured-sample-rate line is
+            # radiod's only steady-state journal output — sigmond-radiod-watchdog's
+            # HEARTBEAT-LOST detector depends on it (silence >10 min ⇒ USB reset).
+            "clock-step-logging = yes\n"
+            "clock-rate-log     = yes\n"
         ),
     },
     "RX-888 Mk2": {
@@ -75,6 +85,11 @@ _FRONTEND_PROFILES: dict[str, dict] = {
         "defaults": (
             "samprate    = 129600000\n"
             "gainmode    = high\n"
+            # Fork clock monitor: the per-minute measured-sample-rate line is
+            # radiod's only steady-state journal output — sigmond-radiod-watchdog's
+            # HEARTBEAT-LOST detector depends on it (silence >10 min ⇒ USB reset).
+            "clock-step-logging = yes\n"
+            "clock-rate-log     = yes\n"
         ),
     },
     "Airspy": {
