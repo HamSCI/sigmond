@@ -142,6 +142,18 @@ CREATE INDEX IF NOT EXISTS idx_pending_uploads_target
     ON pending_uploads (target_db, target_table, id)
 """
 
+# Expression index for hs-uploader's WsprCycleSource, whose cycle
+# discovery and per-cycle batch queries filter on
+# json_extract(payload_json, '$.time').  Without it every 30 s pump
+# JSON-parses EVERY wspr row in the queue (millions) — observed as
+# 100%-CPU spikes and a ~2.4 min/cycle replay pace.  The expression
+# text must match the queries' exactly for SQLite to use it.
+_QUEUE_CYCLE_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS idx_pending_uploads_cycle_time
+    ON pending_uploads (target_db, target_table,
+                        json_extract(payload_json, '$.time'))
+"""
+
 
 class Writer:
     """Writer that buffers rows into a local SQLite queue.
@@ -344,6 +356,7 @@ class Writer:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(_QUEUE_DDL)
         conn.execute(_QUEUE_INDEX_DDL)
+        conn.execute(_QUEUE_CYCLE_INDEX_DDL)
         conn.commit()
         # Ensure the main db + WAL/SHM sidecars are group-writable so
         # OTHER producers in the same supplementary group can write to
