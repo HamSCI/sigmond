@@ -14,7 +14,9 @@
 [global]
 hardware  = ${FRONTEND}        # which front-end driver to load
 status    = ${STATUS_DNS}      # mDNS name for status + control multicast
-samprate  = 24000              # default channel output sample rate (Hz)
+samprate  = 12000              # default channel output sample rate (Hz) — WSPR/FT8/FT4
+                               # recorders request 12000; a 24000 default makes every
+                               # channel fail "not verified" under the bring-up burst.
 mode      = usb                # default demod mode for unspecified channels
 ttl       = 0                  # 0 = loopback-only (single-host default,
                                # safe on every network).  Set to 1 to
