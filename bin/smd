@@ -3259,12 +3259,23 @@ def _bringup_wait_streaming(timeout_s: int = 300, settle_s: int = 15,
     for rid in ids:
         unit = f'radiod@{rid}.service'
         _info(f'waiting for {unit} to stream (rx888 running)...')
-        waited, streaming = 0, False
+        waited, streaming, kicked = 0, False, False
         while waited < timeout_s:
             active = _run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0
             if active and _radiod_streaming(unit):
                 streaming = True
                 break
+            # RX888 first-start firmware-load race: radiod's first start loads the
+            # FX3 firmware, the device re-enumerates (00f3→00f1) and radiod aborts
+            # (NOINPUT / exit 66), which can exhaust the unit's start-limit so
+            # Restart=always stops retrying.  The device is now in SDR mode, so a
+            # ONE-TIME reset-failed + restart recovers it (the manual kick, automated).
+            if not kicked and _run(['systemctl', 'is-failed', '--quiet', unit]).returncode == 0:
+                _info(f'  {unit} failed (RX888 firmware-load race) — reset-failed + '
+                      'restart now the FX3 is in SDR mode')
+                _run(['systemctl', 'reset-failed', unit], sudo=False)
+                _run(['systemctl', 'restart', unit], sudo=False)
+                kicked = True
             time.sleep(poll_s)
             waited += poll_s
             if waited % 60 == 0:
