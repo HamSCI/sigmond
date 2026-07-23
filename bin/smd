@@ -4930,6 +4930,60 @@ def _install_wisdom() -> None:
         _WISDOM_TMP.unlink(missing_ok=True)
 
 
+# CPU-matched pre-planned wisdom bundled in the sigmond repo (wisdom/
+# wisdomf-<slug> + .cpu sidecar; see wisdom/README.md).  Planning
+# rof3240000 from scratch is hours; DASI builds share a small set of CPU
+# models, so a fresh host whose model line matches a bundled sidecar
+# seeds /etc/fftw/wisdomf and the planner pass becomes a seconds-long
+# verify.  Carried in sigmond — NOT the ka9q-radio fork, whose main
+# feeds upstream PRs that must never contain host-tuning data.
+_WISDOM_BUNDLE_DIRS = [
+    Path(__file__).resolve().parent.parent / 'wisdom',
+    Path('/opt/git/sigmond/sigmond/wisdom'),
+]
+
+
+def _seed_bundled_wisdom() -> None:
+    """Seed /etc/fftw/wisdomf from a CPU-matched fork bundle, if any.
+
+    Only fires when NO wisdom exists yet (never overwrites a planned
+    file) and only on an EXACT /proc/cpuinfo model-name match — wisdom
+    from a different CPU is functionally safe for FFTW but defeats the
+    purpose (plans would be non-optimal and fftwf-wisdom re-plans).
+    """
+    if _WISDOM_FILE.exists() and _WISDOM_FILE.stat().st_size > 0:
+        return
+    try:
+        model = next(
+            (ln.split(':', 1)[1].strip()
+             for ln in Path('/proc/cpuinfo').read_text().splitlines()
+             if ln.startswith('model name')), '')
+    except OSError:
+        return
+    if not model:
+        return
+    for d in _WISDOM_BUNDLE_DIRS:
+        if not d.is_dir():
+            continue
+        for sidecar in sorted(d.glob('wisdomf-*.cpu')):
+            try:
+                if sidecar.read_text().strip() != model:
+                    continue
+            except OSError:
+                continue
+            bundle = sidecar.with_suffix('')   # wisdomf-<slug>
+            if not bundle.is_file() or bundle.stat().st_size == 0:
+                continue
+            _WISDOM_FILE.parent.mkdir(parents=True, exist_ok=True)
+            r = _run(['install', '-m', '644', str(bundle),
+                      str(_WISDOM_FILE)], sudo=True)
+            if r.returncode == 0:
+                _ok(f'FFT wisdom: seeded {_WISDOM_FILE} from fork bundle '
+                    f'{bundle.name} (CPU match: {model}) — planner will '
+                    f'verify instead of re-planning')
+            return
+
+
 def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
     """Ensure FFTW wisdom is current for all supported ka9q-radio profiles.
 
@@ -4949,6 +5003,8 @@ def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
     """
     if not _FFTWF_WISDOM_BIN.exists():
         return True   # tool not present; don't block
+
+    _seed_bundled_wisdom()
 
     if _wisdom_already_running():
         _warn('FFT wisdom: generation still in progress from a previous run')
