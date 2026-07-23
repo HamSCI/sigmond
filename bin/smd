@@ -10202,10 +10202,14 @@ def _psk_watch_cycle_loop(
                 ft8_dt_part = f' dt={_d8:+.2f}' if _d8 is not None else ' dt= ----'
                 ft4_dt_part = f' dt={_d4:+.2f}' if _d4 is not None else ''
 
+                # Same reporter=/rx= lead-in as watch wspr's cycle lines so
+                # side-by-side monitoring windows column-align and the
+                # upload identity is on every line, not just the heading.
+                _rep = f'reporter={reporter_label} ' if reporter_label else ''
                 if show_spots:
                     # Detail path (cap=N or no-cap with -v): per-spot dump
                     # bracketed by a slot heading, summary at the end.
-                    print(f'─── slot UTC {wall}  rx={label} ──────────────────',
+                    print(f'─── slot UTC {wall}  {_rep}rx={label} ─────────────',
                           flush=True)
                     for line in ft8_show:
                         print(f'  ft8: {_cal_spot_line(line, _ft8_dt_cal)}', flush=True)
@@ -10238,7 +10242,7 @@ def _psk_watch_cycle_loop(
                 else:
                     # Summary path (no args, cap=0): one line per rx/cycle.
                     print(
-                        f'[{now_str}] slot UTC {wall}  rx={label:<22} '
+                        f'[{now_str}] slot  UTC {wall} {_rep}rx={label:<16} '
                         f'ft8={len(ft8_lines):>3}{ft8_dt_part}{ft8_bands_part}  '
                         f'ft4={len(ft4_lines):>3}{ft4_dt_part}{ft4_bands_part}',
                         flush=True,
