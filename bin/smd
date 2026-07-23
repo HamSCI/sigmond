@@ -3464,6 +3464,20 @@ def cmd_bringup(args) -> int:
         grid = _ask_identity('Maidenhead grid square (e.g. EM38ww)', grid)
     callsign = _ask_identity('Callsign', callsign, optional=True)
 
+    # Grid from the GPS when the operator didn't supply one: the GPSDO's fix IS
+    # the station location, so there's no reason to hand-enter what the receiver's
+    # own disciplining clock already knows.  This seeds coordination [host].grid
+    # (below) → STATION_GRID → every reporting client — wspr/psk (wsprnet /
+    # PSKReporter) and hf-timestd — from one GPS source.  lat/lon/elevation reach
+    # mag-recorder the same way (it reads /run/gpsdo directly).  A supplied grid
+    # (flag/profile/prompt) still wins; this only fills a blank.
+    if needs_grid and not grid:
+        _gf, _gg, _ = _gpsdo_fix()
+        if _gf and _gg:
+            grid = _gg
+            _info(f'grid auto-derived from GPSDO fix: {grid} '
+                  '(no hand-entry — the GPS is the station location)')
+
     plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
                       non_interactive=getattr(args, 'non_interactive', False),
