@@ -175,10 +175,15 @@ unset _resp _tmp
 # this entirely — existing flow is untouched.
 _virt="$(systemd-detect-virt 2>/dev/null || echo none)"
 _state_file="/etc/sigmond/install-state.env"
+# -e /dev/tty is true even with no controlling terminal (the node always
+# exists; opening it then fails with ENXIO — e.g. ssh without -t).  Test
+# openability, not existence.
+_tty_ok=0
+{ : </dev/tty; } 2>/dev/null && _tty_ok=1
 if [[ "$_virt" == "kvm" \
       && -z "${SIGMOND_SKIP_PROXMOX_PROMPT:-}" \
       && ! -f "$_state_file" \
-      && -e /dev/tty \
+      && "$_tty_ok" == 1 \
       && -x "$REPO_DIR/scripts/proxmox/bootstrap.sh" ]]; then
     info "Detected KVM guest. Sigmond can configure the Proxmox host's PCIe USB"
     info "passthrough, CPU isolation, and vfio binding — required for full"
@@ -191,7 +196,7 @@ if [[ "$_virt" == "kvm" \
     fi
     info "skipping Proxmox setup — proceeding with bare-metal install."
 fi
-unset _virt _state_file _resp
+unset _virt _state_file _resp _tty_ok
 
 echo -e "${BOLD}"
 echo "  ┌─────────────────────────────────────────────┐"
