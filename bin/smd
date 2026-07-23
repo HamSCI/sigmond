@@ -10140,7 +10140,9 @@ def _psk_watch_cycle_loop(
             time.sleep(max(0.1, fire_at - time.time()))
 
             wall = time.strftime('%H:%M:%S', time.gmtime(next_boundary))
-            now_str = time.strftime('%H:%M:%S')
+            # UTC, matching watch wspr's event tag — every time on the
+            # line is then UTC.
+            now_str = time.strftime('%H:%M:%S', time.gmtime())
             cap = max_lines_per_mode
             # Blank line between consecutive slot blocks (one fire per
             # 15 s FT8 cadence) so each slot's receiver lines read as a
@@ -10840,6 +10842,24 @@ def cmd_wspr_watch(args) -> int:
     # it only for the displayed [HH:MM:SS] tag; the cycle's UTC time
     # is the authoritative key for sqlite lookups.
     ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}),')
+
+    def _hms_utc(tm_match) -> str:
+        """The [HH:MM:SS] event tag, in UTC.
+
+        The recorder's log prefix is LOCAL time (Python logging default);
+        every other time on the line (cycle UTC HH:MM:SS) is UTC, so a
+        local tag reads as a huge, confusing gap.  Convert — matching
+        watch psk, whose event tag is also UTC."""
+        if tm_match:
+            try:
+                dt = _datetime.datetime.strptime(
+                    f'{tm_match.group(1)} {tm_match.group(2)}',
+                    '%Y-%m-%d %H:%M:%S').astimezone(_datetime.timezone.utc)
+                return dt.strftime('%H:%M:%S')
+            except ValueError:
+                pass
+        return _datetime.datetime.now(
+            _datetime.timezone.utc).strftime('%H:%M:%S')
     # Average decoder dt emitted inline by wspr-recorder's cycle commit
     # (`… ms) dt=+0.84 bands=[…]`).  Parsed with its own regex so cycle_re's
     # group numbering stays untouched; absent on older recorder builds.
@@ -11452,7 +11472,7 @@ def cmd_wspr_watch(args) -> int:
                 tot_posted  = int(t_posted or t_compact or 0)
                 tot_added   = int(t_added  or t_compact or 0)
                 tm = ts_re.match(line)
-                hms = tm.group(2) if tm else _datetime.datetime.now().strftime('%H:%M:%S')
+                hms = _hms_utc(tm)
                 if pump_posted != pump_added:
                     pump_field = f'+{pump_added}/{pump_posted}'
                 else:
@@ -11504,7 +11524,7 @@ def cmd_wspr_watch(args) -> int:
              inline_bands_s) = cm.groups()
             cycle_iso = _cycle_iso(hh, mm)
             tm = ts_re.match(line)
-            hms = tm.group(2) if tm else _datetime.datetime.now().strftime('%H:%M:%S')
+            hms = _hms_utc(tm)
             spots_n = int(spots_n_s)
             noise_n = int(noise_n_s) if noise_n_s else 0
             bands_n = int(bands_n_s)
