@@ -42,7 +42,7 @@ contacts). Conventional WSJT-X dial frequencies (USB):
 
 | Band | MSK144 dial freq |
 |------|------------------|
-| 10 m | **28.130 MHz** |
+| 10 m | **28.145 MHz** |
 | 6 m  | **50.260 MHz** |
 
 **Design implication:** this is a *monitoring/reporting* use, not a real-time
@@ -69,7 +69,7 @@ Net: **psk's skeleton + wspr's jt9 decode and wsprdaemon upload.**
 ## 3. Architecture sketch
 
 ```
-radiod (10 m @ 28.130 MHz, 6 m @ 50.260 MHz channels, USB, 12 kHz)
+radiod (10 m @ 28.145 MHz, 6 m @ 50.260 MHz channels, USB, 12 kHz)
    │  ka9q-python MultiStream (shared socket per mcast group)   [reuse wspr/psk]
    ▼
 per-channel Ring (float32) ──► SlotWorker @ 15 s T/R cadence    [psk pattern]
@@ -108,7 +108,7 @@ sinks in inventory (§17), optional §18 timing-authority subscriber.
    advertises 6 m: psk-recorder records FT8 @ 50.313 MHz and FT4 @ 50.318 MHz
    on this station today, proving the RX888 path covers the 6 m band. MSK144's
    50.260 MHz sits in that same band, so no extra hardware/tuner work is
-   needed. (10 m @ 28.130 MHz is the RX888 HF path.) radiod status name =
+   needed. (10 m @ 28.145 MHz is the RX888 HF path.) radiod status name =
    `sigma-rx888mk2-status.local`.
 2. **`jt9` MSK144 invocation + output.** ✅ RESOLVED (2026-06-12) — ran
    `jt9 --msk144 -p 15 -f 1500 -a <workdir> <wav>` (cwd=workdir, touch
