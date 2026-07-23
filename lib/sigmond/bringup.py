@@ -276,6 +276,22 @@ def build_plan(profile, *, local_radiod: bool,
     steps.append(Step(STAGE4, 'start any remaining enabled components', 'start',
                       argv=[smd, 'start']))
 
+    # hs-uploader burns its systemd start-limit during Stages 1-3: the
+    # component install bootstraps the daemon before any client pipelines
+    # exist, so it exits ("no pipelines built — nothing to do") and
+    # crash-loops until systemd gives up.  Every later start then fails
+    # with "Start request repeated too quickly" and the uploader stays
+    # dead after an otherwise-green bring-up.  The manifest step above has
+    # written the real pipelines by now — clear the failed state and
+    # restart onto the final manifest.  Idempotent: reset-failed is a
+    # no-op when healthy, restart just reloads.
+    steps.append(Step(STAGE4, 'clear hs-uploader start-limit (pre-manifest '
+                              'crash-loop)', 'start',
+                      argv=['systemctl', 'reset-failed', 'hs-uploader.service']))
+    steps.append(Step(STAGE4, 'restart hs-uploader on the final manifest',
+                      'start',
+                      argv=['systemctl', 'restart', 'hs-uploader.service']))
+
     # Now that every client is running, pin them OFF radiod's cache-pair (cores
     # 0-1).  Stage 1's `smd apply` writes the exclusion files but runs before the
     # clients exist and doesn't daemon-reexec the manager CPUAffinity, so without
