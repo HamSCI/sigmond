@@ -327,14 +327,33 @@ def execute_trim(
         clauses.append("target_table = ?")
         params.append(plan.target_table)
     where = " AND ".join(clauses)
+    # Batched delete.  A single-transaction DELETE of millions of rows
+    # journals ~the whole table into the WAL before the one commit —
+    # SQLite's auto-checkpoint only runs at commit boundaries, so the
+    # WAL grows unbounded (observed on B4 2026-07-23: a 12.8M-row trim
+    # wrote a 13.6 GB WAL beside a 14.9 GB db and filled the disk).
+    # Committing per batch lets auto-checkpoint recycle the WAL; the
+    # explicit TRUNCATE checkpoint additionally shrinks the file when
+    # no reader blocks it (busy is fine — the next one catches up).
+    BATCH_ROWS = 100_000
     try:
         conn = opener(plan.db_path)
-        with conn:
-            cur = conn.execute(
-                f"DELETE FROM pending_uploads WHERE {where}",
-                params,
-            )
-            report.rows_deleted = int(cur.rowcount)
+        while True:
+            with conn:
+                cur = conn.execute(
+                    f"DELETE FROM pending_uploads WHERE id IN ("
+                    f"SELECT id FROM pending_uploads WHERE {where} "
+                    f"ORDER BY id LIMIT ?)",
+                    [*params, BATCH_ROWS],
+                )
+                n = int(cur.rowcount)
+            report.rows_deleted += n
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
+            if n < BATCH_ROWS:
+                break
     except Exception as exc:
         report.errors.append(f"DELETE on {plan.db_path}: {exc}")
     finally:
