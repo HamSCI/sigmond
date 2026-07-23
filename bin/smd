@@ -3040,6 +3040,75 @@ def _detect_gpsdo() -> bool:
     return hardware_ready('gpsdo-monitor') is True
 
 
+def _rm3100_responds() -> 'Optional[bool]':
+    """Functional magnetometer check: does the RM3100 actually ANSWER on the I2C
+    bus (0x23), not merely the Pololu adapter being present?  A USB-presence
+    probe passes when the adapter is plugged in but the sensor behind it is
+    dead/unpowered/unwired (exactly the B4-100 case), so bring-up must probe the
+    sensor itself.  Returns True (responding), False (adapter present but sensor
+    silent), or None (can't tell — no /dev/ttyMAG0, or mag-usb not installed
+    yet, so the caller falls back to presence)."""
+    magusb, dev = Path('/usr/local/bin/mag-usb'), Path('/dev/ttyMAG0')
+    if not magusb.exists() or not dev.exists():
+        return None
+    r = _run(['timeout', '8', str(magusb), '-A', '0x23'])
+    out = ((getattr(r, 'stdout', '') or '') + (getattr(r, 'stderr', '') or '')).lower()
+    if '"x":' in out or 'revid' in out:
+        return True
+    if 'nack' in out or 'not respond' in out or 'did not respond' in out:
+        return False
+    return None
+
+
+def _bringup_hardware_gate(prof, local: bool, require: bool) -> bool:
+    """Verify the external devices this profile needs are physically attached —
+    "is everything plugged in?" as the FIRST bring-up step, so the installer is
+    told to fix the hardware before anything else runs.
+
+    Prints one consolidated status table (rather than the scattered per-device
+    warnings) and, when ``require`` is set, returns False (caller aborts) if any
+    REQUIRED device is missing.  Presence comes from each component's inventory /
+    lsusb probe; the magnetometer is additionally probed FUNCTIONALLY — the
+    RM3100 must answer on the bus, not just the adapter be present."""
+    checks = []   # (label, detected: True/False/None, hint)
+    if local:
+        checks.append(('RX888 SDR', _detect_local_sdr(),
+                       'attach the RX888 (Cypress FX3) on a USB-3 port'))
+    if 'gpsdo-monitor' in getattr(prof, 'local_radiod_infra', ()) or local:
+        checks.append(('GPSDO (Leo Bodnar)', _detect_gpsdo(),
+                       'attach the GPSDO on USB — without a fix the RX888 runs '
+                       'undisciplined and location cannot be auto-derived'))
+    if 'mag-recorder' in getattr(prof, 'clients', ()):
+        present, responds = _detect_magnetometer(), _rm3100_responds()
+        if present and responds is False:
+            checks.append(('Magnetometer (RM3100)', False,
+                           'Pololu adapter present but the RM3100 is NOT answering '
+                           'at 0x23 — check the sensor wiring/power'))
+        else:
+            checks.append(('Magnetometer (RM3100)', present,
+                           'attach the RM3100 via the Pololu USB-I2C adapter'))
+    if not checks:
+        return True
+    _heading('required external devices')
+    missing = []
+    for label, det, hint in checks:
+        mark = ('\033[32m✓\033[0m' if det is True
+                else '\033[31m✗\033[0m' if det is False else '\033[33m?\033[0m')
+        state = ('present' if det is True
+                 else 'MISSING' if det is False else 'unconfirmed')
+        print(f'  {mark}  {label:<24} {state}')
+        if det is not True:
+            missing.append((label, hint))
+    if missing:
+        for label, hint in missing:
+            (_err if require else _warn)(f'{label}: {hint}')
+        if require:
+            _err('bringup: required external device(s) not attached — fix the '
+                 'above and re-run (or --skip-hardware-check to proceed DORMANT).')
+            return False
+    return True
+
+
 def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -> bool:
     """Block until FFT wisdom exists (radiod won't start cleanly without it).
 
@@ -3278,6 +3347,16 @@ def cmd_bringup(args) -> int:
                 _err('bringup: no radiod available (local or remote) — aborting')
                 return 1
             remote_dns = entered
+
+    # FIRST bring-up gate: are the REQUIRED external devices physically attached
+    # (RX888 / GPSDO / magnetometer per the profile)?  One consolidated inventory
+    # — the magnetometer is probed FUNCTIONALLY (the RM3100 must answer, not just
+    # the adapter be present).  With --require-hardware this hard-stops until they
+    # are plugged in; otherwise it reports and the dormant-aware warnings below
+    # still apply.
+    if not _bringup_hardware_gate(
+            prof, local, require=getattr(args, 'require_hardware', False)):
+        return 1
 
     # Hardware-aware kit check (docs/install-redesign.md §3).  Hardware-gated
     # components stay in the plan and install DORMANT (enabled, but `smd start`
@@ -15374,6 +15453,14 @@ def main() -> int:
                                 'with `smd config edit <client>`')
     p_bringup.add_argument('--reconfigure', action='store_true',
                            help='re-run config init even for already-configured clients (default: skip them — bringup is idempotent and preserves existing config)')
+    p_bringup.add_argument('--require-hardware', action='store_true', dest='require_hardware',
+                           help='HARD-STOP if a required external device (RX888 / GPSDO / '
+                                'magnetometer) is not attached and answering — the installer must '
+                                'fix the hardware before bring-up proceeds (default: warn + install '
+                                'DORMANT so the device can be attached later)')
+    p_bringup.add_argument('--skip-hardware-check', action='store_false', dest='require_hardware',
+                           help='opposite of --require-hardware: never hard-stop on missing devices '
+                                '(the default) — kept explicit for scripted installs')
     # Station identity — the operant id is the REPORTER id (common to WSPR +
     # PSK), NOT the callsign (which is an optional ham-operator id).  GRAPE
     # (hf-timestd) and the magnetometer upload under their own PSWS station ids.
