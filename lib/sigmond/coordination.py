@@ -381,6 +381,58 @@ def write_host_identity(call: str = '', grid: str = '', *,
     return True
 
 
+def write_station_identity(reporter_id: str = '',
+                           path: Path = COORDINATION_PATH) -> bool:
+    """Merge a ``[station]`` section into coordination.toml.
+
+    Companion to write_host_identity for the station-scope keys rendered
+    into coordination.env (STATION_REPORTER_ID etc.).  Without a
+    ``[station]`` block STATION_REPORTER_ID never renders, and
+    reporter-keyed clients fall back to their systemd instance name —
+    the path-safe storage spelling (``AC0G=B4``), not the real reporter
+    id (``AC0G/B4``) — misattributing every uploaded spot (sigmond#38).
+    ``smd config render`` writes this from site-profile.toml; this writer
+    covers the flags-only path (bring-up ``--reporter`` with no profile).
+
+    Merge semantics match write_host_identity: non-empty arguments
+    override, existing values are otherwise preserved, and all other
+    sections pass through verbatim.  Returns True only when the file
+    changed.
+    """
+    cur = load_coordination(path).station
+    reporter_id = (reporter_id or '').strip() or cur.reporter_id
+
+    fields = []
+    if reporter_id:
+        fields.append(f'reporter_id = "{reporter_id}"')
+    for key, val in (('psws_id', cur.psws_id),
+                     ('instrument_id', cur.instrument_id),
+                     ('wsprnet_call', cur.wsprnet_call),
+                     ('pskreporter_call', cur.pskreporter_call)):
+        if val:
+            fields.append(f'{key} = "{val}"')
+    if not fields:
+        return False
+    block = '[station]\n' + '\n'.join(fields) + '\n'
+
+    existing = path.read_text() if path.exists() else ''
+    lines = existing.splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.strip() == '[station]'), None)
+    if start is None:
+        new_text = block + ('\n' + existing if existing.strip() else '')
+    else:
+        end = next((j for j in range(start + 1, len(lines))
+                    if lines[j].lstrip().startswith('[')), len(lines))
+        new_text = ''.join(lines[:start]) + block + ''.join(lines[end:])
+
+    if new_text == existing:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text)
+    return True
+
+
 def render_env(coord: Coordination,
                passthrough_lookup: Optional[Callable[[str], list]] = None) -> str:
     """Render the coordination as KEY=VALUE lines suitable for systemd
