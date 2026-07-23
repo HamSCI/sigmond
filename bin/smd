@@ -11608,8 +11608,12 @@ def cmd_wspr_watch(args) -> int:
             dtm = dt_re.search(line)
             _avgdt = float(dtm.group(1)) if dtm else None
             dt_part = f' dt={_avgdt:+.2f}' if _avgdt is not None else ' dt= ----'
+            # ':00' — WSPR cycles start on even minutes so the seconds are
+            # always 00; rendering them makes the UTC field the same width
+            # as watch psk's HH:MM:SS, so stacked monitoring windows
+            # column-align through reporter=/rx= into the payload.
             cycle_text = (
-                f'[{hms}] cycle UTC {hh}:{mm}{reporter_part}{rx_part}  '
+                f'[{hms}] cycle UTC {hh}:{mm}:00{reporter_part}{rx_part} '
                 f'{spots_n:>3} spots{noise_part} / {bands_n:>2} bands{dt_part}  '
                 f'(write {write_ms:>3} ms){counts_part}'
             )
