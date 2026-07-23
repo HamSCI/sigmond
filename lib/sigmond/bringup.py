@@ -275,6 +275,19 @@ def build_plan(profile, *, local_radiod: bool,
 
     steps.append(Step(STAGE4, 'start any remaining enabled components', 'start',
                       argv=[smd, 'start']))
+
+    # Now that every client is running, pin them OFF radiod's cache-pair (cores
+    # 0-1).  Stage 1's `smd apply` writes the exclusion files but runs before the
+    # clients exist and doesn't daemon-reexec the manager CPUAffinity, so without
+    # this the recorders/web-api start on all cores, contend with radiod's USB
+    # reader, and the RX888 FX3 overruns → 'rx888 has aborted' → radiod restart
+    # cascade (cycle gaps, missing bands, out-of-order uploads, low output).
+    # `cpu-affinity --apply` daemon-reexecs the exclusion + sets AllowedCPUs on
+    # every running service; idempotent.
+    if local_radiod:
+        steps.append(Step(STAGE4, 'reserve radiod cores (apply cache-pair CPU exclusion)',
+                          'tune',
+                          argv=[smd, 'admin', 'diag', 'cpu-affinity', '--apply']))
     checkpoint(STAGE4, 'final validate', check='validate')
 
     return Plan(profile=profile.name, local_radiod=local_radiod,
