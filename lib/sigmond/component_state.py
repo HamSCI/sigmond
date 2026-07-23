@@ -414,7 +414,12 @@ def _radiod_built(name: str) -> bool:
     if name in ("ka9q-radio", "radiod"):
         return Path("/usr/local/sbin/radiod").exists()
     if name == "ka9q-web":
-        return Path("/usr/local/sbin/ka9q-web").exists()
+        # Binary alone is not enough: `make install` also ships the web
+        # assets, and a flush that removes /usr/local/share/ka9q-web
+        # while the binary survives leaves a server that 404s every
+        # page (B4 2026-07-23).  Require both.
+        return (Path("/usr/local/sbin/ka9q-web").exists()
+                and Path("/usr/local/share/ka9q-web/html/radio.html").exists())
     return False
 
 
