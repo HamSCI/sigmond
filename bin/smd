@@ -13672,7 +13672,14 @@ def _display_reporter(reporter_id: str, inst=None) -> str:
 
     Stored form may carry `=` where the user typed `/`; this reverts
     it.  No-op for hyphen-only IDs.
+
+    Callers that derive the id from a systemd unit name (watch views:
+    ``wspr-recorder@AC0G\\x3dB4.service``) hand us the RAW escaped
+    instance string — decode ``\\xHH`` sequences first so ``\\x3d``
+    becomes ``=`` and then displays as ``/``.
     """
+    reporter_id = re.sub(r'\\x([0-9a-fA-F]{2})',
+                         lambda m: chr(int(m.group(1), 16)), reporter_id)
     if inst is None:
         try:
             from sigmond.instance import display_reporter_id
