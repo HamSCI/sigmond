@@ -24,7 +24,7 @@ Observe (what is, read-only):
     smd admin log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd admin diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd admin environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|codar|superdarn|hf-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
+    smd watch       <wspr|psk|hfdl|codar|superdarn|meteor|hf-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
     smd admin sources     list | add | remove | apply                  per-client SDR source selection
 
 Operate (run things now, may need sudo):
@@ -7966,7 +7966,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar superdarn hf-tec mag ka9q radiod gpsdo uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar superdarn meteor hf-tec mag ka9q radiod gpsdo uploads verifier" -- "$cur"))
                     ;;
                 admin)
                     COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
@@ -7983,7 +7983,7 @@ _smd_complete() {
                         wspr)
                             COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
                             ;;
-                        psk|hfdl|codar|mag|hf-tec)
+                        psk|hfdl|codar|superdarn|meteor|mag|hf-tec)
                             COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
                             ;;
                         ka9q)
@@ -10251,6 +10251,287 @@ def _psk_watch_cycle_loop(
                     )
     except KeyboardInterrupt:
         return 130
+
+
+def _meteor_watch_cycle_loop(
+    receivers: list,
+    *, max_lines_per_mode: Optional[int],
+    reporter_label: str = '',
+) -> int:
+    """Per-15s-cycle meteor-scatter watch loop.
+
+    MSK144 uses a 15 s T/R sequence; meteor-scatter records one 15 s
+    T/R-aligned slot per cycle per frequency and decodes it once with
+    ``jt9 --msk144``.  Every 15 s (plus a settle window for jt9 to
+    finish) we read every new normalized line that landed in each
+    receiver's ``<radiod_id>-msk144.log`` since the previous fire.
+
+    The msk144 log line shape (decoder.normalize_log_line) is::
+
+        YYYY/MM/DD HH:MM:SS <snr> <dt> <abs_freq_hz> & <message>
+
+    i.e. the same field layout psk-watch parses, only the separator is
+    ``&`` (MSK144) instead of ``~`` (decode_ft8).  Field positions are
+    identical, so time is field 1, snr field 2, dt field 3, freq field 4.
+
+    ``max_lines_per_mode``: 0 = summary counts only, N = up to N decodes
+    per cycle, None (``-v``) = every decode.
+    """
+    SETTLE = 4.0
+    SLOT_SEC = 15.0
+    show_spots = max_lines_per_mode != 0
+    _rx_labels = ', '.join(lbl for lbl, _log in receivers)
+    _rep_part = f'reporter={reporter_label}  ' if reporter_label else ''
+    _heading(f'meteor-scatter MSK144 per-cycle activity '
+             f'({_rep_part}{len(receivers)} rx: {_rx_labels})')
+    _info('   stage: decoder (jt9 --msk144) → per-mode log (pre-SQLite, pre-upload)')
+    _info(f'   ▸ every {int(SLOT_SEC)} s (MSK144 T/R cadence) + {SETTLE:.0f} s settle:')
+    if max_lines_per_mode is None:
+        _info(f'     ALL MSK144 decodes from the last {int(SLOT_SEC)} s cycle')
+    elif max_lines_per_mode > 0:
+        _info(f'     first {max_lines_per_mode} decode'
+              f'{"s" if max_lines_per_mode != 1 else ""} of the cycle '
+              f'(sorted by time then freq); summary below')
+    else:
+        _info(f'     summary counts only (pass N to see first N decodes, '
+              f'-v to see all)')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+
+    def _file_size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except (FileNotFoundError, PermissionError):
+            try:
+                r = subprocess.run(
+                    [*sudo_prefix, 'stat', '-c', '%s', str(p)],
+                    capture_output=True, text=True, check=False,
+                )
+                return int(r.stdout.strip()) if r.returncode == 0 else 0
+            except (FileNotFoundError, ValueError):
+                return 0
+
+    def _read_since(p: Path, start: int) -> tuple[int, list]:
+        end = _file_size(p)
+        if end < start:
+            # Log truncated/recreated under us (recorder restart / re-anchor).
+            start = end
+        if end <= start:
+            return start, []
+        try:
+            r = subprocess.run(
+                [*sudo_prefix, 'tail', '-c', f'+{start + 1}', str(p)],
+                capture_output=True, text=True, check=False,
+            )
+            text = r.stdout
+        except FileNotFoundError:
+            return start, []
+        new_end = start + len(text.encode())
+        lines = [l for l in text.splitlines() if l.strip()]
+        return new_end, lines
+
+    # Prime positions per receiver at current EOF so we don't dump history.
+    pos: dict = {}
+    for _lbl, _log in receivers:
+        pos[_lbl] = _file_size(_log)
+
+    import re as _re
+    # Each decode line: "YYYY/MM/DD HH:MM:SS  SNR  DT  FREQ  &  MSG"
+    spot_re = _re.compile(r'^\d{4}/\d{2}/\d{2}\s+(\d{2}:\d{2}:\d{2})\s')
+
+    def _key(line: str):
+        m = spot_re.match(line)
+        parts = line.split()
+        if not m or len(parts) < 5:
+            return ('zz', 0.0)
+        try:
+            freq = float(parts[4].replace(',', ''))
+        except ValueError:
+            freq = 0.0
+        return (m.group(1), freq)
+
+    # MSK144 bands: 10 m (28 MHz) and 6 m (50 MHz).  Anything else renders
+    # under its integer-MHz tag so an off-band exotic still shows.
+    def _band(line: str) -> str:
+        parts = line.split()
+        if len(parts) < 5:
+            return '??'
+        try:
+            mhz = float(parts[4].replace(',', '')) / 1e6
+        except ValueError:
+            return '??'
+        if 28.0 <= mhz < 29.0:
+            return '10m'
+        if 50.0 <= mhz < 55.0:
+            return '6m'
+        return f'{mhz:.0f}MHz'
+
+    def _bands_summary(lines: list) -> str:
+        counts: dict = {}
+        for line in lines:
+            counts[_band(line)] = counts.get(_band(line), 0) + 1
+        if not counts:
+            return ''
+        order = {'10m': 0, '6m': 1}
+        ordered = sorted(counts, key=lambda b: order.get(b, 99))
+        return ' '.join(f'{b}:{counts[b]}' for b in ordered)
+
+    def _avg_dt(lines: list):
+        dts = []
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    dts.append(float(parts[3]))
+                except ValueError:
+                    pass
+        return (sum(dts) / len(dts)) if dts else None
+
+    _prev_wall = [None]
+    try:
+        while True:
+            now = time.time()
+            next_boundary = math.ceil(now / SLOT_SEC) * SLOT_SEC
+            fire_at = next_boundary + SETTLE
+            time.sleep(max(0.1, fire_at - time.time()))
+
+            wall = time.strftime('%H:%M:%S', time.gmtime(next_boundary))
+            now_str = time.strftime('%H:%M:%S', time.gmtime())
+            cap = max_lines_per_mode
+            # Separate multi-line slot blocks; suppress for single-line
+            # summary rows (same rationale as watch psk).
+            if (len(receivers) > 1 or show_spots) \
+                    and _prev_wall[0] is not None and _prev_wall[0] != wall:
+                print(flush=True)
+            _prev_wall[0] = wall
+
+            for label, log in receivers:
+                pos[label], lines = _read_since(log, pos[label])
+                lines.sort(key=_key)
+                show = lines if cap is None else lines[:cap]
+                bands = _bands_summary(lines)
+                bands_part = f' ({bands})' if bands else ''
+                _dt = _avg_dt(lines)
+                dt_part = f' dt={_dt:+.2f}' if _dt is not None else ' dt= ----'
+                _rep = f'reporter={reporter_label} ' if reporter_label else ''
+                if show_spots:
+                    print(f'─── slot UTC {wall}  {_rep}rx={label} ─────────────',
+                          flush=True)
+                    for line in show:
+                        print(f'  msk144: {line}', flush=True)
+                    if cap is not None and len(lines) > len(show):
+                        print(f'  msk144: … ({len(lines) - len(show)} more)',
+                              flush=True)
+                    if not lines:
+                        print('  (no decodes this cycle)', flush=True)
+                    else:
+                        print(f'  → msk144 total={len(lines)}{dt_part}{bands_part}',
+                              flush=True)
+                else:
+                    print(
+                        f'[{now_str}] slot  UTC {wall} {_rep}rx={label:<16} '
+                        f'msk144={len(lines):>3}{dt_part}{bands_part}',
+                        flush=True,
+                    )
+    except KeyboardInterrupt:
+        return 130
+
+
+def cmd_meteor_watch(args) -> int:
+    """Live tail of meteor-scatter's MSK144 decode activity.
+
+    meteor-scatter records 15 s T/R-aligned slots on the MSK144 10 m
+    (28.145 MHz) and 6 m (50.260 MHz) dials and decodes each with
+    ``jt9 --msk144``.  Decoded pings are normalized into
+    ``/var/log/meteor-scatter/<radiod_id>-msk144.log`` (the same file
+    the in-process ChTailer reads before staging rows into the shared
+    ``psk.spots`` sink).  This watch tails that per-mode log — which is
+    why `smd watch psk` does NOT surface MSK144: psk-watch tails
+    psk-recorder's own ``<rid>-ft8.log`` / ``<rid>-ft4.log``, a
+    different producer's logs, even though both feed one SQLite table.
+    """
+    instance = getattr(args, 'instance', None)
+    # The operator's --instance is a plain reporter ID (e.g. AC0G=S), but
+    # systemd names the template unit with the '=' escaped
+    # (meteor-scatter@AC0G\x3dS.service) while the per-instance config path
+    # keeps the literal '=' (/etc/meteor-scatter/AC0G=S.toml).  Canonicalize
+    # to the unescaped reporter for paths/display; escape only for the unit.
+    reporter = None
+    if instance:
+        reporter = re.sub(r'\\x([0-9a-fA-F]{2})',
+                          lambda m: chr(int(m.group(1), 16)), instance)
+    unit_pattern = (f'meteor-scatter@{_systemd_escape_reporter(reporter)}.service'
+                    if reporter else 'meteor-scatter@*')
+    if _watch_preflight(
+            'meteor-watch', unit_pattern,
+            hint='Start it with `smd start meteor-scatter` '
+                 'or pass --instance <reporter-id> to scope.') != 0:
+        return 1
+    log_dir = Path('/var/log/meteor-scatter')
+
+    def _short_rx(rid: str) -> str:
+        suf = '-status.local'
+        return rid[: -len(suf)] if rid.endswith(suf) else rid
+
+    if reporter:
+        # systemd instance (reporter_id) → radiod status name (the log key).
+        radiod_id = _radiod_status_from_per_instance_config(
+            'meteor-scatter', reporter,
+        ) or reporter
+        msk_log = log_dir / f'{radiod_id}-msk144.log'
+        if not msk_log.exists():
+            _err(f'no msk144 log for instance={reporter!r} '
+                 f'(radiod_id={radiod_id!r}) in {log_dir}.  '
+                 f'Looked for {msk_log.name}.')
+            return 1
+        receivers = [(_short_rx(radiod_id), msk_log)]
+    else:
+        # No --instance: every receiver's msk144 log, freshest first,
+        # limited to those actively written (a stopped instance leaves a
+        # stale log behind).  Same active-window logic as watch psk.
+        candidates = sorted(
+            log_dir.glob('*-msk144.log'),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        )
+        if not candidates:
+            _err('no /var/log/meteor-scatter/*-msk144.log found '
+                 '— is meteor-scatter running?')
+            return 1
+        import time as _time
+        _now = _time.time()
+        _FRESH_SEC = 300
+        def _mtime(p):
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0
+        active = [p for p in candidates if (_now - _mtime(p)) <= _FRESH_SEC] \
+            or candidates[:1]
+        receivers = []
+        for log in active:
+            rid = log.stem[: -len('-msk144')]
+            receivers.append((_short_rx(rid), log))
+
+    n_recent = int(getattr(args, 'recent', 0) or 0)
+    verbose = bool(getattr(args, 'verbose', False))
+    cap: Optional[int] = None if verbose else (n_recent if n_recent > 0 else 0)
+
+    if reporter:
+        rep_label = _display_reporter(reporter)
+    else:
+        r = _run(['systemctl', 'list-units', '--no-legend', '--plain',
+                  '--no-pager', '--state=active', 'meteor-scatter@*'])
+        _ids = sorted({
+            _display_reporter(ln.split()[0].split('@', 1)[1]
+                              .rsplit('.service', 1)[0])
+            for ln in r.stdout.splitlines() if ln.split() and '@' in ln.split()[0]
+        })
+        rep_label = ', '.join(_ids)
+    return _meteor_watch_cycle_loop(
+        receivers, max_lines_per_mode=cap, reporter_label=rep_label)
 
 
 def cmd_verifier_watch(args) -> int:
@@ -13769,6 +14050,31 @@ def _normalize_reporter_arg(args, inst) -> bool:
     return True
 
 
+def _systemd_escape_reporter(reporter_id: str) -> str:
+    """Escape a reporter/instance ID the way systemd names its template
+    unit instance, so a `systemctl` pattern matches the real unit.
+
+    E.g. ``AC0G=S`` → ``AC0G\\x3dS`` (the live unit is
+    ``meteor-scatter@AC0G\\x3dS.service``).  This is the forward inverse
+    of the ``\\xHH`` decode in ``_display_reporter``: callers that hold a
+    plain reporter ID (``AC0G=S``) and need to address its systemd unit
+    must escape first, or the pattern silently matches nothing.  Any
+    ``\\xHH`` already present in the input is decoded first so the call
+    is idempotent.
+    """
+    reporter_id = re.sub(r'\\x([0-9a-fA-F]{2})',
+                         lambda m: chr(int(m.group(1), 16)), reporter_id)
+    try:
+        r = subprocess.run(['systemd-escape', '--', reporter_id],
+                           capture_output=True, text=True, check=False)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except FileNotFoundError:
+        pass
+    # Fallback: escape the one special char that shows up in reporter IDs.
+    return reporter_id.replace('=', '\\x3d')
+
+
 def _display_reporter(reporter_id: str, inst=None) -> str:
     """Render a stored reporter ID for user-facing strings.
 
@@ -14468,6 +14774,20 @@ def _add_psk_watch_args(p) -> None:
     p.add_argument('--instance', metavar='RADIOD_ID', default=None,
                    help='specific radiod instance (default: most recently '
                         'modified /var/log/psk-recorder/<id>.log)')
+
+
+def _add_meteor_watch_args(p) -> None:
+    """Argument spec for `smd watch meteor`."""
+    p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                   help='per-15s-cycle mode (MSK144 T/R cadence): print up '
+                        'to N MSK144 decodes under each cycle summary '
+                        '(default 0 = counts only; -v = print all)')
+    p.add_argument('-v', '--verbose', action='store_true',
+                   help='per-cycle mode showing ALL decodes — same '
+                        'cadence as N, no per-band cap')
+    p.add_argument('--instance', metavar='REPORTER_ID', default=None,
+                   help='specific meteor-scatter@<instance> (default: all '
+                        'active meteor-scatter@* receivers)')
 
 
 def _add_hfdl_watch_args(p) -> None:
@@ -15639,7 +15959,7 @@ def main() -> int:
 
               Operator (daily, read-mostly):
                 status     service health snapshot
-                watch      live tail (wspr | psk | hfdl | codar | superdarn | hf-tec | mag | ka9q | radiod | uploads | verifier)
+                watch      live tail (wspr | psk | hfdl | codar | superdarn | meteor | hf-tec | mag | ka9q | radiod | uploads | verifier)
                 tui        launch interactive TUI
 
               Operator (mutating — needs sudo):
@@ -16557,7 +16877,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | hfdl | codar | superdarn | mag | ka9q | radiod | gpsdo | uploads | verifier)')
+                                  '(smd watch wspr | psk | hfdl | codar | superdarn | meteor | mag | ka9q | radiod | gpsdo | uploads | verifier)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -16594,6 +16914,13 @@ def main() -> int:
              '(per-window rollup by radar: sequence ID + score + SNR)',
     )
     _add_superdarn_watch_args(p_w_superdarn)
+
+    p_w_meteor = watch_sub.add_parser(
+        'meteor',
+        help='live tail of meteor-scatter MSK144 decodes '
+             '(per-15s-cycle rollup by band: 10 m / 6 m ping counts)',
+    )
+    _add_meteor_watch_args(p_w_meteor)
 
     p_w_hftec = watch_sub.add_parser(
         'hf-tec',
@@ -17045,6 +17372,8 @@ def main() -> int:
             return cmd_codar_watch(args)
         if target == 'superdarn':
             return cmd_superdarn_watch(args)
+        if target == 'meteor':
+            return cmd_meteor_watch(args)
         if target == 'hf-tec':
             return cmd_hf_tec_watch(args)
         if target == 'mag':
