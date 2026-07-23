@@ -3041,11 +3041,14 @@ def _detect_gpsdo() -> bool:
 
 
 def _gpsdo_fix():
-    """Read the GPSDO's live health from /run/gpsdo: (has_fix, grid, fix_str).
-    A GPSDO on the bus with NO GPS fix can neither discipline the clock nor
-    provide a location, so bring-up must treat present-but-no-fix like the
-    magnetometer's adapter-present-but-sensor-dead — a 'connect the antenna'
-    blocker, not a pass.  gpsdo-monitor publishes gps_fix + the derived grid."""
+    """(has_fix, grid, fix_str) for the GPSDO.
+
+    Prefer gpsdo-monitor's published /run/gpsdo (fast, authoritative once the
+    service runs).  Fall back to reading the GPSDO's NMEA DIRECTLY off its CDC tty
+    so the bring-up gate + grid-derivation work BEFORE gpsdo-monitor is installed —
+    otherwise a physically-locked GPSDO reads as 'no fix' on a fresh host (the bug
+    the walk-through caught).  Both paths need root, so bringup elevates before the
+    gate."""
     import glob, json
     for f in glob.glob('/run/gpsdo/*.json'):
         if f.endswith('index.json'):
@@ -3055,8 +3058,69 @@ def _gpsdo_fix():
         except Exception:   # noqa: BLE001
             continue
         fix = h.get('gps_fix')
-        return (fix in ('2D', '3D'), h.get('grid'), fix)
-    return (False, None, None)
+        if fix:                       # monitor is up and publishing
+            return (fix in ('2D', '3D'), h.get('grid'), fix)
+    return _gpsdo_fix_direct()
+
+
+def _gpsdo_fix_direct():
+    """Sample the GPSDO's NMEA straight off its CDC tty — no gpsdo-monitor needed.
+    Locates the Leo Bodnar (USB vid 1dd2) tty, reads a few seconds of NMEA, returns
+    (has_fix, grid, fix_str).  Best-effort: (False, None, None) if the device isn't
+    found or can't be read (e.g. an unprivileged dry-run)."""
+    import glob, subprocess, sys, types
+    tty = None
+    for node in sorted(glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')):
+        try:
+            props = subprocess.run(
+                ['udevadm', 'info', '-q', 'property', '-n', node],
+                capture_output=True, text=True, check=False).stdout
+        except Exception:   # noqa: BLE001
+            continue
+        if 'ID_VENDOR_ID=1dd2' in props:   # Leo Bodnar LBE-1421
+            tty = node
+            break
+    if tty is None:
+        return (False, None, None)
+    subprocess.run(['stty', '-F', tty, 'raw', '-echo', '9600'], check=False)
+    sys.modules.setdefault('hid', types.ModuleType('hid'))  # nmea.py imports hid_xport
+    try:
+        sys.path.insert(0, '/opt/git/sigmond/gpsdo-monitor/src')
+        from gpsdo_monitor.nmea import NmeaState, feed  # feed() needs no pyserial
+    except Exception:   # noqa: BLE001
+        return (False, None, None)
+    import os as _os, select as _select, time as _time
+    st = NmeaState()
+    try:
+        fd = _os.open(tty, _os.O_RDONLY | _os.O_NONBLOCK | _os.O_NOCTTY)
+    except OSError:
+        return (False, None, None)
+    buf = b''
+    deadline = _time.monotonic() + 5.0
+    try:
+        while _time.monotonic() < deadline:
+            r, _, _ = _select.select([fd], [], [], 0.5)
+            if not r:
+                continue
+            try:
+                chunk = _os.read(fd, 512)
+            except OSError:
+                break
+            if not chunk:
+                continue
+            buf += chunk
+            while b'\n' in buf:
+                line, buf = buf.split(b'\n', 1)
+                try:
+                    feed(st, line.decode('ascii', 'ignore').strip())
+                except Exception:   # noqa: BLE001
+                    pass
+            if st.gps_fix in ('2D', '3D') and st.latitude is not None:
+                break                       # have fix + position, done
+    finally:
+        _os.close(fd)
+    fix = st.gps_fix
+    return (fix in ('2D', '3D'), st.maidenhead(), fix)
 
 
 def _rm3100_responds() -> 'Optional[bool]':
@@ -3377,6 +3441,14 @@ def cmd_bringup(args) -> int:
                 _err('bringup: no radiod available (local or remote) — aborting')
                 return 1
             remote_dns = entered
+
+    # The hardware gate + GPS grid-derivation below probe root-only resources
+    # (/run/gpsdo, the GPSDO/mag CDC ttys), so on a real run elevate UP FRONT —
+    # _need_root re-execs the whole bringup under sudo, after which the gate and
+    # identity probes have root; the later _need_root('bringup') then no-ops.
+    # Dry-run stays unprivileged (its probes are best-effort preview only).
+    if not getattr(args, 'dry_run', False) and _need_root('bringup'):
+        return 1
 
     # FIRST bring-up gate: are the REQUIRED external devices physically attached
     # (RX888 / GPSDO / magnetometer per the profile)?  One consolidated inventory
