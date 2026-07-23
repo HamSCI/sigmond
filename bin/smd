@@ -3040,6 +3040,25 @@ def _detect_gpsdo() -> bool:
     return hardware_ready('gpsdo-monitor') is True
 
 
+def _gpsdo_fix():
+    """Read the GPSDO's live health from /run/gpsdo: (has_fix, grid, fix_str).
+    A GPSDO on the bus with NO GPS fix can neither discipline the clock nor
+    provide a location, so bring-up must treat present-but-no-fix like the
+    magnetometer's adapter-present-but-sensor-dead — a 'connect the antenna'
+    blocker, not a pass.  gpsdo-monitor publishes gps_fix + the derived grid."""
+    import glob, json
+    for f in glob.glob('/run/gpsdo/*.json'):
+        if f.endswith('index.json'):
+            continue
+        try:
+            h = json.load(open(f)).get('health', {})
+        except Exception:   # noqa: BLE001
+            continue
+        fix = h.get('gps_fix')
+        return (fix in ('2D', '3D'), h.get('grid'), fix)
+    return (False, None, None)
+
+
 def _rm3100_responds() -> 'Optional[bool]':
     """Functional magnetometer check: does the RM3100 actually ANSWER on the I2C
     bus (0x23), not merely the Pololu adapter being present?  A USB-presence
@@ -3075,9 +3094,20 @@ def _bringup_hardware_gate(prof, local: bool, require: bool) -> bool:
         checks.append(('RX888 SDR', _detect_local_sdr(),
                        'attach the RX888 (Cypress FX3) on a USB-3 port'))
     if 'gpsdo-monitor' in getattr(prof, 'local_radiod_infra', ()) or local:
-        checks.append(('GPSDO (Leo Bodnar)', _detect_gpsdo(),
-                       'attach the GPSDO on USB — without a fix the RX888 runs '
-                       'undisciplined and location cannot be auto-derived'))
+        present = _detect_gpsdo()
+        has_fix, grid, fixstr = _gpsdo_fix()
+        if present and not has_fix:
+            # On the bus but not located — the exact 'connect the antenna' case.
+            checks.append(('GPSDO fix', False,
+                           f'GPSDO present but NO GPS fix (gps_fix={fixstr or "none"}) — '
+                           'connect the GPS antenna: no fix means an undisciplined '
+                           'RX888 clock and no auto-derived location'))
+        elif present and has_fix:
+            checks.append((f'GPSDO fix [{grid or "?"}]', True, 'located'))
+        else:
+            checks.append(('GPSDO (Leo Bodnar)', present,
+                           'attach the GPSDO on USB — without a fix the RX888 runs '
+                           'undisciplined and location cannot be auto-derived'))
     if 'mag-recorder' in getattr(prof, 'clients', ()):
         present, responds = _detect_magnetometer(), _rm3100_responds()
         if present and responds is False:
