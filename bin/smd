@@ -9839,6 +9839,7 @@ def _radiod_status_from_per_instance_config(client: str, instance: str) -> Optio
 def _psk_watch_cycle_loop(
     receivers: list,
     *, max_lines_per_mode: Optional[int],
+    reporter_label: str = '',
 ) -> int:
     """Per-FT8-cycle psk-watch loop — default, N, and -v all share this.
 
@@ -9863,8 +9864,11 @@ def _psk_watch_cycle_loop(
     SLOT_SEC = 15.0
     show_spots = max_lines_per_mode != 0
     _rx_labels = ', '.join(lbl for lbl, _f8, _f4 in receivers)
+    # reporter= is the upload identity (slash form, matches wspr-watch);
+    # rx= names the radiod source(s).  Same split as the WSPR cycle view.
+    _rep_part = f'reporter={reporter_label}  ' if reporter_label else ''
     _heading(f'PSK Reporter per-cycle activity '
-             f'({len(receivers)} rx: {_rx_labels})')
+             f'({_rep_part}{len(receivers)} rx: {_rx_labels})')
     _info('   stage: decoder (decode_ft8) → per-mode log (pre-SQLite, pre-upload)')
     _info(f'   ▸ every {int(SLOT_SEC)} s (FT8 cadence) + {SETTLE:.0f} s settle:')
     if max_lines_per_mode is None:
@@ -12905,8 +12909,22 @@ def cmd_psk_watch(args) -> int:
         cap: Optional[int] = None
     else:
         cap = n_recent if n_recent > 0 else 0
+    # Reporter identity for the heading: the operator's --instance IS a
+    # reporter id; otherwise collect from the active psk-recorder@ units.
+    # Same systemd-escape → '/' display transform as the WSPR cycle view.
+    if instance:
+        rep_label = _display_reporter(instance)
+    else:
+        r = _run(['systemctl', 'list-units', '--no-legend', '--plain',
+                  '--no-pager', '--state=active', 'psk-recorder@*'])
+        _ids = sorted({
+            _display_reporter(ln.split()[0].split('@', 1)[1]
+                              .rsplit('.service', 1)[0])
+            for ln in r.stdout.splitlines() if ln.split() and '@' in ln.split()[0]
+        })
+        rep_label = ', '.join(_ids)
     return _psk_watch_cycle_loop(
-        receivers, max_lines_per_mode=cap,
+        receivers, max_lines_per_mode=cap, reporter_label=rep_label,
     )
 
     # NOTE: the legacy `psk-uploader-ch:` pump-event tail mode used to
