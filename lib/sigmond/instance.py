@@ -372,11 +372,14 @@ def _stub_header(client: str, reporter_id: str, kind: str) -> str:
 
 
 def _config_stub(client: str, reporter_id: str) -> str:
+    # The config VALUE is the real reporter id (slash form) — clients stamp
+    # it into spot rows and upload it verbatim.  Only filenames and unit
+    # instance names use the '=' storage spelling.
     return (
         _stub_header(client, reporter_id, "Per-instance config")
         + "\n"
         f"[instance]\n"
-        f'reporter_id = "{reporter_id}"\n'
+        f'reporter_id = "{display_reporter_id(reporter_id)}"\n'
         "\n"
         "# Source-keys this instance consumes from.  Use\n"
         '#   smd admin sources add ' + client + '@' + reporter_id + ' <kind>:<id>\n'
@@ -405,7 +408,8 @@ def _config_from_shared(client: str, reporter_id: str, shared_body: str) -> str:
         return shared_body
     instance_block = (
         "[instance]\n"
-        f'reporter_id = "{reporter_id}"\n'
+        # Real reporter id (slash form) — see _config_stub.
+        f'reporter_id = "{display_reporter_id(reporter_id)}"\n'
         "sources = []\n"
         "\n"
     )
@@ -758,7 +762,8 @@ def _migration_config_header(client: str, old: str, reporter_id: str) -> str:
         f"# for the canonical layout.\n"
         f"\n"
         f"[instance]\n"
-        f'reporter_id = "{reporter_id}"\n'
+        # Real reporter id (slash form) — see _config_stub.
+        f'reporter_id = "{display_reporter_id(reporter_id)}"\n'
         f"\n"
         f"[instance.metadata]\n"
         f'# antenna  = "loop"            # operator description\n'
