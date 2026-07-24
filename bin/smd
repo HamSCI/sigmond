@@ -10285,7 +10285,8 @@ def _meteor_watch_cycle_loop(
     _heading(f'meteor-scatter MSK144 per-cycle activity '
              f'({_rep_part}{len(receivers)} rx: {_rx_labels})')
     _info('   stage: decoder (jt9 --msk144) → per-mode log (pre-SQLite, pre-upload)')
-    _info(f'   ▸ every {int(SLOT_SEC)} s (MSK144 T/R cadence) + {SETTLE:.0f} s settle:')
+    _info(f'   ▸ every {int(SLOT_SEC)} s (log poll; MSK144 T/R period is '
+          f'15 or 30 s per config) + {SETTLE:.0f} s settle:')
     if max_lines_per_mode is None:
         _info(f'     ALL MSK144 decodes from the last {int(SLOT_SEC)} s cycle')
     elif max_lines_per_mode > 0:
@@ -14779,9 +14780,10 @@ def _add_psk_watch_args(p) -> None:
 def _add_meteor_watch_args(p) -> None:
     """Argument spec for `smd watch meteor`."""
     p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
-                   help='per-15s-cycle mode (MSK144 T/R cadence): print up '
-                        'to N MSK144 decodes under each cycle summary '
-                        '(default 0 = counts only; -v = print all)')
+                   help='per-15s-poll mode: print up to N MSK144 decodes '
+                        'under each cycle summary (the MSK144 T/R period is '
+                        '15 or 30 s per config; default 0 = counts only; '
+                        '-v = print all)')
     p.add_argument('-v', '--verbose', action='store_true',
                    help='per-cycle mode showing ALL decodes — same '
                         'cadence as N, no per-band cap')
