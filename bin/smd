@@ -9919,6 +9919,16 @@ def _psk_watch_cycle_loop(
     SETTLE = 4.0
     SLOT_SEC = 15.0
     show_spots = max_lines_per_mode != 0
+    # meteor-scatter MSK144 rides the same 15 s T/R cadence and writes the
+    # same normalized line shape ('&' separator, identical field layout) to
+    # <radiod_id>-msk144.log — so its per-cycle counts fit at the end of
+    # each psk cycle line.  Only two bands (6m/10m) are ever configured.
+    _METEOR_LOG_DIR = Path('/var/log/meteor-scatter')
+
+    def _msk_log_for(ft8_log: Path) -> Path:
+        return _METEOR_LOG_DIR / (
+            ft8_log.stem[: -len('-ft8')] + '-msk144.log')
+
     _rx_labels = ', '.join(lbl for lbl, _f8, _f4 in receivers)
     # reporter= is the upload identity (slash form, matches wspr-watch);
     # rx= names the radiod source(s).  Same split as the WSPR cycle view.
@@ -9926,6 +9936,9 @@ def _psk_watch_cycle_loop(
     _heading(f'PSK Reporter per-cycle activity '
              f'({_rep_part}{len(receivers)} rx: {_rx_labels})')
     _info('   stage: decoder (decode_ft8) → per-mode log (pre-SQLite, pre-upload)')
+    if any(_msk_log_for(_f8).exists() for _lbl, _f8, _f4 in receivers):
+        _info('   + msk= column: meteor-scatter MSK144 decodes '
+              '(jt9 --msk144, same 15 s cadence)')
     _info(f'   ▸ every {int(SLOT_SEC)} s (FT8 cadence) + {SETTLE:.0f} s settle:')
     if max_lines_per_mode is None:
         _info(f'     ALL FT8 spots from the last {int(SLOT_SEC)} s cycle')
@@ -9994,6 +10007,7 @@ def _psk_watch_cycle_loop(
         pos[(_lbl, 'ft4')] = _file_size(_f4)
         pos[(_lbl, 'timing')] = _file_size(
             _f8.with_name(_f8.name.replace('-ft8.log', '-timing.log')))
+        pos[(_lbl, 'msk')] = _file_size(_msk_log_for(_f8))
 
     import re as _re
     # Each spot line: "YYYY/MM/DD HH:MM:SS  SCORE  +DT  FREQ  ~  MSG"
@@ -10163,6 +10177,13 @@ def _psk_watch_cycle_loop(
                     ft8_log, pos[(label, 'ft8')])
                 pos[(label, 'ft4')], ft4_lines = _read_since(
                     ft4_log, pos[(label, 'ft4')])
+                # MSK144 (meteor-scatter): same cadence, same line layout.
+                # Absent log (host without meteor-scatter) reads as [] and
+                # the msk= part is omitted entirely.
+                _msk_log = _msk_log_for(ft8_log)
+                _msk_present = _msk_log.exists()
+                pos[(label, 'msk')], msk_lines = _read_since(
+                    _msk_log, pos.get((label, 'msk'), 0))
                 # Timing-fault alarms: psk-recorder writes #TIMINGFAULT lines
                 # to <rid>-timing.log when it detects an anchor divergence (and
                 # re-anchors).  Surface them LOUD inline so the operator sees
@@ -10203,6 +10224,15 @@ def _psk_watch_cycle_loop(
                     _d4 -= _ft4_dt_cal
                 ft8_dt_part = f' dt={_d8:+.2f}' if _d8 is not None else ' dt= ----'
                 ft4_dt_part = f' dt={_d4:+.2f}' if _d4 is not None else ''
+                # msk= only renders on hosts with a meteor-scatter log; the
+                # count is usually 0 (meteor pings are rare), bands only
+                # when something decoded (at most 6m/10m).
+                msk_part = ''
+                if _msk_present:
+                    msk_lines.sort(key=_key)
+                    _msk_bands = _bands_summary(msk_lines)
+                    msk_part = (f'  msk={len(msk_lines):>2}'
+                                + (f' ({_msk_bands})' if _msk_bands else ''))
 
                 # Same reporter=/rx= lead-in as watch wspr's cycle lines so
                 # side-by-side monitoring windows column-align and the
@@ -10235,18 +10265,23 @@ def _psk_watch_cycle_loop(
                     if cap is not None and len(ft4_lines) > len(ft4_show):
                         print(f'  ft4: … ({len(ft4_lines) - len(ft4_show)} more)',
                               flush=True)
-                    if not ft8_lines and not ft4_lines:
+                    # MSK144 decodes are rare enough to always show in full.
+                    for line in msk_lines:
+                        print(f'  msk: {line}', flush=True)
+                    if not ft8_lines and not ft4_lines and not msk_lines:
                         print('  (no decodes this cycle)', flush=True)
                     else:
                         print(f'  → ft8 total={len(ft8_lines)}{ft8_dt_part}{ft8_bands_part}   '
-                              f'ft4 total={len(ft4_lines)}{ft4_dt_part}{ft4_bands_part}',
+                              f'ft4 total={len(ft4_lines)}{ft4_dt_part}{ft4_bands_part}'
+                              f'{msk_part}',
                               flush=True)
                 else:
                     # Summary path (no args, cap=0): one line per rx/cycle.
                     print(
                         f'[{now_str}] slot  UTC {wall} {_rep}rx={label:<16} '
                         f'ft8={len(ft8_lines):>3}{ft8_dt_part}{ft8_bands_part}  '
-                        f'ft4={len(ft4_lines):>3}{ft4_dt_part}{ft4_bands_part}',
+                        f'ft4={len(ft4_lines):>3}{ft4_dt_part}{ft4_bands_part}'
+                        f'{msk_part}',
                         flush=True,
                     )
     except KeyboardInterrupt:
