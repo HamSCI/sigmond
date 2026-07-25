@@ -5401,6 +5401,14 @@ def cmd_start(args) -> int:
     _netdiag_auto_refresh('start')
     rc = 0
     for unit in units:
+        # Persist across reboots: `systemctl start` alone leaves a unit
+        # disabled, and bringup's Stage-4 sweep may be the only lifecycle
+        # touch an instance unit ever gets — a greenfield image otherwise
+        # boots dark (radiod@<inst> running-but-disabled; VM101 image
+        # first-boot, 2026-07-25).  Enable BEFORE the already-running skip
+        # so units started by earlier bringup steps get persisted too.
+        if _run(['systemctl', 'is-enabled', '--quiet', unit.unit]).returncode != 0:
+            _run(['systemctl', 'enable', unit.unit], sudo=True)
         # No-op on already-active units.  `systemctl start` is a no-op for a
         # plain long-running service, but some units re-trigger work on start
         # (hf-timestd's templated metrology instances re-derive and restart,
