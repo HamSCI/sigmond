@@ -3294,6 +3294,58 @@ def _bringup_wait_streaming(timeout_s: int = 300, settle_s: int = 15,
     return ok_all
 
 
+_SMD_MUTATING_VERBS = ('install', 'apply', 'start', 'stop', 'restart', 'reload')
+
+
+def _step_is_smd_mutating(argv: list) -> bool:
+    """True when a bringup step re-execs smd with a verb that takes the
+    lifecycle lock (CONTRACT §5.5) — those can collide with background smd
+    work bringup itself launched (sigmond-wisdom.service runs `smd stop`
+    on startup and holds the lock for its whole stop pass)."""
+    if not argv or 'smd' not in os.path.basename(argv[0]):
+        return False
+    return any(v in argv for v in _SMD_MUTATING_VERBS)
+
+
+def _bringup_wait_lock_free(timeout_s: int = 180) -> None:
+    """Wait (bounded) for the lifecycle lock to be free before re-execing a
+    mutating smd child.
+
+    bringup launches sigmond-wisdom.service detached (--no-block) in Stage 1;
+    that unit's startup runs `smd stop`, which holds the lifecycle lock for
+    the whole stop pass (~tens of seconds).  Without this gate the very next
+    `smd install --components ...` step lands inside that window, bounces off
+    the LOCK_NB flock, and a hard checkpoint aborts the entire bring-up.
+    Probe-and-release only — the lock is never held across the child."""
+    try:
+        from sigmond.paths import LIFECYCLE_LOCK
+    except ImportError:
+        return
+    import fcntl
+    import time
+    deadline = time.monotonic() + timeout_s
+    warned = False
+    while time.monotonic() < deadline:
+        try:
+            fd = os.open(str(LIFECYCLE_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            return                      # unprivileged dry-run etc. — don't gate
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return
+        except OSError:
+            if not warned:
+                _info('  lifecycle lock held by a background smd operation '
+                      '(FFT wisdom startup?) — waiting for it to clear...')
+                warned = True
+            time.sleep(2)
+        finally:
+            os.close(fd)
+    _warn(f'lifecycle lock still held after {timeout_s}s — running the step '
+          f'anyway (it may fail on the lock)')
+
+
 # Sentinel that recorder config templates ship for the radiod status address;
 # `config init` replaces it.  A config that still contains it is unconfigured.
 _CONFIG_PLACEHOLDER = '<configure-via-config-init>'
@@ -3734,8 +3786,23 @@ def cmd_bringup(args) -> int:
             _info(f'» {st.label}')
         # `config` steps run the per-client wizards, which prompt the operator
         # — they must inherit the terminal's stdin (not /dev/null).
+        _smd_mutating = _step_is_smd_mutating(st.argv)
+        if _smd_mutating and not st.background:
+            _bringup_wait_lock_free()
+        import time as _time
+        _t0 = _time.monotonic()
         r = _run(st.argv, capture=False, sudo=False,
                  interactive=(st.kind == 'config'))
+        if (getattr(r, 'returncode', 0) != 0 and not st.background
+                and _smd_mutating and _time.monotonic() - _t0 < 15):
+            # A mutating smd child that dies within seconds is the signature
+            # of a lifecycle-lock bounce (it exits immediately on LOCK_NB) —
+            # wait the lock out and retry once.  Mutating verbs are
+            # idempotent, so a retry after a genuine fast failure is safe.
+            _bringup_wait_lock_free()
+            _info(f'  retrying: {" ".join(st.argv)}')
+            r = _run(st.argv, capture=False, sudo=False,
+                     interactive=(st.kind == 'config'))
         if getattr(r, 'returncode', 0) != 0 and not st.background:
             _warn(f'step exited {r.returncode}: {" ".join(st.argv)}')
         if st.settle_s:
