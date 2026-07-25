@@ -213,13 +213,23 @@ class UpdateOutputModal(ModalScreen):
         btn.disabled = False
         btn.focus()
 
+    def _dismiss_once(self, result: bool) -> None:
+        # Enter on the focused Dismiss button fires BOTH the key binding
+        # (action_try_dismiss) and Button.Pressed — the second dismiss pops
+        # an already-empty screen stack and crashes the whole TUI with
+        # ScreenStackError.  Dismiss exactly once.
+        if getattr(self, '_dismissed', False):
+            return
+        self._dismissed = True
+        self.dismiss(result)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "uom-dismiss":
-            self.dismiss(self._done)
+            self._dismiss_once(self._done)
 
     def action_try_dismiss(self) -> None:
         if self._done:
-            self.dismiss(True)
+            self._dismiss_once(True)
 
 
 def _is_self_elevating(cmd: list) -> bool:
