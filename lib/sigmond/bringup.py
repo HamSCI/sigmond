@@ -143,6 +143,17 @@ def build_plan(profile, *, local_radiod: bool,
                           argv=['systemctl', 'start', '--no-block',
                                 'sigmond-wisdom.service'], background=True))
         checkpoint(STAGE1, 'radiod configured', check='radiod-configured', hard=True)
+        if 'ka9q-web' in profile.local_radiod_infra and 'ka9q-web' not in skip:
+            # ka9q-web builds with the Stage-1 infra above, but its unit-writer
+            # refuses to install ka9q-web.service until coordination.env carries
+            # SIGMOND_RADIOD_STATUS — which `configure radiod` only just wrote.
+            # Re-run the (idempotent, sha-compared) install so the unit exists
+            # before Stage 4 tries to start it; without this every greenfield
+            # bring-up ends with "Unit ka9q-web.service not found".
+            steps.append(Step(STAGE1, 'install ka9q-web unit (post-radiod-config)',
+                              'install',
+                              argv=[smd, 'install', '--components', 'ka9q-web',
+                                    '--yes']))
     else:
         dns = remote_status_dns or 'auto-discover'
         steps.append(Step(STAGE1, f'using remote radiod ({dns}) — skipping radiod '
