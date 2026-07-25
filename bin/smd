@@ -1044,6 +1044,13 @@ def _diag_build_manifests() -> int:
 def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
     if not _ensure_native_build_deps(label='ka9q-web'):
         return False
+    # ka9q-web compiles against the ka9q-radio source tree, so it needs
+    # radiod's full header set (libbsd, iniparser, opus, avahi, …), not just
+    # the generic toolchain.  Install order isn't guaranteed — ka9q-web can
+    # build before ka9q-radio's dep pass has ever run — so ensure the whole
+    # set here instead of chasing one missing header per greenfield run.
+    if not _install_radiod_deps():
+        return False
     onion_url    = _ONION_REPO
     onion_commit = _ONION_COMMIT
     onion_src    = _ONION_SRC
