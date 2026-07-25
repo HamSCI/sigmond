@@ -382,6 +382,23 @@ for _tool in curl tmux btop vim; do
 done
 unset _tool
 
+# ─── usbutils (lsusb) ────────────────────────────────────────────────────────
+# lsusb is load-bearing for SDR discovery: the bringup preflight and the
+# `smd sdr` inventory probe the USB bus via lsusb.  Without it a fresh host
+# reports "no RX888/SDR on the USB bus" and bringup hard-aborts even with an
+# RX-888 attached (a cold FX3 always enumerates in DFU mode until radiod
+# loads firmware, so discovery must work before anything is built).
+if command -v lsusb &>/dev/null; then
+    ok "lsusb: present"
+else
+    info "Installing usbutils (lsusb)…"
+    if _pkg_install usbutils; then
+        ok "usbutils: installed"
+    else
+        warn "usbutils could not be installed via $_PKG_MGR — SDR discovery will report an empty USB bus until lsusb is available"
+    fi
+fi
+
 # ─── tmux mouse support for the operator ─────────────────────────────────────
 # Support sessions run inside tmux; mouse mode (scroll, pane select, resize)
 # is the fleet convention.  Ensure the invoking user's ~/.tmux.conf turns it

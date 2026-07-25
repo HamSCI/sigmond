@@ -718,17 +718,22 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
 # ABORTS the process at runtime when compiled without them (cmake's
 # ONION_USE_SSL=ON silently degrades if either dev package is absent at
 # configure time — GCRYPT_LIBRARY-NOTFOUND still "succeeds").
+# libbsd-dev: ka9q-web includes <bsd/string.h>.  It is also in
+# _RADIOD_APT_DEPS, but install order is not guaranteed — ka9q-web can build
+# before ka9q-radio's dep pass has ever run (greenfield 2026-07-25), so the
+# web build must not borrow it from the radiod recipe.
 _NATIVE_BUILD_DEPS = ['cmake', 'build-essential', 'libssl-dev',
-                      'libgnutls28-dev', 'libgcrypt20-dev', 'pkg-config']
+                      'libgnutls28-dev', 'libgcrypt20-dev', 'pkg-config',
+                      'libbsd-dev']
 
 
 def _ensure_native_build_deps(label: str = 'build') -> bool:
     """Ensure the apt toolchain for native C builds (cmake, a C compiler,
-    pkg-config, SSL/gnutls/gcrypt headers) is present; install it via
-    apt-get if not.  Returns False only when it's missing AND can't be
+    pkg-config, SSL/gnutls/gcrypt/libbsd headers) is present; install it
+    via apt-get if not.  Returns False only when it's missing AND can't be
     installed."""
-    def _have_crypto_headers() -> bool:
-        for pc in ('gnutls', 'libgcrypt'):
+    def _have_build_headers() -> bool:
+        for pc in ('gnutls', 'libgcrypt', 'libbsd'):
             r = subprocess.run(['pkg-config', '--exists', pc],
                                capture_output=True)
             if r.returncode != 0:
@@ -736,7 +741,7 @@ def _ensure_native_build_deps(label: str = 'build') -> bool:
         return True
     if (shutil.which('cmake') and shutil.which('pkg-config')
             and (shutil.which('cc') or shutil.which('gcc'))
-            and _have_crypto_headers()):
+            and _have_build_headers()):
         return True
     apt = shutil.which('apt-get')
     if not apt:
