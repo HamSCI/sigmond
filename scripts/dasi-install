@@ -23,6 +23,15 @@ die()  { echo "dasi-install: ERROR: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo dasi-install)"
 
+# Tool preflight — the Debian cloud base is minimal (its missing partprobe
+# killed the first live test, 2026-07-25).  Fail up front with one clear
+# message instead of mid-install with a half-partitioned target.
+MISSING=""
+for t in sgdisk mkfs.vfat mkfs.ext4 rsync blockdev partx findmnt blkid lsblk; do
+    command -v "$t" >/dev/null || MISSING="$MISSING $t"
+done
+[ -z "$MISSING" ] || die "missing tools:$MISSING — install with: apt-get install gdisk dosfstools e2fsprogs rsync util-linux"
+
 ROOT_SRC=$(findmnt -no SOURCE /)                          # e.g. /dev/sda3
 SRC_DISK=$(lsblk -no PKNAME "$ROOT_SRC")                  # e.g. sda
 [ -n "$SRC_DISK" ] || die "cannot resolve the disk behind $ROOT_SRC"
@@ -65,7 +74,10 @@ sgdisk --zap-all "/dev/$TARGET" >/dev/null
 sgdisk -n1:0:+1M   -t1:ef02 -c1:bios-boot \
        -n2:0:+128M -t2:ef00 -c2:ESP \
        -n3:0:0     -t3:8304 -c3:root "/dev/$TARGET" >/dev/null
-partprobe "/dev/$TARGET"; sleep 2
+# partprobe lives in parted (not on the cloud base) — partx/blockdev are
+# util-linux and always present.
+partx -u "/dev/$TARGET" 2>/dev/null || blockdev --rereadpt "/dev/$TARGET" || true
+udevadm settle 2>/dev/null || sleep 2
 P=""; [[ "$TARGET" == nvme* || "$TARGET" == mmcblk* ]] && P="p"
 T_ESP="/dev/${TARGET}${P}2"; T_ROOT="/dev/${TARGET}${P}3"
 
