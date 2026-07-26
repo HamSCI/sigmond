@@ -1,0 +1,15 @@
+# sigmond-netguard.service — stop station services if a PUBLIC IPv4 address
+# is present on any interface (the station is private-network-only: password
+# logins + NOPASSWD sudo must never sit directly on the internet).
+# Triggered at boot and every 5 min by sigmond-netguard.timer.
+# Override: touch /etc/sigmond/allow-public-ip
+[Unit]
+Description=sigmond public-IP guard (private-network-only enforcement)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/git/sigmond/sigmond/scripts/netguard.py --enforce
+# Violation exits 1 by design; the unit "failing" keeps it red in systemctl,
+# which is exactly the visibility we want.

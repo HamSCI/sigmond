@@ -667,6 +667,43 @@ def _git_head(repo_dir: Path) -> Optional[str]:
     return None
 
 
+def rule_public_ip_guard(view: SystemView) -> RuleResult:
+    """FAIL when any interface holds a globally routable IPv4 address.
+
+    The station is private-network-only (password logins, NOPASSWD sudo,
+    many services) — it must not run directly on the internet.  RFC1918,
+    CGNAT 100.64/10 (Starlink), loopback and link-local all count as
+    private here; global IPv6 is deliberately ignored (every modern LAN
+    has GUAs behind the router firewall).  Enforcement lives in
+    sigmond-netguard.timer (scripts/netguard.py --enforce); this rule is
+    the validate-surface twin.  Override: /etc/sigmond/allow-public-ip."""
+    try:
+        import importlib.util as _ilu
+        _script = Path(__file__).resolve().parents[2] / "scripts" / "netguard.py"
+        _spec = _ilu.spec_from_file_location("sigmond_netguard", _script)
+        _ng = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_ng)
+        v4, _v6 = _ng.public_addrs()
+    except Exception as exc:                            # noqa: BLE001
+        return RuleResult("public_ip_guard", "pass",
+                          f"skipped: probe failed ({exc})", [])
+    if not v4:
+        return RuleResult("public_ip_guard", "pass",
+                          "no public IPv4 on any interface", [])
+    exposure = ", ".join(f"{i}: {a}" for i, a in v4)
+    if Path("/etc/sigmond/allow-public-ip").exists():
+        return RuleResult(
+            "public_ip_guard", "warn",
+            f"PUBLIC IPv4 present ({exposure}) — allowed by "
+            "/etc/sigmond/allow-public-ip override", [])
+    return RuleResult(
+        "public_ip_guard", "fail",
+        f"PUBLIC IPv4 address on this host ({exposure}) — the station is "
+        "private-network-only and sigmond-netguard will stop services.  "
+        "Move behind a router/NAT, or touch /etc/sigmond/allow-public-ip "
+        "if this exposure is deliberate", [])
+
+
 def rule_ka9q_python_compat(view: SystemView) -> RuleResult:
     """Verify ka9q-python's pinned ka9q-radio commit matches the local
     ka9q-radio source HEAD.
@@ -1261,6 +1298,7 @@ ALL_RULES = [
     rule_disk_budget,
     rule_channel_count,
     rule_ka9q_python_compat,
+    rule_public_ip_guard,
     rule_data_path_upstream,
 ]
 

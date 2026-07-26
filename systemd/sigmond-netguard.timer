@@ -1,0 +1,13 @@
+# sigmond-netguard.timer — run the public-IP guard shortly after boot (once
+# the network has settled) and every 5 minutes thereafter, so a station whose
+# addressing CHANGES to public exposure (new uplink, router bypass) is also
+# caught, not just one that boots that way.
+[Unit]
+Description=sigmond public-IP guard (boot + every 5 min)
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

@@ -3435,6 +3435,29 @@ def _bringup_env_blockers(local_radiod: bool) -> list:
     operator (pre-elevation)."""
     blockers: list = []
 
+    # Private-network-only: refuse to bring a station up on a host with a
+    # globally routable IPv4 address (password logins + NOPASSWD sudo must
+    # never sit directly on the internet).  Same probe/override as
+    # scripts/netguard.py and harmonize.rule_public_ip_guard.
+    if not Path('/etc/sigmond/allow-public-ip').exists():
+        try:
+            import importlib.util as _ilu
+            _script = Path(__file__).resolve().parent.parent / 'scripts' / 'netguard.py'
+            _spec = _ilu.spec_from_file_location('sigmond_netguard', _script)
+            _ng = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_ng)
+            _v4, _ = _ng.public_addrs()
+        except Exception:                                # noqa: BLE001
+            _v4 = []
+        if _v4:
+            exposure = ', '.join(f'{i}: {a}' for i, a in _v4)
+            blockers.append((
+                f'this host has a PUBLIC IPv4 address ({exposure}) — the '
+                'station is private-network-only and must not run directly '
+                'on the internet',
+                'move the host behind a router/NAT, or (only if deliberate): '
+                'sudo touch /etc/sigmond/allow-public-ip'))
+
     if local_radiod:
         grub = Path('/etc/default/grub')
         if grub.exists():
