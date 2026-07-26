@@ -1,0 +1,28 @@
+# dasi-usb-installer.service — offer the install-to-internal-disk flow on the
+# console when booted from dasi USB installation media.
+#
+# Armed ONLY by /etc/dasi-installer-media (baked into the USB image at build
+# time; dasi-install deletes it from the installed copy), so an installed
+# system boots straight to a normal login.  Takes over tty1 with the guided
+# installer; declining (Enter at the target prompt) drops to a normal login.
+[Unit]
+Description=dasi2 USB installer prompt (install to internal disk)
+ConditionPathExists=/etc/dasi-installer-media
+After=multi-user.target getty@tty1.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=idle
+ExecStartPre=/bin/sh -c 'echo "dasi2 USB installation media — starting installer prompt (Ctrl-C for a shell)" > /dev/tty1'
+ExecStart=/usr/bin/env bash /opt/git/sigmond/sigmond/scripts/dasi-install
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+Restart=no
+# Whatever the outcome (installed, declined, error), hand tty1 back to getty.
+ExecStopPost=/bin/systemctl --no-block start getty@tty1.service
+
+[Install]
+WantedBy=multi-user.target

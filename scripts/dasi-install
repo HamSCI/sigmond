@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# dasi-install — install the running dasi2 USB-stick system onto an internal disk.
+#
+# The golden USB image IS the station (not an installer): booted from the
+# stick it runs from the stick, and pulling the stick kills the running
+# system.  This script gives the expected appliance flow: boot the stick,
+# install to the internal disk, remove the media, reboot.
+#
+# Shipped on the USB image together with /etc/dasi-installer-media (the flag
+# that arms dasi-usb-installer.service's tty1 prompt); the flag is NOT copied
+# to the installed system, so the internal-disk boot is a normal boot.
+#
+# Approach: recreate the source partition layout on the target (bios-boot,
+# ESP, root-to-fill-disk), mkfs with the SOURCE filesystems' UUIDs so the
+# existing fstab and grub.cfg work unchanged, rsync the live root + ESP,
+# reinstall BIOS grub, freshen identity (machine-id, host keys, cloud-init
+# instance state) so the installed system first-boots like a new station.
+
+set -euo pipefail
+
+say()  { echo -e "\n== $*"; }
+die()  { echo "dasi-install: ERROR: $*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run as root (sudo dasi-install)"
+
+ROOT_SRC=$(findmnt -no SOURCE /)                          # e.g. /dev/sda3
+SRC_DISK=$(lsblk -no PKNAME "$ROOT_SRC")                  # e.g. sda
+[ -n "$SRC_DISK" ] || die "cannot resolve the disk behind $ROOT_SRC"
+ESP_SRC=$(findmnt -no SOURCE /boot/efi 2>/dev/null || true)
+
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_SRC")
+ESP_UUID=""
+[ -n "$ESP_SRC" ] && ESP_UUID=$(blkid -s UUID -o value "$ESP_SRC" | tr -d '-')
+
+USED_KB=$(df --output=used -k / | tail -1 | tr -d ' ')
+
+say "This system is running from: /dev/$SRC_DISK (root $ROOT_SRC)"
+say "Candidate INTERNAL target disks:"
+mapfile -t CANDIDATES < <(lsblk -dn -o NAME,SIZE,TYPE,TRAN,MODEL \
+                          | awk -v src="$SRC_DISK" '$3=="disk" && $1!=src')
+if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+    die "no other disk found — nothing to install to"
+fi
+printf '   %s\n' "${CANDIDATES[@]}"
+echo
+read -r -p "Type the target disk name to ERASE AND INSTALL (e.g. nvme0n1), or Enter to abort: " TARGET
+[ -n "$TARGET" ] || { echo "aborted."; exit 0; }
+[ -b "/dev/$TARGET" ] || die "/dev/$TARGET is not a block device"
+[ "$TARGET" != "$SRC_DISK" ] || die "target is the running USB stick itself"
+
+TARGET_BYTES=$(blockdev --getsize64 "/dev/$TARGET")
+NEED_BYTES=$(( (USED_KB + 2*1024*1024) * 1024 ))          # used + ~2G headroom
+[ "$TARGET_BYTES" -gt "$NEED_BYTES" ] || \
+    die "/dev/$TARGET is too small ($(numfmt --to=iec "$TARGET_BYTES") < $(numfmt --to=iec "$NEED_BYTES") needed)"
+
+echo
+echo "  *** /dev/$TARGET ($(numfmt --to=iec "$TARGET_BYTES")) will be COMPLETELY ERASED ***"
+read -r -p "Type YES to continue: " CONFIRM
+[ "$CONFIRM" = "YES" ] || { echo "aborted."; exit 0; }
+
+say "Partitioning /dev/$TARGET (bios-boot + ESP + root)"
+# Make sure nothing on the target is mounted/held.
+umount -q /dev/${TARGET}?* 2>/dev/null || true
+sgdisk --zap-all "/dev/$TARGET" >/dev/null
+sgdisk -n1:0:+1M   -t1:ef02 -c1:bios-boot \
+       -n2:0:+128M -t2:ef00 -c2:ESP \
+       -n3:0:0     -t3:8304 -c3:root "/dev/$TARGET" >/dev/null
+partprobe "/dev/$TARGET"; sleep 2
+P=""; [[ "$TARGET" == nvme* || "$TARGET" == mmcblk* ]] && P="p"
+T_ESP="/dev/${TARGET}${P}2"; T_ROOT="/dev/${TARGET}${P}3"
+
+say "Creating filesystems (reusing source UUIDs so fstab/grub work unchanged)"
+if [ -n "$ESP_UUID" ]; then mkfs.vfat -F32 -i "$ESP_UUID" "$T_ESP" >/dev/null
+else mkfs.vfat -F32 "$T_ESP" >/dev/null; fi
+mkfs.ext4 -q -F -U "$ROOT_UUID" "$T_ROOT"
+
+say "Copying the running system (rsync) — this is the slow part"
+MNT=$(mktemp -d)
+mount "$T_ROOT" "$MNT"
+rsync -aHAX --info=progress2 \
+      --exclude=/dev/'*' --exclude=/proc/'*' --exclude=/sys/'*' \
+      --exclude=/run/'*' --exclude=/tmp/'*' --exclude=/mnt/'*' \
+      --exclude=/media/'*' --exclude=/lost+found --exclude=/boot/efi/'*' \
+      / "$MNT/"
+mkdir -p "$MNT/boot/efi"
+mount "$T_ESP" "$MNT/boot/efi"
+if [ -d /boot/efi/EFI ]; then rsync -a /boot/efi/ "$MNT/boot/efi/"; fi
+
+say "Installing BIOS bootloader + freshening identity on the target"
+for d in dev proc sys; do mount --bind "/$d" "$MNT/$d"; done
+chroot "$MNT" grub-install --target=i386-pc "/dev/$TARGET" >/dev/null 2>&1 \
+    || echo "   (BIOS grub-install failed — UEFI boot path is still in place)"
+# The installed system must first-boot as a fresh station, and must NOT
+# think it is installation media.
+rm -f  "$MNT/etc/dasi-installer-media"
+rm -f  "$MNT/etc/ssh/ssh_host_"*
+rm -rf "$MNT/var/lib/cloud"/*
+: > "$MNT/etc/machine-id"
+for d in dev proc sys; do umount "$MNT/$d"; done
+sync
+umount "$MNT/boot/efi" "$MNT"
+rmdir "$MNT"
+
+say "Installation to /dev/$TARGET is COMPLETE."
+echo
+echo "   Remove the USB stick, then press Enter to reboot from the internal disk."
+read -r _ || true
+reboot
