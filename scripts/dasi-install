@@ -126,11 +126,27 @@ rm -rf "$MNT/var/lib/cloud"/*
 : > "$MNT/etc/machine-id"
 for d in dev proc sys; do umount "$MNT/$d"; done
 sync
+# Verify the BIOS boot code actually landed — a grub-install that silently
+# writes nothing leaves SeaBIOS hung at "Booting from Hard Disk..." with no
+# error anywhere (2026-07-25).
+if ! dd if="/dev/$TARGET" bs=446 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | grep -qv '^0*$'; then
+    echo "   WARNING: no BIOS boot code in /dev/$TARGET MBR — BIOS/legacy boot" \
+         "will not work (UEFI boot via the copied ESP should).  If this" \
+         "machine boots legacy-BIOS, re-run grub-install before rebooting."
+fi
 umount "$MNT/boot/efi" "$MNT"
 rmdir "$MNT"
 
 say "Installation to /dev/$TARGET is COMPLETE."
 echo
-echo "   Remove the USB stick, then press Enter to reboot from the internal disk."
+echo "   Remove the USB stick, then press Enter — the machine will POWER OFF."
+echo "   Boot it again (without the stick) to start from the internal disk."
+echo
+# POWER OFF, never reboot: the installed disk is an identical clone of the
+# stick (same partition + filesystem UUIDs by design).  Rebooting with both
+# still attached makes every by-UUID mount a coin flip between the two disks
+# — a cross-mounted boot fsck'd/grew/wrote across them and destroyed a
+# freshly installed target (2026-07-25).  Power-off guarantees the stick is
+# gone before anything boots again.
 read -r _ || true
-reboot
+poweroff
