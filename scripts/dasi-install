@@ -43,6 +43,14 @@ ESP_UUID=""
 
 USED_KB=$(df --output=used -k / | tail -1 | tr -d ' ')
 
+# --auto (used by the install media's console auto-run): when there is
+# exactly ONE candidate internal disk, install to it after a 20-second
+# abort window — no typed answers.  Anything ambiguous (zero or several
+# candidates) falls back to the interactive prompt: guessing wrong there
+# means erasing the wrong disk.
+AUTO=0
+[ "${1:-}" = "--auto" ] && AUTO=1
+
 say "This system is running from: /dev/$SRC_DISK (root $ROOT_SRC)"
 say "Candidate INTERNAL target disks:"
 mapfile -t CANDIDATES < <(lsblk -dn -o NAME,SIZE,TYPE,TRAN,MODEL \
@@ -52,8 +60,20 @@ if [ "${#CANDIDATES[@]}" -eq 0 ]; then
 fi
 printf '   %s\n' "${CANDIDATES[@]}"
 echo
-read -r -p "Type the target disk name to ERASE AND INSTALL (e.g. nvme0n1), or Enter to abort: " TARGET
-[ -n "$TARGET" ] || { echo "aborted."; exit 0; }
+TARGET=""
+if [ "$AUTO" -eq 1 ] && [ "${#CANDIDATES[@]}" -eq 1 ]; then
+    TARGET=$(awk '{print $1}' <<<"${CANDIDATES[0]}")
+    echo "  AUTO-INSTALL: erasing /dev/$TARGET and installing in 20 seconds."
+    echo "  Press any key to ABORT and get a normal login shell."
+    if read -r -n1 -t 20 _; then echo; echo "aborted."; exit 0; fi
+    echo
+elif [ "$AUTO" -eq 1 ]; then
+    echo "  (auto mode: ${#CANDIDATES[@]} candidate disks — need a human choice)"
+fi
+if [ -z "$TARGET" ]; then
+    read -r -p "Type the target disk name to ERASE AND INSTALL (e.g. nvme0n1), or Enter to abort: " TARGET
+    [ -n "$TARGET" ] || { echo "aborted."; exit 0; }
+fi
 [ -b "/dev/$TARGET" ] || die "/dev/$TARGET is not a block device"
 [ "$TARGET" != "$SRC_DISK" ] || die "target is the running USB stick itself"
 
@@ -62,10 +82,12 @@ NEED_BYTES=$(( (USED_KB + 2*1024*1024) * 1024 ))          # used + ~2G headroom
 [ "$TARGET_BYTES" -gt "$NEED_BYTES" ] || \
     die "/dev/$TARGET is too small ($(numfmt --to=iec "$TARGET_BYTES") < $(numfmt --to=iec "$NEED_BYTES") needed)"
 
-echo
-echo "  *** /dev/$TARGET ($(numfmt --to=iec "$TARGET_BYTES")) will be COMPLETELY ERASED ***"
-read -r -p "Type YES to continue: " CONFIRM
-[ "$CONFIRM" = "YES" ] || { echo "aborted."; exit 0; }
+if [ "$AUTO" -eq 0 ] || [ "${#CANDIDATES[@]}" -ne 1 ]; then
+    echo
+    echo "  *** /dev/$TARGET ($(numfmt --to=iec "$TARGET_BYTES")) will be COMPLETELY ERASED ***"
+    read -r -p "Type YES to continue: " CONFIRM
+    [ "$CONFIRM" = "YES" ] || { echo "aborted."; exit 0; }
+fi
 
 say "Partitioning /dev/$TARGET (bios-boot + ESP + root)"
 # Make sure nothing on the target is mounted/held.
@@ -116,12 +138,28 @@ chroot "$MNT" grub-install --target=i386-pc "/dev/$TARGET" >/dev/null 2>&1 \
 # The installed system must first-boot as a fresh station, and must NOT
 # think it is installation media.
 rm -f  "$MNT/etc/dasi-installer-media"
+rm -rf "$MNT/etc/systemd/system/getty@tty1.service.d"    # media console autologin
 # Defensive: remove any legacy tty-takeover installer unit from the target
 # (the Conflicts=getty@tty1 design wedged the installed system's boot in a
 # job loop — 2026-07-25; superseded by the profile.d login hint).
 rm -f  "$MNT/etc/systemd/system/dasi-usb-installer.service" \
        "$MNT/etc/systemd/system/multi-user.target.wants/dasi-usb-installer.service"
-rm -f  "$MNT/etc/ssh/ssh_host_"*
+# Generate the target's SSH host keys HERE rather than deleting them and
+# trusting cloud-init's first boot — on real metal that never happened and
+# sshd refused to start (2026-07-25).
+rm -f "$MNT/etc/ssh/ssh_host_"*
+ssh-keygen -A -f "$MNT" >/dev/null
+# Greet the operator on the installed system (the media banner never
+# travels — this is its installed-side counterpart).
+REPORTER=$(grep -m1 '^STATION_REPORTER_ID=' "$MNT/etc/sigmond/coordination.env" 2>/dev/null | cut -d= -f2 | tr -d '"')
+cat > "$MNT/etc/motd" <<MOTD
+
+  ==== dasi2 station ====
+  Installed $(date -u +%Y-%m-%d) from dasi2 USB media.
+  Identity: ${REPORTER:-unset}   (change: smd bringup dasi2 --reporter <CALL/ID> --callsign <CALL> --grid <GRID>)
+  Status: smd status     Validate: smd admin validate     TUI: smd tui
+
+MOTD
 rm -rf "$MNT/var/lib/cloud"/*
 : > "$MNT/etc/machine-id"
 for d in dev proc sys; do umount "$MNT/$d"; done
