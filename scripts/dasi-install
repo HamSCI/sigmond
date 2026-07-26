@@ -74,12 +74,17 @@ sgdisk --zap-all "/dev/$TARGET" >/dev/null
 sgdisk -n1:0:+1M   -t1:ef02 -c1:bios-boot \
        -n2:0:+128M -t2:ef00 -c2:ESP \
        -n3:0:0     -t3:8304 -c3:root "/dev/$TARGET" >/dev/null
-# The Debian cloud image's grub boots with root=PARTUUID=<...> (not the
-# filesystem UUID), so the target's root partition must carry the SOURCE
-# root PARTUUID or the kernel drops to initramfs — caught live on the
-# first full install test, 2026-07-25.
-SRC_PARTUUID=$(blkid -s PARTUUID -o value "$ROOT_SRC")
-[ -n "$SRC_PARTUUID" ] && sgdisk -u "3:$SRC_PARTUUID" "/dev/$TARGET" >/dev/null
+# The Debian cloud image references partitions by PARTUUID everywhere:
+# grub boots root=PARTUUID=<root> and fstab mounts / AND /boot/efi by
+# PARTUUID.  Clone ALL source partition PARTUUIDs onto the target or the
+# install doesn't boot — a fresh root PARTUUID drops to initramfs, a
+# fresh ESP PARTUUID wedges boot in a device-timeout loop on
+# boot-efi.mount (both caught live, 2026-07-25).
+SP=""; [[ "$SRC_DISK" == nvme* || "$SRC_DISK" == mmcblk* ]] && SP="p"
+for n in 1 2 3; do
+    u=$(blkid -s PARTUUID -o value "/dev/${SRC_DISK}${SP}${n}" 2>/dev/null || true)
+    [ -n "$u" ] && sgdisk -u "$n:$u" "/dev/$TARGET" >/dev/null
+done
 # partprobe lives in parted (not on the cloud base) — partx/blockdev are
 # util-linux and always present.
 partx -u "/dev/$TARGET" 2>/dev/null || blockdev --rereadpt "/dev/$TARGET" || true
