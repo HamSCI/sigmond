@@ -139,14 +139,18 @@ rmdir "$MNT"
 
 say "Installation to /dev/$TARGET is COMPLETE."
 echo
-echo "   Remove the USB stick, then press Enter — the machine will POWER OFF."
-echo "   Boot it again (without the stick) to start from the internal disk."
+echo "   This machine will POWER OFF in 10 seconds."
+echo "   Once it is off: remove the USB stick, then power on to boot the"
+echo "   installed system from the internal disk."
 echo
-# POWER OFF, never reboot: the installed disk is an identical clone of the
-# stick (same partition + filesystem UUIDs by design).  Rebooting with both
-# still attached makes every by-UUID mount a coin flip between the two disks
-# — a cross-mounted boot fsck'd/grew/wrote across them and destroyed a
-# freshly installed target (2026-07-25).  Power-off guarantees the stick is
-# gone before anything boots again.
-read -r _ || true
+# POWER OFF unprompted, never reboot.  Two reasons:
+# - The installed disk is an identical clone of the stick (same partition +
+#   filesystem UUIDs by design); any boot with both attached makes every
+#   by-UUID mount a coin flip and a cross-mounted boot destroyed a fresh
+#   install (2026-07-25).  Power-off guarantees the stick is gone first.
+# - No "press Enter after removing the stick": operators naturally pull the
+#   stick when told to remove it, which kills the still-running live system
+#   under the prompt (rob, first metal install 2026-07-25).  Announce, wait
+#   briefly, power off — the stick comes out while the box is dark.
+sleep 10
 poweroff
