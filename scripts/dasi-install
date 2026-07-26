@@ -74,6 +74,12 @@ sgdisk --zap-all "/dev/$TARGET" >/dev/null
 sgdisk -n1:0:+1M   -t1:ef02 -c1:bios-boot \
        -n2:0:+128M -t2:ef00 -c2:ESP \
        -n3:0:0     -t3:8304 -c3:root "/dev/$TARGET" >/dev/null
+# The Debian cloud image's grub boots with root=PARTUUID=<...> (not the
+# filesystem UUID), so the target's root partition must carry the SOURCE
+# root PARTUUID or the kernel drops to initramfs — caught live on the
+# first full install test, 2026-07-25.
+SRC_PARTUUID=$(blkid -s PARTUUID -o value "$ROOT_SRC")
+[ -n "$SRC_PARTUUID" ] && sgdisk -u "3:$SRC_PARTUUID" "/dev/$TARGET" >/dev/null
 # partprobe lives in parted (not on the cloud base) — partx/blockdev are
 # util-linux and always present.
 partx -u "/dev/$TARGET" 2>/dev/null || blockdev --rereadpt "/dev/$TARGET" || true
@@ -105,6 +111,11 @@ chroot "$MNT" grub-install --target=i386-pc "/dev/$TARGET" >/dev/null 2>&1 \
 # The installed system must first-boot as a fresh station, and must NOT
 # think it is installation media.
 rm -f  "$MNT/etc/dasi-installer-media"
+# Defensive: remove any legacy tty-takeover installer unit from the target
+# (the Conflicts=getty@tty1 design wedged the installed system's boot in a
+# job loop — 2026-07-25; superseded by the profile.d login hint).
+rm -f  "$MNT/etc/systemd/system/dasi-usb-installer.service" \
+       "$MNT/etc/systemd/system/multi-user.target.wants/dasi-usb-installer.service"
 rm -f  "$MNT/etc/ssh/ssh_host_"*
 rm -rf "$MNT/var/lib/cloud"/*
 : > "$MNT/etc/machine-id"
