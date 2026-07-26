@@ -136,9 +136,16 @@ def build_plan(profile, *, local_radiod: bool,
         if with_optional:
             for opt in profile.optional:
                 install(STAGE1, opt)
+        configure(STAGE1, 'radiod')
+        # Tune AFTER `configure radiod`, never before: `smd apply` writes
+        # per-INSTANCE affinity drop-ins and enables + starts any radiod
+        # instance it finds, so running it pre-config acts on a stale or
+        # pre-existing instance (a golden-image station carries one) before
+        # the operator has even named the station — rob hit this live on the
+        # first USB-image bring-up, 2026-07-25.  Configuration and naming
+        # first; affinity/tuning applied to the configured result.
         steps.append(Step(STAGE1, 'apply host tuning (affinity / governor / rmem)',
                           'tune', argv=[smd, 'apply']))
-        configure(STAGE1, 'radiod')
         steps.append(Step(STAGE1, 'launch FFT wisdom planner', 'wisdom',
                           argv=['systemctl', 'start', '--no-block',
                                 'sigmond-wisdom.service'], background=True))
