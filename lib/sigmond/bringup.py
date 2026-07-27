@@ -92,6 +92,23 @@ def build_plan(profile, *, local_radiod: bool,
     """
     steps: list = []
 
+    # Pre-create the shared SQLite sink with group-writable perms BEFORE any
+    # component install: hs-uploader bootstraps during the install steps and,
+    # if it wins the creation race, leaves a 0-byte 0644 sink.db that the
+    # recorder users (group sigmond) can't write — every decode then drops
+    # silently while all health checks stay green (sigmond#42; hit live on
+    # the B4 appliance bring-up 2026-07-27).  chmod/chgrp run unconditionally
+    # so a previously-raced file is repaired too.  Idempotent.
+    steps.append(Step(STAGE1, 'provision shared sink.db (group-writable, '
+                              'pre-empts writer race — sigmond#42)', 'tune',
+                      argv=['bash', '-c',
+                            'install -d -m 2775 -o root -g sigmond /var/lib/sigmond'
+                            ' && { [ -f /var/lib/sigmond/sink.db ] || '
+                            'install -m 664 -o root -g sigmond /dev/null '
+                            '/var/lib/sigmond/sink.db; }'
+                            ' && chgrp sigmond /var/lib/sigmond/sink.db'
+                            ' && chmod 664 /var/lib/sigmond/sink.db']))
+
     def install(stage: str, comp: str) -> None:
         # Enable in topology BEFORE installing.  `smd install --components` builds
         # the component but does NOT flip topology `enabled=true` (only
@@ -195,6 +212,18 @@ def build_plan(profile, *, local_radiod: bool,
                               'enable',
                               argv=[smd, 'admin', 'instance', 'add', '--force',
                                     client, reporter]))
+            # Enable the instance's upstream upload — the flag itself
+            # (WSPR/PSK_USE_HS_UPLOADER) plus, via DELIVERY_ON_ENABLE, the
+            # standalone-correct PSK_DELIVERY_PIPELINES=direct.  This was a
+            # manual image-builder step; when skipped, psk-recorder falls to
+            # the server-merge runtime default and PSKReporter silently gets
+            # nothing while every local health check stays green (B4
+            # appliance bring-up, 2026-07-27).  Idempotent.
+            steps.append(Step(STAGE3A,
+                              f'enable upload {client}@{reporter}',
+                              'config',
+                              argv=[smd, 'config', 'upload', client,
+                                    reporter, '--on']))
 
     # --- Stage 3b: independent clients (no radiod, no wisdom wait) ---
     for client in profile.clients:
