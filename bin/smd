@@ -6437,7 +6437,12 @@ def cmd_status(args) -> int:
             sha = git.get('short', '')
             sha_tag = f'  ({sha})' if sha else ''
 
-            print(f'\n  {entry.name}  v{version}{sha_tag}  contract={contract}')
+            # Clean components (no validate issues) get a green ✓ — same
+            # styling as the services section — so operators can tell
+            # "checked, clean" from "not checked" (field confusion 2026-07-30).
+            clean_tag = '\033[32m✓\033[0m  ' if not issues else ''
+            print(f'\n  {clean_tag}{entry.name}  v{version}{sha_tag}  '
+                  f'contract={contract}')
             for inst in instances:
                 name = inst.get('instance', '?')
                 channels = inst.get('ka9q_channels', 0)
