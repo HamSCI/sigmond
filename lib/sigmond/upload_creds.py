@@ -31,7 +31,14 @@ try:
 except ModuleNotFoundError:  # pragma: no cover  (py<3.11)
     tomllib = None  # type: ignore
 
-HS_UPLOADER_KEY    = Path("/etc/hs-uploader/keys/id_ed25519")
+# The uploader manifest (uploader_manifest.py) writes ssh_key_file =
+# .../id_ed25519_host into pipelines.toml; the legacy shared name is
+# .../id_ed25519.  Check the CONFIGURED path when the manifest exists,
+# else accept either name — a station whose key is at the _host path must
+# not be reported as "missing hs-uploader SSH key .../id_ed25519".
+HS_UPLOADER_MANIFEST    = Path("/etc/hs-uploader/pipelines.toml")
+HS_UPLOADER_KEY         = Path("/etc/hs-uploader/keys/id_ed25519")
+HS_UPLOADER_KEY_HOST    = Path("/etc/hs-uploader/keys/id_ed25519_host")
 HF_TIMESTD_CONFIG  = Path("/etc/hf-timestd/timestd-config.toml")
 MAG_CONFIG         = Path("/etc/mag-recorder/mag-recorder-config.toml")
 WSPR_ETC           = Path("/etc/wspr-recorder")
@@ -125,6 +132,24 @@ def _load_toml(p: Path) -> dict:
         return {}
 
 
+def _hs_uploader_key_status() -> tuple[bool, Path]:
+    """(ready, checked_path) for the hs-uploader SFTP key.
+
+    The manifest's ``[identity] ssh_key_file`` is authoritative when
+    pipelines.toml exists; without it, EITHER the ``_host``-suffixed key
+    (what the manifest generator writes) or the legacy shared name counts
+    as present."""
+    configured = ((_load_toml(HS_UPLOADER_MANIFEST).get("identity", {}) or {})
+                  .get("ssh_key_file"))
+    if configured:
+        p = Path(str(configured))
+        return _exists(p), p
+    for p in (HS_UPLOADER_KEY_HOST, HS_UPLOADER_KEY):
+        if _exists(p):
+            return True, p
+    return False, HS_UPLOADER_KEY_HOST
+
+
 def upload_paths_status() -> list[UploadPath]:
     """Per-path upload-credential readiness for the recorders installed on
     this host.  Only reports a path when its owning recorder is installed
@@ -136,10 +161,10 @@ def upload_paths_status() -> list[UploadPath]:
     if WSPR_ETC.is_dir():
         out.append(UploadPath("wsprnet.org", "wspr-recorder",
                               needs_creds=False, ready=True, missing=""))
-        ready = _exists(HS_UPLOADER_KEY)
+        ready, key_path = _hs_uploader_key_status()
         out.append(UploadPath(
             "wsprdaemon.org", "wspr-recorder", needs_creds=True, ready=ready,
-            missing="" if ready else f"hs-uploader SSH key {HS_UPLOADER_KEY}",
+            missing="" if ready else f"hs-uploader SSH key {key_path}",
             fix="" if ready else _FIX["wspr-recorder"]))
 
     # psk-recorder → PSKReporter (no creds)

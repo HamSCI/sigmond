@@ -385,12 +385,46 @@ def _write_root_file(path: Path, content: str, mode: str = "644") -> bool:
         os.unlink(tmp)
 
 
+def _fix_station_key_ownership() -> None:
+    """Private key must be readable by the uploader daemon: hsupload:sigmond
+    mode 600 (group sigmond when it exists, else hsupload's own group).
+    Root-owned keys caused Permission-denied SFTP failures on field stations
+    (sigmond#41 family) — ssh-keygen runs via sudo, so without this chown
+    the key stays root:root.  No-op until the hsupload user exists (the key
+    may be generated before the uploader install creates it; the next
+    ensure_station_key call repairs ownership)."""
+    import grp as _grp
+    import pwd as _pwd
+    try:
+        uid = _pwd.getpwnam("hsupload").pw_uid
+    except KeyError:
+        return
+    try:
+        gid = _grp.getgrnam("sigmond").gr_gid
+        group = "sigmond"
+    except KeyError:
+        gid = _pwd.getpwnam("hsupload").pw_gid
+        group = "hsupload"
+    try:
+        st = STATION_KEY.stat()
+        if st.st_uid == uid and st.st_gid == gid \
+                and (st.st_mode & 0o777) == 0o600:
+            return                       # already correct — nothing to do
+    except OSError:
+        pass                             # can't stat (EACCES/missing) — try fix
+    pub = Path(str(STATION_KEY) + ".pub")
+    subprocess.run([*_sudo(), "chown", f"hsupload:{group}",
+                    str(STATION_KEY), str(pub)],
+                   capture_output=True, check=False)
+    subprocess.run([*_sudo(), "chmod", "600", str(STATION_KEY)],
+                   capture_output=True, check=False)
+
+
 def ensure_station_key() -> tuple:
     """Ensure the station host key exists (one key per SITE — the SFTP
     username is the station id, so the portal registers ONE pubkey per
     station regardless of how many instruments upload).  Returns
     (key_path, pubkey); pubkey is '' when the key can't be read/created."""
-    pub = Path(str(STATION_KEY) + ".pub")
     if not _exists(STATION_KEY):
         import socket as _socket
         subprocess.run([*_sudo(), "install", "-d", "-m", "755",
@@ -401,10 +435,8 @@ def ensure_station_key() -> tuple:
                            capture_output=True, text=True, check=False)
         if r.returncode != 0:
             return str(STATION_KEY), ""
-        subprocess.run([*_sudo(), "chown", "hsupload:hsupload",
-                        str(STATION_KEY), str(pub)], check=False)
-        subprocess.run([*_sudo(), "chmod", "600", str(STATION_KEY)],
-                       check=False)
+    # Always (re)assert ownership: repairs pre-existing root-owned keys too.
+    _fix_station_key_ownership()
     return str(STATION_KEY), _pubkey(str(STATION_KEY))
 
 
