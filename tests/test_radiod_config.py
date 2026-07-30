@@ -298,3 +298,28 @@ class DispatcherRoutingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SoleSdrSerialBindingTests(unittest.TestCase):
+    """Sole-SDR configs omit the serial binding (upstream ka9q review
+    2026-07: serials belong in configs only on multi-SDR systems)."""
+
+    class _Sdr:
+        def __init__(self):
+            self.fields = {"sdr_type": "RX-888 Mk2",
+                           "serial": "0123456789ABCDEF"}
+
+    class _Args:
+        non_interactive = True
+
+    def test_sole_sdr_serial_commented(self):
+        plan = radiod_config._collect_per_sdr_values(
+            self._Sdr(), self._Args(), "bee1", "eth0", sole=True)
+        self.assertTrue(plan["serial_line"].lstrip().startswith("#"))
+        self.assertIn("0123456789ABCDEF", plan["serial_line"])
+        self.assertEqual(plan["serial"], "0123456789ABCDEF")
+
+    def test_multi_sdr_serial_bound(self):
+        plan = radiod_config._collect_per_sdr_values(
+            self._Sdr(), self._Args(), "bee1", "eth0", sole=False)
+        self.assertTrue(plan["serial_line"].startswith("serial"))

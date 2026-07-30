@@ -686,6 +686,16 @@ def _collect_per_sdr_values(sdr, args, hostname_short: str,
              f"first matching device.  Add a udev rule and re-run "
              f"`smd config init radiod` to lock the binding.")
         serial_line = "# serial   = \"<run with udev access for stable binding>\""
+    elif sole:
+        # Sole SDR on the bus: omit the serial binding so radiod takes the
+        # first (only) matching device.  A baked serial goes stale when
+        # firmware or hardware changes (FX3 bootloader vs loaded serials
+        # differ) and has left one-SDR stations dark; per upstream ka9q
+        # review (2026-07), serials belong in configs only on multi-SDR
+        # systems.  The observed serial is still recorded in
+        # coordination.toml ([radiod.*] sdr_serial) for bookkeeping.
+        serial_line = (f'# serial  = "{_format_serial(sdr_type, serial)}"'
+                       "   # sole SDR: unbound by design; uncomment to pin")
     else:
         serial_line = f'serial      = "{_format_serial(sdr_type, serial)}"'
 
