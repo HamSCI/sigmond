@@ -52,7 +52,7 @@ _FIX = {
     "hf-timestd":
         "smd config edit hf-timestd  (set [station] id + instrument_id),  then  "
         "sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh  "
-        "(prints the public key to register at https://pswsnetwork.caps.ua.edu/)",
+        "(prints the public key to register at https://pswsnetwork.eng.ua.edu/)",
     "mag-recorder":
         "smd config edit mag-recorder  (set [station] psws_station_id; "
         "instrument_id defaults RM3100)",

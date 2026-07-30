@@ -29,7 +29,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 PSWS_HOST = "pswsnetwork.eng.ua.edu"
 PSWS_PORT = 22
-PSWS_PORTAL = "https://pswsnetwork.caps.ua.edu/"
+PSWS_PORTAL = "https://pswsnetwork.eng.ua.edu/"
 _PLACEHOLDER_PREFIX = "<YOUR"
 
 
