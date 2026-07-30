@@ -30,7 +30,10 @@ KNOWN_SDR_DEVICES: dict[tuple[str, str], tuple[str, str]] = {
     ("0bda", "2831"): ("RTL-SDR",   "RTL2831U"),
     ("0bda", "2837"): ("RTL-SDR",   "RTL2837U"),
     ("0bda", "2840"): ("RTL-SDR",   "RTL2840"),
+    # Keep the 04b4 PID set in sync with hardware.py's _sdr_present() regex
+    # (they had drifted: this table lacked 00f0, that regex lacked 00bc).
     ("04b4", "00bc"): ("RX-888",    "Cypress FX3"),    # RX-888 operating mode
+    ("04b4", "00f0"): ("RX-888",    "Cypress FX3"),    # RX-888 operating mode (alt PID)
     ("04b4", "00f1"): ("RX-888 Mk2","Cypress FX3"),   # RX-888 Mk2 operating mode
     ("04b4", "00f3"): ("RX-888 DFU","Cypress FX3"),   # RX-888 pre-firmware (DFU mode; radiod loads firmware)
     ("1d50", "6089"): ("HackRF",    "HackRF One"),
