@@ -265,6 +265,17 @@ def _expand_template(
         except PermissionError:
             pass
 
+    # systemctl reports instance names in ESCAPED form ('=' -> \x3d), while
+    # env-file/config discovery above yields the raw form ('AC0G=B4').  Decode
+    # the escapes so both spellings collapse to ONE instance — otherwise the
+    # same unit shows up twice (raw = configured+active, escaped = phantom
+    # "[orphaned]"), and lifecycle verbs re-feeding the escaped spelling to
+    # systemctl get it escaped AGAIN (\x3d -> \x5cx3d), minting a genuinely
+    # new bogus unit.  A truly double-escaped orphan still decodes to a name
+    # (\x5cx3d -> \x3d) that is NOT among the configured instances, so real
+    # orphans stay flagged.
+    from .instance import unescape_systemd_instance
+
     # Discover known instances from systemctl.  Use `list-units`
     # (without --all) + `list-unit-files` together:
     #   list-units      — currently-loaded, NOT-dead units (active
@@ -292,7 +303,8 @@ def _expand_template(
             for unit_info in units_json:
                 unit_name = unit_info.get('unit') or unit_info.get('name', '')
                 if '@' in unit_name and unit_name.endswith(f".{kind}"):
-                    instance_name = unit_name.split('@')[1].rsplit('.', 1)[0]
+                    instance_name = unescape_systemd_instance(
+                        unit_name.split('@')[1].rsplit('.', 1)[0])
                     known.add(instance_name)
     except (json.JSONDecodeError, subprocess.SubprocessError):
         pass
@@ -307,7 +319,8 @@ def _expand_template(
             if len(parts) >= 2 and parts[1] == 'enabled':
                 unit_name = parts[0]
                 if '@' in unit_name and unit_name.endswith(f".{kind}"):
-                    instance_name = unit_name.split('@')[1].rsplit('.', 1)[0]
+                    instance_name = unescape_systemd_instance(
+                        unit_name.split('@')[1].rsplit('.', 1)[0])
                     if instance_name:    # skip the bare template "@"
                         known.add(instance_name)
     except subprocess.SubprocessError:

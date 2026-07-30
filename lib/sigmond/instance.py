@@ -63,6 +63,25 @@ from .paths import SIGMOND_CONF
 
 REPORTER_ID_REGEX = re.compile(r"^[A-Z0-9][A-Z0-9=-]*[A-Z0-9]$")
 
+# systemd escapes '=' in a template instance to \x3d (unit
+# wspr-recorder@AC0G\x3dB4.service <-> instance AC0G=B4).  Escaping is NOT
+# idempotent: systemd-escape 'AC0G\x3dB4' -> 'AC0G\x5cx3dB4', a brand-new
+# unit — a field station ended up with BOTH wspr-recorder@AC0G=B4.service
+# (active) and wspr-recorder@AC0G\x3dB4.service ([orphaned]) this way.
+# Canonicalize by UNESCAPING first wherever an instance name may arrive in
+# systemd-escaped form (systemctl listings, operator copy-paste of a unit
+# name); escape at most once, right at the systemctl boundary.
+_SYSTEMD_XHH_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+
+
+def unescape_systemd_instance(name: str) -> str:
+    """Decode systemd ``\\xHH`` escapes (``AC0G\\x3dB4`` -> ``AC0G=B4``).
+
+    Idempotent on already-plain names (no ``\\xHH`` -> no-op).  Repeated
+    application also collapses a double-escaped name step by step
+    (``AC0G\\x5cx3dB4`` -> ``AC0G\\x3dB4`` -> ``AC0G=B4``)."""
+    return _SYSTEMD_XHH_RE.sub(lambda m: chr(int(m.group(1), 16)), name)
+
 
 class InvalidReporterId(ValueError):
     """Raised when a reporter ID doesn't satisfy REPORTER_ID_REGEX."""
@@ -105,7 +124,12 @@ def parse_user_reporter_id(user_input: str) -> str:
     """
     if not isinstance(user_input, str):
         raise InvalidReporterId("reporter ID must be a string")
-    storage = user_input.strip().upper().replace("/", "=")
+    # Accept a systemd-escaped spelling (operator copy-pasted a unit name:
+    # AC0G\x3dB4) — unescape BEFORE upper() (hex digits are lowercase) so
+    # it canonicalizes to AC0G=B4 instead of failing validation, and so a
+    # pre-escaped name can never flow onward and be escaped a second time.
+    storage = unescape_systemd_instance(user_input.strip())
+    storage = storage.upper().replace("/", "=")
     validate_reporter_id(storage)
     return storage
 
