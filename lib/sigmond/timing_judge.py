@@ -108,6 +108,17 @@ def load_offset_judge(path: Path = OFFSET_JUDGE_PATH,
     return _read_json(path)
 
 
+def load_restart_request(
+        path: Path = RESTART_REQUEST_PATH) -> Optional[dict]:
+    """The pending restart-request doc, or None (absent/unparseable).
+
+    No freshness gate here — for status display a lingering request is
+    still real state worth showing; the honor path applies its own
+    REQUEST_FRESH_S bound.
+    """
+    return _read_json(path)
+
+
 def _short_ssrc(source_key: str) -> str:
     """'hf-status.local/0000a4b2' → 'a4b2' (short ssrc for one-liners)."""
     tail = source_key.rsplit('/', 1)[-1]

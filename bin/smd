@@ -6517,6 +6517,40 @@ def cmd_status(args) -> int:
             else:
                 _ok('plan applied, no contention, no foreign drop-ins')
 
+    # Timing judge — hf-timestd's offset-judge verdicts
+    # (/run/hf-timestd/offset_judge.json).  Rendered only when the
+    # artifact is present and fresh (<120 s), so non-timestd stations
+    # never see the section.  Any in_violation / rate_alarm source (or
+    # a pending radiod restart request) is a loud ✗ and flips the exit
+    # status, matching the services section's semantics.
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond import timing_judge as _tj
+            _judge_doc = _tj.load_offset_judge()
+        except Exception:
+            _judge_doc = None
+        if _judge_doc is not None:
+            try:
+                _tj_lines = _tj.render_status_lines(
+                    _judge_doc, request=_tj.load_restart_request(),
+                    honored=_tj.load_honored_stamp())
+                print('\n  timing judge:')
+                for _lvl, _text in _tj_lines:
+                    if _lvl == 'ok':
+                        _ok(_text)
+                    elif _lvl == 'warn':
+                        _warn(_text)
+                    elif _lvl == 'err':
+                        # stdout (not _err/stderr) so the ✗ rows stay
+                        # inside the section when piped — same inline
+                        # styling as the services rows above.
+                        print(f'  \033[31m✗\033[0m  {_text}')
+                        any_bad = True
+                    else:
+                        _info(_text)
+            except Exception:
+                pass
+
     _netdiag_status_line()
 
     # PSWS upload reminder — installed-but-unfinished recorders record locally
