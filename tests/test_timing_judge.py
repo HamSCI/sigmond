@@ -128,6 +128,14 @@ class HonorGateTests(unittest.TestCase):
         self.assertIn('never honoring twice', d2.reason)
         self.assertEqual(self.rig.restarts, ['radiod@B4-100.service'])
 
+    def test_dry_run_reports_without_stamp_or_restart(self):
+        self.rig.write_request(_valid_request())
+        d = self.rig.process(enabled=True, act=False)
+        self.assertEqual(d.action, 'restart')
+        self.assertIn('DRY-RUN', d.reason)
+        self.assertEqual(self.rig.restarts, [])
+        self.assertFalse(self.rig.stamp_path.exists())
+
     def test_new_requested_utc_after_honored_acts_again(self):
         self.rig.write_request(_valid_request(requested=NOW - 300.0))
         self.rig.process(enabled=True)

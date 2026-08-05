@@ -29,8 +29,20 @@ Guards: per-instance cooldown (RWD_COOLDOWN_SEC, /run state) so a truly
 broken device can't cause a restart storm; warm-up grace after every
 (re)start.  Runs from a 2-minute systemd timer as root.  RWD_DRY_RUN=1
 reports without acting.
+
+Additionally (opt-in site policy): honor hf-timestd's radiod restart
+REQUEST artifact (/run/hf-timestd/radiod-restart-request.json,
+offset-judge spec §9 step 3).  hf-timestd never restarts radiod itself —
+when topology.toml [timing] honor_radiod_restart_request = true (default
+false) and the request is fresh and schema-valid and names a locally
+active radiod@<id>.service, this watchdog performs the restart, logs
+CRITICAL with the full evidence, and stamps
+/run/sigmond/radiod-restart-honored.json so the same requested_utc is
+never honored twice.  See sigmond.timing_judge.process_restart_request
+for the full gate.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -192,8 +204,55 @@ def check_unit(unit: str, now: float) -> None:
                        '(heartbeat lost)', now)
 
 
+RESTART_REQUEST_PATH = Path('/run/hf-timestd/radiod-restart-request.json')
+
+
+def _honor_restart_request(now: float) -> None:
+    """Opt-in honoring of hf-timestd's restart request (spec §9 step 3).
+
+    Fast-exits when the artifact is absent (the overwhelmingly common
+    case) so the sigmond lib import cost is only paid during an actual
+    escalation.  Never deletes the artifact — hf-timestd withdraws it
+    itself once the fault clears.
+    """
+    if not RESTART_REQUEST_PATH.exists():
+        return
+    # The installed /usr/local/bin symlink resolves into the repo, so
+    # lib/ sits beside bin/ after resolution — same bootstrap as smd.
+    lib = Path(__file__).resolve().parent.parent / 'lib'
+    if str(lib) not in sys.path:
+        sys.path.insert(0, str(lib))
+    try:
+        from sigmond.timing_judge import process_restart_request
+        from sigmond.topology import load_topology
+    except Exception as exc:        # noqa: BLE001 — wedge detection must go on
+        print(f'restart-request: {RESTART_REQUEST_PATH} present but sigmond '
+              f'lib unavailable ({exc}) — skipping', file=sys.stderr)
+        return
+    enabled = bool(load_topology().timing.get('honor_radiod_restart_request'))
+    decision = process_restart_request(
+        enabled, request_path=RESTART_REQUEST_PATH, now=now, act=not DRY_RUN)
+    if decision.action == 'restart':
+        # CRITICAL, with the request's full evidence, via journald's
+        # syslog-level prefix (SyslogLevelPrefix= defaults to true).
+        print(f'<2>CRITICAL: {decision.reason} — request evidence: '
+              f'{json.dumps(decision.request, sort_keys=True)}')
+        if not DRY_RUN and decision.unit:
+            # Share the wedge-detectors' cooldown so they leave the
+            # freshly restarted unit alone through warm-up.
+            _mark_restarted(decision.unit, now)
+    elif decision.loud:
+        print(f'<3>restart-request: {decision.reason}')
+    elif decision.action != 'none':
+        print(f'restart-request: {decision.reason}')
+
+
 def main() -> int:
     now = time.time()
+    try:
+        _honor_restart_request(now)
+    except Exception as exc:        # noqa: BLE001 — watchdog must not die
+        print(f'restart-request: check failed: {exc}', file=sys.stderr)
     units = _active_radiod_units()
     if not units:
         return 0                    # no radiod on this host — no-op

@@ -287,6 +287,7 @@ def process_restart_request(
         max_age_s: float = REQUEST_FRESH_S,
         unit_state: Callable[[str], str] = _systemctl_unit_state,
         restart_unit: Callable[[str], None] = _systemctl_restart,
+        act: bool = True,
 ) -> Decision:
     """Evaluate (and, when everything lines up, honor) the restart request.
 
@@ -304,6 +305,9 @@ def process_restart_request(
 
     The stamp is written BEFORE the restart is attempted so a crash
     mid-restart can never lead to honoring the same request twice.
+
+    act=False (the watchdog's RWD_DRY_RUN) runs the full gate but skips
+    both the stamp write and the restart.
     """
     if now is None:
         import time
@@ -361,6 +365,12 @@ def process_restart_request(
             f'refusing to act',
             loud=True, unit=unit, request=doc)
 
+    if not act:
+        return Decision(
+            'restart',
+            f'DRY-RUN: would honor request {doc["requested_utc"]} and '
+            f'restart {unit}',
+            loud=True, unit=unit, request=doc)
     write_honored_stamp(doc, now, unit, stamp_path=stamp_path)
     restart_unit(unit)
     return Decision(
