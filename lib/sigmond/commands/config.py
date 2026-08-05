@@ -739,7 +739,7 @@ def plan_psws_updates(profile, recorder: str, state) -> list:
     from .. import psws
     spec = psws.RECORDERS[recorder]
     updates = []
-    want_station = profile.psws_station_id
+    want_station = profile.station_for(recorder)
     want_instrument = profile.instrument_for(recorder)
     if want_station and state.station != want_station:
         updates.append(('.'.join(spec['station'][:-1]),

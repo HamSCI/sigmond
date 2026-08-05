@@ -154,3 +154,18 @@ station_id = "S000418"
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_psws_station_override_per_recorder(tmp_path):
+    """[psws.stations] gives a recorder its own portal station (AC0G mag:
+    S000082/84 vs site S000170)."""
+    p = tmp_path / "site-profile.toml"
+    p.write_text(
+        '[station]\ncallsign = "AC0G"\ngrid_square = "EM38ww"\n'
+        '[psws]\nenabled = true\nstation_id = "S000170"\n'
+        '[psws.instruments]\n"mag-recorder" = "84"\n'
+        '[psws.stations]\n"mag-recorder" = "S000082"\n'
+    )
+    sp = load_site_profile(p)
+    assert sp.station_for("mag-recorder") == "S000082"
+    assert sp.station_for("hf-timestd") == "S000170"
+    assert sp.instrument_for("mag-recorder") == "84"

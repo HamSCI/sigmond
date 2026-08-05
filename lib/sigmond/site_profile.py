@@ -46,7 +46,11 @@ instrument_id = ""                 # legacy single id (= hf-timestd/GRAPE's)
 
 [psws.instruments]                 # per-recorder instrument/device ids
 # "hf-timestd"   = "172"           # GRAPE instrument id from the portal
-# "mag-recorder" = "RM3100"        # magnetometer device id
+# "mag-recorder" = "84"            # magnetometer instrument id from the portal
+
+[psws.stations]                    # per-recorder PSWS STATION overrides —
+# "mag-recorder" = "S000082"       # for instruments enrolled under their
+                                   # own portal station (default: [psws].station_id)
 
 [reporters]                        # default to [station].callsign when blank
 reporter_id      = ""              # WSPR/PSK reporter instance id, e.g. AC0G/S
@@ -81,6 +85,7 @@ class SiteProfile:
     psws_station_id: str = ""
     psws_instrument_id: str = ""
     psws_instruments: dict = field(default_factory=dict)
+    psws_stations: dict = field(default_factory=dict)
     reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
@@ -118,6 +123,18 @@ class SiteProfile:
         if recorder == "hf-timestd":
             return self.psws_instrument_id
         return ""
+
+    def station_for(self, recorder: str) -> str:
+        """Per-recorder PSWS station id.
+
+        Instruments usually share the site station, but some live under
+        their OWN portal station (AC0G's magnetometer: station S000082 /
+        instrument 84 vs the receiver's S000170). ``[psws.stations]``
+        overrides per recorder; the site ``[psws].station_id`` is the
+        default.
+        """
+        v = str(self.psws_stations.get(recorder, "") or "").strip()
+        return v or self.psws_station_id
 
 
 def _f(v) -> float:
@@ -159,6 +176,11 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
         psws_instruments={
             str(k): _clean(v)
             for k, v in (psws.get("instruments", {}) or {}).items()
+            if _clean(v)
+        },
+        psws_stations={
+            str(k): _clean(v)
+            for k, v in (psws.get("stations", {}) or {}).items()
             if _clean(v)
         },
         reporter_id=_clean(rep.get("reporter_id")).upper(),
