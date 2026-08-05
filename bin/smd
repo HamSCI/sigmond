@@ -611,6 +611,7 @@ def _load_topology(path: Path, client_dir_override: str = None) -> dict:
         },
         'cpu_freq':     dict(t.cpu_freq),
         'cpu_affinity': dict(t.cpu_affinity),
+        'timing':       dict(t.timing),
     }
 
 

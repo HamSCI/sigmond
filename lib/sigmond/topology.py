@@ -43,6 +43,15 @@ _DEFAULT_CPU_FREQ = {
     'other_max_mhz':  1400,
 }
 
+# Timing site policy.  honor_radiod_restart_request gates whether the
+# sigmond radiod watchdog acts on hf-timestd's opt-in escalation artifact
+# (/run/hf-timestd/radiod-restart-request.json, offset-judge spec §9
+# step 3).  Default OFF: hf-timestd only ever *requests*; restarting
+# radiod is a site decision made here.
+_DEFAULT_TIMING = {
+    'honor_radiod_restart_request': False,
+}
+
 
 @dataclass
 class Topology:
@@ -51,6 +60,7 @@ class Topology:
     components: dict = field(default_factory=dict)
     cpu_affinity: dict = field(default_factory=lambda: dict(_DEFAULT_CPU_AFFINITY))
     cpu_freq: dict = field(default_factory=lambda: dict(_DEFAULT_CPU_FREQ))
+    timing: dict = field(default_factory=lambda: dict(_DEFAULT_TIMING))
 
     def enabled_components(self, only: Optional[list] = None) -> list:
         names = [n for n, c in self.components.items() if c.enabled]
@@ -134,6 +144,12 @@ def load_topology(path: Path = TOPOLOGY_PATH,
     if 'radiod_governor' in ca:
         cpu_affinity['radiod_governor'] = str(ca['radiod_governor'])
 
+    timing = dict(_DEFAULT_TIMING)
+    tm = raw.get('timing', {})
+    if 'honor_radiod_restart_request' in tm:
+        timing['honor_radiod_restart_request'] = \
+            bool(tm['honor_radiod_restart_request'])
+
     cpu_freq = dict(_DEFAULT_CPU_FREQ)
     cf = raw.get('cpu_freq', {})
     if 'radiod_max_mhz' in cf:
@@ -153,6 +169,7 @@ def load_topology(path: Path = TOPOLOGY_PATH,
         components=components,
         cpu_affinity=cpu_affinity,
         cpu_freq=cpu_freq,
+        timing=timing,
     )
 
 

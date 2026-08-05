@@ -94,6 +94,34 @@ class CpuFreqParseTests(unittest.TestCase):
         self.assertEqual(t.cpu_freq['radiod_max_mhz'], 3200)
 
 
+class TimingParseTests(unittest.TestCase):
+    def test_default_is_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = load_topology(Path(d) / 'absent.toml')
+        self.assertEqual(t.timing, {'honor_radiod_restart_request': False})
+
+    def test_empty_file_is_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'topology.toml'
+            _write(p, '')
+            t = load_topology(p)
+        self.assertFalse(t.timing['honor_radiod_restart_request'])
+
+    def test_opt_in_true(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'topology.toml'
+            _write(p, '[timing]\nhonor_radiod_restart_request = true\n')
+            t = load_topology(p)
+        self.assertTrue(t.timing['honor_radiod_restart_request'])
+
+    def test_explicit_false(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'topology.toml'
+            _write(p, '[timing]\nhonor_radiod_restart_request = false\n')
+            t = load_topology(p)
+        self.assertFalse(t.timing['honor_radiod_restart_request'])
+
+
 class TopologyDataclassTests(unittest.TestCase):
     def test_default_cpu_affinity_is_independent_between_instances(self):
         # Using lambda: dict(...) as default_factory — verify two

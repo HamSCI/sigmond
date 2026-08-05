@@ -29,6 +29,17 @@ smd_bin = "/usr/local/sbin/smd"
 # this assignment.  See docs/HOST-CAPACITY-PLANNING.md for the broader
 # discussion of how workload tiers map onto host topology.
 
+# Timing site policy (optional).  hf-timestd's offset judge can escalate
+# a sustained radiod timing contradiction into a restart REQUEST artifact
+# (/run/hf-timestd/radiod-restart-request.json — it never restarts radiod
+# itself).  Set honor_radiod_restart_request = true to let the sigmond
+# radiod watchdog (sigmond-radiod-watchdog.timer) act on a fresh,
+# schema-valid request by restarting the named local radiod@<id>.service.
+# Default false: requests are surfaced in `smd status` but never acted on.
+#
+# [timing]
+# honor_radiod_restart_request = false
+
 # ── Core station ──────────────────────────────────────────────────────────
 # The default DASI2 station: enabled out of the box.  These match the `dasi2`
 # catalog profile.  On a host that binds a REMOTE radiod, set ka9q-radio,
