@@ -239,6 +239,67 @@ def _repo_is_dirty(repo_dir: Path) -> tuple[bool, str | None]:
     return False, None
 
 
+# Running git as root inside a component checkout leaves root-owned .git
+# internals (FETCH_HEAD, config, HEAD, index, objects, refs) that every later
+# non-root operation trips over.  The damage is silent when done and only
+# surfaces when the sigmond/service user next touches the repo — sigmond#43.
+# A skipped update is recoverable; a root-owned .git is not, so when no
+# unprivileged identity can be established we decline instead of proceeding.
+_GIT_REFUSED_RC = 77            # EX_NOPERM — distinct from git's own exit codes
+
+
+def _git_target_user(repo_dir: Path) -> Optional[str]:
+    """The unprivileged user a git command against `repo_dir` must run as.
+
+    Returns None when no safe identity can be established, in which case the
+    caller MUST NOT run git — see _git_refused().  Resolution order:
+
+      1. $SUDO_USER — the human who invoked sudo, most likely to hold a key
+         registered with the remote.  Absent in boot/systemd contexts, where
+         nobody invoked sudo; that is exactly when the previous fall-through
+         silently ran git as root.
+      2. The checkout's owning user — but only when the worktree and its .git
+         agree.  Split ownership (sigmond#44) means git would be told to run
+         as the worktree owner while writing into a .git owned by someone
+         else, so it is refused rather than guessed at.
+    """
+    target = os.environ.get('SUDO_USER') or ''
+    if target and target != 'root':
+        return target
+    try:
+        work_uid = os.stat(repo_dir).st_uid
+        git_path = repo_dir / '.git'
+        # A .git *file* (linked worktree / submodule) carries no separate
+        # ownership worth comparing — fall back to the worktree's own uid.
+        git_uid = (os.stat(git_path).st_uid
+                   if git_path.is_dir() else work_uid)
+    except OSError:
+        return None
+    if work_uid == 0 or git_uid == 0:
+        return None             # root-owned checkout — nobody to drop to
+    if work_uid != git_uid:
+        return None             # split ownership — refuse, don't guess
+    try:
+        name = pwd.getpwuid(work_uid).pw_name
+    except KeyError:
+        return None
+    return name if name != 'root' else None
+
+
+def _git_refused(repo_dir: Path, what: str) -> subprocess.CompletedProcess:
+    """Stand-in result for a git command declined rather than run as root."""
+    return subprocess.CompletedProcess(
+        args=['git', '-C', str(repo_dir), what],
+        returncode=_GIT_REFUSED_RC,
+        stdout='',
+        stderr=(f'refusing to run `git {what}` as root in {repo_dir}: no '
+                f'unprivileged owner could be resolved (root-owned, or split '
+                f'worktree/.git ownership).  Skipped — running it as root '
+                f'would leave root-owned .git internals behind.  Run '
+                f'`smd admin diag` to see the ownership, fix it, then '
+                f'retry.\n'))
+
+
 def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     """git pull --ff-only, dropping privileges to a user who can talk to the remote.
 
@@ -257,16 +318,10 @@ def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     """
     git_cmd = ['git', '-C', str(repo_dir), 'pull', '--ff-only']
     if os.geteuid() == 0:
-        target_user = os.environ.get('SUDO_USER') or ''
-        if not target_user or target_user == 'root':
-            try:
-                owner_uid = os.stat(repo_dir).st_uid
-                if owner_uid != 0:
-                    target_user = pwd.getpwuid(owner_uid).pw_name
-            except (OSError, KeyError):
-                target_user = ''
-        if target_user and target_user != 'root':
-            git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
+        target_user = _git_target_user(repo_dir)
+        if not target_user:
+            return _git_refused(repo_dir, 'pull')
+        git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
     return subprocess.run(git_cmd, stdin=subprocess.DEVNULL,
                           capture_output=True, text=True)
 
@@ -282,16 +337,10 @@ def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     git_cmd = ['git', '-c', f'safe.directory={repo_dir}', '-C', str(repo_dir),
                'fetch', '--quiet']
     if os.geteuid() == 0:
-        target_user = os.environ.get('SUDO_USER') or ''
-        if not target_user or target_user == 'root':
-            try:
-                owner_uid = os.stat(repo_dir).st_uid
-                if owner_uid != 0:
-                    target_user = pwd.getpwuid(owner_uid).pw_name
-            except (OSError, KeyError):
-                target_user = ''
-        if target_user and target_user != 'root':
-            git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
+        target_user = _git_target_user(repo_dir)
+        if not target_user:
+            return _git_refused(repo_dir, 'fetch')
+        git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
     return subprocess.run(git_cmd, stdin=subprocess.DEVNULL,
                           capture_output=True, text=True)
 
@@ -955,6 +1004,79 @@ def _expected_build_pins() -> dict:
 # to open it with a cryptic rx888_usb_init error, so flag it in diag first.
 _SUPERSPEED_SDR_VID = {'04b4': 'RX888 (Cypress FX3)'}
 _SDR_DFU_PIDS = {'00f3'}   # RX888 firmware-upgrade bootloader; not yet streamable
+
+
+def _diag_repo_ownership() -> int:
+    """Flag component checkouts whose ownership breaks automated git updates.
+
+    Three conditions, each of which makes a later `git pull`/`fetch` fail —
+    and, before sigmond#43, made it silently run as root instead:
+
+      * split ownership — worktree and .git owned by different users, so git
+        is told to run as one while writing into the other (sigmond#44);
+      * root-owned checkout — no unprivileged user to drop to at all;
+      * root-owned files already inside .git — damage left by an earlier
+        root-run git, which every later non-root operation trips over.
+
+    Catches this at provisioning time rather than at the next failed update.
+    Advisory; returns the number of affected checkouts.
+    """
+    base = Path('/opt/git/sigmond')
+    if not base.is_dir():
+        return 0
+
+    def _uname(uid: int) -> str:
+        try:
+            return pwd.getpwuid(uid).pw_name
+        except KeyError:
+            return f'uid {uid}'
+
+    SCAN_CAP = 2000             # .git can hold thousands of loose objects
+    bad = []
+    for repo in sorted(p for p in base.iterdir() if p.is_dir()):
+        gitdir = repo / '.git'
+        if not gitdir.is_dir():
+            continue
+        try:
+            work_uid = os.stat(repo).st_uid
+            git_uid = os.stat(gitdir).st_uid
+        except OSError:
+            continue
+        rooted = scanned = 0
+        for dirpath, _dirnames, filenames in os.walk(gitdir):
+            for fn in filenames:
+                scanned += 1
+                try:
+                    if os.lstat(os.path.join(dirpath, fn)).st_uid == 0:
+                        rooted += 1
+                except OSError:
+                    pass
+            if scanned >= SCAN_CAP:
+                break
+        issues = []
+        if work_uid != git_uid:
+            issues.append(f'split ownership — worktree {_uname(work_uid)}, '
+                          f'.git {_uname(git_uid)}')
+        elif work_uid == 0:
+            issues.append('checkout owned by root — updates cannot drop privileges')
+        if rooted:
+            issues.append(f'{rooted} root-owned file(s) inside .git'
+                          + (' (scan capped)' if scanned >= SCAN_CAP else ''))
+        if issues:
+            bad.append((repo.name, issues))
+
+    print()
+    _info('Component checkout ownership:')
+    if not bad:
+        _ok('all component checkouts consistently owned by a non-root user')
+        return 0
+    for name, issues in bad:
+        for msg in issues:
+            _warn(f'{name}: {msg}')
+    _info('automated git pull/fetch is SKIPPED on these rather than run as root')
+    _info('(sigmond#43/#44).  Repair:  sudo chown -R <owner>:<owner> '
+          '/opt/git/sigmond/<name>')
+    return len(bad)
 
 
 def _diag_sdr_usb_link() -> int:
@@ -7985,6 +8107,11 @@ def cmd_diag(args) -> int:
     # SDR USB link speed (catch an RX888-class SDR on a USB-2 bus before radiod
     # fails with a cryptic rx888_usb_init error).
     _diag_sdr_usb_link()
+
+    # Component checkout ownership — catch root-owned / split-owned checkouts
+    # here rather than at the next automated update, which now declines to run
+    # git at all in that state (sigmond#43/#44).
+    _diag_repo_ownership()
 
     # Client self-validation
     if _HAS_SIGMOND_LIB:
