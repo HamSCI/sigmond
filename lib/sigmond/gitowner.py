@@ -81,8 +81,11 @@ def resolve(repo_dir: Path):
     checkout owned by *someone else*, which sprays root-owned files into a
     tree the real owner must keep writing to.  So:
 
-      * $SUDO_USER, when set, is the best identity available (a human with a
-        key registered at the remote).
+      * $SUDO_USER, when set AND when it owns the checkout, is the best
+        identity available (a human with a key registered at the remote).
+        When it does not own the checkout it is ignored: writing as an
+        identity that cannot write the tree fails outright, which is worse
+        than dropping to the owner.
       * A consistently root-owned tree is ROOT_OK.  Running as root there adds
         no inconsistency, and the clone path *requires* it: install clones as
         root and the tree stays root-owned until `_apply_canonical_perms()`
@@ -96,7 +99,21 @@ def resolve(repo_dir: Path):
     """
     target = os.environ.get('SUDO_USER') or ''
     if target and target != 'root':
-        return DROP, target
+        # ...but only if that identity can actually write the checkout.
+        # $SUDO_USER is whoever typed the command, which is not necessarily
+        # who owns the tree: the golden-image build runs `smd install` as
+        # `build`, smd re-execs itself under sudo (so SUDO_USER=build), and
+        # the component checkouts are owned by `sigmond`.  Dropping to the
+        # invoker there made every fetch fail with
+        # ".git/FETCH_HEAD: Permission denied" and took the whole image build
+        # down with it (2026-08-07, all 8 components).  Ownership is the
+        # authority; the invoker is only a hint, so fall through when it
+        # disagrees rather than write as someone who cannot.
+        try:
+            if os.stat(repo_dir).st_uid == pwd.getpwnam(target).pw_uid:
+                return DROP, target
+        except (OSError, KeyError):
+            pass
     try:
         work_uid = os.stat(repo_dir).st_uid
         git_path = Path(repo_dir) / '.git'

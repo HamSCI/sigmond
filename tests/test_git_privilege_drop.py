@@ -97,9 +97,35 @@ class GitTargetUserTests(unittest.TestCase):
 
         self.addCleanup(_restore)
 
-    def test_prefers_sudo_user(self):
+    def test_prefers_sudo_user_when_it_owns_the_checkout(self):
         os.environ["SUDO_USER"] = "alice"
-        self.assertEqual(gitowner.target_user(self.repo), "alice")
+        with _stat_map({str(self.repo): 1001, str(self.repo / ".git"): 1001}), \
+             mock.patch.object(gitowner.pwd, "getpwnam",
+                               return_value=mock.Mock(pw_uid=1001)):
+            self.assertEqual(gitowner.target_user(self.repo), "alice")
+
+    def test_ignores_sudo_user_that_cannot_write_the_checkout(self):
+        """The golden-image build: `smd install` runs as `build`, smd re-execs
+        under sudo (SUDO_USER=build), but the checkouts are owned by `sigmond`.
+        Dropping to the invoker there made every fetch fail with
+        ".git/FETCH_HEAD: Permission denied" and broke the whole image build
+        (2026-08-07).  Ownership decides; the invoker is only a hint.
+        """
+        os.environ["SUDO_USER"] = "build"
+        with _stat_map({str(self.repo): 999, str(self.repo / ".git"): 999}), \
+             mock.patch.object(gitowner.pwd, "getpwnam",
+                               return_value=mock.Mock(pw_uid=1000)), \
+             mock.patch.object(gitowner.pwd, "getpwuid",
+                               return_value=mock.Mock(pw_name="sigmond")):
+            self.assertEqual(gitowner.target_user(self.repo), "sigmond")
+
+    def test_unknown_sudo_user_falls_back_to_owner(self):
+        os.environ["SUDO_USER"] = "nosuchuser"
+        with _stat_map({str(self.repo): 999, str(self.repo / ".git"): 999}), \
+             mock.patch.object(gitowner.pwd, "getpwnam", side_effect=KeyError), \
+             mock.patch.object(gitowner.pwd, "getpwuid",
+                               return_value=mock.Mock(pw_name="sigmond")):
+            self.assertEqual(gitowner.target_user(self.repo), "sigmond")
 
     def test_falls_back_to_consistent_owner(self):
         # A fixed non-root uid, not os.getuid(): the suite may run as root,
