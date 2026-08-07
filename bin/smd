@@ -245,59 +245,35 @@ def _repo_is_dirty(repo_dir: Path) -> tuple[bool, str | None]:
 # surfaces when the sigmond/service user next touches the repo — sigmond#43.
 # A skipped update is recoverable; a root-owned .git is not, so when no
 # unprivileged identity can be established we decline instead of proceeding.
-_GIT_REFUSED_RC = 77            # EX_NOPERM — distinct from git's own exit codes
+try:
+    # Canonical implementation — shared with sigmond.installer, which invokes
+    # git over the same checkouts.  This policy must be identical everywhere
+    # git runs; it previously was not, and installer._git() ran everything as
+    # root (sigmond#44).
+    from sigmond.gitowner import (
+        REFUSED_RC as _GIT_REFUSED_RC,
+        target_user as _git_target_user,
+        refused as _git_refused,
+    )
+except ImportError:
+    # Degraded standalone mode: smd without lib/ on sys.path.  Rather than
+    # duplicate the ownership logic (and risk the two drifting), honour only
+    # $SUDO_USER and refuse everything else — erring toward a skipped update,
+    # never toward running git as root.
+    _GIT_REFUSED_RC = 77
 
+    def _git_target_user(repo_dir: Path) -> Optional[str]:
+        user = os.environ.get('SUDO_USER') or ''
+        return user if user and user != 'root' else None
 
-def _git_target_user(repo_dir: Path) -> Optional[str]:
-    """The unprivileged user a git command against `repo_dir` must run as.
-
-    Returns None when no safe identity can be established, in which case the
-    caller MUST NOT run git — see _git_refused().  Resolution order:
-
-      1. $SUDO_USER — the human who invoked sudo, most likely to hold a key
-         registered with the remote.  Absent in boot/systemd contexts, where
-         nobody invoked sudo; that is exactly when the previous fall-through
-         silently ran git as root.
-      2. The checkout's owning user — but only when the worktree and its .git
-         agree.  Split ownership (sigmond#44) means git would be told to run
-         as the worktree owner while writing into a .git owned by someone
-         else, so it is refused rather than guessed at.
-    """
-    target = os.environ.get('SUDO_USER') or ''
-    if target and target != 'root':
-        return target
-    try:
-        work_uid = os.stat(repo_dir).st_uid
-        git_path = repo_dir / '.git'
-        # A .git *file* (linked worktree / submodule) carries no separate
-        # ownership worth comparing — fall back to the worktree's own uid.
-        git_uid = (os.stat(git_path).st_uid
-                   if git_path.is_dir() else work_uid)
-    except OSError:
-        return None
-    if work_uid == 0 or git_uid == 0:
-        return None             # root-owned checkout — nobody to drop to
-    if work_uid != git_uid:
-        return None             # split ownership — refuse, don't guess
-    try:
-        name = pwd.getpwuid(work_uid).pw_name
-    except KeyError:
-        return None
-    return name if name != 'root' else None
-
-
-def _git_refused(repo_dir: Path, what: str) -> subprocess.CompletedProcess:
-    """Stand-in result for a git command declined rather than run as root."""
-    return subprocess.CompletedProcess(
-        args=['git', '-C', str(repo_dir), what],
-        returncode=_GIT_REFUSED_RC,
-        stdout='',
-        stderr=(f'refusing to run `git {what}` as root in {repo_dir}: no '
-                f'unprivileged owner could be resolved (root-owned, or split '
-                f'worktree/.git ownership).  Skipped — running it as root '
-                f'would leave root-owned .git internals behind.  Run '
-                f'`smd admin diag` to see the ownership, fix it, then '
-                f'retry.\n'))
+    def _git_refused(repo_dir: Path, what: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=['git', '-C', str(repo_dir), what], returncode=_GIT_REFUSED_RC,
+            stdout='',
+            stderr=(f'refusing to run `git {what}` as root in {repo_dir}: no '
+                    f'unprivileged owner could be resolved.  Skipped — running '
+                    f'it as root would leave root-owned .git internals '
+                    f'behind.\n'))
 
 
 def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:

@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 from typing import Optional
 
+from . import gitowner
 from .catalog import CatalogEntry
 
 GIT_BASE = Path('/opt/git/sigmond')
@@ -83,12 +84,17 @@ def _git(repo_dir: Path, *git_args: str) -> subprocess.CompletedProcess:
     system user — that trips git's dubious-ownership check.  Passing
     `-c safe.directory=<repo_dir>` per call avoids the need for any
     /etc/gitconfig edit and works regardless of who's running.
+
+    Reads still run as root (they write nothing, and inspection has to keep
+    working on the very hosts whose checkouts are already root-owned).
+    Mutating commands drop to the checkout's owner, or are declined — this
+    helper used to run everything as root, which is what left root-owned
+    `config`/`FETCH_HEAD`/`HEAD`/`index` across component checkouts on the
+    v3.19 B4 install.  On the clone path the closing chown swept up after
+    it; on any later update there is no such chown, so the damage stuck.
+    See sigmond#43/#44 and `sigmond.gitowner`.
     """
-    return subprocess.run(
-        ['git', '-c', f'safe.directory={repo_dir}',
-         '-C', str(repo_dir), *git_args],
-        capture_output=True, text=True,
-    )
+    return gitowner.run_git(repo_dir, *git_args)
 
 
 def _normalize_remote_url(repo_dir: Path, https_url: str) -> None:
