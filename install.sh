@@ -399,6 +399,39 @@ else
     fi
 fi
 
+# ─── health-check prerequisites (sqlite3, lsof, bc) ──────────────────────────
+# These are shelled out to by watchdogs and maintenance scripts.  Each one is
+# absent from a minimal Debian image and was present on our older hosts only by
+# accretion, so a fresh appliance loses the check silently — none of these
+# failures announce themselves:
+#
+#   sqlite3  hf-timestd's pipeline-watchdog measures data freshness with it.
+#            Missing, every query fails and the watchdog cannot tell "no rows"
+#            from "no sqlite3", reads both as stale, and restarts healthy
+#            services every 5 minutes.  Observed on B4 2026-08-07.
+#   lsof     guards deletion in cleanup-orphaned-data.sh ("ensure no processes
+#            have files open") and the HDF5 in-use check.  Missing, the count
+#            comes back 0 while files ARE open, so the guard fails OPEN.
+#   bc       shell-side arithmetic in the timestd helper scripts; missing, the
+#            substitution yields an empty string rather than an error.
+#
+# Installing them here is only half the fix: a check whose tool is absent must
+# fail loudly rather than fall through to a default.  See
+# hf-timestd fix/watchdog-failsafe-sqlite for that half.
+for _tool in sqlite3 lsof bc; do
+    if command -v "$_tool" &>/dev/null; then
+        ok "$_tool: present"
+        continue
+    fi
+    info "Installing $_tool…"
+    if _pkg_install "$_tool"; then
+        ok "$_tool: installed"
+    else
+        warn "$_tool could not be installed via $_PKG_MGR — health checks that use it will be degraded; install it manually"
+    fi
+done
+unset _tool
+
 # ─── tmux mouse support for the operator ─────────────────────────────────────
 # Support sessions run inside tmux; mouse mode (scroll, pane select, resize)
 # is the fleet convention.  Ensure the invoking user's ~/.tmux.conf turns it
