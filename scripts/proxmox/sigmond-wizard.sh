@@ -174,28 +174,40 @@ preflight_devices() {
 # sigmond-location-check ("location authority first (GPSDO definitive)").
 gpsdo_grid() {
     [ "$HAVE_GPSDO" = 1 ] || return 1
-    local port sentence
-    for port in /dev/ttyACM* /dev/ttyUSB*; do
-        [ -c "$port" ] || continue
-        stty -F "$port" 9600 raw -echo 2>/dev/null || true
-        # RMC arrives once per second; 6 s covers a slow fix without hanging
-        # the installer if this port is not the GPSDO.
-        sentence=$(timeout 6 grep -m1 -E '^\$G[PNLA]RMC,' < "$port" 2>/dev/null || true)
-        [ -n "$sentence" ] || continue
-        echo "$sentence" | awk -F, '
-            $3 != "A" { exit 1 }                      # no valid fix
-            {
-              lat = int($4/100) + ($4 - int($4/100)*100)/60; if ($5 == "S") lat = -lat
-              lon = int($6/100) + ($6 - int($6/100)*100)/60; if ($7 == "W") lon = -lon
-              if (lat == 0 && lon == 0) exit 1
-              L = lon + 180; A = lat + 90
-              f1 = int(L/20); f2 = int(A/10)
-              s1 = int((L - f1*20)/2); s2 = int(A - f2*10)
-              u1 = int((L - f1*20 - s1*2) * 12); u2 = int((A - f2*10 - s2) * 24)
-              printf "%c%c%d%d%c%c\n", 65+f1, 65+f2, s1, s2, 97+u1, 97+u2
-            }' && return 0
+    # Find the GPSDO's OWN serial node.  Never walk /dev/ttyACM* blindly:
+    # on a DASI2 box ttyACM0 is usually the TS-1 TimeSync CLI, and opening
+    # a CDC port asserts DTR -- that is how the TS-1's console was wedged
+    # during testing on 2026-08-08.  gpsdo-monitor solves this the same way
+    # (nmea.py: "Return /dev/ttyACM* nodes whose owning USB device matches").
+    local port=""
+    for cand in /dev/serial/by-id/*Leo_Bodnar*; do
+        [ -e "$cand" ] || continue
+        port=$(readlink -f "$cand"); break
     done
-    return 1
+    # LBE-Mini (0x2211) is HID-only -- UBX on interrupt-IN, no serial node
+    # at all (verified on a v3.22 install: bInterfaceClass 3, 1 endpoint).
+    # Nothing to parse here; the VM sets the grid later from the real
+    # gpsdo-monitor, which speaks UBX properly.
+    [ -n "$port" ] || return 1
+    # -hupcl and clocal suppress the DTR toggle on open.
+    stty -F "$port" 9600 raw -echo clocal -hupcl 2>/dev/null || true
+    local sentence
+    sentence=$(timeout 6 grep -m1 -E '^\$G[PNLA]RMC,' < "$port" 2>/dev/null || true)
+    [ -n "$sentence" ] || return 1
+    # Field layout per gpsdo-monitor/nmea.py:
+    #   $xxRMC,utc,status,lat,N/S,lon,E/W,sog,cog,date,magvar,...
+    echo "$sentence" | awk -F, '
+        $3 != "A" { exit 1 }
+        {
+          lat = int($4/100) + ($4 - int($4/100)*100)/60; if ($5 == "S") lat = -lat
+          lon = int($6/100) + ($6 - int($6/100)*100)/60; if ($7 == "W") lon = -lon
+          if (lat == 0 && lon == 0) exit 1
+          L = lon + 180; A = lat + 90
+          f1 = int(L/20); f2 = int(A/10)
+          s1 = int((L - f1*20)/2); s2 = int(A - f2*10)
+          u1 = int((L - f1*20 - s1*2) * 12); u2 = int((A - f2*10 - s2) * 24)
+          printf "%c%c%d%d%c%c\n", 65+f1, 65+f2, s1, s2, 97+u1, 97+u2
+        }'
 }
 
 ask_reporter() {
@@ -216,8 +228,19 @@ ask_grid() {
     if [ "$HAVE_GPSDO" = 1 ]; then
         printf "Reading position from the GPSDO (%s)... " "$GPSDO_MODEL"
         GRID_DEFAULT=$(gpsdo_grid || true)
-        if [ -n "$GRID_DEFAULT" ]; then echo "$GRID_DEFAULT"
-        else echo "no fix yet (enter the grid manually)"; fi
+        if [ -n "$GRID_DEFAULT" ]; then
+            echo "$GRID_DEFAULT"
+        else
+            echo "not readable here"
+            # Either an LBE-Mini (HID/UBX only, no serial node) or no fix
+            # yet.  Not a problem: sigmond-location-check runs before
+            # bring-up and treats a live GPSDO position as DEFINITIVE,
+            # rewriting site-profile grid/lat/lon and propagating to
+            # hf-timestd, the metrology envs and mag-recorder via
+            # sigmond-site-timing.  Whatever is entered now is provisional.
+            echo "  (your GPSDO will set the grid automatically after setup —"
+            echo "   the value below is only used until then)"
+        fi
     fi
     GRID=""
     while [ -z "$GRID" ]; do
