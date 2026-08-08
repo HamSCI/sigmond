@@ -251,13 +251,18 @@ extra_paths = ["/etc/wsprdaemon"]
 # device is absent from the USB bus (the redesign makes them install-dormant
 # instead — docs/install-redesign.md §3).
 [profile.dasi2]
-description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer)"
-clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder"]
+description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer + meteor scatter)"
+# meteor-scatter moved here from `optional` 2026-08-08: the DASI2 stations all
+# run MSK144, so leaving it discretionary meant a fresh `smd bringup dasi2`
+# did not install it while the station's topology.toml declared it -- the
+# service ran on B4's v3.21 install without being part of the profile that
+# provisions it.  Core clients are what bringup installs unprompted.
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "meteor-scatter"]
 local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
 # Discretionary HF-science clients: NOT installed by default.  `smd bringup
 # dasi2 --with-optional` adds them; `smd install <name>` installs+enables one
 # on demand (install implies enable — see bin/smd _enable_after_install).
-optional           = ["codar-sounder", "hf-tec", "hfdl-recorder", "meteor-scatter", "superdarn-sounder"]
+optional           = ["codar-sounder", "hf-tec", "hfdl-recorder", "superdarn-sounder"]
 
 [profile.base]
 description        = "Base SDR station — local radiod + web + timing, no recording clients"
