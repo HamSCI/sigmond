@@ -738,6 +738,35 @@ def _default_instance_id(host: str, sdr_type: str, fields: dict,
 
 
 def _default_description(sdr_type: str) -> str:
+    """Personalise radiod's advertised description with the station identity.
+
+    This string is what radiod advertises: it goes out in the STATUS
+    DESCRIPTION field (which ka9q-python decodes, so every client sees it)
+    and surfaces in ka9q-web.  Left as the generic placeholder it is
+    identical on every station in the fleet, which is not merely untidy --
+    observed on AC0G-B4 2026-08-08, radiod logged:
+
+        Name collision, picking new name
+          'RX-888 Mk2 (set callsign + antenna) #2'
+
+    The operator has already given us the reporter ID by the time any radiod
+    instance is minted (the wizard writes coordination.toml before bring-up),
+    so use it: "AC0G/B4 RX-888 Mk2".  Falls back to the placeholder when
+    coordination has no identity yet -- `smd config init radiod` can be run
+    on a host that has never been through the wizard.
+
+    Note the instance id / mDNS status name is a separate thing and is
+    already unique (`<host>-status.local`, see _default_instance_id), so
+    clients locate radiod regardless; this fixes what they are TOLD it is.
+    """
+    station = ""
+    try:
+        station = (load_coordination(COORDINATION_PATH)
+                   .station.reporter_id or "").strip()
+    except Exception:
+        station = ""
+    if station:
+        return f"{station} {sdr_type}"
     return f"{sdr_type} (set callsign + antenna)"
 
 
