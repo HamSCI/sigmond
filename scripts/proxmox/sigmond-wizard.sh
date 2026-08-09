@@ -54,29 +54,54 @@ VMID="${SIGMOND_VMID:-120}"
 # so every install quietly fell through to an unsecured rung.
 #
 # Tier fields:  label|server|registrar|tls|frps_port
-RAC_PROFILE="${SIGMOND_RAC_PROFILE:-dasi}"
+#
+# DASI stations get a REGISTRAR-LESS rung (rob 2026-08-09): both gateways
+# keep their registration pages WireGuard-only by policy (exposing them
+# publicly is a hole rob won't open — gw2's :35737 is firewalled to known
+# sites), so a greenfield DASI box cannot self-register with the HamSCI
+# gateway.  Instead DASI-N maps DETERMINISTICALLY to RAC 220+N (DASI-001 ->
+# RAC #221) and to the standard port bands, and "is it free?" is answered
+# by ATTEMPTING the tunnel — frps refuses a taken name/port — never by
+# probing.  Port bands measured live on gw2 (RAC #151, 2026-08-09):
+RAC_BASE_VMSSH=35800; RAC_BASE_VMWEB=45800
+RAC_BASE_HSSH=50800;  RAC_BASE_HUI=55800
+# Profile + DASI number stick across --reconfigure via /etc/sigmond-appliance.
+RAC_PROFILE="${SIGMOND_RAC_PROFILE:-$(cat /etc/sigmond-appliance/rac-profile 2>/dev/null || echo dasi)}"
+DASI_NUM="${SIGMOND_DASI_NUMBER:-$(cat /etc/sigmond-appliance/dasi-number 2>/dev/null)}"
+HAMSCI_TOKEN="${SIGMOND_RAC_HAMSCI_TOKEN:-}"
 RAC_REG_PORT="${SIGMOND_RAC_REG_PORT:-35737}"
 RAC_PORT_SECURE="${SIGMOND_RAC_PORT_SECURE:-35736}"
 RAC_PORT_UNSEC="${SIGMOND_RAC_PORT_UNSECURED:-35735}"
 _hs="vpn.hamsci.org"
 _wd="gw2.wsprdaemon.org"
-case "$RAC_PROFILE" in
-    standard)
-        RAC_TIERS="wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE"
-        ;;
-    *)
-        RAC_TIERS="HamSCI (secure)|$_hs|http://$_hs:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+build_rac_tiers() {
+    case "$RAC_PROFILE" in
+        standard)
+            RAC_TIERS="wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE"
+            ;;
+        *)
+            if [ -n "$HAMSCI_TOKEN" ] && [ -n "$DASI_NUM" ]; then
+                # DIRECT replaces the unreachable HamSCI-registrar rung.
+                RAC_TIERS="HamSCI (secure)|$_hs|http://$_hs:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+HamSCI (direct, UNSECURED)|$_hs|DIRECT|off|$RAC_PORT_UNSEC
+wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
+            else
+                RAC_TIERS="HamSCI (secure)|$_hs|http://$_hs:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
 HamSCI (UNSECURED)|$_hs|http://$_hs:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC
 wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
 wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
-        ;;
-esac
-# An explicitly pinned endpoint is an instruction, not a preference: it
-# replaces the ladder outright rather than becoming its first rung.
-if [ -n "${SIGMOND_RAC_SERVER:-}" ] || [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
-    _ps="${SIGMOND_RAC_SERVER:-$_wd}"
-    RAC_TIERS="pinned|$_ps|${SIGMOND_RAC_REGISTRAR:-http://$_ps:$RAC_REG_PORT/register}|${SIGMOND_RAC_TLS:-on}|${SIGMOND_RAC_FRPS_PORT:-$RAC_PORT_SECURE}"
-fi
+            fi
+            ;;
+    esac
+    # An explicitly pinned endpoint is an instruction, not a preference: it
+    # replaces the ladder outright rather than becoming its first rung.
+    if [ -n "${SIGMOND_RAC_SERVER:-}" ] || [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
+        _ps="${SIGMOND_RAC_SERVER:-$_wd}"
+        RAC_TIERS="pinned|$_ps|${SIGMOND_RAC_REGISTRAR:-http://$_ps:$RAC_REG_PORT/register}|${SIGMOND_RAC_TLS:-on}|${SIGMOND_RAC_FRPS_PORT:-$RAC_PORT_SECURE}"
+    fi
+}
+build_rac_tiers
 RAC_SERVER="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
 RAC_TLS="on"
 RAC_TIER_LABEL=""
@@ -333,6 +358,39 @@ ask_antenna() {
 }
 
 ask_rac() {
+    echo ""
+    # Station class decides the gateway ladder (rob 2026-08-09): DASI = the
+    # HamSCI-managed install shape, prefers vpn.hamsci.org and may walk down
+    # to an unsecured tunnel; everything else is an ordinary WsprDaemon-group
+    # station, gw2 secure ONLY.  Default follows the image profile so later
+    # image builds can flip it (SIGMOND_RAC_PROFILE=standard -> default No).
+    if [ "$RAC_PROFILE" = "standard" ]; then _dp="y/N"; else _dp="Y/n"; fi
+    read -r -p "Is this a DASI (HamSCI) station? [$_dp] " _dq
+    _ddef="Y"; [ "$RAC_PROFILE" = "standard" ] && _ddef="N"
+    case "${_dq:-$_ddef}" in
+        [Nn]*) RAC_PROFILE="standard" ;;
+        *)     RAC_PROFILE="dasi" ;;
+    esac
+    if [ "$RAC_PROFILE" = "dasi" ]; then
+        while :; do
+            read -r -p "DASI unit number (1-99, e.g. 3 for DASI-003${DASI_NUM:+; current $DASI_NUM}; Enter to skip): " _dn
+            _dn="${_dn:-$DASI_NUM}"
+            [ -z "$_dn" ] && break
+            echo "$_dn" | grep -qE '^[1-9][0-9]?$' && { DASI_NUM="$_dn"; break; }
+            echo "  ✗ DASI numbers are 1-99 (DASI-001 … DASI-099)"
+        done
+        if [ -n "$DASI_NUM" ]; then
+            _rn=$((220 + DASI_NUM))
+            echo "  DASI-$(printf '%03d' "$DASI_NUM") maps deterministically to RAC #$_rn:"
+            echo "    VM ssh :$((RAC_BASE_VMSSH+_rn)) · ka9q-web :$((RAC_BASE_VMWEB+_rn)) · host ssh :$((RAC_BASE_HSSH+_rn)) · host UI :$((RAC_BASE_HUI+_rn))"
+            if [ -z "$HAMSCI_TOKEN" ]; then
+                read -r -p "  HamSCI gateway token (Enter if none — the HamSCI direct rung is skipped): " HAMSCI_TOKEN
+            fi
+        else
+            echo "  No DASI number — the HamSCI direct rung is skipped this run."
+        fi
+    fi
+    build_rac_tiers
     echo ""
     echo "Remote access (RAC) is a reverse tunnel to the fleet gateway so the"
     echo "admin can reach this station for support.  Keys, credentials and"
@@ -924,6 +982,50 @@ if [ -n "$RAC_NUM" ]; then
             say "  $_lbl did not answer (no frps on $_cand:$_fport)"
             continue
         fi
+        if [ "$_cand_reg" = "DIRECT" ]; then
+            # Registrar-less DASI rung: deterministic RAC + ports, verified
+            # by ATTEMPT — a throwaway frpc claims all 4 proxies and the
+            # frps itself refuses a taken name/port.  The live tunnel (if
+            # any) is untouched: separate config, separate admin port.
+            _racn=$((220 + DASI_NUM))
+            _pvs=$((RAC_BASE_VMSSH+_racn)); _pvw=$((RAC_BASE_VMWEB+_racn))
+            _phs=$((RAC_BASE_HSSH+_racn)); _phu=$((RAC_BASE_HUI+_racn))
+            _duser="DASI-$(printf '%03d' "$DASI_NUM")"
+            say "  deterministic mapping: $_duser -> RAC #$_racn (attempting, not probing)"
+            _tf=$(mktemp /tmp/frpc-dasi-XXXXXX.toml)
+            {
+                printf 'serverAddr = "%s"\nserverPort = %s\nuser = "%s"\nloginFailExit = true\n' "$_cand" "$_fport" "$_duser"
+                printf '[auth]\nmethod = "token"\ntoken = "%s"\n' "$HAMSCI_TOKEN"
+                printf '[transport.tls]\nenable = false\n'
+                printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
+                for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu"; do
+                    IFS=: read -r _n _lp _rp <<<"$_spec"
+                    printf '[[proxies]]\nname = "%s-%s"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = %s\nremotePort = %s\n' "$SITE" "$_n" "$_lp" "$_rp"
+                done
+            } > "$_tf"
+            /usr/local/sbin/frpc -c "$_tf" >>"$LOG" 2>&1 &
+            _tpid=$!
+            _drun=0; _derr=""
+            for _i in 1 2 3 4 5 6 7 8; do
+                sleep 3
+                kill -0 "$_tpid" 2>/dev/null || break
+                _api=$(curl -s http://127.0.0.1:7502/api/status 2>/dev/null)
+                _drun=$(echo "$_api" | grep -o '"status":"running"' | wc -l)
+                _derr=$(echo "$_api" | grep -o '"err":"[^"]\{1,\}"' | head -3)
+                [ "$_drun" -ge 4 ] && break
+            done
+            kill "$_tpid" 2>/dev/null; wait "$_tpid" 2>/dev/null; rm -f "$_tf"
+            if [ "$_drun" -ge 4 ]; then
+                say "  RAC #$_racn is free on $_cand — claiming it"
+                REG="RACN=$_racn RUSER=$_duser RTOKEN=$HAMSCI_TOKEN P_VMSSH=$_pvs P_VMWEB=$_pvw P_HSSH=$_phs P_HUI=$_phu SRV=$_cand SPORT=$_fport"
+            elif echo "$_derr" | grep -qi "port already"; then
+                say "  ** RAC #$_racn ports are TAKEN on $_cand — is another unit already"
+                say "  ** using DASI number $DASI_NUM?  Choose a different number via"
+                say "  ** sigmond-setup --reconfigure, or let the ladder continue below."
+            else
+                say "  HamSCI direct attempt failed (${_derr:-login refused — check the token}); see $LOG"
+            fi
+        else
         REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" "$_cand_reg" <<'PYEOF' 2>>"$LOG"
 import json, re, sys, urllib.error, urllib.request
 site, pub, registrar = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -953,6 +1055,7 @@ print("RACN=%d RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%
     r["server_addr"], int(r["server_port"])))
 PYEOF
 )
+        fi
         if [ -n "$REG" ]; then
             RAC_SERVER="$_cand"
             RAC_REGISTRAR="$_cand_reg"
@@ -1167,6 +1270,9 @@ elif [ -n "$PSWS_ID" ]; then
 fi
 
 echo "$REPORTER $GRID $(date -u +%F)" > "$CONF_MARK"
+# Station class + DASI number stick across --reconfigure / --rac-upgrade.
+printf '%s\n' "$RAC_PROFILE" > "$MARK_DIR/rac-profile"
+[ -n "$DASI_NUM" ] && printf '%s\n' "$DASI_NUM" > "$MARK_DIR/dasi-number"
 
 # The wizard unit must NOT stay enabled once configured: its
 # Conflicts=getty@tty1 stop job fires even when the Condition check fails
