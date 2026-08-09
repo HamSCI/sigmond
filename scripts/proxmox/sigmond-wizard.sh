@@ -40,34 +40,42 @@ VMID="${SIGMOND_VMID:-120}"
 # weakening; rob scoped it to DASI deliberately rather than dropping it, and
 # every tier below announces itself on the console and in $LOG.
 #
-# Why a ladder at all: vpn.hamsci.org:35737 has never answered (the host runs
-# only the legacy unsecured frps), so EVERY greenfield install since
-# 2026-07-30 finished with RAC dead and nobody noticed until someone needed
-# remote support (found on B4, 2026-08-06).
+# Why a ladder at all: vpn.hamsci.org's secure stack has never answered, so
+# EVERY greenfield install since 2026-07-30 finished with RAC dead and nobody
+# noticed until someone needed remote support (found on B4, 2026-08-06).
 #
-# Tier fields:  label|server|registrar|tls
-#   secure    = registrar over https + frpc [transport.tls] with the pinned CA
-#   unsecured = plain-http registrar + TLS off (legacy frps, port 35735)
+# What secure/unsecured actually MEANS (mjh 2026-08-09, correcting the
+# v3.25/v3.26 guess): it is the frps TUNNEL port —
+#   secure    = TLS frps on 35736 + frpc [transport.tls] with the pinned CA
+#   unsecured = legacy plain frps on 35735 + TLS off
+# The REGISTRAR (account-creation API) is a separate, tier-independent thing:
+# plain http on 35737, the only registrar either gateway serves.  v3.25/26
+# implemented "secure" as an https registrar on 35737 — nothing serves that,
+# so every install quietly fell through to an unsecured rung.
+#
+# Tier fields:  label|server|registrar|tls|frps_port
 RAC_PROFILE="${SIGMOND_RAC_PROFILE:-dasi}"
 RAC_REG_PORT="${SIGMOND_RAC_REG_PORT:-35737}"
+RAC_PORT_SECURE="${SIGMOND_RAC_PORT_SECURE:-35736}"
+RAC_PORT_UNSEC="${SIGMOND_RAC_PORT_UNSECURED:-35735}"
 _hs="vpn.hamsci.org"
 _wd="gw2.wsprdaemon.org"
 case "$RAC_PROFILE" in
     standard)
-        RAC_TIERS="wsprdaemon (secure)|$_wd|https://$_wd:$RAC_REG_PORT/register|on"
+        RAC_TIERS="wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE"
         ;;
     *)
-        RAC_TIERS="HamSCI (secure)|$_hs|https://$_hs:$RAC_REG_PORT/register|on
-HamSCI (UNSECURED)|$_hs|http://$_hs:$RAC_REG_PORT/register|off
-wsprdaemon (secure)|$_wd|https://$_wd:$RAC_REG_PORT/register|on
-wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off"
+        RAC_TIERS="HamSCI (secure)|$_hs|http://$_hs:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+HamSCI (UNSECURED)|$_hs|http://$_hs:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC
+wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
         ;;
 esac
 # An explicitly pinned endpoint is an instruction, not a preference: it
 # replaces the ladder outright rather than becoming its first rung.
 if [ -n "${SIGMOND_RAC_SERVER:-}" ] || [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
     _ps="${SIGMOND_RAC_SERVER:-$_wd}"
-    RAC_TIERS="pinned|$_ps|${SIGMOND_RAC_REGISTRAR:-https://$_ps:$RAC_REG_PORT/register}|${SIGMOND_RAC_TLS:-on}"
+    RAC_TIERS="pinned|$_ps|${SIGMOND_RAC_REGISTRAR:-http://$_ps:$RAC_REG_PORT/register}|${SIGMOND_RAC_TLS:-on}|${SIGMOND_RAC_FRPS_PORT:-$RAC_PORT_SECURE}"
 fi
 RAC_SERVER="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
 RAC_TLS="on"
@@ -96,14 +104,15 @@ case "${1:-}" in
         echo "current RAC tier: $CUR"
         echo "probing the ladder, best first:"
         BEST=""; BEST_LBL=""
-        while IFS='|' read -r _l _c _r _t; do
+        while IFS='|' read -r _l _c _r _t _p; do
             [ -n "$_c" ] || continue
-            if curl -fsS --max-time 10 -o /dev/null "$_r" 2>/dev/null \
-               || curl -fsS --max-time 10 -o /dev/null -X POST -d '{}' "$_r" 2>/dev/null; then
-                echo "  $_l — ANSWERS"
+            # a tier is up iff its frps TUNNEL port answers (35736 TLS /
+            # 35735 legacy); the registrar is shared and proves nothing
+            if timeout 5 bash -c "exec 3<>/dev/tcp/$_c/$_p" 2>/dev/null; then
+                echo "  $_l — ANSWERS ($_c:$_p)"
                 [ -z "$BEST" ] && { BEST="$_r"; BEST_LBL="$_l"; }
             else
-                echo "  $_l — no answer"
+                echo "  $_l — no answer ($_c:$_p)"
             fi
         done <<TIEREOF
 $RAC_TIERS
@@ -334,8 +343,8 @@ ask_rac() {
         echo "  Gateway: $RAC_SERVER, secure only."
     else
         echo "  Gateways are tried in order, most secure first:"
-        echo "$RAC_TIERS" | while IFS='|' read -r _l _c _r _t; do
-            [ -n "$_c" ] && echo "    · $_l  ($_c)"
+        echo "$RAC_TIERS" | while IFS='|' read -r _l _c _r _t _p; do
+            [ -n "$_c" ] && echo "    · $_l  ($_c:$_p)"
         done
         echo "  The tier that answers is reported at the end of the install."
     fi
@@ -901,13 +910,20 @@ if [ -n "$RAC_NUM" ]; then
         SITE=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
         REG=""
         RAC_TRIED=""
-        while IFS='|' read -r _lbl _cand _cand_reg _tls; do
+        while IFS='|' read -r _lbl _cand _cand_reg _tls _fport; do
         [ -n "$_cand" ] || continue
         RAC_TRIED="${RAC_TRIED:+$RAC_TRIED, }$_lbl"
-        say "trying $_lbl — $_cand_reg"
+        say "trying $_lbl — $_cand:$_fport (registrar $_cand_reg)"
         case "$_tls" in
             off) say "  NOTE: this tier is UNSECURED (no TLS, legacy frps)." ;;
         esac
+        # The tier IS its tunnel port: if no frps listens there, the tier is
+        # down no matter what the (shared) registrar would say — probe it
+        # first so a dead secure stack can't register and then fail late.
+        if ! timeout 5 bash -c "exec 3<>/dev/tcp/$_cand/$_fport" 2>/dev/null; then
+            say "  $_lbl did not answer (no frps on $_cand:$_fport)"
+            continue
+        fi
         REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" "$_cand_reg" <<'PYEOF' 2>>"$LOG"
 import json, re, sys, urllib.error, urllib.request
 site, pub, registrar = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -941,10 +957,11 @@ PYEOF
             RAC_SERVER="$_cand"
             RAC_REGISTRAR="$_cand_reg"
             RAC_TLS="$_tls"
+            RAC_PORT="$_fport"
             RAC_TIER_LABEL="$_lbl"
             break
         fi
-        say "  $_lbl did not answer"
+        say "  $_lbl frps answered on :$_fport but its registrar did not"
         done <<TIEREOF
 $RAC_TIERS
 TIEREOF
@@ -1060,8 +1077,10 @@ trustedCaFile = \"/etc/sigmond/frps-ca.crt\""
 # ONE frpc on the Proxmox host carries all four channels; the vm-*
 # channels ride the local relays (12222/12223) that resolve the VM's
 # current IP per connection, so this file never needs the VM's address.
+# serverPort comes from the TIER that answered (35736 TLS / 35735 legacy),
+# not from the registrar's reply — the registrar only knows the legacy stack.
 serverAddr = "$SRV"
-serverPort = $SPORT
+serverPort = ${RAC_PORT:-$SPORT}
 user = "$RUSER"
 
 [auth]
