@@ -82,8 +82,12 @@ build_rac_tiers() {
         *)
             if [ -n "$HAMSCI_TOKEN" ] && [ -n "$DASI_NUM" ]; then
                 # DIRECT replaces the unreachable HamSCI-registrar rung.
+                # tls=opp (opportunistic): vpn's frps accepts TLS on the
+                # legacy port (proven 2026-08-09) but serves a self-signed
+                # cert, so we encrypt WITHOUT pinning until the VPN carries
+                # a fleet-CA cert — then this rung can graduate to tls=on.
                 RAC_TIERS="HamSCI (secure)|$_hs|http://$_hs:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
-HamSCI (direct, UNSECURED)|$_hs|DIRECT|off|$RAC_PORT_UNSEC
+HamSCI (direct, TLS unpinned)|$_hs|DIRECT|opp|$RAC_PORT_UNSEC
 wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
 wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
             else
@@ -974,6 +978,7 @@ if [ -n "$RAC_NUM" ]; then
         say "trying $_lbl — $_cand:$_fport (registrar $_cand_reg)"
         case "$_tls" in
             off) say "  NOTE: this tier is UNSECURED (no TLS, legacy frps)." ;;
+            opp) say "  NOTE: encrypted (TLS) but the server is unauthenticated" ;;
         esac
         # The tier IS its tunnel port: if no frps listens there, the tier is
         # down no matter what the (shared) registrar would say — probe it
@@ -993,10 +998,15 @@ if [ -n "$RAC_NUM" ]; then
             _duser="DASI-$(printf '%03d' "$DASI_NUM")"
             say "  deterministic mapping: $_duser -> RAC #$_racn (attempting, not probing)"
             _tf=$(mktemp /tmp/frpc-dasi-XXXXXX.toml)
+            _dtls=true; [ "$_tls" = "off" ] && _dtls=false
             {
                 printf 'serverAddr = "%s"\nserverPort = %s\nuser = "%s"\nloginFailExit = true\n' "$_cand" "$_fport" "$_duser"
+                # the pubkey rides EVERY login as metadata — today the server
+                # ignores it; a future Login plugin on the VPN turns it into
+                # per-unit admission (TOFU) with no Linux accounts (rob).
+                printf '[metadatas]\npubkey = "%s"\nsite = "%s"\ndasi = "%s"\n' "$(cat /root/.ssh/id_ed25519.pub)" "$SITE" "$_duser"
                 printf '[auth]\nmethod = "token"\ntoken = "%s"\n' "$HAMSCI_TOKEN"
-                printf '[transport.tls]\nenable = false\n'
+                printf '[transport.tls]\nenable = %s\n' "$_dtls"
                 printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
                 for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu"; do
                     IFS=: read -r _n _lp _rp <<<"$_spec"
@@ -1161,15 +1171,18 @@ SVCEOF
             systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket >>"$LOG" 2>&1
 
             # transport follows the tier that actually answered: a secure
-            # tier pins the fleet CA, an unsecured one has no CA to pin.
-            if [ "$RAC_TLS" = "off" ]; then
-                RAC_TLS_BLOCK="[transport.tls]
-enable = false"
-            else
-                RAC_TLS_BLOCK="[transport.tls]
+            # tier pins the fleet CA, opportunistic (opp) encrypts without
+            # pinning (server cert is self-signed — vpn.hamsci.org today),
+            # and an unsecured one has no TLS at all.
+            case "$RAC_TLS" in
+                off) RAC_TLS_BLOCK="[transport.tls]
+enable = false" ;;
+                opp) RAC_TLS_BLOCK="[transport.tls]
+enable = true" ;;
+                *)   RAC_TLS_BLOCK="[transport.tls]
 enable = true
-trustedCaFile = \"/etc/sigmond/frps-ca.crt\""
-            fi
+trustedCaFile = \"/etc/sigmond/frps-ca.crt\"" ;;
+            esac
             # record the tier so 'sigmond-setup --rac-upgrade' can tell whether
             # a better one has since come up
             printf '%s\n' "$RAC_TIER_LABEL" > "$MARK_DIR/rac-tier"
@@ -1185,6 +1198,14 @@ trustedCaFile = \"/etc/sigmond/frps-ca.crt\""
 serverAddr = "$SRV"
 serverPort = ${RAC_PORT:-$SPORT}
 user = "$RUSER"
+
+# The station's pubkey rides every login as metadata (any tier): servers
+# ignore it today; a Login plugin can enforce per-unit admission (TOFU)
+# from it later — no per-client accounts needed (rob 2026-08-09).
+[metadatas]
+pubkey = "$(cat /root/.ssh/id_ed25519.pub)"
+site = "$SITE"
+dasi = "${DASI_NUM:+DASI-$(printf '%03d' "$DASI_NUM")}"
 
 [auth]
 method = "token"
