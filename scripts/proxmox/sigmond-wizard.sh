@@ -607,6 +607,41 @@ if gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
         fi
         sleep 10
     done
+elif [ "$HAVE_RX888" = 1 ]; then
+    # The pre-flight saw an RX888 on this machine, but the VM cannot.  This is
+    # the first-install USB handoff, and it is expected exactly once:
+    #
+    #   1. the host boots and enumerates the RX888 in its FX3 boot ROM
+    #      (04b4:00f3, USB 2.0) -- the host has no rx888_boot, so it sits
+    #      there claimed but unloaded;
+    #   2. firstboot binds the USB controllers to the VM and reboots;
+    #   3. the FX3 is handed across mid-state and never re-enumerates in the
+    #      guest -- no `add` uevent, so 70-rx888-boot.rules never fires
+    #      rx888_boot.service, so no firmware, so no RX888.
+    #
+    # On EVERY later boot the controllers are already assigned at boot and the
+    # host never touches the device, so the guest enumerates it cleanly.  That
+    # is why this is an install-only problem (rob, 2026-08-09).
+    #
+    # A warm reboot does NOT clear it: the FX3 stays latched as long as VBUS is
+    # maintained.  Only removing power -- or physically replugging the RX888 --
+    # resets it.  Say so plainly, because "reboot" is what an operator will try
+    # first and it will not work.
+    say ""
+    say "  ── RX888 not visible to the decoder VM ──────────────"
+    say "  An RX888 was detected on this machine, but the VM cannot see it."
+    say "  This is EXPECTED on a first install: the SDR was handed across to"
+    say "  the VM mid-state and needs its power removed to reset."
+    say ""
+    say "  ==> POWER-CYCLE THE MACHINE (a reboot is NOT enough), or unplug and"
+    say "      replug the RX888's USB cable."
+    say ""
+    say "  Nothing else needs doing — radiod comes up automatically within"
+    say "  ~2 min once the SDR appears, and this will not recur on later boots."
+    say "──────────────────────────────────────────────────────"
+    RADIOD_STATE="RX888 present on the host but NOT yet visible to the VM —
+            POWER-CYCLE the machine (a reboot is not enough); radiod then
+            starts automatically within ~2 min"
 else
     RADIOD_STATE="NO RX888 on the VM's USB bus — plug it in (or re-seat its USB
             cable if it was already in: a wedged FX3 needs a physical replug);
