@@ -80,14 +80,17 @@ build_rac_tiers() {
             RAC_TIERS="wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE"
             ;;
         *)
-            if [ -n "$HAMSCI_TOKEN" ] && [ -n "$DASI_NUM" ]; then
-                # DIRECT replaces the unreachable HamSCI-registrar rung.
-                # tls=opp (opportunistic): vpn's frps accepts TLS on the
-                # legacy port (proven 2026-08-09) but serves a self-signed
-                # cert, so we encrypt WITHOUT pinning until the VPN carries
-                # a fleet-CA cert — then this rung can graduate to tls=on.
-                RAC_TIERS="HamSCI (secure)|$_hs|http://$_hs:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
-HamSCI (direct, TLS unpinned)|$_hs|DIRECT|opp|$RAC_PORT_UNSEC
+            if [ -n "$DASI_NUM" ]; then
+                # vpn.hamsci.org runs frps-secure on 35736 with account-less
+                # TOFU auth (verified end-to-end 2026-08-09): no registrar,
+                # no Linux accounts — the station's pubkey rides the login as
+                # metadata and is trusted-on-first-use, keyed by DASI id.
+                # DIRECT = deterministic RAC/ports claimed by ATTEMPT.
+                # tls=opp: encrypted against the self-signed cert without
+                # pinning; graduates to tls=on when the VPN gets a fleet-CA
+                # cert (one tier-table field).  No token needed (pubkey is
+                # the gate; the server's auth.token is empty).
+                RAC_TIERS="HamSCI secure (TOFU)|$_hs|DIRECT|opp|$RAC_PORT_SECURE
 wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
 wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
             else
@@ -387,11 +390,10 @@ ask_rac() {
             _rn=$((220 + DASI_NUM))
             echo "  DASI-$(printf '%03d' "$DASI_NUM") maps deterministically to RAC #$_rn:"
             echo "    VM ssh :$((RAC_BASE_VMSSH+_rn)) · ka9q-web :$((RAC_BASE_VMWEB+_rn)) · host ssh :$((RAC_BASE_HSSH+_rn)) · host UI :$((RAC_BASE_HUI+_rn))"
-            if [ -z "$HAMSCI_TOKEN" ]; then
-                read -r -p "  HamSCI gateway token (Enter if none — the HamSCI direct rung is skipped): " HAMSCI_TOKEN
-            fi
+            echo "  Secure HamSCI access (vpn.hamsci.org:35736, TLS + trust-on-first-use)"
+            echo "  needs no token or account — this station's key is filed on first connect."
         else
-            echo "  No DASI number — the HamSCI direct rung is skipped this run."
+            echo "  No DASI number — the secure HamSCI rung is skipped; falling back to gw2."
         fi
     fi
     build_rac_tiers
@@ -1005,7 +1007,9 @@ if [ -n "$RAC_NUM" ]; then
                 # ignores it; a future Login plugin on the VPN turns it into
                 # per-unit admission (TOFU) with no Linux accounts (rob).
                 printf '[metadatas]\npubkey = "%s"\nsite = "%s"\ndasi = "%s"\n' "$(cat /root/.ssh/id_ed25519.pub)" "$SITE" "$_duser"
-                printf '[auth]\nmethod = "token"\ntoken = "%s"\n' "$HAMSCI_TOKEN"
+                # TOFU: the pubkey (above) is the credential; the server's
+                # auth.token is empty, so the client sends an empty token too.
+                printf '[auth]\nmethod = "token"\ntoken = ""\n'
                 printf '[transport.tls]\nenable = %s\n' "$_dtls"
                 printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
                 for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu"; do
