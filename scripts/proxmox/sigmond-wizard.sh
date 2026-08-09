@@ -90,7 +90,17 @@ build_rac_tiers() {
                 # pinning; graduates to tls=on when the VPN gets a fleet-CA
                 # cert (one tier-table field).  No token needed (pubkey is
                 # the gate; the server's auth.token is empty).
+                # Rung 2 (unsecured VPN) is the interim path that works TODAY:
+                # vpn's legacy frps on 35735 is open (empty token, no plugin),
+                # reachable through the firewall now, so a DASI box gets a
+                # HamSCI tunnel before 35736 is opened.  Same DIRECT
+                # deterministic RAC/ports + pubkey metadata; tls=off means the
+                # pubkey rides but isn't verified there — the shared-open port
+                # is the admission, a working tunnel the point (proven from
+                # the AI6VN box 2026-08-09).  --rac-upgrade climbs to the TOFU
+                # rung once 35736 opens.
                 RAC_TIERS="HamSCI secure (TOFU)|$_hs|DIRECT|opp|$RAC_PORT_SECURE
+HamSCI unsecured (direct)|$_hs|DIRECT|off|$RAC_PORT_UNSEC
 wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
 wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
             else
