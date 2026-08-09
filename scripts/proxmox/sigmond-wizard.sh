@@ -402,9 +402,16 @@ ask_names() {
 # ── take the console cleanly ────────────────────────────────────────────
 # sigmond-wizard.service has Conflicts=getty@tty1, but systemd stops getty
 # ASYNCHRONOUSLY: getty routinely gets "login:" onto the screen just before
-# it dies, and our first prompt then lands on that same line (rob 2026-08-09).
-# Waiting for one Enter gives the tty back to us on a line of our own, and
-# doubles as a "the installer is about to start" beat for the operator.
+# it dies.  v3.25 printed blank lines first, but blank lines can't win a
+# race — "login:" can land AFTER they've flushed, putting the banner back
+# on the login line (mjh, v3.25 test 2026-08-09).  So wait for getty@tty1
+# to actually be gone (bounded) before emitting the first byte; the leading
+# blank line then lands below whatever getty last wrote.
+for _i in $(seq 1 50); do
+    _gst=$(systemctl show -p ActiveState --value getty@tty1.service 2>/dev/null)
+    case "$_gst" in active|activating|deactivating) sleep 0.2 ;; *) break ;; esac
+done
+sleep 1
 printf '\n\n'
 echo "════════════════════════════════════════════════════════════════"
 echo "  Sigmond appliance — first-boot station setup"
@@ -724,17 +731,21 @@ elif [ "$HAVE_RX888" = 1 ]; then
     say "  This is EXPECTED on a first install: the SDR was handed across to"
     say "  the VM mid-state and needs its power removed to reset."
     say ""
-    say "  ==> POWER-CYCLE THE MACHINE (a reboot is NOT enough), or unplug and"
-    say "      replug the RX888's USB cable."
+    say "  ==> The installer POWERS THIS MACHINE OFF at the end of setup;"
+    say "      that power-off is exactly the reset the SDR needs (a reboot"
+    say "      would NOT be — the FX3 stays latched while USB power is held)."
     say ""
-    say "  Nothing else needs doing — radiod comes up automatically within"
-    say "  ~2 min once the SDR appears, and this will not recur on later boots."
+    say "  Nothing else needs doing — after you power back on, radiod comes up"
+    say "  automatically within ~2 min, and this will not recur on later boots."
+    say "  If the SDR STILL fails to appear then, unplug and replug the"
+    say "  RX888's USB cable (some boards keep USB power even in soft-off)."
     say "──────────────────────────────────────────────────────"
     RADIOD_STATE="RX888 present on the host but NOT yet visible to the VM —
-            POWER-CYCLE the machine (a reboot is not enough); radiod then
-            starts automatically within ~2 min"
-    # The wizard's transcript does not survive the reboot that follows, so the
-    # operator never sees the paragraph above (rob 2026-08-09: "after the
+            expected on a first install; the POWER-OFF at the end of setup
+            resets it, and radiod starts automatically ~2 min after the
+            next power-on"
+    # The wizard's transcript does not survive the power-off that follows, so
+    # the operator never sees the paragraph above (rob 2026-08-09: "after the
     # reboot I did not see any mention of the need to re-plug or power cycle").
     # Leave a marker: the console access panel repeats the instruction on every
     # boot, and clears it by itself once the SDR turns up.
