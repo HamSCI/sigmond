@@ -22,31 +22,56 @@
 # Subcommands: --reconfigure   rerun the wizard (RAC number is sticky)
 #              --rac-off       drop the remote-access tunnel (config kept)
 #              --rac-on        bring it back up
+#              --rac-upgrade   climb to a more secure gateway tier if one
+#                              has since come up (see the RAC ladder below)
 set -u
 VMID="${SIGMOND_VMID:-120}"
-# RAC server: the secure HamSCI frps endpoint (TLS). Configurable via
-# environment for other deployments; the fleet default is vpn.hamsci.org
-# (replaces gw2.wsprdaemon.org, rob 2026-07-30 — dashboard + registrar
-# being stood up in parallel).
+# ── RAC endpoint ladder ────────────────────────────────────────────────
+# Two policies, split on whether this is a DASI station (rob 2026-08-09):
 #
-# "Fails softly and --reconfigure retries later" was the plan while the new
-# gateway came up, but the cost landed on the wrong side: vpn.hamsci.org:35737
-# still times out, so EVERY greenfield install since 2026-07-30 has finished
-# with RAC dead and nobody to notice until someone needs remote support
-# (found on B4, 2026-08-06 — install reported "FAILED — could not register").
-# So try the fleet default FIRST and fall back to the gateway that is still
-# serving: new installs get a working tunnel today, and they migrate to
-# vpn.hamsci.org by themselves the moment it answers.  Pinning either
-# SIGMOND_RAC_SERVER or SIGMOND_RAC_REGISTRAR disables the fallback — an
-# explicit endpoint is an instruction, not a preference.
-RAC_SERVER="${SIGMOND_RAC_SERVER:-vpn.hamsci.org}"
-RAC_REGISTRAR="${SIGMOND_RAC_REGISTRAR:-http://${RAC_SERVER}:35737/register}"
-RAC_FALLBACK_SERVER="${SIGMOND_RAC_FALLBACK_SERVER:-gw2.wsprdaemon.org}"
+#   dasi      Prefer the HamSCI gateway, and rather than finish with no
+#             remote access at all, walk all the way down to an unsecured
+#             tunnel.  These boxes sit in a physically secure location, and
+#             a station nobody can reach is a station nobody can support.
+#   standard  Ordinary WsprDaemon-group installs never touch vpn.hamsci.org
+#             and are secure-only — no unsecured fallback, ever.
+#
+# I flagged that silently downgrading to an unsecured transport is a genuine
+# weakening; rob scoped it to DASI deliberately rather than dropping it, and
+# every tier below announces itself on the console and in $LOG.
+#
+# Why a ladder at all: vpn.hamsci.org:35737 has never answered (the host runs
+# only the legacy unsecured frps), so EVERY greenfield install since
+# 2026-07-30 finished with RAC dead and nobody noticed until someone needed
+# remote support (found on B4, 2026-08-06).
+#
+# Tier fields:  label|server|registrar|tls
+#   secure    = registrar over https + frpc [transport.tls] with the pinned CA
+#   unsecured = plain-http registrar + TLS off (legacy frps, port 35735)
+RAC_PROFILE="${SIGMOND_RAC_PROFILE:-dasi}"
+RAC_REG_PORT="${SIGMOND_RAC_REG_PORT:-35737}"
+_hs="vpn.hamsci.org"
+_wd="gw2.wsprdaemon.org"
+case "$RAC_PROFILE" in
+    standard)
+        RAC_TIERS="wsprdaemon (secure)|$_wd|https://$_wd:$RAC_REG_PORT/register|on"
+        ;;
+    *)
+        RAC_TIERS="HamSCI (secure)|$_hs|https://$_hs:$RAC_REG_PORT/register|on
+HamSCI (UNSECURED)|$_hs|http://$_hs:$RAC_REG_PORT/register|off
+wsprdaemon (secure)|$_wd|https://$_wd:$RAC_REG_PORT/register|on
+wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off"
+        ;;
+esac
+# An explicitly pinned endpoint is an instruction, not a preference: it
+# replaces the ladder outright rather than becoming its first rung.
 if [ -n "${SIGMOND_RAC_SERVER:-}" ] || [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
-    RAC_CANDIDATES="$RAC_SERVER"
-else
-    RAC_CANDIDATES="$RAC_SERVER $RAC_FALLBACK_SERVER"
+    _ps="${SIGMOND_RAC_SERVER:-$_wd}"
+    RAC_TIERS="pinned|$_ps|${SIGMOND_RAC_REGISTRAR:-https://$_ps:$RAC_REG_PORT/register}|${SIGMOND_RAC_TLS:-on}"
 fi
+RAC_SERVER="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
+RAC_TLS="on"
+RAC_TIER_LABEL=""
 MARK_DIR=/etc/sigmond-appliance
 CONF_MARK="$MARK_DIR/.configured"
 LOG=/var/log/sigmond-wizard.log
@@ -62,6 +87,45 @@ case "${1:-}" in
         say "remote access (RAC) disabled — tunnel is down, config kept."
         say "re-enable any time:  sigmond-setup --rac-on"
         exit 0;;
+    --rac-upgrade)
+        # rob 2026-08-09: a station that had to settle for a lower tier should
+        # be able to climb once a better gateway comes up, without a rebuild.
+        # This probes the ladder top-down and only acts if something strictly
+        # better than the current tier answers.
+        CUR=$(cat "$MARK_DIR/rac-tier" 2>/dev/null || echo "(none)")
+        echo "current RAC tier: $CUR"
+        echo "probing the ladder, best first:"
+        BEST=""; BEST_LBL=""
+        while IFS='|' read -r _l _c _r _t; do
+            [ -n "$_c" ] || continue
+            if curl -fsS --max-time 10 -o /dev/null "$_r" 2>/dev/null \
+               || curl -fsS --max-time 10 -o /dev/null -X POST -d '{}' "$_r" 2>/dev/null; then
+                echo "  $_l — ANSWERS"
+                [ -z "$BEST" ] && { BEST="$_r"; BEST_LBL="$_l"; }
+            else
+                echo "  $_l — no answer"
+            fi
+        done <<TIEREOF
+$RAC_TIERS
+TIEREOF
+        if [ -z "$BEST" ]; then
+            echo "no gateway tier is reachable right now — nothing to do."
+            exit 1
+        fi
+        if [ "$BEST_LBL" = "$CUR" ]; then
+            echo "already on the best tier that answers ($CUR) — nothing to do."
+            exit 0
+        fi
+        echo ""
+        echo "a better tier is available: $BEST_LBL  (currently $CUR)"
+        echo "re-registering re-runs the setup questions; the RAC number is sticky,"
+        echo "so the station keeps its assigned channels."
+        read -r -p "upgrade now? [y/N] " _u
+        case "${_u:-N}" in
+            [Yy]*) exec "$0" --reconfigure ;;
+            *) echo "left on $CUR; run this again any time." ; exit 0 ;;
+        esac
+        ;;
     --rac-on)
         if [ ! -f /etc/sigmond/frpc-host.toml ]; then
             say "no RAC config on this host yet — run: sigmond-setup --reconfigure"
@@ -261,11 +325,20 @@ ask_antenna() {
 
 ask_rac() {
     echo ""
-    echo "Remote access (RAC) is a secure reverse tunnel to the HamSCI server"
-    echo "($RAC_SERVER) so the fleet admin can reach this station for support."
-    echo "Everything — keys,"
-    echo "credentials, channel numbers — is handled automatically, and you can"
-    echo "turn it off any time with:  sigmond-setup --rac-off"
+    echo "Remote access (RAC) is a reverse tunnel to the fleet gateway so the"
+    echo "admin can reach this station for support.  Keys, credentials and"
+    echo "channel numbers are all handled automatically, and you can turn it"
+    echo "off any time with:  sigmond-setup --rac-off"
+    echo ""
+    if [ "$RAC_PROFILE" = "standard" ]; then
+        echo "  Gateway: $RAC_SERVER, secure only."
+    else
+        echo "  Gateways are tried in order, most secure first:"
+        echo "$RAC_TIERS" | while IFS='|' read -r _l _c _r _t; do
+            [ -n "$_c" ] && echo "    · $_l  ($_c)"
+        done
+        echo "  The tier that answers is reported at the end of the install."
+    fi
     # When equipment is missing this is the single most valuable thing the
     # install can still achieve: it is how someone remote reaches the station
     # to help finish it.  Say so at the moment of the decision.
@@ -325,6 +398,24 @@ ask_names() {
     VMNAME="$DES"
     PMNAME="$DES-PM"
 }
+
+# ── take the console cleanly ────────────────────────────────────────────
+# sigmond-wizard.service has Conflicts=getty@tty1, but systemd stops getty
+# ASYNCHRONOUSLY: getty routinely gets "login:" onto the screen just before
+# it dies, and our first prompt then lands on that same line (rob 2026-08-09).
+# Waiting for one Enter gives the tty back to us on a line of our own, and
+# doubles as a "the installer is about to start" beat for the operator.
+printf '\n\n'
+echo "════════════════════════════════════════════════════════════════"
+echo "  Sigmond appliance — first-boot station setup"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+echo "  This asks a short series of questions about the station, then"
+echo "  configures the Proxmox host and the decoder VM.  Nothing is"
+echo "  applied until you confirm at the review screen."
+echo ""
+read -r -p "  Press Enter to begin: " _ || true
+echo ""
 
 preflight_devices
 ask_reporter
@@ -642,6 +733,12 @@ elif [ "$HAVE_RX888" = 1 ]; then
     RADIOD_STATE="RX888 present on the host but NOT yet visible to the VM —
             POWER-CYCLE the machine (a reboot is not enough); radiod then
             starts automatically within ~2 min"
+    # The wizard's transcript does not survive the reboot that follows, so the
+    # operator never sees the paragraph above (rob 2026-08-09: "after the
+    # reboot I did not see any mention of the need to re-plug or power cycle").
+    # Leave a marker: the console access panel repeats the instruction on every
+    # boot, and clears it by itself once the SDR turns up.
+    : > "$MARK_DIR/.rx888-needs-powercycle"
 else
     RADIOD_STATE="NO RX888 on the VM's USB bus — plug it in (or re-seat its USB
             cable if it was already in: a wedged FX3 needs a physical replug);
@@ -793,14 +890,13 @@ if [ -n "$RAC_NUM" ]; then
         SITE=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
         REG=""
         RAC_TRIED=""
-        for _cand in $RAC_CANDIDATES; do
-        if [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
-            _cand_reg="$SIGMOND_RAC_REGISTRAR"
-        else
-            _cand_reg="http://${_cand}:35737/register"
-        fi
-        RAC_TRIED="${RAC_TRIED:+$RAC_TRIED, }$_cand"
-        say "registering with $_cand"
+        while IFS='|' read -r _lbl _cand _cand_reg _tls; do
+        [ -n "$_cand" ] || continue
+        RAC_TRIED="${RAC_TRIED:+$RAC_TRIED, }$_lbl"
+        say "trying $_lbl — $_cand_reg"
+        case "$_tls" in
+            off) say "  NOTE: this tier is UNSECURED (no TLS, legacy frps)." ;;
+        esac
         REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" "$_cand_reg" <<'PYEOF' 2>>"$LOG"
 import json, re, sys, urllib.error, urllib.request
 site, pub, registrar = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -833,12 +929,16 @@ PYEOF
         if [ -n "$REG" ]; then
             RAC_SERVER="$_cand"
             RAC_REGISTRAR="$_cand_reg"
+            RAC_TLS="$_tls"
+            RAC_TIER_LABEL="$_lbl"
             break
         fi
-        say "  $_cand did not answer"
-        done
+        say "  $_lbl did not answer"
+        done <<TIEREOF
+$RAC_TIERS
+TIEREOF
         if [ -z "$REG" ]; then
-            RAC_STATE="FAILED — could not register with any gateway (tried: $RAC_TRIED; see $LOG), rerun: sigmond-setup --reconfigure"
+            RAC_STATE="FAILED — no gateway tier answered (tried: $RAC_TRIED; see $LOG), rerun: sigmond-setup --reconfigure"
             say "WARN: $RAC_STATE"
         else
             eval "$REG"
@@ -929,6 +1029,20 @@ SVCEOF
             systemctl daemon-reload
             systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket >>"$LOG" 2>&1
 
+            # transport follows the tier that actually answered: a secure
+            # tier pins the fleet CA, an unsecured one has no CA to pin.
+            if [ "$RAC_TLS" = "off" ]; then
+                RAC_TLS_BLOCK="[transport.tls]
+enable = false"
+            else
+                RAC_TLS_BLOCK="[transport.tls]
+enable = true
+trustedCaFile = \"/etc/sigmond/frps-ca.crt\""
+            fi
+            # record the tier so 'sigmond-setup --rac-upgrade' can tell whether
+            # a better one has since come up
+            printf '%s\n' "$RAC_TIER_LABEL" > "$MARK_DIR/rac-tier"
+            printf '%s\n' "$RAC_REGISTRAR" > "$MARK_DIR/rac-registrar"
             say "writing /etc/sigmond/frpc-host.toml (4 channels, one tunnel)"
             cat > /etc/sigmond/frpc-host.toml <<TOMLEOF
 # Written by sigmond-setup $(date -u +%F) — RAC #$RACN (auto-assigned), site $SITE.
@@ -943,9 +1057,7 @@ user = "$RUSER"
 method = "token"
 token = "$RTOKEN"
 
-[transport.tls]
-enable = true
-trustedCaFile = "/etc/sigmond/frps-ca.crt"
+$RAC_TLS_BLOCK
 
 [webServer]
 addr = "127.0.0.1"
@@ -994,7 +1106,12 @@ TOMLEOF
                 sleep 5
             done
             if [ "$RUNNING" -ge 4 ]; then
-                RAC_STATE="#$RACN live on $SRV — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI (off: sigmond-setup --rac-off)"
+                RAC_STATE="#$RACN live on $SRV via $RAC_TIER_LABEL — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI (off: sigmond-setup --rac-off)"
+                if [ "$RAC_TLS" = "off" ]; then
+                    RAC_STATE="$RAC_STATE
+              ** this tunnel is UNSECURED (no TLS) — the secure gateways did
+                 not answer.  Once one is available run: sigmond-setup --rac-upgrade **"
+                fi
                 echo "$RACN" > "$MARK_DIR/rac-number"
             else
                 RAC_STATE="FAILED — registered, but only $RUNNING/4 channels came up; journalctl -u sigmond-rac-host"
