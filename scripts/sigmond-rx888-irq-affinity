@@ -1,0 +1,37 @@
+#!/bin/bash
+# Pin xhci (USB3 host controller) IRQs onto radiod's reserved CPUs.
+#
+# The CPU-affinity subsystem fences radiod ONTO a reserved HT pair and
+# every other unit OFF it — but hard-IRQ service obeys neither nice
+# levels nor unit CPUAffinity.  On B4 the RX888's xhci IRQ sat on a CPU
+# inside the decoder range; quarter-hourly jt9 decode walls delayed URB
+# completions and dropped sample blocks on ALL channels (radiod
+# "measured sample rate" dips; hf-timestd
+# docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md).  Co-locating the IRQs
+# with radiod (its reserved pair has ample headroom and is the data's
+# consumer) makes the USB path immune to decoder load.
+#
+# No-op when no radiod unit carries a CPUAffinity (non-radiod hosts).
+set -u
+cpus=""
+for u in $(systemctl list-units --type=service --state=running --no-legend "radiod@*" 2>/dev/null | awk '{print $1}'); do
+    cpus=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr -d ' ')
+    [ -n "$cpus" ] && break
+done
+if [ -z "${cpus}" ]; then
+    # Fall back to an enabled-but-not-yet-started radiod (boot ordering).
+    for f in /etc/systemd/system/radiod@*.service.d/*.conf; do
+        [ -f "$f" ] || continue
+        cpus=$(sed -n 's/^CPUAffinity=\(.\+\)/\1/p' "$f" | tail -1 | tr -d ' ')
+        [ -n "$cpus" ] && break
+    done
+fi
+[ -z "${cpus}" ] && exit 0
+pinned=0
+for irq in $(grep -i xhci_hcd /proc/interrupts | cut -d: -f1 | tr -d ' '); do
+    if echo "$cpus" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null; then
+        pinned=$((pinned+1))
+    fi
+done
+echo "sigmond-rx888-irq-affinity: pinned $pinned xhci IRQ(s) to CPUs $cpus"
+exit 0

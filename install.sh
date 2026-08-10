@@ -725,6 +725,14 @@ info "Installing sigmond-shm-precreate → /usr/local/sbin/"
 $SUDO ln -sf "$REPO_DIR/scripts/sigmond-shm-precreate" /usr/local/sbin/sigmond-shm-precreate
 ok "sigmond-shm-precreate symlink installed"
 
+# xhci IRQ pinning (CPU-affinity subsystem's missing piece): hard-IRQ
+# service obeys neither nice nor unit CPUAffinity, so decoder walls can
+# starve the RX888 USB path even with perfect unit fences.  No-op on
+# hosts without a CPU-affinity-managed radiod.
+info "Installing sigmond-rx888-irq-affinity → /usr/local/sbin/"
+$SUDO ln -sf "$REPO_DIR/scripts/sigmond-rx888-irq-affinity" /usr/local/sbin/sigmond-rx888-irq-affinity
+ok "sigmond-rx888-irq-affinity symlink installed"
+
 $SUDO systemctl daemon-reload
 # Enable just the unified trim timer.  ConditionPathExists=/var/lib/sigmond/sink.db
 # in the service unit keeps it inactive until a producer writes — and even
@@ -741,6 +749,8 @@ $SUDO systemctl enable --now sigmond-storage-trim-all.timer
 # before gpsd/chrony/hf-timestd).  Only meaningful on a host running radiod +
 # a local GPS, but harmless otherwise.
 $SUDO systemctl enable sigmond-shm-precreate.service 2>/dev/null || true
+# xhci IRQ pin at boot (no-op without a CPU-affinity-managed radiod).
+$SUDO systemctl enable --now sigmond-rx888-irq-affinity.service 2>/dev/null || true
 # Timing-chain reconciler (docs/timing-chain-architecture.md, step 3): the single
 # owner of GPSDO/gpsd/chrony/hf-timestd recovery, replacing the hf-timestd watchdogs.
 # Service is ConditionFileIsExecutable=/usr/sbin/gpsd, so harmless where no local GPS.

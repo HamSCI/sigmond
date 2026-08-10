@@ -1,0 +1,13 @@
+[Unit]
+Description=Pin xhci (RX888 USB) IRQs to radiod reserved CPUs
+Documentation=file:/opt/git/sigmond/hf-timestd/docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md
+# After radiod so the running unit's CPUAffinity is readable; falls back
+# to the smd drop-in when radiod hasn't started yet.
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-rx888-irq-affinity
+
+[Install]
+WantedBy=multi-user.target
