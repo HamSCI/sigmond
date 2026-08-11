@@ -61,7 +61,6 @@ class ComponentTree(Tree):
         monitoring.add_leaf("\u26a1 Activity",          data={"screen": "activity"})
         monitoring.add_leaf("\u25d0 GPSDO live",        data={"screen": "gpsdo"})
         monitoring.add_leaf("\u25c9 ka9q-radio live",   data={"screen": "radiod"})
-        monitoring.add_leaf("\u25b6 KiwiSDR live",      data={"screen": "kiwisdr"})
         monitoring.add_leaf("\u2316 Receiver channels", data={"screen": "receiver_channels"})
         monitoring.add_leaf("\u21c6 RAC tunnel",        data={"screen": "rac"})
         monitoring.add_leaf("\u2b22 Resources",         data={"screen": "resources"})
@@ -73,7 +72,6 @@ class ComponentTree(Tree):
         # Installation step \u2462 Enable / start / stop.)
         maintenance = self.root.add("Maintenance", expand=True)
         maintenance.add_leaf("\u21c4 Apply",            data={"screen": "apply"})
-        maintenance.add_leaf("\u2604 Sources",          data={"screen": "sources"})
         maintenance.add_leaf("\u2193 Backup",           data={"screen": "backup"})
         maintenance.add_leaf("\u2191 Restore",          data={"screen": "restore"})
 
@@ -92,7 +90,6 @@ class ComponentTree(Tree):
         advanced.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
         advanced.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
         advanced.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
-        advanced.add_leaf("\u2a09 FFT Wisdom",        data={"screen": "fft_wisdom"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
@@ -103,8 +100,6 @@ class ComponentTree(Tree):
             self.app.action_show_overview()
         elif screen == "greenfield":
             self.app.action_show_greenfield()
-        elif screen == "topology":
-            self.app.action_show_topology()
         elif screen == "components":
             self.app.action_show_components()
         elif screen == "cpu_affinity":
@@ -119,16 +114,10 @@ class ComponentTree(Tree):
             self.app.action_show_resources()
         elif screen == "gpsdo":
             self.app.action_show_gpsdo()
-        elif screen == "authority":
-            self.app.action_show_authority()
         elif screen == "timing_authority":
             self.app.action_show_timing_authority()
         elif screen == "annotation_quality":
             self.app.action_show_annotation_quality()
-        elif screen == "timing":
-            self.app.action_show_timing()
-        elif screen == "kiwisdr":
-            self.app.action_show_kiwisdr()
         elif screen == "sdr_inventory":
             self.app.action_show_sdr_inventory()
         elif screen == "logs":
@@ -147,22 +136,12 @@ class ComponentTree(Tree):
             self.app.action_show_restore()
         elif screen == "apply":
             self.app.action_show_apply()
-        elif screen == "sources":
-            self.app.action_show_sources()
-        elif screen == "instance":
-            self.app.action_show_instance()
         elif screen == "configuration":
             self.app.action_show_configuration()
         elif screen == "activity":
             self.app.action_show_activity()
         elif screen == "verifier":
             self.app.action_show_verifier()
-        elif screen == "fft_wisdom":
-            self.app.action_show_fft_wisdom()
-        elif screen == "config_show":
-            self.app.action_show_config()
-        elif screen == "client_config":
-            self.app.action_show_client_config()
         elif screen == "ka9q_watch":
             self.app.action_show_ka9q_watch()
         elif screen == "diag_net":

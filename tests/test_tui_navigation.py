@@ -26,34 +26,64 @@ class TreeNavigationTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(120, 60)) as pilot:
             # Every main binding, in order.  A crash in any action_show_*
             # method fails the test with a clear traceback.
-            for key in ('o', 't', 'c', 'r', 'v'):
+            for key in ('o', 'c', 'r', 'v'):
                 await pilot.press(key)
                 await pilot.pause()
                 self.assertIsNotNone(app.query_one("#center"))
 
-    async def test_no_stale_placeholders_remain(self):
-        """Every non-binding action should mount a real screen — no
-        PlaceholderScreen should survive into the mounted widget tree
-        after the last mutation screen (Update) landed."""
+    async def test_actions_mount_expected_screen_classes(self):
+        """Every surviving non-binding action mounts its own screen
+        class.  Phase 2 of the TUI reconciliation deleted the 8 dead
+        screens (including PlaceholderScreen itself), so the old
+        "not a placeholder" assertion is no longer meaningful — this
+        pins the actual expected class per action instead, which is a
+        strictly stronger claim."""
+        from unittest import mock
         from sigmond.tui.app import SigmondApp
-        from sigmond.tui.screens.placeholder import PlaceholderScreen
+        from sigmond.topology import Topology
+        from sigmond.tui.screens.overview import OverviewScreen
+        from sigmond.tui.screens.cpu_affinity import CPUAffinityScreen
+        from sigmond.tui.screens.cpu_freq import CPUFreqScreen
+        from sigmond.tui.screens.radiod import RadiodScreen
+        from sigmond.tui.screens.gpsdo import GpsdoScreen
+        from sigmond.tui.screens.logs import LogsScreen
+        from sigmond.tui.screens.validate import ValidateScreen
+        from sigmond.tui.screens.diag_net import DiagNetScreen
+        from sigmond.tui.screens.lifecycle import LifecycleScreen
+        from sigmond.tui.screens.apply import ApplyScreen
+        from sigmond.tui.screens.install import InstallScreen
+        from sigmond.tui.screens.components import ComponentsScreen
 
-        app = SigmondApp()
-        async with app.run_test(size=(120, 60)) as pilot:
-            for action in ("show_overview", "show_topology",
-                           "show_cpu_affinity", "show_cpu_freq",
-                           "show_radiod", "show_gpsdo", "show_logs",
-                           "show_validate", "show_diag_net",
-                           "show_lifecycle", "show_apply",
-                           "show_config", "show_install", "show_update"):
-                getattr(app, f"action_{action}")()
-                await pilot.pause()
-                center = app.query_one("#center")
-                self.assertFalse(
-                    any(isinstance(c, PlaceholderScreen)
-                        for c in center.children),
-                    f"{action} mounted a stale PlaceholderScreen",
-                )
+        action_to_screen = (
+            ("show_overview", OverviewScreen),
+            ("show_cpu_affinity", CPUAffinityScreen),
+            ("show_cpu_freq", CPUFreqScreen),
+            ("show_radiod", RadiodScreen),
+            ("show_gpsdo", GpsdoScreen),
+            ("show_logs", LogsScreen),
+            ("show_validate", ValidateScreen),
+            ("show_diag_net", DiagNetScreen),
+            ("show_lifecycle", LifecycleScreen),
+            ("show_apply", ApplyScreen),
+            ("show_install", InstallScreen),
+            # show_update is a kept alias for show_components.
+            ("show_update", ComponentsScreen),
+        )
+
+        with mock.patch.object(
+                Topology, "enabled_components",
+                lambda self, only=None: ["wspr-recorder"]):
+            app = SigmondApp()
+            async with app.run_test(size=(120, 60)) as pilot:
+                for action, screen_cls in action_to_screen:
+                    getattr(app, f"action_{action}")()
+                    await pilot.pause()
+                    center = app.query_one("#center")
+                    self.assertTrue(
+                        any(isinstance(c, screen_cls)
+                            for c in center.children),
+                        f"{action} did not mount {screen_cls.__name__}",
+                    )
 
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
@@ -149,6 +179,24 @@ class ComponentTreeStructureTests(unittest.TestCase):
                        for grp in tree.root.children
                        for leaf in grp.children if leaf.data]
         self.assertNotIn("topology", all_screens)
+
+    def test_killed_screens_are_not_tree_leaves(self):
+        """Phase 2 of the TUI reconciliation removed KiwiSDR live, FFT
+        Wisdom, and Sources as tree leaves (their screens were deleted
+        outright), plus the already-dead ids that populate() never
+        set. None of the 8 killed screens' ids should appear."""
+        from sigmond.tui.widgets.component_tree import ComponentTree
+        from sigmond.topology import load_topology
+
+        tree = ComponentTree()
+        tree.populate(load_topology(), {})
+
+        all_screens = [leaf.data.get("screen")
+                       for grp in tree.root.children
+                       for leaf in grp.children if leaf.data]
+        for dead_id in ("kiwisdr", "fft_wisdom", "sources", "topology",
+                        "instance", "config_show", "client_config"):
+            self.assertNotIn(dead_id, all_screens)
 
 
 if __name__ == '__main__':

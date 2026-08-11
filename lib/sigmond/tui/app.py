@@ -150,14 +150,12 @@ class SigmondApp(App):
 
     BINDINGS = [
         Binding("o", "show_overview", "Overview"),
-        Binding("t", "show_topology", "Topology"),
         Binding("c", "show_cpu_affinity", "CPU affinity"),
         Binding("r", "show_radiod", "Radiod"),
         Binding("a", "show_rac", "RAC"),
         Binding("v", "show_validate", "Validate"),
         Binding("b", "show_backup", "Backup"),
         Binding("R", "show_restore", "Restore"),
-        Binding("C", "show_client_config", "Client config"),
         Binding("K", "show_ka9q_watch", "ka9q-watch"),
         Binding("q", "quit", "Quit"),
     ]
@@ -315,20 +313,6 @@ class SigmondApp(App):
             "(requires write permission — run smd tui if needed).\n\n"
             "CLI equivalent: `smd list` (status); `smd component update` "
             "(pull + reapply per policy).",
-        )
-
-    def action_show_topology(self) -> None:
-        from .screens.topology import TopologyScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(TopologyScreen(self.topology, self.catalog))
-
-        ctx = self.query_one(ContextPanel)
-        ctx.show_help(
-            "Topology",
-            "Enable or disable components for this host.\n\n"
-            "Enabled components will be managed by smd start/stop.\n"
-            "Save writes changes to /etc/sigmond/topology.toml.",
         )
 
     def action_show_radiod(self, radiod_id: str = "") -> None:
@@ -531,23 +515,6 @@ class SigmondApp(App):
             "used by configuration screens to refer to devices by name.",
         )
 
-    def action_show_kiwisdr(self) -> None:
-        from .screens.kiwisdr import KiwiSDRScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(KiwiSDRScreen())
-
-        self.query_one(ContextPanel).show_help(
-            "KiwiSDR live",
-            "Discovers all KiwiSDRs on the local LAN by scanning port 8073.\n\n"
-            "For each KiwiSDR found, fetches /status and /gps to show:\n"
-            "  • Name and software version\n"
-            "  • Connected users / max users\n"
-            "  • GPS fix status and fix count\n"
-            "  • Uptime and antenna description\n\n"
-            "Press 'Rescan' to run a fresh port scan.",
-        )
-
     def action_show_validate(self) -> None:
         from .screens.validate import ValidateScreen
         center = self.query_one("#center")
@@ -578,16 +545,6 @@ class SigmondApp(App):
             "Read-only. To apply the plan, run:\n"
             "  smd admin diag cpu-affinity --apply",
         )
-
-    def _mount_placeholder(self, title: str, description: str,
-                           cli_hint: str, help_title: str,
-                           help_body: str) -> None:
-        from .screens.placeholder import PlaceholderScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(PlaceholderScreen(
-            title=title, description=description, cli_hint=cli_hint))
-        self.query_one(ContextPanel).show_help(help_title, help_body)
 
     def action_show_overview(self) -> None:
         from .screens.overview import OverviewScreen
@@ -819,57 +776,6 @@ class SigmondApp(App):
             "`smd admin instance migrate --yes` in a terminal.",
         )
 
-    def action_show_instance(self) -> None:
-        from .screens.instance import InstanceScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(InstanceScreen())
-
-        self.query_one(ContextPanel).show_help(
-            "Instance",
-            "Per-reporter client instance lifecycle (sigmond's "
-            "MULTI-INSTANCE-ARCHITECTURE.md §3).\n\n"
-            "Each instance is one deployment context of a recorder "
-            "client (psk-recorder, wspr-recorder, hfdl-recorder, "
-            "codar-sounder, mag-recorder) keyed by an operator-"
-            "meaningful reporter ID (e.g. AC0G-B1).\n\n"
-            "Listing: read-only view of /etc/<client>/<reporter-id>.toml "
-            "files across known clients.  Refresh re-walks the catalog.\n\n"
-            "Add: creates per-instance config / env / sources files "
-            "(does NOT enable or start the unit — that's `smd admin instance "
-            "enable` after editing the config).\n\n"
-            "Remove: deletes per-instance files.  Doesn't touch the "
-            "systemd unit (run `smd admin instance disable` first if "
-            "the unit is running) or state/log/run dirs (use `--purge` "
-            "from the CLI for that).\n\n"
-            "Migrate: scans for legacy radiod-keyed deployments "
-            "(`<client>@<radiod-id>.service`).  Dry-run lists "
-            "candidates here; the actual interactive migration is "
-            "CLI-only — run `smd admin instance migrate --yes` in a "
-            "terminal.",
-        )
-
-    def action_show_sources(self) -> None:
-        from .screens.sources import SourcesScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(SourcesScreen())
-
-        self.query_one(ContextPanel).show_help(
-            "Sources",
-            "Per-client sensor-feed selection — which radiod control "
-            "plane or KiwiSDR (future: magnetometer, VLF) each recorder "
-            "consumes from.\n\n"
-            "Selections live at /etc/sigmond/clients/<client>.sources.toml. "
-            "Refresh re-runs `smd admin sources list`; Apply (dry-run) previews "
-            "what would be written; Apply runs `smd admin sources apply` "
-            "to render the selections into each client's config.\n\n"
-            "Add/remove of individual selections is CLI-only for now:\n"
-            "  smd admin sources add <client> <kind>:<id>\n"
-            "  smd admin sources remove <client> <kind>:<id>\n"
-            "Then return here and press Apply.",
-        )
-
     def action_show_activity(self) -> None:
         from .screens.activity import ActivityScreen
         center = self.query_one("#center")
@@ -932,42 +838,6 @@ class SigmondApp(App):
             "confirm-modal-gated.",
         )
 
-    def action_show_fft_wisdom(self) -> None:
-        from .screens.fft_wisdom import FFTWisdomScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(FFTWisdomScreen())
-
-        self.query_one(ContextPanel).show_help(
-            "FFT Wisdom",
-            "Generates the FFTW wisdom file that radiod needs to plan "
-            "its FFT transforms efficiently.\n\n"
-            "Small channel-inverse transforms (cob*) finish in seconds. "
-            "The large forward real transforms (rof3240000 for an RX888 "
-            "@ 129.6 MHz) can take hours on the first run.\n\n"
-            "All managed services are stopped while planning runs so "
-            "they don't compete for CPU.  The planner is pinned to one "
-            "CPU core to prevent migration.\n\n"
-            "Once wisdom is built, run Apply to start radiod and the "
-            "decoder chain.",
-        )
-
-    def action_show_config(self) -> None:
-        from .screens.config_show import ConfigShowScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(ConfigShowScreen())
-
-        self.query_one(ContextPanel).show_help(
-            "Config view",
-            "Read-only snapshot of coordination + client config.\n\n"
-            "Equivalent to `smd config show`.  Shows radiod instances, "
-            "their scope (local/remote), and which clients have "
-            "declared contract-compliant inventory.\n\n"
-            "'Migrate config' upgrades coordination to the latest "
-            "schema (`smd config migrate`).",
-        )
-
     def action_show_diag_net(self) -> None:
         from .screens.diag_net import DiagNetScreen
         center = self.query_one("#center")
@@ -1004,26 +874,6 @@ class SigmondApp(App):
             "Active probes are rate-limited and skipped entirely when "
             "discovery.passive_only = true in the manifest.\n\n"
             "Keys: p probe all · m/n/k source-only · r reload manifest",
-        )
-
-    def action_show_client_config(self) -> None:
-        from .screens.client_config import ClientConfigScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(ClientConfigScreen())
-
-        self.query_one(ContextPanel).show_help(
-            "Client config",
-            "Run a client's first-run wizard or edit its config file.\n\n"
-            "Init wizard — `smd config init <client>` — invokes "
-            "the entry point each client advertises in its deploy.toml "
-            "[contract.config].init.  radiod uses the sigmond-owned "
-            "wizard (probe USB SDRs, render radiod@<id>.conf).\n\n"
-            "Edit config — `smd config edit <client>` — invokes "
-            "the client's edit hook, or falls back to $EDITOR on the "
-            "config file.\n\n"
-            "Library-kind catalog entries (e.g. ka9q-python) are "
-            "excluded — they have no operator-facing config.",
         )
 
     def action_show_ka9q_watch(self) -> None:
