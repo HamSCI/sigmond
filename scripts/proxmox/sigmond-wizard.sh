@@ -196,12 +196,15 @@ fi
 
 # ── wait for decoder VM + guest agent ───────────────────────────────────────
 say "waiting for decoder VM $VMID and its guest agent..."
+# </dev/null on every qm call: qm inherits our stdin and can slurp piped
+# answers — one stolen line desynced every later prompt (nested test,
+# 2026-08-11: nine grid rejections = exactly one line short).
 for i in $(seq 1 60); do
-    qm agent "$VMID" ping >/dev/null 2>&1 && break
-    [ "$i" = 1 ] && qm start "$VMID" >/dev/null 2>&1
+    qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
+    [ "$i" = 1 ] && qm start "$VMID" >/dev/null 2>&1 </dev/null
     sleep 5
 done
-if ! qm agent "$VMID" ping >/dev/null 2>&1; then
+if ! qm agent "$VMID" ping >/dev/null 2>&1 </dev/null; then
     say "ERROR: guest agent in VM $VMID not answering — is the decoder VM imported and running?"
     say "        (plug in the Sigmond USB to trigger import, then rerun sigmond-setup)"
     exit 1
@@ -215,7 +218,7 @@ rd(){ read "$@" || { echo; say "stdin closed (EOF) — aborting wizard; nothing 
 gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
     local t="$1"; shift
     local out rc
-    out=$(qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>&1)
+    out=$(qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>&1 </dev/null)
     rc=$(echo "$out" | grep -o '"exitcode" *: *[0-9-]*' | grep -o '[0-9-]*$' | head -1)
     echo "$out" >> "$LOG"
     [ "${rc:-1}" = "0" ]
