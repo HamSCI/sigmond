@@ -336,8 +336,9 @@ gpsdo_grid() {
 ask_reporter() {
     REPORTER=""
     while [ -z "$REPORTER" ]; do
-        rd -r -p "Reporter ID (your callsign, optionally /suffix — e.g. AC0G/B4): " REPORTER
+        rd -r -p "Reporter ID — your callsign, optionally /suffix (e.g. AC0G/B4 — required): " REPORTER
         REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+        if [ -z "$REPORTER" ]; then echo "  ✗ required — please enter your callsign"; continue; fi
         echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; }
     done
     CALLSIGN="${REPORTER%%/*}"
@@ -380,9 +381,12 @@ ask_grid() {
             rd -r -p "Grid square (Maidenhead) [$GRID_DEFAULT]: " GRID
             GRID="${GRID:-$GRID_DEFAULT}"
         else
-            rd -r -p "Grid square (Maidenhead, e.g. EM38ww): " GRID
+            rd -r -p "Grid square — 4/6-char Maidenhead (e.g. EM38ww — required): " GRID
         fi
         GRID=$(echo "$GRID" | tr -d ' ')
+        if [ -z "$GRID" ] && [ -z "$GRID_DEFAULT" ]; then
+            echo "  ✗ required — please enter your grid square"; continue
+        fi
         echo "$GRID" | grep -qE '^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$' || { echo "  ✗ 4 or 6 character Maidenhead locator, please"; GRID=""; }
     done
 }
@@ -520,6 +524,10 @@ echo ""
 echo "  This asks a short series of questions about the station, then"
 echo "  configures the Proxmox host and the decoder VM.  Nothing is"
 echo "  applied until you confirm at the review screen."
+echo ""
+echo "  Prompt conventions:  [bracketed] values are defaults — press Enter"
+echo "  to accept them.  'e.g.' values are examples only — those answers"
+echo "  are required (or say 'Enter to skip' when optional)."
 echo ""
 # Console-only pacing gate: on a tty it lets the operator take in the
 # banner before questions start.  On piped stdin it must NOT run — it
