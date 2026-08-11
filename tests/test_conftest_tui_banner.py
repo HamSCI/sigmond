@@ -19,6 +19,12 @@ from unittest import mock
 
 _CONFTEST_PATH = Path(__file__).resolve().parent / 'conftest.py'
 
+try:
+    import textual  # noqa: F401
+    _HAS_TEXTUAL = True
+except ImportError:
+    _HAS_TEXTUAL = False
+
 
 def _load_conftest_module():
     """Load tests/conftest.py as a standalone module.
@@ -68,6 +74,7 @@ class TuiSkipBannerTests(unittest.TestCase):
                 line, '=', 'found a lone "=" line -- separator got split one char per line',
             )
 
+    @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
     def test_no_banner_when_textual_importable(self):
         module = _load_conftest_module()
         buf = io.StringIO()
