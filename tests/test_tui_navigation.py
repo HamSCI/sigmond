@@ -160,9 +160,13 @@ class ComponentTreeStructureTests(unittest.TestCase):
         self.assertTrue(any("Overview" in lbl for lbl in labels))
 
     def test_installation_is_the_three_step_arc(self):
-        """Installation collapses to the guided + ①②③ arc; Topology is no
-        longer a leaf (derived state, surfaced by step ③).  See
-        docs/install-redesign.md Stage 3."""
+        """Installation collapses to the guided + ①②③ arc, plus PSWS
+        enrolment (bring-up work, not part of the numbered per-component
+        arc -- placed after step ③ since it depends on a component
+        already being enabled/started).  Topology is no longer a leaf
+        (derived state, surfaced by step ③).  See
+        docs/install-redesign.md Stage 3 and
+        .superpowers/sdd/plan-tui-reconciliation/task-5-brief.md."""
         from sigmond.tui.widgets.component_tree import ComponentTree
         from sigmond.topology import load_topology
 
@@ -173,7 +177,8 @@ class ComponentTreeStructureTests(unittest.TestCase):
                     if str(n.label) == "Installation")
         screens = [leaf.data.get("screen") for leaf in inst.children]
         self.assertEqual(
-            screens, ["greenfield", "install", "configuration", "lifecycle"])
+            screens,
+            ["greenfield", "install", "configuration", "lifecycle", "psws"])
         # Topology must not appear as a primary nav leaf anywhere.
         all_screens = [leaf.data.get("screen")
                        for grp in tree.root.children

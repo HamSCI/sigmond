@@ -53,6 +53,7 @@ class ComponentTree(Tree):
         installation.add_leaf("\u2460 Download & install",     data={"screen": "install"})
         installation.add_leaf("\u2461 Configure",              data={"screen": "configuration"})
         installation.add_leaf("\u2462 Enable / start / stop",  data={"screen": "lifecycle"})
+        installation.add_leaf("\u2712 PSWS enrolment",         data={"screen": "psws"})
 
         monitoring = self.root.add("Monitoring", expand=True)
         monitoring.add_leaf("\u2316 Environment",        data={"screen": "environment"})
@@ -126,6 +127,8 @@ class ComponentTree(Tree):
             self.app.action_show_validate()
         elif screen == "lifecycle":
             self.app.action_show_lifecycle()
+        elif screen == "psws":
+            self.app.action_show_psws()
         elif screen == "install":
             self.app.action_show_install()
         elif screen == "rac":

@@ -54,8 +54,20 @@ SCREEN_VERBS: dict[str, tuple[str, ...] | None] = {
     "install": ("install",),
     "ka9q_watch": ("watch ka9q",),
     "lifecycle": ("start", "stop", "restart"),
+    # Coarser than the screen's real behaviour: `admin log set-level` is
+    # handled by a pre-argparse `sys.argv` intercept near the top of
+    # bin/smd's main() (matched before the argparse tree is even built,
+    # so it can accept both `set-level <level>` and
+    # `set-level <client> <level>`), not an argparse subparser -- so the
+    # lint's parser walk (_live_verb_paths, which only sees
+    # ArgumentParser/_SubParsersAction objects) can never observe
+    # "admin log set-level" as a live path.  "admin log" (the journal/
+    # file-tail verb, which IS a real subparser) is the closest
+    # resolvable verb and stands in for the whole screen.
     "logs": ("admin log",),
     "overview": ("status", "timing"),
+    "psws": ("psws status", "psws enroll", "psws verify",
+             "config register-radiod", "config upload"),
     "rac": ("admin rac",),
     "radiod": None,
     "receiver_channels": None,

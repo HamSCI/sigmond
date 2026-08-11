@@ -722,6 +722,28 @@ class SigmondApp(App):
             "  ssh -p <35800+n> wsprdaemon@vpn.wsprdaemon.org",
         )
 
+    def action_show_psws(self) -> None:
+        from .screens.psws import PswsScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(PswsScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "PSWS enrolment",
+            "Site-level PSWS enrolment: ensures this station's SSH key "
+            "exists, prints the public key to register at the PSWS "
+            "portal (Enroll), then proves the login live and records "
+            "it in /etc/sigmond/.psws-verified (Verify).  Recorders "
+            "queue data locally regardless — enrolment only gates "
+            "upload.\n\n"
+            "Below that, per-instance upload toggles for wspr-recorder "
+            "/ psk-recorder / meteor-scatter (`smd config upload`). "
+            "Select a row and press Enable/Disable — this flips the "
+            "per-instance flag only, it does not verify delivery. For "
+            "delivery verdicts (did wsprnet/pskreporter actually "
+            "receive the spot), see the Verifier screen.",
+        )
+
     def action_show_apply(self) -> None:
         from .screens.apply import ApplyScreen
         center = self.query_one("#center")
