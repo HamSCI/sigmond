@@ -51,6 +51,23 @@ class TuiSkipBannerTests(unittest.TestCase):
         self.assertIn('textual', output.lower())
         self.assertIn('dev-setup.sh', output)
 
+        # Shape, not just substrings: adjacent string literals
+        # concatenate before `*` binds, so `'\n' '=' * 70` silently
+        # becomes `'\n=' * 70` (seventy one-char lines) instead of one
+        # 70-char rule. Assert the actual rendered lines to catch that
+        # class of bug, which the substring checks above would miss.
+        rule = '=' * 70
+        lines = output.splitlines()
+        rule_lines = [line for line in lines if line == rule]
+        self.assertEqual(
+            len(rule_lines), 2,
+            f'expected exactly two {len(rule)}-char rule lines, got: {lines!r}',
+        )
+        for line in lines:
+            self.assertNotEqual(
+                line, '=', 'found a lone "=" line -- separator got split one char per line',
+            )
+
     def test_no_banner_when_textual_importable(self):
         module = _load_conftest_module()
         buf = io.StringIO()

@@ -33,11 +33,10 @@ def _tui_skip_banner():
         return
     tui_test_count = len(list((Path(__file__).resolve().parent).glob('test_tui_*.py')))
     print(
-        '\n'
-        '=' * 70 + '\n'
+        '\n' + '=' * 70 + '\n'
         'WARNING: textual is not installed in this interpreter.\n'
         f'  {tui_test_count} tests/test_tui_*.py file(s) will SKIP ENTIRELY,\n'
-        '  not fail — the run will still look green.\n'
+        '  not fail -- the run will still look green.\n'
         "  Run scripts/dev-setup.sh to install the '.[tui,dev]' extras.\n"
         + '=' * 70 + '\n',
         file=sys.stderr,
