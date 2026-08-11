@@ -512,7 +512,12 @@ echo "  This asks a short series of questions about the station, then"
 echo "  configures the Proxmox host and the decoder VM.  Nothing is"
 echo "  applied until you confirm at the review screen."
 echo ""
-rd -r -p "  Press Enter to begin: " _ || true
+# Console-only pacing gate: on a tty it lets the operator take in the
+# banner before questions start.  On piped stdin it must NOT run — it
+# silently ate the first answer, desyncing every prompt after it (the
+# 2026-08-11 nested-test hunt; the theft is invisible because bash
+# suppresses read -p prompts on non-tty stdin).
+if [ -t 0 ]; then rd -r -p "  Press Enter to begin: " _; fi
 echo ""
 
 preflight_devices
