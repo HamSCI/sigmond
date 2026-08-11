@@ -365,6 +365,15 @@ ask_grid() {
             echo "   the value below is only used until then)"
         fi
     fi
+    # A live GPSDO fix IS the answer — don't ask (mjh 2026-08-11).  The
+    # review screen can still override (it re-runs us with "ask"), and
+    # sigmond-location-check re-asserts the GPSDO position as definitive
+    # after bring-up anyway.
+    if [ -n "$GRID_DEFAULT" ] && [ "${1:-}" != "ask" ]; then
+        GRID="$GRID_DEFAULT"
+        echo "Grid square: $GRID  (from the GPSDO fix; re-edit at the review screen to override)"
+        return
+    fi
     GRID=""
     while [ -z "$GRID" ]; do
         if [ -n "$GRID_DEFAULT" ]; then
@@ -546,7 +555,7 @@ while :; do
     rd -r -p "Apply? [Y = apply / 1-6 = re-edit that entry / n = abort] " OK
     case "${OK:-Y}" in
         1) ask_reporter;;
-        2) ask_grid;;
+        2) ask_grid ask;;
         3) ask_antenna;;
         4) ask_rac;;
         5) ask_psws;;
