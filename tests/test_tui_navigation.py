@@ -166,7 +166,7 @@ class ComponentTreeStructureTests(unittest.TestCase):
         already being enabled/started).  Topology is no longer a leaf
         (derived state, surfaced by step ③).  See
         docs/install-redesign.md Stage 3 and
-        .superpowers/sdd/plan-tui-reconciliation/task-5-brief.md."""
+        tasks/plan-tui-reconciliation.md Task 5."""
         from sigmond.tui.widgets.component_tree import ComponentTree
         from sigmond.topology import load_topology
 

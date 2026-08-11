@@ -292,6 +292,7 @@ class GreenfieldArgvTests(unittest.IsolatedAsyncioTestCase):
              "--remote-radiod", "bee3-status.local", "--dry-run"])
 
 
+@unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
 class HardwareGateConsolidationTests(unittest.TestCase):
     """The screen and `smd bringup` must share ONE detection implementation."""
 
@@ -389,6 +390,7 @@ class GreenfieldHardStopFramingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--skip-hardware-check", argv)
 
 
+@unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
 class SdrRowLabelPinTests(unittest.TestCase):
     def test_hard_stop_annotation_is_keyed_to_the_real_gate_label(self):
         """The screen keys the HARD STOP banner off the SDR row's label.

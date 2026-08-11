@@ -9,8 +9,8 @@ cross-checks it against the declared `SCREEN_VERBS` mapping in
 `sigmond.tui.parity`. Its entire value is that it breaks CI when
 someone renames an smd verb, deletes a screen, or a nav-tree leaf and
 its dispatch branch fall out of sync -- so every assertion here must be
-capable of failing for real; see task-3-report.md for verbatim
-before/after proof.
+capable of failing for real; see `tasks/plan-tui-reconciliation.md`,
+Task 3, for the parity-lint requirement this test implements.
 
 Hermetic: no real host state is touched, and no smd subcommand ever
 runs (argparse.ArgumentParser.parse_args is patched to raise before

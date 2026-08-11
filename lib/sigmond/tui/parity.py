@@ -7,7 +7,7 @@ walks the live ``bin/smd`` argparse tree and cross-checks every verb
 listed here still exists, and that every screen module has an entry.
 An ``smd`` verb rename or a deleted screen with a stale entry fails CI
 instead of silently rotting the TUI out of sync with the CLI (see
-``.superpowers/sdd/plan-tui-reconciliation/``).
+``tasks/plan-tui-reconciliation.md``, Task 3).
 
 Screens that call sigmond library functions in-process rather than
 shelling out to ``smd`` (e.g. ``validate``, ``environment``) still
