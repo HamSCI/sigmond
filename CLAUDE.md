@@ -312,7 +312,7 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
     classifies the delta as pass / warn / fail (red = stream-critical
     field shifted, RTP delivery to clients would break). Read-only, no
     sudo. Surfaced as `smd watch ka9q` (legacy `smd ka9q-watch` still
-    works during the v2 deprecation window) and as the TUI Observe →
+    works during the v2 deprecation window) and as the TUI Debugging →
     ka9q-watch screen. Operator-triggered; no scheduler installed —
     rerun manually before deploying a new ka9q-radio build.
 
