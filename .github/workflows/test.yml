@@ -1,10 +1,25 @@
 # Runs the sigmond test suite on every push to main and every PR.
 #
+# Runner: pytest, matching CLAUDE.md's "the dev venv's pytest is the
+# canonical runner".  This workflow previously ran
+# `python -m unittest discover tests`, which collects only
+# unittest.TestCase subclasses -- so every module-level `def test_*()`
+# function was silently skipped.  That hid 247 of 1273 tests, including
+# ALL of test_bringup.py, test_timing.py, test_wizard_dispatch.py,
+# test_instance.py, test_catalog_prune.py and test_timing_show.py: the
+# bring-up planner and the timing suites ran nowhere.  Two tests in that
+# blind spot had been failing since 2026-07-23 while CI stayed green.
+# Do not switch this back to `unittest discover` -- pytest collects both
+# styles, unittest collects only one.
+#
 # Why these dependencies:
-#   - pytest:   5 test modules use the pytest framework (catalog,
-#               installer, lifecycle, log_cmd, radiod_fragments).
-#   - textual:  test_tui_timing imports sigmond.tui.screens.timing,
-#               which in turn pulls textual at module load.
+#   - pytest:   the runner, and many test modules use pytest-style
+#               bare test functions that only it collects.
+#   - textual:  the TUI tests import sigmond.tui.screens.*, which pull
+#               textual at module load.  Without it those tests skip
+#               (see tests/conftest.py's banner), so CI must install it
+#               or the TUI suite silently stops running -- the exact
+#               failure mode this file already fell into once.
 # Core sigmond stays stdlib-only per CLAUDE.md; these are *test-only*
 # deps and are not implied for end users.
 name: tests
@@ -31,10 +46,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest textual
 
-      - name: Run unittest suite
+      - name: Run test suite
         # PYTHONPATH=lib lets tests that import `sigmond.catalog` etc.
         # work without `pip install -e .` (the package layout is
         # lib/sigmond/, not the conventional src/sigmond/).
         env:
           PYTHONPATH: lib
-        run: python -m unittest discover tests -v
+        run: python -m pytest tests/ -q
