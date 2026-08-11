@@ -8,9 +8,9 @@ previous version (a snapshot of commit `01d6bb7`, 2026-05-24) sat
 unregenerated for months while `bin/smd` grew ~20 commits of verb
 changes and the TUI's screen list diverged from it — nobody noticed
 because nothing mechanically checked doc vs. reality. That drift is
-what the `TUI-RECONCILIATION` plan (`.superpowers/sdd/plan-tui-reconciliation/`)
-fixed. Two structural changes make the same drift harder to repeat
-silently this time:
+what the `TUI-RECONCILIATION` plan (`tasks/plan-tui-reconciliation.md`,
+committed at `e7f3b5b`) fixed. Two structural changes make the same
+drift harder to repeat silently this time:
 
 1. **`tests/test_tui_parity.py`** (added in that plan's Task 3) fails
    CI the moment a screen loses its `SCREEN_VERBS` entry, a mapping
@@ -34,10 +34,11 @@ silently this time:
    (never execute a subcommand). The exact recipe already lives in
    the repo as `tests/test_tui_parity.py::_live_verb_paths()` — reuse
    that function rather than re-deriving the argparse-patching trick.
-   A standalone dump script that does the same walk and prints
-   `path<TAB>help` for every node is checked in as
-   `.superpowers/sdd/TUI-RECONCILIATION-DESIGN/verbs.tsv`'s generator;
-   regenerate with:
+   There is no checked-in verb-list file to diff against (nothing
+   under `docs/` or elsewhere in the repo snapshots it); the following
+   self-contained script performs the identical walk and prints
+   `path<TAB>help` for every node, so you can eyeball or diff its
+   output directly against §2's tables below:
 
    ```
    .venv/bin/python - <<'PY'
@@ -72,9 +73,13 @@ silently this time:
    PY
    ```
 
-   Diff the output against `.superpowers/sdd/TUI-RECONCILIATION-DESIGN/verbs.tsv`;
-   if it differs, `bin/smd`'s verb tree changed and §2 below needs a
-   refresh.
+   Compare the row count and paths against §2's tables below (or,
+   for a mechanically-verified answer rather than an eyeball diff, run
+   `.venv/bin/python -m pytest tests/test_tui_parity.py -q` — it runs
+   this same extraction internally and fails the moment a
+   `SCREEN_VERBS` entry stops resolving against it). If either check
+   turns up a difference, `bin/smd`'s verb tree changed and §2 below
+   needs a refresh.
 
 2. **TUI screen list** — `ls lib/sigmond/tui/screens/*.py`, excluding
    `__init__.py`. Cross-check every module name appears as a key in
@@ -102,11 +107,14 @@ inferred from commit messages.
 
 ## 2. CLI verb surface (`bin/smd`)
 
-138 verb paths, extracted mechanically (§0 recipe) and byte-identical
-to the tracked `.superpowers/sdd/TUI-RECONCILIATION-DESIGN/verbs.tsv` —
-`bin/smd`'s verb tree did not change across Tasks 6–7 of this plan.
-Full detail (138 rows, one per node, with help text) lives in that
-file; the tables below are the top-level shape.
+138 verb paths, extracted mechanically (§0 recipe) at commit `b5dc3cd`
+and cross-checked against `tests/test_tui_parity.py`'s own
+`_live_verb_paths()` extraction (same walk, run independently) — both
+produced the identical 138-path set, and every verb this doc names in
+§4/§5 was grepped out of that fresh output before being written down.
+No verb-list snapshot is checked into this repo; the tables below are
+the durable record of the top-level shape, and §0's recipe is how to
+reproduce the full 138-row detail (path + help text) on demand.
 
 ### Top-level (18 verbs)
 
@@ -379,9 +387,12 @@ listing:
 (commit `ead4ee4`) and its role folded into `lib/sigmond/hardware.py`.
 Worth recording plainly: it probed USB vendor ID `1d50` for the
 station's GPSDO, but the real Leo Bodnar GPSDO (LBE-1420/1421/mini,
-the device sigmond actually ships with) is VID `1dd2` — confirmed
-against `bin/smd`'s own `_gpsdo_fix_direct` udev match, which is what
-`hardware.py` uses. `hardware_detect.py` could never have detected the
+the device sigmond actually ships with) is VID `1dd2` — confirmed both
+by `gpsdo_fix_direct()` in `lib/sigmond/hardware.py:186` (the
+`udevadm`-based `ID_VENDOR_ID=1dd2` match `hardware.py` itself uses)
+and, independently, by the sibling `gpsdo-monitor` repo's own udev
+rules (`gpsdo-monitor/deploy/99-gpsdo.rules:13`:
+`ATTRS{idVendor}=="1dd2"`). `hardware_detect.py` could never have detected the
 station's GPSDO. It had no live caller (its only caller,
 `screens/topology.py`, was itself deleted in Task 2) and no tests. It
 was deleted outright rather than merged, because merging a probe table
@@ -435,10 +446,19 @@ for whoever picks this up next.
    RM3100 bus poke) run as whatever the TUI process is running as; an
    unprivileged operator may see a GPSDO probe fail ("no fix" / not
    found) that an elevated `smd bringup` run — which does the same
-   probe with root — would see fine. Not yet reconciled; the panel
-   should either elevate the same way `bringup` does, or say
-   explicitly when a negative result might be a privilege artifact
-   rather than a real hardware absence.
+   probe with root — would see fine. **Partially addressed since this
+   was first flagged:** commit `c6f7dba` (landed after this doc's
+   original regeneration) added explicit disclosure text to the
+   Equipment panel's intro (`lib/sigmond/tui/screens/greenfield.py`,
+   the `gf-equip-intro` `Static`) stating the probes run unelevated
+   while Begin pre-elevates, and that the real run "may see MORE ...
+   never less." That closes the *silent-surprise* half of this
+   question — an operator reading the panel now knows the asymmetry
+   exists. It does **not** close the underlying asymmetry itself: the
+   panel still does not elevate, so a negative GPSDO read here can
+   still be a privilege artifact rather than a real absence. Whether
+   to also make the probes elevate (matching `bringup`'s behaviour
+   exactly) remains open.
 
 ---
 
@@ -452,12 +472,16 @@ for whoever picks this up next.
   and `::test_every_mapping_entry_names_an_existing_screen_module` run
   in CI.
 - **Verb list**: re-ran the §0 argparse-walk recipe against HEAD
-  `b5dc3cd`, got 138 verb paths, and `diff`'d the output byte-for-byte
-  against the tracked `.superpowers/sdd/TUI-RECONCILIATION-DESIGN/verbs.tsv`
-  — identical, so no drift since that file was generated. Every verb
-  named in §2 and §5 of this document was grepped out of that fresh
-  138-line output before being written down (not typed from memory).
-- **Full test suite**: `.venv/bin/python -m pytest tests/ -q` — 1266
-  passed, 0 failed, before and after this doc-only change (this file
-  and the one `CLAUDE.md` line noted below are not imported by
-  anything the suite runs).
+  `b5dc3cd`, got 138 verb paths, and cross-checked it against an
+  independent run of `tests/test_tui_parity.py::_live_verb_paths()`
+  (the same walk, invoked directly rather than copied) — identical
+  138-path sets from both. Every verb named in §2 and §5 of this
+  document was grepped out of that fresh output before being written
+  down (not typed from memory, and not carried forward from any
+  checked-in snapshot — there isn't one).
+- **Full test suite**: `.venv/bin/python -m pytest tests/ -q` — 1273
+  passed, 0 failed at the time of this fix round (the floor moved from
+  1266 to 1273 between the original Task 7 commit and this fix round,
+  as other work landed on `main`; this doc-only change does not move
+  it further — this file and the one `CLAUDE.md` line noted below are
+  not imported by anything the suite runs).
