@@ -4,10 +4,12 @@ These build SystemView objects by hand so they're independent of any
 real /etc state on the host.
 """
 
+import collections
 import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
@@ -284,7 +286,13 @@ class TestStandaloneSafe(unittest.TestCase):
             ],
         )
         view = _make_view(coord)
-        results = run_all(view)
+        # rule_disk_budget shutil.disk_usage()'s the REAL disk — pin it
+        # so the verdict doesn't depend on how full the host running the
+        # tests happens to be.
+        Roomy = collections.namedtuple("usage", "total used free")
+        with mock.patch.object(harmonize.shutil, "disk_usage",
+                               return_value=Roomy(100, 10, 90)):
+            results = run_all(view)
         self.assertEqual(worst_severity(results), "pass",
                          msg=f"unexpected severity; results={results}")
 

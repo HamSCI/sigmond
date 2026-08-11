@@ -58,20 +58,52 @@ class TreeNavigationTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
 class OverviewScreenMountTests(unittest.IsolatedAsyncioTestCase):
-    async def test_overview_is_default_landing_and_renders(self):
+    """Greenfield-aware landing (app.on_mount): a host with at least one
+    enabled component lands on Overview; a blank host leads with the
+    guided Greenfield bring-up.  Both branches are pinned here with the
+    topology mocked, so the tests are independent of the host they run
+    on (CI has no /etc/sigmond; a production box has real state)."""
+
+    async def test_overview_is_default_landing_when_configured(self):
+        from unittest import mock
         from sigmond.tui.app import SigmondApp
         from sigmond.tui.screens.overview import OverviewScreen
+        from sigmond.topology import Topology
 
-        app = SigmondApp()
-        async with app.run_test(size=(120, 50)) as pilot:
-            # Let the worker complete and the screen re-render.
-            for _ in range(3):
-                await pilot.pause()
-            center = app.query_one("#center")
-            self.assertTrue(
-                any(isinstance(c, OverviewScreen) for c in center.children),
-                "OverviewScreen should be the default landing",
-            )
+        with mock.patch.object(
+                Topology, "enabled_components",
+                lambda self, only=None: ["wspr-recorder"]):
+            app = SigmondApp()
+            async with app.run_test(size=(120, 50)) as pilot:
+                # Let the worker complete and the screen re-render.
+                for _ in range(3):
+                    await pilot.pause()
+                center = app.query_one("#center")
+                self.assertTrue(
+                    any(isinstance(c, OverviewScreen)
+                        for c in center.children),
+                    "OverviewScreen should be the default landing",
+                )
+
+    async def test_greenfield_is_default_landing_when_blank(self):
+        from unittest import mock
+        from sigmond.tui.app import SigmondApp
+        from sigmond.tui.screens.greenfield import GreenfieldScreen
+        from sigmond.topology import Topology
+
+        with mock.patch.object(
+                Topology, "enabled_components",
+                lambda self, only=None: []):
+            app = SigmondApp()
+            async with app.run_test(size=(120, 50)) as pilot:
+                for _ in range(3):
+                    await pilot.pause()
+                center = app.query_one("#center")
+                self.assertTrue(
+                    any(isinstance(c, GreenfieldScreen)
+                        for c in center.children),
+                    "GreenfieldScreen should lead on a blank host",
+                )
 
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")

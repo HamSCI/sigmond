@@ -127,6 +127,14 @@ class LoadConfigViaShowTests(unittest.TestCase):
 # Screen happy-path: load → edit → save.  Uses Textual's run_test pilot.
 # ---------------------------------------------------------------------------
 
+# Mirrors the real psk-recorder config/help.toml: paths.spool_dir is
+# tier-1 install-canonical and marked hidden.  Patched in wherever the
+# screen is launched so the tests are independent of whether the host
+# has /opt/git/<client>/config/help.toml (CI does not; stations do).
+CANNED_HELP = {
+    "paths": {"spool_dir": {"hidden": True}},
+}
+
 CANNED_SHOW = {
     "station": {"callsign": "W1ABC", "grid_square": "FN42"},
     "paths":   {"spool_dir": "/var/lib/psk-recorder",
@@ -197,6 +205,8 @@ class TextualConfigWizardScreenTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(tw, "load_config_via_show",
                                return_value=load_result), \
+             mock.patch.object(tw, "load_help_toml",
+                               return_value=CANNED_HELP), \
              mock.patch.object(tw, "run_with_stdin",
                                side_effect=apply_runner or default_apply_runner):
             yield_obj = (Harness(), results, captured_payloads)
@@ -223,7 +233,9 @@ class TextualConfigWizardScreenTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         with mock.patch.object(tw, "load_config_via_show",
-                               return_value=(CANNED_SHOW, "")):
+                               return_value=(CANNED_SHOW, "")), \
+             mock.patch.object(tw, "load_help_toml",
+                               return_value=CANNED_HELP):
             app = Harness()
             async with app.run_test(size=(120, 40)) as pilot:
                 # Wait for on_mount + worker dispatch.
