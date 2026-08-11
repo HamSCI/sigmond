@@ -171,7 +171,7 @@ TIEREOF
         echo "a better tier is available: $BEST_LBL  (currently $CUR)"
         echo "re-registering re-runs the setup questions; the RAC number is sticky,"
         echo "so the station keeps its assigned channels."
-        read -r -p "upgrade now? [y/N] " _u
+        rd -r -p "upgrade now? [y/N] " _u
         case "${_u:-N}" in
             [Yy]*) exec "$0" --reconfigure ;;
             *) echo "left on $CUR; run this again any time." ; exit 0 ;;
@@ -206,6 +206,11 @@ if ! qm agent "$VMID" ping >/dev/null 2>&1; then
     say "        (plug in the Sigmond USB to trigger import, then rerun sigmond-setup)"
     exit 1
 fi
+
+# rd — read that ABORTS on EOF instead of letting a validation loop spin
+# forever when piped stdin runs dry (nested-test hang, 2026-08-11).  On a
+# live tty read only fails on EOF (Ctrl-D), where aborting is also right.
+rd(){ read "$@" || { echo; say "stdin closed (EOF) — aborting wizard; nothing applied. Rerun: sigmond-setup"; exit 1; }; }
 
 gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
     local t="$1"; shift
@@ -328,7 +333,7 @@ gpsdo_grid() {
 ask_reporter() {
     REPORTER=""
     while [ -z "$REPORTER" ]; do
-        read -r -p "Reporter ID (your callsign, optionally /suffix — e.g. AC0G/B4): " REPORTER
+        rd -r -p "Reporter ID (your callsign, optionally /suffix — e.g. AC0G/B4): " REPORTER
         REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; }
     done
@@ -360,10 +365,10 @@ ask_grid() {
     GRID=""
     while [ -z "$GRID" ]; do
         if [ -n "$GRID_DEFAULT" ]; then
-            read -r -p "Grid square (Maidenhead) [$GRID_DEFAULT]: " GRID
+            rd -r -p "Grid square (Maidenhead) [$GRID_DEFAULT]: " GRID
             GRID="${GRID:-$GRID_DEFAULT}"
         else
-            read -r -p "Grid square (Maidenhead, e.g. EM38ww): " GRID
+            rd -r -p "Grid square (Maidenhead, e.g. EM38ww): " GRID
         fi
         GRID=$(echo "$GRID" | tr -d ' ')
         echo "$GRID" | grep -qE '^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$' || { echo "  ✗ 4 or 6 character Maidenhead locator, please"; GRID=""; }
@@ -371,7 +376,7 @@ ask_grid() {
 }
 
 ask_antenna() {
-    read -r -p "Antenna description (optional, Enter to skip): " ANTENNA
+    rd -r -p "Antenna description (optional, Enter to skip): " ANTENNA
 }
 
 ask_rac() {
@@ -382,7 +387,7 @@ ask_rac() {
     # station, gw2 secure ONLY.  Default follows the image profile so later
     # image builds can flip it (SIGMOND_RAC_PROFILE=standard -> default No).
     if [ "$RAC_PROFILE" = "standard" ]; then _dp="y/N"; else _dp="Y/n"; fi
-    read -r -p "Is this a DASI (HamSCI) station? [$_dp] " _dq
+    rd -r -p "Is this a DASI (HamSCI) station? [$_dp] " _dq
     _ddef="Y"; [ "$RAC_PROFILE" = "standard" ] && _ddef="N"
     case "${_dq:-$_ddef}" in
         [Nn]*) RAC_PROFILE="standard" ;;
@@ -390,7 +395,7 @@ ask_rac() {
     esac
     if [ "$RAC_PROFILE" = "dasi" ]; then
         while :; do
-            read -r -p "DASI unit number (1-99, e.g. 3 for DASI-003${DASI_NUM:+; current $DASI_NUM}; Enter to skip): " _dn
+            rd -r -p "DASI unit number (1-99, e.g. 3 for DASI-003${DASI_NUM:+; current $DASI_NUM}; Enter to skip): " _dn
             _dn="${_dn:-$DASI_NUM}"
             [ -z "$_dn" ] && break
             echo "$_dn" | grep -qE '^[1-9][0-9]?$' && { DASI_NUM="$_dn"; break; }
@@ -431,7 +436,7 @@ ask_rac() {
         echo "     access is strongly recommended: it lets the fleet admin connect"
         echo "     and help finish the install once the missing parts are fitted. **"
     fi
-    read -r -p "Enable remote access? [Y/n] " RAC_EN
+    rd -r -p "Enable remote access? [Y/n] " RAC_EN
     RAC_NUM=""
     case "${RAC_EN:-Y}" in [Nn]*) ;; *) RAC_NUM="auto";; esac
 }
@@ -444,7 +449,7 @@ ask_psws() {
     echo "banner walks you through it (no copy-paste needed on this console)."
     PSWS_ID=""
     while :; do
-        read -r -p "PSWS station ID (e.g. S000123, Enter to skip): " PSWS_ID
+        rd -r -p "PSWS station ID (e.g. S000123, Enter to skip): " PSWS_ID
         PSWS_ID=$(echo "$PSWS_ID" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         [ -z "$PSWS_ID" ] && break
         echo "$PSWS_ID" | grep -qE '^S[0-9]{6}$' && break
@@ -452,13 +457,13 @@ ask_psws() {
     done
     PSWS_GRAPE=""; PSWS_MAG=""; PSWS_MAG_STATION=""
     if [ -n "$PSWS_ID" ]; then
-        read -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
+        rd -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
         PSWS_GRAPE=$(echo "$PSWS_GRAPE" | tr -d ' ')
-        read -r -p "  magnetometer instrument number from the portal (e.g. 84, Enter if none): " PSWS_MAG
+        rd -r -p "  magnetometer instrument number from the portal (e.g. 84, Enter if none): " PSWS_MAG
         PSWS_MAG=$(echo "$PSWS_MAG" | tr -d ' ')
         PSWS_MAG_STATION=""
         if [ -n "$PSWS_MAG" ]; then
-            read -r -p "  magnetometer PSWS station ID (Enter if same as $PSWS_ID): " PSWS_MAG_STATION
+            rd -r -p "  magnetometer PSWS station ID (Enter if same as $PSWS_ID): " PSWS_MAG_STATION
             PSWS_MAG_STATION=$(echo "$PSWS_MAG_STATION" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         fi
     fi
@@ -475,7 +480,7 @@ ask_names() {
     echo "Station names: the decoder VM takes the station designator and the"
     echo "Proxmox host takes designator-PM (e.g. AC0G-B4 + AC0G-B4-PM, or"
     echo "DASI2-01 + DASI2-01-PM for numbered deployments)."
-    read -r -p "Station designator [$DES_DEFAULT]: " DES
+    rd -r -p "Station designator [$DES_DEFAULT]: " DES
     DES=$(echo "${DES:-$DES_DEFAULT}" | tr -cd 'A-Za-z0-9-')
     [ -z "$DES" ] && DES="$DES_DEFAULT"
     VMNAME="$DES"
@@ -504,7 +509,7 @@ echo "  This asks a short series of questions about the station, then"
 echo "  configures the Proxmox host and the decoder VM.  Nothing is"
 echo "  applied until you confirm at the review screen."
 echo ""
-read -r -p "  Press Enter to begin: " _ || true
+rd -r -p "  Press Enter to begin: " _ || true
 echo ""
 
 preflight_devices
@@ -530,7 +535,7 @@ while :; do
     fi
     echo "  6) Names:     VM $VMNAME · Proxmox host $PMNAME"
     echo "  ─────────────────────────────────────────────────────"
-    read -r -p "Apply? [Y = apply / 1-6 = re-edit that entry / n = abort] " OK
+    rd -r -p "Apply? [Y = apply / 1-6 = re-edit that entry / n = abort] " OK
     case "${OK:-Y}" in
         1) ask_reporter;;
         2) ask_grid;;
@@ -1369,5 +1374,5 @@ else
     done
 fi
 echo ""
-read -r -p "Press Enter to finish (this summary stays on the login screen)... " _ 2>/dev/null || true
+rd -r -p "Press Enter to finish (this summary stays on the login screen)... " _ 2>/dev/null || true
 exit 0
