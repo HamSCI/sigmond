@@ -55,7 +55,7 @@ SCREEN_VERBS: dict[str, tuple[str, ...] | None] = {
     "ka9q_watch": ("watch ka9q",),
     "lifecycle": ("start", "stop", "restart"),
     "logs": ("admin log",),
-    "overview": ("status",),
+    "overview": ("status", "timing"),
     "rac": ("admin rac",),
     "radiod": None,
     "receiver_channels": None,

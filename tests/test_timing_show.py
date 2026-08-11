@@ -20,7 +20,7 @@ def _write_snapshot(tmp_path):
 
 
 def test_text_output(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr("sigmond.commands.timing_show._chrony_tracking", lambda: {})
+    monkeypatch.setattr("sigmond.commands.timing_show.chrony_tracking", lambda: {})
     args = types.SimpleNamespace(path=str(_write_snapshot(tmp_path)), json=False)
     assert cmd_timing_show(args) == 0
     out = capsys.readouterr().out
@@ -31,7 +31,7 @@ def test_text_output(tmp_path, capsys, monkeypatch):
 
 
 def test_json_output(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr("sigmond.commands.timing_show._chrony_tracking",
+    monkeypatch.setattr("sigmond.commands.timing_show.chrony_tracking",
                         lambda: {"reference": "FUSE", "stratum": 1,
                                  "system_offset_s": 1.8e-6, "rms_offset_s": 7.2e-5,
                                  "root_dispersion_s": 1e-4, "leap_status": "Normal"})
@@ -44,7 +44,7 @@ def test_json_output(tmp_path, capsys, monkeypatch):
 
 
 def test_missing_snapshot(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr("sigmond.commands.timing_show._chrony_tracking", lambda: {})
+    monkeypatch.setattr("sigmond.commands.timing_show.chrony_tracking", lambda: {})
     args = types.SimpleNamespace(path=str(tmp_path / "nope.json"), json=False)
     assert cmd_timing_show(args) == 0
     assert "no authority snapshot" in capsys.readouterr().out

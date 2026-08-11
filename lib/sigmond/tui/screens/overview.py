@@ -18,7 +18,13 @@ from textual.containers import Vertical
 from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
 
-from ..format import format_timing_line
+from ..format import (
+    chrony_tracking,
+    format_timing_line,
+    read_authority_snapshot,
+    render_overview_timing_body,
+    snapshot_age_seconds,
+)
 
 
 @dataclass
@@ -30,6 +36,10 @@ class _OverviewData:
     view: object = None                                       # SystemView | None
     affinity: object = None                                   # AffinityReport | None
     error: Optional[str] = None
+    timing_snapshot: object = None                            # AuthoritySnapshot | None
+    timing_error: Optional[str] = None                        # sentinel from read_authority_snapshot
+    timing_age_s: Optional[float] = None
+    chrony: Optional[dict] = None
 
 
 # Per-component well-known systemd unit patterns for components that
@@ -119,6 +129,24 @@ def _batch_is_active(unit_names: list) -> dict:
     return result
 
 
+def _gather_timing() -> tuple:
+    """Read the host's §18 timing-authority snapshot + chrony tracking
+    for the Overview screen's timing section.
+
+    Deliberately isolated from ``_gather_overview``'s topology/catalog
+    machinery: it touches exactly two host resources
+    (``read_authority_snapshot``, ``chrony_tracking``, both in
+    ``sigmond.tui.format`` -- the same shared layer ``smd timing``
+    reads), so a test can mock precisely those two call sites and
+    nothing else, and so a topology/catalog failure elsewhere in the
+    overview never hides the timing verdict.
+    """
+    snap, err = read_authority_snapshot()
+    age = snapshot_age_seconds(snap) if snap is not None else None
+    chrony = chrony_tracking()
+    return snap, err, age, chrony
+
+
 def _gather_overview() -> _OverviewData:
     """Build _OverviewData from the live host.  Intended to run in a
     background worker; does multiple systemctl calls."""
@@ -183,6 +211,20 @@ def _gather_overview() -> _OverviewData:
 
     except Exception as exc:
         data.error = str(exc)
+
+    # Timing is gathered independently of the topology/catalog walk
+    # above -- a host mid-failure there should still show its timing
+    # verdict, since that's the number every science-data decision on
+    # this station gates on.
+    try:
+        (data.timing_snapshot, data.timing_error,
+         data.timing_age_s, data.chrony) = _gather_timing()
+    except Exception:
+        data.timing_snapshot = None
+        data.timing_error = "internal_error"
+        data.timing_age_s = None
+        data.chrony = None
+
     return data
 
 
@@ -237,6 +279,7 @@ class OverviewScreen(Vertical):
     OverviewScreen #ov-actions {
         margin-bottom: 1;
     }
+    OverviewScreen #ov-timing,
     OverviewScreen #ov-inventory,
     OverviewScreen #ov-cpu {
         margin-top: 0;
@@ -257,6 +300,8 @@ class OverviewScreen(Vertical):
         yield Static("Overview", classes="ov-title")
         yield Static("loading…", id="ov-summary")
         yield Static("", id="ov-actions")
+        yield Static("Timing", classes="ov-section")
+        yield Static("", id="ov-timing")
         yield Static("Service health", classes="ov-section")
         table = DataTable(id="ov-services")
         table.add_columns("Component", "Status")
@@ -319,6 +364,7 @@ class OverviewScreen(Vertical):
         self.query_one("#ov-summary", Static).update(summary)
 
         self._render_actions(data)
+        self._render_timing(data)
         self._render_services(data)
         self._render_inventory(data)
         self._render_cpu(data)
@@ -337,6 +383,18 @@ class OverviewScreen(Vertical):
                 lines.append(f"  [yellow]• {subject}[/]")
                 lines.append(f"    [dim]fix:  {action}[/]")
         widget.update("\n".join(lines))
+
+    def _render_timing(self, data: _OverviewData) -> None:
+        """Landing-screen timing verdict -- shallow by design.  Depth
+        lives on Monitoring / Authority and Monitoring / Annotation
+        Quality; all three (plus ``smd timing``) read the snapshot
+        through the same ``sigmond.tui.format`` helpers so they can't
+        disagree."""
+        widget = self.query_one("#ov-timing", Static)
+        widget.update(render_overview_timing_body(
+            data.timing_snapshot, data.timing_error,
+            data.timing_age_s, data.chrony,
+        ))
 
     def _render_services(self, data: _OverviewData) -> None:
         table = self.query_one("#ov-services", DataTable)

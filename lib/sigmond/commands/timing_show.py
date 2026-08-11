@@ -22,39 +22,17 @@ smd core policy (sigmond.tui.format is plain stdlib).
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 from sigmond.tui.format import (
     AUTHORITY_JSON_PATH,
+    chrony_tracking,
     format_age_seconds,
     format_offset_ns,
     format_sigma_ns,
     read_authority_snapshot,
     snapshot_age_seconds,
 )
-
-
-def _chrony_tracking() -> dict:
-    """Parse ``chronyc -c tracking`` into a small dict; {} when unavailable."""
-    try:
-        out = subprocess.run(
-            ["chronyc", "-c", "tracking"],
-            capture_output=True, text=True, timeout=3.0, check=True,
-        ).stdout.strip().splitlines()
-        f = out[0].split(",") if out else []
-        if len(f) < 14:
-            return {}
-        return {
-            "reference": f[1] or f[0],
-            "stratum": int(f[2]),
-            "system_offset_s": float(f[4]),
-            "rms_offset_s": float(f[6]),
-            "root_dispersion_s": float(f[11]),
-            "leap_status": f[13],
-        }
-    except Exception:
-        return {}
 
 
 def _fmt_s(seconds: float) -> str:
@@ -69,7 +47,7 @@ def _fmt_s(seconds: float) -> str:
 def cmd_timing_show(args) -> int:
     path = Path(getattr(args, "path", None) or AUTHORITY_JSON_PATH)
     snap, snap_err = read_authority_snapshot(path=path)
-    chrony = _chrony_tracking()
+    chrony = chrony_tracking()
 
     if getattr(args, "json", False):
         d = {"authority": None, "chrony": chrony or None,

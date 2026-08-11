@@ -229,6 +229,38 @@ def format_age_seconds(seconds: Optional[float]) -> str:
 AUTHORITY_STALE_THRESHOLD_S = 60.0
 
 
+def chrony_tracking() -> dict:
+    """Parse ``chronyc -c tracking`` into a small dict; ``{}`` when
+    chrony is unavailable (not installed, not running, times out, or
+    the CSV shape is unexpected).
+
+    Promoted from ``sigmond.commands.timing_show._chrony_tracking``
+    (the ``smd timing`` CLI) so the Overview screen's timing section
+    can read the same chrony-side numbers without duplicating the
+    parser -- ``timing_show.py`` now imports this function rather
+    than keeping its own copy.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["chronyc", "-c", "tracking"],
+            capture_output=True, text=True, timeout=3.0, check=True,
+        ).stdout.strip().splitlines()
+        f = out[0].split(",") if out else []
+        if len(f) < 14:
+            return {}
+        return {
+            "reference": f[1] or f[0],
+            "stratum": int(f[2]),
+            "system_offset_s": float(f[4]),
+            "rms_offset_s": float(f[6]),
+            "root_dispersion_s": float(f[11]),
+            "leap_status": f[13],
+        }
+    except Exception:
+        return {}
+
+
 def _tier_colour(tier: Optional[str]) -> str:
     """Tier-quality colour mirroring format_timing_line: T5/T6 ns-class
     hard-wired paths are green; T4 USB/LAN is yellow; T0-T3 are red
@@ -372,6 +404,74 @@ def render_authority_body(
             f"[yellow]Bootstrap pending:[/] {reason}{delta_str}"
             f"   [dim](probes resume when bootstrap completes)[/]"
         )
+
+    return "\n".join(lines)
+
+
+def render_overview_timing_body(
+    snap: Optional[AuthoritySnapshot],
+    error: Optional[str],
+    age_s: Optional[float],
+    chrony: Optional[dict],
+) -> str:
+    """Render the Overview screen's timing section -- the landing
+    screen's SHALLOW verdict.  Depth lives on the Authority screen
+    (``render_authority_body``) and the Annotation Quality screen
+    (``render_annotation_quality_body``); all three read the same
+    ``AuthoritySnapshot`` through the same ``read_authority_snapshot``
+    /  ``snapshot_age_seconds`` helpers, so they cannot disagree.
+
+    Mirrors ``smd timing``'s handling of the no-snapshot case rather
+    than inventing new wording: a host with no authority.json (not an
+    hf-timestd host, or the service is down) gets the same explanatory
+    line the CLI prints -- never a traceback, never a fake tier.
+
+    Colour comes from ``_tier_colour``, the same tier-quality mapping
+    ``render_authority_body`` and ``format_timing_line`` use (T5/T6
+    green, T4 yellow, else red) -- no second colour scheme.
+    """
+    lines: list = []
+
+    if snap is None:
+        lines.append(
+            f"[dim]no authority snapshot at {AUTHORITY_JSON_PATH} "
+            f"({error or 'unknown'})[/]"
+        )
+        lines.append(
+            "[dim](not an hf-timestd host, service down, "
+            "or file stale-deleted)[/]"
+        )
+    else:
+        tier = snap.t_level_active or "—"
+        tcol = _tier_colour(snap.t_level_active)
+        avail = ", ".join(snap.t_level_available) or "—"
+        wit = ", ".join(snap.t_level_witnesses) or "—"
+        offset_str = format_offset_ns(snap.rtp_to_utc_offset_ns)
+        sigma_str = format_sigma_ns(snap.sigma_ns)
+        lines.append(
+            f"Tier: [bold {tcol}]{tier}[/]"
+            f"   (available: {avail} · witnesses: {wit})"
+        )
+        lines.append(f"Offset: [bold]{offset_str}[/] ± {sigma_str}")
+        if snap.governor_radiod:
+            lines.append(f"Governor: {snap.governor_radiod}")
+
+        age_str = format_age_seconds(age_s)
+        if age_s is not None and age_s > AUTHORITY_STALE_THRESHOLD_S:
+            lines.append(f"Published: [red]{age_str} ago ⚠ stale[/]")
+        else:
+            age_colour = "green" if age_s is not None and age_s < 30 else "yellow"
+            lines.append(f"Published: [{age_colour}]{age_str} ago[/]")
+
+    if chrony:
+        chrony_offset = format_offset_ns(round(chrony["system_offset_s"] * 1e9))
+        lines.append(
+            f"chrony: {chrony['reference']}"
+            f"   stratum {chrony['stratum']}"
+            f"   offset {chrony_offset}"
+        )
+    else:
+        lines.append("[dim]chrony: unavailable[/]")
 
     return "\n".join(lines)
 
