@@ -869,7 +869,12 @@ gexec 30 "for u in hamsci sigmond; do for g in sigmond timestd pskrec wsprrec ra
     || say "WARN: could not add operator accounts to service groups"
 HASH=$(getent shadow root | cut -d: -f2)
 if [ -n "$HASH" ] && [ "$HASH" != "*" ] && [ "$HASH" != "!" ]; then
-    gexec 30 "usermod -p '$HASH' sigmond && usermod -p '$HASH' root && usermod -p '$HASH' hamsci" \
+    # Transport the hash as base64: yescrypt hashes are full of $ runs
+    # ($y$j9T$...) which the double-quoted gexec string used to expand to
+    # nothing — every fresh v3.30 install shipped VM accounts with a
+    # mangled hash and no working password (found on B4, 2026-08-11).
+    HB64=$(printf '%s' "$HASH" | base64 -w0)
+    gexec 30 "H=\$(echo $HB64 | base64 -d); for u in sigmond root hamsci; do usermod -p \"\$H\" \$u; done" \
         || say "WARN: could not set VM account passwords"
 fi
 [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519
