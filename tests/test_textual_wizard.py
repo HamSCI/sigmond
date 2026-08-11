@@ -48,7 +48,7 @@ class LoadConfigViaShowTests(unittest.TestCase):
         )
 
     def test_success_returns_parsed_dict(self):
-        from sigmond.tui.screens.textual_wizard import load_config_via_show
+        from sigmond.tui.wizard_support import load_config_via_show
         canned = {"station": {"callsign": "W1ABC", "grid_square": "FN42"}}
         with mock.patch("subprocess.run",
                         return_value=self._make_proc(stdout=json.dumps(canned))):
@@ -57,7 +57,7 @@ class LoadConfigViaShowTests(unittest.TestCase):
         self.assertEqual(data, canned)
 
     def test_nonzero_exit_returns_error(self):
-        from sigmond.tui.screens.textual_wizard import load_config_via_show
+        from sigmond.tui.wizard_support import load_config_via_show
         with mock.patch("subprocess.run",
                         return_value=self._make_proc(returncode=2,
                                                      stderr="boom\n")):
@@ -67,7 +67,7 @@ class LoadConfigViaShowTests(unittest.TestCase):
         self.assertIn("boom", err)
 
     def test_bad_json_returns_error(self):
-        from sigmond.tui.screens.textual_wizard import load_config_via_show
+        from sigmond.tui.wizard_support import load_config_via_show
         with mock.patch("subprocess.run",
                         return_value=self._make_proc(stdout="not json")):
             data, err = load_config_via_show("/usr/bin/fake")
@@ -75,7 +75,7 @@ class LoadConfigViaShowTests(unittest.TestCase):
         self.assertIn("not JSON", err)
 
     def test_non_object_top_level_returns_error(self):
-        from sigmond.tui.screens.textual_wizard import load_config_via_show
+        from sigmond.tui.wizard_support import load_config_via_show
         with mock.patch("subprocess.run",
                         return_value=self._make_proc(stdout="[1,2,3]")):
             data, err = load_config_via_show("/usr/bin/fake")
@@ -83,7 +83,7 @@ class LoadConfigViaShowTests(unittest.TestCase):
         self.assertIn("expected object", err)
 
     def test_oserror_returns_error(self):
-        from sigmond.tui.screens.textual_wizard import load_config_via_show
+        from sigmond.tui.wizard_support import load_config_via_show
         with mock.patch("subprocess.run", side_effect=OSError("no such file")):
             data, err = load_config_via_show("/usr/bin/missing")
         self.assertIsNone(data)
@@ -92,7 +92,7 @@ class LoadConfigViaShowTests(unittest.TestCase):
     def test_config_path_appends_arg(self):
         """When config_path is given, ``--config <path>`` lands in argv
         (per MULTI-INSTANCE-ARCHITECTURE.md §4 per-instance files)."""
-        from sigmond.tui.screens.textual_wizard import load_config_via_show
+        from sigmond.tui.wizard_support import load_config_via_show
         captured = {}
         def fake_run(argv, **kwargs):
             captured["argv"] = list(argv)
@@ -112,7 +112,7 @@ class LoadConfigViaShowTests(unittest.TestCase):
     def test_omitted_config_path_leaves_argv_clean(self):
         """Default (None) → argv is the bare 5-element form so the
         client picks its own default config."""
-        from sigmond.tui.screens.textual_wizard import load_config_via_show
+        from sigmond.tui.wizard_support import load_config_via_show
         captured = {}
         def fake_run(argv, **kwargs):
             captured["argv"] = list(argv)
@@ -481,7 +481,7 @@ class TextualConfigWizardScreenTests(unittest.IsolatedAsyncioTestCase):
 class LoadHelpTomlTests(unittest.TestCase):
 
     def test_returns_empty_when_absent(self):
-        from sigmond.tui.screens import textual_wizard as tw
+        from sigmond.tui import wizard_support as tw
         with mock.patch.object(
             tw, "_help_toml_candidates",
             return_value=[Path("/nonexistent/help.toml")],
@@ -489,7 +489,7 @@ class LoadHelpTomlTests(unittest.TestCase):
             self.assertEqual(tw.load_help_toml("psk-recorder"), {})
 
     def test_parses_valid_toml(self):
-        from sigmond.tui.screens import textual_wizard as tw
+        from sigmond.tui import wizard_support as tw
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "help.toml"
             p.write_text(textwrap.dedent("""\
@@ -513,7 +513,7 @@ class LoadHelpTomlTests(unittest.TestCase):
     def test_swallows_parse_errors(self):
         """A broken help.toml must not block the wizard — operator help
         is a UX nicety, not a contract dependency."""
-        from sigmond.tui.screens import textual_wizard as tw
+        from sigmond.tui import wizard_support as tw
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "help.toml"
             p.write_text("this is not valid TOML = = =")
@@ -524,32 +524,34 @@ class LoadHelpTomlTests(unittest.TestCase):
 
 
 class InstanceTagFromPathTests(unittest.TestCase):
+    """Exercises the pure function directly (sigmond.tui.wizard_support.
+    instance_tag_from_path) rather than through TextualConfigWizardScreen
+    (whose module imports Textual at module scope) — the screen's
+    ``_instance_tag_from_path`` is just a staticmethod alias onto this
+    same function, so this covers both call paths."""
 
     def test_extracts_reporter_id(self):
-        from sigmond.tui.screens.textual_wizard import TextualConfigWizardScreen
+        from sigmond.tui.wizard_support import instance_tag_from_path
         self.assertEqual(
-            TextualConfigWizardScreen._instance_tag_from_path(
-                "/etc/psk-recorder/AC0G-B1.toml"),
+            instance_tag_from_path("/etc/psk-recorder/AC0G-B1.toml"),
             "AC0G-B1",
         )
         self.assertEqual(
-            TextualConfigWizardScreen._instance_tag_from_path(
-                "/etc/wspr-recorder/W4UK-WEST.toml"),
+            instance_tag_from_path("/etc/wspr-recorder/W4UK-WEST.toml"),
             "W4UK-WEST",
         )
 
     def test_legacy_shared_config_returns_empty(self):
         """Legacy shared paths shouldn't render as if they were a
         reporter id."""
-        from sigmond.tui.screens.textual_wizard import TextualConfigWizardScreen
+        from sigmond.tui.wizard_support import instance_tag_from_path
         self.assertEqual(
-            TextualConfigWizardScreen._instance_tag_from_path(
+            instance_tag_from_path(
                 "/etc/psk-recorder/psk-recorder-config.toml"),
             "",
         )
         self.assertEqual(
-            TextualConfigWizardScreen._instance_tag_from_path(
-                "/etc/wspr-recorder/config.toml"),
+            instance_tag_from_path("/etc/wspr-recorder/config.toml"),
             "",
         )
 
@@ -557,24 +559,24 @@ class InstanceTagFromPathTests(unittest.TestCase):
 class HelpLabelTests(unittest.TestCase):
 
     def test_returns_title_when_present(self):
-        from sigmond.tui.screens.textual_wizard import help_label
+        from sigmond.tui.wizard_support import help_label
         help_data = {"station": {"callsign": {"title": "Amateur callsign"}}}
         self.assertEqual(help_label(help_data, "station", "callsign"),
                          "Amateur callsign")
 
     def test_falls_back_to_bare_key(self):
-        from sigmond.tui.screens.textual_wizard import help_label
+        from sigmond.tui.wizard_support import help_label
         self.assertEqual(help_label({}, "station", "callsign"), "callsign")
 
     def test_falls_back_when_section_missing(self):
-        from sigmond.tui.screens.textual_wizard import help_label
+        from sigmond.tui.wizard_support import help_label
         self.assertEqual(
             help_label({"other": {}}, "station", "callsign"),
             "callsign",
         )
 
     def test_falls_back_when_title_blank(self):
-        from sigmond.tui.screens.textual_wizard import help_label
+        from sigmond.tui.wizard_support import help_label
         self.assertEqual(
             help_label({"s": {"k": {"title": ""}}}, "s", "k"),
             "k",
@@ -819,7 +821,7 @@ class RadiodBlockEditingTests(unittest.IsolatedAsyncioTestCase):
 
 class RunWithStdinTests(unittest.TestCase):
     def test_non_sudo_pipes_stdin_and_returns(self):
-        from sigmond.tui.mutation import run_with_stdin
+        from sigmond.tui.wizard_support import run_with_stdin
         with mock.patch("subprocess.run") as run_mock:
             run_mock.return_value = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout=b"ok", stderr=b"")
@@ -836,7 +838,7 @@ class RunWithStdinTests(unittest.TestCase):
 
     def test_sudo_fast_path_when_nopasswd(self):
         """``sudo -n`` returns 0 → that's the final result, no fallback."""
-        from sigmond.tui.mutation import run_with_stdin
+        from sigmond.tui.wizard_support import run_with_stdin
         with mock.patch("subprocess.run") as run_mock:
             run_mock.return_value = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout=b"", stderr=b"")
@@ -856,7 +858,7 @@ class RunWithStdinTests(unittest.TestCase):
         """``sudo -n`` returns nonzero with NO 'password required' marker
         → that's a real failure, not a missing password.  Should NOT
         fall back to suspended mode."""
-        from sigmond.tui.mutation import run_with_stdin
+        from sigmond.tui.wizard_support import run_with_stdin
         with mock.patch("subprocess.run") as run_mock:
             run_mock.return_value = subprocess.CompletedProcess(
                 args=[], returncode=2, stdout=b"",

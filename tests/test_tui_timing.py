@@ -31,7 +31,7 @@ class ParserTests(unittest.TestCase):
         (commit 4c14712): TSL1 dropped entirely, TSL2 renamed FUSE,
         TSL3 renamed HPPS. SHM unit 0 unused; SHM unit 1 = FUSE;
         SHM unit 2 = HPPS."""
-        from sigmond.tui.screens.timing import parse_sources
+        from sigmond.tui.format import parse_sources
         sample = (
             "#,?,FUSE,0,4,111,29,-0.000378765,-0.000378765,0.000600000\n"
             "#,?,HPPS,0,0,0,20,-0.000001919,-0.000006823,0.000055000\n"
@@ -51,7 +51,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(format_round(rows[2].last_offset_sec), '7.242e-06')
 
     def test_parse_sources_skips_malformed_rows(self):
-        from sigmond.tui.screens.timing import parse_sources
+        from sigmond.tui.format import parse_sources
         sample = (
             "#,?,FUSE,0,4,111,23,0.001,0.001,0.002\n"
             "trash row\n"
@@ -63,12 +63,12 @@ class ParserTests(unittest.TestCase):
         self.assertEqual([r.name for r in rows], ['FUSE', 'server'])
 
     def test_parse_sources_empty_input(self):
-        from sigmond.tui.screens.timing import parse_sources
+        from sigmond.tui.format import parse_sources
         self.assertEqual(parse_sources(""), [])
         self.assertEqual(parse_sources("\n\n"), [])
 
     def test_parse_tracking_full_row(self):
-        from sigmond.tui.screens.timing import parse_tracking
+        from sigmond.tui.format import parse_tracking
         sample = (
             "C0A80150,192.168.1.80,2,1778242874.833737496,0.000001075,"
             "-0.000001383,0.000001174,-85.209,0.006,0.050,"
@@ -83,7 +83,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(t.leap_status, 'Normal')
 
     def test_parse_tracking_short_row_returns_none(self):
-        from sigmond.tui.screens.timing import parse_tracking
+        from sigmond.tui.format import parse_tracking
         # Only 5 fields — chrony would never emit this, but defensive.
         self.assertIsNone(parse_tracking("a,b,c,d,e\n"))
         self.assertIsNone(parse_tracking(""))
@@ -93,7 +93,7 @@ class ParserTests(unittest.TestCase):
 class FormatterTests(unittest.TestCase):
 
     def test_format_offset_auto_scales(self):
-        from sigmond.tui.screens.timing import format_offset
+        from sigmond.tui.format import format_offset
         self.assertEqual(format_offset(0.0), '+0.0 ns')
         self.assertEqual(format_offset(2.3e-9), '+2.3 ns')
         self.assertEqual(format_offset(-2.3e-6), '-2.30 µs')
@@ -101,7 +101,7 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(format_offset(-2.5), '-2.500 s')
 
     def test_format_age(self):
-        from sigmond.tui.screens.timing import format_age
+        from sigmond.tui.format import format_age
         self.assertEqual(format_age(0), 'now')
         self.assertEqual(format_age(-1), 'now')
         self.assertEqual(format_age(45), '45s')
@@ -109,7 +109,7 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(format_age(3725), '1h02')
 
     def test_format_reach_bitcount(self):
-        from sigmond.tui.screens.timing import format_reach
+        from sigmond.tui.format import format_reach
         self.assertEqual(format_reach(0), '0/8')
         self.assertEqual(format_reach(255), '8/8')
         # 0o111 = decimal 73, three bits set.
@@ -118,7 +118,7 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(format_reach(0o377), '8/8')
 
     def test_sparkline_pad_and_render(self):
-        from sigmond.tui.screens.timing import sparkline, SPARKS
+        from sigmond.tui.format import sparkline, SPARKS
         # Empty — full-width pad.
         self.assertEqual(sparkline([], width=8), ' ' * 8)
         # Flat series — middle band.

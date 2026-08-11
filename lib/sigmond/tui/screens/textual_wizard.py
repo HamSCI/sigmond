@@ -33,13 +33,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Optional
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # py<3.11
-    import tomli as tomllib  # type: ignore[no-redef]
 
 from textual import events, on
 from textual.app import ComposeResult
@@ -50,135 +44,13 @@ from textual.widgets import Button, Input, Static, Switch
 from textual.worker import Worker, WorkerState
 
 from ..mutation import run_with_stdin
-
-
-# ---------------------------------------------------------------------------
-# Subprocess helpers (kept module-level so tests can monkeypatch them).
-# ---------------------------------------------------------------------------
-
-def load_config_via_show(
-    client_bin: str,
-    config_path: Optional[str] = None,
-) -> tuple[Optional[dict], str]:
-    """Run ``<client_bin> config show --json --defaults`` and parse JSON.
-
-    When ``config_path`` is given, ``--config <path>`` is appended so
-    the client reads the per-instance file at
-    ``/etc/<client>/<reporter-id>.toml`` instead of its legacy shared
-    config (MULTI-INSTANCE-ARCHITECTURE.md §4).  When ``config_path`` is
-    None the client picks its own default.
-
-    Returns ``(data, error)``.  ``data`` is the parsed dict on success,
-    None on failure; ``error`` is a human-readable string for display.
-    """
-    argv = [client_bin, 'config', 'show', '--json', '--defaults']
-    if config_path:
-        argv.extend(['--config', config_path])
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, check=False, text=True,
-        )
-    except OSError as exc:
-        return None, f"failed to exec {client_bin}: {exc}"
-    if proc.returncode != 0:
-        return None, (
-            f"`{client_bin} config show` exited {proc.returncode}: "
-            f"{proc.stderr.strip() or '(no stderr)'}"
-        )
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        return None, f"`{client_bin} config show` stdout was not JSON: {exc}"
-    if not isinstance(data, dict):
-        return None, (
-            f"`{client_bin} config show` returned "
-            f"{type(data).__name__}, expected object"
-        )
-    return data, ""
-
-
-# ---------------------------------------------------------------------------
-# help.toml — per-client operator-help sidecar.  Same file the whiptail
-# wizard reads; we share the schema-of-truth across both renderers.
-# ---------------------------------------------------------------------------
-
-def _help_toml_candidates(client_name: str) -> list[Path]:
-    """Where to look for ``<client>/config/help.toml``.
-
-    Sigmond's editable-install path first, then the packaged-install
-    fallback.  Both psk-recorder and mag-recorder live at the first
-    path on production hosts; the second covers operators who installed
-    from a package.
-    """
-    return [
-        Path(f"/opt/git/sigmond/{client_name}/config/help.toml"),
-        Path(f"/usr/local/share/{client_name}/help.toml"),
-    ]
-
-
-def load_help_toml(client_name: str) -> dict:
-    """Read the client's ``config/help.toml`` if present.
-
-    Returns a dict shaped like::
-
-        {"station": {"callsign": {"title": "Amateur callsign", "help": "...",
-                                  "example": "AC0G", "validator_hint": "...",
-                                  "required": True},
-                     "grid_square": {...}, ...},
-         "radiod":  {"id":            {...},
-                     "radiod_status": {...}}, ...}
-
-    Returns ``{}`` when the file is absent or unreadable — the renderer
-    just falls back to bare key names.  Errors are swallowed because
-    operator help is a UX nicety, not a contract dependency.
-    """
-    for path in _help_toml_candidates(client_name):
-        if not path.is_file():
-            continue
-        try:
-            with open(path, "rb") as fh:
-                data = tomllib.load(fh)
-        except (OSError, tomllib.TOMLDecodeError):
-            continue
-        if isinstance(data, dict):
-            return data
-    return {}
-
-
-def help_label(help_data: dict, section: str, key: str) -> str:
-    """Look up the operator-facing label for one (section, key).
-
-    Returns the help.toml ``title`` when present, the bare key name
-    otherwise.  Used so the form's left-column label is human-readable
-    on clients with a help sidecar and still legible on clients without.
-    """
-    block = help_data.get(section, {})
-    if isinstance(block, dict):
-        entry = block.get(key, {})
-        if isinstance(entry, dict):
-            title = entry.get("title")
-            if isinstance(title, str) and title.strip():
-                return title
-    return key
-
-
-def help_entry(help_data: dict, section: str, key: str) -> dict:
-    """Look up the full per-key help block for one (section, key).
-
-    Returns the help.toml subtable as a dict (with keys ``title``,
-    ``help``, ``example``, ``validator_hint``, ``required``) when the
-    client ships a help sidecar entry; an empty dict otherwise.
-    Used so the wizard can surface placeholder text, required-field
-    markers, validator hints, and focus-driven help bodies — every
-    piece of operator guidance the help.toml authors put in is
-    consumed by the form.
-    """
-    block = help_data.get(section, {})
-    if isinstance(block, dict):
-        entry = block.get(key, {})
-        if isinstance(entry, dict):
-            return entry
-    return {}
+from ..wizard_support import (
+    help_entry,
+    help_label,
+    instance_tag_from_path,
+    load_config_via_show,
+    load_help_toml,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -477,20 +349,11 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
     def _load_data(self) -> tuple[Optional[dict], str]:
         return load_config_via_show(self._client_bin, self._config_path)
 
-    @staticmethod
-    def _instance_tag_from_path(config_path: str) -> str:
-        """Best-effort extraction of the reporter-id from a per-instance
-        config path.  ``/etc/psk-recorder/AC0G-B1.toml`` → ``AC0G-B1``.
-        Returns ``""`` when the path doesn't look reporter-keyed.
-        """
-        stem = Path(config_path).stem
-        # Strip well-known legacy suffixes so e.g. the legacy
-        # ``psk-recorder-config`` doesn't get treated as a reporter id.
-        if stem in {"config", "psk-recorder-config",
-                    "wspr-recorder-config", "hfdl-recorder-config",
-                    "codar-sounder-config"} or stem.endswith("-config"):
-            return ""
-        return stem
+    # Pure logic lives in wizard_support.instance_tag_from_path (Textual-
+    # free so it's unit-testable without the [tui] extra); this is just
+    # a staticmethod alias so existing call sites (self._instance_tag_
+    # from_path(...)) keep working unchanged.
+    _instance_tag_from_path = staticmethod(instance_tag_from_path)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         # Single dispatcher for both the loader and the apply workers.

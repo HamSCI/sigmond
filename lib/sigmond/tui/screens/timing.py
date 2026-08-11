@@ -31,53 +31,31 @@ the underlying calibrator.
 
 from __future__ import annotations
 
-import csv
-import io
 import subprocess
 from collections import deque
-from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from textual.containers import Vertical
 from textual.widgets import DataTable, Static
 
+from ..format import (
+    HISTORY,
+    SPARKS,
+    SourceRow,
+    TrackingRow,
+    format_age,
+    format_offset,
+    format_reach,
+    parse_sources,
+    parse_tracking,
+    sparkline,
+)
 
-# Refresh cadence and history depth.  60 samples at 1 Hz = the last
-# minute of trace per source, which spans a full Costas excursion plus
-# margin on each side.
+# Refresh cadence.  Lightweight enough that the running cost is
+# negligible, fast enough to track the ~13-s Costas excursions visible
+# in the underlying calibrator.  History depth (HISTORY) lives in
+# ..format alongside sparkline(), whose default width it sets.
 POLL_SEC = 1.0
-HISTORY = 60
-
-# Unicode "block elements" for the sparkline, low → high.
-SPARKS = "▁▂▃▄▅▆▇█"
-
-
-@dataclass
-class SourceRow:
-    """One parsed row from ``chronyc -c sources``."""
-    mode: str
-    state: str
-    name: str
-    stratum: int
-    poll: int
-    reach: int
-    last_rx_sec: float
-    last_offset_sec: float          # adjusted offset (ch's combined view)
-    measured_offset_sec: float      # raw measurement
-    sample_error_sec: float         # 1-sigma estimate
-
-
-@dataclass
-class TrackingRow:
-    """``chronyc -c tracking`` summary."""
-    ref_id_hex: str
-    ref_id_name: str
-    stratum: int
-    last_offset_sec: float
-    rms_offset_sec: float
-    root_delay_sec: float
-    root_dispersion_sec: float
-    leap_status: str
 
 
 def _run_chronyc(args: List[str]) -> Optional[str]:
@@ -93,123 +71,6 @@ def _run_chronyc(args: List[str]) -> Optional[str]:
         return proc.stdout
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
-
-
-def parse_sources(csv_text: str) -> List[SourceRow]:
-    """Parse the CSV output of ``chronyc -c sources``.  Format (10
-    columns): mode, state, name, stratum, poll, reach, last_rx_sec,
-    last_adjusted, last_measured, sample_error.  Skips malformed rows
-    rather than raising — a partial display is more useful than a
-    crash when chrony emits an unexpected source line."""
-    rows: List[SourceRow] = []
-    if not csv_text:
-        return rows
-    reader = csv.reader(io.StringIO(csv_text))
-    for parts in reader:
-        if len(parts) < 10:
-            continue
-        try:
-            rows.append(SourceRow(
-                mode=parts[0],
-                state=parts[1],
-                name=parts[2],
-                stratum=int(parts[3]),
-                poll=int(parts[4]),
-                reach=int(parts[5]),
-                last_rx_sec=float(parts[6]),
-                last_offset_sec=float(parts[7]),
-                measured_offset_sec=float(parts[8]),
-                sample_error_sec=float(parts[9]),
-            ))
-        except (ValueError, IndexError):
-            continue
-    return rows
-
-
-def parse_tracking(csv_text: str) -> Optional[TrackingRow]:
-    """Parse the CSV output of ``chronyc -c tracking``.  Format (14
-    columns): ref_id_hex, ref_id_name, stratum, ref_time, system_time,
-    last_offset, rms_offset, frequency, residual_freq, skew,
-    root_delay, root_dispersion, update_interval, leap_status."""
-    if not csv_text or not csv_text.strip():
-        return None
-    parts = next(csv.reader(io.StringIO(csv_text)), None)
-    if not parts or len(parts) < 14:
-        return None
-    try:
-        return TrackingRow(
-            ref_id_hex=parts[0],
-            ref_id_name=parts[1],
-            stratum=int(parts[2]),
-            last_offset_sec=float(parts[5]),
-            rms_offset_sec=float(parts[6]),
-            root_delay_sec=float(parts[10]),
-            root_dispersion_sec=float(parts[11]),
-            leap_status=parts[13],
-        )
-    except (ValueError, IndexError):
-        return None
-
-
-def format_offset(seconds: float) -> str:
-    """Auto-scale a duration into the most natural unit (ns / µs / ms /
-    s).  Includes an explicit sign so trace lines stay aligned in
-    width regardless of polarity."""
-    sign = '+' if seconds >= 0 else '-'
-    abs_s = abs(seconds)
-    if abs_s < 1e-6:
-        return f"{sign}{abs_s * 1e9:.1f} ns"
-    if abs_s < 1e-3:
-        return f"{sign}{abs_s * 1e6:.2f} µs"
-    if abs_s < 1.0:
-        return f"{sign}{abs_s * 1e3:.2f} ms"
-    return f"{sign}{abs_s:.3f} s"
-
-
-def format_age(seconds: float) -> str:
-    """Format last-sample age.  Negative or zero treated as 'now'."""
-    if seconds <= 0:
-        return "now"
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        return f"{int(seconds / 60)}m{int(seconds) % 60:02d}"
-    return f"{int(seconds / 3600)}h{int((seconds % 3600) / 60):02d}"
-
-
-def format_reach(reach: int) -> str:
-    """Reach as 'N/8' (popcount of the 8-bit register).  This is more
-    intuitive than the raw decimal/octal value — N/8 immediately tells
-    you fraction of recent polls that succeeded."""
-    if reach < 0 or reach > 255:
-        return "?"
-    return f"{bin(reach).count('1')}/8"
-
-
-def sparkline(values: List[float], width: int = HISTORY) -> str:
-    """Render a list of floats as a Unicode sparkline.  Pads with
-    leading spaces so a partial-history source still renders aligned
-    with full-history ones.  Auto-scales to the actual range so a flat
-    series and a noisy one both use the full vertical resolution."""
-    if not values:
-        return ' ' * width
-    pad = max(0, width - len(values))
-    use = list(values)[-width:]
-    lo = min(use)
-    hi = max(use)
-    span = hi - lo
-    if span <= 0:
-        # Flat trace — render at the middle band so it's visible.
-        bar = SPARKS[len(SPARKS) // 2] * len(use)
-    else:
-        bar = ''.join(
-            SPARKS[
-                max(0, min(len(SPARKS) - 1,
-                           int((v - lo) / span * (len(SPARKS) - 1))))
-            ]
-            for v in use
-        )
-    return (' ' * pad) + bar
 
 
 def _row_color(name: str, delta_sec: float) -> str:
