@@ -32,6 +32,7 @@ Operate (run things now, may need sudo):
     smd stop        [<component> [<instance>]]
     smd restart     [<component> [<instance>]]
     smd reload      [--via=auto|systemd|socket]  [<component>]
+    smd timing            [--json]                               timing authority + accuracy
     smd tui                                                      launch interactive TUI
 
 Topology file (default: /etc/sigmond/topology.toml) controls which
@@ -109,6 +110,7 @@ try:
     from sigmond.commands.validate    import cmd_validate
     from sigmond.commands.readiness   import cmd_readiness
     from sigmond.commands.timing      import cmd_timing
+    from sigmond.commands.timing_show import cmd_timing_show
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
     from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_upload, cmd_config_location
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
@@ -17490,6 +17492,14 @@ def main() -> int:
     p.add_argument('peer', help='declared id or observed endpoint/hostname')
     p.add_argument('--json', action='store_true')
 
+    # timing — one-shot authority + accuracy display (read-only; the
+    # chain reconciler lives at `smd admin timing`).
+    p = sub.add_parser('timing',
+        help='show timing authority (tier/offset/sigma) + system-clock accuracy')
+    p.add_argument('--json', action='store_true', help='machine-readable output')
+    p.add_argument('--path', help='authority.json path override (default /run/hf-timestd/authority.json)')
+    p.set_defaults(timing_display=True)
+
     # tui — primary entry point (replaces `smd config edit`).
     sub.add_parser('tui', help='launch the sigmond TUI')
 
@@ -17515,6 +17525,9 @@ def main() -> int:
 
     # admin — umbrella verb.  Rewrite into the relocated former top-level
     # verb so every existing per-verb dispatch branch below works unchanged.
+    if args.command == 'timing' and getattr(args, 'timing_display', False):
+        return cmd_timing_show(args)
+
     if args.command == 'admin':
         args.command = getattr(args, 'admin_command', None)
         if not args.command:
@@ -17770,7 +17783,7 @@ def main() -> int:
             return cmd_validate(args)
         if args.command == 'readiness':
             return cmd_readiness(args)
-        if args.command == 'timing':
+        if args.command == 'timing' and not getattr(args, 'timing_display', False):
             return cmd_timing(args)
         if args.command == 'uninstall':
             return cmd_uninstall(args)
