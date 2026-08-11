@@ -20,6 +20,14 @@ Design (see memory: sigmond-greenfield-tui-architecture):
     later with ``smd config edit radiod``.
   • Plan preview uses ``smd bringup … --dry-run`` which returns before any
     elevation, so it needs no sudo.
+  • The Equipment panel is driven by ``sigmond.hardware.gate_checks`` — the
+    SAME probe-and-decide code ``smd bringup``'s ``--require-hardware`` gate
+    runs — so what the operator reads here is what bring-up will decide.  It
+    is deliberately NOT a second detection implementation (there used to be
+    one, ``sigmond.hardware_detect``, and it disagreed on every device).
+  • The readiness panel calls ``sigmond.readiness.run_gate`` in-process (the
+    library behind ``smd admin readiness``) before and after the run, so the
+    operator sees whether the station is actually complete.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import (
     Button, Checkbox, Input, Label, RadioButton, RadioSet, Static,
 )
-from textual.worker import WorkerState
+from textual.worker import Worker, WorkerState
 
 from ..mutation import ConfirmModal, UpdateOutputModal, suspend_and_run_sudo
 
@@ -55,15 +63,104 @@ def _load_profiles() -> dict:
         return {}
 
 
-# Profile presentation order + one-line "what you get" blurbs.  The catalog
-# carries the authoritative client/infra lists; these are just operator-facing
-# summaries for the radio buttons.
+# Presentation order only.  `dasi2` leads because it is also `smd bringup`'s
+# own default (bin/smd: `args.profile = ... or 'dasi2'`), so the pre-selected
+# radio button and a bare `smd bringup` agree.  The one-line summary next to
+# each name is the catalog profile's own ``description`` field — read, never
+# hardcoded, so the wizard cannot drift from etc/catalog.toml.
 _PROFILE_ORDER = ["dasi2", "base", "client"]
-_PROFILE_BLURB = {
-    "dasi2": "Canonical DASI2 station — RX888 radiod + WSPR + PSK + timing + GPSDO + magnetometer",
-    "base":   "Minimal — local radiod + timing only, no spot reporters",
-    "client": "Decode-only — bind a REMOTE radiod, no local SDR (WSPR + PSK + timing)",
-}
+
+
+def _profile_blurb(prof) -> str:
+    return (getattr(prof, "description", "") or "").strip()
+
+
+# ---------------------------------------------------------------------------
+# Equipment + readiness probes
+#
+# Each is a module-level function taking no screen state, so tests can patch
+# exactly one host-touching call site (project pattern, dc48e80) and the
+# screen never reads real host state under test.
+# ---------------------------------------------------------------------------
+
+# The three tri-states bring-up prints under "required external devices".
+# Word-for-word from bin/smd's _bringup_hardware_gate so the wizard and the
+# CLI transcript read identically.
+_PRESENCE_WORD = {"yes": "present", "no": "MISSING", "unknown": "unconfirmed",
+                  "na": "n/a"}
+_PRESENCE_MARK = {"yes": "[green]\u2713[/]", "no": "[red]\u2717[/]",
+                  "unknown": "[yellow]?[/]", "na": "[dim]\u2014[/]"}
+
+
+def _gate_checks(prof, local: bool) -> list:
+    """Rows of the bring-up hardware gate as ``(presence, label, hint)``.
+
+    Delegates to ``sigmond.hardware.gate_checks`` — the exact function
+    ``smd bringup`` uses — so a device that reads MISSING here is a device
+    that would hard-stop ``smd bringup --require-hardware``.
+    """
+    from ...hardware import gate_checks
+    return [(c.presence.value, c.label, c.hint)
+            for c in gate_checks(prof, local)]
+
+
+def _ts1_state() -> tuple:
+    """TS-1 refclock presence as ``(presence, detail, armed_note)``.
+
+    TS-1 is a HamSCI HF BPSK time-reference TRANSMISSION, not a USB device:
+    nothing on this host can detect it before hf-timestd is decoding.  So it
+    is NOT part of the bring-up hardware gate, and it is reported from
+    hf-timestd's published authority snapshot instead.
+
+    "TS-1 detected" and "T6 armed" are DIFFERENT facts and are reported
+    separately: shipped images set ``t6_pps.enabled = false``, so a station
+    can be receiving TS-1 with the T6 fine stage disarmed.  ``T6`` appearing
+    in ``t_level_available`` means the signal is witnessed; ``t_level_active
+    == "T6"`` means it is actually the operating tier.
+    """
+    from ..format import ERR_NOT_FOUND, read_authority_snapshot
+    snap, err = read_authority_snapshot()
+    if snap is None:
+        if err == ERR_NOT_FOUND:
+            return ("unknown",
+                    "hf-timestd is not publishing an authority snapshot yet "
+                    "\u2014 TS-1 is decoded off the air AFTER bring-up; it is "
+                    "not a bring-up gate",
+                    "")
+        return ("unknown",
+                f"authority snapshot {err} \u2014 TS-1 presence undetermined", "")
+    available = list(snap.t_level_available or [])
+    active = snap.t_level_active or "\u2014"
+    if "T6" in available:
+        presence = "yes"
+        detail = ("TS-1 witnessed \u2014 T6 is in hf-timestd's available tiers "
+                  f"({', '.join(available)})")
+    else:
+        presence = "no"
+        detail = ("TS-1 not witnessed \u2014 hf-timestd's available tiers are "
+                  f"{', '.join(available) or '(none)'}")
+    if active == "T6":
+        armed = "T6 fine stage is ARMED and active (operating tier T6)."
+    else:
+        armed = (f"T6 fine stage NOT armed \u2014 operating tier is {active}. "
+                 "A fresh install ships t6_pps.enabled=false; TS-1 hardware "
+                 "presence does NOT by itself improve the timing tier.")
+    return (presence, detail, armed)
+
+
+def _readiness_report(profile: str, with_optional: bool, gate: str = "auto"):
+    """``smd admin readiness`` verdict as a dict, or ``None`` on failure.
+
+    Calls ``sigmond.readiness.run_gate`` in-process rather than parsing the
+    CLI's text output; ``GateReport.as_dict()`` is the same payload
+    ``smd admin readiness --json`` prints.
+    """
+    from ...readiness import run_gate
+    try:
+        return run_gate(gate=gate, profile=profile,
+                        with_optional=with_optional).as_dict()
+    except Exception:                                   # noqa: BLE001
+        return None
 
 
 class _BringupModal(UpdateOutputModal):
@@ -118,6 +215,11 @@ class GreenfieldScreen(Vertical):
     GreenfieldScreen #gf-optional { display: none; }
     GreenfieldScreen #gf-optional.show { display: block; }
     GreenfieldScreen #gf-optional-list { color: $text-muted; }
+    GreenfieldScreen #gf-equip-intro { color: $text-muted; }
+    GreenfieldScreen #gf-equip { margin-bottom: 1; }
+    GreenfieldScreen #gf-equip-actions { height: 3; }
+    GreenfieldScreen #gf-readiness { margin-top: 1; }
+    GreenfieldScreen #gf-readiness-actions { height: 3; }
     GreenfieldScreen #gf-actions { height: 3; margin-top: 1; }
     GreenfieldScreen #gf-actions Button { margin-right: 1; }
     GreenfieldScreen #gf-status { margin-top: 1; }
@@ -147,12 +249,21 @@ class GreenfieldScreen(Vertical):
         yield Static("1 · Station profile", classes="gf-section")
         with RadioSet(id="gf-profile"):
             for name in self._profile_names:
-                blurb = _PROFILE_BLURB.get(name, "")
-                label = f"{name}  —  {blurb}" if blurb else name
+                blurb = _profile_blurb(self._profiles.get(name))
+                label = f"{name}  \u2014  {blurb}" if blurb else name
                 yield RadioButton(label, value=(name == self._profile_names[0]),
                                   id=f"gf-prof-{name}")
 
-        yield Static("2 · Station identity", classes="gf-section")
+        yield Static("2 · Equipment", classes="gf-section")
+        yield Static(
+            "What [bold]smd bringup[/] will check before it installs anything "
+            "— the same probes its --require-hardware gate acts on.",
+            id="gf-equip-intro")
+        yield Static("[dim]checking…[/]", id="gf-equip")
+        with Horizontal(id="gf-equip-actions"):
+            yield Button("Re-check equipment", id="gf-equip-refresh")
+
+        yield Static("3 · Station identity", classes="gf-section")
         with Horizontal(classes="gf-field"):
             yield Label("Reporter id *")
             yield Input(placeholder="e.g. AC0G/S", id="gf-reporter")
@@ -173,10 +284,16 @@ class GreenfieldScreen(Vertical):
         # declare any.  All-or-nothing (mirrors bringup's --with-optional);
         # install a single one later with `smd install <name>`.
         with Vertical(id="gf-optional"):
-            yield Static("3 · Optional clients", classes="gf-section")
+            yield Static("4 · Optional clients", classes="gf-section")
             yield Checkbox("Also install this profile's optional clients",
                            id="gf-with-optional")
             yield Static("", id="gf-optional-list")
+
+        yield Static("Station readiness  (smd admin readiness)",
+                     classes="gf-section")
+        yield Static("[dim]checking…[/]", id="gf-readiness")
+        with Horizontal(id="gf-readiness-actions"):
+            yield Button("Re-check readiness", id="gf-readiness-refresh")
 
         with Horizontal(id="gf-actions"):
             yield Button("Preview plan", id="gf-preview", variant="default")
@@ -190,6 +307,116 @@ class GreenfieldScreen(Vertical):
 
     def on_mount(self) -> None:
         self._sync_required_hints()
+        self._refresh_equipment()
+        self._refresh_readiness()
+
+    # ----- equipment panel -------------------------------------------------
+
+    def _refresh_equipment(self) -> None:
+        """Probe the bring-up hardware gate + TS-1 off the UI thread.
+
+        The probes shell out (lsusb, each client's `inventory --json`, a
+        5 s GPSDO NMEA sample, the RM3100 bus poke) so they must not run on
+        the event loop — several seconds is normal on a cold host.
+        """
+        name = self._selected_profile()
+        prof = self._profiles.get(name)
+        local = self._profile_is_local(name)
+        self.query_one("#gf-equip", Static).update("[dim]checking…[/]")
+
+        def _probe():
+            try:
+                rows = _gate_checks(prof, local)
+            except Exception as exc:                     # noqa: BLE001
+                rows = exc
+            try:
+                ts1 = _ts1_state()
+            except Exception:                            # noqa: BLE001
+                ts1 = ("unknown", "TS-1 presence undetermined", "")
+            return {"rows": rows, "ts1": ts1}
+
+        self.run_worker(_probe, thread=True, name="gf-equip")
+
+    def _render_equipment(self, data: dict) -> None:
+        rows = data.get("rows")
+        lines = []
+        if isinstance(rows, Exception):
+            lines.append(f"[red]hardware probe failed: {rows}[/]")
+        elif not rows:
+            lines.append(
+                "[dim]This profile needs no external devices attached.[/]")
+        else:
+            for presence, label, hint in rows:
+                mark = _PRESENCE_MARK.get(presence, "[yellow]?[/]")
+                word = _PRESENCE_WORD.get(presence, presence)
+                lines.append(f"  {mark} {label}  —  {word}")
+                if presence != "yes":
+                    lines.append(f"      [dim]{hint}[/]")
+        presence, detail, armed = data.get(
+            "ts1", ("unknown", "TS-1 presence undetermined", ""))
+        mark = _PRESENCE_MARK.get(presence, "[yellow]?[/]")
+        word = _PRESENCE_WORD.get(presence, presence)
+        lines.append(f"  {mark} TS-1 refclock  —  {word}")
+        lines.append(f"      [dim]{detail}[/]")
+        if armed:
+            lines.append(f"      [dim]{armed}[/]")
+        self.query_one("#gf-equip", Static).update("\n".join(lines))
+
+    # ----- readiness panel -------------------------------------------------
+
+    def _refresh_readiness(self, *, label: str = "now") -> None:
+        name = self._selected_profile()
+        with_optional = self._with_optional_checked()
+        self.query_one("#gf-readiness", Static).update("[dim]checking…[/]")
+
+        def _probe():
+            return {"label": label,
+                    "report": _readiness_report(name, with_optional)}
+
+        self.run_worker(_probe, thread=True, name="gf-readiness")
+
+    def _render_readiness(self, data: dict) -> None:
+        rep = data.get("report")
+        when = data.get("label") or "now"
+        widget = self.query_one("#gf-readiness", Static)
+        if not rep:
+            widget.update(
+                "[yellow]readiness gate could not run — check "
+                "[bold]smd admin readiness[/] from a shell.[/]")
+            return
+        counts = rep.get("counts") or {}
+        head = (f"gate [bold]{rep.get('gate')}[/] · profile "
+                f"[bold]{rep.get('profile')}[/] ({when}): ")
+        summary = (f"{counts.get('pass', 0)} pass, {counts.get('warn', 0)} "
+                   f"warn, {counts.get('fail', 0)} fail")
+        if rep.get("ready"):
+            lines = [head + f"[green]READY[/] — {summary}"]
+        else:
+            lines = [head + f"[red]NOT READY[/] — {summary}"]
+        for r in rep.get("results") or []:
+            if r.get("status") in ("fail", "warn"):
+                colour = "red" if r["status"] == "fail" else "yellow"
+                lines.append(
+                    f"  [{colour}]{r['status']}[/] {r.get('name')} — "
+                    f"{r.get('detail', '')}")
+        widget.update("\n".join(lines))
+
+    def _with_optional_checked(self) -> bool:
+        try:
+            return bool(self.query_one("#gf-with-optional", Checkbox).value)
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.state != WorkerState.SUCCESS:
+            return
+        result = event.worker.result
+        if not isinstance(result, dict):
+            return
+        if event.worker.name == "gf-equip":
+            self._render_equipment(result)
+        elif event.worker.name == "gf-readiness":
+            self._render_readiness(result)
 
     # ----- profile-dependent UI ------------------------------------------
 
@@ -244,9 +471,20 @@ class GreenfieldScreen(Vertical):
                 "Adds: " + ", ".join(optional))
             self.query_one("#gf-with-optional", Checkbox).value = False
 
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        # --with-optional changes the component set the readiness gate
+        # enumerates, so the verdict has to follow the checkbox.
+        if event.checkbox.id == "gf-with-optional":
+            self._refresh_readiness()
+
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         self._sync_required_hints()
         self.query_one("#gf-status", Static).update("")
+        # Both panels are profile-dependent: the gate rows follow the
+        # profile's clients/local_radiod_infra, the readiness gate follows
+        # its component list.
+        self._refresh_equipment()
+        self._refresh_readiness()
 
     # ----- input gathering / validation ----------------------------------
 
@@ -299,7 +537,11 @@ class GreenfieldScreen(Vertical):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
-        if bid == "gf-preview":
+        if bid == "gf-equip-refresh":
+            self._refresh_equipment()
+        elif bid == "gf-readiness-refresh":
+            self._refresh_readiness()
+        elif bid == "gf-preview":
             self._preview()
         elif bid == "gf-begin":
             self._begin()
@@ -417,6 +659,12 @@ class GreenfieldScreen(Vertical):
                 "Review the log above, then try [bold]Open Validate[/] or "
                 "[bold]Logs[/] to see what needs attention.")
         fixits.add_class("show")
+        # Re-run the readiness gate: the operator needs the AFTER verdict —
+        # bring-up exiting 0 is not the same claim as "the station is
+        # complete", and the gate auto-flips from capture to site once
+        # identity has been seeded.
+        self._refresh_equipment()
+        self._refresh_readiness(label="after bring-up")
         # Refresh the app's system view so the tree / Overview reflect the
         # now-running station.
         try:

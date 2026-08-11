@@ -50,7 +50,7 @@ SCREEN_VERBS: dict[str, tuple[str, ...] | None] = {
         "admin environment describe",
     ),
     "gpsdo": ("watch gpsdo",),
-    "greenfield": ("bringup", "config edit"),
+    "greenfield": ("bringup", "admin readiness", "config edit"),
     "install": ("install",),
     "ka9q_watch": ("watch ka9q",),
     "lifecycle": ("start", "stop", "restart"),
