@@ -103,11 +103,10 @@ def _maybe_elevate(argv: list, env: Optional[dict] = None) -> list:
 
     Client wizards (and the `$EDITOR` fallback) read/write config files
     owned by the client's service user (e.g. `wsprrec:wsprrec` for
-    wspr-recorder), so the smd CLI must self-elevate the same way the TUI
-    path does — see `tui/screens/client_config.py:218` which invokes
-    with `sudo=True`.  The contract env-var bag is preserved explicitly
-    (matching installer.py's pattern) rather than via `-E`, to avoid
-    leaking unrelated shell state into the wizard process.
+    wspr-recorder), so the smd CLI must self-elevate.  The contract
+    env-var bag is preserved explicitly (matching installer.py's pattern)
+    rather than via `-E`, to avoid leaking unrelated shell state into the
+    wizard process.
     """
     if os.geteuid() == 0:
         return argv

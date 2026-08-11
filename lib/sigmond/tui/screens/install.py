@@ -286,9 +286,10 @@ class InstallScreen(Vertical):
         confirm_and_run(
             self.app,
             title="Install the topology-enabled components?",
-            body=("Installs every component this host's [bold]Topology[/] has "
-                  "enabled \u2014 set the station shape on the Topology screen "
-                  "first (or use a profile / guided bring-up below).\n\n"
+            body=("Installs every component this host's topology has "
+                  "enabled. To set the station shape first, use a "
+                  "profile below or Guided bring-up \u2014 install implies "
+                  "enable, so there's no separate enable step.\n\n"
                   "Already-built components are left alone."),
             cmd=cmd, sudo=True,
             on_complete=self._after_install,

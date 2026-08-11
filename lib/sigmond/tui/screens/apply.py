@@ -39,7 +39,7 @@ from ..mutation import confirm_and_run
 
 # How long to trust a cached pending result before re-running dry-run
 # on screen mount.  30s keeps navigation snappy while the operator
-# tabs between Topology / Coordination / Apply; the manual Refresh
+# tabs between other screens and Apply; the manual Refresh
 # button always bypasses the cache.
 _CACHE_TTL_SEC = 30.0
 

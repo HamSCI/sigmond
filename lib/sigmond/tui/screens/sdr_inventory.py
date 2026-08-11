@@ -863,7 +863,8 @@ class SdrInventoryScreen(Vertical):
         if local_usb and wisdom_missing:
             warn_w.update(
                 "[yellow]⚠ FFT wisdom file missing — radiod cannot start. "
-                "Go to Operate → FFT Wisdom to generate it (may take hours "
+                "Wisdom is built as part of Guided bring-up, or run "
+                "`smd admin wisdom plan` from a terminal (may take hours "
                 "for RX888 @ 129.6 MHz on first run).[/]"
             )
         else:

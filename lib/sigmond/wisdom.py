@@ -1,14 +1,18 @@
 """FFTW3 wisdom-file planning — paths, profile list, install helper.
 
-Shared between:
+CLI-only: the standalone TUI screen for this was deleted (Task 2 of the
+TUI reconciliation, 2026-08); the planner now has two callers, both of
+which shell out to the same CLI verb rather than importing this module
+directly:
 
-  * The TUI screen (``lib/sigmond/tui/screens/fft_wisdom.py``) — runs
-    the planner in a worker thread with live progress in a RichLog.
-  * The CLI verb (``smd admin wisdom plan``) — runs it in the foreground for
+  * The CLI verb itself (``smd admin wisdom plan``) — foreground run for
     operators on a tmux/screen session who want to disconnect and
     reconnect over an hours-long planning job.
+  * ``systemd/sigmond-wisdom.service`` — the first-boot oneshot Guided
+    bring-up enables, which execs ``smd admin wisdom plan`` when
+    ``/etc/fftw/wisdomf`` is absent.
 
-Both code paths call ``fftwf-wisdom`` with the same profile list so the
+Both callers land on the same ``fftwf-wisdom`` profile list, so the
 generated ``/etc/fftw/wisdomf`` is bit-identical regardless of which
 surface the operator chose.
 

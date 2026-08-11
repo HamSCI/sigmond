@@ -297,7 +297,7 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
 
 11. **TUI configurator** (`lib/sigmond/tui/`, Textual) — three-panel layout
     accessed via `smd tui`. Left: component tree with health indicators.
-    Center: various screens (topology, install, logs, validate, cpu_affinity,
+    Center: various screens (install, logs, validate, cpu_affinity,
     cpu_freq, environment, gpsdo, lifecycle, apply, components, backup, restore).
     Right: contextual help. Textual is a lazy import; core smd stays stdlib-only.
 
@@ -320,7 +320,6 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
 
 - **Overview** — system health dashboard with component status
 - **Install** — browse and install components from the catalog
-- **Topology** — enable/disable components with live validation
 - **Logs** — view and filter service logs (journal and file)
 - **CPU affinity** — visual core map with conflict detection
 - **CPU frequency** — monitor and control CPU frequencies
@@ -334,7 +333,6 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
   buttons; replaces the old separate Update screen.
 - **Backup/Restore** — backup and restore configuration
 - **RAC** — Remote Access Channel (frpc tunnel) configuration
-- **Config show** — dump effective coordination config
 - **Diag net** — network diagnostics for multicast readiness
 - **Radiod** — radiod status and channel monitoring
 
