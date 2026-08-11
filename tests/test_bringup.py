@@ -236,10 +236,21 @@ def test_stage4_remote_has_no_streaming_gate_but_still_staggers():
 
 def test_stage4_final_sweep_start_then_validate():
     s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
-    # last two stage-4 steps: an argument-less `smd start` sweep, then validate.
-    assert s4[-1].kind == 'checkpoint' and s4[-1].check == 'validate'
-    sweep = s4[-2]
-    assert sweep.kind == 'start' and '--components' not in sweep.argv
+    # Locate the argument-less `smd start` sweep by content, not by a fixed
+    # offset from the end: later Stage-4 steps (hs-uploader restart, the
+    # cache-pair CPU-exclusion `tune` step) legitimately run after it and
+    # before the final validate checkpoint.
+    sweep_idx = next(i for i, s in enumerate(s4)
+                     if s.kind == 'start' and s.argv[-1] == 'start'
+                     and '--components' not in s.argv)
+    validate_idx = next(i for i, s in enumerate(s4)
+                        if s.kind == 'checkpoint' and s.check == 'validate')
+    # The invariant that matters: the sweep (which starts every remaining
+    # enabled component) must run before the final validate checkpoint, so
+    # every client is up by the time validate runs.
+    assert sweep_idx < validate_idx
+    # validate is still the terminal Stage-4 step.
+    assert validate_idx == len(s4) - 1
 
 
 def test_plan_renders_site_profile_before_manifest():

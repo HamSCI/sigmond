@@ -48,9 +48,13 @@ def test_config_from_shared_keeps_radiod_block_and_prepends_instance():
     assert '[[radiod]]' in out
     assert 'status = "sigma-rx888mk2-status.local"' in out
     assert '[radiod.ft8]' in out
-    # and an [instance] block with the reporter id is prepended
+    # and an [instance] block with the reporter id is prepended, using the
+    # real (slash-form) reporter id — recorders stamp [instance].reporter_id
+    # verbatim into every uploaded spot row, so the path-safe '=' storage
+    # spelling must be converted back via display_reporter_id() before it
+    # lands here (see instance.py's _config_from_shared).
     assert '[instance]' in out
-    assert 'reporter_id = "AC0G=S"' in out
+    assert 'reporter_id = "AC0G/S"' in out
     assert out.index('[instance]') < out.index('[[radiod]]')
 
 
