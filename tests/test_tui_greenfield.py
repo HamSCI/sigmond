@@ -325,6 +325,171 @@ class HardwareGateConsolidationTests(unittest.TestCase):
         self.assertIs(GateCheck("x", None, "").presence, Presence.UNKNOWN)
 
 
+@unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
+class GreenfieldHardStopFramingTests(unittest.IsolatedAsyncioTestCase):
+    """The panel must not flatten two different consequences into one.
+
+    On a local-radiod profile bin/smd's cmd_bringup does
+    `if not _detect_local_sdr(): _err(...); return 1` BEFORE it calls
+    _bringup_hardware_gate and before it elevates -- no flag softens it.
+    The GPSDO/magnetometer rows abort only under --require-hardware, which
+    this wizard never passes.  An operator who reads "MISSING" as uniformly
+    advisory, presses Begin and gets an instant exit 1 is the failure this
+    pins.
+    """
+
+    async def test_missing_sdr_is_marked_hard_stop(self):
+        with _stack(_patched()):
+            app = _Harness.app()
+            async with app.run_test(size=(120, 80)) as pilot:
+                text = await _render(pilot, "#gf-equip")
+        self.assertIn("RX888 SDR", text)
+        self.assertNotIn("HARD STOP", text)   # present in the default fixture
+
+        rows = [("no", "RX888 SDR", "attach the RX888"),
+                ("no", "GPSDO (Leo Bodnar)", "attach the GPSDO on USB")]
+        with _stack(_patched(gate_rows=rows)):
+            app = _Harness.app()
+            async with app.run_test(size=(120, 80)) as pilot:
+                text = await _render(pilot, "#gf-equip")
+        self.assertIn("HARD STOP", text)
+        self.assertIn("exit immediately", text)
+        # ...and ONLY on the SDR row: the GPSDO is MISSING in the same render
+        # but must not carry the banner.
+        self.assertEqual(text.count("HARD STOP"), 1)
+        sdr_i, gpsdo_i = text.index("RX888 SDR"), text.index("GPSDO (Leo")
+        self.assertLess(sdr_i, text.index("HARD STOP"))
+        self.assertLess(text.index("HARD STOP"), gpsdo_i)
+
+    async def test_intro_states_advisory_and_unelevated_caveats(self):
+        with _stack(_patched()):
+            app = _Harness.app()
+            async with app.run_test(size=(120, 80)) as pilot:
+                await pilot.pause()
+                text = await _render(pilot, "#gf-equip-intro")
+        self.assertIn("HARD STOP", text)
+        self.assertIn("advisory", text)
+        self.assertIn("--require-hardware", text)
+        self.assertIn("DORMANT", text)
+        # The privilege caveat, and its direction: under-report only.
+        self.assertIn("unelevated", text)
+        self.assertIn("never less", text)
+
+    async def test_wizard_never_passes_require_hardware(self):
+        """The 'advisory' claim in the intro is only true while this holds."""
+        with _stack(_patched()):
+            app = _Harness.app()
+            async with app.run_test(size=(120, 80)) as pilot:
+                await pilot.pause()
+                argv = app.query_one("#gf")._build_argv(
+                    {"profile": "dasi2", "reporter": "AC0G/S", "grid": "EM38ww",
+                     "callsign": "", "psws": "", "remote": "",
+                     "with_optional": True}, dry_run=False)
+        self.assertNotIn("--require-hardware", argv)
+        self.assertNotIn("--skip-hardware-check", argv)
+
+
+class SdrRowLabelPinTests(unittest.TestCase):
+    def test_hard_stop_annotation_is_keyed_to_the_real_gate_label(self):
+        """The screen keys the HARD STOP banner off the SDR row's label.
+        If sigmond.hardware renames that row, fail here loudly rather than
+        silently dropping the warning an operator depends on."""
+        from sigmond import hardware
+        from sigmond.tui.screens import greenfield as gf
+
+        with mock.patch.object(hardware, "detect_local_sdr", lambda: False), \
+             mock.patch.object(hardware, "detect_gpsdo", lambda: False), \
+             mock.patch.object(hardware, "gpsdo_fix",
+                               lambda: (False, None, None)), \
+             mock.patch.object(hardware, "detect_magnetometer", lambda: False), \
+             mock.patch.object(hardware, "rm3100_responds", lambda: None):
+            checks = hardware.gate_checks(_PROFILES["dasi2"], True)
+        self.assertEqual(checks[0].label, gf._SDR_ROW_LABEL)
+
+
+@unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
+class GreenfieldStaleResultTests(unittest.IsolatedAsyncioTestCase):
+    """A superseded probe must never paint.
+
+    exclusive=True alone cannot carry this: a THREAD worker is not
+    interruptible, so a cancelled probe keeps running and can still deliver
+    its result.  The generation guard lives in the RENDERER, and these tests
+    drive the renderer directly so the proof does not depend on thread
+    timing.
+    """
+
+    async def test_stale_equipment_payload_is_dropped(self):
+        with _stack(_patched()):
+            app = _Harness.app()
+            async with app.run_test(size=(120, 80)) as pilot:
+                gf = app.query_one("#gf")
+                fresh = await _render(pilot, "#gf-equip")
+                stale_gen = gf._equip_gen - 1
+                gf._render_equipment({
+                    "gen": stale_gen, "profile": "dasi2",
+                    "rows": [("no", "CANNED-STALE-DEVICE", "stale hint")],
+                    "ts1": ("no", "stale ts1", "")})
+                after_stale = await _render(pilot, "#gf-equip")
+                # ...while a CURRENT-generation payload does paint, so the
+                # guard is not just "never renders anything".
+                gf._render_equipment({
+                    "gen": gf._equip_gen, "profile": "dasi2",
+                    "rows": [("no", "CANNED-CURRENT-DEVICE", "current hint")],
+                    "ts1": ("no", "current ts1", "")})
+                after_current = await _render(pilot, "#gf-equip")
+        self.assertNotIn("CANNED-STALE-DEVICE", after_stale)
+        self.assertEqual(fresh, after_stale)
+        self.assertIn("CANNED-CURRENT-DEVICE", after_current)
+
+    async def test_stale_readiness_payload_is_dropped(self):
+        with _stack(_patched()):
+            app = _Harness.app()
+            async with app.run_test(size=(120, 80)) as pilot:
+                gf = app.query_one("#gf")
+                fresh = await _render(pilot, "#gf-readiness")
+                gf._render_readiness({
+                    "gen": gf._readiness_gen - 1, "label": "STALE-LABEL",
+                    "report": dict(_READY, profile="CANNED-STALE-PROFILE")})
+                after = await _render(pilot, "#gf-readiness")
+        self.assertNotIn("CANNED-STALE-PROFILE", after)
+        self.assertNotIn("STALE-LABEL", after)
+        self.assertEqual(fresh, after)
+
+    async def test_arrowing_profiles_shows_the_last_selected_not_the_slowest(self):
+        """End-to-end: dasi2's probe is the slow one (as on a real host --
+        inventory --json, a 5 s NMEA read, an 8 s RM3100 poke).  Arrow
+        dasi2 -> base -> client and the panel must show CLIENT's rows."""
+        import asyncio
+        import time
+        from textual.widgets import RadioButton
+        from sigmond.tui.screens import greenfield as gf
+
+        def _slow(prof, local):
+            name = getattr(prof, "name", "?")
+            if name == "dasi2":
+                time.sleep(0.6)          # lands LAST
+            return [("no", f"CANNED-{name}-DEVICE", f"attach {name} hardware")]
+
+        mgrs = _patched()
+        with _stack(mgrs), mock.patch.object(gf, "_gate_checks", _slow):
+            app = _Harness.app()
+            async with app.run_test(size=(120, 80)) as pilot:
+                await pilot.pause()      # dasi2 probe launched on mount
+                app.query_one("#gf-prof-base", RadioButton).value = True
+                await pilot.pause()
+                app.query_one("#gf-prof-client", RadioButton).value = True
+                # Outlast the slow dasi2 probe so it has really delivered.
+                for _ in range(50):
+                    await pilot.pause()
+                    await asyncio.sleep(0.03)
+                text = await _render(pilot, "#gf-equip")
+                selected = app.query_one("#gf-profile").pressed_button.id
+        self.assertEqual(selected, "gf-prof-client")
+        self.assertIn("CANNED-client-DEVICE", text)
+        self.assertNotIn("CANNED-dasi2-DEVICE", text)
+        self.assertNotIn("CANNED-base-DEVICE", text)
+
+
 class _stack:
     """Enter a tuple of context managers as one."""
 
