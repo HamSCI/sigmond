@@ -98,9 +98,10 @@ def cmd_timing_show(args) -> int:
         avail = ",".join(snap.t_level_available or []) or "-"
         wit = ",".join(snap.t_level_witnesses or []) or "-"
         print(f"  tier       {snap.t_level_active or '(none)'}   "
-              f"(available: {avail} · witnesses: {wit})")
-        print(f"  offset     {format_offset_ns(snap.rtp_to_utc_offset_ns)}    "
-              f"sigma {format_sigma_ns(snap.sigma_ns)}")
+              f"(available: {avail} | witnesses: {wit})")
+        line = (f"  offset     {format_offset_ns(snap.rtp_to_utc_offset_ns)}    "
+                f"sigma {format_sigma_ns(snap.sigma_ns)}")
+        print(line.replace("\u00b5s", "us"))
         if snap.governor_radiod:
             print(f"  governor   {snap.governor_radiod}")
         if snap.stations_contributing:
