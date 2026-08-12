@@ -1,6 +1,10 @@
 # Host capacity planning — design discussion
 
 **Status:** open design discussion, no policy decisions yet.
+**See also:** [CAPACITY-MEASUREMENT-PLAN.md](CAPACITY-MEASUREMENT-PLAN.md) —
+the executable measurement program that answers the open questions below with
+numbers, including the zero-packet-loss acceptance criterion and the
+fix-in-place vs. split-the-architecture decision gate.
 **Audience:** Rob, Michael — and future contributors arriving cold.
 **Why this exists:** writing it down so we can think about it
 together rather than re-derive it under pressure each time a host
