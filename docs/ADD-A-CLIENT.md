@@ -9,6 +9,12 @@ what file to touch and points to [CLIENT-CONTRACT.md](CLIENT-CONTRACT.md)
 for the rules behind it.  When in doubt, copy `psk-recorder/` — it's
 the canonical reference for a v0.8-conformant client.
 
+If you are standing up a **short-notice client for a one-off event** (eclipse,
+meteor shower, eruption), read
+[EVENT-CLIENT-PLAYBOOK.md](EVENT-CLIENT-PLAYBOOK.md) first — it covers the design
+decisions (capture-first, channel envelope, load budgeting) that this checklist
+assumes you have already made.
+
 If you're _operating_ sigmond rather than authoring a client, you want
 [install-quickstart.md](install-quickstart.md) instead.
 
