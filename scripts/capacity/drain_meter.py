@@ -97,9 +97,15 @@ def main(argv):
     rt = _realtime()
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # SO_RCVBUFFORCE (CAP_NET_ADMIN) is the only way past net.core.rmem_max,
+    # but CPython does not expose the constant on every build -- hence the
+    # numeric fallback and the AttributeError catch. Missing that catch made
+    # the privileged path, the whole point of this rewrite, crash on first
+    # use while the unprivileged path kept working.
+    _force = getattr(socket, "SO_RCVBUFFORCE", 33)
     try:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUFFORCE, WANT_RCVBUF)
-    except (PermissionError, OSError):
+        s.setsockopt(socket.SOL_SOCKET, _force, WANT_RCVBUF)
+    except (AttributeError, PermissionError, OSError):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, WANT_RCVBUF)
     granted = s.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)   # Linux reports 2x
     s.bind(("", port))
@@ -107,9 +113,14 @@ def main(argv):
                  struct.pack("4s4s", socket.inet_aton(dest), socket.inet_aton("0.0.0.0")))
     s.settimeout(5.0)
 
+    try:
+        rmem_max = int(open("/proc/sys/net/core/rmem_max").read())
+    except OSError:
+        rmem_max = 0
     sys.stderr.write(
         f"drain_meter: rcvbuf granted {granted//(1024*1024)} MB "
-        f"(requested {WANT_RCVBUF//(1024*1024)} MB), SCHED_FIFO={rt}\n")
+        f"(requested {WANT_RCVBUF//(1024*1024)} MB, "
+        f"net.core.rmem_max {rmem_max//(1024*1024)} MB), SCHED_FIFO={rt}\n")
     if granted < WANT_RCVBUF:
         sys.stderr.write(
             "  WARNING: kernel capped the buffer. Raise net.core.rmem_max, or run\n"
@@ -205,6 +216,21 @@ def verdict(rec):
     inst = rec["instrument"]
     losses = sorted(rec["seqlost"].values())
     reasons, bad = [], False
+
+    # No data is not a clean result. Without this, a wrong multicast group,
+    # a dead radiod or an IGMP failure all report VALID with a deficit of
+    # nothing -- the most dangerous possible output from an instrument whose
+    # entire job is to notice absence.
+    if not rec.get("packets") or not rec.get("cps"):
+        return {"verdict": "INCONCLUSIVE — no packets received",
+                "reasons": ["received %d packets on the group; check the "
+                            "multicast address, radiod, and IGMP snooping "
+                            "before reading anything into this run"
+                            % (rec.get("packets") or 0)]}
+    if min((len(v) for v in rec["cps"].values()), default=0) < 3:
+        return {"verdict": "INCONCLUSIVE — too few checkpoints",
+                "reasons": ["fewer than 3 minute-checkpoints per SSRC; the "
+                            "rate fit needs a longer run"]}
 
     if inst["socket_drops"]:
         bad = True
