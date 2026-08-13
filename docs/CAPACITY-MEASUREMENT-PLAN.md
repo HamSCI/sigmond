@@ -59,6 +59,34 @@ USB-layer loss, because samples dropped *before* radiod forms a packet produce a
 *step*, not a gap. Any capacity work that measures sequence gaps will conclude
 everything is fine right up until it isn't.
 
+**And the instrument itself can lie in the other direction.** On 2026-08-13 a
+second 2 h drain run reported deficits 132% worse than the first, with 35,236 RTP
+sequence losses where the first run had zero. It was not radiod. The per-channel
+losses were **5871, 5877, 5872, 5871, 5874, 5871** — six independent channels
+agreeing to 0.1%, which is the fingerprint of a *receiver-side* socket overflow
+discarding whatever arrives, not of a source dropping samples. (Genuine
+radiod-side deficits differ across channels by ~80%.) `Udp RcvbufErrors` on the
+host confirmed it, and the context sampler showed why: mean load 7.39 with
+wspr-recorder at 107% CPU, against ~11% when the run started. A 16 MB
+`SO_RCVBUF` was not enough under that load.
+
+So the measuring tool starves on exactly the load it exists to measure, and
+reports phantom loss when it does. **Both failure modes must be fixed before
+Phase 1 produces a number anyone should act on:**
+
+* a much larger `SO_RCVBUF`, and `SCHED_FIFO` on the listener
+* per-run `RcvbufErrors` deltas recorded beside the deficit, so a starved run
+  **declares itself** instead of masquerading as radiod loss
+* per-channel loss spread reported as a first-class output — uniformity across
+  channels is the tell that the reading is the instrument's, not the source's
+
+A corollary for Phase 3, which stops clients one at a time: any A/B taken hours
+apart is confounded by decode load that swings by an order of magnitude across
+the day. Either randomise and interleave the A and B conditions, or record the
+load alongside every measurement and discard runs that are not comparable. The
+2026-08-13 pair had to be discarded on exactly this ground — the fusion logging
+change it was meant to evaluate remains unmeasured.
+
 ---
 
 ## Phase 1 — Build the margin meter
