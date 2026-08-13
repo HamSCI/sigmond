@@ -80,6 +80,20 @@ Phase 1 produces a number anyone should act on:**
 * per-channel loss spread reported as a first-class output — uniformity across
   channels is the tell that the reading is the instrument's, not the source's
 
+**Known recurring load events, which any measurement window must dodge or
+account for** (found 2026-08-13 while clearing the decks):
+
+* `grape-daily.service` — fires **01:01 UTC daily**, runs ~3.5 h wall for
+  **1 h 47 min CPU and a 2.6 GB memory peak**. It overlapped 72 of drain run
+  2's 120 minutes. Note the honest limit of that observation: load1 averaged
+  8.04 in the 53 minutes *before* it started and 7.01 after, so it is **not**
+  the dominant driver and does not by itself explain that run's starvation.
+  It is a confound to control, not a culprit to blame.
+* `mag-recorder-upload.timer` — 03:07 UTC daily; small.
+* B4's idle-ish baseline sits around **load 7–8** with radiod at ~112% and
+  hf-timestd at ~91–141% CPU. Understanding that floor is arguably Phase 2's
+  real question, ahead of measuring anything added on top.
+
 A corollary for Phase 3, which stops clients one at a time: any A/B taken hours
 apart is confounded by decode load that swings by an order of magnitude across
 the day. Either randomise and interleave the A and B conditions, or record the
