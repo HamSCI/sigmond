@@ -52,6 +52,7 @@ Reference runs, including the invalid one — that is the point of keeping it.
 |---|---|
 | `2026-08-12T2143Z-run1-fusion-info.json` | **VALID.** 2 h, deficits 0.95–1.72 s across 6 SSRCs (133–241 ppm), **zero** sequence loss, 96–99% arriving in ~30 discrete bursts. Deficits differ by 80% across channels — the source-side signature. |
 | `2026-08-13T0008Z-run2-fusion-warning.json` | **INVALID.** Deficits 2.83–3.27 s looked 132% worse, with 35,236 sequence losses. Per channel: 5871, 5877, 5872, 5871, 5874, 5871 — uniform to 0.1%. The meter's 16 MB buffer overflowed; radiod was not at fault. |
+| `2026-08-13T2023Z-run3-post-memory-fixes.json` | **VALID.** 2 h after the memory work (~1.7 GB reclaimed: VSCode session, hot-tier sizing, ring sizing). Deficit **0.08-0.32 s, 12-45 ppm** — down ~80% from run 1 — with a **median per-minute deficit of -0.00018 s**, i.e. zero. Zero radiod RTP↔GPS steps and zero OOM kills across the window. Shows 2001 uniform "sequence loss" per channel that costs no samples (2001 packets would be 13.4 s of audio; measured deficit is 0.3 s) — a sequence discontinuity, not loss. |
 | `2026-08-13T0008Z-run2-host-context.log` | Load, context switches, IRQ rate and per-client CPU each minute of run 2: mean load 7.39, wspr-recorder 107% CPU. Why the buffer overflowed. |
 
 Run 2 was intended as an A/B of an hf-timestd logging change (INFO → WARNING,

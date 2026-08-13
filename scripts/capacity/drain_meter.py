@@ -250,12 +250,59 @@ def verdict(rec):
                        "this meter; see socket_drops for that.")
     if len(losses) >= 3 and losses[-1] > 0:
         spread = (losses[-1] - losses[0]) / max(losses[-1], 1)
-        if spread < UNIFORMITY_FRAC:
+        # Does the sequence loss actually cost samples? A gap in sequence
+        # numbers that leaves the sample count intact is a discontinuity,
+        # not loss -- a renumbering, a reorder, or our own accounting. The
+        # 2026-08-13 clean baseline showed exactly 2001 "lost" packets on
+        # all six channels, which at 160 samples/packet would be 13.4 s of
+        # audio, against a measured deficit of 0.08-0.32 s. Nothing was
+        # missing. Uniformity alone had already mis-called two earlier runs;
+        # this is the check that distinguishes them.
+        deficits = []
+        for k, cps in rec["cps"].items():
+            if len(cps) < 3:
+                continue
+            t0, y0 = cps[0]; t1, y1 = cps[-1]
+            span = t1 - t0
+            if span <= 0:
+                continue
+            nominal = round(((y1 - y0) / span) / 1000) * 1000 or 12000
+            deficits.append((nominal * span - (y1 - y0)) / nominal)
+        pkts = rec.get("packets") or 0
+        elapsed = rec.get("elapsed") or 1
+        per_ssrc_rate = pkts / elapsed / max(len(losses), 1)
+        samples_per_pkt = (nominal / per_ssrc_rate) if per_ssrc_rate else 0
+        implied = losses[-1] * samples_per_pkt / max(nominal, 1)
+        measured = max(deficits) if deficits else 0.0
+        accounted = implied <= max(measured * 2.0, 0.05)
+
+        if inst.get("socket_drops") is None:
+            # Pre-instrumentation run: our own drop counter was not recorded,
+            # and nothing else distinguishes a starved meter from a benign
+            # sequence discontinuity. Both show uniform loss with implied
+            # samples far exceeding the measured deficit -- run 2 (starved,
+            # 3.3 s deficit) and the 2026-08-13 clean baseline (0.08-0.32 s)
+            # are indistinguishable from these fields alone. Say so rather
+            # than guess; a wrong VALID is worse than an honest shrug.
+            reasons.append(
+                f"per-channel loss uniform ({losses[0]}..{losses[-1]}) but this run "
+                "predates socket_drops instrumentation, so starvation cannot be "
+                "ruled in or out from the data. Judge it by hand.")
+            return {"verdict": "INDETERMINATE — no socket_drops recorded",
+                    "reasons": reasons}
+        if not accounted:
+            reasons.append(
+                f"per-channel sequence loss is uniform ({losses[0]}..{losses[-1]}) "
+                f"but costs no samples: {losses[-1]} packets would be {implied:.1f} s "
+                f"of audio, measured deficit is {measured:.3f} s. That is a sequence "
+                "DISCONTINUITY (renumbering/reorder/accounting), not loss.")
+        elif spread < UNIFORMITY_FRAC:
             bad = True
             reasons.append(
                 f"per-channel loss is uniform to {spread*100:.1f}% "
-                f"({losses[0]}..{losses[-1]} across {len(losses)} channels) — that is a "
-                "receiver-side overflow signature, not source loss")
+                f"({losses[0]}..{losses[-1]} across {len(losses)} channels) and the "
+                f"samples ARE missing ({implied:.1f} s implied, {measured:.3f} s "
+                "measured) — receiver-side overflow signature")
         else:
             reasons.append(f"per-channel loss spread {spread*100:.0f}% — consistent with "
                            "source-side loss, not a uniform receiver overflow")
