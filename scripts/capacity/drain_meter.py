@@ -237,9 +237,17 @@ def verdict(rec):
         reasons.append(f"socket drop counter advanced by {inst['socket_drops']} "
                        "— the METER lost these, not radiod")
     if inst["udp_rcvbuf_errors_delta"]:
-        bad = True
-        reasons.append(f"system UDP RcvbufErrors +{inst['udp_rcvbuf_errors_delta']} "
-                       "during the run — a receiver on this host overflowed")
+        # Context, NOT a verdict. This counter is system-wide, so any other
+        # leaky socket on the box pins it high forever and would make every
+        # measurement "invalid". B4 has exactly that: an abandoned status
+        # socket in wspr-recorder (pid-local fd, 5 MB queue permanently
+        # full) discarding ~24 status packets/s that nobody reads. Our own
+        # socket's drop counter is the precise signal; this one only says
+        # somebody on the host is overflowing.
+        reasons.append(f"note: system-wide UDP RcvbufErrors +"
+                       f"{inst['udp_rcvbuf_errors_delta']} during the run — "
+                       "some receiver on this host overflowed. Not necessarily "
+                       "this meter; see socket_drops for that.")
     if len(losses) >= 3 and losses[-1] > 0:
         spread = (losses[-1] - losses[0]) / max(losses[-1], 1)
         if spread < UNIFORMITY_FRAC:
