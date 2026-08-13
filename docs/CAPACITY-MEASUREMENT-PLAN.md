@@ -31,6 +31,59 @@ What we cannot keep doing is accommodating a loss whose cause we have not measur
 
 ---
 
+## ⚡ 2026-08-13: the premise is wrong — it is memory, not the USB deadline
+
+Phase 2's first real baseline (2 h, privileged meter, production load) found
+the loss and it is not what this plan was built to look for.
+
+**The mechanism.** radiod's own log, at the one minute that carried 8.68 s of
+the run's 10.9 s deficit:
+
+    RX888 RTP<->GPS offset STEPPED +3.483 s over 3.5 s
+    (~451,340,000 samples missing; USB xfer failures +0)
+
+`USB xfer failures +0`. The drain was working. radiod could not get
+scheduled, because the kernel was OOM-killing `timestd-core-recorder` —
+**15 times on 2026-08-13 alone, roughly hourly**.
+
+**The shape.** Median per-minute deficit **0.0000 s**. Outside the stalls
+radiod is perfect. This is rare catastrophes, not the continuous 133-241 ppm
+drip the earlier runs appeared to show — and it retroactively puts those
+readings in doubt, since a handful of OOM stalls in a 2 h window looks
+exactly like a steady rate when you only measure the endpoints.
+
+**It is not a leak.** `timestd-core-recorder`'s 3.14 GB peak is its designed
+working set: 9 x 220 MB rings + ~1.3 GB baseline, documented in its unit
+file. A previous operator already tried `MemoryHigh=3G` and removed it —
+throttling made the recorder miss its 180 s watchdog. Do not re-try that.
+
+**The arithmetic.** Per-service cgroup peaks, measured:
+
+| | |
+|---|---|
+| Sum of service **peaks** | **10.73 GB** |
+| Dev tooling on the box (vscode-server + extension) | 1.15 GB |
+| **VM RAM** | **9.32 GB** |
+| Swap | none |
+| Sum of declared `MemoryMax` caps | ~28.6 GB |
+
+Current usage is only 4.72 GB, which is why it survives most hours. When
+several services peak together it does not. And the caps are individually
+sane but collectively meaningless: **nothing enforces a total**, which is
+this plan's own thesis arriving in the memory dimension instead of the CPU
+one.
+
+**No headroom above.** The Proxmox host (192.168.1.244) has 11 GB total,
+0 available, and hands 9831 MB to the single VM. The VM cannot be given
+more without more physical RAM.
+
+So Phase 5b's decision gate is reachable earlier and by a different route
+than expected: on this hardware the DASI2 client set does not fit in RAM,
+and no amount of URB depth, IRQ affinity or CAT partitioning changes that.
+Phases 2-5 below should be re-read with memory as a first-class axis.
+
+---
+
 ## The missing primitive
 
 Everything downstream — cost per client, admission control, tier policy — depends on
