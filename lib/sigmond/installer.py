@@ -522,7 +522,7 @@ def _clone_source_only_deps(
             continue
         print(f"  cloning source dep {dep_name} from {dep.repo}")
         try:
-            clone_repo(dep, base=base)
+            clone_repo(dep, base=base, ref=dep.pin)
         except RuntimeError as exc:
             print(f"  warning: could not clone {dep_name}: {exc}",
                   file=sys.stderr)
@@ -552,7 +552,7 @@ def install_client(
     if not entry.install_script and not entry.repo:
         return False
 
-    repo_dir = clone_repo(entry, pull_if_exists=pull)
+    repo_dir = clone_repo(entry, pull_if_exists=pull, ref=entry.pin)
     _clone_source_only_deps(entry, catalog, dry_run=dry_run)
     script = find_install_script(entry, repo_dir)
     if script is None:

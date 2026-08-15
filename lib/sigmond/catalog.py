@@ -94,6 +94,15 @@ class CatalogEntry:
     # not hardware-gated.  Declared here so the gated set lives in config, not
     # code (harmonize._hardware_gated_registry).
     hardware_gated: Optional[str] = None
+    pin: Optional[str] = None
+    """Exact commit/tag to build, or None to track the default branch.
+
+    installer.clone_repo/_checkout_ref have always been able to honour a
+    pin -- nothing ever passed one, so every install built whatever the
+    component's ``main`` happened to be at install time and two images
+    built weeks apart were different software.  Pinning matters most for
+    ka9q-radio, whose wire-protocol headers ka9q-python and ka9q-web
+    adapt to."""
 
     def is_installed(self) -> bool:
         """Best-effort check that this entry is installed on the local host.
@@ -191,6 +200,7 @@ def _entry_from_toml_block(name: str, cfg: dict) -> CatalogEntry:
         topology_alias=cfg.get('topology_alias') or None,
         start_priority=int(raw_priority) if raw_priority is not None else None,
         hardware_gated=cfg.get('hardware_gated') or None,
+        pin=cfg.get('pin') or None,
     )
 
 
@@ -216,6 +226,8 @@ def _entry_to_block(entry: CatalogEntry) -> dict:
         block['start_priority'] = entry.start_priority
     if entry.hardware_gated is not None:
         block['hardware_gated'] = entry.hardware_gated
+    if entry.pin is not None:
+        block['pin'] = entry.pin
     return block
 
 

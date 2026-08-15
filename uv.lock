@@ -22,8 +22,8 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.10.0"
-source = { directory = "../ka9q-python" }
+version = "3.24.0"
+source = { editable = "../ka9q-python" }
 dependencies = [
     { name = "numpy" },
 ]
@@ -31,11 +31,12 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=1.24.0" },
+    { name = "opuslib", marker = "extra == 'opus'", specifier = ">=3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.50" },
 ]
-provides-extras = ["dev", "tui"]
+provides-extras = ["dev", "tui", "opus"]
 
 [[package]]
 name = "linkify-it-py"
@@ -239,6 +240,8 @@ source = { editable = "." }
 [package.optional-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "rich" },
+    { name = "textual" },
 ]
 tui = [
     { name = "ka9q-python" },
@@ -253,15 +256,17 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ka9q-python", marker = "extra == 'tui'", directory = "../ka9q-python" },
+    { name = "ka9q-python", marker = "extra == 'tui'", editable = "../ka9q-python" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "rich", marker = "extra == 'dev'", specifier = ">=13.0.0" },
     { name = "rich", marker = "extra == 'tui'", specifier = ">=13.0.0" },
+    { name = "textual", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=8.0.0" },
 ]
 provides-extras = ["tui", "dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ka9q-python", directory = "../ka9q-python" }]
+dev = [{ name = "ka9q-python", editable = "../ka9q-python" }]
 
 [[package]]
 name = "textual"

@@ -24,6 +24,17 @@
 kind            = "server"
 description     = "ka9q-radio SDR daemon — receives and multicasts RF channels"
 repo            = "https://github.com/ka9q/ka9q-radio"
+# Upstream release 2026.08.15-1-trixie1.  Pinned because ka9q-radio's
+# wire-protocol headers are what ka9q-python and ka9q-web adapt to, and
+# upstream moves fast — the 165 commits between our previous build and
+# this one carried a `struct channel` -> `chan_t` rename and a rework of
+# the output-filter stall path.  Unpinned, two images built weeks apart
+# are different software with nothing to say so.
+# Verified against this tree: ka9q-python's sync_types.py reports
+# types.py in sync, src/status.h byte-identical (118 tags).
+# ⚠ NOT ka9q_radio_compat's value — that file tracks our merge commit,
+# which exists only on a personal fork and is unreachable from upstream.
+pin             = "cd44bbdd"
 uses            = []
 contract        = ""                                  # not contract-conformant
 install_script  = ""                                  # built natively (apt deps + make install)
