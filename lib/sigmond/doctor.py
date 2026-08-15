@@ -55,6 +55,29 @@ class Finding:
 OWNERSHIP_SKIP_DIRS = ('venv',)
 
 
+def component_checkouts(base) -> list:
+    """Component checkouts under ``base``, skipping anything unreadable.
+
+    ``/opt/git/sigmond`` contains entries the invoking user cannot stat
+    (``.ssh``), and on Python 3.13 ``Path.exists()`` propagates
+    PermissionError rather than returning False — so a naive scan died
+    with a traceback on a 3.13 host while working on 3.11.  A diagnostic
+    has to survive the very permission problems it exists to report.
+    """
+    out = []
+    try:
+        entries = sorted(Path(base).iterdir())
+    except OSError:
+        return out
+    for d in entries:
+        try:
+            if (d / '.git').exists():
+                out.append(d)
+        except OSError:
+            continue
+    return out
+
+
 def foreign_owned(root, expected_uid: int, limit: int = 0,
                   skip_dirs: tuple = OWNERSHIP_SKIP_DIRS) -> list:
     """Paths under ``root`` not owned by ``expected_uid``.

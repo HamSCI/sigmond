@@ -2893,7 +2893,8 @@ def cmd_doctor(args) -> int:
     import subprocess
     from pathlib import Path
     from sigmond.doctor import (
-        foreign_owned, git_state, venv_skew, Finding, summarise,
+        component_checkouts, foreign_owned, git_state, venv_skew,
+        Finding, summarise,
     )
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
@@ -2902,8 +2903,7 @@ def cmd_doctor(args) -> int:
         return 1
 
     findings = []
-    repos = sorted(d for d in base.iterdir()
-                   if (d / '.git').exists())
+    repos = component_checkouts(base)
 
     for d in repos:
         name = d.name

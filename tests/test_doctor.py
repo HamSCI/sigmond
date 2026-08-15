@@ -26,11 +26,13 @@ instead of surfacing one failed command at a time.
 """
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from sigmond.doctor import (
-    foreign_owned, git_state, venv_skew, Finding, summarise,
+    component_checkouts, foreign_owned, git_state, venv_skew,
+    Finding, summarise,
 )
 
 
@@ -220,3 +222,28 @@ def test_inspecting_a_repo_does_not_write_the_index(repo):
     git_state(repo)
 
     assert (idx.read_bytes(), idx.stat().st_mtime_ns) == before
+
+
+def test_an_unreadable_entry_does_not_crash_the_scan(tmp_path, monkeypatch):
+    """`/opt/git/sigmond/.ssh` is not readable by the invoking user, and on
+    Python 3.13 `Path.exists()` propagates PermissionError rather than
+    returning False — so `smd doctor` died with a traceback on B4 while
+    working fine on B3 (3.11).  A diagnostic must survive the very
+    permission problems it exists to report.
+    """
+    (tmp_path / "good").mkdir()
+    (tmp_path / "good" / ".git").mkdir()
+    (tmp_path / "unreadable").mkdir()
+
+    real_exists = Path.exists
+
+    def boom(self, *a, **kw):
+        # Match the entry precisely: pytest's tmp_path embeds the test
+        # name, so a substring check fires for every path under it.
+        if self.parent.name == "unreadable" or self.name == "unreadable":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "exists", boom)
+
+    assert [d.name for d in component_checkouts(tmp_path)] == ["good"]
