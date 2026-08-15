@@ -2874,6 +2874,122 @@ def cmd_add(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    """Report deploy-tree damage: ownership, git state, venv skew.
+
+    Each check corresponds to something that blocked the DASI002 update
+    on 2026-08-15, discovered one failed command at a time.  Ownership is
+    the only class --fix repairs: the correct owner is unambiguous (the
+    checkout's own) and the repair is idempotent.  A dirty tree may be a
+    real uncommitted fix — it was on DASI002 — so it is reported and left
+    to a human.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('doctor: sigmond library not importable')
+        return 1
+
+    import os
+    import shutil
+    import subprocess
+    from pathlib import Path
+    from sigmond.doctor import (
+        foreign_owned, git_state, venv_skew, Finding, summarise,
+    )
+
+    base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+    if not base.is_dir():
+        _err(f'doctor: {base} not found')
+        return 1
+
+    findings = []
+    repos = sorted(d for d in base.iterdir()
+                   if (d / '.git').exists())
+
+    for d in repos:
+        name = d.name
+        try:
+            owner_uid = d.stat().st_uid
+        except OSError:
+            continue
+
+        bad = foreign_owned(d, owner_uid)
+        if bad:
+            try:
+                owner = d.owner()
+            except Exception:
+                owner = str(owner_uid)
+            findings.append(Finding(
+                name, 'ownership',
+                f'{len(bad)} path(s) not owned by {owner} '
+                f'(e.g. {bad[0].relative_to(d) if bad[0] != d else "."})',
+                fixable=True))
+            if getattr(args, 'fix', False):
+                if _need_root('doctor --fix'):
+                    return 1
+                shutil.chown  # noqa: B018 — imported for clarity
+                subprocess.run(['chown', '-R', f'{owner_uid}:{d.stat().st_gid}',
+                                str(d)], check=False)
+                _ok(f'{name}: repaired {len(bad)} path(s)')
+
+        st = git_state(d)
+        if st['error']:
+            findings.append(Finding(name, 'git', st['error']))
+            continue
+        if st['dirty']:
+            findings.append(Finding(
+                name, 'dirty',
+                f'{len(st["dirty"])} modified file(s): '
+                f'{", ".join(st["dirty"][:3])}'
+                f'{" ..." if len(st["dirty"]) > 3 else ""} '
+                f'(diff against origin before discarding)'))
+        if st['untracked']:
+            findings.append(Finding(
+                name, 'untracked',
+                f'{len(st["untracked"])} untracked path(s): '
+                f'{", ".join(st["untracked"][:3])}'
+                f'{" ..." if len(st["untracked"]) > 3 else ""} '
+                f'(harmless in place; `git add -A` would commit them)'))
+        if st['ahead']:
+            findings.append(Finding(
+                name, 'unpushed', f'{st["ahead"]} local commit(s) not on origin'))
+        if st['detached']:
+            findings.append(Finding(name, 'detached', 'HEAD is detached'))
+
+    # venv skew: which venvs do NOT take ka9q-python from the shared checkout
+    shared = base / 'ka9q-python'
+
+    def _probe(venv):
+        py = Path(venv) / 'bin' / 'python'
+        if not py.exists():
+            return None
+        code = ('import ka9q,os,importlib.metadata as m;'
+                'print(os.path.dirname(ka9q.__file__));'
+                'print(m.version("ka9q-python"))')
+        r = subprocess.run([str(py), '-c', code], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        parts = r.stdout.split()
+        return {'location': parts[0], 'version': parts[1] if len(parts) > 1 else '?'}
+
+    skew = venv_skew([str(d / 'venv') for d in repos], str(shared), _probe)
+    for sk in skew:
+        comp = Path(sk['venv']).parent.name
+        findings.append(Finding(
+            comp, 'venv-skew',
+            f'ka9q-python {sk["version"]} from {sk["location"]} — a private '
+            f'copy; updating {shared} will NOT reach it'))
+
+    ok, text = summarise(findings)
+    if ok:
+        _ok(text)
+        return 0
+    print(text)
+    fixable = sum(1 for f in findings if f.fixable)
+    if fixable and not getattr(args, 'fix', False):
+        _info(f'{fixable} finding(s) repairable with: smd doctor --fix')
+    return 1
+
+
 def cmd_enable(args) -> int:
     """Set [component.<name>].enabled=true in /etc/sigmond/topology.toml."""
     if _need_root('enable'):
@@ -16171,6 +16287,12 @@ def main() -> int:
     admin_sub = p_admin.add_subparsers(dest='admin_command')
 
     # enable — set [component.<name>].enabled = true in topology.toml
+    p = sub.add_parser('doctor',
+                       help='report deploy-tree damage (ownership, git, venv)')
+    p.add_argument('--fix', action='store_true',
+                   help='repair ownership (the only auto-repairable class)')
+    p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
+
     p = sub.add_parser('enable', help='enable component(s) in /etc/sigmond/topology.toml')
     p.add_argument('names', nargs='+', help='one or more component names')
 
@@ -17410,6 +17532,7 @@ def main() -> int:
             return 0
 
     dispatch = {
+        'doctor':  cmd_doctor,
         'enable':  cmd_enable,
         'disable': cmd_disable,
         'install': cmd_install,
