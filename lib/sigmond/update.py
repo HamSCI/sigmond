@@ -90,6 +90,15 @@ def plan_update(state: dict) -> list:
     for name in sorted(repos):
         info = repos[name] or {}
         dirty = info.get('dirty') or []
+        # git only refuses a fast-forward when the incoming commits touch a
+        # locally-modified file.  Holding on mere dirtiness blocks every box
+        # carrying generated churn — wspr-recorder's uv.lock is rewritten by
+        # install.sh on every host — and a tool that always says no gets
+        # ignored.  `incoming` absent means we could not tell: hold, because
+        # losing a real fix is worse than a spurious hold.
+        incoming = info.get('incoming')
+        if incoming is not None:
+            dirty = [f for f in dirty if f in set(incoming)]
         if dirty:
             # Never discard: on DASI002 this was a real uncommitted fix.
             refusals.append(Refusal(

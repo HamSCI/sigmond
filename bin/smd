@@ -2914,8 +2914,12 @@ def cmd_update(args) -> int:
             owner = d.owner()
         except Exception:
             owner = None
+        inc = subprocess.run(
+            ['git', '--no-optional-locks', '-C', str(d), 'diff',
+             '--name-only', 'HEAD..@{u}'], capture_output=True, text=True)
+        incoming = (inc.stdout.split() if inc.returncode == 0 else None)
         repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
-                         'owner': owner}
+                         'incoming': incoming, 'owner': owner}
 
     def _probe(venv):
         py = Path(venv) / 'bin' / 'python'
