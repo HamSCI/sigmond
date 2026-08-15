@@ -203,3 +203,20 @@ def test_venv_contents_are_not_flagged_as_foreign(tmp_path):
 
     assert "x" not in names          # inside venv/ — excluded
     assert "PKG-INFO" in names       # egg-info — still reported
+
+
+def test_inspecting_a_repo_does_not_write_the_index(repo):
+    """`git status` refreshes the stat cache and REWRITES .git/index — so a
+    diagnostic run as root leaves a root-owned index behind, recreating
+    the exact damage it exists to find.  Observed on DASI002: `.git/index`
+    reappeared immediately after `smd doctor --fix` repaired it.
+
+    `--no-optional-locks` is git's documented flag for read-only status
+    tools.  The index must be byte-identical after inspection.
+    """
+    idx = repo / ".git" / "index"
+    before = idx.read_bytes(), idx.stat().st_mtime_ns
+
+    git_state(repo)
+
+    assert (idx.read_bytes(), idx.stat().st_mtime_ns) == before

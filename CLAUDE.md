@@ -502,6 +502,17 @@ to drive fleet upgrades.
    install of a sibling (e.g. someone hand-ran `uv pip install ka9q-python`
    from PyPI rather than `uv sync`), it stops auto-tracking until the
    next `uv sync` cycle re-resolves through `[tool.uv.sources]`.
+   ⚠ **`hf-timestd`'s `deploy.sh` does NOT re-resolve siblings.**  It runs
+   `pip install -e .` for hf-timestd itself only, so it will neither create
+   nor repair the editable ka9q-python / hamsci-dsp links.  A venv that has
+   somehow acquired a *copy* of a sibling stays stale through any number of
+   `git pull` + `deploy.sh` cycles — observed on DASI002 2026-08-15, where
+   hf-timestd sat on ka9q-python 3.22.0 while four sibling venvs had already
+   moved to 3.24.0, and the new code was silently absent from the one service
+   that needed it most.  The repair is the consumer's `install.sh` (uv sync,
+   which honours `[tool.uv.sources]`), not pip.  `smd doctor` detects this
+   class as `venv-skew`.
+
 2. **Code loaded in memory.**  Python imports modules once at process
    start.  A long-running service still holds its start-time bytecode
    until restarted.  Identify stale services by `systemctl show
@@ -527,9 +538,9 @@ sudo systemctl restart <consumer>             # to load new in-memory code
 
 ### The shared install helper
 
-The nine consumer `install.sh` files (`hs-uploader`, `gpsdo-monitor`,
+The ten consumer `install.sh` files (`hs-uploader`, `gpsdo-monitor`,
 `mag-recorder`, `psk-recorder`, `wspr-recorder`, `codar-sounder`,
-`hfdl-recorder`, `hf-tec`, `meteor-scatter`) each source
+`hfdl-recorder`, `hf-tec`, `meteor-scatter`, `hf-timestd`) each source
 `scripts/install/ensure_uv.sh` from this repo via:
 
 ```bash

@@ -88,8 +88,14 @@ def git_state(repo_dir, run: Optional[Callable] = None) -> dict:
     leaves the judgement to a human.
     """
     repo_dir = Path(repo_dir)
+    # --no-optional-locks: `git status` normally refreshes the stat cache
+    # and REWRITES .git/index.  Run as root that leaves a root-owned index
+    # behind — recreating the very damage this tool exists to find.
+    # Observed on DASI002: .git/index reappeared immediately after
+    # `smd doctor --fix` had just repaired it.
     runner = run or (lambda *a: subprocess.run(
-        ['git', '-c', f'safe.directory={repo_dir}', '-C', str(repo_dir), *a],
+        ['git', '--no-optional-locks', '-c', f'safe.directory={repo_dir}',
+         '-C', str(repo_dir), *a],
         capture_output=True, text=True))
 
     probe = runner('rev-parse', '--is-inside-work-tree')
