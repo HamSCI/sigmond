@@ -182,3 +182,24 @@ def test_modified_and_untracked_are_reported_separately(repo):
 
     assert st["dirty"] == ["f"]
     assert st["untracked"] == ["junk"]
+
+
+def test_venv_contents_are_not_flagged_as_foreign(tmp_path):
+    """A venv legitimately belongs to its SERVICE user, not the checkout
+    owner — mag-recorder's venv alone produced 1330 false findings on the
+    first live run.  A diagnostic that cries wolf gets ignored.
+
+    Build metadata (egg-info, __pycache__) is NOT excluded: that is what
+    blocked `pip install` on DASI002 with "Cannot update time stamp of
+    directory 'ka9q_python.egg-info'".
+    """
+    (tmp_path / "venv" / "lib").mkdir(parents=True)
+    (tmp_path / "venv" / "lib" / "x").write_text("service-owned")
+    (tmp_path / "src.egg-info").mkdir()
+    (tmp_path / "src.egg-info" / "PKG-INFO").write_text("blocks installs")
+
+    bad = foreign_owned(tmp_path, os.getuid() + 12345)
+    names = {p.name for p in bad}
+
+    assert "x" not in names          # inside venv/ — excluded
+    assert "PKG-INFO" in names       # egg-info — still reported

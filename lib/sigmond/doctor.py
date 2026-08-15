@@ -46,7 +46,17 @@ class Finding:
     fixable: bool = False
 
 
-def foreign_owned(root, expected_uid: int, limit: int = 0) -> list:
+# A venv legitimately belongs to its SERVICE user rather than the
+# checkout owner, so scanning it is pure noise — mag-recorder's venv
+# alone produced 1330 false findings on the first live run.  Build
+# metadata is deliberately NOT excluded: an unwritable egg-info is what
+# blocked pip on DASI002 ("Cannot update time stamp of directory
+# 'ka9q_python.egg-info'").
+OWNERSHIP_SKIP_DIRS = ('venv',)
+
+
+def foreign_owned(root, expected_uid: int, limit: int = 0,
+                  skip_dirs: tuple = OWNERSHIP_SKIP_DIRS) -> list:
     """Paths under ``root`` not owned by ``expected_uid``.
 
     A missing tree is not an error — a component may simply not be
@@ -57,6 +67,7 @@ def foreign_owned(root, expected_uid: int, limit: int = 0) -> list:
     if not root.exists():
         return out
     for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for name in ('.', *dirnames, *filenames):
             p = Path(dirpath) if name == '.' else Path(dirpath) / name
             try:
