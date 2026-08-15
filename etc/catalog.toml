@@ -24,17 +24,15 @@
 kind            = "server"
 description     = "ka9q-radio SDR daemon — receives and multicasts RF channels"
 repo            = "https://github.com/ka9q/ka9q-radio"
-# Upstream release 2026.08.15-1-trixie1.  Pinned because ka9q-radio's
-# wire-protocol headers are what ka9q-python and ka9q-web adapt to, and
-# upstream moves fast — the 165 commits between our previous build and
-# this one carried a `struct channel` -> `chan_t` rename and a rework of
-# the output-filter stall path.  Unpinned, two images built weeks apart
-# are different software with nothing to say so.
-# Verified against this tree: ka9q-python's sync_types.py reports
-# types.py in sync, src/status.h byte-identical (118 tags).
-# ⚠ NOT ka9q_radio_compat's value — that file tracks our merge commit,
-# which exists only on a personal fork and is unreachable from upstream.
-pin             = "cd44bbdd"
+# NOT pinned here.  ka9q-radio's version is owned by ka9q-python's
+# `ka9q_radio_compat` (and its importable twin `ka9q.compat.KA9Q_RADIO_COMMIT`),
+# which `_install_radiod_native()` reads and checks out.  That pin means
+# something a catalog pin cannot — "the commit ka9q-python's types.py was
+# validated against" — and it is DERIVED from a real check of the 118 status
+# tags and the encoding enum, so bumping it requires the check to pass.  A
+# hand-edited pin here could drift from the wire contract silently.
+# Bump it with `sync_types.py --apply`, never by hand.
+# (Both existed briefly on 2026-08-15 and agreed only by coincidence.)
 uses            = []
 contract        = ""                                  # not contract-conformant
 install_script  = ""                                  # built natively (apt deps + make install)

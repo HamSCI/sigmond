@@ -36,13 +36,25 @@ def test_no_pin_means_track_the_default_branch():
     assert e.pin is None
 
 
-def test_the_shipped_catalog_pins_ka9q_radio():
-    """The component whose wire-protocol headers everything adapts to is
-    the one that must never float."""
+def test_ka9q_radio_is_NOT_catalog_pinned():
+    """ka9q-radio is pinned by ka9q-python's compat file, not here.
+
+    That pin means something this one cannot: "the commit ka9q-python's
+    types.py was validated against".  It is DERIVED from a real check —
+    the 118 status tags and the encoding enum — and bumping it requires
+    that check to pass.  A hand-edited catalog pin can drift from the
+    wire contract silently; the compat pin cannot.
+
+    Both existed briefly on 2026-08-15 and agreed only by coincidence,
+    which is the setup that bites later.  `_install_radiod_native()`
+    reads the compat pin, so that is the one that decides what gets
+    built, and this file must not appear to be a second authority.
+    """
     from pathlib import Path
     import tomllib
     root = Path(__file__).resolve().parents[1]
     cfg = tomllib.loads((root / 'etc' / 'catalog.toml').read_text())
 
-    entry = cfg['client']['ka9q-radio']
-    assert entry.get('pin'), "ka9q-radio must be pinned in etc/catalog.toml"
+    assert not cfg['client']['ka9q-radio'].get('pin'), (
+        "ka9q-radio must NOT be pinned here — ka9q-python's "
+        "ka9q_radio_compat owns that pin; two authorities will diverge")
