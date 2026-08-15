@@ -147,3 +147,37 @@ def test_every_action_is_verifiable():
     for a in plan:
         if isinstance(a, Action):
             assert a.verify, f'{a.kind} has no verification'
+
+
+def test_a_host_running_a_superset_of_the_pin_is_not_rebuilt():
+    """B4 runs our merge (7fca458a), which CONTAINS the pinned upstream
+    release plus two fork commits.  Exact-equality would order a pointless
+    rebuild that would also throw away the fork patches.
+
+    `contains_pin` is supplied by the caller (a merge-base check against
+    the local checkout), because the planner itself stays pure.
+    """
+    plan = plan_update(_state(radiod={'running': '7fca458a',
+                                      'pin': 'cd44bbdd',
+                                      'contains_pin': True}))
+
+    assert [a for a in plan if a.kind == 'rebuild-radiod'] == []
+
+
+def test_a_host_behind_the_pin_is_still_rebuilt():
+    plan = plan_update(_state(radiod={'running': '14d780af',
+                                      'pin': 'cd44bbdd',
+                                      'contains_pin': False}))
+
+    assert [a for a in plan if a.kind == 'rebuild-radiod']
+
+
+def test_an_unknown_running_commit_is_refused_not_guessed():
+    """If the running version cannot be read, saying "rebuild" is a guess.
+    B4 reported `running None` because radiod prints its banner to
+    stderr — a parse failure that masqueraded as a real finding."""
+    plan = plan_update(_state(radiod={'running': None, 'pin': 'cd44bbdd'}))
+
+    assert any(isinstance(a, Refusal) and a.target == 'ka9q-radio'
+               for a in plan)
+    assert [a for a in plan if getattr(a, 'kind', '') == 'rebuild-radiod'] == []

@@ -2948,16 +2948,30 @@ def cmd_update(args) -> int:
         try:
             r = subprocess.run(['/usr/local/sbin/radiod', '--version'],
                                capture_output=True, text=True)
-            for line in r.stdout.splitlines():
+            # The banner goes to STDERR; reading only stdout yields None,
+            # which reads as "needs rebuild" when it means "could not tell".
+            for line in (r.stdout + r.stderr).splitlines():
                 if 'commit hash' in line.lower():
-                    running = line.split(':')[-1].strip()[:len(pin)]
+                    running = line.split(':')[-1].strip()
         except OSError:
             running = None
+
+    # A host may deliberately run a SUPERSET of the pin (B4 runs our merge,
+    # which contains the pinned release plus two fork commits).  Exact
+    # equality would order a pointless rebuild that discards them.
+    contains_pin = False
+    if pin and running:
+        chk = subprocess.run(
+            ['git', '--no-optional-locks', '-C', str(base / 'ka9q-radio'),
+             'merge-base', '--is-ancestor', pin, running],
+            capture_output=True, text=True)
+        contains_pin = chk.returncode == 0
 
     state = {
         'repos': repos,
         'venv_skew': skew,
-        'radiod': {'running': running, 'pin': pin} if pin else {},
+        'radiod': ({'running': running, 'pin': pin,
+                    'contains_pin': contains_pin} if pin else {}),
         'wisdom_misses': plans_from_fft_log(),
     }
 

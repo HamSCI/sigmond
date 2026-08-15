@@ -121,7 +121,16 @@ def plan_update(state: dict) -> list:
         needs_restart = True
 
     radiod = state.get('radiod') or {}
-    if radiod.get('pin') and radiod.get('running') != radiod.get('pin'):
+    if radiod.get('pin') and radiod.get('running') is None:
+        # A parse failure is not a finding.  B4 reported `running None`
+        # because radiod prints its banner to STDERR, and that masqueraded
+        # as "needs rebuild".  Say so instead of guessing.
+        refusals.append(Refusal(
+            'ka9q-radio',
+            'could not read the running radiod version — refusing to guess '
+            'whether a rebuild is needed (the banner goes to stderr)'))
+    elif (radiod.get('pin') and radiod.get('running') != radiod.get('pin')
+            and not radiod.get('contains_pin')):
         actions.append(Action(
             'rebuild-radiod', 'ka9q-radio',
             detail=f'running {radiod.get("running")} != pin '
