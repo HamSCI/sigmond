@@ -177,6 +177,48 @@ qm set "$VMID" --cores "$VM_CORES" --sockets 1
 qm set "$VMID" --args "-smp ${VM_VCPU_COUNT},sockets=1,cores=${VM_CORES},threads=${VM_THREADS},maxcpus=${VM_VCPU_COUNT} -cpu host,topoext=on"
 log "qm set complete"
 
+# ─── radiod VM fence + KSM hold ───────────────────────────────────────────────
+# qemu's NON-vCPU threads (io_uring iou-wrk, the main loop) inherit the VM-wide
+# affinity and land on the very CPU pair radiod's threads are isolated onto.
+# io_uring spawns those threads at RUNTIME, so a one-shot fence decays — hence a
+# service that re-applies every 30 s.  It also holds KSM off: with a single VM
+# KSM merges ~76 pages out of billions scanned, and its TLB shootdowns hit
+# exactly the CPUs being protected.
+# Measured on AC0G-B4: the pair is worth ~3x on sample loss (30 s/day/channel
+# -> ~8 s/day/channel).  It was hand-applied there on 2026-08-14 and was NOT in
+# the image — so every DASI unit has been running without it.
+# Target = the CPUs OUTSIDE the VM's affinity, derived rather than hardcoded.
+FENCE_HI="${ISOLCPUS_RANGE##*-}"
+FENCE_LO=$((FENCE_HI + 1))
+HOST_CPUS="$(nproc)"
+if [ "$FENCE_LO" -le $((HOST_CPUS - 1)) ]; then
+    FENCE_CPUS="${FENCE_LO}-$((HOST_CPUS - 1))"
+    install -m 755 "$(dirname "$0")/radiod-vm-fence.sh" \
+        /usr/local/sbin/radiod-vm-fence.sh
+    cat > /etc/systemd/system/radiod-vm-fence.service <<FENCE
+[Unit]
+Description=Keep qemu non-vCPU threads off radiod's isolated CPUs, hold KSM off
+After=qemu.slice
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/radiod-vm-fence.sh ${VMID} ${FENCE_CPUS} 30
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+FENCE
+    systemctl daemon-reload
+    systemctl enable --now radiod-vm-fence.service >/dev/null 2>&1 \
+        && log "radiod-vm-fence armed (VM ${VMID} non-vCPU threads -> ${FENCE_CPUS}, KSM held off)" \
+        || log "WARNING: radiod-vm-fence failed to start"
+    # ksmtuned would turn KSM back on behind the fence's back.
+    systemctl disable --now ksmtuned >/dev/null 2>&1 || true
+else
+    log "radiod-vm-fence SKIPPED: VM affinity ${ISOLCPUS_RANGE} leaves no spare CPU on a ${HOST_CPUS}-CPU host"
+fi
+
 # Snapshot the working configuration alongside the originals.
 cp -p "$CONF" "${BACKUP_DIR}/${VMID}.conf.applied"
 date -Iseconds > "${BACKUP_DIR}/applied-on.txt"
