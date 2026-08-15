@@ -247,3 +247,27 @@ def test_an_unreadable_entry_does_not_crash_the_scan(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "exists", boom)
 
     assert [d.name for d in component_checkouts(tmp_path)] == ["good"]
+
+
+def test_tool_and_build_caches_are_not_flagged(tmp_path):
+    """B4's first run buried the real findings: 18460 paths for `.vscode`,
+    3080 for `dist`, 2340 for `.venv`, 1523 for `.ruff_cache`.  None of
+    those block a git operation or an install — they are editor and build
+    detritus whose ownership is irrelevant.
+
+    `.git` and `*.egg-info` stay in scope: a root-owned `.git/index` is
+    the signature of the bug this tool exists to find, and an unwritable
+    egg-info is what blocks pip.
+    """
+    for junk in ('.venv', '.vscode', '.ruff_cache', 'dist', '__pycache__'):
+        (tmp_path / junk).mkdir()
+        (tmp_path / junk / 'x').write_text('noise')
+    (tmp_path / '.git').mkdir()
+    (tmp_path / '.git' / 'index').write_text('signal')
+    (tmp_path / 'p.egg-info').mkdir()
+    (tmp_path / 'p.egg-info' / 'PKG-INFO').write_text('signal')
+
+    names = {p.name for p in foreign_owned(tmp_path, os.getuid() + 12345)}
+
+    assert 'index' in names and 'PKG-INFO' in names
+    assert 'x' not in names

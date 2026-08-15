@@ -47,12 +47,20 @@ class Finding:
 
 
 # A venv legitimately belongs to its SERVICE user rather than the
-# checkout owner, so scanning it is pure noise — mag-recorder's venv
-# alone produced 1330 false findings on the first live run.  Build
-# metadata is deliberately NOT excluded: an unwritable egg-info is what
-# blocked pip on DASI002 ("Cannot update time stamp of directory
-# 'ka9q_python.egg-info'").
-OWNERSHIP_SKIP_DIRS = ('venv',)
+# checkout owner, and editor/build caches belong to whoever last built.
+# Neither blocks a git operation or an install, and both bury the real
+# findings: B4's first run reported 18460 paths for `.vscode`, 3080 for
+# `dist`, 2340 for `.venv`, 1523 for `.ruff_cache`, and 1330 on DASI002
+# for mag-recorder's venv.
+# `.git` and `*.egg-info` are deliberately IN scope: a root-owned
+# `.git/index` is the signature of the bug this tool exists to find, and
+# an unwritable egg-info is what blocked pip on DASI002 ("Cannot update
+# time stamp of directory 'ka9q_python.egg-info').
+OWNERSHIP_SKIP_DIRS = (
+    'venv', '.venv',                      # belong to the service user
+    '.vscode', '.ruff_cache', '.pytest_cache', '.mypy_cache',
+    '__pycache__', 'dist', 'build', 'node_modules',   # tool/build detritus
+)
 
 
 def component_checkouts(base) -> list:
