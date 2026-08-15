@@ -2874,6 +2874,134 @@ def cmd_add(args) -> int:
     return 0
 
 
+def cmd_update(args) -> int:
+    """Plan (and optionally apply) a component update.  Safe to re-run.
+
+    Dry-run by default: prints the ordered steps and, for each, how to
+    VERIFY it actually happened — today's failures were uniformly of the
+    form "looked fine, wasn't done".
+
+    --apply performs the mechanical steps (pull, install, restart).  The
+    radiod rebuild and the FFTW wisdom run are printed as exact commands
+    rather than executed: both are long, both bounce acquisition, and
+    both deserve an operator watching.  That boundary is deliberate.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('update: sigmond library not importable')
+        return 1
+
+    import subprocess
+    from pathlib import Path
+    from sigmond.doctor import component_checkouts, git_state, venv_skew
+    from sigmond.wisdom import plans_from_fft_log
+    from sigmond.update import plan_update, Action, Refusal
+
+    base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+    repos = {}
+    for d in component_checkouts(base):
+        st = git_state(d)
+        if st['error']:
+            continue
+        behind = 0
+        r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
+                            'rev-list', '--count', 'HEAD..@{u}'],
+                           capture_output=True, text=True)
+        try:
+            behind = int(r.stdout.strip())
+        except ValueError:
+            behind = 0
+        try:
+            owner = d.owner()
+        except Exception:
+            owner = None
+        repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
+                         'owner': owner}
+
+    def _probe(venv):
+        py = Path(venv) / 'bin' / 'python'
+        if not py.exists():
+            return None
+        code = ('import ka9q,os,importlib.metadata as m;'
+                'print(os.path.dirname(ka9q.__file__));'
+                'print(m.version("ka9q-python"))')
+        r = subprocess.run([str(py), '-c', code], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        parts = r.stdout.split()
+        return {'location': parts[0], 'version': parts[1] if len(parts) > 1 else '?'}
+
+    shared = base / 'ka9q-python'
+    skew = [Path(s['venv']).parent.name for s in
+            venv_skew([str(d / 'venv') for d in component_checkouts(base)],
+                      str(shared), _probe)]
+
+    # radiod: compare the RUNNING binary against the catalog pin.
+    pin = running = None
+    try:
+        from sigmond.catalog import load_catalog
+        entry = load_catalog().get('ka9q-radio')
+        pin = getattr(entry, 'pin', None) if entry else None
+    except Exception:
+        pin = None
+    if pin and Path('/usr/local/sbin/radiod').exists():
+        # radiod may be absent (a client-only host, or a dev checkout).
+        try:
+            r = subprocess.run(['/usr/local/sbin/radiod', '--version'],
+                               capture_output=True, text=True)
+            for line in r.stdout.splitlines():
+                if 'commit hash' in line.lower():
+                    running = line.split(':')[-1].strip()[:len(pin)]
+        except OSError:
+            running = None
+
+    state = {
+        'repos': repos,
+        'venv_skew': skew,
+        'radiod': {'running': running, 'pin': pin} if pin else {},
+        'wisdom_misses': plans_from_fft_log(),
+    }
+
+    plan = plan_update(state)
+    if not plan:
+        _ok('host is current — nothing to do')
+        return 0
+
+    apply_ = getattr(args, 'apply', False)
+    print('' if apply_ else '(dry run — re-run with --apply)')
+    rc = 0
+    for step in plan:
+        if isinstance(step, Refusal):
+            _err(f'{step.target}: HELD — {step.reason}')
+            rc = 1
+            continue
+        print(f'\n  [{step.kind}] {step.target}')
+        if step.detail:
+            _info(step.detail)
+        _info(f'verify: {step.verify}')
+        if not apply_:
+            continue
+        if step.kind == 'pull':
+            r = subprocess.run(['runuser', '-u', step.run_as or 'root', '--',
+                                'git', '-C', str(base / step.target),
+                                'pull', '--ff-only'],
+                               capture_output=True, text=True)
+            (_ok if r.returncode == 0 else _err)(
+                f'{step.target}: {(r.stdout + r.stderr).strip().splitlines()[-1]}')
+        elif step.kind == 'install':
+            sh = base / step.target / 'scripts' / 'install.sh'
+            if not sh.exists():
+                sh = base / step.target / 'install.sh'
+            r = subprocess.run(['bash', str(sh)], capture_output=True, text=True)
+            (_ok if r.returncode == 0 else _err)(
+                f'{step.target}: install.sh exit {r.returncode}')
+        elif step.kind == 'restart':
+            _info('restart not automated here — bounce radiod, wait for it to '
+                  'settle, then the recorders')
+        else:
+            _info('run this step by hand (long-running; bounces acquisition)')
+    return rc
+
+
 def cmd_doctor(args) -> int:
     """Report deploy-tree damage: ownership, git state, venv skew.
 
@@ -16287,6 +16415,12 @@ def main() -> int:
     admin_sub = p_admin.add_subparsers(dest='admin_command')
 
     # enable — set [component.<name>].enabled = true in topology.toml
+    p = sub.add_parser('update',
+                       help='plan (and optionally apply) a component update')
+    p.add_argument('--apply', action='store_true',
+                   help='perform the mechanical steps (default: dry run)')
+    p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
+
     p = sub.add_parser('doctor',
                        help='report deploy-tree damage (ownership, git, venv)')
     p.add_argument('--fix', action='store_true',
@@ -17533,6 +17667,7 @@ def main() -> int:
 
     dispatch = {
         'doctor':  cmd_doctor,
+        'update':  cmd_update,
         'enable':  cmd_enable,
         'disable': cmd_disable,
         'install': cmd_install,
