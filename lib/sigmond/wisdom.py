@@ -24,12 +24,16 @@ rates that dominate planning time on x86 / Pi5.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 # Where the wisdom files live.  Radiod reads system-wide first, then
 # the app-specific fallback.  Sigmond plans into the system-wide path
 # because it survives package upgrades and is shared across any other
 # FFTW user on the host.
+# fftwf-wisdom transform mnemonic: [cr] [io] [fb] <size>.
+_PLAN_RE = re.compile(r'[cr][io][fb]\d+')
+
 WISDOM_FILE = Path('/etc/fftw/wisdomf')
 WISDOM_TMP  = Path('/etc/fftw/wisdomf.new')
 
@@ -54,7 +58,48 @@ FFT_WISDOM_PROFILES: tuple[str, ...] = (
     # Forward real FFTs.
     'rof1620000',   # RX888 MkII @  64.8 MHz, 20 ms block, overlap 5
     'rof3240000',   # RX888 MkII @ 129.6 MHz, 20 ms block, overlap 5  ← hours
+    # ── radiod's own channel-filter transforms ────────────────────────
+    # The list above is all `cob` (complex, OUT-of-place, BACKWARD) plus
+    # the two front-end `rof` sizes.  radiod also plans IN-PLACE forward
+    # (`cif`) and out-of-place forward (`cof`) transforms — filter.c
+    # encodes the mnemonic as complex / in-place-or-out / forward-or-
+    # backward / N — so those families were never planned at ALL.  On a
+    # miss radiod silently falls back to FFTW_ESTIMATE (filter.c:105-108):
+    # fast to plan, suboptimal forever, and invisible in startup time.
+    # These seven were observed falling back on AC0G-B4 2026-08-15 via
+    # /var/lib/ka9q-radio/fft.log, which radiod writes ONLY on a miss.
+    'cif300',  'cif512',  'cif600',  'cif2400',
+    'cof512',
+    'cob512',  'cob2400',
 )
+
+
+# radiod records every wisdom MISS here — and nothing else.  A non-empty
+# file means it is running estimate plans for those transforms right now,
+# which is the only way to observe the gap: planning stays fast either
+# way, so startup time proves nothing.
+FFT_MISS_LOG = Path('/var/lib/ka9q-radio/fft.log')
+
+
+def plans_from_fft_log(log: Path = FFT_MISS_LOG) -> list[str]:
+    """Distinct transform names radiod could not find in wisdom.
+
+    The authoritative top-up list: whatever is here is what the static
+    profiles above failed to cover on this host's actual channel set.
+    Absent file (radiod has never run) and blank/garbage lines are not
+    errors — they simply mean nothing to add.
+    """
+    try:
+        raw = log.read_text().split()
+    except OSError:
+        return []
+    seen, out = set(), []
+    for tok in raw:
+        if not _PLAN_RE.fullmatch(tok) or tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return out
 
 
 def install_wisdom(tmp: Path = WISDOM_TMP, dst: Path = WISDOM_FILE) -> None:
