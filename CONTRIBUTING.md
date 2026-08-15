@@ -42,6 +42,7 @@ between a host and its declared version is a defect.
 ## 3. Updating a host
 
 ```bash
+smd version         # what is actually installed here?
 smd doctor          # what is wrong here?
 smd doctor --fix    # repairs ownership only — never touches your edits
 smd update          # what would change? (dry run)
@@ -52,6 +53,12 @@ smd update --apply  # do the mechanical steps
 is safe to re-run and safe to schedule. It refuses rather than
 discarding when a local change collides with an incoming one — on
 DASI002 that local change was a real uncommitted fix.
+
+`smd version` reports the image string as *lineage* and the component
+commits *live from the checkouts*. Do not read
+`/etc/sigmond-appliance/version` on its own: firstboot writes it once and
+nothing updates it, so after an in-place update it states something
+false. DASI002 read `v3.20` while running v3.31-era components.
 
 Never prefix `smd` with `sudo`; it elevates itself.
 

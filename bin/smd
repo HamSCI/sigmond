@@ -2985,6 +2985,7 @@ def cmd_update(args) -> int:
         return 0
 
     apply_ = getattr(args, 'apply', False)
+    applied = set()
     print('' if apply_ else '(dry run — re-run with --apply)')
     rc = 0
     for step in plan:
@@ -3005,6 +3006,8 @@ def cmd_update(args) -> int:
                                capture_output=True, text=True)
             (_ok if r.returncode == 0 else _err)(
                 f'{step.target}: {(r.stdout + r.stderr).strip().splitlines()[-1]}')
+            if r.returncode == 0:
+                applied.add(f'pull {step.target}')
         elif step.kind == 'install':
             sh = base / step.target / 'scripts' / 'install.sh'
             if not sh.exists():
@@ -3012,12 +3015,65 @@ def cmd_update(args) -> int:
             r = subprocess.run(['bash', str(sh)], capture_output=True, text=True)
             (_ok if r.returncode == 0 else _err)(
                 f'{step.target}: install.sh exit {r.returncode}')
+            if r.returncode == 0:
+                applied.add(f'install {step.target}')
         elif step.kind == 'restart':
             _info('restart not automated here — bounce radiod, wait for it to '
                   'settle, then the recorders')
         else:
             _info('run this step by hand (long-running; bounces acquisition)')
+
+    # Record what was done.  Without this the host keeps asserting the
+    # image version it was installed with — the exact way DASI002 came to
+    # claim v3.20 while running v3.31-era components.  Only real work is
+    # recorded: an empty plan means nothing changed, and a history full of
+    # no-ops would be as uninformative as no history at all.
+    if apply_ and applied:
+        from datetime import datetime, timezone
+        from sigmond.provenance import record_update, HISTORY_FILE
+        record_update(HISTORY_FILE, {
+            'at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'what': 'smd update --apply: ' + ', '.join(sorted(applied)),
+        })
+        _info(f'recorded in {HISTORY_FILE} (see: smd version)')
     return rc
+
+
+def cmd_version(args) -> int:
+    """What is actually installed here — image lineage plus live commits.
+
+    `/etc/sigmond-appliance/version` is written once at install and never
+    updated, so DASI002 reported v3.20 while running v3.31-era components
+    it had been given in place that morning.  This prints the image string
+    as LINEAGE, next to component commits read live from the checkouts, so
+    a host that has moved says so instead of asserting a number that
+    stopped being true.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('version: sigmond library not importable')
+        return 1
+
+    from pathlib import Path
+    from sigmond.doctor import component_checkouts
+    from sigmond.provenance import (
+        image_lineage, component_versions, update_history, format_report,
+        IMAGE_VERSION_FILE, HISTORY_FILE,
+    )
+
+    base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+    radiod = None
+    try:
+        from sigmond.compat_pin import read_pin       # optional helper
+        radiod = {'pin': read_pin()}
+    except Exception:
+        pass
+
+    print(format_report(
+        lineage=image_lineage(IMAGE_VERSION_FILE),
+        components=component_versions(component_checkouts(base)),
+        history=update_history(HISTORY_FILE),
+        radiod=radiod))
+    return 0
 
 
 def cmd_doctor(args) -> int:
@@ -16439,6 +16495,10 @@ def main() -> int:
                    help='perform the mechanical steps (default: dry run)')
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
 
+    p = sub.add_parser('version',
+                       help='what is actually installed (image lineage + live commits)')
+    p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
+
     p = sub.add_parser('doctor',
                        help='report deploy-tree damage (ownership, git, venv)')
     p.add_argument('--fix', action='store_true',
@@ -17684,6 +17744,7 @@ def main() -> int:
             return 0
 
     dispatch = {
+        'version': cmd_version,
         'doctor':  cmd_doctor,
         'update':  cmd_update,
         'enable':  cmd_enable,
