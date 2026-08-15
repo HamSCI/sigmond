@@ -10,6 +10,14 @@ hf-tec, meteor-scatter) and future HamSCI clients.
 
 The CLI entry point is **`smd`**.
 
+## Contributing
+
+Human-facing working agreements — where work happens, how hosts get
+updated, pins, deploy-tree hygiene, PR expectations and graphify
+maintenance — live in [CONTRIBUTING.md](CONTRIBUTING.md).  This file is
+the assistant-facing companion; when the two overlap, CONTRIBUTING.md is
+the one a collaborator reads first.
+
 ## Authors
 
 - Rob Robinett (AI6VN, GitHub: rrobinett) 
