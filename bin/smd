@@ -93,6 +93,7 @@ import shutil
 import subprocess
 import textwrap
 import time
+import tomllib
 from typing import Optional
 
 # Bootstrap step 2 — add sibling lib/ to sys.path so `import sigmond`
@@ -2879,6 +2880,145 @@ def cmd_add(args) -> int:
     return 0
 
 
+def _editable_siblings(component_dir: Path) -> dict:
+    """{package_name: shared_checkout_path} for every editable path
+    dependency THIS component declares in its own pyproject.toml
+    [tool.uv.sources] — e.g. ka9q-python, hamsci-dsp, hs-uploader.
+
+    Read per-component from the consumer's own declaration rather than a
+    single hardcoded list shared by every caller: different consumers
+    declare different subsets (mag-recorder declares hamsci-dsp and
+    hs-uploader but not ka9q-python; wspr-recorder declares all three
+    plus callhash), and a newly-added sibling dependency is picked up
+    automatically the next time this runs, with no smd code change.
+
+    The shared path comes from the declared `path =` value, resolved
+    relative to this component's own checkout (normalized, not fully
+    symlink-resolved, matching how the venv-skew check has always
+    compared paths) — not assumed to equal `base / package_name`. The
+    convention happens to hold for every sibling today, but nothing
+    enforces it, and reading the real declared path costs nothing extra.
+
+    Returns {} for anything that can't be read as valid TOML — a missing
+    or malformed pyproject.toml here means "nothing declared", not
+    "crash the whole doctor/update run".
+    """
+    try:
+        data = tomllib.loads((component_dir / 'pyproject.toml').read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    sources = data.get('tool', {}).get('uv', {}).get('sources', {})
+    if not isinstance(sources, dict):
+        return {}
+    out = {}
+    for name, spec in sources.items():
+        if isinstance(spec, dict) and spec.get('editable') and spec.get('path'):
+            out[name] = Path(os.path.normpath(component_dir / spec['path']))
+    return out
+
+
+def _sibling_probe(package: str, component: str, unassessable: list):
+    """Build a `venv_skew`-compatible probe for one editable sibling
+    package in one component's venv.
+
+    Reads the real resolved `<module>.__file__`, not just install
+    metadata, so a non-editable copy at a right-looking path is still
+    caught — the same property Task 4's review verified for the
+    original ka9q-python-only probe this generalizes.
+    `importlib.metadata.distribution(name).read_text('top_level.txt')`
+    supplies the importable module name when it differs from the
+    distribution name (ka9q-python -> ka9q, the case that makes a
+    generic `import <name>` wrong); the PyPI hyphen->underscore
+    convention is the fallback for siblings where it doesn't
+    (hamsci-dsp -> hamsci_dsp, hs-uploader -> hs_uploader).
+
+    `venv_skew`'s own `probe` contract treats any falsy return as "not
+    applicable, skip" — it has no way to say "known, but broken". That
+    contract collapses two different situations: the package is
+    genuinely not installed in this venv (fine, skip), vs. package
+    metadata resolves but the import itself raises (e.g. a `.pth` file
+    pointing at a checkout that moved or was renamed — an editable
+    install left dangling, not a stale-but-working one). This probe
+    still returns a falsy value to `venv_skew` for both, but records the
+    second case into `unassessable` so the caller can report it as its
+    own "cannot assess" finding instead of letting it read as clean —
+    mirroring the same "cannot assess != healthy" principle already
+    applied to the manifest-drift check.
+    """
+    def probe(venv):
+        py = Path(venv) / 'bin' / 'python'
+        if not py.exists():
+            return None
+        code = (
+            'import sys, os, importlib, importlib.metadata as m\n'
+            f'name = {package!r}\n'
+            'try:\n'
+            '    dist = m.distribution(name)\n'
+            'except m.PackageNotFoundError:\n'
+            '    sys.exit(3)\n'
+            'top = None\n'
+            'try:\n'
+            '    txt = dist.read_text("top_level.txt")\n'
+            '    top = txt.strip().splitlines()[0] if txt else None\n'
+            'except Exception:\n'
+            '    top = None\n'
+            'top = top or name.replace("-", "_")\n'
+            'try:\n'
+            '    mod = importlib.import_module(top)\n'
+            '    loc = os.path.dirname(mod.__file__)\n'
+            'except Exception as e:\n'
+            '    print(str(e), file=sys.stderr)\n'
+            '    sys.exit(4)\n'
+            'print(loc)\n'
+            'print(dist.version)\n'
+        )
+        r = subprocess.run([str(py), '-c', code], capture_output=True, text=True)
+        if r.returncode == 3:
+            return None                      # not installed in this venv
+        if r.returncode != 0:
+            unassessable.append({
+                'component': component, 'package': package,
+                'detail': (r.stderr.strip() or r.stdout.strip()
+                          or f'probe exited {r.returncode}')[:200]})
+            return None
+        parts = r.stdout.split()
+        if len(parts) < 2:
+            unassessable.append({
+                'component': component, 'package': package,
+                'detail': 'probe produced no output'})
+            return None
+        return {'location': parts[0], 'version': parts[1]}
+    return probe
+
+
+def _venv_sibling_skew(repos) -> tuple:
+    """(skew, unassessable) across every component's declared editable
+    siblings.
+
+    This is the generalized replacement for what used to be two
+    near-identical closures, each hardcoded to ka9q-python only — one in
+    cmd_doctor, one in cmd_update's planner. Widening to "every declared
+    sibling" and needing per-component (not just per-venv) context made
+    the duplication worth collapsing into one helper shared by both.
+
+    `skew` entries: dicts with `component`, `package`, `shared`,
+    `location`, `version`. `unassessable` entries: dicts with
+    `component`, `package`, `detail` — see `_sibling_probe`.
+    """
+    from sigmond.doctor import venv_skew
+    skew = []
+    unassessable: list = []
+    for d in repos:
+        for pkg, shared in _editable_siblings(d).items():
+            probe = _sibling_probe(pkg, d.name, unassessable)
+            for sk in venv_skew([str(d / 'venv')], str(shared), probe):
+                skew.append({'component': d.name, 'package': pkg,
+                             'shared': str(shared),
+                             'location': sk['location'],
+                             'version': sk['version']})
+    return skew, unassessable
+
+
 def cmd_update(args) -> int:
     """Plan (and optionally apply) a component update.  Safe to re-run.
 
@@ -2897,13 +3037,14 @@ def cmd_update(args) -> int:
 
     import subprocess
     from pathlib import Path
-    from sigmond.doctor import component_checkouts, git_state, venv_skew
+    from sigmond.doctor import component_checkouts, git_state
     from sigmond.wisdom import plans_from_fft_log
     from sigmond.update import plan_update, Action, Refusal
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+    checkouts = component_checkouts(base)
     repos = {}
-    for d in component_checkouts(base):
+    for d in checkouts:
         st = git_state(d)
         if st['error']:
             continue
@@ -2926,23 +3067,16 @@ def cmd_update(args) -> int:
         repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
                          'incoming': incoming, 'owner': owner}
 
-    def _probe(venv):
-        py = Path(venv) / 'bin' / 'python'
-        if not py.exists():
-            return None
-        code = ('import ka9q,os,importlib.metadata as m;'
-                'print(os.path.dirname(ka9q.__file__));'
-                'print(m.version("ka9q-python"))')
-        r = subprocess.run([str(py), '-c', code], capture_output=True, text=True)
-        if r.returncode != 0:
-            return None
-        parts = r.stdout.split()
-        return {'location': parts[0], 'version': parts[1] if len(parts) > 1 else '?'}
-
-    shared = base / 'ka9q-python'
-    skew = [Path(s['venv']).parent.name for s in
-            venv_skew([str(d / 'venv') for d in component_checkouts(base)],
-                      str(shared), _probe)]
+    # Every editable sibling THIS component declares (ka9q-python,
+    # hamsci-dsp, hs-uploader, ...) is checked, not just ka9q-python —
+    # see _venv_sibling_skew. A sibling whose import is broken (not
+    # merely stale) is folded into the same `skew` set: `install.sh`
+    # (uv sync) is the fix for both, so the planner doesn't need to tell
+    # them apart. `smd doctor` is where that distinction is surfaced to
+    # a human — see cmd_doctor.
+    skew_pairs, unassessable_venv = _venv_sibling_skew(checkouts)
+    skew = sorted({s['component'] for s in skew_pairs} |
+                  {u['component'] for u in unassessable_venv})
 
     # radiod: compare the RUNNING binary against the catalog pin.
     pin = running = None
@@ -3081,6 +3215,92 @@ def cmd_version(args) -> int:
     return 0
 
 
+# Systemd's optional ExecStart= prefix modifiers (systemd.service(5)
+# "Command lines"): '-' ignore the command's exit status, '@' override
+# argv[0], ':' skip environment-variable substitution, '+'/'!'/'!!' run
+# with elevated/original privileges. None of them are part of the
+# binary path itself, so they're stripped before comparison.
+_EXEC_START_PREFIX_MODIFIERS = '-@:+!'
+
+
+def _unit_exec_expected(unit: str, run=None) -> Optional[str]:
+    """The executable path THIS unit's own (pre-drop-in) unit file names
+    in its ExecStart= line — "what the deploy tree provides", not "what
+    is currently configured to run".
+
+    Reads FragmentPath — the base unit file systemd loaded BEFORE
+    applying any ``*.d/*.conf`` drop-in — rather than the merged,
+    post-drop-in value ``systemctl show -p ExecStart`` would return.
+    This is deliberate: a drop-in redirecting ExecStart at a different
+    binary is invisible to anything that only inspects the merged
+    config, which is exactly what "verification" did during the
+    radiod-swap incident this check exists to catch. The trade-off is
+    that a FUTURE *legitimate* ExecStart-overriding drop-in would
+    produce a permanent, unresolvable false 'mismatch' — this check has
+    no way to distinguish "the drop-in is the intentional new source of
+    truth" from "the drop-in is the incident happening again". The
+    fleet's only current drop-in, ``smd-cpu-affinity.conf``, sets
+    ``CPUAffinity=`` only and never touches ``ExecStart=``, so nothing
+    is affected today; if a future drop-in legitimately does override
+    ExecStart, look here first before assuming this check is broken.
+
+    ``run`` is injected (mirrors the ``resolve``/``probe`` convention
+    already used by ``exec_mismatch``/``venv_skew`` in doctor.py) so
+    this is testable without a real systemd; defaults to the module's
+    ``_run``.
+
+    Returns ``None`` when FragmentPath can't be determined, the file
+    can't be read, or it has no ExecStart= line at all — any of which
+    means "could not tell", handled the same way by the caller (skipped
+    from ``services``, never silently treated as a match).
+    """
+    run = run or _run
+    frag = run(['systemctl', 'show', '-p', 'FragmentPath', '--value', unit],
+               capture=True).stdout.strip()
+    if not frag:
+        return None
+    try:
+        text = Path(frag).read_text()
+    except OSError:
+        return None
+    # A unit with MULTIPLE ExecStart= lines resolves to the LAST one
+    # here — matching systemd's own semantics for Type=oneshot, the only
+    # service type that even permits more than one ExecStart= (every
+    # other Type= rejects a second one outright), which bounds the
+    # real-world risk. Still, "last wins" is incidental here — a side
+    # effect of overwriting exec_line on every match — rather than a
+    # deliberately chosen multi-command semantics; worth knowing if a
+    # oneshot unit's exec-mismatch finding ever looks wrong.
+    exec_line = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith('ExecStart='):
+            exec_line = line[len('ExecStart='):].strip()
+    if not exec_line:
+        return None
+    exec_line = exec_line.lstrip(_EXEC_START_PREFIX_MODIFIERS).strip()
+    parts = exec_line.split()
+    return parts[0] if parts else None
+
+
+def _manifest_usable(manifest_text: Optional[str]) -> bool:
+    """Whether ``manifest_text`` can be trusted enough to run
+    ``manifest_drift()`` against.
+
+    Mirrors the exact "can this manifest be trusted" test
+    ``manifest_drift()`` already applies internally
+    (``_parse_manifest_components`` — missing header, or fewer than
+    ``MIN_COMPONENT_ROWS`` parseable rows, both count as untrustworthy),
+    reused rather than re-derived here so ``smd doctor``'s "unassessed"
+    branch and the drift check itself can never disagree about the same
+    file. ``None`` (the read failed entirely) is also not usable.
+    """
+    if manifest_text is None:
+        return False
+    from sigmond.doctor import _parse_manifest_components
+    return _parse_manifest_components(manifest_text) is not None
+
+
 def cmd_doctor(args) -> int:
     """Report deploy-tree damage: ownership, git state, venv skew, image
     drift, and running-vs-installed binary mismatches.
@@ -3102,8 +3322,8 @@ def cmd_doctor(args) -> int:
     import subprocess
     from pathlib import Path
     from sigmond.doctor import (
-        component_checkouts, foreign_owned, git_state, venv_skew,
-        manifest_drift, exec_mismatch, _parse_manifest_components,
+        component_checkouts, foreign_owned, git_state,
+        manifest_drift, exec_mismatch,
         Finding, summarise,
     )
     from sigmond.provenance import component_versions
@@ -3166,29 +3386,33 @@ def cmd_doctor(args) -> int:
         if st['detached']:
             findings.append(Finding(name, 'detached', 'HEAD is detached'))
 
-    # venv skew: which venvs do NOT take ka9q-python from the shared checkout
-    shared = base / 'ka9q-python'
-
-    def _probe(venv):
-        py = Path(venv) / 'bin' / 'python'
-        if not py.exists():
-            return None
-        code = ('import ka9q,os,importlib.metadata as m;'
-                'print(os.path.dirname(ka9q.__file__));'
-                'print(m.version("ka9q-python"))')
-        r = subprocess.run([str(py), '-c', code], capture_output=True, text=True)
-        if r.returncode != 0:
-            return None
-        parts = r.stdout.split()
-        return {'location': parts[0], 'version': parts[1] if len(parts) > 1 else '?'}
-
-    skew = venv_skew([str(d / 'venv') for d in repos], str(shared), _probe)
+    # venv skew: which venvs do NOT take one of their DECLARED editable
+    # siblings from the shared checkout. Originally checked ka9q-python
+    # only; widened to probe every sibling a component's own
+    # pyproject.toml [tool.uv.sources] actually declares (ka9q-python,
+    # hamsci-dsp, hs-uploader, ...) — see _venv_sibling_skew /
+    # _editable_siblings. Reading the declared set (instead of a second
+    # hardcoded list here) means a newly-added sibling dependency is
+    # picked up with no smd code change, and cmd_update can never drift
+    # from this check — both now call the same helper.
+    skew, unassessable_venv = _venv_sibling_skew(repos)
     for sk in skew:
-        comp = Path(sk['venv']).parent.name
         findings.append(Finding(
-            comp, 'venv-skew',
-            f'ka9q-python {sk["version"]} from {sk["location"]} — a private '
-            f'copy; updating {shared} will NOT reach it'))
+            sk['component'], 'venv-skew',
+            f'{sk["package"]} {sk["version"]} from {sk["location"]} — a '
+            f'private copy; updating {sk["shared"]} will NOT reach it'))
+    for u in unassessable_venv:
+        # `venv_skew()`'s probe contract has no way to say "known, but
+        # broken" — a stale `.pth` pointing at a moved/renamed checkout
+        # makes the import raise, and that collapses to the same falsy
+        # "not applicable" return as "package genuinely not used here".
+        # Reporting it distinctly, instead of letting it fold silently
+        # into "no skew found", mirrors the same "cannot assess !=
+        # healthy" principle applied to the manifest check below.
+        findings.append(Finding(
+            u['component'], 'venv-unassessable',
+            f'{u["package"]}: could not be probed ({u["detail"]}) — '
+            f'this is NOT the same as "no skew found"'))
 
     # manifest drift: live component SHAs vs. the image manifest this host
     # was laid down from.  `live` is sourced the exact way `smd version`
@@ -3207,12 +3431,10 @@ def cmd_doctor(args) -> int:
     # to check against; reporting silence there would read as "verified
     # clean" when it is really "never checked", a lie of omission on
     # exactly the boxes least likely to have been looked at recently.
-    # _parse_manifest_components is the same "can this be trusted" test
-    # manifest_drift() applies internally — reused rather than
-    # re-deriving the row-floor logic here.
-    manifest_usable = (manifest_text is not None
-                       and _parse_manifest_components(manifest_text) is not None)
-    if not manifest_usable:
+    # _manifest_usable (module level, above) applies the same "can this
+    # be trusted" test manifest_drift() uses internally — reused rather
+    # than re-deriving the row-floor logic here.
+    if not _manifest_usable(manifest_text):
         findings.append(Finding(
             'manifest', 'unassessed',
             f'no usable image manifest at {MANIFEST_PATH} — component '
@@ -3236,33 +3458,9 @@ def cmd_doctor(args) -> int:
     # radiod-swap check — a drop-in redirecting ExecStart at a different
     # binary is invisible to anything that only inspects the installed
     # file, which is exactly what "verification" did during the
-    # incident.  FragmentPath is the unit file systemd loaded BEFORE
-    # applying any *.d/*.conf drop-in, so reading ExecStart out of that
-    # file (not `systemctl show -p ExecStart`, which is the merged,
-    # post-drop-in value) gives "what the deploy tree provides" rather
-    # than "what is currently configured to run".
-    def _unit_exec_expected(unit):
-        frag = _run(['systemctl', 'show', '-p', 'FragmentPath', '--value', unit],
-                    capture=True).stdout.strip()
-        if not frag:
-            return None
-        try:
-            text = Path(frag).read_text()
-        except OSError:
-            return None
-        exec_line = None
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith('ExecStart='):
-                exec_line = line[len('ExecStart='):].strip()
-        if not exec_line:
-            return None
-        # Strip systemd's optional ExecStart= prefix modifiers (-, @, :,
-        # +, !, !!) so the comparison lands on the actual binary path.
-        exec_line = exec_line.lstrip('-@:+!').strip()
-        parts = exec_line.split()
-        return parts[0] if parts else None
-
+    # incident.  See `_unit_exec_expected` (module level, above) for how
+    # "the deploy tree's expected binary" is derived and its documented
+    # trade-offs.
     def _resolve_proc_exe(pid):
         return os.readlink(f'/proc/{pid}/exe')
 
@@ -3277,15 +3475,34 @@ def cmd_doctor(args) -> int:
     for u in exec_units:
         if u.kind != 'service':
             continue
-        pid = _run(['systemctl', 'show', '-p', 'MainPID', '--value', u.unit],
-                   capture=True).stdout.strip()
-        if not pid or pid == '0':
-            continue          # not running — exec_mismatch would skip it too
-        expected = _unit_exec_expected(u.unit)
-        if not expected:
-            continue          # couldn't determine what the deploy tree names
-        services.append({'name': u.unit, 'pid': pid, 'expected': expected})
-        unit_component[u.unit] = u.component
+        try:
+            pid = _run(['systemctl', 'show', '-p', 'MainPID', '--value', u.unit],
+                       capture=True).stdout.strip()
+            if not pid or pid == '0':
+                continue          # not running — exec_mismatch would skip it too
+            expected = _unit_exec_expected(u.unit)
+            if not expected:
+                continue          # couldn't determine what the deploy tree names
+            services.append({'name': u.unit, 'pid': pid, 'expected': expected})
+            unit_component[u.unit] = u.component
+        except Exception as exc:
+            # One service's systemctl query failing (permission denied, a
+            # transient subprocess error, systemctl itself unreachable)
+            # must not abort the whole `smd doctor` run and silently
+            # discard the ownership, git, venv and manifest findings
+            # already gathered above — this is the same failure mode
+            # doctor.py's own docstring warns against: "A diagnostic has
+            # to survive the very permission problems it exists to
+            # report." Report this one service in the same shape
+            # exec_mismatch() already uses for "could not tell what ran"
+            # (status=unknown) rather than skipping it silently — a
+            # silent skip here would read as "checked, and it's fine",
+            # which is exactly the lie of omission this module exists to
+            # avoid.
+            findings.append(Finding(
+                u.component, 'exec-mismatch',
+                f'{u.unit}: running=(unreadable) expected=(unreadable) '
+                f'status=unknown ({exc})'))
 
     for m in exec_mismatch(services, _resolve_proc_exe):
         comp = unit_component.get(m['name'], m['name'])
