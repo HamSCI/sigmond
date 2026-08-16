@@ -173,6 +173,52 @@ def venv_skew(venvs: Iterable[str], shared: str, probe: Callable) -> list:
     return out
 
 
+def exec_mismatch(services: Iterable[dict], resolve: Callable) -> list:
+    """Running services whose ``/proc/<pid>/exe`` is not the binary their
+    deploy tree provides.
+
+    The radiod-swap incident this exists for: a systemd drop-in pointed
+    ``ExecStart`` at a different binary than the one that had been
+    installed, and "verification" checked the installed file — never the
+    running process. ``resolve(pid)`` is injected (mirrors ``probe`` in
+    ``venv_skew``) so this never touches real ``/proc``; on a real host
+    it resolves ``/proc/<pid>/exe``.
+
+    Each ``service`` needs at least ``name``, ``pid`` and ``expected``
+    (the executable path the deploy tree provides). A missing/``None``
+    ``pid`` means the service isn't running — that's not a wrong binary,
+    so it is skipped, not flagged. Paths are compared after
+    ``os.path.realpath`` on both sides: the deploy tree path and the
+    running path may legitimately differ by symlink (e.g. a ``current``
+    symlink into a versioned install dir), and flagging that would be
+    noise a real defect would drown in.
+
+    Returns one entry per problem service, each a dict with ``name``,
+    ``status`` (``'mismatch'`` — running a different binary; ``'unknown'``
+    — ``/proc/<pid>/exe`` could not be read, because the process exited
+    mid-check or permission was denied), ``expected``, and ``running``
+    (``None`` for ``'unknown'`` — guessing there would be worse than
+    admitting the check couldn't see what ran). This returns data only;
+    ``summarise()`` owns presentation.
+    """
+    out = []
+    for svc in services:
+        pid = svc.get('pid')
+        if not pid:
+            continue          # not running — not a wrong binary
+        try:
+            running = resolve(pid)
+        except OSError:
+            out.append({'name': svc['name'], 'status': 'unknown',
+                        'expected': svc['expected'], 'running': None})
+            continue
+        expected = svc['expected']
+        if os.path.realpath(running) != os.path.realpath(expected):
+            out.append({'name': svc['name'], 'status': 'mismatch',
+                        'expected': expected, 'running': running})
+    return out
+
+
 def _parse_manifest_components(text: str) -> dict:
     """Extract the ``components (live):`` block emitted by ``smd version``
     (see ``provenance.format_report``): a header line, then one line per

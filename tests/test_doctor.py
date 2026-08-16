@@ -32,7 +32,7 @@ import pytest
 
 from sigmond.doctor import (
     component_checkouts, foreign_owned, git_state, venv_skew,
-    Finding, summarise, manifest_drift,
+    Finding, summarise, manifest_drift, exec_mismatch,
 )
 
 
@@ -362,3 +362,71 @@ def test_manifest_drift_tolerates_the_release_manifest_shape(tmp_path):
     live = {'hf-timestd': 'ccccccc', 'superdarn-sounder': 'eeeeeee'}
     out = manifest_drift(live, str(manifest))
     assert [d['component'] for d in out] == ['hf-timestd']
+
+
+# ── exec mismatch ────────────────────────────────────────────────────
+# The radiod-swap incident this check exists for: a systemd drop-in
+# pointed ExecStart at a DIFFERENT binary than the one that had been
+# installed, and "verification" checked the installed file, never the
+# running process. The lesson: verify /proc/<pid>/exe, not the file you
+# installed.
+
+def test_exec_mismatch_flags_running_wrong_binary():
+    services = [
+        {'name': 'radiod', 'pid': 101, 'expected': '/usr/local/sbin/radiod'},
+        {'name': 'wspr-recorder', 'pid': 102, 'expected': '/opt/wspr/bin/wsprd'},
+    ]
+    resolve = lambda pid: {101: '/usr/local/sbin/radiod.patched',
+                           102: '/opt/wspr/bin/wsprd'}[pid]
+    out = exec_mismatch(services, resolve)
+    assert [m['name'] for m in out] == ['radiod']
+    assert out[0]['running'] == '/usr/local/sbin/radiod.patched'
+    assert out[0]['expected'] == '/usr/local/sbin/radiod'
+
+
+def test_exec_mismatch_skips_a_service_with_no_pid():
+    """A stopped service is not a wrong binary — it must not be flagged."""
+    services = [{'name': 'hf-timestd', 'pid': None,
+                'expected': '/opt/timestd/bin/core'}]
+
+    assert exec_mismatch(services, resolve=lambda pid: '/whatever') == []
+
+
+def test_exec_mismatch_reports_unreadable_proc_as_unknown():
+    """The process exited mid-check, or permission was denied — either
+    way the check cannot see what ran. Guessing would be worse than
+    admitting it, so this must be distinguishable from a real mismatch,
+    not silently dropped or silently flagged."""
+    def resolve(pid):
+        raise OSError(2, 'No such file or directory')
+
+    services = [{'name': 'radiod', 'pid': 999,
+                'expected': '/usr/local/sbin/radiod'}]
+    out = exec_mismatch(services, resolve)
+
+    assert len(out) == 1
+    assert out[0]['status'] == 'unknown'
+    assert out[0]['name'] == 'radiod'
+
+
+def test_exec_mismatch_is_silent_when_running_the_expected_binary():
+    services = [{'name': 'radiod', 'pid': 101,
+                'expected': '/usr/local/sbin/radiod'}]
+
+    assert exec_mismatch(services, resolve=lambda pid: '/usr/local/sbin/radiod') == []
+
+
+def test_exec_mismatch_does_not_flag_a_symlink_difference(tmp_path):
+    """The deploy tree path and the running /proc/<pid>/exe path may
+    legitimately differ by symlink — e.g. expected points through a
+    'current' symlink into a versioned install dir. Flagging that is
+    noise a real defect would drown in.
+    """
+    real = tmp_path / 'radiod-1.2.3'
+    real.write_text('binary')
+    link = tmp_path / 'current'
+    link.symlink_to(real)
+
+    services = [{'name': 'radiod', 'pid': 101, 'expected': str(link)}]
+
+    assert exec_mismatch(services, resolve=lambda pid: str(real)) == []
