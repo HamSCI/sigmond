@@ -160,6 +160,11 @@ except ImportError:
 TOPOLOGY_PATH   = Path('/etc/sigmond/topology.toml')
 SIGMOND_CONF    = Path('/etc/sigmond')
 SIGMOND_LOG     = Path('/var/log/sigmond')
+# Where firstboot-v3.sh writes the image's component manifest (see
+# sigmond.provenance.IMAGE_VERSION_FILE for its sibling, the lineage
+# stamp). `smd doctor` reads it to detect drift; absent on any host
+# installed before this existed.
+MANIFEST_PATH   = Path('/etc/sigmond-appliance/manifest.txt')
 
 # ---------------------------------------------------------------------------
 # Banner
@@ -3077,14 +3082,16 @@ def cmd_version(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    """Report deploy-tree damage: ownership, git state, venv skew.
+    """Report deploy-tree damage: ownership, git state, venv skew, image
+    drift, and running-vs-installed binary mismatches.
 
     Each check corresponds to something that blocked the DASI002 update
     on 2026-08-15, discovered one failed command at a time.  Ownership is
     the only class --fix repairs: the correct owner is unambiguous (the
     checkout's own) and the repair is idempotent.  A dirty tree may be a
     real uncommitted fix — it was on DASI002 — so it is reported and left
-    to a human.
+    to a human.  Manifest drift and a running/installed binary mismatch
+    are likewise judgement calls, never auto-repaired.
     """
     if not _HAS_SIGMOND_LIB:
         _err('doctor: sigmond library not importable')
@@ -3096,8 +3103,10 @@ def cmd_doctor(args) -> int:
     from pathlib import Path
     from sigmond.doctor import (
         component_checkouts, foreign_owned, git_state, venv_skew,
+        manifest_drift, exec_mismatch, _parse_manifest_components,
         Finding, summarise,
     )
+    from sigmond.provenance import component_versions
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     if not base.is_dir():
@@ -3180,6 +3189,117 @@ def cmd_doctor(args) -> int:
             comp, 'venv-skew',
             f'ka9q-python {sk["version"]} from {sk["location"]} — a private '
             f'copy; updating {shared} will NOT reach it'))
+
+    # manifest drift: live component SHAs vs. the image manifest this host
+    # was laid down from.  `live` is sourced the exact way `smd version`
+    # computes it (component_versions() over the same `repos` list already
+    # gathered above), so the two readings cannot drift apart from each
+    # other.
+    live = component_versions(repos)
+    try:
+        manifest_text = MANIFEST_PATH.read_text()
+    except OSError:
+        manifest_text = None
+    # manifest_drift() returns [] both when nothing has drifted AND when
+    # the manifest can't be trusted at all (missing, or malformed/
+    # truncated below its row floor) — those are not the same finding.
+    # A field unit installed before the manifest existed has no baseline
+    # to check against; reporting silence there would read as "verified
+    # clean" when it is really "never checked", a lie of omission on
+    # exactly the boxes least likely to have been looked at recently.
+    # _parse_manifest_components is the same "can this be trusted" test
+    # manifest_drift() applies internally — reused rather than
+    # re-deriving the row-floor logic here.
+    manifest_usable = (manifest_text is not None
+                       and _parse_manifest_components(manifest_text) is not None)
+    if not manifest_usable:
+        findings.append(Finding(
+            'manifest', 'unassessed',
+            f'no usable image manifest at {MANIFEST_PATH} — component '
+            f'drift cannot be checked on this host (file missing, or '
+            f'present but malformed/truncated); this is NOT the same as '
+            f'"no drift found"'))
+    else:
+        for d in manifest_drift(live, str(MANIFEST_PATH)):
+            if d['status'] == 'moved':
+                detail = f'live {d["live"]} != manifest {d["manifest"]}'
+            elif d['status'] == 'live_only':
+                detail = (f'installed live ({d["live"]}) but not in the '
+                          f'image manifest')
+            else:  # manifest_only
+                detail = (f'in the image manifest ({d["manifest"]}) but '
+                          f'not installed live')
+            findings.append(Finding(d['component'], 'drift', detail))
+
+    # exec mismatch: does each running service actually execute the
+    # binary its own (pre-drop-in) unit file names?  This is the
+    # radiod-swap check — a drop-in redirecting ExecStart at a different
+    # binary is invisible to anything that only inspects the installed
+    # file, which is exactly what "verification" did during the
+    # incident.  FragmentPath is the unit file systemd loaded BEFORE
+    # applying any *.d/*.conf drop-in, so reading ExecStart out of that
+    # file (not `systemctl show -p ExecStart`, which is the merged,
+    # post-drop-in value) gives "what the deploy tree provides" rather
+    # than "what is currently configured to run".
+    def _unit_exec_expected(unit):
+        frag = _run(['systemctl', 'show', '-p', 'FragmentPath', '--value', unit],
+                    capture=True).stdout.strip()
+        if not frag:
+            return None
+        try:
+            text = Path(frag).read_text()
+        except OSError:
+            return None
+        exec_line = None
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith('ExecStart='):
+                exec_line = line[len('ExecStart='):].strip()
+        if not exec_line:
+            return None
+        # Strip systemd's optional ExecStart= prefix modifiers (-, @, :,
+        # +, !, !!) so the comparison lands on the actual binary path.
+        exec_line = exec_line.lstrip('-@:+!').strip()
+        parts = exec_line.split()
+        return parts[0] if parts else None
+
+    def _resolve_proc_exe(pid):
+        return os.readlink(f'/proc/{pid}/exe')
+
+    services = []
+    unit_component = {}
+    try:
+        topology = _load_topology(TOPOLOGY_PATH)
+        enabled = _enabled_components(topology)
+        exec_units = resolve_units(enabled, enabled)
+    except Exception:
+        exec_units = []
+    for u in exec_units:
+        if u.kind != 'service':
+            continue
+        pid = _run(['systemctl', 'show', '-p', 'MainPID', '--value', u.unit],
+                   capture=True).stdout.strip()
+        if not pid or pid == '0':
+            continue          # not running — exec_mismatch would skip it too
+        expected = _unit_exec_expected(u.unit)
+        if not expected:
+            continue          # couldn't determine what the deploy tree names
+        services.append({'name': u.unit, 'pid': pid, 'expected': expected})
+        unit_component[u.unit] = u.component
+
+    for m in exec_mismatch(services, _resolve_proc_exe):
+        comp = unit_component.get(m['name'], m['name'])
+        # A `deleted` backing file is NOT presented as quieter than a
+        # `mismatch`: both use the same finding kind and both always show
+        # the raw running path (with its literal ` (deleted)` suffix)
+        # alongside `expected`, so a binary that was both wrong AND
+        # deleted stays visible — collapsing that detail would hide
+        # exactly the case this check exists to catch.
+        running = m['running'] if m['running'] is not None else '(unreadable)'
+        findings.append(Finding(
+            comp, 'exec-mismatch',
+            f'{m["name"]}: running={running} expected={m["expected"]} '
+            f'status={m["status"]}'))
 
     ok, text = summarise(findings)
     if ok:
