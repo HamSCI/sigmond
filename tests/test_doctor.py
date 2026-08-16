@@ -32,7 +32,7 @@ import pytest
 
 from sigmond.doctor import (
     component_checkouts, foreign_owned, git_state, venv_skew,
-    Finding, summarise,
+    Finding, summarise, manifest_drift,
 )
 
 
@@ -271,3 +271,94 @@ def test_tool_and_build_caches_are_not_flagged(tmp_path):
 
     assert 'index' in names and 'PKG-INFO' in names
     assert 'x' not in names
+
+
+# ── manifest drift ──────────────────────────────────────────────────
+
+def test_manifest_drift_reports_moved_components(tmp_path):
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "image_version: v3.32\n"
+        "\ncomponents (live):\n"
+        "    hf-timestd       aaaaaaa\n"
+        "    wspr-recorder    bbbbbbb\n"
+    )
+    live = {'hf-timestd': 'ccccccc', 'wspr-recorder': 'bbbbbbb'}
+    out = manifest_drift(live, str(manifest))
+    assert [d['component'] for d in out] == ['hf-timestd']
+    assert out[0]['manifest'] == 'aaaaaaa'
+    assert out[0]['live'] == 'ccccccc'
+
+
+def test_manifest_drift_on_a_missing_manifest_is_not_an_error(tmp_path):
+    """A host installed from an older image (predating this manifest
+    format) has nothing to compare against — that is not drift, it is
+    simply unassessable, and must not raise."""
+    assert manifest_drift({'hf-timestd': 'ccccccc'},
+                          str(tmp_path / 'nope.txt')) == []
+
+
+def test_manifest_drift_reports_component_added_since_install(tmp_path):
+    """Present live, absent from the manifest: installed after the image
+    was built. Distinct from a moved SHA — there is no manifest value to
+    compare against."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "components (live):\n"
+        "    hf-timestd       aaaaaaa\n"
+    )
+    live = {'hf-timestd': 'aaaaaaa', 'meteor-scatter': 'ddddddd'}
+    out = manifest_drift(live, str(manifest))
+    assert [d['component'] for d in out] == ['meteor-scatter']
+    assert out[0]['manifest'] is None
+    assert out[0]['live'] == 'ddddddd'
+
+
+def test_manifest_drift_reports_component_missing_since_install(tmp_path):
+    """Present in the manifest, absent live: removed, or failed to
+    install. Distinct from a moved SHA — there is no live value to
+    compare against."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "components (live):\n"
+        "    hf-timestd       aaaaaaa\n"
+        "    codar-sounder    eeeeeee\n"
+    )
+    live = {'hf-timestd': 'aaaaaaa'}
+    out = manifest_drift(live, str(manifest))
+    assert [d['component'] for d in out] == ['codar-sounder']
+    assert out[0]['manifest'] == 'eeeeeee'
+    assert out[0]['live'] is None
+
+
+def test_manifest_drift_is_silent_when_nothing_moved(tmp_path):
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "components (live):\n"
+        "    hf-timestd       aaaaaaa\n"
+    )
+    assert manifest_drift({'hf-timestd': 'aaaaaaa'}, str(manifest)) == []
+
+
+def test_manifest_drift_tolerates_the_release_manifest_shape(tmp_path):
+    """The Release-attached manifest carries an `image_sha256:` field the
+    host copy at /etc/sigmond-appliance/manifest.txt does not. The parser
+    must not depend on it, and must skip the non-component preamble and
+    the trailing free-text lines below the block."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "image_version: v3.32\n"
+        "appliance_commit: 9f6d417605b78a6171b5cf81a1802c1bfcba7679\n"
+        "appliance_tag: v3.32\n"
+        "built_utc: 2026-08-16T14:49:08+00:00\n"
+        "image_sha256: 6c11624261e3c8d123df700656486257b522268710e820b0c3a64cc78d723d53\n"
+        "\n"
+        "components (live):\n"
+        "    hf-timestd       aaaaaaa\n"
+        "    superdarn-sounder eeeeeee\n"
+        "\n"
+        "no recorded updates since install\n"
+    )
+    live = {'hf-timestd': 'ccccccc', 'superdarn-sounder': 'eeeeeee'}
+    out = manifest_drift(live, str(manifest))
+    assert [d['component'] for d in out] == ['hf-timestd']

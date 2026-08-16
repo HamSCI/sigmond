@@ -173,6 +173,77 @@ def venv_skew(venvs: Iterable[str], shared: str, probe: Callable) -> list:
     return out
 
 
+def _parse_manifest_components(text: str) -> dict:
+    """Extract the ``components (live):`` block emitted by ``smd version``
+    (see ``provenance.format_report``): a header line, then one line per
+    component, four-space indent, name then a short SHA. The block ends
+    at the next blank line or unindented line.
+    """
+    lines = text.splitlines()
+    out: dict = {}
+    in_block = False
+    for line in lines:
+        if line.strip() == 'components (live):':
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if not line.startswith('    ') or not line.strip():
+            break
+        parts = line.split()
+        if len(parts) != 2:
+            continue          # e.g. "(no component checkouts found)"
+        name, sha = parts
+        out[name] = sha
+    return out
+
+
+def manifest_drift(live: dict, manifest_path: str) -> list:
+    """Components whose live SHA has drifted from the image manifest.
+
+    ``manifest_path`` is an image manifest in the shape ``smd version``
+    emits (see ``provenance.format_report``): a ``components (live):``
+    block, four-space indent, name then short SHA. Both the host copy
+    (``/etc/sigmond-appliance/manifest.txt``, no ``image_sha256``) and the
+    Release-attached copy (which has one) share this block shape, and
+    only the block is read — the surrounding fields are ignored.
+
+    A host installed from an image that predates this manifest, or any
+    host with no manifest at all, cannot be assessed against one. That
+    is not drift — it's simply unknown — so a missing or unreadable
+    manifest returns ``[]`` rather than raising.
+
+    Returns one entry per component that differs, each a dict with
+    ``component``, ``status`` (``'moved'`` — the SHA changed;
+    ``'live_only'`` — installed live but not present in the manifest,
+    e.g. added after install; ``'manifest_only'`` — listed in the
+    manifest but absent live, e.g. removed or never installed), and the
+    ``manifest``/``live`` SHAs (``None`` for whichever side doesn't have
+    an entry). Matching components are omitted. This returns data only;
+    ``summarise()`` owns presentation.
+    """
+    try:
+        text = Path(manifest_path).read_text()
+    except OSError:
+        return []
+
+    manifest = _parse_manifest_components(text)
+
+    out = []
+    for name, manifest_sha in manifest.items():
+        live_sha = live.get(name)
+        if live_sha is None:
+            out.append({'component': name, 'status': 'manifest_only',
+                        'manifest': manifest_sha, 'live': None})
+        elif live_sha != manifest_sha:
+            out.append({'component': name, 'status': 'moved',
+                        'manifest': manifest_sha, 'live': live_sha})
+    for name in sorted(set(live) - set(manifest)):
+        out.append({'component': name, 'status': 'live_only',
+                    'manifest': None, 'live': live[name]})
+    return out
+
+
 def summarise(findings: list) -> tuple:
     """(ok, human-readable report).  ok is False if anything was found."""
     if not findings:
