@@ -261,6 +261,34 @@ def exec_mismatch(services: Iterable[dict], resolve: Callable) -> list:
     return out
 
 
+# How many component rows a manifest needs before it's trusted at all.
+# This deliberately matches the floor already enforced on the build and
+# install sides — `build-usb-v3.sh` and `build-golden-vm.sh` both refuse
+# to ship a manifest with fewer than 10 rows, and firstboot rejects one
+# below the same floor before installing it to
+# `/etc/sigmond-appliance/manifest.txt`. If this end trusted a lower
+# count, a manifest firstboot had already rejected as too short to
+# install could still reach this parser some other way (a manually
+# copied file, an older host, a Release asset fetched directly) and be
+# treated as a legitimate low-component image instead of the truncated
+# capture it actually is — the same false-positive flood Finding 2
+# exists to prevent, just at reduced scale (a partially-truncated file
+# with, say, 3 of 22 rows surviving still reports the other 19 as
+# spuriously added).
+#
+# This constant is intentionally NOT imported from (or exported to) the
+# sigmond-appliance repo where the build/firstboot copies of this same
+# number live — the two repos have no dependency relationship today, and
+# adding one solely to deduplicate a single integer would be a worse
+# trade than the duplication. If a third consumer of this floor turns up,
+# or the two repos already share a library boundary for another reason,
+# that's the point to revisit; until then keep them in sync by eyeball
+# (grep for `MIN_COMPONENT_ROWS` here and `10` in
+# `build-usb-v3.sh` / `build-golden-vm.sh` / `firstboot-v3.sh` when
+# either changes).
+MIN_COMPONENT_ROWS = 10
+
+
 def _parse_manifest_components(text: str) -> Optional[dict]:
     """Extract the ``components (live):`` block emitted by ``smd version``
     (see ``provenance.format_report``): a header line, then one line per
@@ -271,11 +299,13 @@ def _parse_manifest_components(text: str) -> Optional[dict]:
     the ``components (live):`` header is missing entirely (matches the
     ``grep -q 'components (live):'`` test ``firstboot-v3.sh`` uses to
     decide whether a manifest is installable at all), or the header is
-    present but yields zero parseable rows. A real manifest never ships
-    with zero components — the build-side capture gate refuses to ship
-    one with fewer than 10 — so a header with nothing under it is exactly
-    what a truncated or corrupted capture looks like, not a real "zero
-    components" image. Conflating that with an empty dict would make
+    present but yields fewer than ``MIN_COMPONENT_ROWS`` parseable rows.
+    A real manifest never ships below that floor — the build-side
+    capture gate (``build-usb-v3.sh`` / ``build-golden-vm.sh``) refuses
+    to ship one with fewer than 10 component rows, and firstboot applies
+    the same floor before installing — so a block that thin is exactly
+    what a truncated or corrupted capture looks like, not a real
+    low-component image. Conflating that with an empty dict would make
     ``manifest_drift`` report every live component as newly-added, which
     is a worse failure than admitting the file can't be read.
     """
@@ -297,7 +327,7 @@ def _parse_manifest_components(text: str) -> Optional[dict]:
             continue          # e.g. "(no component checkouts found)"
         name, sha = parts
         out[name] = sha
-    if not seen_header or not out:
+    if not seen_header or len(out) < MIN_COMPONENT_ROWS:
         return None
     return out
 
@@ -331,6 +361,20 @@ def _sha_equal(a: str, b: str) -> bool:
     — extending either string would mean guessing digits that were never
     recorded. See ``MIN_SHA_PREFIX`` for why a too-short shared prefix is
     treated as NOT matching rather than as a match.
+
+    KNOWN LIMITATION — this is a bound, not a proof. ``MIN_SHA_PREFIX``
+    narrows the window in which two genuinely different commits could be
+    silently equated; it does not close it. ``_sha_equal('a1b2', 'a1b2c3d')``
+    is ``True`` — a real collision at the floor length is accepted, not
+    rejected, because the shorter side simply has no more characters to
+    disagree with. Git's own "this abbreviation is unique" guarantee is
+    scoped to one repo at one point in time; it says nothing about two
+    independently-abbreviated reads compared against each other later,
+    which is exactly what this function does. The exposure is bounded in
+    practice — the repos behind this manifest currently abbreviate to
+    7-9 characters, well above the floor — but a caller relying on this
+    check to *prove* two SHAs match, rather than to *flag likely* drift,
+    is trusting more than it delivers.
     """
     n = min(len(a), len(b))
     if n < MIN_SHA_PREFIX:
@@ -350,17 +394,22 @@ def manifest_drift(live: dict, manifest_path: str) -> list:
 
     A host installed from an image that predates this manifest, any host
     with no manifest at all, or a manifest that is present but malformed
-    (its ``components (live):`` header missing, or present with zero
-    parseable rows — the truncated/corrupt case) cannot be assessed
-    against. None of that is drift — it's simply unknown, on the same
-    footing as no manifest at all — so all three return ``[]`` rather
-    than raising, and rather than reporting every live component as
-    freshly added.
+    (its ``components (live):`` header missing, or present with fewer
+    than ``MIN_COMPONENT_ROWS`` parseable rows — the truncated/corrupt
+    case, matching the same floor the build and firstboot sides already
+    enforce) cannot be assessed against. None of that is drift — it's
+    simply unknown, on the same footing as no manifest at all — so all
+    three return ``[]`` rather than raising, and rather than reporting
+    every live component as freshly added.
 
     SHAs are compared on their shared prefix (see ``_sha_equal``), not by
     exact string equality — ``git rev-parse --short`` abbreviation length
     varies by repo size, so the manifest and a live read of the identical
-    commit will not always be the same length.
+    commit will not always be the same length. This is a bound on false
+    positives, not a proof of identity: two genuinely different commits
+    that happen to share a prefix at or above ``MIN_SHA_PREFIX`` are
+    silently treated as the same component and drift is masked. See
+    ``_sha_equal``'s docstring for the specifics of that exposure.
 
     Returns one entry per component that differs, each a dict with
     ``component``, ``status`` (``'moved'`` — the SHA changed;

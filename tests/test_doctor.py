@@ -33,6 +33,7 @@ import pytest
 from sigmond.doctor import (
     component_checkouts, foreign_owned, git_state, venv_skew,
     Finding, summarise, manifest_drift, exec_mismatch,
+    MIN_COMPONENT_ROWS,
 )
 
 
@@ -275,6 +276,20 @@ def test_tool_and_build_caches_are_not_flagged(tmp_path):
 
 # ── manifest drift ──────────────────────────────────────────────────
 
+def _filler_rows(n, start=0):
+    """`n` synthetic component-row lines, for padding a small illustrative
+    manifest above MIN_COMPONENT_ROWS without polluting the assertions
+    under test -- each filler name/SHA pair is written identically into
+    both the manifest and the `live` mapping by `_filler_live`, so it
+    never itself shows up as a drift finding."""
+    return ''.join(f"    filler-{i:02d}       ffff{i:03d}\n"
+                   for i in range(start, start + n))
+
+
+def _filler_live(n, start=0):
+    return {f'filler-{i:02d}': f'ffff{i:03d}' for i in range(start, start + n)}
+
+
 def test_manifest_drift_reports_moved_components(tmp_path):
     manifest = tmp_path / 'manifest.txt'
     manifest.write_text(
@@ -282,8 +297,10 @@ def test_manifest_drift_reports_moved_components(tmp_path):
         "\ncomponents (live):\n"
         "    hf-timestd       aaaaaaa\n"
         "    wspr-recorder    bbbbbbb\n"
+        + _filler_rows(MIN_COMPONENT_ROWS - 2)
     )
-    live = {'hf-timestd': 'ccccccc', 'wspr-recorder': 'bbbbbbb'}
+    live = {'hf-timestd': 'ccccccc', 'wspr-recorder': 'bbbbbbb',
+            **_filler_live(MIN_COMPONENT_ROWS - 2)}
     out = manifest_drift(live, str(manifest))
     assert [d['component'] for d in out] == ['hf-timestd']
     assert out[0]['manifest'] == 'aaaaaaa'
@@ -306,8 +323,10 @@ def test_manifest_drift_reports_component_added_since_install(tmp_path):
     manifest.write_text(
         "components (live):\n"
         "    hf-timestd       aaaaaaa\n"
+        + _filler_rows(MIN_COMPONENT_ROWS - 1)
     )
-    live = {'hf-timestd': 'aaaaaaa', 'meteor-scatter': 'ddddddd'}
+    live = {'hf-timestd': 'aaaaaaa', 'meteor-scatter': 'ddddddd',
+            **_filler_live(MIN_COMPONENT_ROWS - 1)}
     out = manifest_drift(live, str(manifest))
     assert [d['component'] for d in out] == ['meteor-scatter']
     assert out[0]['manifest'] is None
@@ -323,8 +342,9 @@ def test_manifest_drift_reports_component_missing_since_install(tmp_path):
         "components (live):\n"
         "    hf-timestd       aaaaaaa\n"
         "    codar-sounder    eeeeeee\n"
+        + _filler_rows(MIN_COMPONENT_ROWS - 2)
     )
-    live = {'hf-timestd': 'aaaaaaa'}
+    live = {'hf-timestd': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 2)}
     out = manifest_drift(live, str(manifest))
     assert [d['component'] for d in out] == ['codar-sounder']
     assert out[0]['manifest'] == 'eeeeeee'
@@ -336,8 +356,10 @@ def test_manifest_drift_is_silent_when_nothing_moved(tmp_path):
     manifest.write_text(
         "components (live):\n"
         "    hf-timestd       aaaaaaa\n"
+        + _filler_rows(MIN_COMPONENT_ROWS - 1)
     )
-    assert manifest_drift({'hf-timestd': 'aaaaaaa'}, str(manifest)) == []
+    live = {'hf-timestd': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+    assert manifest_drift(live, str(manifest)) == []
 
 
 def test_manifest_drift_tolerates_the_release_manifest_shape(tmp_path):
@@ -356,10 +378,12 @@ def test_manifest_drift_tolerates_the_release_manifest_shape(tmp_path):
         "components (live):\n"
         "    hf-timestd       aaaaaaa\n"
         "    superdarn-sounder eeeeeee\n"
+        + _filler_rows(MIN_COMPONENT_ROWS - 2) +
         "\n"
         "no recorded updates since install\n"
     )
-    live = {'hf-timestd': 'ccccccc', 'superdarn-sounder': 'eeeeeee'}
+    live = {'hf-timestd': 'ccccccc', 'superdarn-sounder': 'eeeeeee',
+            **_filler_live(MIN_COMPONENT_ROWS - 2)}
     out = manifest_drift(live, str(manifest))
     assert [d['component'] for d in out] == ['hf-timestd']
 
@@ -374,8 +398,10 @@ def test_manifest_drift_tolerates_differing_abbreviation_length(tmp_path):
     manifest.write_text(
         "components (live):\n"
         "    hf-timestd       0b8a729\n"
+        + _filler_rows(MIN_COMPONENT_ROWS - 1)
     )
-    live = {'hf-timestd': '0b8a729ab'}         # same commit, longer read
+    live = {'hf-timestd': '0b8a729ab',         # same commit, longer read
+            **_filler_live(MIN_COMPONENT_ROWS - 1)}
     assert manifest_drift(live, str(manifest)) == []
 
 
@@ -387,8 +413,10 @@ def test_manifest_drift_still_catches_a_genuinely_different_commit(tmp_path):
     manifest.write_text(
         "components (live):\n"
         "    hf-timestd       0b8a729\n"
+        + _filler_rows(MIN_COMPONENT_ROWS - 1)
     )
-    live = {'hf-timestd': '0b8a999'}           # diverges at the 5th char
+    live = {'hf-timestd': '0b8a999',           # diverges at the 5th char
+            **_filler_live(MIN_COMPONENT_ROWS - 1)}
     out = manifest_drift(live, str(manifest))
     assert [d['component'] for d in out] == ['hf-timestd']
     assert out[0]['status'] == 'moved'
@@ -403,8 +431,10 @@ def test_manifest_drift_does_not_trust_a_too_short_shared_prefix(tmp_path):
     manifest.write_text(
         "components (live):\n"
         "    hf-timestd       abc\n"
+        + _filler_rows(MIN_COMPONENT_ROWS - 1)
     )
-    live = {'hf-timestd': 'abcdef0'}           # 'abc' is a literal prefix
+    live = {'hf-timestd': 'abcdef0',           # 'abc' is a literal prefix
+            **_filler_live(MIN_COMPONENT_ROWS - 1)}
     out = manifest_drift(live, str(manifest))
     assert [d['component'] for d in out] == ['hf-timestd']
     assert out[0]['status'] == 'moved'
@@ -436,6 +466,42 @@ def test_manifest_drift_on_a_truncated_components_block(tmp_path):
     )
     live = {'hf-timestd': 'aaaaaaa', 'wspr-recorder': 'bbbbbbb'}
     assert manifest_drift(live, str(manifest)) == []
+
+
+def _manifest_text(n):
+    """A synthetic `components (live):` block with exactly n rows."""
+    rows = ''.join(f"    component-{i:02d}      aaaaaa{i % 10}\n"
+                   for i in range(n))
+    return "components (live):\n" + rows
+
+
+def test_manifest_drift_below_the_component_row_floor_is_unassessable(tmp_path):
+    """One row short of MIN_COMPONENT_ROWS -- a partially-truncated file,
+    e.g. 9 of a real ~20-row manifest surviving a cut-off write. Below
+    the floor the build and firstboot sides already enforce
+    (`build-usb-v3.sh` / `build-golden-vm.sh` / `firstboot-v3.sh`, all
+    gated at >= 10), this end must agree it's unusable too -- not treat
+    the 9 rows as a legitimately thin image and report every other live
+    component as spuriously added."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(_manifest_text(MIN_COMPONENT_ROWS - 1))
+    live = {f'component-{i:02d}': f'aaaaaa{i % 10}'
+           for i in range(MIN_COMPONENT_ROWS - 1)}
+    live['extra-component'] = 'ffffff0'   # would be a flood of one if trusted
+    assert manifest_drift(live, str(manifest)) == []
+
+
+def test_manifest_drift_at_the_component_row_floor_is_assessable(tmp_path):
+    """Exactly MIN_COMPONENT_ROWS rows -- the boundary itself must work
+    normally, not be swept into 'malformed' by an off-by-one."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(_manifest_text(MIN_COMPONENT_ROWS))
+    live = {f'component-{i:02d}': f'aaaaaa{i % 10}'
+           for i in range(MIN_COMPONENT_ROWS)}
+    live['component-00'] = 'deadbee'      # genuine drift on one component
+    out = manifest_drift(live, str(manifest))
+    assert [d['component'] for d in out] == ['component-00']
+    assert out[0]['status'] == 'moved'
 
 
 # ── exec mismatch ────────────────────────────────────────────────────
