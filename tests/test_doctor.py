@@ -430,3 +430,89 @@ def test_exec_mismatch_does_not_flag_a_symlink_difference(tmp_path):
     services = [{'name': 'radiod', 'pid': 101, 'expected': str(link)}]
 
     assert exec_mismatch(services, resolve=lambda pid: str(real)) == []
+
+
+# ── exec mismatch: review findings ──────────────────────────────────
+# Review found three gaps: a `resolve` that signals failure by
+# RETURNING a falsy value (matching `venv_skew`'s `probe` convention,
+# not raising) crashed the whole pass with an uncaught TypeError from
+# `os.path.realpath(None)`; the same falsy-return case produced a
+# spurious 'mismatch' when it returned '' rather than None; and a
+# deleted backing file (`/proc/<pid>/exe` resolves to the path plus the
+# literal " (deleted)" suffix, raising nothing) was indistinguishable
+# from a genuine wrong-binary swap.
+
+def test_exec_mismatch_treats_a_none_returning_resolve_as_unknown():
+    """A `resolve` written to match `venv_skew`'s sibling `probe`
+    convention — return a falsy value, don't raise — must not crash the
+    whole exec_mismatch() call for every other service."""
+    services = [{'name': 'radiod', 'pid': 101,
+                'expected': '/usr/local/sbin/radiod'}]
+
+    out = exec_mismatch(services, resolve=lambda pid: None)
+
+    assert out == [{'name': 'radiod', 'status': 'unknown',
+                    'expected': '/usr/local/sbin/radiod', 'running': None}]
+
+
+def test_exec_mismatch_treats_an_empty_string_resolve_as_unknown_not_mismatch():
+    """A falsy non-None return ('') must not be compared against
+    `expected` as if it were a real path — that produces a spurious
+    'mismatch' against a service that may be running exactly right."""
+    services = [{'name': 'radiod', 'pid': 101,
+                'expected': '/usr/local/sbin/radiod'}]
+
+    out = exec_mismatch(services, resolve=lambda pid: '')
+
+    assert out == [{'name': 'radiod', 'status': 'unknown',
+                    'expected': '/usr/local/sbin/radiod', 'running': None}]
+
+
+def test_exec_mismatch_still_flags_a_genuine_mismatch_alongside_falsy_handling():
+    """Guard against a fix for the falsy-return cases swallowing real
+    mismatches too."""
+    services = [{'name': 'radiod', 'pid': 101,
+                'expected': '/usr/local/sbin/radiod'}]
+
+    out = exec_mismatch(services, resolve=lambda pid: '/usr/local/sbin/radiod.patched')
+
+    assert out == [{'name': 'radiod', 'status': 'mismatch',
+                    'expected': '/usr/local/sbin/radiod',
+                    'running': '/usr/local/sbin/radiod.patched'}]
+
+
+def test_exec_mismatch_reports_a_deleted_backing_file_distinctly():
+    """B3's own relocation-behind-symlinks operation produces exactly
+    this: /proc/<pid>/exe for a process whose backing file was replaced
+    while it kept running resolves to the path plus a literal
+    ' (deleted)' suffix, raising nothing. That is a different situation
+    from a wrong-but-present binary (restart to pick up the new file,
+    vs investigate a genuine swap) and must not be reported as an
+    ordinary 'mismatch'."""
+    services = [{'name': 'radiod', 'pid': 101,
+                'expected': '/usr/local/sbin/radiod'}]
+
+    out = exec_mismatch(
+        services, resolve=lambda pid: '/usr/local/sbin/radiod (deleted)')
+
+    assert out == [{'name': 'radiod', 'status': 'deleted',
+                    'expected': '/usr/local/sbin/radiod',
+                    'running': '/usr/local/sbin/radiod (deleted)'}]
+
+
+def test_exec_mismatch_reports_deleted_even_when_the_deleted_path_also_differs():
+    """A deleted backing file is reported as 'deleted' regardless of
+    whether the (stripped) underlying path also happens to differ from
+    `expected` — the deletion itself is the anomaly worth surfacing, and
+    guessing whether it's ALSO a wrong-binary swap would be worse than
+    just saying 'go look'."""
+    services = [{'name': 'radiod', 'pid': 101,
+                'expected': '/usr/local/sbin/radiod'}]
+
+    out = exec_mismatch(
+        services,
+        resolve=lambda pid: '/usr/local/sbin/radiod.patched (deleted)')
+
+    assert out == [{'name': 'radiod', 'status': 'deleted',
+                    'expected': '/usr/local/sbin/radiod',
+                    'running': '/usr/local/sbin/radiod.patched (deleted)'}]

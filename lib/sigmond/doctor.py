@@ -173,6 +173,13 @@ def venv_skew(venvs: Iterable[str], shared: str, probe: Callable) -> list:
     return out
 
 
+# The literal suffix Linux appends to /proc/<pid>/exe's readlink target
+# when the backing file has been unlinked (e.g. replaced during an
+# update) while the process kept running. No exception is raised — the
+# path just carries this marker.
+_DELETED_SUFFIX = ' (deleted)'
+
+
 def exec_mismatch(services: Iterable[dict], resolve: Callable) -> list:
     """Running services whose ``/proc/<pid>/exe`` is not the binary their
     deploy tree provides.
@@ -191,15 +198,44 @@ def exec_mismatch(services: Iterable[dict], resolve: Callable) -> list:
     ``os.path.realpath`` on both sides: the deploy tree path and the
     running path may legitimately differ by symlink (e.g. a ``current``
     symlink into a versioned install dir), and flagging that would be
-    noise a real defect would drown in.
+    noise a real defect would drown in. Paths are expected to be
+    absolute, as ``/proc/<pid>/exe`` and this codebase's deploy-tree
+    paths always are; a relative ``resolve()`` result is resolved
+    against this process's cwd, which is the caller's responsibility to
+    avoid.
+
+    ``resolve(pid)`` contract: return the resolved executable path as a
+    non-empty string, or raise ``OSError``. Either convention signals
+    failure — a falsy return (``None``, ``''``) is ALSO treated as
+    failure, not just a raise, because `venv_skew`'s sibling ``probe``
+    signals absence by returning a falsy value rather than raising, and
+    a ``resolve`` written to match that established pattern must not
+    crash the whole pass (nor silently compare a falsy value as if it
+    were a real path, which would produce a spurious mismatch).
 
     Returns one entry per problem service, each a dict with ``name``,
-    ``status`` (``'mismatch'`` — running a different binary; ``'unknown'``
-    — ``/proc/<pid>/exe`` could not be read, because the process exited
-    mid-check or permission was denied), ``expected``, and ``running``
-    (``None`` for ``'unknown'`` — guessing there would be worse than
-    admitting the check couldn't see what ran). This returns data only;
-    ``summarise()`` owns presentation.
+    ``status``, ``expected``, and ``running``. ``status`` is one of:
+
+    * ``'mismatch'`` — running a different, still-present binary.
+    * ``'unknown'`` — ``/proc/<pid>/exe`` could not be read, because the
+      process exited mid-check, permission was denied, or ``resolve``
+      returned a falsy value. ``running`` is ``None`` — guessing here
+      would be worse than admitting the check couldn't see what ran.
+    * ``'deleted'`` — the backing file was unlinked while the process
+      kept running (``/proc/<pid>/exe`` resolves to the path plus the
+      literal `` (deleted)`` suffix, raising nothing — an in-place
+      binary replacement produces exactly this). Kept distinct from
+      ``'mismatch'``: the operator response differs (restart to pick up
+      the new file, vs investigate a genuine wrong-binary swap), and
+      collapsing it into ``'mismatch'`` would be technically true but
+      indistinguishable from the incident this check exists to catch.
+      Reported as ``'deleted'`` regardless of whether the path
+      underneath the suffix also differs from ``expected`` — the
+      deletion itself is the anomaly worth surfacing, and guessing
+      whether it's *also* a wrong-binary swap would be worse than
+      simply flagging it for a human to look at.
+
+    This returns data only; ``summarise()`` owns presentation.
     """
     out = []
     for svc in services:
@@ -209,28 +245,48 @@ def exec_mismatch(services: Iterable[dict], resolve: Callable) -> list:
         try:
             running = resolve(pid)
         except OSError:
+            running = None
+        if not running:
             out.append({'name': svc['name'], 'status': 'unknown',
                         'expected': svc['expected'], 'running': None})
             continue
         expected = svc['expected']
+        if running.endswith(_DELETED_SUFFIX):
+            out.append({'name': svc['name'], 'status': 'deleted',
+                        'expected': expected, 'running': running})
+            continue
         if os.path.realpath(running) != os.path.realpath(expected):
             out.append({'name': svc['name'], 'status': 'mismatch',
                         'expected': expected, 'running': running})
     return out
 
 
-def _parse_manifest_components(text: str) -> dict:
+def _parse_manifest_components(text: str) -> Optional[dict]:
     """Extract the ``components (live):`` block emitted by ``smd version``
     (see ``provenance.format_report``): a header line, then one line per
     component, four-space indent, name then a short SHA. The block ends
     at the next blank line or unindented line.
+
+    Returns ``None`` — not ``{}`` — when the block cannot be trusted:
+    the ``components (live):`` header is missing entirely (matches the
+    ``grep -q 'components (live):'`` test ``firstboot-v3.sh`` uses to
+    decide whether a manifest is installable at all), or the header is
+    present but yields zero parseable rows. A real manifest never ships
+    with zero components — the build-side capture gate refuses to ship
+    one with fewer than 10 — so a header with nothing under it is exactly
+    what a truncated or corrupted capture looks like, not a real "zero
+    components" image. Conflating that with an empty dict would make
+    ``manifest_drift`` report every live component as newly-added, which
+    is a worse failure than admitting the file can't be read.
     """
     lines = text.splitlines()
     out: dict = {}
     in_block = False
+    seen_header = False
     for line in lines:
         if line.strip() == 'components (live):':
             in_block = True
+            seen_header = True
             continue
         if not in_block:
             continue
@@ -241,7 +297,45 @@ def _parse_manifest_components(text: str) -> dict:
             continue          # e.g. "(no component checkouts found)"
         name, sha = parts
         out[name] = sha
+    if not seen_header or not out:
+        return None
     return out
+
+
+# `git rev-parse --short` picks abbreviation length by repository size at
+# call time, not a fixed 7 — the real v3.32 manifest already carries 7,
+# 8 and 9-character SHAs side by side (most components at 7, ka9q-radio
+# at 8, wsjtx at 9). Two independent reads of the SAME commit can
+# therefore legitimately come back different lengths, so exact string
+# equality is the wrong comparison: it reports drift that never
+# happened on whichever components happen to straddle an abbreviation
+# boundary between manifest time and live read time.
+#
+# A shared prefix below this many hex characters is not trustworthy
+# evidence of identity — a git SHA is hex, so a 3-character prefix has
+# roughly a 1-in-4096 chance of coinciding between two unrelated commits
+# even in a modest-sized repo, and this tool must not silently equate
+# two possibly-different commits on that kind of coincidence. 4 is
+# git's own historical floor for an unambiguous abbreviation
+# (`git rev-parse --short=4`); below it we refuse to call two SHAs
+# equal, which means the failure mode for a too-short pair is a
+# reported (and easily dismissed) false "moved" rather than a silently
+# swallowed real difference — the safer direction for a drift detector.
+MIN_SHA_PREFIX = 4
+
+
+def _sha_equal(a: str, b: str) -> bool:
+    """True if two short SHAs plausibly name the same commit.
+
+    Compares on the common prefix, using the SHORTER of the two lengths
+    — extending either string would mean guessing digits that were never
+    recorded. See ``MIN_SHA_PREFIX`` for why a too-short shared prefix is
+    treated as NOT matching rather than as a match.
+    """
+    n = min(len(a), len(b))
+    if n < MIN_SHA_PREFIX:
+        return False
+    return a[:n] == b[:n]
 
 
 def manifest_drift(live: dict, manifest_path: str) -> list:
@@ -254,10 +348,19 @@ def manifest_drift(live: dict, manifest_path: str) -> list:
     Release-attached copy (which has one) share this block shape, and
     only the block is read — the surrounding fields are ignored.
 
-    A host installed from an image that predates this manifest, or any
-    host with no manifest at all, cannot be assessed against one. That
-    is not drift — it's simply unknown — so a missing or unreadable
-    manifest returns ``[]`` rather than raising.
+    A host installed from an image that predates this manifest, any host
+    with no manifest at all, or a manifest that is present but malformed
+    (its ``components (live):`` header missing, or present with zero
+    parseable rows — the truncated/corrupt case) cannot be assessed
+    against. None of that is drift — it's simply unknown, on the same
+    footing as no manifest at all — so all three return ``[]`` rather
+    than raising, and rather than reporting every live component as
+    freshly added.
+
+    SHAs are compared on their shared prefix (see ``_sha_equal``), not by
+    exact string equality — ``git rev-parse --short`` abbreviation length
+    varies by repo size, so the manifest and a live read of the identical
+    commit will not always be the same length.
 
     Returns one entry per component that differs, each a dict with
     ``component``, ``status`` (``'moved'`` — the SHA changed;
@@ -274,6 +377,8 @@ def manifest_drift(live: dict, manifest_path: str) -> list:
         return []
 
     manifest = _parse_manifest_components(text)
+    if manifest is None:
+        return []
 
     out = []
     for name, manifest_sha in manifest.items():
@@ -281,7 +386,7 @@ def manifest_drift(live: dict, manifest_path: str) -> list:
         if live_sha is None:
             out.append({'component': name, 'status': 'manifest_only',
                         'manifest': manifest_sha, 'live': None})
-        elif live_sha != manifest_sha:
+        elif not _sha_equal(live_sha, manifest_sha):
             out.append({'component': name, 'status': 'moved',
                         'manifest': manifest_sha, 'live': live_sha})
     for name in sorted(set(live) - set(manifest)):
