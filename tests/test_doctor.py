@@ -364,6 +364,80 @@ def test_manifest_drift_tolerates_the_release_manifest_shape(tmp_path):
     assert [d['component'] for d in out] == ['hf-timestd']
 
 
+def test_manifest_drift_tolerates_differing_abbreviation_length(tmp_path):
+    """`git rev-parse --short` picks abbreviation length by repo size at
+    call time, not a fixed 7 -- the real v3.32 manifest already has 7, 8
+    and 9-character SHAs side by side. A live read of the SAME commit,
+    abbreviated to a different length than the manifest recorded, must
+    not be reported as drift."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "components (live):\n"
+        "    hf-timestd       0b8a729\n"
+    )
+    live = {'hf-timestd': '0b8a729ab'}         # same commit, longer read
+    assert manifest_drift(live, str(manifest)) == []
+
+
+def test_manifest_drift_still_catches_a_genuinely_different_commit(tmp_path):
+    """A shared short prefix must not mask a real difference -- the
+    common-prefix comparison has to fail once the strings actually
+    diverge, not just pass anything that starts the same."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "components (live):\n"
+        "    hf-timestd       0b8a729\n"
+    )
+    live = {'hf-timestd': '0b8a999'}           # diverges at the 5th char
+    out = manifest_drift(live, str(manifest))
+    assert [d['component'] for d in out] == ['hf-timestd']
+    assert out[0]['status'] == 'moved'
+
+
+def test_manifest_drift_does_not_trust_a_too_short_shared_prefix(tmp_path):
+    """Below MIN_SHA_PREFIX characters a shared prefix isn't good enough
+    evidence of identity -- collisions become plausible. The safe
+    direction is to report a (dismissible) false 'moved' rather than
+    silently equate two SHAs that might be different commits."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "components (live):\n"
+        "    hf-timestd       abc\n"
+    )
+    live = {'hf-timestd': 'abcdef0'}           # 'abc' is a literal prefix
+    out = manifest_drift(live, str(manifest))
+    assert [d['component'] for d in out] == ['hf-timestd']
+    assert out[0]['status'] == 'moved'
+
+
+def test_manifest_drift_on_a_manifest_missing_the_components_header(tmp_path):
+    """No `components (live):` line anywhere -- e.g. a manifest cut off
+    before the block ever started. Must read as unassessable, the same
+    as no manifest at all, NOT as 'this image shipped zero components'
+    (which would report every live component as newly added)."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "image_version: v3.32\n"
+        "appliance_commit: deadbeef\n"
+    )
+    live = {'hf-timestd': 'aaaaaaa', 'wspr-recorder': 'bbbbbbb'}
+    assert manifest_drift(live, str(manifest)) == []
+
+
+def test_manifest_drift_on_a_truncated_components_block(tmp_path):
+    """The header is present but nothing usable follows -- capture cut
+    off mid-write. A real manifest never ships with zero components (the
+    build-side gate refuses fewer than 10), so this is corruption, not a
+    legitimately empty image, and must not flood the report with
+    'live_only' for every installed component."""
+    manifest = tmp_path / 'manifest.txt'
+    manifest.write_text(
+        "components (live):\n"
+    )
+    live = {'hf-timestd': 'aaaaaaa', 'wspr-recorder': 'bbbbbbb'}
+    assert manifest_drift(live, str(manifest)) == []
+
+
 # ── exec mismatch ────────────────────────────────────────────────────
 # The radiod-swap incident this check exists for: a systemd drop-in
 # pointed ExecStart at a DIFFERENT binary than the one that had been
