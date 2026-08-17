@@ -475,6 +475,62 @@ equivalent `./install.sh` (or `make install`) that uses `deploy.toml`
 as its source of truth. A user who installs without sigmond gets the
 same production layout.
 
+#### 4.1 Libraries do NOT ship an installer
+
+The requirement above binds **clients and servers** — components that
+own systemd units and run as services. It does **not** bind
+**libraries**: components that exist only to be *imported* by clients.
+`ka9q-python`, `hs-uploader`, `callhash` and `hamsci-dsp` are the
+current set. They are declared `kind = "library"` in `etc/catalog.toml`
+(`ka9q-python` is synthesized in `catalog.py`), and they carry
+`install_script = None`.
+
+A library has no installer because it has nothing to install. Every
+consumer declares it in its own `pyproject.toml` as
+
+```toml
+[tool.uv.sources]
+ka9q-python = { path = "../ka9q-python", editable = true }
+```
+
+so the consumer's `install.sh` (`uv sync`, which honours
+`[tool.uv.sources]`) is what puts the library into that venv — as an
+*editable* install pointing at the shared checkout. That is the whole
+mechanism, and it is what makes a `git pull` of any suite library
+propagate to every consumer's venv with no further action.
+
+**Requirements**
+
+- A library MUST declare `kind = "library"` and MUST NOT ship an
+  `install.sh`. Shipping one implies a per-library install step that
+  does not exist and cannot be made to exist.
+- Every consumer MUST declare the library in `[tool.uv.sources]` with
+  `editable = true`. A consumer that vendors or wheel-installs a copy
+  silently stops tracking the shared checkout.
+- Repair is always the **consumer's** `install.sh`, never the library's
+  and never `deploy.sh` — `deploy.sh` runs `pip install -e .` for the
+  consumer alone and will not re-resolve siblings, so a venv holding a
+  private copy stays stale through any number of pull+deploy cycles.
+
+**What sigmond does with this**
+
+- `smd update` plans **no install step** for a library: the pull is the
+  whole update. Before this was stated, the planner emitted one anyway
+  and the executor ran a path that does not exist — `ka9q-python:
+  install.sh exit 127` on DASI002, 2026-08-17, which alone made an
+  otherwise successful `smd update --apply` return non-zero.
+- `smd doctor` reports `venv-skew` when a consumer's venv resolves the
+  library somewhere other than the shared checkout. That is the
+  detector for a broken editable link, and it is the reason a library
+  needs no installer of its own rather than a silent one.
+- Verify a consumer by asking where the import actually resolves:
+
+```bash
+<venv>/bin/python -c "import ka9q, os; print(os.path.dirname(ka9q.__file__))"
+# must print the shared checkout (/opt/git/sigmond/ka9q-python/ka9q),
+# never a path inside the consumer's own venv
+```
+
 #### 5.0 Declaring units in `deploy.toml` (v0.5)
 
 The `[systemd]` block above declared a single `units` array.  v0.5
