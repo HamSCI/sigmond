@@ -30,18 +30,21 @@ machine — same argument, one level up.** Its value is being representative
 enough to indicate whether an install image is complete; human accounts
 and dev tooling on it would introduce the drift it exists to detect. It
 deliberately has zero human accounts. Development happens on the devbox
-VM it hosts, where `mjh` and `rob` each work as themselves — own SSH key,
-own `gh` auth, own clone under `~/hamsci`. Before the devbox existed,
-every login on B3 was `root`, Rob's included; `last` showed no other
-account had ever been used, so git history could not attribute a change
-to a person.
+VM it hosts (`sigmond-devbox`), where `mjh` and `rob` each work as
+themselves — own SSH key, own `gh` auth, own `~/hamsci` layout (`ops` for
+shared knowledge and fleet aliases, `repos` for per-project clones).
+Before the devbox existed, every login on B3 was `root`, Rob's included;
+`last` showed no other account had ever been used, so git history could
+not attribute a change to a person.
 
-Reaching a fleet host from the devbox is a function of two separate
-things — where it is, and which key it has actually authorized — and
-getting the second one wrong looks exactly like a broken config while
-naming the wrong host in the error. See `hamsci-ops/docs/fleet-ssh-access.md`
-(private repo — site topology and fleet ssh aliases do not belong in this
-public one).
+Reaching the devbox itself, and reaching a fleet host from it, are each a
+function of two separate things — where the target is, and which key it
+has actually authorized — and getting the second one wrong looks exactly
+like a broken config while naming the wrong host in the error. Both the
+devbox's own reach details and the fleet ssh aliases live in
+`hamsci-ops/docs/fleet-ssh-access.md` (private repo — site topology does
+not belong in this public one); ask an existing operator for onboarding
+access if you don't have it yet.
 
 ## 2. The repository is the source of truth — no machine is
 
