@@ -1,0 +1,97 @@
+# /etc/sigmond/fleet.toml — EXAMPLE ONLY
+#
+# ┌───────────────────────────────────────────────────────────────────┐
+# │  THIS REPOSITORY IS PUBLIC.                                       │
+# │                                                                   │
+# │  Never commit a real inventory. Every entry below is a            │
+# │  placeholder (*.example, RFC-5737/RFC-1918 documentation          │
+# │  addresses). A real inventory names, and therefore maps, every    │
+# │  field unit you operate: hostnames, addresses, ports, usernames   │
+# │  and jump hosts, in one file.                                     │
+# │                                                                   │
+# │  Copy this to /etc/sigmond/fleet.toml and edit it there.          │
+# └───────────────────────────────────────────────────────────────────┘
+#
+# WHERE THIS FILE IS READ FROM
+#
+# First match wins, highest precedence first:
+#
+#   1. smd fleet --inventory PATH     explicit, for one invocation
+#   2. $SIGMOND_FLEET                 for hosts with no /etc/sigmond
+#   3. /etc/sigmond/fleet.toml        the default
+#
+# Unlike catalog.toml, these are NOT sparse overlay layers — one whole
+# file wins. An inventory is a list of machines to act on, and a
+# fan-out that reached a host you did not list would be exactly the
+# accident this file exists to prevent.
+#
+# WHAT A HOST RECORDS
+#
+#   reach    (required)  Opaque ssh destination. Anything ssh accepts,
+#                        flags included. It is never parsed — ssh is
+#                        the parser. This records WHERE the host is,
+#                        never WHICH KEY reaches it; the credential is
+#                        your own ~/.ssh/config, so two operators can
+#                        share one inventory.
+#
+#   hop      (optional)  Inner ssh destination, when the host must be
+#                        reached by a NESTED ssh: `ssh <reach> "ssh
+#                        <hop> '<cmd>'"`. Use this when the credential
+#                        for the final hop lives on the intermediate
+#                        host rather than on yours — a guest whose
+#                        hypervisor holds the authorized key is the
+#                        usual case. This is NOT ProxyJump: `-J` offers
+#                        YOUR key on the final hop, which is precisely
+#                        the credential that does not reach there.
+#
+#   profile  (optional)  Bring-up profile the host runs.
+#   role     (optional)  Free-form grouping for reporting.
+#   frozen   (optional)  Why this host must not be changed. A reason,
+#                        not a flag, so the skip can say why. A frozen
+#                        host is still REPORTED by `status` and
+#                        `doctor` — freeze prevents changes, not
+#                        visibility — and is skipped loudly by
+#                        `update`, never silently.
+
+
+# A host reached directly. The simplest form.
+[host.alpha]
+reach   = "root@alpha.example"
+profile = "dasi2"
+role    = "field"
+
+
+# A host behind a jump, on a non-default port. All of that is ssh's
+# business, not ours — it stays one opaque string.
+[host.beta]
+reach   = "-J jump.example -p 2222 root@10.0.0.9"
+profile = "dasi2"
+role    = "field"
+
+
+# A sigmond guest on a hypervisor. `reach` gets you to the hypervisor
+# with YOUR key; the hypervisor's own key is what is authorized inside
+# the guest, so the hypervisor runs the inner ssh named by `hop`.
+[host.gamma]
+reach   = "root@hypervisor.example"
+hop     = "sigmond@10.0.0.5"
+profile = "dasi2"
+role    = "field"
+
+
+# Frozen: reported by status and doctor, skipped loudly by update.
+# Give a reason and an end time — a freeze with neither outlives its
+# cause and quietly becomes permanent.
+[host.delta]
+reach   = "root@delta.example"
+profile = "dasi2"
+role    = "field"
+frozen  = "capture window through 2026-08-20T00:00Z"
+
+
+# Not every fleet member runs sigmond. Recording one anyway is useful —
+# it is reported as having no install rather than going unmentioned,
+# and it is often the jump host the others are reached through.
+[host.epsilon]
+reach = "operator@epsilon.example"
+role  = "server"
