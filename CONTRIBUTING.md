@@ -15,8 +15,8 @@ there.**
 
 | role | machine | what it is for |
 |---|---|---|
-| development | your workstation / B3 | writing code and running tests |
-| staging | a nested VM on B3 (`test-nested-v3.sh`) | validating an install before it ships |
+| development | the devbox VM on B3 | writing code and running tests, as yourself |
+| build + staging | B3's PM, and a nested VM on it (`test-nested-v3.sh`) | building images and validating an install before it ships |
 | production | B4, DASI002 and the field units | collecting science data |
 
 **B4 is a reference station, not a development machine.** Its value is
@@ -24,6 +24,24 @@ being representative of a real deployment; developing on it destroys
 exactly that. (It currently carries `.vscode`, `.ruff_cache` and `dist`
 directories that no deployed unit has — that is the drift we are trying
 to avoid.)
+
+**B3's PM is a hypervisor and the image build rig, not a development
+machine — same argument, one level up.** Its value is being representative
+enough to indicate whether an install image is complete; human accounts
+and dev tooling on it would introduce the drift it exists to detect. It
+deliberately has zero human accounts. Development happens on the devbox
+VM it hosts, where `mjh` and `rob` each work as themselves — own SSH key,
+own `gh` auth, own clone under `~/hamsci`. Before the devbox existed,
+every login on B3 was `root`, Rob's included; `last` showed no other
+account had ever been used, so git history could not attribute a change
+to a person.
+
+Reaching a fleet host from the devbox is a function of two separate
+things — where it is, and which key it has actually authorized — and
+getting the second one wrong looks exactly like a broken config while
+naming the wrong host in the error. See `hamsci-ops/docs/fleet-ssh-access.md`
+(private repo — site topology and fleet ssh aliases do not belong in this
+public one).
 
 ## 2. The repository is the source of truth — no machine is
 
@@ -92,7 +110,73 @@ side effect.
 * A host may legitimately run a *superset* of the pin. Test containment,
   not equality.
 
-## 6. Deploy trees are not workspaces
+## 6. Cutting a release
+
+An appliance image moves through four rungs — **built → tested → blessed
+→ rolled** — and nothing is blessed without evidence. Full detail lives in
+`sigmond-appliance/docs/RELEASE.md`; this is the summary a contributor
+needs to know the mechanism exists.
+
+* `build-usb-v3.sh` derives the image version from the **git tag on
+  `HEAD`** and refuses to build from a dirty tree. Before this, version
+  was a positional argument nobody recorded — "v3.31" existed only inside
+  a filename, with no way to reconstruct which commit produced a shipped
+  image.
+* The **component pin manifest** is generated from `smd version` inside
+  the golden VM template at build time, never hand-written, and ships
+  beside the image.
+* `bless-release.sh <version> [--apply]` enforces seven gates (version
+  format, tag reachable from `origin/main`, clean tree, verified image
+  checksum, a real manifest, test evidence tied to *that* image, no
+  pre-existing Release) and cannot publish without a human typing a
+  confirmation at a terminal — it reads `/dev/tty` explicitly so a pipe
+  or an automated caller can't satisfy it.
+* The first Release is
+  [v3.32](https://github.com/HamSCI/sigmond-appliance/releases/tag/v3.32):
+  the record carries the manifest, the sha256, and the test verdict. The
+  image itself stays on the artifact store — GitHub caps release assets
+  at 2 GiB and images run ~4.9 GB.
+
+**The gate earned its keep immediately.** A v3.32 build from a proper
+tag, with a valid 22-component manifest and a verified checksum, shipped
+a 127-byte `sigmond.tar.gz` containing a single broken symlink instead of
+the 7.7 MB sigmond source tree — a rig-sibling directory had become a
+symlink during a disk migration, and `tar` archived the link instead of
+its contents. Every install from that image would have booted with no
+sigmond payload. The gate refused to bless it.
+
+## 7. Shell and tooling traps
+
+None of these are sigmond-specific, and all of them have cost real time
+on this project recently enough to write down.
+
+* **`grep -c` prints `0` and exits 1 when it matches nothing.** Under
+  `set -e`, a bare `VAR=$(grep -c ...)` aborts the script silently before
+  any of your own error handling runs. `VAR=$(grep -c ... || echo 0)` is
+  not the fix — it appends a second `0` line on top of the one `grep -c`
+  already printed, so `$VAR` becomes `"0\n0"` and corrupts whatever row
+  it's written into. Use `|| true`, not `|| echo 0`. This bit three
+  separate times in two days, including corrupting 461 rows of a capacity
+  dataset.
+* **`systemd-run` does not inherit `HOME`**, and its transient unit
+  defaults to `KillMode=control-group`. A process started with
+  `-daemonize` (or any other double-fork) stays in that cgroup unless
+  something explicitly moves it out — so the instant the driver script
+  exits, systemd tears down the whole cgroup and SIGTERMs the "detached"
+  child anyway. This destroyed post-mortem evidence mid-investigation and
+  sent it down a wrong path before the cgroup teardown itself was found.
+  Pass `-E HOME=...`, and give anything that must outlive the driver its
+  own transient scope (`systemd-run --scope --collect`) rather than
+  trusting `-daemonize` to escape.
+* **`pgrep -f <string>` matches the shell running it.** It has reported a
+  VM as still running when it had already stopped. Match on something the
+  invoking shell can't contain, or use `ps -C <comm>`.
+* **`ProxyJump` does not inherit `-i`** — the jump is a separate ssh
+  process — and each fleet host authorizes keys independently, so
+  reaching the jump host does not imply reaching anything behind it. See
+  "Where work happens" above and `hamsci-ops/docs/fleet-ssh-access.md`.
+
+## 8. Deploy trees are not workspaces
 
 Component checkouts on a host are owned by their **service users**
 (`timestd`, `wsprrec`, …) and are simultaneously a git working tree, an
@@ -112,7 +196,7 @@ most of our operational pain.
 * Never `git add -A` in a deploy tree. A stray test artifact committed
   that way broke `git pull` on a field unit.
 
-## 7. Verify the thing that runs, not the thing you installed
+## 9. Verify the thing that runs, not the thing you installed
 
 Nearly every failure this project has had looked like success:
 
@@ -128,7 +212,27 @@ readlink -f /proc/$(systemctl show UNIT -p MainPID --value)/exe
 systemctl show UNIT -p ExecStart      # a drop-in may override it
 ```
 
-## 8. Using graphify
+**As of Stage 3, `smd doctor` checks this for you.** It reports:
+
+* **drift** — do this host's live component SHAs still match the
+  manifest it was installed from (`/etc/sigmond-appliance/manifest.txt`,
+  the same manifest the image shipped with — see §6)? This lets a field
+  unit answer "am I what my image says I am" with no network access.
+* **exec mismatch** — is each running service's `/proc/PID/exe` actually
+  the binary its deploy tree provides? It reads `ExecStart` from the
+  *base* unit file, not the merged effective value, so a drop-in override
+  can't hide from it — the exact mechanism behind the radiod swap that
+  was once silently a no-op.
+* **venv skew** — across every declared editable sibling
+  (`[tool.uv.sources]`), not just `ka9q-python`.
+* **"cannot assess"**, reported distinctly from "healthy" — a host with
+  no usable manifest (an older image, or B3's PM, which is not an
+  appliance install) says so rather than reporting clean.
+
+The manual commands above are still how you check by hand, and are what
+`smd doctor` runs under the hood.
+
+## 10. Using graphify
 
 The suite has a cross-repo knowledge graph at
 `/root/appliance/repos/graphify-out/`, covering all the component repos.
@@ -156,7 +260,7 @@ The suite has a cross-repo knowledge graph at
     anything, do a clean rebuild or the graph keeps answering with code
     that no longer exists.
 
-## 9. Pull requests
+## 11. Pull requests
 
 * Branch from `main`, small and focused.
 * State what you observed, what you changed, and how you verified it.
@@ -166,7 +270,7 @@ The suite has a cross-repo knowledge graph at
   script, say so explicitly — those are the changes that reach every
   field unit at once.
 
-## 10. When something is wrong on a deployed unit
+## 12. When something is wrong on a deployed unit
 
 1. `smd doctor` on the unit — most problems name themselves.
 2. Reproduce on staging, not on the unit.
