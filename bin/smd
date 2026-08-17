@@ -3056,6 +3056,94 @@ def _no_actionable_outcome(held_targets):
     return 0, 'host is current — nothing to do'
 
 
+def _read_cmdline_at(path: str) -> list:
+    """argv from a /proc/<pid>/cmdline-shaped file, NUL-separated.
+
+    The file ends with a trailing NUL, which a naive split turns into a
+    spurious empty final argument.
+    """
+    with open(path, 'rb') as fh:
+        raw = fh.read()
+    return [p.decode('utf-8', 'replace') for p in raw.split(b'\0') if p]
+
+
+def _read_cmdline(pid) -> list:
+    return _read_cmdline_at(f'/proc/{pid}/cmdline')
+
+
+def _make_exe_resolver(readlink=None, read_cmdline=None):
+    """(resolve, unverified) for `exec_mismatch`'s injected ``resolve``.
+
+    ``/proc/<pid>/exe`` is readable only by a process that could ptrace
+    the target, so `smd doctor` run as the `sigmond` operator cannot
+    read it for a service running as `timestd` or `wsprrec` — and every
+    one of those collapsed to ``status=unknown``, which is the check
+    going blind for precisely the services it exists to watch (all 13
+    timestd units on DASI002, 2026-08-17).
+
+    Running the check under sudo is not available: smd refuses to run
+    under sudo at all, because it elevates itself when a verb needs
+    root. So the fallback has to be something an unprivileged caller can
+    already read, and that is ``/proc/<pid>/cmdline`` (world-readable).
+    Its argv[0] is what systemd exec'd, which for these units is the
+    same absolute path ``/proc/<pid>/exe`` would have given.
+
+    KNOWN LIMITATION — argv[0] is evidence, not proof. Unlike
+    ``/proc/<pid>/exe``, which the kernel maintains, argv[0] is
+    process-CONTROLLED: a process can rewrite it, and a unit file can
+    set it independently of the binary actually executed. A swap
+    performed by something that also set argv[0] to the expected path
+    would read as clean here. It therefore answers the accidental case
+    this check was built for — the drop-in that pointed ExecStart at a
+    different binary — and not an adversarial one. ``unverified``
+    collects the pids answered this way so every finding derived from
+    one says so; see ``_exec_finding_text``.
+
+    Only PermissionError falls back. A process that exited mid-check
+    raises FileNotFoundError, has no argv[0] either, and 'unknown' is
+    the honest answer — guessing there would be worse than admitting the
+    check could not see what ran.
+    """
+    _readlink = readlink or (lambda pid: os.readlink(f'/proc/{pid}/exe'))
+    _cmdline = read_cmdline or _read_cmdline
+    unverified: set = set()
+
+    def resolve(pid):
+        try:
+            return _readlink(pid)
+        except PermissionError:
+            pass
+        try:
+            argv = _cmdline(pid)
+        except OSError:
+            return None
+        argv0 = argv[0] if argv else None
+        # A relative argv[0] ('python3') names no particular binary, and
+        # resolving it against OUR cwd would invent an answer.
+        if not argv0 or not argv0.startswith('/'):
+            return None
+        unverified.add(str(pid))
+        return argv0
+
+    return resolve, unverified
+
+
+def _exec_finding_text(m: dict, pid=None, unverified=frozenset()) -> str:
+    """One exec-mismatch finding line, disclosing its provenance.
+
+    A verdict reached from argv[0] must never read like one reached from
+    ``/proc/<pid>/exe`` — the codebase states its bounds rather than
+    letting a weaker check pass for a stronger one (see ``_sha_equal``).
+    """
+    running = m['running'] if m['running'] is not None else '(unreadable)'
+    text = (f'{m["name"]}: running={running} expected={m["expected"]} '
+            f'status={m["status"]}')
+    if pid is not None and str(pid) in unverified:
+        text += (' [UNVERIFIED: read from argv[0], not /proc/<pid>/exe — '
+                 'run as root for an authoritative answer]')
+    return text
+
+
 def _chown_tree(d: Path, owner_uid: int) -> None:
     """Recursively give a checkout back to its owning uid and group."""
     subprocess.run(['chown', '-R', f'{owner_uid}:{d.stat().st_gid}', str(d)],
@@ -3672,8 +3760,11 @@ def cmd_doctor(args) -> int:
     # incident.  See `_unit_exec_expected` (module level, above) for how
     # "the deploy tree's expected binary" is derived and its documented
     # trade-offs.
-    def _resolve_proc_exe(pid):
-        return os.readlink(f'/proc/{pid}/exe')
+    # Falls back to argv[0] when /proc/<pid>/exe is denied — otherwise
+    # every service owned by another user reports 'unknown' and the
+    # check is blind exactly where it matters. See _make_exe_resolver
+    # for why that fallback is evidence rather than proof.
+    _resolve_proc_exe, _exec_unverified = _make_exe_resolver()
 
     services = []
     unit_component = {}
@@ -3715,6 +3806,7 @@ def cmd_doctor(args) -> int:
                 f'{u.unit}: running=(unreadable) expected=(unreadable) '
                 f'status=unknown ({exc})'))
 
+    unit_pid = {s['name']: s['pid'] for s in services}
     for m in exec_mismatch(services, _resolve_proc_exe):
         comp = unit_component.get(m['name'], m['name'])
         # A `deleted` backing file is NOT presented as quieter than a
@@ -3723,11 +3815,10 @@ def cmd_doctor(args) -> int:
         # alongside `expected`, so a binary that was both wrong AND
         # deleted stays visible — collapsing that detail would hide
         # exactly the case this check exists to catch.
-        running = m['running'] if m['running'] is not None else '(unreadable)'
         findings.append(Finding(
             comp, 'exec-mismatch',
-            f'{m["name"]}: running={running} expected={m["expected"]} '
-            f'status={m["status"]}'))
+            _exec_finding_text(m, pid=unit_pid.get(m['name']),
+                               unverified=_exec_unverified)))
 
     ok, text = summarise(findings)
     if ok:
