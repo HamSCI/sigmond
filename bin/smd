@@ -3140,8 +3140,15 @@ def cmd_update(args) -> int:
             ['git', '--no-optional-locks', '-C', str(d), 'diff',
              '--name-only', 'HEAD..@{u}'], capture_output=True, text=True)
         incoming = (inc.stdout.split() if inc.returncode == 0 else None)
+        # Whether there is an install script to run at all. ka9q-python
+        # has none (library, consumed editably), and planning an install
+        # for it made the executor run a nonexistent path — exit 127.
+        # Same two candidates the executor tries, in the same order.
+        installer = ((d / 'scripts' / 'install.sh').exists()
+                     or (d / 'install.sh').exists())
         repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
-                         'incoming': incoming, 'owner': owner}
+                         'incoming': incoming, 'owner': owner,
+                         'installer': installer}
 
     # Every editable sibling THIS component declares (ka9q-python,
     # hamsci-dsp, hs-uploader, ...) is checked, not just ka9q-python —

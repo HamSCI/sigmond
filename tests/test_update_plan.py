@@ -216,3 +216,74 @@ def test_unknown_incoming_files_are_treated_conservatively():
         'behind': 1, 'dirty': ['a'], 'owner': 'u'}}))
 
     assert isinstance(plan[0], Refusal)
+
+
+# ---------------------------------------------------------------------------
+# Components that have no install script
+# ---------------------------------------------------------------------------
+#
+# ka9q-python is a library: it has no scripts/install.sh and no
+# install.sh, because it is consumed editably through its consumers'
+# [tool.uv.sources]. Pulling it IS the whole update — every consumer's
+# venv tracks the checkout automatically.
+#
+# The planner emitted an [install] step for it anyway, and the executor
+# (bin/smd, `sh = base/<name>/scripts/install.sh`, falling back to
+# `install.sh`) then ran a path that does not exist:
+#
+#     ✗ ka9q-python: install.sh exit 127
+#
+# Observed on DASI002 2026-08-17, and it is what made an otherwise
+# successful `smd update --apply` return 1.
+
+
+def test_a_component_without_an_installer_is_pulled_but_not_installed():
+    plan = plan_update(_state(repos={'ka9q-python': {
+        'behind': 3, 'dirty': [], 'owner': 'sigmond', 'installer': False}}))
+
+    assert [a.kind for a in plan] == ['pull', 'restart']
+
+
+def test_the_plan_says_why_it_skipped_the_install_rather_than_going_quiet():
+    """A step that vanishes without explanation reads as an oversight."""
+    plan = plan_update(_state(repos={'ka9q-python': {
+        'behind': 3, 'dirty': [], 'owner': 'sigmond', 'installer': False}}))
+
+    pull = next(a for a in plan if a.kind == 'pull')
+    assert 'no install script' in pull.detail
+
+
+def test_a_component_with_an_installer_still_gets_one():
+    plan = plan_update(_state(repos={'hf-timestd': {
+        'behind': 3, 'dirty': [], 'owner': 'timestd', 'installer': True}}))
+
+    assert [a.kind for a in plan] == ['pull', 'install', 'restart']
+
+
+def test_an_unstated_installer_is_assumed_present():
+    """Absent means UNKNOWN, and unknown must not skip an install.
+
+    A skipped install leaves a venv holding stale code, which is silent
+    and lasting; a spurious 127 is loud and harmless. Callers that
+    predate this key keep their behaviour.
+    """
+    plan = plan_update(_state(repos={'hf-timestd': {
+        'behind': 3, 'dirty': [], 'owner': 'timestd'}}))
+
+    assert [a.kind for a in plan] == ['pull', 'install', 'restart']
+
+
+def test_a_skewed_venv_that_cannot_be_repaired_refuses_rather_than_pretending():
+    """venv skew is repaired BY install.sh. With no install script there
+    is nothing to run, so saying nothing would leave a real defect
+    unreported."""
+    plan = plan_update(_state(
+        repos={'ka9q-python': {'behind': 0, 'dirty': [], 'owner': 'sigmond',
+                               'installer': False}},
+        venv_skew=['ka9q-python']))
+
+    refusals = [s for s in plan if isinstance(s, Refusal)]
+    assert refusals, 'expected a refusal naming the unrepairable skew'
+    assert refusals[0].target == 'ka9q-python'
+    assert 'install' in refusals[0].reason
+    assert not [a for a in plan if getattr(a, 'kind', '') == 'install']

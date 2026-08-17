@@ -72,6 +72,29 @@ class Refusal:
 # everything settles before services are bounced.
 _ORDER = ('pull', 'install', 'rebuild-radiod', 'wisdom', 'restart')
 
+#: Said on the pull, so a missing install step reads as a decision
+#: rather than an oversight.
+_NO_INSTALLER_NOTE = (
+    'no install script: a library consumed editably through its '
+    "consumers' [tool.uv.sources], so the pull is the whole update")
+
+
+def _has_installer(info: dict) -> bool:
+    """Whether this component has an install script to run.
+
+    ka9q-python has none — it is a library, and every consumer's venv
+    already tracks its checkout. The planner emitted an install step for
+    it regardless, and the executor then ran a path that does not exist
+    (`install.sh exit 127` on DASI002, 2026-08-17), which is what made an
+    otherwise successful `smd update --apply` return 1.
+
+    ABSENT means UNKNOWN, and unknown assumes present. A skipped install
+    leaves a venv holding stale code — silent, and lasting; a spurious
+    127 is loud and harmless. Callers that predate this key keep their
+    behaviour unchanged.
+    """
+    return info.get('installer', True) is not False
+
 
 def plan_update(state: dict) -> list:
     """Return ordered actions (and refusals) to bring a host current.
@@ -108,9 +131,12 @@ def plan_update(state: dict) -> list:
                 f'change may be a fix that never got committed'))
             continue
         if info.get('behind'):
+            detail = f'{info["behind"]} commit(s) behind upstream'
+            if not _has_installer(info):
+                detail += f' — {_NO_INSTALLER_NOTE}'
             actions.append(Action(
                 'pull', name,
-                detail=f'{info["behind"]} commit(s) behind upstream',
+                detail=detail,
                 run_as=info.get('owner'),
                 verify='git rev-parse HEAD == origin/main'))
             to_install.add(name)
@@ -118,6 +144,18 @@ def plan_update(state: dict) -> list:
 
     # A skewed venv needs install.sh even when the source is current.
     for name in sorted(skew | to_install):
+        if not _has_installer(repos.get(name) or {}):
+            # Nothing to run. For a library that is the correct outcome —
+            # consumers' editable installs already track the checkout —
+            # but a SKEWED venv is a real defect that install.sh is the
+            # repair for, and staying silent would leave it unreported.
+            if name in skew:
+                refusals.append(Refusal(
+                    name,
+                    'venv skew, but this component has no install script to '
+                    'repair it — rerun the CONSUMER\'s install.sh (uv sync '
+                    'honours [tool.uv.sources])'))
+            continue
         actions.append(Action(
             'install', name,
             detail='run scripts/install.sh (uv sync honours '
