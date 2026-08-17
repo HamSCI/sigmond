@@ -218,7 +218,8 @@ def _repo_is_dirty(repo_dir: Path) -> tuple[bool, str | None]:
     Untracked files alone don't count — git pull won't clobber them.
     """
     r = subprocess.run(
-        ['git', '-C', str(repo_dir), 'status', '--porcelain', '--untracked-files=no'],
+        ['git', '--no-optional-locks', '-C', str(repo_dir),
+         'status', '--porcelain', '--untracked-files=no'],
         capture_output=True, text=True,
     )
     if r.returncode == 0 and r.stdout.strip():
@@ -3054,6 +3055,50 @@ def _no_actionable_outcome(held_targets):
             f'nothing to do — {len(held_targets)} component(s) HELD '
             f'({", ".join(held_targets)}); the rest of the host is current')
     return 0, 'host is current — nothing to do'
+
+
+def _harden_git_env(env) -> None:
+    """Stop any git smd spawns from rewriting .git/index as root.
+
+    `git status` opportunistically refreshes and REWRITES the index. Run
+    as root — which smd is, whenever a verb elevates — that leaves the
+    index root-owned, recreating precisely the damage `smd doctor --fix`
+    exists to repair.
+
+    Three call sites already hand-added `--no-optional-locks` for this
+    (doctor.py `git_state`, provenance.py `_git_head`, `_repo_is_dirty`
+    below), and it was STILL happening: `doctor --fix` repaired ownership
+    and seconds later left `.git/index` root-owned again on 5 components
+    (B4) and 2 (DASI002). A PATH shim caught the culprit — three bare
+    invocations with no -C and no flags:
+
+        root | status --porcelain
+        root | rev-parse HEAD
+        root | rev-parse --abbrev-ref HEAD
+
+    none of which smd authored. They come from inside the venv-skew
+    probe, which imports each component's package as root; setuptools_scm
+    style version derivation on an editable install shells out to exactly
+    those, with cwd in the project root.
+
+    Per-call flags cannot cover a call smd does not write. The
+    environment can: GIT_OPTIONAL_LOCKS=0 is the env form of
+    `--no-optional-locks` and every descendant inherits it. Verified A/B
+    on DASI002 (2026-08-17): with it the index stayed `sigmond`, without
+    it the same seeded run left it `root`.
+
+    Only OPTIONAL locks are suppressed, so real work is unaffected —
+    `git pull`'s index write is required, not opportunistic.
+
+    An operator who set this deliberately keeps their value.
+    """
+    env.setdefault('GIT_OPTIONAL_LOCKS', '0')
+
+
+# Applied at import, before any subprocess can be spawned — the git that
+# caused this is in a grandchild, so the guard has to be in place before
+# the first fork, not at the point of use.
+_harden_git_env(os.environ)
 
 
 def _read_cmdline_at(path: str) -> list:
