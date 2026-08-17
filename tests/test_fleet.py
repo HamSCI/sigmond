@@ -828,19 +828,13 @@ def updating_runner(names):
         calls.append((host.name, command))
         if host.name not in names:
             return RunResult(rc=1, out='', err='unexpected host')
-        # This fake host grants the scoped sudoers rule, so the elevated
-        # form is answered rather than refused.
-        bare = command[len('sudo -n '):] if command.startswith('sudo -n ') \
-            else command
-        if bare == 'true':
+        if command == 'true':
             return _ok()
-        if bare == 'smd update --apply':
+        if command == 'smd update --apply':
             updated.add(host.name)
             return _ok('done')
-        if bare == 'smd update':
+        if command == 'smd update':
             return _ok(CURRENT if host.name in updated else HAS_PLAN)
-        if bare == 'smd version':
-            return _ok(VERSION_OK)
         return RunResult(rc=1, out='', err='unexpected command')
 
     run.calls = calls
@@ -872,9 +866,7 @@ class TestCanaryThenWave:
         [result] = fleet_update(fleet, run, apply=True)
         assert result.applied is True
         assert result.verified is True
-        # The last thing it did was re-plan (elevated, so the fetch can
-        # reach repos owned by other users).
-        assert run.calls[-1][1].endswith('smd update')
+        assert run.calls[-1][1] == 'smd update'
 
     def test_every_wave_host_is_updated_once_the_canary_holds(self):
         fleet = _fleet(Host(name='canary', reach='r', canary=True),
@@ -1134,127 +1126,3 @@ class TestStripAnsi:
         result = ssh_runner(exec_=exec_)(Host(name='h', reach='r'), 'smd version')
         assert result.out == '✓ ok'
         assert result.err == 'bad'
-
-
-# ---------------------------------------------------------------------------
-# Scoped elevation
-# ---------------------------------------------------------------------------
-#
-# Two checks need root and degrade honestly without it:
-#   * exec-mismatch reads /proc/<pid>/exe, unreadable for another user's
-#     process — every service reported `running=(unreadable)`.
-#   * _git_fetch_as_owner can only drop privileges when it HAS them, so
-#     as `sigmond` it cannot fetch a timestd-owned repo and the ref
-#     stays stale (hf-timestd sat 19 commits behind, invisible).
-#
-# The elevation is per-verb, never blanket: sudoers matches arguments
-# exactly, so `smd doctor` permits only the bare form. `--fix` and
-# `--apply` still require a password.
-
-from sigmond.fleet import run_elevated, sudo_refused  # noqa: E402
-
-
-class TestSudoRefusalDetection:
-
-    def test_a_password_prompt_is_a_refusal(self):
-        assert sudo_refused(RunResult(rc=1, err='sudo: a password is required'))
-
-    def test_not_in_sudoers_is_a_refusal(self):
-        assert sudo_refused(RunResult(
-            rc=1, err='sudo: user sigmond is not allowed to execute'))
-
-    def test_a_successful_run_is_not_a_refusal(self):
-        assert not sudo_refused(RunResult(rc=0, out='deploy trees clean'))
-
-    def test_the_commands_own_failure_is_not_a_refusal(self):
-        """`smd doctor` exits 1 when it FINDS something. Treating that as
-        a sudo refusal would silently rerun it unelevated and report less."""
-        assert not sudo_refused(RunResult(rc=1, out='hf-timestd:\n  venv-skew'))
-
-
-class TestRunElevated:
-
-    def test_it_prefers_the_elevated_form(self):
-        seen = []
-
-        def run(host, command):
-            seen.append(command)
-            return _ok('clean')
-
-        result, elevated = run_elevated(run, Host(name='h', reach='r'),
-                                        'smd doctor')
-        assert seen == ['sudo -n smd doctor']
-        assert elevated is True
-        assert result.out == 'clean'
-
-    def test_it_falls_back_when_sudo_refuses(self):
-        """A host without the rule must still be reported, not dropped."""
-        seen = []
-
-        def run(host, command):
-            seen.append(command)
-            if command.startswith('sudo -n'):
-                return RunResult(rc=1, err='sudo: a password is required')
-            return _ok('clean')
-
-        result, elevated = run_elevated(run, Host(name='h', reach='r'),
-                                        'smd doctor')
-        assert seen == ['sudo -n smd doctor', 'smd doctor']
-        assert elevated is False
-        assert result.out == 'clean'
-
-    def test_it_does_not_retry_when_the_command_itself_failed(self):
-        """Running a findings-producing doctor twice would double the work
-        and could report different results from the two runs."""
-        seen = []
-
-        def run(host, command):
-            seen.append(command)
-            return RunResult(rc=1, out='findings')
-
-        _result, elevated = run_elevated(run, Host(name='h', reach='r'),
-                                         'smd doctor')
-        assert seen == ['sudo -n smd doctor']
-        assert elevated is True
-
-
-class TestElevationIsReported:
-
-    def test_doctor_records_whether_it_ran_elevated(self):
-        fleet = _fleet(Host(name='h', reach='r'))
-        run = runner({
-            ('h', 'true'): _ok(),
-            ('h', 'sudo -n smd doctor'): _ok('deploy trees clean'),
-        })
-        [result] = fleet_doctor(fleet, run)
-        assert result.elevated is True
-        assert result.clean is True
-
-    def test_an_unelevated_host_says_so_in_the_report(self):
-        """Coverage differs between the two, so a reader must be able to
-        tell which ran — a short report must not read as a clean one."""
-        fleet = _fleet(Host(name='h', reach='r'))
-        run = runner({
-            ('h', 'true'): _ok(),
-            ('h', 'sudo -n smd doctor'): RunResult(
-                rc=1, err='sudo: a password is required'),
-            ('h', 'smd doctor'): _ok('deploy trees clean'),
-        })
-        results = fleet_doctor(fleet, run)
-        assert results[0].elevated is False
-        report = format_doctor(results)
-        assert 'unelevated' in report.lower() or 'not elevated' in report.lower()
-
-    def test_elevation_never_reaches_a_mutating_form(self):
-        """The whole point of pinning verbs: --fix and --apply must never
-        be issued with sudo, or the sudoers rule would have to permit
-        them."""
-        fleet = _fleet(Host(name='h', reach='r'))
-        run = runner({
-            ('h', 'true'): _ok(),
-            ('h', 'sudo -n smd doctor'): _ok('clean'),
-        })
-        fleet_doctor(fleet, run)
-        for _host, command in run.calls:
-            assert '--fix' not in command
-            assert '--apply' not in command

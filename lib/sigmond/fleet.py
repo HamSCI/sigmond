@@ -204,48 +204,8 @@ _MANIFEST_CMD = 'cat /etc/sigmond-appliance/manifest.txt'
 #: `smd doctor` with no --fix. The flag is not merely omitted at the
 #: call site: it is absent from the only string the fan-out can send.
 _DOCTOR_CMD = 'smd doctor'
-
-#: Non-interactive: never prompt. A fan-out that blocks on a password
-#: hangs every host queued behind it.
-SUDO_PREFIX = 'sudo -n '
-
-#: Substrings by which sudo announces that IT refused, as opposed to the
-#: command running and failing. The distinction matters: `smd doctor`
-#: exits 1 when it FINDS something, and treating that as a refusal would
-#: silently rerun it unelevated and report less than it just did.
-_SUDO_REFUSALS = ('a password is required', 'is not allowed to execute',
-                  'no tty present', 'sudo: not found', 'command not found')
-
-
-def sudo_refused(result) -> bool:
-    """True when sudo declined, not when the command itself failed."""
-    if result.rc == 0:
-        return False
-    text = f'{result.err or ""}{result.out or ""}'
-    return any(marker in text for marker in _SUDO_REFUSALS)
-
-
-def run_elevated(run, host, command):
-    """(result, elevated) — prefer the elevated form, fall back cleanly.
-
-    Two read-only checks need root and degrade honestly without it:
-    exec-mismatch reads ``/proc/<pid>/exe``, which is unreadable for
-    another user's process, and ``_git_fetch_as_owner`` can only DROP
-    privileges when it has them — as ``sigmond`` it cannot fetch a
-    timestd-owned repo, so the ref stays stale and 19 commits of drift
-    stayed invisible on DASI002.
-
-    A host without the sudoers rule is still reported, unelevated,
-    rather than dropped — and the caller records which, because the two
-    do not have equal coverage.
-    """
-    result = run(host, SUDO_PREFIX + command)
-    if sudo_refused(result):
-        return run(host, command), False
-    return result, True
-READ_ONLY_COMMANDS: tuple[str, ...] = (
-    _PROBE_CMD, _VERSION_CMD, _MANIFEST_CMD, _DOCTOR_CMD,
-    SUDO_PREFIX + _DOCTOR_CMD)
+READ_ONLY_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _VERSION_CMD,
+                                       _MANIFEST_CMD, _DOCTOR_CMD)
 
 
 @dataclass(frozen=True)
@@ -533,7 +493,6 @@ class HostDoctor:
     clean: Optional[bool] = None
     has_sigmond: bool = False
     report: str = ''
-    elevated: bool = False
     error: Optional[str] = None
 
 
@@ -565,19 +524,17 @@ def _doctor_for(host, run):
                           error=(probe.err or probe.out or
                                  f'unreachable (exit {probe.rc})').strip())
 
-    result, elevated = run_elevated(run, host, _DOCTOR_CMD)
+    result = run(host, _DOCTOR_CMD)
     # 0 = clean, 1 = findings; anything else is smd failing to run at
     # all (absent, or erroring), which is not a verdict about the host.
     if result.rc == 0:
         return HostDoctor(host=host, reachable=True, clean=True,
-                          has_sigmond=True, report=result.out.strip(),
-                          elevated=elevated)
+                          has_sigmond=True, report=result.out.strip())
     if result.rc == 1:
         return HostDoctor(host=host, reachable=True, clean=False,
-                          has_sigmond=True, report=result.out.strip(),
-                          elevated=elevated)
+                          has_sigmond=True, report=result.out.strip())
     return HostDoctor(host=host, reachable=True, clean=None,
-                      has_sigmond=False, elevated=elevated,
+                      has_sigmond=False,
                       error=(result.err or result.out or
                              f'smd doctor exit {result.rc}').strip())
 
@@ -616,15 +573,7 @@ def format_doctor(results: list) -> str:
         state = 'unreachable' if not r.reachable else 'not examined'
         lines.append(f'{r.host.name}: {state} — {why}')
 
-    unelevated = [r.host.name for r in results
-                  if r.clean is not None and not r.elevated]
     lines.append('')
-    if unelevated:
-        lines.append(f'NOTE: ran UNELEVATED on {", ".join(unelevated)} — '
-                     f'exec-mismatch cannot read another user\'s '
-                     f'/proc/<pid>/exe without root, so those checks report '
-                     f'"unknown" rather than a verdict. Install the scoped '
-                     f'sudoers rule (see docs) to close that gap.')
     lines.append('NOTE: a host that has not yet updated runs an older '
                  '`smd doctor` and reports fewer checks. Coverage is not '
                  'equal across the fleet until every host is current.')
@@ -644,9 +593,8 @@ _UPDATE_APPLY_CMD = 'smd update --apply'
 #: `smd version` is here because verification reads the host's live SHA
 #: — an empty plan alone cannot prove arrival on a host with a stale
 #: upstream ref. It is read-only; the only writing member is --apply.
-UPDATE_COMMANDS: tuple[str, ...] = (
-    _PROBE_CMD, _UPDATE_PLAN_CMD, _UPDATE_APPLY_CMD, _VERSION_CMD,
-    SUDO_PREFIX + _UPDATE_PLAN_CMD)
+UPDATE_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _UPDATE_PLAN_CMD,
+                                    _UPDATE_APPLY_CMD, _VERSION_CMD)
 
 #: What `smd update` prints when ``plan_update`` yields nothing (see
 #: ``cmd_update``). An empty plan is how a current host is recognised,
@@ -850,7 +798,7 @@ def _plan_only(host, run, commits_behind=None) -> HostUpdate:
         return HostUpdate(host=host, reachable=False,
                           error=(probe.err or probe.out or
                                  f'unreachable (exit {probe.rc})').strip())
-    result, _elev = run_elevated(run, host, _UPDATE_PLAN_CMD)
+    result = run(host, _UPDATE_PLAN_CMD)
     if result.rc not in (0, HELD_EXIT):
         return HostUpdate(host=host, plan=result.out.strip(),
                           error=(result.err or f'smd update exit {result.rc}'
@@ -887,7 +835,7 @@ def _arrived(host, run, commits_behind):
     An unknown position counts as NOT arrived. Failing closed halts the
     wave; failing open rolls an unverified change across the fleet.
     """
-    recheck, _elev = run_elevated(run, host, _UPDATE_PLAN_CMD)
+    recheck = run(host, _UPDATE_PLAN_CMD)
     if recheck.rc not in (0, HELD_EXIT) or CURRENT_SENTINEL not in recheck.out:
         return False, ('post-update re-plan is not empty — the host did not '
                        'reach the state the update intended')
