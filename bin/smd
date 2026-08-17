@@ -3019,6 +3019,46 @@ def _venv_sibling_skew(repos) -> tuple:
     return skew, unassessable
 
 
+def _chown_tree(d: Path, owner_uid: int) -> None:
+    """Recursively give a checkout back to its owning uid and group."""
+    subprocess.run(['chown', '-R', f'{owner_uid}:{d.stat().st_gid}', str(d)],
+                   check=False)
+
+
+def _repair_and_recheck(d: Path, owner_uid: int, bad, chown, rescan):
+    """Repair ownership, then RE-SCAN. Returns (repaired_count, still_bad).
+
+    `smd doctor --fix` used to report the findings from its *pre-fix*
+    scan, so a repair that fully succeeded still printed the original
+    complaint underneath it — "repaired 44 path(s)" directly above "44
+    path(s) not owned by sigmond" (DASI002, 2026-08-17). An operator
+    reading that runs the fix again, or stops believing the tool.
+
+    The re-scan also keeps the count honest in the other direction: the
+    chown runs with `check=False`, so a repair that silently changed
+    nothing reports 0 rather than claiming the paths it merely attempted.
+    """
+    chown(d, owner_uid)
+    still_bad = rescan(d, owner_uid)
+    return len(bad) - len(still_bad), still_bad
+
+
+def _wants_sigmond_self_update(components_filter) -> bool:
+    """Whether this invocation should pull sigmond itself.
+
+    `smd component update sigmond` used to be a silent no-op: the
+    self-update block was gated on `not components_filter`, so naming
+    the component skipped it entirely and the command reported "all
+    components up to date" while its own table showed sigmond 15 commits
+    behind (B4, 2026-08-17).
+
+    `_component_statuses` already used this predicate for deciding
+    whether to SHOW sigmond. The table and the action must agree about
+    what is in scope; they did not.
+    """
+    return (not components_filter) or ('sigmond' in components_filter)
+
+
 def _refresh_upstreams(checkouts, fetch: bool = True) -> None:
     """Bring each checkout's origin/* refs up to date before they are read.
 
@@ -3450,18 +3490,22 @@ def cmd_doctor(args) -> int:
                 owner = d.owner()
             except Exception:
                 owner = str(owner_uid)
-            findings.append(Finding(
-                name, 'ownership',
-                f'{len(bad)} path(s) not owned by {owner} '
-                f'(e.g. {bad[0].relative_to(d) if bad[0] != d else "."})',
-                fixable=True))
             if getattr(args, 'fix', False):
                 if _need_root('doctor --fix'):
                     return 1
-                shutil.chown  # noqa: B018 — imported for clarity
-                subprocess.run(['chown', '-R', f'{owner_uid}:{d.stat().st_gid}',
-                                str(d)], check=False)
-                _ok(f'{name}: repaired {len(bad)} path(s)')
+                repaired, bad = _repair_and_recheck(
+                    d, owner_uid, bad,
+                    chown=_chown_tree, rescan=foreign_owned)
+                if repaired:
+                    _ok(f'{name}: repaired {repaired} path(s)')
+            # Report from the scan taken AFTER any repair — reporting the
+            # pre-fix scan made a successful --fix read as a failure.
+            if bad:
+                findings.append(Finding(
+                    name, 'ownership',
+                    f'{len(bad)} path(s) not owned by {owner} '
+                    f'(e.g. {bad[0].relative_to(d) if bad[0] != d else "."})',
+                    fixable=True))
 
         st = git_state(d)
         if st['error']:
@@ -8278,8 +8322,8 @@ def _apply_updates(args, rows: list[dict]) -> int:
     pulled = 0  # count of repos whose HEAD actually advanced
     advanced: list = []  # (name, entry, repo_dir) that advanced → rebuild+reinstall
 
-    # --- sigmond self-update (only on full apply, not component-targeted) ---
-    if not components_filter:
+    # --- sigmond self-update: on a bare apply, or when explicitly named ---
+    if _wants_sigmond_self_update(components_filter):
         sigmond_dir = Path(__file__).resolve().parent.parent
         if (sigmond_dir / '.git').exists():
             dirty, reason = _repo_is_dirty(sigmond_dir)
