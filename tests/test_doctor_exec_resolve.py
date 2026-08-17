@@ -166,3 +166,76 @@ class CmdlineParsingTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ExpectedExeForScriptsTest(unittest.TestCase):
+    """A #! script's /proc/<pid>/exe is the INTERPRETER, never the script.
+
+    `/usr/local/bin/gpsdo-monitor` and `.../venv/bin/uvicorn` are console
+    scripts. The kernel execs their interpreter, so the exe link can
+    never equal the ExecStart path — those units reported `mismatch`
+    permanently, at every privilege level. Confirmed by a root run on B4
+    on 2026-08-17, which reported the identical two mismatches:
+
+        gpsdo-monitor.service: running=/opt/uv/python/.../python3.11
+                               expected=/usr/local/bin/gpsdo-monitor
+
+    A diagnostic that cries wolf on healthy services is one people stop
+    reading, so the comparison resolves the script to what will actually
+    execute.
+    """
+
+    def _script(self, tmp, first_line):
+        p = Path(tmp) / 'wrapper'
+        p.write_text(first_line + '\nprint("hi")\n')
+        return str(p)
+
+    def test_a_shebang_script_resolves_to_its_interpreter(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            s = self._script(d, '#!/opt/gpsdo-monitor/venv/bin/python3')
+            exe, via = smd._expected_exe(s)
+            self.assertEqual(exe, '/opt/gpsdo-monitor/venv/bin/python3')
+            self.assertEqual(via, s)
+
+    def test_a_shebang_with_interpreter_args_still_resolves(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            s = self._script(d, '#!/usr/bin/python3 -u')
+            exe, _via = smd._expected_exe(s)
+            self.assertEqual(exe, '/usr/bin/python3')
+
+    def test_an_env_shebang_refuses_rather_than_guessing(self):
+        """`#!/usr/bin/env python3` execs env, which REPLACES itself with
+        whatever python3 resolves to on PATH at start time. That cannot
+        be determined statically, and guessing would trade a false
+        mismatch for a false match."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            s = self._script(d, '#!/usr/bin/env python3')
+            exe, _via = smd._expected_exe(s)
+            self.assertIsNone(exe)
+
+    def test_a_real_binary_is_returned_unchanged(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'radiod'
+            p.write_bytes(b'\x7fELF\x02\x01\x01\x00' + b'\x00' * 40)
+            exe, via = smd._expected_exe(str(p))
+            self.assertEqual(exe, str(p))
+            self.assertIsNone(via)
+
+    def test_an_unreadable_path_is_returned_unchanged(self):
+        """No worse than before: compare the path we were given."""
+        exe, via = smd._expected_exe('/nonexistent/binary')
+        self.assertEqual(exe, '/nonexistent/binary')
+        self.assertIsNone(via)
+
+    def test_the_finding_names_the_script_it_resolved_through(self):
+        text = smd._exec_finding_text(
+            {'name': 'gpsdo-monitor.service', 'status': 'mismatch',
+             'expected': '/opt/gpsdo-monitor/venv/bin/python3',
+             'running': '/usr/bin/python3'},
+            pid='7', unverified=set(), via='/usr/local/bin/gpsdo-monitor')
+        self.assertIn('/usr/local/bin/gpsdo-monitor', text)
+        self.assertIn('via', text)

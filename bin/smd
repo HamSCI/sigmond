@@ -3128,7 +3128,53 @@ def _make_exe_resolver(readlink=None, read_cmdline=None):
     return resolve, unverified
 
 
-def _exec_finding_text(m: dict, pid=None, unverified=frozenset()) -> str:
+def _expected_exe(path):
+    """(exe, via) — what will actually execute when systemd runs ``path``.
+
+    A ``#!`` script never becomes the running image: the kernel execs
+    its INTERPRETER, so ``/proc/<pid>/exe`` is the interpreter and can
+    never equal the ExecStart path. `/usr/local/bin/gpsdo-monitor` and
+    `.../venv/bin/uvicorn` are console scripts, and both reported
+    `mismatch` permanently — at every privilege level, confirmed by a
+    root run on B4 (2026-08-17) that produced the identical two.
+    A diagnostic that cries wolf on healthy services is one people stop
+    reading.
+
+    Returns the interpreter and the script it came from, so the finding
+    can name both. A non-script returns ``(path, None)``.
+
+    ``#!/usr/bin/env python3`` returns ``(None, None)``: env REPLACES
+    itself with whatever ``python3`` resolves to on PATH at start time,
+    which cannot be determined statically. The caller skips the unit —
+    trading a false mismatch for a false MATCH would be the worse deal,
+    since a false match is the silence this check exists to break.
+
+    An unreadable path is returned unchanged: no worse than comparing
+    the path we were given, which is what happened before.
+
+    NARROWING, stated: for an interpreted unit this verifies the
+    INTERPRETER, not the script. A swapped script under an unchanged
+    interpreter reads as clean. That is the limit of what
+    ``/proc/<pid>/exe`` can answer for scripts at all, not a shortcut.
+    """
+    try:
+        with open(path, 'rb') as fh:
+            head = fh.readline(512)
+    except OSError:
+        return path, None
+    if not head.startswith(b'#!'):
+        return path, None
+    parts = head[2:].decode('utf-8', 'replace').strip().split()
+    if not parts:
+        return path, None
+    interp = parts[0]
+    if os.path.basename(interp) == 'env':
+        return None, None
+    return interp, path
+
+
+def _exec_finding_text(m: dict, pid=None, unverified=frozenset(),
+                       via=None) -> str:
     """One exec-mismatch finding line, disclosing its provenance.
 
     A verdict reached from argv[0] must never read like one reached from
@@ -3138,6 +3184,8 @@ def _exec_finding_text(m: dict, pid=None, unverified=frozenset()) -> str:
     running = m['running'] if m['running'] is not None else '(unreadable)'
     text = (f'{m["name"]}: running={running} expected={m["expected"]} '
             f'status={m["status"]}')
+    if via:
+        text += f' (via {via} — a #! script; the exe is its interpreter)'
     if pid is not None and str(pid) in unverified:
         text += (' [UNVERIFIED: read from argv[0], not /proc/<pid>/exe — '
                  'run as root for an authoritative answer]')
@@ -3782,10 +3830,14 @@ def cmd_doctor(args) -> int:
                        capture=True).stdout.strip()
             if not pid or pid == '0':
                 continue          # not running — exec_mismatch would skip it too
-            expected = _unit_exec_expected(u.unit)
-            if not expected:
+            declared = _unit_exec_expected(u.unit)
+            if not declared:
                 continue          # couldn't determine what the deploy tree names
-            services.append({'name': u.unit, 'pid': pid, 'expected': expected})
+            expected, via = _expected_exe(declared)
+            if not expected:
+                continue          # an `env` shebang — cannot be resolved
+            services.append({'name': u.unit, 'pid': pid,
+                             'expected': expected, 'via': via})
             unit_component[u.unit] = u.component
         except Exception as exc:
             # One service's systemctl query failing (permission denied, a
@@ -3807,6 +3859,7 @@ def cmd_doctor(args) -> int:
                 f'status=unknown ({exc})'))
 
     unit_pid = {s['name']: s['pid'] for s in services}
+    unit_via = {s['name']: s.get('via') for s in services}
     for m in exec_mismatch(services, _resolve_proc_exe):
         comp = unit_component.get(m['name'], m['name'])
         # A `deleted` backing file is NOT presented as quieter than a
@@ -3818,7 +3871,8 @@ def cmd_doctor(args) -> int:
         findings.append(Finding(
             comp, 'exec-mismatch',
             _exec_finding_text(m, pid=unit_pid.get(m['name']),
-                               unverified=_exec_unverified)))
+                               unverified=_exec_unverified,
+                               via=unit_via.get(m['name']))))
 
     ok, text = summarise(findings)
     if ok:
