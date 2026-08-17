@@ -565,3 +565,131 @@ class TestCommitsBehindMain:
             return RunResult(rc=0, out='not a number\n', err='')
 
         assert commits_behind_main('/repo', git=git)('517995a') is None
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — smd fleet doctor
+# ---------------------------------------------------------------------------
+
+from sigmond.fleet import fleet_doctor, format_doctor  # noqa: E402
+
+
+DOCTOR_FINDINGS = """hf-timestd:
+    venv-skew: ka9q-python from a private copy, not the shared checkout
+"""
+
+
+class TestFleetDoctor:
+
+    def test_a_host_with_findings_keeps_its_report(self):
+        fleet = {'sick': Host(name='sick', reach='root@sick.example')}
+        run = runner({
+            ('sick', 'true'): _ok(),
+            ('sick', 'smd doctor'): RunResult(rc=1, out=DOCTOR_FINDINGS, err=''),
+        })
+        [result] = fleet_doctor(fleet, run)
+        assert result.reachable is True
+        assert result.clean is False
+        assert 'venv-skew' in result.report
+
+    def test_a_clean_host_is_distinguishable_from_one_with_findings(self):
+        fleet = {
+            'sick': Host(name='sick', reach='root@sick.example'),
+            'well': Host(name='well', reach='root@well.example'),
+        }
+        run = runner({
+            ('sick', 'true'): _ok(),
+            ('sick', 'smd doctor'): RunResult(rc=1, out=DOCTOR_FINDINGS),
+            ('well', 'true'): _ok(),
+            ('well', 'smd doctor'): _ok('deploy trees clean'),
+        })
+        by_name = {r.host.name: r for r in fleet_doctor(fleet, run)}
+        assert by_name['well'].clean is True
+        assert by_name['sick'].clean is False
+
+    def test_an_unreachable_host_is_neither_clean_nor_dirty(self):
+        """Reporting it as clean would hide it. As dirty would libel it."""
+        fleet = {'gone': Host(name='gone', reach='root@gone.example')}
+        run = runner({('gone', 'true'): RunResult(rc=255, out='',
+                                                  err='denied')})
+        [result] = fleet_doctor(fleet, run)
+        assert result.reachable is False
+        assert result.clean is None
+        assert 'denied' in result.error
+
+    def test_one_unreachable_host_does_not_abort_the_run(self):
+        fleet = {
+            'gone': Host(name='gone', reach='root@gone.example'),
+            'well': Host(name='well', reach='root@well.example'),
+        }
+        run = runner({
+            ('gone', 'true'): RunResult(rc=255, out='', err='denied'),
+            ('well', 'true'): _ok(),
+            ('well', 'smd doctor'): _ok('deploy trees clean'),
+        })
+        assert len(fleet_doctor(fleet, run)) == 2
+
+    def test_a_frozen_host_is_still_examined(self):
+        """doctor reports; it never repairs. Freeze has nothing to stop."""
+        fleet = {'cold': Host(name='cold', reach='root@cold.example',
+                              frozen='capture window')}
+        run = runner({
+            ('cold', 'true'): _ok(),
+            ('cold', 'smd doctor'): RunResult(rc=1, out=DOCTOR_FINDINGS),
+        })
+        [result] = fleet_doctor(fleet, run)
+        assert result.clean is False
+
+    def test_a_host_without_sigmond_is_reported_not_counted_as_clean(self):
+        fleet = {'srv': Host(name='srv', reach='op@srv.example', role='server')}
+        run = runner({
+            ('srv', 'true'): _ok(),
+            ('srv', 'smd doctor'): RunResult(rc=127, out='',
+                                             err='smd: command not found'),
+        })
+        [result] = fleet_doctor(fleet, run)
+        assert result.has_sigmond is False
+        assert result.clean is None
+
+    def test_doctor_never_offers_fix(self):
+        """`smd fleet doctor` reports; it does not repair."""
+        fleet = {'sick': Host(name='sick', reach='root@sick.example')}
+        run = runner({
+            ('sick', 'true'): _ok(),
+            ('sick', 'smd doctor'): RunResult(rc=1, out=DOCTOR_FINDINGS),
+        })
+        fleet_doctor(fleet, run)
+        for _host, command in run.calls:
+            assert '--fix' not in command
+            assert command in READ_ONLY_COMMANDS
+
+
+class TestFormatDoctor:
+
+    def _results(self):
+        fleet = {
+            'sick': Host(name='sick', reach='r'),
+            'well': Host(name='well', reach='r'),
+            'gone': Host(name='gone', reach='r'),
+        }
+        run = runner({
+            ('sick', 'true'): _ok(),
+            ('sick', 'smd doctor'): RunResult(rc=1, out=DOCTOR_FINDINGS),
+            ('well', 'true'): _ok(),
+            ('well', 'smd doctor'): _ok('deploy trees clean'),
+            ('gone', 'true'): RunResult(rc=255, out='', err='denied'),
+        })
+        return fleet_doctor(fleet, run)
+
+    def test_all_three_outcomes_appear_in_the_summary(self):
+        """Aggregate without hiding."""
+        report = format_doctor(self._results()).lower()
+        assert 'sick' in report and 'well' in report and 'gone' in report
+        assert 'unreachable' in report
+        assert 'clean' in report
+
+    def test_findings_are_shown_not_merely_counted(self):
+        assert 'venv-skew' in format_doctor(self._results())
+
+    def test_an_empty_fleet_says_so(self):
+        assert 'no hosts' in format_doctor([]).lower()

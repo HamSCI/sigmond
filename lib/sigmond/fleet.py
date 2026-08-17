@@ -195,7 +195,11 @@ def load_fleet(path: Optional[str] = None) -> dict[str, Host]:
 _PROBE_CMD = 'true'
 _VERSION_CMD = 'smd version'
 _MANIFEST_CMD = 'cat /etc/sigmond-appliance/manifest.txt'
-READ_ONLY_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _VERSION_CMD, _MANIFEST_CMD)
+#: `smd doctor` with no --fix. The flag is not merely omitted at the
+#: call site: it is absent from the only string the fan-out can send.
+_DOCTOR_CMD = 'smd doctor'
+READ_ONLY_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _VERSION_CMD,
+                                       _MANIFEST_CMD, _DOCTOR_CMD)
 
 
 @dataclass(frozen=True)
@@ -458,3 +462,111 @@ def commits_behind_main(repo: str, git=None):
             return None
 
     return behind
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — smd fleet doctor
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class HostDoctor:
+    """One host's `smd doctor` outcome.
+
+    ``clean`` is deliberately tri-state. True and False mean the host
+    was examined and the answer is known. **None means it was not
+    examined** — unreachable, or running no sigmond. Collapsing that
+    into False would libel a host nobody looked at; collapsing it into
+    True would hide it, which is the failure mode this whole stage
+    exists to remove.
+    """
+
+    host: Host
+    reachable: bool
+    clean: Optional[bool] = None
+    has_sigmond: bool = False
+    report: str = ''
+    error: Optional[str] = None
+
+
+def fleet_doctor(fleet: dict, run) -> list:
+    """Run `smd doctor` across every reachable host and aggregate.
+
+    Reports; never repairs. ``--fix`` is not passed — and cannot be,
+    since :data:`READ_ONLY_COMMANDS` is the only vocabulary the fan-out
+    has. Per-host failures stay per-host.
+
+    A host not yet carrying Stage 3 runs an older `smd doctor` and
+    reports less. That is expected until it updates, not a defect, and
+    the summary says so rather than implying equal coverage.
+    """
+    out = []
+    for host in fleet.values():
+        try:
+            out.append(_doctor_for(host, run))
+        except Exception as exc:            # noqa: BLE001
+            out.append(HostDoctor(host=host, reachable=False,
+                                  error=f'{type(exc).__name__}: {exc}'))
+    return out
+
+
+def _doctor_for(host, run):
+    probe = run(host, _PROBE_CMD)
+    if probe.rc != 0:
+        return HostDoctor(host=host, reachable=False,
+                          error=(probe.err or probe.out or
+                                 f'unreachable (exit {probe.rc})').strip())
+
+    result = run(host, _DOCTOR_CMD)
+    # 0 = clean, 1 = findings; anything else is smd failing to run at
+    # all (absent, or erroring), which is not a verdict about the host.
+    if result.rc == 0:
+        return HostDoctor(host=host, reachable=True, clean=True,
+                          has_sigmond=True, report=result.out.strip())
+    if result.rc == 1:
+        return HostDoctor(host=host, reachable=True, clean=False,
+                          has_sigmond=True, report=result.out.strip())
+    return HostDoctor(host=host, reachable=True, clean=None,
+                      has_sigmond=False,
+                      error=(result.err or result.out or
+                             f'smd doctor exit {result.rc}').strip())
+
+
+def format_doctor(results: list) -> str:
+    """Aggregate without hiding.
+
+    Every host appears, and the three outcomes — findings, clean, not
+    examined — are told apart in words. Findings are shown, not merely
+    counted: a count tells an operator something is wrong without
+    telling them what, which is where fleet reports usually stop being
+    useful.
+    """
+    if not results:
+        return ('no hosts in the inventory — see etc/fleet.toml.example '
+                'and $SIGMOND_FLEET')
+
+    lines = []
+    dirty = [r for r in results if r.clean is False]
+    clean = [r for r in results if r.clean is True]
+    skipped = [r for r in results if r.clean is None]
+
+    for r in dirty:
+        lines.append(f'{r.host.name}: findings')
+        for line in (r.report or '(no detail)').splitlines():
+            lines.append(f'    {line}')
+        if r.host.frozen:
+            lines.append(f'    FROZEN: {r.host.frozen}')
+        lines.append('')
+
+    if clean:
+        lines.append('clean: ' + ', '.join(r.host.name for r in clean))
+    for r in skipped:
+        why = r.error or ('no sigmond install' if not r.has_sigmond
+                          else 'not examined')
+        state = 'unreachable' if not r.reachable else 'not examined'
+        lines.append(f'{r.host.name}: {state} — {why}')
+
+    lines.append('')
+    lines.append('NOTE: a host that has not yet updated runs an older '
+                 '`smd doctor` and reports fewer checks. Coverage is not '
+                 'equal across the fleet until every host is current.')
+    return '\n'.join(lines)

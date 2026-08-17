@@ -3197,8 +3197,9 @@ def cmd_fleet(args) -> int:
 
     from sigmond import fleet as fleet_mod
 
-    if getattr(args, 'fleet_command', None) is None:
-        _err('fleet: pick a verb — status')
+    verb = getattr(args, 'fleet_command', None)
+    if verb is None:
+        _err('fleet: pick a verb — status | doctor')
         return 2
 
     try:
@@ -3207,10 +3208,16 @@ def cmd_fleet(args) -> int:
         _err(f'fleet: {exc}')
         return 1
 
+    run = fleet_mod.ssh_runner()
+
+    if verb == 'doctor':
+        results = fleet_mod.fleet_doctor(hosts, run)
+        print(fleet_mod.format_doctor(results))
+        return 1 if any(r.clean is not True for r in results) else 0
+
     repo_root = Path(__file__).resolve().parent.parent
     statuses = fleet_mod.fleet_status(
-        hosts,
-        fleet_mod.ssh_runner(),
+        hosts, run,
         commits_behind=fleet_mod.commits_behind_main(repo_root),
     )
     print(fleet_mod.format_status(statuses))
@@ -16896,6 +16903,8 @@ def main() -> int:
     fleet_sub = p_fleet.add_subparsers(dest='fleet_command')
     fleet_sub.add_parser('status',
         help="each host's live component SHAs vs its blessed pin")
+    fleet_sub.add_parser('doctor',
+        help='smd doctor across every reachable host (never repairs)')
 
     p = sub.add_parser('enable', help='enable component(s) in /etc/sigmond/topology.toml')
     p.add_argument('names', nargs='+', help='one or more component names')
