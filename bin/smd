@@ -3199,7 +3199,7 @@ def cmd_fleet(args) -> int:
 
     verb = getattr(args, 'fleet_command', None)
     if verb is None:
-        _err('fleet: pick a verb — status | doctor')
+        _err('fleet: pick a verb — status | doctor | update')
         return 2
 
     try:
@@ -3214,6 +3214,22 @@ def cmd_fleet(args) -> int:
         results = fleet_mod.fleet_doctor(hosts, run)
         print(fleet_mod.format_doctor(results))
         return 1 if any(r.clean is not True for r in results) else 0
+
+    if verb == 'update':
+        do_apply = getattr(args, 'apply', False)
+        repo_root = Path(__file__).resolve().parent.parent
+        try:
+            results = fleet_mod.fleet_update(
+                hosts, run, apply=do_apply,
+                commits_behind=fleet_mod.commits_behind_main(repo_root))
+        except (fleet_mod.NoCanary, fleet_mod.AmbiguousCanary) as exc:
+            _err(f'fleet update: {exc}')
+            return 2
+        print(fleet_mod.format_update(results))
+        bad = [r for r in results
+               if r.error or r.halted or not r.reachable
+               or (do_apply and r.verified is not True)]
+        return 1 if bad else 0
 
     repo_root = Path(__file__).resolve().parent.parent
     statuses = fleet_mod.fleet_status(
@@ -16905,6 +16921,10 @@ def main() -> int:
         help="each host's live component SHAs vs its blessed pin")
     fleet_sub.add_parser('doctor',
         help='smd doctor across every reachable host (never repairs)')
+    p_fleet_update = fleet_sub.add_parser('update',
+        help='multiplex smd update: canary, verify, then the wave')
+    p_fleet_update.add_argument('--apply', action='store_true',
+        help='perform the update (default: dry run, changes nothing)')
 
     p = sub.add_parser('enable', help='enable component(s) in /etc/sigmond/topology.toml')
     p.add_argument('names', nargs='+', help='one or more component names')

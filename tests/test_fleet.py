@@ -693,3 +693,341 @@ class TestFormatDoctor:
 
     def test_an_empty_fleet_says_so(self):
         assert 'no hosts' in format_doctor([]).lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — smd fleet update
+# ---------------------------------------------------------------------------
+
+from sigmond.fleet import (  # noqa: E402
+    UPDATE_COMMANDS,
+    AmbiguousCanary,
+    NoCanary,
+    choose_canary,
+    fleet_update,
+    format_update,
+)
+
+
+CURRENT = 'host is current — nothing to do'
+HAS_PLAN = '(dry run — re-run with --apply)\n\n  [pull] sigmond'
+
+
+def _fleet(*hosts):
+    return {h.name: h for h in hosts}
+
+
+class TestChooseCanary:
+
+    def test_the_host_marked_canary_is_chosen(self):
+        fleet = _fleet(
+            Host(name='remote', reach='r'),
+            Host(name='near', reach='r', canary=True),
+        )
+        assert choose_canary(fleet).name == 'near'
+
+    def test_no_marked_canary_refuses_rather_than_guessing(self):
+        """Inventory order is an accident, not a decision.
+
+        Picking the first host would make the blast radius of a bad
+        update depend on alphabetical luck.
+        """
+        fleet = _fleet(Host(name='a', reach='r'), Host(name='b', reach='r'))
+        with pytest.raises(NoCanary):
+            choose_canary(fleet)
+
+    def test_two_marked_canaries_refuse_rather_than_picking_one(self):
+        fleet = _fleet(Host(name='a', reach='r', canary=True),
+                       Host(name='b', reach='r', canary=True))
+        with pytest.raises(AmbiguousCanary):
+            choose_canary(fleet)
+
+    def test_a_single_host_fleet_needs_no_mark(self):
+        """With one host there is no wave to protect."""
+        fleet = _fleet(Host(name='only', reach='r'))
+        assert choose_canary(fleet).name == 'only'
+
+    def test_a_frozen_host_is_never_the_canary(self):
+        """The canary is the host that goes first. A frozen host goes
+        nowhere, so it cannot lead."""
+        fleet = _fleet(Host(name='cold', reach='r', canary=True,
+                            frozen='capture window'),
+                       Host(name='warm', reach='r'))
+        with pytest.raises(NoCanary):
+            choose_canary(fleet)
+
+
+class TestFleetUpdateDryRun:
+
+    def test_dry_run_is_the_default_and_never_applies(self):
+        fleet = _fleet(Host(name='a', reach='r', canary=True))
+        run = runner({('a', 'true'): _ok(), ('a', 'smd update'): _ok(HAS_PLAN)})
+        results = fleet_update(fleet, run)
+        assert all(not r.applied for r in results)
+        for _host, command in run.calls:
+            assert '--apply' not in command
+            assert command in UPDATE_COMMANDS
+
+    def test_a_current_host_produces_an_empty_plan(self):
+        fleet = _fleet(Host(name='a', reach='r', canary=True))
+        run = runner({('a', 'true'): _ok(), ('a', 'smd update'): _ok(CURRENT)})
+        [result] = fleet_update(fleet, run)
+        assert result.empty_plan is True
+
+    def test_dry_run_plans_every_host_not_just_the_canary(self):
+        """A dry run changes nothing, so there is no reason to stage it."""
+        fleet = _fleet(Host(name='a', reach='r', canary=True),
+                       Host(name='b', reach='r'))
+        run = runner({
+            ('a', 'true'): _ok(), ('a', 'smd update'): _ok(HAS_PLAN),
+            ('b', 'true'): _ok(), ('b', 'smd update'): _ok(HAS_PLAN),
+        })
+        assert len(fleet_update(fleet, run)) == 2
+
+
+class TestFrozenHostsAreSkippedLoudly:
+
+    def test_a_frozen_host_is_never_contacted(self):
+        fleet = _fleet(Host(name='cold', reach='r',
+                            frozen='capture window through 2026-08-20'),
+                       Host(name='warm', reach='r', canary=True))
+        run = runner({
+            ('warm', 'true'): _ok(), ('warm', 'smd update'): _ok(CURRENT),
+        })
+        fleet_update(fleet, run)
+        assert all(host != 'cold' for host, _cmd in run.calls)
+
+    def test_the_skip_appears_in_the_output_with_its_reason(self):
+        """Never silent. A silent skip is indistinguishable from a host
+        that was updated."""
+        fleet = _fleet(Host(name='cold', reach='r',
+                            frozen='capture window through 2026-08-20'),
+                       Host(name='warm', reach='r', canary=True))
+        run = runner({
+            ('warm', 'true'): _ok(), ('warm', 'smd update'): _ok(CURRENT),
+        })
+        report = format_update(fleet_update(fleet, run))
+        assert 'cold' in report
+        assert 'SKIPPED' in report.upper()
+        assert 'capture window' in report
+
+
+def updating_runner(names):
+    """A fan-out that models a host actually being updated.
+
+    `smd update` reports a plan until `--apply` runs on that host, and
+    an empty plan afterwards — which is the whole basis of the
+    post-check. A fixed script cannot express that, and a host scripted
+    as already-current never applies at all, so ordering assertions
+    against one prove nothing.
+    """
+    calls = []
+    updated = set()
+
+    def run(host, command):
+        calls.append((host.name, command))
+        if host.name not in names:
+            return RunResult(rc=1, out='', err='unexpected host')
+        if command == 'true':
+            return _ok()
+        if command == 'smd update --apply':
+            updated.add(host.name)
+            return _ok('done')
+        if command == 'smd update':
+            return _ok(CURRENT if host.name in updated else HAS_PLAN)
+        return RunResult(rc=1, out='', err='unexpected command')
+
+    run.calls = calls
+    return run
+
+
+class TestCanaryThenWave:
+
+    def test_the_canary_is_verified_before_any_other_host_is_touched(self):
+        fleet = _fleet(Host(name='wave1', reach='r'),
+                       Host(name='canary', reach='r', canary=True),
+                       Host(name='wave2', reach='r'))
+        run = updating_runner({'canary', 'wave1', 'wave2'})
+        fleet_update(fleet, run, apply=True)
+
+        order = [(h, c) for h, c in run.calls if c != 'true']
+        assert ('canary', 'smd update --apply') in order
+        canary_verified = max(i for i, (h, c) in enumerate(order)
+                              if h == 'canary')
+        first_wave_touch = min(i for i, (h, c) in enumerate(order)
+                               if h != 'canary')
+        assert canary_verified < first_wave_touch
+
+    def test_the_canary_is_verified_by_re_planning_not_by_assumption(self):
+        """`smd update` is idempotent and yields an empty plan on a
+        current host — so re-planning IS the post-check."""
+        fleet = _fleet(Host(name='canary', reach='r', canary=True))
+        run = updating_runner({'canary'})
+        [result] = fleet_update(fleet, run, apply=True)
+        assert result.applied is True
+        assert result.verified is True
+        assert run.calls[-1][1] == 'smd update'
+
+    def test_every_wave_host_is_updated_once_the_canary_holds(self):
+        fleet = _fleet(Host(name='canary', reach='r', canary=True),
+                       Host(name='w1', reach='r'),
+                       Host(name='w2', reach='r'))
+        run = updating_runner({'canary', 'w1', 'w2'})
+        results = fleet_update(fleet, run, apply=True)
+        assert all(r.verified is True for r in results)
+        assert all(r.applied for r in results)
+
+
+class TestStopOnFirstFailure:
+
+    def test_a_canary_that_fails_its_post_check_stops_the_wave(self):
+        fleet = _fleet(Host(name='canary', reach='r', canary=True),
+                       Host(name='wave', reach='r'))
+        run = runner({
+            ('canary', 'true'): _ok(),
+            ('canary', 'smd update'): _ok(HAS_PLAN),   # still has a plan
+            ('canary', 'smd update --apply'): _ok('done'),
+            ('wave', 'true'): _ok(),
+            ('wave', 'smd update'): _ok(CURRENT),
+        })
+        results = fleet_update(fleet, run, apply=True)
+        by_name = {r.host.name: r for r in results}
+        assert by_name['canary'].verified is False
+        assert by_name['wave'].halted is True
+        assert all(host != 'wave' for host, _c in run.calls)
+
+    def test_a_failing_apply_stops_the_run(self):
+        fleet = _fleet(Host(name='canary', reach='r', canary=True),
+                       Host(name='wave', reach='r'))
+        run = runner({
+            ('canary', 'true'): _ok(),
+            ('canary', 'smd update'): _ok(HAS_PLAN),
+            ('canary', 'smd update --apply'): RunResult(rc=1, out='',
+                                                        err='install failed'),
+            ('wave', 'true'): _ok(),
+        })
+        by_name = {r.host.name: r for r in fleet_update(fleet, run, apply=True)}
+        assert by_name['canary'].error
+        assert by_name['wave'].halted is True
+
+    def test_a_wave_host_failing_halts_the_hosts_behind_it(self):
+        fleet = _fleet(Host(name='canary', reach='r', canary=True),
+                       Host(name='w1', reach='r'),
+                       Host(name='w2', reach='r'))
+        run = runner({
+            ('canary', 'true'): _ok(),
+            ('canary', 'smd update'): _ok(CURRENT),
+            ('canary', 'smd update --apply'): _ok('done'),
+            ('w1', 'true'): _ok(),
+            ('w1', 'smd update'): _ok(HAS_PLAN),      # never goes current
+            ('w1', 'smd update --apply'): _ok('done'),
+            ('w2', 'true'): _ok(),
+            ('w2', 'smd update'): _ok(CURRENT),
+        })
+        by_name = {r.host.name: r for r in fleet_update(fleet, run, apply=True)}
+        assert by_name['w1'].verified is False
+        assert by_name['w2'].halted is True
+
+    def test_an_unreachable_canary_stops_the_run(self):
+        fleet = _fleet(Host(name='canary', reach='r', canary=True),
+                       Host(name='wave', reach='r'))
+        run = runner({
+            ('canary', 'true'): RunResult(rc=255, out='', err='denied'),
+            ('wave', 'true'): _ok(),
+        })
+        by_name = {r.host.name: r for r in fleet_update(fleet, run, apply=True)}
+        assert by_name['canary'].reachable is False
+        assert by_name['wave'].halted is True
+
+
+class TestUpdateVocabulary:
+
+    def test_update_commands_carry_no_destructive_verb_beyond_apply(self):
+        for command in UPDATE_COMMANDS:
+            assert 'rm ' not in command
+            assert '--fix' not in command
+            assert 'systemctl' not in command
+
+
+class TestFormatUpdate:
+
+    def test_a_dry_run_says_it_changed_nothing(self):
+        fleet = _fleet(Host(name='a', reach='r', canary=True))
+        run = runner({('a', 'true'): _ok(), ('a', 'smd update'): _ok(HAS_PLAN)})
+        report = format_update(fleet_update(fleet, run)).lower()
+        assert 'dry run' in report
+        assert '--apply' in report
+
+    def test_a_halted_host_is_reported_as_halted_not_as_clean(self):
+        fleet = _fleet(Host(name='canary', reach='r', canary=True),
+                       Host(name='wave', reach='r'))
+        run = runner({
+            ('canary', 'true'): RunResult(rc=255, out='', err='denied'),
+            ('wave', 'true'): _ok(),
+        })
+        report = format_update(fleet_update(fleet, run, apply=True))
+        assert 'HALTED' in report.upper()
+        assert 'wave' in report
+
+
+class TestPostCheckCannotPassOnAHostThatNeverMoved:
+    """`smd update` computes HEAD..@{u} WITHOUT fetching.
+
+    A host whose origin/main ref is stale therefore reports "nothing to
+    do" while genuinely behind — observed live on B4 2026-08-17, whose
+    last fetch was two days old. An empty plan is consequently NOT
+    evidence that a host reached the intended state, so the post-check
+    also confirms the SHA actually arrived.
+    """
+
+    def test_an_empty_plan_alone_does_not_verify_a_stale_host(self):
+        fleet = _fleet(Host(name='stale', reach='r', canary=True))
+        run = runner({
+            ('stale', 'true'): _ok(),
+            # Reports current because its upstream ref is two days old.
+            ('stale', 'smd update'): _ok(CURRENT),
+            ('stale', 'smd version'): _ok(VERSION_OK),   # sigmond 517995a
+        })
+        [result] = fleet_update(fleet, run, apply=True,
+                                commits_behind=lambda sha: 10)
+        assert result.verified is False
+        assert 'behind' in (result.error or '').lower()
+
+    def test_a_host_that_really_arrived_verifies(self):
+        fleet = _fleet(Host(name='good', reach='r', canary=True))
+        run = runner({
+            ('good', 'true'): _ok(),
+            ('good', 'smd update'): _ok(CURRENT),
+            ('good', 'smd version'): _ok(VERSION_OK),
+        })
+        [result] = fleet_update(fleet, run, apply=True,
+                                commits_behind=lambda sha: 0)
+        assert result.verified is True
+
+    def test_an_unknown_position_is_not_treated_as_arrived(self):
+        """None means "we could not tell". Failing closed halts the
+        wave; failing open rolls a bad change across the fleet."""
+        fleet = _fleet(Host(name='murky', reach='r', canary=True))
+        run = runner({
+            ('murky', 'true'): _ok(),
+            ('murky', 'smd update'): _ok(CURRENT),
+            ('murky', 'smd version'): _ok(VERSION_OK),
+        })
+        [result] = fleet_update(fleet, run, apply=True,
+                                commits_behind=lambda sha: None)
+        assert result.verified is False
+
+    def test_without_a_position_check_the_dry_run_still_flags_the_gap(self):
+        """Even in dry-run, "current" must not be reported bare when the
+        host is behind — that is the misreading that started this."""
+        fleet = _fleet(Host(name='stale', reach='r'))
+        run = runner({
+            ('stale', 'true'): _ok(),
+            ('stale', 'smd update'): _ok(CURRENT),
+            ('stale', 'smd version'): _ok(VERSION_OK),
+        })
+        [result] = fleet_update(fleet, run, commits_behind=lambda sha: 10)
+        assert result.empty_plan is True
+        assert result.behind == 10
+        report = format_update([result])
+        assert 'stale ref' in report.lower() or 'behind' in report.lower()

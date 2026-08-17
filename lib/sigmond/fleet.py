@@ -81,6 +81,9 @@ class Host:
         frozen: Why the host must not be changed, or None if it may be.
             A reason rather than a bool, so the skip can say *why* when
             it is reported.
+        canary: Whether this host leads a fleet update. Exactly one
+            host carries it; see :func:`choose_canary` for why it is
+            declared rather than inferred.
     """
 
     name: str
@@ -89,6 +92,7 @@ class Host:
     profile: Optional[str] = None
     role: Optional[str] = None
     frozen: Optional[str] = None
+    canary: bool = False
 
 
 def _resolve_path() -> Optional[Path]:
@@ -132,6 +136,7 @@ def _host_from_block(name: str, block, source: Path) -> Host:
         profile=block.get('profile'),
         role=block.get('role'),
         frozen=block.get('frozen'),
+        canary=bool(block.get('canary', False)),
     )
 
 
@@ -569,4 +574,311 @@ def format_doctor(results: list) -> str:
     lines.append('NOTE: a host that has not yet updated runs an older '
                  '`smd doctor` and reports fewer checks. Coverage is not '
                  'equal across the fleet until every host is current.')
+    return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — smd fleet update
+# ---------------------------------------------------------------------------
+
+#: `smd update` is the mechanism, not a model of it. It is idempotent,
+#: it refuses rather than discarding when a local change collides with
+#: an incoming one, and it is verified on B4 and DASI002 — which is
+#: exactly why this multiplexes it instead of reimplementing its logic.
+_UPDATE_PLAN_CMD = 'smd update'
+_UPDATE_APPLY_CMD = 'smd update --apply'
+#: `smd version` is here because verification reads the host's live SHA
+#: — an empty plan alone cannot prove arrival on a host with a stale
+#: upstream ref. It is read-only; the only writing member is --apply.
+UPDATE_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _UPDATE_PLAN_CMD,
+                                    _UPDATE_APPLY_CMD, _VERSION_CMD)
+
+#: What `smd update` prints when ``plan_update`` yields nothing (see
+#: ``cmd_update``). An empty plan is how a current host is recognised,
+#: and re-planning after an apply is therefore the post-check.
+#:
+#: This couples to cmd_update's wording. That coupling FAILS CLOSED: if
+#: the wording changes, verification stops matching, the canary reads as
+#: unverified and the wave halts. A run that stops for a stale string is
+#: recoverable; one that rolls the fleet on an unnoticed regression is
+#: not.
+CURRENT_SENTINEL = 'nothing to do'
+
+
+class NoCanary(Exception):
+    """No host is marked to lead the update, and more than one exists."""
+
+
+class AmbiguousCanary(Exception):
+    """More than one host claims to lead."""
+
+
+@dataclass(frozen=True)
+class HostUpdate:
+    """One host's outcome in a fleet update.
+
+    Attributes:
+        skipped: Why the host was not touched (its freeze reason), or
+            None. A skip is reported, never silent — a silent skip is
+            indistinguishable from a host that was updated.
+        halted: True when the run stopped before reaching this host.
+            Distinct from skipped and from clean: nobody looked.
+        empty_plan: The host was already current.
+        applied: `smd update --apply` ran here.
+        verified: Post-apply re-plan came back empty. None when no
+            apply was attempted.
+    """
+
+    host: Host
+    reachable: bool = True
+    skipped: Optional[str] = None
+    halted: bool = False
+    plan: str = ''
+    empty_plan: bool = False
+    applied: bool = False
+    verified: Optional[bool] = None
+    behind: Optional[int] = None
+    error: Optional[str] = None
+
+
+def choose_canary(fleet: dict) -> Host:
+    """The host that goes first, and why it is declared not inferred.
+
+    Inventory order is an accident: it would make the blast radius of a
+    bad update depend on alphabetical luck. Nor is there a property of
+    a host that reliably names the safest one to break — the real
+    criterion is operational (how quickly can a human get hands on it
+    if the update bricks it), and that lives in the operator's head,
+    not in any field this module can read.
+
+    So it is declared: exactly one host sets ``canary = true``, and the
+    inventory carries the justification as a comment. With no mark and
+    more than one candidate this REFUSES rather than guessing.
+
+    A frozen host can never lead — it goes nowhere, so it cannot go
+    first.
+    """
+    marked = [h for h in fleet.values() if h.canary]
+    if len(marked) > 1:
+        raise AmbiguousCanary(
+            'more than one host is marked canary: '
+            + ', '.join(h.name for h in marked)
+            + " — exactly one host leads an update")
+    if marked and marked[0].frozen:
+        # Do NOT quietly promote someone else. The operator named a
+        # leader; substituting another host without saying so is the
+        # same accident as picking one by inventory order.
+        raise NoCanary(
+            f"the host marked canary ({marked[0].name}) is frozen: "
+            f"{marked[0].frozen}. Lift the freeze or mark a different "
+            f"host — the leader must be chosen deliberately.")
+    if marked:
+        return marked[0]
+    eligible = [h for h in fleet.values() if not h.frozen]
+    if len(eligible) == 1:
+        return eligible[0]
+    raise NoCanary(
+        'no host is marked `canary = true` in the inventory. The host '
+        'that goes first must be chosen deliberately — inventory order '
+        'is an accident, not a decision.')
+
+
+def fleet_update(fleet: dict, run, apply: bool = False,
+                 commits_behind=None) -> list:
+    """Plan (and optionally perform) an update across the fleet.
+
+    Dry-run by default, matching ``smd update``'s own contract. A dry
+    run changes nothing, so it plans every host at once; there is
+    nothing to stage.
+
+    With ``apply=True`` the order is canary first, VERIFIED, then the
+    wave — and the run stops at the first failure. A host that fails
+    its post-update check halts everything behind it rather than the
+    run continuing to roll a known-bad change across the fleet.
+
+    Frozen hosts are never contacted, and their skip is reported.
+    """
+    results = []
+    live = {n: h for n, h in fleet.items() if not h.frozen}
+    for host in fleet.values():
+        if host.frozen:
+            results.append(HostUpdate(host=host, skipped=host.frozen))
+
+    if not apply:
+        for host in live.values():
+            results.append(_plan_only(host, run, commits_behind))
+        return _in_inventory_order(fleet, results)
+
+    canary = choose_canary(fleet)
+    outcome = _update_one(canary, run, commits_behind)
+    results.append(outcome)
+
+    halted = not (outcome.verified is True)
+    for host in live.values():
+        if host.name == canary.name:
+            continue
+        if halted:
+            results.append(HostUpdate(host=host, halted=True))
+            continue
+        outcome = _update_one(host, run, commits_behind)
+        results.append(outcome)
+        halted = not (outcome.verified is True)
+
+    return _in_inventory_order(fleet, results)
+
+
+def _in_inventory_order(fleet: dict, results: list) -> list:
+    """Report in the operator's order, not execution order.
+
+    Execution order is canary-first by design; a report that reordered
+    itself to match would make the inventory harder to read against.
+    """
+    order = {name: i for i, name in enumerate(fleet)}
+    return sorted(results, key=lambda r: order.get(r.host.name, 0))
+
+
+def _true_position(host, run, commits_behind):
+    """How far the host really is from main, independent of its plan.
+
+    ``smd update`` computes ``HEAD..@{u}`` and does NOT fetch, so a host
+    whose ``origin/main`` ref is stale reports an empty plan while
+    genuinely behind. Observed live on B4 2026-08-17: HEAD and @{u} both
+    517995a, last fetch two days old, real distance 10 commits.
+
+    An empty plan therefore proves only "this host believes it is
+    current" — never "this host has the code". This reads the live SHA
+    and asks the devbox checkout where it actually sits.
+    """
+    if commits_behind is None:
+        return None
+    from .doctor import _parse_manifest_components
+    version = run(host, _VERSION_CMD)
+    if version.rc != 0:
+        return None
+    live = _parse_manifest_components(version.out) or {}
+    sha = live.get('sigmond')
+    return commits_behind(sha) if sha else None
+
+
+def _plan_only(host, run, commits_behind=None) -> HostUpdate:
+    probe = run(host, _PROBE_CMD)
+    if probe.rc != 0:
+        return HostUpdate(host=host, reachable=False,
+                          error=(probe.err or probe.out or
+                                 f'unreachable (exit {probe.rc})').strip())
+    result = run(host, _UPDATE_PLAN_CMD)
+    if result.rc != 0:
+        return HostUpdate(host=host, plan=result.out.strip(),
+                          error=(result.err or f'smd update exit {result.rc}'
+                                 ).strip())
+    empty = CURRENT_SENTINEL in result.out
+    behind = _true_position(host, run, commits_behind) if empty else None
+    return HostUpdate(host=host, plan=result.out.strip(), empty_plan=empty,
+                      behind=behind)
+
+
+def _arrived(host, run, commits_behind):
+    """(verified, reason) — did the host actually reach the target?
+
+    Two conditions, and both must hold: the re-plan is empty AND the
+    host's live SHA is level with main. The first alone cannot fail on
+    a host with a stale upstream ref, which would let a host that
+    updated nothing verify as updated.
+
+    An unknown position counts as NOT arrived. Failing closed halts the
+    wave; failing open rolls an unverified change across the fleet.
+    """
+    recheck = run(host, _UPDATE_PLAN_CMD)
+    if recheck.rc != 0 or CURRENT_SENTINEL not in recheck.out:
+        return False, ('post-update re-plan is not empty — the host did not '
+                       'reach the state the update intended')
+    if commits_behind is None:
+        return True, None
+    behind = _true_position(host, run, commits_behind)
+    if behind == 0:
+        return True, None
+    if behind is None:
+        return False, ("the host reports an empty plan, but its position "
+                       "against main could not be determined — treated as "
+                       "NOT arrived")
+    return False, (f'the host reports an empty plan but is still {behind} '
+                   f'behind main — its upstream ref is stale (smd update '
+                   f'does not fetch), so "nothing to do" is not evidence '
+                   f'it has the code')
+
+
+def _empty_plan_verdict(behind, commits_behind):
+    """(verified, reason) for a host that planned nothing.
+
+    With no position check available, an empty plan is all there is to
+    go on. With one, it must agree — see :func:`_arrived`.
+    """
+    if commits_behind is None:
+        return True, None
+    if behind == 0:
+        return True, None
+    if behind is None:
+        return False, 'reports nothing to do; position against main unknown'
+    return False, (f'reports nothing to do but is {behind} behind main '
+                   f'(stale upstream ref — smd update does not fetch)')
+
+
+def _update_one(host, run, commits_behind=None) -> HostUpdate:
+    planned = _plan_only(host, run, commits_behind)
+    if not planned.reachable or planned.error:
+        return planned
+    if planned.empty_plan:
+        # Believes it is current — but "believes" is not "is". Confirm
+        # against main before letting the wave move on.
+        verified, why = _empty_plan_verdict(planned.behind, commits_behind)
+        return HostUpdate(host=host, plan=planned.plan, empty_plan=True,
+                          behind=planned.behind, verified=verified, error=why)
+
+    applied = run(host, _UPDATE_APPLY_CMD)
+    if applied.rc != 0:
+        return HostUpdate(host=host, plan=planned.plan, applied=True,
+                          verified=False,
+                          error=(applied.err or applied.out or
+                                 f'apply exit {applied.rc}').strip())
+
+    verified, why = _arrived(host, run, commits_behind)
+    return HostUpdate(host=host, plan=planned.plan, applied=True,
+                      verified=verified, error=why)
+
+
+def format_update(results: list) -> str:
+    """Render a fleet update, dry-run or applied."""
+    if not results:
+        return ('no hosts in the inventory — see etc/fleet.toml.example '
+                'and $SIGMOND_FLEET')
+
+    applied_any = any(r.applied for r in results)
+    lines = []
+    if not applied_any:
+        lines.append('(dry run — nothing was changed; re-run with --apply)')
+        lines.append('')
+
+    for r in results:
+        name = r.host.name
+        if r.skipped:
+            lines.append(f'{name}: SKIPPED (frozen) — {r.skipped}')
+        elif r.halted:
+            lines.append(f'{name}: HALTED — an earlier host failed; '
+                         f'this one was never contacted')
+        elif not r.reachable:
+            lines.append(f'{name}: unreachable — {r.error}')
+        elif r.error:
+            lines.append(f'{name}: FAILED — {r.error}')
+        elif r.empty_plan and r.behind:
+            lines.append(f'{name}: reports "nothing to do" but is '
+                         f'{r.behind} behind main — STALE UPSTREAM REF '
+                         f'(smd update does not fetch)')
+        elif r.empty_plan:
+            lines.append(f'{name}: current — nothing to do')
+        elif r.applied:
+            lines.append(f'{name}: applied and verified')
+        else:
+            lines.append(f'{name}: has a plan')
+            for line in r.plan.splitlines():
+                lines.append(f'    {line}')
     return '\n'.join(lines)
