@@ -54,6 +54,7 @@ exactly like a healthy fleet that happens not to include it.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -380,7 +381,9 @@ def ssh_runner(exec_=None, timeout: int = SSH_TIMEOUT_SEC):
         else:
             remote = command
         argv = ['ssh', *_SSH_OPTS, *shlex.split(host.reach), remote]
-        return runner(argv, timeout)
+        result = runner(argv, timeout)
+        return RunResult(rc=result.rc, out=strip_ansi(result.out),
+                         err=strip_ansi(result.err))
 
     return run
 
@@ -604,6 +607,34 @@ UPDATE_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _UPDATE_PLAN_CMD,
 #: not.
 CURRENT_SENTINEL = 'nothing to do'
 
+#: `smd update`'s exit code for "nothing failed, but component(s) were
+#: deliberately HELD" (bin/smd `UPDATE_EXIT_HELD`). A hold is a steady
+#: state the operator has accepted — wspr-recorder's uv.lock is rewritten
+#: by install.sh on every host — so it must not read as a failure, and
+#: must not halt the wave. Before this existed a Refusal returned 1, the
+#: same as a broken step, and an entire healthy host reported as FAILED.
+HELD_EXIT = 3
+
+_ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
+#: A per-component hold, `<name>: HELD — <reason>`. Anchored on the colon
+#: so the run's own summary line ("... N component(s) HELD (name)") is not
+#: mistaken for a component called "nothing to do".
+_HELD_LINE = re.compile(r'([A-Za-z0-9._@+-]+):\s*HELD\b')
+
+
+def strip_ansi(text):
+    """Remove terminal colour codes from remote output.
+
+    `smd` colours its output, and over ssh it cannot tell that its stdout
+    is a pipe rather than a terminal — so escapes arrive embedded in
+    every captured line and leak into the report. Strip once, at the
+    boundary where remote text enters, rather than in each formatter.
+    """
+    if not text:
+        return text
+    return _ANSI.sub('', text)
+
 
 class NoCanary(Exception):
     """No host is marked to lead the update, and more than one exists."""
@@ -634,6 +665,7 @@ class HostUpdate:
     skipped: Optional[str] = None
     halted: bool = False
     plan: str = ''
+    held: list = field(default_factory=list)
     empty_plan: bool = False
     applied: bool = False
     verified: Optional[bool] = None
@@ -767,14 +799,29 @@ def _plan_only(host, run, commits_behind=None) -> HostUpdate:
                           error=(probe.err or probe.out or
                                  f'unreachable (exit {probe.rc})').strip())
     result = run(host, _UPDATE_PLAN_CMD)
-    if result.rc != 0:
+    if result.rc not in (0, HELD_EXIT):
         return HostUpdate(host=host, plan=result.out.strip(),
                           error=(result.err or f'smd update exit {result.rc}'
                                  ).strip())
+    held = _held_targets(result.out) if result.rc == HELD_EXIT else []
     empty = CURRENT_SENTINEL in result.out
     behind = _true_position(host, run, commits_behind) if empty else None
     return HostUpdate(host=host, plan=result.out.strip(), empty_plan=empty,
-                      behind=behind)
+                      held=held, behind=behind)
+
+
+def _held_targets(text: str) -> list:
+    """Component names `smd update` reported as HELD, in order.
+
+    Parsed from the report the operator already reads, so the fleet
+    summary names the same components the host named.
+    """
+    out = []
+    for match in _HELD_LINE.finditer(text or ''):
+        name = match.group(1)
+        if name not in out:
+            out.append(name)
+    return out
 
 
 def _arrived(host, run, commits_behind):
@@ -789,7 +836,7 @@ def _arrived(host, run, commits_behind):
     wave; failing open rolls an unverified change across the fleet.
     """
     recheck = run(host, _UPDATE_PLAN_CMD)
-    if recheck.rc != 0 or CURRENT_SENTINEL not in recheck.out:
+    if recheck.rc not in (0, HELD_EXIT) or CURRENT_SENTINEL not in recheck.out:
         return False, ('post-update re-plan is not empty — the host did not '
                        'reach the state the update intended')
     if commits_behind is None:
@@ -832,7 +879,8 @@ def _update_one(host, run, commits_behind=None) -> HostUpdate:
         # against main before letting the wave move on.
         verified, why = _empty_plan_verdict(planned.behind, commits_behind)
         return HostUpdate(host=host, plan=planned.plan, empty_plan=True,
-                          behind=planned.behind, verified=verified, error=why)
+                          held=planned.held, behind=planned.behind,
+                          verified=verified, error=why)
 
     applied = run(host, _UPDATE_APPLY_CMD)
     if applied.rc != 0:
@@ -869,6 +917,10 @@ def format_update(results: list) -> str:
             lines.append(f'{name}: unreachable — {r.error}')
         elif r.error:
             lines.append(f'{name}: FAILED — {r.error}')
+        elif r.held and r.empty_plan:
+            lines.append(f'{name}: current, except HELD: '
+                         f'{", ".join(r.held)} (deliberate — local changes '
+                         f'preserved, not discarded)')
         elif r.empty_plan and r.behind:
             lines.append(f'{name}: reports "nothing to do" but is '
                          f'{r.behind} behind main — STALE UPSTREAM REF '
@@ -878,7 +930,8 @@ def format_update(results: list) -> str:
         elif r.applied:
             lines.append(f'{name}: applied and verified')
         else:
-            lines.append(f'{name}: has a plan')
+            suffix = (f'  [also HELD: {", ".join(r.held)}]' if r.held else '')
+            lines.append(f'{name}: has a plan{suffix}')
             for line in r.plan.splitlines():
                 lines.append(f'    {line}')
     return '\n'.join(lines)

@@ -3019,6 +3019,43 @@ def _venv_sibling_skew(repos) -> tuple:
     return skew, unassessable
 
 
+#: `smd update` exit code for "nothing failed, but component(s) were
+#: deliberately HELD". Non-zero, because the host is not fully updated —
+#: but distinguishable from 1, which now means something actually broke.
+#:
+#: A Refusal used to return 1 as well, so no caller could tell a
+#: deliberate decline from a failure: `smd fleet update` reported an
+#: entire healthy host as FAILED because wspr-recorder's uv.lock had the
+#: install-time churn it has on every host.
+UPDATE_EXIT_HELD = 3
+
+
+def _update_exit(held: int, failed: int) -> int:
+    """Exit code for an update run. A failure outranks a hold."""
+    if failed:
+        return 1
+    return UPDATE_EXIT_HELD if held else 0
+
+
+def _no_actionable_outcome(held_targets):
+    """(exit code, line) when no runnable steps remain.
+
+    The 'nothing to do' phrase is emitted even when components are held,
+    because that phrase is how `smd fleet update` recognises a host as
+    arrived. Without it a host carrying a permanent hold — routine
+    uv.lock churn is exactly that — could never verify, and would halt
+    the fleet wave forever on a host that is behaving correctly.
+
+    The holds are NAMED in the same line, so 'nothing to do' can never
+    be read as 'everything is current'.
+    """
+    if held_targets:
+        return UPDATE_EXIT_HELD, (
+            f'nothing to do — {len(held_targets)} component(s) HELD '
+            f'({", ".join(held_targets)}); the rest of the host is current')
+    return 0, 'host is current — nothing to do'
+
+
 def _chown_tree(d: Path, owner_uid: int) -> None:
     """Recursively give a checkout back to its owning uid and group."""
     subprocess.run(['chown', '-R', f'{owner_uid}:{d.stat().st_gid}', str(d)],
@@ -3202,18 +3239,31 @@ def cmd_update(args) -> int:
     }
 
     plan = plan_update(state)
-    if not plan:
-        _ok('host is current — nothing to do')
-        return 0
+    held_targets = [s.target for s in plan if isinstance(s, Refusal)]
+    if not [s for s in plan if not isinstance(s, Refusal)]:
+        # Nothing runnable. Either the host is current, or the only
+        # entries left are deliberate holds — which is a steady state,
+        # not a failure, and must still read as "nothing to do" so a
+        # fleet run can recognise the host as arrived.
+        for target in held_targets:
+            reason = next(s.reason for s in plan
+                          if isinstance(s, Refusal) and s.target == target)
+            _warn(f'{target}: HELD — {reason}')
+        code, line = _no_actionable_outcome(held_targets)
+        (_warn if held_targets else _ok)(line)
+        return code
 
     apply_ = getattr(args, 'apply', False)
     applied = set()
     print('' if apply_ else '(dry run — re-run with --apply)')
-    rc = 0
+    # Held and failed are counted separately: a deliberate decline and a
+    # broken step are different outcomes and must not share an exit code.
+    held = 0
+    failed = 0
     for step in plan:
         if isinstance(step, Refusal):
-            _err(f'{step.target}: HELD — {step.reason}')
-            rc = 1
+            _warn(f'{step.target}: HELD — {step.reason}')
+            held += 1
             continue
         print(f'\n  [{step.kind}] {step.target}')
         if step.detail:
@@ -3230,6 +3280,8 @@ def cmd_update(args) -> int:
                 f'{step.target}: {(r.stdout + r.stderr).strip().splitlines()[-1]}')
             if r.returncode == 0:
                 applied.add(f'pull {step.target}')
+            else:
+                failed += 1
         elif step.kind == 'install':
             sh = base / step.target / 'scripts' / 'install.sh'
             if not sh.exists():
@@ -3239,6 +3291,8 @@ def cmd_update(args) -> int:
                 f'{step.target}: install.sh exit {r.returncode}')
             if r.returncode == 0:
                 applied.add(f'install {step.target}')
+            else:
+                failed += 1
         elif step.kind == 'restart':
             _info('restart not automated here — bounce radiod, wait for it to '
                   'settle, then the recorders')
@@ -3258,7 +3312,12 @@ def cmd_update(args) -> int:
             'what': 'smd update --apply: ' + ', '.join(sorted(applied)),
         })
         _info(f'recorded in {HISTORY_FILE} (see: smd version)')
-    return rc
+    # A step that failed used to print an error and leave the exit code
+    # at 0 — so `smd update --apply` could report success while a pull or
+    # an install had broken. DASI002's rc=1 on 2026-08-17 came entirely
+    # from the HELD refusal; ka9q-python's `install.sh exit 127` in the
+    # same run contributed nothing to it.
+    return _update_exit(held, failed)
 
 
 def cmd_fleet(args) -> int:

@@ -1031,3 +1031,98 @@ class TestPostCheckCannotPassOnAHostThatNeverMoved:
         assert result.behind == 10
         report = format_update([result])
         assert 'stale ref' in report.lower() or 'behind' in report.lower()
+
+
+# ---------------------------------------------------------------------------
+# A held component is not a failed host; and remote output is not a
+# terminal, so it must not arrive wearing colour codes.
+# ---------------------------------------------------------------------------
+
+from sigmond.fleet import HELD_EXIT, strip_ansi  # noqa: E402
+
+
+HELD_OUT = ('  x  wspr-recorder: HELD — 1 modified file(s) (uv.lock) — diff '
+            'against origin/main before discarding\n'
+            'nothing to do — 1 component(s) HELD (wspr-recorder); '
+            'the rest of the host is current\n')
+
+
+class TestHeldIsNotFailed:
+
+    def test_a_held_component_is_reported_as_held_not_failed(self):
+        fleet = _fleet(Host(name='churn', reach='r'))
+        run = runner({
+            ('churn', 'true'): _ok(),
+            ('churn', 'smd update'): RunResult(rc=HELD_EXIT, out=HELD_OUT),
+        })
+        [result] = fleet_update(fleet, run)
+        assert result.error is None, 'a deliberate hold is not an error'
+        assert result.held == ['wspr-recorder']
+
+    def test_the_report_says_held_and_names_the_component(self):
+        fleet = _fleet(Host(name='churn', reach='r'))
+        run = runner({
+            ('churn', 'true'): _ok(),
+            ('churn', 'smd update'): RunResult(rc=HELD_EXIT, out=HELD_OUT),
+        })
+        report = format_update(fleet_update(fleet, run))
+        assert 'HELD' in report
+        assert 'wspr-recorder' in report
+        assert 'FAILED' not in report
+
+    def test_a_held_host_can_still_verify_and_not_block_the_wave(self):
+        """Routine uv.lock churn must not halt the fleet forever.
+
+        A hold is a steady state the operator has accepted; the host is
+        current in every respect the update could act on.
+        """
+        fleet = _fleet(Host(name='churn', reach='r', canary=True),
+                       Host(name='after', reach='r'))
+        run = runner({
+            ('churn', 'true'): _ok(),
+            ('churn', 'smd update'): RunResult(rc=HELD_EXIT, out=HELD_OUT),
+            ('churn', 'smd version'): _ok(VERSION_OK),
+            ('after', 'true'): _ok(),
+            ('after', 'smd update'): _ok(CURRENT),
+            ('after', 'smd version'): _ok(VERSION_OK),
+        })
+        by_name = {r.host.name: r
+                   for r in fleet_update(fleet, run, apply=True,
+                                         commits_behind=lambda sha: 0)}
+        assert by_name['churn'].verified is True
+        assert by_name['after'].halted is False
+
+    def test_a_genuine_failure_is_still_a_failure(self):
+        fleet = _fleet(Host(name='broken', reach='r'))
+        run = runner({
+            ('broken', 'true'): _ok(),
+            ('broken', 'smd update'): RunResult(rc=1, out='', err='boom'),
+        })
+        [result] = fleet_update(fleet, run)
+        assert result.error
+        assert 'FAILED' in format_update([result])
+
+
+class TestStripAnsi:
+
+    def test_colour_codes_are_removed(self):
+        assert strip_ansi('\x1b[31m✗\x1b[0m  held') == '✗  held'
+
+    def test_plain_text_is_untouched(self):
+        assert strip_ansi('nothing to do') == 'nothing to do'
+
+    def test_none_and_empty_survive(self):
+        assert strip_ansi('') == ''
+        assert strip_ansi(None) is None
+
+    def test_the_fan_out_strips_what_it_receives(self):
+        """smd colours its output; a pipe is not a terminal, but the
+        remote end cannot tell. Strip at the boundary rather than
+        letting escapes into every report."""
+        def exec_(argv, timeout):
+            return RunResult(rc=0, out='\x1b[32m✓\x1b[0m ok',
+                             err='\x1b[31mbad\x1b[0m')
+
+        result = ssh_runner(exec_=exec_)(Host(name='h', reach='r'), 'smd version')
+        assert result.out == '✓ ok'
+        assert result.err == 'bad'
