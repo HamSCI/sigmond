@@ -1,0 +1,66 @@
+# /etc/sudoers.d/sigmond-fleet-readonly
+#
+# Install with:
+#     install -m 0440 -o root -g root \
+#         etc/sudoers.d/sigmond-fleet-readonly /etc/sudoers.d/
+#     visudo -c            # MUST pass before you log out
+#
+# WHY THIS EXISTS
+#
+# `smd fleet doctor` and `smd fleet update` connect to each host as the
+# `sigmond` user. Two read-only checks need root and degrade honestly
+# without it, reporting less rather than reporting wrongly:
+#
+#   * exec-mismatch reads /proc/<pid>/exe to confirm a running service
+#     executes the binary its deploy tree provides. That link is
+#     unreadable for another user's process, so as `sigmond` every
+#     service came back `running=(unreadable) status=unknown`.
+#
+#   * `smd update` refreshes origin/* before deciding a host is current.
+#     `_git_fetch_as_owner` DROPS privileges to each repo's owner — which
+#     it can only do if it has privileges to drop. As `sigmond` it cannot
+#     fetch a timestd-owned checkout, so that ref stays stale: hf-timestd
+#     sat 19 commits behind on DASI002 and `smd update` reported the host
+#     current.
+#
+# WHY IT IS SCOPED THIS WAY
+#
+# sudo matches the command AND its arguments exactly. Listing `smd
+# doctor` with no arguments therefore permits ONLY the bare, read-only
+# invocation:
+#
+#     sudo -n smd doctor          permitted
+#     sudo -n smd doctor --fix    REFUSED (prompts for a password)
+#     sudo -n smd update          permitted
+#     sudo -n smd update --apply  REFUSED (prompts for a password)
+#
+# So the fan-out can report on every host without ever being able to
+# change one. Rolling the fleet forward stays a deliberate, interactive
+# act.
+#
+# Two narrower-looking alternatives were rejected:
+#
+#   * `NOPASSWD: /bin/readlink /proc/*/exe` cannot work at all — smd
+#     reads that link with an in-process os.readlink() syscall
+#     (bin/smd, _resolve_exe), which no sudoers rule can affect.
+#
+#   * `NOPASSWD: (timestd, wsprrec, ...) /usr/bin/git` is far BROADER
+#     than it looks. git as another user is near-total impersonation of
+#     them: hooks, aliases, --exec-path, -c core.pager=<anything>.
+#
+# SAFETY NOTE
+#
+# `smd doctor` run as root does NOT recreate the root-owned .git damage
+# it exists to detect: sigmond.doctor.git_state passes
+# --no-optional-locks precisely so `git status` cannot rewrite
+# .git/index. See the comment there — that damage was observed on
+# DASI002 and is why the flag is present.
+#
+# The trailing full paths matter: a bare `smd` would let any binary
+# named smd earlier in PATH be run as root.
+
+Cmnd_Alias SIGMOND_FLEET_RO = /usr/local/bin/smd doctor, \
+                              /usr/local/bin/smd update, \
+                              /usr/local/bin/smd version
+
+sigmond ALL=(root) NOPASSWD: SIGMOND_FLEET_RO
