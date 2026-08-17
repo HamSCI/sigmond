@@ -533,8 +533,14 @@ def _doctor_for(host, run):
     if result.rc == 1:
         return HostDoctor(host=host, reachable=True, clean=False,
                           has_sigmond=True, report=result.out.strip())
+    if _smd_absent(result):
+        # Reachable, runs no sigmond. Named the same way `status` and
+        # `update` name it — one fact must not read three ways.
+        return HostDoctor(host=host, reachable=True, clean=None,
+                          has_sigmond=False)
+    # smd IS here and the verb broke: the operator needs the message.
     return HostDoctor(host=host, reachable=True, clean=None,
-                      has_sigmond=False,
+                      has_sigmond=True,
                       error=(result.err or result.out or
                              f'smd doctor exit {result.rc}').strip())
 
@@ -568,10 +574,12 @@ def format_doctor(results: list) -> str:
     if clean:
         lines.append('clean: ' + ', '.join(r.host.name for r in clean))
     for r in skipped:
-        why = r.error or ('no sigmond install' if not r.has_sigmond
-                          else 'not examined')
+        if r.reachable and not r.has_sigmond:
+            lines.append(f'{r.host.name}: no sigmond install '
+                         f'(role: {r.host.role or "unset"})')
+            continue
         state = 'unreachable' if not r.reachable else 'not examined'
-        lines.append(f'{r.host.name}: {state} — {why}')
+        lines.append(f'{r.host.name}: {state} — {r.error or "not examined"}')
 
     lines.append('')
     lines.append('NOTE: a host that has not yet updated runs an older '

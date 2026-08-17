@@ -1191,3 +1191,44 @@ class TestHostWithoutSigmond:
                                 commits_behind=lambda sha: 0)}
         assert by_name['srv'].has_sigmond is False
         assert by_name['last'].halted is False, 'the host behind it was skipped'
+
+
+class TestDoctorAgreesAboutHostsWithoutSigmond:
+    """All three verbs must name the same state the same way.
+
+    `status` and `update` both say "no sigmond install (role: server)"
+    for wd30 — the ClickHouse box and RAC-mesh jump host, which was never
+    meant to have one. `doctor` said "not examined — bash: line 1: smd:
+    command not found", leaking the raw shell error instead of naming the
+    state, because _doctor_for set `error` on any unexpected exit code
+    and format_doctor preferred `error` over the has_sigmond wording.
+    """
+
+    def test_an_absent_smd_is_not_an_error(self):
+        fleet = _fleet(Host(name='srv', reach='r', role='server'))
+        run = runner({('srv', 'true'): _ok(), ('srv', 'smd doctor'): NO_SMD})
+        [result] = fleet_doctor(fleet, run)
+        assert result.has_sigmond is False
+        assert result.clean is None, 'nobody looked — not clean, not dirty'
+        assert result.error is None
+
+    def test_it_is_worded_exactly_as_status_and_update_word_it(self):
+        fleet = _fleet(Host(name='srv', reach='r', role='server'))
+        run = runner({('srv', 'true'): _ok(), ('srv', 'smd doctor'): NO_SMD})
+        report = format_doctor(fleet_doctor(fleet, run))
+        assert 'no sigmond install' in report
+        assert 'server' in report
+        assert 'command not found' not in report, 'raw shell error leaked'
+
+    def test_a_real_doctor_failure_still_surfaces_its_error(self):
+        """Only 'smd is absent' is benign. If smd EXISTS and the verb
+        broke, the operator needs the actual message."""
+        fleet = _fleet(Host(name='odd', reach='r'))
+        run = runner({
+            ('odd', 'true'): _ok(),
+            ('odd', 'smd doctor'): RunResult(rc=4, out='', err='segfault'),
+        })
+        [result] = fleet_doctor(fleet, run)
+        assert result.has_sigmond is True
+        assert 'segfault' in (result.error or '')
+        assert 'segfault' in format_doctor([result])
