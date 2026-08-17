@@ -185,66 +185,6 @@ host that symlink already points at the repo, so an editable workflow is
 automatic — no `pip install -e` step needed for the core. The dev venv is
 only required for tests and the TUI extras.
 
-## Core commands (implemented)
-
-```
-smd component install [<client>]    Install a client from catalog, or full-suite
-                         (bare `smd install` kept as alias; `smd software install`
-                         deprecated in CLI v2 — see docs/CLI-V2-SPEC.md §5)
-smd apply                Reconcile running services with current config
-                         (`smd software apply` deprecated in v2)
-smd start                Start all managed services
-smd stop                 Stop all managed services
-smd restart              Restart managed services (with reset-failed)
-smd reload               Reload via signal or restart (auto-routing)
-smd component list       Per-component status: lifecycle + git ref + upstream
-                         divergence + version policy + verdict.
-                         (bare `smd list` kept as alias)
-smd component update [<name>]       Pull and reconcile per topology version policy
-                         (was `smd list --update`/`--apply`). Requires root.
-smd component list --catalog        Show catalog of known clients (was `--available`).
-smd admin log <client>         Follow journal, tail file logs
-smd admin log set-level [<client>] <lvl>  Set per-client (+ SIGHUP) or global default log
-                         level (was `smd admin log --level`).
-smd status               Service health + client inventory enrichment
-smd config show|migrate  Inspect or migrate coordination config
-smd config init <c>      Invoke a client's first-run wizard (CONTRACT-v0.5 §14)
-smd config edit <c>      Invoke a client's edit flow, or $EDITOR fallback
-smd config init radiod   Sigmond-owned wizard: probe USB, render radiod@<id>.conf
-                         per SDR, register in coordination.toml (CONTRACT-v0.5 §14.4)
-smd admin validate             Cross-client harmonization rules (read-only)
-smd watch ka9q           Compare pinned ka9q-radio commit vs upstream and
-                         flag changes that would break RTP delivery
-                         (was `smd ka9q-watch`)
-smd admin diag                 Network + deps + client validation diagnostics
-smd tui                  Launch interactive TUI configurator
-smd admin environment list|probe|describe   Situational awareness of network peers
-smd admin storage migrate-to-sqlite   Remove a leftover legacy ClickHouse
-                         install once SQLite (the sole local sink) is in
-                         use. Dry-run by default; --yes to execute.
-                         Requires root.
-smd admin storage trim         TTL-based janitor for the local SQLite sink.
-                         `--all` applies per-target policies from env
-                         (PSK_RETENTION_MIN=60 min); 30-min floor
-                         enforced. One-shot mode: `--target-db psk
-                         --max-age 2h`. Systemd timer
-                         `sigmond-storage-trim-all.timer` (15 min).
-smd admin verifier report      Windowed audit of upload delivery. Default
-                         `--target wspr` reads wsprnet_audit (per-spot
-                         delivered/lost/in_flight/rejected/silent_drop
-                         cohorts + cadence). `--target psk` audits the
-                         local SQLite sink for FT8/FT4 spot delivery,
-                         with cadence on the 15s / 7.5s FT cycles.
-smd admin uploader manifest    Generate /etc/hs-uploader/pipelines.toml (the
-                         single-host uploader daemon's manifest) from every
-                         enabled client's deploy.toml [[hs_uploader.pipeline]]
-                         declarations, substituting per-site identity from the
-                         current configs. `--check` (read-only drift diff) /
-                         `--write` (render, root) / `--enable` (write +
-                         install/refresh hs-uploader.service). Also run
-                         automatically during bring-up and `smd apply`.
-```
-
 ## Sink backend selection
 
 `sigmond.hamsci_sink.Writer.from_env()` picks the producer-side sink at
@@ -323,26 +263,6 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
     works during the v2 deprecation window) and as the TUI Debugging →
     ka9q-watch screen. Operator-triggered; no scheduler installed —
     rerun manually before deploying a new ka9q-radio build.
-
-## Implemented TUI screens
-
-- **Overview** — system health dashboard with component status
-- **Install** — browse and install components from the catalog
-- **Logs** — view and filter service logs (journal and file)
-- **CPU affinity** — visual core map with conflict detection
-- **CPU frequency** — monitor and control CPU frequencies
-- **Environment** — discover and probe network peers (KIWISDRs, GPSDOs, NTP)
-- **GPSDO** — monitor Leo Bodnar GPSDO health via mDNS
-- **Validate** — cross-client harmonization checks
-- **Lifecycle** — start/stop/restart services
-- **Apply** — reconcile services with current config
-- **List (Software versions)** — per-component status (git ref, upstream
-  divergence, version policy) with Update All / per-component update
-  buttons; replaces the old separate Update screen.
-- **Backup/Restore** — backup and restore configuration
-- **RAC** — Remote Access Channel (frpc tunnel) configuration
-- **Diag net** — network diagnostics for multicast readiness
-- **Radiod** — radiod status and channel monitoring
 
 ## Still to build
 
