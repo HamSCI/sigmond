@@ -1126,3 +1126,68 @@ class TestStripAnsi:
         result = ssh_runner(exec_=exec_)(Host(name='h', reach='r'), 'smd version')
         assert result.out == '✓ ok'
         assert result.err == 'bad'
+
+
+# ---------------------------------------------------------------------------
+# A host that runs no sigmond is a fact, not a fault
+# ---------------------------------------------------------------------------
+#
+# `status` already reported wd30 as "no sigmond install (role: server)" —
+# it is the ClickHouse box and the RAC-mesh jump host, and was never
+# meant to have one. `update` reported the SAME host as
+# "FAILED — bash: line 1: smd: command not found".
+#
+# One fact, two readings, one of them alarming. Worse, in an --apply run
+# a non-failure would have halted every host queued behind it.
+
+NO_SMD = RunResult(rc=127, out='', err='bash: line 1: smd: command not found')
+
+
+class TestHostWithoutSigmond:
+
+    def test_it_is_not_an_error(self):
+        fleet = _fleet(Host(name='srv', reach='r', role='server'))
+        run = runner({('srv', 'true'): _ok(), ('srv', 'smd update'): NO_SMD})
+        [result] = fleet_update(fleet, run)
+        assert result.has_sigmond is False
+        assert result.error is None
+
+    def test_the_report_matches_what_status_says(self):
+        fleet = _fleet(Host(name='srv', reach='r', role='server'))
+        run = runner({('srv', 'true'): _ok(), ('srv', 'smd update'): NO_SMD})
+        report = format_update(fleet_update(fleet, run))
+        assert 'no sigmond install' in report
+        assert 'server' in report
+        assert 'FAILED' not in report
+
+    def test_a_genuine_failure_is_still_failed(self):
+        """Only 'smd is absent' is benign. A host where smd exists and
+        the verb broke must stay loud."""
+        fleet = _fleet(Host(name='broken', reach='r'))
+        run = runner({
+            ('broken', 'true'): _ok(),
+            ('broken', 'smd update'): RunResult(rc=1, out='', err='boom'),
+        })
+        [result] = fleet_update(fleet, run)
+        assert result.error
+        assert 'FAILED' in format_update([result])
+
+    def test_it_does_not_halt_the_wave(self):
+        """A jump host with no sigmond sitting mid-inventory must not
+        stop the hosts behind it from updating."""
+        fleet = _fleet(Host(name='canary', reach='r', canary=True),
+                       Host(name='srv', reach='r', role='server'),
+                       Host(name='last', reach='r'))
+        script = {
+            ('canary', 'true'): _ok(), ('canary', 'smd update'): _ok(CURRENT),
+            ('canary', 'smd version'): _ok(VERSION_OK),
+            ('srv', 'true'): _ok(), ('srv', 'smd update'): NO_SMD,
+            ('last', 'true'): _ok(), ('last', 'smd update'): _ok(CURRENT),
+            ('last', 'smd version'): _ok(VERSION_OK),
+        }
+        run = runner(script)
+        by_name = {r.host.name: r for r in
+                   fleet_update(fleet, run, apply=True,
+                                commits_behind=lambda sha: 0)}
+        assert by_name['srv'].has_sigmond is False
+        assert by_name['last'].halted is False, 'the host behind it was skipped'

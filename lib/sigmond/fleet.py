@@ -636,6 +636,25 @@ def strip_ansi(text):
     return _ANSI.sub('', text)
 
 
+#: How a shell reports that `smd` is not installed. A host that runs no
+#: sigmond is a FACT — wd30 is the ClickHouse box and the RAC-mesh jump
+#: host, and was never meant to have one — so it must read the same way
+#: `status` already reports it, not as a failure.
+_NO_SMD_MARKERS = ('command not found', 'No such file or directory')
+
+
+def _smd_absent(result) -> bool:
+    """True when the verb never ran because smd is not there.
+
+    Distinguished from the verb running and failing: a host where smd
+    EXISTS and `update` broke must stay loud.
+    """
+    if result.rc == 0:
+        return False
+    text = f'{result.err or ""}{result.out or ""}'
+    return result.rc == 127 or any(m in text for m in _NO_SMD_MARKERS)
+
+
 class NoCanary(Exception):
     """No host is marked to lead the update, and more than one exists."""
 
@@ -662,6 +681,7 @@ class HostUpdate:
 
     host: Host
     reachable: bool = True
+    has_sigmond: bool = True
     skipped: Optional[str] = None
     halted: bool = False
     plan: str = ''
@@ -799,6 +819,9 @@ def _plan_only(host, run, commits_behind=None) -> HostUpdate:
                           error=(probe.err or probe.out or
                                  f'unreachable (exit {probe.rc})').strip())
     result = run(host, _UPDATE_PLAN_CMD)
+    if _smd_absent(result):
+        # Reachable, runs no sigmond. Not an error, and nothing to plan.
+        return HostUpdate(host=host, has_sigmond=False)
     if result.rc not in (0, HELD_EXIT):
         return HostUpdate(host=host, plan=result.out.strip(),
                           error=(result.err or f'smd update exit {result.rc}'
@@ -874,6 +897,10 @@ def _update_one(host, run, commits_behind=None) -> HostUpdate:
     planned = _plan_only(host, run, commits_behind)
     if not planned.reachable or planned.error:
         return planned
+    if not planned.has_sigmond:
+        # Nothing to update, so nothing failed — the wave carries on past
+        # it rather than treating a jump host as a stopped canary.
+        return HostUpdate(host=host, has_sigmond=False, verified=True)
     if planned.empty_plan:
         # Believes it is current — but "believes" is not "is". Confirm
         # against main before letting the wave move on.
@@ -915,6 +942,9 @@ def format_update(results: list) -> str:
                          f'this one was never contacted')
         elif not r.reachable:
             lines.append(f'{name}: unreachable — {r.error}')
+        elif not r.has_sigmond:
+            lines.append(f'{name}: no sigmond install '
+                         f'(role: {r.host.role or "unset"})')
         elif r.error:
             lines.append(f'{name}: FAILED — {r.error}')
         elif r.held and r.empty_plan:
