@@ -3019,6 +3019,35 @@ def _venv_sibling_skew(repos) -> tuple:
     return skew, unassessable
 
 
+def _refresh_upstreams(checkouts, fetch: bool = True) -> None:
+    """Bring each checkout's origin/* refs up to date before they are read.
+
+    `plan_update` decides a host is current from `HEAD..@{u}` — a count
+    against the LOCALLY CACHED remote ref. Nothing used to refresh that
+    ref, so a host whose last fetch was old reported "host is current —
+    nothing to do" while genuinely behind: B4 on 2026-08-17 had HEAD and
+    @{u} both at 517995a with a two-day-old fetch, 10 commits behind main.
+
+    This is the same defect `component list` already fixed — see
+    `_git_fetch_as_owner`'s docstring and the "Fetch by default so
+    divergence is LIVE" comment in `cmd_component_list`. `smd update`
+    read the same stale refs and drew the same false conclusion.
+
+    Failures are per-repo and silent by design: a checkout with no
+    remote, or one whose remote is unreachable, must not stop the other
+    components from being refreshed. The consequence of a failed fetch
+    is the stale-ref behaviour that was there before — no worse — and
+    `smd doctor` is where unreachable remotes get reported.
+    """
+    if not fetch:
+        return
+    for repo_dir in checkouts:
+        try:
+            _git_fetch_as_owner(Path(repo_dir))
+        except Exception:                        # noqa: BLE001
+            continue
+
+
 def cmd_update(args) -> int:
     """Plan (and optionally apply) a component update.  Safe to re-run.
 
@@ -3043,6 +3072,13 @@ def cmd_update(args) -> int:
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     checkouts = component_checkouts(base)
+
+    # Fetch by default so "nothing to do" means something. Without this
+    # the counts below are taken against whatever origin/* happened to
+    # be cached at the last fetch, and a stale host reports itself
+    # current. --no-fetch opts out for speed, as on `component list`.
+    _refresh_upstreams(checkouts, fetch=not getattr(args, 'no_fetch', False))
+
     repos = {}
     for d in checkouts:
         st = git_state(d)
@@ -16896,6 +16932,10 @@ def main() -> int:
     p.add_argument('--apply', action='store_true',
                    help='perform the mechanical steps (default: dry run)')
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
+    p.add_argument('--no-fetch', action='store_true',
+                   help='skip the git fetch (faster, but plans against '
+                        'cached origin/* refs — a stale host will report '
+                        'itself current; fetching is the default)')
 
     p = sub.add_parser('version',
                        help='what is actually installed (image lineage + live commits)')
