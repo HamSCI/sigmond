@@ -424,7 +424,18 @@ def manifest_drift(live: dict, manifest_path: str) -> list:
         text = Path(manifest_path).read_text()
     except OSError:
         return []
+    return manifest_drift_text(live, text)
 
+
+def manifest_drift_text(live: dict, text: str) -> list:
+    """``manifest_drift`` for a manifest already in hand as text.
+
+    Same contract and same return shape; the only difference is where
+    the manifest came from. A fleet fan-out reads the manifest over ssh
+    and never has a local path to hand — routing that through a
+    temporary file, or reimplementing the comparison, would give two
+    sources of the same truth and they would drift.
+    """
     manifest = _parse_manifest_components(text)
     if manifest is None:
         return []

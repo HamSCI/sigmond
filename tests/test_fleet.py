@@ -200,3 +200,368 @@ class TestHost:
                     frozen='capture window')
         assert host.frozen == 'capture window'
         assert host.reach == 'root@alpha.example'
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — smd fleet status
+# ---------------------------------------------------------------------------
+
+from sigmond.fleet import (  # noqa: E402
+    READ_ONLY_COMMANDS,
+    RunResult,
+    fleet_status,
+)
+
+
+VERSION_OK = """image:      v3.30   [image installed on this host]
+
+components (live):
+    callhash         2a1b584
+    codar-sounder    5481589
+    ft8_lib          400e236
+    gpsdo-monitor    19e85b0
+    hamsci-dsp       1ea760a
+    hf-tec           b512b50
+    hf-timestd       f85f36e
+    hfdl-recorder    458c8fa
+    hs-uploader      73e89e1
+    igmp-querier     471574e
+    ka9q-python      c5dc9ed
+    sigmond          517995a
+"""
+
+MANIFEST_MATCHING = VERSION_OK
+MANIFEST_BEHIND = VERSION_OK.replace('hf-timestd       f85f36e',
+                                     'hf-timestd       aaaaaaa')
+
+
+def runner(script):
+    """Build an injected fan-out from {(host, command): RunResult}.
+
+    Mirrors ``venv_skew``'s ``probe`` and ``exec_mismatch``'s
+    ``resolve`` — tests never touch a real host.
+    """
+    calls = []
+
+    def run(host, command):
+        calls.append((host.name, command))
+        result = script.get((host.name, command))
+        if result is None:
+            return RunResult(rc=1, out='', err='command not found')
+        return result
+
+    run.calls = calls
+    return run
+
+
+def _ok(out=''):
+    return RunResult(rc=0, out=out, err='')
+
+
+class TestFleetStatus:
+
+    def test_host_matching_its_blessed_manifest_reports_no_drift(self):
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+            ('alpha', 'cat /etc/sigmond-appliance/manifest.txt'):
+                _ok(MANIFEST_MATCHING),
+        })
+        [status] = fleet_status(fleet, run)
+        assert status.reachable is True
+        assert status.blessed_source == 'manifest'
+        assert status.drift == []
+
+    def test_host_behind_its_manifest_names_the_components(self):
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+            ('alpha', 'cat /etc/sigmond-appliance/manifest.txt'):
+                _ok(MANIFEST_BEHIND),
+        })
+        [status] = fleet_status(fleet, run)
+        assert status.blessed_source == 'manifest'
+        assert [d['component'] for d in status.drift] == ['hf-timestd']
+        assert status.drift[0]['live'] == 'f85f36e'
+
+    def test_host_without_a_manifest_falls_back_to_main_and_says_so(self):
+        """No fleet host carries a manifest yet.
+
+        Comparing against main is still useful, but must never be
+        presented as though it were a blessed pin.
+        """
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+        })
+        [status] = fleet_status(fleet, run, commits_behind=lambda sha: 10)
+        assert status.blessed_source == 'main'
+        assert status.behind == 10
+        assert status.drift == []
+
+    def test_unreachable_host_is_reported_distinctly_from_a_healthy_one(self):
+        fleet = {
+            'alpha': Host(name='alpha', reach='root@alpha.example'),
+            'gone': Host(name='gone', reach='root@gone.example'),
+        }
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+            ('gone', 'true'): RunResult(rc=255, out='',
+                                        err='Permission denied (publickey).'),
+        })
+        by_name = {s.host.name: s for s in fleet_status(fleet, run)}
+        assert by_name['alpha'].reachable is True
+        assert by_name['gone'].reachable is False
+        assert 'Permission denied' in by_name['gone'].error
+
+    def test_one_unreachable_host_does_not_abort_the_run(self):
+        """doctor.py:73's principle, and Stage 3 Task 4's defect."""
+        fleet = {
+            'gone': Host(name='gone', reach='root@gone.example'),
+            'alpha': Host(name='alpha', reach='root@alpha.example'),
+        }
+        run = runner({
+            ('gone', 'true'): RunResult(rc=255, out='', err='no route to host'),
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+        })
+        statuses = fleet_status(fleet, run)
+        assert len(statuses) == 2
+        assert any(s.reachable and s.components for s in statuses)
+
+    def test_a_raising_runner_is_contained_to_its_own_host(self):
+        """A fan-out that throws must not discard the other hosts."""
+        fleet = {
+            'boom': Host(name='boom', reach='root@boom.example'),
+            'alpha': Host(name='alpha', reach='root@alpha.example'),
+        }
+        script = {
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+        }
+
+        def run(host, command):
+            if host.name == 'boom':
+                raise OSError('ssh binary missing')
+            return script.get((host.name, command)) or RunResult(1, '', 'nope')
+
+        by_name = {s.host.name: s for s in fleet_status(fleet, run)}
+        assert by_name['boom'].reachable is False
+        assert 'ssh binary missing' in by_name['boom'].error
+        assert by_name['alpha'].components['sigmond'] == '517995a'
+
+    def test_frozen_host_is_still_reported(self):
+        """Freeze prevents changes, not visibility."""
+        fleet = {'cold': Host(name='cold', reach='root@cold.example',
+                              frozen='capture window through 2026-08-20')}
+        run = runner({
+            ('cold', 'true'): _ok(),
+            ('cold', 'smd version'): _ok(VERSION_OK),
+        })
+        [status] = fleet_status(fleet, run)
+        assert status.reachable is True
+        assert status.components['sigmond'] == '517995a'
+        assert status.host.frozen.startswith('capture window')
+
+    def test_reachable_host_without_sigmond_is_not_an_error(self):
+        """The jump host runs no sigmond. That is a fact, not a fault."""
+        fleet = {'srv': Host(name='srv', reach='op@srv.example', role='server')}
+        run = runner({('srv', 'true'): _ok()})
+        [status] = fleet_status(fleet, run)
+        assert status.reachable is True
+        assert status.has_sigmond is False
+        assert status.error is None
+        assert status.blessed_source == 'none'
+
+    def test_unparseable_version_output_is_reported_not_silently_empty(self):
+        fleet = {'odd': Host(name='odd', reach='root@odd.example')}
+        run = runner({
+            ('odd', 'true'): _ok(),
+            ('odd', 'smd version'): _ok('total gibberish\n'),
+        })
+        [status] = fleet_status(fleet, run)
+        assert status.has_sigmond is True
+        assert status.components == {}
+        assert status.error and 'components' in status.error.lower()
+
+
+class TestStatusIsReadOnlyByConstruction:
+
+    def test_every_command_it_can_issue_is_in_the_read_only_set(self):
+        """`status` must be INCAPABLE of writing, not merely not writing.
+
+        The guard is the whitelist itself: if a future edit adds a
+        mutating command to the fan-out, this test fails.
+        """
+        for command in READ_ONLY_COMMANDS:
+            assert not any(tok in command for tok in
+                           ('--apply', '--fix', 'install', 'rm ', 'systemctl',
+                            'update', '>', 'tee'))
+
+    def test_status_issues_only_whitelisted_commands(self):
+        fleet = {
+            'alpha': Host(name='alpha', reach='root@alpha.example'),
+            'gone': Host(name='gone', reach='root@gone.example'),
+        }
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+            ('alpha', 'cat /etc/sigmond-appliance/manifest.txt'):
+                _ok(MANIFEST_MATCHING),
+            ('gone', 'true'): RunResult(rc=255, out='', err='denied'),
+        })
+        fleet_status(fleet, run)
+        assert run.calls, 'the fan-out was never exercised'
+        for _host, command in run.calls:
+            assert command in READ_ONLY_COMMANDS, f'not read-only: {command}'
+
+
+from sigmond.fleet import HostStatus, format_status, ssh_runner  # noqa: E402
+
+
+class TestSshRunner:
+
+    def _argv_for(self, host, command='smd version'):
+        seen = {}
+
+        def exec_(argv, timeout):
+            seen['argv'] = argv
+            seen['timeout'] = timeout
+            return RunResult(rc=0, out='', err='')
+
+        ssh_runner(exec_=exec_)(host, command)
+        return seen
+
+    def test_direct_host_runs_the_command_over_one_ssh(self):
+        host = Host(name='srv', reach='op@srv.example')
+        argv = self._argv_for(host)['argv']
+        assert argv[0] == 'ssh'
+        assert 'op@srv.example' in argv
+        assert argv[-1] == 'smd version'
+
+    def test_reach_flags_are_split_into_argv_not_passed_as_one_word(self):
+        """`-J jump -p 2222 host` is four arguments, not one."""
+        host = Host(name='beta', reach='-J jump.example -p 2222 root@10.0.0.9')
+        argv = self._argv_for(host)['argv']
+        for token in ('-J', 'jump.example', '-p', '2222', 'root@10.0.0.9'):
+            assert token in argv
+
+    def test_hop_becomes_a_nested_ssh_run_by_the_outer_host(self):
+        """The inner hop's credential lives on the outer host.
+
+        So the outer host must run the inner ssh itself. Expressed as
+        -J, ssh would offer OUR key on the final hop — the one key that
+        is not authorized there.
+        """
+        host = Host(name='guest', reach='root@hv.example',
+                    hop='sigmond@10.0.0.5')
+        argv = self._argv_for(host)['argv']
+        assert 'root@hv.example' in argv
+        assert '-J' not in argv, 'hop must not degrade to ProxyJump'
+        remote = argv[-1]
+        assert remote.startswith('ssh ')
+        assert 'sigmond@10.0.0.5' in remote
+        assert 'smd version' in remote
+
+    def test_batchmode_is_forced_so_an_unreachable_host_never_prompts(self):
+        """A password prompt in a fan-out hangs the whole run."""
+        host = Host(name='srv', reach='op@srv.example')
+        argv = self._argv_for(host)['argv']
+        assert 'BatchMode=yes' in ' '.join(argv)
+        assert 'ConnectTimeout=' in ' '.join(argv)
+
+    def test_nested_hop_also_forces_batchmode_on_the_inner_ssh(self):
+        host = Host(name='guest', reach='root@hv.example',
+                    hop='sigmond@10.0.0.5')
+        remote = self._argv_for(host)['argv'][-1]
+        assert 'BatchMode=yes' in remote
+
+    def test_a_timeout_is_always_applied(self):
+        """An unresponsive host must not stall the fan-out forever."""
+        host = Host(name='srv', reach='op@srv.example')
+        assert self._argv_for(host)['timeout'] > 0
+
+
+class TestFormatStatus:
+
+    def test_the_four_states_are_visually_distinguishable(self):
+        statuses = [
+            HostStatus(host=Host(name='ok', reach='r'), reachable=True,
+                       has_sigmond=True, components={'sigmond': '517995a'},
+                       blessed_source='manifest', drift=[]),
+            HostStatus(host=Host(name='behind', reach='r'), reachable=True,
+                       has_sigmond=True, components={'sigmond': '517995a'},
+                       blessed_source='main', behind=10),
+            HostStatus(host=Host(name='gone', reach='r'), reachable=False,
+                       error='Permission denied (publickey).'),
+            HostStatus(host=Host(name='srv', reach='r'), reachable=True,
+                       has_sigmond=False),
+        ]
+        report = format_status(statuses)
+        assert 'unreachable' in report.lower()
+        assert 'no sigmond' in report.lower()
+        assert '10' in report
+
+    def test_the_main_fallback_is_never_presented_as_a_blessed_pin(self):
+        """"current with main" and "matches what we blessed" differ."""
+        statuses = [
+            HostStatus(host=Host(name='b4', reach='r'), reachable=True,
+                       has_sigmond=True, components={'sigmond': '517995a'},
+                       blessed_source='main', behind=10),
+        ]
+        report = format_status(statuses).lower()
+        assert 'no manifest' in report or 'unblessed' in report
+        assert 'main' in report
+
+    def test_a_frozen_host_is_shown_with_its_reason(self):
+        statuses = [
+            HostStatus(host=Host(name='cold', reach='r',
+                                 frozen='capture window through 2026-08-20'),
+                       reachable=True, has_sigmond=True,
+                       components={'sigmond': '517995a'},
+                       blessed_source='main', behind=0),
+        ]
+        report = format_status(statuses)
+        assert 'frozen' in report.lower()
+        assert 'capture window' in report
+
+    def test_an_empty_fleet_says_so_rather_than_printing_nothing(self):
+        """Silence reads as success. It is not."""
+        report = format_status([])
+        assert report.strip()
+        assert 'no hosts' in report.lower()
+
+
+from sigmond.fleet import commits_behind_main  # noqa: E402
+
+
+class TestCommitsBehindMain:
+
+    def test_counts_commits_between_the_host_sha_and_main(self):
+        calls = []
+
+        def git(argv):
+            calls.append(argv)
+            return RunResult(rc=0, out='10\n', err='')
+
+        assert commits_behind_main('/repo', git=git)('517995a') == 10
+        assert any('rev-list' in a for a in calls[-1])
+
+    def test_an_unknown_sha_is_unknown_not_zero(self):
+        """A SHA the local checkout has never seen must not read as
+        'current'. Zero here would report a stale host as up to date."""
+        def git(argv):
+            return RunResult(rc=128, out='',
+                             err="fatal: bad revision 'deadbee..origin/main'")
+
+        assert commits_behind_main('/repo', git=git)('deadbee') is None
+
+    def test_unparseable_output_is_unknown_not_zero(self):
+        def git(argv):
+            return RunResult(rc=0, out='not a number\n', err='')
+
+        assert commits_behind_main('/repo', git=git)('517995a') is None

@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -179,3 +179,282 @@ def load_fleet(path: Optional[str] = None) -> dict[str, Host]:
         name: _host_from_block(name, block, source)
         for name, block in hosts.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# Fan-out: reading the fleet
+# ---------------------------------------------------------------------------
+
+#: Every command the status fan-out is permitted to issue.
+#:
+#: This is the enforcement point for "``status`` must be INCAPABLE of
+#: changing a host, not merely not changing one today". The fan-out
+#: issues nothing that is not in this tuple, and a test asserts both
+#: that membership holds and that no member can mutate. An edit that
+#: adds a writing command has to add it here first, in plain sight.
+_PROBE_CMD = 'true'
+_VERSION_CMD = 'smd version'
+_MANIFEST_CMD = 'cat /etc/sigmond-appliance/manifest.txt'
+READ_ONLY_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _VERSION_CMD, _MANIFEST_CMD)
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """One remote command's outcome.
+
+    ``rc`` is the exit status, ``out``/``err`` its streams. Reachability
+    is decided by the dedicated probe rather than by inspecting ``rc``
+    for ssh's 255 convention — a remote command may legitimately exit
+    255 itself, and conflating the two would report a live host as
+    unreachable.
+    """
+
+    rc: int
+    out: str = ''
+    err: str = ''
+
+
+@dataclass(frozen=True)
+class HostStatus:
+    """What one host reports, and against what it was judged.
+
+    Attributes:
+        host: The inventory entry, so callers keep ``frozen``/``role``.
+        reachable: Whether the fan-out got to the host at all.
+        error: Why not, or what could not be read. None when clean.
+        has_sigmond: Whether the host runs sigmond. A jump host or a
+            data server legitimately does not; that is a fact, not a
+            fault, and is reported rather than omitted.
+        components: Live component SHAs, as ``smd version`` reports.
+        blessed_source: What ``components`` was compared against —
+            ``'manifest'`` (the blessed image pin), ``'main'`` (the
+            fallback), or ``'none'`` (nothing to compare). Callers must
+            surface this: "current with main" and "matches what we
+            blessed" are different claims, and presenting the fallback
+            as a blessed pin would erase the distinction the manifest
+            exists to draw.
+        drift: ``doctor.manifest_drift`` entries. Only meaningful when
+            ``blessed_source == 'manifest'``.
+        behind: Commits the host's sigmond is behind main. Only
+            meaningful when ``blessed_source == 'main'``.
+    """
+
+    host: Host
+    reachable: bool
+    error: Optional[str] = None
+    has_sigmond: bool = False
+    components: dict = field(default_factory=dict)
+    blessed_source: str = 'none'
+    drift: list = field(default_factory=list)
+    behind: Optional[int] = None
+
+
+def fleet_status(fleet: dict, run, commits_behind=None) -> list:
+    """Read every host's live pin and judge it against its blessed one.
+
+    Read-only by construction: see :data:`READ_ONLY_COMMANDS`.
+
+    Args:
+        fleet: Hosts to read, as :func:`load_fleet` returns.
+        run: Injected fan-out, ``run(host, command) -> RunResult``.
+            Injected for the same reason ``doctor.venv_skew`` takes a
+            ``probe`` — so tests never touch a real host.
+        commits_behind: Optional ``(sha) -> int | None``, how far a
+            sigmond SHA trails main. Supplies the fallback comparison
+            for hosts with no blessed manifest, which today is all of
+            them.
+
+    Returns:
+        One :class:`HostStatus` per host, in inventory order. Frozen
+        hosts are included — freeze prevents changes, not visibility.
+
+    Per-host failures stay per-host: one unreachable host must not
+    abort the run and discard the others (``doctor.py:73``'s principle,
+    and the defect Stage 3's Task 4 had to fix). A ``run`` that raises
+    is contained the same way as one that returns a failure.
+    """
+    from .doctor import _parse_manifest_components, manifest_drift_text
+
+    out = []
+    for host in fleet.values():
+        try:
+            out.append(_status_for(host, run, commits_behind,
+                                   _parse_manifest_components,
+                                   manifest_drift_text))
+        except Exception as exc:            # noqa: BLE001 — see docstring
+            out.append(HostStatus(host=host, reachable=False,
+                                  error=f'{type(exc).__name__}: {exc}'))
+    return out
+
+
+def _status_for(host, run, commits_behind, parse_components, drift_text):
+    probe = run(host, _PROBE_CMD)
+    if probe.rc != 0:
+        return HostStatus(host=host, reachable=False,
+                          error=(probe.err or probe.out or
+                                 f'unreachable (exit {probe.rc})').strip())
+
+    version = run(host, _VERSION_CMD)
+    if version.rc != 0:
+        # Reachable, but runs no sigmond. Not an error.
+        return HostStatus(host=host, reachable=True, has_sigmond=False)
+
+    live = parse_components(version.out)
+    if not live:
+        return HostStatus(
+            host=host, reachable=True, has_sigmond=True,
+            error="smd version produced no readable 'components (live):' block",
+        )
+
+    manifest = run(host, _MANIFEST_CMD)
+    if manifest.rc == 0 and parse_components(manifest.out):
+        return HostStatus(host=host, reachable=True, has_sigmond=True,
+                          components=live, blessed_source='manifest',
+                          drift=drift_text(live, manifest.out))
+
+    behind = None
+    if commits_behind is not None and live.get('sigmond'):
+        behind = commits_behind(live['sigmond'])
+    return HostStatus(host=host, reachable=True, has_sigmond=True,
+                      components=live, blessed_source='main', behind=behind)
+
+
+# ---------------------------------------------------------------------------
+# The real fan-out, and presentation
+# ---------------------------------------------------------------------------
+
+#: Long enough for `smd version` to walk every component checkout on a
+#: field unit at the end of a slow link; short enough that a dead host
+#: does not stall the run.
+SSH_TIMEOUT_SEC = 90
+
+#: Fail fast on a host that is not answering at all. The fan-out reports
+#: it as unreachable and moves on.
+SSH_CONNECT_TIMEOUT_SEC = 10
+
+#: BatchMode is not an optimisation. Without it ssh prompts for a
+#: password on any host whose key is not authorized, and a fan-out that
+#: blocks on a prompt hangs every remaining host behind it.
+_SSH_OPTS = ('-o', 'BatchMode=yes',
+             '-o', f'ConnectTimeout={SSH_CONNECT_TIMEOUT_SEC}')
+_INNER_SSH_OPTS = f'-o BatchMode=yes -o ConnectTimeout={SSH_CONNECT_TIMEOUT_SEC}'
+
+
+def _default_exec(argv, timeout):
+    import subprocess
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return RunResult(rc=124, out='', err=f'timed out after {timeout}s')
+    except OSError as exc:
+        return RunResult(rc=127, out='', err=str(exc))
+    return RunResult(rc=p.returncode, out=p.stdout, err=p.stderr)
+
+
+def ssh_runner(exec_=None, timeout: int = SSH_TIMEOUT_SEC):
+    """A fan-out that reaches hosts over ssh.
+
+    ``exec_(argv, timeout) -> RunResult`` is injected so tests can
+    assert on the argv without shelling out.
+
+    A host with a ``hop`` is reached by a NESTED ssh — the outer host
+    runs the inner one. This is deliberately not ProxyJump: ``-J`` makes
+    the final hop with *our* key, and the whole reason a hop exists is
+    that the credential for it lives on the outer host instead.
+    """
+    import shlex
+    runner = exec_ or _default_exec
+
+    def run(host: Host, command: str) -> RunResult:
+        if host.hop:
+            remote = f'ssh {_INNER_SSH_OPTS} {host.hop} {shlex.quote(command)}'
+        else:
+            remote = command
+        argv = ['ssh', *_SSH_OPTS, *shlex.split(host.reach), remote]
+        return runner(argv, timeout)
+
+    return run
+
+
+def format_status(statuses: list) -> str:
+    """Render :func:`fleet_status` output for an operator.
+
+    Every state gets words, not just a blank column: an unreachable host,
+    a host with no sigmond, and a clean host must not look alike at a
+    glance. The ``main`` fallback always carries "no manifest" so it can
+    never be mistaken for a blessed pin.
+    """
+    if not statuses:
+        return ('no hosts in the inventory — see etc/fleet.toml.example '
+                'and $SIGMOND_FLEET')
+
+    width = max(len(s.host.name) for s in statuses)
+    lines = []
+    for s in statuses:
+        name = s.host.name.ljust(width)
+        if not s.reachable:
+            lines.append(f'{name}  unreachable — {s.error}')
+        elif not s.has_sigmond:
+            lines.append(f'{name}  no sigmond install '
+                         f'(role: {s.host.role or "unset"})')
+        elif s.error:
+            lines.append(f'{name}  reachable, but {s.error}')
+        elif s.blessed_source == 'manifest':
+            if s.drift:
+                moved = ', '.join(
+                    f'{d["component"]} {d["manifest"]}→{d["live"]}'
+                    for d in s.drift)
+                lines.append(f'{name}  DRIFTED from blessed manifest: {moved}')
+            else:
+                lines.append(f'{name}  matches blessed manifest')
+        else:
+            sha = s.components.get('sigmond', '?')
+            if s.behind is None:
+                behind = 'position vs main unknown'
+            elif s.behind == 0:
+                behind = 'current with main'
+            else:
+                behind = f'{s.behind} behind main'
+            lines.append(f'{name}  sigmond {sha}  {behind}  '
+                         f'[no manifest — unblessed]')
+        if s.host.frozen:
+            lines.append(f'{" " * width}  FROZEN: {s.host.frozen}')
+    return '\n'.join(lines)
+
+
+def _default_git(argv):
+    import subprocess
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, Exception) as exc:      # noqa: BLE001
+        return RunResult(rc=127, out='', err=str(exc))
+    return RunResult(rc=p.returncode, out=p.stdout, err=p.stderr)
+
+
+def commits_behind_main(repo: str, git=None):
+    """Build a ``(sha) -> int | None`` for the blessed-pin fallback.
+
+    Counts commits between a host's live sigmond SHA and ``origin/main``
+    in the local checkout. Used only when a host has no blessed
+    manifest — which today is every host.
+
+    Returns None, never 0, when the answer is not known: a SHA the local
+    checkout has never seen, or output that does not parse. Zero would
+    read as "current with main", so a stale host would be reported as up
+    to date — the exact failure `smd fleet status` exists to prevent.
+    """
+    runner = git or _default_git
+
+    def behind(sha: str):
+        if not sha:
+            return None
+        result = runner(['git', '-C', str(repo), 'rev-list', '--count',
+                         f'{sha}..origin/main'])
+        if result.rc != 0:
+            return None
+        try:
+            return int(result.out.strip())
+        except ValueError:
+            return None
+
+    return behind

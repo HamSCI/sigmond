@@ -3178,6 +3178,48 @@ def cmd_update(args) -> int:
     return rc
 
 
+def cmd_fleet(args) -> int:
+    """The Observe verbs, multiplexed across the fleet inventory.
+
+    Read-only. `status` fans out with a fixed whitelist of commands
+    (`fleet.READ_ONLY_COMMANDS`) and has no --apply or --fix to offer:
+    it must be INCAPABLE of changing a host, not merely not change one
+    today.
+
+    Exit status is 1 when any host could not be read or has drifted, so
+    this composes in a script; the report is printed either way.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('fleet: sigmond library not importable')
+        return 1
+
+    from pathlib import Path
+
+    from sigmond import fleet as fleet_mod
+
+    if getattr(args, 'fleet_command', None) is None:
+        _err('fleet: pick a verb — status')
+        return 2
+
+    try:
+        hosts = fleet_mod.load_fleet(getattr(args, 'inventory', None))
+    except (FileNotFoundError, ValueError) as exc:
+        _err(f'fleet: {exc}')
+        return 1
+
+    repo_root = Path(__file__).resolve().parent.parent
+    statuses = fleet_mod.fleet_status(
+        hosts,
+        fleet_mod.ssh_runner(),
+        commits_behind=fleet_mod.commits_behind_main(repo_root),
+    )
+    print(fleet_mod.format_status(statuses))
+
+    unhealthy = [s for s in statuses
+                 if not s.reachable or s.error or s.drift or s.behind]
+    return 1 if unhealthy else 0
+
+
 def cmd_version(args) -> int:
     """What is actually installed here — image lineage plus live commits.
 
@@ -16842,6 +16884,19 @@ def main() -> int:
                    help='repair ownership (the only auto-repairable class)')
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
 
+    # fleet — the same Observe verbs, multiplexed across the inventory.
+    # Read-only verbs only for now; `fleet update` is gated behind
+    # `status` and `doctor` being complete and trusted (report before
+    # roll), which is a human decision, not a preference.
+    p_fleet = sub.add_parser('fleet',
+        help='every host at once: status (read-only fan-out)')
+    p_fleet.add_argument('--inventory', metavar='FILE',
+        help='fleet inventory (default: $SIGMOND_FLEET, '
+             'then /etc/sigmond/fleet.toml)')
+    fleet_sub = p_fleet.add_subparsers(dest='fleet_command')
+    fleet_sub.add_parser('status',
+        help="each host's live component SHAs vs its blessed pin")
+
     p = sub.add_parser('enable', help='enable component(s) in /etc/sigmond/topology.toml')
     p.add_argument('names', nargs='+', help='one or more component names')
 
@@ -18084,6 +18139,7 @@ def main() -> int:
         'version': cmd_version,
         'doctor':  cmd_doctor,
         'update':  cmd_update,
+        'fleet':   cmd_fleet,
         'enable':  cmd_enable,
         'disable': cmd_disable,
         'install': cmd_install,
