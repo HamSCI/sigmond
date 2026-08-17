@@ -215,6 +215,84 @@ def parse_ht_pairs(s: str) -> "list[list[int]]":
     return pairs
 
 
+def eligible_radiod_cores(cores: "list[set]",
+                          isolated_cpus: Optional[set] = None) -> "list[set]":
+    """Physical cores radiod may be placed on, lowest-numbered first.
+
+    Two filters, applied in order:
+
+    1. **Never the boot CPU's core.**  The kernel refuses to tick-isolate
+       CPU 0 — ``nohz_full=0-13`` on the cmdline comes back as ``1-13``
+       from ``/sys/devices/system/cpu/nohz_full``.  A radiod pinned to
+       CPU 0's pair therefore keeps taking the timer tick on half its
+       pair no matter what the operator asked for.  Measured on a
+       Ryzen 5825U: moving radiod off core 0 took output block drops
+       from thousands/hour to zero.
+    2. **Inside the kernel's isolated set, when there is one.**  A core
+       counts only if *both* siblings are isolated — a half-isolated
+       core would run unisolated work on the sibling and defeat the
+       pairing.  Hosts that boot ``isolcpus=`` (the bare-metal bees)
+       thus keep radiod inside the isolated range instead of being
+       pushed out of it by filter 1.
+
+    Each filter degrades rather than returning nothing: an isolated set
+    that admits no whole core falls back to "anything but core 0", and a
+    single-core host falls back to that one core.  Callers always get a
+    non-empty list as long as ``cores`` is non-empty.
+    """
+    if not cores:
+        return []
+    off_boot = [c for c in cores if 0 not in c]
+    if not off_boot:
+        return list(cores)
+    if isolated_cpus:
+        confined = [c for c in off_boot if c <= set(isolated_cpus)]
+        if confined:
+            return confined
+    return off_boot
+
+
+def assign_radiod_cores(units: "list[str]",
+                        topology_cpu_affinity: Optional[dict] = None,
+                        *,
+                        cores: Optional["list[set]"] = None,
+                        isolated_cpus: Optional[set] = None) -> dict:
+    """Map each radiod unit name to the CPU set it should be pinned to.
+
+    THE single placement rule.  ``compute_affinity_plan`` and bin/smd's
+    drop-in writer both call this, so the "which cores does radiod get"
+    decision exists once — it previously existed three times and two of
+    the copies silently kept handing radiod core 0.
+
+    ``[cpu_affinity].radiod_cpus`` in topology.toml overrides everything
+    and is shared by every instance.  Otherwise instances take the top
+    eligible cores (see ``eligible_radiod_cores``) in ascending order, so
+    a second instance sits beside the first; if there are more instances
+    than cores they share the last one.
+    """
+    if not units:
+        return {}
+    ca = topology_cpu_affinity or {}
+    override = parse_cpu_mask(str(ca.get('radiod_cpus', '') or '').strip())
+    if override:
+        return {u: set(override) for u in units}
+
+    if cores is None:
+        cores = get_physical_cores()
+    if isolated_cpus is None:
+        isolated_cpus = get_isolated_cpus()
+
+    eligible = eligible_radiod_cores(cores, isolated_cpus)
+    chosen = eligible[-len(units):] if eligible else []
+    out: dict = {}
+    for i, unit in enumerate(units):
+        if i < len(chosen):
+            out[unit] = set(chosen[i])
+        else:
+            out[unit] = set(chosen[-1]) if chosen else set()
+    return out
+
+
 def compute_host_cpu_layout(
     pairs: "list[list[int]]",
     *,
@@ -268,8 +346,12 @@ def compute_host_cpu_layout(
             f"{reserve_host_pairs} reserved host pair(s); host has {total}"
         )
     vm_pairs = pairs[: total - reserve_host_pairs]
-    radiod_pairs = vm_pairs[:local_radiod_count]
-    worker_pairs = vm_pairs[local_radiod_count:]
+    # radiod takes the HIGHEST VM pairs, not the lowest: vm_pairs[0] always
+    # holds the host's boot CPU, which the kernel will not tick-isolate (see
+    # eligible_radiod_cores).  The `need` check above guarantees at least one
+    # worker pair is left below them.
+    radiod_pairs = vm_pairs[-local_radiod_count:]
+    worker_pairs = vm_pairs[:-local_radiod_count]
 
     def flat(ps: "list[list[int]]") -> "list[int]":
         return [c for p in ps for c in p]
@@ -490,6 +572,7 @@ def compute_affinity_plan(
     *,
     l3_islands: Optional[list] = None,
     logical_cpus: Optional[int] = None,
+    isolated_cpus: Optional[set] = None,
 ) -> AffinityPlan:
     """Compute the CPU affinity plan from hardware topology and running radiod instances.
 
@@ -527,19 +610,8 @@ def compute_affinity_plan(
     # the same pool — multi-instance deployments that need per-instance
     # carving should leave this empty and let auto-compute distribute
     # one physical core per instance.
-    radiod_override = parse_cpu_mask(ca.get('radiod_cpus', '').strip())
-
-    radiod_plan: dict = {}
-    if radiod_override:
-        for unit in instances:
-            radiod_plan[unit] = set(radiod_override)
-    else:
-        for i, unit in enumerate(instances):
-            if i < len(cores):
-                radiod_plan[unit] = cores[i]
-            else:
-                # More instances than cores — share the last one.
-                radiod_plan[unit] = cores[-1] if cores else set()
+    radiod_plan = assign_radiod_cores(instances, ca, cores=cores,
+                                      isolated_cpus=isolated_cpus)
 
     radiod_all: set = set()
     for cpus in radiod_plan.values():

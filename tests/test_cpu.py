@@ -24,9 +24,11 @@ from sigmond.cpu import (
     _cpus_to_range_str,
     _is_kernel_thread,
     affinity_report_to_dict,
+    assign_radiod_cores,
     build_affinity_report,
     compute_affinity_plan,
     compute_host_cpu_layout,
+    eligible_radiod_cores,
     expand_template_instances,
     gather_capabilities,
     is_split_l3,
@@ -364,12 +366,12 @@ def _split_pairs(n_cpus):
 
 
 class ComputeHostCpuLayoutTests(unittest.TestCase):
-    def test_sequential_16cpu_matches_legacy(self):
-        """Sequential host, 1 radiod: must reproduce the old hardcoded
-        layout (radiod 0,1; workers 2..13; identity vCPU map; 7 cores)."""
+    def test_sequential_16cpu_layout_shape(self):
+        """Sequential host, 1 radiod: radiod on the top VM pair (12,13),
+        workers 0..11, identity vCPU map, 7 cores."""
         lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=1)
-        self.assertEqual(lay['radiod_cpus'], [0, 1])
-        self.assertEqual(lay['worker_cpus'], list(range(2, 14)))
+        self.assertEqual(lay['radiod_cpus'], [12, 13])
+        self.assertEqual(lay['worker_cpus'], list(range(12)))
         self.assertEqual(lay['vcpu_to_pcpu'], list(range(14)))  # identity
         self.assertEqual(lay['isolcpus'], list(range(14)))
         self.assertEqual(lay['vm_cores'], 7)
@@ -377,31 +379,31 @@ class ComputeHostCpuLayoutTests(unittest.TestCase):
 
     def test_split_16cpu_interleaves(self):
         """Split host (cpu0<->cpu8): radiod must get a REAL sibling pair
-        {0,8}, and the vCPU map must interleave so guest pairs land on
-        host pairs."""
+        — the top one, {6,14} — and the vCPU map must interleave so guest
+        pairs land on host pairs."""
         lay = compute_host_cpu_layout(_split_pairs(16), local_radiod_count=1)
-        self.assertEqual(lay['radiod_cpus'], [0, 8])           # real sibling pair
+        self.assertEqual(lay['radiod_cpus'], [6, 14])          # real sibling pair
         self.assertEqual(lay['vcpu_to_pcpu'][:2], [0, 8])      # guest core0 -> host core0
         self.assertEqual(lay['vcpu_to_pcpu'][2:4], [1, 9])     # guest core1 -> host core1
         self.assertEqual(
             lay['vcpu_to_pcpu'],
             [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14],
         )
-        self.assertEqual(lay['worker_cpus'], [1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14])
+        self.assertEqual(lay['worker_cpus'], [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13])
         self.assertEqual(lay['isolcpus'], [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14])
         self.assertEqual(lay['vm_cores'], 7)
 
     def test_two_local_radiods_sequential(self):
-        """Second local radiod gets the next physical core's pair."""
+        """Second local radiod gets the next physical core's pair down."""
         lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=2)
-        self.assertEqual(lay['radiod_pairs'], [[0, 1], [2, 3]])
-        self.assertEqual(lay['radiod_cpus'], [0, 1, 2, 3])
-        self.assertEqual(lay['worker_cpus'], list(range(4, 14)))
+        self.assertEqual(lay['radiod_pairs'], [[10, 11], [12, 13]])
+        self.assertEqual(lay['radiod_cpus'], [10, 11, 12, 13])
+        self.assertEqual(lay['worker_cpus'], list(range(10)))
 
     def test_two_local_radiods_split(self):
         lay = compute_host_cpu_layout(_split_pairs(16), local_radiod_count=2)
-        self.assertEqual(lay['radiod_pairs'], [[0, 8], [1, 9]])
-        self.assertEqual(lay['radiod_cpus'], [0, 8, 1, 9])
+        self.assertEqual(lay['radiod_pairs'], [[5, 13], [6, 14]])
+        self.assertEqual(lay['radiod_cpus'], [5, 13, 6, 14])
 
     def test_reserves_last_pair_for_host(self):
         lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=1)
@@ -437,8 +439,8 @@ class LayoutShellVarsTests(unittest.TestCase):
     def test_sequential_render(self):
         lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=1)
         out = layout_shell_vars(lay)
-        self.assertIn('RADIOD_CPUS="0 1"', out)
-        self.assertIn('WORKER_CPUS="2 3 4 5 6 7 8 9 10 11 12 13"', out)
+        self.assertIn('RADIOD_CPUS="12 13"', out)
+        self.assertIn('WORKER_CPUS="0 1 2 3 4 5 6 7 8 9 10 11"', out)
         self.assertIn('VCPU_TO_PCPU="0 1 2 3 4 5 6 7 8 9 10 11 12 13"', out)
         self.assertIn('ISOLCPUS_RANGE="0-13"', out)
         self.assertIn('VM_CORES="7"', out)
@@ -490,26 +492,29 @@ class CacheAwarePlanTests(unittest.TestCase):
         with mock.patch('sigmond.cpu.get_physical_cores', return_value=cores), \
              mock.patch('sigmond.cpu.get_radiod_instances',
                         return_value=list(instances)):
-            return compute_affinity_plan(ca, l3_islands=l3, logical_cpus=16)
+            # isolated_cpus pinned so the plan never reads the test host's
+            # own /sys isolation state.
+            return compute_affinity_plan(ca, l3_islands=l3, logical_cpus=16,
+                                         isolated_cpus=set())
 
     def test_split_excludes_whole_island(self):
         plan = self._plan(SPLIT_L3)
         self.assertTrue(plan.cache_split)
-        self.assertEqual(plan.radiod['radiod@rx.service'], {0, 1})
-        self.assertEqual(plan.radiod_l3_cpus, set(range(8)))
+        self.assertEqual(plan.radiod['radiod@rx.service'], {14, 15})
+        self.assertEqual(plan.radiod_l3_cpus, set(range(8, 16)))
         # Other work confined to the *other* island only.
-        self.assertEqual(plan.other_cpus, set(range(8, 16)))
-        # 2-7 share radiod's L3 → reserved idle, used by no one.
-        self.assertEqual(plan.reserved_idle_cpus, {2, 3, 4, 5, 6, 7})
-        self.assertEqual(recommended_isolcpus(plan), set(range(8)))
+        self.assertEqual(plan.other_cpus, set(range(8)))
+        # 8-13 share radiod's L3 → reserved idle, used by no one.
+        self.assertEqual(plan.reserved_idle_cpus, {8, 9, 10, 11, 12, 13})
+        self.assertEqual(recommended_isolcpus(plan), set(range(8, 16)))
 
     def test_unified_is_legacy_behaviour(self):
         plan = self._plan(UNIFIED_L3)
         self.assertFalse(plan.cache_split)
         # Only radiod's own cores excluded; everything else available.
-        self.assertEqual(plan.other_cpus, set(range(16)) - {0, 1})
+        self.assertEqual(plan.other_cpus, set(range(16)) - {14, 15})
         self.assertEqual(plan.reserved_idle_cpus, set())
-        self.assertEqual(recommended_isolcpus(plan), {0, 1})
+        self.assertEqual(recommended_isolcpus(plan), {14, 15})
 
     def test_explicit_other_cpus_override_wins(self):
         plan = self._plan(SPLIT_L3, ca={'other_cpus': '10-15'})
@@ -518,17 +523,155 @@ class CacheAwarePlanTests(unittest.TestCase):
     def test_cache_aware_opt_out(self):
         plan = self._plan(SPLIT_L3, ca={'cache_aware': False})
         # Segregation disabled → legacy: only radiod's cores excluded.
-        self.assertEqual(plan.other_cpus, set(range(16)) - {0, 1})
+        self.assertEqual(plan.other_cpus, set(range(16)) - {14, 15})
         self.assertEqual(plan.reserved_idle_cpus, set())
 
     def test_cache_aware_opt_out_string(self):
         plan = self._plan(SPLIT_L3, ca={'cache_aware': 'false'})
-        self.assertEqual(plan.other_cpus, set(range(16)) - {0, 1})
+        self.assertEqual(plan.other_cpus, set(range(16)) - {14, 15})
 
     def test_no_radiod_instances_no_segregation(self):
         plan = self._plan(SPLIT_L3, instances=())
         self.assertEqual(plan.radiod_l3_cpus, set())
         self.assertEqual(plan.reserved_idle_cpus, set())
+
+
+# 8 physical cores, sequential SMT — the B4/bee shape.
+_EIGHT_CORES = [{0, 1}, {2, 3}, {4, 5}, {6, 7},
+                {8, 9}, {10, 11}, {12, 13}, {14, 15}]
+
+
+class EligibleRadiodCoresTests(unittest.TestCase):
+    """radiod must never be offered the boot CPU's core: the kernel refuses
+    to tick-isolate CPU 0 (nohz_full silently drops it), so half of radiod's
+    pair would keep taking the timer tick."""
+
+    def test_drops_the_boot_cpu_core(self):
+        out = eligible_radiod_cores(_EIGHT_CORES, set())
+        self.assertNotIn({0, 1}, out)
+        self.assertEqual(out[0], {2, 3})
+
+    def test_restricts_to_kernel_isolated_set_when_present(self):
+        out = eligible_radiod_cores(_EIGHT_CORES, set(range(8)))
+        self.assertEqual(out, [{2, 3}, {4, 5}, {6, 7}])
+
+    def test_half_isolated_core_is_not_eligible(self):
+        # {6,7} is only half inside the isolated set — its sibling would run
+        # unisolated work, which defeats the pairing.
+        out = eligible_radiod_cores(_EIGHT_CORES, {2, 3, 4, 5, 6})
+        self.assertEqual(out, [{2, 3}, {4, 5}])
+
+    def test_falls_back_when_isolation_leaves_nothing(self):
+        out = eligible_radiod_cores(_EIGHT_CORES, {0, 1})
+        self.assertEqual(out[0], {2, 3})
+        self.assertEqual(out[-1], {14, 15})
+
+    def test_never_returns_empty_on_a_single_core_host(self):
+        self.assertEqual(eligible_radiod_cores([{0, 1}], set()), [{0, 1}])
+
+
+class AssignRadiodCoresTests(unittest.TestCase):
+    """The single placement rule shared by compute_affinity_plan and the
+    bin/smd drop-in writer, so the two can't drift apart again."""
+
+    def test_default_avoids_boot_core_and_takes_highest(self):
+        out = assign_radiod_cores(['radiod@rx.service'], cores=_EIGHT_CORES,
+                                  isolated_cpus=set())
+        self.assertEqual(out, {'radiod@rx.service': {14, 15}})
+
+    def test_override_gives_every_instance_the_pool(self):
+        out = assign_radiod_cores(['radiod@a.service', 'radiod@b.service'],
+                                  {'radiod_cpus': '0-1'},
+                                  cores=_EIGHT_CORES, isolated_cpus=set())
+        self.assertEqual(out['radiod@a.service'], {0, 1})
+        self.assertEqual(out['radiod@b.service'], {0, 1})
+
+    def test_respects_kernel_isolation(self):
+        out = assign_radiod_cores(['radiod@rx.service'], cores=_EIGHT_CORES,
+                                  isolated_cpus=set(range(8)))
+        self.assertEqual(out, {'radiod@rx.service': {6, 7}})
+
+    def test_two_instances_take_top_cores_ascending(self):
+        out = assign_radiod_cores(['radiod@a.service', 'radiod@b.service'],
+                                  cores=_EIGHT_CORES, isolated_cpus=set())
+        self.assertEqual(out['radiod@a.service'], {12, 13})
+        self.assertEqual(out['radiod@b.service'], {14, 15})
+
+    def test_more_instances_than_cores_share_the_last(self):
+        out = assign_radiod_cores(['a', 'b', 'c'], cores=[{0, 1}, {2, 3}],
+                                  isolated_cpus=set())
+        self.assertEqual(out['a'], {2, 3})
+        self.assertEqual(out['b'], {2, 3})
+        self.assertEqual(out['c'], {2, 3})
+
+    def test_no_units_is_empty(self):
+        self.assertEqual(
+            assign_radiod_cores([], cores=_EIGHT_CORES, isolated_cpus=set()), {})
+
+
+class RadiodDefaultPlacementTests(unittest.TestCase):
+    """compute_affinity_plan's default placement (no topology override)."""
+
+    def _plan(self, ca=None, instances=('radiod@rx.service',),
+              isolated=(), cores=None):
+        cores = cores or _EIGHT_CORES
+        with mock.patch('sigmond.cpu.get_physical_cores', return_value=cores), \
+             mock.patch('sigmond.cpu.get_radiod_instances',
+                        return_value=list(instances)):
+            return compute_affinity_plan(ca, l3_islands=UNIFIED_L3,
+                                         logical_cpus=16,
+                                         isolated_cpus=set(isolated))
+
+    def test_default_avoids_the_boot_cpu(self):
+        plan = self._plan()
+        self.assertNotIn(0, plan.radiod['radiod@rx.service'])
+
+    def test_default_is_the_highest_core(self):
+        plan = self._plan()
+        self.assertEqual(plan.radiod['radiod@rx.service'], {14, 15})
+
+    def test_kernel_isolation_confines_the_choice(self):
+        # bee-style bare metal: isolcpus=0-7 must keep radiod inside 0-7.
+        plan = self._plan(isolated=range(8))
+        self.assertEqual(plan.radiod['radiod@rx.service'], {6, 7})
+
+    def test_two_instances_take_the_top_cores(self):
+        plan = self._plan(instances=('radiod@a.service', 'radiod@b.service'))
+        self.assertEqual(plan.radiod['radiod@a.service'], {12, 13})
+        self.assertEqual(plan.radiod['radiod@b.service'], {14, 15})
+
+    def test_explicit_override_still_wins_even_on_the_boot_core(self):
+        plan = self._plan(ca={'radiod_cpus': '0-1'})
+        self.assertEqual(plan.radiod['radiod@rx.service'], {0, 1})
+
+
+class HostLayoutAvoidsBootCoreTests(unittest.TestCase):
+    """compute_host_cpu_layout must hand radiod the HIGHEST VM pair, not the
+    lowest — vm_pairs[0] always contains the host's boot CPU."""
+
+    def test_radiod_gets_the_highest_vm_pair(self):
+        lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=1)
+        self.assertEqual(lay['radiod_cpus'], [12, 13])
+        self.assertEqual(lay['worker_cpus'], list(range(12)))
+        # vCPU map and reserved host pair are unchanged.
+        self.assertEqual(lay['vcpu_to_pcpu'], list(range(14)))
+        self.assertEqual(lay['vm_cores'], 7)
+
+    def test_split_host_radiod_is_still_a_real_sibling_pair(self):
+        lay = compute_host_cpu_layout(_split_pairs(16), local_radiod_count=1)
+        self.assertEqual(lay['radiod_cpus'], [6, 14])
+        self.assertEqual(lay['vcpu_to_pcpu'][-2:], [6, 14])
+
+    def test_two_radiods_take_the_top_pairs(self):
+        lay = compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=2)
+        self.assertEqual(lay['radiod_pairs'], [[10, 11], [12, 13]])
+        self.assertEqual(lay['worker_cpus'], list(range(10)))
+
+    def test_shell_vars_render_the_new_default(self):
+        out = layout_shell_vars(
+            compute_host_cpu_layout(_seq_pairs(16), local_radiod_count=1))
+        self.assertIn('RADIOD_CPUS="12 13"', out)
+        self.assertIn('WORKER_CPUS="0 1 2 3 4 5 6 7 8 9 10 11"', out)
 
 
 if __name__ == '__main__':

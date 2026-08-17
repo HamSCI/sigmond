@@ -6241,9 +6241,12 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
                                      topology_cpu_affinity=None) -> bool:
     """Write smd-cpu-affinity.conf drop-ins for radiod service instances.
 
-    Assigns physical core 0 to the first instance (alphabetically), core 1 to
-    the second, etc.  Runs daemon-reload after writing so the constraints are
-    in effect when the units start.
+    Placement comes from sigmond.cpu.assign_radiod_cores — the same rule the
+    `admin diag cpu-affinity --apply` path uses: never the boot CPU's core
+    (the kernel will not tick-isolate CPU 0), inside the kernel's isolated
+    set when there is one, and `[cpu_affinity].radiod_cpus` overrides all of
+    it.  Runs daemon-reload after writing so the constraints are in effect
+    when the units start.
 
     For any instance already running with the wrong CPU affinity, restarts it
     so the new constraint takes effect immediately.
@@ -6251,7 +6254,8 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     Returns True if any drop-in was written, removed, or any unit restarted.
     """
     try:
-        from sigmond.cpu import get_physical_cores, parse_cpu_mask
+        from sigmond.cpu import (get_physical_cores, parse_cpu_mask,
+                                 assign_radiod_cores)
     except ImportError:
         return False
 
@@ -6260,6 +6264,8 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         return False
 
     sorted_units = sorted(radiod_units, key=lambda u: u.instance or u.unit)
+    placement = assign_radiod_cores([u.unit for u in sorted_units],
+                                    topology_cpu_affinity, cores=cores)
     valid_unit_names = {u.unit for u in sorted_units}
     wrote_any = False
     units_to_restart: list[str] = []
@@ -6279,8 +6285,8 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
                 _run(['rm', '-rf', str(p)], sudo=True)
                 wrote_any = True
 
-    for i, unit_ref in enumerate(sorted_units):
-        core_cpus = cores[i] if i < len(cores) else cores[-1]
+    for unit_ref in sorted_units:
+        core_cpus = placement.get(unit_ref.unit, set())
         label = f'radiod {unit_ref.instance or unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}'
         if _write_affinity_drop_in(unit_ref.unit, core_cpus, label) == 'wrote':
             _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
@@ -9560,8 +9566,16 @@ def _discover_pcpu_for_vcpu0(state: dict) -> int | None:
 
     Reads /var/lib/vz/snippets/cpu-pin-<VMID>.sh on the host (rendered by
     sigmond install.sh from cpu-pin-VMID.sh.template) and grabs the first
-    entry of RADIOD_CPUS.  Sequential vCPU pinning means RADIOD_CPUS[0]
-    is the pCPU running vCPU 0.
+    entry of VCPU_TO_PCPU, which is by definition the pCPU that guest vCPU 0
+    is pinned to — on a split-HT host as well as a sequential one.
+
+    This used to read RADIOD_CPUS[0], which coincided with vCPU 0's pCPU only
+    while radiod was placed on the FIRST VM pair.  radiod now takes the top
+    pair (it must not sit on the boot CPU's core), so RADIOD_CPUS[0] is
+    radiod's own core — and the caller rewrites that CPU's scaling_max_freq,
+    which must not happen to the core whose min==max pin is holding radiod's
+    clock.  Returns None when the map is absent, so the caller degrades to a
+    no-op rather than boosting the wrong CPU.
     """
     vmid = state.get('VMID', '')
     if not vmid:
@@ -9575,7 +9589,7 @@ def _discover_pcpu_for_vcpu0(state: dict) -> int | None:
     if r.returncode != 0:
         return None
     for line in r.stdout.splitlines():
-        m = re.match(r'^RADIOD_CPUS=\(([^)]+)\)\s*$', line.strip())
+        m = re.match(r'^VCPU_TO_PCPU=\(([^)]+)\)\s*$', line.strip())
         if m:
             cpus = m.group(1).split()
             if cpus:
