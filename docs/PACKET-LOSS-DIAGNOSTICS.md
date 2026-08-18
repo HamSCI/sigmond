@@ -142,6 +142,10 @@ IGMP querier flapping               | (Phase 3 — not yet implemented)
 
 ## Related
 
+- `docs/PRODUCER-THREAT-MODEL.md` — the complement to this document: what
+  threatens radiod's data production and what defends it. This file tells
+  you where to look after loss; that one tells you what to protect so it
+  does not happen.
 - `tasks/plan-local-resources-probe.md` — full design and remaining
   phases
 - `etc/environment.example.toml` — operator-facing config template
