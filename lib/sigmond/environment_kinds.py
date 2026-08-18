@@ -133,11 +133,16 @@ def _local_system_classifier(declared, good_obs: list) -> tuple:
 
     Recognised ``expect.*`` keys (all optional):
 
+      radiod_gap_rate_max         radiod output block-drops per
+                                  channel-hour (e.g. 0).
       udp_rcvbuf_errors_rate_max  Per-second rate ceiling (e.g. 0).
       udp_in_errors_rate_max      Per-second rate ceiling.
       softirq_percent_max         %soft on the busiest core (e.g. 30).
       irq_pin_drift_allowed       If False, every declared IRQ must fire
                                   only on the cores listed in irq_pins.
+      llc_radiod_occupancy_min_mib
+                                  Floor on radiod's L3 occupancy. Skipped
+                                  when resctrl is unavailable (host-only).
 
     The first failure wins — order in this function is the order of
     surface-level diagnostic value (UDP rate is the loudest packet-loss
@@ -151,6 +156,20 @@ def _local_system_classifier(declared, good_obs: list) -> tuple:
     merged: dict = {}
     for o in good_obs:
         merged.update(o.fields)
+
+    # radiod output block-drops first: this is loss at the ORIGIN, and if
+    # radiod never produced the block, every downstream counter is moot.
+    # NB gap_count is the only honest field -- radiod zero-fills a dropped
+    # block, so samples_written/completeness_pct both still read 100%.
+    gap_max = expect.get("radiod_gap_rate_max")
+    if gap_max is not None:
+        rd = merged.get("radiod", {}) or {}
+        rate = rd.get("gap_rate_per_channel_hour")
+        if rate is not None and float(rate) > gap_max:
+            return "degraded", (
+                f"radiod gap rate {float(rate):.2f}/channel-hour exceeds "
+                f"max {gap_max}"
+            )
 
     udp = merged.get("udp", {}) or {}
     rcv_max = expect.get("udp_rcvbuf_errors_rate_max")
@@ -188,6 +207,21 @@ def _local_system_classifier(declared, good_obs: list) -> tuple:
                 return "degraded", (
                     f"irq {handler} firing on unexpected cores {drift} "
                     f"(expected {sorted(expected)})"
+                )
+
+    # L3 occupancy last: it is the CAUSE behind the gap symptom above, so
+    # report the symptom first when both fire.  Skipped entirely when
+    # resctrl could not be read -- it lives on the Proxmox host and is
+    # absent on bare metal, and absence of evidence is not a fault.
+    occ_min = expect.get("llc_radiod_occupancy_min_mib")
+    if occ_min is not None:
+        llc = merged.get("llc", {}) or {}
+        if llc.get("available"):
+            occ = llc.get("radiod_occupancy_mib")
+            if occ is not None and float(occ) < occ_min:
+                return "degraded", (
+                    f"radiod L3 occupancy {float(occ):.2f} MiB below min "
+                    f"{occ_min} MiB -- decoders are evicting its working set"
                 )
 
     return "healthy", ""

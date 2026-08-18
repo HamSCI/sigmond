@@ -215,5 +215,89 @@ class ReconcilerWiringTests(unittest.TestCase):
         self.assertEqual(ls_declared, [])
 
 
+
+class RadiodGapTests(unittest.TestCase):
+    """radiod output block-drops -- the honest loss signal.
+
+    radiod zero-fills a dropped filter block, so samples_written and
+    completeness_pct both read 100% while data is genuinely missing.
+    gap_count is the only field that sees it.  Each gap costs up to
+    +/-25.6 s of GRAPE spectrogram validity, so the COUNT matters far
+    more than the duration.
+    """
+
+    def test_gap_rate_above_max_is_degraded(self):
+        ls = _ls(expect={"radiod_gap_rate_max": 0})
+        status, detail = _local_system_classifier(
+            ls, [_obs({"radiod": {"gap_rate_per_channel_hour": 3.53}})],
+        )
+        self.assertEqual(status, "degraded")
+        self.assertIn("gap", detail)
+        self.assertIn("3.53", detail)
+
+    def test_zero_gaps_is_healthy(self):
+        ls = _ls(expect={"radiod_gap_rate_max": 0})
+        status, _ = _local_system_classifier(
+            ls, [_obs({"radiod": {"gap_rate_per_channel_hour": 0.0}})],
+        )
+        self.assertEqual(status, "healthy")
+
+    def test_no_expect_key_never_degrades(self):
+        ls = _ls(expect={"udp_rcvbuf_errors_rate_max": 0})
+        status, _ = _local_system_classifier(
+            ls, [_obs({"radiod": {"gap_rate_per_channel_hour": 99.0}})],
+        )
+        self.assertEqual(status, "healthy")
+
+    def test_reported_before_llc_because_symptom_beats_cause(self):
+        """Both failing: the operator should be told data is being lost,
+        not that a cache is under-occupied."""
+        ls = _ls(expect={"radiod_gap_rate_max": 0,
+                         "llc_radiod_occupancy_min_mib": 10})
+        status, detail = _local_system_classifier(ls, [_obs({
+            "radiod": {"gap_rate_per_channel_hour": 2.0},
+            "llc": {"available": True, "radiod_occupancy_mib": 4.0},
+        })])
+        self.assertEqual(status, "degraded")
+        self.assertIn("gap", detail)
+
+
+class LlcOccupancyTests(unittest.TestCase):
+    """L3 CAT occupancy.  Low radiod occupancy means the decoders are
+    evicting its working set -- the cause behind the gap symptom."""
+
+    def test_occupancy_below_min_is_degraded(self):
+        ls = _ls(expect={"llc_radiod_occupancy_min_mib": 10})
+        status, detail = _local_system_classifier(
+            ls, [_obs({"llc": {"available": True,
+                               "radiod_occupancy_mib": 4.8}})],
+        )
+        self.assertEqual(status, "degraded")
+        self.assertIn("4.8", detail)
+
+    def test_occupancy_at_or_above_min_is_healthy(self):
+        ls = _ls(expect={"llc_radiod_occupancy_min_mib": 10})
+        status, _ = _local_system_classifier(
+            ls, [_obs({"llc": {"available": True,
+                               "radiod_occupancy_mib": 12.4}})],
+        )
+        self.assertEqual(status, "healthy")
+
+    def test_unavailable_llc_is_healthy_not_degraded(self):
+        """resctrl is host-only and absent on bare-metal guests; an
+        operator must not get a permanent degraded because RDT could not
+        be read.  Absence of evidence is not evidence of a fault."""
+        ls = _ls(expect={"llc_radiod_occupancy_min_mib": 10})
+        status, _ = _local_system_classifier(
+            ls, [_obs({"llc": {"available": False}})],
+        )
+        self.assertEqual(status, "healthy")
+
+    def test_missing_llc_field_entirely_is_healthy(self):
+        ls = _ls(expect={"llc_radiod_occupancy_min_mib": 10})
+        status, _ = _local_system_classifier(ls, [_obs({})])
+        self.assertEqual(status, "healthy")
+
+
 if __name__ == '__main__':
     unittest.main()

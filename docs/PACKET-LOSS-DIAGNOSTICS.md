@@ -53,6 +53,8 @@ groups.  Each maps to a packet-loss suspect.
 | `nics.<iface>.rx_no_buffer_count` | `ethtool -S` | NIC buffer exhaustion |
 | `irqs.<handler>` | `/proc/interrupts` | IRQ pinning drift — interrupts landing on wrong cores |
 | `usb.urb_errors` | `dmesg` | USB controller errors — RX888 capture stalls |
+| `radiod.gap_rate_per_channel_hour` | raw_buffer sidecars | radiod dropped a filter output block — the honest loss signal (see below) |
+| `llc.radiod_occupancy_mib` | `resctrl` | radiod's L3 working set being evicted by decoders — host-only |
 
 ## How to read the output
 
@@ -96,8 +98,19 @@ or pin via `irqbalance`'s ban list.
 - **Per-USB-device error attribution.**  `dmesg` lines don't reliably
   carry `vendor:product` info, so the USB error tally is host-wide.
   RX888 firmware control-endpoint counters would fix this; deferred.
-- **radiod-internal drops.**  These come from the radiod adapter's
-  `inventory --json` output, not this probe.
+- ~~**radiod-internal drops.**~~  **Now covered** (2026-08-18) as
+  `radiod.gap_rate_per_channel_hour`, threshold `radiod_gap_rate_max`.
+  The earlier note that these "come from the radiod adapter's
+  `inventory --json`" was wrong in an important way: **that path cannot
+  see them.**  radiod emits a block of *zeros* when it drops a filter
+  output block, and the recorder faithfully writes those zeros, so
+  `samples_written` and `completeness_pct` both still report 100% while
+  data is genuinely missing.  `gap_count` in the raw_buffer sidecars is
+  the only honest field.  Measured on AC0G-B4: 3.53 gaps/channel-hour
+  with radiod pinned to the boot CPU, 0.68 once moved off it, 0.00 with
+  L3 CAT reserving 13 of 16 ways.  Note each gap costs up to +/-25.6 s
+  of GRAPE spectrogram validity, so the *count* matters far more than
+  the duration -- roughly a 1000x amplification.
 - **RTP sequence gaps at consumers.**  Live in the consumer projects
   (hf-timestd, ka9q-web) and surface via the contract adapter.
 

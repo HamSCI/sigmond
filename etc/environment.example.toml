@@ -50,10 +50,20 @@ irq_pins = { xhci_hcd = [2, 3], eth0 = [4, 5] }
 # turns the local_system delta `degraded`.  Order of evaluation:
 # UDP rate → softirq → IRQ drift (loudest signal first).
 [local_system.expect]
+# radiod output block-drops per channel-hour.  0 is the right default: radiod
+# zero-fills a dropped filter block, so samples_written/completeness_pct both
+# still read 100% -- gap_count is the only field that sees it -- and each gap
+# invalidates up to +/-25.6 s of GRAPE spectrogram.  Measured on AC0G-B4:
+# 3.53 with radiod on the boot CPU, 0.68 once moved off it, 0.00 with L3 CAT.
+radiod_gap_rate_max        = 0
 udp_rcvbuf_errors_rate_max = 0       # per-second; any UDP loss = degraded
 udp_in_errors_rate_max     = 0       # per-second; other UDP errors
 softirq_percent_max        = 30      # %soft on the busiest core
 irq_pin_drift_allowed      = false   # IRQs must land on declared cores
+# Floor on radiod's L3 occupancy (MiB).  Skipped automatically wherever
+# resctrl cannot be read -- RDT is not virtualised into guests, so this only
+# evaluates on a bare-metal host or the hypervisor itself.
+# llc_radiod_occupancy_min_mib = 10
 
 # ---------------------------------------------------------------------------
 # Other entity kinds (illustrative — uncomment what applies)

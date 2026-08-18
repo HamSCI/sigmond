@@ -6,6 +6,7 @@ no /proc access.
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -280,6 +281,71 @@ class DmesgUsbTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# radiod output block-drops (gap_count) and L3 occupancy
+# ---------------------------------------------------------------------------
+
+class SummariseGapsTests(unittest.TestCase):
+    """gap_count is the only honest loss field: radiod zero-fills a dropped
+    filter block, so samples_written/completeness_pct still read 100%."""
+
+    def _rec(self, boundary, gaps):
+        return {"minute_boundary": boundary, "gap_count": gaps}
+
+    def test_rate_is_gaps_per_channel_hour(self):
+        # 12 sidecars x 300 s = 1.0 channel-hour, 3 gaps -> 3.0 per ch-hr
+        recs = [self._rec(3600 + 300 * i, 0) for i in range(12)]
+        recs[0]["gap_count"] = 3
+        out = lr._summarise_gaps(recs, now=7200.0)
+        self.assertAlmostEqual(out["channel_hours"], 1.0)
+        self.assertEqual(out["gaps"], 3)
+        self.assertAlmostEqual(out["gap_rate_per_channel_hour"], 3.0)
+
+    def test_zero_gaps_reports_zero_not_none(self):
+        recs = [self._rec(3600 + 300 * i, 0) for i in range(12)]
+        out = lr._summarise_gaps(recs, now=7200.0)
+        self.assertEqual(out["gaps"], 0)
+        self.assertEqual(out["gap_rate_per_channel_hour"], 0.0)
+
+    def test_records_outside_the_window_are_ignored(self):
+        old = [self._rec(0 + 300 * i, 5) for i in range(12)]      # long past
+        recent = [self._rec(3600 + 300 * i, 0) for i in range(12)]
+        out = lr._summarise_gaps(old + recent, now=7200.0)
+        self.assertEqual(out["gaps"], 0)
+
+    def test_no_records_yields_no_rate_rather_than_a_false_zero(self):
+        """A silent zero would read as 'perfectly healthy' when in fact
+        nothing was measured."""
+        out = lr._summarise_gaps([], now=7200.0)
+        self.assertEqual(out["channel_hours"], 0.0)
+        self.assertIsNone(out["gap_rate_per_channel_hour"])
+
+
+class ReadResctrlTests(unittest.TestCase):
+    """resctrl is host-only -- absent in the guest and on hosts without RDT."""
+
+    def test_absent_resctrl_reports_unavailable(self):
+        out = lr._read_resctrl(Path("/nonexistent/resctrl"))
+        self.assertFalse(out["available"])
+
+    def test_reads_radiod_occupancy_when_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            mon = root / "radiod" / "mon_data" / "mon_L3_00"
+            mon.mkdir(parents=True)
+            (mon / "llc_occupancy").write_text(str(13 * 1024 * 1024) + "\n")
+            out = lr._read_resctrl(root)
+        self.assertTrue(out["available"])
+        self.assertAlmostEqual(out["radiod_occupancy_mib"], 13.0, places=2)
+
+    def test_group_without_counters_is_unavailable_not_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "radiod").mkdir(parents=True)
+            out = lr._read_resctrl(root)
+        self.assertFalse(out["available"])
+
+
+# ---------------------------------------------------------------------------
 # Full probe() integration
 # ---------------------------------------------------------------------------
 
@@ -318,7 +384,8 @@ class ProbeIntegrationTests(unittest.TestCase):
         self.assertEqual(o.id, "localhost")
         self.assertTrue(o.ok)
         self.assertEqual(set(o.fields.keys()),
-                         {"cpu_per_core", "udp", "nics", "irqs", "usb"})
+                         {"cpu_per_core", "udp", "nics", "irqs", "usb",
+                          "radiod", "llc"})
 
     def test_first_run_interval_is_zero(self):
         env = _make_env(nics=["eth0"])
@@ -437,6 +504,50 @@ class DispatchRegistrationTests(unittest.TestCase):
         from sigmond import discovery
         self.assertIn("local_resources", discovery.DEFAULT_CADENCE)
         self.assertGreater(discovery.DEFAULT_CADENCE["local_resources"], 0)
+
+
+class ProbeEmitsRadiodAndLlcTests(unittest.TestCase):
+    """The two stages the packet-loss probe previously did not cover."""
+
+    def _probe(self, *, gap_records, resctrl_root):
+        env = Environment()
+        env.local_system = DeclaredLocalSystem()
+        return lr.probe(
+            env,
+            timeout=1.0,
+            read_proc=_proc_reader(stat=PROC_STAT_T1, snmp=PROC_NET_SNMP_T1),
+            run_ethtool=lambda iface, t: "",
+            read_dmesg=lambda secs, t: "",
+            load_prev=lambda src: None,
+            save_curr=lambda src, snap: None,
+            clock=lambda: 7200.0,
+            read_gap_records=lambda: gap_records,
+            resctrl_root=resctrl_root,
+        )[0]
+
+    def test_emits_radiod_gap_rate(self):
+        recs = [{"minute_boundary": 3600 + 300 * i, "gap_count": 0}
+                for i in range(12)]
+        recs[0]["gap_count"] = 2
+        obs = self._probe(gap_records=recs, resctrl_root="/nonexistent")
+        self.assertIn("radiod", obs.fields)
+        self.assertAlmostEqual(
+            obs.fields["radiod"]["gap_rate_per_channel_hour"], 2.0)
+
+    def test_emits_llc_unavailable_without_resctrl(self):
+        obs = self._probe(gap_records=[], resctrl_root="/nonexistent")
+        self.assertIn("llc", obs.fields)
+        self.assertFalse(obs.fields["llc"]["available"])
+
+    def test_emits_llc_occupancy_when_resctrl_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            mon = Path(d) / "radiod" / "mon_data" / "mon_L3_00"
+            mon.mkdir(parents=True)
+            (mon / "llc_occupancy").write_text(str(12 * 1024 * 1024))
+            obs = self._probe(gap_records=[], resctrl_root=d)
+        self.assertTrue(obs.fields["llc"]["available"])
+        self.assertAlmostEqual(obs.fields["llc"]["radiod_occupancy_mib"],
+                               12.0, places=2)
 
 
 if __name__ == '__main__':

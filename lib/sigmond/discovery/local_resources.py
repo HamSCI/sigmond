@@ -93,6 +93,92 @@ _DMESG_USB_PATTERNS = (
 )
 
 
+# --- radiod output block-drops -------------------------------------------
+# gap_count is the ONLY honest loss field.  radiod emits a block of zeros
+# when it drops a filter output block, and the recorder faithfully writes
+# those zeros -- so samples_written and completeness_pct both still read
+# 100% while data is genuinely missing.  Each gap also costs up to
+# +/-25.6 s of GRAPE spectrogram validity, so the COUNT matters far more
+# than the duration.
+
+_SIDECAR_SECONDS = 300
+
+
+def _summarise_gaps(records, now: float, window_s: int = 3600) -> dict:
+    """Aggregate raw_buffer sidecars into gaps per channel-hour.
+
+    Returns ``gap_rate_per_channel_hour = None`` when nothing was in the
+    window: a silent 0.0 would read as "perfectly healthy" when in fact
+    nothing was measured.
+    """
+    start = now - window_s
+    n = 0
+    gaps = 0
+    for r in records or []:
+        try:
+            t = float(r.get("minute_boundary"))
+        except (TypeError, ValueError):
+            continue
+        if start <= t < now:
+            n += 1
+            gaps += int(r.get("gap_count", 0) or 0)
+    channel_hours = n * _SIDECAR_SECONDS / 3600.0
+    rate = (gaps / channel_hours) if channel_hours else None
+    return {
+        "gaps": gaps,
+        "channel_hours": channel_hours,
+        "gap_rate_per_channel_hour": rate,
+    }
+
+
+def _read_resctrl(root) -> dict:
+    """Read radiod's L3 occupancy from a resctrl tree.
+
+    resctrl is HOST-only: RDT is not virtualised into guests, and plenty
+    of hosts have no CAT at all.  Every failure path reports
+    ``available: False`` rather than a zero, so a missing counter can
+    never masquerade as an empty cache.
+    """
+    try:
+        occ_file = Path(root) / "radiod" / "mon_data" / "mon_L3_00" / "llc_occupancy"
+        raw = occ_file.read_text().strip()
+        return {
+            "available": True,
+            "radiod_occupancy_mib": int(raw) / (1024.0 * 1024.0),
+        }
+    except (OSError, ValueError):
+        return {"available": False}
+
+
+_RAW_BUFFER = "/var/lib/timestd/raw_buffer"
+
+
+def _default_gap_records(root: str = _RAW_BUFFER) -> list:
+    """Read the last two days of raw_buffer sidecars.  Soft-fails to []."""
+    import glob
+    import json
+    import os
+    out: list = []
+    try:
+        channels = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for chan in channels:
+        cdir = os.path.join(root, chan)
+        try:
+            days = sorted(os.listdir(cdir))[-2:]
+        except OSError:
+            continue
+        for day in days:
+            for f in glob.glob(os.path.join(cdir, day, "*.json")):
+                try:
+                    with open(f) as fh:
+                        out.append(json.load(fh))
+                except (OSError, ValueError):
+                    continue
+    return out
+
+
 def probe(env: Environment, *,
           timeout: float = 5.0,
           limiter=None,
@@ -103,6 +189,8 @@ def probe(env: Environment, *,
           save_curr: Optional[Callable[[str, dict], None]] = None,
           clock: Callable[[], float] = time.time,
           dmesg_window_seconds: int = 60,
+          read_gap_records: Optional[Callable[[], list]] = None,
+          resctrl_root: str = "/sys/fs/resctrl",
           ) -> list[Observation]:
     """Gather host-side resource counters into a single Observation.
 
@@ -156,12 +244,17 @@ def probe(env: Environment, *,
     else:
         usb_fields = {}
 
+    # ---- radiod output block-drops (the honest loss signal) ----
+    gap_records = read_gap_records() if read_gap_records else _default_gap_records()
+
     fields: dict = {
         "cpu_per_core": cpu_per_core,
         "udp": {**udp_rates, "interval_s": interval_s},
         "nics": nic_fields,
         "irqs": irq_observed,
         "usb": usb_fields,
+        "radiod": _summarise_gaps(gap_records, now),
+        "llc": _read_resctrl(resctrl_root),
     }
     if errors:
         fields["errors"] = errors
