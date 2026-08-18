@@ -228,7 +228,8 @@ def probe(env: Environment, *,
     # ---- derived rates / drift ----
     cpu_per_core = _delta_cpu(prev.get("cpu", {}), cur_cpu)
     udp_rates = _delta_udp(prev.get("udp", {}), cur_udp, interval_s)
-    irq_observed = _summarise_irq(cur_irq, declared.irq_pins)
+    irq_observed = _summarise_irq(cur_irq, declared.irq_pins,
+                                  prev_irq=prev.get("irq", {}) or None)
 
     # ---- per-NIC ethtool snapshots (no rate; absolute counters) ----
     nic_fields: dict = {}
@@ -470,19 +471,43 @@ def _parse_proc_interrupts(text: str, handler_names: Iterable[str]) -> dict:
     return out
 
 
-def _summarise_irq(cur_irq: dict, declared_pins: dict) -> dict:
+def _summarise_irq(cur_irq: dict, declared_pins: dict,
+                   prev_irq: Optional[dict] = None) -> dict:
     """Return per-handler observation: which cores actually received
     interrupts vs. the cores the operator declared.
+
+    ``observed_cores`` means "fired SINCE THE LAST PROBE", not "fired at
+    some point since boot".  /proc/interrupts is cumulative, so the naive
+    reading marks a host drifted forever over an unavoidable boot-time
+    transient: on AC0G-B4 2026-08-18 the xhci vector took 60,020
+    interrupts on CPU5 in the ~60 s between boot and
+    sigmond-rx888-irq-affinity pinning it to 12-13, after which CPU5's
+    delta was zero and every interrupt went to CPU13 -- yet cumulative
+    counters reported cores [5, 13] indefinitely.
+
+    With no previous snapshot there is no delta, so ``delta_available``
+    is False and ``observed_cores`` is empty: the first probe after boot
+    reports "not measured" rather than guessing.  Cumulative counts stay
+    in ``per_core_count`` for diagnostics.
 
     The reconciler decides whether a mismatch is degraded — this layer
     only reports facts.
     """
     out: dict = {}
+    prev_irq = prev_irq or {}
     for handler, counts in cur_irq.items():
-        observed = [i for i, n in enumerate(counts) if n > 0]
+        prev_counts = prev_irq.get(handler)
+        if prev_counts is not None and len(prev_counts) == len(counts):
+            observed = [i for i, n in enumerate(counts)
+                        if n - prev_counts[i] > 0]
+            delta_available = True
+        else:
+            observed = []
+            delta_available = False
         out[handler] = {
             "expected_cores": list(declared_pins.get(handler, [])),
             "observed_cores": observed,
+            "delta_available": delta_available,
             "per_core_count": list(counts),
         }
     return out

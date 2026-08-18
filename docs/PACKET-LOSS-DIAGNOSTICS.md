@@ -51,7 +51,7 @@ groups.  Each maps to a packet-loss suspect.
 | `cpu_per_core[i].usr/sys/idle` | `/proc/stat` | Per-core load — find which thread is monopolising a core |
 | `nics.<iface>.rx_missed_errors` | `ethtool -S` | NIC ring overrun — driver or DMA pressure |
 | `nics.<iface>.rx_no_buffer_count` | `ethtool -S` | NIC buffer exhaustion |
-| `irqs.<handler>` | `/proc/interrupts` | IRQ pinning drift — interrupts landing on wrong cores |
+| `irqs.<handler>` | `/proc/interrupts` | IRQ pinning drift — interrupts landing on wrong cores (delta since last probe, not since boot) |
 | `usb.urb_errors` | `dmesg` | USB controller errors — RX888 capture stalls |
 | `radiod.gap_rate_per_channel_hour` | raw_buffer sidecars | radiod dropped a filter output block — the honest loss signal (see below) |
 | `llc.radiod_occupancy_mib` | `resctrl` | radiod's L3 working set being evicted by decoders — host-only |
@@ -87,6 +87,17 @@ IRQ balancing has drifted.  Reapply `/proc/irq/<n>/smp_affinity_list`
 or pin via `irqbalance`'s ban list.
 
 ## What this probe does NOT cover (yet)
+
+> **Fixed 2026-08-18:** IRQ drift used to share the same since-boot flaw as
+> the NIC counters below, and it mattered more, because *every* boot produces
+> pre-pin interrupts.  On AC0G-B4 the xhci vector took 60,020 interrupts on
+> CPU5 in the ~60 s between boot and `sigmond-rx888-irq-affinity` pinning it
+> to 12-13; cumulative counters then reported cores `[5, 13]` indefinitely
+> even though CPU5's delta was zero.  `irqs.<handler>.observed_cores` is now
+> the delta since the previous probe.  With no previous snapshot,
+> `delta_available` is `false` and `observed_cores` is empty — the first
+> probe after boot reports "not measured" rather than guessing, so
+> `irq_pin_drift_allowed = false` no longer false-alarms on every host.
 
 - **Switch-side counters.**  `ifInDiscards` / `ifOutDiscards` and IGMP
   querier health require an SNMP-extended `network_device` probe.

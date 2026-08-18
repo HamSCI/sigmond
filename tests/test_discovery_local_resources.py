@@ -228,16 +228,18 @@ class ProcInterruptsTests(unittest.TestCase):
 
 
 class SummariseIrqTests(unittest.TestCase):
-    def test_observed_cores_match_nonzero(self):
+    def test_observed_cores_are_those_that_moved_since_last_probe(self):
+        prev = {"xhci_hcd": [100, 200, 0, 0]}
         cur = {"xhci_hcd": [123556, 654521, 0, 0]}
-        out = lr._summarise_irq(cur, {"xhci_hcd": [2, 3]})
+        out = lr._summarise_irq(cur, {"xhci_hcd": [2, 3]}, prev_irq=prev)
         self.assertEqual(out["xhci_hcd"]["expected_cores"], [2, 3])
         self.assertEqual(out["xhci_hcd"]["observed_cores"], [0, 1])
         self.assertEqual(out["xhci_hcd"]["per_core_count"],
                          [123556, 654521, 0, 0])
 
     def test_handler_with_no_declaration(self):
-        out = lr._summarise_irq({"foo": [0, 0, 5]}, {})
+        out = lr._summarise_irq({"foo": [0, 0, 5]}, {},
+                                prev_irq={"foo": [0, 0, 1]})
         self.assertEqual(out["foo"]["expected_cores"], [])
         self.assertEqual(out["foo"]["observed_cores"], [2])
 
@@ -278,6 +280,44 @@ class DmesgUsbTests(unittest.TestCase):
         self.assertEqual(out["urb_errors"], 0)
         self.assertEqual(out["resets"], 0)
         self.assertEqual(out["overruns"], 0)
+
+
+class IrqDriftUsesDeltaTests(unittest.TestCase):
+    """/proc/interrupts counts are cumulative since boot, so a boot-time
+    transient would mark a host drifted forever.  Observed cores must mean
+    "fired since the last probe", not "fired at some point since boot".
+
+    Real case, AC0G-B4 2026-08-18: xhci took 60,020 interrupts on CPU5 in
+    the ~60 s between boot and sigmond-rx888-irq-affinity pinning it to
+    12-13.  Cumulative counters then reported cores [5, 13] forever, even
+    though CPU5's delta was zero and every interrupt was going to CPU13.
+    """
+
+    def test_only_cores_that_moved_since_last_probe_count(self):
+        prev = {"xhci_hcd": [0, 0, 0, 0, 0, 60020, 0, 0, 0, 0, 0, 0, 0, 100]}
+        cur = {"xhci_hcd": [0, 0, 0, 0, 0, 60020, 0, 0, 0, 0, 0, 0, 0, 9999]}
+        out = lr._summarise_irq(cur, {"xhci_hcd": [12, 13]}, prev_irq=prev)
+        self.assertEqual(out["xhci_hcd"]["observed_cores"], [13])
+        self.assertTrue(out["xhci_hcd"]["delta_available"])
+
+    def test_first_run_reports_delta_unavailable_rather_than_guessing(self):
+        cur = {"xhci_hcd": [0, 0, 0, 0, 0, 60020, 0, 0, 0, 0, 0, 0, 0, 9999]}
+        out = lr._summarise_irq(cur, {"xhci_hcd": [12, 13]}, prev_irq=None)
+        self.assertFalse(out["xhci_hcd"]["delta_available"])
+        self.assertEqual(out["xhci_hcd"]["observed_cores"], [])
+
+    def test_genuine_drift_after_a_baseline_is_still_caught(self):
+        prev = {"xhci_hcd": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100]}
+        cur = {"xhci_hcd": [0, 0, 0, 0, 0, 500, 0, 0, 0, 0, 0, 0, 0, 100]}
+        out = lr._summarise_irq(cur, {"xhci_hcd": [12, 13]}, prev_irq=prev)
+        self.assertEqual(out["xhci_hcd"]["observed_cores"], [5])
+        self.assertTrue(out["xhci_hcd"]["delta_available"])
+
+    def test_cumulative_counts_are_still_reported_for_diagnostics(self):
+        prev = {"xhci_hcd": [0, 0, 5]}
+        cur = {"xhci_hcd": [0, 0, 9]}
+        out = lr._summarise_irq(cur, {"xhci_hcd": [2]}, prev_irq=prev)
+        self.assertEqual(out["xhci_hcd"]["per_core_count"], [0, 0, 9])
 
 
 # ---------------------------------------------------------------------------

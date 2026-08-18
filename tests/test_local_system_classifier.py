@@ -134,6 +134,23 @@ class IrqDriftTests(unittest.TestCase):
         status, _ = _local_system_classifier(ls, [_obs({"irqs": irqs})])
         self.assertEqual(status, "healthy")
 
+    def test_drift_skipped_when_delta_unavailable(self):
+        """First probe after boot has no baseline.  Reporting drift from
+        cumulative counters would flag every host, every boot, forever."""
+        ls = _ls(
+            irq_pins={"xhci_hcd": [12, 13]},
+            expect={"irq_pin_drift_allowed": False},
+        )
+        irqs = {
+            "xhci_hcd": {
+                "expected_cores": [12, 13],
+                "observed_cores": [],
+                "delta_available": False,
+            },
+        }
+        status, _ = _local_system_classifier(ls, [_obs({"irqs": irqs})])
+        self.assertEqual(status, "healthy")
+
     def test_no_expected_cores_is_healthy(self):
         # If the operator declared no irq_pins for a handler, drift is
         # undefined — don't degrade on it.
