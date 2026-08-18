@@ -232,6 +232,62 @@ The general rule this suggests: **prefer the counter that can only move
 when the bad thing actually happens.** Byte counts and completeness
 percentages are derived and can be satisfied by zeros; `gap_count` cannot.
 
+## Who observes what, and where it lands
+
+The previous section says which fields to trust. This one says which module
+produces each one and whether the value survives long enough to be useful
+after an incident.
+
+| stage | honest metric | produced by | sampled by | aggregates in |
+|---|---|---|---|---|
+| RF / front end | `AD_OVER`, AGC gain | radiod `rx888.c` / `agc_rx888()` → status multicast | `ka9q-python/ka9q/status.py` → `wspr-recorder/__main__.py::_read_cycle_ad_over` | recorder journal only |
+| USB transport | xhci IRQ rate, per-CPU delivery | kernel `/proc/interrupts` | `discovery/local_resources.py::_parse_proc_interrupts` + `_summarise_irq` | environment observation cache (delta vs previous probe) |
+| **radiod FFT / filter** | **`gap_count`, `gap_samples`** | **hf-timestd `core/binary_archive_writer.py`**, driven by `core_recorder_v2.py` | `local_resources.py::_summarise_gaps`; `gap-hourly.sh` | raw_buffer sidecars (~3 d) → **`/var/log/gap-hourly.tsv`** (indefinite) |
+| — radiod's own view of the same event | `FILTER_DROPS` (tag 77) | radiod → `ka9q-python/ka9q/status.py` | `wspr-recorder::_read_cycle_filter_drops` | recorder journal, logged loud when > 0 |
+| CPU scheduling | `run_delay` per thread | kernel `/proc/<tid>/schedstat` | **nothing** — ad hoc only | **nowhere** |
+| cache / memory | LLC occupancy, MBM bandwidth | CPU RDT → kernel `resctrl` *(host only)* | `local_resources.py::_read_resctrl` | environment cache — **instantaneous, no history** |
+| RTP emission | sample deficit vs wall time | radiod RTP timestamps | `scripts/capacity/drain_meter.py` | run output only, on demand |
+| client reception | segments present, `samples_written` | same `binary_archive_writer.py` | — | raw_buffer sidecars |
+| client processing | decode latency per cycle | `wspr-recorder/spot_sink.py` (`cycle UTC … dt=`) | — | journald → `sink.db` → wd30 `wsprdaemon.spots` |
+| timing output | FUSE Std Dev, offset | hf-timestd fusion → chrony SHM refclock | `timestd-chrony-monitor`, `hf-timestd quality` | `/var/tmp/fuse_gate.tsv`, chrony's own stats |
+
+Four things fall out of the last two columns.
+
+**Three stages have no durable store.** `run_delay`, LLC/MBM occupancy and RTP
+sample deficit are all instantaneous or on-demand. If nothing is sampling at
+the moment of a fault, *the evidence is gone permanently* — you cannot go back
+and ask what the cache looked like during last night's incident. This is why
+the 2026-08-18 diagnosis required an engineer present running samplers by hand,
+and why `gap-hourly.tsv` matters out of proportion to its size: it is the only
+stage with an indefinite record.
+
+**`run_delay` has no owner at all** — not produced by us, not sampled by
+anything, not stored. It is the measurement that ruled out PREEMPT_RT, and it
+survives only in a session transcript.
+
+**The liar shares a module with the honest field.** `samples_written` and
+`gap_count` are written by the *same* `binary_archive_writer.py`, into the same
+sidecar, on the same line — but only one of them can see zero-filled loss. That
+adjacency is exactly why the trap is easy to fall into.
+
+**`gap_count` is measured twice, independently** — once by the recorder as it
+writes the sidecar, once by radiod as `FILTER_DROPS` and read back over the
+status socket. The two agree. That is a stronger position than any other stage
+here and is worth preserving: an independent second witness is what lets you
+trust a counter that reports zero.
+
+### Gap list
+
+If post-hoc forensics is wanted rather than live-only diagnosis, these three
+need a sampler with somewhere to write:
+
+1. **LLC / MBM** — highest value, since cache pressure is the mechanism behind
+   the loss this document exists to prevent, and resctrl is now mounted anyway.
+2. **RTP sample deficit** — `drain_meter.py` already computes it; it just has
+   no scheduled run or store.
+3. **`run_delay`** on the critical threads only — cheap, and it would let the
+   PREEMPT_RT question be answered from history rather than re-measured.
+
 ## Standing defences
 
 | defence | what it protects against | where |
