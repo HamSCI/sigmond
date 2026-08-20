@@ -348,6 +348,39 @@ def test_gaps_above_zero_is_invalid_naming_count_and_rate():
     assert block["data"]["gap_rate"] == pytest.approx(1.1667)
 
 
+def test_manifest_superset_only_is_valid_with_note():
+    """The sanctioned contains-pin case (doctor.sha_contained): a drift
+    entry with status='superset' is ancestry-verified containment, not
+    drift — the block stays VALID but SAYS so, never disguising the
+    superset as an exact match."""
+    env = assemble(NOW, CONFIG, rich_readers(manifest=lambda: {
+        "present": True, "blessed_source": "/etc/sigmond-appliance/manifest.txt",
+        "drift": [
+            {"component": "ka9q-radio", "status": "superset",
+             "manifest": "cd44bbdd", "live": "7fca458a"},
+        ]}))
+    block = env["blocks"]["manifest"]
+    assert block["verdict"] == "VALID"
+    assert "superset" in block["reason"]
+    assert "ka9q-radio" in block["reason"]
+
+
+def test_manifest_mixed_superset_and_real_drift_is_invalid():
+    """One sanctioned superset must never launder a REAL drift entry."""
+    env = assemble(NOW, CONFIG, rich_readers(manifest=lambda: {
+        "present": True, "blessed_source": "/etc/sigmond-appliance/manifest.txt",
+        "drift": [
+            {"component": "ka9q-radio", "status": "superset",
+             "manifest": "cd44bbdd", "live": "7fca458a"},
+            {"component": "hf-timestd", "status": "moved",
+             "manifest": "aaaaaaa", "live": "bbbbbbb"},
+        ]}))
+    block = env["blocks"]["manifest"]
+    assert block["verdict"] == "INVALID"
+    assert "hf-timestd" in block["reason"]
+    assert "ka9q-radio" not in block["reason"]
+
+
 def test_manifest_drift_is_invalid_naming_components():
     env = assemble(NOW, CONFIG, rich_readers(manifest=lambda: {
         "present": True, "blessed_source": "/etc/sigmond-appliance/manifest.txt",

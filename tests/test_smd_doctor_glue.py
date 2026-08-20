@@ -402,7 +402,7 @@ class CollectFindingsTests(unittest.TestCase):
         # nothing drifted" branch collect_findings takes, not a real
         # manifest text laid out to match a real live read.
         smd._manifest_usable = lambda text: True
-        self._doctor_mod.manifest_drift = lambda live, path: []
+        self._doctor_mod.manifest_drift = lambda live, path, ancestry=None: []
 
     def _make_component(self, name='comp1'):
         comp = self.base / name

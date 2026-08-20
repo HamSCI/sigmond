@@ -239,3 +239,118 @@ class ManifestAdoptCliDryRunTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SupersetTests(unittest.TestCase):
+    """--allow-superset: the sanctioned contains-pin case.
+
+    plan_adopt trusts superset_components (it stays pure); the ancestry
+    proof lives in doctor.sha_contained, tested below against real git
+    history built in a tmp dir.
+    """
+
+    MANIFEST = ("components (live):\n" + _filler_rows(MIN_COMPONENT_ROWS))
+
+    def test_mismatch_in_superset_set_is_ok_and_labelled(self):
+        from sigmond.manifest_adopt import plan_adopt
+        live = _filler_live(MIN_COMPONENT_ROWS)
+        name = sorted(live)[0]
+        live[name] = 'feedface1'
+        plan = plan_adopt(self.MANIFEST, live,
+                          superset_components=frozenset({name}))
+        self.assertTrue(plan.ok, plan.refusals)
+        labelled = [m for m in plan.matches if m.startswith(f'{name}: superset')]
+        self.assertEqual(len(labelled), 1, plan.matches)
+        self.assertIn('contained in live feedface1', labelled[0])
+        # A superset entry is never disguised as an exact match.
+        self.assertNotIn(f'{name}: feedface1', plan.matches)
+
+    def test_mismatch_not_in_set_still_refuses(self):
+        from sigmond.manifest_adopt import plan_adopt
+        live = _filler_live(MIN_COMPONENT_ROWS)
+        names = sorted(live)
+        live[names[0]] = 'feedface1'
+        live[names[1]] = 'cafecafe1'
+        plan = plan_adopt(self.MANIFEST, live,
+                          superset_components=frozenset({names[0]}))
+        self.assertFalse(plan.ok)
+        self.assertEqual(len(plan.refusals), 1)
+        self.assertIn(names[1], plan.refusals[0])
+
+    def test_component_missing_live_refuses_even_if_in_set(self):
+        from sigmond.manifest_adopt import plan_adopt
+        live = _filler_live(MIN_COMPONENT_ROWS)
+        name = sorted(live)[0]
+        del live[name]
+        plan = plan_adopt(self.MANIFEST, live,
+                          superset_components=frozenset({name}))
+        self.assertFalse(plan.ok)
+
+
+class ShaContainedTests(unittest.TestCase):
+    """doctor.sha_contained: fail-closed ancestry proof in a real repo."""
+
+    def _mkrepo(self, root):
+        import subprocess as sp
+        def git(*a):
+            r = sp.run(['git', '-C', str(root), *a],
+                       capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout.strip()
+        sp.run(['git', 'init', '-q', str(root)], check=True)
+        git('config', 'user.email', 't@t'); git('config', 'user.name', 't')
+        (root / 'f').write_text('a'); git('add', 'f')
+        git('commit', '-qm', 'base')
+        base = git('rev-parse', '--short', 'HEAD')
+        git('checkout', '-qb', 'fork')
+        (root / 'g').write_text('b'); git('add', 'g')
+        git('commit', '-qm', 'fork work')
+        fork = git('rev-parse', '--short', 'HEAD')
+        return base, fork
+
+    def test_ancestor_is_contained(self):
+        import tempfile
+        from pathlib import Path
+        from sigmond.doctor import sha_contained
+        with tempfile.TemporaryDirectory() as d:
+            comp = Path(d) / 'ka9q-radio'
+            comp.mkdir()
+            base, fork = self._mkrepo(comp)
+            self.assertTrue(sha_contained('ka9q-radio', base, fork, base=d))
+            # Reversed: live older than manifest is NOT containment.
+            self.assertFalse(sha_contained('ka9q-radio', fork, base, base=d))
+
+    def test_unknown_sha_and_missing_repo_fail_closed(self):
+        import tempfile
+        from pathlib import Path
+        from sigmond.doctor import sha_contained
+        with tempfile.TemporaryDirectory() as d:
+            comp = Path(d) / 'ka9q-radio'
+            comp.mkdir()
+            base, fork = self._mkrepo(comp)
+            self.assertFalse(
+                sha_contained('ka9q-radio', 'deadbeef9', fork, base=d))
+            self.assertFalse(
+                sha_contained('nonexistent', base, fork, base=d))
+
+
+class DriftAncestryTests(unittest.TestCase):
+    """manifest_drift_text: ancestry hook turns 'moved' into 'superset';
+    default (no hook) stays strict."""
+
+    def test_hook_marks_superset_and_default_stays_moved(self):
+        from sigmond.doctor import manifest_drift_text
+        live = _filler_live(MIN_COMPONENT_ROWS)
+        name = sorted(live)[0]
+        live[name] = 'feedface1'
+        MANIFEST = ("components (live):\n" + _filler_rows(MIN_COMPONENT_ROWS))
+        strict = manifest_drift_text(live, MANIFEST)
+        self.assertEqual([d['status'] for d in strict], ['moved'])
+        hooked = manifest_drift_text(
+            live, MANIFEST,
+            ancestry=lambda n, m, l: n == name)
+        self.assertEqual([d['status'] for d in hooked], ['superset'])
+        # Hook that vouches for nothing: unchanged.
+        refused = manifest_drift_text(
+            live, MANIFEST, ancestry=lambda n, m, l: False)
+        self.assertEqual([d['status'] for d in refused], ['moved'])

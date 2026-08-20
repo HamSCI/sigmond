@@ -382,7 +382,44 @@ def _sha_equal(a: str, b: str) -> bool:
     return a[:n] == b[:n]
 
 
-def manifest_drift(live: dict, manifest_path: str) -> list:
+def sha_contained(component: str, manifest_sha: str, live_sha: str,
+                  base: str = '/opt/git/sigmond') -> bool:
+    """True iff the component's checkout proves ``manifest_sha`` is an
+    ancestor of ``live_sha`` (the live commit CONTAINS the manifest one).
+
+    This is the same containment rule the catalog pin check uses
+    (``contains_pin`` in ``bin/smd``): a host deliberately running a
+    merge superset of the pinned baseline — B4's ka9q-radio fork merge
+    is the motivating case — is sanctioned, not drifted.  The proof is
+    asked of the component's own git history, in its own checkout.
+
+    FAIL CLOSED: any failure at all — no checkout, git absent, either
+    SHA unknown to the repo, ancestry not provable — returns False, so
+    the caller keeps treating the pair as real drift.  A containment
+    check that errors toward "sanctioned" would hide exactly the drift
+    this module exists to expose.
+    """
+    repo = Path(base) / component
+    if not (repo / '.git').exists():
+        return False
+    try:
+        for sha in (manifest_sha, live_sha):
+            r = subprocess.run(
+                ['git', '-C', str(repo), 'rev-parse', '--verify', '--quiet',
+                 f'{sha}^{{commit}}'],
+                capture_output=True, text=True)
+            if r.returncode != 0:
+                return False
+        r = subprocess.run(
+            ['git', '-C', str(repo), 'merge-base', '--is-ancestor',
+             manifest_sha, live_sha],
+            capture_output=True, text=True)
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+def manifest_drift(live: dict, manifest_path: str, ancestry=None) -> list:
     """Components whose live SHA has drifted from the image manifest.
 
     ``manifest_path`` is an image manifest in the shape ``smd version``
@@ -424,10 +461,10 @@ def manifest_drift(live: dict, manifest_path: str) -> list:
         text = Path(manifest_path).read_text()
     except OSError:
         return []
-    return manifest_drift_text(live, text)
+    return manifest_drift_text(live, text, ancestry)
 
 
-def manifest_drift_text(live: dict, text: str) -> list:
+def manifest_drift_text(live: dict, text: str, ancestry=None) -> list:
     """``manifest_drift`` for a manifest already in hand as text.
 
     Same contract and same return shape; the only difference is where
@@ -435,6 +472,15 @@ def manifest_drift_text(live: dict, text: str) -> list:
     and never has a local path to hand — routing that through a
     temporary file, or reimplementing the comparison, would give two
     sources of the same truth and they would drift.
+
+    ``ancestry`` (optional): a callable ``(component, manifest_sha,
+    live_sha) -> bool``.  When provided, a ``moved`` entry the callable
+    vouches for — the live commit provably CONTAINS the manifest one —
+    is reported with ``status='superset'`` instead of ``'moved'``:
+    still visible, never silently dropped, but distinguishable so a
+    caller can treat the sanctioned contains-pin case (see
+    ``sha_contained``) as non-alarming.  ``None`` (the default) keeps
+    the strict behavior every existing caller relies on.
     """
     manifest = _parse_manifest_components(text)
     if manifest is None:
@@ -447,7 +493,10 @@ def manifest_drift_text(live: dict, text: str) -> list:
             out.append({'component': name, 'status': 'manifest_only',
                         'manifest': manifest_sha, 'live': None})
         elif not _sha_equal(live_sha, manifest_sha):
-            out.append({'component': name, 'status': 'moved',
+            status = 'moved'
+            if ancestry is not None and ancestry(name, manifest_sha, live_sha):
+                status = 'superset'
+            out.append({'component': name, 'status': status,
                         'manifest': manifest_sha, 'live': live_sha})
     for name in sorted(set(live) - set(manifest)):
         out.append({'component': name, 'status': 'live_only',

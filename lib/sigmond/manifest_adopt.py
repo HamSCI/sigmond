@@ -41,7 +41,8 @@ class AdoptPlan:
     matches: list = field(default_factory=list)
 
 
-def plan_adopt(manifest_text: str, live_components: dict) -> AdoptPlan:
+def plan_adopt(manifest_text: str, live_components: dict,
+               superset_components=frozenset()) -> AdoptPlan:
     """Fail-closed comparison of a candidate manifest against the live
     component SHAs already installed on this host.
 
@@ -71,6 +72,19 @@ def plan_adopt(manifest_text: str, live_components: dict) -> AdoptPlan:
     first one found, because the operator adopting a manifest by hand
     needs the complete diff to decide whether to fix the host or the
     manifest — not one line at a time.
+
+    ``superset_components``: component names for which a SHA mismatch is
+    accepted as a SANCTIONED SUPERSET — the live commit contains the
+    manifest one (the contains-pin case; B4's ka9q-radio fork merge is
+    the motivating example).  The entry lands in ``matches`` labelled
+    ``superset`` — never as a plain match, so the adopted state stays
+    visibly different from an exact one.  THIS FUNCTION TRUSTS THE SET:
+    it stays pure and runs no git.  The only legitimate caller is the
+    CLI's ``--allow-superset`` path, which verifies each candidate with
+    ``sigmond.doctor.sha_contained`` (fail-closed ancestry proof in the
+    component's own checkout) BEFORE naming it here.  Every other
+    divergence for a listed component (absent live, absent from
+    manifest) still refuses.
     """
     manifest = _parse_manifest_components(manifest_text)
     if manifest is None:
@@ -92,8 +106,13 @@ def plan_adopt(manifest_text: str, live_components: dict) -> AdoptPlan:
             refusals.append(
                 f'{name}: in the manifest ({manifest_sha}) but not installed live')
         elif not _sha_equal(live_sha, manifest_sha):
-            refusals.append(
-                f'{name}: SHA mismatch — manifest {manifest_sha} != live {live_sha}')
+            if name in superset_components:
+                matches.append(
+                    f'{name}: superset — manifest {manifest_sha} '
+                    f'contained in live {live_sha}')
+            else:
+                refusals.append(
+                    f'{name}: SHA mismatch — manifest {manifest_sha} != live {live_sha}')
         else:
             matches.append(f'{name}: {live_sha}')
 

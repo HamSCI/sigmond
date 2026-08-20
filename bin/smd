@@ -3610,8 +3610,12 @@ def cmd_fleet(args) -> int:
         commits_behind=fleet_mod.commits_behind_main(repo_root),
     )
     # Same exit decision for text and json — computed once, reused.
+    # 'superset' drift entries are the ancestry-verified contains-pin
+    # case (sanctioned; see doctor.sha_contained) — visible in the
+    # rendering but not unhealthy.
     unhealthy = [s for s in statuses
-                 if not s.reachable or s.error or s.drift or s.behind]
+                 if not s.reachable or s.error or s.behind
+                 or any(d.get('status') != 'superset' for d in s.drift)]
     if getattr(args, 'json', False):
         payload = {'schema': 1,
                   'hosts': [fleet_mod.status_to_dict(s.host.name, s)
@@ -3703,7 +3707,9 @@ def cmd_manifest_adopt(args) -> int:
         return 1
 
     from pathlib import Path
-    from sigmond.doctor import component_checkouts, manifest_drift
+    from sigmond.doctor import (component_checkouts, manifest_drift,
+                                sha_contained, _parse_manifest_components,
+                                _sha_equal)
     from sigmond.provenance import component_versions
     from sigmond.manifest_adopt import plan_adopt
 
@@ -3717,7 +3723,25 @@ def cmd_manifest_adopt(args) -> int:
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     live = component_versions(component_checkouts(base))
 
-    plan = plan_adopt(manifest_text, live)
+    # --allow-superset: for each component whose SHAs mismatch, ask the
+    # component's own git history whether the live commit CONTAINS the
+    # manifest one (the sanctioned contains-pin case — B4's ka9q-radio
+    # fork merge).  Only ancestry-PROVEN names reach plan_adopt's
+    # superset set; sha_contained fails closed, so an unprovable pair
+    # stays a refusal.  The ancestry hook is reused verbatim for the
+    # post-write drift re-check so the two stages cannot disagree.
+    ancestry = None
+    superset = frozenset()
+    if getattr(args, 'allow_superset', False):
+        ancestry = lambda n, m, l: sha_contained(n, m, l, base=str(base))
+        parsed = _parse_manifest_components(manifest_text) or {}
+        superset = frozenset(
+            n for n, msha in parsed.items()
+            if live.get(n) is not None
+            and not _sha_equal(live[n], msha)
+            and ancestry(n, msha, live[n]))
+
+    plan = plan_adopt(manifest_text, live, superset_components=superset)
 
     for m in plan.matches:
         _ok(m)
@@ -3730,8 +3754,15 @@ def cmd_manifest_adopt(args) -> int:
               f'not adopting {MANIFEST_PATH}', file=sys.stderr)
         return 1
 
-    print(f'admin manifest adopt: plan OK — {len(plan.matches)} '
-          f'component(s) match live exactly')
+    n_super = sum(1 for m in plan.matches if ': superset — ' in m)
+    if n_super:
+        print(f'admin manifest adopt: plan OK — '
+              f'{len(plan.matches) - n_super} component(s) match live '
+              f'exactly, {n_super} sanctioned superset '
+              f'(ancestry-verified via --allow-superset)')
+    else:
+        print(f'admin manifest adopt: plan OK — {len(plan.matches)} '
+              f'component(s) match live exactly')
 
     if not apply:
         print('admin manifest adopt: dry-run only (pass --apply to write '
@@ -3745,7 +3776,8 @@ def cmd_manifest_adopt(args) -> int:
         _err(f'admin manifest adopt: failed to write {MANIFEST_PATH}: {exc}')
         return 1
 
-    drift = manifest_drift(live, str(MANIFEST_PATH))
+    drift = manifest_drift(live, str(MANIFEST_PATH), ancestry=ancestry)
+    drift = [d for d in drift if d['status'] != 'superset']
     if drift:
         _err(f'admin manifest adopt: wrote {MANIFEST_PATH} but drift is '
              f'STILL detected immediately after ({len(drift)} '
@@ -4038,7 +4070,7 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
     from pathlib import Path as _Path
     from sigmond.doctor import (
         component_checkouts, foreign_owned, git_state,
-        manifest_drift, exec_mismatch, Finding,
+        manifest_drift, exec_mismatch, Finding, sha_contained,
     )
     from sigmond.provenance import component_versions
 
@@ -4165,7 +4197,18 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
                 f'present but malformed/truncated); this is NOT the same as '
                 f'"no drift found"'))
         else:
-            for d in manifest_drift(live, str(MANIFEST_PATH)):
+            # ancestry hook: a 'moved' component whose live commit
+            # provably CONTAINS the manifest one (sha_contained, fail-
+            # closed) is the sanctioned contains-pin case (B4's
+            # ka9q-radio fork merge) — reported as status 'superset'
+            # and deliberately NOT a finding: an alarm that can never
+            # clear on a sanctioned host teaches operators to ignore
+            # the drift check entirely.  It stays visible in `smd
+            # version`'s pin line and the heartbeat manifest block.
+            _anc = lambda n, m, l: sha_contained(n, m, l, base=str(base))
+            for d in manifest_drift(live, str(MANIFEST_PATH), ancestry=_anc):
+                if d['status'] == 'superset':
+                    continue
                 if d['status'] == 'moved':
                     detail = f'live {d["live"]} != manifest {d["manifest"]}'
                 elif d['status'] == 'live_only':
@@ -18275,6 +18318,13 @@ def main() -> int:
             'the GitHub Release asset stays the operator\'s job, this '
             'verb adds smd no network dependency.'))
     p_m_adopt.add_argument('path', help='local path to a candidate manifest file')
+    p_m_adopt.add_argument('--allow-superset', action='store_true',
+                           help='accept a component whose live commit is a '
+                                'git ANCESTRY-VERIFIED superset of the '
+                                'manifest SHA (the contains-pin case, e.g. '
+                                'a sanctioned ka9q-radio fork merge); '
+                                'verified per component in its own '
+                                'checkout, fail-closed')
     p_m_adopt.add_argument('--apply', action='store_true',
         help='write the manifest to /etc/sigmond-appliance/manifest.txt '
              '(root; only if the plan is ok). Default is dry-run: plan '

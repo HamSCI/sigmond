@@ -339,13 +339,29 @@ def fleet_status(fleet: dict, run, commits_behind=None) -> list:
     is contained the same way as one that returns a failure.
     """
     from .doctor import _parse_manifest_components, manifest_drift_text
+    from .doctor import sha_contained
+    import os as _os
+
+    # Devbox-side ancestry: the fan-out compares remote SHAs locally, so
+    # proving the sanctioned contains-pin superset (a fork merge that
+    # CONTAINS the manifest commit) needs a local checkout of the same
+    # component.  $SIGMOND_ANCESTRY_DIR names a directory of checkouts
+    # (component name -> git repo).  Unset, or a component with no
+    # checkout there, FAILS CLOSED: the entry stays 'moved' and renders
+    # DRIFTED — visible, never silently blessed.
+    _anc_dir = _os.environ.get('SIGMOND_ANCESTRY_DIR')
+    _ancestry = (
+        (lambda n, m, l: sha_contained(n, m, l, base=_anc_dir))
+        if _anc_dir else None)
+    drift_text = (lambda live, text:
+                  manifest_drift_text(live, text, ancestry=_ancestry))
 
     out = []
     for host in fleet.values():
         try:
             out.append(_status_for(host, run, commits_behind,
                                    _parse_manifest_components,
-                                   manifest_drift_text))
+                                   drift_text))
         except Exception as exc:            # noqa: BLE001 — see docstring
             out.append(HostStatus(host=host, reachable=False,
                                   error=f'{type(exc).__name__}: {exc}'))
@@ -467,11 +483,17 @@ def format_status(statuses: list) -> str:
         elif s.error:
             lines.append(f'{name}  reachable, but {s.error}')
         elif s.blessed_source == 'manifest':
-            if s.drift:
+            real = [d for d in s.drift if d.get('status') != 'superset']
+            supers = [d for d in s.drift if d.get('status') == 'superset']
+            if real:
                 moved = ', '.join(
                     f'{d["component"]} {d["manifest"]}→{d["live"]}'
-                    for d in s.drift)
+                    for d in real)
                 lines.append(f'{name}  DRIFTED from blessed manifest: {moved}')
+            elif supers:
+                names = ', '.join(d['component'] for d in supers)
+                lines.append(f'{name}  matches blessed manifest '
+                             f'(sanctioned superset: {names})')
             else:
                 lines.append(f'{name}  matches blessed manifest')
         else:

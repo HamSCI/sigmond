@@ -535,6 +535,44 @@ class TestFormatStatus:
         assert report.strip()
         assert 'no hosts' in report.lower()
 
+    def test_superset_only_drift_reads_as_a_match_with_the_note(self):
+        """An ancestry-verified 'superset' entry (the sanctioned
+        contains-pin case, e.g. B4's ka9q-radio fork merge) is a match,
+        rendered WITH the superset note — never as DRIFTED, and never
+        silently identical to an exact match."""
+        statuses = [
+            HostStatus(host=Host(name='b4', reach='r'), reachable=True,
+                       has_sigmond=True, components={'sigmond': '517995a'},
+                       blessed_source='manifest',
+                       drift=[{'component': 'ka9q-radio',
+                               'status': 'superset',
+                               'manifest': 'cd44bbdd',
+                               'live': '7fca458a'}]),
+        ]
+        report = format_status(statuses)
+        assert 'matches blessed manifest' in report
+        assert 'superset' in report
+        assert 'ka9q-radio' in report
+        assert 'DRIFTED' not in report
+
+    def test_superset_never_launders_real_drift(self):
+        statuses = [
+            HostStatus(host=Host(name='b4', reach='r'), reachable=True,
+                       has_sigmond=True, components={'sigmond': '517995a'},
+                       blessed_source='manifest',
+                       drift=[{'component': 'ka9q-radio',
+                               'status': 'superset',
+                               'manifest': 'cd44bbdd',
+                               'live': '7fca458a'},
+                              {'component': 'hf-timestd',
+                               'status': 'moved',
+                               'manifest': 'aaaaaaa',
+                               'live': 'bbbbbbb'}]),
+        ]
+        report = format_status(statuses)
+        assert 'DRIFTED' in report
+        assert 'hf-timestd' in report
+
 
 from sigmond.fleet import commits_behind_main  # noqa: E402
 

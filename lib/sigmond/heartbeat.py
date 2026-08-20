@@ -286,12 +286,24 @@ def _map_manifest(raw) -> dict:
         return _block("INDETERMINATE",
                       "manifest unassessed — host not on a blessed image",
                       data)
-    if data["drift"]:
-        names = ", ".join(_drift_names(data["drift"]))
+    real = [d for d in data["drift"]
+            if not (isinstance(d, dict) and d.get("status") == "superset")]
+    supers = [d for d in data["drift"]
+              if isinstance(d, dict) and d.get("status") == "superset"]
+    if real:
+        names = ", ".join(_drift_names(real))
         return _block(
             "INVALID",
-            f"{len(data['drift'])} component(s) drifted from the image "
+            f"{len(real)} component(s) drifted from the image "
             f"manifest: {names}",
+            data)
+    if supers:
+        names = ", ".join(_drift_names(supers))
+        source = data["blessed_source"] or "the image manifest"
+        return _block(
+            "VALID",
+            f"live components match {source} "
+            f"({len(supers)} sanctioned superset: {names})",
             data)
     source = data["blessed_source"] or "the image manifest"
     return _block("VALID", f"live components match {source}", data)
@@ -652,7 +664,7 @@ def _read_manifest(paths: HeartbeatPaths) -> dict:
     the same file.
     """
     from .doctor import (component_checkouts, _parse_manifest_components,
-                         manifest_drift_text)
+                         manifest_drift_text, sha_contained)
     from .provenance import component_versions
 
     try:
@@ -665,10 +677,16 @@ def _read_manifest(paths: HeartbeatPaths) -> dict:
         return {"present": False, "blessed_source": paths.manifest_path,
                 "drift": []}
     live = component_versions(component_checkouts(paths.base))
+    # Ancestry hook: a 'moved' component whose live commit provably
+    # CONTAINS the manifest one is the sanctioned contains-pin case
+    # (B4's ka9q-radio fork merge) and comes back status='superset'
+    # instead — carried as data, not treated as drift by the mapper.
+    # sha_contained fails closed, so an unprovable pair stays 'moved'.
+    anc = lambda n, m, l: sha_contained(n, m, l, base=str(paths.base))
     return {
         "present": True,
         "blessed_source": paths.manifest_path,
-        "drift": manifest_drift_text(live, text),
+        "drift": manifest_drift_text(live, text, ancestry=anc),
     }
 
 
