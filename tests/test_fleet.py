@@ -1462,3 +1462,234 @@ class TestFleetRoster:
         by_name = {e['name']: e for e in roster}
         assert by_name['bee1']['frozen'] == 'co-operated site'
         assert by_name['bee2']['frozen'] is None
+
+
+# ---------------------------------------------------------------------------
+# Task 12 — smd fleet pubkeys
+#
+# The DESIGNED extension of the read-only whitelist: harvesting the
+# station identity PUBLIC key is read-only by construction (it is a
+# `cat` of a file that is, itself, a public key), so it joins
+# READ_ONLY_COMMANDS deliberately and visibly rather than working
+# around it.
+# ---------------------------------------------------------------------------
+
+from sigmond.fleet import (  # noqa: E402
+    PubkeyResult,
+    _PUBKEY_CMD,
+    fleet_pubkeys,
+    format_pubkeys,
+    pubkeys_incomplete,
+    write_pubkeys,
+)
+
+
+VALID_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexamplekeymaterial== sigmond@b4'
+
+
+class TestFleetPubkeys:
+
+    def test_a_harvested_key_is_returned(self):
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', _PUBKEY_CMD): _ok(VALID_KEY + '\n'),
+        })
+        [result] = fleet_pubkeys(fleet, run, profile=None)
+        assert result.reachable is True
+        assert result.key == VALID_KEY
+        assert result.error is None
+
+    def test_no_key_file_yet_is_an_honest_state_not_an_error_string(self):
+        """A host that has never uploaded has no key yet — that is a
+        known, expected state, distinct from being unreachable."""
+        fleet = {'fresh': Host(name='fresh', reach='root@fresh.example')}
+        run = runner({
+            ('fresh', 'true'): _ok(),
+            ('fresh', _PUBKEY_CMD): RunResult(rc=1, out='',
+                                              err='No such file or directory'),
+        })
+        [result] = fleet_pubkeys(fleet, run, profile=None)
+        assert result.reachable is True
+        assert result.key is None
+        assert result.error == 'no key yet'
+
+    def test_garbage_output_is_never_stored_as_a_key(self):
+        fleet = {'odd': Host(name='odd', reach='root@odd.example')}
+        run = runner({
+            ('odd', 'true'): _ok(),
+            ('odd', _PUBKEY_CMD): _ok('cat: permission denied\n'),
+        })
+        [result] = fleet_pubkeys(fleet, run, profile=None)
+        assert result.reachable is True
+        assert result.key is None
+        assert result.error == 'unexpected output'
+
+    def test_ansi_is_stripped_and_output_trimmed(self):
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        colored = f'\x1b[32m{VALID_KEY}\x1b[0m\n  '
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', _PUBKEY_CMD): _ok(colored),
+        })
+        [result] = fleet_pubkeys(fleet, run, profile=None)
+        assert result.key == VALID_KEY
+
+    def test_unreachable_host_is_isolated_per_host(self):
+        """doctor.py:73's principle: one dead host must not swallow
+        the rest of the harvest."""
+        fleet = {
+            'gone': Host(name='gone', reach='root@gone.example'),
+            'alpha': Host(name='alpha', reach='root@alpha.example'),
+        }
+        run = runner({
+            ('gone', 'true'): RunResult(rc=255, out='', err='no route to host'),
+            ('alpha', 'true'): _ok(),
+            ('alpha', _PUBKEY_CMD): _ok(VALID_KEY),
+        })
+        by_name = {r.name: r for r in fleet_pubkeys(fleet, run, profile=None)}
+        assert by_name['gone'].reachable is False
+        assert by_name['gone'].key is None
+        assert 'no route to host' in by_name['gone'].error
+        assert by_name['alpha'].reachable is True
+        assert by_name['alpha'].key == VALID_KEY
+
+    def test_a_raising_runner_is_contained_to_its_own_host(self):
+        fleet = {
+            'boom': Host(name='boom', reach='root@boom.example'),
+            'alpha': Host(name='alpha', reach='root@alpha.example'),
+        }
+        script = {
+            ('alpha', 'true'): _ok(),
+            ('alpha', _PUBKEY_CMD): _ok(VALID_KEY),
+        }
+
+        def run(host, command):
+            if host.name == 'boom':
+                raise OSError('ssh binary missing')
+            return script.get((host.name, command)) or RunResult(1, '', 'nope')
+
+        by_name = {r.name: r for r in fleet_pubkeys(fleet, run, profile=None)}
+        assert by_name['boom'].reachable is False
+        assert 'ssh binary missing' in by_name['boom'].error
+        assert by_name['alpha'].key == VALID_KEY
+
+    def test_scoped_by_profile_before_the_fan_out(self):
+        fleet = {
+            'b4': Host(name='b4', reach='r', profile='dasi2'),
+            'bee1': Host(name='bee1', reach='r', profile='bee'),
+        }
+        run = runner({('b4', 'true'): _ok(),
+                       ('b4', _PUBKEY_CMD): _ok(VALID_KEY)})
+        results = fleet_pubkeys(fleet, run, profile='dasi2')
+        assert [r.name for r in results] == ['b4']
+        assert not any(name == 'bee1' for name, _cmd in run.calls)
+
+
+class TestPubkeysIsReadOnlyByConstruction:
+
+    def test_pubkey_command_joined_the_whitelist(self):
+        """Task 12's DESIGNED extension: this is a deliberate, visible
+        growth of READ_ONLY_COMMANDS, not a violation of it."""
+        assert _PUBKEY_CMD in READ_ONLY_COMMANDS
+        assert _PUBKEY_CMD == 'cat /etc/hs-uploader/keys/id_ed25519_host.pub'
+
+    def test_pubkeys_issues_only_whitelisted_commands(self):
+        fleet = {
+            'alpha': Host(name='alpha', reach='root@alpha.example'),
+            'gone': Host(name='gone', reach='root@gone.example'),
+        }
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', _PUBKEY_CMD): _ok(VALID_KEY),
+            ('gone', 'true'): RunResult(rc=255, out='', err='denied'),
+        })
+        fleet_pubkeys(fleet, run, profile=None)
+        assert run.calls, 'the fan-out was never exercised'
+        for _host, command in run.calls:
+            assert command in READ_ONLY_COMMANDS, f'not read-only: {command}'
+
+    def test_fleet_status_never_issues_the_pubkey_command(self):
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+        })
+        fleet_status(fleet, run)
+        assert all(cmd != _PUBKEY_CMD for _h, cmd in run.calls)
+
+    def test_fleet_doctor_never_issues_the_pubkey_command(self):
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd doctor'): _ok('deploy trees clean'),
+        })
+        fleet_doctor(fleet, run)
+        assert all(cmd != _PUBKEY_CMD for _h, cmd in run.calls)
+
+
+class TestFormatPubkeys:
+
+    def test_no_hosts(self):
+        assert 'no hosts' in format_pubkeys([])
+
+    def test_reports_key_no_key_and_unreachable_distinctly(self):
+        results = [
+            PubkeyResult(name='alpha', reachable=True, key=VALID_KEY),
+            PubkeyResult(name='fresh', reachable=True, key=None,
+                        error='no key yet'),
+            PubkeyResult(name='gone', reachable=False, key=None,
+                        error='denied'),
+        ]
+        text = format_pubkeys(results)
+        assert VALID_KEY in text
+        assert 'fresh' in text and 'no key yet' in text
+        assert 'gone' in text and 'unreachable' in text and 'denied' in text
+
+
+class TestWritePubkeys:
+
+    def test_writes_only_reachable_hosts_with_a_key(self, tmp_path):
+        results = [
+            PubkeyResult(name='alpha', reachable=True, key=VALID_KEY),
+            PubkeyResult(name='fresh', reachable=True, key=None,
+                        error='no key yet'),
+            PubkeyResult(name='gone', reachable=False, key=None,
+                        error='denied'),
+        ]
+        out_dir = tmp_path / 'pubkeys'
+        written = write_pubkeys(results, out_dir)
+        assert written == ['alpha']
+        assert (out_dir / 'alpha.pub').read_text().strip() == VALID_KEY
+        assert not (out_dir / 'fresh.pub').exists()
+        assert not (out_dir / 'gone.pub').exists()
+
+    def test_creates_the_directory(self, tmp_path):
+        results = [PubkeyResult(name='alpha', reachable=True, key=VALID_KEY)]
+        out_dir = tmp_path / 'nested' / 'pubkeys'
+        assert not out_dir.exists()
+        write_pubkeys(results, out_dir)
+        assert out_dir.is_dir()
+        assert (out_dir / 'alpha.pub').exists()
+
+
+class TestPubkeysIncomplete:
+
+    def test_all_reachable_with_keys_is_complete(self):
+        results = [PubkeyResult(name='a', reachable=True, key=VALID_KEY),
+                   PubkeyResult(name='b', reachable=True, key=VALID_KEY)]
+        assert pubkeys_incomplete(results) is False
+
+    def test_any_unreachable_host_is_incomplete(self):
+        results = [PubkeyResult(name='a', reachable=True, key=VALID_KEY),
+                   PubkeyResult(name='b', reachable=False, error='denied')]
+        assert pubkeys_incomplete(results) is True
+
+    def test_any_keyless_host_is_incomplete(self):
+        results = [PubkeyResult(name='a', reachable=True, key=VALID_KEY),
+                   PubkeyResult(name='b', reachable=True, key=None,
+                               error='no key yet')]
+        assert pubkeys_incomplete(results) is True
+
+    def test_no_hosts_is_vacuously_complete(self):
+        assert pubkeys_incomplete([]) is False

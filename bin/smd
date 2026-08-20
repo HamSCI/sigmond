@@ -3528,7 +3528,7 @@ def cmd_fleet(args) -> int:
 
     verb = getattr(args, 'fleet_command', None)
     if verb is None:
-        _err('fleet: pick a verb — status | doctor | roster | update')
+        _err('fleet: pick a verb — status | doctor | roster | update | pubkeys')
         return 2
 
     try:
@@ -3536,6 +3536,20 @@ def cmd_fleet(args) -> int:
     except (FileNotFoundError, ValueError) as exc:
         _err(f'fleet: {exc}')
         return 1
+
+    if verb == 'pubkeys':
+        # Scoped internally by fleet_pubkeys (same style as fleet_roster) —
+        # an unwanted profile is never contacted.
+        profile = getattr(args, 'profile', 'dasi2')
+        run = fleet_mod.ssh_runner()
+        results = fleet_mod.fleet_pubkeys(hosts, run, profile=profile)
+        print(fleet_mod.format_pubkeys(results))
+        out_dir = getattr(args, 'out', None)
+        if out_dir:
+            written = fleet_mod.write_pubkeys(results, out_dir)
+            print(f'wrote {len(written)} key(s) to {out_dir}: '
+                  f'{", ".join(written) or "(none)"}')
+        return 1 if fleet_mod.pubkeys_incomplete(results) else 0
 
     if verb == 'roster':
         profile = getattr(args, 'profile', 'dasi2')
@@ -17686,6 +17700,14 @@ def main() -> int:
         help='multiplex smd update: canary, verify, then the wave')
     p_fleet_update.add_argument('--apply', action='store_true',
         help='perform the update (default: dry run, changes nothing)')
+    p_fleet_pubkeys = fleet_sub.add_parser('pubkeys',
+        help="harvest each host's station identity public key "
+             '(feeds server/heartbeat/authorize-stations.sh)')
+    p_fleet_pubkeys.add_argument('--profile', metavar='NAME', default='dasi2',
+        help='profile to scope to (default: dasi2)')
+    p_fleet_pubkeys.add_argument('--out', metavar='DIR',
+        help='write <station>.pub per harvested key into DIR (created '
+             'if needed); only reachable hosts with a key are written')
 
     p = sub.add_parser('enable', help='enable component(s) in /etc/sigmond/topology.toml')
     p.add_argument('names', nargs='+', help='one or more component names')

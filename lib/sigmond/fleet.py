@@ -255,8 +255,12 @@ _MANIFEST_CMD = 'cat /etc/sigmond-appliance/manifest.txt'
 #: `smd doctor` with no --fix. The flag is not merely omitted at the
 #: call site: it is absent from the only string the fan-out can send.
 _DOCTOR_CMD = 'smd doctor'
+#: read-only by construction; harvests the station identity PUBLIC key
+#: for the heartbeat drop's authorized_keys.
+_PUBKEY_CMD = 'cat /etc/hs-uploader/keys/id_ed25519_host.pub'
 READ_ONLY_COMMANDS: tuple[str, ...] = (_PROBE_CMD, _VERSION_CMD,
-                                       _MANIFEST_CMD, _DOCTOR_CMD)
+                                       _MANIFEST_CMD, _DOCTOR_CMD,
+                                       _PUBKEY_CMD)
 
 
 @dataclass(frozen=True)
@@ -1055,3 +1059,153 @@ def format_update(results: list) -> str:
             for line in r.plan.splitlines():
                 lines.append(f'    {line}')
     return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Task 12 — smd fleet pubkeys
+#
+# The wd30 heartbeat drop authorizes per-station keys (attribution +
+# revocation). The station key is
+# /etc/hs-uploader/keys/id_ed25519_host.pub — hs-uploader already uses
+# it to sign into the drop, so harvesting it exposes nothing new. This
+# is the DESIGNED extension of the read-only whitelist: see
+# _PUBKEY_CMD above, joined to READ_ONLY_COMMANDS deliberately.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PubkeyResult:
+    """One host's harvested station identity PUBLIC key.
+
+    ``name`` only — not the ``Host`` (unlike :class:`HostStatus` /
+    :class:`HostDoctor`). The result travels into ``<station>.pub``
+    filenames and ``server/heartbeat/authorize-stations.sh`` reasons
+    about it purely by roster name, the same string a heartbeat
+    envelope already carries; access topology (``reach``/``hop``) has
+    no business riding along.
+
+    ``error`` covers two DIFFERENT situations that both leave ``key``
+    as None, and the message is how a reader tells them apart: "no key
+    yet" (the host is fine — see :func:`fleet_pubkeys`) versus
+    "unexpected output" (something came back that is not an OpenSSH
+    public key, and must never be written to a `.pub` file as though
+    it were one).
+    """
+
+    name: str
+    reachable: bool
+    key: Optional[str] = None
+    error: Optional[str] = None
+
+
+def fleet_pubkeys(fleet: dict, runner, profile: str = 'dasi2') -> list:
+    """Harvest each host's station identity PUBLIC key.
+
+    Reads ``/etc/hs-uploader/keys/id_ed25519_host.pub`` over the
+    read-only fan-out (see :data:`READ_ONLY_COMMANDS`) and feeds
+    ``server/heartbeat/authorize-stations.sh``, which expects one
+    ``<station>.pub`` file per roster name.
+
+    A host with no key file yet is NOT an error: it is reachable, and
+    simply has not generated a station identity yet. The fix lives
+    on-host — ``smd admin uploader manifest --write``, or letting a
+    first upload run (either one generates the key) — so this is
+    reported as ``reachable=True, key=None, error="no key yet"``: an
+    honest to-do, not a fault.
+
+    Output that is not an OpenSSH public key — after stripping ANSI
+    and trimming surrounding whitespace, does not start with
+    ``"ssh-"`` — is never stored as a key: a truncated read or a stray
+    shell banner must not be handed to ``authorize-stations.sh`` as
+    though it were a credential.
+
+    Scoped by ``profile`` BEFORE the fan-out, the same discipline
+    :func:`fleet_roster` uses — an unwanted profile is never contacted.
+
+    Per-host failures stay per-host (``doctor.py:73``'s principle): a
+    ``runner`` that raises for one host does not discard the rest.
+    """
+    out = []
+    for host in filter_fleet(fleet, profile).values():
+        try:
+            out.append(_pubkey_for(host, runner))
+        except Exception as exc:            # noqa: BLE001 — see docstring
+            out.append(PubkeyResult(name=host.name, reachable=False,
+                                    error=f'{type(exc).__name__}: {exc}'))
+    return out
+
+
+def _pubkey_for(host, run) -> PubkeyResult:
+    probe = run(host, _PROBE_CMD)
+    if probe.rc != 0:
+        return PubkeyResult(name=host.name, reachable=False,
+                            error=(probe.err or probe.out or
+                                   f'unreachable (exit {probe.rc})').strip())
+
+    result = run(host, _PUBKEY_CMD)
+    if result.rc != 0:
+        # No key file (yet). Reachable, but the fix is on-host — an
+        # honest state, not an error to alarm on.
+        return PubkeyResult(name=host.name, reachable=True, key=None,
+                            error='no key yet')
+
+    text = strip_ansi(result.out).strip()
+    if not text.startswith('ssh-'):
+        # Never store garbage as a key — a permission error or a
+        # motd line must not end up in a .pub file.
+        return PubkeyResult(name=host.name, reachable=True, key=None,
+                            error='unexpected output')
+    return PubkeyResult(name=host.name, reachable=True, key=text)
+
+
+def format_pubkeys(results: list) -> str:
+    """Render `smd fleet pubkeys` for an operator.
+
+    Every host gets one line, and the three outcomes — a key, "no key
+    yet", unreachable — read differently at a glance, the same
+    discipline :func:`format_status` and :func:`format_doctor` use.
+    """
+    if not results:
+        return ('no hosts in the inventory — see etc/fleet.toml.example '
+                'and $SIGMOND_FLEET')
+    lines = []
+    for r in results:
+        if not r.reachable:
+            lines.append(f'{r.name}: unreachable — {r.error}')
+        elif r.key:
+            lines.append(f'{r.name}: {r.key}')
+        else:
+            lines.append(f'{r.name}: {r.error}')
+    return '\n'.join(lines)
+
+
+def write_pubkeys(results: list, out_dir) -> list:
+    """Write ``<station>.pub`` for every harvested key into ``out_dir``.
+
+    Creates ``out_dir`` if needed. Writes only hosts that are
+    reachable AND yielded a key — never a placeholder for "no key
+    yet" or an unreachable host, which would hand
+    ``authorize-stations.sh`` a file to reject, or worse, an empty
+    credential it might accept.
+
+    Returns the station names written, in ``results`` order — the
+    summary the CLI prints after the per-host report.
+    """
+    path = Path(out_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    written = []
+    for r in results:
+        if r.reachable and r.key:
+            (path / f'{r.name}.pub').write_text(r.key + '\n')
+            written.append(r.name)
+    return written
+
+
+def pubkeys_incomplete(results: list) -> bool:
+    """Whether `smd fleet pubkeys` should exit non-zero.
+
+    True when ANY roster host is unreachable or key-less — visibility
+    into an incomplete harvest, not failure-masking. False (exit 0)
+    only when every roster host yielded a key; vacuously False for an
+    empty roster (nothing to be incomplete about).
+    """
+    return any(not r.reachable or not r.key for r in results)
