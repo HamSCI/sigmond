@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..coordination import (
-    Host, Station, load_coordination, render_env, write_host_identity,
+    Heartbeat, Host, Station, load_coordination, render_env, write_host_identity,
 )
 from ..paths import COORDINATION_ENV, COORDINATION_PATH
 from ..site_profile import (
@@ -680,14 +680,37 @@ def cmd_config_render(args) -> int:
         pskreporter_call=profile.effective_pskreporter_call,
     )
 
+    # [heartbeat] (sigmond#task-8) — copied through field-for-field ONLY
+    # when site-profile.toml actually declares the block (heartbeat_declared);
+    # an untouched profile must never seed coordination.toml with a block
+    # nobody asked for. Keys are FIXED (shared with the manifest-rendering
+    # consumer of host/port/sftp_user/remote_path); station defaults to the
+    # same reporter identity coordination [station] already uses.
+    heartbeat = None
+    if profile.heartbeat_declared:
+        heartbeat = Heartbeat(
+            enabled=profile.heartbeat_enabled,
+            station=profile.effective_heartbeat_station,
+            host=profile.heartbeat_host,
+            port=profile.heartbeat_port,
+            sftp_user=profile.heartbeat_sftp_user,
+            remote_path=profile.heartbeat_remote_path,
+            interval_sec=profile.heartbeat_interval_sec,
+        )
+
     if getattr(args, 'dry_run', False):
         coord = load_coordination(COORDINATION_PATH)
         coord.host = Host(call=profile.call, grid=profile.grid,
                           lat=profile.lat, lon=profile.lon)
         coord.station = station
+        if heartbeat is not None:
+            coord.heartbeat = heartbeat
         heading('config render (dry-run)')
         info(f'source: {SITE_PROFILE_PATH}')
         print(render_env(coord), end='')
+        if heartbeat is not None:
+            info(f'[heartbeat] would be written: enabled={heartbeat.enabled} '
+                 f'station={heartbeat.station!r}')
         return 0
 
     try:
@@ -695,10 +718,13 @@ def cmd_config_render(args) -> int:
                             lat=profile.lat, lon=profile.lon,
                             path=COORDINATION_PATH)
         _patch_station_block(COORDINATION_PATH, station)
+        if heartbeat is not None:
+            _patch_heartbeat_block(COORDINATION_PATH, heartbeat)
     except PermissionError:
         err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
         return 1
-    ok(f'updated {COORDINATION_PATH} ([host] + [station]) from {SITE_PROFILE_PATH.name}')
+    blocks = '[host] + [station]' + (' + [heartbeat]' if heartbeat is not None else '')
+    ok(f'updated {COORDINATION_PATH} ({blocks}) from {SITE_PROFILE_PATH.name}')
 
     coord = load_coordination(COORDINATION_PATH)
     try:
@@ -831,6 +857,55 @@ def _patch_station_block(path: Path, station: Station) -> None:
     for line in lines:
         s = line.strip()
         if s == '[station]':
+            in_block = True
+            found = True
+            out.extend(body)
+            continue
+        if in_block:
+            if s.startswith('['):
+                in_block = False
+                out.append(line)
+            continue
+        out.append(line)
+    if not found:
+        if out and out[-1].strip():
+            out.append('')
+        out.extend(body)
+    path.write_text('\n'.join(out).rstrip() + '\n')
+
+
+def _patch_heartbeat_block(path: Path, hb: Heartbeat) -> None:
+    """Rewrite the [heartbeat] block of coordination.toml in place; other
+    blocks (including [host]/[station]) are preserved verbatim. Mirrors
+    _patch_station_block. Only called when site-profile.toml declares a
+    [heartbeat] block at all -- see cmd_config_render's heartbeat_declared
+    gate -- so every FIXED key (sigmond#task-8-brief.md) is always written
+    together rather than merged field-by-field."""
+    body = ['[heartbeat]', f'enabled = {"true" if hb.enabled else "false"}']
+    if hb.station:
+        body.append(f'station = "{hb.station}"')
+    if hb.host:
+        body.append(f'host = "{hb.host}"')
+    body.append(f'port = {hb.port}')
+    if hb.sftp_user:
+        body.append(f'sftp_user = "{hb.sftp_user}"')
+    if hb.remote_path:
+        body.append(f'remote_path = "{hb.remote_path}"')
+    body.append(f'interval_sec = {hb.interval_sec}')
+    body.append('')
+
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('\n'.join(body) + '\n')
+        return
+
+    lines = path.read_text().splitlines()
+    out: list = []
+    in_block = False
+    found = False
+    for line in lines:
+        s = line.strip()
+        if s == '[heartbeat]':
             in_block = True
             found = True
             out.extend(body)

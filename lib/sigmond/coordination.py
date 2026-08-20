@@ -81,6 +81,26 @@ class Radiod:
 
 
 @dataclass
+class Heartbeat:
+    """``[heartbeat]`` — fleet situational-awareness heartbeat config
+    (sigmond#task-8, PRODUCER-THREAT-MODEL.md).  Keys are FIXED, shared
+    with the manifest-rendering side that turns ``host``/``port``/
+    ``sftp_user``/``remote_path`` into an actual sftp delivery pipeline;
+    ``sigmond.heartbeat.assemble`` itself only consumes ``station`` and
+    ``interval_sec`` (``enabled`` gates whether ``smd admin heartbeat
+    emit`` runs at all). Absent ``[heartbeat]`` parses to every default
+    below, i.e. disabled — greenfield hosts never emit until an operator
+    opts in."""
+    enabled:      bool = False
+    station:      str  = ""
+    host:         str  = ""
+    port:         int  = 22
+    sftp_user:    str  = "hamsci-hb"
+    remote_path:  str  = "incoming"
+    interval_sec: int  = 300
+
+
+@dataclass
 class Cpu:
     suite_cores:           str = ""
     worker_cores:          str = ""
@@ -151,6 +171,7 @@ class Coordination:
     disk_budget: DiskBudget        = field(default_factory=DiskBudget)
     timing_authority: TimingAuthority = field(default_factory=TimingAuthority)
     per_radiod_timing_authority: dict = field(default_factory=dict)  # radiod_id -> TimingAuthority
+    heartbeat: Heartbeat            = field(default_factory=Heartbeat)
     source_path: Optional[Path]    = None
 
     def instances_of(self, client_type: str) -> list:
@@ -265,6 +286,17 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
             tier_min=str(entry.get('tier_min', '') or ''),
         )
 
+    hb_raw = raw.get('heartbeat', {}) or {}
+    heartbeat = Heartbeat(
+        enabled=bool(hb_raw.get('enabled', False)),
+        station=str(hb_raw.get('station', '') or ''),
+        host=str(hb_raw.get('host', '') or ''),
+        port=int(hb_raw.get('port', 22) or 22),
+        sftp_user=str(hb_raw.get('sftp_user', '') or '') or 'hamsci-hb',
+        remote_path=str(hb_raw.get('remote_path', '') or '') or 'incoming',
+        interval_sec=int(hb_raw.get('interval_sec', 300) or 300),
+    )
+
     return Coordination(
         host=host,
         station=station,
@@ -274,6 +306,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         disk_budget=disk,
         timing_authority=station_wide,
         per_radiod_timing_authority=per_radiod,
+        heartbeat=heartbeat,
         source_path=source_path,
     )
 

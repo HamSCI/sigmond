@@ -70,6 +70,17 @@ gnss_vtec_host = ""
 [secrets]
 # Declared so `smd admin validate` knows which delivered secrets to expect.
 require = []                       # e.g. ["earthdata", "rac"]
+
+# [heartbeat]                      # fleet situational-awareness heartbeat (optional)
+# enabled       = false            # opt in explicitly — false until you flip this
+# station       = ""               # blank defaults to [reporters].reporter_id
+# host          = "wd30.wsprdaemon.org"
+# port          = 38222            # operator's router-forward to the fleet server;
+#                                   # public/self-hosted installs point this at
+#                                   # wherever they run their own fleetboard
+# sftp_user     = "hamsci-hb"
+# remote_path   = "incoming"
+# interval_sec  = 300
 """
 
 
@@ -96,6 +107,19 @@ class SiteProfile:
     timing: str = ""
     gnss_vtec_host: str = ""
     secrets_require: list = field(default_factory=list)
+    # [heartbeat] — sigmond#task-8.  heartbeat_declared distinguishes "the
+    # operator opened the block" from "every field happens to be default":
+    # `smd config render` only writes coordination.toml's [heartbeat]
+    # when this is True, so an untouched profile never seeds a block a
+    # future edit would then have to notice and remove.
+    heartbeat_declared:     bool = False
+    heartbeat_enabled:      bool = False
+    heartbeat_station:      str = ""
+    heartbeat_host:         str = ""
+    heartbeat_port:         int = 22
+    heartbeat_sftp_user:    str = "hamsci-hb"
+    heartbeat_remote_path:  str = "incoming"
+    heartbeat_interval_sec: int = 300
     source_path: Optional[Path] = None
 
     @property
@@ -109,6 +133,14 @@ class SiteProfile:
     @property
     def effective_reporter_id(self) -> str:
         return self.reporter_id or self.call
+
+    @property
+    def effective_heartbeat_station(self) -> str:
+        """The station identifier the heartbeat attributes to on the
+        fleetboard.  An explicit [heartbeat].station wins; blank falls
+        back to the same reporter identity coordination [station] already
+        uses (write_tick sanitizes any '/' at write time)."""
+        return self.heartbeat_station or self.effective_reporter_id
 
     def instrument_for(self, recorder: str) -> str:
         """Per-recorder PSWS instrument/device id.
@@ -157,6 +189,7 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
     host = data.get("host", {}) or {}
     hw = data.get("hardware", {}) or {}
     sec = data.get("secrets", {}) or {}
+    hb = data.get("heartbeat", {}) or {}
 
     def _clean(s) -> str:
         s = str(s or "").strip()
@@ -193,5 +226,13 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
         timing=_clean(hw.get("timing")),
         gnss_vtec_host=_clean(hw.get("gnss_vtec_host")),
         secrets_require=list(sec.get("require", []) or []),
+        heartbeat_declared="heartbeat" in data,
+        heartbeat_enabled=bool(hb.get("enabled", False)),
+        heartbeat_station=_clean(hb.get("station")),
+        heartbeat_host=_clean(hb.get("host")),
+        heartbeat_port=int(hb.get("port", 22) or 22),
+        heartbeat_sftp_user=_clean(hb.get("sftp_user")) or "hamsci-hb",
+        heartbeat_remote_path=_clean(hb.get("remote_path")) or "incoming",
+        heartbeat_interval_sec=int(hb.get("interval_sec", 300) or 300),
         source_path=path,
     )

@@ -6,7 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sigmond.site_profile import TEMPLATE, load_site_profile
-from sigmond.commands.config import plan_psws_updates
+from sigmond.commands.config import plan_psws_updates, _patch_heartbeat_block
+from sigmond.coordination import Heartbeat, load_coordination
 
 
 def _write_profile(td: str, body: str) -> Path:
@@ -98,6 +99,109 @@ instrument_id = "172"
 "hf-timestd" = "367"
 """))
         self.assertEqual(sp.instrument_for("hf-timestd"), "367")
+
+    def test_template_heartbeat_is_undeclared(self):
+        """The TEMPLATE's [heartbeat] block is fully commented out (no
+        live [heartbeat] table at all) — an operator must uncomment it to
+        opt in, so a freshly-scaffolded profile declares nothing."""
+        with TemporaryDirectory() as td:
+            sp = load_site_profile(_write_profile(td, TEMPLATE))
+        self.assertFalse(sp.heartbeat_declared)
+
+    def test_heartbeat_block_parses(self):
+        with TemporaryDirectory() as td:
+            sp = load_site_profile(_write_profile(td, """\
+[station]
+callsign = "AC0G"
+
+[heartbeat]
+enabled      = true
+station      = "AC0G-B4"
+host         = "wd30.wsprdaemon.org"
+port         = 38222
+sftp_user    = "hamsci-hb"
+remote_path  = "incoming"
+interval_sec = 300
+"""))
+        self.assertTrue(sp.heartbeat_declared)
+        self.assertTrue(sp.heartbeat_enabled)
+        self.assertEqual(sp.heartbeat_station, "AC0G-B4")
+        self.assertEqual(sp.heartbeat_host, "wd30.wsprdaemon.org")
+        self.assertEqual(sp.heartbeat_port, 38222)
+        self.assertEqual(sp.heartbeat_sftp_user, "hamsci-hb")
+        self.assertEqual(sp.heartbeat_remote_path, "incoming")
+        self.assertEqual(sp.heartbeat_interval_sec, 300)
+
+    def test_heartbeat_block_absent_is_not_declared(self):
+        with TemporaryDirectory() as td:
+            sp = load_site_profile(_write_profile(td, """\
+[station]
+callsign = "AC0G"
+"""))
+        self.assertFalse(sp.heartbeat_declared)
+        self.assertFalse(sp.heartbeat_enabled)
+        self.assertEqual(sp.heartbeat_port, 22)
+        self.assertEqual(sp.heartbeat_sftp_user, "hamsci-hb")
+        self.assertEqual(sp.heartbeat_remote_path, "incoming")
+        self.assertEqual(sp.heartbeat_interval_sec, 300)
+
+    def test_heartbeat_station_defaults_to_effective_reporter_id_when_blank(self):
+        with TemporaryDirectory() as td:
+            sp = load_site_profile(_write_profile(td, """\
+[station]
+callsign = "AC0G"
+
+[reporters]
+reporter_id = "AC0G/B4"
+
+[heartbeat]
+enabled = true
+"""))
+        self.assertEqual(sp.heartbeat_station, "")   # raw field IS blank
+        self.assertEqual(sp.effective_heartbeat_station, "AC0G/B4")
+
+
+class TestPatchHeartbeatBlock(unittest.TestCase):
+    """`_patch_heartbeat_block` — the coordination.toml [heartbeat] writer
+    `smd config render` calls when site-profile.toml declares one. Mirrors
+    _patch_station_block: rewrite the block in place, preserve everything
+    else verbatim, copy the fixed keys through field-for-field."""
+
+    def _tmp(self, text=""):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "coordination.toml"
+        if text:
+            p.write_text(text)
+        return p
+
+    def test_writes_all_fields_on_empty_file(self):
+        p = self._tmp()
+        hb = Heartbeat(enabled=True, station="AC0G-B4",
+                       host="wd30.wsprdaemon.org", port=38222,
+                       sftp_user="hamsci-hb", remote_path="incoming",
+                       interval_sec=300)
+        _patch_heartbeat_block(p, hb)
+        coord = load_coordination(p)
+        self.assertTrue(coord.heartbeat.enabled)
+        self.assertEqual(coord.heartbeat.station, "AC0G-B4")
+        self.assertEqual(coord.heartbeat.host, "wd30.wsprdaemon.org")
+        self.assertEqual(coord.heartbeat.port, 38222)
+        self.assertEqual(coord.heartbeat.interval_sec, 300)
+
+    def test_preserves_other_blocks(self):
+        p = self._tmp('[host]\ncall = "AC0G"\ngrid = "EM38ww"\n')
+        _patch_heartbeat_block(p, Heartbeat(enabled=True, station="AC0G-B4"))
+        coord = load_coordination(p)
+        self.assertEqual(coord.host.call, "AC0G")
+        self.assertTrue(coord.heartbeat.enabled)
+
+    def test_replaces_existing_heartbeat_block_wholesale(self):
+        p = self._tmp('[heartbeat]\nenabled = false\nstation = "OLD"\n')
+        _patch_heartbeat_block(p, Heartbeat(enabled=True, station="NEW"))
+        coord = load_coordination(p)
+        self.assertTrue(coord.heartbeat.enabled)
+        self.assertEqual(coord.heartbeat.station, "NEW")
 
 
 class _FakeState:

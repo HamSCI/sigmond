@@ -1,0 +1,20 @@
+# /etc/systemd/system/sigmond-heartbeat.timer
+[Unit]
+Description=Fleet situational-awareness heartbeat cadence
+Documentation=https://github.com/HamSCI/sigmond
+
+[Timer]
+OnCalendar=*:0/5
+RandomizedDelaySec=30
+# Persistent=false is DELIBERATE, same reasoning as sigmond-gap-hourly.timer
+# but sharper here: the central board derives "is this station alive"
+# SOLELY from heartbeat ARRIVAL times (never from anything inside one — see
+# heartbeat_schema.py's module docstring), so a missed tick must look
+# missed. Persistent=true would let a host that was down or suspended
+# through a tick fire late on resume, backfilling an arrival the board
+# would read as "still up the whole time" — hiding exactly the outage this
+# feature exists to surface. Leave it false.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

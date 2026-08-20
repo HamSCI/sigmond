@@ -711,6 +711,22 @@ done
 unset _unit
 ok "sigmond systemd units installed"
 
+# tmpfiles.d entries.  sigmond has exactly one today: the heartbeat spool
+# needs group hsupload + setgid (2775) so hs-uploader, running as its own
+# user, can unlink acked ticks that `smd admin heartbeat emit` (root) wrote.
+# A plain `install -d` here (like the /var/lib/sigmond dir below) would fail
+# once and stay wrong if hs-uploader's own install.sh -- which creates the
+# hsupload user/group -- hasn't run yet; systemd-tmpfiles re-applies this
+# every boot, so the ownership self-heals in whichever order the two
+# installs actually happen.
+if [[ -f "$REPO_DIR/systemd/sigmond-heartbeat.conf" ]]; then
+    info "Installing sigmond-heartbeat.conf → /etc/tmpfiles.d/"
+    $SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-heartbeat.conf" /etc/tmpfiles.d/
+    $SUDO systemd-tmpfiles --create /etc/tmpfiles.d/sigmond-heartbeat.conf 2>/dev/null \
+        || warn "sigmond-heartbeat.conf: could not create /var/lib/sigmond/heartbeat yet (hsupload group not present?) — self-heals next boot or once hs-uploader is installed"
+    ok "sigmond-heartbeat.conf installed"
+fi
+
 # Helper script invoked by sigmond-decode-health-collect.service.  Symlinked
 # from the repo (same pattern as bin/smd) so a `git pull` updates the script
 # without re-running install.sh.
@@ -764,6 +780,15 @@ $SUDO systemctl enable --now sigmond-storage-trim-all.timer
 # without hf-timestd, so it's safe to always enable (same reasoning as the
 # trim timer above re: greenfield-safe).
 $SUDO systemctl enable --now sigmond-gap-hourly.timer 2>/dev/null || true
+# sigmond-heartbeat.timer is INSTALLED above (it matched the sigmond-*.timer
+# glob) but deliberately NOT enabled here — this is the one asymmetry with
+# every other timer in this block.  Unlike gap-hourly/storage-trim, `smd
+# admin heartbeat emit` has no ConditionPathExists to stay inert on an
+# unconfigured host: it exits 2 every run until [heartbeat] is set in
+# coordination.toml, so enabling it here would tick a failed-unit exit-2
+# error every 5 minutes on every fresh install.  Enabling it is a per-host
+# Phase-6 step, run once an operator has configured [heartbeat]:
+#   sudo systemctl enable --now sigmond-heartbeat.timer
 # Enable the timing SHM pre-create oneshot (idempotent; creates NTP0-3 at boot
 # before gpsd/chrony/hf-timestd).  Only meaningful on a host running radiod +
 # a local GPS, but harmless otherwise.

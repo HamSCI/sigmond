@@ -1,0 +1,21 @@
+# /etc/systemd/system/sigmond-heartbeat.service
+[Unit]
+Description=Fleet situational-awareness heartbeat — one envelope to the spool
+Documentation=https://github.com/HamSCI/sigmond
+# No ConditionPathExists gate: `smd admin heartbeat emit` is self-gating on
+# [heartbeat].enabled in coordination.toml (exit 2, no write, no crash) —
+# see sigmond-heartbeat.timer for why the TIMER, not this unit, is what
+# stays un-enabled until an operator opts in.
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+# No Nice= (unlike sigmond-gap-hourly.service): the heartbeat's whole point
+# is a station saying "I am alive" on a tight cadence, so it must run
+# promptly rather than wait behind other background work.
+ExecStart=/usr/local/bin/smd admin heartbeat emit
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-heartbeat

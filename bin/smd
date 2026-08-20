@@ -166,6 +166,11 @@ SIGMOND_LOG     = Path('/var/log/sigmond')
 # stamp). `smd doctor` reads it to detect drift; absent on any host
 # installed before this existed.
 MANIFEST_PATH   = Path('/etc/sigmond-appliance/manifest.txt')
+# Fleet situational-awareness heartbeat spool (sigmond#task-7/8).  A
+# module-level constant (not a hardcoded literal in the cmd_ functions
+# below) so tests can redirect it the same way ManifestAdoptCliDryRunTests
+# redirects MANIFEST_PATH — no real /var access from the test suite.
+HEARTBEAT_SPOOL_DIR = Path('/var/lib/sigmond/heartbeat')
 
 # ---------------------------------------------------------------------------
 # Banner
@@ -3739,6 +3744,145 @@ def cmd_manifest_adopt(args) -> int:
         return 1
 
     _ok(f'wrote {MANIFEST_PATH} — 0 drift confirmed')
+    return 0
+
+
+def cmd_admin_heartbeat_emit(args) -> int:
+    """`smd admin heartbeat emit [--dry-run]` — assemble one fleet
+    situational-awareness heartbeat and write it to the spool
+    (sigmond#task-8; sigmond.heartbeat.assemble is sigmond#task-7).
+
+    Reads `[heartbeat]` from coordination.toml via the existing
+    coordination loader (never re-parses TOML ad hoc). `enabled=false`
+    or an absent block is a quiet exit 2 (this is the state of every
+    host until an operator opts in — the systemd timer that calls this
+    is installed everywhere but never auto-enabled, see
+    systemd/sigmond-heartbeat.timer); a blank `station` is a louder
+    exit 2 (a configured-but-unattributable heartbeat is a config bug,
+    not a normal unconfigured state).
+
+    `--dry-run` prints ONLY the assembled JSON to stdout (any warning
+    goes to stderr) and never calls write_tick — a script may pipe this
+    straight to `json.loads`/`jq`. The default path validates the
+    envelope before writing (never spool an envelope that would fail
+    its own schema check — the exact silence this feature exists to
+    remove) and prints the written path plus the rollup verdict line.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('admin heartbeat emit: sigmond library not importable')
+        return 1
+
+    import json
+    from datetime import datetime, timezone
+    from sigmond.heartbeat import assemble, default_readers, read_uptime, write_tick
+    from sigmond.heartbeat_schema import validate
+    from sigmond.uploader_manifest import reporter_call
+
+    coord = load_coordination()
+    hb = coord.heartbeat
+    if not hb.enabled:
+        print('heartbeat: not enabled ([heartbeat] in coordination.toml)')
+        return 2
+
+    station = (hb.station or '').strip()
+    if not station:
+        _err('admin heartbeat emit: [heartbeat] station is required in '
+             'coordination.toml (an unattributable heartbeat is worse than none)')
+        return 2
+
+    # Callsign/grid reuse the SAME identity lookups smd already uses for
+    # reporter identity elsewhere (sigmond.uploader_manifest, the
+    # hs-uploader manifest renderer) rather than re-deriving it here.
+    try:
+        callsign = reporter_call(coord)
+    except Exception:
+        callsign = coord.host.call or None
+
+    config = {
+        'station': station,
+        'callsign': callsign,
+        'grid': coord.host.grid or None,
+        'interval_sec': hb.interval_sec,
+    }
+
+    readers = default_readers(doctor_reader=lambda: collect_findings(strict=False))
+    envelope = assemble(datetime.now(timezone.utc), config, readers,
+                        uptime_s=read_uptime())
+
+    errs = validate(envelope)
+    if errs:
+        # Self-check: never write a tick that fails its own schema —
+        # this branch should be unreachable given assemble()'s own
+        # guarantees (task-7's fix report), but a server-side silent
+        # drop is exactly the failure mode this feature exists to
+        # remove, so it stays a loud, non-writing failure regardless.
+        for e in errs:
+            _err(f'admin heartbeat emit: {e}')
+        return 1
+
+    if bool(getattr(args, 'dry_run', False)):
+        print(json.dumps(envelope, indent=2))
+        return 0
+
+    try:
+        path = write_tick(envelope, spool_dir=str(HEARTBEAT_SPOOL_DIR))
+    except OSError as exc:
+        _err(f'admin heartbeat emit: could not write to {HEARTBEAT_SPOOL_DIR}: {exc}')
+        return 1
+    rollup = envelope['rollup']
+    _ok(f'wrote {path}')
+    _info(f"rollup: {rollup['verdict']} — {rollup['reason']}")
+    return 0
+
+
+def cmd_admin_heartbeat_show(args) -> int:
+    """`smd admin heartbeat show [--json]` — pretty-print the newest
+    spooled heartbeat tick (rollup + per-block verdict/reason table).
+
+    Read-only; never touches coordination.toml. `--json` prints the
+    raw envelope instead of the table.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('admin heartbeat show: sigmond library not importable')
+        return 1
+
+    import json
+    from sigmond.heartbeat_schema import BLOCK_NAMES
+
+    spool = Path(HEARTBEAT_SPOOL_DIR)
+    ticks = sorted(spool.glob('*.json')) if spool.is_dir() else []
+    if not ticks:
+        _err(f'admin heartbeat show: no heartbeat ticks in {spool}')
+        return 1
+
+    newest = max(ticks, key=lambda p: p.stat().st_mtime)
+    try:
+        envelope = json.loads(newest.read_text())
+    except (OSError, ValueError) as exc:
+        _err(f'admin heartbeat show: cannot read {newest}: {exc}')
+        return 1
+
+    if bool(getattr(args, 'json', False)):
+        print(json.dumps(envelope, indent=2))
+        return 0
+
+    rollup = envelope.get('rollup') or {}
+    _heading(f'heartbeat — {newest.name}')
+    _info(f"station:  {envelope.get('station')}")
+    _info(f"callsign: {envelope.get('callsign')}   grid: {envelope.get('grid')}")
+    _info(f"emitted:  {envelope.get('emitted_at')}   "
+          f"interval: {envelope.get('interval_sec')}s   "
+          f"uptime: {envelope.get('uptime_s')}s")
+    print()
+    _info(f"rollup: {rollup.get('verdict')} — {rollup.get('reason')}")
+    print()
+    blocks = envelope.get('blocks') or {}
+    for name in BLOCK_NAMES:
+        block = blocks.get(name)
+        if not isinstance(block, dict):
+            print(f'  {name:<10} MISSING')
+            continue
+        print(f"  {name:<10} {block.get('verdict', '?'):<14} {block.get('reason', '')}")
     return 0
 
 
@@ -18115,6 +18259,24 @@ def main() -> int:
              'only, never writes.')
     p_m_adopt.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
 
+    p_heartbeat = admin_sub.add_parser(
+        'heartbeat',
+        help='fleet situational-awareness heartbeat — assemble + spool one '
+             'envelope for the central board (sigmond#task-7/8)')
+    heartbeat_sub = p_heartbeat.add_subparsers(dest='heartbeat_command')
+    heartbeat_sub.add_parser('help', help='show this help')
+    p_hb_emit = heartbeat_sub.add_parser(
+        'emit',
+        help='assemble one heartbeat and write it to the spool; exit 2 if '
+             '[heartbeat] is absent/disabled or station is unset')
+    p_hb_emit.add_argument('--dry-run', dest='dry_run', action='store_true',
+        help='print the assembled envelope as JSON on stdout only (no write)')
+    p_hb_show = heartbeat_sub.add_parser(
+        'show',
+        help='pretty-print the newest spooled heartbeat tick')
+    p_hb_show.add_argument('--json', dest='json', action='store_true',
+        help='print the raw envelope instead of the verdict table')
+
     p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
     p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
@@ -18888,6 +19050,18 @@ def main() -> int:
         if m_cmd == 'adopt':
             return cmd_manifest_adopt(args)
         p_manifest.print_help()
+        return 0
+
+    if args.command == 'heartbeat':
+        hb_cmd = getattr(args, 'heartbeat_command', None)
+        if hb_cmd in (None, 'help'):
+            p_heartbeat.print_help()
+            return 0
+        if hb_cmd == 'emit':
+            return cmd_admin_heartbeat_emit(args)
+        if hb_cmd == 'show':
+            return cmd_admin_heartbeat_show(args)
+        p_heartbeat.print_help()
         return 0
 
     if args.command == 'personalize':

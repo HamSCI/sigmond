@@ -8,8 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
 
 from sigmond.coordination import (
-    Coordination, Radiod, TimingAuthority, load_coordination, parse_coordination,
-    render_env, write_host_identity, _env_key,
+    Coordination, Heartbeat, Radiod, TimingAuthority, load_coordination,
+    parse_coordination, render_env, write_host_identity, _env_key,
 )
 
 
@@ -449,6 +449,66 @@ class TestEffectiveStatusDns(unittest.TestCase):
     def test_empty_when_field_empty_and_id_not_a_dns(self):
         r = Radiod(id="sigma-rx888mk2")                # short id, no field
         self.assertEqual(r.effective_status_dns, "")
+
+
+class TestHeartbeatCoordination(unittest.TestCase):
+    """[heartbeat] — task-8's fleet situational-awareness config contract.
+    Keys are FIXED (task-8-brief.md): enabled, station, host, port,
+    sftp_user, remote_path, interval_sec."""
+
+    def test_dataclass_defaults(self):
+        hb = Heartbeat()
+        self.assertFalse(hb.enabled)
+        self.assertEqual(hb.station, "")
+        self.assertEqual(hb.host, "")
+        self.assertEqual(hb.port, 22)
+        self.assertEqual(hb.sftp_user, "hamsci-hb")
+        self.assertEqual(hb.remote_path, "incoming")
+        self.assertEqual(hb.interval_sec, 300)
+
+    def test_coordination_default_heartbeat_is_disabled(self):
+        coord = Coordination()
+        self.assertIsInstance(coord.heartbeat, Heartbeat)
+        self.assertFalse(coord.heartbeat.enabled)
+
+    def test_parse_absent_block_is_defaults(self):
+        coord = parse_coordination({})
+        self.assertFalse(coord.heartbeat.enabled)
+        self.assertEqual(coord.heartbeat.port, 22)
+
+    def test_parse_full_block(self):
+        toml = """\
+[heartbeat]
+enabled       = true
+station       = "DASI-003"
+host          = "wd30.wsprdaemon.org"
+port          = 38222
+sftp_user     = "hamsci-hb"
+remote_path   = "incoming"
+interval_sec  = 300
+"""
+        import tomllib
+        coord = parse_coordination(tomllib.loads(toml))
+        hb = coord.heartbeat
+        self.assertTrue(hb.enabled)
+        self.assertEqual(hb.station, "DASI-003")
+        self.assertEqual(hb.host, "wd30.wsprdaemon.org")
+        self.assertEqual(hb.port, 38222)
+        self.assertEqual(hb.sftp_user, "hamsci-hb")
+        self.assertEqual(hb.remote_path, "incoming")
+        self.assertEqual(hb.interval_sec, 300)
+
+    def test_parse_partial_block_falls_back_to_defaults(self):
+        toml = '[heartbeat]\nenabled = true\nstation = "AC0G-B4"\n'
+        import tomllib
+        coord = parse_coordination(tomllib.loads(toml))
+        hb = coord.heartbeat
+        self.assertTrue(hb.enabled)
+        self.assertEqual(hb.station, "AC0G-B4")
+        self.assertEqual(hb.port, 22)
+        self.assertEqual(hb.sftp_user, "hamsci-hb")
+        self.assertEqual(hb.remote_path, "incoming")
+        self.assertEqual(hb.interval_sec, 300)
 
 
 if __name__ == "__main__":
