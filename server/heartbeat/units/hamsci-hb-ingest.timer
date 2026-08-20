@@ -1,0 +1,21 @@
+# /etc/systemd/system/hamsci-hb-ingest.timer
+[Unit]
+Description=Heartbeat ingest cadence (every minute)
+Documentation=https://github.com/HamSCI/sigmond
+
+[Timer]
+# Every minute, at :30 — deliberately offset from the stations' own
+# :00-aligned emit cadence so a tick is normally already sitting in the
+# drop when this fires, instead of racing the upload that produced it.
+OnCalendar=*:*:30
+AccuracySec=5s
+# Persistent=false, same reasoning as the station-side timer: ingest has
+# nothing to catch up on. The board derives availability from ARRIVAL
+# times, so a run missed while the server was down must stay missed —
+# nothing in the drop becomes less true by being read a minute late, and
+# a burst of catch-up runs after a reboot would only re-read what the
+# next ordinary tick reads anyway.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

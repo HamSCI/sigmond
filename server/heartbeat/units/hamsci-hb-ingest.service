@@ -1,0 +1,25 @@
+# /etc/systemd/system/hamsci-hb-ingest.service
+# Installed on the CENTRAL BOARD (wd30) by setup-wd30.sh — this is not a
+# sigmond host and carries no sigmond install.
+[Unit]
+Description=Ingest station heartbeats from the SFTP drop into sqlite
+Documentation=https://github.com/HamSCI/sigmond
+
+[Service]
+Type=oneshot
+# Runs as the operator account that owns /var/lib/hamsci-fleetboard and is
+# a member of the drop's group — NEVER as root: this process parses files
+# written by remote stations, and the SFTP user it reads from is chrooted
+# and nologin precisely so that nothing privileged touches that content.
+User=wsprdaemon
+ExecStart=/usr/bin/python3 /opt/hamsci-fleetboard/ingest.py
+
+# The drop is the only thing it needs to mutate besides its own database.
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hamsci-hb-ingest

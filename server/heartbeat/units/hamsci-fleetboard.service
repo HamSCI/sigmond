@@ -1,0 +1,33 @@
+# /etc/systemd/system/hamsci-fleetboard.service
+[Unit]
+Description=HamSCI fleet board — availability derived from heartbeat arrivals
+Documentation=https://github.com/HamSCI/sigmond
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wsprdaemon
+# --bind names an address ON PURPOSE. The board reports which stations are
+# down and what their versions are; that is reconnaissance for anyone who
+# can reach it, so it binds the LAN/WireGuard address the operator chose
+# and never a wildcard. Edit the address here to match this host.
+ExecStart=/usr/bin/python3 /opt/hamsci-fleetboard/fleetboard.py \
+    --bind 192.168.1.164 \
+    --port 8090 \
+    --db /var/lib/hamsci-fleetboard/heartbeats.db \
+    --roster /opt/hamsci-fleetboard/roster.json
+Restart=on-failure
+RestartSec=5s
+
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hamsci-fleetboard
+
+[Install]
+WantedBy=multi-user.target
