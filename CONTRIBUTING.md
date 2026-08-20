@@ -83,6 +83,20 @@ false. DASI002 read `v3.20` while running v3.31-era components.
 
 Never prefix `smd` with `sudo`; it elevates itself.
 
+**Rolling more than one host.** `smd fleet status|doctor|roster|pubkeys`
+fan out read-only over ssh (the command vocabulary is a whitelist a test
+enforces; `--apply` is structurally impossible through it). Mutating a
+host happens ON the host, through its root channel, one host at a time —
+**canary first** (`canary = true` in the fleet inventory; B4), verify,
+then the rest. Know your root channel before you need it:
+`smd update --apply` over a plain ssh session as a service user cannot
+self-elevate (no passwordless sudo — by design), and on a Proxmox-hosted
+station the working channel is `qm guest exec` from the hypervisor. That
+channel has its own failure mode: the guest agent can be healthy
+*inside* the guest while the host side of the virtio channel is wedged —
+`qm guest exec` says "not running", the guest's `systemctl status` says
+active. A guest-side `systemctl restart qemu-guest-agent` resyncs it.
+
 ## 4. Tests
 
 ```bash
@@ -112,6 +126,18 @@ side effect.
   unbuildable. `sync_types.py` now refuses to write such a pin.
 * A host may legitimately run a *superset* of the pin. Test containment,
   not equality.
+* The same principle now governs **blessed manifests**: blessed means
+  *contained baseline*, not frozen equality. A host whose live commit
+  provably CONTAINS the manifest commit (git ancestry, checked
+  fail-closed by `doctor.sha_contained` in the component's own checkout)
+  is a sanctioned superset — reported as such, in so many words, never
+  disguised as an exact match and never alarmed on. A host *behind* the
+  manifest, or on a commit ancestry can't prove, is real drift. This is
+  what lets a develop-on-main fleet keep a meaningful blessed baseline:
+  strict equality would alarm on every `git pull` and train everyone to
+  ignore the one check that matters. (It caught its first real defect
+  the day it shipped: a field unit 3 commits *behind* blessed, held back
+  by a churned `uv.lock`, missing an OOM fix.)
 
 ## 6. Cutting a release
 
@@ -148,6 +174,20 @@ symlink during a disk migration, and `tar` archived the link instead of
 its contents. Every install from that image would have booted with no
 sigmond payload. The gate refused to bless it.
 
+**The fourth rung — rolled — is real now.** Live hosts are never
+reimaged; after a bless they adopt the Release's manifest in place:
+
+```bash
+smd admin manifest adopt <manifest.txt>                    # dry-run plan
+smd admin manifest adopt <manifest.txt> --allow-superset --apply
+```
+
+The verb is fail-closed: it refuses unless every component matches the
+manifest exactly or (with `--allow-superset`) is an ancestry-verified
+sanctioned superset (§5), and it re-checks drift immediately after
+writing. v3.33 was the first release adopted fleet-wide — the first time
+any host could answer "am I what we blessed" with yes.
+
 ## 7. Shell and tooling traps
 
 None of these are sigmond-specific, and all of them have cost real time
@@ -173,7 +213,16 @@ on this project recently enough to write down.
   trusting `-daemonize` to escape.
 * **`pgrep -f <string>` matches the shell running it.** It has reported a
   VM as still running when it had already stopped. Match on something the
-  invoking shell can't contain, or use `ps -C <comm>`.
+  invoking shell can't contain, use the bracket trick (`pgrep -f
+  '[s]md update'`), or `ps -C <comm>`. It re-bit a completion watcher
+  the very week this line already existed — the trap survives knowing
+  about it.
+* **A pipeline's exit status is its LAST command's.** `some-command |
+  tail -3; echo rc=$?` reports `tail`'s success, always. This masked a
+  crashed fleet update once and a refused manifest adoption twice in a
+  single day — three "successes" that were failures. Capture output to a
+  file and echo the real `$?` before any filtering, or use
+  `set -o pipefail` where the shell allows it.
 * **`ProxyJump` does not inherit `-i`** — the jump is a separate ssh
   process — and each fleet host authorizes keys independently, so
   reaching the jump host does not imply reaching anything behind it. See
@@ -221,6 +270,10 @@ systemctl show UNIT -p ExecStart      # a drop-in may override it
   manifest it was installed from (`/etc/sigmond-appliance/manifest.txt`,
   the same manifest the image shipped with — see §6)? This lets a field
   unit answer "am I what my image says I am" with no network access.
+  Ancestry-verified sanctioned supersets (§5) are not findings — they
+  stay visible in `smd version`, the fleet status line, and the
+  heartbeat's manifest block, but an alarm that can never clear on a
+  sanctioned host is worse than none.
 * **exec mismatch** — is each running service's `/proc/PID/exe` actually
   the binary its deploy tree provides? It reads `ExecStart` from the
   *base* unit file, not the merged effective value, so a drop-in override
@@ -235,7 +288,58 @@ systemctl show UNIT -p ExecStart      # a drop-in may override it
 The manual commands above are still how you check by hand, and are what
 `smd doctor` runs under the hood.
 
-## 10. Using graphify
+## 10. Fleet situational awareness — the heartbeat and the board
+
+§9's principle, applied fleet-wide: in one four-day stretch this project
+found eight defects, every one silent while some metric reported
+success. The awareness system exists so that class of failure has
+somewhere it must show up. A contributor needs four things:
+
+**The shape.** Every station assembles a heartbeat envelope every 5
+minutes (`smd admin heartbeat emit`, `lib/sigmond/heartbeat.py`) from
+signals that cannot lie, ships it via hs-uploader's SFTP transport to a
+chrooted drop on the central server, where `server/heartbeat/` ingests
+it and renders one board. The roster of expected stations is
+`profile = "dasi2"` in the fleet inventory — never "whatever is on the
+VPN", never inferred from arrivals. Adding a station: one inventory
+block, `smd fleet pubkeys` + `authorize-stations.sh`, one `[heartbeat]`
+config stanza.
+
+**The honesty rules, which are load-bearing and test-enforced:**
+
+* The envelope is built ONLY from counters that move when the bad thing
+  happens (`docs/PRODUCER-THREAT-MODEL.md`). A test walks every
+  serialized envelope and refuses the known liars by name
+  (`completeness_pct`, `pending_uploads`, `seconds_detected`, …). Do
+  not fight that test; it is the design.
+* Every block carries a four-state verdict — VALID / INVALID /
+  INCONCLUSIVE / INDETERMINATE — and "nothing measured" can never
+  render healthy. If you add a field, it must be able to say "I don't
+  know" (null, a reason string), never a fabricated zero.
+* **Availability comes from arrival times at the server, never from
+  anything a station says about itself.** A station silent past 3
+  intervals goes red no matter how green its last self-report was —
+  that override is pinned by a mutation-verified test and was
+  drill-proven on the live fleet the day it deployed.
+
+**What it is not.** The board (`fleetboard`, LAN/WireGuard-side) is the
+entire administrative interface — a deliberate decision, twice
+affirmed. Nothing pages, mails, or pushes. The lesson behind it: a
+timing subsystem once alarmed ~5,000 times a day into a void for four
+days. **No alarm ships without a named owner and a written response
+action**, and so far no condition has both. Do not add notifications as
+a side effect of other work.
+
+**Deployment coupling.** The heartbeat rides the blessed image (the
+nested test asserts the CLI answers, and answers *correctly for an
+unconfigured host*: exit 2, "not enabled"). The timer is installed
+everywhere but enabled per host only after `[heartbeat]` is configured
+— an enabled timer on an unconfigured host would fail every 5 minutes,
+and the station name must equal the roster name exactly or the board
+shows the host as both "never heard" and "unexpected" (loudly, on
+purpose).
+
+## 11. Using graphify
 
 The suite has a cross-repo knowledge graph at
 `/root/appliance/repos/graphify-out/`, covering all the component repos.
@@ -263,7 +367,7 @@ The suite has a cross-repo knowledge graph at
     anything, do a clean rebuild or the graph keeps answering with code
     that no longer exists.
 
-## 11. Pull requests
+## 12. Pull requests
 
 * Branch from `main`, small and focused.
 * State what you observed, what you changed, and how you verified it.
@@ -273,7 +377,7 @@ The suite has a cross-repo knowledge graph at
   script, say so explicitly — those are the changes that reach every
   field unit at once.
 
-## 12. When something is wrong on a deployed unit
+## 13. When something is wrong on a deployed unit
 
 1. `smd doctor` on the unit — most problems name themselves.
 2. Reproduce on staging, not on the unit.
