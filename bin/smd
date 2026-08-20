@@ -3640,6 +3640,108 @@ def cmd_version(args) -> int:
     return 0
 
 
+def cmd_manifest_adopt(args) -> int:
+    """`smd admin manifest adopt <path> [--apply]` — let an already-running
+    host adopt a blessed manifest in place.
+
+    The blessed-manifest pipeline only installs
+    `/etc/sigmond-appliance/manifest.txt` on hosts IMAGED from a release
+    (firstboot-v3.sh). Live hosts (b4, dasi002, ...) are never reimaged,
+    so this is the fail-closed alternative: refuse unless the host's
+    live component SHAs already match `<path>` exactly.
+
+    `<path>` is a LOCAL file only — fetching the GitHub Release asset
+    that carries a blessed manifest stays the operator's job; this verb
+    grows smd no network dependency.
+
+    Dry-run (default, no `--apply`): read `<path>`, compute live
+    components the same way `smd version` does
+    (`sigmond.provenance.component_versions` over
+    `sigmond.doctor.component_checkouts`), print the plan (matches +
+    refusals), and exit 0 if the plan is ok, 1 if refused. NEVER writes.
+
+    `--apply`: only proceeds to write when the plan is ok. Self-elevates
+    like every other mutating verb (`_need_root`, sudo re-exec carrying
+    SIGMOND_ALLOW_SUDO=1 — never instructs the operator to `sudo smd`
+    themselves). Writes the manifest text VERBATIM to `MANIFEST_PATH`,
+    then immediately re-runs `sigmond.doctor.manifest_drift` against
+    what was just written and prints the result: non-empty drift here
+    should be impossible (we just proved live == manifest before
+    writing) and is treated as a loud failure (exit 1), not silently
+    accepted.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('admin manifest adopt: sigmond library not importable')
+        return 1
+
+    apply = getattr(args, 'apply', False)
+    # Elevate BEFORE doing any work: if we're not root and sudo can
+    # re-exec us, _need_root replaces this process entirely, and the
+    # planning below runs fresh in the elevated re-exec.  Dry-run never
+    # reaches this branch, so `smd admin manifest adopt <path>` (no
+    # --apply) never needs root.
+    if apply and _need_root('admin manifest adopt --apply'):
+        return 1
+
+    from pathlib import Path
+    from sigmond.doctor import component_checkouts, manifest_drift
+    from sigmond.provenance import component_versions
+    from sigmond.manifest_adopt import plan_adopt
+
+    manifest_path = Path(args.path)
+    try:
+        manifest_text = manifest_path.read_text()
+    except OSError as exc:
+        _err(f'admin manifest adopt: cannot read {manifest_path}: {exc}')
+        return 1
+
+    base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+    live = component_versions(component_checkouts(base))
+
+    plan = plan_adopt(manifest_text, live)
+
+    for m in plan.matches:
+        _ok(m)
+    for r in plan.refusals:
+        _err(r)
+
+    if not plan.ok:
+        print(f'admin manifest adopt: REFUSED — {len(plan.refusals)} '
+              f'component(s) diverge between {manifest_path} and live; '
+              f'not adopting {MANIFEST_PATH}', file=sys.stderr)
+        return 1
+
+    print(f'admin manifest adopt: plan OK — {len(plan.matches)} '
+          f'component(s) match live exactly')
+
+    if not apply:
+        print('admin manifest adopt: dry-run only (pass --apply to write '
+              f'{MANIFEST_PATH})')
+        return 0
+
+    try:
+        MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MANIFEST_PATH.write_text(manifest_text)
+    except OSError as exc:
+        _err(f'admin manifest adopt: failed to write {MANIFEST_PATH}: {exc}')
+        return 1
+
+    drift = manifest_drift(live, str(MANIFEST_PATH))
+    if drift:
+        _err(f'admin manifest adopt: wrote {MANIFEST_PATH} but drift is '
+             f'STILL detected immediately after ({len(drift)} '
+             f'component(s)) — this should be impossible since the plan '
+             f'was ok before writing; treat {MANIFEST_PATH} as untrusted '
+             f'and investigate before relying on it')
+        for d in drift:
+            _err(f'{d["component"]}: {d["status"]} '
+                 f'manifest={d["manifest"]} live={d["live"]}')
+        return 1
+
+    _ok(f'wrote {MANIFEST_PATH} — 0 drift confirmed')
+    return 0
+
+
 # Systemd's optional ExecStart= prefix modifiers (systemd.service(5)
 # "Command lines"): '-' ignore the command's exit status, '@' override
 # argv[0], ':' skip environment-variable substitution, '+'/'!'/'!!' run
@@ -17878,6 +17980,34 @@ def main() -> int:
     p_u_manifest.add_argument('--enable', action='store_true',
         help='write, then enable + (re)start hs-uploader.service')
 
+    p_manifest = admin_sub.add_parser(
+        'manifest',
+        help='blessed IMAGE manifest — adopt a release manifest onto '
+             'an already-running host (distinct from `admin uploader '
+             'manifest`, the hs-uploader pipeline manifest)')
+    manifest_sub = p_manifest.add_subparsers(dest='manifest_command')
+    manifest_sub.add_parser('help', help='show this help')
+    p_m_adopt = manifest_sub.add_parser(
+        'adopt',
+        help='adopt a blessed manifest in place — refuses unless live '
+             'component SHAs already match it exactly (fail-closed)',
+        description=(
+            'The blessed-manifest pipeline only installs '
+            '/etc/sigmond-appliance/manifest.txt on hosts IMAGED from a '
+            'release. Live hosts (b4, dasi002, ...) are never reimaged, '
+            'so this adopts one in place -- but only when it is provably '
+            'a no-op: every live component SHA must already match <path> '
+            'exactly, or the whole adopt is refused with the full '
+            'per-component diff. <path> is a LOCAL file only -- fetching '
+            'the GitHub Release asset stays the operator\'s job, this '
+            'verb adds smd no network dependency.'))
+    p_m_adopt.add_argument('path', help='local path to a candidate manifest file')
+    p_m_adopt.add_argument('--apply', action='store_true',
+        help='write the manifest to /etc/sigmond-appliance/manifest.txt '
+             '(root; only if the plan is ok). Default is dry-run: plan '
+             'only, never writes.')
+    p_m_adopt.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
+
     p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
     p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
@@ -18641,6 +18771,16 @@ def main() -> int:
                 return 1
             return cmd_uploader_manifest(args)
         p_uploader.print_help()
+        return 0
+
+    if args.command == 'manifest':
+        m_cmd = getattr(args, 'manifest_command', None)
+        if m_cmd in (None, 'help'):
+            p_manifest.print_help()
+            return 0
+        if m_cmd == 'adopt':
+            return cmd_manifest_adopt(args)
+        p_manifest.print_help()
         return 0
 
     if args.command == 'personalize':
