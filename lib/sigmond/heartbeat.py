@@ -63,6 +63,12 @@ BACKLOG_TIMEOUT_SEC = 20
 SIGMOND_BASE = "/opt/git/sigmond"
 MANIFEST_PATH = "/etc/sigmond-appliance/manifest.txt"
 
+# Config contract default.  assemble() substitutes it rather than
+# emitting an envelope that fails its own validate(): a heartbeat that
+# cannot be validated is dropped at the server, which is silence — the
+# exact failure mode this feature exists to remove.
+DEFAULT_INTERVAL_SEC = 300
+
 SPOOL_DIR = "/var/lib/sigmond/heartbeat"
 SPOOL_MAX_AGE_SEC = 24 * 3600
 
@@ -138,6 +144,10 @@ def assemble(now, config: dict, readers, uptime_s: Optional[float] = None) -> di
     if uptime_s is None:
         uptime_s = config.get("uptime_s")
 
+    interval_sec = config.get("interval_sec")
+    if interval_sec is None:
+        interval_sec = DEFAULT_INTERVAL_SEC
+
     return {
         "kind": KIND,
         "schema_version": SCHEMA_VERSION,
@@ -145,7 +155,7 @@ def assemble(now, config: dict, readers, uptime_s: Optional[float] = None) -> di
         "callsign": config.get("callsign"),
         "grid": grid,
         "emitted_at": emitted.strftime(_EMITTED_AT_FORMAT),
-        "interval_sec": config.get("interval_sec"),
+        "interval_sec": interval_sec,
         "uptime_s": uptime_s,
         "rollup": rollup(blocks),
         "blocks": blocks,
@@ -162,15 +172,42 @@ def rollup(blocks: dict) -> dict:
     present = [n for n in BLOCK_NAMES if isinstance(blocks.get(n), dict)]
     if not present:
         return {"verdict": "INDETERMINATE", "reason": "no blocks assembled"}
-    worst = max(PRECEDENCE.get(blocks[n].get("verdict"), 0) for n in present)
+    worst = max(_rank(blocks[n].get("verdict")) for n in present)
     for name in present:
-        if PRECEDENCE.get(blocks[name].get("verdict"), 0) == worst:
+        verdict = blocks[name].get("verdict")
+        if _rank(verdict) != worst:
+            continue
+        if verdict not in PRECEDENCE:
+            # An uninterpretable verdict is reported AS uninterpretable,
+            # not passed through: passing it through would put a value
+            # outside VERDICTS in the rollup and fail validate(), and
+            # dropping it would be worse still.
             return {
-                "verdict": blocks[name].get("verdict"),
-                "reason": f"{name}: {blocks[name].get('reason')}",
+                "verdict": "INDETERMINATE",
+                "reason": f"{name}: unknown verdict {verdict!r} — "
+                          f"{blocks[name].get('reason')}",
             }
+        return {
+            "verdict": verdict,
+            "reason": f"{name}: {blocks[name].get('reason')}",
+        }
     # unreachable: `worst` came from this same list
     return {"verdict": "INDETERMINATE", "reason": "no blocks assembled"}
+
+
+def _rank(verdict) -> int:
+    """Precedence of ``verdict``, FAILING CLOSED.
+
+    A verdict this schema does not know — a typo, a block from a newer
+    producer, a missing key — ranks as INDETERMINATE, never as VALID.
+    Ranking the unknown at 0 (the old default) meant a single misspelt
+    verdict could carry a whole station to a green rollup, which is the
+    defect class the heartbeat exists to catch, reintroduced inside the
+    heartbeat itself.  INDETERMINATE rather than INVALID because "I
+    cannot interpret this" is genuinely "could not assess", not
+    "measured and bad" — and it is still, correctly, not healthy.
+    """
+    return PRECEDENCE.get(verdict, PRECEDENCE["INDETERMINATE"])
 
 
 def _assemble_block(name: str, readers) -> dict:
@@ -291,11 +328,27 @@ def _map_timing(raw) -> dict:
         return _block(
             "INCONCLUSIVE",
             "standalone fallback — no adjudicated timing authority", data)
+    # hf-timestd really publishes a fully-formed authority.json with no
+    # adjudicated tier and no witnesses while the bootstrap coordinator
+    # has probing gated (authority_manager._build_bootstrap_pending_state:
+    # t_level_active None, t_level_witnesses [], sigma_ns None).  That is
+    # a live file, fresh, schema-v1, with empty disagreement_flags — it
+    # would sail straight through every check above and render VALID.
+    # It is measured but NOT conclusive: nothing is adjudicating time.
+    missing = []
+    if data["tier"] in (None, "T0"):
+        missing.append("no adjudicated tier")
+    if not data["t_level_witnesses"]:
+        missing.append("no witnesses")
+    if missing:
+        return _block("INCONCLUSIVE",
+                      f"authority present but {' and '.join(missing)}", data)
+
     sigma = data["sigma_ns"]
     sigma_txt = f"sigma {sigma} ns" if sigma is not None else "sigma unreported"
     return _block(
         "VALID",
-        f"{data['tier'] or 'no tier'} active, {sigma_txt}, "
+        f"{data['tier']} active, {sigma_txt}, "
         f"{len(data['t_level_witnesses'])} witness(es)",
         data)
 
@@ -317,6 +370,12 @@ def _map_gaps(raw) -> dict:
         return _block("INDETERMINATE",
                       "gap-hourly row age unknown (unparseable row timestamp)",
                       data)
+    if age < 0:
+        # A row stamped in the future means the sampler's clock and ours
+        # disagree; its age is not evidence of anything, and a negative
+        # age would sail through the freshness gate below.
+        return _block("INDETERMINATE",
+                      "gap row is future-stamped (clock step?)", data)
     if age > GAP_ROW_MAX_AGE_SEC:
         return _block(
             "INDETERMINATE",
@@ -396,6 +455,12 @@ def _map_doctor(raw) -> dict:
         return _block("INVALID",
                       f"{len(findings)} doctor finding(s): {', '.join(kinds)}",
                       data)
+    if clean is False:
+        # Contradictory input: not-clean is only ever set alongside at
+        # least one finding.  Fail toward caution rather than pick the
+        # half of the answer that reads healthy.
+        return _block("INDETERMINATE",
+                      "doctor reported not-clean but no findings", data)
     return _block("VALID", "deploy trees clean — no doctor findings", data)
 
 

@@ -895,3 +895,130 @@ def test_heartbeat_schema_imports_nothing_from_sigmond():
         stripped = line.strip()
         assert not stripped.startswith("import "), stripped
         assert not stripped.startswith("from "), stripped
+
+
+# ---------------------------------------------------------------------------
+# 10. Review fixes — states that used to render healthy and must not
+# ---------------------------------------------------------------------------
+
+# Mirrors authority_manager._build_bootstrap_pending_state(): a real,
+# fresh, schema-v1 authority.json published while the bootstrap
+# coordinator has probing gated.  No tier, no witnesses, no offset, and
+# — crucially — no disagreement flags, so every other check passes.
+BOOTSTRAP_PENDING = {
+    "source": "hf-timestd-authority",
+    "t_level_active": None,
+    "sigma_ns": None,
+    "t_level_witnesses": [],
+    "disagreement_flags": [],
+    "t6_authority_state": None,
+    "snapshot_age_s": 2.0,
+}
+
+
+def test_bootstrap_pending_authority_is_inconclusive_not_valid():
+    env = assemble(NOW, CONFIG, rich_readers(timing=lambda: BOOTSTRAP_PENDING))
+    block = env["blocks"]["timing"]
+    assert block["verdict"] == "INCONCLUSIVE"
+    assert block["reason"] == (
+        "authority present but no adjudicated tier and no witnesses")
+    assert env["rollup"]["verdict"] == "INCONCLUSIVE"
+
+
+def test_tier_t0_is_inconclusive_not_valid():
+    env = assemble(NOW, CONFIG, rich_readers(timing=lambda: dict(
+        BOOTSTRAP_PENDING, t_level_active="T0", t_level_witnesses=["T3"])))
+    block = env["blocks"]["timing"]
+    assert block["verdict"] == "INCONCLUSIVE"
+    assert block["reason"] == "authority present but no adjudicated tier"
+
+
+def test_tier_active_but_no_witnesses_is_inconclusive():
+    env = assemble(NOW, CONFIG, rich_readers(timing=lambda: dict(
+        BOOTSTRAP_PENDING, t_level_active="T2", sigma_ns=9000,
+        t_level_witnesses=[])))
+    block = env["blocks"]["timing"]
+    assert block["verdict"] == "INCONCLUSIVE"
+    assert block["reason"] == "authority present but no witnesses"
+    assert env["rollup"]["verdict"] != "VALID"
+
+
+def test_a_witnessed_tier_is_still_valid():
+    """The fix must not swallow the genuinely-good case."""
+    env = assemble(NOW, CONFIG, rich_readers())
+    assert env["blocks"]["timing"]["verdict"] == "VALID"
+    assert env["blocks"]["timing"]["reason"] == (
+        "T2 active, sigma 12000 ns, 2 witness(es)")
+
+
+@pytest.mark.parametrize("bad", ["VALIID", "ok", "", None, 0, "valid"])
+def test_unknown_verdict_never_rolls_up_valid(bad):
+    """Fail closed: a verdict this schema cannot interpret is not health."""
+    from sigmond.heartbeat import rollup as rollup_fn
+    blocks = _blocks_with()
+    blocks["timing"]["verdict"] = bad
+    out = rollup_fn(blocks)
+    assert out["verdict"] == "INDETERMINATE"
+    assert out["verdict"] in heartbeat_schema.VERDICTS
+    assert "unknown verdict" in out["reason"]
+    assert "timing" in out["reason"]
+
+
+def test_block_with_no_verdict_key_never_rolls_up_valid():
+    from sigmond.heartbeat import rollup as rollup_fn
+    blocks = _blocks_with()
+    blocks["gaps"].pop("verdict")
+    assert rollup_fn(blocks)["verdict"] == "INDETERMINATE"
+
+
+def test_unknown_verdict_loses_to_a_real_invalid():
+    from sigmond.heartbeat import rollup as rollup_fn
+    blocks = _blocks_with(doctor="INVALID")
+    blocks["timing"]["verdict"] = "VALIID"
+    out = rollup_fn(blocks)
+    assert out["verdict"] == "INVALID"
+    assert out["reason"].startswith("doctor: ")
+
+
+def test_interval_sec_defaults_so_the_envelope_always_validates():
+    config = {"station": "AC0G-B4", "callsign": "AC0G", "grid": "EM38ww"}
+    env = assemble(NOW, config, rich_readers())
+    assert env["interval_sec"] == 300
+    assert heartbeat_schema.validate(env) == []
+
+
+def test_explicit_interval_sec_is_preserved():
+    env = assemble(NOW, dict(CONFIG, interval_sec=60), rich_readers())
+    assert env["interval_sec"] == 60
+
+
+def test_doctor_not_clean_with_no_findings_is_indeterminate():
+    """Contradictory input fails toward caution, not toward healthy."""
+    env = assemble(NOW, CONFIG, rich_readers(doctor=lambda: (False, [])))
+    block = env["blocks"]["doctor"]
+    assert block["verdict"] == "INDETERMINATE"
+    assert block["reason"] == "doctor reported not-clean but no findings"
+    assert env["rollup"]["verdict"] != "VALID"
+
+
+def test_doctor_clean_true_with_no_findings_is_still_valid():
+    env = assemble(NOW, CONFIG, rich_readers(doctor=lambda: (True, [])))
+    assert env["blocks"]["doctor"]["verdict"] == "VALID"
+
+
+def test_future_stamped_gap_row_is_indeterminate():
+    env = assemble(NOW, CONFIG, rich_readers(gaps=lambda: {
+        "row_utc": "2026-08-20T15:00Z", "gaps": 0, "channel_hours": 6.0,
+        "rate": 0.0, "row_age_s": -3300.0}))
+    block = env["blocks"]["gaps"]
+    assert block["verdict"] == "INDETERMINATE"
+    assert block["reason"] == "gap row is future-stamped (clock step?)"
+    assert env["rollup"]["verdict"] != "VALID"
+
+
+def test_future_stamped_row_with_gaps_still_reports_indeterminate():
+    """Age is not evidence when the two clocks disagree."""
+    env = assemble(NOW, CONFIG, rich_readers(gaps=lambda: {
+        "row_utc": "2026-08-20T15:00Z", "gaps": 4, "channel_hours": 6.0,
+        "rate": 0.67, "row_age_s": -60.0}))
+    assert env["blocks"]["gaps"]["verdict"] == "INDETERMINATE"
