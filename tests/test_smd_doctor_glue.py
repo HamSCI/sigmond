@@ -363,5 +363,129 @@ class VenvSiblingSkewTests(unittest.TestCase):
         self.assertEqual(unassessable[0]['component'], 'consumer')
 
 
+class CollectFindingsTests(unittest.TestCase):
+    """`smd.collect_findings()` — the extraction (sigmond#task-6) of the
+    five check families `cmd_doctor` used to compose inline. Exercised
+    directly, not through `cmd_doctor`, because the whole point of the
+    extraction is a caller (the fleet heartbeat assembler, Task 7) that
+    gets `(clean, findings)` in-process, without going through the CLI.
+    """
+
+    def setUp(self):
+        self.tdir = Path(tempfile.mkdtemp())
+        self.base = self.tdir / 'base'
+        self.base.mkdir()
+        self._orig_manifest_path = smd.MANIFEST_PATH
+        self._orig_topology_path = smd.TOPOLOGY_PATH
+        self._orig_manifest_usable = smd._manifest_usable
+        import sigmond.doctor as _doctor_mod
+        self._doctor_mod = _doctor_mod
+        self._orig_manifest_drift = _doctor_mod.manifest_drift
+        self._orig_git_state = _doctor_mod.git_state
+        self._orig_foreign_owned = _doctor_mod.foreign_owned
+        # No topology file — matches ManifestUsableWiringTests: makes
+        # _load_topology take its deterministic "no topology file"
+        # default rather than picking up whatever the test host has.
+        smd.TOPOLOGY_PATH = self.tdir / 'no-such-topology.toml'
+
+    def tearDown(self):
+        smd.MANIFEST_PATH = self._orig_manifest_path
+        smd.TOPOLOGY_PATH = self._orig_topology_path
+        smd._manifest_usable = self._orig_manifest_usable
+        self._doctor_mod.manifest_drift = self._orig_manifest_drift
+        self._doctor_mod.git_state = self._orig_git_state
+        self._doctor_mod.foreign_owned = self._orig_foreign_owned
+
+    def _force_manifest_clean(self):
+        # manifest_drift()'s own branching is exhaustively covered by
+        # tests/test_doctor.py already — here we only need the "usable,
+        # nothing drifted" branch collect_findings takes, not a real
+        # manifest text laid out to match a real live read.
+        smd._manifest_usable = lambda text: True
+        self._doctor_mod.manifest_drift = lambda live, path: []
+
+    def _make_component(self, name='comp1'):
+        comp = self.base / name
+        (comp / '.git').mkdir(parents=True)
+        # Not a real git repository — stub git_state() so the (untested
+        # here) git family doesn't add its own findings from that.
+        self._doctor_mod.git_state = lambda d: {
+            'error': None, 'dirty': [], 'untracked': [], 'ahead': 0,
+            'detached': False}
+        return comp
+
+    def test_clean_tree_examined_nothing_found(self):
+        self._force_manifest_clean()
+        clean, findings = smd.collect_findings(base=str(self.base))
+        self.assertIs(clean, True)
+        self.assertEqual(findings, [])
+
+    def test_seeded_finding_manifest_unassessed(self):
+        # Mirrors ManifestUsableWiringTests.test_missing_manifest_reports_unassessed,
+        # but through collect_findings() directly rather than cmd_doctor.
+        smd.MANIFEST_PATH = self.tdir / 'no-such-manifest.txt'
+        clean, findings = smd.collect_findings(base=str(self.base))
+        self.assertIs(clean, False)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].component, 'manifest')
+        self.assertEqual(findings[0].kind, 'unassessed')
+
+    def test_strict_defaults_true_matching_cmd_doctor(self):
+        smd.MANIFEST_PATH = self.tdir / 'no-such-manifest.txt'
+        clean, findings = smd.collect_findings(str(self.base))
+        self.assertIs(clean, False)  # not None — strict=True is the default
+
+    def test_strict_false_converts_raising_family_to_unassessed(self):
+        self._force_manifest_clean()
+        self._make_component()
+
+        def _boom(root, expected_uid, **kwargs):
+            raise RuntimeError('boom')
+        self._doctor_mod.foreign_owned = _boom
+
+        clean, findings = smd.collect_findings(base=str(self.base), strict=False)
+        self.assertIsNone(clean)
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f.component, 'ownership')
+        self.assertEqual(f.kind, 'ownership-unassessed')
+        self.assertIn('boom', f.detail)
+
+    def test_strict_true_lets_family_exception_propagate(self):
+        # The CLI path (cmd_doctor -> collect_findings(), strict=True
+        # default) must reproduce cmd_doctor's pre-extraction behaviour:
+        # nothing here caught a family's own exception before, so
+        # nothing here catches it now either.
+        self._force_manifest_clean()
+        self._make_component()
+
+        def _boom(root, expected_uid, **kwargs):
+            raise RuntimeError('boom')
+        self._doctor_mod.foreign_owned = _boom
+
+        with self.assertRaises(RuntimeError):
+            smd.collect_findings(base=str(self.base))
+
+    def test_readonly_never_repairs_ownership(self):
+        # collect_findings() has no --fix concept at all: it must never
+        # invoke chown, even when it detects a foreign-owned path.
+        self._force_manifest_clean()
+        comp = self._make_component()
+        bad_path = comp / 'file.txt'
+        bad_path.write_text('x')
+        chown_calls = []
+        self._doctor_mod.foreign_owned = lambda root, uid, **kw: [bad_path]
+        orig_chown_tree = smd._chown_tree
+        smd._chown_tree = lambda *a, **kw: chown_calls.append(a)
+        try:
+            clean, findings = smd.collect_findings(base=str(self.base))
+        finally:
+            smd._chown_tree = orig_chown_tree
+        self.assertEqual(chown_calls, [])
+        self.assertIs(clean, False)
+        self.assertEqual(findings[0].kind, 'ownership')
+        self.assertTrue(findings[0].fixable)
+
+
 if __name__ == '__main__':
     unittest.main()

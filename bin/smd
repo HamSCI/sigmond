@@ -3828,6 +3828,288 @@ def _manifest_usable(manifest_text: Optional[str]) -> bool:
     return _parse_manifest_components(manifest_text) is not None
 
 
+def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
+    """Read-only composition of the five `smd doctor` check families:
+    ownership, git state, venv skew, manifest drift, exec mismatch.
+
+    Extracted from `cmd_doctor` so the fleet heartbeat assembler can get
+    the same findings in-process, without shelling out to `smd doctor`
+    (sigmond#task-6). `cmd_doctor` now calls this and only adds
+    presentation (`summarise`) and the `--fix` repair pass, which stays
+    here-adjacent in `cmd_doctor` on purpose: this function never mutates
+    anything, including ownership — a caller that only wants a read (the
+    assembler) must never be able to trigger a chown as a side effect of
+    asking "what's wrong".
+
+    Returns ``(clean, findings)``:
+
+    * ``clean is True`` — every family was examined; nothing found.
+    * ``clean is False`` — every family was examined; ``findings`` is the
+      (non-empty) list of problems.
+    * ``clean is None`` — ``strict=False`` and at least one family's
+      check raised while being examined. That family contributes a
+      ``Finding`` of kind ``"<family>-unassessed"`` (component named
+      after the family) instead of raising; every family that *could*
+      still be examined ran and contributed its own findings as usual.
+
+    ``strict`` controls what happens when a family's check raises:
+
+    * ``strict=True`` (the default, and what `cmd_doctor` uses) does
+      NOT catch anything here — it reproduces, statement for statement,
+      what `cmd_doctor` ran inline before this function existed, so
+      whatever `cmd_doctor` did with an exception before (some are
+      already absorbed deep inside individual helpers — e.g. a missing
+      `pyproject.toml` or an absent `git` — but others were never
+      caught anywhere and propagated all the way out of `cmd_doctor` as
+      a traceback: `git_state`'s `subprocess.run(['git', ...])` raises
+      `FileNotFoundError` with no `git` on `$PATH`, and the venv-skew
+      probe's `subprocess.run` can raise for reasons `_sibling_probe`
+      does not itself guard) it still does, byte for byte.
+    * ``strict=False`` is the catching mode for the assembler (Task 7):
+      one host's broken family (a moved checkout, `git` missing from
+      `$PATH`, a permission error probing a venv, …) must not crash the
+      whole run and silently lose the other four families' findings for
+      that host.
+
+    Ownership is reported from whatever state the checkouts are ALREADY
+    in — no repair happens here. `smd doctor --fix` runs its chown pass
+    in `cmd_doctor` before calling this, so the ownership family below
+    still reports the POST-repair state on the CLI path, exactly as it
+    did when repair and reporting were interleaved in one loop.
+    """
+    from pathlib import Path as _Path
+    from sigmond.doctor import (
+        component_checkouts, foreign_owned, git_state,
+        manifest_drift, exec_mismatch, Finding,
+    )
+    from sigmond.provenance import component_versions
+
+    base = _Path(base)
+    findings: list = []
+    unassessed = False
+
+    def _guarded(family: str, fn) -> None:
+        nonlocal unassessed
+        if strict:
+            fn()
+            return
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — see strict= docstring above
+            unassessed = True
+            findings.append(Finding(family, f'{family}-unassessed', str(exc)))
+
+    repos = component_checkouts(base)
+
+    def _ownership() -> None:
+        for d in repos:
+            name = d.name
+            try:
+                owner_uid = d.stat().st_uid
+            except OSError:
+                continue
+            bad = foreign_owned(d, owner_uid)
+            if bad:
+                try:
+                    owner = d.owner()
+                except Exception:
+                    owner = str(owner_uid)
+                findings.append(Finding(
+                    name, 'ownership',
+                    f'{len(bad)} path(s) not owned by {owner} '
+                    f'(e.g. {bad[0].relative_to(d) if bad[0] != d else "."})',
+                    fixable=True))
+
+    def _git() -> None:
+        for d in repos:
+            name = d.name
+            st = git_state(d)
+            if st['error']:
+                findings.append(Finding(name, 'git', st['error']))
+                continue
+            if st['dirty']:
+                findings.append(Finding(
+                    name, 'dirty',
+                    f'{len(st["dirty"])} modified file(s): '
+                    f'{", ".join(st["dirty"][:3])}'
+                    f'{" ..." if len(st["dirty"]) > 3 else ""} '
+                    f'(diff against origin before discarding)'))
+            if st['untracked']:
+                findings.append(Finding(
+                    name, 'untracked',
+                    f'{len(st["untracked"])} untracked path(s): '
+                    f'{", ".join(st["untracked"][:3])}'
+                    f'{" ..." if len(st["untracked"]) > 3 else ""} '
+                    f'(harmless in place; `git add -A` would commit them)'))
+            if st['ahead']:
+                findings.append(Finding(
+                    name, 'unpushed', f'{st["ahead"]} local commit(s) not on origin'))
+            if st['detached']:
+                findings.append(Finding(name, 'detached', 'HEAD is detached'))
+
+    def _venv() -> None:
+        # which venvs do NOT take one of their DECLARED editable siblings
+        # from the shared checkout. Originally checked ka9q-python only;
+        # widened to probe every sibling a component's own pyproject.toml
+        # [tool.uv.sources] actually declares (ka9q-python, hamsci-dsp,
+        # hs-uploader, ...) — see _venv_sibling_skew / _editable_siblings.
+        # Reading the declared set (instead of a second hardcoded list
+        # here) means a newly-added sibling dependency is picked up with
+        # no smd code change, and cmd_update can never drift from this
+        # check — both now call the same helper.
+        skew, unassessable_venv = _venv_sibling_skew(repos)
+        for sk in skew:
+            findings.append(Finding(
+                sk['component'], 'venv-skew',
+                f'{sk["package"]} {sk["version"]} from {sk["location"]} — a '
+                f'private copy; updating {sk["shared"]} will NOT reach it'))
+        for u in unassessable_venv:
+            # `venv_skew()`'s probe contract has no way to say "known, but
+            # broken" — a stale `.pth` pointing at a moved/renamed
+            # checkout makes the import raise, and that collapses to the
+            # same falsy "not applicable" return as "package genuinely
+            # not used here". Reporting it distinctly, instead of letting
+            # it fold silently into "no skew found", mirrors the same
+            # "cannot assess != healthy" principle applied to the
+            # manifest check below.
+            findings.append(Finding(
+                u['component'], 'venv-unassessable',
+                f'{u["package"]}: could not be probed ({u["detail"]}) — '
+                f'this is NOT the same as "no skew found"'))
+
+    def _manifest() -> None:
+        # live component SHAs vs. the image manifest this host was laid
+        # down from. `live` is sourced the exact way `smd version`
+        # computes it (component_versions() over the same `repos` list
+        # already gathered above), so the two readings cannot drift apart
+        # from each other.
+        live = component_versions(repos)
+        try:
+            manifest_text = MANIFEST_PATH.read_text()
+        except OSError:
+            manifest_text = None
+        # manifest_drift() returns [] both when nothing has drifted AND
+        # when the manifest can't be trusted at all (missing, or
+        # malformed/truncated below its row floor) — those are not the
+        # same finding. A field unit installed before the manifest
+        # existed has no baseline to check against; reporting silence
+        # there would read as "verified clean" when it is really "never
+        # checked", a lie of omission on exactly the boxes least likely
+        # to have been looked at recently. _manifest_usable (module
+        # level, above) applies the same "can this be trusted" test
+        # manifest_drift() uses internally — reused rather than
+        # re-deriving the row-floor logic here.
+        if not _manifest_usable(manifest_text):
+            findings.append(Finding(
+                'manifest', 'unassessed',
+                f'no usable image manifest at {MANIFEST_PATH} — component '
+                f'drift cannot be checked on this host (file missing, or '
+                f'present but malformed/truncated); this is NOT the same as '
+                f'"no drift found"'))
+        else:
+            for d in manifest_drift(live, str(MANIFEST_PATH)):
+                if d['status'] == 'moved':
+                    detail = f'live {d["live"]} != manifest {d["manifest"]}'
+                elif d['status'] == 'live_only':
+                    detail = (f'installed live ({d["live"]}) but not in the '
+                              f'image manifest')
+                else:  # manifest_only
+                    detail = (f'in the image manifest ({d["manifest"]}) but '
+                              f'not installed live')
+                findings.append(Finding(d['component'], 'drift', detail))
+
+    def _exec() -> None:
+        # does each running service actually execute the binary its own
+        # (pre-drop-in) unit file names? This is the radiod-swap check —
+        # a drop-in redirecting ExecStart at a different binary is
+        # invisible to anything that only inspects the installed file,
+        # which is exactly what "verification" did during the incident.
+        # See `_unit_exec_expected` (module level, above) for how "the
+        # deploy tree's expected binary" is derived and its documented
+        # trade-offs.
+        # Falls back to argv[0] when /proc/<pid>/exe is denied —
+        # otherwise every service owned by another user reports
+        # 'unknown' and the check is blind exactly where it matters. See
+        # _make_exe_resolver for why that fallback is evidence rather
+        # than proof.
+        _resolve_proc_exe, _exec_unverified = _make_exe_resolver()
+
+        services = []
+        unit_component = {}
+        try:
+            topology = _load_topology(TOPOLOGY_PATH)
+            enabled = _enabled_components(topology)
+            exec_units = resolve_units(enabled, enabled)
+        except Exception:
+            exec_units = []
+        for u in exec_units:
+            if u.kind != 'service':
+                continue
+            try:
+                pid = _run(['systemctl', 'show', '-p', 'MainPID', '--value', u.unit],
+                           capture=True).stdout.strip()
+                if not pid or pid == '0':
+                    continue          # not running — exec_mismatch would skip it too
+                declared = _unit_exec_expected(u.unit)
+                if not declared:
+                    continue          # couldn't determine what the deploy tree names
+                expected, via = _expected_exe(declared)
+                if not expected:
+                    continue          # an `env` shebang — cannot be resolved
+                services.append({'name': u.unit, 'pid': pid,
+                                 'expected': expected, 'via': via})
+                unit_component[u.unit] = u.component
+            except Exception as exc:
+                # One service's systemctl query failing (permission
+                # denied, a transient subprocess error, systemctl itself
+                # unreachable) must not abort the whole `smd doctor` run
+                # and silently discard the ownership, git, venv and
+                # manifest findings already gathered above — this is the
+                # same failure mode doctor.py's own docstring warns
+                # against: "A diagnostic has to survive the very
+                # permission problems it exists to report." Report this
+                # one service in the same shape exec_mismatch() already
+                # uses for "could not tell what ran" (status=unknown)
+                # rather than skipping it silently — a silent skip here
+                # would read as "checked, and it's fine", which is
+                # exactly the lie of omission this module exists to
+                # avoid.
+                findings.append(Finding(
+                    u.component, 'exec-mismatch',
+                    f'{u.unit}: running=(unreadable) expected=(unreadable) '
+                    f'status=unknown ({exc})'))
+
+        unit_pid = {s['name']: s['pid'] for s in services}
+        unit_via = {s['name']: s.get('via') for s in services}
+        for m in exec_mismatch(services, _resolve_proc_exe):
+            comp = unit_component.get(m['name'], m['name'])
+            # A `deleted` backing file is NOT presented as quieter than a
+            # `mismatch`: both use the same finding kind and both always
+            # show the raw running path (with its literal ` (deleted)`
+            # suffix) alongside `expected`, so a binary that was both
+            # wrong AND deleted stays visible — collapsing that detail
+            # would hide exactly the case this check exists to catch.
+            findings.append(Finding(
+                comp, 'exec-mismatch',
+                _exec_finding_text(m, pid=unit_pid.get(m['name']),
+                                   unverified=_exec_unverified,
+                                   via=unit_via.get(m['name']))))
+
+    _guarded('ownership', _ownership)
+    _guarded('git', _git)
+    _guarded('venv-skew', _venv)
+    _guarded('manifest', _manifest)
+    _guarded('exec-mismatch', _exec)
+
+    if unassessed:
+        clean = None
+    elif findings:
+        clean = False
+    else:
+        clean = True
+    return clean, findings
+
+
 def cmd_doctor(args) -> int:
     """Report deploy-tree damage: ownership, git state, venv skew, image
     drift, and running-vs-installed binary mismatches.
@@ -3839,224 +4121,49 @@ def cmd_doctor(args) -> int:
     real uncommitted fix — it was on DASI002 — so it is reported and left
     to a human.  Manifest drift and a running/installed binary mismatch
     are likewise judgement calls, never auto-repaired.
+
+    The five check families themselves are composed in `collect_findings`
+    (module level, above) — read-only, and reusable by the fleet
+    heartbeat assembler without shelling out to `smd doctor`. `--fix`'s
+    repair pass stays here: `collect_findings` never mutates anything.
     """
     if not _HAS_SIGMOND_LIB:
         _err('doctor: sigmond library not importable')
         return 1
 
-    import os
-    import shutil
-    import subprocess
     from pathlib import Path
-    from sigmond.doctor import (
-        component_checkouts, foreign_owned, git_state,
-        manifest_drift, exec_mismatch,
-        Finding, summarise,
-    )
-    from sigmond.provenance import component_versions
+    from sigmond.doctor import component_checkouts, foreign_owned, summarise
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     if not base.is_dir():
         _err(f'doctor: {base} not found')
         return 1
 
-    findings = []
-    repos = component_checkouts(base)
-
-    for d in repos:
-        name = d.name
-        try:
-            owner_uid = d.stat().st_uid
-        except OSError:
-            continue
-
-        bad = foreign_owned(d, owner_uid)
-        if bad:
+    if getattr(args, 'fix', False):
+        # Repair pass only — read-only reporting (including ownership,
+        # from the POST-repair state) happens below via
+        # collect_findings(). Mirrors the pre-extraction loop's ordering
+        # and its "abort immediately if we can't elevate" behaviour:
+        # `_need_root` is only ever consulted once, for the first
+        # checkout with foreign-owned paths, and returning 1 there
+        # matches cmd_doctor's prior behaviour of bailing out before any
+        # findings (from this or any other family) were reported.
+        for d in component_checkouts(base):
             try:
-                owner = d.owner()
-            except Exception:
-                owner = str(owner_uid)
-            if getattr(args, 'fix', False):
+                owner_uid = d.stat().st_uid
+            except OSError:
+                continue
+            bad = foreign_owned(d, owner_uid)
+            if bad:
                 if _need_root('doctor --fix'):
                     return 1
                 repaired, bad = _repair_and_recheck(
                     d, owner_uid, bad,
                     chown=_chown_tree, rescan=foreign_owned)
                 if repaired:
-                    _ok(f'{name}: repaired {repaired} path(s)')
-            # Report from the scan taken AFTER any repair — reporting the
-            # pre-fix scan made a successful --fix read as a failure.
-            if bad:
-                findings.append(Finding(
-                    name, 'ownership',
-                    f'{len(bad)} path(s) not owned by {owner} '
-                    f'(e.g. {bad[0].relative_to(d) if bad[0] != d else "."})',
-                    fixable=True))
+                    _ok(f'{d.name}: repaired {repaired} path(s)')
 
-        st = git_state(d)
-        if st['error']:
-            findings.append(Finding(name, 'git', st['error']))
-            continue
-        if st['dirty']:
-            findings.append(Finding(
-                name, 'dirty',
-                f'{len(st["dirty"])} modified file(s): '
-                f'{", ".join(st["dirty"][:3])}'
-                f'{" ..." if len(st["dirty"]) > 3 else ""} '
-                f'(diff against origin before discarding)'))
-        if st['untracked']:
-            findings.append(Finding(
-                name, 'untracked',
-                f'{len(st["untracked"])} untracked path(s): '
-                f'{", ".join(st["untracked"][:3])}'
-                f'{" ..." if len(st["untracked"]) > 3 else ""} '
-                f'(harmless in place; `git add -A` would commit them)'))
-        if st['ahead']:
-            findings.append(Finding(
-                name, 'unpushed', f'{st["ahead"]} local commit(s) not on origin'))
-        if st['detached']:
-            findings.append(Finding(name, 'detached', 'HEAD is detached'))
-
-    # venv skew: which venvs do NOT take one of their DECLARED editable
-    # siblings from the shared checkout. Originally checked ka9q-python
-    # only; widened to probe every sibling a component's own
-    # pyproject.toml [tool.uv.sources] actually declares (ka9q-python,
-    # hamsci-dsp, hs-uploader, ...) — see _venv_sibling_skew /
-    # _editable_siblings. Reading the declared set (instead of a second
-    # hardcoded list here) means a newly-added sibling dependency is
-    # picked up with no smd code change, and cmd_update can never drift
-    # from this check — both now call the same helper.
-    skew, unassessable_venv = _venv_sibling_skew(repos)
-    for sk in skew:
-        findings.append(Finding(
-            sk['component'], 'venv-skew',
-            f'{sk["package"]} {sk["version"]} from {sk["location"]} — a '
-            f'private copy; updating {sk["shared"]} will NOT reach it'))
-    for u in unassessable_venv:
-        # `venv_skew()`'s probe contract has no way to say "known, but
-        # broken" — a stale `.pth` pointing at a moved/renamed checkout
-        # makes the import raise, and that collapses to the same falsy
-        # "not applicable" return as "package genuinely not used here".
-        # Reporting it distinctly, instead of letting it fold silently
-        # into "no skew found", mirrors the same "cannot assess !=
-        # healthy" principle applied to the manifest check below.
-        findings.append(Finding(
-            u['component'], 'venv-unassessable',
-            f'{u["package"]}: could not be probed ({u["detail"]}) — '
-            f'this is NOT the same as "no skew found"'))
-
-    # manifest drift: live component SHAs vs. the image manifest this host
-    # was laid down from.  `live` is sourced the exact way `smd version`
-    # computes it (component_versions() over the same `repos` list already
-    # gathered above), so the two readings cannot drift apart from each
-    # other.
-    live = component_versions(repos)
-    try:
-        manifest_text = MANIFEST_PATH.read_text()
-    except OSError:
-        manifest_text = None
-    # manifest_drift() returns [] both when nothing has drifted AND when
-    # the manifest can't be trusted at all (missing, or malformed/
-    # truncated below its row floor) — those are not the same finding.
-    # A field unit installed before the manifest existed has no baseline
-    # to check against; reporting silence there would read as "verified
-    # clean" when it is really "never checked", a lie of omission on
-    # exactly the boxes least likely to have been looked at recently.
-    # _manifest_usable (module level, above) applies the same "can this
-    # be trusted" test manifest_drift() uses internally — reused rather
-    # than re-deriving the row-floor logic here.
-    if not _manifest_usable(manifest_text):
-        findings.append(Finding(
-            'manifest', 'unassessed',
-            f'no usable image manifest at {MANIFEST_PATH} — component '
-            f'drift cannot be checked on this host (file missing, or '
-            f'present but malformed/truncated); this is NOT the same as '
-            f'"no drift found"'))
-    else:
-        for d in manifest_drift(live, str(MANIFEST_PATH)):
-            if d['status'] == 'moved':
-                detail = f'live {d["live"]} != manifest {d["manifest"]}'
-            elif d['status'] == 'live_only':
-                detail = (f'installed live ({d["live"]}) but not in the '
-                          f'image manifest')
-            else:  # manifest_only
-                detail = (f'in the image manifest ({d["manifest"]}) but '
-                          f'not installed live')
-            findings.append(Finding(d['component'], 'drift', detail))
-
-    # exec mismatch: does each running service actually execute the
-    # binary its own (pre-drop-in) unit file names?  This is the
-    # radiod-swap check — a drop-in redirecting ExecStart at a different
-    # binary is invisible to anything that only inspects the installed
-    # file, which is exactly what "verification" did during the
-    # incident.  See `_unit_exec_expected` (module level, above) for how
-    # "the deploy tree's expected binary" is derived and its documented
-    # trade-offs.
-    # Falls back to argv[0] when /proc/<pid>/exe is denied — otherwise
-    # every service owned by another user reports 'unknown' and the
-    # check is blind exactly where it matters. See _make_exe_resolver
-    # for why that fallback is evidence rather than proof.
-    _resolve_proc_exe, _exec_unverified = _make_exe_resolver()
-
-    services = []
-    unit_component = {}
-    try:
-        topology = _load_topology(TOPOLOGY_PATH)
-        enabled = _enabled_components(topology)
-        exec_units = resolve_units(enabled, enabled)
-    except Exception:
-        exec_units = []
-    for u in exec_units:
-        if u.kind != 'service':
-            continue
-        try:
-            pid = _run(['systemctl', 'show', '-p', 'MainPID', '--value', u.unit],
-                       capture=True).stdout.strip()
-            if not pid or pid == '0':
-                continue          # not running — exec_mismatch would skip it too
-            declared = _unit_exec_expected(u.unit)
-            if not declared:
-                continue          # couldn't determine what the deploy tree names
-            expected, via = _expected_exe(declared)
-            if not expected:
-                continue          # an `env` shebang — cannot be resolved
-            services.append({'name': u.unit, 'pid': pid,
-                             'expected': expected, 'via': via})
-            unit_component[u.unit] = u.component
-        except Exception as exc:
-            # One service's systemctl query failing (permission denied, a
-            # transient subprocess error, systemctl itself unreachable)
-            # must not abort the whole `smd doctor` run and silently
-            # discard the ownership, git, venv and manifest findings
-            # already gathered above — this is the same failure mode
-            # doctor.py's own docstring warns against: "A diagnostic has
-            # to survive the very permission problems it exists to
-            # report." Report this one service in the same shape
-            # exec_mismatch() already uses for "could not tell what ran"
-            # (status=unknown) rather than skipping it silently — a
-            # silent skip here would read as "checked, and it's fine",
-            # which is exactly the lie of omission this module exists to
-            # avoid.
-            findings.append(Finding(
-                u.component, 'exec-mismatch',
-                f'{u.unit}: running=(unreadable) expected=(unreadable) '
-                f'status=unknown ({exc})'))
-
-    unit_pid = {s['name']: s['pid'] for s in services}
-    unit_via = {s['name']: s.get('via') for s in services}
-    for m in exec_mismatch(services, _resolve_proc_exe):
-        comp = unit_component.get(m['name'], m['name'])
-        # A `deleted` backing file is NOT presented as quieter than a
-        # `mismatch`: both use the same finding kind and both always show
-        # the raw running path (with its literal ` (deleted)` suffix)
-        # alongside `expected`, so a binary that was both wrong AND
-        # deleted stays visible — collapsing that detail would hide
-        # exactly the case this check exists to catch.
-        findings.append(Finding(
-            comp, 'exec-mismatch',
-            _exec_finding_text(m, pid=unit_pid.get(m['name']),
-                               unverified=_exec_unverified,
-                               via=unit_via.get(m['name']))))
+    _, findings = collect_findings(base)
 
     ok, text = summarise(findings)
     if ok:
