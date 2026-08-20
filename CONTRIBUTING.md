@@ -60,7 +60,20 @@ between a host and its declared version is a defect.
 * Emergency hot-fixes on production are allowed to restore service, but
   land in the repo the same day.
 
-## 3. Updating a host
+## 3. Updating — two orientations, never mixed
+
+Every update procedure in this project stands in one of two chairs, and
+confusing them is how fleets get broken. Say which one you are in before
+you type anything.
+
+**Station-inward (pull).** You are ON a sigmond machine — a DASI2 unit,
+a standalone install, eventually a stranger's — and the machine looks
+*out* to the repositories for its own update. This orientation is
+self-contained by design: it needs git remotes and nothing else — no
+fleet inventory, no central server, no keys of ours. It is the whole
+story for a field operator maintaining their own box, and it is the only
+orientation a future public sigmond install will ever have. Everything
+in it runs as a question first:
 
 ```bash
 smd version         # what is actually installed here?
@@ -68,6 +81,9 @@ smd doctor          # what is wrong here?
 smd doctor --fix    # repairs ownership only — never touches your edits
 smd update          # what would change? (dry run)
 smd update --apply  # do the mechanical steps
+smd admin manifest adopt <manifest.txt> [--allow-superset] [--apply]
+                    # after a release: record what blessed baseline
+                    # this host now satisfies (§6)
 ```
 
 `smd update` is idempotent: a current host produces an empty plan, so it
@@ -83,19 +99,36 @@ false. DASI002 read `v3.20` while running v3.31-era components.
 
 Never prefix `smd` with `sudo`; it elevates itself.
 
-**Rolling more than one host.** `smd fleet status|doctor|roster|pubkeys`
-fan out read-only over ssh (the command vocabulary is a whitelist a test
-enforces; `--apply` is structurally impossible through it). Mutating a
-host happens ON the host, through its root channel, one host at a time —
-**canary first** (`canary = true` in the fleet inventory; B4), verify,
-then the rest. Know your root channel before you need it:
-`smd update --apply` over a plain ssh session as a service user cannot
-self-elevate (no passwordless sudo — by design), and on a Proxmox-hosted
-station the working channel is `qm guest exec` from the hypervisor. That
-channel has its own failure mode: the guest agent can be healthy
-*inside* the guest while the host side of the virtio channel is wedged —
-`qm guest exec` says "not running", the guest's `systemctl status` says
-active. A guest-side `systemctl restart qemu-guest-agent` resyncs it.
+**Fleet-outward (push).** You are on the devbox, wearing the
+fleet-administrator hat: building and blessing images (§6), rolling a
+change across designated machines, watching the fleetboard (§10). This
+orientation owns the *when* and the *order*; the actual mutation is
+still, always, the station-inward procedure above — executed on each
+host in turn, through that host's root channel:
+
+* The fan-out — `smd fleet status|doctor|roster|pubkeys` — only asks
+  questions. Its command vocabulary is a whitelist a test enforces, and
+  `--apply` is structurally impossible through it. This is not a missing
+  feature; it is the wall between the chairs. A fan-out that could
+  mutate would turn one bad afternoon on the devbox into a fleet-wide
+  incident.
+* Mutation is one host at a time, **canary first** (`canary = true` in
+  the fleet inventory; B4), verify, then the rest.
+* Know each host's root channel before you need it: `smd update --apply`
+  over a plain ssh session as a service user cannot self-elevate (no
+  passwordless sudo — by design), and on a Proxmox-hosted station the
+  working channel is `qm guest exec` from the hypervisor. That channel
+  has its own failure mode: the guest agent can be healthy *inside* the
+  guest while the host side of the virtio channel is wedged — `qm guest
+  exec` says "not running", the guest's `systemctl status` says active.
+  A guest-side `systemctl restart qemu-guest-agent` resyncs it.
+
+The two orientations meet only at the repository and the Release: the
+push side decides what gets blessed and when each machine pulls; the
+pull side is the only thing that ever changes a machine. A station that
+needed the fleet machinery to update itself would foreclose public
+sigmond; a fleet that could push mutations directly would make every
+central mistake a fleet-wide one. Keep the wall.
 
 ## 4. Tests
 
