@@ -1,0 +1,16 @@
+# /etc/systemd/system/sigmond-gap-hourly.timer
+[Unit]
+Description=Hourly radiod block-drop sampler timer
+Documentation=https://github.com/HamSCI/sigmond
+
+[Timer]
+OnCalendar=*-*-* *:05:00
+# Persistent=false is DELIBERATE, not an oversight: a missed hour must
+# look missed. If this were Persistent=true, a host that was down or
+# suspended through :05 would run the sampler late on resume, sample a
+# window that was mostly down, and write a healthy-looking row -- hiding
+# the very outage this sampler exists to catch. Leave it false.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

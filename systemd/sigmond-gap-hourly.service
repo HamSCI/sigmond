@@ -1,0 +1,20 @@
+# /etc/systemd/system/sigmond-gap-hourly.service
+[Unit]
+Description=Hourly radiod block-drop (gap_count) rate sampler into /var/log/gap-hourly.tsv
+Documentation=https://github.com/HamSCI/sigmond
+ConditionPathExists=/var/lib/timestd/raw_buffer
+# NOTE: no Requires= on this service -- see hf-timestd#27 for why that is
+# a trap (a Requires= dependency on a unit that legitimately isn't running
+# yet turns "sampler quietly skipped this hour" into "sampler chain fails
+# to start at all").  This note was carried over verbatim from B4's
+# uncommitted gap-hourly.timer, where it originally lived.
+
+[Service]
+Type=oneshot
+Nice=19
+IOWeight=10
+ExecStart=/usr/local/sbin/sigmond-gap-hourly
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-gap-hourly

@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Thin executable wrapper for sigmond.gap_hourly.
+
+The real logic (pure ``summarise_window``, fs walk ``collect_records``,
+``append_row``, ``main``) lives in ``lib/sigmond/gap_hourly.py`` -- see
+its module docstring for the honest-loss-field rationale and the
+observed core-pinning baselines this sampler exists to track.
+
+Installed as /usr/local/sbin/sigmond-gap-hourly (symlink from the repo,
+same pattern as sigmond-decode-health-collect); invoked hourly by
+sigmond-gap-hourly.service / .timer.
+"""
+import sys
+from pathlib import Path
+
+# Same bootstrap bin/smd uses to find lib/sigmond regardless of whether
+# we're running from a repo checkout, an installed tree, or the
+# /usr/local/sbin symlink.
+_SCRIPT = Path(__file__).resolve()
+for _candidate in (_SCRIPT.parent.parent / "lib",       # repo layout
+                    Path("/opt/sigmond/lib"),            # installed layout
+                    Path("/usr/local/lib/sigmond")):     # alt installed
+    if (_candidate / "sigmond" / "__init__.py").exists():
+        sys.path.insert(0, str(_candidate))
+        break
+
+from sigmond.gap_hourly import main
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -692,14 +692,17 @@ ok "Venv ready at $VENV_DIR"
 
 # ─── sigmond systemd units + helper scripts ─────────────────────────────────
 # Ship the unit files that smd's scheduled verbs depend on (storage-trim
-# janitors, decode-health collector).  Without these, PSK retention silently
-# fails (sink.db grows unbounded) and decode trend collection never runs.
+# janitors, decode-health collector, gap-hourly block-drop sampler).
+# Without these, PSK retention silently fails (sink.db grows unbounded),
+# decode trend collection never runs, and the fleet's only honest
+# radiod-loss signal stops at whichever single host still has it hand-run.
 #
 # Per-target trim units are shipped for backwards compatibility; the unified
 # sigmond-storage-trim-all.timer covers every retention policy in one pass
 # and is the only one enabled here.  Decode-health is installed but not
 # enabled — operators turn it on once psk-recorder is producing log lines
-# worth scraping.
+# worth scraping.  gap-hourly IS enabled by default (see below) — it's
+# gated by ConditionPathExists so it's inert without hf-timestd.
 info "Installing sigmond systemd units → /etc/systemd/system/"
 for _unit in "$REPO_DIR"/systemd/sigmond-*.service "$REPO_DIR"/systemd/sigmond-*.timer; do
     [[ -f "$_unit" ]] || continue
@@ -716,6 +719,17 @@ $SUDO chmod a+x "$REPO_DIR/scripts/sigmond-decode-health-collect.py"
 $SUDO ln -sf "$REPO_DIR/scripts/sigmond-decode-health-collect.py" \
         /usr/local/sbin/sigmond-decode-health-collect
 ok "sigmond-decode-health-collect symlink installed"
+
+# Helper script invoked by sigmond-gap-hourly.service.  Symlinked from the
+# repo (same pattern as sigmond-decode-health-collect above) so a `git pull`
+# updates the sampler without re-running install.sh.  This promotes B4's
+# uncommitted /usr/local/sbin/gap-hourly.sh -- the only durable honest gap
+# (radiod block-drop) record in the fleet -- into sigmond proper.
+info "Installing sigmond-gap-hourly → /usr/local/sbin/"
+$SUDO chmod a+x "$REPO_DIR/scripts/sigmond-gap-hourly"
+$SUDO ln -sf "$REPO_DIR/scripts/sigmond-gap-hourly" \
+        /usr/local/sbin/sigmond-gap-hourly
+ok "sigmond-gap-hourly symlink installed"
 
 # Timing-chain SHM pre-create (docs/timing-chain-architecture.md, step 2): give
 # the chrony/gpsd/hf-timestd refclock SHM segments a stable owner+perm before any
@@ -745,6 +759,11 @@ $SUDO systemctl daemon-reload
 # OnBootSec/OnUnitActiveSec have no anchor until reboot or a manual
 # service run).  Observed on B4-100 2026-05-30.
 $SUDO systemctl enable --now sigmond-storage-trim-all.timer
+# Enable the gap-hourly block-drop sampler timer.  ConditionPathExists=
+# /var/lib/timestd/raw_buffer in the service unit keeps it inert on hosts
+# without hf-timestd, so it's safe to always enable (same reasoning as the
+# trim timer above re: greenfield-safe).
+$SUDO systemctl enable --now sigmond-gap-hourly.timer 2>/dev/null || true
 # Enable the timing SHM pre-create oneshot (idempotent; creates NTP0-3 at boot
 # before gpsd/chrony/hf-timestd).  Only meaningful on a host running radiod +
 # a local GPS, but harmless otherwise.
