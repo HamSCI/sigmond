@@ -889,6 +889,19 @@ def _safe_component(value: str) -> str:
     A station name arrives from config and lands in a path; a '/' in it
     would write outside the spool.  Substitute rather than reject, so a
     surprising name costs a mangled filename and not a lost heartbeat.
+
+    A LEADING DOT IS REPLACED, not merely allowed through.  The server
+    ingest deliberately skips dotfiles, so a station configured as
+    ``.b4`` would spool, upload and be ignored on arrival — every hop
+    reporting success while the station was permanently invisible on the
+    board.  That is the exact silent-failure shape this whole feature
+    exists to remove, so it is closed here, at the only place that
+    turns a station name into a filename.
     """
-    return "".join(
+    safe = "".join(
         c if (c.isalnum() or c in "._-") else "-" for c in value) or "unknown"
+    # Every leading dot: "..b4" is as invisible as ".b4".
+    stripped = safe.lstrip(".")
+    if stripped != safe:
+        safe = "_" * (len(safe) - len(stripped)) + stripped
+    return safe or "unknown"

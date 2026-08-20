@@ -20,3 +20,7 @@ jt9_wisdom.dat
 ka9q-radio/
 ka9q-web/
 onion/
+# Generated fresh on every deploy from `smd fleet roster --json` — a
+# checked-in copy would go stale, and a stale roster means a station is
+# never asked about instead of going red (server/heartbeat/deploy-wd30.sh).
+server/heartbeat/roster.json

@@ -515,6 +515,24 @@ def test_write_tick_station_name_cannot_escape_the_spool(tmp_path):
     assert "/" not in path.name.replace(".json", "")
 
 
+@pytest.mark.parametrize("station", [".b4", "..b4", ".", "..", "./b4"])
+def test_write_tick_station_name_can_never_produce_a_dotfile(tmp_path,
+                                                             station):
+    """A dotfile tick is a PERMANENTLY INVISIBLE heartbeat.
+
+    The server ingest skips dotfiles by design (they are never ours, and
+    the drop's only completeness guarantee is the .json suffix).  A
+    station configured as ".b4" would therefore spool, upload and be
+    ignored on arrival, with every hop reporting success — the exact
+    silent-failure shape this feature exists to remove.
+    """
+    env = assemble(NOW, dict(CONFIG, station=station), rich_readers())
+    path = write_tick(env, spool_dir=tmp_path)
+    assert not path.name.startswith("."), path.name
+    assert path.name.endswith(".json")
+    assert path.parent == tmp_path
+
+
 def test_prune_removes_only_ticks_older_than_24h(tmp_path):
     now = time.time()
     fresh = tmp_path / "s_20260820T140506Z.json"

@@ -302,6 +302,59 @@ def test_quarantine_collision_does_not_clobber_the_earlier_evidence(
     assert len(rows(db_path, "rejects")) == 2
 
 
+def test_the_same_arrival_is_never_stored_twice(drop_dir, db_path):
+    """A manual run racing the timer must not inflate the record.
+
+    Both passes see the same file, both insert, and the loser's unlink
+    fails harmlessly — leaving the table claiming a station reported
+    twice at the same instant. UNIQUE(station, received_at) settles it.
+    """
+    env = make_envelope()
+    drop(drop_dir, "AC0G-B4_20260820T140506Z.json", env, mtime=1000.0)
+    first = ingest.ingest_once(str(drop_dir), str(db_path))
+    # The identical file arrives again (or the same pass runs twice).
+    drop(drop_dir, "AC0G-B4_20260820T140506Z.json", env, mtime=1000.0)
+    second = ingest.ingest_once(str(drop_dir), str(db_path))
+
+    assert first["ingested"] == 1
+    assert second["ingested"] == 0
+    assert second["duplicates"] == 1
+    assert second["errors"] == 0
+    assert len(rows(db_path)) == 1
+    # The duplicate file is still cleared from the drop — it is stored.
+    assert not (drop_dir / "AC0G-B4_20260820T140506Z.json").exists()
+
+
+def test_a_later_arrival_from_the_same_station_is_not_a_duplicate(
+        drop_dir, db_path):
+    env = make_envelope()
+    drop(drop_dir, "AC0G-B4_20260820T140506Z.json", env, mtime=1000.0)
+    ingest.ingest_once(str(drop_dir), str(db_path))
+    drop(drop_dir, "AC0G-B4_20260820T141006Z.json", env, mtime=1300.0)
+    result = ingest.ingest_once(str(drop_dir), str(db_path))
+
+    assert result["ingested"] == 1
+    assert result["duplicates"] == 0
+    assert len(rows(db_path)) == 2
+
+
+def test_ingest_writes_into_a_quarantine_it_does_not_own_the_mode_of(
+        drop_dir, db_path):
+    """setup-wd30.sh creates the quarantine 0750 owned by the OPERATOR —
+    the station account has no access to the evidence of its own bad
+    uploads. Ingest must move files in without widening that."""
+    quarantine = drop_dir.parent / "quarantine"
+    quarantine.mkdir(parents=True)
+    quarantine.chmod(0o750)
+    drop(drop_dir, "AC0G-B4_20260820T140506Z.json", "{bad")
+
+    result = ingest.ingest_once(str(drop_dir), str(db_path))
+
+    assert result["quarantined"] == 1
+    assert (quarantine / "AC0G-B4_20260820T140506Z.json").exists()
+    assert oct(quarantine.stat().st_mode)[-3:] == "750"
+
+
 def test_index_exists_on_station_and_received_at(db_path):
     conn = ingest.open_db(str(db_path))
     try:
@@ -745,3 +798,60 @@ def test_http_handler_serves_the_board_and_404s_elsewhere(tmp_path, db_path):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# 7. review fixes — server-side operational hazards
+# ---------------------------------------------------------------------------
+
+def setup_text():
+    return (SERVER / "setup-wd30.sh").read_text()
+
+
+def test_quarantine_is_not_owned_or_writable_by_the_station_account():
+    # Every authorized station shares one SFTP account. If that account
+    # owns the quarantine, any of them can delete the evidence of its own
+    # malformed uploads — and ingest.py's docstring calls the quarantine
+    # exactly that: the evidence.
+    text = setup_text()
+    assert 'install -d -o "$OPERATOR" -g "$OPERATOR" -m 750 "$QUARANTINE"' \
+        in text
+    assert 'install -d -o "$HB_USER" -g "$HB_USER" -m 750 "$INCOMING"' in text
+    # Only the drop is group-widened for ingest; the quarantine is not.
+    assert 'chmod 770 "$INCOMING"' in text
+    assert 'chmod 770 "$INCOMING" "$QUARANTINE"' not in text
+
+
+def test_a_rejected_sshd_snippet_is_moved_aside_not_left_to_detonate():
+    # A broken file in sshd_config.d is invisible while sshd keeps
+    # running, then stops sshd from starting at the next reboot — locking
+    # everyone out of the central server.
+    text = setup_text()
+    assert 'mv "$SSHD_SNIPPET" "$SSHD_SNIPPET.rejected"' in text
+    # And the surviving config is re-checked, with both outcomes reported.
+    after = text.split('mv "$SSHD_SNIPPET" "$SSHD_SNIPPET.rejected"', 1)[1]
+    assert "sshd -t" in after
+    assert "STILL FAILS" in after
+
+
+def test_the_ingest_timer_is_not_started_before_the_code_is_deployed():
+    # /opt/hamsci-fleetboard/ingest.py only exists after the first deploy;
+    # --now would fail every 60 s against a missing file and bury the
+    # real error. The script already declines to start the board for
+    # exactly this reason.
+    text = setup_text()
+    assert "systemctl enable hamsci-hb-ingest.timer" in text
+    assert "--now" not in text
+
+
+def test_authorize_regenerates_the_roster_instead_of_trusting_a_stale_copy():
+    text = (SERVER / "authorize-stations.sh").read_text()
+    # No preference for an on-disk deploy artefact of unknown age: a host
+    # removed from the inventory this morning must lose its key today.
+    assert 'ROSTER="$HERE/roster.json"' not in text
+    assert "fleet roster --json" in text
+
+
+def test_generated_roster_is_git_ignored():
+    ignored = (REPO / ".gitignore").read_text()
+    assert "server/heartbeat/roster.json" in ignored

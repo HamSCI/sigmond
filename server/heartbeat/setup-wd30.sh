@@ -50,6 +50,18 @@ else
     say "created system user $HB_USER (nologin, no home of its own)"
 fi
 
+step "Operator account: $OPERATOR"
+# Checked BEFORE the directories, because the quarantine is created owned
+# by this account. Both units hardcode User=$OPERATOR, so a missing
+# account is a broken install, not a warning to scroll past.
+if ! id "$OPERATOR" >/dev/null 2>&1; then
+    echo "operator account '$OPERATOR' does not exist on this host." >&2
+    echo "Create it, or re-run with OPERATOR=<account> and edit the two" >&2
+    echo "units' User= lines to match." >&2
+    exit 1
+fi
+say "$OPERATOR exists — will own the quarantine, the database and both units"
+
 step "Drop directories under $DROP_ROOT"
 # The chroot root MUST be root-owned and non-group/other-writable or sshd
 # refuses the session with a message that names the directory but not the
@@ -58,22 +70,26 @@ install -d -o root -g root -m 755 "$DROP_ROOT"
 say "chroot root $DROP_ROOT root:root 755"
 install -d -o "$HB_USER" -g "$HB_USER" -m 750 "$INCOMING"
 say "drop $INCOMING $HB_USER:$HB_USER 750"
-install -d -o "$HB_USER" -g "$HB_USER" -m 750 "$QUARANTINE"
-say "quarantine $QUARANTINE $HB_USER:$HB_USER 750"
+# The quarantine is EVIDENCE — the record of a station shipping something
+# the server cannot read. It must not be owned or writable by the account
+# the stations authenticate as, or any authorized station could read and
+# DELETE the proof of its own malformed uploads. The SFTP user needs no
+# access to it at all: nothing it does ever puts a file there. Ingest runs
+# as $OPERATOR and moves rejects in, which is why $OPERATOR owns it.
+# (Only the CHROOT ROOT must be root-owned and non-writable; sshd places
+# no ownership requirement on subdirectories, so leaving this inside the
+# tree is safe as long as hamsci-hb cannot enter it — mode 750 with a
+# group the station account is not in.)
+install -d -o "$OPERATOR" -g "$OPERATOR" -m 750 "$QUARANTINE"
+say "quarantine $QUARANTINE $OPERATOR:$OPERATOR 750 (stations have NO access)"
 
-# The ingest service runs as the operator and must be able to read the
-# drop, move rejects into quarantine and unlink what it ingested.  Both
-# units hardcode User=$OPERATOR, so a missing account is a broken install,
-# not a warning to scroll past.
-if ! id "$OPERATOR" >/dev/null 2>&1; then
-    echo "operator account '$OPERATOR' does not exist on this host." >&2
-    echo "Create it, or re-run with OPERATOR=<account> and edit the two" >&2
-    echo "units' User= lines to match." >&2
-    exit 1
-fi
+# Ingest runs as $OPERATOR and must read the drop, unlink what it
+# ingested and move rejects out of it — all of which need write access to
+# incoming/ only. It reaches that through the station account's GROUP;
+# the quarantine it writes into is its own and stays 750.
 usermod -a -G "$HB_USER" "$OPERATOR"
-chmod 770 "$INCOMING" "$QUARANTINE"
-say "added $OPERATOR to group $HB_USER; drop dirs group-writable (770)"
+chmod 770 "$INCOMING"
+say "added $OPERATOR to group $HB_USER; $INCOMING group-writable (770)"
 
 step "Authorized keys OUTSIDE the chroot"
 install -d -o root -g root -m 755 "$KEYS_DIR"
@@ -112,8 +128,25 @@ else
         systemctl reload ssh 2>/dev/null || systemctl reload sshd
         say "reloaded sshd"
     else
-        echo "sshd -t FAILED — snippet left in place but sshd NOT reloaded;" >&2
-        echo "fix $SSHD_SNIPPET before the next sshd restart" >&2
+        # Do NOT leave a rejected snippet on disk. The running sshd keeps
+        # its old config, so a broken file here is invisible until the
+        # next restart or reboot — at which point sshd fails to start and
+        # NOBODY can log into the central server. Move it aside and prove
+        # the surviving config is valid before we walk away.
+        mv "$SSHD_SNIPPET" "$SSHD_SNIPPET.rejected"
+        echo >&2
+        echo "  ** sshd -t REJECTED the snippet. **" >&2
+        echo "  Moved it to $SSHD_SNIPPET.rejected so the next sshd" >&2
+        echo "  restart cannot fail on it (that would lock everyone out" >&2
+        echo "  of this server). sshd was NOT reloaded." >&2
+        if sshd -t; then
+            echo "  Re-checked without it: sshd -t PASSES — the running" >&2
+            echo "  config is safe to restart." >&2
+        else
+            echo "  Re-checked without it: sshd -t STILL FAILS — this" >&2
+            echo "  host had a pre-existing sshd config problem." >&2
+            echo "  DO NOT restart sshd until it is fixed." >&2
+        fi
         exit 1
     fi
 fi
@@ -137,12 +170,15 @@ done
 systemctl daemon-reload
 say "daemon-reload done"
 
-systemctl enable --now hamsci-hb-ingest.timer
-say "enabled hamsci-hb-ingest.timer"
-# The board is enabled but only STARTED once code is deployed; starting it
-# now would crash-loop on a missing roster.json and bury the real error.
+# NEITHER unit is started here: /opt/hamsci-fleetboard/ingest.py and
+# roster.json do not exist until the first deploy-wd30.sh run. Starting
+# the timer now would fail every 60 s against a missing file and fill the
+# journal with an error that is not the real one; the board would
+# crash-loop for the same reason. deploy-wd30.sh starts both.
+systemctl enable hamsci-hb-ingest.timer
+say "enabled hamsci-hb-ingest.timer (starts at the first deploy)"
 systemctl enable hamsci-fleetboard.service
-say "enabled hamsci-fleetboard.service (start it after the first deploy)"
+say "enabled hamsci-fleetboard.service (starts at the first deploy)"
 
 step "Done"
 say "Next, from the devbox:"

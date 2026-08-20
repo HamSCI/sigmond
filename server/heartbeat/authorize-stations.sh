@@ -33,17 +33,20 @@ die() { printf '\nauthorize-stations.sh: %s\n' "$*" >&2; exit 1; }
 [[ -d "$KEYDIR" ]] || die "not a directory: $KEYDIR"
 
 if [[ -z "$ROSTER" ]]; then
-    ROSTER="$HERE/roster.json"
-    if [[ ! -f "$ROSTER" ]]; then
-        WORK=$(mktemp -d)
-        trap 'rm -rf "$WORK"' EXIT
-        ROSTER="$WORK/roster.json"
-        REPO="$(cd "$HERE/../.." && pwd)"
-        export SIGMOND_FLEET=${SIGMOND_FLEET:-$HOME/hamsci/ops/fleet.toml}
-        PYTHONPATH="$REPO/lib" "$REPO/bin/smd" fleet roster --json \
-            --profile "${PROFILE:-dasi2}" > "$ROSTER" \
-            || die "smd fleet roster failed and no roster.json was given"
-    fi
+    # ALWAYS regenerate. An on-disk roster.json is a deploy artefact of
+    # unknown age, and preferring it would authorize yesterday's fleet:
+    # a host removed from the inventory this morning would keep its key,
+    # and this script would report success while doing exactly the thing
+    # it exists to prevent. Pass a path explicitly to override.
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+    ROSTER="$WORK/roster.json"
+    REPO="$(cd "$HERE/../.." && pwd)"
+    export SIGMOND_FLEET=${SIGMOND_FLEET:-$HOME/hamsci/ops/fleet.toml}
+    PYTHONPATH="$REPO/lib" "$REPO/bin/smd" fleet roster --json \
+        --profile "${PROFILE:-dasi2}" > "$ROSTER" \
+        || die "smd fleet roster failed and no roster path was given"
+    say "regenerated from $SIGMOND_FLEET (profile ${PROFILE:-dasi2})"
 fi
 
 step "Roster: $ROSTER"

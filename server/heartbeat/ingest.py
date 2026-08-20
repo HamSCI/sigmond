@@ -49,7 +49,16 @@ CREATE TABLE IF NOT EXISTS heartbeats (
     emitted_at     TEXT,
     schema_version INTEGER,
     rollup_verdict TEXT,
-    payload        TEXT    NOT NULL
+    payload        TEXT    NOT NULL,
+    -- One arrival per (station, mtime).  Without this, a manual run
+    -- racing the timer double-inserts the same file: both read the drop,
+    -- both insert, the loser's unlink fails harmlessly, and the table
+    -- quietly disagrees with reality about how often a station reported.
+    -- CREATE TABLE IF NOT EXISTS will NOT retrofit this onto an existing
+    -- database — which is free to ignore today because nothing is
+    -- deployed yet. Once wd30 has a real heartbeats.db, changing this
+    -- line means writing a migration.
+    UNIQUE (station, received_at)
 );
 -- Every board query is "the newest arrival for this station"; this index
 -- is what keeps that O(log n) as the table grows without bound.
@@ -83,15 +92,22 @@ def open_db(path):
 
 
 def record_heartbeat(conn, station, received_at, envelope):
-    """Insert one accepted heartbeat.  Caller commits."""
+    """Insert one accepted heartbeat.  Caller commits.
+
+    Returns True if a row was written, False if this exact arrival was
+    already stored (a concurrent second ingest pass).  OR IGNORE rather
+    than OR REPLACE: the first writer's row is the one whose file it
+    unlinked, and rewriting it would gain nothing.
+    """
     rollup = envelope.get("rollup")
     verdict = rollup.get("verdict") if isinstance(rollup, dict) else None
-    conn.execute(
-        "INSERT INTO heartbeats (station, received_at, emitted_at,"
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO heartbeats (station, received_at, emitted_at,"
         " schema_version, rollup_verdict, payload) VALUES (?, ?, ?, ?, ?, ?)",
         (station, float(received_at), envelope.get("emitted_at"),
          envelope.get("schema_version"), verdict,
          json.dumps(envelope, sort_keys=True)))
+    return cur.rowcount > 0
 
 
 def record_reject(conn, station_guess, received_at, reason, filename):
@@ -163,7 +179,8 @@ def ingest_once(drop_dir, db_path=None, quarantine_dir=None, conn=None):
     (anything unexpected: fs errors, a locked database).  A non-zero
     ``errors`` is what makes the process exit 1.
     """
-    result = {"ingested": 0, "quarantined": 0, "skipped": 0, "errors": 0}
+    result = {"ingested": 0, "quarantined": 0, "skipped": 0,
+              "duplicates": 0, "errors": 0}
     if quarantine_dir is None:
         quarantine_dir = os.path.join(os.path.dirname(
             os.path.abspath(drop_dir)), QUARANTINE_SUBDIR)
@@ -228,10 +245,17 @@ def _ingest_file(conn, path, name, quarantine_dir, result):
         return
 
     # validate() has already guaranteed a non-empty string station.
-    record_heartbeat(conn, envelope["station"], received_at, envelope)
+    inserted = record_heartbeat(conn, envelope["station"], received_at,
+                                envelope)
     conn.commit()          # commit BEFORE unlink: never lose a heartbeat
     os.unlink(path)
-    result["ingested"] += 1
+    if inserted:
+        result["ingested"] += 1
+    else:
+        # Another pass stored this exact arrival first. The file is still
+        # ours to remove, and the count is reported rather than hidden:
+        # a rising duplicate count means two ingests are racing.
+        result["duplicates"] += 1
 
 
 def _ensure_dir(path):
@@ -258,9 +282,11 @@ def main(argv=None):
         print(f"ingest: fatal: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    if result["ingested"] or result["quarantined"] or result["errors"]:
+    if (result["ingested"] or result["quarantined"] or result["errors"]
+            or result["duplicates"]):
         print("ingest: {ingested} ingested, {quarantined} quarantined, "
-              "{skipped} skipped, {errors} errors".format(**result))
+              "{skipped} skipped, {duplicates} duplicate, {errors} errors"
+              .format(**result))
     return 1 if result["errors"] else 0
 
 
