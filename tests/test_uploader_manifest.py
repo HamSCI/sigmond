@@ -15,7 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
 
 from sigmond import uploader_manifest as um
-from sigmond.coordination import Coordination, Host, Radiod
+from sigmond.coordination import Coordination, Heartbeat, Host, Radiod
 
 
 class SerializerTests(unittest.TestCase):
@@ -201,6 +201,135 @@ decoding_software = "psk-recorder/0.1 (radiod={radiod_status})"
         # {radiod_status} substituted from coordination's radiod
         self.assertIn("sigma-status.local",
                       pls[0]["transport"]["decoding_software"])
+
+
+class HeartbeatPipelineTests(unittest.TestCase):
+    """sigmond#task-10 — the station-level heartbeat pipeline, rendered from
+    [heartbeat] in coordination.toml (not any client's deploy.toml — the
+    heartbeat is a station product, no client declares it)."""
+
+    def _coord_hb(self, **hb_kwargs) -> Coordination:
+        return Coordination(
+            host=Host(call="AC0G", grid="EM38ww"),
+            radiods={"sigma-status.local": Radiod(id="sigma-status.local")},
+            heartbeat=Heartbeat(**hb_kwargs),
+        )
+
+    def test_present_when_enabled_and_resolved(self):
+        coord = self._coord_hb(enabled=True, station="S000418",
+                               host="drop.hamsci.org")
+        pl = um.heartbeat_pipeline(coord)
+        self.assertEqual(pl, {
+            "name": "heartbeat",
+            "source": {
+                "type": "filetree",
+                "root": "/var/lib/sigmond/heartbeat",
+                "patterns": ["*.json"],
+                "table": "station.heartbeat",
+                "retention": "delete_on_ack",
+            },
+            "transport": {
+                "type": "heartbeat_sftp",
+                "host": "drop.hamsci.org",
+                "port": 22,
+                "sftp_user": "hamsci-hb",
+                "remote_path": "incoming",
+            },
+            "retry": {"base": 2.0, "cap_sec": 300.0},
+        })
+
+    def test_present_with_non_default_transport_values(self):
+        coord = self._coord_hb(enabled=True, station="S000418",
+                               host="drop.hamsci.org", port=2222,
+                               sftp_user="hb2", remote_path="drop")
+        pl = um.heartbeat_pipeline(coord)
+        self.assertEqual(pl["transport"], {
+            "type": "heartbeat_sftp",
+            "host": "drop.hamsci.org",
+            "port": 2222,
+            "sftp_user": "hb2",
+            "remote_path": "drop",
+        })
+
+    def test_missing_station_skipped_with_warning(self):
+        coord = self._coord_hb(enabled=True, station="", host="drop.hamsci.org")
+        with self.assertLogs(um.logger, level="WARNING") as cm:
+            pl = um.heartbeat_pipeline(coord)
+        self.assertIsNone(pl)
+        self.assertTrue(any("heartbeat" in msg for msg in cm.output))
+
+    def test_missing_host_skipped_with_warning(self):
+        coord = self._coord_hb(enabled=True, station="S000418", host="")
+        with self.assertLogs(um.logger, level="WARNING") as cm:
+            pl = um.heartbeat_pipeline(coord)
+        self.assertIsNone(pl)
+        self.assertTrue(any("heartbeat" in msg for msg in cm.output))
+
+    def test_disabled_is_absent_no_warning(self):
+        coord = self._coord_hb(enabled=False, station="S000418",
+                               host="drop.hamsci.org")
+        with self.assertNoLogs(um.logger, level="WARNING"):
+            pl = um.heartbeat_pipeline(coord)
+        self.assertIsNone(pl)
+
+    def test_block_absent_is_absent_no_warning(self):
+        coord = Coordination(
+            host=Host(call="AC0G", grid="EM38ww"),
+            radiods={"sigma-status.local": Radiod(id="sigma-status.local")},
+        )
+        with self.assertNoLogs(um.logger, level="WARNING"):
+            pl = um.heartbeat_pipeline(coord)
+        self.assertIsNone(pl)
+
+    def test_generate_appends_heartbeat_after_client_pipelines(self):
+        coord = self._coord_hb(enabled=True, station="S000418",
+                               host="drop.hamsci.org")
+        with mock.patch.object(um, "host_key_file", return_value="/k"), \
+             mock.patch.object(um, "list_instances", return_value=[]):
+            text = um.generate(_Topo([]), coord)
+        parsed = tomllib.loads(text)
+        self.assertEqual([p["name"] for p in parsed["pipeline"]], ["heartbeat"])
+
+
+class HeartbeatCrossRepoShapeTests(unittest.TestCase):
+    """CROSS-REPO SHAPE TEST: the rendered heartbeat pipeline must build via
+    hs_uploader.pipeline_factory.build_pipelines, using its already-registered
+    "heartbeat_sftp" transport (hs-uploader HEAD b3941bb). No cross-repo
+    import precedent exists in this test module, so sys.path.insert the
+    hs-uploader src dir here, scoped to this test class."""
+
+    @classmethod
+    def setUpClass(cls):
+        hs_uploader_src = (Path(__file__).resolve().parent.parent.parent
+                           / "hs-uploader" / "src")
+        if not hs_uploader_src.is_dir():
+            raise unittest.SkipTest(
+                f"hs-uploader checkout not found at {hs_uploader_src}")
+        sys.path.insert(0, str(hs_uploader_src))
+
+    def test_rendered_manifest_builds_with_heartbeat_sftp_transport(self):
+        from hs_uploader.pipeline_factory import build_pipelines
+        from hs_uploader.transports.heartbeat_sftp import HeartbeatSftp
+        from hs_uploader.watermark.sqlite import SqliteWatermarkStore
+
+        coord = Coordination(
+            host=Host(call="AC0G", grid="EM38ww"),
+            radiods={"sigma-status.local": Radiod(id="sigma-status.local")},
+            heartbeat=Heartbeat(enabled=True, station="S000418",
+                                host="drop.hamsci.org"),
+        )
+        pipelines = [um.heartbeat_pipeline(coord)]
+        identity = {"call": "AC0G", "grid": "EM38ww",
+                   "ssh_key_file": "/etc/hs-uploader/keys/id_ed25519_host"}
+        text = um.render_manifest(pipelines, identity)
+        manifest = tomllib.loads(text)
+
+        built = build_pipelines(manifest, watermark=SqliteWatermarkStore(":memory:"))
+        self.assertEqual(len(built), 1)
+        p = built[0]
+        self.assertIsInstance(p.transport, HeartbeatSftp)
+        self.assertEqual(p.transport.host, "drop.hamsci.org")
+        self.assertEqual(p.transport.primary_table(), "station.heartbeat")
 
 
 if __name__ == "__main__":

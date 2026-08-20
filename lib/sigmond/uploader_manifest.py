@@ -27,6 +27,12 @@ warning** (mirrors ``upload_creds`` "upload info missing") rather than emitted
 broken.  The rendered manifest reproduces the same derived watermark keys
 (``source_id``/``dest_id``/``table``) as a correctly hand-written one, so the
 daemon inherits its cursors with no backlog re-ship.
+
+One pipeline is NOT client-declared: the fleet-heartbeat upload
+(:func:`heartbeat_pipeline`) is a station-level product (sigmond#task-8/9/10),
+so it is rendered straight from ``[heartbeat]`` in coordination.toml rather
+than any client's ``deploy.toml``, and appended by :func:`generate` after
+:func:`collect_pipelines`.
 """
 
 from __future__ import annotations
@@ -222,6 +228,56 @@ def collect_pipelines(topology: Optional[Topology] = None,
     return pipelines
 
 
+def heartbeat_pipeline(coord: Coordination) -> Optional[dict]:
+    """The station-level heartbeat pipeline (sigmond#task-8..10,
+    PRODUCER-THREAT-MODEL.md), rendered from ``[heartbeat]`` in
+    coordination.toml rather than a client's ``deploy.toml`` — the
+    heartbeat is a station product, no client declares it.
+
+    Returns ``None`` (skipped with the same warning discipline
+    :func:`collect_pipelines` uses for unresolved identity) when
+    ``[heartbeat]`` is absent, ``enabled`` is false, or ``station``/``host``
+    is missing/empty.  Otherwise a pipeline dict shaped for
+    :func:`render_manifest` / ``hs_uploader.pipeline_factory`` — the
+    ``heartbeat_sftp`` transport keys (``host``/``port``/``sftp_user``/
+    ``remote_path``) are a cross-repo contract with hs-uploader; do not
+    rename."""
+    hb = coord.heartbeat
+    if not hb.enabled:
+        return None
+    missing = [k for k, v in (("station", hb.station), ("host", hb.host))
+              if not v]
+    if missing:
+        logger.warning(
+            "uploader-manifest: skipping pipeline %s (%s) — "
+            "unresolved identity: %s",
+            "heartbeat", "coordination.heartbeat", ", ".join(missing))
+        return None
+    return {
+        "name": "heartbeat",
+        "source": {
+            "type": "filetree",
+            "root": "/var/lib/sigmond/heartbeat",
+            "patterns": ["*.json"],
+            "table": "station.heartbeat",
+            "retention": "delete_on_ack",
+        },
+        "transport": {
+            "type": "heartbeat_sftp",
+            "host": hb.host,
+            "port": hb.port,
+            "sftp_user": hb.sftp_user,
+            "remote_path": hb.remote_path,
+        },
+        # Matches the RetryPolicy() default hs_uploader.pipeline_factory
+        # falls back to when a pipeline omits [retry] — and the explicit
+        # values psk-recorder/meteor-scatter declare for their own
+        # pipelines (wspr's 900.0 cap is a documented drain-mode special
+        # case, not the norm).
+        "retry": {"base": 2.0, "cap_sec": 300.0},
+    }
+
+
 def build_identity(coord: Coordination, call: Optional[str]) -> dict:
     ident: dict = {}
     if call:
@@ -295,5 +351,8 @@ def generate(topology: Optional[Topology] = None,
     coord = coord or load_coordination()
     call = reporter_call(coord)
     pipelines = collect_pipelines(topology, coord)
+    hb_pipeline = heartbeat_pipeline(coord)
+    if hb_pipeline is not None:
+        pipelines.append(hb_pipeline)
     identity = build_identity(coord, call)
     return render_manifest(pipelines, identity)
