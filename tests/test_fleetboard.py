@@ -473,6 +473,26 @@ def test_default_interval_used_when_the_envelope_has_none(db_path):
     assert b4["availability"]["verdict"] == "VALID"
 
 
+def test_declared_interval_cannot_stretch_the_silent_window(db_path):
+    # A station declaring interval_sec=86400 (one day) must NOT get a
+    # 3-day silent window: interval_sec is clamped to MAX_INTERVAL_SEC
+    # (3600s), so 3x3600s = 10800s of silence is already INVALID —
+    # despite the declared interval implying 3x86400s would be fine.
+    assert fleetboard.MAX_INTERVAL_SEC == 3600
+    silent_for = 3 * fleetboard.MAX_INTERVAL_SEC + 1
+    seed(db_path, "AC0G-B4", NOW - silent_for,
+        make_envelope(interval_sec=86400))
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, ROSTER, NOW)
+    finally:
+        conn.close()
+
+    b4 = {s["station"]: s for s in statuses}["AC0G-B4"]
+    assert b4["availability"]["verdict"] == "INVALID"
+
+
 def test_only_the_latest_arrival_decides(db_path):
     seed(db_path, "AC0G-B4", NOW - 9000, make_envelope(rollup="INVALID",
                                                        reason="old news"))

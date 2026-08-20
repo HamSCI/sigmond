@@ -49,6 +49,17 @@ DEFAULT_INTERVAL_SEC = 300
 #: land inside this window.
 DEFAULT_SILENT_TICKS = 3
 
+#: Upper bound on an envelope-declared interval_sec.  interval_sec is
+#: SELF-REPORTED — the one number a station gets to hand the server that
+#: directly sets the silent-window threshold this board uses to detect
+#: that station going dark.  Left unbounded, a station (mistakenly or
+#: not) declaring interval_sec=86400 would buy itself a 3-day window of
+#: silence before absence detection fires — self-report re-entering the
+#: one derivation (arrival time vs. roster) that exists specifically to
+#: beat self-report.  Bounds the lie a station can tell about its own
+#: cadence; slow public installs still get absence detection within 3h.
+MAX_INTERVAL_SEC = 3600
+
 #: Window for "who has been talking to us lately" — both the unexpected
 #: -stations list and the rejects counter.
 DEFAULT_WINDOW_S = 86400
@@ -180,7 +191,10 @@ def _interval_of(payload, default):
         return default
     # A zero or negative cadence would make every station instantly
     # absent; treat it as "not declared".
-    return interval if interval > 0 else default
+    if interval <= 0:
+        return default
+    # Clamp the top end too: see MAX_INTERVAL_SEC.
+    return min(interval, MAX_INTERVAL_SEC)
 
 
 def _envelope_rollup(payload, rollup_verdict):

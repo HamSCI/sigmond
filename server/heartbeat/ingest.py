@@ -20,6 +20,23 @@ downstream (fleetboard.derive_status) purely from these arrival times.
 Safe to run every minute from a systemd timer: it is idempotent, it takes
 no lock, and a file it cannot make sense of is quarantined with a row
 explaining why rather than deleted or silently skipped.
+
+TRUST MODEL
+-----------
+The drop is ONE shared chrooted SFTP account (``hamsci-hb``, see
+setup-wd30.sh): every authorized station authenticates as the same
+user.  Per-station SSH keys give REVOCATION (pull one station's key and
+it can no longer connect) — they do NOT give ATTRIBUTION.  There is no
+server-side cross-check between "which key connected" and "what station
+name is in the envelope" — this ingest trusts whatever the in-band
+``station`` field claims.  Consequently, any currently-authorized
+station could emit a heartbeat claiming to be a DIFFERENT roster name,
+or delete another station's not-yet-ingested files out of the shared
+``incoming/`` directory before this timer runs.  Acceptable for an owned
+fleet where every key-holder is a trusted operator; if that stops being
+true, the fix is per-station subdirectories (one SFTP chroot subtree per
+station, enforced by sshd ``Match``) or sshd-side fingerprint logging
+tying each connection to the file it dropped.
 """
 
 import argparse

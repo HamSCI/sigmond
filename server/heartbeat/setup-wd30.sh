@@ -101,6 +101,17 @@ else
 fi
 
 step "sshd snippet $SSHD_SNIPPET"
+# TRUST MODEL: every station authenticates as this ONE shared $HB_USER
+# account (per-station keys are authorized against the same login, see
+# authorize-stations.sh). That gives REVOCATION — pull a station's key
+# and it can no longer connect — but NOT attribution: sshd has no way
+# to tie a connection back to a specific roster station, and nothing on
+# the ingest side cross-checks the login against the in-band "station"
+# field in the envelope. Any currently-authorized station could emit a
+# heartbeat claiming to be a different roster name, or delete another
+# station's not-yet-ingested file. Acceptable for an owned fleet; if
+# that stops being true, per-station chroot subdirectories or sshd
+# fingerprint logging are the fix (see ingest.py's matching note).
 install -d -o root -g root -m 755 /etc/ssh/sshd_config.d
 snippet=$(cat <<EOF
 # Managed by sigmond server/heartbeat/setup-wd30.sh — do not hand-edit.

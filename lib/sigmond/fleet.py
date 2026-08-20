@@ -1047,8 +1047,11 @@ def format_update(results: list) -> str:
                          f'preserved, not discarded)')
         elif r.empty_plan and r.behind:
             lines.append(f'{name}: reports "nothing to do" but is '
-                         f'{r.behind} behind main — STALE UPSTREAM REF '
-                         f'(smd update does not fetch)')
+                         f'{r.behind} behind main — the host\'s own smd '
+                         f'predates the fetch-by-default fix '
+                         f'(_refresh_upstreams) and never refreshed its '
+                         f'upstream ref before planning; update smd on '
+                         f'that host, then re-run')
         elif r.empty_plan:
             lines.append(f'{name}: current — nothing to do')
         elif r.applied:
