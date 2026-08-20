@@ -56,7 +56,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -185,6 +185,57 @@ def load_fleet(path: Optional[str] = None) -> dict[str, Host]:
         name: _host_from_block(name, block, source)
         for name, block in hosts.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — machine-readable fleet: --profile scoping and the roster
+# ---------------------------------------------------------------------------
+
+def filter_fleet(fleet: dict, profile) -> dict:
+    """Scope an inventory to one bring-up profile, before any fan-out.
+
+    Args:
+        fleet: Hosts as :func:`load_fleet` returns.
+        profile: Keep only hosts whose ``Host.profile`` equals this. None
+            means "no scoping" — the input is returned unchanged, so
+            every caller can pass ``args.profile`` straight through
+            without an ``if`` of its own.
+
+    Returns:
+        The matching subset, in inventory order. Filtering here — before
+        ``ssh_runner`` is ever built — means an unwanted profile costs
+        nothing: it is never contacted, not merely excluded from the
+        report.
+    """
+    if profile is None:
+        return fleet
+    return {name: host for name, host in fleet.items()
+            if host.profile == profile}
+
+
+def fleet_roster(fleet: dict, profile: str = 'dasi2') -> list[dict]:
+    """The machine-readable roster for one profile — what ships to a server.
+
+    ``reach`` and ``hop`` are DELIBERATELY EXCLUDED: the roster travels
+    off-box (a server ingesting fleet membership), and access topology —
+    which key reaches which host, and by what nested hop — must never
+    travel with it. Everything here is safe to publish.
+
+    Returns:
+        One ``{name, profile, role, frozen, canary}`` dict per matching
+        host, in inventory order. ``frozen`` is the reason string, or
+        None when the host may be changed.
+    """
+    return [
+        {
+            'name': host.name,
+            'profile': host.profile,
+            'role': host.role,
+            'frozen': host.frozen,
+            'canary': host.canary,
+        }
+        for host in filter_fleet(fleet, profile).values()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +485,18 @@ def format_status(statuses: list) -> str:
     return '\n'.join(lines)
 
 
+def status_to_dict(name: str, status: HostStatus) -> dict:
+    """The JSON serializer for `smd fleet status --json`.
+
+    Emits ``name`` plus every :class:`HostStatus` field verbatim —
+    nothing derived, nothing omitted. ``None`` stays ``None``, which
+    ``json.dumps`` renders as ``null``: the honest-unknown discipline
+    (``behind`` unmeasured, not 0) must survive the JSON boundary the
+    same way it holds in the dataclass.
+    """
+    return {'name': name, **asdict(status)}
+
+
 def _default_git(argv):
     import subprocess
     try:
@@ -586,6 +649,17 @@ def format_doctor(results: list) -> str:
                  '`smd doctor` and reports fewer checks. Coverage is not '
                  'equal across the fleet until every host is current.')
     return '\n'.join(lines)
+
+
+def doctor_to_dict(name: str, doctor: HostDoctor) -> dict:
+    """The JSON serializer for `smd fleet doctor --json`.
+
+    Emits ``name`` plus every :class:`HostDoctor` field verbatim. ``clean``
+    is deliberately tri-state (True/False/None); collapsing the
+    not-examined case to ``false`` here would libel a host nobody looked
+    at, so ``None`` must serialize as JSON ``null``, never ``false``.
+    """
+    return {'name': name, **asdict(doctor)}
 
 
 # ---------------------------------------------------------------------------
@@ -800,13 +874,20 @@ def _in_inventory_order(fleet: dict, results: list) -> list:
 def _true_position(host, run, commits_behind):
     """How far the host really is from main, independent of its plan.
 
-    ``smd update`` computes ``HEAD..@{u}`` and does NOT fetch, so a host
-    whose ``origin/main`` ref is stale reports an empty plan while
-    genuinely behind. Observed live on B4 2026-08-17: HEAD and @{u} both
-    517995a, last fetch two days old, real distance 10 commits.
+    ``cmd_update`` now fetches by default before planning
+    (``_refresh_upstreams``, ``bin/smd:3338``, honoring ``--no-fetch``),
+    so a host running current ``smd`` already has a fresh
+    ``origin/main`` by the time ``HEAD..@{u}`` is computed. This
+    double-check remains necessary for a host still running an OLDER
+    ``smd`` that predates the fetch-by-default fix: its ``@{u}`` is
+    whatever was cached at some earlier fetch, and it can report an
+    empty plan while genuinely behind. Observed live on B4 2026-08-17:
+    HEAD and @{u} both 517995a, last fetch two days old, real distance
+    10 commits.
 
     An empty plan therefore proves only "this host believes it is
-    current" — never "this host has the code". This reads the live SHA
+    current" — never "this host has the code", on a host that has not
+    yet picked up the fetch-by-default fix. This reads the live SHA
     and asks the devbox checkout where it actually sits.
     """
     if commits_behind is None:
@@ -880,9 +961,9 @@ def _arrived(host, run, commits_behind):
                        "against main could not be determined — treated as "
                        "NOT arrived")
     return False, (f'the host reports an empty plan but is still {behind} '
-                   f'behind main — its upstream ref is stale (smd update '
-                   f'does not fetch), so "nothing to do" is not evidence '
-                   f'it has the code')
+                   f'behind main — its upstream ref is stale (this host is '
+                   f'running an smd older than the fetch-by-default fix), '
+                   f'so "nothing to do" is not evidence it has the code')
 
 
 def _empty_plan_verdict(behind, commits_behind):
@@ -898,7 +979,8 @@ def _empty_plan_verdict(behind, commits_behind):
     if behind is None:
         return False, 'reports nothing to do; position against main unknown'
     return False, (f'reports nothing to do but is {behind} behind main '
-                   f'(stale upstream ref — smd update does not fetch)')
+                   f'(stale upstream ref — an smd older than the '
+                   f'fetch-by-default fix)')
 
 
 def _update_one(host, run, commits_behind=None) -> HostUpdate:

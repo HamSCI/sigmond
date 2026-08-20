@@ -3516,13 +3516,14 @@ def cmd_fleet(args) -> int:
         _err('fleet: sigmond library not importable')
         return 1
 
+    import json
     from pathlib import Path
 
     from sigmond import fleet as fleet_mod
 
     verb = getattr(args, 'fleet_command', None)
     if verb is None:
-        _err('fleet: pick a verb — status | doctor | update')
+        _err('fleet: pick a verb — status | doctor | roster | update')
         return 2
 
     try:
@@ -3531,12 +3532,42 @@ def cmd_fleet(args) -> int:
         _err(f'fleet: {exc}')
         return 1
 
+    if verb == 'roster':
+        profile = getattr(args, 'profile', 'dasi2')
+        roster = fleet_mod.fleet_roster(hosts, profile=profile)
+        if getattr(args, 'json', False):
+            print(json.dumps(roster, indent=2))
+            return 0
+        if not roster:
+            print(f'no hosts with profile={profile!r}')
+            return 0
+        for entry in roster:
+            line = (f"{entry['name']}  profile={entry['profile']} "
+                    f"role={entry['role']}")
+            if entry['frozen']:
+                line += f" [FROZEN: {entry['frozen']}]"
+            if entry['canary']:
+                line += ' [canary]'
+            print(line)
+        return 0
+
+    # --profile scopes BEFORE the fan-out — fewer ssh targets, not just a
+    # filtered report.
+    hosts = fleet_mod.filter_fleet(hosts, getattr(args, 'profile', None))
     run = fleet_mod.ssh_runner()
 
     if verb == 'doctor':
         results = fleet_mod.fleet_doctor(hosts, run)
-        print(fleet_mod.format_doctor(results))
-        return 1 if any(r.clean is not True for r in results) else 0
+        # Same exit decision for text and json — computed once, reused.
+        unhealthy = any(r.clean is not True for r in results)
+        if getattr(args, 'json', False):
+            payload = {'schema': 1,
+                      'hosts': [fleet_mod.doctor_to_dict(r.host.name, r)
+                               for r in results]}
+            print(json.dumps(payload, indent=2))
+        else:
+            print(fleet_mod.format_doctor(results))
+        return 1 if unhealthy else 0
 
     if verb == 'update':
         do_apply = getattr(args, 'apply', False)
@@ -3559,10 +3590,16 @@ def cmd_fleet(args) -> int:
         hosts, run,
         commits_behind=fleet_mod.commits_behind_main(repo_root),
     )
-    print(fleet_mod.format_status(statuses))
-
+    # Same exit decision for text and json — computed once, reused.
     unhealthy = [s for s in statuses
                  if not s.reachable or s.error or s.drift or s.behind]
+    if getattr(args, 'json', False):
+        payload = {'schema': 1,
+                  'hosts': [fleet_mod.status_to_dict(s.host.name, s)
+                           for s in statuses]}
+        print(json.dumps(payload, indent=2))
+    else:
+        print(fleet_mod.format_status(statuses))
     return 1 if unhealthy else 0
 
 
@@ -17271,10 +17308,27 @@ def main() -> int:
         help='fleet inventory (default: $SIGMOND_FLEET, '
              'then /etc/sigmond/fleet.toml)')
     fleet_sub = p_fleet.add_subparsers(dest='fleet_command')
-    fleet_sub.add_parser('status',
+    p_fleet_status = fleet_sub.add_parser('status',
         help="each host's live component SHAs vs its blessed pin")
-    fleet_sub.add_parser('doctor',
+    p_fleet_status.add_argument('--json', action='store_true',
+        help='emit {"schema": 1, "hosts": [...]} instead of the text report')
+    p_fleet_status.add_argument('--profile', metavar='NAME',
+        help='scope to hosts with this profile before the fan-out '
+             '(e.g. dasi2) — default: no scoping, every host')
+    p_fleet_doctor = fleet_sub.add_parser('doctor',
         help='smd doctor across every reachable host (never repairs)')
+    p_fleet_doctor.add_argument('--json', action='store_true',
+        help='emit {"schema": 1, "hosts": [...]} instead of the text report')
+    p_fleet_doctor.add_argument('--profile', metavar='NAME',
+        help='scope to hosts with this profile before the fan-out '
+             '(e.g. dasi2) — default: no scoping, every host')
+    p_fleet_roster = fleet_sub.add_parser('roster',
+        help='machine-readable roster for one profile (no fan-out; '
+             'reach/hop excluded — this is what ships to a server)')
+    p_fleet_roster.add_argument('--json', action='store_true',
+        help='emit the roster as a JSON array')
+    p_fleet_roster.add_argument('--profile', metavar='NAME', default='dasi2',
+        help='profile to scope to (default: dasi2)')
     p_fleet_update = fleet_sub.add_parser('update',
         help='multiplex smd update: canary, verify, then the wave')
     p_fleet_update.add_argument('--apply', action='store_true',

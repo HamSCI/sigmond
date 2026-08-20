@@ -1232,3 +1232,233 @@ class TestDoctorAgreesAboutHostsWithoutSigmond:
         assert result.has_sigmond is True
         assert 'segfault' in (result.error or '')
         assert 'segfault' in format_doctor([result])
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — machine-readable fleet: JSON serializers, --profile, roster
+# ---------------------------------------------------------------------------
+
+import dataclasses  # noqa: E402
+import json  # noqa: E402
+
+from sigmond.fleet import (  # noqa: E402
+    HostDoctor,
+    doctor_to_dict,
+    filter_fleet,
+    fleet_roster,
+    status_to_dict,
+)
+
+
+class TestStatusToDict:
+    """`status_to_dict` — the JSON serializer for `smd fleet status --json`.
+
+    Round-trips every state `fleet_status` can produce. The honest-unknown
+    discipline must survive JSON: None stays `null`, never 0/false/"".
+    """
+
+    def test_unreachable_round_trips(self):
+        fleet = {'gone': Host(name='gone', reach='root@gone.example')}
+        run = runner({
+            ('gone', 'true'): RunResult(rc=255, out='',
+                                        err='Permission denied (publickey).'),
+        })
+        [status] = fleet_status(fleet, run)
+        d = status_to_dict('gone', status)
+        assert d['name'] == 'gone'
+        assert d['reachable'] is False
+        assert 'Permission denied' in d['error']
+        assert d['behind'] is None
+
+    def test_no_sigmond_round_trips(self):
+        fleet = {'srv': Host(name='srv', reach='op@srv.example', role='server')}
+        run = runner({('srv', 'true'): _ok()})
+        [status] = fleet_status(fleet, run)
+        d = status_to_dict('srv', status)
+        assert d['reachable'] is True
+        assert d['has_sigmond'] is False
+        assert d['error'] is None
+
+    def test_frozen_host_carries_its_reason(self):
+        fleet = {'cold': Host(name='cold', reach='root@cold.example',
+                              frozen='capture window through 2026-08-20')}
+        run = runner({
+            ('cold', 'true'): _ok(),
+            ('cold', 'smd version'): _ok(VERSION_OK),
+        })
+        [status] = fleet_status(fleet, run)
+        d = status_to_dict('cold', status)
+        assert d['host']['frozen'].startswith('capture window')
+
+    def test_drifted_manifest_round_trips(self):
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+            ('alpha', 'cat /etc/sigmond-appliance/manifest.txt'):
+                _ok(MANIFEST_BEHIND),
+        })
+        [status] = fleet_status(fleet, run)
+        d = status_to_dict('alpha', status)
+        assert d['blessed_source'] == 'manifest'
+        assert d['drift'][0]['component'] == 'hf-timestd'
+
+    def test_behind_none_serializes_as_null_not_zero(self):
+        """No `commits_behind` supplied ⇒ `behind` stays None — must be
+        JSON `null`, never coerced to 0 (0 would read as "current")."""
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+        })
+        [status] = fleet_status(fleet, run)
+        d = status_to_dict('alpha', status)
+        assert d['behind'] is None
+        text = json.dumps(d)
+        assert '"behind": null' in text
+        assert '"behind": 0' not in text
+        assert '"behind": false' not in text
+
+    def test_every_dataclass_field_is_present_and_none_omitted(self):
+        fleet = {'alpha': Host(name='alpha', reach='root@alpha.example')}
+        run = runner({
+            ('alpha', 'true'): _ok(),
+            ('alpha', 'smd version'): _ok(VERSION_OK),
+        })
+        [status] = fleet_status(fleet, run)
+        d = status_to_dict('alpha', status)
+        for f in dataclasses.fields(HostStatus):
+            assert f.name in d, f'{f.name} missing from status_to_dict output'
+        assert d['name'] == 'alpha'
+
+
+class TestDoctorToDict:
+    """`doctor_to_dict` — the JSON serializer for `smd fleet doctor --json`.
+
+    `clean` is deliberately tri-state (True/False/None); JSON must
+    preserve all three, and None must never collapse to false.
+    """
+
+    def test_clean_host_is_true(self):
+        fleet = {'well': Host(name='well', reach='root@well.example')}
+        run = runner({
+            ('well', 'true'): _ok(),
+            ('well', 'smd doctor'): _ok('deploy trees clean'),
+        })
+        [result] = fleet_doctor(fleet, run)
+        d = doctor_to_dict('well', result)
+        assert d['clean'] is True
+
+    def test_findings_host_is_false(self):
+        fleet = {'sick': Host(name='sick', reach='root@sick.example')}
+        run = runner({
+            ('sick', 'true'): _ok(),
+            ('sick', 'smd doctor'): RunResult(rc=1, out=DOCTOR_FINDINGS, err=''),
+        })
+        [result] = fleet_doctor(fleet, run)
+        d = doctor_to_dict('sick', result)
+        assert d['clean'] is False
+        assert 'venv-skew' in d['report']
+
+    def test_not_examined_is_null_not_false(self):
+        """Unreachable ⇒ nobody looked. Collapsing to False would libel
+        a host nobody examined; it must serialize as JSON null."""
+        fleet = {'gone': Host(name='gone', reach='root@gone.example')}
+        run = runner({('gone', 'true'): RunResult(rc=255, out='', err='denied')})
+        [result] = fleet_doctor(fleet, run)
+        d = doctor_to_dict('gone', result)
+        assert d['clean'] is None
+        text = json.dumps(d)
+        assert '"clean": null' in text
+        assert '"clean": false' not in text
+
+    def test_no_sigmond_is_also_clean_null(self):
+        fleet = {'srv': Host(name='srv', reach='op@srv.example', role='server')}
+        run = runner({('srv', 'true'): _ok(), ('srv', 'smd doctor'): NO_SMD})
+        [result] = fleet_doctor(fleet, run)
+        d = doctor_to_dict('srv', result)
+        assert d['clean'] is None
+        assert d['has_sigmond'] is False
+
+    def test_every_dataclass_field_is_present(self):
+        fleet = {'well': Host(name='well', reach='root@well.example')}
+        run = runner({
+            ('well', 'true'): _ok(),
+            ('well', 'smd doctor'): _ok('deploy trees clean'),
+        })
+        [result] = fleet_doctor(fleet, run)
+        d = doctor_to_dict('well', result)
+        for f in dataclasses.fields(HostDoctor):
+            assert f.name in d, f'{f.name} missing from doctor_to_dict output'
+        assert d['name'] == 'well'
+
+
+class TestFilterFleet:
+
+    def test_none_passes_through_unchanged(self):
+        fleet = _fleet(Host(name='b4', reach='r', profile='dasi2'),
+                       Host(name='bee1', reach='r', profile='bee'))
+        assert filter_fleet(fleet, None) == fleet
+
+    def test_subset_by_profile(self):
+        fleet = _fleet(Host(name='b4', reach='r', profile='dasi2'),
+                       Host(name='dasi002', reach='r', profile='dasi2'),
+                       Host(name='bee1', reach='r', profile='bee'))
+        scoped = filter_fleet(fleet, 'dasi2')
+        assert set(scoped) == {'b4', 'dasi002'}
+
+    def test_unknown_profile_is_empty(self):
+        fleet = _fleet(Host(name='b4', reach='r', profile='dasi2'))
+        assert filter_fleet(fleet, 'nope') == {}
+
+    def test_preserves_order(self):
+        fleet = _fleet(Host(name='z', reach='r', profile='dasi2'),
+                       Host(name='a', reach='r', profile='dasi2'))
+        assert list(filter_fleet(fleet, 'dasi2')) == ['z', 'a']
+
+
+class TestFleetRoster:
+
+    def test_default_profile_is_dasi2(self):
+        fleet = _fleet(
+            Host(name='b4', reach='r', profile='dasi2', role='field', canary=True),
+            Host(name='dasi002', reach='r', profile='dasi2', role='field'),
+            Host(name='bee1', reach='r', profile='bee', role='field',
+                frozen='co-operated'),
+        )
+        roster = fleet_roster(fleet)
+        assert {e['name'] for e in roster} == {'b4', 'dasi002'}
+
+    def test_excludes_non_matching_profiles(self):
+        fleet = _fleet(Host(name='b4', reach='r', profile='dasi2'),
+                       Host(name='bee1', reach='r', profile='bee'))
+        roster = fleet_roster(fleet, profile='bee')
+        assert [e['name'] for e in roster] == ['bee1']
+
+    def test_entry_shape_is_exactly_five_fields(self):
+        fleet = _fleet(Host(name='b4', reach='root@b4.example',
+                            hop='sigmond@10.0.0.1', profile='dasi2',
+                            role='field', frozen=None, canary=True))
+        [entry] = fleet_roster(fleet, profile='dasi2')
+        assert entry == {
+            'name': 'b4', 'profile': 'dasi2', 'role': 'field',
+            'frozen': None, 'canary': True,
+        }
+
+    def test_reach_and_hop_are_absent(self):
+        """The roster travels to a server; access topology must not."""
+        fleet = _fleet(Host(name='b4', reach='root@b4.example',
+                            hop='sigmond@10.0.0.1', profile='dasi2'))
+        [entry] = fleet_roster(fleet, profile='dasi2')
+        assert 'reach' not in entry
+        assert 'hop' not in entry
+
+    def test_frozen_reason_or_null(self):
+        fleet = _fleet(
+            Host(name='bee1', reach='r', profile='bee', frozen='co-operated site'),
+            Host(name='bee2', reach='r', profile='bee'),
+        )
+        roster = fleet_roster(fleet, profile='bee')
+        by_name = {e['name']: e for e in roster}
+        assert by_name['bee1']['frozen'] == 'co-operated site'
+        assert by_name['bee2']['frozen'] is None
