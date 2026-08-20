@@ -150,17 +150,8 @@ extras. The dev venv lives at `.venv/` (separate from the installed
 
 ### Tests
 
-`pyproject.toml` configures pytest with `testpaths = ["tests"]`. The dev
-venv's pytest is the canonical runner:
-
-```bash
-.venv/bin/pytest                                  # full suite (42 test files)
-.venv/bin/pytest tests/test_lifecycle.py          # one file
-.venv/bin/pytest tests/test_lifecycle.py::test_X  # one test
-.venv/bin/pytest -k harmonize                     # by keyword
-.venv/bin/pytest -x -vv tests/test_catalog.py     # stop on first failure, verbose
-```
-
+`pyproject.toml` configures pytest with `testpaths = ["tests"]`. **`.venv/bin/pytest`
+is the canonical runner** — not a bare `pytest`, which would miss the dev extras.
 Fixtures and shared scaffolding live in `tests/fixtures/` and `tests/conftest.py`.
 
 ### Linting & typing
