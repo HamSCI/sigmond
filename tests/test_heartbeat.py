@@ -1073,3 +1073,40 @@ def test_future_stamped_row_with_gaps_still_reports_indeterminate():
         "row_utc": "2026-08-20T15:00Z", "gaps": 4, "channel_hours": 6.0,
         "rate": 0.67, "row_age_s": -60.0}))
     assert env["blocks"]["gaps"]["verdict"] == "INDETERMINATE"
+
+
+def test_validate_accepts_a_strict_subset_of_block_names():
+    """RELIED-UPON CONTRACT: a producer may emit only SOME blocks.
+
+    ``heartbeat_schema.validate()`` never requires every name in
+    ``BLOCK_NAMES`` to be present — a block is a question the producer
+    is ABLE to answer, and a producer that cannot see a given question
+    at all (e.g. a Proxmox host, which has no view of `timing`/`gaps`/
+    `uploads`/`manifest`) must be able to emit only the blocks that
+    apply to it without being rejected as malformed.
+
+    scripts/proxmox/pm-heartbeat.py (sigmond fleet-awareness task PM-1)
+    is the first real producer that relies on this: it emits exactly
+    ``{versions, doctor, resources}`` and nothing else. This test turns
+    an earlier code review's "missing block names are not flagged"
+    observation into documented, tested behavior, so nobody "fixes"
+    validate() into requiring the full set and silently breaks every
+    partial producer.
+    """
+    envelope = {
+        "kind": heartbeat_schema.KIND,
+        "schema_version": heartbeat_schema.SCHEMA_VERSION,
+        "station": "b4-pm",
+        "emitted_at": "2026-08-20T14:05:06Z",
+        "interval_sec": 300,
+        "rollup": {"verdict": "VALID", "reason": "versions: 2 read"},
+        "blocks": {
+            "versions": {"verdict": "VALID", "reason": "2 read"},
+            "doctor": {"verdict": "VALID", "reason": "3 checks passed"},
+            "resources": {"verdict": "VALID", "reason": "host counters read"},
+        },
+    }
+    block_names = set(envelope["blocks"])
+    assert block_names < set(heartbeat_schema.BLOCK_NAMES), (
+        "fixture must be a STRICT subset to pin the behavior under test")
+    assert heartbeat_schema.validate(envelope) == []

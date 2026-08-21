@@ -1,0 +1,22 @@
+# /etc/systemd/system/pm-heartbeat.service
+[Unit]
+Description=Proxmox-host fleet heartbeat — assemble, spool, and ship one envelope
+Documentation=https://github.com/HamSCI/sigmond
+# No ConditionPathExists gate: pm-heartbeat.py is self-gating on
+# /etc/pm-heartbeat/config.toml (loud stderr + exit 2 when it's missing
+# or missing a required key) — see pm-heartbeat.timer for why the TIMER,
+# not this unit, is what stays un-enabled until pm-heartbeat-setup.sh has
+# written a complete config.
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+# root: `qm guest exec`/`qm status`/`qm config` and /sys/fs/resctrl reads
+# are host-admin operations on Proxmox; there is no unprivileged path to
+# them.
+ExecStart=/usr/local/sbin/pm-heartbeat.py
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pm-heartbeat

@@ -1,0 +1,24 @@
+# /etc/systemd/system/pm-heartbeat.timer
+[Unit]
+Description=Proxmox-host fleet situational-awareness heartbeat cadence
+Documentation=https://github.com/HamSCI/sigmond
+
+[Timer]
+OnCalendar=*:0/5
+# 45s, deliberately DIFFERENT from the station units' 30s
+# (systemd/sigmond-heartbeat.timer): this spreads PM emits off the VM
+# emits so an sftp burst from a PM and its own guest VM don't land on
+# the drop in the same instant every 5 minutes.
+RandomizedDelaySec=45
+# Persistent=false is DELIBERATE, same reasoning as
+# systemd/sigmond-heartbeat.timer: the central board derives "is this PM
+# alive" SOLELY from heartbeat ARRIVAL times (never from anything inside
+# one), so a missed tick must look missed. Persistent=true would let a PM
+# that was down or rebooting through a tick fire late on resume,
+# backfilling an arrival the board would read as "up the whole time" —
+# hiding exactly the outage this feature exists to surface. Leave it
+# false.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
