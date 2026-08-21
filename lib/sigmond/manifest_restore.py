@@ -19,6 +19,28 @@ unusable manifest — so operating it feels like the same family as
 `adopt`. The CLI wrapper in `bin/smd` (`cmd_manifest_restore`) owns
 reading the manifest file, computing live components, fetching, the
 dirty-tree check, and (on `--apply`) actually moving checkouts.
+
+Post-apply verification re-runs `plan_restore` itself against the
+recomputed live components (`resolvable` stubbed to always return
+`False` — nothing should need a fresh checkout move immediately after
+`--apply` just landed), demanding "ok AND every action is `'keep'`".
+It deliberately does NOT reuse `manifest_adopt.plan_adopt` STRICT for
+this, even though that was the first cut: `plan_adopt` refuses on any
+live component absent from the manifest, so a perfectly successful
+restore on a host carrying a sanctioned extra (a `RestorePlan.strays`
+entry) would report verification FAILURE — contradicting this
+module's own documented promise that strays are informational and
+never a refusal. Re-running `plan_restore` states restore's actual
+contract instead.
+
+Shared behavior with `cmd_update` worth knowing about: the CLI
+wrapper's `_owner_of` helper (used for every `runuser -u <owner>`
+fetch/checkout) falls back to `'root'` when `Path.owner()` raises —
+the same fallback `cmd_update`'s pull step uses for `step.run_as`.
+On a real deploy tree this should never trigger (every checkout is
+service-user-owned), so it is left matching `cmd_update` rather than
+diverging into a refusal here; an ownership problem severe enough to
+hit this path is `smd doctor`'s finding to report, not restore's.
 """
 from __future__ import annotations
 

@@ -3859,13 +3859,25 @@ def cmd_manifest_restore(args) -> int:
        guidance `smd update` prints (`cmd_update`'s "restart not
        automated here" line) — restarts stay manual and stated, never
        silently triggered.
-    7. Post-apply verification: recompute live components and run
-       `sigmond.manifest_adopt.plan_adopt` (STRICT — no
-       `--allow-superset`; this must come back exactly clean, not
-       merely superset-sanctioned) against `<path>`. Success prints a
-       one-line confirmation; failure is LOUD (every remaining
-       divergence listed) and exits 1 — a restore that still shows
-       drift immediately afterward is not a success just because the
+    7. Post-apply verification: recompute live components and re-run
+       `plan_restore` ITSELF against `<path>` (`resolvable` stubbed to
+       always return `False` — nothing should need a NEW checkout move
+       immediately after `--apply` just landed). The bar is "ok AND
+       every action is `'keep'`" — NOT `plan_adopt` STRICT. An earlier
+       version used `plan_adopt` here on the theory that live ==
+       manifest exactly is what "restored" should mean; it wasn't,
+       because `plan_adopt` refuses on ANY live component absent from
+       the manifest, so a perfectly successful restore on a host
+       carrying a sanctioned extra (a `RestorePlan.strays` entry)
+       reported verification FAILURE — directly contradicting
+       `plan_restore`'s own documented promise that strays are
+       informational and never a refusal. Re-running `plan_restore`
+       states restore's actual contract instead: every manifest
+       component at its manifest SHA, strays left alone. Success prints
+       a one-line confirmation naming how many strays were (correctly)
+       left untouched; failure is LOUD (every remaining divergence
+       listed by name) and exits 1 — a restore that still shows drift
+       immediately afterward is not a success just because the
        mechanical steps ran.
 
     Exit codes: 0 plan/restore ok, 1 refusal or post-apply verification
@@ -3889,7 +3901,6 @@ def cmd_manifest_restore(args) -> int:
     from sigmond.doctor import (component_checkouts, _parse_manifest_components,
                                 _sha_equal)
     from sigmond.provenance import component_versions
-    from sigmond.manifest_adopt import plan_adopt
     from sigmond.manifest_restore import plan_restore
 
     manifest_path = Path(args.path)
@@ -4051,24 +4062,39 @@ def cmd_manifest_restore(args) -> int:
         _info('restart not automated here — bounce radiod, wait for it to '
               'settle, then the recorders')
 
-    # Post-apply verification: recompute live and demand a STRICT
-    # (no --allow-superset) adopt-clean result. This should be
-    # impossible to fail if every checkout move above landed — treat a
-    # failure as loud, not silently accepted.
+    # Post-apply verification: re-run plan_restore ITSELF, not
+    # plan_adopt.  An earlier version used plan_adopt (STRICT, no
+    # --allow-superset) here, on the theory that live == manifest
+    # exactly is what "restored" should mean.  It isn't: plan_adopt
+    # refuses on ANY live component absent from the manifest, so a
+    # perfectly successful restore on a host carrying a sanctioned
+    # extra (a "stray" — see RestorePlan.strays) reported verification
+    # FAILURE, directly contradicting plan_restore's own documented
+    # promise that strays are informational and never a refusal.
+    # plan_restore states restore's actual contract: every manifest
+    # component sits at its manifest SHA, strays are left alone.
+    # `resolvable` is stubbed to always return False — nothing should
+    # need a NEW checkout move immediately after --apply just landed,
+    # so any component that still wants one is exactly the divergence
+    # this check exists to catch (reported as a refusal, naming the
+    # component), not a case to paper over by resolving/fetching again.
     live_after = component_versions(component_checkouts(base))
-    verify = plan_adopt(manifest_text, live_after)
-    if verify.ok:
+    reverify = plan_restore(manifest_text, live_after, lambda *a: False)
+    non_keep = [(n, a, f, t) for n, a, f, t in reverify.actions if a != 'keep']
+    if reverify.ok and not non_keep:
         print(f'admin manifest restore: restored to manifest — '
-              f'{len(moved)} component(s) moved, adopt-strict verifies '
-              f'clean')
+              f'{len(moved)} component(s) moved, re-plan verifies '
+              f'all-keep ({len(reverify.strays)} stray component(s) '
+              f'untouched)')
         return 0
 
     _err(f'admin manifest restore: restored {len(moved)} component(s) but '
-         f'adopt-strict verification STILL finds '
-         f'{len(verify.refusals)} divergence(s) — treat this host as '
-         f'unverified and investigate before relying on it')
-    for r in verify.refusals:
+         f're-plan verification STILL finds a divergence — treat this '
+         f'host as unverified and investigate before relying on it')
+    for r in reverify.refusals:
         _err(r)
+    for n, a, f, t in non_keep:
+        _err(f'{n}: still {a} ({f} -> {t}) after --apply')
     return 1
 
 

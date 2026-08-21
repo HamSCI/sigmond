@@ -443,14 +443,18 @@ class ManifestRestoreApplyTests(unittest.TestCase):
             path=str(manifest_path), apply=True, no_fetch=False,
             base=str(self.base))
         buf = io.StringIO()
-        versions = mock.Mock(side_effect=[live, after_live or live])
+        errbuf = io.StringIO()
+        versions = mock.Mock(side_effect=[live, after_live if after_live is not None else live])
         with mock.patch.object(smd, '_need_root', return_value=False), \
              mock.patch('sigmond.provenance.component_versions',
                          side_effect=versions), \
              mock.patch('subprocess.run', side_effect=fake):
-            with contextlib.redirect_stdout(buf):
+            with contextlib.redirect_stdout(buf), \
+                 contextlib.redirect_stderr(errbuf):
                 rc = smd.cmd_manifest_restore(args)
-        return rc, buf.getvalue(), fake
+        # Refusals/errors print via _err (stderr); combine so a test can
+        # assert on message text without caring which stream carried it.
+        return rc, buf.getvalue() + errbuf.getvalue(), fake
 
     def test_install_sh_runs_when_pyproject_changed_between_shas(self):
         live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
@@ -489,16 +493,41 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         fake = _FakeGit()
         rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
         self.assertEqual(rc, 0)
-        self.assertIn('adopt-strict verifies clean', out)
+        self.assertIn('re-plan verifies all-keep', out)
+        self.assertIn('0 stray component(s) untouched', out)
+
+    def test_post_apply_verification_passes_with_a_stray_live_component(self):
+        # The finding this test guards against: an earlier version used
+        # plan_adopt STRICT for post-apply verification, which refuses
+        # on ANY live component absent from the manifest -- so a
+        # perfectly successful restore on a host carrying a sanctioned
+        # extra (e.g. meteor-scatter, not in this manifest) reported
+        # verification FAILURE. plan_restore's own re-plan must pass:
+        # strays are informational, never a refusal.
+        live = {'wspr-recorder': 'ccccccc', 'meteor-scatter': 'deadbee',
+                **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'wspr-recorder': 'aaaaaaa', 'meteor-scatter': 'deadbee',
+                **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        fake = _FakeGit()
+        rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('re-plan verifies all-keep', out)
+        self.assertIn('1 stray component(s) untouched', out)
+        # The stray is never named in any git argv -- it's genuinely
+        # never touched, not just excluded from the final message.
+        self.assertFalse(any('meteor-scatter' in str(c) for c in fake.calls))
 
     def test_post_apply_verification_failure_is_loud_and_exits_1(self):
         live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
-        # Simulate the checkout not actually landing (still 'ccccccc' after).
+        # Simulate the checkout not actually landing (still 'ccccccc' after)
+        # -- a manifest component still diverging after --apply.
         after = live
         fake = _FakeGit()
         rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
         self.assertEqual(rc, 1)
         self.assertIn('wspr-recorder', out)
+        self.assertIn('not resolvable', out)
+        self.assertNotIn('re-plan verifies all-keep', out)
 
 
 if __name__ == '__main__':
