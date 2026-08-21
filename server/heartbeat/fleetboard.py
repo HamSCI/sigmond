@@ -79,6 +79,17 @@ def _unknown_blocks(reason):
             for name in heartbeat_schema.BLOCK_NAMES}
 
 
+#: Board-only sentinel, deliberately NOT one of heartbeat_schema.VERDICTS.
+#: A block missing from an envelope that DID arrive and parse is a
+#: producer's honest declaration that it has no view of that block (a PM
+#: heartbeat carries only versions/doctor/resources — it has no way to
+#: see timing/gaps/uploads/manifest at all).  That is a different fact
+#: from INDETERMINATE ("I looked and could not tell"), and painting both
+#: the same grey would make an honest partial producer read as several
+#: failed measurements instead of the blocks it never claimed.
+NOT_CLAIMED = "N/A"
+
+
 def _latest(conn, station):
     row = conn.execute(
         "SELECT received_at, emitted_at, rollup_verdict, payload"
@@ -102,7 +113,10 @@ def _blocks_from_payload(payload):
     for name in heartbeat_schema.BLOCK_NAMES:
         block = blocks.get(name)
         if not isinstance(block, dict):
-            out[name] = _verdict("INDETERMINATE", "block absent from heartbeat")
+            # The envelope arrived and parsed; this block simply was never
+            # in it.  See NOT_CLAIMED above — this is "not claimed", not
+            # "measured nothing".
+            out[name] = _verdict(NOT_CLAIMED, "not claimed by this producer")
             continue
         verdict = block.get("verdict")
         if verdict not in heartbeat_schema.VERDICTS:
@@ -138,6 +152,11 @@ def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
             "last_received_at": None,
             "silent_for_s": None,
             "emitted_at": None,
+            # The envelope's own top-level "role" (e.g. "pm"), NOT the
+            # roster's free-form "role" field above.  None until a
+            # parseable envelope has actually arrived — a station never
+            # heard from gets no tag, same as a plain station.
+            "envelope_role": None,
         }
         row = _latest(conn, station)
         if row is None:
@@ -168,6 +187,9 @@ def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
             status["blocks"] = _blocks_from_payload(payload)
             envelope_top = _envelope_rollup(payload, rollup_verdict)
             interval = _interval_of(payload, interval_default)
+            role = payload.get("role")
+            if isinstance(role, str) and role.strip():
+                status["envelope_role"] = role.strip()
 
         if silent_for_s > silent_ticks * interval:
             reason = f"silent {int(silent_for_s // 60)}m"
@@ -273,6 +295,7 @@ td.verdict small { display: block; font-weight: normal; color: #333;
 .v-INVALID       { background: #f6cccc; }
 .v-INCONCLUSIVE  { background: #fbe8c0; }
 .v-INDETERMINATE { background: #dedede; }
+.v-NA            { background: #fafafa; color: #888; font-style: italic; }
 footer { color: #555; font-size: .85rem; border-top: 1px solid #ccc;
          padding-top: .5rem; }
 """
@@ -313,18 +336,25 @@ VERDICT_LABEL = {
     "INVALID": "FAIL",
     "INCONCLUSIVE": "unsure",
     "INDETERMINATE": "unknown",
+    NOT_CLAIMED: "n/a",
 }
+
+#: NOT_CLAIMED gets its own muted CSS class ("NA" — "N/A" is not a legal
+#: CSS class token). Deliberately distinct from v-INDETERMINATE: "not
+#: claimed" must never look like "measured nothing".
+_CSS_SUFFIX = {NOT_CLAIMED: "NA"}
 
 
 def _verdict_cell(block, full=False):
     verdict = block.get("verdict") if isinstance(block, dict) else None
-    if verdict not in heartbeat_schema.VERDICTS:
+    if verdict not in heartbeat_schema.VERDICTS and verdict != NOT_CLAIMED:
         verdict = "INDETERMINATE"
     reason = (block.get("reason") if isinstance(block, dict) else "") or ""
+    css = _CSS_SUFFIX.get(verdict, verdict)
     if full:
-        return (f'<td class="verdict v-{verdict}">{_e(verdict)}'
+        return (f'<td class="verdict v-{css}">{_e(verdict)}'
                 f'<small>{_e(reason)}</small></td>')
-    return (f'<td class="verdict v-{verdict}" title="{_e(reason)}">'
+    return (f'<td class="verdict v-{css}" title="{_e(reason)}">'
             f'{_e(VERDICT_LABEL[verdict])}</td>')
 
 
@@ -358,6 +388,8 @@ def render_html(statuses, unexpected, rejects, generated_at):
 
     for status in statuses:
         tags = []
+        if status.get("envelope_role") == "pm":
+            tags.append("pm")
         if status.get("canary"):
             tags.append("canary")
         if status.get("frozen"):
@@ -380,8 +412,12 @@ def render_html(statuses, unexpected, rejects, generated_at):
             out.append(_verdict_cell(blocks.get(name) or {}))
         out.append("</tr>")
     if not statuses:
-        out.append('<tr><td colspan="13">roster is empty — nothing is being '
-                   'watched</td></tr>')
+        # 6 fixed columns (station, status, availability, silent for,
+        # last arrival, emitted at) + one per block name — kept in sync
+        # with the <thead> above rather than hand-counted.
+        colspan = 6 + len(heartbeat_schema.BLOCK_NAMES)
+        out.append(f'<tr><td colspan="{colspan}">roster is empty — nothing '
+                   'is being watched</td></tr>')
     out.append("</tbody></table>")
 
     out.append("<h2>Unexpected stations</h2>")

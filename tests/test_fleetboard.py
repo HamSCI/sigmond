@@ -19,6 +19,7 @@ test a layout that does not exist on the server.
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -75,6 +76,34 @@ def make_envelope(station="AC0G-B4", rollup="VALID",
         "emitted_at": emitted_at,
         "interval_sec": interval_sec,
         "uptime_s": 98765.4,
+        "rollup": {"verdict": rollup, "reason": reason},
+        "blocks": blocks,
+    }
+    assert heartbeat_schema.validate(env) == [], "builder must emit valid JSON"
+    return env
+
+
+#: The 3-block subset scripts/proxmox/pm-heartbeat.py's assemble() emits
+#: (see its BLOCK_NAMES) — a PM has no view of manifest/timing/gaps/
+#: uploads at all.
+PM_BLOCK_NAMES = ("versions", "doctor", "resources")
+
+
+def make_pm_envelope(station="B4-100-PM", rollup="VALID",
+                     reason="doctor: 3 checks clean",
+                     emitted_at="2026-08-20T14:05:06Z", interval_sec=300):
+    """A structurally valid PM envelope: 3 blocks + top-level role='pm',
+    shaped exactly like pm-heartbeat.py's assemble() output."""
+    blocks = {name: {"verdict": "VALID", "reason": f"{name} ok"}
+             for name in PM_BLOCK_NAMES}
+    env = {
+        "kind": heartbeat_schema.KIND,
+        "schema_version": heartbeat_schema.SCHEMA_VERSION,
+        "station": station,
+        "role": "pm",
+        "emitted_at": emitted_at,
+        "interval_sec": interval_sec,
+        "uptime_s": 12345.6,
         "rollup": {"verdict": rollup, "reason": reason},
         "blocks": blocks,
     }
@@ -555,6 +584,139 @@ def test_status_rows_follow_roster_order(db_path):
 
 
 # ---------------------------------------------------------------------------
+# 2b. PM-heartbeat awareness — role tag, n/a vs unknown blocks
+# ---------------------------------------------------------------------------
+
+def test_blocks_a_pm_does_not_claim_render_na_not_indeterminate(db_path):
+    seed(db_path, "AC0G-B4", NOW - 10, make_pm_envelope(station="AC0G-B4"))
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, ROSTER, NOW)
+    finally:
+        conn.close()
+
+    b4 = {s["station"]: s for s in statuses}["AC0G-B4"]
+    for name in heartbeat_schema.BLOCK_NAMES:
+        block = b4["blocks"][name]
+        if name in PM_BLOCK_NAMES:
+            assert block["verdict"] == "VALID"
+        else:
+            # Deliberately not claimed by a PM — n/a, never "unknown".
+            assert block["verdict"] == fleetboard.NOT_CLAIMED
+            assert block["verdict"] != "INDETERMINATE"
+
+    html = fleetboard.render_html(
+        [b4], [], {"count": 0, "window_s": 86400, "recent": []}, NOW)
+    assert 'class="verdict v-NA"' in html
+    # Nothing on this fully-alive PM row should read as "measured
+    # nothing" (the CSS block always DEFINES v-INDETERMINATE; no *cell*
+    # may use it here).
+    assert 'class="verdict v-INDETERMINATE"' not in html
+
+
+def test_never_heard_station_still_shows_unknown_not_na(db_path):
+    # Regression: the never-heard path must still be the full-INDETERMINATE
+    # block set (test_never_heard_roster_station_is_indeterminate pins this
+    # too) — n/a is only for a block missing from an envelope that arrived.
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, ROSTER, NOW)
+    finally:
+        conn.close()
+    d2 = {s["station"]: s for s in statuses}["DASI002"]
+    assert all(b["verdict"] == "INDETERMINATE" for b in d2["blocks"].values())
+    assert all(b["verdict"] != fleetboard.NOT_CLAIMED
+              for b in d2["blocks"].values())
+
+
+def test_full_blocks_station_row_is_unchanged(db_path):
+    """Regression pin: an ordinary station's full 7-block envelope must
+    never pick up the n/a class — n/a is only for a genuinely absent
+    block."""
+    seed(db_path, "AC0G-B4", NOW - 10, make_envelope())
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, ROSTER, NOW)
+    finally:
+        conn.close()
+
+    b4 = {s["station"]: s for s in statuses}["AC0G-B4"]
+    assert set(b4["blocks"]) == set(heartbeat_schema.BLOCK_NAMES)
+    assert all(b["verdict"] != fleetboard.NOT_CLAIMED
+              for b in b4["blocks"].values())
+    assert b4["envelope_role"] is None
+
+
+def test_envelope_role_pm_is_recorded_station_role_is_none(db_path):
+    seed(db_path, "AC0G-B4", NOW - 10, make_pm_envelope(station="AC0G-B4"))
+    seed(db_path, "DASI002", NOW - 10, make_envelope(station="DASI002"))
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, ROSTER, NOW)
+    finally:
+        conn.close()
+
+    by_name = {s["station"]: s for s in statuses}
+    assert by_name["AC0G-B4"]["envelope_role"] == "pm"
+    assert by_name["DASI002"]["envelope_role"] is None
+
+
+def test_role_pm_renders_a_tag_in_the_station_cell():
+    status = crafted_statuses()[0]
+    status["envelope_role"] = "pm"
+    status["canary"] = False
+    html = fleetboard.render_html(
+        [status], [], {"count": 0, "window_s": 86400, "recent": []}, 1.0)
+    assert '<span class="tag">pm</span>' in html
+
+
+def test_absent_role_renders_no_tag():
+    status = crafted_statuses()[0]
+    status["envelope_role"] = None
+    status["canary"] = False
+    status["frozen"] = None
+    html = fleetboard.render_html(
+        [status], [], {"count": 0, "window_s": 86400, "recent": []}, 1.0)
+    assert '<span class="tag">' not in html
+
+
+def test_silent_pm_row_flips_invalid_same_as_a_station(db_path):
+    """Absence detection gets NO PM-specific carve-out: a silent PM row
+    is INVALID exactly like a silent station row (see
+    test_absence_overrides_self_report for the station case)."""
+    pm_roster = [
+        {"name": "B4-100-PM", "profile": "dasi2-pm", "role": None,
+         "frozen": None, "canary": False},
+    ]
+    seed(db_path, "B4-100-PM", NOW - 3600,
+         make_pm_envelope(station="B4-100-PM", rollup="VALID",
+                          reason="everything is fine"))
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, pm_roster, NOW)
+    finally:
+        conn.close()
+
+    pm = statuses[0]
+    assert pm["availability"]["verdict"] == "INVALID"
+    assert pm["top"]["verdict"] == "INVALID"
+    assert "silent" in pm["availability"]["reason"]
+    assert "fine" not in pm["top"]["reason"]
+
+
+def test_colspan_is_computed_not_hardcoded():
+    html = fleetboard.render_html(
+        [], [], {"count": 0, "window_s": 86400, "recent": []}, 1.0)
+    match = re.search(r'colspan="(\d+)"', html)
+    assert match, "the empty-roster row must declare a colspan"
+    assert int(match.group(1)) == 6 + len(heartbeat_schema.BLOCK_NAMES)
+
+
+# ---------------------------------------------------------------------------
 # 3. unexpected stations + rejects
 # ---------------------------------------------------------------------------
 
@@ -628,7 +790,30 @@ def crafted_statuses():
                        for n in heartbeat_schema.BLOCK_NAMES},
             "frozen": None,
             "canary": i == 0,
+            "envelope_role": None,
         })
+    # A PM row: 3 claimed blocks + 4 not-claimed, so v-NA / "n/a" also
+    # appears in any render built from this fixture.
+    pm_blocks = {n: {"verdict": "VALID", "reason": f"{n} ok"}
+                for n in heartbeat_schema.BLOCK_NAMES}
+    for n in heartbeat_schema.BLOCK_NAMES:
+        if n not in PM_BLOCK_NAMES:
+            pm_blocks[n] = {"verdict": fleetboard.NOT_CLAIMED,
+                            "reason": "not claimed by this producer"}
+    out.append({
+        "station": "B4-100-PM",
+        "profile": "dasi2-pm",
+        "role": None,
+        "availability": {"verdict": "VALID", "reason": "heard 10s ago"},
+        "top": {"verdict": "VALID", "reason": "doctor: 3 checks clean"},
+        "last_received_at": 1.0,
+        "silent_for_s": 10.0,
+        "emitted_at": "2026-08-20T14:05:06Z",
+        "blocks": pm_blocks,
+        "frozen": None,
+        "canary": False,
+        "envelope_role": "pm",
+    })
     return out
 
 
@@ -755,6 +940,52 @@ def test_roster_check_prints_names(tmp_path, capsys):
 def test_roster_check_refuses_a_nameless_entry(tmp_path):
     path = write_roster(tmp_path, [{"profile": "dasi2"}])
     assert roster_check.main(["--check", str(path)]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6b. roster_check.merge_rosters — the dasi2 + dasi2-pm union
+# ---------------------------------------------------------------------------
+
+def test_merge_rosters_unions_both_halves_dasi2_first():
+    dasi2 = [{"name": "AC0G-B4", "profile": "dasi2"},
+            {"name": "DASI002", "profile": "dasi2"}]
+    pm = [{"name": "B4-100-PM", "profile": "dasi2-pm"}]
+
+    merged = roster_check.merge_rosters(dasi2, pm)
+
+    assert [e["name"] for e in merged] == ["AC0G-B4", "DASI002", "B4-100-PM"]
+
+
+def test_merge_rosters_allows_an_empty_pm_half():
+    dasi2 = [{"name": "AC0G-B4", "profile": "dasi2"}]
+
+    merged = roster_check.merge_rosters(dasi2, [])
+
+    assert merged == dasi2
+
+
+def test_merge_rosters_refuses_an_empty_dasi2_half():
+    # The pm half legitimately empty is fine (fresh checkout); the dasi2
+    # half empty is not — that is the core fleet the board exists to
+    # watch, and the failure must name which half was the problem.
+    with pytest.raises(ValueError) as exc:
+        roster_check.merge_rosters([], [{"name": "B4-100-PM"}])
+    assert "dasi2" in str(exc.value)
+
+
+def test_merge_rosters_refuses_a_name_declared_in_both_halves():
+    dasi2 = [{"name": "AC0G-B4", "profile": "dasi2"}]
+    pm = [{"name": "AC0G-B4", "profile": "dasi2-pm"}]
+    with pytest.raises(ValueError) as exc:
+        roster_check.merge_rosters(dasi2, pm)
+    assert "AC0G-B4" in str(exc.value)
+
+
+def test_merge_rosters_refuses_non_list_halves():
+    with pytest.raises(ValueError):
+        roster_check.merge_rosters({"name": "x"}, [])
+    with pytest.raises(ValueError):
+        roster_check.merge_rosters([{"name": "x"}], {"name": "y"})
 
 
 @pytest.mark.parametrize("script", SCRIPTS)

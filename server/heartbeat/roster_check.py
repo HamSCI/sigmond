@@ -45,6 +45,51 @@ def read_roster(path):
     return names
 
 
+def merge_rosters(dasi2, pm):
+    """Union of the ``dasi2`` and ``dasi2-pm`` profile rosters.
+
+    ``dasi2`` (the core station fleet) MUST be non-empty — an empty
+    result here means the profile scoping went wrong (bad
+    ``SIGMOND_FLEET``, wrong profile name, empty inventory), not that a
+    PM-only board is what was wanted.  Fails LOUDLY and says which half
+    was the problem, per deploy-wd30.sh's existing empty-roster refusal.
+
+    ``pm`` (the ``dasi2-pm`` profile) MAY legitimately be empty — a
+    fresh checkout with no PM hosts declared yet in ``ops/fleet.toml``
+    is a normal state, not a failure.
+
+    A name declared in both halves is refused rather than silently
+    de-duplicated: that is a fleet.toml authoring bug (the same host in
+    two profiles) that belongs fixed at the source, not papered over
+    here.
+
+    Returns the merged list, dasi2 entries first, in their original
+    per-half order.
+    """
+    if not isinstance(dasi2, list):
+        raise ValueError(
+            f"dasi2 roster half is {type(dasi2).__name__}, expected a list")
+    if not isinstance(pm, list):
+        raise ValueError(
+            f"dasi2-pm roster half is {type(pm).__name__}, expected a list")
+    if not dasi2:
+        raise ValueError(
+            "dasi2 roster half is EMPTY — refusing to merge. The core "
+            "fleet roster must never be empty (the dasi2-pm half may "
+            "legitimately be empty on a fresh checkout).")
+
+    dasi2_names = {e.get("name") for e in dasi2 if isinstance(e, dict)}
+    pm_names = {e.get("name") for e in pm if isinstance(e, dict)}
+    dupes = sorted(n for n in (dasi2_names & pm_names) if n)
+    if dupes:
+        raise ValueError(
+            f"name(s) declared in BOTH dasi2 and dasi2-pm profiles: "
+            f"{dupes} — fix ops/fleet.toml, one host cannot be in two "
+            f"profiles")
+
+    return list(dasi2) + list(pm)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Check a roster JSON file, or list its station names.")

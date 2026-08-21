@@ -37,16 +37,48 @@ say "profile:         $PROFILE"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+ROSTER_DASI2="$WORK/roster-dasi2.json"
+ROSTER_PM="$WORK/roster-dasi2-pm.json"
 ROSTER="$WORK/roster.json"
+PM_PROFILE=${PM_PROFILE:-${PROFILE}-pm}
 
-step "Generating roster.json fresh from the inventory"
+step "Generating roster.json fresh from the inventory ($PROFILE + $PM_PROFILE)"
 if ! PYTHONPATH="$REPO/lib" "$REPO/bin/smd" fleet roster --json \
-        --profile "$PROFILE" > "$ROSTER"; then
-    die "smd fleet roster failed — refusing to deploy a board with no roster"
+        --profile "$PROFILE" > "$ROSTER_DASI2"; then
+    die "smd fleet roster --profile $PROFILE failed — refusing to deploy a board with no roster"
+fi
+if ! PYTHONPATH="$REPO/lib" "$REPO/bin/smd" fleet roster --json \
+        --profile "$PM_PROFILE" > "$ROSTER_PM"; then
+    die "smd fleet roster --profile $PM_PROFILE failed — refusing to deploy a board with no roster"
+fi
+# roster.json = union of both halves.  $PROFILE must be non-empty;
+# $PM_PROFILE may legitimately be empty (no PM hosts declared yet) — see
+# roster_check.merge_rosters's docstring. Fails LOUDLY and says which
+# half was the problem.
+if ! /usr/bin/env python3 -c "
+import json, sys
+sys.path.insert(0, '$HERE')
+import roster_check
+
+with open('$ROSTER_DASI2') as f:
+    dasi2 = json.load(f)
+with open('$ROSTER_PM') as f:
+    pm = json.load(f)
+
+try:
+    merged = roster_check.merge_rosters(dasi2, pm)
+except ValueError as exc:
+    sys.stderr.write(f'roster merge: {exc}\n')
+    sys.exit(1)
+
+with open('$ROSTER', 'w') as f:
+    json.dump(merged, f, indent=2)
+"; then
+    die "roster merge failed — refusing to deploy a board with a bad roster."
 fi
 # Fails CLOSED on [] / non-list / unparseable — see roster_check.py.
 if ! /usr/bin/env python3 "$HERE/roster_check.py" --check "$ROSTER"; then
-    die "roster is empty or malformed — refusing to deploy.
+    die "merged roster is empty or malformed — refusing to deploy.
 An empty roster renders a board that watches nothing and reports success."
 fi
 say "$(/usr/bin/env python3 "$HERE/roster_check.py" --names "$ROSTER" \
