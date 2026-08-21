@@ -2,6 +2,7 @@
 one-file identity for the golden-image model)."""
 
 import unittest
+from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -273,3 +274,166 @@ def test_psws_station_override_per_recorder(tmp_path):
     assert sp.station_for("mag-recorder") == "S000082"
     assert sp.station_for("hf-timestd") == "S000170"
     assert sp.instrument_for("mag-recorder") == "84"
+
+
+class UploadsPolicyProfileTests(unittest.TestCase):
+    """site-profile.toml [uploads] — sigmond#53. Mirrors the [heartbeat]
+    contract: `uploads_declared` separates "block present" from "enabled",
+    so an untouched profile never seeds coordination with a policy nobody
+    asked for."""
+
+    def _load(self, text):
+        import tempfile
+        from sigmond.site_profile import load_site_profile
+        p = Path(tempfile.mkdtemp()) / "site-profile.toml"
+        p.write_text(text)
+        return load_site_profile(p)
+
+    def test_absent_block_is_undeclared_and_enabled(self):
+        prof = self._load('[station]\ncallsign = "AC0G"\ngrid_square = "EM38ww"\n')
+        self.assertFalse(prof.uploads_declared)
+        self.assertTrue(prof.uploads_enabled)
+        self.assertEqual(prof.uploads_reason, "")
+
+    def test_disabled_block_parses(self):
+        prof = self._load('[station]\ncallsign = "DASI002"\ngrid_square = "FN21ok"\n'
+                          '[uploads]\nenabled = false\nreason = "no HF antenna"\n')
+        self.assertTrue(prof.uploads_declared)
+        self.assertFalse(prof.uploads_enabled)
+        self.assertEqual(prof.uploads_reason, "no HF antenna")
+
+
+class UploadsBlockWriterTests(unittest.TestCase):
+    """`_patch_uploads_block` (sigmond#53) — writes `[uploads]` into either
+    site-profile.toml or coordination.toml (same two keys in both files),
+    rewriting the block wholesale and preserving every other block."""
+
+    def _tmp(self, name="coordination.toml", text=""):
+        from tempfile import TemporaryDirectory
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / name
+        if text:
+            p.write_text(text)
+        return p
+
+    def test_writes_block_on_empty_file_and_roundtrips(self):
+        from sigmond.commands.config import _patch_uploads_block
+        from sigmond.coordination import Uploads, load_coordination
+        p = self._tmp()
+        _patch_uploads_block(p, Uploads(enabled=False, reason="no HF antenna"))
+        coord = load_coordination(p)
+        self.assertFalse(coord.uploads.enabled)
+        self.assertEqual(coord.uploads.reason, "no HF antenna")
+
+    def test_preserves_other_blocks_and_replaces_wholesale(self):
+        from sigmond.commands.config import _patch_uploads_block
+        from sigmond.coordination import Uploads, load_coordination
+        p = self._tmp(text='[host]\ncall = "AC0G"\n\n[uploads]\nenabled = false\n'
+                           'reason = "old"\n\n[heartbeat]\nenabled = true\n'
+                           'station = "x"\n')
+        _patch_uploads_block(p, Uploads(enabled=True))
+        coord = load_coordination(p)
+        self.assertEqual(coord.host.call, "AC0G")
+        self.assertTrue(coord.heartbeat.enabled)
+        self.assertTrue(coord.uploads.enabled)
+        self.assertEqual(coord.uploads.reason, "")
+        self.assertEqual(p.read_text().count("[uploads]"), 1)
+
+    def test_reason_with_quotes_is_escaped(self):
+        from sigmond.commands.config import _patch_uploads_block
+        from sigmond.coordination import Uploads, load_coordination
+        p = self._tmp()
+        _patch_uploads_block(p, Uploads(enabled=False, reason='say "no" \\ twice'))
+        self.assertEqual(load_coordination(p).uploads.reason, 'say "no" \\ twice')
+
+    def test_site_profile_roundtrips_through_loader(self):
+        from sigmond.commands.config import _patch_uploads_block
+        from sigmond.coordination import Uploads
+        from sigmond.site_profile import load_site_profile
+        p = self._tmp("site-profile.toml",
+                      '[station]\ncallsign = "DASI002"\ngrid_square = "FN21ok"\n')
+        _patch_uploads_block(p, Uploads(enabled=False, reason="no HF antenna"))
+        prof = load_site_profile(p)
+        self.assertTrue(prof.uploads_declared)
+        self.assertFalse(prof.uploads_enabled)
+        self.assertEqual(prof.uploads_reason, "no HF antenna")
+        self.assertEqual(prof.call, "DASI002")
+
+
+class ConfigUploadsVerbTests(unittest.TestCase):
+    """`smd config uploads status|disable|enable` (sigmond#53)."""
+
+    def setUp(self):
+        from tempfile import TemporaryDirectory
+        import sigmond.commands.config as cfg
+        self.cfg = cfg
+        d = TemporaryDirectory(); self.addCleanup(d.cleanup)
+        self.coord = Path(d.name) / "coordination.toml"
+        self.coord.write_text('[host]\ncall = "DASI002"\ngrid = "FN21ok"\n')
+        self.profile = Path(d.name) / "site-profile.toml"
+        self.profile.write_text('[station]\ncallsign = "DASI002"\ngrid_square = "FN21ok"\n')
+        for name, val in (("COORDINATION_PATH", self.coord),
+                          ("SITE_PROFILE_PATH", self.profile)):
+            patcher = mock.patch.object(cfg, name, val)
+            patcher.start(); self.addCleanup(patcher.stop)
+        self.regen = mock.patch.object(cfg, "_regenerate_uploader_manifest",
+                                       return_value=0)
+        self.regen_mock = self.regen.start(); self.addCleanup(self.regen.stop)
+
+    def _run(self, **kw):
+        import io, contextlib, types
+        args = types.SimpleNamespace(**{"uploads_command": None, "reason": None, **kw})
+        out = io.StringIO()   # ui.ok/info/warn print to stderr by convention
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = self.cfg.cmd_config_uploads(args)
+        return rc, out.getvalue()
+
+    def test_disable_writes_both_files_and_regenerates(self):
+        from sigmond.coordination import load_coordination
+        from sigmond.site_profile import load_site_profile
+        rc, out = self._run(uploads_command="disable", reason="no HF antenna")
+        self.assertEqual(rc, 0)
+        self.assertFalse(load_coordination(self.coord).uploads.enabled)
+        self.assertEqual(load_coordination(self.coord).uploads.reason, "no HF antenna")
+        prof = load_site_profile(self.profile)
+        self.assertTrue(prof.uploads_declared)
+        self.assertFalse(prof.uploads_enabled)
+        self.regen_mock.assert_called_once()
+        self.assertIn("disabled", out)
+
+    def test_enable_flips_back_and_regenerates(self):
+        from sigmond.coordination import load_coordination
+        self._run(uploads_command="disable", reason="x")
+        self.regen_mock.reset_mock()
+        rc, out = self._run(uploads_command="enable")
+        self.assertEqual(rc, 0)
+        self.assertTrue(load_coordination(self.coord).uploads.enabled)
+        self.regen_mock.assert_called_once()
+        self.assertIn("enabled", out)
+
+    def test_status_reports_policy_and_suppressed_pipelines(self):
+        self._run(uploads_command="disable", reason="no HF antenna")
+        with mock.patch("sigmond.uploader_manifest.suppressed_pipelines",
+                        return_value=["wspr-wsprdaemon", "psk-pskreporter"]):
+            rc, out = self._run(uploads_command="status")
+        self.assertEqual(rc, 0)
+        self.assertIn("disabled", out.lower())
+        self.assertIn("no HF antenna", out)
+        self.assertIn("wspr-wsprdaemon", out)
+
+    def test_status_when_enabled(self):
+        with mock.patch("sigmond.uploader_manifest.suppressed_pipelines",
+                        return_value=[]):
+            rc, out = self._run(uploads_command="status")
+        self.assertEqual(rc, 0)
+        self.assertIn("enabled", out)
+        self.regen_mock.assert_not_called()
+
+    def test_profile_absent_still_patches_coordination(self):
+        from sigmond.coordination import load_coordination
+        self.profile.unlink()
+        rc, _ = self._run(uploads_command="disable", reason="r")
+        self.assertEqual(rc, 0)
+        self.assertFalse(load_coordination(self.coord).uploads.enabled)
+        self.assertFalse(self.profile.exists())

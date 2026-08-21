@@ -11,6 +11,7 @@ forbidden-fields test comes FIRST because it is the executable form of
 the rule the whole feature exists to enforce.
 """
 
+from unittest import mock
 import json
 import os
 import sys
@@ -1110,3 +1111,55 @@ def test_validate_accepts_a_strict_subset_of_block_names():
     assert block_names < set(heartbeat_schema.BLOCK_NAMES), (
         "fixture must be a STRICT subset to pin the behavior under test")
     assert heartbeat_schema.validate(envelope) == []
+
+
+# --- sigmond#53: uploads policy -------------------------------------------
+
+def test_uploads_disabled_by_policy_reads_valid_with_reason():
+    """A station that has switched outbound uploads off by policy is NOT
+    'unsure' — the board must say so in words, and the data must carry the
+    policy so a reader can tell policy from idleness."""
+    env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
+        "readable": True, "pipelines": [], "cursors": [],
+        "policy": {"enabled": False, "reason": "no HF antenna"}}))
+    block = env["blocks"]["uploads"]
+    assert block["verdict"] == "VALID"
+    assert block["reason"] == (
+        "uploads disabled by policy (no HF antenna) — heartbeat only")
+    assert block["data"]["policy"] == {"enabled": False, "reason": "no HF antenna"}
+
+
+def test_uploads_disabled_by_policy_keeps_a_real_backlog_verdict():
+    """Leftover dead letters are still dead letters; policy is appended,
+    not substituted — the board must not paint junk green by policy."""
+    env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
+        "readable": True, "cursors": [],
+        "pipelines": [{"name": "wspr-wsprdaemon", "dead_letter_count": 7,
+                       "deliverable_count": 0}],
+        "policy": {"enabled": False, "reason": "no HF antenna"}}))
+    block = env["blocks"]["uploads"]
+    assert block["verdict"] == "INVALID"
+    assert block["reason"] == (
+        "dead letters in wspr-wsprdaemon(7) (uploads disabled by policy; leftovers)")
+
+
+def test_uploads_policy_enabled_changes_nothing():
+    env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
+        "readable": True, "pipelines": [], "cursors": [],
+        "policy": {"enabled": True, "reason": ""}}))
+    block = env["blocks"]["uploads"]
+    assert block["verdict"] == "VALID"
+    assert block["reason"] == "no backlog, no dead letters"
+
+
+def test_default_readers_merge_uploads_policy_into_raw():
+    """The production wiring: default_readers(uploads_policy=...) hands the
+    policy to the uploads reader so the mapper sees it beside the backlog."""
+    from sigmond.heartbeat import default_readers
+    with mock.patch("sigmond.heartbeat._read_backlog",
+                    return_value={"readable": True, "pipelines": [], "cursors": []}):
+        readers = default_readers(
+            uploads_policy={"enabled": False, "reason": "no HF antenna"})
+        raw = readers["uploads"]()
+    assert raw["policy"] == {"enabled": False, "reason": "no HF antenna"}
+    assert raw["readable"] is True

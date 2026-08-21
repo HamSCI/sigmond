@@ -101,6 +101,20 @@ class Heartbeat:
 
 
 @dataclass
+class Uploads:
+    """``[uploads]`` — site-level OUTBOUND-UPLOADS POLICY (sigmond#53).
+    ``enabled = false`` makes ``sigmond.uploader_manifest`` render the
+    heartbeat pipeline ONLY (a station without an antenna or PSWS identity
+    must not ship junk to shared gateways), and every surface that reads
+    it says "disabled by policy" — never INCONCLUSIVE.  The heartbeat is
+    never subject to this switch.  Absent ``[uploads]`` parses to enabled:
+    today's behaviour on every existing host.  ``reason`` is free text,
+    echoed verbatim on the fleetboard and in the manifest header."""
+    enabled: bool = True
+    reason:  str  = ""
+
+
+@dataclass
 class Cpu:
     suite_cores:           str = ""
     worker_cores:          str = ""
@@ -172,6 +186,7 @@ class Coordination:
     timing_authority: TimingAuthority = field(default_factory=TimingAuthority)
     per_radiod_timing_authority: dict = field(default_factory=dict)  # radiod_id -> TimingAuthority
     heartbeat: Heartbeat            = field(default_factory=Heartbeat)
+    uploads:   Uploads              = field(default_factory=Uploads)
     source_path: Optional[Path]    = None
 
     def instances_of(self, client_type: str) -> list:
@@ -297,6 +312,12 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         interval_sec=int(hb_raw.get('interval_sec', 300) or 300),
     )
 
+    up_raw = raw.get('uploads', {}) or {}
+    uploads = Uploads(
+        enabled=bool(up_raw.get('enabled', True)),
+        reason=str(up_raw.get('reason', '') or ''),
+    )
+
     return Coordination(
         host=host,
         station=station,
@@ -307,6 +328,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         timing_authority=station_wide,
         per_radiod_timing_authority=per_radiod,
         heartbeat=heartbeat,
+        uploads=uploads,
         source_path=source_path,
     )
 

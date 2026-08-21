@@ -94,3 +94,11 @@ port      = 8081
 [disk_budget]
 root_path    = "/var"
 warn_percent = 80
+
+# [uploads] — site-level OUTBOUND-UPLOADS POLICY (sigmond#53). Absent = enabled.
+# `enabled = false` renders the uploader manifest heartbeat-only (a station
+# with no antenna / no PSWS identity must not ship junk to shared gateways);
+# the heartbeat is never subject to it. Set with: smd config uploads disable --reason "..."
+# [uploads]
+# enabled = false
+# reason  = "no HF antenna; no PSWS station/instrument ids"

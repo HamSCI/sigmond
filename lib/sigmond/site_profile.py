@@ -81,6 +81,11 @@ require = []                       # e.g. ["earthdata", "rac"]
 # sftp_user     = "hamsci-hb"
 # remote_path   = "incoming"
 # interval_sec  = 300
+
+# [uploads]                        # outbound-uploads POLICY (sigmond#53); absent = enabled
+# enabled = false                  # false: uploader manifest is heartbeat-only — a station
+#                                  # with no antenna / no PSWS ids must not ship junk upstream
+# reason  = "no HF antenna"        # echoed on the fleetboard and in pipelines.toml
 """
 
 
@@ -120,6 +125,13 @@ class SiteProfile:
     heartbeat_sftp_user:    str = "hamsci-hb"
     heartbeat_remote_path:  str = "incoming"
     heartbeat_interval_sec: int = 300
+    # [uploads] — sigmond#53 outbound-uploads policy. uploads_declared
+    # distinguishes "block present" from "enabled": `smd config render`
+    # only writes coordination.toml's [uploads] when the profile declares
+    # one. Absent == enabled (no behaviour change for existing hosts).
+    uploads_declared:       bool = False
+    uploads_enabled:        bool = True
+    uploads_reason:         str = ""
     source_path: Optional[Path] = None
 
     @property
@@ -190,6 +202,7 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
     hw = data.get("hardware", {}) or {}
     sec = data.get("secrets", {}) or {}
     hb = data.get("heartbeat", {}) or {}
+    up = data.get("uploads", {}) or {}
 
     def _clean(s) -> str:
         s = str(s or "").strip()
@@ -234,5 +247,8 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
         heartbeat_sftp_user=_clean(hb.get("sftp_user")) or "hamsci-hb",
         heartbeat_remote_path=_clean(hb.get("remote_path")) or "incoming",
         heartbeat_interval_sec=int(hb.get("interval_sec", 300) or 300),
+        uploads_declared="uploads" in data,
+        uploads_enabled=bool(up.get("enabled", True)),
+        uploads_reason=_clean(up.get("reason")),
         source_path=path,
     )

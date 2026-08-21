@@ -513,3 +513,33 @@ interval_sec  = 300
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UploadsPolicyTests(unittest.TestCase):
+    """[uploads] — sigmond#53: site-level outbound-uploads policy. Absent
+    block == enabled (today's behaviour); `enabled = false` makes the
+    uploader manifest heartbeat-only and is surfaced everywhere as
+    "disabled by policy", never as INCONCLUSIVE."""
+
+    def test_dataclass_defaults_are_enabled(self):
+        from sigmond.coordination import Uploads
+        up = Uploads()
+        self.assertTrue(up.enabled)
+        self.assertEqual(up.reason, "")
+
+    def test_coordination_default_uploads_enabled(self):
+        coord = Coordination()
+        self.assertTrue(coord.uploads.enabled)
+
+    def test_parse_disabled_with_reason(self):
+        import tomllib
+        toml = '[uploads]\nenabled = false\nreason = "no HF antenna; no PSWS ids"\n'
+        coord = parse_coordination(tomllib.loads(toml))
+        self.assertFalse(coord.uploads.enabled)
+        self.assertEqual(coord.uploads.reason, "no HF antenna; no PSWS ids")
+
+    def test_parse_absent_block_is_enabled(self):
+        import tomllib
+        coord = parse_coordination(tomllib.loads('[host]\ncall = "AC0G"\n'))
+        self.assertTrue(coord.uploads.enabled)
+        self.assertEqual(coord.uploads.reason, "")

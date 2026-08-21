@@ -334,3 +334,62 @@ class HeartbeatCrossRepoShapeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UploadsPolicyRenderTests(unittest.TestCase):
+    """sigmond#53: `[uploads] enabled = false` renders the heartbeat pipeline
+    ONLY and says so loudly in the manifest header; enabled (the default)
+    renders exactly as before."""
+
+    def _coord(self, *, enabled: bool, reason: str = "") -> Coordination:
+        from sigmond.coordination import Uploads
+        return Coordination(
+            host=Host(call="DASI002", grid="FN21ok"),
+            heartbeat=Heartbeat(enabled=True, station="dasi002",
+                                host="drop.example.org"),
+            uploads=Uploads(enabled=enabled, reason=reason),
+        )
+
+    def _generate(self, coord):
+        deploy = Path(tempfile.mkdtemp()) / "deploy.toml"
+        deploy.write_text(CollectTests.GRAPE)
+        with mock.patch.object(um, "find_deploy_toml", return_value=deploy), \
+             mock.patch.object(um, "list_instances", return_value=[]), \
+             mock.patch.object(um.psws, "is_psws_recorder", return_value=True), \
+             mock.patch.object(um.psws, "read_state",
+                               return_value=_State(station="S000418",
+                                                   instrument="367")), \
+             mock.patch.object(um, "host_key_file", return_value="/k"):
+            return um.generate(_Topo(["hf-timestd"]), coord)
+
+    def test_disabled_renders_heartbeat_only_with_policy_header(self):
+        text = self._generate(self._coord(enabled=False, reason="no HF antenna"))
+        parsed = tomllib.loads(text)
+        self.assertEqual([p["name"] for p in parsed["pipeline"]], ["heartbeat"])
+        self.assertIn("DISABLED BY POLICY", text)
+        self.assertIn("no HF antenna", text)
+        self.assertIn("[uploads] enabled = false", text)
+
+    def test_enabled_is_unchanged(self):
+        text = self._generate(self._coord(enabled=True))
+        parsed = tomllib.loads(text)
+        self.assertEqual([p["name"] for p in parsed["pipeline"]],
+                         ["grape-psws", "heartbeat"])
+        self.assertNotIn("DISABLED BY POLICY", text)
+
+    def test_suppressed_pipelines_are_reported(self):
+        """The command layer needs the names it suppressed, to print them."""
+        coord = self._coord(enabled=False, reason="x")
+        deploy = Path(tempfile.mkdtemp()) / "deploy.toml"
+        deploy.write_text(CollectTests.GRAPE)
+        with mock.patch.object(um, "find_deploy_toml", return_value=deploy), \
+             mock.patch.object(um, "list_instances", return_value=[]), \
+             mock.patch.object(um.psws, "is_psws_recorder", return_value=True), \
+             mock.patch.object(um.psws, "read_state",
+                               return_value=_State(station="S000418",
+                                                   instrument="367")), \
+             mock.patch.object(um, "host_key_file", return_value="/k"):
+            self.assertEqual(um.suppressed_pipelines(_Topo(["hf-timestd"]), coord),
+                             ["grape-psws"])
+            self.assertEqual(um.suppressed_pipelines(
+                _Topo(["hf-timestd"]), self._coord(enabled=True)), [])

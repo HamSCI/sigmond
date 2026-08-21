@@ -419,23 +419,42 @@ def _map_uploads(raw) -> dict:
                       raw.get("reason") or "upload backlog unreadable")
     pipelines = list(raw.get("pipelines") or [])
     data = {"pipelines": pipelines, "cursors": list(raw.get("cursors") or [])}
+    # sigmond#53: the site's outbound-uploads policy rides beside the
+    # backlog (default_readers merges it in).  Policy never hides a real
+    # backlog — it rewords the idle case and annotates the others.
+    policy = raw.get("policy")
+    if isinstance(policy, dict):
+        data["policy"] = policy
+    disabled = isinstance(policy, dict) and not policy.get("enabled", True)
 
     dead = [p for p in pipelines if _as_int(p.get("dead_letter_count")) or 0]
     if dead:
         named = ", ".join(
             f"{p.get('name')}({_as_int(p.get('dead_letter_count'))})"
             for p in dead)
-        return _block("INVALID", f"dead letters in {named}", data)
+        return _block("INVALID", _policy_suffix(
+            f"dead letters in {named}", disabled), data)
 
     retrying = [p for p in pipelines if _as_int(p.get("deliverable_count")) or 0]
     if retrying:
         total = sum(_as_int(p.get("deliverable_count")) or 0 for p in retrying)
         named = ", ".join(str(p.get("name")) for p in retrying)
-        return _block("INCONCLUSIVE",
-                      f"{total} deliverables retrying ({named})", data)
+        return _block("INCONCLUSIVE", _policy_suffix(
+            f"{total} deliverables retrying ({named})", disabled), data)
     # A fully-idle pipeline is ABSENT from `pipelines`, so an empty list
     # on a readable store genuinely means nothing is stuck.
+    if disabled:
+        why = str(policy.get("reason") or "").strip()
+        return _block("VALID",
+                      f"uploads disabled by policy ({why}) — heartbeat only"
+                      if why else "uploads disabled by policy — heartbeat only",
+                      data)
     return _block("VALID", "no backlog, no dead letters", data)
+
+
+def _policy_suffix(reason: str, disabled: bool) -> str:
+    return (f"{reason} (uploads disabled by policy; leftovers)"
+            if disabled else reason)
 
 
 def _map_doctor(raw) -> dict:
@@ -617,7 +636,8 @@ def _no_data_rows() -> dict:
 # ---------------------------------------------------------------------------
 
 def default_readers(paths: Optional[HeartbeatPaths] = None,
-                    doctor_reader: Optional[Callable[[], Any]] = None) -> dict:
+                    doctor_reader: Optional[Callable[[], Any]] = None,
+                    uploads_policy: Optional[dict] = None) -> dict:
     """The seven production readers.
 
     ``doctor_reader`` is INJECTED, not built here: ``collect_findings()``
@@ -628,14 +648,28 @@ def default_readers(paths: Optional[HeartbeatPaths] = None,
     is ``smd admin heartbeat emit``, which runs INSIDE bin/smd and passes
     ``collect_findings`` straight in.  With no reader wired the doctor
     block reads INDETERMINATE, which is the truth.
+
+    ``uploads_policy`` (sigmond#53) is the site's ``[uploads]`` policy as a
+    dict (``{"enabled": bool, "reason": str}``), merged into the uploads
+    reader's raw result so the mapper can render "disabled by policy".
     """
     paths = paths or HeartbeatPaths()
+
+    def _uploads():
+        # sigmond#53: carry the site's uploads policy beside the backlog so
+        # _map_uploads can say "disabled by policy" instead of "unsure".
+        raw = _read_backlog(paths)
+        if uploads_policy is not None and isinstance(raw, dict):
+            raw = dict(raw)
+            raw["policy"] = dict(uploads_policy)
+        return raw
+
     return {
         "versions": lambda: _read_versions(paths),
         "manifest": lambda: _read_manifest(paths),
         "timing": lambda: _read_authority(paths.authority_json),
         "gaps": lambda: _read_gap_tsv(paths.gap_tsv),
-        "uploads": lambda: _read_backlog(paths),
+        "uploads": _uploads,
         "doctor": doctor_reader or _doctor_not_wired,
         "resources": _read_resources,
     }

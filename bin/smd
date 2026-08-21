@@ -113,7 +113,7 @@ try:
     from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.timing_show import cmd_timing_show
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_upload, cmd_config_location
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_upload, cmd_config_location, cmd_config_uploads
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -4156,7 +4156,12 @@ def cmd_admin_heartbeat_emit(args) -> int:
         'interval_sec': hb.interval_sec,
     }
 
-    readers = default_readers(doctor_reader=lambda: collect_findings(strict=False))
+    readers = default_readers(
+        doctor_reader=lambda: collect_findings(strict=False),
+        # sigmond#53: the uploads block must say "disabled by policy",
+        # not INCONCLUSIVE, on a station that has switched uploads off.
+        uploads_policy={'enabled': coord.uploads.enabled,
+                        'reason': coord.uploads.reason})
     envelope = assemble(datetime.now(timezone.utc), config, readers,
                         uptime_s=read_uptime())
 
@@ -19164,6 +19169,18 @@ def main() -> int:
     p.add_argument('--dry-run', action='store_true',
                    help='print the rendered env file to stdout, do not write')
 
+    p = config_sub.add_parser('uploads',
+                              help='site-level OUTBOUND-UPLOADS POLICY: status | disable '
+                                   '[--reason ..] | enable (heartbeat is never subject to it)')
+    uploads_sub = p.add_subparsers(dest='uploads_command')
+    uploads_sub.add_parser('status', help='show the policy and what it suppresses')
+    pu = uploads_sub.add_parser('disable',
+                                help='stop rendering every client pipeline (heartbeat only); '
+                                     'regenerates the uploader manifest')
+    pu.add_argument('--reason', help='why (echoed on the fleetboard and in the manifest), '
+                                     'e.g. "no HF antenna; no PSWS ids"')
+    uploads_sub.add_parser('enable', help='restore outbound data pipelines')
+
     p = config_sub.add_parser('render',
                               help='render coordination.toml/.env from the single '
                                    'per-site /etc/sigmond/site-profile.toml')
@@ -19719,6 +19736,13 @@ def main() -> int:
             if writing and _need_root('config render'):
                 return 1
             return cmd_config_render(args)
+        if sub_cmd == 'uploads':
+            # status is read-only; enable/disable write site-profile.toml +
+            # coordination.toml and regenerate the uploader manifest (root).
+            verb = getattr(args, 'uploads_command', None) or 'status'
+            if verb in ('enable', 'disable') and _need_root('config uploads'):
+                return 1
+            return cmd_config_uploads(args)
         if sub_cmd == 'upload':
             # Writing the per-instance env (--on/--off) needs root; the bare
             # status view is read-only.

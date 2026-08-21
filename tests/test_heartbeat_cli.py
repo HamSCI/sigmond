@@ -240,3 +240,25 @@ class ShowRendersLatestTests(HeartbeatCliTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class UploadsPolicyWiringTests(HeartbeatCliTestCase):
+    """sigmond#53: `smd admin heartbeat emit` hands the site's [uploads]
+    policy to default_readers so the uploads block can say 'disabled by
+    policy' on the board."""
+
+    def test_emit_passes_uploads_policy_to_default_readers(self):
+        from sigmond.coordination import Uploads
+        coord = _coord()
+        coord.uploads = Uploads(enabled=False, reason="no HF antenna")
+        args = types.SimpleNamespace(dry_run=True)
+        with mock.patch.object(smd, 'load_coordination', return_value=coord), \
+             mock.patch('sigmond.heartbeat.default_readers',
+                        return_value=_fake_readers()) as dr, \
+             mock.patch('sigmond.uploader_manifest.reporter_call',
+                        return_value="AC0G"), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            smd.cmd_admin_heartbeat_emit(args)
+        self.assertEqual(dr.call_args.kwargs.get("uploads_policy"),
+                         {"enabled": False, "reason": "no HF antenna"})

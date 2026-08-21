@@ -100,6 +100,16 @@ def cmd_uploader_manifest(args) -> int:
         _err(f"uploader manifest generation failed: {exc}")
         return 1
 
+    # sigmond#53: say, by name, what the uploads policy is holding back.
+    try:
+        suppressed = um.suppressed_pipelines()
+    except Exception:  # pragma: no cover - defensive
+        suppressed = []
+    if suppressed:
+        print("uploader: OUTBOUND DATA PIPELINES DISABLED BY POLICY "
+              "([uploads] enabled = false) — suppressed: "
+              + ", ".join(suppressed))
+
     path = um.MANIFEST_PATH
     installed = path.read_text() if path.exists() else ""
     changed = _semantic(text) != _semantic(installed)

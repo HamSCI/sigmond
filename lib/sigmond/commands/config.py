@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..coordination import (
-    Heartbeat, Host, Station, load_coordination, render_env, write_host_identity,
+    Heartbeat, Host, Station, Uploads, load_coordination, render_env,
+    write_host_identity,
 )
 from ..paths import COORDINATION_ENV, COORDINATION_PATH
 from ..site_profile import (
@@ -698,6 +699,13 @@ def cmd_config_render(args) -> int:
             interval_sec=profile.heartbeat_interval_sec,
         )
 
+    # [uploads] (sigmond#53) — same discipline as [heartbeat]: copied
+    # through only when site-profile.toml declares the block.
+    uploads = None
+    if profile.uploads_declared:
+        uploads = Uploads(enabled=profile.uploads_enabled,
+                          reason=profile.uploads_reason)
+
     if getattr(args, 'dry_run', False):
         coord = load_coordination(COORDINATION_PATH)
         coord.host = Host(call=profile.call, grid=profile.grid,
@@ -705,12 +713,17 @@ def cmd_config_render(args) -> int:
         coord.station = station
         if heartbeat is not None:
             coord.heartbeat = heartbeat
+        if uploads is not None:
+            coord.uploads = uploads
         heading('config render (dry-run)')
         info(f'source: {SITE_PROFILE_PATH}')
         print(render_env(coord), end='')
         if heartbeat is not None:
             info(f'[heartbeat] would be written: enabled={heartbeat.enabled} '
                  f'station={heartbeat.station!r}')
+        if uploads is not None:
+            info(f'[uploads] would be written: enabled={uploads.enabled} '
+                 f'reason={uploads.reason!r}')
         return 0
 
     try:
@@ -720,10 +733,14 @@ def cmd_config_render(args) -> int:
         _patch_station_block(COORDINATION_PATH, station)
         if heartbeat is not None:
             _patch_heartbeat_block(COORDINATION_PATH, heartbeat)
+        if uploads is not None:
+            _patch_uploads_block(COORDINATION_PATH, uploads)
     except PermissionError:
         err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
         return 1
-    blocks = '[host] + [station]' + (' + [heartbeat]' if heartbeat is not None else '')
+    blocks = ('[host] + [station]'
+              + (' + [heartbeat]' if heartbeat is not None else '')
+              + (' + [uploads]' if uploads is not None else ''))
     ok(f'updated {COORDINATION_PATH} ({blocks}) from {SITE_PROFILE_PATH.name}')
 
     coord = load_coordination(COORDINATION_PATH)
@@ -921,6 +938,126 @@ def _patch_heartbeat_block(path: Path, hb: Heartbeat) -> None:
             out.append('')
         out.extend(body)
     path.write_text('\n'.join(out).rstrip() + '\n')
+
+
+def _toml_str(v: str) -> str:
+    return '"' + str(v).replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _patch_uploads_block(path: Path, up: Uploads) -> None:
+    """Rewrite the ``[uploads]`` block (sigmond#53) in place — in
+    coordination.toml OR site-profile.toml, which share the block's two
+    keys — preserving every other block verbatim. Mirrors
+    _patch_heartbeat_block: the block is always written whole."""
+    body = ['[uploads]', f'enabled = {"true" if up.enabled else "false"}']
+    if up.reason:
+        body.append(f'reason = {_toml_str(up.reason)}')
+    body.append('')
+
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('\n'.join(body) + '\n')
+        return
+
+    lines = path.read_text().splitlines()
+    out: list = []
+    in_block = False
+    found = False
+    for line in lines:
+        s = line.strip()
+        if s == '[uploads]':
+            in_block = True
+            found = True
+            out.extend(body)
+            continue
+        if in_block:
+            if s.startswith('['):
+                in_block = False
+                out.append(line)
+            continue
+        out.append(line)
+    if not found:
+        if out and out[-1].strip():
+            out.append('')
+        out.extend(body)
+    path.write_text('\n'.join(out).rstrip() + '\n')
+
+
+# ---------------------------------------------------------------------------
+# smd config uploads — site-level outbound-uploads policy (sigmond#53)
+# ---------------------------------------------------------------------------
+
+def _regenerate_uploader_manifest() -> int:
+    """Re-render /etc/hs-uploader/pipelines.toml from the new policy and
+    restart hs-uploader if it changed. Isolated so tests can stub it."""
+    import types
+    from .uploader import cmd_uploader_manifest
+    return cmd_uploader_manifest(types.SimpleNamespace(write=True, enable=True))
+
+
+def cmd_config_uploads(args) -> int:
+    """``smd config uploads status | disable [--reason ..] | enable``.
+
+    The policy is written to BOTH site-profile.toml (the one-file identity
+    source `smd config render` copies from — so a re-render keeps it) and
+    coordination.toml (what the renderer and the heartbeat read), then the
+    uploader manifest is regenerated (heartbeat-only when disabled).
+    """
+    from .. import uploader_manifest as um
+
+    verb = getattr(args, 'uploads_command', None) or 'status'
+    coord = load_coordination(COORDINATION_PATH)
+
+    if verb == 'status':
+        up = coord.uploads
+        if up.enabled:
+            ok('uploads: enabled (outbound data pipelines render normally)')
+        else:
+            warn('uploads: DISABLED BY POLICY'
+                 + (f' — {up.reason}' if up.reason else ''))
+            try:
+                sup = um.suppressed_pipelines(coord=coord)
+            except Exception as exc:  # pragma: no cover - defensive
+                sup = []
+                warn(f'could not enumerate suppressed pipelines: {exc}')
+            if sup:
+                info('suppressed pipelines: ' + ', '.join(sup))
+            info('heartbeat is never subject to this policy')
+        prof = load_site_profile(SITE_PROFILE_PATH) if SITE_PROFILE_PATH.exists() else None
+        if prof is not None and not prof.uploads_declared:
+            info(f'{SITE_PROFILE_PATH.name} declares no [uploads] block '
+                 '(coordination.toml is authoritative until it does)')
+        return 0
+
+    if verb not in ('enable', 'disable'):
+        err(f'config uploads: unknown verb {verb!r} (status|enable|disable)')
+        return 2
+
+    reason = (getattr(args, 'reason', None) or '').strip()
+    up = Uploads(enabled=(verb == 'enable'), reason='' if verb == 'enable' else reason)
+    if not up.enabled and not reason:
+        warn('no --reason given; the board will say "disabled by policy" '
+             'with no why — consider re-running with --reason')
+
+    try:
+        if SITE_PROFILE_PATH.exists():
+            _patch_uploads_block(SITE_PROFILE_PATH, up)
+            ok(f'{SITE_PROFILE_PATH}: [uploads] enabled = '
+               f'{"true" if up.enabled else "false"}')
+        _patch_uploads_block(COORDINATION_PATH, up)
+        ok(f'{COORDINATION_PATH}: [uploads] enabled = '
+           f'{"true" if up.enabled else "false"}')
+    except PermissionError:
+        err(f'permission denied writing the policy; re-run smd as root')
+        return 1
+
+    rc = _regenerate_uploader_manifest()
+    if up.enabled:
+        ok('uploads enabled — outbound data pipelines restored in the manifest')
+    else:
+        ok('uploads disabled by policy — manifest is heartbeat-only'
+           + (f' ({reason})' if reason else ''))
+    return rc
 
 
 # ---------------------------------------------------------------------------
