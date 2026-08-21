@@ -43,10 +43,29 @@ if [[ -z "$ROSTER" ]]; then
     ROSTER="$WORK/roster.json"
     REPO="$(cd "$HERE/../.." && pwd)"
     export SIGMOND_FLEET=${SIGMOND_FLEET:-$HOME/hamsci/ops/fleet.toml}
+    # Merge the SAME two profiles deploy-wd30.sh serves the board: the
+    # dasi2 stations and the dasi2-pm Proxmox hosts. Authorizing against
+    # a narrower roster than the board watches would hard-refuse every
+    # PM key (this exact failure shipped once: the first b4-pm key was
+    # rejected as "not on the roster" while the board already listed it).
+    # Same merge helper, same fail-loud semantics — see
+    # roster_check.merge_rosters.
     PYTHONPATH="$REPO/lib" "$REPO/bin/smd" fleet roster --json \
-        --profile "${PROFILE:-dasi2}" > "$ROSTER" \
+        --profile "${PROFILE:-dasi2}" > "$WORK/roster-dasi2.json" \
         || die "smd fleet roster failed and no roster path was given"
-    say "regenerated from $SIGMOND_FLEET (profile ${PROFILE:-dasi2})"
+    PYTHONPATH="$REPO/lib" "$REPO/bin/smd" fleet roster --json \
+        --profile "${PM_PROFILE:-dasi2-pm}" > "$WORK/roster-pm.json" \
+        || die "smd fleet roster (pm profile) failed"
+    python3 -c "
+import json, sys
+sys.path.insert(0, '$HERE')
+import roster_check
+dasi2 = json.load(open('$WORK/roster-dasi2.json'))
+pm = json.load(open('$WORK/roster-pm.json'))
+merged = roster_check.merge_rosters(dasi2, pm)
+json.dump(merged, open('$ROSTER', 'w'), indent=2)
+" || die "roster merge failed"
+    say "regenerated from $SIGMOND_FLEET (profiles ${PROFILE:-dasi2} + ${PM_PROFILE:-dasi2-pm})"
 fi
 
 step "Roster: $ROSTER"
