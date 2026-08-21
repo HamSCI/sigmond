@@ -3793,6 +3793,285 @@ def cmd_manifest_adopt(args) -> int:
     return 0
 
 
+def cmd_manifest_restore(args) -> int:
+    """`smd admin manifest restore <path> [--apply] [--no-fetch]` — the
+    remote-rollback half of the blessed-manifest mechanism; `admin
+    manifest adopt`'s mirror.
+
+    Rollback today means a road trip: `smd update` / `smd component
+    update` only move a host forward, and the only fallback when a
+    change turns out bad is reimaging from a stick on-site. The blessed
+    manifest is already a complete restore point (the same 22 pinned
+    component SHAs `admin manifest adopt` compares against); this verb
+    makes "roll back to what we blessed" station-inward and remote-safe.
+
+    Where `adopt` asks "does live already equal `<path>`, so recording
+    it is a provable no-op?", `restore` asks the opposite question and
+    then, on `--apply`, ACTS on the answer: it moves each diverging
+    checkout onto the manifest SHA. Fail-closed throughout — every
+    refusal lists the whole diff (`sigmond.manifest_restore.plan_restore`
+    is `adopt`'s planning-core mirror), and dry-run (the default, no
+    `--apply`) never writes or checks anything out.
+
+    Sequence:
+
+    1. Read `<path>` and compute live components the same way `smd
+       version` / `admin manifest adopt` do
+       (`sigmond.provenance.component_versions` over
+       `sigmond.doctor.component_checkouts`).
+    2. Unless `--no-fetch`: for every component whose live SHA looks
+       like it needs to move, `git fetch --all --quiet` AS THE
+       CHECKOUT OWNER — `runuser -u <owner> --`, the exact pattern
+       `cmd_update`'s pull step uses (owner from the checkout's own
+       stat, `Path.owner()`). Root NEVER runs git directly in a deploy
+       tree — that recreates the root-owned-`.git`-index scar
+       (CONTRIBUTING.md §8). A fetch failure is a warning, not a fatal
+       error here; a stale ref just means `resolvable()` below is more
+       likely to refuse, which is the fail-closed direction.
+    3. Ask `sigmond.manifest_restore.plan_restore` for the plan, with
+       `resolvable(name, sha)` implemented as `git rev-parse --verify
+       --quiet <sha>^{commit}` inside the component's own checkout
+       (read-only; run un-elevated, never via runuser). Any subprocess
+       error there is treated as unresolvable — fail closed.
+    4. DIRTY TREE CHECK, per component the plan wants to move
+       (`git status --porcelain`): a dirty tree is always a refusal,
+       naming the files and pointing at CONTRIBUTING.md §8 — restore
+       NEVER stashes and NEVER discards, because a local modification
+       may be a real fix nobody committed yet. The `uv.lock` case (that
+       file is rewritten by every consumer's `install.sh`) gets a
+       specific hint instead of a generic "go fix it".
+    5. Dry-run (default): print the plan — keeps, checkouts (from ->
+       to), strays (informational; restore reproduces the baseline, it
+       never deletes extras — see `RestorePlan.strays`), refusals — and
+       exit 0 if ok, 1 if refused. NEVER touches a checkout.
+    6. `--apply` (only reached if the plan is ok): self-elevates like
+       every other mutating verb (`_need_root`), then for each
+       `'checkout'` action: `git checkout --detach <to_sha>` AS THE
+       CHECKOUT OWNER (`runuser`, same pattern as the fetch). Detached
+       HEAD is CORRECT here — the restore point is a specific commit,
+       not a branch tip; `smd update` is how a component gets back onto
+       `main` afterwards, restore's job stops at reproducing the
+       blessed SHA. Then, only if `pyproject.toml` or `uv.lock` changed
+       between `from_sha` and `to_sha` (`git diff --name-only`),
+       root runs the component's `install.sh` — editable installs
+       auto-track everything else, the same rationale `smd update`
+       uses for its own install step. Finally, the SAME restart
+       guidance `smd update` prints (`cmd_update`'s "restart not
+       automated here" line) — restarts stay manual and stated, never
+       silently triggered.
+    7. Post-apply verification: recompute live components and run
+       `sigmond.manifest_adopt.plan_adopt` (STRICT — no
+       `--allow-superset`; this must come back exactly clean, not
+       merely superset-sanctioned) against `<path>`. Success prints a
+       one-line confirmation; failure is LOUD (every remaining
+       divergence listed) and exits 1 — a restore that still shows
+       drift immediately afterward is not a success just because the
+       mechanical steps ran.
+
+    Exit codes: 0 plan/restore ok, 1 refusal or post-apply verification
+    failure, 2 usage (argparse's own doing, not this function's).
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('admin manifest restore: sigmond library not importable')
+        return 1
+
+    apply_ = getattr(args, 'apply', False)
+    # Elevate BEFORE doing any work, exactly like `admin manifest adopt`:
+    # if we're not root and sudo can re-exec us, `_need_root` replaces
+    # this process entirely and everything below runs fresh, elevated.
+    # Dry-run never reaches this branch, so a bare
+    # `admin manifest restore <path>` never needs root.
+    if apply_ and _need_root('admin manifest restore --apply'):
+        return 1
+
+    import subprocess
+    from pathlib import Path
+    from sigmond.doctor import (component_checkouts, _parse_manifest_components,
+                                _sha_equal)
+    from sigmond.provenance import component_versions
+    from sigmond.manifest_adopt import plan_adopt
+    from sigmond.manifest_restore import plan_restore
+
+    manifest_path = Path(args.path)
+    try:
+        manifest_text = manifest_path.read_text()
+    except OSError as exc:
+        _err(f'admin manifest restore: cannot read {manifest_path}: {exc}')
+        return 1
+
+    base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
+    checkouts = component_checkouts(base)
+    checkout_by_name = {d.name: d for d in checkouts}
+    live = component_versions(checkouts)
+
+    # A loose PRE-pass (same _sha_equal comparison plan_restore itself
+    # uses) to decide who might need a checkout move, so the fetch below
+    # can run BEFORE resolvable() is asked — a manifest SHA that only
+    # exists upstream would always read as unresolvable otherwise.
+    manifest_components = _parse_manifest_components(manifest_text) or {}
+    candidates = sorted(
+        name for name, msha in manifest_components.items()
+        if name in checkout_by_name and live.get(name) is not None
+        and not _sha_equal(live[name], msha))
+
+    def _owner_of(d):
+        try:
+            return d.owner()
+        except Exception:
+            return None
+
+    no_fetch = getattr(args, 'no_fetch', False)
+    if not no_fetch:
+        for name in candidates:
+            d = checkout_by_name[name]
+            owner = _owner_of(d)
+            r = subprocess.run(
+                ['runuser', '-u', owner or 'root', '--',
+                 'git', '-C', str(d), 'fetch', '--all', '--quiet'],
+                capture_output=True, text=True)
+            if r.returncode != 0:
+                _warn(f'{name}: fetch failed — '
+                      f'{(r.stdout + r.stderr).strip()}')
+
+    def resolvable(name, sha):
+        d = checkout_by_name.get(name)
+        if d is None:
+            return False
+        try:
+            r = subprocess.run(
+                ['git', '--no-optional-locks', '-C', str(d), 'rev-parse',
+                 '--verify', '--quiet', f'{sha}^{{commit}}'],
+                capture_output=True, text=True)
+        except OSError:
+            return False
+        return r.returncode == 0
+
+    plan = plan_restore(manifest_text, live, resolvable)
+
+    checkout_actions = [(n, f, t) for n, a, f, t in plan.actions
+                        if a == 'checkout']
+    keep_actions = [(n, f, t) for n, a, f, t in plan.actions if a == 'keep']
+
+    # DIRTY TREE — CONTRIBUTING.md §8: deploy trees are not workspaces.
+    # Checked only for components the plan actually wants to move; a
+    # dirty tree on a 'keep' needs no working-tree change here and is
+    # `smd doctor`'s concern, not restore's. NEVER stash, NEVER discard
+    # — a local modification may be a real fix nobody committed yet.
+    dirty_refusals = []
+    for name, _from, _to in checkout_actions:
+        d = checkout_by_name[name]
+        r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
+                            'status', '--porcelain'],
+                           capture_output=True, text=True)
+        files = [line[3:].strip() for line in r.stdout.splitlines()
+                if line.strip()]
+        if files:
+            hint = ''
+            if 'uv.lock' in files:
+                hint = (' — uv.lock is regenerated by install.sh; '
+                        '`git checkout -- uv.lock` then retry')
+            dirty_refusals.append(
+                f'{name}: dirty working tree ({", ".join(files)}) — '
+                f'never stashed or discarded (CONTRIBUTING.md §8); '
+                f'commit or revert by hand, then retry{hint}')
+
+    for n, f, t in keep_actions:
+        _ok(f'{n}: keep ({t})')
+    for n, f, t in checkout_actions:
+        print(f'  → {n}: checkout {f} -> {t}')
+    for s in plan.strays:
+        _warn(f'stray (not in manifest, left alone): {s}')
+    for r in plan.refusals:
+        _err(r)
+    for r in dirty_refusals:
+        _err(r)
+
+    all_refusals = plan.refusals + dirty_refusals
+    ok = plan.ok and not dirty_refusals
+
+    if not ok:
+        print(f'admin manifest restore: REFUSED — {len(all_refusals)} '
+              f'component(s) block restoring to {manifest_path}; not '
+              f'touching any checkout', file=sys.stderr)
+        return 1
+
+    print(f'admin manifest restore: plan OK — {len(keep_actions)} '
+          f'component(s) already match, {len(checkout_actions)} to '
+          f'checkout' +
+          (f', {len(plan.strays)} stray (left alone)' if plan.strays else ''))
+
+    if not apply_:
+        print('admin manifest restore: dry-run only (pass --apply to move '
+              'checkouts)')
+        return 0
+
+    moved = []
+    for name, from_sha, to_sha in checkout_actions:
+        d = checkout_by_name[name]
+        owner = _owner_of(d)
+        # Detached HEAD is CORRECT here: the restore point is a specific
+        # commit, not a branch tip. `smd update` gets a component back
+        # onto main later — restore's job stops at reproducing the
+        # blessed SHA.
+        r = subprocess.run(
+            ['runuser', '-u', owner or 'root', '--',
+             'git', '-C', str(d), 'checkout', '--detach', to_sha],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            _err(f'{name}: checkout failed — '
+                 f'{(r.stdout + r.stderr).strip()}')
+            continue
+        _ok(f'{name}: checked out {to_sha} (detached HEAD)')
+        moved.append(name)
+
+        # install.sh only if pyproject.toml/uv.lock changed between the
+        # SHAs — editable installs auto-track everything else, same
+        # rationale `smd update` uses for its own install step.
+        diff = subprocess.run(
+            ['git', '--no-optional-locks', '-C', str(d), 'diff',
+             '--name-only', from_sha, to_sha],
+            capture_output=True, text=True)
+        changed = set(diff.stdout.split())
+        if changed & {'pyproject.toml', 'uv.lock'}:
+            sh = d / 'scripts' / 'install.sh'
+            if not sh.exists():
+                sh = d / 'install.sh'
+            if sh.exists():
+                r = subprocess.run(['bash', str(sh)],
+                                   capture_output=True, text=True)
+                (_ok if r.returncode == 0 else _err)(
+                    f'{name}: install.sh exit {r.returncode}')
+            else:
+                _warn(f'{name}: pyproject.toml/uv.lock changed but no '
+                      f'install.sh found on disk — venv may be stale')
+
+    if moved:
+        # The SAME restart guidance `cmd_update` prints — restarts stay
+        # manual and stated, never silently triggered by this verb.
+        _info('restart not automated here — bounce radiod, wait for it to '
+              'settle, then the recorders')
+
+    # Post-apply verification: recompute live and demand a STRICT
+    # (no --allow-superset) adopt-clean result. This should be
+    # impossible to fail if every checkout move above landed — treat a
+    # failure as loud, not silently accepted.
+    live_after = component_versions(component_checkouts(base))
+    verify = plan_adopt(manifest_text, live_after)
+    if verify.ok:
+        print(f'admin manifest restore: restored to manifest — '
+              f'{len(moved)} component(s) moved, adopt-strict verifies '
+              f'clean')
+        return 0
+
+    _err(f'admin manifest restore: restored {len(moved)} component(s) but '
+         f'adopt-strict verification STILL finds '
+         f'{len(verify.refusals)} divergence(s) — treat this host as '
+         f'unverified and investigate before relying on it')
+    for r in verify.refusals:
+        _err(r)
+    return 1
+
+
 def cmd_admin_heartbeat_emit(args) -> int:
     """`smd admin heartbeat emit [--dry-run]` — assemble one fleet
     situational-awareness heartbeat and write it to the spool
@@ -18331,6 +18610,31 @@ def main() -> int:
              'only, never writes.')
     p_m_adopt.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
 
+    p_m_restore = manifest_sub.add_parser(
+        'restore',
+        help='roll live component checkouts BACK to a blessed manifest — '
+             'the remote-rollback half of the blessed-manifest mechanism '
+             '(distinct from `adopt`, which only records a manifest '
+             'that already matches live)',
+        description=(
+            'Updates today are forward-only; the only rollback is '
+            're-imaging on-site. The blessed manifest is already a '
+            'complete restore point (the same pinned component SHAs '
+            '`admin manifest adopt` compares against) -- this moves each '
+            'diverging checkout onto its manifest SHA, fail-closed: a '
+            'dirty tree or an unresolvable SHA refuses that component '
+            '(never stashed, never discarded), and components live but '
+            'not in the manifest are left alone as strays. <path> is a '
+            'LOCAL file only, same as `adopt`.'))
+    p_m_restore.add_argument('path', help='local path to a candidate (blessed) manifest file')
+    p_m_restore.add_argument('--apply', action='store_true',
+        help='move checkouts onto the manifest SHAs (root; only if the plan '
+             'is ok). Default is dry-run: plan only, never touches a checkout.')
+    p_m_restore.add_argument('--no-fetch', action='store_true',
+        help='skip `git fetch` before planning (faster, but a manifest SHA '
+             'not yet fetched will read as unresolvable and refuse)')
+    p_m_restore.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
+
     p_heartbeat = admin_sub.add_parser(
         'heartbeat',
         help='fleet situational-awareness heartbeat — assemble + spool one '
@@ -19121,6 +19425,8 @@ def main() -> int:
             return 0
         if m_cmd == 'adopt':
             return cmd_manifest_adopt(args)
+        if m_cmd == 'restore':
+            return cmd_manifest_restore(args)
         p_manifest.print_help()
         return 0
 
