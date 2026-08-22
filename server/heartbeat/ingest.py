@@ -104,8 +104,28 @@ def open_db(path):
         os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10.0)
     conn.executescript(SCHEMA)
+    _migrate_dedupe_emitted(conn)
     conn.commit()
     return conn
+
+
+def _migrate_dedupe_emitted(conn):
+    """sigmond#51: one row per (station, emitted_at).
+
+    A re-delivered heartbeat (the uploader lost its ack at ENOSPC and
+    shipped the same file again) arrives with a NEW mtime, so the original
+    UNIQUE (station, received_at) let it in three times.  Availability is
+    derived from arrival time, so the EARLIEST arrival is the one that
+    counts; later copies of the same emission are dropped, then the unique
+    index makes the rule permanent.  Idempotent; safe on an existing board.
+    """
+    conn.execute(
+        "DELETE FROM heartbeats WHERE id NOT IN ("
+        " SELECT MIN(id) FROM heartbeats GROUP BY station, emitted_at)"
+        " AND emitted_at IS NOT NULL")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS heartbeats_station_emitted"
+        " ON heartbeats (station, emitted_at)")
 
 
 def record_heartbeat(conn, station, received_at, envelope):

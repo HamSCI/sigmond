@@ -155,3 +155,33 @@ class NetworkBoundTests(unittest.TestCase):
             r = smd._git_fetch_as_owner(Path("/tmp/x"))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("timed out", (r.stderr or "").lower())
+
+
+class HistoryPerStepTests(_Rig):
+    """sigmond#50: a killed/failed update must leave provenance for the steps
+    it DID apply — record each step as it lands, not once at the end."""
+
+    def _history(self, tmp):
+        p = Path(tmp) / "update-history.jsonl"
+        return p, (p.read_text().splitlines() if p.exists() else [])
+
+    def test_pull_is_recorded_even_when_install_fails(self):
+        import sigmond.provenance as prov
+        hist = Path(self._tmp.name) / "update-history.jsonl"
+        self._set_install_sh("#!/bin/bash\necho boom >&2\nexit 1\n")
+        with mock.patch.object(prov, "HISTORY_FILE", str(hist)):
+            rc, text = self._update()
+        self.assertNotEqual(rc, 0)
+        lines = hist.read_text().splitlines() if hist.exists() else []
+        self.assertTrue(any("pull fakeclient" in l for l in lines), lines)
+        self.assertFalse(any("install fakeclient" in l for l in lines), lines)
+
+    def test_success_records_pull_then_install(self):
+        import sigmond.provenance as prov
+        hist = Path(self._tmp.name) / "update-history.jsonl"
+        with mock.patch.object(prov, "HISTORY_FILE", str(hist)):
+            rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        lines = hist.read_text().splitlines()
+        self.assertTrue(any("pull fakeclient" in l for l in lines), lines)
+        self.assertTrue(any("install fakeclient" in l for l in lines), lines)

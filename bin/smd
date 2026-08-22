@@ -2854,6 +2854,7 @@ def _stop_component_units(component: str) -> None:
                         unit_names.append(u)
             for unit_name in _augment_stop_list_with_timer_services(unit_names):
                 _run(['systemctl', 'stop', unit_name], sudo=True)
+                _run(['systemctl', 'disable', unit_name], sudo=True)
             return
         units = [u for u in units if not u.orphaned]
         # Reverse-dependency order: stop consumers before the services they
@@ -2867,6 +2868,12 @@ def _stop_component_units(component: str) -> None:
             [u.unit for u in reversed(units)])
         for unit_name in stop_list:
             _run(['systemctl', 'stop', unit_name], sudo=True)
+            # sigmond#52: "disabled" must survive a reboot.  `smd disable`
+            # used to stop units and flip topology but leave them
+            # systemd-enabled, so the next boot resurrected a component the
+            # operator had just taken offline (wspr-recorder@DASI002 on B4,
+            # 2026-08-21).  `smd start` re-enables (it already does).
+            _run(['systemctl', 'disable', unit_name], sudo=True)
     except Exception as exc:
         _warn(f'{component}: stop units skipped — {exc}')
 
@@ -3340,6 +3347,20 @@ def _refresh_upstreams(checkouts, fetch: bool = True) -> None:
             continue
 
 
+def _record_update_step(what: str) -> None:
+    """Append one history line for a step that just completed (sigmond#50).
+    Best-effort: provenance that cannot be written never fails the update."""
+    from datetime import datetime, timezone
+    import sigmond.provenance as _prov
+    try:
+        _prov.record_update(_prov.HISTORY_FILE, {
+            'at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'what': f'smd update --apply: {what}',
+        })
+    except OSError as exc:
+        _warn(f'could not record "{what}" in {_prov.HISTORY_FILE}: {exc}')
+
+
 def _write_update_log(target: str, r) -> 'Path | None':
     """Keep install.sh's full output (sigmond#48: "install.sh exit 1" with
     the reason swallowed is a loud failure that cannot be diagnosed).
@@ -3512,6 +3533,7 @@ def cmd_update(args) -> int:
             (_ok if r.returncode == 0 else _err)(f'{step.target}: {last}')
             if r.returncode == 0:
                 applied.add(f'pull {step.target}')
+                _record_update_step(f'pull {step.target}')
             else:
                 failed += 1
                 pull_failed.add(step.target)
@@ -3532,6 +3554,7 @@ def cmd_update(args) -> int:
             if r.returncode == 0:
                 _ok(f'{step.target}: install.sh exit 0')
                 applied.add(f'install {step.target}')
+                _record_update_step(f'install {step.target}')
             else:
                 failed += 1
                 _err(f'{step.target}: install.sh exit {r.returncode} — last lines:')
@@ -3552,12 +3575,11 @@ def cmd_update(args) -> int:
     # recorded: an empty plan means nothing changed, and a history full of
     # no-ops would be as uninformative as no history at all.
     if apply_ and applied:
-        from datetime import datetime, timezone
-        from sigmond.provenance import record_update, HISTORY_FILE
-        record_update(HISTORY_FILE, {
-            'at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-            'what': 'smd update --apply: ' + ', '.join(sorted(applied)),
-        })
+        # sigmond#50: each step was recorded AS IT LANDED (see
+        # _record_update_step) so an update killed between its pull and its
+        # install still leaves provenance for the pull.  Nothing to add
+        # here but the pointer.
+        from sigmond.provenance import HISTORY_FILE
         _info(f'recorded in {HISTORY_FILE} (see: smd version)')
     # A step that failed used to print an error and leave the exit code
     # at 0 — so `smd update --apply` could report success while a pull or

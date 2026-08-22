@@ -145,10 +145,18 @@ def rows(db, table="heartbeats"):
 
 
 def seed(db, station, received_at, envelope=None):
-    """Put one arrival in the DB without going through the drop dir."""
-    env = envelope if envelope is not None else make_envelope(station=station)
+    """Seed one ARRIVAL.  Unless an envelope is given, each seeded tick is a
+    distinct emission (emitted_at derived from received_at): since
+    sigmond#51 the board stores one row per (station, emitted_at), so two
+    seeds reusing the default fixed emitted_at would be a re-delivery of
+    the same heartbeat, not two ticks."""
+    import datetime as _dt
     conn = ingest.open_db(str(db))
     try:
+        env = envelope
+        if env is None:
+            iso = _dt.datetime.fromtimestamp(float(received_at), tz=_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            env = make_envelope(station=station, emitted_at=iso)
         ingest.record_heartbeat(conn, station, received_at, env)
         conn.commit()
     finally:
@@ -356,14 +364,22 @@ def test_the_same_arrival_is_never_stored_twice(drop_dir, db_path):
 
 def test_a_later_arrival_from_the_same_station_is_not_a_duplicate(
         drop_dir, db_path):
-    env = make_envelope()
-    drop(drop_dir, "AC0G-B4_20260820T140506Z.json", env, mtime=1000.0)
+    """A later TICK is a new row; a re-delivery of the SAME tick (same
+    station, same emitted_at — sigmond#51) is a duplicate, however many
+    times and under whatever filename it arrives."""
+    env1 = make_envelope(emitted_at="2026-08-20T14:01:06Z")
+    env2 = make_envelope(emitted_at="2026-08-20T14:06:06Z")
+    drop(drop_dir, "AC0G-B4_20260820T140506Z.json", env1, mtime=1000.0)
     ingest.ingest_once(str(drop_dir), str(db_path))
-    drop(drop_dir, "AC0G-B4_20260820T141006Z.json", env, mtime=1300.0)
+    drop(drop_dir, "AC0G-B4_20260820T141006Z.json", env2, mtime=1300.0)
     result = ingest.ingest_once(str(drop_dir), str(db_path))
-
     assert result["ingested"] == 1
     assert result["duplicates"] == 0
+    assert len(rows(db_path)) == 2
+    # the uploader re-ships tick 1 (lost ack): same emission, new file, new mtime
+    drop(drop_dir, "AC0G-B4_20260820T140506Z-again.json", env1, mtime=1400.0)
+    result = ingest.ingest_once(str(drop_dir), str(db_path))
+    assert result["duplicates"] == 1
     assert len(rows(db_path)) == 2
 
 
@@ -523,9 +539,9 @@ def test_declared_interval_cannot_stretch_the_silent_window(db_path):
 
 
 def test_only_the_latest_arrival_decides(db_path):
-    seed(db_path, "AC0G-B4", NOW - 9000, make_envelope(rollup="INVALID",
+    seed(db_path, "AC0G-B4", NOW - 9000, make_envelope(emitted_at="2026-08-20T14:01:06Z", rollup="INVALID",
                                                        reason="old news"))
-    seed(db_path, "AC0G-B4", NOW - 10, make_envelope(rollup="VALID",
+    seed(db_path, "AC0G-B4", NOW - 10, make_envelope(emitted_at="2026-08-20T14:02:06Z", rollup="VALID",
                                                      reason="fresh news"))
 
     conn = ingest.open_db(str(db_path))
@@ -1106,3 +1122,39 @@ def test_authorize_regenerates_the_roster_instead_of_trusting_a_stale_copy():
 def test_generated_roster_is_git_ignored():
     ignored = (REPO / ".gitignore").read_text()
     assert "server/heartbeat/roster.json" in ignored
+
+
+# --- sigmond#51: a re-delivered heartbeat is one observation ----------------
+
+def test_redelivered_heartbeat_is_stored_once(db_path):
+    """The same envelope (station, emitted_at) arriving twice — the uploader
+    lost its ack at ENOSPC and re-shipped — must not become two rows."""
+    conn = ingest.open_db(str(db_path))
+    env = {"emitted_at": "2026-08-21T18:05:29Z", "schema_version": 1,
+           "rollup": {"verdict": "VALID"}, "station": "dasi002"}
+    assert ingest.record_heartbeat(conn, "dasi002", 1000.0, env) is True
+    assert ingest.record_heartbeat(conn, "dasi002", 1061.0, env) is False
+    assert ingest.record_heartbeat(conn, "dasi002", 1092.0, env) is False
+    n, first = conn.execute("select count(*), min(received_at) from heartbeats").fetchone()
+    assert (n, first) == (1, 1000.0)            # earliest ARRIVAL is the one kept
+    # a genuinely new tick still lands
+    env2 = dict(env, emitted_at="2026-08-21T18:10:29Z")
+    assert ingest.record_heartbeat(conn, "dasi002", 1300.0, env2) is True
+
+
+def test_open_db_dedupes_existing_rows_before_adding_the_unique_index(db_path):
+    """Migration: a board that already holds duplicates (dasi002 had 3 rows
+    for 18:05:29Z) must open cleanly, keeping the earliest arrival."""
+    import sqlite3
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(str(db_path))
+    raw.executescript(ingest.SCHEMA_V1_FOR_TESTS if hasattr(ingest, "SCHEMA_V1_FOR_TESTS") else ingest.SCHEMA)
+    for rx in (1000.0, 1061.0, 1092.0):
+        raw.execute("insert or ignore into heartbeats(station, received_at, emitted_at, schema_version, rollup_verdict, payload) values (?,?,?,?,?,?)",
+                    ("dasi002", rx, "2026-08-21T18:05:29Z", 1, "VALID", "{}"))
+    raw.commit(); raw.close()
+    conn = ingest.open_db(str(db_path))
+    n, first = conn.execute("select count(*), min(received_at) from heartbeats where station='dasi002'").fetchone()
+    assert (n, first) == (1, 1000.0)
+    idx = [r[1] for r in conn.execute("pragma index_list(heartbeats)")]
+    assert any("emitted" in i for i in idx)
