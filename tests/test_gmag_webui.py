@@ -83,7 +83,10 @@ class RenderTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=/opt/git/sigmond/gmag-webui", unit)
         self.assertIn("EnvironmentFile=/opt/git/sigmond/gmag-webui/.env", unit)
         self.assertIn("Environment=DENO_DIR=/var/lib/gmag-webui/deno", unit)
-        self.assertIn("ExecStart=/usr/local/bin/deno run --allow-net "
+        # --no-lock: Deno 2 writes deno.lock next to deno.json in the checkout,
+        # which is read-only for the service user (and EROFS under
+        # ProtectSystem=strict) — observed on b4 2026-08-22.
+        self.assertIn("ExecStart=/usr/local/bin/deno run --no-lock --allow-net "
                       "--allow-read=/opt/git/sigmond/gmag-webui "
                       "--allow-env ts/main.ts", unit)
         self.assertIn("Restart=always", unit)

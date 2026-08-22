@@ -6468,7 +6468,7 @@ def _install_gmag_webui_native(catalog, *, force: bool = False) -> bool:
     # imports @std/dotenv from jsr).  Run as the service user with its DENO_DIR.
     r = _run(['runuser', '-u', _gw.SERVICE_USER, '--', 'env',
               f'DENO_DIR={_gw.DENO_DIR}', 'DENO_NO_UPDATE_CHECK=1',
-              str(_gw.DENO_BIN), 'cache', 'ts/main.ts'], cwd=str(checkout), sudo=True)
+              str(_gw.DENO_BIN), 'cache', '--no-lock', 'ts/main.ts'], cwd=str(checkout), sudo=True)
     if r.returncode == 0:
         _ok('gmag-webui: Deno module cache pre-warmed')
     else:

@@ -86,6 +86,8 @@ def render_unit(*, checkout: Path = CHECKOUT, deno_bin: Path = DENO_BIN,
 # (re-run the install to regenerate).  Serves the HamSCI magnetometer
 # dashboard on :{port}; the browser connects to mag-usb's WebSocket feed
 # (mag-recorder, ws://127.0.0.1:8765) directly — Deno is not in the data path.
+# --no-lock: Deno 2 would otherwise write deno.lock beside deno.json inside
+# the read-only, sigmond-owned checkout (EROFS under ProtectSystem=strict).
 # Upstream's gmag-webui-update.timer is deliberately NOT installed: smd
 # update owns the checkout.
 
@@ -103,7 +105,7 @@ WorkingDirectory={checkout}
 EnvironmentFile={checkout}/.env
 Environment=DENO_DIR={deno_dir}
 Environment=DENO_NO_UPDATE_CHECK=1
-ExecStart={deno_bin} run --allow-net --allow-read={checkout} --allow-env ts/main.ts
+ExecStart={deno_bin} run --no-lock --allow-net --allow-read={checkout} --allow-env ts/main.ts
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
