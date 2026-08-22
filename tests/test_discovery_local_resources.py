@@ -425,7 +425,7 @@ class ProbeIntegrationTests(unittest.TestCase):
         self.assertTrue(o.ok)
         self.assertEqual(set(o.fields.keys()),
                          {"cpu_per_core", "udp", "nics", "irqs", "usb",
-                          "radiod", "llc"})
+                          "radiod", "llc", "disk"})
 
     def test_first_run_interval_is_zero(self):
         env = _make_env(nics=["eth0"])
@@ -592,3 +592,38 @@ class ProbeEmitsRadiodAndLlcTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# --- sigmond#49: probe reports filesystem headroom ---------------------------
+
+class DiskProbeTests(unittest.TestCase):
+    def test_disk_fields_from_statvfs(self):
+        import os
+        from collections import namedtuple
+        SV = namedtuple("SV", "f_frsize f_blocks f_bavail f_bfree")
+        def fake_statvfs(path):
+            return {"/": SV(4096, 1000, 100, 150),          # 10% avail → 90% used
+                    "/var/lib/timestd": SV(4096, 10000, 9000, 9100)}[path]
+        fields = lr.disk_fields(["/", "/var/lib/timestd", "/nonexistent"],
+                                statvfs=fake_statvfs, exists=lambda p: p != "/nonexistent")
+        self.assertEqual([d["path"] for d in fields], ["/", "/var/lib/timestd"])
+        root = fields[0]
+        self.assertEqual(root["total_bytes"], 4096 * 1000)
+        self.assertEqual(root["avail_bytes"], 4096 * 100)
+        # df semantics: used/(used+avail) = 850/(850+100) — what an operator sees in `df`
+        self.assertAlmostEqual(root["pct_used"], 89.5, places=1)
+
+    def test_disk_fields_dedupe_same_filesystem(self):
+        from collections import namedtuple
+        SV = namedtuple("SV", "f_frsize f_blocks f_bavail f_bfree f_fsid")
+        same = SV(4096, 1000, 500, 500, 7)
+        fields = lr.disk_fields(["/", "/opt"], statvfs=lambda p: same, exists=lambda p: True)
+        self.assertEqual(len(fields), 1)
+
+    def test_disk_error_is_reported_not_raised(self):
+        def boom(path):
+            raise PermissionError("nope")
+        errors = []
+        fields = lr.disk_fields(["/"], statvfs=boom, exists=lambda p: True, errors=errors)
+        self.assertEqual(fields, [])
+        self.assertTrue(errors and "/" in errors[0])

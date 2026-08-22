@@ -179,6 +179,52 @@ def _default_gap_records(root: str = _RAW_BUFFER) -> list:
     return out
 
 
+
+# sigmond#49: filesystems whose headroom decides whether the station can
+# keep recording.  Deduplicated by filesystem at probe time, so a root that
+# holds everything appears once.
+DISK_PATHS = ("/", "/var/lib/timestd", "/var/lib/sigmond", "/var/lib/mag-recorder",
+              "/opt/git/sigmond", "/var/log")
+
+
+def disk_fields(paths=DISK_PATHS, *, statvfs=None, exists=None, errors=None) -> list:
+    """[{path, total_bytes, avail_bytes, pct_used}] per DISTINCT filesystem
+    among ``paths`` that exist.  ``avail_bytes`` is what a non-root writer
+    gets (f_bavail): the recorders run unprivileged, and ext4's 5 % root
+    reserve is exactly what made a 100 %-full disk look survivable to a
+    root-run install.sh while every recorder was already failing."""
+    import os
+    statvfs = statvfs or os.statvfs
+    exists = exists or os.path.exists
+    out: list = []
+    seen: set = set()
+    for path in paths:
+        try:
+            if not exists(path):
+                continue
+            sv = statvfs(path)
+        except OSError as exc:
+            if errors is not None:
+                errors.append(f"{path}: {type(exc).__name__}")
+            continue
+        key = getattr(sv, "f_fsid", None)
+        if not key:
+            key = (sv.f_blocks, sv.f_bfree, sv.f_frsize)
+        if key in seen:
+            continue
+        seen.add(key)
+        total = sv.f_frsize * sv.f_blocks
+        avail = sv.f_frsize * sv.f_bavail
+        used = total - sv.f_frsize * sv.f_bfree
+        # df's Use%: used / (used + avail) — the root reserve is neither
+        # used nor available to a non-root writer, so it is excluded, and
+        # the number matches what an operator reads in `df -h`.
+        denom = used + avail
+        pct = (100.0 * used / denom) if denom else None
+        out.append({"path": path, "total_bytes": total, "avail_bytes": avail,
+                    "pct_used": None if pct is None else round(pct, 1)})
+    return out
+
 def probe(env: Environment, *,
           timeout: float = 5.0,
           limiter=None,
@@ -256,6 +302,7 @@ def probe(env: Environment, *,
         "usb": usb_fields,
         "radiod": _summarise_gaps(gap_records, now),
         "llc": _read_resctrl(resctrl_root),
+        "disk": disk_fields(errors=errors),
     }
     if errors:
         fields["errors"] = errors

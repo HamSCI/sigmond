@@ -1163,3 +1163,64 @@ def test_default_readers_merge_uploads_policy_into_raw():
         raw = readers["uploads"]()
     assert raw["policy"] == {"enabled": False, "reason": "no HF antenna"}
     assert raw["readable"] is True
+
+
+# --- sigmond#49: the board must see disk pressure --------------------------
+
+def _disk(path, pct_used, avail_mib, total_gib=245):
+    return {"path": path, "total_bytes": total_gib * 2**30,
+            "avail_bytes": avail_mib * 2**20, "pct_used": pct_used}
+
+
+def test_resources_disk_healthy_is_valid_and_named():
+    env = assemble(NOW, CONFIG, rich_readers(resources=lambda: {
+        "llc": {"available": False}, "irqs": {}, "radiod": {},
+        "disk": [_disk("/", 64.0, 85 * 1024)]}))
+    block = env["blocks"]["resources"]
+    assert block["verdict"] == "VALID"
+    assert block["data"]["disk"][0]["path"] == "/"
+    assert "disk / 64%" in block["reason"]
+
+
+def test_resources_disk_pressure_is_inconclusive():
+    env = assemble(NOW, CONFIG, rich_readers(resources=lambda: {
+        "llc": {"available": False}, "irqs": {}, "radiod": {},
+        "disk": [_disk("/", 92.0, 20 * 1024)]}))
+    block = env["blocks"]["resources"]
+    assert block["verdict"] == "INCONCLUSIVE"
+    assert "disk pressure" in block["reason"] and "/ 92%" in block["reason"]
+
+
+def test_resources_disk_nearly_full_is_invalid():
+    """The 2026-08-21 drill: 100% full, board read VALID.  Never again."""
+    env = assemble(NOW, CONFIG, rich_readers(resources=lambda: {
+        "llc": {"available": False}, "irqs": {}, "radiod": {},
+        "disk": [_disk("/", 100.0, 0)]}))
+    block = env["blocks"]["resources"]
+    assert block["verdict"] == "INVALID"
+    assert "disk nearly full" in block["reason"] and "/ 100%" in block["reason"]
+
+
+def test_resources_disk_low_absolute_headroom_is_invalid_even_at_low_percent():
+    """A 4 TB disk at 96% has hundreds of GB; a 20 GB root at 80% with
+    300 MiB left is about to fail writes — judge headroom too."""
+    env = assemble(NOW, CONFIG, rich_readers(resources=lambda: {
+        "llc": {"available": False}, "irqs": {}, "radiod": {},
+        "disk": [_disk("/", 80.0, 300, total_gib=20)]}))
+    assert env["blocks"]["resources"]["verdict"] == "INVALID"
+
+
+def test_resources_worst_filesystem_decides():
+    env = assemble(NOW, CONFIG, rich_readers(resources=lambda: {
+        "llc": {"available": False}, "irqs": {}, "radiod": {},
+        "disk": [_disk("/", 40.0, 100 * 1024), _disk("/var/lib/timestd", 98.0, 500)]}))
+    block = env["blocks"]["resources"]
+    assert block["verdict"] == "INVALID"
+    assert "/var/lib/timestd 98%" in block["reason"]
+
+
+def test_resources_without_disk_field_is_unchanged():
+    """Older producers carry no disk list — must not become INDETERMINATE."""
+    env = assemble(NOW, CONFIG, rich_readers(resources=lambda: {
+        "llc": {"available": False}, "irqs": {}, "radiod": {}}))
+    assert env["blocks"]["resources"]["verdict"] == "VALID"

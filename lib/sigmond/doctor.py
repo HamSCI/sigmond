@@ -180,6 +180,45 @@ def venv_skew(venvs: Iterable[str], shared: str, probe: Callable) -> list:
 _DELETED_SUFFIX = ' (deleted)'
 
 
+
+def import_name_for(repo_dir) -> Optional[str]:
+    """The module a component's venv must be able to import, from its
+    pyproject: ``[tool.sigmond].import_name`` if declared, else
+    ``[project].name`` with dashes as underscores.  None when the repo has
+    no pyproject (C projects, shallow clones)."""
+    import tomllib
+    p = Path(repo_dir) / 'pyproject.toml'
+    try:
+        data = tomllib.loads(p.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    declared = ((data.get('tool') or {}).get('sigmond') or {}).get('import_name')
+    if declared:
+        return str(declared)
+    name = (data.get('project') or {}).get('name')
+    return str(name).replace('-', '_') if name else None
+
+
+def venv_import_check(python, module: str, *, timeout: float = 20.0,
+                      run: Optional[Callable] = None) -> Optional[str]:
+    """None if ``<python> -c "import <module>"`` succeeds; otherwise the
+    failure text (sigmond#49: an EMPTY venv left by a failed install must
+    be a finding, not silence).  A missing interpreter is a failure too."""
+    import subprocess
+    run = run or subprocess.run
+    python = Path(python)
+    if not python.exists():
+        return f'{python} does not exist'
+    try:
+        r = run([str(python), '-c', f'import {module}'],
+                capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f'{type(exc).__name__}: {exc}'
+    if r.returncode == 0:
+        return None
+    tail = (r.stderr or r.stdout or '').strip().splitlines()
+    return tail[-1] if tail else f'exit {r.returncode}'
+
 def exec_mismatch(services: Iterable[dict], resolve: Callable) -> list:
     """Running services whose ``/proc/<pid>/exe`` is not the binary their
     deploy tree provides.

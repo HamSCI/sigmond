@@ -656,3 +656,42 @@ def test_exec_mismatch_reports_deleted_even_when_the_deleted_path_also_differs()
     assert out == [{'name': 'radiod', 'status': 'deleted',
                     'expected': '/usr/local/sbin/radiod',
                     'running': '/usr/local/sbin/radiod.patched (deleted)'}]
+
+
+# --- sigmond#49: a venv that cannot import its own package is a finding ----
+import unittest  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+
+class VenvImportTests(unittest.TestCase):
+    def test_import_name_from_pyproject(self):
+        import tempfile
+        from sigmond.doctor import import_name_for
+        d = Path(tempfile.mkdtemp())
+        (d / "pyproject.toml").write_text('[project]\nname = "mag-recorder"\n')
+        self.assertEqual(import_name_for(d), "mag_recorder")
+        (d / "pyproject.toml").write_text('[project]\nname = "sigmond"\n[tool.sigmond]\nimport_name = "sigmond"\n')
+        self.assertEqual(import_name_for(d), "sigmond")
+        (d / "pyproject.toml").unlink()
+        self.assertIsNone(import_name_for(d))
+
+    def test_venv_import_check_reports_failure_text(self):
+        import tempfile, os, stat
+        from sigmond.doctor import venv_import_check
+        d = Path(tempfile.mkdtemp()); (d / "bin").mkdir()
+        py = d / "bin" / "python"
+        py.write_text("#!/bin/bash\necho 'ModuleNotFoundError: No module named sigmond' >&2\nexit 1\n")
+        py.chmod(py.stat().st_mode | stat.S_IXUSR)
+        err = venv_import_check(py, "sigmond")
+        self.assertIsNotNone(err)
+        self.assertIn("ModuleNotFoundError", err)
+
+    def test_venv_import_check_ok_returns_none(self):
+        import sys
+        from sigmond.doctor import venv_import_check
+        self.assertIsNone(venv_import_check(Path(sys.executable), "json"))
+
+    def test_venv_import_check_missing_python_is_a_finding_text(self):
+        from sigmond.doctor import venv_import_check
+        err = venv_import_check(Path("/nonexistent/venv/bin/python"), "x")
+        self.assertIsNotNone(err)

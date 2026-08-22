@@ -4524,6 +4524,25 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
                 sk['component'], 'venv-skew',
                 f'{sk["package"]} {sk["version"]} from {sk["location"]} — a '
                 f'private copy; updating {sk["shared"]} will NOT reach it'))
+        # sigmond#49: a venv that cannot import its OWN package (the empty
+        # venv a failed install.sh used to leave behind) is a finding in its
+        # own right — the sibling-skew probe above folds "nothing importable"
+        # into "no skew", which is how a dead venv read as healthy on the
+        # board on 2026-08-21.
+        from sigmond.doctor import import_name_for, venv_import_check
+        for d in repos:
+            vpy = Path(d) / 'venv' / 'bin' / 'python'
+            if not vpy.exists():
+                continue
+            mod = import_name_for(d)
+            if not mod:
+                continue
+            err = venv_import_check(vpy, mod)
+            if err:
+                findings.append(Finding(
+                    d.name, 'venv-broken',
+                    f'venv cannot import {mod}: {err} — re-run install.sh '
+                    f'(smd update --apply / smd install {d.name} --force)'))
         for u in unassessable_venv:
             # `venv_skew()`'s probe contract has no way to say "known, but
             # broken" — a stale `.pth` pointing at a moved/renamed

@@ -520,16 +520,69 @@ def _map_resources(raw) -> dict:
             (raw.get("radiod") or {}).get("gap_rate_per_channel_hour"),
     }
 
+    # sigmond#49: filesystem headroom.  On 2026-08-21 a 100 %-full disk
+    # (empty venv, ENOSPC storm) read "resources VALID" on the board — the
+    # probe carried no disk numbers at all.  Judge BOTH percent and absolute
+    # headroom: a 4 TB disk at 96 % is fine, a 20 GB root with 300 MiB left
+    # is about to fail writes.  Worst filesystem decides.
+    disks = [d for d in (raw.get("disk") or []) if isinstance(d, dict)]
+    data["disk"] = disks
+    disk_verdict, disk_note = _judge_disk(disks)
+    if disk_verdict == "INVALID":
+        return _block("INVALID", disk_note, data)
     errors = list(raw.get("errors") or [])
     if errors:
         return _block("INCONCLUSIVE",
                       f"resource probe incomplete: {'; '.join(errors)}", data)
+    if disk_verdict == "INCONCLUSIVE":
+        return _block("INCONCLUSIVE", disk_note, data)
     return _block(
         "VALID",
         f"host resource counters read (llc "
         f"{'available' if llc['available'] else 'unavailable'}, irq delta "
-        f"{'available' if irq_delta else 'unavailable'})",
+        f"{'available' if irq_delta else 'unavailable'}"
+        + (f"; {disk_note}" if disk_note else "") + ")",
         data)
+
+
+# Thresholds — percent OR absolute headroom, whichever is worse.
+DISK_INVALID_PCT = 97.0
+DISK_INVALID_MIN_AVAIL_BYTES = 512 * 2**20
+DISK_PRESSURE_PCT = 90.0
+DISK_PRESSURE_MIN_AVAIL_BYTES = 2 * 2**30
+
+
+def _judge_disk(disks: list) -> tuple:
+    """(verdict, note) for the worst filesystem in ``disks``; ("VALID",
+    "disk / 64%") when healthy, ("VALID", "") when no disk data at all."""
+    worst = None
+    worst_rank = 0
+    for d in disks:
+        pct = _as_float(d.get("pct_used"))
+        avail = _as_int(d.get("avail_bytes"))
+        if pct is None and avail is None:
+            continue
+        rank = 0
+        if (pct is not None and pct >= DISK_INVALID_PCT) or \
+           (avail is not None and avail < DISK_INVALID_MIN_AVAIL_BYTES):
+            rank = 2
+        elif (pct is not None and pct >= DISK_PRESSURE_PCT) or \
+             (avail is not None and avail < DISK_PRESSURE_MIN_AVAIL_BYTES):
+            rank = 1
+        if worst is None or rank > worst_rank or \
+           (rank == worst_rank and (pct or 0) > (_as_float(worst.get("pct_used")) or 0)):
+            worst, worst_rank = d, rank
+    if worst is None:
+        return "VALID", ""
+    pct = _as_float(worst.get("pct_used"))
+    avail = _as_int(worst.get("avail_bytes"))
+    where = f"{worst.get('path')} {pct:.0f}%" if pct is not None else str(worst.get("path"))
+    head = f", {avail / 2**20:.0f} MiB free" if avail is not None else ""
+    if worst_rank == 2:
+        return "INVALID", f"disk nearly full: {where}{head}"
+    if worst_rank == 1:
+        return "INCONCLUSIVE", f"disk pressure: {where}{head}"
+    return "VALID", f"disk {where}"
 
 
 _MAPPERS = {
