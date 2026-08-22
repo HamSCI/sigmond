@@ -89,6 +89,20 @@ hardware_gated  = "magnetometer (RM3100 / Pololu USB-I2C)"  # Phase D: dormant w
 # pattern as hfdl-recorder owning dumphfdl — and so is intentionally NOT
 # a separate catalog entry.
 
+
+[client.gmag-webui]
+kind            = "server"
+description     = "HamSCI magnetometer real-time web dashboard (gmag_webui; browser reads mag-usb's WebSocket feed)"
+repo            = "https://github.com/HamSCI/gmag_webui"
+uses            = []
+requires        = ["mag-recorder"]                    # the feed: mag-usb -W on 127.0.0.1:8765 (mag-recorder >= 8e2a744)
+contract        = ""                                  # Deno/JS single-page app — not contract-conformant (ka9q-web precedent)
+install_script  = ""                                  # smd-native recipe (bin/smd _install_gmag_webui_native, lib/sigmond/gmag_webui.py):
+                                                      # pinned Deno release (sha256-verified), unzip vendor/fontawesome, .env PORT=8082,
+                                                      # OUR unit; NEVER upstream's gmag-webui-update.timer (git reset --hard every 5 min).
+start_priority  = 210                                 # after mag-recorder (feed first)
+hardware_gated  = "magnetometer (RM3100 / Pololu USB-I2C)"  # dormant when absent, same gate as mag-recorder
+
 [client.hs-uploader]
 kind            = "library"                           # source-only dep from the catalog's perspective
 description     = "HamSCI PSWS uploader (sibling Python pkg used by mag-recorder via uv editable install)"
@@ -266,7 +280,7 @@ description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetomete
 # did not install it while the station's topology.toml declared it -- the
 # service ran on B4's v3.21 install without being part of the profile that
 # provisions it.  Core clients are what bringup installs unprompted.
-clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "meteor-scatter"]
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "gmag-webui", "meteor-scatter"]
 local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
 # Discretionary HF-science clients: NOT installed by default.  `smd bringup
 # dasi2 --with-optional` adds them; `smd install <name>` installs+enables one

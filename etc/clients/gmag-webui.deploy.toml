@@ -1,0 +1,11 @@
+# Fallback lifecycle shim for gmag-webui.
+#
+# gmag_webui (https://github.com/HamSCI/gmag_webui) is a Deno-served static
+# dashboard that does not carry a sigmond CONTRACT-conformant deploy.toml.
+# Sigmond ships this shim so the lifecycle helpers (resolve_units, smd
+# start/stop/restart/status) can find its single concrete service.
+#
+# Installed by sigmond's install.sh into /etc/sigmond/clients/.
+
+[systemd]
+units = ["gmag-webui.service"]

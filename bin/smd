@@ -5365,6 +5365,9 @@ def cmd_bringup(args) -> int:
               'mag-recorder installs DORMANT; magnetometer uploads stay dark '
               'until one is attached.')
         dormant.add('mag-recorder')
+    if 'gmag-webui' in prof.clients and not _detect_magnetometer():
+        # The dashboard has nothing to show without the sensor; same gate.
+        dormant.add('gmag-webui')
     if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
         _warn('no Leo Bodnar GPSDO on the bus — gpsdo-monitor installs DORMANT, '
               'and the RX888 runs UNDISCIPLINED: WSPR / PSK / GRAPE (hf-timestd) '
@@ -5839,6 +5842,23 @@ def _install_single_client(args) -> int:
                 return 1
             _enable_after_install(entry, args)
             return 0
+        # gmag-webui is a Deno-served static dashboard — smd-native recipe
+        # (pinned Deno + our unit), no install.sh.  lib/sigmond/gmag_webui.py.
+        if entry.name == 'gmag-webui':
+            from sigmond import gmag_webui as _gw
+            _heading('install gmag-webui')
+            _info(f'repo:   {entry.repo}')
+            for line in _gw.plan_lines():
+                _info(('(dry-run) would ' if dry_run else '') + line)
+            if dry_run:
+                return 0
+            if _need_root('install'):
+                return 1
+            _netdiag_auto_refresh('install')
+            if not _install_gmag_webui_native(catalog, force=getattr(args, 'force', False)):
+                return 1
+            _enable_after_install(entry, args)
+            return 0
         # Otherwise we expect to discover install.sh in the cloned repo
         # post-clone (the mag-recorder pattern).  install_client() handles
         # this fall-through; it needs a repo URL to clone from.
@@ -5952,6 +5972,7 @@ def _install_full_suite(args) -> int:
     catalog_queue = []    # CatalogEntry objects with install_script
     radiod_needed = False
     ka9q_web_needed = False
+    gmag_webui_needed = False
     unknown = []
 
     # C projects without install_script — built natively by sigmond
@@ -5971,6 +5992,8 @@ def _install_full_suite(args) -> int:
             radiod_needed = True
         elif entry.name == 'ka9q-web':
             ka9q_web_needed = True
+        elif entry.name == 'gmag-webui':
+            gmag_webui_needed = True
         elif entry.kind in ('library', 'infra') and not entry.install_script:
             # Handled by sigmond itself (e.g. ka9q-python via venv, wd-rac via _install_frpc).
             pass
@@ -5983,13 +6006,16 @@ def _install_full_suite(args) -> int:
         _info('native:       radiod  (apt deps + make install)')
     if ka9q_web_needed:
         _info('native:       ka9q-web  (onion + make install)')
+    if gmag_webui_needed:
+        _info('native:       gmag-webui  (pinned Deno + static dashboard)')
     for entry in catalog_queue:
         _info(f'catalog:      {entry.name:22s} → {entry.install_script}')
     for comp in unknown:
         _warn(f'unknown:      {comp} (not in catalog, skipping)')
 
     wd_rac_needed = 'wd-rac' in components
-    if not catalog_queue and not radiod_needed and not ka9q_web_needed and not wd_rac_needed:
+    if (not catalog_queue and not radiod_needed and not ka9q_web_needed
+            and not gmag_webui_needed and not wd_rac_needed):
         _warn('nothing to install')
         return 0
     if wd_rac_needed:
@@ -6029,6 +6055,15 @@ def _install_full_suite(args) -> int:
     if ka9q_web_needed:
         _heading('ka9q-web (onion + make install)')
         if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)):
+            errors += 1
+
+    # --- 2b'. gmag-webui (Deno static dashboard, sigmond-native) — after the
+    # catalog clients would be ideal (it needs mag-recorder's feed at RUN time,
+    # not at install time), but install order does not matter for a static
+    # server: it just serves files.
+    if gmag_webui_needed:
+        _heading('gmag-webui (pinned Deno + static dashboard)')
+        if not _install_gmag_webui_native(catalog, force=getattr(args, 'force', False)):
             errors += 1
 
     # --- 2c. wsjtx-decoders (jt9/wsprd + jt9_decode, sigmond-native) — the
@@ -6272,6 +6307,175 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     # First-boot wisdom generation (FFTW plans for radiod's transforms).
     _install_wisdom_service()
     _ensure_radiod_running()
+    return True
+
+
+def _ensure_deno(*, force: bool = False) -> bool:
+    """Install the pinned Deno release (sigmond.gmag_webui.DENO_VERSION):
+    download once to the sigmond cache, sha256-verify, unzip under
+    DENO_ROOT/<version>/, point /usr/local/bin/deno at it.  Idempotent:
+    a current, verified install is a no-op.  Never `curl | sh`."""
+    import shutil as _sh
+    import urllib.request as _ur
+    from sigmond import gmag_webui as _gw
+    inst_dir = _gw.deno_install_dir()
+    binary = inst_dir / 'deno'
+    if binary.exists() and not force:
+        r = _run([str(binary), '--version'])
+        if r.returncode == 0 and _gw.DENO_VERSION.lstrip('v') in r.stdout:
+            _ensure_symlink(_gw.DENO_BIN, binary)
+            _ok(f'deno {_gw.DENO_VERSION}: already installed ({binary})')
+            return True
+    _gw.DENO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    zpath = _gw.DENO_CACHE_DIR / f'deno-{_gw.DENO_VERSION}-{_gw.DENO_ASSET}'
+    if not _gw.verify_sha256(zpath, _gw.DENO_SHA256):
+        url = _gw.deno_zip_url()
+        _info(f'deno {_gw.DENO_VERSION}: downloading {url}')
+        try:
+            tmp = zpath.with_suffix('.part')
+            with _ur.urlopen(url, timeout=120) as resp, open(tmp, 'wb') as out:
+                _sh.copyfileobj(resp, out)
+            tmp.replace(zpath)
+        except Exception as exc:
+            _err(f'deno download failed: {exc}')
+            return False
+        if not _gw.verify_sha256(zpath, _gw.DENO_SHA256):
+            _err(f'deno {_gw.DENO_VERSION}: sha256 MISMATCH for {zpath} — refusing to install')
+            try:
+                zpath.unlink()
+            except OSError:
+                pass
+            return False
+    _ok(f'deno {_gw.DENO_VERSION}: archive verified (sha256 {_gw.DENO_SHA256[:12]}…)')
+    inst_dir.mkdir(parents=True, exist_ok=True)
+    import zipfile as _zf
+    try:
+        with _zf.ZipFile(zpath) as z:
+            z.extract('deno', path=str(inst_dir))
+    except (OSError, KeyError, _zf.BadZipFile) as exc:
+        _err(f'deno unzip failed: {exc}')
+        return False
+    binary.chmod(0o755)
+    r = _run([str(binary), '--version'])
+    if r.returncode != 0:
+        _err(f'deno does not run: {r.stderr.strip()[:200]}')
+        return False
+    _ensure_symlink(_gw.DENO_BIN, binary)
+    _ok(f'deno {_gw.DENO_VERSION}: installed → {binary}  ({_gw.DENO_BIN} → it)')
+    return True
+
+
+def _ensure_symlink(link: Path, target: Path) -> None:
+    try:
+        if link.is_symlink() and link.resolve() == target.resolve():
+            return
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(target)
+    except OSError as exc:
+        _warn(f'could not point {link} at {target}: {exc}')
+
+
+def _ensure_gmag_user() -> bool:
+    from sigmond import gmag_webui as _gw
+    import pwd as _pwd
+    try:
+        _pwd.getpwnam(_gw.SERVICE_USER)
+        return True
+    except KeyError:
+        pass
+    r = _run(['useradd', '--system', '--user-group', '--no-create-home',
+              '--shell', '/usr/sbin/nologin', '--home-dir', str(_gw.DENO_DIR.parent),
+              _gw.SERVICE_USER], sudo=True)
+    if r.returncode != 0:
+        _err(f'useradd {_gw.SERVICE_USER} failed: {r.stderr.strip()}')
+        return False
+    _ok(f'created system user {_gw.SERVICE_USER}')
+    return True
+
+
+def _write_gmag_webui_unit(checkout: Path) -> bool:
+    from sigmond import gmag_webui as _gw
+    content = _gw.render_unit(checkout=checkout)
+    try:
+        current = _gw.UNIT_PATH.read_text()
+    except OSError:
+        current = ''
+    if current != content:
+        import tempfile as _tfw
+        with _tfw.NamedTemporaryFile('w', suffix='.service', delete=False) as tf:
+            tf.write(content)
+            tmp = tf.name
+        r = _run(['install', '-m', '644', tmp, str(_gw.UNIT_PATH)], sudo=True)
+        Path(tmp).unlink(missing_ok=True)
+        if r.returncode != 0:
+            _err(f'gmag-webui unit install failed: {r.stderr.strip()}')
+            return False
+        _run(['systemctl', 'daemon-reload'], sudo=True)
+        _ok(f'gmag-webui: unit written  →  {_gw.UNIT_PATH}')
+    else:
+        _ok('gmag-webui: unit already current')
+    _run(['systemctl', 'enable', _gw.SERVICE], sudo=True)
+    return True
+
+
+def _install_gmag_webui_native(catalog, *, force: bool = False) -> bool:
+    """smd-native install of gmag_webui (see lib/sigmond/gmag_webui.py):
+    clone/pull the checkout, pinned Deno, unzip Font Awesome, service user,
+    .env, our unit, pre-warmed Deno module cache.  Upstream's deploy/ (its
+    install.sh and 5-minute git-reset auto-update timer) is never run."""
+    from sigmond import gmag_webui as _gw
+    entry = get_entry('gmag-webui', catalog)
+    if entry is None:
+        _err('gmag-webui: not in catalog')
+        return False
+    try:
+        checkout = _clone_repo(entry, pull_if_exists=True)
+    except RuntimeError as exc:
+        _err(f'gmag-webui clone failed: {exc}')
+        return False
+    if not _ensure_deno(force=force):
+        return False
+    # Font Awesome is vendored as a zip the operator is told to unzip (README).
+    fa_zip = checkout / _gw.FONTAWESOME_ZIP
+    fa_dir = fa_zip.with_suffix('')
+    if fa_zip.exists() and (force or not fa_dir.exists()):
+        import zipfile as _zf
+        try:
+            with _zf.ZipFile(fa_zip) as z:
+                z.extractall(path=str(fa_zip.parent))
+            _ok(f'gmag-webui: unpacked {fa_zip.name}')
+        except (OSError, _zf.BadZipFile) as exc:
+            _warn(f'gmag-webui: could not unpack {fa_zip.name}: {exc} (icons will be missing)')
+    if not _ensure_gmag_user():
+        return False
+    env_path = checkout / '.env'
+    env_text = _gw.render_env()
+    try:
+        if not env_path.exists() or env_path.read_text() != env_text:
+            env_path.write_text(env_text)
+            _ok(f'gmag-webui: wrote {env_path} (HOST={_gw.HOST} PORT={_gw.PORT})')
+    except OSError as exc:
+        _err(f'gmag-webui: could not write {env_path}: {exc}')
+        return False
+    # The checkout is owned by the sigmond checkout owner; the dashboard only
+    # needs to READ it.  World-readable is the norm under /opt/git/sigmond.
+    _gw.DENO_DIR.mkdir(parents=True, exist_ok=True)
+    _run(['chown', '-R', f'{_gw.SERVICE_USER}:{_gw.SERVICE_USER}', str(_gw.DENO_DIR.parent)], sudo=True)
+    if not _write_gmag_webui_unit(checkout):
+        return False
+    # Pre-warm the module cache so first start needs no network (ts/main.ts
+    # imports @std/dotenv from jsr).  Run as the service user with its DENO_DIR.
+    r = _run(['runuser', '-u', _gw.SERVICE_USER, '--', 'env',
+              f'DENO_DIR={_gw.DENO_DIR}', 'DENO_NO_UPDATE_CHECK=1',
+              str(_gw.DENO_BIN), 'cache', 'ts/main.ts'], cwd=str(checkout), sudo=True)
+    if r.returncode == 0:
+        _ok('gmag-webui: Deno module cache pre-warmed')
+    else:
+        _warn(f'gmag-webui: deno cache failed (first start will fetch modules): '
+              f'{(r.stderr or r.stdout).strip()[:160]}')
+    _ok(f'gmag-webui: installed — dashboard on http://<this-host>:{_gw.PORT}/ '
+        f'(browser feed: ws://127.0.0.1:8765 from mag-recorder)')
     return True
 
 
