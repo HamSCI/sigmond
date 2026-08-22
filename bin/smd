@@ -290,6 +290,37 @@ except ImportError:
                     f'behind.\n'))
 
 
+# sigmond#48: every network-touching git call is bounded.  Offline, `git
+# fetch` over https hung ~5 minutes on DASI002 (curl defaults) before the
+# update could even say "pull failed".  Low-speed limit + time turns a dead
+# link into a failure in ~30 s; the subprocess timeout is the hard ceiling.
+_GIT_NET_TIMEOUT_S = 120
+UPDATE_LOG_DIR = Path('/var/log/sigmond')
+
+
+def _git_net_env() -> dict:
+    env = dict(os.environ)
+    env.setdefault('GIT_HTTP_LOW_SPEED_LIMIT', '1000')
+    env.setdefault('GIT_HTTP_LOW_SPEED_TIME', '30')
+    env.setdefault('GIT_TERMINAL_PROMPT', '0')
+    env.setdefault('GIT_OPTIONAL_LOCKS', '0')
+    return env
+
+
+def _run_git_net(git_cmd: list, verb: str) -> subprocess.CompletedProcess:
+    """subprocess.run for a git command that talks to the network: bounded,
+    non-interactive, and a timeout comes back as a FAILED result (returncode
+    124, stderr says so) rather than an exception the caller forgets."""
+    try:
+        return subprocess.run(git_cmd, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True,
+                              timeout=_GIT_NET_TIMEOUT_S, env=_git_net_env())
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            git_cmd, 124, '',
+            f'git {verb} timed out after {_GIT_NET_TIMEOUT_S}s (network unreachable or stalled)')
+
+
 def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     """git pull --ff-only, dropping privileges to a user who can talk to the remote.
 
@@ -312,8 +343,7 @@ def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
         if not target_user:
             return _git_refused(repo_dir, 'pull')
         git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
-    return subprocess.run(git_cmd, stdin=subprocess.DEVNULL,
-                          capture_output=True, text=True)
+    return _run_git_net(git_cmd, 'pull')
 
 
 def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
@@ -331,8 +361,7 @@ def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
         if not target_user:
             return _git_refused(repo_dir, 'fetch')
         git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
-    return subprocess.run(git_cmd, stdin=subprocess.DEVNULL,
-                          capture_output=True, text=True)
+    return _run_git_net(git_cmd, 'fetch')
 
 
 def _git_behind_main_live(repo_dir: Path, branch: str) -> tuple[int, str]:
@@ -3311,6 +3340,23 @@ def _refresh_upstreams(checkouts, fetch: bool = True) -> None:
             continue
 
 
+def _write_update_log(target: str, r) -> 'Path | None':
+    """Keep install.sh's full output (sigmond#48: "install.sh exit 1" with
+    the reason swallowed is a loud failure that cannot be diagnosed).
+    Best-effort: a log that cannot be written never fails the update."""
+    from datetime import datetime, timezone
+    try:
+        UPDATE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        path = UPDATE_LOG_DIR / f'update-{ts}-{target}.log'
+        path.write_text(
+            f'# smd update --apply: install {target} — exit {r.returncode}\n'
+            f'# --- stdout ---\n{r.stdout}\n# --- stderr ---\n{r.stderr}\n')
+        return path
+    except OSError:
+        return None
+
+
 def cmd_update(args) -> int:
     """Plan (and optionally apply) a component update.  Safe to re-run.
 
@@ -3446,6 +3492,7 @@ def cmd_update(args) -> int:
     # broken step are different outcomes and must not share an exit code.
     held = 0
     failed = 0
+    pull_failed: set = set()
     for step in plan:
         if isinstance(step, Refusal):
             _warn(f'{step.target}: HELD — {step.reason}')
@@ -3458,27 +3505,41 @@ def cmd_update(args) -> int:
         if not apply_:
             continue
         if step.kind == 'pull':
-            r = subprocess.run(['runuser', '-u', step.run_as or 'root', '--',
-                                'git', '-C', str(base / step.target),
-                                'pull', '--ff-only'],
-                               capture_output=True, text=True)
-            (_ok if r.returncode == 0 else _err)(
-                f'{step.target}: {(r.stdout + r.stderr).strip().splitlines()[-1]}')
+            r = _run_git_net(['runuser', '-u', step.run_as or 'root', '--',
+                              'git', '-C', str(base / step.target),
+                              'pull', '--ff-only'], 'pull')
+            last = ((r.stdout + r.stderr).strip().splitlines() or ['(no output)'])[-1]
+            (_ok if r.returncode == 0 else _err)(f'{step.target}: {last}')
             if r.returncode == 0:
                 applied.add(f'pull {step.target}')
             else:
                 failed += 1
+                pull_failed.add(step.target)
         elif step.kind == 'install':
+            if step.target in pull_failed:
+                # sigmond#48: install.sh on a checkout whose pull just
+                # failed would either re-install the OLD code or, offline,
+                # wipe the venv (#47).  The step is not "done", and it is
+                # not another failure either — it is skipped because its
+                # precondition failed.
+                _warn(f'{step.target}: install skipped — pull failed above')
+                continue
             sh = base / step.target / 'scripts' / 'install.sh'
             if not sh.exists():
                 sh = base / step.target / 'install.sh'
             r = subprocess.run(['bash', str(sh)], capture_output=True, text=True)
-            (_ok if r.returncode == 0 else _err)(
-                f'{step.target}: install.sh exit {r.returncode}')
+            logpath = _write_update_log(step.target, r)
             if r.returncode == 0:
+                _ok(f'{step.target}: install.sh exit 0')
                 applied.add(f'install {step.target}')
             else:
                 failed += 1
+                _err(f'{step.target}: install.sh exit {r.returncode} — last lines:')
+                tail = (r.stdout + r.stderr).strip().splitlines()[-15:]
+                for line in tail:
+                    _info(f'  | {line}')
+                if logpath:
+                    _info(f'full output: {logpath}')
         elif step.kind == 'restart':
             _info('restart not automated here — bounce radiod, wait for it to '
                   'settle, then the recorders')

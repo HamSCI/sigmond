@@ -676,14 +676,15 @@ _pip_install() {
 }
 
 # ─── sigmond TUI venv ─────────────────────────────────────────────────────────
-info "Building sigmond venv at $VENV_DIR…"
-_venv_create "$VENV_DIR"
-
-info "Installing sigmond[tui] (textual, rich)…"
-_pip_install "$VENV_DIR" -e "$REPO_DIR[tui]"
-
-# Make venv world-readable/executable so any user can re-exec into it.
-$SUDO chmod -R a+rX "$VENV_DIR"
+info "Building sigmond venv at $VENV_DIR (beside the live one; swapped only after it imports)..."
+# sigmond#47: build into $VENV_DIR.new, verify `import sigmond, ka9q`, then
+# swap — a failed build (ENOSPC, offline) leaves the live venv untouched
+# instead of wiped.  Helper: scripts/venv-atomic.sh.
+# shellcheck source=scripts/venv-atomic.sh
+source "$REPO_DIR/scripts/venv-atomic.sh"
+SUDO="$SUDO" UV="$UV" PYTHON3="$PYTHON3" UV_PYTHON_INSTALL_DIR="$UV_PYTHON_INSTALL_DIR" \
+    venv_atomic_install "$VENV_DIR" "sigmond ka9q" -e "$REPO_DIR[tui]" \
+    || die "sigmond venv build failed — the previous venv (if any) is still live at $VENV_DIR"
 ok "Venv ready at $VENV_DIR"
 
 # ka9q-python was placed at /opt/git/sigmond/ka9q-python near the top of this
