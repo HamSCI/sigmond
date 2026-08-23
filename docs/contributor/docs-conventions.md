@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 50632bc on 2026-08-23 — docs
+> **Verified against:** sigmond 5d082b9 on 2026-08-23 — docs
 > **Canonical for:** how docs are organised and kept true across the HamSCI/DASI2 repos
 
 ## 1. Where things live
@@ -124,13 +124,14 @@ one-command habit that checks it live in
 — it is in force now, ahead of the PR-template checkbox and CI gate that
 will make it a checked rule instead of a convention.
 
-## 9. Checking links
+## 9. Checking links and freshness
 
 From the sigmond repo root:
 
 ```bash
 python3 scripts/docs-linkcheck.py docs README.md CONTRIBUTING.md CLAUDE.md
-pytest tests/test_docs_links.py tests/test_docs_cli_table.py
+python3 scripts/docs-freshness.py docs README.md CONTRIBUTING.md CLAUDE.md
+pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py
 ```
 
 `test_docs_cli_table.py` is the second check: it parses `bin/smd --help`
@@ -138,22 +139,30 @@ and `bin/smd admin --help` and fails if `contributor/orchestration.md`'s
 verb table is missing a verb, or names something that isn't one, in either
 direction.
 
-From any other repo, sigmond's checker can be pointed at that repo's own
+From any other repo, sigmond's checkers can be pointed at that repo's own
 docs:
 
 ```bash
 python3 ../sigmond/scripts/docs-linkcheck.py docs README.md
+python3 ../sigmond/scripts/docs-freshness.py docs README.md
 ```
 
-Both forms are stdlib-only and exit non-zero on the first broken relative
-link or missing anchor, so they're safe to run in CI or before a commit.
-`docs/superpowers/` (specs/plans) is skipped by the checker: those are
-working documents that legitimately forward-reference pages not yet
+`docs-linkcheck.py` is stdlib-only and exits non-zero on the first broken
+relative link or missing anchor, so it's safe to run in CI or before a
+commit. `docs/superpowers/` (specs/plans) is skipped by the checker: those
+are working documents that legitimately forward-reference pages not yet
 written by later tasks in the same program.
 
-A third check, `docs-freshness` *(being written)*, will warn on a page
-whose `Verified against:` line has gone stale relative to the commit it
-names — not yet implemented.
+`docs-freshness.py` warns when a page's `Verified against:` sha predates
+the last commit that actually changed its content (bumping the sha alone
+doesn't count) — warn-only by design (§7 of the design spec: "staleness is
+visible, not enforced"), so it exits 0 unless run with `--strict`.
+
+The `docs-check` GitHub Actions workflow
+(`.github/workflows/docs-check.yml`, reusable as
+`HamSCI/sigmond/.github/workflows/docs-check.yml@main`) runs both checkers
+plus, in sigmond itself, the three doc pytest files above on every push
+and PR to `main`.
 
 ## 10. Software gaps found while writing
 

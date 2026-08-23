@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 978c80a on 2026-08-23 — code + commands run in the checkout
+> **Verified against:** sigmond 5d082b9 on 2026-08-23 — code + commands run in the checkout
 > **Canonical for:** setting up and testing a development environment for the suite
 
 This page gets a fresh clone of `sigmond` to a state where you can run `smd`,
@@ -138,7 +138,7 @@ revert CI to `unittest discover`.**
 
 ## Docs checks
 
-Three checks exist today and run against this repo's `docs/`, `README.md`,
+Four checks exist today and run against this repo's `docs/`, `README.md`,
 `CONTRIBUTING.md`, and `CLAUDE.md`:
 
 - **`scripts/docs-linkcheck.py`** — stdlib-only relative-Markdown-link and
@@ -152,12 +152,19 @@ Three checks exist today and run against this repo's `docs/`, `README.md`,
 - **`tests/test_docs_cli_table.py`** — asserts `orchestration.md`'s CLI
   table matches `bin/smd --help` / `bin/smd admin --help` exactly
   (verb-for-verb, both directions).
-- **`docs-freshness`** *(being written)* — `scripts/docs-freshness.py` +
-  `tests/test_docs_freshness.py`, a warn-only check on each page's
-  `Verified against` line; not yet implemented.
+- **`scripts/docs-freshness.py`** + **`tests/test_docs_freshness.py`** — a
+  warn-only check that flags a page whose `Verified against` sha predates
+  the last commit that actually changed its content: `python3
+  scripts/docs-freshness.py docs README.md CONTRIBUTING.md CLAUDE.md`
+  (exits 0 unless run with `--strict`).
+
+All four run in CI on every push and PR via
+[`.github/workflows/docs-check.yml`](../../.github/workflows/docs-check.yml)
+(reusable as `HamSCI/sigmond/.github/workflows/docs-check.yml@main` for the
+other suite repos).
 
 ```bash
-.venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py -q
+.venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py -q
 ```
 
 ## graphify

@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond dac759d on 2026-08-23 — code
+> **Verified against:** sigmond 5d082b9 on 2026-08-23 — code
 > **Canonical for:** the route through the client-authoring documents, and the rule that a client's own `docs/` must be true
 
 Writing a new client is well covered — by four documents, a runnable
@@ -156,17 +156,31 @@ last time someone opened the file.
 
 ## What else a new client ships
 
-Two upkeep files, one per repo, both currently being written by this
-documentation program:
+Two upkeep files, one per repo:
 
 - `.github/PULL_REQUEST_TEMPLATE.md` — the docs-travel-with-behavior
-  checklist a reviewer sees on every PR. *(being written — Task 6)*
+  checklist a reviewer sees on every PR (sigmond's copy:
+  [`.github/PULL_REQUEST_TEMPLATE.md`](../../.github/PULL_REQUEST_TEMPLATE.md)).
 - `.github/workflows/docs-check.yml` — a ~12-line caller of sigmond's
   reusable `docs-check` workflow, which runs the stdlib link checker and
-  the `Verified against` freshness check on every push.
-  *(being written — Task 7)*
+  the (warn-only) `Verified against` freshness check on every push and PR:
 
-Until those land, run the link checker by hand before you commit docs:
+  ```yaml
+  name: docs-check
+  on: { push: { branches: [main] }, pull_request: { branches: [main] } }
+  jobs:
+    docs:
+      uses: HamSCI/sigmond/.github/workflows/docs-check.yml@main
+      with: { paths: "docs README.md" }
+  ```
+
+Both files copy into a new client repo largely as-is; adjust the PR
+template's checklist wording only if the repo has no `docs/` tree yet, and
+adjust `paths:` if the repo's doc surface includes more than `docs/` and
+`README.md` (e.g. hf-timestd also lists `INSTALLATION.md`).
+
+Run the link checker by hand before you commit docs, in addition to
+whatever CI runs on push:
 
 ```bash
 python3 /opt/git/sigmond/sigmond/scripts/docs-linkcheck.py \

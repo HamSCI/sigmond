@@ -441,20 +441,23 @@ two things:
 * **Or say so.** State "no doc impact" explicitly in the PR description. A
   silent PR with no doc changes reads as an oversight, not a decision.
 
-The PR template's checkboxes will make this a checked step rather than a
-remembered one *(template being added — Task 6)*; CI will run `docs-check`
-on every push to enforce it *(being added — Task 7)*. Until both land, this
-rule is already in force by convention — `docs-conventions.md` §8 says the
-same thing from the docs side.
+The [PR template](.github/PULL_REQUEST_TEMPLATE.md)'s checkboxes make this
+a checked step rather than a remembered one, and the `docs-check` GitHub
+Actions workflow (`.github/workflows/docs-check.yml`, reusable as
+`HamSCI/sigmond/.github/workflows/docs-check.yml@main`) runs on every push
+and PR to `main` — link check plus the (warn-only) `Verified against`
+freshness check, and in sigmond itself the doc pytest files too.
+`docs-conventions.md` §8 says the same thing from the docs side.
 
 The one-command habit, from the repo root, before you open the PR:
 
 ```bash
 python3 scripts/docs-linkcheck.py docs README.md CONTRIBUTING.md CLAUDE.md && \
-  .venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py -q
+  python3 scripts/docs-freshness.py docs README.md CONTRIBUTING.md CLAUDE.md && \
+  .venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py -q
 ```
 
-Zero broken links and both test files green is the bar. See
+Zero broken links and all three test files green is the bar. See
 [`docs/contributor/docs-conventions.md`](docs/contributor/docs-conventions.md)
 §2–§4 for what "canonical page" and "pointer file" mean, and
 [`docs/contributor/README.md`](docs/contributor/README.md) for the full

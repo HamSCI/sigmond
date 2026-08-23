@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 50632bc on 2026-08-23 — docs
+> **Verified against:** sigmond 5d082b9 on 2026-08-23 — docs
 > **Canonical for:** the contributor's table of contents
 
 You can read the source. This page is the order to read it in, not a
@@ -42,16 +42,19 @@ the row shape and when a filed issue lets the page graduate from "gap" to
 
 ```bash
 python3 scripts/docs-linkcheck.py docs README.md CONTRIBUTING.md CLAUDE.md
-.venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py -q
+python3 scripts/docs-freshness.py docs README.md CONTRIBUTING.md CLAUDE.md
+.venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py -q
 ```
 
-The first is the stdlib-only relative-link and `#anchor` checker; the second
-runs it again as a pytest test and additionally asserts `orchestration.md`'s
-CLI table matches `bin/smd --help` / `bin/smd admin --help` exactly, both
-directions. A third check, `docs-freshness` *(being written)*, will warn on
-stale `Verified against` lines — not yet implemented. See
-[`dev-setup.md`](dev-setup.md) §Docs checks for the full list and what each
-one verifies.
+The first is the stdlib-only relative-link and `#anchor` checker. The
+second, `docs-freshness`, warns on a page whose `Verified against` sha
+predates the last commit that actually changed its content (warn-only:
+exits 0 unless run with `--strict`). The pytest run repeats both as tests
+and additionally asserts `orchestration.md`'s CLI table matches
+`bin/smd --help` / `bin/smd admin --help` exactly, both directions. All
+three run in CI via `.github/workflows/docs-check.yml` on every push and
+PR. See [`dev-setup.md`](dev-setup.md) §Docs checks for the full list and
+what each one verifies.
 
 ## Deploy trees are not workspaces
 
