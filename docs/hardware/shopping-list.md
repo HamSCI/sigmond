@@ -6,8 +6,7 @@
 > **Canonical for:** the station parts list
 
 Words in *italics* the first time they appear are explained in the
-operator glossary at `docs/operator/glossary.md` (being written; this
-becomes a link once that page lands).
+operator [glossary](../operator/glossary.md).
 
 ## The one-paragraph version
 

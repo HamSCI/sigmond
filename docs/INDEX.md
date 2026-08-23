@@ -12,7 +12,10 @@ Front door for each audience: [docs/README.md](README.md).
 
 | Doc | What it gives you |
 |---|---|
-| [operator/README.md](operator/README.md) (stub — Phase 1) | Placeholder — real operator guide not yet written; points to sigmond-appliance's INSTALL.md until then |
+| [operator/README.md](operator/README.md) ★ | The operator's table of contents: what hosting a station involves, the ordered path from parts to weekly check, the two-machines-in-one-box (`[host]` vs `[VM]`) rule, and what to send when asking for help |
+| [operator/glossary.md](operator/glossary.md) ★ | Plain-English definition of every term the operator pages use, alphabetical |
+| [operator/hardware.md](operator/hardware.md) (pointer) | Redirects to `hardware/shopping-list.md` — the parts list is shared with the scientist path |
+| [operator/install.md](operator/install.md) (pointer) | Redirects to sigmond-appliance's `INSTALL.md`, plus what to expect from the ~45-minute install |
 
 ## 2. Scientist (record a signal)
 
