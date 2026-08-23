@@ -1025,7 +1025,7 @@ is Tier 1, and it is a different contract.
 ## Next
 
 - Where the data lands, how RTP maps to UTC, and what each timing tier means
-  for a product: data-and-timing.md *(being written)*.
+  for a product: [data-and-timing.md](data-and-timing.md).
 - Turning this into a conformant sigmond client: becoming-a-client.md
   *(being written)*.
 - The envelope this recipe assumed:

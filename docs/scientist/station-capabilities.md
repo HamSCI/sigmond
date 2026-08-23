@@ -228,7 +228,7 @@ The conversion itself is one library call, `rtp_to_utc()` (formerly
 fields — see
 [ka9q-python `RTP_TIMING_SUPPORT.md`](https://github.com/HamSCI/ka9q-python/blob/main/docs/RTP_TIMING_SUPPORT.md).
 Where the data lands and how these tiers propagate into products:
-data-and-timing.md *(being written)*.
+[data-and-timing.md](data-and-timing.md).
 
 **Holdover.** When everything above T1 fails but the GPSDO still holds, RTP
 timestamps stay rate-accurate and their UTC origin is frozen at whatever
@@ -399,8 +399,8 @@ from a live one.
 
 ## Next
 
-- Getting a capture running: capture-quickstart.md *(being written)*.
-- Where the data lands and how it is timestamped: data-and-timing.md *(being
-  written)*.
+- Getting a capture running: [capture-quickstart.md](capture-quickstart.md).
+- Where the data lands and how it is timestamped:
+  [data-and-timing.md](data-and-timing.md).
 - The design decisions behind all of the above:
   [EVENT-CLIENT-PLAYBOOK.md](../EVENT-CLIENT-PLAYBOOK.md).

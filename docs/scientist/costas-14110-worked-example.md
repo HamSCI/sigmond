@@ -611,4 +611,4 @@ URL while every other cross-repo link in this tree resolves under
 - The rules it was built to: [EVENT-CLIENT-PLAYBOOK.md](../EVENT-CLIENT-PLAYBOOK.md) ★
 - How the hardware behaves underneath it: [hardware/character.md](../hardware/character.md) ★
 - Turning a capture into a station product: becoming-a-client.md *(being written)*
-- Where the data lands and how time is carried: data-and-timing.md *(being written)*
+- Where the data lands and how time is carried: [data-and-timing.md](data-and-timing.md)

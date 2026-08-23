@@ -353,7 +353,7 @@ station are in
 **Record the tier alongside your data**, not just in the inventory: an
 archive whose timestamps cannot be traced to a tier cannot be re-analysed
 against a better one later. The mechanics of carrying an anchor through to a
-product are the subject of data-and-timing.md *(being written)*.
+product are the subject of [data-and-timing.md](data-and-timing.md).
 
 ## Instances and `reporter_id`
 
@@ -410,4 +410,4 @@ its component block is assembled from every git checkout under
 - A real client end to end, and why it stayed Tier 0: [costas-14110-worked-example.md](costas-14110-worked-example.md)
 - The scaffold: [skeleton/README.md](skeleton/README.md)
 - The rules, in full: [ADD-A-CLIENT.md](../ADD-A-CLIENT.md) and [CLIENT-CONTRACT.md](../CLIENT-CONTRACT.md)
-- Where data lands and how time is carried through it: data-and-timing.md *(being written)*
+- Where data lands and how time is carried through it: [data-and-timing.md](data-and-timing.md)
