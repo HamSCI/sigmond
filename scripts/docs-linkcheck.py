@@ -19,7 +19,7 @@ import re
 import sys
 from pathlib import Path
 
-LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 GH_RE = re.compile(r"^https?://github\.com/HamSCI/([^/]+)/(?:blob|tree)/[^/]+/(.*)$")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 SKIP_DIRS = {".venv", "venv", "node_modules", "graphify-out", ".git", "__pycache__", ".pytest_cache"}
@@ -109,7 +109,7 @@ def check_file(md: Path, workspace: Path) -> list[str]:
                 continue
             if anchor and path.is_file() and path.suffix.lower() == ".md":
                 if anchor.lower() not in anchors_of(path):
-                    failures.append(f"{md}:{lineno}: missing anchor -> {target}")
+                    failures.append(f"{md}:{lineno}: broken -> {target} (missing anchor)")
     return failures
 
 
