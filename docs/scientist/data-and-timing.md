@@ -82,8 +82,9 @@ Three properties of that layout are the ones to steal:
   packet arrived."** The writer computes the RTP timestamp *of* the chunk
   boundary from the GPS/RTP mapping "so sample position 0 = chunk boundary,
   regardless of when the first packet actually arrived" (source:
-  `hf-timestd/src/hf_timestd/core/binary_archive_writer.py`, `_start_new_chunk`
-  docstring).
+  `hf-timestd/src/hf_timestd/core/binary_archive_writer.py:568-584`,
+  `_start_new_minute` docstring — the method is named for the older
+  one-minute chunk size).
 - **Every data file has a sidecar with the same stem.** No metadata lives only
   in a database.
 - **The sidecar is self-describing**: raw radiod mapping *and* the correction
@@ -118,7 +119,9 @@ and the timestamp in the name is the segment's start — **name your segments so
 lexicographic order equals chronological order**, because on that archive the
 filename is what rescued the orphan.
 
-The `.sigmf-meta` of the first segment, live b4 2026-08-23 (read-only `cat`):
+The `.sigmf-meta` of the **last** segment, live b4 2026-08-23 (read-only
+`cat` of `…-20260812T211411Z-00.sigmf-meta`) — the last one because the wire
+probe was written mid-capture, so the late sidecars are the complete ones:
 
 ```json
 {
@@ -130,33 +133,28 @@ The `.sigmf-meta` of the first segment, live b4 2026-08-23 (read-only `cat`):
     "core:description": "eclipse-costas-14110",
     "event:preset": "iq",
     "event:encoding": "f32",
-    "event:radiod_encoding": "s16",
+    "event:radiod_encoding": "f32",
     "event:agc": false,
     "event:gain_db": 0.0,
     "event:low_edge_hz": -5000.0,
-    "event:high_edge_hz": 5000.0
+    "event:high_edge_hz": 5000.0,
+    "event:asserted_encoding": 4,
+    "event:wire_bytes_per_component": 4.0
   },
   "captures": [
     {
       "core:sample_start": 0,
       "core:frequency": 14110000.0,
       "event:timing_state": "anchored",
-      "core:datetime": "2026-08-11T23:11:20.136992+00:00",
-      "event:rtp_timestamp": 445894560
+      "core:datetime": "2026-08-12T21:14:11.085379+00:00",
+      "event:rtp_timestamp": 1398346860
     }
   ],
-  "annotations": [
-    {
-      "core:sample_start": 0,
-      "core:sample_count": 720000,
-      "core:label": "settling",
-      "event:reason": "analog chain / AGC settling"
-    }
-  ]
+  "annotations": []
 }
 ```
 
-Four things that file does right, and one it records rather than hides:
+Five things that file does right:
 
 - `core:datatype` says how to decode the blob without any other document.
 - `captures[0]` pins `core:sample_start: 0` to both an absolute
@@ -165,14 +163,35 @@ Four things that file does right, and one it records rather than hides:
 - `event:timing_state: "anchored"` is an explicit state, so an *unanchored*
   segment is distinguishable from an anchored one instead of silently looking
   identical.
-- The `settling` annotation marks the first 720,000 samples (60 s at 12 kHz)
-  as analog-chain/AGC settling — metadata about *quality*, carried with the
-  data.
-- ⚠ `"event:encoding": "f32"` next to `"event:radiod_encoding": "s16"` is the
-  [encoding race](../hardware/character.md#the-encoding-you-asked-for-is-a-second-command)
-  caught in the act and **written down** rather than resolved silently. The
-  wire carried F32 (the recorder measured it); radiod's status still said S16.
-  Recording both is what lets a future reader tell which one to believe.
+- **Three separate encoding facts, not one.** `event:radiod_encoding` is what
+  was *requested* from radiod on the wire; `event:encoding` (with
+  `core:datatype`) is the *on-disk* format; `event:asserted_encoding: 4` and
+  `event:wire_bytes_per_component: 4.0` are what the recorder's own probe
+  *measured*. Those are three independent questions and the sidecar answers
+  each separately (source: `event_recorder/jobspec.py`'s module docstring, "Two
+  independent encodings live on a `JobSpec`, and they must not be conflated";
+  `event_recorder/contract.py`, `asserted_encoding` / `wire_bytes_per_component`
+  are "what was actually confirmed on the wire … as opposed to
+  `radiod_encoding` … which is always what was REQUESTED").
+- Annotations carry *quality*, not just data: this segment has none, but the
+  first segment marks its opening 720,000 samples (60 s at 12 kHz) as
+  `"core:label": "settling", "event:reason": "analog chain / AGC settling"`
+  (live b4 2026-08-23, `…-20260811T231120Z-00.sigmf-meta`).
+
+⚠ **A requested wire format with no measurement beside it is the trap**, and
+this archive contains four of them: the four sidecars written before the wire
+probe existed record `event:radiod_encoding: "s16"` with no
+`asserted_encoding` and no `wire_bytes_per_component` — the worked example's
+own lesson 3, "measure the wire from the first segment, not the fifth hour"
+([costas-14110-worked-example.md §What we would change](costas-14110-worked-example.md#what-we-would-change)).
+Note what it is *not*: `radiod_encoding: "s16"` beside `encoding: "f32"` is a
+legitimate, documented configuration — ka9q-python decodes whatever the wire
+carried and hands the client `complex64` regardless, so "a capture can
+legitimately request `radiod_encoding="s16"` from radiod while still writing
+`encoding="f32"` (`cf32_le`) to disk" (source: `event_recorder/jobspec.py`
+docstring). The failure is the *absent measurement*, not the mismatch. Record
+all three readings — what `ensure_channel` returned, what a fresh poll says,
+and what you measured.
 
 ⚠ What that meta does **not** carry is the timing tier, the σ or the judge
 age that were live while it ran — so the archive cannot be re-analysed against
@@ -299,9 +318,15 @@ Ask for headroom before the event, not during it.
 5. **hf-timestd publishes, independently of that loop, the tier its evidence
    supports and the RTP↔UTC offset that corrects radiod's epoch — so record
    which tier labelled your data**, whether or not you apply the correction,
-   because the annotation is what has to travel with the sample (source:
-   [CLIENT-CONTRACT.md §18.5](../CLIENT-CONTRACT.md#185-client-obligations),
-   "Annotation propagation").
+   because the annotation is what has to travel with the sample. (§18.5's
+   "Annotation propagation" MUST is scoped to *authority-corrected*
+   timestamps — source:
+   [CLIENT-CONTRACT.md §18.5](../CLIENT-CONTRACT.md#185-client-obligations).
+   In RTP-default mode nothing compels you, but the playbook asks for it
+   anyway:
+   [record the timing anchor](../EVENT-CLIENT-PLAYBOOK.md#record-the-timing-anchor-not-just-the-samples),
+   and so does
+   [station-capabilities.md §Timing](station-capabilities.md#timing-you-can-rely-on--tiers).)
 
 Sentence 4 deserves its own paragraph, because it is the thing most likely to
 be misunderstood. On b4, live 2026-08-23 17:05Z, `chronyc sources` showed
@@ -314,7 +339,9 @@ current-feeds table: unit 1 `FUSE` = calibrated L2 fusion timing, unit 2
 `HPPS` = T6 BPSK-PPS via the matched-filter calibrator; the refclock lines are
 live in `/etc/chrony/conf.d/timestd-refclocks.conf` on b4). The station's
 chrony chain and why nothing may restart it is
-[timing-chain-architecture.md](../timing-chain-architecture.md).
+[timing-chain-architecture.md](../timing-chain-architecture.md) — read it as
+the design note it says it is (`Status: Design (proposed 2026-06-06)`), not as
+a description of what every station runs today.
 
 This is not a bug and hf-timestd does not pretend otherwise — it states
 plainly that **chrony is a downstream consumer**, that its selection "reflects
@@ -415,8 +442,14 @@ The stated principle is "anchor once off radiod's RTP timestamp and defer to
 it"; a genuine radiod restart is handled by the stream's drop/restore path,
 not by polling status.
 
-⚠ **The pair `get_anchor()` gives you is the one captured at channel
-discovery, not at your first packet.** On the DASI002 Tier-0 run it was taken
+⚠ **The pair `get_anchor()` gives you may be the one captured at channel
+discovery, not at your first packet** — unless you run a `StatusListener`
+(ka9q-python 3.16.0+), which refreshes the anchor in place at sub-second
+cadence via `ChannelInfo.update_anchor()` (source:
+`ka9q-python/ka9q/status_listener.py:468`; `CHANGELOG.md` §[3.16.1], "the
+`StatusListener` introduced in 3.16.0 refreshes the anchor in place at
+sub-second cadence (~450 ms on a busy host)"). Without one, the pair is
+frozen at discovery. On the DASI002 Tier-0 run it was taken
 6.24 s before the first packet arrived, and every sample after it is
 extrapolated from that single reading at the nominal rate
 ([capture-quickstart.md §What the script does that matters](capture-quickstart.md#what-the-script-does-that-matters)).
@@ -467,7 +500,8 @@ any, composes *after* the §18 conversion and never replaces it
 
 The station's own recorder is the reference implementation of everything
 above. A live five-minute sidecar, b4 2026-08-23 (read-only `cat` of
-`/var/lib/timestd/raw_buffer/WWV_25000/20260823/1787503800.json`):
+`/var/lib/timestd/raw_buffer/WWV_25000/20260823/1787503800.json`, abridged —
+`radiod_snr_db: null` and the station block's `description` are elided):
 
 ```json
 {
@@ -492,6 +526,7 @@ above. A live five-minute sidecar, b4 2026-08-23 (read-only `cat` of
   "station": {"callsign": "AC0G", "grid_square": "EM38ww", "id": "S000170",
               "instrument_id": "171", "latitude": 38.9187497, "longitude": -92.1277207},
   "pipeline_offset_samples": 0,
+  "timing_snapshots": [],
   "bpsk_chain_delay_ns": 16621380,
   "bpsk_chain_delay_applied": false,
   "timing": {
@@ -591,11 +626,13 @@ only as a labelled diagnostic.
 a *separate* command after the create, "which makes the grant easy to drop and
 impossible to notice"
 ([character.md §The encoding you asked for is a second command](../hardware/character.md#the-encoding-you-asked-for-is-a-second-command)).
-The eclipse SigMF meta above has the race written into it —
-`event:encoding: "f32"` beside `event:radiod_encoding: "s16"`. **Measure the
-wire format** (payload bytes ÷ RTP ticks ÷ components: ~4 is F32, ~2 is S16)
-and record all three readings — what `ensure_channel` returned, what a fresh
-poll says, and what you measured.
+A status field saying `f32` is a *report*, and a sidecar field saying `f32` may
+only be recording what you *asked for* — the eclipse archive's four earliest
+sidecars carry `event:radiod_encoding` with no measurement beside it
+(§"Event captures — SigMF", above). **Measure the wire format** (payload bytes
+÷ RTP ticks ÷ components: ~4 is F32, ~2 is S16) and record all three readings
+— what `ensure_channel` returned, what a fresh poll says, and what you
+measured — under names that say which is which.
 
 **3. A radiod restart moves the counter space.** A cached anchor pair from
 before the restart is in a *different* RTP counter space from the packets
