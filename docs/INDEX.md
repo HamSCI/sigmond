@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — code
+> **Verified against:** sigmond 6f7babc on 2026-08-23 — code
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -36,6 +36,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [ADD-A-CLIENT.md](ADD-A-CLIENT.md) | Checklist for writing a new contract-conformant client repo so it appears in `smd list`/the TUI |
 | [STATION-NETWORK-CAPABILITIES.md](STATION-NETWORK-CAPABILITIES.md) | What a coordinated mesh of DASI2 stations delivers scientifically — spatial + modal diversity, resilience to losing any one transmitter |
 | [SCINTILLATION-MONITORING.md](SCINTILLATION-MONITORING.md) | Design note + implementation plan for adding S4/σ_φ/Doppler ionospheric-scintillation observables |
+| [scientist/station-capabilities.md](scientist/station-capabilities.md) ★ | The DASI2 station capability envelope for a new client: the frequency/preset/sample-rate/encoding menu radiod will actually serve, how many channels you may add and how to measure the load, the T6–T1 timing tiers and where the tier is recorded, storage per channel-hour with the measured tie-point, the front-end AGC caveat, what "a gap" means when radiod zero-fills, and what the station cannot do |
 | [scientist/README.md](scientist/README.md) (stub — Phase 2) | Placeholder — real scientist guide not yet written; points to EVENT-CLIENT-PLAYBOOK.md and ka9q-python's Getting Started guide until then |
 
 ## 3. Contributor (work on the code)
