@@ -5,7 +5,7 @@
 > **Verified against:** n/a
 > **Canonical for:** software gaps discovered while documenting; each row becomes a `docs-gap` issue in the owning repo at the end of each phase
 
-**Phase 0+1 done 2026-08-23; rows 1–32 are ready to file as issues (Phase 4). Phase 2 is appending from row 33.**
+**Phase 0+1 done 2026-08-23; Phase 2 done 2026-08-23; rows 1–51 ready to file as issues (Phase 4); Phase 3 plan next.**
 
 | # | Repo | Gap (what the doc wanted to say) | What is true today | Page that needs it | Issue |
 |---|------|----------------------------------|--------------------|--------------------|-------|

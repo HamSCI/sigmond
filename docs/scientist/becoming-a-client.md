@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 67a3a6d on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** graduating a capture to a sigmond client (Tier 1)
 
 [Tier 0](capture-quickstart.md) ends with bytes on a disk and a person who

@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 6a569b5 on 2026-08-23 — code
+> **Verified against:** sigmond 67a3a6d on 2026-08-23 — code
 > **Canonical for:** the front door
 
 Pick the door that matches you. Each path is self-contained; you will be

@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 67a3a6d on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the DASI2 station capability envelope for a new client
 
 Every number below is cited to code, to a doc, or to a dated live reading on
