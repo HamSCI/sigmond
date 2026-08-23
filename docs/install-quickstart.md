@@ -22,11 +22,9 @@ planning — see [`installation-guide.md`](installation-guide.md).
 - `git` and Python 3.11+ — `install.sh` will install them via your
   distro's package manager if missing.
 
-Hardware (for an actual SDR install, not just `smd`):
-
-- HF antenna
-- RX-888 or other ka9q-radio-supported SDR
-- GPS-disciplined oscillator (10 MHz + PPS)
+Hardware (for an actual SDR install, not just `smd`): see
+[hardware/shopping-list.md](hardware/shopping-list.md) — the canonical
+parts list, with models, what is optional, and what B4 runs.
 
 ---
 

@@ -68,7 +68,9 @@ Front door for each audience: [docs/README.md](README.md).
 
 ## 4. Hardware
 
-Coming — Task 8. No `docs/hardware/` pages exist yet.
+| Doc | What it gives you |
+|---|---|
+| [hardware/shopping-list.md](hardware/shopping-list.md) ★ | The station parts list: required vs optional with model numbers, what each optional part buys you, cabling, approximate cost, and the known-good build AC0G/B4 runs |
 
 ## 5. Archive
 

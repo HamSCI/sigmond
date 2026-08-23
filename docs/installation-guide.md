@@ -14,10 +14,9 @@ wspr-recorder, psk-recorder, and hf-timestd on a shared SDR receiver.
 
 ## Hardware Requirements
 
-- HF antenna
-- RX-888 or compatible SDR receiver
-- GPS-disciplined oscillator (10 MHz + PPS output)
-- Linux computer (Debian 12+, Ubuntu 22.04+, or equivalent)
+See [hardware/shopping-list.md](hardware/shopping-list.md) — the canonical
+parts list, with models, what is optional, and what B4 runs. Software side:
+a Linux computer running Debian 12+, Ubuntu 22.04+, or equivalent.
 
 ---
 

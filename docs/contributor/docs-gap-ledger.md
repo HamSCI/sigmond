@@ -11,3 +11,4 @@
 | 2 | sigmond-appliance | the RAC page's root@ ssh command is wrong (PermitRootLogin no) | operators must ssh as hamsci@ via the PM | operator/remote-access.md | — |
 | 3 | hs-uploader | PSWS transport for a new client's products | only hf-timestd/GRAPE + mag ship to PSWS; GRAPE uploader bypasses [uploads] policy | scientist/becoming-a-client.md (Phase 2) | — |
 | 4 | sigmond | client scaffold command (`smd component add` takes a repo, not a template) | ADD-A-CLIENT says "copy psk-recorder" | scientist/becoming-a-client.md (Phase 2) | — |
+| 5 | sigmond | which GPSDO output is patched into which jack (RX888 reference, TS-1 reference) | nothing on the station records the physical cabling; `gpsdo-monitor` reports OUT1/OUT2 frequencies (b4: 10 MHz / 27 MHz) but not where they go | hardware/shopping-list.md | — |

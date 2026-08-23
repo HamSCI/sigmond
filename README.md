@@ -55,6 +55,9 @@ lifecycle, CPU-pinning, and the shared sink.
 - A GPS disciplined oscillator (e.g. Leo Bodnar GPSDO) providing 10 MHz + PPS
 - A Linux computer (Debian 12+ or Ubuntu 22.04+)
 
+Full list with models, what is optional, and what B4 runs:
+[docs/hardware/shopping-list.md](docs/hardware/shopping-list.md)
+
 **Software prerequisites:**
 - Python 3.11 or later
 - git
