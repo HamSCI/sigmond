@@ -1,0 +1,29 @@
+# docs-check — link check + Verified-against freshness (warn) for any HamSCI repo.
+# Reusable: other repos call it with `uses: HamSCI/sigmond/.github/workflows/docs-check.yml@main`.
+# In sigmond itself it also runs the CLI-table and freshness pytest.
+name: docs-check
+on:
+  workflow_call:
+    inputs:
+      paths: { type: string, required: false, default: "docs README.md" }
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }                       # freshness needs history
+      - uses: actions/checkout@v6                      # the checker lives in sigmond
+        with: { repository: HamSCI/sigmond, path: .sigmond-tools, fetch-depth: 1 }
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.11" }
+      - name: Link check (relative links + anchors; external links skipped)
+        run: python3 .sigmond-tools/scripts/docs-linkcheck.py ${{ inputs.paths || 'docs README.md' }}
+      - name: Verified-against freshness (warn-only)
+        run: python3 .sigmond-tools/scripts/docs-freshness.py ${{ inputs.paths || 'docs README.md' }} || true
+      - name: sigmond-only doc tests
+        if: github.repository == 'HamSCI/sigmond'
+        run: |
+          pip install pytest
+          PYTHONPATH=lib python -m pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py -q
