@@ -36,7 +36,7 @@ block immediately under the H1:
 ```
 > **Audience:** operator | scientist | contributor | all
 > **Status:** draft | current | shipped | historical | pointer
-> **Verified against:** <repo> <commit-or-tag> on <date> — <how: live dasi002 / live b4 / code / not re-verified>
+> **Verified against:** <repo> <commit-or-tag> on <date> — <how: live dasi002 / live b4 / code / docs / not re-verified>
 > **Canonical for:** <topic>        (or  **See instead:** [<path>](<path>)  for pointer pages)
 ```
 
@@ -48,10 +48,12 @@ explanation, `historical` lives in `archive/` and may be wrong today,
 parenthetical qualifier narrowing or explaining it — e.g. `shipped (stages
 0–3)`, `draft (plan, not executed)`, `current (working file)` — rather than
 inventing a new status word. `Verified against` records **how** the
-page was last checked — against a live host, against the code, or "not
-re-verified" if nobody has confirmed it recently — so a reader can judge
-trust without an automated staleness check. `Canonical for` names the one
-topic this page owns; pointer pages replace it with `See instead:`.
+page was last checked — against a live host, against the code, against
+the surrounding docs tree itself (`docs`, for a page whose claims are
+about doc organisation rather than code behavior), or "not re-verified"
+if nobody has confirmed it recently — so a reader can judge trust without
+an automated staleness check. `Canonical for` names the one topic this
+page owns; pointer pages replace it with `See instead:`.
 
 ## 4. Pointer files
 

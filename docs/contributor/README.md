@@ -17,15 +17,16 @@ what actually runs.
 | 1 | [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) | 15 min | Working agreements: where work happens, the two update orientations, pins, deploy-tree hygiene, PR expectations, graphify. Read this first — everything else assumes it. |
 | 2 | [`orchestration.md`](orchestration.md) ★ | 20 min | How sigmond works: the 13 architecture layers, the FHS paths, and the CI-checked `smd` verb→module map. |
 | 3 | [`../architecture.png`](../architecture.png) | 2 min | The whole-suite picture — radiod, the clients, the shared sink, uploaders — in one diagram. |
-| 4 | [`../CLIENT-CONTRACT.md`](../CLIENT-CONTRACT.md) ★ | 20 min | The sigmond↔component seam: what every client must do and why. The norm every other client doc defers to. |
-| 5 | one client's six-file docs — [psk-recorder](https://github.com/HamSCI/psk-recorder/blob/main/docs/INDEX.md) (the reference implementation) or [meteor-scatter](https://github.com/HamSCI/meteor-scatter/blob/main/docs/INDEX.md) (a descendant, now truthed to its own MSK144 reality) | 15 min | What a conformant client's `docs/` looks like once ARCHITECTURE/CONFIG/INSTALL/OPERATIONS/REQUIREMENTS/SIGMOND-CONTRACT actually describe the client shipping them. |
+| 4 | [`../CLIENT-CONTRACT.md`](../CLIENT-CONTRACT.md) ★ | 45–60 min (or skim the section headers first — it is a reference, not a linear read) | The sigmond↔component seam: what every client must do and why. The norm every other client doc defers to. |
+| 5 | one client's six-file docs — [psk-recorder](https://github.com/HamSCI/psk-recorder/blob/main/docs/INDEX.md) (the reference implementation) or [meteor-scatter](https://github.com/HamSCI/meteor-scatter/blob/main/docs/INDEX.md) (a descendant, now truthed to its own MSK144 reality) | ~25–30 min | What a conformant client's `docs/` looks like once ARCHITECTURE/CONFIG/INSTALL/OPERATIONS/REQUIREMENTS/SIGMOND-CONTRACT actually describe the client shipping them. |
 | 6 | [`appliance-boundary.md`](appliance-boundary.md) ★ | 20 min | The appliance ↔ sigmond boundary: what the golden image bakes, what first boot does, what the wizard sets, the three version-provenance files, and — the question every change eventually asks — does this reach a station by `smd update` or does it need a new image. |
 | 7 | [`dev-setup.md`](dev-setup.md) ★ | 10 min | Clone layout, the dev venv, running `smd` from a checkout, the test runner, and the docs checks (below). |
 | 8 | [`client-authoring.md`](client-authoring.md) | 10 min | The route through the client-authoring documents, the two registrations that fail silently (`AFFINITY_UNITS`, `[client_features]`), and the rule that a client's own `docs/` must be true for *that* client. |
 | 9 | [`docs-conventions.md`](docs-conventions.md) ★ | 10 min | How this whole tree is organised and kept true: the header block, the ★-canonical rule, pointer files, archive policy, and the "docs travel with behavior" rule below. |
 
-~2 hours end to end; each step assumes the ones before it, so read in order the
-first time through.
+~2.5–3 hours end to end (CLIENT-CONTRACT is the long pole — skim its headers
+first if you're short on time); each step assumes the ones before it, so read
+in order the first time through.
 
 ## The ledger
 

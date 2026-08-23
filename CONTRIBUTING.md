@@ -425,9 +425,9 @@ is precisely how a stale library sat undetected on both for a day.
 
 A doc that describes last month's CLI is worse than no doc — it sends the
 next reader confidently in the wrong direction. This project has enough
-scars from stale docs and disagreeing lists (§7, and the whole documentation
-program's Phase 1–3 gap ledger) that we treat a doc gap the same way we
-treat a missing test: not shipped.
+scars from stale docs and disagreeing lists (the documentation program's
+Phase 1–3 gap ledger runs 64 rows deep, one per scar) that we treat a doc
+gap the same way we treat a missing test: not shipped.
 
 If your PR changes a CLI surface, a config key, a systemd unit, a file
 path, a wizard prompt, or any other observable behavior, it must do one of
