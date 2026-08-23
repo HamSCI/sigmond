@@ -41,6 +41,7 @@ import copy
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import sys
@@ -67,6 +68,12 @@ INSTANCE_CONFIG_DIR = f"/etc/{CLIENT_NAME}"
 RX888_LOW_HZ = 10_000
 RX888_HIGH_HZ = 64_000_000
 RATE_QUANTUM_HZ = 200                   # radiod serves rates that are a multiple of this
+# §19.1 reporter id: uppercase alphanumerics and hyphens, no leading or
+# trailing hyphen, at least two characters.  Path-safe by construction — the
+# same string becomes the systemd instance, the config stem, the env-file
+# stem, the data dir and the log dir, so an id that is wrong here is wrong in
+# five places at once.  Check it where you can still refuse to start.
+REPORTER_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]*[A-Z0-9]$")
 DISK_HEADROOM_BYTES = 1_000_000_000     # refuse to start with less than this free
 
 # Complex I/Q: two components per sample.  Used only for the disk estimate
@@ -294,6 +301,10 @@ def build_validate(cfg: dict, issues: list[dict]) -> dict:
         out.append(_issue("fail", f"sample_rate {rate} is not a positive multiple of "
                                    f"{RATE_QUANTUM_HZ} Hz; radiod will not serve it", name))
 
+    if not REPORTER_ID_RE.match(str(name)):
+        out.append(_issue("fail", f"reporter id {name!r} does not match the §19.1 form "
+                                  "[A-Z0-9][A-Z0-9-]*[A-Z0-9]", name))
+
     if not str(cfg["station"]["callsign"]).strip():
         out.append(_issue("fail", "station.callsign is unset", name))
 
@@ -355,8 +366,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="emit JSON (always on; accepted for contract symmetry)")
 
     d = sub.add_parser("daemon", help="[contract §3] the long-running process")
+    # Accept BOTH spellings the fleet's unit files use: the positional
+    # (`daemon %i`) and §19.2's flag (`daemon --instance %i`).  Costs two
+    # lines here and removes a whole class of "unit starts, exits 2".
     d.add_argument("instance_arg", nargs="?", metavar="REPORTER_ID",
                    help="instance name; the unit passes %%i here")
+    d.add_argument("--instance", dest="instance_flag", metavar="REPORTER_ID",
+                   help="same thing, as a flag (CLIENT-CONTRACT §19.2)")
 
     c = sub.add_parser("config", help="[contract §14] configuration interview")
     csub = c.add_subparsers(dest="config_cmd", required=True)
@@ -376,7 +392,9 @@ def main(argv=None) -> int:
     _configure_logging_to_stderr("-v" in argv or "--verbose" in argv)
     args = build_parser().parse_args(argv)
 
-    instance = args.instance or getattr(args, "instance_arg", None)
+    instance = (args.instance
+                or getattr(args, "instance_flag", None)
+                or getattr(args, "instance_arg", None))
     config_path = resolve_config_path(args.config, instance)
     cfg, issues = load_config(config_path)
     if instance:

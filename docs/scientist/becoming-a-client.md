@@ -110,15 +110,19 @@ carrying into whatever you write instead:
   mode 0640 and owned by the service user, so an operator running
   `my-recorder inventory --json` cannot read yours. Catch that and print a
   contract-shaped payload with the failure in `issues`, still exiting 0.
-- **Spell a hard problem `"fail"`.** The contract does not enumerate the
-  `issues[].severity` vocabulary, but `bin/smd` prints an issue as an error
-  only when the string is exactly `fail`, and as a warning for everything
-  else — so `"error"` puts your worst failure on the operator's screen
-  looking like a nag ([ledger row 42](../contributor/docs-gap-ledger.md)).
+- **Spell a hard problem `"fail"`.** [ADD-A-CLIENT §4](../ADD-A-CLIENT.md#4-contract-subcommands-client-contractmd-3)
+  requires exactly that word for a degraded inventory, and it is the only one
+  that carries: `bin/smd` prints an issue as an error when the severity is
+  `fail` and as a warning for every other string, so `"error"` — which reads
+  like the more serious word — puts your worst failure on the operator's
+  screen looking like a nag. Nothing states the full vocabulary
+  ([ledger row 42](../contributor/docs-gap-ledger.md)); use `fail` and `warn`.
 
 ## How it gets onto a station
 
-Two commands, in this order:
+Two commands, in this order, on the station's decoder VM (the `[VM]` half of
+a two-machines-in-one-box appliance — see the operator
+[glossary](../operator/glossary.md)):
 
 ```bash
 smd component add https://github.com/<org>/my-recorder.git
@@ -136,10 +140,13 @@ applies your `[[install.steps]]`, and enables the component in topology, so
 `sudo smd`.
 
 Then the ordinary path: `smd config init my-recorder`, `smd start my-recorder`
-— download → install → configure → start, with no separate `enable` step
-([install-quickstart.md](../install-quickstart.md) is the same sequence from
-the installing operator's side). `smd admin diag drop-in my-recorder` lints
-every surface at once and is the fastest way to find what you got wrong
+— download → install → configure → start, with no separate `enable` step,
+because `smd install` already did it. ([install-quickstart.md](../install-quickstart.md)
+walks the same ground for an installing operator, but its headless section
+still tells you to hand-edit `topology.toml` to set `enabled = true`; that
+predates install-implies-enable — [ledger row 45](../contributor/docs-gap-ledger.md).)
+`smd admin diag drop-in my-recorder` lints every surface at once and is the
+fastest way to find what you got wrong
 ([ADD-A-CLIENT §7](../ADD-A-CLIENT.md#7-verify-the-drop-in)).
 
 **On an appliance station you do not run these — the fleet admin does.**
@@ -292,16 +299,25 @@ callsign or a key path. A pipeline whose required identity is missing is
 | `heartbeat_sftp` | the fleet heartbeat endpoint |
 
 **The gap you will hit: there is no PSWS path for a new client's product.**
-`psws_dataset` is the only PSWS transport and it uploads *files* produced by a
-`filetree` source — there is no `sqlite` → PSWS pairing, so rows in the sink
-cannot be shipped to PSWS at all. Worse, the `{station_id}` /
-`{instrument_id}` placeholders resolve only for a client listed in sigmond's
-hard-coded `psws.RECORDERS` map — today `hf-timestd` and `mag-recorder` and
-nothing else (`lib/sigmond/psws.py`; `lib/sigmond/uploader_manifest.py`
-`_tokens_for`) — so a new client using them gets its pipeline skipped, with a
-warning, forever. **Today you ship your own files**: write them, arrange the
-PSWS-side registration yourself, and treat upstream delivery as your problem,
-not the station's. This is
+`psws_dataset` is the only PSWS transport and it uploads *files* discovered by
+a `filetree` source — there is no `sqlite` → PSWS pairing, so rows in the sink
+cannot be shipped to PSWS at all.
+
+And the identity placeholders will not save you either. `{station_id}` /
+`{instrument_id}` are added to the substitution map **only** for a client
+sigmond already knows as a PSWS recorder — today `hf-timestd` and
+`mag-recorder`, hard-coded in `psws.RECORDERS` (`lib/sigmond/psws.py`;
+`uploader_manifest.resolve_tokens`). For anybody else the keys are not in the
+map at all, so the substitution pass never sees them, never records them as
+missing, and **writes the literal string `{instrument_id}` straight into
+`/etc/hs-uploader/pipelines.toml`** — which is worse than being skipped,
+because the pipeline then runs against a nonsense destination. (The
+skip-with-a-warning behaviour that PER-SITE-SETUP describes applies to a
+*declared* PSWS recorder whose id is merely unset.)
+
+**Today you ship your own files**: write them, arrange the PSWS-side
+registration yourself, and treat upstream delivery as your problem, not the
+station's. This is
 [docs-gap ledger row 3a](../contributor/docs-gap-ledger.md); the fix it names
 is a generic sqlite→PSWS SFTP transport plus a way for a client to declare its
 own PSWS ids.

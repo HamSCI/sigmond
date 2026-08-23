@@ -20,14 +20,19 @@ license          = "MIT"
 # §3 self-describe CLI.  Sigmond shells these out as subprocesses and never
 # imports client code; both must print JSON to stdout and nothing else.
 #
-# HOW SIGMOND ACTUALLY FINDS THEM, as of 2026-08-23: it looks up a binary
-# on $PATH whose name is exactly `[package] name` and runs
-# `<binary> inventory --json` / `validate --json`
-# (lib/sigmond/clients/__init__.py `load_adapter`, clients/contract.py
-# `find_binary`).  So the `link` step below — package name == symlink name
-# — is what makes this work.  Sigmond reads no `[contract.cli]` block; it
-# is kept here because it documents the two commands an operator can run by
-# hand, and because a future sigmond that honours it will find it correct.
+# HOW SIGMOND ACTUALLY FINDS THEM, as of 2026-08-23: it resolves ONE name —
+# the component name — on $PATH and runs `<binary> inventory --json` /
+# `validate --json` (lib/sigmond/clients/__init__.py `load_adapter` sets
+# `adapter.binary = component_name`; clients/contract.py `find_binary`).
+# The component name is `[client].name` if you declare one, otherwise the
+# INSTALL-DIRECTORY name — `/opt/git/sigmond/<dir>/` — and NOT `[package]
+# name`, which discovery deliberately ignores because it often differs
+# (lib/sigmond/discover.py, the comment above `name = client_block.get(...)`).
+# So what makes this work is: directory name == the `dst` symlink below.
+# Keep all three in step, or declare `[client] name` and match that.
+# Sigmond reads no `[contract.cli]` block; it is kept here because it
+# documents the two commands an operator can run by hand, and because a
+# future sigmond that honours it will find it correct.
 [contract.cli]
 inventory = ["/usr/local/bin/my-recorder", "inventory", "--json"]
 validate  = ["/usr/local/bin/my-recorder", "validate", "--json"]
@@ -40,6 +45,13 @@ validate  = ["/usr/local/bin/my-recorder", "validate", "--json"]
 # init = ["/usr/local/bin/my-recorder", "config", "init"]
 # edit = ["/usr/local/bin/my-recorder", "config", "edit"]
 
+# §5 "Standalone-safe requirement": a client MUST also ship an equivalent
+# `./install.sh` (or `make install`) driven by this file, so a user without
+# sigmond gets the same layout — and ADD-A-CLIENT §6 puts that path in the
+# catalog as `install_script`.  The skeleton ships none: writing it is your
+# job, and it is the one required file this scaffold cannot guess for you.
+# The build below needs `pyproject.toml` (beside this file) to exist — that
+# is what makes `produces` a real console script.
 [build]
 steps = [
     "python3 -m venv /opt/git/sigmond/my-recorder/venv",

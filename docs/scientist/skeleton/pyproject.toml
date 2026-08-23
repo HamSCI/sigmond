@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MIT
+# The Python packaging half of the skeleton — ordinary, and required.
+#
+# `deploy.toml`'s [build] step runs `pip install -e .` into the client's venv
+# and then declares `produces = .../venv/bin/my-recorder`.  That console
+# script exists only because of the [project.scripts] entry below; without
+# this file the build succeeds and produces nothing, and the `link` install
+# step then points at a path that is not there.
+#
+# Rename `my-recorder` / `my_recorder` here too — see ../README.md.
+
+[project]
+name            = "my-recorder"
+version         = "0.1.0"
+description     = "minimal sigmond client skeleton"
+license         = { text = "MIT" }
+requires-python = ">=3.11"
+# No dependencies: the skeleton is stdlib-only so it runs before anything is
+# installed.  A real recorder adds `ka9q-python` here AND declares it under
+# `[[deps.pypi]]` in deploy.toml — the two lists serve different readers
+# (pip resolves one, sigmond budgets and audits the other).
+dependencies    = []
+
+[project.scripts]
+my-recorder = "my_recorder.cli:main"
+
+[build-system]
+requires      = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["my_recorder"]

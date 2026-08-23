@@ -29,6 +29,12 @@ EnvironmentFile=-/etc/sigmond/coordination.env
 EnvironmentFile=-/etc/my-recorder/env/%i.env
 
 WorkingDirectory=/opt/git/sigmond/my-recorder
+# Two spellings are in use and both are fine — what matters is that the
+# instance name reaches the process.  CLIENT-CONTRACT §19.2 shows the flag
+# form, `daemon --instance %i`, and that is what the shipped recorders use
+# (meteor-scatter passes `--instance %i --radiod-id %i`).  The positional
+# form below is shorter and is what this skeleton's CLI accepts first; it
+# also accepts `--instance`.  Pick one and keep the unit and the CLI in step.
 ExecStart=/usr/local/bin/my-recorder daemon %i
 
 Restart=on-failure

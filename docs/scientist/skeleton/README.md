@@ -5,9 +5,9 @@
 > **Verified against:** sigmond e1c4452 on 2026-08-23 — every command below run on the devbox
 > **Canonical for:** the copyable Tier-1 scaffold (nothing else — the narrative is [becoming-a-client.md](../becoming-a-client.md))
 
-Five files that sigmond will accept as a client. They are documentation
-scaffolding: nothing installs them, nothing imports them, and no test collects
-them. MIT-licensed — copy them and delete this README.
+Six files that sigmond will accept as a client. They are documentation
+scaffolding: nothing in sigmond installs them, nothing imports them, and no
+test collects them. MIT-licensed — copy them and delete this README.
 
 Read [becoming-a-client.md](../becoming-a-client.md) first; this directory is
 its worked scaffold.
@@ -18,11 +18,16 @@ its worked scaffold.
 | [`my-recorder@.service`](my-recorder@.service) | the templated unit; `%i` is the reporter id | §4 |
 | [`my_recorder/cli.py`](my_recorder/cli.py) | `version` / `inventory` / `validate` / `daemon` / `config show` | §3, §14 |
 | [`config/help.toml`](config/help.toml) | the wizard sidecar, with the three-tier audit as comments | ADD-A-CLIENT §8 |
+| [`pyproject.toml`](pyproject.toml) | ordinary packaging — but `[project.scripts]` is what makes `deploy.toml`'s `produces` a real console script | — |
 | `README.md` | this file |
 
-What is **not** here, on purpose: `pyproject.toml`, `scripts/install.sh`,
-tests, and a config template. Those are ordinary Python packaging, and the
-`deploy.toml` comments say where each one is referenced.
+What is **not** here: `scripts/install.sh`, tests, and a config template.
+The first of those is **required** — CLIENT-CONTRACT §5's *standalone-safe
+requirement* says a client must also ship an equivalent `./install.sh` (or
+`make install`) driven by `deploy.toml`, so that someone installing without
+sigmond gets the same layout, and [ADD-A-CLIENT §6](../../ADD-A-CLIENT.md#6-catalog-entry-often-optional)
+puts that path in the catalog as `install_script`. The skeleton cannot guess
+it for you; write it before you hand the repo to a station.
 
 ## Copy it
 
@@ -41,16 +46,20 @@ systemd unit stem, the `/etc/` directory, the `/usr/local/bin` symlink, the
 the whole job:
 
 ```bash
-grep -rl my-recorder . | xargs sed -i 's/my-recorder/your-client/g'
-grep -rl my_recorder . | xargs sed -i 's/my_recorder/your_client/g'
+grep -rl my-recorder . | xargs -r sed -i 's/my-recorder/your-client/g'
+grep -rl my_recorder . | xargs -r sed -i 's/my_recorder/your_client/g'
 mv my-recorder@.service your-client@.service
 mv my_recorder your_client
 ```
 
 Use a **hyphenated** name for the client and the matching **underscored**
 name for the Python package — that is the convention every client in the
-fleet follows, and `deploy.toml`'s `[package] name` must be the hyphenated
-one.
+fleet follows. One thing to get right that nothing will tell you: sigmond
+resolves a client by its **install-directory** name (`/opt/git/sigmond/<dir>/`),
+or by `[client] name` if you declare one — *not* by `[package] name`
+(`lib/sigmond/discover.py`). Since `smd component add` derives the directory
+from your git URL, the repo name, the `/usr/local/bin` symlink and the unit
+stem all have to be the same word.
 
 Three values in `my_recorder/cli.py` are marked `CHANGE ME` and are wrong for
 your station until you change them: the reporter id, the radiod status name,
@@ -166,6 +175,13 @@ $ python3 docs/scientist/skeleton/my_recorder/cli.py --config /tmp/bad.toml vali
 exit=1
 ```
 
+It checks four things, chosen because each one silently produces nothing:
+the frequency is inside the front end's span, the sample rate is a multiple of
+200 Hz, the callsign is set, and the reporter id matches §19.1's
+`[A-Z0-9][A-Z0-9-]*[A-Z0-9]` — that last one because the same string becomes
+the systemd instance, the config stem, the env-file stem and two directories,
+so a bad id is wrong in five places at once.
+
 `inventory`, by contrast, **must never** exit nonzero — sigmond's `installed`
 flag depends on it. Point it at a config that is not there and it degrades
 instead of failing:
@@ -227,6 +243,34 @@ $ python3 docs/scientist/skeleton/my_recorder/cli.py -v inventory --json 2>/dev/
 stdout is clean JSON
 ```
 
+## Or install it the way a station does
+
+`deploy.toml`'s build step is an editable install into a venv; the console
+script it declares under `produces` comes from `pyproject.toml`. Proven on the
+devbox, 2026-08-23, in a throwaway venv (since deleted):
+
+```console
+$ cp -r docs/scientist/skeleton/. /tmp/…/pkg/
+$ python3 -m venv /tmp/…/venv && /tmp/…/venv/bin/pip install -e /tmp/…/pkg
+$ /tmp/…/venv/bin/my-recorder version
+{
+  "client": "my-recorder",
+  "version": "0.1.0",
+  "contract_version": "0.8",
+  "python": "3.13.5",
+  "deploy_toml_path": "/tmp/…/pkg/deploy.toml"
+}
+$ /tmp/…/venv/bin/my-recorder validate --json ; echo "exit=$?"
+{
+  "ok": true,
+  "issues": []
+}
+exit=0
+```
+
+On a station the venv is `/opt/git/sigmond/<client>/venv/` and the symlink to
+`/usr/local/bin/` is an install step — `smd install` does both.
+
 ## What is stubbed
 
 | Stub | Replace it with |
@@ -234,7 +278,8 @@ stdout is clean JSON
 | `run_daemon()` — a 10-second tick loop | your capture loop; the Tier-0 recipe in [capture-quickstart.md](../capture-quickstart.md) drops straight in |
 | `DEFAULT_CONFIG` in `cli.py` | a config template rendered to `/etc/<client>/` by a `kind = "render"` install step ([ADD-A-CLIENT.md §2](../../ADD-A-CLIENT.md#2-deploytoml--the-sigmond-manifest)) |
 | `config init` / `config edit` | the interactive halves, then uncomment `[contract.config]` in `deploy.toml` |
-| `deps.pypi` version | whatever ka9q-python your client is tested against |
+| `deps.pypi` version, and `pyproject.toml`'s empty `dependencies` | whatever ka9q-python your client is tested against — both lists, they serve different readers |
+| no `install.sh` | the standalone installer §5 requires (see above) |
 | `[[hs_uploader.pipeline]]` — absent | a pipeline declaration, if your rows should leave the station ([becoming-a-client.md](../becoming-a-client.md#shipping-it-upstream)) |
 | `[client_features]` — absent | one block per TUI screen you want to appear on ([ADD-A-CLIENT.md §5](../../ADD-A-CLIENT.md#5-client_features--tui-registration-drop-in)) |
 
