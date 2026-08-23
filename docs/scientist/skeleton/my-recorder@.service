@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT
+# my-recorder@.service — the templated unit sigmond's lifecycle drives.
+#
+# TEMPLATED IS MANDATORY (CLIENT-CONTRACT.md §4, MULTI-INSTANCE-ARCHITECTURE.md
+# §3): the `@` and `%i` are what let one host run one process per reporter
+# identity.  `smd start my-recorder` expands this per configured instance.
+#
+# Trimmed from meteor-scatter@.service, which is worth reading in full once
+# you have a daemon that does real work — it carries the hardening,
+# watchdog, and memory ceiling this one leaves out on purpose.
+
+[Unit]
+Description=my-recorder capture client (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=myrec
+Group=myrec
+
+# Cross-client commons sigmond maintains (callsign, grid, sink path, log
+# level).  The leading `-` means "absent is fine".
+EnvironmentFile=-/etc/sigmond/coordination.env
+# Per-instance environment sigmond seeds when it creates an instance.
+# %i, NOT %I: %I un-escapes systemd escaping and turns every dash into a
+# slash, so `AC0G-B4` becomes the path `AC0G/B4` and the file never matches.
+# This bug has been fixed twice in this fleet; do not reintroduce it.
+EnvironmentFile=-/etc/my-recorder/env/%i.env
+
+WorkingDirectory=/opt/git/sigmond/my-recorder
+ExecStart=/usr/local/bin/my-recorder daemon %i
+
+Restart=on-failure
+RestartSec=5
+# EX_CONFIG (78): the daemon found an unconfigured placeholder and exited
+# deliberately.  Do not crash-loop a config that can never succeed — stop
+# and wait for `smd config init my-recorder`.
+RestartPreventExitStatus=78
+
+# Logs go to the journal (the sigmond standard): `smd log my-recorder`.
+StandardOutput=journal
+StandardError=inherit
+SyslogIdentifier=my-recorder@%i
+
+ReadWritePaths=/var/lib/my-recorder
+# Add /var/lib/sigmond here the moment you write rows to the shared sink —
+# without it, ProtectSystem=strict makes the directory read-only and the
+# Writer silently no-ops, dropping every row before it is queued.
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

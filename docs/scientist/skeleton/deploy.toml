@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: MIT
+# deploy.toml — the sigmond manifest (CLIENT-CONTRACT.md §5).
+#
+# This is the whole sigmond-facing surface of a client: what it is called,
+# how to build it, what to link where, and which systemd units it owns.
+# Sigmond's catalog discovers a client from THIS file alone, so a repo with
+# a valid deploy.toml at /opt/git/sigmond/<name>/ needs no sigmond-side edit
+# (ADD-A-CLIENT.md §6).
+#
+# Rename `my-recorder` throughout — the name is also the /etc dir, the
+# systemd unit stem, and the /usr/local/bin symlink.
+
+[package]
+name             = "my-recorder"
+version          = "0.1.0"
+contract_version = "0.8"
+description      = "one line — this is what `smd list` prints"
+license          = "MIT"
+
+# §3 self-describe CLI.  Sigmond shells these out as subprocesses and never
+# imports client code; both must print JSON to stdout and nothing else.
+#
+# HOW SIGMOND ACTUALLY FINDS THEM, as of 2026-08-23: it looks up a binary
+# on $PATH whose name is exactly `[package] name` and runs
+# `<binary> inventory --json` / `validate --json`
+# (lib/sigmond/clients/__init__.py `load_adapter`, clients/contract.py
+# `find_binary`).  So the `link` step below — package name == symlink name
+# — is what makes this work.  Sigmond reads no `[contract.cli]` block; it
+# is kept here because it documents the two commands an operator can run by
+# hand, and because a future sigmond that honours it will find it correct.
+[contract.cli]
+inventory = ["/usr/local/bin/my-recorder", "inventory", "--json"]
+validate  = ["/usr/local/bin/my-recorder", "validate", "--json"]
+
+# §14 configuration interview: what `smd config init|edit my-recorder` runs.
+# Commented out because the skeleton's CLI implements `config show` but not
+# the interactive halves; with no block, sigmond falls back to opening the
+# config file in $EDITOR (§14.4).  Uncomment when you write them.
+# [contract.config]
+# init = ["/usr/local/bin/my-recorder", "config", "init"]
+# edit = ["/usr/local/bin/my-recorder", "config", "edit"]
+
+[build]
+steps = [
+    "python3 -m venv /opt/git/sigmond/my-recorder/venv",
+    "/opt/git/sigmond/my-recorder/venv/bin/pip install --upgrade pip setuptools wheel",
+    "/opt/git/sigmond/my-recorder/venv/bin/pip install -e /opt/git/sigmond/my-recorder",
+]
+produces = ["/opt/git/sigmond/my-recorder/venv/bin/my-recorder"]
+
+[[install.steps]]
+kind = "link"
+src  = "/opt/git/sigmond/my-recorder/venv/bin/my-recorder"
+dst  = "/usr/local/bin/my-recorder"
+
+# `src` is relative to the repo root.  The skeleton keeps the unit file at
+# the top level so you can read it without opening a directory; the
+# conventional layout is `systemd/<name>@.service` (ADD-A-CLIENT.md §1) —
+# move it there and change this line to match.
+[[install.steps]]
+kind = "link"
+src  = "my-recorder@.service"
+dst  = "/etc/systemd/system/my-recorder@.service"
+
+[[install.steps]]
+kind  = "mkdir"
+dst   = "/var/lib/my-recorder"
+owner = "myrec:myrec"
+mode  = "0755"
+
+[systemd]
+units = ["my-recorder@.service"]
+
+[[deps.pypi]]
+name    = "ka9q-python"
+version = "3.25.2"
+venv    = "/opt/git/sigmond/my-recorder/venv"
+
+# ---------------------------------------------------------------------------
+# Deliberately absent, and why — each of these is a real decision, not an
+# oversight.  Delete a comment when you make the opposite choice.
+# ---------------------------------------------------------------------------
+#
+# No [[radiod.fragment]].  §15 fragments declare a STATIC channel written
+# into radiod@<id>.conf.d/ and held open forever.  A client that opens its
+# channel per capture window through ka9q-python — with a `lifetime` so
+# radiod reclaims it — must NOT also declare a fragment.  Add one only for a
+# channel the station should carry permanently, whether your client is
+# running or not.
+#
+# No [client_features].  These are pure TUI registration (ADD-A-CLIENT.md
+# §5): omit a sub-block and your client is simply absent from that screen.
+# Nothing else breaks.
+#
+# No [[hs_uploader.pipeline]].  Declare one when you want hs-uploader to
+# ship your rows upstream; see scientist/becoming-a-client.md §Shipping it
+# upstream and hs-uploader/docs/PER-SITE-SETUP.md §7.

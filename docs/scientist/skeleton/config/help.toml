@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: MIT
+# config/help.toml — the wizard sidecar (ADD-A-CLIENT.md §8).
+#
+# Sigmond's Textual config wizard reads this file from
+# /opt/git/sigmond/<client>/config/help.toml and uses it to turn "a raw TOML
+# editor in a modal" into a guided interview: one subtable per config key,
+# keyed `[<section>.<key>]` exactly as the key appears in your config TOML.
+#
+# The three-tier audit is the whole method.  Classify EVERY key you put in
+# the config file:
+#
+#   tier 1  install-canonical paths, FHS directories, protocol constants
+#           (sample rate, block time), endpoint hostnames  ->  hidden = true
+#   tier 2  host-level operator knobs: callsign, grid, which radiod, gain,
+#           sink opt-ins                                    ->  author a full
+#                                                               help body
+#   tier 3  per-instance differentiators (reporter_id, instance.metadata)
+#                                                           ->  nothing here;
+#                                                               sigmond locks
+#                                                               these itself
+#
+# `hidden = true` keeps the key in the on-disk TOML (config apply deep-merges,
+# so untouched keys survive) — the wizard just never shows it.  Two examples,
+# one of each authored tier.
+
+# --- tier 2: the operator must fill this in -------------------------------
+
+[station.callsign]
+title          = "Amateur callsign"
+help           = """The callsign this client reports under.
+
+Pre-filled from sigmond's coordination.env STATION_CALL when the station
+already knows it, so the operator does not retype it into five wizards.
+Change it only if this client should report under a different identity
+from the rest of the station."""
+example        = "AC0G"
+validator_hint = "1-9 letters/digits/slashes, uppercase"
+required       = true
+
+# --- tier 1: correct by construction, never ask ---------------------------
+
+[capture.out_dir]
+hidden         = true
+title          = "Capture output directory"
+help           = """Where this client writes its samples.
+
+Install-canonical: /var/lib/<client>/ is created by the deploy manifest's
+mkdir step with the right owner and mode, and the systemd unit lists it in
+ReadWritePaths.  Editing it here breaks both, so the wizard skips it — an
+operator who genuinely must move it uses `smd config edit my-recorder`."""
+example        = "/var/lib/my-recorder"
