@@ -15,6 +15,10 @@ between them: installation, service lifecycle, log aggregation,
 diagnostics, timing-authority distribution, the shared SQLite sink, and
 resource (CPU) arbitration.
 
+> **Who are you?** Station host → [Operator guide](docs/operator/README.md) ·
+> Scientist wanting a signal recorded → [Scientist guide](docs/scientist/README.md) ·
+> Developer → [CONTRIBUTING.md](CONTRIBUTING.md). Full map: [docs/README.md](docs/README.md).
+
 ## Architecture at a glance
 
 ![Sigmond / DASI2 station architecture](docs/architecture.png)
