@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond a7f01c0 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -581,13 +581,17 @@ smd version
 It prints the image lineage, then every component's live commit, then the log
 of updates applied since install. **The count in `updates since install (N)` is
 the real total, but only the most recent five are printed** (`lib/sigmond/provenance.py`,
-`history[-5:]`) — so `(16):` above five lines is correct output, not truncation
+`history[-5:]`) — so `(13):` above five lines is correct output, not truncation
 you need to report. The line that matters is the last one:
 
 ```text
 image:      v3.30   [image installed on this host — lineage only; components may have moved since (see below)]
 ...
 updates since install (13):
+    2026-08-18T09:02:11Z  smd update --apply: install hf-timestd, install sigmond, ...
+    2026-08-19T22:47:03Z  smd update --apply: install wspr-recorder, ...
+    2026-08-20T14:11:56Z  smd component update: pull mag-recorder, ...
+    2026-08-21T23:06:41Z  smd update --apply: install hs-uploader, ...
     2026-08-22T16:26:24Z  smd update --apply: install mag-recorder, install sigmond, ...
     -> this host has moved since v3.30 was installed
 ```

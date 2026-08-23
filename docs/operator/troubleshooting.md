@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond a7f01c0 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** symptom-first troubleshooting of an appliance station
 
 Start with the symptom you can actually see, not with a theory. Every section
@@ -1000,8 +1000,8 @@ problem is on your network between the two machines, not on the station.
 
 **What to do**
 
-- Service not running → restart that page's component. `gmag-webui` is cheap;
-  ⛔ `ka9q-web` and `hf-timestd` both pull the radio in with them
+- Service not running → restart that page's component. `gmag-webui` is cheap
+  (it drags `mag-recorder` with it); ⛔ `ka9q-web` and `hf-timestd` both pull the radio in with them
   ([why](#restarting-one-client-is-often-not-one-client)), so for those two
   prefer `smd restart all` and accept one clean bounce of the whole station.
 - Listening locally but not reachable → try from a computer plugged into the

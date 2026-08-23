@@ -1,12 +1,15 @@
 # T6 block-slip root cause — B4 mitigations (pointer + local record)
 
 > **Audience:** contributor
-> **Status:** pointer
+> **Status:** pointer (plus local historical record)
 > **Verified against:** n/a
 > **See instead:** [hf-timestd/docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md](https://github.com/HamSCI/hf-timestd/blob/main/docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md) — the 108-line analysis is canonical.
 
 What follows is only the record of the layer-1 mitigations deployed on B4
-on 2026-08-10 (xhci IRQ pin, decode-wave spreading); it is historical.
+on 2026-08-10 (xhci IRQ pin, decode-wave spreading); it is historical. The
+IRQ pin and core numbers below (CPUs 0-1 for radiod, 2-13 for everything
+else) are from that date and are no longer current — today's radiod cores
+are `[10, 11, 12, 13]` ([day-2.md](operator/day-2.md#1-smd-status--is-everything-running)).
 
 ## Layer-1 mitigations DEPLOYED on B4 (2026-08-10 ~21:55 UTC)
 

@@ -9,8 +9,9 @@ Usage:  docs-linkcheck.py [--workspace DIR] PATH [PATH...]
 
 Exit 0 when every link resolves; exit 1 and print `file:line: broken -> target`
 per failure otherwise.  Stdlib only.  Skips: other http(s)/mailto links, links
-inside fenced code blocks, and directories named .venv/venv/node_modules/
-graphify-out/.git.
+inside fenced code blocks, directories named .venv/venv/node_modules/
+graphify-out/.git, and docs/superpowers/ (specs/plans are working documents
+that legitimately forward-reference pages not yet written).
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from pathlib import Path
 LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 GH_RE = re.compile(r"^https?://github\.com/HamSCI/([^/]+)/(?:blob|tree)/[^/]+/(.*)$")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
-SKIP_DIRS = {".venv", "venv", "node_modules", "graphify-out", ".git", "__pycache__", ".pytest_cache"}
+SKIP_DIRS = {".venv", "venv", "node_modules", "graphify-out", ".git", "__pycache__", ".pytest_cache", "superpowers"}
 
 
 def slugify(heading: str) -> str:

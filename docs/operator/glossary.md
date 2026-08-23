@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond a7f01c0 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;
@@ -19,7 +19,7 @@ if it isn't, that is a bug in the docs — tell your fleet admin.
 |---|---|
 | **appliance** | The ready-made Sigmond USB image that installs a whole station — Proxmox host, decoder VM and all the software — onto a blank machine in one pass. Installing any other way makes you a contributor, not an operator. |
 | **canary** | The one fleet station that takes every update first, so a bad release breaks one station instead of all of them. Today that is AC0G/B4. |
-| **client** | A *component* that records or ships a science product and owns systemd units — `wspr-recorder`, `psk-recorder`, `hf-timestd`, `mag-recorder`, `meteor-scatter`, `gpsdo-monitor`. Only clients get a block in `smd status`, and only while they are *enabled*. |
+| **client** | A *component* that records or ships a science product — `wspr-recorder`, `psk-recorder`, `hf-timestd`, `mag-recorder`, `meteor-scatter`, `gpsdo-monitor`. Every component that owns systemd units gets a block in `smd status`; the recording clients also get a summary line — see [day-2.md §1](day-2.md#1-smd-status--is-everything-running). |
 | **component** | Anything `smd` manages and versions: a *client*, a shared library (`ka9q-python`, `hs-uploader`, `hamsci-dsp`), the radio server itself, or `smd`. `smd version` lists **every** component; `smd status` shows only the enabled clients among them, which is why the two lists are different lengths. |
 | **decoder VM** (**VM**) | The virtual machine running inside the station computer, where `radiod` and every recorder actually run. Named after the *designator* (e.g. `AC0G-B4`). Commands tagged `[VM]` run here. |
 | **designator** | The station name you give the *wizard* (e.g. `AC0G-B4`, `DASI2-01`). The VM takes the designator; the Proxmox host takes `<designator>-PM`. |
@@ -33,7 +33,7 @@ if it isn't, that is a bug in the docs — tell your fleet admin.
 | **heartbeat** | A small status record your station sends to the fleet board every 5 minutes. If it stops arriving the board turns your station red — that is exactly what it is for (`CONTRIBUTING.md` §10). |
 | **holdover** | What a *GPSDO* does when it loses its GPS fix: it keeps producing a clock from its own oscillator, coasting and drifting slowly away from GPS. `smd status` prints `gpsdo=holdover` and marks it ⚠. The station keeps recording and keeps producing spots the whole time — it only loses timing quality, and it is a thing to report, not a thing to fix. |
 | **host** (**PM**, **Proxmox**) | The bare machine itself, running the Proxmox virtualisation system; named `<designator>-PM`, web GUI on port 8006. Commands tagged `[host]` run here. |
-| **igmp-querier** | A tiny always-on service on the VM that keeps your LAN switch forwarding the station's *multicast* streams. Switches stop forwarding multicast a few minutes after the last query, and then the recorders go deaf, so this exists to ask the question nothing else on a home network asks. One of the four clients that is cheap to restart. |
+| **igmp-querier** | A tiny always-on service on the VM that keeps your LAN switch forwarding the station's *multicast* streams. Switches stop forwarding multicast a few minutes after the last query, and then the recorders go deaf, so this exists to ask the question nothing else on a home network asks. One of the four components that are cheap to restart. |
 | **installed** | Present on the station: the code is checked out and `smd version` prints its commit. Installed does **not** mean running and does not mean *enabled* — dasi002 listed 23 installed components while `smd status` showed 7 client blocks (live, 2026-08-23). |
 | **ka9q-web** | The live receiver web page on the VM, port 8081: waterfall plus the channel list. The quickest "is the radio hearing anything?" check. |
 | **multicast** | How `radiod` hands each channel to the recorders — one stream on your local network that many programs subscribe to at once. It is why the station needs wired Ethernet; Wi-Fi handles multicast badly. |
@@ -85,7 +85,7 @@ is something you act on; it is here so you can read your own output.
 | **`contract=0.8`** | Which version of sigmond's client contract that client implements — the agreed interface between `smd` and a recorder. Bookkeeping between components; nothing for you. |
 | **`default: 6 ch, 6 freqs`, `default: [other]`** | A client's inventory: how many radio channels its instance named `default` uses, and on how many frequencies. `[other]` means "this client does not consume radio channels". |
 | **`σ`, `age 0s`, `seg 3`, `rate +0.066 ppm`** | The timing judge's working numbers: σ is the spread of the clock evidence (smaller is better), `age` how long since it was updated, `seg` which measurement segment, and `rate` how fast a channel's error is changing in parts per million. Your admin reads these; the word you watch is `gpsdo=`. |
-| **`other pool: 12 CPUs`** | The CPUs *not* reserved for `radiod` — the ones everything else is allowed to run on. |
+| **`other pool: 10 CPUs`** | The CPUs *not* reserved for `radiod` — the ones everything else is allowed to run on. |
 | **`lan-capable`, `querier: v2 <address> on ens18`** | The network self-check: the station can carry *multicast* on its LAN, and something is issuing the periodic membership queries that keep the switch forwarding it. `ens18` is just the network interface's name. |
 | **`IQ`** | In-phase and quadrature — the pair of numbers that make up one raw radio sample. "Raw IQ" is the unprocessed recording the timing client writes, and it is what fills the disk. |
 | **`raw_buffer` / `phase2` / eviction** | Two directories under `/var/lib/timestd`: `raw_buffer` holds the raw IQ on a rolling window, `phase2` holds the derived analysis products and database. **Eviction** is the timing client deleting its own oldest data to stay under the disk limit — see [day-2.md §3](day-2.md#3-disk--df--h-). |

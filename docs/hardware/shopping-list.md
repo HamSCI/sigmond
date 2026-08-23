@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** the station parts list
 
 Words in *italics* the first time they appear are explained in the
@@ -153,7 +153,7 @@ of [`../contributor/docs-gap-ledger.md`](../contributor/docs-gap-ledger.md).
 | Rebooting to make an unseen RX888 appear | A warm reboot never drops USB power, and the radio's FX3 chip stays latched as long as VBUS is held. **Power the whole box off**, then on — or physically unplug the radio (source: `sigmond/scripts/proxmox/sigmond-wizard.sh`). |
 | Two RX888s on one host | The upstream author explicitly recommends against it for performance reasons (source: `ka9q-radio/docs/SDR/rx888.md` §serial). |
 | 8 GB of RAM "because it boots fine" | The appliance asks for 16 GB or more, and the station VM plus the Proxmox host both need their share (source: `sigmond-appliance/INSTALL.md` §1). |
-| A small disk with retention left at defaults | **Measured on AC0G/B4, 2026-08-23: about 15 GB of raw IQ per timing channel per day** — a full UTC day of one channel came to 15,073,610,352 bytes — so a six-channel station writes roughly **90 GB a day** of raw IQ; the cumulative `phase2` analysis database adds roughly **1 GB per channel per day** amortised, for **≈16 GB per channel per day, ≈96 GB a day** in total. `hf-timestd/INSTALLATION.md` §Storage Requirements says 6.7 GB and calls **9 channels on a 120 GB disk** the absolute margin; at the measured rate a 120 GB disk is barely a day even at six channels. Whichever number you believe, the failure mode is the same: it fills, and above 95 % the timing client starts deleting your oldest recordings ([day-2.md §3](../operator/day-2.md#3-disk--df--h-)). The disagreement is [docs-gap ledger row 20](../contributor/docs-gap-ledger.md). |
+| A small disk with retention left at defaults | **Measured on AC0G/B4, 2026-08-23: about 15 GB of raw IQ per timing channel per day** — a full UTC day of one channel came to 15,073,610,352 bytes — so a six-channel station writes roughly **90 GB a day** of raw IQ; the cumulative `phase2` analysis database adds roughly **1 GB per channel per day** amortised, for **≈16 GB per channel per day, ≈96 GB a day** in total. `hf-timestd/INSTALLATION.md` §Storage Requirements says 6.7 GB and calls **9 channels on a 120 GB disk** the absolute margin; at the measured rate a 120 GB disk is barely a day even at six channels. Whichever number you believe, the failure mode is the same: it fills, and at 95 % the timing client pauses all writes and alerts immediately — no data is deleted at that point. Only if the disk is still at or above 95 % ten minutes later does it start deleting your oldest recordings, down to 90 % ([day-2.md §3](../operator/day-2.md#3-disk--df--h-)). The disagreement is [docs-gap ledger row 20](../contributor/docs-gap-ledger.md). |
 
 ## Next
 

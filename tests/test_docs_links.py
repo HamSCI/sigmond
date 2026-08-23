@@ -23,14 +23,7 @@ def _load():
 
 def test_doc_links_resolve():
     mod = _load()
-    # docs/superpowers/ holds working/planning docs that legitimately
-    # forward-reference pages not yet written by later tasks in this
-    # same program; exclude it from the checked doc surface.
-    docs_md = [
-        p for p in sorted((REPO / "docs").rglob("*.md"))
-        if "superpowers" not in p.relative_to(REPO / "docs").parts
-    ]
-    roots = docs_md + [REPO / "README.md", REPO / "CONTRIBUTING.md", REPO / "CLAUDE.md"]
+    roots = [REPO / "docs", REPO / "README.md", REPO / "CONTRIBUTING.md", REPO / "CLAUDE.md"]
     failures = mod.check_paths(roots, workspace=REPO.parent)
     assert not failures, "\n" + "\n".join(failures)
 

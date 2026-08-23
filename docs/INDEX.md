@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 78d9a8b on 2026-08-23 — code
+> **Verified against:** sigmond cfe8177 on 2026-08-23 — code
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -90,4 +90,4 @@ Front door for each audience: [docs/README.md](README.md).
 
 | Doc | What it gives you |
 |---|---|
-| [archive/README.md](archive/README.md) | Index of 6 dated investigation reports, session logs, and superseded/shipped design notes kept for provenance only — nothing here is maintained |
+| [archive/README.md](archive/README.md) | Archive policy note (the files sit beside it) — dated investigation reports, session logs, and superseded/shipped design notes kept for provenance only; nothing here is maintained |

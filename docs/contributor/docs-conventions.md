@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 7704d6c on 2026-08-23 — code
+> **Verified against:** sigmond cfe8177 on 2026-08-23 — code
 > **Canonical for:** how docs are organised and kept true across the HamSCI/DASI2 repos
 
 ## 1. Where things live
@@ -14,10 +14,7 @@ every page in this repo's `docs/` by audience so nothing is orphaned. The
 narrative subtrees are `operator/`, `scientist/`, `contributor/`, and
 `hardware/` (shared by scientist and operator); `archive/` holds history
 (§5). Every HamSCI repo keeps a `docs/INDEX.md` on the same pattern
-(hf-timestd's is the model; sigmond-appliance, wspr-recorder,
-psk-recorder, meteor-scatter, mag-recorder, gpsdo-monitor, hs-uploader,
-and hamsci-dsp are gaining theirs as this documentation program rolls
-out). Material that belongs to another repo — a client's install
+(hf-timestd's is the model). Material that belongs to another repo — a client's install
 mechanics, a library's API — is linked from here, never copied or moved
 into this tree.
 
@@ -141,6 +138,9 @@ python3 ../sigmond/scripts/docs-linkcheck.py docs README.md
 
 Both forms are stdlib-only and exit non-zero on the first broken relative
 link or missing anchor, so they're safe to run in CI or before a commit.
+`docs/superpowers/` (specs/plans) is skipped by the checker: those are
+working documents that legitimately forward-reference pages not yet
+written by later tasks in the same program.
 
 ## 10. Software gaps found while writing
 
