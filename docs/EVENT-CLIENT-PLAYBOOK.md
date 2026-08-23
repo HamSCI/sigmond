@@ -1,5 +1,13 @@
 # Building an ad-hoc event client
 
+> **Audience:** scientist, contributor
+> **Status:** current
+> **Verified against:** sigmond 6a569b5 on 2026-08-23 — docs
+> **Canonical for:** design judgment for an event/capture client
+
+New here? Start at the [scientist guide](scientist/README.md) — this page is
+required reading #1 there.
+
 A playbook for standing up a receiving client on **short notice** — an eclipse, a
 meteor shower, a volcanic eruption, an unannounced experiment.
 

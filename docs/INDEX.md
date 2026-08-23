@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond e1ab9d6 on 2026-08-23 — code
+> **Verified against:** sigmond 6a569b5 on 2026-08-23 — code
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -32,6 +32,7 @@ Front door for each audience: [docs/README.md](README.md).
 
 | Doc | What it gives you |
 |---|---|
+| [scientist/README.md](scientist/README.md) ★ | The scientist's table of contents: the five-page reading order with time estimates, the Tier 0 vs Tier 1 table, what to get from the fleet admin before you touch a station, what the station will not do for you, and links to the worked example and the hardware page |
 | [EVENT-CLIENT-PLAYBOOK.md](EVENT-CLIENT-PLAYBOOK.md) ★ | Decision playbook for standing up a receiving client on short notice (eclipse, meteor shower, unannounced experiment) |
 | [ADD-A-CLIENT.md](ADD-A-CLIENT.md) | Checklist for writing a new contract-conformant client repo so it appears in `smd list`/the TUI |
 | [STATION-NETWORK-CAPABILITIES.md](STATION-NETWORK-CAPABILITIES.md) | What a coordinated mesh of DASI2 stations delivers scientifically — spatial + modal diversity, resilience to losing any one transmitter |
@@ -42,7 +43,6 @@ Front door for each audience: [docs/README.md](README.md).
 | [scientist/becoming-a-client.md](scientist/becoming-a-client.md) ★ | Tier 1 — turning a capture into a sigmond client: when graduating is worth it (and the eclipse listener that rightly stayed Tier 0), the seven things you must ship with a scientist's gloss on each, how `smd component add` + `smd install` put a repo on a station and why the fleet admin runs them, the permanent `[[radiod.fragment]]` vs dynamic-channel-with-`lifetime` decision, writing rows to the shared sink with `Writer.from_env` (including the hardened-unit trap that silently drops every row), declaring an hs-uploader pipeline and the transports that actually exist — with the PSWS dead end for a new client's product stated plainly — reporting your timing tier honestly under §18, `reporter_id` under §19, and the four checks that say you are done |
 | [scientist/skeleton/README.md](scientist/skeleton/README.md) | The copyable minimal client scaffold — six MIT files (`deploy.toml`, templated unit, `cli.py` with the four contract verbs, `pyproject.toml`, `config/help.toml`, this README) that run on a laptop with stdlib Python and install editable into a venv, with the real output of every verb, what is stubbed, and the one required file (`install.sh`) it cannot guess |
 | [scientist/data-and-timing.md](scientist/data-and-timing.md) ★ | Where a station's data lands and what its timestamps are worth: the three sink shapes and which one is yours, the live layout on b4 (hf-timestd's five-minute raw-buffer pairs and their products, SigMF event captures, the one `pending_uploads` table every client writes to) with the naming conventions worth copying, the clock story in five sentences — including the loop in which radiod's `GPS_TIME` is a host clock that chrony disciplines from hf-timestd's own feed — the tiers in one line each, how to stamp your own capture with `rtp_to_utc()` and the five fields to record per segment, RTP-default vs authority-corrected mode under §18, hf-timestd's sidecar as the reference implementation with its arithmetic reproduced, and six silent ways a well-formed archive turns out to be wrong |
-| [scientist/README.md](scientist/README.md) (stub — Phase 2) | Placeholder — real scientist guide not yet written; points to EVENT-CLIENT-PLAYBOOK.md and ka9q-python's Getting Started guide until then |
 
 ## 3. Contributor (work on the code)
 

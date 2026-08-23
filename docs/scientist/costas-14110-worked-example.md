@@ -559,7 +559,7 @@ regret prevented:
    (a static fragment would hold a channel open forever), no `@.service` (a
    transient `systemd-run` unit is enough for one night). If 14.110 MHz becomes a
    standing observation, that is the moment to add both and cross into Tier 1 —
-   becoming-a-client.md *(being written)*, and the playbook's
+   [becoming-a-client.md](becoming-a-client.md), and the playbook's
    [Rule 2](../EVENT-CLIENT-PLAYBOOK.md#rule-2--start-from-the-client-contract-not-from-the-radio).
 8. **Never let a hand-run verification stand without its own negative control.**
    The single most expensive lesson here cost a day and a wrong public answer,
@@ -610,5 +610,5 @@ URL while every other cross-repo link in this tree resolves under
 - The envelope it chose from: [station-capabilities.md](station-capabilities.md) ★
 - The rules it was built to: [EVENT-CLIENT-PLAYBOOK.md](../EVENT-CLIENT-PLAYBOOK.md) ★
 - How the hardware behaves underneath it: [hardware/character.md](../hardware/character.md) ★
-- Turning a capture into a station product: becoming-a-client.md *(being written)*
+- Turning a capture into a station product: [becoming-a-client.md](becoming-a-client.md)
 - Where the data lands and how time is carried: [data-and-timing.md](data-and-timing.md)

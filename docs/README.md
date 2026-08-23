@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — code
+> **Verified against:** sigmond 6a569b5 on 2026-08-23 — code
 > **Canonical for:** the front door
 
 Pick the door that matches you. Each path is self-contained; you will be
@@ -16,7 +16,7 @@ receiver that uploads WSPR / FT8 / timing / magnetometer data for science.
 ## I want to record a signal (scientist / event responder)
 You have a signal in mind (a beacon, an eclipse experiment, a time standard)
 and want it captured on a station — possibly by Friday.
-→ **[Scientist guide](scientist/README.md)** *(Phase 2 — until then start with [EVENT-CLIENT-PLAYBOOK.md](EVENT-CLIENT-PLAYBOOK.md) and [ka9q-python Getting Started](https://github.com/HamSCI/ka9q-python/blob/main/docs/GETTING_STARTED.md))*
+→ **[Scientist guide](scientist/README.md)** — the capability envelope, Tier-0 capture running in an afternoon, a worked example, where data lands and what its timestamps are worth, and graduating to a client, in reading order.
 
 ## I work on the code (contributor)
 → **[CONTRIBUTING.md](../CONTRIBUTING.md)** then **[Contributor guide](contributor/README.md)** *(Phase 3 — until then: [docs-conventions.md](contributor/docs-conventions.md), [CLIENT-CONTRACT.md](CLIENT-CONTRACT.md), [ADD-A-CLIENT.md](ADD-A-CLIENT.md))*

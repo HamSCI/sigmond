@@ -8,7 +8,7 @@
 **Tier 0 is capture only.** You create one `radiod` channel, you write its bytes
 to a file with a timing anchor beside them, and you go home. No sigmond client
 contract, no systemd unit, no shared sink, no uploader — those are Tier 1, and
-they are a different page (becoming-a-client.md *(being written)*).
+they are a different page ([becoming-a-client.md](becoming-a-client.md)).
 
 Tier 0 exists because the playbook's first rule is
 [capture first, process later, always](../EVENT-CLIENT-PLAYBOOK.md#rule-1--capture-first-process-later-always):
@@ -1026,8 +1026,8 @@ is Tier 1, and it is a different contract.
 
 - Where the data lands, how RTP maps to UTC, and what each timing tier means
   for a product: [data-and-timing.md](data-and-timing.md).
-- Turning this into a conformant sigmond client: becoming-a-client.md
-  *(being written)*.
+- Turning this into a conformant sigmond client:
+  [becoming-a-client.md](becoming-a-client.md).
 - The envelope this recipe assumed:
   [station-capabilities.md](station-capabilities.md).
 - How the hardware behaves under it: [character.md](../hardware/character.md).
