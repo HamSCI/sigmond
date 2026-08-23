@@ -189,13 +189,25 @@ to under a quarter of it) — and it repairs by restarting the affected instance
 to force a re-anchor (source: same docstring; operator view in
 [troubleshooting.md](../operator/troubleshooting.md)).
 
-**For your own recorder, the lesson generalises:** re-derive the anchor
-periodically rather than trusting a start-of-run one, and record the anchor
-state per segment. ka9q-python's `RadiodStream` already detects an RTP↔GPS
-offset step and re-anchors instead of carrying a stale anchor, with the step
-threshold raised to 0.75 s "to tolerate output-timing jitter on a busy radiod"
-(source: `ka9q-python/CHANGELOG.md`, `stream.py` `anchor_epoch` /
-`anchor_step_threshold_sec`).
+**For your own recorder, the lesson generalises — but not the way it first
+looks.** The tempting fix is to keep polling radiod's status pair and re-anchor
+whenever it diverges. ka9q-python did exactly that and **removed it in 3.19.0**:
+`ChannelInfo.update_anchor` "now simply adopts the latest anchor pair", and
+`SlotClock.divergence_sec` is gone, because "a busy radiod's status pair
+(`gps_time`/`rtp_timesnap`) jitters ~0.45 s and occasionally tears between
+~450 ms snapshots, so the check reported large spurious divergences and drove
+downstream recorders into a re-anchor storm" (source:
+`ka9q-python/CHANGELOG.md` §[3.19.0], l.235-252). The `anchor_epoch`,
+`last_offset_step_sec` and `anchor_step_threshold_sec` fields survive as
+**vestigial** defaults in `ka9q/discovery.py:73,83` — do not build on them.
+
+The principle the release states instead: **"anchor once off radiod's RTP
+timestamp and defer to it."** A genuine radiod restart is handled by the
+stream's drop/restore path (`MultiStream`'s callback), "not by polling the
+status feed for divergence", and the sigmond recorders dropped their matching
+re-anchor machinery in lockstep (source: same, l.254-258). So: anchor once,
+record the anchor and its state per segment, and let the stream layer tell you
+when the producer went away.
 
 ### The FX3 latch: a reboot is not a power cycle
 
@@ -203,20 +215,27 @@ If the RX888 has wedged — it is not enumerating, or the host's boot ROM caught
 it mid-state — **rebooting will not fix it**. "A warm reboot does NOT clear it:
 the FX3 stays latched as long as VBUS is maintained. Only removing power — or
 physically replugging the RX888 — resets it" (source:
-`scripts/proxmox/sigmond-wizard.sh` l.837-841). The appliance installer powers
+`scripts/proxmox/sigmond-wizard.sh` l.837-840). The appliance installer powers
 the machine *off* at the end of setup for exactly this reason, and warns that
 "some boards keep USB power even in soft-off" (source: same file, l.847-854).
+Note the scope: the wizard is describing the **first-install USB handoff**,
+where the host enumerates the FX3 in its boot ROM and then hands the
+controllers to the VM mid-state — "that is why this is an install-only problem"
+(source: same file, l.822-835). The latch itself is general, which is why the
+no-RX888 branch also tells the operator "a wedged FX3 needs a physical replug"
+(source: same file, l.867-869).
 Operator procedure:
 [troubleshooting.md](../operator/troubleshooting.md#rx888-not-found-or-the-waterfall-is-blank).
 
 ### One radio, straight into the machine
 
-One RX888 per host — the upstream author "recommend[s] only one per host" for
-performance reasons (source: `ka9q-radio/docs/SDR/rx888.md` §Description,
-§serial). And it goes straight into a USB-3 port: on b4 the RX888 is alone on a
-10 Gbit/s root hub, negotiated at 5 Gbit/s, while the GPSDO and the
-magnetometer adapter sit one and two hubs deep on 480 Mbit/s buses (source:
-`lsusb -t` on b4, 2026-08-23). Hubs are fine for the slow devices and fatal for
+One RX888 per host — the processing requirements "are not exactly
+insubstantial either so I recommend only one per host" (source:
+`ka9q-radio/docs/SDR/rx888.md` l.33, the §Configuration preamble). And it goes
+straight into a USB-3 port: on b4 the RX888 is alone on a 10 Gbit/s root hub,
+negotiated at 5 Gbit/s, while the magnetometer adapter sits **one** hub deep
+and the GPSDO **two**, both on 480 Mbit/s buses (source: `lsusb -t` on b4,
+2026-08-23; the GPSDO's own `"hid_path": "3-3.4.4:1.2"` agrees). Hubs are fine for the slow devices and fatal for
 the radio; the symptom is silent sample loss, not an error (source:
 [shopping-list.md §Things that look right but aren't](shopping-list.md#things-that-look-right-but-arent);
 `docs/PACKET-LOSS-DIAGNOSTICS.md`).
@@ -287,8 +306,11 @@ When everything above T1 fails but the GPSDO still holds, RTP timestamps stay
 rate-accurate while their UTC origin is frozen at whatever `RTP_TIMESNAP` was
 at the last good sync — hf-timestd calls this "a degraded holdover, not a
 steady operating point" (source: `hf-timestd/docs/METROLOGY.md` §4.5, T1). ⚠
-**No published figure puts a drift rate on that coast**
-([docs-gap ledger row 33](../contributor/docs-gap-ledger.md)), so a capture
+**the only published figure is an idealised zero** — the tier table gives T1
+`const offset at snapshot + 0 drift`, and the prose says "with no drift
+(because A1 is perfect rate-wise)" (source: `hf-timestd/docs/METROLOGY.md`
+l.262, l.305), which is an idealisation of a timebase that is ppb-stable, not
+perfect ([docs-gap ledger row 33](../contributor/docs-gap-ledger.md)). So a capture
 that outlives GPS lock must record the tier transition and be analysed as
 unanchored. If someone quotes you a µs/hour coast rate, ask which document it
 is in — as of 2026-08-23 there isn't one.
@@ -297,9 +319,10 @@ is in — as of 2026-08-23 there isn't one.
 
 ### The only path that is hard-wired
 
-The TS-1 has **its own GPS antenna and onboard PPS** — it does not take PPS
-from the LBE-1421 (source: `hf-timestd/docs/ARCHITECTURE-FIRST-PRINCIPLES.md`
-§"TS-1 HF-PPS injector"; `hf-timestd/INSTALLATION.md` §Hardware). It
+The TS-1 has **its own GPS receiver** — "the TS-1's onboard GPS supplies the
+PPS that gets BPSK-modulated into the RX path", so it does not take PPS from
+the LBE-1421 (source: `hf-timestd/docs/ARCHITECTURE-FIRST-PRINCIPLES.md` l.147;
+the tier table at l.47 says the same). It
 BPSK-modulates that PPS onto a clean GPSDO-disciplined carrier (default
 **84.225 MHz**), couples it into the receive path through a
 filter/attenuator, and hf-timestd recovers the phase flips **sample-precise
@@ -341,7 +364,12 @@ you can assume was applied.
 ⚠ Do not read `T6` off a sidecar and assume nanoseconds. Live b4, 2026-08-23,
 `smd status` reported `judge T6  σ=738.9 µs  age 0s  gpsdo=locked` **and**, on
 the same screen, six channels flagged `OFFSET VIOLATION — offset +219…+235 ms,
-rate −0.095 ppm, T6, seg 2`. Those violation lines are known and tracked and
+rate −0.095 ppm, T6, seg 2`. Both the tier and the offsets move through the
+day: that is a ~14:30Z reading, while
+[day-2.md](../operator/day-2.md#1-smd-status--is-everything-running)'s annotated
+sample from the same station earlier on 2026-08-23 shows `judge T4 σ=666.9 µs`
+with violations at 5–19 ms. Neither page is stale; the number is a reading, not
+a property. Those violation lines are known and tracked and
 are not an operator fault — the judge is "a detector, not a fault", it compares
 each radiod channel's advertised epoch against the station's best clock
 evidence, and hf-timestd's own labels stay corrected regardless (source:
@@ -493,11 +521,21 @@ instant.** In `encode_radio_status()`:
   block that actually went out, including whatever lateness that emission had.
 
 So a single `(GPS_TIME, RTP_TIMESNAP)` pair carries **block-grid resolution
-plus emission lateness**, not sample-precise truth. Treat one pair as
-block-accurate; use ka9q-python's `rtp_to_utc()` and its step-detecting
-re-anchor rather than differencing raw pairs yourself (source:
-[`ka9q-python/docs/RTP_TIMING_SUPPORT.md`](https://github.com/HamSCI/ka9q-python/blob/main/docs/RTP_TIMING_SUPPORT.md)),
-and do not attribute a sub-block offset to physics.
+plus emission lateness**, not sample-precise truth. ka9q-python measured the
+consequence from the outside and reached the same place: on a busy radiod that
+pair "jitters ~0.45 s and occasionally tears between ~450 ms snapshots"
+(source: `ka9q-python/CHANGELOG.md` §[3.19.0], l.238-239) — which is why the
+library stopped second-guessing its own grid against the status feed. Use
+`rtp_to_utc()` (source: `ka9q-python/ka9q/rtp_recorder.py:128`) rather than
+differencing raw pairs yourself, and do not attribute a sub-block offset to
+physics.
+
+⚠ ka9q-python's own
+[`RTP_TIMING_SUPPORT.md`](https://github.com/HamSCI/ka9q-python/blob/main/docs/RTP_TIMING_SUPPORT.md)
+overstates the pair in the other direction — "a **sample-accurate** Unix
+wallclock time" (l.5), `RTP_TIMESNAP` as "the RTP timestamp value **at that
+exact GPS time**" (l.24) — and still names the deprecated `rtp_to_wallclock()`.
+Tracked as [docs-gap ledger row 37](../contributor/docs-gap-ledger.md).
 
 Two corollaries worth stating plainly:
 
@@ -532,9 +570,11 @@ it and `verify_channel()` can tell a granted encoding from a silently lost one
 because "radiod may grant a different encoding (e.g. F32→S16 for some IQ
 configs); the returned `ChannelInfo` carries the granted value, which consumers
 use authoritatively" (source:
-`ka9q-python/ka9q/control.py::ensure_channel`, l.2062-2066). **Read the granted
-values off the returned `ChannelInfo`, and measure the wire format
-independently** — bytes ÷ RTP ticks ÷ components — before trusting a byte.
+`ka9q-python/ka9q/control.py::ensure_channel`, l.2062-2066). What to do about
+it — read the granted values, measure the wire format independently — is
+already stated once, in
+[station-capabilities.md §Encoding](../scientist/station-capabilities.md#frequency-and-bandwidth--what-radiod-will-hand-you);
+this page only supplies the mechanism behind it.
 
 ### Two stations can share one frequency
 
