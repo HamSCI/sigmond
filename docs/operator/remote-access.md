@@ -291,7 +291,7 @@ If you want it gone permanently rather than merely stopped, run
 `sigmond-setup --rac-off` and **tell your fleet admin** — so that "cannot reach
 the station" is recorded as your decision rather than chased as a fault. Do not
 delete files under `/etc/sigmond/` by hand to achieve it
-(→ `do-not-touch.md` *(being written)*).
+(→ [do-not-touch.md](do-not-touch.md)).
 
 ---
 

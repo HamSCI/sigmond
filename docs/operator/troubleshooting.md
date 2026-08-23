@@ -747,7 +747,7 @@ That is not theoretical. In a deliberate drill on DASI002 on 2026-08-21, an
   time to act.
 - ⛔ **Do not delete files yourself** to make room. You cannot tell which files
   are the station's regenerable scratch and which are the day's science
-  (→ `do-not-touch.md` *(being written)*).
+  (→ [do-not-touch.md](do-not-touch.md)).
 
 **When to stop and ask**
 
@@ -1067,7 +1067,7 @@ of science, and nobody minds a false alarm.
 ## What NOT to do while troubleshooting
 
 The full list with the reasoning behind each one is
-`do-not-touch.md` *(being written)*. The five that matter most while you are
+[do-not-touch.md](do-not-touch.md). The five that matter most while you are
 chasing a fault:
 
 - ⛔ **Don't `sudo smd`.** It refuses, and it is telling you the truth: it

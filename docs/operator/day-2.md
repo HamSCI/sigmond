@@ -195,7 +195,7 @@ So 95% is the number that costs you data. Live on 2026-08-23: b4 was at **52%**
 (126 G of 252 G), dasi002 at **86%** (201 G of 245 G) — dasi002 is the one to
 watch. If you are over 80% and climbing, tell your fleet admin *before* it
 reaches 95%; do not start deleting files yourself
-(→ `do-not-touch.md` *(being written)*).
+(→ [do-not-touch.md](do-not-touch.md)).
 
 ### 4. `smd doctor` — only when something looks off
 
@@ -313,14 +313,15 @@ running now."
 
 ### Three things never to do by hand
 
-- **Never `apt upgrade`.** The station's packages are held where they are on
-  purpose.
+- **Never `apt upgrade`.** The station's radio and several of its decoders are
+  native binaries built against exactly the system packages that are on it
+  now, and nothing on the station stops you moving them.
 - **Never `pip install`.** Every component lives in a managed virtual
   environment; a hand-installed package silently breaks the next update.
 - **Never `git pull`** in `/opt/git/sigmond/…`. That is exactly what
   `smd update` does, in the right order, with the right ownership.
 
-Full list and reasoning → `do-not-touch.md` *(being written)*.
+Full list and reasoning → [do-not-touch.md](do-not-touch.md).
 
 ---
 
