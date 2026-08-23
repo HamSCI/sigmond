@@ -69,10 +69,13 @@ don't run smd under sudo — it elevates itself when a verb needs root.
 ```
 
 The verbs that change the station — `start`, `stop`, `restart`, `reload` — call
-for root themselves and re-run the whole command under `sudo` for you, which
-means **you may be asked for your password**; that prompt is normal, not a
-failure (source: `bin/smd`, the top-of-`main` guard and `_need_root()`, which
-re-execs `sudo -- env SIGMOND_ALLOW_SUDO=1 smd <same arguments>`).
+for root themselves and re-run the whole command under `sudo` for you (source:
+`bin/smd`, the top-of-`main` guard and `_need_root()`, which re-execs
+`sudo -- env SIGMOND_ALLOW_SUDO=1 smd <same arguments>`). **Logged in as
+`hamsci`, that is silent — you are not asked for a password**, because the
+appliance image gives `hamsci` passwordless sudo
+(`hamsci ALL=(ALL) NOPASSWD:ALL` in `/etc/sudoers.d/hamsci`, written by
+`sigmond-appliance/provision-components.sh`).
 
 So the shape is always:
 
@@ -85,16 +88,61 @@ smd restart mag-recorder
 `smd restart` takes component names, or the word `all`, and defaults to
 everything enabled (`smd restart --help`, read live on AC0G/B4 2026-08-23).
 The names it accepts are the ones in the **NAME** column of
-`smd component list` — on b4, live 2026-08-23: `ka9q-radio` (that is the radio,
-whose unit is `radiod@<designator>`), `ka9q-web`, `wspr-recorder`,
-`psk-recorder`, `mag-recorder`, `hf-timestd`, `gpsdo-monitor`,
-`meteor-scatter`, `gmag-webui` and `igmp-querier`.
+`smd component list`.
 
-> **If it answers that your account may not use sudo**, log in as `sigmond@`
-> instead of `hamsci@`. The [wizard](glossary.md) puts the `sigmond` account in
-> the `sudo` group and not the login you may have been given (source:
-> `scripts/proxmox/sigmond-wizard.sh`, `usermod -aG sudo sigmond`; live on b4,
-> `getent group sudo` reads `sudo:x:27:sigmond`).
+### Restarting one client is often not one client
+
+**`smd restart <name>` restarts that component *and everything it declares it
+needs*.** Before it resolves a single unit it walks the dependency graph —
+`_expand_requires_closure`, called from `cmd_restart` in `bin/smd` — and
+restarts the dependencies **first**. For most names on this station the
+dependency is the radio itself, so "restart the FT8 recorder" is really
+"restart the radio, then the FT8 recorder", and every *other* recorder is left
+running against a radio that just went away — which is exactly the stale-anchor
+fault [Spots stopped](#spots-stopped-were-fine-before) is about.
+
+Here is the split, read from `etc/catalog.toml` (`requires =` on each
+`[client.<name>]` block; `kind = "library"` entries are skipped by the walk, so
+they cost nothing):
+
+| Name | `requires =` | What a restart actually touches |
+|---|---|---|
+| `mag-recorder` | `["hs-uploader", "hamsci-dsp"]` — both `kind = "library"` | **Cheap.** Just the magnetometer |
+| `gpsdo-monitor` | `[]` | **Cheap.** Just the GPSDO reader |
+| `igmp-querier` | `[]` | **Cheap.** Just the querier |
+| `gmag-webui` | `["mag-recorder"]` | Cheap, but **drags `mag-recorder` with it** |
+| `wspr-recorder` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio for the whole station** |
+| `psk-recorder` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio** |
+| `meteor-scatter` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio** |
+| `hf-timestd` | `["ka9q-python", "ka9q-radio"]` | ⛔ **Bounces the radio** *and* restarts the whole metrology stack |
+| `ka9q-web` | `["ka9q-radio"]` | ⛔ **Bounces the radio**, to restart a web page |
+| `ka9q-radio` | (it *is* the radio; `kind = "server"`, topology alias `radiod`) | ⛔ **Bounces the radio** |
+
+**So, before you restart anything, look up its row.**
+
+- A **cheap** name: go ahead.
+- A **radio-bouncing** name: `smd` will order the radio first, but it does
+  **not** wait for the radio to settle, and it does **not** re-anchor the
+  recorders you did not name. Either restart everything in one go — `[VM]`:
+
+  ```bash
+  smd restart all
+  ```
+
+  which costs one bounce and brings every recorder back against the same fresh
+  radio — or restart the one name and then **watch the other recorders**, and
+  expect to restart them too when their spots stop.
+
+⚠ **A radio bounce is not free for timing.** `hf-timestd`'s metrology needs
+minutes to re-settle afterwards, so a station's timing numbers will look worse
+for a while and that is the restart, not a fault. Give it ten minutes before
+reading the judge summary in `smd status`
+([day-2.md](day-2.md#1-smd-status--is-everything-running)); a timing-stack
+restart has been observed to inflate the station's stability figures several-fold
+for about three minutes.
+
+> **If it answers that your account may not use sudo, tell your fleet admin.**
+> That is a provisioning problem on the station, not something to work around.
 
 ---
 
@@ -269,26 +317,42 @@ problem is in a decoder ([day-2.md, the four windows](day-2.md#the-four-windows)
 what they are for: `sigmond-timing-watchdog.timer` fires every 90 seconds and
 restarts a recorder whose anchor has gone stale, and
 `sigmond-radiod-watchdog.timer` every two minutes (both enabled on b4, live
-2026-08-23). The timing watchdog will not act on a genuinely dead band — it
-requires either a peer receiver that *is* decoding, or a real RX888 sample-rate
-glitch in the log, before it restarts anything (source:
-`bin/sigmond-timing-watchdog`).
+2026-08-23). The timing watchdog **will not act on a genuinely dead band**: its
+catastrophic detector needs either a peer receiver that *is* decoding or a real
+RX888 sample-rate glitch in the log before it restarts anything. Its second,
+drift detector does work on a station with no peers — it gates on the FT8
+dt-centre against true UTC instead (`TWD_DT_ABS_SEC`, 2.5 s, plus a
+persistent-moderate gate at 1.5 s held for four consecutive runs) — so a
+single-receiver station is covered too (source: `bin/sigmond-timing-watchdog`).
 
-If it is still dead after five minutes and `radiod` is active — `[VM]`:
+If it is still dead after five minutes and `radiod` is active, the thing to know
+before you type anything is that **`smd restart psk-recorder` is not a narrow
+action** — `psk-recorder` declares `requires = ["ka9q-python", "ka9q-radio"]`, so
+it restarts the radio for the whole station first
+([the table above](#restarting-one-client-is-often-not-one-client)). Restarting
+one recorder that way stops the *others*' spots, because they are still holding
+anchors against a radio that just went away — you would be spreading the fault
+you are trying to fix.
+
+So: since the radio is going to bounce anyway, bounce it **once** and bring
+everything back against it — `[VM]`:
 
 ```bash
-smd restart psk-recorder
+smd restart all
 ```
 
-(or `wspr-recorder`, whichever stopped). Recovery takes one or two decode
-cycles.
+Recovery takes one or two decode cycles for the spot recorders, and about ten
+minutes before the timing numbers mean anything again.
 
-⚠ **If `radiod` needs restarting too, restart it first and let it settle before
-you touch the recorders.** A recorder started against a restarting `radiod`
-picks up a bad anchor and you will have manufactured this exact fault — that
-warning is `smd update`'s own words, printed live on b4 2026-08-23:
-*"radiod first, then the recorders once it is stable — a recorder started
-against a restarting radiod picks up a bad anchor."*
+The one case where a single name is genuinely narrow is a **cheap** component —
+`mag-recorder`, `gpsdo-monitor`, `igmp-querier` — where nothing else moves.
+
+⚠ **Whatever you restart, the radio must come first and be allowed to settle.**
+A recorder started against a restarting `radiod` picks up a bad anchor and you
+will have manufactured this exact fault. `smd` does order the radio first, but
+it does not wait for it — that warning is `smd update`'s own words, printed live
+on b4 2026-08-23: *"radiod first, then the recorders once it is stable — a
+recorder started against a restarting radiod picks up a bad anchor."*
 
 **When to stop and ask**
 
@@ -501,17 +565,20 @@ smd watch gpsdo --once
 *Good* (live b4, 2026-08-23):
 
 ```text
-  SERIAL        MODEL       A   PLL   FIX   SATS  ANT   OUT1 MHz    OUT2 MHz    PPS   AGE
-  0C7BB80D10EF  lbe-1421    A1  yes   3D    8     yes   10.000000   27.000000   yes   0s
+  SERIAL        MODEL       A   PLL   FIX     SATS  ANT   OUT1 MHz     OUT2 MHz     PPS   AGE   GOVERNS
+  0C7BB80D10EF  lbe-1421    A1  yes   3D      8     yes   10.000000    27.000000    yes   0s    —
       A-level A1: pll_locked && gps_fix=3D && antenna_ok && pps_present && fresh
 ```
 
 *Bad* (live DASI002, same morning):
 
 ```text
-  0C7BB80D5116  lbe-1421    A0  yes   no_fix  0   yes   27.000000   27.000000   no    —
+  0C7BB80D5116  lbe-1421    A0  yes   no_fix  0     yes   27.000000    27.000000    no    —     —
       A-level A0: gps_fix=no_fix
 ```
+
+(An empty **GOVERNS** column is normal on both stations — it fills in only once
+a GPSDO has been explicitly associated with a particular radio.)
 
 Note the shape of that bad case: the oscillator's own loop is locked (`PLL yes`)
 and the antenna reads OK, but there are **zero satellites**. That is an antenna
@@ -838,8 +905,10 @@ problem is on your network between the two machines, not on the station.
 
 **What to do**
 
-- Service not running → `smd restart <name>` for that page's component
-  (`ka9q-web`, `hf-timestd`, `gmag-webui`).
+- Service not running → restart that page's component. `gmag-webui` is cheap;
+  ⛔ `ka9q-web` and `hf-timestd` both pull the radio in with them
+  ([why](#restarting-one-client-is-often-not-one-client)), so for those two
+  prefer `smd restart all` and accept one clean bounce of the whole station.
 - Listening locally but not reachable → try from a computer plugged into the
   same switch by cable. Check that you are using the **VM** address and not the
   host's.
@@ -904,15 +973,25 @@ both fleet stations, 2026-08-23; row 16 of the
 
 **What to do**
 
-`[VM]`, naming just the one component:
+**Check the component's row in
+[Restarting one client is often not one client](#restarting-one-client-is-often-not-one-client)
+first.** If it is one of the cheap ones, name it — `[VM]`:
 
 ```bash
-smd restart <name>
+smd restart mag-recorder
 ```
 
-If `radiod` is among the failures, restart `radiod` **first** and give it a
-minute to settle before the recorders — see
-[Spots stopped](#spots-stopped-were-fine-before) for why that order matters.
+If it is one that pulls the radio in — `psk-recorder`, `wspr-recorder`,
+`meteor-scatter`, `hf-timestd`, `ka9q-web`, or `radiod` itself — then the radio
+is bouncing whatever you type, so bounce it once and bring everything back
+together instead — `[VM]`:
+
+```bash
+smd restart all
+```
+
+Give the timing products about ten minutes afterwards before you judge them; see
+[Spots stopped](#spots-stopped-were-fine-before) for why the order matters.
 
 **When to stop and ask**
 
@@ -923,12 +1002,15 @@ second one just hides the evidence.
 
 ## Replug, restart, reboot, reinstall — which one, when
 
-Work down this table, never up. Each row costs more than the one above it.
+Work down this table, never up. Each row costs more than the one above it, and
+the jump from row two to row three is the big one — it is the difference between
+touching one program and bouncing the whole station.
 
 | Action | Use it when | What it costs | How |
 |---|---|---|---|
 | **Replug a USB device** | The device is missing from `lsusb`, or a sensor has frozen at a constant value | Seconds of that one device's data | Unplug, wait, plug back in. The RX888 goes **straight into a blue USB-3 port, no hub**. Then restart the client that owns it (`smd restart mag-recorder`); the RX888 needs nothing — `sigmond-sdr-sentinel.timer` picks it up within two minutes |
-| **Restart one client** | One client is `failed`, or one program's spots stopped while the rest are fine | A decode cycle or two of that program | `[VM]`: `smd restart <name>` — names from `smd component list`. **Never `sudo smd`.** If `radiod` is involved, `radiod` first, then the recorders once it is stable |
+| **Restart one *cheap* client** | `mag-recorder`, `gpsdo-monitor`, `igmp-querier` or `gmag-webui` is `failed` or stuck | A decode cycle or two of that one program — nothing else moves | `[VM]`: `smd restart <name>`. **Never `sudo smd`.** These four declare no radio dependency ([the table](#restarting-one-client-is-often-not-one-client)) |
+| **Restart anything else — which bounces the radio** | A spot recorder, `hf-timestd`, `ka9q-web` or the radio itself needs restarting | **The whole station**: every recorder loses its anchor, and the timing products need about ten minutes to re-settle | ⛔ Not narrow. `psk-recorder`, `wspr-recorder`, `meteor-scatter`, `hf-timestd` and `ka9q-web` all pull `ka9q-radio` in with them. Prefer `smd restart all` — one bounce, everything re-anchored together — over restarting one name and leaving the rest stale |
 | **Reboot — or power off** | Nothing above worked, and your fleet admin agrees | About ten minutes of everything | ⛔ **These are not the same thing.** A reboot holds USB power, so a wedged RX888 stays wedged; only a full **power-off** resets it (source: `sigmond-wizard.sh`). If the radio is the problem, power off. Otherwise a reboot is enough |
 | **Reinstall** | Never on your own initiative | Everything, including your PSWS registration unless the keys were saved first | Only with your fleet admin, and save the old keys onto the stick first ([INSTALL.md §4](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#4-returning-station-put-your-old-keys-on-the-stick-optional)) |
 
