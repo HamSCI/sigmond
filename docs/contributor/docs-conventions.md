@@ -13,10 +13,11 @@ code" — and sends each to its own subtree. `sigmond/docs/INDEX.md` lists
 every page in this repo's `docs/` by audience so nothing is orphaned. The
 narrative subtrees are `operator/`, `scientist/`, `contributor/`, and
 `hardware/` (shared by scientist and operator); `archive/` holds history
-(§5). Every other HamSCI repo (sigmond-appliance, wspr-recorder,
+(§5). Every HamSCI repo keeps a `docs/INDEX.md` on the same pattern
+(hf-timestd's is the model; sigmond-appliance, wspr-recorder,
 psk-recorder, meteor-scatter, mag-recorder, gpsdo-monitor, hs-uploader,
-hamsci-dsp, hf-timestd) carries its own `docs/INDEX.md` on the same
-pattern. Material that belongs to another repo — a client's install
+and hamsci-dsp are gaining theirs as this documentation program rolls
+out). Material that belongs to another repo — a client's install
 mechanics, a library's API — is linked from here, never copied or moved
 into this tree.
 
