@@ -97,7 +97,8 @@ granted values off the returned `ChannelInfo`, and measure the wire format
 independently — bytes ÷ RTP ticks ÷ components — before you trust a byte
 (source: `docs/EVENT-CLIENT-PLAYBOOK.md`
 [§Station traps](../EVENT-CLIENT-PLAYBOOK.md#station-traps-worth-knowing)). More
-on how the hardware behaves under this: character.md *(being written)*.
+on how the hardware behaves under this:
+[character.md](../hardware/character.md).
 
 **`lifetime` is mandatory, `destination` is forbidden.** radiod cannot tell that
 your process died, so a channel created without a `lifetime` streams to nobody

@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 6f7babc on 2026-08-23 — code
+> **Verified against:** sigmond 1c27c3b on 2026-08-23 — code
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -86,6 +86,7 @@ Front door for each audience: [docs/README.md](README.md).
 | Doc | What it gives you |
 |---|---|
 | [hardware/shopping-list.md](hardware/shopping-list.md) ★ | The station parts list: required vs optional with model numbers, what each optional part buys you, cabling, approximate cost, and the known-good build AC0G/B4 runs |
+| [hardware/character.md](hardware/character.md) ★ | How the station hardware *behaves*: the RX888's one 16-bit converter and its live front-end AGC, the 20 ms deadline and zero-fill, USB sample loss stepping the timing anchor, the FX3 latch, what the GPSDO provably disciplines, the TS-1 and T6, the magnetometer's frozen-constant failure, and the timing-chain caveats (anchor pair, encoding grant, shared-frequency stations) |
 
 ## 5. Archive
 

@@ -27,6 +27,8 @@ The required set on its own already produces WSPR and FT8/FT4 spots.
 Budget roughly **$860–1,630** for it, and **$1,195–2,200** for the full
 build AC0G/B4 runs (see [Approximate cost](#approximate-cost) — all
 figures approximate, as of 2026-08, check current prices).
+How the hardware *behaves* — dynamic range, AGC, loss modes, timing
+roles, failure modes: [character.md](character.md).
 
 ## Required
 
