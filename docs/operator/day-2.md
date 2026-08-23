@@ -35,7 +35,7 @@ Ports 8081, 8000 and 8082 were confirmed listening on AC0G/B4 on 2026-08-23
 magnetometer dashboard was running there that morning.
 
 If a page will not load at all, that is a real finding — take it to
-`troubleshooting.md` *(being written)*.
+[troubleshooting.md → *Web pages don't load but ssh works*](troubleshooting.md#web-pages-dont-load-but-ssh-works).
 
 ---
 
@@ -151,11 +151,13 @@ sudo: a password is required
    `render_status_lines`) — it means the [GPSDO](glossary.md) has lost its GPS
    fix. dasi002 read `⚠ judge T3 σ=3107.9 µs gpsdo=holdover` on the same
    morning: that ⚠ is the software telling the truth about a real condition,
-   and it is the shape of thing to report.
+   and it is the shape of thing to report —
+   [troubleshooting.md → *GPS not locked*](troubleshooting.md#gps-not-locked-or-the-timing-dashboard-is-red).
 3. **A whole client missing, or a unit `failed`.** `inactive` on a spare unit is
    fine (see the table); `failed` is not. dasi002 shows
    `✗ mag-recorder.service: failed` — that is a genuine finding, not background
-   noise.
+   noise, and it is chased in
+   [troubleshooting.md → *After a power cut everything is back except one client*](troubleshooting.md#after-a-power-cut-everything-is-back-except-one-client).
 
 If any of those three is wrong, go to step 4 and then to your fleet admin.
 
@@ -333,7 +335,7 @@ and a reboot is the easier case. Do not power-cycle it again while you wait.
 
 If spots have not resumed after **30 minutes**, that is a fault: check the
 antenna is still connected, then run `smd status` and send the output to your
-fleet admin (`troubleshooting.md` *(being written)*;
+fleet admin ([troubleshooting.md](troubleshooting.md);
 [INSTALL.md §11](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#11-if-something-goes-wrong)).
 
 **A dead keyboard on the station itself is normal.** After the first reboot

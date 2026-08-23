@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 3e1a885 on 2026-08-23 — code
+> **Verified against:** sigmond 2d5ea11 on 2026-08-23 — code
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -17,6 +17,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [operator/registration.md](operator/registration.md) ★ | Getting a station's uploads accepted: which of the four networks need registration (only PSWS does), the PSWS account→site→instrument→key walkthrough, how to confirm each product arrived and how long to wait |
 | [operator/day-2.md](operator/day-2.md) ★ | Day-2 operation: the four web windows and what "good" looks like in each, the weekly four-step check with an annotated real `smd status` (which ✗ and ⚠ are normal and why), the disk numbers that cost you data, how updates are decided and run, power loss and reboots, the heartbeat, and passwords |
 | [operator/remote-access.md](operator/remote-access.md) ★ | Remote access (RAC): what the outbound tunnel is, that it runs on the Proxmox host and not the VM, the four channels it exposes and who can reach them, turning it on/off/checking from the host, why the dashboard's `root@` ssh command cannot work, and what to do when the install says FAILED |
+| [operator/troubleshooting.md](operator/troubleshooting.md) ★ | Symptom-first troubleshooting: the 2-minute triage, fourteen symptoms each with likely causes / what to check / what to do / when to stop and ask, the replug-restart-reboot-reinstall ladder, exactly what to send when asking for help, and what not to touch while chasing a fault |
 | [operator/hardware.md](operator/hardware.md) (pointer) | Redirects to `hardware/shopping-list.md` — the parts list is shared with the scientist path |
 | [operator/install.md](operator/install.md) (pointer) | Redirects to sigmond-appliance's `INSTALL.md`, plus what to expect from the ~45-minute install |
 

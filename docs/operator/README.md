@@ -37,7 +37,7 @@ Do these in order. Only steps 1 and 2 need you physically at the machine.
 | 3. Register your station's uploads | [registration.md](registration.md) | 30 min + portal waits |
 | 4. Learn what "healthy" looks like | [day-2.md](day-2.md) | 15 min |
 | 5. (optional) Let the fleet admin reach it | [remote-access.md](remote-access.md) | 10 min |
-| When it breaks | troubleshooting.md *(being written)* | — |
+| When it breaks | [troubleshooting.md](troubleshooting.md) | — |
 | Before you touch anything | do-not-touch.md *(being written)* | — |
 | Words used in these pages | [glossary.md](glossary.md) | — |
 

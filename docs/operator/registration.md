@@ -378,16 +378,16 @@ wsprnet after about fifteen minutes
 ## 8. What can go wrong here
 
 Four failures account for nearly all of it. Each has a first move you can make
-yourself; the full diagnosis for each lives in troubleshooting.md *(being
-written)*, under the heading named below.
+yourself; the full diagnosis for each lives in
+[troubleshooting.md](troubleshooting.md), under the heading named below.
 
 | Symptom | First move | Then see |
 |---|---|---|
-| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — if it prints nothing at all, the problem is decoding, not registration; if it prints `wsprnet=posted:0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | troubleshooting.md → *No spots on wsprnet* |
-| **Nothing on pskreporter** | Search your callsign **as receiver**, not sender (§3) — that is the answer more often than not | troubleshooting.md → *Nothing on pskreporter* |
-| **Uploads pending, and the number keeps growing** | `smd config uploads status` first (§6) — uploads may be off by policy | troubleshooting.md → *Uploads pending and growing* |
-| **PSWS not verified** | `smd psws verify` and read which of the two failures it reports (§5c) | troubleshooting.md → *PSWS not verified* |
-| **PSWS has GRAPE data but no magnetometer data** | Nothing to fix locally — tell your fleet admin, and quote §5d | troubleshooting.md → *PSWS not verified* |
+| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — if it prints nothing at all, the problem is decoding, not registration; if it prints `wsprnet=posted:0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
+| **Nothing on pskreporter** | Search your callsign **as receiver**, not sender (§3) — that is the answer more often than not | [troubleshooting.md → *Nothing on pskreporter*](troubleshooting.md#nothing-on-pskreporter) |
+| **Uploads pending, and the number keeps growing** | `smd config uploads status` first (§6) — uploads may be off by policy | [troubleshooting.md → *Uploads pending and growing*](troubleshooting.md#uploads-pending-and-growing) |
+| **PSWS not verified** | `smd psws verify` and read which of the two failures it reports (§5c) | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |
+| **PSWS has GRAPE data but no magnetometer data** | Nothing to fix locally — tell your fleet admin, and quote §5d | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |
 
 When you ask for help, send the four outputs listed on
 [the operator front page](README.md#getting-help--what-to-send), plus
