@@ -1,5 +1,10 @@
 # radiod identification — canonical multicast naming
 
+> **Audience:** contributor
+> **Status:** shipped
+> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Canonical for:** radiod multicast naming
+
 Locks the radiod-naming model that all sigmond-suite clients (psk-recorder,
 wspr-recorder, hfdl-recorder, codar-sounder, hf-timestd) and the sigmond
 substrate (coordination.toml, validate rules, configurators) must converge

@@ -110,7 +110,7 @@ scope for this boundary):
   - `remote_path` / instrument id locate the product on the server.
   This is the concrete shape of board item **#25 (registration)** and
   **#5 (WW0WWV → PSWS migration)**.
-- **Phase-D PSK merge endpoint** (`docs/PHASE-D-SERVER-MERGE-ENDPOINT.md`,
+- **Phase-D PSK merge endpoint** (`docs/archive/PHASE-D-SERVER-MERGE-ENDPOINT.md`,
   *plan, server side not yet implemented*) — defines the cross-receiver
   JSONL contract (`ft8/<site>/<rx>/<band>/<cycle>_ft8.jsonl`, per-row
   fields incl. `rx_source`, `host_call`, `radiod_id`) for when a station

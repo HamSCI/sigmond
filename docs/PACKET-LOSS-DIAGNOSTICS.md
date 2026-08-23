@@ -1,5 +1,10 @@
 # Packet-Loss Diagnostics
 
+> **Audience:** contributor
+> **Status:** shipped
+> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Canonical for:** diagnosing RTP loss
+
 When RTP streams from radiod show sequence gaps, when channels stutter,
 or when downstream consumers (hf-timestd, ka9q-web, recorders) report
 missing samples — this is the diagnostic loop.

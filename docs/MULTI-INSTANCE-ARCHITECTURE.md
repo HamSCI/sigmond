@@ -1,5 +1,10 @@
 # sigmond multi-instance client architecture
 
+> **Audience:** contributor
+> **Status:** shipped
+> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Canonical for:** per-reporter instance shape
+
 Locks the per-reporter-instance shape that all recorder clients
 (wspr-recorder, psk-recorder, hfdl-recorder, codar-sounder,
 mag-recorder, future VLF) and the sigmond substrate must converge on.

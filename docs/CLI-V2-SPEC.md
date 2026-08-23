@@ -2,7 +2,7 @@
 
 Locks the verb shape, cluster boundaries, and alias-keep decisions for
 the next major rework of `bin/smd`. Companion to
-[TUI-FUNCTION-INVENTORY.md](TUI-FUNCTION-INVENTORY.md): the inventory
+[TUI-FUNCTION-INVENTORY.md](archive/TUI-FUNCTION-INVENTORY.md): the inventory
 catalogues today's surface; this doc decides what tomorrow's surface
 looks like and why.
 

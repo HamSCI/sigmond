@@ -1,3 +1,12 @@
+# T6 block-slip root cause — B4 mitigations (pointer + local record)
+
+> **Audience:** contributor
+> **Status:** pointer
+> **Verified against:** n/a
+> **See instead:** [hf-timestd/docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md](https://github.com/HamSCI/hf-timestd/blob/main/docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md) — the 108-line analysis is canonical.
+
+What follows is only the record of the layer-1 mitigations deployed on B4
+on 2026-08-10 (xhci IRQ pin, decode-wave spreading); it is historical.
 
 ## Layer-1 mitigations DEPLOYED on B4 (2026-08-10 ~21:55 UTC)
 

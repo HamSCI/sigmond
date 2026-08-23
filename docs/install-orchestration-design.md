@@ -1,5 +1,10 @@
 # Install orchestration design — TUI-driven, contract-ordered bring-up
 
+> **Audience:** contributor
+> **Status:** shipped (phases A–C)
+> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Canonical for:** bring-up phase order (A–C)
+
 **Status:** Design (proposed). Captures the agreed model for turning a bare host
 into a running DASI2 station with `./install.sh` as the only CLI and the sigmond
 TUI driving everything after. Phases A–C implemented (2026-06-06); see roadmap.

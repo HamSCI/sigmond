@@ -1,5 +1,10 @@
 # Capacity measurement plan — how much headroom do we actually have?
 
+> **Audience:** contributor
+> **Status:** plan, not executed
+> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Canonical for:** how to measure headroom (unexecuted)
+
 **Status:** action plan, ready to execute. Companion to
 [HOST-CAPACITY-PLANNING.md](HOST-CAPACITY-PLANNING.md), which frames the problem and
 asks the open questions; this document says how to answer them with measurements

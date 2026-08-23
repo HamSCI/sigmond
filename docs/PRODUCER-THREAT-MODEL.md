@@ -1,5 +1,10 @@
 # Producer Threat Model
 
+> **Audience:** contributor
+> **Status:** shipped
+> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Canonical for:** what threatens radiod data production
+
 What threatens radiod's core data production, what currently defends it,
 and what is still exposed.
 

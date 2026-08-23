@@ -1,5 +1,10 @@
 # Install redesign — station patterns, hardware-aware install, 3-step IA
 
+> **Audience:** contributor
+> **Status:** shipped (stages 0–3); still the best explanation of install-implies-enable
+> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Canonical for:** install-implies-enable vocabulary and station patterns
+
 _Status (2026-06-23): **Stages 0–3 shipped.** Stages 0+1 (canonical dasi2,
 hostname-derived radiod name, hardware-aware install) landed earlier (`3406557`,
 `9c4fc26`). The multi-site deployment-readiness pass committed the remaining
@@ -8,7 +13,7 @@ direction: **install now implies enable** (the vocabulary fix — see below), th
 **Guided bring-up screen carries the optional-clients picker** (`--with-optional`),
 and the **Installation nav was collapsed to the ①②③ arc + Advanced group**
 (Stage 3). Extends `install-orchestration-design.md`, `RADIOD-IDENTIFICATION.md`,
-and the nav proposal in `TUI-FUNCTION-INVENTORY.md` §4._
+and the nav proposal in `archive/TUI-FUNCTION-INVENTORY.md` §4._
 
 > ✅ **Direction confirmed & shipped.** The vocabulary question — *why are
 > `install` and `enable` separate?* — resolved to: they are not, for the common
@@ -191,7 +196,7 @@ The nav mirrors the build sequence: download → build/install → configure
 
 - **Topology** is no longer a leaf; it is the derived state surfaced by step ③.
 - **Lifecycle** (currently under *Maintenance*) becomes step ③.
-- Reconcile with `TUI-FUNCTION-INVENTORY.md` §4's 4-way reorg — this refines
+- Reconcile with `archive/TUI-FUNCTION-INVENTORY.md` §4's 4-way reorg — this refines
   the Installation column of that proposal.
 
 **DECIDED:** one **"Advanced / Under-the-hood"** group holds the displaced
@@ -239,7 +244,7 @@ FFT wisdom. SDR inventory is Advanced, NOT folded into Configure.
   stays Advanced, NOT folded into Configure — see §5).
 - Implemented in `tui/widgets/component_tree.py`; pinned by
   `tests/test_tui_navigation.py::test_installation_is_the_three_step_arc`.
-- TODO: reconcile the prose in `TUI-FUNCTION-INVENTORY.md` §4 with the shipped tree.
+- TODO: reconcile the prose in `archive/TUI-FUNCTION-INVENTORY.md` §4 with the shipped tree.
 
 ## 7. Decisions resolved + remaining
 - ✓ dasi2 absent-hardware → **install-dormant**; base → detection-gated (§3).
