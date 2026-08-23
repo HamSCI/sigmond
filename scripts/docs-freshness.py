@@ -45,7 +45,9 @@ enforced"): the CLI always exits 0 unless `--strict` is passed and at
 least one stale page was found, in which case it exits 1. If `git` isn't
 on PATH (or otherwise unusable), that's reported as a warning to stderr
 and the check is skipped (empty result) rather than raising -- a warn-only
-tool should never hand a caller a traceback.
+tool should never hand a caller a traceback. The CLI always prints a
+summary line (`docs-freshness: N stale page(s)`), even on a clean run --
+silence otherwise reads as "did nothing", not "ran and found nothing".
 
 Usage: docs-freshness.py [--strict] PATH [PATH...]
 """
@@ -205,6 +207,10 @@ def main(argv=None) -> int:
     stale = stale_pages(repo_root, a.paths)
     for s in stale:
         print(f"{s.path}: Verified against {s.named_sha} but last content edit {s.last_content_sha}")
+    # Always print a summary count, symmetric with docs-linkcheck.py's
+    # "N broken link(s)" line -- silence otherwise reads as "did nothing"
+    # rather than "ran clean" (a real point of confusion on a first run).
+    print(f"docs-freshness: {len(stale)} stale page(s)")
     if not stale:
         return 0
     return 1 if a.strict else 0

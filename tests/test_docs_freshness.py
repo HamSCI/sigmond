@@ -76,6 +76,16 @@ def test_pages_without_header_or_na_are_skipped(tmp_path):
     _repo_with(tmp_path, [("docs/b.md", "# B\n\n> **Verified against:** n/a\n\nbody\n"), ("docs/c.md", "# C\nno header\n")])
     assert mod.stale_pages(tmp_path, [tmp_path/"docs"]) == []
 
+def test_cli_prints_summary_line_even_when_clean(tmp_path):
+    # the library function stale_pages() is silent by design (it returns
+    # data); the CLI must not be -- a clean run still prints a summary so
+    # "no output" reads as "ran clean", not "did nothing".
+    _repo_with(tmp_path, [("docs/a.md", "# A\n\n> **Verified against:** n/a\n\nbody\n")])
+    r = subprocess.run([sys.executable, str(SCRIPT), str(tmp_path / "docs")],
+                        capture_output=True, text=True)
+    assert r.returncode == 0
+    assert "docs-freshness: 0 stale page(s)" in r.stdout
+
 def test_real_docs_tree_runs():
     mod = _load()
     # must run without error on the real tree; staleness here is a warning, not a failure

@@ -133,9 +133,16 @@ central mistake a fleet-wide one. Keep the wall.
 ## 4. Tests
 
 ```bash
-PYTHONPATH=lib python3 -m pytest tests/      # sigmond
+.venv/bin/pytest tests/                      # sigmond
 uv run pytest                                # the client repos
 ```
+
+`.venv/bin/pytest` is the canonical runner — it needs the dev venv built
+first; see [`docs/contributor/dev-setup.md`](docs/contributor/dev-setup.md)
+for `uv sync --extra tui --extra dev` and the sibling-checkout layout it
+requires. A bare `pytest` or `python -m pytest` runs outside the venv and
+misses the dev extras (Textual, etc.); on a fresh system with no venv yet
+it fails outright with `No module named pytest`.
 
 The suite is the main asset — over 1200 tests in sigmond alone. A change
 without a test that would have failed before it is not finished.
@@ -375,14 +382,26 @@ purpose).
 ## 11. Using graphify
 
 The suite has a cross-repo knowledge graph at
-`/root/appliance/repos/graphify-out/`, covering all the component repos.
+`/home/mjh/hamsci/repos/graphify-out/` (built with root `repos/`, covering
+all the component repos). It is **not** at `/root/appliance/...` (that
+path is stale and permission-denied to a non-root contributor anyway) and
+there is **no `wiki/`** anywhere near it — skip wiki navigation entirely.
 
-* **Orientation.** `graphify query "<question>"`, `graphify explain
-  "<symbol>"` and `graphify path "<A>" "<B>"` answer "where does this
-  live and what touches it" across repo boundaries, which is exactly the
-  question a newcomer has and which grep answers badly. `wiki/index.md`
-  is the readable entry point; `GRAPH_REPORT.md` is for broad
-  architecture review.
+* **Orientation.** Every command needs the explicit `--graph` flag, or the
+  bare form fails with "graph file not found":
+  ```bash
+  graphify query "<question>" --graph /home/mjh/hamsci/repos/graphify-out/graph.json
+  graphify path "<A>" "<B>" --graph /home/mjh/hamsci/repos/graphify-out/graph.json
+  graphify explain "<concept>" --graph /home/mjh/hamsci/repos/graphify-out/graph.json
+  ```
+  These answer "where does this live and what touches it" across repo
+  boundaries, which is exactly the question a newcomer has and which grep
+  answers badly. Query output's `src=` paths are relative to `repos/` —
+  e.g. `src=sigmond/lib/sigmond/catalog.py` means
+  `/home/mjh/hamsci/repos/sigmond/lib/sigmond/catalog.py`.
+  `GRAPH_REPORT.md` (`/home/mjh/hamsci/repos/graphify-out/GRAPH_REPORT.md`)
+  is for broad architecture review, or when `query`/`path`/`explain` don't
+  surface enough context.
 * **It is an aid, not a gate.** Use it when it helps; nobody needs to
   route an IDE search through it. (AI assistants working here are asked
   to query it before grepping, because it is far more context-efficient
@@ -390,12 +409,13 @@ The suite has a cross-repo knowledge graph at
   requirement on humans.)
 * **Keep it current.** After changing code:
   ```bash
-  cd /root/appliance/repos && graphify update .
+  graphify update /home/mjh/hamsci/repos
   ```
   Two traps, both of which have bitten:
-  * **Run it from the repos root**, never inside a single repo —
-    running it in a subdirectory silently creates a second, repo-scoped
-    graph there instead of updating the real one.
+  * **Never `graphify update .` from `/home/mjh/hamsci`** — that
+    re-roots the graph on the whole tree (including `ops/`) and clobbers
+    the repos-rooted extraction. The refresh command above, run from
+    anywhere, is always the right one — it names the root explicitly.
   * `update` **never drops deleted files**. After removing or renaming
     anything, do a clean rebuild or the graph keeps answering with code
     that no longer exists.

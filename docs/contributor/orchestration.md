@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 978c80a on 2026-08-23 — code (bin/smd, lib/sigmond, CLAUDE.md)
+> **Verified against:** sigmond b51280b on 2026-08-23 — code (bin/smd, lib/sigmond, CLAUDE.md)
 > **Canonical for:** sigmond's orchestration model and the smd verb→module map
 
 ## The shape
@@ -74,7 +74,7 @@ catalog layer in `catalog.py` (`DEFAULT_CATALOG_PATHS`), `site-profile.toml` in
 | `/etc/sigmond/topology.toml` | what is enabled on this host |
 | `/etc/sigmond/coordination.toml` + `coordination.env` | station identity, radiod registration, per-client env bag |
 | `/etc/sigmond/site-profile.toml` | per-site profile written by `personalize` |
-| `/etc/sigmond/catalog.toml` | operator overrides only — the sparse top layer of the catalog |
+| `/etc/sigmond/catalog.toml` | operator overrides only — the sparse top layer of the catalog (sparse: only the keys present here override; everything else falls through to the layer below) |
 | `/etc/sigmond/environment.toml` | declared network peers, checked against observation |
 | `/var/lib/sigmond/sink.db` | the shared SQLite sink every producer writes into |
 | `/var/lib/sigmond/upload-wake.sock` | stateless edge trigger: "something committed, go re-derive completeness" |
@@ -135,7 +135,7 @@ left to list: the v2 removals in
 | `admin` | contributor | umbrella for diagnostics + maintenance; bare form prints the group help | no handler — `main()` rewrites `args.command = args.admin_command`, so every relocated verb keeps its old dispatch branch | via its subverb |
 | `apply` | after a config edit | reconcile running units with current config: re-render radiod fragments + firmware, regenerate the uploader manifest, restart what changed | `cmd_apply` → `lifecycle.py`, `commands/radiod_fragments.py`, `commands/radiod_firmware.py`, `commands/uploader.py`, `coordination.py` | yes (root + lock) |
 | `bringup` | first install | guided station bring-up from a catalog profile; `--with-optional` adds the discretionary set | `cmd_bringup` → `bringup.py` (`build_plan`), `catalog.py`, `coordination.py`, `site_profile.py`, `psws.py`; the plan's steps shell out to sub-`smd` calls, which is how `topology.py` is reached (`smd enable <comp>`) | yes (root) |
-| `component` | installer | per-component catalog + status: `list`, `install`, `update`, `add`, `remove`, `enable`, `disable` | dispatch branch in `main()` → `cmd_list`, `cmd_install`, `cmd_add`, `cmd_remove`, `cmd_enable`, `cmd_disable`; `catalog.py`, `installer.py` | `install`/`update`/`add`/`remove` do (root) |
+| `component` | installer | per-component catalog + status: `list`, `install`, `update`, `add`, `remove`, `enable`, `disable` | dispatch branch in `main()`: `list` and `update` both reach `cmd_list` (`update` sets `args.update=True`); `update`'s actual work is `cmd_list` → `_apply_updates` (pull each catalog repo per its version policy) → `_rebuild_component` per repo that advanced (`install.sh`/`uv sync`, or `make install` for `ka9q-radio`/`ka9q-web`) → `cmd_apply` (reconcile); `install`/`add`/`remove`/`enable`/`disable` → `cmd_install`, `cmd_add`, `cmd_remove`, `cmd_enable`, `cmd_disable`; `catalog.py`, `installer.py` | `install`/`update`/`add`/`remove` do (root) |
 | `config` | installer | show / migrate / init / render / edit station and per-client config; also `catalog-prune`, `backup`, `restore`, `uploads`, `register-radiod` | dispatch branch → `commands/config.py`, `commands/client_config.py`, `commands/radiod_config.py`, `catalog_prune.py`, `psws.py` | writing subverbs do (root) |
 | `disable` | operator | take a component offline reversibly — stop its units, clear the topology flag | `cmd_disable` → `topology.py`, `catalog.py` | yes (root) |
 | `doctor` | station-inward update | checkout health: ownership, venv skew, dirty trees; `--fix` repairs ownership only | `cmd_doctor` → `doctor.py` | `--fix` does (root) |

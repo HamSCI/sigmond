@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond b6ff371 on 2026-08-23 — code + commands run in the checkout
+> **Verified against:** sigmond b51280b on 2026-08-23 — code + commands run in the checkout
 > **Canonical for:** setting up and testing a development environment for the suite
 
 This page gets a fresh clone of `sigmond` to a state where you can run `smd`,
@@ -41,7 +41,18 @@ ka9q-python = { path = "../ka9q-python", editable = true }
 
 — so `uv sync` (or `scripts/dev-setup.sh`'s pip fallback) only finds a local,
 editable `ka9q-python` if it sits at `../ka9q-python` from this repo. Clone
-it as a sibling, not nested inside `sigmond/` or somewhere unrelated.
+it as a sibling, not nested inside `sigmond/` or somewhere unrelated. Get
+the layout wrong (e.g. a copy sitting in an unrelated scratch directory)
+and `uv sync` fails immediately with:
+
+```
+error: Failed to generate package metadata for `ka9q-python==3.24.0 @ editable+../ka9q-python`
+Caused by: Distribution not found at: file:///…/ka9q-python
+```
+
+— that `file:///` path is exactly `../ka9q-python` resolved from wherever
+the checkout actually sits, which is the tell: fix the layout (clone or
+symlink `ka9q-python` as a true sibling), not the command.
 
 **This is a *development* layout, not the one a running station uses.** A
 station's checkouts live at `/opt/git/sigmond/<name>`, owned by that
@@ -125,6 +136,18 @@ the run still reports green — the gap that let the TUI suite go
 unexercised in CI from June to August 2026 unnoticed. Installing the `tui`
 extra (either dev-venv path above) makes the banner go away.
 
+`tests/test_docs_links.py` needs the "Clone layout" section's sibling
+checkouts to actually be present, not just `ka9q-python` — it link-checks
+this repo's whole doc surface, and at least one page links across a repo
+boundary (`docs/STATION-NETWORK-CAPABILITIES.md` → `hf-timestd/docs/PHYSICS.md`).
+Clone (or symlink) `hf-timestd` as a sibling too, or that one test fails
+with `broken -> ../../hf-timestd/docs/PHYSICS.md` even though nothing is
+actually wrong with the link — it's a layout gap, not a doc defect (the
+real `/home/mjh/hamsci/repos/sigmond` checkout, a true sibling of
+`hf-timestd`, passes this test cleanly). The fix is the same as the
+`ka9q-python` case above: put the missing sibling where the test expects
+it.
+
 **What CI runs** (`.github/workflows/test.yml`): `pip install pytest
 textual`, then `PYTHONPATH=lib python -m pytest tests/ -q` on Python 3.11.
 Its comment records the trap: CI previously ran `python -m unittest
@@ -156,7 +179,9 @@ Four checks exist today and run against this repo's `docs/`, `README.md`,
   warn-only check that flags a page whose `Verified against` sha predates
   the last commit that actually changed its content: `python3
   scripts/docs-freshness.py docs README.md CONTRIBUTING.md CLAUDE.md`
-  (exits 0 unless run with `--strict`).
+  (exits 0 unless run with `--strict`). Always prints a summary line, even
+  clean — `docs-freshness: 0 stale page(s)` — so silence never has to be
+  read as "did nothing" instead of "ran and found nothing".
 
 All four run in CI via
 [`.github/workflows/docs-check.yml`](../../.github/workflows/docs-check.yml)

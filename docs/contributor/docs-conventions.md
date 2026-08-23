@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond b6ff371 on 2026-08-23 — docs
+> **Verified against:** sigmond b51280b on 2026-08-23 — docs
 > **Canonical for:** how docs are organised and kept true across the HamSCI/DASI2 repos
 
 ## 1. Where things live
@@ -168,7 +168,9 @@ named.
 `docs-freshness.py` warns when a page's `Verified against:` sha predates
 the last commit that actually changed its content (bumping the sha alone
 doesn't count) — warn-only by design (§7 of the design spec: "staleness is
-visible, not enforced"), so it exits 0 unless run with `--strict`.
+visible, not enforced"), so it exits 0 unless run with `--strict`. It
+always prints a one-line summary (`docs-freshness: N stale page(s)`), on a
+clean run too, so no output never has to be read as "did nothing."
 
 The `docs-check` GitHub Actions workflow
 (`.github/workflows/docs-check.yml`, reusable as
