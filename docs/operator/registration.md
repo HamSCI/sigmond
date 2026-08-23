@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 0fd90dd on 2026-08-23 — live b4 + dasi002 (smd psws status, smd status uploads section) + code/docs
+> **Verified against:** sigmond 0fd90dd on 2026-08-23 — live b4 + dasi002 (smd psws status, smd status "PSWS upload not finished" block, smd config uploads status, smd admin instance list) + code/docs
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -38,11 +38,16 @@ do not edit that file by hand and you do not repeat yourself per program.
 | The wizard asked | What it becomes | Who uses it |
 |---|---|---|
 | **Reporter ID** (e.g. `AC0G/B4`) | `[reporters] reporter_id` | wsprnet, wsprdaemon — this *is* your identity there |
-| **Callsign** (e.g. `AC0G`) | `[station] callsign` | pskreporter — the bare call, no suffix |
 | **Grid square** (e.g. `EM38ww`) | `[station] grid_square` | all four; also the station's own coordinates |
-| **Station designator** | `[host] hostname` | names the VM and the radio's channels |
+| **Station designator** | `site-profile.toml` `[host].hostname` | names the VM and the radio's channels |
 | **PSWS station + instrument IDs** *(optional, skippable)* | `[psws]` and `[psws.instruments]` | PSWS only |
 | **Remote access** *(optional)* | the RAC tunnel | your fleet admin, not a data path |
+
+Note what is **not** on that list: the wizard never asks for your callsign. It
+takes the part of the reporter ID before the `/` — `AC0G/B4` gives `AC0G`
+(source: `scripts/proxmox/sigmond-wizard.sh`, `CALLSIGN="${REPORTER%%/*}"`) —
+and stores it as `[station] callsign`. That derived, unsuffixed call is exactly
+what pskreporter wants (§3), which is why you never typed it twice.
 
 If you gave it PSWS IDs, it also **generated your PSWS upload key** —
 `/etc/hs-uploader/keys/id_ed25519_host` — and armed the login banner that keeps
@@ -131,7 +136,9 @@ Or, again from the station — `[VM]`:
 smd watch uploads
 ```
 
-The `ft8=` and `ft4=` counters in each line are what pskreporter is being sent.
+Lines from the PSK uploader carry `ft8=` and `ft4=` counters — that is what
+pskreporter is being sent. Not every line has them: WSPR cycle lines and PSK
+lines are two different shapes sharing one screen.
 
 > **Don't poll pskreporter's query API.** It is rate-limited, and a script that
 > checks it in a loop will get you blocked. Look at the web page, or use
@@ -151,8 +158,10 @@ tries to upload, this happens by itself (source:
    station this is refused, because the gateway has never seen you.
 2. It automatically falls back to a plain FTP drop that carries your reporter
    ID **and your public key** alongside the data.
-3. The gateway registers that key for you and, from the next cycle onward, the
-   station switches to the secure path on its own.
+3. The gateway registers that key for you and the station switches to the
+   secure path on its own. That provisioning is **gateway-paced and can take a
+   while** — it is not something your station controls or can hurry
+   (`hs-uploader/docs/PER-SITE-SETUP.md` §4.3).
 
 **Your data flows the whole time** — during step 2 as much as after step 3.
 There is nothing for you to do at any point, and nothing to check up on unless
@@ -179,8 +188,8 @@ time-standard dataset from `hf-timestd`, and the magnetometer day-file from
 files data under IDs it issues to you, and it accepts uploads only from a key
 you have registered. Hence a form.
 
-This is the only part of registration with an outside dependency, so start it
-early — a HamSCI admin has to approve the account.
+This is the only part of registration with an outside dependency — a portal you
+do not control — so start it early rather than last.
 
 ### 5a. Get the IDs (in a browser, once)
 
@@ -191,10 +200,15 @@ early — a HamSCI admin has to approve the account.
    **instrument ID**, a plain number. AC0G/B4 has two: `171` for GRAPE and
    `372` for the magnetometer.
 
-> The portal address `smd` prints is `https://pswsnetwork.eng.ua.edu/`
-> (source: `lib/sigmond/psws.py`, `PSWS_PORTAL`). Some older HamSCI pages give
-> `pswsnetwork.caps.ua.edu` instead; if one address does not load, try the
-> other, and tell your fleet admin which one worked.
+> **Two addresses are in circulation, and the HamSCI docs do not agree on which
+> is the portal.** Everything on the station says
+> `https://pswsnetwork.eng.ua.edu/` — that is what `smd psws enroll` prints
+> (source: `lib/sigmond/psws.py`, `PSWS_PORTAL`). But
+> `hf-timestd/docs/PSWS_SETUP_GUIDE.md` presents that as the *server* and gives
+> `pswsnetwork.caps.ua.edu` as a separate *registration portal*, and a third
+> HamSCI page gives `pswsnetwork.org`. If one does not load, try the others —
+> and please tell your fleet admin which one worked, so this paragraph can be
+> deleted (docs-gap row 9).
 
 If you already gave these to the wizard, skip to 5b. If not, put them in from
 the **host** with `sigmond-setup --reconfigure` (§1) — that is easier and safer
@@ -218,6 +232,19 @@ public key (one long `ssh-ed25519 AAAA…` line), and the portal steps. Copy tha
 whole line — no line breaks, nothing trimmed — and paste it into the SSH-key
 field for your **site** on the PSWS portal.
 
+`enroll` and `verify` write files that belong to root, so `smd` re-runs itself
+under `sudo` and **you should expect a password prompt** (source: `bin/smd`,
+`_need_root()`). That is normal, not a failure. `smd psws status` and the login
+banner never ask.
+
+> **If you find hf-timestd's `PSWS_SETUP_GUIDE.md`, it will tell you to do
+> something else** — generate a per-recorder RSA key, then push it with
+> `ssh-copy-id` and a TOKEN from the portal. That is the **older** per-recorder
+> procedure. On an appliance station it is superseded: one station key
+> (`/etc/hs-uploader/keys/id_ed25519_host`) serves every PSWS product, and
+> `smd psws enroll` / `smd psws verify` are the whole flow. Follow this page.
+> (The two documents contradicting each other is docs-gap row 10.)
+
 Nothing is lost while you wait to do this. The recorders keep recording and the
 day's files queue up locally; they upload once the key is accepted.
 
@@ -230,7 +257,7 @@ smd psws verify
 ```
 
 This makes one real login to PSWS as your station ID. On success it prints
-`✓ SFTP login OK as S0000NN@pswsnetwork.eng.ua.edu`, records the fact in
+`✓ SFTP login OK as S000NNN@pswsnetwork.eng.ua.edu`, records the fact in
 `/etc/sigmond/.psws-verified`, and the login banner stops nagging. If it fails
 it tells you which of the two ways it failed:
 
@@ -285,6 +312,11 @@ produces no spots no matter how healthy your station is.
 | **WSPR copies** → wsprdaemon.org | `smd watch uploads`, the `wsprdaemon=` counter | same cycle as wsprnet; the very first ever may go the slower FTP route until the gateway registers you (§4) |
 | **GRAPE daily dataset** → PSWS | your site's page on the PSWS portal | next day — packaged and uploaded at **01:00 UTC** for the previous UTC day |
 | **Magnetometer daily file** → PSWS | your site's page on the PSWS portal | next day — uploaded at **03:00 UTC** |
+
+The two PSWS rows are vaguer than the rest on purpose: **nobody has yet written
+down what the portal's data view actually looks like** or how to navigate to
+your site's files (docs-gap row 8). If you get an account and work it out, tell
+your fleet admin so those two cells can name the page properly.
 
 The two daily timers are real and checkable — `[VM]`:
 
@@ -351,7 +383,7 @@ written)*, under the heading named below.
 
 | Symptom | First move | Then see |
 |---|---|---|
-| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — if it prints nothing at all, the problem is decoding, not registration; if it prints `wsprnet=posted:0`, check the reporter ID in `smd status` | troubleshooting.md → *No spots on wsprnet* |
+| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — if it prints nothing at all, the problem is decoding, not registration; if it prints `wsprnet=posted:0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | troubleshooting.md → *No spots on wsprnet* |
 | **Nothing on pskreporter** | Search your callsign **as receiver**, not sender (§3) — that is the answer more often than not | troubleshooting.md → *Nothing on pskreporter* |
 | **Uploads pending, and the number keeps growing** | `smd config uploads status` first (§6) — uploads may be off by policy | troubleshooting.md → *Uploads pending and growing* |
 | **PSWS not verified** | `smd psws verify` and read which of the two failures it reports (§5c) | troubleshooting.md → *PSWS not verified* |
