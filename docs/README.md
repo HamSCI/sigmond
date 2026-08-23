@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 9f42681 on 2026-08-23 — code
+> **Verified against:** sigmond 78d9a8b on 2026-08-23 — code
 > **Canonical for:** the front door
 
 Pick the door that matches you. Each path is self-contained; you will be
@@ -11,7 +11,7 @@ told when (and only when) you need something from another path.
 ## I host a station (amateur radio operator)
 You have, or want, a Sigmond appliance: a small PC running the HamSCI
 receiver that uploads WSPR / FT8 / timing / magnetometer data for science.
-→ **[Operator guide](operator/README.md)** *(Phase 1 — until then use [sigmond-appliance/INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md))* — shopping list, install, registration, the weekly check, what to do when it breaks, what not to touch.
+→ **[Operator guide](operator/README.md)** — the shopping list, the install, getting registered with the upload networks, the weekly check, remote access, troubleshooting, what not to touch, and a glossary of every term used.
 
 ## I want to record a signal (scientist / event responder)
 You have a signal in mind (a beacon, an eclipse experiment, a time standard)

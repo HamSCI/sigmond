@@ -47,7 +47,10 @@ block immediately under the H1:
 current: `draft` is being written, `current` is actively maintained,
 `shipped` is a design note whose design landed and is still the best
 explanation, `historical` lives in `archive/` and may be wrong today,
-`pointer` means "look elsewhere." `Verified against` records **how** the
+`pointer` means "look elsewhere." A `Status` value may carry one
+parenthetical qualifier narrowing or explaining it — e.g. `shipped (stages
+0–3)`, `draft (plan, not executed)`, `current (working file)` — rather than
+inventing a new status word. `Verified against` records **how** the
 page was last checked — against a live host, against the code, or "not
 re-verified" if nobody has confirmed it recently — so a reader can judge
 trust without an automated staleness check. `Canonical for` names the one

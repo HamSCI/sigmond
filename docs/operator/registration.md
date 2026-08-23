@@ -350,10 +350,13 @@ smd psws status
 > `finish:  smd config hf-timestd edit   (records locally regardless)`.
 > (You will also see the same verb written the other way round —
 > `smd config edit hf-timestd` — in `smd component list`'s upload-readiness
-> block. Both orders work — `smd config` has an `edit` subcommand that takes a
-> client name *and* a per-client subcommand that takes `edit` (`smd config
-> --help`, read live on b4 2026-08-23) — they are the same operation, and
-> neither is yours to run.) Do
+> block. Both orders parse, but they are **two different flows**: `smd config
+> hf-timestd edit` is the recorder-first form and runs the guided PSWS
+> key/station-id wizard (`psws.cmd_edit`); `smd config edit hf-timestd` is the
+> verb-first form and runs the client's own `deploy.toml [contract.config]`
+> edit entry point (`cmd_config_edit_client`) — `bin/smd`'s `config_command`
+> dispatch routes them to different functions (read live on b4 2026-08-23).
+> Neither is yours to run unless your fleet admin says so.) Do
 > **not** run it: `smd config <client> edit` opens and rewrites a client's own
 > configuration file, which is your fleet admin's job, not yours
 > ([do-not-touch.md](do-not-touch.md#the-table)). The operator path for putting
