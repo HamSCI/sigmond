@@ -35,7 +35,7 @@ Do these in order. Only steps 1 and 2 need you physically at the machine.
 | 1. Buy the parts | [hardware.md](hardware.md) | an evening of shopping |
 | 2. Install from the USB stick | [install.md](install.md) | ~45 min |
 | 3. Register your station's uploads | [registration.md](registration.md) | 30 min + portal waits |
-| 4. Learn what "healthy" looks like | day-2.md *(being written)* | 15 min |
+| 4. Learn what "healthy" looks like | [day-2.md](day-2.md) | 15 min |
 | 5. (optional) Let the fleet admin reach it | remote-access.md *(being written)* | 10 min |
 | When it breaks | troubleshooting.md *(being written)* | — |
 | Before you touch anything | do-not-touch.md *(being written)* | — |
@@ -61,14 +61,15 @@ all are `[VM]`; the host matters only for the Proxmox GUI and a dead box.
 
 ## The weekly check
 
-Five minutes a week; day-2.md *(being written)* defines it properly, in four
+Five minutes a week; [day-2.md](day-2.md) defines it properly, in four
 steps. The one command to know now — `[VM]`, on the decoder VM:
 
 ```bash
 smd status
 ```
 
-Most lines should be ticked; a few ✗ and ⚠ are normal, and day-2.md says which.
+Most lines should be ticked; a few ✗ and ⚠ are normal, and
+[day-2.md](day-2.md) says which.
 If a whole client is missing, or `radiod` is not active, ask. Then the web
 pages, from any computer on your network: `http://<VM address>:8081` (live
 receiver), `http://<VM address>:8000` (timing dashboard) and

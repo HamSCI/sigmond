@@ -17,4 +17,4 @@ boot is up and the console asks for it; you then answer the setup questions and
 remove the stick for good when told. Keep it until then.
 
 When INSTALL.md §9 says "check it's alive", come back here and continue with
-day-2.md *(being written)*.
+[day-2.md](day-2.md).
