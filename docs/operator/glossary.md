@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 63e8cbb on 2026-08-23 — live b4 + dasi002 (smd --help, smd status/version) + code/docs
+> **Verified against:** sigmond 63e8cbb on 2026-08-23 — live b4 + dasi002 (smd status/version/doctor, smd psws status, smd admin rac status, smd update dry run, smd watch --help) + code/docs
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;
@@ -21,7 +21,7 @@ if it isn't, that is a bug in the docs — tell your fleet admin.
 | **host** (**PM**, **Proxmox**) | The bare machine itself, running the Proxmox virtualisation system; named `<designator>-PM`, web GUI on port 8006. Commands tagged `[host]` run here. |
 | **ka9q-web** | The live receiver web page on the VM, port 8081: waterfall plus the channel list. The quickest "is the radio hearing anything?" check. |
 | **multicast** | How `radiod` hands each channel to the recorders — one stream on your local network that many programs subscribe to at once. It is why the station needs wired Ethernet; Wi-Fi handles multicast badly. |
-| **PPS** | "Pulse per second", the once-a-second tick a GPS receiver produces. The PPS the GPSDO reports over USB is a liveness indicator only, never a timing reference. |
+| **PPS** | "Pulse per second", the once-a-second tick a GPS receiver produces. The edge statistics `gpsdo-monitor` reports over USB are a liveness/health check only (OS-millisecond), not precision metrology — but hf-timestd does use the GPSDO's GPS/PPS as timing tier T5. |
 | **pskreporter** | [pskreporter.info](https://pskreporter.info) — the public database your FT8 and FT4 *spots* are uploaded to. |
 | **PSWS** | HamSCI's Personal Space Weather Station network and its [data portal](https://pswsnetwork.eng.ua.edu/), where the daily time-standard and magnetometer products land. Needs a station ID plus per-instrument IDs. |
 | **RAC** | Remote Access Channel — an outbound tunnel that lets your fleet admin reach the station from outside your router with no ports opened and no firewall changes. Optional. |
@@ -33,8 +33,8 @@ if it isn't, that is a bug in the docs — tell your fleet admin.
 | **sink** | The shared database `/var/lib/sigmond/sink.db` that every recorder writes into and the uploader reads from. It is the station's source of truth for what was heard. |
 | **smd** | The single command that runs the station ("SigMonD") — `smd status`, `smd doctor`, `smd version`. Run it as yourself inside the VM; it refuses to run under `sudo`. |
 | **spot** | One report that you heard one station, at one time, on one frequency. The unit of WSPR and FT8/FT4 data. |
-| **SSRC** | The 32-bit stream id `radiod` assigns to each channel; it shows up in status output and logs. It is assigned, never derived from the frequency. |
-| **timing tier** (**T1–T6**) | How good the station's clock evidence is right now — T6 (TS-1 injector, nanosecond class) is best, T5 is the GPSDO's GPS/PPS, lower tiers come from HF broadcasts. `smd status` prints the current tier (b4 showed T4, dasi002 T3, 2026-08-23). |
+| **SSRC** | The 32-bit stream id `radiod` assigns to each channel; it shows up in status output and logs. `radiod` assigns it, so don't try to work it out from the frequency. |
+| **timing tier** (**T1–T6**) | How good the station's clock evidence is right now, best first: T6 TS-1 injector (ns class), T5 the GPSDO's GPS/PPS over USB, T4 a LAN GPS timeserver over NTP, T3 HF broadcast fusion (WWV/WWVH/CHU), T2 internet NTP, T1 GPSDO rate only (source: `hf-timestd/docs/METROLOGY.md` §"Axis T"). `smd status` prints the current tier — b4 T4, dasi002 T3 on 2026-08-23. |
 | **TS-1** | The Turn Island Systems time injector, optional. It feeds a GPS-locked signal into the receive path so the station can measure its own clock at tier T6. |
 | **wizard** (`sigmond-setup`) | The setup questions asked on first boot — reporter ID, grid square, station name, PSWS IDs. Rerun it from the host as `sigmond-setup --reconfigure` to fix an answer. |
 | **wsprdaemon** | [wsprdaemon.org](https://wsprdaemon.org) — the aggregation service that receives a copy of the spots for fleet-wide analysis. |
