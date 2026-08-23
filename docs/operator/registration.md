@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 0fd90dd on 2026-08-23 — live b4 + dasi002 (smd psws status, smd status "PSWS upload not finished" block, smd config uploads status, smd admin instance list) + code/docs
+> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -99,6 +99,14 @@ antenna — `AC0G/B4`, `AC0G/B1`, `AC0G/S` are three different reporters at one
 callsign — so that a site with several receivers doesn't blur them together
 (source: `hs-uploader/docs/PER-SITE-SETUP.md` §2).
 
+**On a testbed it may not be a callsign at all.** A station that is not meant to
+put data in the public databases — no antenna, or still being built — can be
+given a plain [designator](glossary.md) instead: our own DASI002 reports
+`DASI002`, with no callsign anywhere in it, and `smd admin instance list` shows
+that for all three of its recorders. That is legitimate and is **not** a wizard
+answer to go and correct. A real station's reporter ID is `CALL` or
+`CALL/SUFFIX`; whatever `smd admin instance list` prints is what to search on.
+
 **How to confirm:** go to [wsprnet.org](https://wsprnet.org), open the
 **Database** tab, and search for your reporter ID in the *Reporter* field. Rows
 should appear within about fifteen minutes of the station being up
@@ -113,7 +121,44 @@ smd watch uploads
 
 That prints one line per two-minute WSPR cycle, e.g.
 `cycle=21:48 shipped wsprdaemon=199 wsprnet=posted:75/added:74 ft8=312 ft4=0`.
-Press Ctrl-C to stop it; it changes nothing.
+It keeps printing until you press Ctrl-C; it changes nothing.
+
+#### When it says "no active uploader"
+
+There is a **fourth** answer, and it is the one you get on a station whose
+recorders are switched off. It **returns immediately** — there is nothing to
+Ctrl-C, and the command has not failed:
+
+```text
+  ✗  uploads-watch: no active uploader on this host (wspr-uploader.service,
+     wspr-recorder@*, psk-recorder@*, wd-upload-hs@* all inactive).
+```
+
+It means exactly what it says: none of the units that could be shipping spots
+are running on this station, so there is nothing for the watcher to watch. On a
+station like DASI002 that is **correct and deliberate** — no HF antenna, so the
+spot recorders are not [enabled](glossary.md) and uploads are off by policy
+(§6). Confirm which it is — `[VM]`:
+
+```bash
+smd config uploads status
+smd component list
+```
+
+`⚠ uploads: DISABLED BY POLICY` in the first, or a LIFECYCLE of
+`binary, on PATH` / `configured` rather than `enabled, running` for
+`wspr-recorder` and `psk-recorder` in the second, and you have your answer:
+nothing is wrong, this station is not meant to be uploading spots
+([day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
+If instead uploads are **enabled** and you still get this line, that is a real
+finding — send it to your fleet admin.
+
+The four unit names in the message are internal plumbing and appear nowhere else
+in these pages: `wspr-uploader.service` is a retired name still checked for,
+`wd-upload-hs@*` is the shipping service, and the two `@*` recorder patterns are
+the per-reporter recorder instances. That an operator-facing message names units
+no operator page explains is
+[docs-gap ledger row 27](../contributor/docs-gap-ledger.md).
 
 ---
 
@@ -138,7 +183,10 @@ smd watch uploads
 
 Lines from the PSK uploader carry `ft8=` and `ft4=` counters — that is what
 pskreporter is being sent. Not every line has them: WSPR cycle lines and PSK
-lines are two different shapes sharing one screen.
+lines are two different shapes sharing one screen. If it returns at once with
+`✗ uploads-watch: no active uploader on this host`, see
+[when it says "no active uploader"](#when-it-says-no-active-uploader) — that is
+a station with its recorders switched off, not a fault.
 
 > **Don't poll pskreporter's query API.** It is rate-limited, and a script that
 > checks it in a loop will get you blocked. Look at the web page, or use
@@ -175,7 +223,10 @@ smd watch uploads
 
 A number bigger than zero means the cycle shipped. The gateway side of it (has
 wsprdaemon.org actually got your rows?) is not visible from your station; ask
-your fleet admin, who can query the collector directly.
+your fleet admin, who can query the collector directly. An immediate
+`✗ uploads-watch: no active uploader on this host` means the recorders are not
+running here at all —
+[when it says "no active uploader"](#when-it-says-no-active-uploader).
 
 ---
 
@@ -274,8 +325,21 @@ smd psws status
 
 `✓ key verified <timestamp>` is the finish line for registration.
 
-> **One warning to expect and ignore.** `smd status` may still print a
-> `━━━ PSWS upload not finished ━━━` block naming an SSH key under
+> **The remedy that block prints is not the operator's path.** Each line of the
+> `━━━ PSWS upload not finished ━━━` block ends with
+> `finish:  smd config hf-timestd edit   (records locally regardless)`. Do
+> **not** run it: `smd config <client> edit` opens and rewrites a client's own
+> configuration file, which is your fleet admin's job, not yours
+> ([do-not-touch.md](do-not-touch.md#the-table)). The operator path for putting
+> PSWS ids in is the one in §5a — `sigmond-setup --reconfigure` from the
+> `[host]`, pressing Enter through the answers that are already right. The
+> parenthesis is the useful half: *records locally regardless* means nothing is
+> being lost while the ids are missing. That `smd status` hands the operator a
+> command the operator guide forbids is
+> [docs-gap ledger row 28](../contributor/docs-gap-ledger.md).
+>
+> **And one warning to expect and ignore.** `smd status` may still print that
+> block naming an SSH key under
 > `/home/timestd/.ssh/` or `/etc/mag-recorder/keys/` even after
 > `smd psws status` says verified. Those are the paths of an older
 > per-recorder key scheme; today one station key serves everything. If
@@ -318,11 +382,26 @@ down what the portal's data view actually looks like** or how to navigate to
 your site's files (docs-gap row 8). If you get an account and work it out, tell
 your fleet admin so those two cells can name the page properly.
 
-The two daily timers are real and checkable — `[VM]`:
+The daily timers are real and checkable — `[VM]`:
 
 ```bash
-systemctl list-timers grape-daily.timer mag-recorder-upload.timer
+systemctl list-timers --all grape-daily.timer mag-recorder-upload.timer
 ```
+
+Those are the correct names (verified live on both fleet stations, 2026-08-23).
+On b4, which has a magnetometer, **both** rows appear —
+`grape-daily.timer → grape-daily.service` at 01:0x UTC and
+`mag-recorder-upload.timer → mag-recorder-upload.service` at 03:0x UTC.
+
+⚠ **On a station with no working magnetometer only `grape-daily.timer` is
+listed, and systemd says nothing about the other one.** dasi002 printed exactly
+one row and `1 timers listed.` — no error, no mention of the name it could not
+show. The unit file is there (`systemctl list-unit-files` finds
+`mag-recorder-upload.timer`), it simply is not loaded on a station where
+`mag-recorder` is not running. So a missing second row means "no magnetometer
+here", not "the timer is broken". If you *do* have an RM3100 and only one row
+appears, that is worth reporting — start at
+[troubleshooting.md → *Magnetometer flat line, or mag-recorder says failed*](troubleshooting.md#magnetometer-flat-line-or-mag-recorder-says-failed).
 
 So a station finished on Tuesday afternoon shows spots the same afternoon and
 its first PSWS products on Wednesday. Don't judge PSWS on day one.
@@ -342,6 +421,15 @@ its first PSWS products on Wednesday. Don't judge PSWS on day one.
 > changing it. The station's 5-minute [heartbeat](glossary.md) is never subject
 > to this switch, so a station with uploads off still shows up on the fleet
 > board.
+>
+> On a station that has not enrolled in PSWS the command also prints one or more
+> lines like `uploader-manifest: skipping pipeline grape-psws (hf-timestd) —
+> unresolved identity: instrument_id, station_id`. Read that as: *"I know how to
+> ship this product, but I have not been told which PSWS ids to file it under, so
+> I am leaving it alone."* A **pipeline** is one product-to-destination route
+> (`grape-psws`, `mag-psws`), and **unresolved identity** names the ids that are
+> missing. One line per product you have not enrolled; they disappear as §5 gets
+> finished, and the recorder keeps recording locally either way.
 
 ---
 
@@ -383,7 +471,7 @@ yourself; the full diagnosis for each lives in
 
 | Symptom | First move | Then see |
 |---|---|---|
-| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — if it prints nothing at all, the problem is decoding, not registration; if it prints `wsprnet=posted:0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
+| **No spots on wsprnet** after 30 minutes | `smd watch uploads` — three answers to tell apart. If it **returns at once** with `✗ uploads-watch: no active uploader on this host`, this station's recorders are switched off and zero spots is expected ([above](#when-it-says-no-active-uploader)). If it sits there printing **nothing at all**, the problem is decoding, not registration. If it prints `wsprnet=posted:0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
 | **Nothing on pskreporter** | Search your callsign **as receiver**, not sender (§3) — that is the answer more often than not | [troubleshooting.md → *Nothing on pskreporter*](troubleshooting.md#nothing-on-pskreporter) |
 | **Uploads pending, and the number keeps growing** | `smd config uploads status` first (§6) — uploads may be off by policy | [troubleshooting.md → *Uploads pending and growing*](troubleshooting.md#uploads-pending-and-growing) |
 | **PSWS not verified** | `smd psws verify` and read which of the two failures it reports (§5c) | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |

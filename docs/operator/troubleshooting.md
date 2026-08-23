@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 2d5ea11 on 2026-08-23 — live b4 + dasi002 (smd status/doctor/version, df -h, journal/unit names via systemctl list-units, smd watch --help, smd admin log --help) + code/docs
+> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** symptom-first troubleshooting of an appliance station
 
 Start with the symptom you can actually see, not with a theory. Every section
@@ -45,7 +45,8 @@ Read them in this order:
 | What you saw | Go to |
 |---|---|
 | `radiod@<designator>.service` is **not** `active` | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
-| A unit says `failed` | [After a power cut everything is back except one client](#after-a-power-cut-everything-is-back-except-one-client) |
+| `mag-recorder.service` says `failed` | [Magnetometer flat line, or mag-recorder says failed](#magnetometer-flat-line-or-mag-recorder-says-failed) — start there even with no power cut; on a station with no RM3100 this is the normal state |
+| Any **other** unit says `failed` | [After a power cut everything is back except one client](#after-a-power-cut-everything-is-back-except-one-client) — that is the general "one unit is down" tree, whether or not you lost power |
 | `df -h /` is 80 % or more | [Disk filling up](#disk-filling-up) |
 | The waterfall is blank or empty | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
 | No page loads at all | [Web pages don't load but ssh works](#web-pages-dont-load-but-ssh-works) |
@@ -173,11 +174,26 @@ for about three minutes.
 smd watch uploads
 ```
 
-*Good* looks like one line per two-minute cycle, e.g.
-`cycle=21:48 shipped wsprdaemon=199 wsprnet=posted:75/added:74 ft8=312 ft4=0`.
-*Bad* is either `wsprnet=posted:0` (the station is shipping, but zero WSPR spots
-were found) or **nothing printed at all for more than five minutes** (nothing is
-reaching the uploader). Ctrl-C stops it; it changes nothing.
+It follows the uploader until you press Ctrl-C; it changes nothing. There are
+**four** answers:
+
+| What you see | What it means |
+|---|---|
+| One line per two-minute cycle, e.g. `cycle=21:48 shipped wsprdaemon=199 wsprnet=posted:75/added:74 ft8=312 ft4=0` | *Good.* The station is shipping. |
+| `wsprnet=posted:0` on those lines | The station is shipping but found zero WSPR spots — empty bands, or you are searching the wrong reporter ID. |
+| **Nothing printed at all** for more than five minutes | Nothing is reaching the uploader; the problem is upstream of uploading. |
+| It **returns immediately** with `✗ uploads-watch: no active uploader on this host (wspr-uploader.service, wspr-recorder@*, psk-recorder@*, wd-upload-hs@* all inactive).` | The spot recorders and uploaders are **not running on this station** — usually because they were deliberately switched off (no antenna, or a station still being built). This is DASI002's answer, and it is correct there. Nothing has failed and there is nothing to Ctrl-C. |
+
+That fourth answer is the one most likely to be mistaken for a crash. Confirm it
+with the next two commands: if `smd config uploads status` says
+`DISABLED BY POLICY`, or `smd component list` shows `wspr-recorder` and
+`psk-recorder` at LIFECYCLE `binary, on PATH` rather than `enabled, running`,
+then this station is not meant to be uploading spots
+([registration.md → *when it says "no active uploader"*](registration.md#when-it-says-no-active-uploader);
+[day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
+If uploads are **enabled** and you still get it, that is a real finding for your
+fleet admin. The four unit names it lists are internal plumbing and appear
+nowhere else in these pages — [docs-gap ledger row 27](../contributor/docs-gap-ledger.md).
 
 Then confirm which identity you should be searching — `[VM]`:
 
@@ -206,7 +222,9 @@ answer. *Bad, but deliberate:*
   either the bands are empty or you are searching the wrong reporter ID. Search
   the one `smd admin instance list` printed.
 - Nothing printed at all → the problem is upstream of uploading. Go to
-  [Spots stopped](#spots-stopped-were-fine-before).
+  [Spots stopped](#spots-stopped-were-fine-before). (Only if it **sat there**
+  silently. An *immediate* `✗ … no active uploader on this host` is the fourth
+  row of the table above, and does not belong on that path.)
 - `DISABLED BY POLICY` → **do not turn it back on yourself.** Somebody set that
   for a reason ([registration.md §6](registration.md#6-confirming-everything-flows)).
   Ask your [fleet admin](glossary.md).
@@ -650,14 +668,27 @@ For the reason, read the client's own file log — `[VM]`:
 smd admin log mag-recorder --files
 ```
 
+**It follows the log until you press Ctrl-C; it changes nothing.** Like
+`tail -f`, it prints what is there and then waits for more, so a terminal that
+appears to hang is the command working. Press Ctrl-C when you have read enough.
+
 DASI002 answers, over and over:
 
 ```text
 ERROR:mag_recorder.daemon:config still at template placeholders
-  (station.psws_station_id=<YOUR_PSWS_STATION_ID>) — run `mag-recorder config init` … exiting EX_CONFIG
+  (station.psws_station_id=<YOUR_PSWS_STATION_ID>) — run `mag-recorder config init`
+  (or `smd config init mag-recorder`) before starting; exiting EX_CONFIG
 ```
 
 That is "no magnetometer was ever set up here," not "the hardware died."
+
+⛔ **Do not run what that message tells you to run.** The line ends by naming
+`mag-recorder config init` / `smd config init mag-recorder`: those write a
+client's configuration file and belong to your fleet admin, not to you
+([do-not-touch.md](do-not-touch.md#the-table)). The message is addressed to
+whoever installs magnetometers, and it prints on every start whether or not this
+station has a sensor. On a station with no RM3100 the correct action is
+**nothing** — see *What to do* below.
 
 For a station that *does* have a sensor, read the last two samples it wrote —
 `[VM]`:
@@ -730,6 +761,29 @@ df -h /
 
 Live on 2026-08-23: b4 at **52 %** (126 G of 252 G), DASI002 at **86 %**
 (201 G of 245 G).
+
+Then find out **what** is using it, so your message to your fleet admin says more
+than a percentage. This is read-only, changes nothing, and is safe to run any
+time — `[VM]`:
+
+```bash
+du -xh --max-depth=2 /var/lib /home /var/log 2>/dev/null | sort -h | tail -15
+```
+
+It prints the fifteen largest directories two levels down in the three places
+station data actually lives. `-x` keeps it on the root filesystem; the
+`2>/dev/null` hides the "Permission denied" lines you will get for directories
+your account cannot read — **the result is therefore incomplete but still
+useful**, and it is the best an operator account can do. On b4 the biggest entry
+by far is the timing client's own recording buffer under `/var/lib/timestd`,
+which is expected ([day-2.md §3](day-2.md#3-disk--df--h-) has the measured
+rate). **Paste the whole output to your fleet admin** — an unexpected name near
+the top is exactly cause #2, and it is what they need to see.
+
+⚠ There is no `smd` verb for this. `smd admin storage` is **not** a read-only
+report — its three subcommands (`migrate-to-sqlite`, `trim`, `tune-timestd`)
+change the station — so do not reach for it (`smd admin storage --help`, read
+live on b4, 2026-08-23).
 
 **What the numbers mean** —
 [day-2.md §3](day-2.md#3-disk--df--h-) owns this table and is the canonical
@@ -962,6 +1016,10 @@ systemctl status <unit> --no-pager
 smd admin log <client> --files
 ```
 
+`smd admin log … --files` **follows the log until you press Ctrl-C; it changes
+nothing** — a terminal that seems to hang after the last line is the command
+waiting for more output, not a crash.
+
 ⚠ **`journalctl -u <unit>` will not work for you, and its silence is
 misleading.** Neither operator account is in the `adm` or `systemd-journal`
 group — both groups are empty on b4 — so `journalctl` answers *"No journal files
@@ -1048,7 +1106,7 @@ which image you *started from*, not what you are running now —
 | Anything about spots or uploads | `smd config uploads status`, and a minute of `smd watch uploads` |
 | PSWS | `smd psws status` |
 | GPS or timing | `smd watch gpsdo --once` |
-| A failed unit | `systemctl --failed --no-pager`, then `systemctl status <unit> --no-pager` and `smd admin log <client> --files` |
+| A failed unit | `systemctl --failed --no-pager`, then `systemctl status <unit> --no-pager` and `smd admin log <client> --files` (that last one follows the log until you press Ctrl-C; it changes nothing) |
 | Disk | `df -h /` |
 | Radio not found | `lsusb` |
 

@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 3e1a885 on 2026-08-23 — live b4 + dasi002 (`smd admin rac status` + subverb `--help` and sshd config in each VM; `sigmond-rac-host.service`, `/etc/sigmond/frpc-host.toml` and the `/etc/sigmond-appliance/rac-*` marks read-only on both Proxmox hosts; frpc channel API and the wizard summary on b4's host) + code/docs
+> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, on/off, how the admin connects
 
 The setup wizard asked you for one decision about this — it ends
@@ -14,6 +14,16 @@ that someone is, and how to switch it off. Words you don't recognise are in the
 
 **RAC** stands for *Remote Access Channel*. It is optional, it is off if you
 said No, and turning it off later is one command.
+
+⚠ **Two things to know before you read on.** First: **from inside the decoder
+`[VM]` there is no way to tell whether remote access is enabled on your
+station** — every check on this page runs on the `[host]`, and the one VM-side
+verb answers about a different tunnel entirely (§4). Second, and consequently:
+**you need the host address**, which prints on the station's monitor at install
+time and is very hard to recover afterwards, because the keyboard stops working
+by design once the install is done. Write it down then
+([install.md](install.md)); if you did not, your fleet admin or your router's
+DHCP list can find it for you.
 
 ---
 
@@ -83,7 +93,10 @@ four ports are exactly those bases plus that station's RAC number.)
 The **RAC number** is bookkeeping, not identity — the gateway assigns a free one
 during the install (except on the HamSCI-direct rungs, where it is derived from
 your DASI unit number instead: 220 + N, so DASI-001 is RAC #221), it is written
-to `/etc/sigmond-appliance/rac-number`, and it **sticks** across a later
+to `/etc/sigmond-appliance/rac-number` **on the `[host]`** — that file does not
+exist in the `[VM]`, where `/etc/sigmond-appliance/` holds only `manifest.txt`
+and `version` (checked live on both stations, 2026-08-23) — and it **sticks**
+across a later
 `sigmond-setup --reconfigure` so your ports never move (source:
 `sigmond-wizard.sh` header and `ask_rac()`, "the RAC number is sticky"; live on
 b4).
@@ -142,9 +155,11 @@ Enable remote access? [Y/n]
 of hardware at install time, the wizard also pressed the point — remote access
 is how somebody helps you finish the build once the missing part arrives.
 
-If it worked, the wizard's closing summary said so, and that summary is still on
-the host at `/root/sigmond-setup-summary.txt`. Real line from b4, with this
-station's number and ports masked — yours prints the actual digits:
+If it worked, the wizard's closing summary said so, and that summary is still at
+`/root/sigmond-setup-summary.txt` — **on the `[host]`, and readable only by
+`root`** (that is what `/root/` means), so it is `ssh root@<host address>` or
+nothing. Real line from b4, with this station's number and ports masked — yours
+prints the actual digits:
 
 ```text
  RAC:       #<your RAC number> live on gw2.wsprdaemon.org via wsprdaemon (secure) — VM ssh :3XXXX · VM web :4XXXX · host ssh :5XXXX · Proxmox UI :5XXXX (off: sigmond-setup --rac-off)
@@ -210,6 +225,13 @@ square, RAC number and PSWS registration all stick
 stops `sigmond-rac-host.service` and prints "tunnel is down, config kept";
 `--rac-on` re-enables it; both were read from the shipped script, **not** run on
 a live station.)
+
+**Nothing on this list can be run from the `[VM]`,** and that is the honest
+answer to "is my remote access working?" asked from a decoder-VM ssh session:
+you cannot tell from there. Not by design so much as by nobody having built it —
+there is no read-only host verb either, which is why the channel check above is a
+`curl` against frpc's own API
+([docs-gap ledger row 14](../contributor/docs-gap-ledger.md)).
 
 ### Ignore `smd admin rac` on an appliance station
 
@@ -318,7 +340,8 @@ journal entries at all* — the service is written to stay inert until its confi
 file exists (`ConditionPathExists=/etc/sigmond/frpc-host.toml` in
 `/etc/systemd/system/sigmond-rac-host.service`, read live on b4). So an empty
 `journalctl -u sigmond-rac-host` means "never set up", not "broken". The wizard's
-own summary is the place that says what happened — `[host]`:
+own summary is the place that says what happened — `[host]`, as `root` (the file
+lives on the host and is root-only):
 
 ```bash
 cat /root/sigmond-setup-summary.txt
@@ -342,7 +365,7 @@ wizard rather than in anything you can reach:
 
 Today the wizard tries a ladder of gateways, announces on the console which one
 answered, and falls back to `gw2.wsprdaemon.org` — b4's live
-`/etc/sigmond-appliance/rac-registrar` reads
+`/etc/sigmond-appliance/rac-registrar` (`[host]`, like `rac-number` above) reads
 `http://gw2.wsprdaemon.org:35737/register`, its recorded tier is
 `wsprdaemon (secure)`, and its four channels have been up since 2026-08-11. If
 `sigmond-setup --reconfigure` still fails, the answer is a newer image, not more

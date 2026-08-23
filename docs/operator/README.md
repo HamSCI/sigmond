@@ -2,12 +2,17 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 63e8cbb on 2026-08-23 — live b4 + dasi002 (smd status/version/doctor, smd psws status, smd admin rac status, smd update dry run, smd watch --help) + code/docs
+> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** the operator's table of contents
 
 You are hosting a *station*: one small computer that listens to the whole
 shortwave band, all the time, and sends what it hears to science. This page is
 the contents page; unfamiliar words are in the [glossary](glossary.md).
+
+> **About the "Verified against" line at the top of every page here:** it names
+> the commit *the page* was checked against, not your station. `smd version` on
+> your station will print different commits, and different pages here name
+> different ones — that is expected, not a warning sign.
 
 ## What you are signing up for (10-minute version)
 
@@ -55,6 +60,14 @@ VM after it and adds `-PM` for the host (source:
 `sigmond/scripts/proxmox/sigmond-wizard.sh`, `ask_names()`). Both addresses
 print on the station's monitor; one password unlocks both at first — change it
 with `passwd` in each ([INSTALL.md §10](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#10-logins--and-change-the-password)).
+
+⚠ **Write down BOTH addresses while the install is showing them — the host one
+especially.** After the first reboot the station's keyboard stops working on
+purpose (the USB ports go to the radio), so that screen is the last easy chance
+to read the host address. Several later steps — the Proxmox window, every
+remote-access check in [remote-access.md §4](remote-access.md#4-turning-it-on-off-and-checking-it--all-on-the-host) —
+run on the `[host]` and are simply unreachable without it. If you have already
+lost it, your fleet admin or your router's DHCP list can recover it.
 **Every command here is tagged `[host]` or `[VM]`** — the tag sits on the line
 above the command, never inside it, so a whole block is safe to copy. Nearly
 all are `[VM]`; the host matters only for the Proxmox GUI and a dead box.
@@ -70,8 +83,12 @@ smd status
 
 Most lines should be ticked; a few ✗ and ⚠ are normal, and
 [day-2.md](day-2.md) says which.
-If a whole client is missing, or `radiod` is not active, ask. Then the web
-pages, from any computer on your network: `http://<VM address>:8081` (live
+If a client **you expect to be enabled** has no block at all, or `radiod` is not
+active, ask. (`smd status` lists only *[enabled](glossary.md)* clients, so a
+client that is *[installed](glossary.md)* and deliberately switched off shows
+nothing and that is correct — `smd component list` is the command that shows
+both, see [day-2.md §1](day-2.md#installed-enabled-shown).)
+Then the web pages, from any computer on your network: `http://<VM address>:8081` (live
 receiver), `http://<VM address>:8000` (timing dashboard) and
 `http://<VM address>:8082` (magnetometer dashboard, if you have one) — ports
 confirmed live on AC0G/B4, 2026-08-23.
@@ -93,3 +110,12 @@ image you installed from, not what you are running now — `smd version` is.
 
 **Where to send it:** your fleet admin (the person who gave you the image) or
 the HamSCI DASI2 operators group via <https://hamsci.org/>.
+
+**One thing you will notice when you follow the links:** some explanations of a
+⚠ or ✗ line end by pointing at the
+[docs-gap ledger](../contributor/docs-gap-ledger.md) — a list of known gaps
+between what the software reports and what these pages would like to tell you.
+It is marked *Audience: contributor*, and that is deliberate: it names source
+files rather than actions. You may read it, and it is the honest answer to "why
+does my healthy station print this every week?" — it just is not written for
+you, and there is never anything in it for you to do.

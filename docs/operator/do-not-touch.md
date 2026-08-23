@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 8e66fac on 2026-08-23 — bin/smd (sudo refusal, _need_root, requires closure), etc/catalog.toml, live b4 + dasi002 + code/docs
+> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** what an operator must not do on a station, and why
 
 Almost nothing on a station is fragile. What *is* fragile is the small set of
@@ -46,6 +46,7 @@ five-minute fix and a week of chasing ghosts.
 | **`smd apply`** or **`smd component update`** | `smd apply` reconciles the whole station with config in one pass — it enables and starts units, rewrites radiod's CPU-affinity drop-ins and the cpufreq governor on its cores, rewrites the `radiod@*.conf.d/` fragments, reconciles the RX888 FX3 firmware variant **and restarts radiod if that firmware changed**, and may restart the uploaders — it does whenever anything changed or one is already down (`cmd_apply` in `bin/smd`). `smd component update` pulls every repo and then runs the same apply | Tell your fleet admin, then `smd status` and send it. Expect the radio to have bounced; give timing ten minutes before judging it |
 | **`smd doctor --fix`** or **`smd update --apply`** unless you were told to | The plain forms are read-only; these two flags are precisely what turns them into a change to a working station. `--fix` repairs file ownership and nothing else (`smd doctor --help`: *"repair ownership (the only auto-repairable class)"*), and `--apply` performs the update plan for real ([day-2.md](day-2.md#updates--who-decides-and-what-you-run) — a release goes through the [canary](glossary.md) station first) | Send the output to your fleet admin and say which flag you used |
 | **Edit `/etc/radio/radiod@*.conf`, or anything in `radiod@*.conf.d/`** | Nothing in `/etc/radio` was written by hand: the base file is generated from a template and says so in its own first three lines, and the `conf.d/` fragments are **rewritten by `smd apply`** whenever they differ from what the client declares — so your edit either vanishes at the next apply or, worse, survives. Two of its settings are load-bearing (`fft-threads`, `affinity`) — see below | Do **not** restart radiod. Tell your fleet admin what you changed; the file has to be repaired before the radio is bounced |
+| **`smd config <client> edit`, `smd config init <client>`, or a client's own `<client> config init`** | These rewrite a client's configuration file — the same class of change as hand-editing `/etc/sigmond/`, just with a friendlier front door. Two of the station's own messages hand them to you unprompted: `smd status`'s `━━━ PSWS upload not finished ━━━` block ends each line with `finish:  smd config hf-timestd edit`, and `mag-recorder`'s log on a station with no sensor ends with *"run `mag-recorder config init` (or `smd config init mag-recorder`)"* (both live, 2026-08-23). Neither is addressed to you. The operator path for changing station identity or PSWS ids is `sigmond-setup --reconfigure` on the `[host]` ([registration.md §5a](registration.md#5a-get-the-ids-in-a-browser-once)); for a client that was never set up here, the answer is to tell your fleet admin so the unit gets disabled | Tell your fleet admin what the editor was opened on and whether you saved. Send `smd status` |
 | **Edit or delete anything under `/etc/sigmond/`** | It is the station's identity and wiring — `topology.toml`, `coordination.toml`, and the `coordination.env` that sigmond renders from it and every client reads. It is written by the wizard and by `smd`, not by hand; deleting a file here does not turn a feature off, it makes the station disagree with itself | Tell your fleet admin. To turn something off there is always a supported verb — e.g. `sigmond-setup --rac-off` on the `[host]` for remote access ([remote-access.md §6](remote-access.md#6-privacy--and-switching-it-off-for-good)) |
 | **`smd admin rac install`** inside the `[VM]` | Your remote-access tunnel runs on the Proxmox **host**, not in the VM; the VM's `smd admin rac` verbs manage a *different* tunnel and their "not configured" message is correct output, not a fault. Running the install would stand up a second, redundant tunnel ([remote-access.md §4](remote-access.md#ignore-smd-admin-rac-on-an-appliance-station); [docs-gap ledger row 13](../contributor/docs-gap-ledger.md)) | Tell your fleet admin so the extra tunnel gets removed from the gateway too |
 | **Change CPU pinning, the VM's CPU count, or the `[host]`'s CPU settings in the Proxmox GUI** | `radiod`'s FFT and block threads have to share one physical core's L1/L2 cache, and the host enforces that with a boot **hookscript** doing strict 1:1 vCPU→pCPU pinning plus per-core frequency caps (`hookscript: local:snippets/cpu-pin-100.sh`, `-smp 14,sockets=1,cores=7,threads=2`, live on b4's host 2026-08-23; `CLAUDE.md`, "CPU pinning & the Proxmox host"). Change the core count and the computed layout is wrong; the symptom is USB sample loss, which appears as gaps in recordings, not as an error | Put it back exactly as it was in the Proxmox GUI and reboot the `[host]`. Tell your fleet admin the dates it was wrong — recordings from that window are suspect |
@@ -146,7 +147,17 @@ No permission needed, any time, as often as you like. All `[VM]` unless noted.
 - **`smd watch <thing>`** — `gpsdo`, `uploads`, `mag` and friends: live views,
   read-only.
 - **`smd psws status`**, **`smd config uploads status`** — status verbs, all read-only.
+- **`smd component list`** — every installed component and whether it is
+  [enabled](glossary.md), with `--no-fetch` if you want it quick
+  ([day-2.md](day-2.md#installed-enabled-shown)).
 - **`df -h /`**, **`lsusb`**, **`systemctl status <unit>`** — plain Linux looking-around.
+- **`du -xh --max-depth=2 /var/lib /home /var/log 2>/dev/null | sort -h | tail -15`**
+  — read-only: shows what is actually using the disk, so your message about a
+  full disk can name a directory instead of a percentage. It skips what your
+  account may not read, so the answer is incomplete; paste it to your fleet admin
+  anyway ([troubleshooting.md → *Disk filling up*](troubleshooting.md#disk-filling-up)).
+  ⚠ Not to be confused with `smd admin storage`, which is **not** a read-only
+  report — its subcommands change the station.
 - **The four web pages** — receiver, timing, magnetometer, Proxmox
   ([day-2.md](day-2.md#the-four-windows)).
 - **`smd restart <cheap name>`** — `mag-recorder`, `gpsdo-monitor`,

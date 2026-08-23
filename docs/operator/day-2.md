@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 09d44f8 on 2026-08-23 — live b4 + dasi002 (smd status/version/doctor, smd update dry run, df -h, /etc/sigmond-appliance/version, ss -ltnp) + code/docs
+> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -44,11 +44,27 @@ If a page will not load at all, that is a real finding — take it to
 Four steps. Steps 1–3 every week; step 4 only when one of the first three looks
 wrong.
 
-Run these on the **decoder VM** — `[VM]`, i.e. after `ssh hamsci@<VM address>`:
+Only two of the four are commands. **Step 2 is a web search** — you look
+yourself up on wsprnet and pskreporter, there is nothing to type on the station
+— and **step 4 is `smd doctor`**, which you run only when one of the first three
+looked wrong. So the block below is steps 1 and 3, which is the whole of a
+normal week. Run it on the **decoder VM** — `[VM]`, i.e. after
+`ssh hamsci@<VM address>`:
 
 ```bash
 smd status
 df -h /
+```
+
+If you would rather copy all four at once, this is the whole check — the middle
+line is a reminder, not a command, and `smd doctor` is harmless to run every
+week even when nothing looks wrong. `[VM]`:
+
+```bash
+smd status                      # step 1
+#                                 step 2: look yourself up on wsprnet / pskreporter
+df -h /                         # step 3
+smd doctor                      # step 4 — read-only; never add --fix
 ```
 
 ### 1. `smd status` — is everything running?
@@ -127,21 +143,46 @@ sudo: a password is required
   ...  (1 more: the same ⚠ for mag-recorder)
 ```
 
-**Every ✗ and ⚠ in that output is normal today.** Here is why, line by line:
+A station with fewer optional parts prints a few lines b4 does not. Here are
+the ones dasi002 — a testbed with no magnetometer, no dual-frequency GNSS and no
+PSWS enrolment — added on the same morning, all of them normal:
+
+```text
+  ✗  station.psws_station_id is unset (need PSWS-issued S0xxxxx)     ← above the banner
+
+  gmag-webui:
+    ✗  gmag-webui.service: inactive
+  hf-timestd:
+    ✗  timestd-vtec.service: inactive
+  mag-recorder:
+    ✗  mag-recorder.service: failed
+
+  mag-recorder  v0.1.0  (8551d27)  contract=0.8                       ← note: no ✓
+  ⚠  station.callsign is unset
+```
+
+**Every ✗ and ⚠ in either output is normal today** — except `mag-recorder`'s
+`failed`, which is the one genuine finding on that station. Here is why, line by
+line:
 
 | Line | Normal? | Why |
 |---|---|---|
+| `✗ station.psws_station_id is unset (need PSWS-issued S0xxxxx)`, *before* the banner | **Normal on a station with no PSWS enrolment** | This is not a station-wide check and it is not about `/etc/sigmond/site-profile.toml`. It is **mag-recorder's own config check** — `mag_recorder/contract.py`, `_collect_issues()`, which raises `severity: fail` when `[station] psws_station_id` in `/etc/mag-recorder/config.toml` is missing or still holds its `<YOUR_PSWS_STATION_ID>` template placeholder. It surfaces above the banner because the client is asked for its inventory before the banner prints. On a station that never enrolled in PSWS, or has no magnetometer, this is the expected state — confirm with `smd psws status`, which answers in plain English ([registration.md §1](registration.md#1-what-the-wizard-already-did)). |
+| `✗ gmag-webui.service: inactive` | **Normal without a magnetometer dashboard** | `gmag-webui` is the port-8082 magnetometer web page ([the four windows](#the-four-windows)). It is installed on every station but only worth running where there is an RM3100 feeding it, so on a station without one it sits `inactive`. dasi002 printed this on 2026-08-23; b4, which has the sensor, printed `✓ active`. |
+| `✗ timestd-vtec.service: inactive` | **Normal without a dual-frequency GNSS receiver** | [vTEC](glossary.md) is the ionospheric total-electron-content product, and computing it needs an optional dual-frequency GNSS receiver (a u-blox ZED-F9P) that most stations do not have. The unit ships enabled-but-inert on every station; `inactive` is the correct state when the hardware is absent. |
+| A client-summary line with **no glyph at all** — e.g. `mag-recorder  v0.1.0  (8551d27)  contract=0.8` where `hf-timestd` above it reads `✓  hf-timestd …` | **Not an error — it means "this client reported something", and the something is printed underneath** | The ✓ on those summary lines means *validated clean*: `bin/smd` sets it only when the client returned an empty issue list (`clean_tag = '✓ ' if not issues else ''`), specifically so an operator can tell "checked, clean" from "not checked". No glyph therefore means the client returned one or more issues — and every one of them is printed immediately below that line as its own ⚠ or ✗. So read the lines under a glyph-less client, not the missing glyph itself. |
+| `⚠ station.callsign is unset` on a station whose `site-profile.toml` **does** have a callsign | **Normal — different file** | Same origin as the row above: it is one of **mag-recorder's** config issues (`mag_recorder/contract.py`, `_collect_issues()` — `[station] callsign` in `/etc/mag-recorder/config.toml`), printed under mag-recorder's glyph-less summary line. It says nothing about your station identity. `/etc/sigmond/site-profile.toml` remains the one place your identity lives ([registration.md §1](registration.md#1-what-the-wizard-already-did)), and `smd admin instance list` is what proves what your recorders actually report under. That the two look like the same key is a genuine trap — tracked as [docs-gap ledger row 24](../contributor/docs-gap-ledger.md). |
 | `sudo: a password is required` (twice, before the banner) | **Normal — ignore** | A read-only command reaching for `sudo` it does not have and carrying on regardless. It is noise on stderr, not a failure, and it appears on b4 but not dasi002. Known and tracked — [docs-gap ledger row 6](../contributor/docs-gap-ledger.md). |
 | `✗ radiod@AC0G-B4-patched.service: inactive` | **Normal** | A *second, deliberately disabled* `radiod` unit. B4 keeps two `radiod` configs in `/etc/radio/` — the live one and a spare "patched" variant. `systemctl is-enabled` reads `enabled` for `radiod@AC0G-B4` and `disabled` for `-patched` (checked live, 2026-08-23). Only one radiod can own the RX888, so the other one being down is the correct state. Most stations have only one and never see this line. |
 | `✓ meteor-scatter@my-rx888.service: active [orphaned]` | **Normal-ish — mention it** | `[orphaned]` means a unit is running that the current config no longer declares. Harmless, but worth naming to your fleet admin so it gets tidied. |
-| `⚠ 22 pinned process(es) overlap radiod cores` | **Normal — every station shows it** | The station reserves CPU cores for `radiod` and pins the decoders elsewhere. This line counts userspace processes whose CPU mask still overlaps radiod's cores (`lib/sigmond/cpu.py`, `find_contending_processes`; kernel threads and ka9q-radio's own mDNS helpers are already excluded). Both fleet stations carry it — b4 22, dasi002 18 on 2026-08-23 — while producing good data, so today it is the fleet's normal state rather than a fault. Nothing here is yours to fix; mention the number if it changes a lot. Tracked — [docs-gap ledger row 12](../contributor/docs-gap-ledger.md). |
+| `⚠ 22 pinned process(es) overlap radiod cores` | **Normal — every station shows it** | The station reserves CPU cores for `radiod` and pins the decoders elsewhere. This line counts userspace processes whose CPU mask still overlaps radiod's cores (`lib/sigmond/cpu.py`, `find_contending_processes`; kernel threads and ka9q-radio's own mDNS helpers are already excluded). Both fleet stations carry it — b4 22, dasi002 17–18, as of 2026-08-23 (it moves by one or two between runs as processes come and go) — while producing good data, so today it is the fleet's normal state rather than a fault. Nothing here is yours to fix; mention the number if it changes a lot. Tracked — [docs-gap ledger row 12](../contributor/docs-gap-ledger.md). |
 | `✗ … OFFSET VIOLATION — offset +9.833 ms …` | **Normal today — known and tracked** | The **timing judge** compares each `radiod` channel's advertised epoch against the station's best clock evidence and flags any channel that disagrees by more than *k×σ* for longer than 60 s (`hf-timestd/src/hf_timestd/core/offset_judge.py`, `_evaluate_violation_locked`). It is a **detector, not a fault**: hf-timestd's own data labels stay corrected regardless — the judge's own log line says so ("labels remain CORRECTED … radiod's advertised epoch is contradicted"). B4 was flagging four of its six timing channels at 5–19 ms on 2026-08-23 while producing good data all day; dasi002, on the weaker T3 evidence, was flagging all six at 200–650 ms. **What matters to you is the summary line above them**: `judge T4 σ=666.9 µs gpsdo=locked`. `gpsdo=locked` is the healthy word; the tier is information for your admin about how good the clock evidence is, not something the software grades. |
 | `━━━ PSWS upload not finished ━━━` on a station that *is* enrolled | **Normal — a known contradiction** | B4 is fully enrolled (`smd psws status` reports `✓ key verified 2026-08-17`), yet `smd status` still prints this block, because it checks for the *older* per-recorder key files that a station-key host does not use. Two enrolment models coexist and disagree in your face. Tracked — [docs-gap ledger rows 7 and 10](../contributor/docs-gap-ledger.md). Confirm your real enrolment state with `smd psws status`, not with this block. |
 
 **The three lines that actually matter**, in order:
 
 1. **`radiod@<designator>.service: active`.** If `radiod` is down, nothing on
-   the station works — no spots, no timing, no GRAPE. Everything else on the
+   the station works — no spots, no timing, no [GRAPE](glossary.md). Everything else on the
    page is downstream of this one line.
 2. **The judge summary** — `judge T4 σ=666.9 µs age 0s gpsdo=locked`. The
    [timing tier](glossary.md) tells your admin how good the station's clock
@@ -153,13 +194,73 @@ sudo: a password is required
    morning: that ⚠ is the software telling the truth about a real condition,
    and it is the shape of thing to report —
    [troubleshooting.md → *GPS not locked*](troubleshooting.md#gps-not-locked-or-the-timing-dashboard-is-red).
-3. **A whole client missing, or a unit `failed`.** `inactive` on a spare unit is
-   fine (see the table); `failed` is not. dasi002 shows
-   `✗ mag-recorder.service: failed` — that is a genuine finding, not background
-   noise, and it is chased in
-   [troubleshooting.md → *After a power cut everything is back except one client*](troubleshooting.md#after-a-power-cut-everything-is-back-except-one-client).
+3. **A client you expect to be enabled has no block, or a unit says `failed`.**
+   `inactive` on a spare unit is fine (see the table); `failed` is not. A client
+   with no block at all is only a finding if you expected it to be enabled —
+   read the next heading before you report one.
+
+   **Where to chase a `failed` unit: start with that client's own section.**
+   `mag-recorder` → [troubleshooting.md → *Magnetometer flat line, or mag-recorder says failed*](troubleshooting.md#magnetometer-flat-line-or-mag-recorder-says-failed),
+   which separates "this station has no sensor" (normal, nothing to do) from "the
+   sensor died" in one command. dasi002's `✗ mag-recorder.service: failed` is the
+   first of those. Any **other** client showing `failed` — and any client at all
+   if the machine has just lost power — goes to
+   [troubleshooting.md → *After a power cut everything is back except one client*](troubleshooting.md#after-a-power-cut-everything-is-back-except-one-client),
+   which is the general "one unit is down" tree despite its name.
 
 If any of those three is wrong, go to step 4 and then to your fleet admin.
+
+#### Installed, enabled, shown
+
+`smd status` is shorter than `smd version`, on every station, and the difference
+is not damage. Three words are doing three different jobs:
+
+- **[installed](glossary.md)** — the code is on the station and `smd version`
+  prints its commit. dasi002 listed **23** components on 2026-08-23.
+- **[enabled](glossary.md)** — this station has been told to *run* that client,
+  so its systemd units exist and start at boot. **`smd status` shows only
+  enabled clients** — its own help says so: `component names (default: all
+  enabled)`. dasi002 showed **7** client blocks (verified live, 2026-08-23).
+- **shown** — the intersection. A client that is installed and deliberately not
+  enabled prints nothing at all, and that is correct output.
+
+That is why dasi002's `smd status` has no `wspr-recorder`, `psk-recorder` or
+`meteor-scatter` block while `smd version` lists all three: **that station has no
+HF antenna**, so its spot recorders were switched off on purpose rather than
+uninstalled, to keep a testbed out of the public databases.
+
+**The one command that shows both** — `[VM]`:
+
+```bash
+smd component list
+```
+
+Read its **LIFECYCLE** column. Live on 2026-08-23, the same three clients read:
+
+| | b4 (production) | dasi002 (testbed, no antenna) |
+|---|---|---|
+| `wspr-recorder` | `enabled, running` | `binary, on PATH` |
+| `psk-recorder` | `enabled, running` | `binary, on PATH` |
+| `meteor-scatter` | `enabled, running` | `configured` |
+| `mag-recorder` | `enabled, running` | `enabled, stopped` |
+
+`enabled, running` and `enabled, stopped` are the two states that get a block in
+`smd status`. `configured` (set up, no units running), `binary, on PATH`
+(installed, nothing enabled), `binary, missing` (never installed here) and
+`library` (no units at all — `ka9q-python`, `hs-uploader`) do not. It fetches
+from the repositories first, which makes it slow; add `--no-fetch` if you only
+want the lifecycle column.
+
+**So: report a missing block only when you expected that client to be enabled.**
+If `smd component list` says `binary, on PATH` and you thought the station was
+uploading WSPR, that *is* worth a message to your fleet admin — but it is a
+configuration question, not a crash.
+
+⚠ The column says what state a client is *in*; it does not say who chose it or
+why. Nothing on the station records "deliberately disabled". If you are not sure
+whether a client is off on purpose, ask — that is a one-line question with a
+one-line answer, and it is tracked as
+[docs-gap ledger row 25](../contributor/docs-gap-ledger.md).
 
 ### 2. Are your spots arriving?
 
@@ -178,11 +279,25 @@ Propagation dies, bands go empty, and a quiet afternoon produces nothing from a
 flawless station. A week with *zero* spots is a fault. An hour with none is
 weather.
 
+**Except on a station whose uploads are switched off** — then a week with zero
+spots is guaranteed and is not a fault at all. A testbed with no antenna, or a
+station still being built, is deliberately kept out of the public databases.
+Check once, and you never have to wonder again — `[VM]`:
+
+```bash
+smd config uploads status
+```
+
+If it answers `⚠ uploads: DISABLED BY POLICY` with a reason, **zero spots is the
+expected result and there is nothing to report**; do not turn it back on
+yourself. The full explanation is the closing blockquote of
+[registration.md §6 — Confirming everything flows](registration.md#6-confirming-everything-flows).
+
 ### 3. Disk — `df -h /`
 
-The one number that can quietly destroy data. hf-timestd records raw IQ at
-roughly 18 GB per channel per day and manages its own eviction, but it also has
-percentage-based safety nets for when *something else* fills the disk
+The one number that can quietly destroy data. hf-timestd records raw IQ
+continuously and manages its own eviction, but it also has percentage-based
+safety nets for when *something else* fills the disk
 (`hf-timestd/src/hf_timestd/core/resource_guardian.py`):
 
 | `Use%` on `/` | What happens |
@@ -196,6 +311,25 @@ So 95% is the number that costs you data. Live on 2026-08-23: b4 was at **52%**
 watch. If you are over 80% and climbing, tell your fleet admin *before* it
 reaches 95%; do not start deleting files yourself
 (→ [do-not-touch.md](do-not-touch.md)).
+
+**How fast does it actually fill? Measured on AC0G/B4, 2026-08-23: about
+15 GB per timing channel per day** — one complete UTC day (2026-08-22, all 288
+five-minute files) of one channel's compressed raw IQ came to 15,073,610,352
+bytes in `/var/lib/timestd/raw_buffer/WWV_25000/20260822`. That station records
+**six** timing channels (`smd status` prints `default: 6 ch, 6 freqs`), so it
+writes roughly **90 GB a day** and keeps about a day and a half of it before its
+own eviction reclaims the space. Use 15 GB per channel per day for arithmetic,
+and read your own channel count off `smd status` rather than assuming six.
+
+⚠ **The two written sources disagree with each other and with that
+measurement**, so quote the measured figure and not either of them: hf-timestd's
+own code comment says ~18 GB per channel per day (high by about 20%), while
+`hf-timestd/INSTALLATION.md` — the source behind
+[shopping-list.md](../hardware/shopping-list.md) — says 6.7 GB and sizes a
+6-channel station at a 120 GB disk, which the measurement says is under two days
+of recording. The ~2.7× disagreement is
+[docs-gap ledger row 20](../contributor/docs-gap-ledger.md); neither upstream
+number has been corrected yet.
 
 ### 4. `smd doctor` — only when something looks off
 
@@ -227,6 +361,24 @@ hf-timestd:
 tested commit — expected, not damage. `untracked` and `ownership` findings are
 housekeeping. The tool says so itself where it can. Send the whole output to
 your fleet admin rather than acting on it.
+
+Two more shapes you are likely to meet:
+
+- **`dirty: 1 modified file(s): uv.lock (diff against origin before
+  discarding)`** — "dirty" just means a file that git tracks has been changed on
+  this machine since it was checked out. `uv.lock` is the common and benign case:
+  it is a Python dependency lock file that the client's own installer rewrites
+  when it runs, so it drifts from the committed copy without anyone editing
+  anything. **"Discarding" is a decision for whoever maintains the checkout, not
+  an instruction to you** — the parenthesis is `smd doctor` telling a *developer*
+  to look at the diff first. Report it; do not run any git command.
+- **`N finding(s) repairable with: smd doctor --fix`, where N is smaller than the
+  number of lines on screen.** That is not a miscount and you have not missed
+  anything. `--fix` repairs exactly one class — file **ownership** — so N counts
+  only the `ownership:` lines. Every other line (`untracked`, `detached`,
+  `dirty`) is reported and left alone by design. It reads like a mismatch, and
+  that it does not say so is [docs-gap ledger row 26](../contributor/docs-gap-ledger.md).
+  Either way: send the output, do not run `--fix`.
 
 ---
 
