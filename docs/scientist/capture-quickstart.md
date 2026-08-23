@@ -20,13 +20,14 @@ Two ways to do it:
 
 | | Option A — `event-recorder` | Option B — write it yourself |
 |---|---|---|
-| Effort | a TOML job file | one Python file, below |
+| Effort | a TOML job file | ~330 lines of Python, below |
 | Scheduling | built in (`start_utc` / `stop_utc`, lead-in, segments) | you supply it |
 | Output | SigMF (`.sigmf-data` + `.sigmf-meta`) | raw payload + JSON sidecar |
 | Provenance | the tool that recorded the 2026-08-12 eclipse | proven on DASI002, 2026-08-23 (this page) |
 
 Take Option A unless you need something it cannot express. Read Option B
-anyway — it is short, and it is the shape every correct Tier-0 recorder has.
+anyway: most of its length is the checking, and that is the shape every correct
+Tier-0 recorder has.
 
 ---
 
@@ -53,7 +54,9 @@ station:
    should have produced for hours
    (source: [§Budget the load](../EVENT-CLIENT-PLAYBOOK.md#budget-the-load-before-you-choose-your-architecture)).
    Also ask for disk headroom for the whole window, with margin: at 95 % full
-   the station's timing client starts deleting the oldest recordings
+   the station's timing client pauses all writes and alerts, and if the disk is
+   still ≥ 95 % ten minutes later it begins deleting the oldest recordings until
+   the disk is back under 90 %
    ([station-capabilities.md §Storage](station-capabilities.md#storage-per-channel-hour)).
 3. **Know which station, and pick a testbed.** AC0G/B4 is a production station
    carrying four clients; DASI002 is a plumbing testbed with **no antenna** —
@@ -145,7 +148,8 @@ is `costas-14110-worked-example.md` *(being written)*.
 
 ## Option B — write it yourself
 
-One file, no framework. This is the whole thing; it ran as printed.
+One file, no framework — about 330 lines, most of them checking rather than
+recording. This is the whole thing; it ran as printed.
 
 Set up a venv on the station VM (the system `python3` on a station has no
 `ka9q` module, and you must not install into the station's own venvs):
@@ -167,14 +171,28 @@ It has no `--version` flag; `pip show` is where the version lives. On DASI002,
 **3.22.0** while the stations run **3.25.2** from the checkout at
 `/opt/git/sigmond/ka9q-python`
 ([docs-gap ledger row 38](../contributor/docs-gap-ledger.md)). 3.22.0 is fine
-for the presets this recipe uses (`iq`, `usb`, `lsb`, `cw`, `am`) but sends the
-**FM** demodulator for every other preset, including `wfm` — the channel is
-created, verified, and never emits a packet. If you need a preset outside that
-list, install the checkout instead:
+for the presets this recipe uses (`iq`, `usb`, `lsb`, `cw`, `am`), which it
+labels with the right demodulator. Every *other* preset gets `DEMOD_TYPE = FM`
+regardless of what `presets.conf` says it is — measured for `wfm`, where radiod
+runs the narrowband FM demodulator behind a ±110 kHz filter and the channel
+**never emits a packet** (source: `ka9q-python/CHANGELOG.md` §[3.25.1]); the
+others (`sam`, `ame`, `dsb`, `cwu`, `cwl`, `wspr`, `nam`, `amsq`, `spectrum`)
+are mislabelled the same way, with consequences that release note does not
+quantify. If you need a preset outside the five, install a pinned 3.25.2
+instead — on the station VM:
 
 ```bash
-~/tier0/bin/pip install -e /opt/git/sigmond/ka9q-python
+~/tier0/bin/pip install 'git+https://github.com/HamSCI/ka9q-python@v3.25.2'
 ```
+
+⛔ Do **not** `pip install -e /opt/git/sigmond/ka9q-python`. That is the shared
+checkout every client on the station imports; an editable install writes
+`*.egg-info` into it and one shared library checkout means touching it changes
+all of them at once (source:
+[§Station traps](../EVENT-CLIENT-PLAYBOOK.md#station-traps-worth-knowing), "One
+shared library checkout"). If the station cannot reach GitHub either, ask the
+fleet admin — copying the checkout into your own home and installing from the
+copy is the fallback, not an editable install over theirs.
 
 ### The script
 
@@ -188,8 +206,10 @@ Tier 0: capture only. No sigmond contract, no systemd unit, no shared sink.
 It creates ONE radiod channel with a mandatory lifetime, refreshes that
 lifetime while it lives, writes every RTP payload verbatim to <name>.f32, and
 writes <name>.json carrying (a) the FIRST packet's timing anchor, (b) every
-value radiod actually GRANTED, and (c) an independent measurement of the wire
-format. Nothing here trusts what it asked for.
+value radiod actually GRANTED -- both as ensure_channel reported it and as a
+FRESH poll reports it after the separate encoding command has landed -- and
+(c) an independent measurement of the wire format. Nothing here trusts what it
+asked for.
 
 Usage:
   tier0_capture.py --status DASI002-status.local --freq 10000000 \
@@ -263,8 +283,11 @@ class Capture:
             if self.first is None:
                 # The anchor pair is read as ONE snapshot (get_anchor), never
                 # as two attribute reads -- a background status listener can
-                # tear them apart. wallclock is the library's rtp_to_utc() of
-                # this packet's timestamp against that pair.
+                # tear them apart. This is the pair captured when the channel
+                # was discovered, seconds before this packet; everything after
+                # it is EXTRAPOLATION at the channel's nominal rate. wallclock
+                # is the library's rtp_to_utc() of this packet's timestamp
+                # against that pair.
                 anchor = self.channel.get_anchor()
                 self.first = {
                     "rtp_timestamp": header.timestamp,
@@ -308,7 +331,7 @@ def level_dbfs(payload, bytes_per_component):
     """RMS of one packet, in dBFS -- the dead-antenna heartbeat.
 
     Decoded with the MEASURED width, not the requested one: 4 bytes/component
-    is F32LE, 2 is S16BE (the width radiod's IQ channels actually use here).
+    is F32LE, 2 is S16BE.
     """
     if np is None or bytes_per_component is None or not payload:
         return None
@@ -337,7 +360,7 @@ def encoding_from_wire(bytes_per_component):
 START_MONO = time.monotonic()
 
 
-def main():
+def parse_args():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--status", required=True, help="radiod status/control mDNS name")
@@ -352,33 +375,10 @@ def main():
     ap.add_argument("--settle", type=float, default=4.0,
                     help="seconds to let radiod's separate encoding command land")
     ap.add_argument("--level-every", type=float, default=10.0)
-    args = ap.parse_args()
+    return ap.parse_args()
 
-    out = pathlib.Path(args.out).expanduser()
-    out.mkdir(parents=True, exist_ok=True)
-    stem = "%s_%d_%s" % (args.preset, int(args.freq),
-                         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
-    raw_path = out / (stem + ".f32")
-    meta_path = out / (stem + ".json")
 
-    requested = {
-        "status_address": args.status,
-        "client_id": args.client_id,
-        "frequency_hz": args.freq,
-        "preset": args.preset,
-        "sample_rate": args.rate,
-        "low_edge": args.low_edge,
-        "high_edge": args.high_edge,
-        "encoding": int(Encoding.F32LE),
-        "encoding_name": "F32LE",
-        "agc_enable": 0,
-        "gain_db": 0.0,
-        "lifetime_frames": LIFETIME_FRAMES,
-    }
-
-    # client_id (never destination=) -- ka9q-python derives a collision-free
-    # multicast group from (client_id, status_address).
-    control = RadiodControl(args.status, client_id=args.client_id)
+def run(args, control, raw_path, meta_path, requested):
     kwargs = dict(frequency_hz=args.freq, preset=args.preset, sample_rate=args.rate,
                   agc_enable=0, gain=0.0, encoding=Encoding.F32LE,
                   lifetime=LIFETIME_FRAMES, timeout=20.0)
@@ -393,7 +393,7 @@ def main():
         "frequency_hz": channel.frequency,
         "preset": channel.preset,
         "sample_rate": channel.sample_rate,
-        "encoding": channel.encoding,
+        "encoding_from_ensure_channel": channel.encoding,
         "multicast_address": channel.multicast_address,
         "port": channel.port,
     }
@@ -431,6 +431,20 @@ def main():
     print("settling %.1fs (radiod takes OUTPUT_ENCODING as a SEPARATE command)"
           % args.settle, flush=True)
     time.sleep(args.settle)
+
+    # ensure_channel polls ONCE, immediately after the create -- possibly
+    # before the separate OUTPUT_ENCODING command has been applied -- and it
+    # matches on frequency only, so the encoding it hands back can be stale.
+    # Re-poll now that the command has had time to land, and ask the library's
+    # own verifier what it thinks.
+    fresh = control.poll_channel(channel.ssrc, expected_freq=args.freq, timeout=2.0)
+    fresh_encoding = fresh.encoding if fresh is not None else None
+    verified = control.verify_channel(channel.ssrc, expected_freq=args.freq,
+                                      expected_encoding=int(Encoding.F32LE))
+    print("fresh poll: encoding=%s (ensure_channel said %s); "
+          "verify_channel(expected=F32LE)=%s"
+          % (fresh_encoding, channel.encoding, verified), flush=True)
+
     recorder.start_recording()
     cap.enabled.set()
     started = time.time()
@@ -456,7 +470,7 @@ def main():
 
     meta = {
         "tool": "tier0_capture.py",
-        "schema": "tier0-capture/1",
+        "schema": "tier0-capture/2",
         "ka9q_python_version": _lib_version(),
         "raw_file": raw_path.name,
         "requested": requested,
@@ -465,11 +479,16 @@ def main():
         "wire": {
             "bytes_per_component_measured": bpc,
             "encoding_measured": measured_encoding,
-            "encoding_reported_by_radiod": channel.encoding,
-            "measurement_agrees_with_report": (
+            "encoding_from_ensure_channel": channel.encoding,
+            "encoding_fresh_poll": fresh_encoding,
+            "verify_channel_expected_f32le": verified,
+            "measurement_agrees_with_ensure_channel": (
                 None if measured_encoding is None else measured_encoding == channel.encoding),
+            "measurement_agrees_with_fresh_poll": (
+                None if (measured_encoding is None or fresh_encoding is None)
+                else measured_encoding == fresh_encoding),
             "components_per_rtp_tick": components,
-            "note": "Trust the measurement, not the report. The file is payload bytes verbatim.",
+            "note": "Trust the measurement. The file is payload bytes verbatim.",
         },
         "run": {
             "recording_started_host_utc": utc_stamp(started),
@@ -483,12 +502,14 @@ def main():
             "samples_expected_from_host_clock": expected_samples,
         },
         "loss": {
-            "packets_received": metrics["packets_received"],
+            "packets_received_on_port": metrics["packets_received"],
             "packets_dropped": metrics["packets_dropped"],
             "sequence_errors": metrics["sequence_errors"],
             "timestamp_jumps": metrics["timestamp_jumps"],
             "note": "radiod zero-fills a missed block, so byte counts cannot show loss; "
-                    "these RTP-level counters and the sequence gaps are the honest evidence.",
+                    "these RTP-level counters and the sequence gaps are the honest "
+                    "evidence. packets_received_on_port counts EVERY datagram on the "
+                    "bound port, not just this SSRC.",
         },
     }
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=False) + "\n")
@@ -498,13 +519,49 @@ def main():
     if bpc is None:
         print("ERROR: could not measure the wire format -- do not trust this file's layout",
               flush=True)
-    elif measured_encoding != channel.encoding:
-        print("WARNING: measured %.2f bytes/component (encoding %s) but radiod REPORTED "
-              "encoding %s -- decode using the measurement" % (bpc, measured_encoding,
-                                                               channel.encoding), flush=True)
-    print("channel released; radiod auto-destructs it within ~%ds" % (LIFETIME_FRAMES // 50),
-          flush=True)
+    else:
+        if measured_encoding != channel.encoding:
+            print("NOTE: measured %.2f bytes/component (encoding %s); ensure_channel had "
+                  "reported encoding %s" % (bpc, measured_encoding, channel.encoding), flush=True)
+        if fresh_encoding is not None and measured_encoding != fresh_encoding:
+            print("WARNING: measured encoding %s but a FRESH poll still reports %s -- "
+                  "radiod's status disagrees with its own wire; decode using the "
+                  "measurement" % (measured_encoding, fresh_encoding), flush=True)
+    print("stopping: no channel teardown is sent. The lifetime simply expires and radiod "
+          "reclaims the channel within ~%ds -- a deliberate crash-safe trade, at the cost "
+          "of up to that long streaming to nobody." % (LIFETIME_FRAMES // 50), flush=True)
     return 0
+
+
+def main():
+    args = parse_args()
+    out = pathlib.Path(args.out).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    stem = "%s_%d_%s" % (args.preset, int(args.freq),
+                         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    raw_path = out / (stem + ".f32")
+    meta_path = out / (stem + ".json")
+
+    requested = {
+        "status_address": args.status,
+        "client_id": args.client_id,
+        "frequency_hz": args.freq,
+        "preset": args.preset,
+        "sample_rate": args.rate,
+        "low_edge": args.low_edge,
+        "high_edge": args.high_edge,
+        "encoding": int(Encoding.F32LE),
+        "encoding_name": "F32LE",
+        "agc_enable": 0,
+        "gain_db": 0.0,
+        "lifetime_frames": LIFETIME_FRAMES,
+    }
+
+    # client_id (never destination=) -- ka9q-python derives a collision-free
+    # multicast group from (client_id, status_address). The context manager
+    # closes the control socket on the way out.
+    with RadiodControl(args.status, client_id=args.client_id) as control:
+        return run(args, control, raw_path, meta_path, requested)
 
 
 def _lib_version():
@@ -521,35 +578,49 @@ if __name__ == "__main__":
 
 ### What the script does that matters
 
-Seven decisions, each of which is there because the alternative fails quietly.
+Eight decisions, each of which is there because the alternative fails quietly.
 
 - **`client_id`, never `destination=`.** `RadiodControl(status, client_id=...)`
   makes ka9q-python derive a per-(client, radiod) multicast group, so you
   cannot land on a peer client's group. Passing neither raises `ValidationError`
   rather than falling back to a shared default (source:
-  `ka9q-python/ka9q/control.py::RadiodControl.__init__`, audit finding F5).
+  `ka9q-python/ka9q/control.py::RadiodControl.__init__`, audit finding F5). It is
+  used as a context manager so the control socket is closed on every exit path,
+  including an exception.
 - **`lifetime=6000`, plus a keepalive.** radiod cannot learn that a Python
   process died. 6000 frames ≈ 120 s at the default 20 ms blocktime; a *bare
   poll does not refresh it* — only a command carrying a `LIFETIME` tag does
   (source: `ka9q-python/ka9q/control.py::set_channel_lifetime`, audit finding
-  F7), which is what the keepalive thread sends every 30 s. When the script
-  exits, the channel expires on its own.
+  F7), which is what the keepalive thread sends every 30 s. **The script sends
+  no teardown when it exits** — it stops refreshing and lets the timer run out,
+  so radiod reclaims the channel within ~120 s. That is a deliberate crash-safe
+  trade: the same mechanism cleans up after a `kill -9` or a power cut, at the
+  cost of up to two minutes of a channel streaming to nobody.
 - **The sidecar records what was *granted*, not what was asked.** On the create
   path `ensure_channel` accepts the channel on frequency match alone; a
   sample-rate or preset divergence is logged, not raised
   ([station-capabilities.md §Encoding](station-capabilities.md#frequency-and-bandwidth--what-radiod-will-hand-you)).
   So the script prints a warning on divergence and writes both `requested` and
   `granted` blocks.
-- **The wire format is measured, never believed.** radiod takes
-  `OUTPUT_ENCODING` as a *separate* command after the create, which makes the
-  grant easy to lose and impossible to notice
-  ([character.md §The encoding you asked for is a second command](../hardware/character.md#the-encoding-you-asked-for-is-a-second-command)) —
-  and, in the other direction, radiod's status **misreports** the encoding of
-  IQ channels. The script accumulates payload bytes ÷ RTP ticks ÷ components as
-  it records, which is a direct measurement of bytes-per-component: ~4 is F32,
-  ~2 is S16. It reported a disagreement on the live run below.
-  `--settle 4.0` exists so the follow-up encoding command has landed before the
-  measurement starts.
+- **The encoding `ensure_channel` returns can be stale, so the script re-polls.**
+  radiod takes `OUTPUT_ENCODING` as a *separate* command sent after the create
+  (source: `ka9q-python/ka9q/control.py:1601-1618`;
+  [character.md §The encoding you asked for is a second command](../hardware/character.md#the-encoding-you-asked-for-is-a-second-command)),
+  while `ensure_channel` confirms the channel with **one** targeted poll that
+  matches on *frequency only* and never re-checks encoding (source: same file,
+  `ensure_channel`'s `poll_channel(ssrc, expected_freq=…)` and the comment above
+  it). Those two can race. So after `--settle 4.0` the script calls
+  `poll_channel()` again and `verify_channel(expected_encoding=…)`, and records
+  **both** values — `encoding_from_ensure_channel` and `encoding_fresh_poll` —
+  in the sidecar. On the live run below they disagreed, and the fresh one was
+  right.
+- **The wire format is measured, never believed.** Even a fresh poll is a
+  *report*. The script accumulates payload bytes ÷ RTP ticks ÷ components as it
+  records, which is a direct measurement of bytes-per-component: ~4 is F32, ~2
+  is S16. That measurement is what the sidecar tells a future reader to decode
+  with, and it is the check that catches a lost grant no status field can
+  (source: [§Station traps](../EVENT-CLIENT-PLAYBOOK.md#station-traps-worth-knowing),
+  "Stale encoding from `ensure_channel`").
 - **The anchor is read as one snapshot.** `channel.get_anchor()` returns
   `(gps_time, rtp_timesnap)` as a single tuple; reading the two attributes
   separately can tear across a background status update. The `wallclock`
@@ -559,13 +630,24 @@ Seven decisions, each of which is there because the alternative fails quietly.
   explicit `anchored`/`unanchored` state, exactly as the playbook's
   [§Record the timing anchor](../EVENT-CLIENT-PLAYBOOK.md#record-the-timing-anchor-not-just-the-samples)
   asks.
+
+  ⚠ **That pair is the one captured at channel discovery, not at your first
+  packet.** In the run below it was taken ~6 s before the first packet arrived
+  (`rtp_timesnap 2147495888` against a first-packet `rtp_timestamp` of
+  2147570768 — 74,880 ticks = 6.24 s at 12 kHz), and every sample after it is
+  **extrapolated** from that one pair at the channel's nominal rate. Over 60 s
+  that is fine; over an hour you are extrapolating an hour from a single
+  block-grid-resolution reading. A recorder that cares should adopt a fresher
+  pair — the `fresh` `ChannelInfo` this script already polls carries one — and
+  record which pair it used.
 - **It anchors once, at the first packet, and does not poll for divergence.**
   A single `(GPS_TIME, RTP_TIMESNAP)` pair carries block-grid resolution plus
   emission lateness, and on a busy radiod it jitters ~0.45 s between snapshots
   ([character.md §The anchor pair is not atomic](../hardware/character.md#the-anchor-pair-is-not-atomic)).
   Re-reading it during the run and "correcting" your timestamps against it
   manufactures the jitter into your data. Record the first pair; interpret
-  offline.
+  offline. (The one re-poll the script does make is about *encoding*, before
+  recording starts, and never touches the anchor.)
 - **A level heartbeat, so a dead antenna is distinguishable from a live one.**
   Every 10 s the script prints packets, bytes, measured bytes-per-component and
   the RMS of the current packet in dBFS. Nothing outside your process will tell
@@ -589,36 +671,42 @@ On the station VM, as the `sigmond` user:
     --seconds 60 --out ~/capture
 ```
 
-Real output, trimmed only of eight further `TTL=0` notices — one per other
-channel radiod was already carrying (see below):
+Real output. Two sets of repeated `TTL=0` notices are trimmed: eight after the
+first (one per other channel radiod was already carrying), and seventeen more
+after the settle, which is radiod's other channels answering the re-poll.
 
 ```text
 Radiod reporting TTL=0 for SSRC 1038463489: Multicast data restricted to localhost loopback only!
 channel granted: ssrc=1038463489 10.000000 MHz preset=iq rate=12000 encoding=2 dest=239.183.22.68:5004
 settling 4.0s (radiod takes OUTPUT_ENCODING as a SEPARATE command)
-recording 60s to /opt/git/sigmond/capture/iq_10000000_20260823T150049Z.f32
-     5.1s  packets=1      bytes=1440       bytes/component=?  level=?
-    15.1s  packets=1001   bytes=961440     bytes/component=4.00  level=-127.4 dBFS
-    25.1s  packets=2003   bytes=1923360    bytes/component=4.00  level=-126.9 dBFS
-    35.1s  packets=3003   bytes=2883360    bytes/component=4.00  level=-126.2 dBFS
-    45.1s  packets=4003   bytes=3843360    bytes/component=4.00  level=-126.3 dBFS
-    55.1s  packets=5003   bytes=4803360    bytes/component=4.00  level=-126.7 dBFS
-wrote /opt/git/sigmond/capture/iq_10000000_20260823T150049Z.f32 (5760000 bytes, 6000 packets)
-wrote /opt/git/sigmond/capture/iq_10000000_20260823T150049Z.json
-WARNING: measured 4.00 bytes/component (encoding 4) but radiod REPORTED encoding 2 -- decode using the measurement
-channel released; radiod auto-destructs it within ~120s
+fresh poll: encoding=4 (ensure_channel said 2); verify_channel(expected=F32LE)=True
+recording 60s to /opt/git/sigmond/capture/iq_10000000_20260823T152306Z.f32
+     7.3s  packets=1      bytes=1440       bytes/component=?  level=?
+    17.3s  packets=1001   bytes=961440     bytes/component=4.00  level=-126.6 dBFS
+    27.3s  packets=2003   bytes=1923360    bytes/component=4.00  level=-127.3 dBFS
+    37.3s  packets=3003   bytes=2883360    bytes/component=4.00  level=-126.9 dBFS
+    47.4s  packets=4005   bytes=3845280    bytes/component=4.00  level=-126.9 dBFS
+    57.4s  packets=5005   bytes=4805280    bytes/component=4.00  level=-126.7 dBFS
+wrote /opt/git/sigmond/capture/iq_10000000_20260823T152306Z.f32 (5760000 bytes, 6000 packets)
+wrote /opt/git/sigmond/capture/iq_10000000_20260823T152306Z.json
+NOTE: measured 4.00 bytes/component (encoding 4); ensure_channel had reported encoding 2
+stopping: no channel teardown is sent. The lifetime simply expires and radiod reclaims the channel within ~120s -- a deliberate crash-safe trade, at the cost of up to that long streaming to nobody.
 ```
 
-Four things to read out of that:
+Five things to read out of that:
 
-- **`encoding=2` in the grant line, `4.00 bytes/component` on the wire.**
-  radiod *reported* S16BE (2 bytes) and *sent* F32LE (4 bytes) — the exact
-  misreport `event-recorder` found on live hardware, reproduced here with a
-  fresh client on a different station
+- **`encoding=2` from `ensure_channel`, `encoding=4` from a poll four seconds
+  later, `4.00 bytes/component` on the wire.** The grant *was* honoured — radiod
+  was sending F32LE and, once asked again, said so; `verify_channel(expected =
+  F32LE)` returned `True`. What was wrong is the value `ensure_channel` handed
+  back: it polls once, immediately after the create and before its own separate
+  `OUTPUT_ENCODING` command can be reflected in status, and it matches that
+  reply on frequency alone. **Stale, not misreported**
   ([docs-gap ledger row 39](../contributor/docs-gap-ledger.md)). Had the script
-  believed the report, it would have decoded 2 bytes where 4 were sent and
-  produced a plausible, well-formed, wrong array — at twice the sample count,
-  with clean completeness. **This is why you measure.**
+  believed that first value it would have decoded 2 bytes where 4 were sent and
+  produced a plausible, well-formed, wrong array at twice the sample count, with
+  clean completeness and zero gaps. Re-poll, or verify, or measure — this
+  recipe does all three.
 - **The arithmetic closes.** 5,760,000 bytes ÷ 8 bytes per complex F32 sample =
   720,000 samples = exactly 60.0 s at 12 kHz. 6000 packets in 60 s is 100
   packets/s, i.e. 960 payload bytes = 120 complex samples = 10 ms per packet.
@@ -627,10 +715,12 @@ Four things to read out of that:
 - **`TTL=0`** is not an error: it is radiod telling you the stream is
   loopback-only, which is the station's normal configuration
   ([station-capabilities.md](station-capabilities.md#what-the-station-cannot-do)).
-  ka9q-python prints one notice per channel it sees, and DASI002's radiod was
-  carrying nine, ours among them.
+  ka9q-python prints one notice per channel status it parses.
+- **Nothing was torn down.** The closing line is the honest description of the
+  lifetime contract, not a euphemism: the script stops refreshing, and radiod
+  reclaims the channel when the timer runs out.
 
-The files, and the whole sidecar:
+The files it left, on the station VM:
 
 ```bash
 ls -la ~/capture
@@ -638,10 +728,10 @@ ls -la ~/capture
 
 ```text
 total 5640
-drwxrwsr-x  2 sigmond sigmond    4096 Aug 23 15:01 .
-drwxrwsr-x 29 sigmond sigmond    4096 Aug 23 15:00 ..
--rw-rw-r--  1 sigmond sigmond 5760000 Aug 23 15:01 iq_10000000_20260823T150049Z.f32
--rw-rw-r--  1 sigmond sigmond    1981 Aug 23 15:01 iq_10000000_20260823T150049Z.json
+drwxrwsr-x  2 sigmond sigmond    4096 Aug 23 15:24 .
+drwxrwsr-x 29 sigmond sigmond    4096 Aug 23 15:23 ..
+-rw-rw-r--  1 sigmond sigmond 5760000 Aug 23 15:24 iq_10000000_20260823T152306Z.f32
+-rw-rw-r--  1 sigmond sigmond    2209 Aug 23 15:24 iq_10000000_20260823T152306Z.json
 ```
 
 (`~` for the `sigmond` user on a station is `/opt/git/sigmond`, which is why
@@ -652,9 +742,9 @@ the absolute paths above look the way they do.)
 ```json
 {
   "tool": "tier0_capture.py",
-  "schema": "tier0-capture/1",
+  "schema": "tier0-capture/2",
   "ka9q_python_version": "3.22.0",
-  "raw_file": "iq_10000000_20260823T150049Z.f32",
+  "raw_file": "iq_10000000_20260823T152306Z.f32",
   "requested": {
     "status_address": "DASI002-status.local",
     "client_id": "tier0-capture",
@@ -674,70 +764,84 @@ the absolute paths above look the way they do.)
     "frequency_hz": 10000000.0,
     "preset": "iq",
     "sample_rate": 12000,
-    "encoding": 2,
+    "encoding_from_ensure_channel": 2,
     "multicast_address": "239.183.22.68",
     "port": 5004
   },
   "anchor": {
-    "rtp_timestamp": 2147543888,
-    "rtp_sequence": 400,
-    "utc_unix_sec": 1787497254.3450809,
-    "utc": "2026-08-23T15:00:54.345081+00:00",
-    "gps_time_ns": 1471532468345080867,
+    "rtp_timestamp": 2147570768,
+    "rtp_sequence": 624,
+    "utc_unix_sec": 1787498593.3457522,
+    "utc": "2026-08-23T15:23:13.345752+00:00",
+    "gps_time_ns": 1471533805105752210,
     "rtp_timesnap": 2147495888,
     "state": "anchored",
-    "host_clock_at_receipt": "2026-08-23T15:00:54.365189+00:00"
+    "host_clock_at_receipt": "2026-08-23T15:23:13.365408+00:00"
   },
   "wire": {
     "bytes_per_component_measured": 4.0,
     "encoding_measured": 4,
-    "encoding_reported_by_radiod": 2,
-    "measurement_agrees_with_report": false,
+    "encoding_from_ensure_channel": 2,
+    "encoding_fresh_poll": 4,
+    "verify_channel_expected_f32le": true,
+    "measurement_agrees_with_ensure_channel": false,
+    "measurement_agrees_with_fresh_poll": true,
     "components_per_rtp_tick": 2,
-    "note": "Trust the measurement, not the report. The file is payload bytes verbatim."
+    "note": "Trust the measurement. The file is payload bytes verbatim."
   },
   "run": {
-    "recording_started_host_utc": "2026-08-23T15:00:54.346393+00:00",
-    "recording_stopped_host_utc": "2026-08-23T15:01:54.346512+00:00",
+    "recording_started_host_utc": "2026-08-23T15:23:13.362929+00:00",
+    "recording_stopped_host_utc": "2026-08-23T15:24:13.363081+00:00",
     "requested_seconds": 60.0,
     "settle_sec": 4.0,
     "packets": 6000,
     "bytes_written": 5760000,
-    "last_rtp_timestamp": 2148263828,
+    "last_rtp_timestamp": 2148290708,
     "samples_written_estimate": 720000.0,
-    "samples_expected_from_host_clock": 720001
+    "samples_expected_from_host_clock": 720002
   },
   "loss": {
-    "packets_received": 70400,
+    "packets_received_on_port": 72864,
     "packets_dropped": 0,
     "sequence_errors": 0,
     "timestamp_jumps": 0,
-    "note": "radiod zero-fills a missed block, so byte counts cannot show loss; these RTP-level counters and the sequence gaps are the honest evidence."
+    "note": "radiod zero-fills a missed block, so byte counts cannot show loss; these RTP-level counters and the sequence gaps are the honest evidence. packets_received_on_port counts EVERY datagram on the bound port, not just this SSRC."
   }
 }
 ```
 
 That sidecar is the whole point of Tier 0. It says which SSRC, on which
 multicast group, at which granted rate and preset; it says what the wire really
-carried; and it pins sample 0 of the file to an absolute UTC through radiod's
-GPS reference. Six months later, that file is still interpretable.
+carried and how that compares with **both** status readings; and it pins sample
+0 of the file to an absolute UTC through radiod's GPS reference. Six months
+later, that file is still interpretable.
 
-Two readings that need care:
+Three readings that need care:
 
-- **`gps_time_ns` is not the host clock, and is not sample-precise.** It is
-  radiod's GPS-epoch nanosecond count paired with `rtp_timesnap`; the pair is
-  quantised to the 20 ms block grid plus that emission's lateness
-  ([character.md §The anchor pair is not atomic](../hardware/character.md#the-anchor-pair-is-not-atomic)).
-  Do not attribute a sub-block offset to physics. The `utc` field, computed by
-  the library's `rtp_to_utc()`, is the number to use; `host_clock_at_receipt`
-  is there only so you can see how far the host clock sat from it (20 ms, on
-  this run).
-- **`packets_received: 70400` against `packets: 6000`.** `RTPRecorder`'s
-  metric counts every datagram arriving on the bound port, before the SSRC
-  filter, so on a station where several clients publish to port 5004 it is a
-  measure of the host, not of your channel. `packets` (this script's own
-  counter, SSRC-filtered) is yours; `packets_dropped` / `sequence_errors` /
-  `timestamp_jumps` are also per-SSRC and are the honest ones
+- **`encoding_from_ensure_channel: 2` vs `encoding_fresh_poll: 4`.** Keep both.
+  The first is what the library told you at create time; the second is what
+  radiod said once the follow-up command had landed; `encoding_measured: 4` is
+  what came off the wire. Recording only the first would have poisoned the file;
+  recording only the last would have hidden the race from whoever debugs the
+  next one.
+- **`gps_time_ns` is not the host clock, is not sample-precise, and is not
+  contemporaneous with your first packet.** It is radiod's GPS-epoch nanosecond
+  count paired with `rtp_timesnap`, quantised to the 20 ms block grid plus that
+  emission's lateness
+  ([character.md §The anchor pair is not atomic](../hardware/character.md#the-anchor-pair-is-not-atomic)),
+  and captured at channel discovery — here 74,880 RTP ticks (6.24 s) before the
+  first packet. Everything after it is extrapolation at the nominal rate. Do not
+  attribute a sub-block offset to physics. The `utc` field, computed by the
+  library's `rtp_to_utc()`, is the number to use; `host_clock_at_receipt` is
+  there only so you can see how far the host clock sat from it (20 ms, on this
+  run).
+- **`packets_received_on_port: 72864` against `packets: 6000`.** `RTPRecorder`'s
+  `packets_received` metric counts every datagram arriving on the bound port,
+  before the SSRC filter, so on a station where several clients publish to port
+  5004 it is a measure of the host, not of your channel — the sidecar renames it
+  to say so. `packets` (this script's own counter, SSRC-filtered) is yours;
+  `packets_dropped` / `sequence_errors` / `timestamp_jumps` are also per-SSRC and
+  are the honest ones
   ([docs-gap ledger row 40](../contributor/docs-gap-ledger.md)).
 
 And the loss note is not a formality:
@@ -747,15 +851,16 @@ timestamp jumps are what can actually move when the bad thing happens.
 
 ### Cleaning up
 
-Tier-0 captures are yours to delete. The channel needs no cleanup — it expires:
+Tier-0 captures are yours to delete. The channel needs no cleanup — it expires.
+On the station VM:
 
 ```bash
 rm -rf ~/capture
-ls -d ~/capture 2>/dev/null || echo "capture dir gone"
+ls ~/capture
 ```
 
 ```text
-capture dir gone
+ls: cannot access '/opt/git/sigmond/capture': No such file or directory
 ```
 
 ---
@@ -769,13 +874,14 @@ answer you already know
 The cheapest good test on HF: tune **1 kHz below WWV** and confirm the carrier
 lands at exactly **+1000 Hz** in the recording. That single measurement
 validates frequency scale, sample rate, encoding, and that you are recording
-real signal rather than noise or misinterpreted bytes. On a station with an
-antenna:
+real signal rather than noise or misinterpreted bytes. On the VM of a station
+that has an antenna:
 
 ```bash
 ~/tier0/bin/python ~/tier0_capture.py \
     --status AC0G-B4-status.local --freq 9999000 \
-    --preset iq --rate 12000 --seconds 30 --out ~/capture
+    --preset iq --rate 12000 --low-edge -5000 --high-edge 5000 \
+    --seconds 30 --out ~/capture
 ```
 
 Then, on your laptop, over the file you copied off:
@@ -797,6 +903,13 @@ print("peak at %.1f Hz (expect +1000)" % freqs[int(np.argmax(spec))])
 That test caught a wire-format fault that had been reporting *"completeness
 100.0 %, gaps 0"* while producing a 1.96×-rate stream of garbage (source: the
 playbook, same section). It is worth thirty seconds.
+
+⚠ **Unlike everything above, this section has not been run here.** The Tier-0
+proof on this page was done on DASI002, which has no antenna, so there was
+nothing at +1000 Hz to find: the capture path is proven live, the known-signal
+check is not. The two snippets are written from the playbook and from the
+sidecar's own fields; execute them on a station with an antenna before you rely
+on them.
 
 Two cautions on the check itself, both from
 [character.md](../hardware/character.md):
@@ -822,7 +935,8 @@ and reports healthy while recording nothing
 
 For Tier 0, do not install a system unit — that is a Tier-1 concern and it puts
 your process into the station's lifecycle. Use a user-level transient unit,
-which dies with your session's scope and needs no operator involvement:
+which dies with your session's scope and needs no operator involvement. On the
+station VM:
 
 ```bash
 systemd-run --user --unit=tier0-capture \
@@ -845,7 +959,7 @@ journal.
 
 Then the part that actually matters — **a file-growth watchdog outside the
 capture process**, so that a bug in the capture cannot disable its own
-supervisor:
+supervisor. In a second session on the station VM:
 
 ```bash
 while sleep 30; do
@@ -858,8 +972,16 @@ while sleep 30; do
 done
 ```
 
-**Test it by killing the live capture.** An untested watchdog is worse than
-none, because it buys false confidence. And make restart safe: the script's
+⚠ **This section has not been run here either.** A one-hour unattended capture
+was outside the read-only budget for the testbed, so the `systemd-run` command
+and the watchdog loop above are written, not executed — treat them as a
+starting point you must test. What *was* measured live on DASI002, 2026-08-23,
+is the pair of readings the lingering warning rests on
+(`loginctl show-user sigmond -p Linger` → `Linger=no`;
+`/etc/systemd/logind.conf:22` → `#KillUserProcesses=no`).
+
+**Test the watchdog by killing the live capture.** An untested watchdog is worse
+than none, because it buys false confidence. And make restart safe: the script's
 UTC-stamped filenames never overwrite and sort chronologically, which is the
 other half of that rule.
 
