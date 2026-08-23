@@ -23,7 +23,7 @@ reports about itself. The whole-suite picture is
 [`../CLIENT-CONTRACT.md`](../CLIENT-CONTRACT.md) ★.
 
 The user-facing surface is one stdlib-only Python program, `bin/smd`
-(~19k lines), plus the `lib/sigmond/` package it leans on. Core `smd` imports
+(20,221 lines today), plus the `lib/sigmond/` package it leans on. Core `smd` imports
 nothing outside the standard library — Textual is a lazy import reached only by
 `smd tui` — because it has to run on a freshly-imaged host before any venv
 exists.
@@ -59,7 +59,13 @@ stays standalone-safe).
 
 ## Production paths
 
-FHS-compliant, all defined in [`../../lib/sigmond/paths.py`](../../lib/sigmond/paths.py):
+The FHS anchors — `/etc/sigmond`, `/var/lib/sigmond`, `/var/log/sigmond`,
+`/run/sigmond` and the files under them — live in
+[`../../lib/sigmond/paths.py`](../../lib/sigmond/paths.py); the rest are named at
+their point of use: `GIT_BASE` in `discover.py` / `installer.py`, the operator
+catalog layer in `catalog.py` (`DEFAULT_CATALOG_PATHS`), `site-profile.toml` in
+`capture_prep.py`, the sink default in `hamsci_sink/writer.py`, and
+`upload-wake.sock` in ka9q-python's wspr_recorder.
 
 | Path | What it is |
 |---|---|
@@ -114,7 +120,9 @@ moves (ledger row 54).
 ## The verb map
 
 Every top-level verb and every `admin` subverb, with the handler that runs it
-and the `lib/sigmond/` module it leans on. Bare names are `bin/smd` functions.
+and the `lib/sigmond/` module it leans on. Handlers live in `bin/smd` unless the module column names a `commands/…` file
+(`cmd_uploader_manifest` is in `commands/uploader.py`, `cmd_timing_show` in
+`commands/timing_show.py`).
 **This table is CI-checked** — `tests/test_docs_cli_table.py` parses
 `smd --help` and `smd admin --help` and fails if a verb is missing here or a
 row names something that is not a verb. There are no deprecated top-level verbs
@@ -126,14 +134,14 @@ left to list: the v2 removals in
 |---|---|---|---|---|
 | `admin` | contributor | umbrella for diagnostics + maintenance; bare form prints the group help | no handler — `main()` rewrites `args.command = args.admin_command`, so every relocated verb keeps its old dispatch branch | via its subverb |
 | `apply` | after a config edit | reconcile running units with current config: re-render radiod fragments + firmware, regenerate the uploader manifest, restart what changed | `cmd_apply` → `lifecycle.py`, `commands/radiod_fragments.py`, `commands/radiod_firmware.py`, `commands/uploader.py`, `coordination.py` | yes (root + lock) |
-| `bringup` | first install | guided station bring-up from a catalog profile; `--with-optional` adds the discretionary set | `cmd_bringup` → `bringup.py`, `catalog.py`, `topology.py`, `site_profile.py`, `psws.py` | yes (root) |
+| `bringup` | first install | guided station bring-up from a catalog profile; `--with-optional` adds the discretionary set | `cmd_bringup` → `bringup.py` (`build_plan`), `catalog.py`, `coordination.py`, `site_profile.py`, `psws.py`; the plan's steps shell out to sub-`smd` calls, which is how `topology.py` is reached (`smd enable <comp>`) | yes (root) |
 | `component` | installer | per-component catalog + status: `list`, `install`, `update`, `add`, `remove`, `enable`, `disable` | dispatch branch in `main()` → `cmd_list`, `cmd_install`, `cmd_add`, `cmd_remove`, `cmd_enable`, `cmd_disable`; `catalog.py`, `installer.py` | `install`/`update`/`add`/`remove` do (root) |
 | `config` | installer | show / migrate / init / render / edit station and per-client config; also `catalog-prune`, `backup`, `restore`, `uploads`, `register-radiod` | dispatch branch → `commands/config.py`, `commands/client_config.py`, `commands/radiod_config.py`, `catalog_prune.py`, `psws.py` | writing subverbs do (root) |
 | `disable` | operator | take a component offline reversibly — stop its units, clear the topology flag | `cmd_disable` → `topology.py`, `catalog.py` | yes (root) |
 | `doctor` | station-inward update | checkout health: ownership, venv skew, dirty trees; `--fix` repairs ownership only | `cmd_doctor` → `doctor.py` | `--fix` does (root) |
 | `enable` | scripting | set `enabled = true` in topology — rarely typed, install and start do it for you | `cmd_enable` → `topology.py`, `catalog.py` | yes (root) |
 | `fleet` | fleet-outward | read-only fan-out over the inventory: `status`, `doctor`, `roster`, `pubkeys`. `--apply` is structurally impossible here, by design | `cmd_fleet` → `fleet.py` | no — the wall between the two chairs |
-| `install` | installer | install + configure + enable one component, or walk catalog × topology for the whole suite | `cmd_install` → `installer.py`, `discover.py`, `preflight.py`, `topology.py`, `harmonize.py` | yes (root + lock) |
+| `install` | installer | install + configure + enable one component, or walk catalog × topology for the whole suite | `cmd_install` → `installer.py`, `catalog.py`, `discover.py`, `preflight.py`, `topology.py` | yes (root + lock) |
 | `notify` | operator | fault-notification outbox: `test`, `status`, `list`, spooling to `/var/lib/sigmond/notify/` | `cmd_notify` — self-contained in `bin/smd` | `test` writes a spool record |
 | `psws` | registration | station-level PSWS enrolment: `status`, `enroll`, `verify`, `motd` | dispatch branch → `psws.py` | `enroll`/`verify` do (root) |
 | `reload` | operator | reload config in place via the control socket or SIGHUP, falling back to restart | `cmd_reload` → `control_socket.py`, `lifecycle.py` | yes (root + lock) |
@@ -154,7 +162,7 @@ left to list: the v2 removals in
 | `admin instance` | multi-reporter hosts | per-reporter client instance lifecycle: `list`, `show`, `add`, `remove`, `edit`, `enable`, `disable`, `migrate` | `cmd_instance_*` → `instance.py` | all but `list`/`show` (root) |
 | `admin log` | debugging | follow a client's journal, or its file logs with `--files`; `--level` sets the level via `coordination.env` + SIGHUP | `cmd_log` → `log_cmd.py`, `component_state.py`, `catalog.py` | `--level` writes `coordination.env` (ledger row 53) |
 | `admin manifest` | after a release | adopt a blessed image manifest onto an already-running host (`adopt`), or restore one (`restore`) | `cmd_manifest_adopt`, `cmd_manifest_restore` → `manifest_adopt.py`, `manifest_restore.py`, `provenance.py` | `--apply` does (root) |
-| `admin personalize` | first boot of a clone | re-identify a cloned image: hostname, identity, config render, secrets, validate; plan-first | `cmd_personalize` → `site_profile.py`, `psws.py`, `coordination.py` | `--yes` does (root) |
+| `admin personalize` | first boot of a clone | re-identify a cloned image: hostname, identity, config render, secrets, validate; plan-first | `cmd_personalize` → `site_profile.py`; the rest of the sequence shells out to `smd config render`, `smd admin secrets status`, `smd admin validate` | `--yes` does (root) |
 | `admin public-ip` | debugging | this host's outbound public IPv4 + IPv6 | `cmd_public_ip` — self-contained | no |
 | `admin rac` | remote access | the wd-rac (frpc) tunnel — bare form is state-aware; also `status`, `configure`, `reconfigure`, `install`, `start`, `stop`, `restart`, `register` | `cmd_rac` + `_rac_configure` in `bin/smd`; the TUI path uses `rac_config.py` | configuring + lifecycle subverbs (root) |
 | `admin radiod` | migration | radiod canonical-naming operations (`migrate`), per [`../RADIOD-IDENTIFICATION.md`](../RADIOD-IDENTIFICATION.md) | `cmd_radiod_migrate` → `radiod_migrate.py` | `--apply` does (root) |
@@ -170,7 +178,7 @@ left to list: the v2 removals in
 | `admin wisdom` | tuning | FFTW3 wisdom planner radiod reads from `/etc/fftw/wisdomf`: `status`, `plan` | `cmd_wisdom_status`, `cmd_wisdom_plan` → `wisdom.py` | `plan` does (root) |
 
 Two conventions the table encodes. **Read-only verbs never take the lifecycle
-lock and never elevate** — `status`, `list`, `log`, `diag`, `validate` are safe
+lock and never elevate** — `status`, `component list`, `log`, `diag`, `validate` are safe
 to run concurrently; the mutating set `{install, apply, start, stop, restart,
 reload}` takes the flock in `main()`, and the rest self-elevate through
 `_need_root()`. And **`smd` refuses to be run under `sudo`**: it re-execs
