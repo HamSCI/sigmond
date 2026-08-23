@@ -1,5 +1,7 @@
 # Per-installation provisioning inputs
 
+> **Operators:** the step-by-step narrative is [operator/registration.md](operator/registration.md); this page is the per-transport reference.
+
 **Scope:** every piece of unique-per-installation information, credential, and
 manual action required to stand up a sigmond + dasi2-client host — in **both**
 deployment models (golden image and sigmond clone + install). Use this to plan

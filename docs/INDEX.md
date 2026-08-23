@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 6af4773 on 2026-08-23 — code
+> **Verified against:** sigmond 0fd90dd on 2026-08-23 — code
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -14,6 +14,7 @@ Front door for each audience: [docs/README.md](README.md).
 |---|---|
 | [operator/README.md](operator/README.md) ★ | The operator's table of contents: what hosting a station involves, the ordered path from parts to weekly check, the two-machines-in-one-box (`[host]` vs `[VM]`) rule, and what to send when asking for help |
 | [operator/glossary.md](operator/glossary.md) ★ | Plain-English definition of every term the operator pages use, alphabetical |
+| [operator/registration.md](operator/registration.md) ★ | Getting a station's uploads accepted: which of the four networks need registration (only PSWS does), the PSWS account→site→instrument→key walkthrough, how to confirm each product arrived and how long to wait |
 | [operator/hardware.md](operator/hardware.md) (pointer) | Redirects to `hardware/shopping-list.md` — the parts list is shared with the scientist path |
 | [operator/install.md](operator/install.md) (pointer) | Redirects to sigmond-appliance's `INSTALL.md`, plus what to expect from the ~45-minute install |
 

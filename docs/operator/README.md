@@ -34,7 +34,7 @@ Do these in order. Only steps 1 and 2 need you physically at the machine.
 |---|---|---|
 | 1. Buy the parts | [hardware.md](hardware.md) | an evening of shopping |
 | 2. Install from the USB stick | [install.md](install.md) | ~45 min |
-| 3. Register your station's uploads | registration.md *(being written)* | 30 min + portal waits |
+| 3. Register your station's uploads | [registration.md](registration.md) | 30 min + portal waits |
 | 4. Learn what "healthy" looks like | day-2.md *(being written)* | 15 min |
 | 5. (optional) Let the fleet admin reach it | remote-access.md *(being written)* | 10 min |
 | When it breaks | troubleshooting.md *(being written)* | — |
