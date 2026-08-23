@@ -64,7 +64,7 @@ plus the handful below that its pages use without defining.
 | **wizard** (`sigmond-setup`) | The setup questions asked on first boot — reporter ID, grid square, station name, PSWS IDs. Rerun it from the host as `sigmond-setup --reconfigure` to fix an answer. |
 | **wsprdaemon** | [wsprdaemon.org](https://wsprdaemon.org) — the aggregation service that receives a copy of the spots for fleet-wide analysis. |
 | **wsprnet** | [wsprnet.org](https://wsprnet.org) — the global WSPR spot database; where your WSPR spots land, searchable by your *reporter ID*. |
-| **WWV / WWVH / CHU** | The shortwave time stations the timing client listens to: WWV (Colorado) and WWVH (Hawaii) on 2.5, 5, 10, 15, 20 and 25 MHz, CHU (Canada) on 3.33, 7.85 and 14.67 MHz. They are the HF evidence behind timing tier T3, and the standard signal to test a capture against. |
+| **WWV / WWVH / CHU** | The shortwave time stations the timing client listens to: WWV (Colorado) on 2.5, 5, 10, 15, 20 and 25 MHz, WWVH (Hawaii) on 2.5, 5, 10 and 15 MHz only, CHU (Canada) on 3.33, 7.85 and 14.67 MHz. They are the HF evidence behind timing tier T3, and the standard signal to test a capture against. |
 
 ---
 

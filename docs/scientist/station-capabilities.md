@@ -25,10 +25,11 @@ channel without a `lifetime`; a stream that leaves the host as things are
 configured today; a second receiver; or more load than radiod's **20 ms** block
 deadline can absorb. Live on b4 on 2026-08-23, radiod was carrying **44
 channels** for four clients **as `smd status` counts them** (6 + 19 + 17 + 2;
-source: `smd status` on b4). radiod's true count is higher — **at least 45** —
+source: `smd status` on b4). radiod's true count is higher — **at least 46** —
 because a client's inventory is not radiod's channel list: hf-timestd declares
-6 and also runs the 96 kHz TS-1 BPSK-PPS channel and a 4 kHz WWVB channel from
-the same config. Budget against the higher number. One
+6 and also runs two channels that count in neither, the 96 kHz TS-1 BPSK-PPS
+channel and the 4 kHz WWVB channel, from the same config. Budget against the
+higher number. One
 12 kHz complex-float32 channel costs about **96 kB/s** of disk and **~3 % of one
 core** (source: `docs/EVENT-CLIENT-PLAYBOOK.md`
 [§What "good" cost](../EVENT-CLIENT-PLAYBOOK.md#what-good-cost-for-calibration));
@@ -409,7 +410,9 @@ from a live one.
 - **You are one client among several.** Gain, AGC and filter edges are
   last-writer-wins on a shared channel (source:
   `ka9q-python/ka9q/control.py::ensure_channel`), and your load lands on a
-  radiod already carrying 44 channels for four other clients. Coordinate.
+  radiod already carrying 44 channels for four other clients as `smd status`
+  counts them — at least 46 in radiod itself
+  ([the one-paragraph version](#the-one-paragraph-version)). Coordinate.
 
 ## Next
 

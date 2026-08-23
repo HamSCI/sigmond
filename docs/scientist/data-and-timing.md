@@ -721,17 +721,36 @@ field "can be wrong by seconds or more after a radiod restart" (same file).
 Let the stream layer's drop/restore callback tell you the producer went away,
 start a new segment with a new anchor, and never silently splice across it.
 
-The same is true, and far more often, of **channel creation**: every dynamic
-channel starts its RTP counter near 2³¹ rather than continuing anything, so a
-recorder that restarts — which re-creates its channel — begins a fresh counter
-space each time, and two runs hours apart can carry *overlapping* RTP
-timestamps that mean completely different UTC. Three ephemeral Tier-0 channels
-created on DASI002 on 2026-08-23 (15:23Z, 17:37Z and 17:53Z) took anchors of
-`rtp_timesnap` 2147495888, 2147495888 and 2147496128 — the same value twice and
-the third one block (240 ticks, 20 ms) later, all ≈ 2³¹ + 1.02 s at 12 kHz —
-while `gps_time_ns` advanced by the real 9013.16 s between the first and the
-last. An RTP timestamp is meaningful **only within one channel incarnation**,
-and neither ka9q-radio's nor ka9q-python's documentation says so
+The same is true, and far more often, of **channel creation**. A new channel
+does not continue anything: radiod seeds its RTP counter from **radiod's own
+uptime** — "Tie the RTP timestamps to radiod uptime … reference RTP timestamp 0
+to the first radiod block",
+`chan->output.rtp.timestamp = (int32_t)(first_block * (chan->output.samprate /
+block_rate))`, where `first_block` is the master FFT job counter (source:
+`ka9q-radio/src/linear.c:88-91`; `filter.c:397`). So on a freshly restarted
+radiod a new channel starts near **0**, and a recorder that restarts — which
+re-creates its channel — begins a fresh counter space each time. Two runs hours
+apart can carry *overlapping* RTP timestamps that mean completely different
+UTC.
+
+Three ephemeral Tier-0 channels created on DASI002 on 2026-08-23 (15:23Z,
+17:37Z, 17:53Z) took anchors of `rtp_timesnap` 2147495888, 2147495888 and
+2147496128 — the same value twice, the third one block (240 ticks, 20 ms)
+later — while `gps_time_ns` advanced by the real 9013.16 s between the first
+and the last. They cluster at 2³¹ for a specific reason worth knowing: that
+`(int32_t)` cast is of a `double`, and once `uptime × sample_rate` exceeds
+`INT32_MAX` the conversion pins at `0x80000000` = 2147483648 — which at 12 kHz
+is any radiod that has been up longer than **~49.7 h** (DASI002's had been up
+since 2026-08-15, 8 days). Every one of those channels therefore started at
+*exactly* 2³¹ and counted up from there: run 1's first packet was
+2³¹ + 87,120 ticks = **+7.26 s**, against a first heartbeat printed at 7.3 s;
+run 3's was 2³¹ + 154,800 = **+12.90 s** against 13.0 s. The seed is a clock
+reading, not a magic number, and on a station with a shorter uptime you will
+see small values instead.
+
+The operational conclusion is unchanged either way: an RTP timestamp is
+meaningful **only within one channel incarnation**, and neither ka9q-radio's
+nor ka9q-python's documentation says so
 ([docs-gap ledger row 51](../contributor/docs-gap-ledger.md)). Keep the anchor
 pair *per file*, which the Tier-0 sidecar does, and never compare raw RTP
 timestamps across two captures.
