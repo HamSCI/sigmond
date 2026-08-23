@@ -57,8 +57,10 @@ df -h /
 ```
 
 If you would rather copy all four at once, this is the whole check — the middle
-line is a reminder, not a command, and `smd doctor` is harmless to run every
-week even when nothing looks wrong. `[VM]`:
+line is a reminder, not a command. Step 4 is listed as "only when something
+looks off" because that is when it *tells* you anything — `smd doctor` is
+read-only and harmless to run weekly, it just prints the same housekeeping
+findings every time on a healthy station. `[VM]`:
 
 ```bash
 smd status                      # step 1
@@ -167,11 +169,11 @@ line:
 
 | Line | Normal? | Why |
 |---|---|---|
-| `✗ station.psws_station_id is unset (need PSWS-issued S0xxxxx)`, *before* the banner | **Normal on a station with no PSWS enrolment** | This is not a station-wide check and it is not about `/etc/sigmond/site-profile.toml`. It is **mag-recorder's own config check** — `mag_recorder/contract.py`, `_collect_issues()`, which raises `severity: fail` when `[station] psws_station_id` in `/etc/mag-recorder/config.toml` is missing or still holds its `<YOUR_PSWS_STATION_ID>` template placeholder. It surfaces above the banner because the client is asked for its inventory before the banner prints. On a station that never enrolled in PSWS, or has no magnetometer, this is the expected state — confirm with `smd psws status`, which answers in plain English ([registration.md §1](registration.md#1-what-the-wizard-already-did)). |
+| `✗ station.psws_station_id is unset (need PSWS-issued S0xxxxx)`, *before* the banner | **Normal on a station with no PSWS enrolment** | This is not a station-wide check and it is not about `/etc/sigmond/site-profile.toml`. It is **mag-recorder's own config check** — `mag_recorder/contract.py`, `_collect_issues()`, which raises `severity: fail` when `[station] psws_station_id` in `[VM]` `/etc/mag-recorder/mag-recorder-config.toml` is missing or still holds its `<YOUR_PSWS_STATION_ID>` template placeholder. It surfaces above the banner because the client is asked for its inventory before the banner prints. On a station that never enrolled in PSWS, or has no magnetometer, this is the expected state — confirm with `smd psws status`, which answers in plain English ([registration.md §1](registration.md#1-what-the-wizard-already-did)). |
 | `✗ gmag-webui.service: inactive` | **Normal without a magnetometer dashboard** | `gmag-webui` is the port-8082 magnetometer web page ([the four windows](#the-four-windows)). It is installed on every station but only worth running where there is an RM3100 feeding it, so on a station without one it sits `inactive`. dasi002 printed this on 2026-08-23; b4, which has the sensor, printed `✓ active`. |
-| `✗ timestd-vtec.service: inactive` | **Normal without a dual-frequency GNSS receiver** | [vTEC](glossary.md) is the ionospheric total-electron-content product, and computing it needs an optional dual-frequency GNSS receiver (a u-blox ZED-F9P) that most stations do not have. The unit ships enabled-but-inert on every station; `inactive` is the correct state when the hardware is absent. |
+| `✗ timestd-vtec.service: inactive` | **Normal without a dual-frequency GNSS receiver** | [vTEC](glossary.md) is the ionospheric total-electron-content product, and computing it needs an optional dual-frequency GNSS receiver (a u-blox ZED-F9P) that most stations do not have. `timestd-vtec.service` is enabled only where a GNSS receiver is configured, and left disabled elsewhere: on 2026-08-23 b4 read `UnitFileState=enabled  ActiveState=active` against its networked GNSS, while dasi002 read `UnitFileState=disabled  ActiveState=inactive`. Either way, **`inactive` on a station without a dual-frequency GNSS receiver is normal, not a fault** — you would only report it if you know your station has one. |
 | A client-summary line with **no glyph at all** — e.g. `mag-recorder  v0.1.0  (8551d27)  contract=0.8` where `hf-timestd` above it reads `✓  hf-timestd …` | **Not an error — it means "this client reported something", and the something is printed underneath** | The ✓ on those summary lines means *validated clean*: `bin/smd` sets it only when the client returned an empty issue list (`clean_tag = '✓ ' if not issues else ''`), specifically so an operator can tell "checked, clean" from "not checked". No glyph therefore means the client returned one or more issues — and every one of them is printed immediately below that line as its own ⚠ or ✗. So read the lines under a glyph-less client, not the missing glyph itself. |
-| `⚠ station.callsign is unset` on a station whose `site-profile.toml` **does** have a callsign | **Normal — different file** | Same origin as the row above: it is one of **mag-recorder's** config issues (`mag_recorder/contract.py`, `_collect_issues()` — `[station] callsign` in `/etc/mag-recorder/config.toml`), printed under mag-recorder's glyph-less summary line. It says nothing about your station identity. `/etc/sigmond/site-profile.toml` remains the one place your identity lives ([registration.md §1](registration.md#1-what-the-wizard-already-did)), and `smd admin instance list` is what proves what your recorders actually report under. That the two look like the same key is a genuine trap — tracked as [docs-gap ledger row 24](../contributor/docs-gap-ledger.md). |
+| `⚠ station.callsign is unset` on a station whose `site-profile.toml` **does** have a callsign | **Normal — different file** | Same origin as the row above: it is one of **mag-recorder's** config issues (`mag_recorder/contract.py`, `_collect_issues()` — `[station] callsign` in `[VM]` `/etc/mag-recorder/mag-recorder-config.toml`), printed under mag-recorder's glyph-less summary line. It says nothing about your station identity. `/etc/sigmond/site-profile.toml` remains the one place your identity lives ([registration.md §1](registration.md#1-what-the-wizard-already-did)), and `smd admin instance list` is what proves what your recorders actually report under. That the two look like the same key is a genuine trap — tracked as [docs-gap ledger row 24](../contributor/docs-gap-ledger.md). |
 | `sudo: a password is required` (twice, before the banner) | **Normal — ignore** | A read-only command reaching for `sudo` it does not have and carrying on regardless. It is noise on stderr, not a failure, and it appears on b4 but not dasi002. Known and tracked — [docs-gap ledger row 6](../contributor/docs-gap-ledger.md). |
 | `✗ radiod@AC0G-B4-patched.service: inactive` | **Normal** | A *second, deliberately disabled* `radiod` unit. B4 keeps two `radiod` configs in `/etc/radio/` — the live one and a spare "patched" variant. `systemctl is-enabled` reads `enabled` for `radiod@AC0G-B4` and `disabled` for `-patched` (checked live, 2026-08-23). Only one radiod can own the RX888, so the other one being down is the correct state. Most stations have only one and never see this line. |
 | `✓ meteor-scatter@my-rx888.service: active [orphaned]` | **Normal-ish — mention it** | `[orphaned]` means a unit is running that the current config no longer declares. Harmless, but worth naming to your fleet admin so it gets tidied. |
@@ -318,16 +320,29 @@ five-minute files) of one channel's compressed raw IQ came to 15,073,610,352
 bytes in `/var/lib/timestd/raw_buffer/WWV_25000/20260822`. That station records
 **six** timing channels (`smd status` prints `default: 6 ch, 6 freqs`), so it
 writes roughly **90 GB a day** and keeps about a day and a half of it before its
-own eviction reclaims the space. Use 15 GB per channel per day for arithmetic,
-and read your own channel count off `smd status` rather than assuming six.
+own eviction reclaims the space. Read your own channel count off `smd status`
+rather than assuming six. (Sizes here are decimal GB, from `du -sb`; `df -h`
+prints GiB, which is why 15 GB of files reads as `14G` there.)
+
+That is **raw IQ only**. On top of it the station keeps a cumulative analysis
+database — `/var/lib/timestd/phase2/timestd.db`, 9,233,326,080 of the
+9,244,733,098 bytes in `phase2` on b4 (measured 2026-08-23) — which **grows
+continuously instead of rolling**, plus a few megabytes of per-channel
+products. Amortised over what b4 is currently holding that is roughly **1 GB
+per channel per day**, so budget **≈16 GB per channel per day, ≈96 GB a day**
+for a six-channel station, and treat the database as a slow permanent addition
+rather than part of the daily churn.
 
 ⚠ **The two written sources disagree with each other and with that
-measurement**, so quote the measured figure and not either of them: hf-timestd's
-own code comment says ~18 GB per channel per day (high by about 20%), while
-`hf-timestd/INSTALLATION.md` — the source behind
+measurement**, so quote the measured figures and not either of them.
+hf-timestd's own code comment budgets ~18 GB per channel per day — raw ~14 GB
+plus phase2 ~4 GB of "HDF5 data products" — and its raw line matches the
+measurement well, but b4 writes no per-channel HDF5 anywhere near that size
+(its phase2 channel directories are 292 bytes), so the phase2 half of that
+budget over-counts. `hf-timestd/INSTALLATION.md` — the source behind
 [shopping-list.md](../hardware/shopping-list.md) — says 6.7 GB and sizes a
-6-channel station at a 120 GB disk, which the measurement says is under two days
-of recording. The ~2.7× disagreement is
+6-channel station at a 120 GB disk, which the measurement says is well under
+two days of recording. The ~2.7× disagreement is
 [docs-gap ledger row 20](../contributor/docs-gap-ledger.md); neither upstream
 number has been corrected yet.
 

@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** pointer
-> **Verified against:** n/a
+> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **See instead:** [sigmond-appliance/INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md)
 
 The install walkthrough belongs to the repository that builds the USB image, so

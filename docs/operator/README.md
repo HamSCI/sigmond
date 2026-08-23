@@ -67,7 +67,9 @@ purpose (the USB ports go to the radio), so that screen is the last easy chance
 to read the host address. Several later steps — the Proxmox window, every
 remote-access check in [remote-access.md §4](remote-access.md#4-turning-it-on-off-and-checking-it--all-on-the-host) —
 run on the `[host]` and are simply unreachable without it. If you have already
-lost it, your fleet admin or your router's DHCP list can recover it.
+lost it, your fleet admin or your router's DHCP list can recover it — it is a
+nuisance, not a dead end.
+
 **Every command here is tagged `[host]` or `[VM]`** — the tag sits on the line
 above the command, never inside it, so a whole block is safe to copy. Nearly
 all are `[VM]`; the host matters only for the Proxmox GUI and a dead box.

@@ -148,8 +148,10 @@ No permission needed, any time, as often as you like. All `[VM]` unless noted.
   read-only.
 - **`smd psws status`**, **`smd config uploads status`** — status verbs, all read-only.
 - **`smd component list`** — every installed component and whether it is
-  [enabled](glossary.md), with `--no-fetch` if you want it quick
-  ([day-2.md](day-2.md#installed-enabled-shown)).
+  [enabled](glossary.md) ([day-2.md](day-2.md#installed-enabled-shown)). By
+  default it runs `git fetch` for each component first, so it needs internet and
+  takes a while; `smd component list --no-fetch` skips that and answers from
+  cached refs, which is all you need for the LIFECYCLE column.
 - **`df -h /`**, **`lsusb`**, **`systemctl status <unit>`** — plain Linux looking-around.
 - **`du -xh --max-depth=2 /var/lib /home /var/log 2>/dev/null | sort -h | tail -15`**
   — read-only: shows what is actually using the disk, so your message about a

@@ -393,14 +393,19 @@ On b4, which has a magnetometer, **both** rows appear —
 `grape-daily.timer → grape-daily.service` at 01:0x UTC and
 `mag-recorder-upload.timer → mag-recorder-upload.service` at 03:0x UTC.
 
-⚠ **On a station with no working magnetometer only `grape-daily.timer` is
-listed, and systemd says nothing about the other one.** dasi002 printed exactly
-one row and `1 timers listed.` — no error, no mention of the name it could not
-show. The unit file is there (`systemctl list-unit-files` finds
-`mag-recorder-upload.timer`), it simply is not loaded on a station where
-`mag-recorder` is not running. So a missing second row means "no magnetometer
-here", not "the timer is broken". If you *do* have an RM3100 and only one row
-appears, that is worth reporting — start at
+⚠ **On a station where the magnetometer timer was never enabled, only
+`grape-daily.timer` is listed, and systemd says nothing about the other one.**
+dasi002 printed exactly one row and `1 timers listed.` — no error, no mention of
+the name it could not show, even with `--all`. The timer is **installed and
+loaded but not enabled**: `systemctl show mag-recorder-upload.timer` reads
+`UnitFileState=linked  LoadState=loaded  ActiveState=inactive` there, against
+`UnitFileState=enabled  ActiveState=active` on b4 (live, 2026-08-23). A timer
+that is not enabled is never started, so it never gets a next-elapse time and
+`list-timers` has nothing to print. That is about **enablement**, not about
+whether `mag-recorder` happens to be running right now. So a missing second row
+means "the magnetometer upload was never switched on here", not "the timer is
+broken". If you *do* have an RM3100 and only one row appears, that is worth
+reporting — start at
 [troubleshooting.md → *Magnetometer flat line, or mag-recorder says failed*](troubleshooting.md#magnetometer-flat-line-or-mag-recorder-says-failed).
 
 So a station finished on Tuesday afternoon shows spots the same afternoon and
