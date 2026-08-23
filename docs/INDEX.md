@@ -49,6 +49,7 @@ Front door for each audience: [docs/README.md](README.md).
 | Doc | What it gives you |
 |---|---|
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) ★ | Working agreements: where work happens, host updates, pins, deploy-tree hygiene, PR expectations, graphify maintenance |
+| [contributor/orchestration.md](contributor/orchestration.md) ★ | How sigmond works in one page: the 13 architecture layers and their modules, production paths, catalog/topology discovery, and the CI-checked `smd` verb→module map |
 | [contributor/docs-conventions.md](contributor/docs-conventions.md) ★ | How the docs tree is organised and kept true: header block, ★-canonical rule, audience split |
 | [contributor/docs-gap-ledger.md](contributor/docs-gap-ledger.md) | Running ledger of software gaps discovered while documenting, feeding per-repo issues |
 | [contributor/README.md](contributor/README.md) (stub — Phase 3) | Placeholder — real contributor guide not yet written; points to docs-conventions/CLIENT-CONTRACT/ADD-A-CLIENT/CONTRIBUTING until then |
