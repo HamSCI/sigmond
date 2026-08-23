@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 04fc9b1 on 2026-08-23 — code
+> **Verified against:** sigmond e8e5bff on 2026-08-23 — code
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -38,6 +38,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [SCINTILLATION-MONITORING.md](SCINTILLATION-MONITORING.md) | Design note + implementation plan for adding S4/σ_φ/Doppler ionospheric-scintillation observables |
 | [scientist/station-capabilities.md](scientist/station-capabilities.md) ★ | The DASI2 station capability envelope for a new client: the frequency/preset/sample-rate/encoding menu radiod will actually serve, how many channels you may add and how to measure the load, the T6–T1 timing tiers and where the tier is recorded, storage per channel-hour with the measured tie-point, the front-end AGC caveat, what "a gap" means when radiod zero-fills, and what the station cannot do |
 | [scientist/capture-quickstart.md](scientist/capture-quickstart.md) ★ | The Tier-0 "capture first" recipe: what to settle before you touch a station, `event-recorder` with a job TOML as the fast path, and a complete one-file ka9q-python recorder — proven live on DASI002 — that sets a mandatory `lifetime`, re-polls the encoding `ensure_channel` returns (it can be stale) and then measures the wire format anyway, and writes a sidecar pinning sample 0 to UTC; plus the WWV known-signal check, running it unattended with a watchdog, and where not to write on a production station |
+| [scientist/costas-14110-worked-example.md](scientist/costas-14110-worked-example.md) ★ | The 2026-08-12 eclipse Costas listener end to end, as the worked example a next scientist copies: the one-day ask, why the envelope was 14.110 MHz I/Q ±5 kHz at 12 kHz float32, the WWV known-signal check and the wire-format probe that replaced it, the external stall watchdog and what it caught, a timeline reconstructed from the station's own logs, the 22.23 h / 7.68 GB / 26-segment archive, the "no detection" verdict of 08-12 overturned on 08-13 by testing the permutation instead of the energy, the 24 null hours that make it a result, what the capture cannot show (no eclipse effect, no confirmed TX schedule or locations), and the eight things worth doing differently |
 | [scientist/README.md](scientist/README.md) (stub — Phase 2) | Placeholder — real scientist guide not yet written; points to EVENT-CLIENT-PLAYBOOK.md and ka9q-python's Getting Started guide until then |
 
 ## 3. Contributor (work on the code)

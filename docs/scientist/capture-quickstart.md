@@ -142,7 +142,7 @@ Three properties worth knowing before you adopt it:
   otherwise.
 
 The eclipse run itself — the job, the signal, what came out —
-is `costas-14110-worked-example.md` *(being written)*.
+is [costas-14110-worked-example.md](costas-14110-worked-example.md).
 
 ---
 
