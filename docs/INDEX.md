@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — code
+> **Verified against:** sigmond dac759d on 2026-08-23 — docs
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.
@@ -48,14 +48,14 @@ Front door for each audience: [docs/README.md](README.md).
 
 | Doc | What it gives you |
 |---|---|
-| [../CONTRIBUTING.md](../CONTRIBUTING.md) ★ | Working agreements: where work happens, host updates, pins, deploy-tree hygiene, PR expectations, graphify maintenance |
+| [contributor/README.md](contributor/README.md) ★ | The contributor's table of contents: reading order with time estimates across CONTRIBUTING, orchestration, the architecture diagram, CLIENT-CONTRACT, a client's six-file docs, appliance-boundary, dev-setup, client-authoring, and docs-conventions; where the gap ledger is; how to run the docs checks; and the "deploy trees are not workspaces" pointer |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) ★ | Working agreements: where work happens, host updates, pins, deploy-tree hygiene, PR expectations, graphify maintenance, and §14 "docs travel with behavior" |
 | [contributor/orchestration.md](contributor/orchestration.md) ★ | How sigmond works in one page: the 13 architecture layers and their modules, production paths, catalog/topology discovery, and the CI-checked `smd` verb→module map |
 | [contributor/appliance-boundary.md](contributor/appliance-boundary.md) ★ | The appliance ↔ sigmond boundary: what the golden VM bakes vs what first boot does vs what the wizard sets, version provenance (image lineage vs `smd version` vs the blessed manifest), and which changes reach a station by `smd update` and which need a new image |
 | [contributor/dev-setup.md](contributor/dev-setup.md) ★ | Build and test the suite: prereqs, sibling-checkout clone layout, the dev venv (`uv sync` + the `dev-setup.sh` pip fallback), running `smd` from the tree, the canonical test runner and what CI runs (with the unittest-discovery trap), the docs checks, and pointers to graphify, native binaries, and the appliance rig |
 | [contributor/client-authoring.md](contributor/client-authoring.md) | The route through the client-authoring documents (becoming-a-client → ADD-A-CLIENT → CLIENT-CONTRACT → REQUIREMENTS-TEMPLATE → the skeleton), the two registrations that fail silently (`AFFINITY_UNITS`, `[client_features]`), the six-file per-client docs skeleton, and the rule that a client's own `docs/` must be true for that client — with meteor-scatter's copied-and-stale docs as the cautionary example |
 | [contributor/docs-conventions.md](contributor/docs-conventions.md) ★ | How the docs tree is organised and kept true: header block, ★-canonical rule, audience split |
 | [contributor/docs-gap-ledger.md](contributor/docs-gap-ledger.md) | Running ledger of software gaps discovered while documenting, feeding per-repo issues |
-| [contributor/README.md](contributor/README.md) (stub — Phase 3) | Placeholder — real contributor guide not yet written; points to docs-conventions/CLIENT-CONTRACT/ADD-A-CLIENT/CONTRIBUTING until then |
 | [CLIENT-CONTRACT.md](CLIENT-CONTRACT.md) ★ | The sigmond↔component interface contract — the authoritative statement of the integration surface every client implements |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Sigmond-overseer-only requirements baseline (retroactive v0.1); the suite-wide frame, not the component seam |
 | [REQUIREMENTS-INDEX.md](REQUIREMENTS-INDEX.md) | Front door to the whole suite's requirements baseline, one row per component repo |

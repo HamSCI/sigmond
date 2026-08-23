@@ -290,7 +290,7 @@ because they are software/doc defects in another repo:
   — what the operator actually experiences at first boot.
 - [`sigmond-appliance/docs/RELEASE.md`](https://github.com/HamSCI/sigmond-appliance/blob/main/docs/RELEASE.md)
   — the four rungs in full.
-- dev-setup.md *(being written)* — getting a working checkout before any of
+- [`dev-setup.md`](dev-setup.md) ★ — getting a working checkout before any of
   this matters.
-- client-authoring.md *(being written)* — adding a component the image will
-  then carry.
+- [`client-authoring.md`](client-authoring.md) — adding a component the image
+  will then carry.

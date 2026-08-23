@@ -196,5 +196,5 @@ restated.
 
 - [`orchestration.md`](orchestration.md) ★ — layers, verb→module map.
 - [`appliance-boundary.md`](appliance-boundary.md) ★ — how a change reaches a station.
-- `client-authoring.md` *(being written)* — writing a new client.
-- contributor `README.md` *(being written)*.
+- [`client-authoring.md`](client-authoring.md) — writing a new client.
+- [`README.md`](README.md) ★ — the contributor's table of contents.

@@ -212,7 +212,7 @@ Version provenance is its own trap: `/etc/sigmond-appliance/version` is written
 once at firstboot and never updated, so it lies after any in-place update — read
 `smd version`, which reports lineage separately from the live component commits.
 The image/appliance side of that boundary gets its own page,
-appliance-boundary.md *(being written)*.
+[`appliance-boundary.md`](appliance-boundary.md) ★.
 
 ## Heartbeat and the board
 
@@ -262,6 +262,7 @@ Do not add notifications as a side effect of other work.
 - [`docs-conventions.md`](docs-conventions.md) ★ — how these pages are kept
   true, and the rule that a contributor page links the code path rather than
   restating it.
-- dev-setup.md *(being written)* — getting a working checkout, `.venv`, and
-  the test suite. client-authoring.md *(being written)* — writing a new
-  conformant client; until it lands, [`../ADD-A-CLIENT.md`](../ADD-A-CLIENT.md).
+- [`dev-setup.md`](dev-setup.md) ★ — getting a working checkout, `.venv`, and
+  the test suite.
+- [`client-authoring.md`](client-authoring.md) — writing a new conformant
+  client; starts with [`../ADD-A-CLIENT.md`](../ADD-A-CLIENT.md).

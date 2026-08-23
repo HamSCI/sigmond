@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — code
+> **Verified against:** sigmond dac759d on 2026-08-23 — docs
 > **Canonical for:** how docs are organised and kept true across the HamSCI/DASI2 repos
 
 ## 1. Where things live
@@ -116,9 +116,11 @@ page for that behavior, or say explicitly "no doc impact" in the PR
 description. This keeps the ★-canonical pages from drifting the moment
 code moves out from under them, and it's cheaper to write one sentence at
 review time than to rediscover the gap later while writing an unrelated
-guide. `CONTRIBUTING.md` §14 will turn this from a convention into a
-checked rule (PR template checkbox) in Phase 3 of this program; until
-then, treat it as already in force.
+guide. The rule itself, the `Verified against:` bump it requires, and the
+one-command habit that checks it live in
+[`CONTRIBUTING.md` §14, "Docs travel with behavior"](../../CONTRIBUTING.md#14-docs-travel-with-behavior)
+— it is in force now, ahead of the PR-template checkbox and CI gate that
+will make it a checked rule instead of a convention.
 
 ## 9. Checking links
 
@@ -126,8 +128,13 @@ From the sigmond repo root:
 
 ```bash
 python3 scripts/docs-linkcheck.py docs README.md CONTRIBUTING.md CLAUDE.md
-pytest tests/test_docs_links.py
+pytest tests/test_docs_links.py tests/test_docs_cli_table.py
 ```
+
+`test_docs_cli_table.py` is the second check: it parses `bin/smd --help`
+and `bin/smd admin --help` and fails if `contributor/orchestration.md`'s
+verb table is missing a verb, or names something that isn't one, in either
+direction.
 
 From any other repo, sigmond's checker can be pointed at that repo's own
 docs:
@@ -141,6 +148,10 @@ link or missing anchor, so they're safe to run in CI or before a commit.
 `docs/superpowers/` (specs/plans) is skipped by the checker: those are
 working documents that legitimately forward-reference pages not yet
 written by later tasks in the same program.
+
+A third check, `docs-freshness` *(being written)*, will warn on a page
+whose `Verified against:` line has gone stale relative to the commit it
+names — not yet implemented.
 
 ## 10. Software gaps found while writing
 

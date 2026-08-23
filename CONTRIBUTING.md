@@ -420,3 +420,42 @@ The suite has a cross-repo knowledge graph at
 Comparing a broken unit against B4 is a reasonable instinct, but it only
 finds *differences*. It cannot find a defect both machines share — which
 is precisely how a stale library sat undetected on both for a day.
+
+## 14. Docs travel with behavior
+
+A doc that describes last month's CLI is worse than no doc — it sends the
+next reader confidently in the wrong direction. This project has enough
+scars from stale docs and disagreeing lists (§7, and the whole documentation
+program's Phase 1–3 gap ledger) that we treat a doc gap the same way we
+treat a missing test: not shipped.
+
+If your PR changes a CLI surface, a config key, a systemd unit, a file
+path, a wizard prompt, or any other observable behavior, it must do one of
+two things:
+
+* **Touch the canonical page.** Find it with `docs/INDEX.md` — the
+  ★-marked page for that topic is the one that wins on contradiction, so
+  it's the one that has to move with you. Bump that page's
+  `Verified against:` line (`docs-conventions.md` §3) to the commit and date
+  of your change.
+* **Or say so.** State "no doc impact" explicitly in the PR description. A
+  silent PR with no doc changes reads as an oversight, not a decision.
+
+The PR template's checkboxes will make this a checked step rather than a
+remembered one *(template being added — Task 6)*; CI will run `docs-check`
+on every push to enforce it *(being added — Task 7)*. Until both land, this
+rule is already in force by convention — `docs-conventions.md` §8 says the
+same thing from the docs side.
+
+The one-command habit, from the repo root, before you open the PR:
+
+```bash
+python3 scripts/docs-linkcheck.py docs README.md CONTRIBUTING.md CLAUDE.md && \
+  .venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py -q
+```
+
+Zero broken links and both test files green is the bar. See
+[`docs/contributor/docs-conventions.md`](docs/contributor/docs-conventions.md)
+§2–§4 for what "canonical page" and "pointer file" mean, and
+[`docs/contributor/README.md`](docs/contributor/README.md) for the full
+contributor reading path.

@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — code
+> **Verified against:** sigmond dac759d on 2026-08-23 — docs
 > **Canonical for:** the front door
 
 Pick the door that matches you. Each path is self-contained; you will be
@@ -19,7 +19,7 @@ and want it captured on a station — possibly by Friday.
 → **[Scientist guide](scientist/README.md)** — the capability envelope, Tier-0 capture running in an afternoon, a worked example, where data lands and what its timestamps are worth, and graduating to a client, in reading order.
 
 ## I work on the code (contributor)
-→ **[CONTRIBUTING.md](../CONTRIBUTING.md)** then **[Contributor guide](contributor/README.md)** *(Phase 3 — until then: [docs-conventions.md](contributor/docs-conventions.md), [CLIENT-CONTRACT.md](CLIENT-CONTRACT.md), [ADD-A-CLIENT.md](ADD-A-CLIENT.md))*
+→ **[CONTRIBUTING.md](../CONTRIBUTING.md)** then **[Contributor guide](contributor/README.md)** — orchestration, the appliance ↔ sigmond boundary, dev setup, client authoring, and the conventions that keep these docs true.
 
 ## Everything, by audience
 [INDEX.md](INDEX.md) lists every page and marks the canonical one per topic.
