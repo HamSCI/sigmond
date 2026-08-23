@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 04fc9b1 on 2026-08-23 — live DASI002 (Tier-0 capture run) + ka9q-python 3.22.0 + code/docs
+> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the Tier-0 capture recipe
 
 **Tier 0 is capture only.** You create one `radiod` channel, you write its bytes
@@ -20,7 +20,7 @@ Two ways to do it:
 
 | | Option A — `event-recorder` | Option B — write it yourself |
 |---|---|---|
-| Effort | a TOML job file | ~330 lines of Python, below |
+| Effort | a TOML job file | ~375 lines of Python, below |
 | Scheduling | built in (`start_utc` / `stop_utc`, lead-in, segments) | you supply it |
 | Output | SigMF (`.sigmf-data` + `.sigmf-meta`) | raw payload + JSON sidecar |
 | Provenance | the tool that recorded the 2026-08-12 eclipse | proven on DASI002, 2026-08-23 (this page) |
@@ -97,7 +97,10 @@ cd Costas-array
 python3 -m venv venv && ./venv/bin/pip install '.[capture]'
 ```
 
-Write a job file — this is the eclipse job as published in the repo README (the file that actually ran differs in four lines — see
+Write a job file — this is the eclipse job as published in the repo README with
+`out_dir` repointed at a directory you can write (the published one is
+`/var/lib/event-recorder/eclipse-costas-14110`; the file that actually ran
+differs in four lines — see
 [the worked example](costas-14110-worked-example.md#the-envelope-and-why)):
 
 ```toml
@@ -112,13 +115,17 @@ lead_in_sec   = 60
 segment_sec   = 3600
 start_utc     = "2026-08-12T01:14:11Z"
 stop_utc      = "2026-08-12T22:00:00Z"
-out_dir       = "/var/lib/event-recorder/eclipse-costas-14110"
+out_dir       = "/opt/git/sigmond/event-recorder/eclipse-costas-14110"  # absolute: "~" is not expanded
 ```
 
-Then, on the station VM:
+Save it somewhere you can write — **not** `/etc/event-recorder/jobs/`, which
+the repo README's example uses and which is root-owned. Then, on the station
+VM:
 
 ```bash
-./venv/bin/event-recorder run --job /etc/event-recorder/jobs/my-event.toml
+mkdir -p ~/event-recorder/jobs
+$EDITOR ~/event-recorder/jobs/my-event.toml
+./venv/bin/event-recorder run --job ~/event-recorder/jobs/my-event.toml
 ```
 
 What it produces: one `.sigmf-data` blob of raw samples per segment plus a
@@ -138,9 +145,11 @@ Three properties worth knowing before you adopt it:
 - **It measures the wire format instead of believing the status report**
   (source: same file, `probe_wire_bytes_per_component`) — see
   [Option B](#what-the-script-does-that-matters) for why that is not optional.
-- **`out_dir` in the example points at `/var/lib`** because that station agreed
-  to it in advance. Point yours at your own directory unless you have agreed
-  otherwise.
+- **Both paths in the repo README's example are root-owned** — the job file at
+  `/etc/event-recorder/jobs/` and an `out_dir` under `/var/lib/event-recorder/`
+  — because that station agreed to them in advance. The job file above points
+  `out_dir` at the `sigmond` user's home instead (`~` = `/opt/git/sigmond` on a
+  station). Point both at your own directory unless you have agreed otherwise.
 
 The eclipse run itself — the job, the signal, what came out —
 is [costas-14110-worked-example.md](costas-14110-worked-example.md).
@@ -149,8 +158,8 @@ is [costas-14110-worked-example.md](costas-14110-worked-example.md).
 
 ## Option B — write it yourself
 
-One file, no framework — about 330 lines, most of them checking rather than
-recording. This is the whole thing; it ran as printed.
+One file, no framework — about 375 lines (328 of them non-blank), most of them
+checking rather than recording. This is the whole thing; it ran as printed.
 
 Set up a venv on the station VM (the system `python3` on a station has no
 `ka9q` module, and you must not install into the station's own venvs):
@@ -158,7 +167,7 @@ Set up a venv on the station VM (the system `python3` on a station has no
 ```bash
 python3 -m venv ~/tier0
 ~/tier0/bin/pip install ka9q-python
-~/tier0/bin/pip show ka9q-python | head -2
+~/tier0/bin/pip show ka9q-python 2>/dev/null | grep -E '^(Name|Version)'
 ~/tier0/bin/ka9q --help | head -1
 ```
 
@@ -166,7 +175,11 @@ The `ka9q` CLI comes with the package and is worth having on `PATH` for
 read-only pokes at the station (`ka9q list`, `ka9q query <status> --ssrc <n>`).
 It has no `--version` flag; `pip show` is where the version lives. On DASI002,
 2026-08-23, those two lines printed `Name: ka9q-python` / `Version: 3.22.0` and
-`usage: ka9q [-h] [--interface INTERFACE] {list,query,set,tui} ...`.
+`usage: ka9q [-h] [--interface INTERFACE] {list,query,set,tui} ...`. (`grep`,
+not `head -2`: closing the pipe early makes `pip` print
+`ERROR: Pipe to stdout was broken` on stderr, and an "ERROR" that means nothing
+is exactly what you do not want in a recipe. `ka9q --help | head -1` can do the
+same — that one is harmless.)
 
 ⚠ **PyPI is behind the fleet.** On 2026-08-23 the newest release on PyPI was
 **3.22.0** while the stations run **3.25.2** from the checkout at
@@ -709,8 +722,26 @@ Five things to read out of that:
   clean completeness and zero gaps. Re-poll, or verify, or measure — this
   recipe does all three.
 - **The arithmetic closes.** 5,760,000 bytes ÷ 8 bytes per complex F32 sample =
-  720,000 samples = exactly 60.0 s at 12 kHz. 6000 packets in 60 s is 100
-  packets/s, i.e. 960 payload bytes = 120 complex samples = 10 ms per packet.
+  720,000 samples = exactly 60.0 s at 12 kHz.
+- **The packets are not all the same size, and the first one is not special.**
+  6000 packets in 60 s averages 960 bytes, but no packet is 960 bytes: radiod
+  caps a PCM packet at **1440 payload bytes** to fit the Ethernet MTU
+  (`BYTES_PER_PKT` in `ka9q-radio/src/audio.c:27`), which for F32 complex is
+  1440 ÷ (4 bytes × 2 components) = **180 complex samples**, and it flushes
+  whatever is left over rather than waiting to fill the next one, because the
+  default output buffering is none (`maxdelay = 0`, "No output buffering",
+  `ka9q-radio/src/modes.c:225`; the send loop is `send_output` in `audio.c`).
+  A 20 ms block at 12 kHz is 240 complex samples, so every block goes out as
+  **1440 bytes + 480 bytes** — two packets per block, 100 packets/s, 96 kB/s.
+  The counters above say so exactly: `packets=1001 bytes=961440` is 500 pairs
+  plus one 1440-byte packet — 500 × 1920 + 1440 = **961,440**, to the byte, and
+  the same identity holds at every heartbeat (`packets=5005` →
+  2502 × 1920 + 1440 = 4,805,280). So `packets=1 bytes=1440` is simply the
+  first full-size packet of the first block, not a runt or a header. Never
+  divide a byte count by a packet count and
+  call it a packet size — and note that the script never does: it divides
+  payload bytes by *RTP ticks*, which is immune to how radiod chose to chop
+  them up, and that is what `samples_written_estimate` is derived from.
 - **`level ≈ −127 dBFS`** is the noise floor of a receiver with nothing plugged
   into it. On a station with an antenna this line is where you would see WWV.
 - **`TTL=0`** is not an error: it is radiod telling you the stream is
@@ -836,6 +867,15 @@ Three readings that need care:
   library's `rtp_to_utc()`, is the number to use; `host_clock_at_receipt` is
   there only so you can see how far the host clock sat from it (20 ms, on this
   run).
+- **`samples_written_estimate: 720000.0` against
+  `samples_expected_from_host_clock: 720002`.** They measure different things.
+  The first is the file itself — bytes written ÷ the *measured* wire width —
+  and it is what you decode. The second is only `rate × (stopped − started)`
+  with `started`/`stopped` read from `time.time()` around the sleep loop, so it
+  inherits ~0.2 ms of scheduling slop on each end. Two samples is **167 µs**;
+  the RTP counter is the ruler and the host clock is the estimate, so a small
+  divergence here is the host clock being imprecise, not the recording being
+  short. A *large* one (a whole second, say) would be worth chasing.
 - **`packets_received_on_port: 72864` against `packets: 6000`.** `RTPRecorder`'s
   `packets_received` metric counts every datagram arriving on the bound port,
   before the SSRC filter, so on a station where several clients publish to port
@@ -849,6 +889,97 @@ And the loss note is not a formality:
 [radiod does not drop, it zero-fills](station-capabilities.md#loss-semantics--what-a-gap-is).
 Your byte count will read 100 % complete over a missed block. Sequence gaps and
 timestamp jumps are what can actually move when the bad thing happens.
+
+### Optional: record what the timestamp is *worth*
+
+One thing that sidecar does **not** carry is the fifth field
+[data-and-timing.md](data-and-timing.md#how-to-stamp-your-own-capture) asks
+every segment to have: the **tier, σ and judge age**. `utc` says *when*; only
+the tier and σ say what that number is worth, and without them you cannot
+state an uncertainty six months later.
+
+They do not come from radiod or ka9q-python — they come from hf-timestd, and
+no scientist-facing page or API publishes them
+([docs-gap ledger row 50](../contributor/docs-gap-ledger.md)). Two ways to get
+them anyway, on a station that runs hf-timestd:
+
+1. **`smd status`** — a read-only operator verb that works as an ordinary
+   station user and prints one `judge` line. Always there; a text report.
+2. **`/run/hf-timestd/offset_judge.json`** — the same numbers as data.
+   World-readable on DASI002 (`-rw-r--r-- timestd:timestd`, live
+   2026-08-23T18:02Z), carrying `"schema": "offset-judge-v1"` and a `judge`
+   block: `"tier": "T3", "sigma_ns": 3083883.8, "age_s": 0.002` beside
+   `"gpsdo_discipline": "holdover"`. hf-timestd's own spec says recorders "MAY
+   consume" it (`hf-timestd/docs/OFFSET-JUDGE-SPEC-2026-08-05.md` §3, §4.4).
+   **Prefer this when it is present** — parse it, keep the whole `judge` block,
+   and fall back to (1) when the file is absent or its mtime is stale (`smd`
+   itself treats a stale file as no reading: `lib/sigmond/timing_judge.py`,
+   `load_offset_judge`). It is a `/run` file on a station you do not own, so
+   code it as "may vanish", not as an API.
+
+hf-timestd's own raw-buffer sidecars carry the tier as a field
+(`timing.judge_tier`,
+[data-and-timing.md §How hf-timestd's sidecars do it](data-and-timing.md#how-hf-timestds-sidecars-do-it)),
+and a Tier-1 client should subscribe to the authority properly
+([data-and-timing.md §If you can do better](data-and-timing.md#if-you-can-do-better-subscribe-to-the-authority)).
+
+The snippet below takes route (1), because it needs nothing but `smd` on
+`$PATH` and it is the one that was run live for this page.
+
+⚠ **This is a text capture of a human-readable report, not an interface.** The
+wording can change under you. Store the line verbatim, parse it offline, and
+never let a failure here end a capture — which is why the helper returns a
+string instead of raising. (Run where there is no `smd` at all, it returns
+`["unavailable: [Errno 2] No such file or directory: 'smd'"]`.)
+
+Paste this beside the script's other helpers:
+
+```python
+import re, subprocess
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def judge_lines():
+    """Every `smd status` line naming the timing judge, colour stripped."""
+    try:
+        out = subprocess.run(["smd", "status"], capture_output=True,
+                             text=True, timeout=90).stdout
+    except Exception as exc:                              # noqa: BLE001
+        return ["unavailable: %s" % exc]
+    return [_ANSI.sub("", ln).strip() for ln in out.splitlines() if "judge" in ln]
+```
+
+then take a reading either side of the recording — `judge_at_start =
+judge_lines()` immediately before `recorder.start_recording()`, `judge_at_end =
+judge_lines()` immediately after `cap.close()` — and add both to the sidecar's
+`run` block:
+
+```python
+            "timing_judge_at_start": judge_at_start,
+            "timing_judge_at_end": judge_at_end,
+```
+
+Run live on DASI002 with the add-on applied (a second 60 s capture,
+2026-08-23T17:53Z, otherwise the same command as above), the sidecar's `run`
+block gained:
+
+```json
+    "timing_judge_at_start": [
+      "timing judge:",
+      "⚠  judge T3  σ=3174.9 µs  age 0s  gpsdo=holdover"
+    ],
+    "timing_judge_at_end": [
+      "timing judge:",
+      "⚠  judge T3  σ=3151.8 µs  age 0s  gpsdo=holdover"
+    ]
+```
+
+Read that, and the point of the exercise is immediate: DASI002 was on **T3** —
+WWV/WWVH/CHU tick fusion — with **σ ≈ 3.2 ms** and its GPSDO in **holdover**
+([station-capabilities.md §Timing](station-capabilities.md#timing-you-can-rely-on--tiers)).
+The `utc` field in the same sidecar prints microseconds. The capture is worth
+milliseconds. Only the judge line tells you which.
 
 ### Cleaning up
 
@@ -1008,8 +1139,11 @@ Three rules about where to write, which matter more on a production station
 than a testbed:
 
 - **Never `/var/lib`.** `/var/lib/sigmond/`, `/var/lib/timestd/`,
-  `/var/lib/event-recorder/` belong to the station's own clients, and the disk
-  guardian deletes from `/var/lib/timestd/` on its own authority at 95 % full
+  `/var/lib/event-recorder/` belong to the station's own clients, and at 95 %
+  full hf-timestd's disk guardian pauses all writes and alerts — then, if the
+  disk is still ≥ 95 % ten minutes later, begins deleting the oldest recordings
+  from `/var/lib/timestd/` on its own authority until the disk is back under
+  90 %
   ([station-capabilities.md §Storage](station-capabilities.md#storage-per-channel-hour)).
   Your home directory, or a directory the operator agreed to.
 - **Budget the disk for the whole window before you start**, and tell the

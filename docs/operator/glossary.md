@@ -2,11 +2,14 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;
-if it isn't, that is a bug in the docs — tell your fleet admin.
+if it isn't, that is a bug in the docs — tell your fleet admin. The
+[scientist guide](../scientist/README.md) defines its own vocabulary inline,
+where the mechanism is, and sends you here for station and operator words —
+plus the handful below that its pages use without defining.
 
 > **"Verified against" names the commit *this page* was checked against — not
 > your station.** Every operator page carries one, and they differ from page to
@@ -21,6 +24,8 @@ if it isn't, that is a bug in the docs — tell your fleet admin.
 | **canary** | The one fleet station that takes every update first, so a bad release breaks one station instead of all of them. Today that is AC0G/B4. |
 | **client** | A *component* that records or ships a science product — `wspr-recorder`, `psk-recorder`, `hf-timestd`, `mag-recorder`, `meteor-scatter`, `gpsdo-monitor`. Every component that owns systemd units gets a block in `smd status`; the recording clients also get a summary line — see [day-2.md §1](day-2.md#1-smd-status--is-everything-running). |
 | **component** | Anything `smd` manages and versions: a *client*, a shared library (`ka9q-python`, `hs-uploader`, `hamsci-dsp`), the radio server itself, or `smd`. `smd version` lists **every** component; `smd status` shows only the enabled clients among them, which is why the two lists are different lengths. |
+| **Costas array** | A pattern of tones whose time/frequency shifts never repeat, so a receiver can find *when* a burst started even in noise. The 2026-08-12 eclipse experiment transmitted one on 14.110 MHz; "the Costas client" is the recorder built for it. |
+| **dBFS** | Decibels relative to full scale — signal level measured against the largest number the digitiser can represent, so it is always ≤ 0 and more negative means quieter. A receiver with nothing plugged in reads around −127 dBFS. |
 | **decoder VM** (**VM**) | The virtual machine running inside the station computer, where `radiod` and every recorder actually run. Named after the *designator* (e.g. `AC0G-B4`). Commands tagged `[VM]` run here. |
 | **designator** | The station name you give the *wizard* (e.g. `AC0G-B4`, `DASI2-01`). The VM takes the designator; the Proxmox host takes `<designator>-PM`. |
 | **docs-gap ledger** | [`../contributor/docs-gap-ledger.md`](../contributor/docs-gap-ledger.md) — the project's running list of places where the software does not yet let a page say what it wants to say. Several of the ⚠ and ✗ lines you see every week are explained by a row in it, and the operator pages link straight to those rows. You may read it freely; it is written for contributors, so it names source files rather than actions. |
@@ -39,6 +44,7 @@ if it isn't, that is a bug in the docs — tell your fleet admin.
 | **multicast** | How `radiod` hands each channel to the recorders — one stream on your local network that many programs subscribe to at once. It is why the station needs wired Ethernet; Wi-Fi handles multicast badly. |
 | **orphaned** | The tag `smd status` puts on a running unit that the station's current configuration no longer declares — usually left behind by a rename. Harmless, but worth naming to your fleet admin so it gets tidied. |
 | **PPS** | "Pulse per second", the once-a-second tick a GPS receiver produces. The edge statistics `gpsdo-monitor` reports over USB are a liveness/health check only (OS-millisecond), not precision metrology — but hf-timestd does use the GPSDO's GPS/PPS as timing tier T5. |
+| **preset** (radiod) | A named recipe in `radiod` for how to demodulate one channel — `iq`, `usb`, `lsb`, `am`, `fm`, `cw` and others the station's `presets.conf` defines. `iq` is raw complex baseband and is what every timing and archive channel uses. **Not** systemd's `preset` (below), which is a different word about whether a unit starts at boot. |
 | **pskreporter** | [pskreporter.info](https://pskreporter.info) — the public database your FT8 and FT4 *spots* are uploaded to. |
 | **PSWS** | HamSCI's Personal Space Weather Station network and its [data portal](https://pswsnetwork.eng.ua.edu/), where the daily time-standard and magnetometer products land. Needs a station ID plus per-instrument IDs. |
 | **RAC** | Remote Access Channel — an outbound tunnel that lets your fleet admin reach the station from outside your router with no ports opened and no firewall changes. Optional. |
@@ -58,6 +64,7 @@ if it isn't, that is a bug in the docs — tell your fleet admin.
 | **wizard** (`sigmond-setup`) | The setup questions asked on first boot — reporter ID, grid square, station name, PSWS IDs. Rerun it from the host as `sigmond-setup --reconfigure` to fix an answer. |
 | **wsprdaemon** | [wsprdaemon.org](https://wsprdaemon.org) — the aggregation service that receives a copy of the spots for fleet-wide analysis. |
 | **wsprnet** | [wsprnet.org](https://wsprnet.org) — the global WSPR spot database; where your WSPR spots land, searchable by your *reporter ID*. |
+| **WWV / WWVH / CHU** | The shortwave time stations the timing client listens to: WWV (Colorado) and WWVH (Hawaii) on 2.5, 5, 10, 15, 20 and 25 MHz, CHU (Canada) on 3.33, 7.85 and 14.67 MHz. They are the HF evidence behind timing tier T3, and the standard signal to test a capture against. |
 
 ---
 

@@ -2,7 +2,7 @@
 
 > **Audience:** scientist, contributor
 > **Status:** current
-> **Verified against:** sigmond 1c27c3b on 2026-08-23 — code (ka9q-radio, ka9q-python, sigmond, hf-timestd, mag-recorder) + live b4/dasi002
+> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** how the station hardware behaves (dynamic range, AGC, loss modes, timing roles, failure modes)
 
 [shopping-list.md](shopping-list.md) says what the parts *are*.
@@ -562,17 +562,24 @@ only as a follow-up command …, which makes the grant easy to drop and
 impossible to notice; HamSCI/ka9q-python#3" (source:
 `ka9q-python/ka9q/control.py:946-948`).
 
-That is the "requested F32, observed S16" shape. The mitigations already in the
-library: the requested encoding is remembered per SSRC so keepalives re-assert
-it and `verify_channel()` can tell a granted encoding from a silently lost one
-(source: same, `_requested_encoding`; `verify_channel` l.1666-1676); and on the
-*create* path `ensure_channel` accepts the channel on frequency match alone,
-because "radiod may grant a different encoding (e.g. F32→S16 for some IQ
-configs); the returned `ChannelInfo` carries the granted value, which consumers
-use authoritatively" (source:
-`ka9q-python/ka9q/control.py::ensure_channel`, l.2062-2066). What to do about
-it — read the granted values, measure the wire format independently — is
-already stated once, in
+That is the "requested F32, observed S16" shape. **The mitigation** already in
+the library: the requested encoding is remembered per SSRC so keepalives
+re-assert it, and `verify_channel(expected_encoding=…)` can tell a granted
+encoding from a silently lost one (source: same, `_requested_encoding`;
+`verify_channel` l.1666-1676).
+
+**The gap, in the same place:** on the *create* path `ensure_channel` accepts
+the channel on frequency match alone — "radiod may grant a different encoding
+(e.g. F32→S16 for some IQ configs); the returned `ChannelInfo` carries the
+granted value, which consumers use authoritatively" (source:
+`ka9q-python/ka9q/control.py::ensure_channel`, l.2062-2066). That single
+post-create poll can land *before* the library's own follow-up encoding command
+is reflected in status, so the value it hands back is not a granted value at
+all but a stale one — measured twice on DASI002 (`ensure_channel` → 2, a poll
+4 s later → 4, the wire → 4). It is a defect to route around, not a defence
+([docs-gap ledger row 39](../contributor/docs-gap-ledger.md)). What to do about
+it — read the granted values, re-poll after the settle, and measure the wire
+format independently — is already stated once, in
 [station-capabilities.md §Encoding](../scientist/station-capabilities.md#frequency-and-bandwidth--what-radiod-will-hand-you);
 this page only supplies the mechanism behind it.
 

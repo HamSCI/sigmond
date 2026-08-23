@@ -64,7 +64,14 @@ CANONICAL_CONFIG = f"/etc/{CLIENT_NAME}/{CLIENT_NAME}-config.toml"
 # §19.2: per-instance config wins over the legacy shared path.
 INSTANCE_CONFIG_DIR = f"/etc/{CLIENT_NAME}"
 
-# The station envelope, from docs/scientist/station-capabilities.md.
+# The station envelope, from docs/scientist/station-capabilities.md.  Two spans
+# exist and they are not the same: the RX888 Mk II streams 10 kHz - 64 MHz to
+# the host (ka9q-radio/docs/SDR/rx888.md), but radiod's LIVE front-end filter is
+# narrower -- on AC0G/B4, 2026-08-23, `fe filt low/high` reported 15 kHz -
+# 60.912 MHz.  The wider hardware span is the default here because it is the one
+# claim true of every DASI2 station; a frequency inside it can still be outside
+# your station's passband, so tighten these two numbers to your own station's
+# `fe filt low`/`fe filt high` before you rely on `validate` to catch a typo.
 RX888_LOW_HZ = 10_000
 RX888_HIGH_HZ = 64_000_000
 RATE_QUANTUM_HZ = 200                   # radiod serves rates that are a multiple of this

@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 6a569b5 on 2026-08-23 — docs
+> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the scientist's table of contents
 
 You have a signal in mind — a beacon, an eclipse experiment, a time
@@ -17,9 +17,9 @@ to hunt for the next one.
 |---|---|---|---|
 | 1 | [EVENT-CLIENT-PLAYBOOK.md](../EVENT-CLIENT-PLAYBOOK.md) ★ | ~15 min | the design judgment — capture first, the channel envelope, what fails silently |
 | 2 | [station-capabilities.md](station-capabilities.md) ★ | ~10 min | the envelope: frequency/rate/encoding menu, load budget, timing tiers, storage, what the station cannot do |
-| 3 | [capture-quickstart.md](capture-quickstart.md) ★ | Tier 0 running in an afternoon | `event-recorder` or a proven ~330-line script, pre-flight, the WWV check |
-| 4 | [data-and-timing.md](data-and-timing.md) ★ | ~10 min | where your bytes land and what the timestamp is actually worth |
-| 5 | [becoming-a-client.md](becoming-a-client.md) ★ | when it recurs | graduating a one-shot capture into a sigmond client |
+| 3 | [capture-quickstart.md](capture-quickstart.md) ★ | Tier 0 running in an afternoon | `event-recorder` or a proven ~375-line script, pre-flight, the WWV check |
+| 4 | [data-and-timing.md](data-and-timing.md) ★ | ~15–20 min | where your bytes land and what the timestamp is actually worth |
+| 5 | [becoming-a-client.md](becoming-a-client.md) ★ + [skeleton/](skeleton/) | when it recurs | graduating a one-shot capture into a sigmond client, and the six-file scaffold to copy |
 
 ## Tier 0 vs Tier 1
 

@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond e1ab9d6 on 2026-08-23 — live b4 (raw_buffer sidecar, event-recorder SigMF meta, sink schema) + code/docs
+> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** where station data lands and what its timing labels mean
 
 Two questions arrive the moment a capture works: *where did it go*, and *what
@@ -407,6 +407,68 @@ and its own docstring is explicit that "the timing REFERENCE is radiod's
 GPS_TIME/RTP_TIMESNAP anchor, not the host clock" (source:
 `ka9q-python/ka9q/rtp_recorder.py:128`, `rtp_to_utc`).
 
+**The whole calculation, in the Tier-0 sidecar's own field names.** You need
+this the moment you re-open a file offline, where there is no `channel` object
+to hand it to `rtp_to_utc()` — so it is written out here rather than left to be
+assembled from three places:
+
+```text
+utc_unix(N) = gps_time_ns/1e9
+            + 315964800                                   # GPS epoch 1980-01-06, in Unix seconds
+            − leap                                        # GPS − UTC, currently 18 s
+            + (rtp_timestamp + N − rtp_timesnap) / sample_rate
+```
+
+`gps_time_ns`, `rtp_timesnap` and `rtp_timestamp` are the `anchor` block of the
+[Tier-0 sidecar](capture-quickstart.md#the-sidecar); `sample_rate` is the
+**granted** one, not the requested one; `N` is the sample index in the file,
+so `N = 0` is the first sample. One RTP tick is one sample — for an `iq`
+channel one *complex* sample, which is two components on the wire, which is why
+the sidecar records `components_per_rtp_tick` separately. Both constants are in
+ka9q-python as module-level values: `GPS_UTC_OFFSET = 315964800` and
+`GPS_LEAP_SECONDS = 18` (source: `ka9q-python/ka9q/rtp_recorder.py:31,34`).
+
+Checked against that page's published sidecar — `gps_time_ns
+1471533805105752210`, `rtp_timesnap 2147495888`, `rtp_timestamp 2147570768`,
+`sample_rate 12000`:
+
+```python
+gps_utc = 1471533805105752210 / 1e9 + 315964800 - 18   # 1787498587.1057522
+delta   = (2147570768 - 2147495888) / 12000            # 74880 ticks = 6.24 s
+sample0 = gps_utc + delta                              # 1787498593.3457522
+#                            the sidecar's own anchor.utc_unix_sec: 1787498593.3457522
+```
+
+Bit-identical, which is the check worth doing once on your own file: if your
+arithmetic does not reproduce the `utc` the library already computed, it is
+your arithmetic.
+
+⚠ **The leap term is 18 and you must not treat it as a constant of nature.**
+GPS time does not observe leap seconds and UTC does, so the two drift apart by
+an integer number of seconds; the offset has been **18 s since 2017-01-01**,
+the last leap second inserted. Getting it wrong does not produce noise — it
+produces a result that is wrong by *exactly* 1.000000 s, or 18.000000 s if you
+omit it altogether, and it will look entirely plausible. So:
+
+- **The authority is IERS Bulletin C**
+  (<https://datacenter.iers.org/products/eop/bulletinc/>), issued twice a year;
+  it announces a leap second about six months ahead or says "no leap second".
+- **`chronyc tracking`'s `Leap status` line** on the station tells you whether
+  one is *pending* (`Normal` = nothing scheduled this month; `Insert second` /
+  `Delete second` = a change at the end of the current month). It reports the
+  warning, not the 18.
+- **ka9q-python has no helper.** `GPS_LEAP_SECONDS = 18` is a hardcoded module
+  constant carrying the comment "as of 2025"
+  (`ka9q-python/ka9q/rtp_recorder.py:34`); nothing in the library resolves the
+  value for a given epoch. hf-timestd has one internally
+  (`gps_leap_seconds_at_gps_time`, used per buffer — see
+  [§How hf-timestd's sidecars do it](#how-hf-timestds-sidecars-do-it)) but it is
+  not a Tier-0 surface.
+
+**Record the number you used** in your sidecar, next to the pair. A file that
+says which leap value produced its labels can be repaired; one that does not
+cannot.
+
 **The one place the host clock still enters**, and it is worth knowing:
 `rtp_to_utc` consults `time.time()` for exactly one thing — disambiguating the
 32-bit RTP wrap epoch — and it needs only ±half-a-period accuracy for that
@@ -431,6 +493,16 @@ concretely that means five fields:
 Plus a `host_clock_at_receipt` if you want to *see* the divergence — the
 Tier-0 recipe records it and it sat 20 ms from the anchor-derived UTC on the
 DASI002 run ([capture-quickstart.md §The sidecar](capture-quickstart.md#the-sidecar)).
+
+The last row is the one every Tier-0 sidecar on this fleet misses, including
+the recipe's own and `event-recorder`'s
+([docs-gap ledger row 48](../contributor/docs-gap-ledger.md)) — because no
+scientist-facing surface publishes the tier: `smd status` prints it as text,
+hf-timestd publishes it as JSON at `/run/hf-timestd/offset_judge.json`, and
+nothing documented for a client says so
+([docs-gap ledger row 50](../contributor/docs-gap-ledger.md)). Both routes, and
+what they showed on a station in holdover, are in
+[capture-quickstart.md §Optional: record what the timestamp is worth](capture-quickstart.md#optional-record-what-the-timestamp-is-worth).
 
 **Anchor once. Do not poll for divergence.** ka9q-python removed exactly that
 machinery in 3.19.0 — `ChannelInfo.update_anchor` "now simply adopts the
@@ -555,10 +627,15 @@ block; `core/buffer_timing.py::resolve_buffer_timing`).
 You can check the arithmetic yourself, on your laptop, from the JSON above
 (source: `buffer_timing.py::resolve_buffer_timing`; `GPS_EPOCH_UNIX =
 315964800` at `buffer_timing.py:38`, leap seconds resolved per buffer by
-`gps_leap_seconds_at_gps_time`):
+`gps_leap_seconds_at_gps_time`). It is the same calculation as
+[§How to stamp your own capture](#how-to-stamp-your-own-capture) above, in
+**this** sidecar's field names — `start_rtp_timestamp` where a Tier-0 sidecar
+says `rtp_timestamp`, and a `minute_boundary` to check against instead of a
+first sample — plus the offset-judge correction, which a Tier-0 capture does
+not have:
 
 ```python
-GPS_EPOCH_UNIX, leap = 315964800, 18          # leap = 18 for this GPS time
+GPS_EPOCH_UNIX, leap = 315964800, 18          # 18 s since 2017-01-01; see above
 gps_utc = 1471504195463675564 / 1e9 + GPS_EPOCH_UNIX - leap
 delta   = (2006546195 - 1170805408) / 24000   # (start_rtp - rtp_timesnap) / rate
 sample0 = gps_utc + delta + 3514416.3694462753 / 1e9
@@ -634,15 +711,30 @@ sidecars carry `event:radiod_encoding` with no measurement beside it
 — what `ensure_channel` returned, what a fresh poll says, and what you
 measured — under names that say which is which.
 
-**3. A radiod restart moves the counter space.** A cached anchor pair from
-before the restart is in a *different* RTP counter space from the packets
-after it; hf-timestd's own resolver says so and handles it by using "the most
+**3. A *new channel* is a new counter space — not just a radiod restart.**
+A cached anchor pair from before a restart is in a *different* RTP counter
+space from the packets after it; hf-timestd's own resolver says so and handles it by using "the most
 recent snapshot — that's the counter space the buffer's `start_rtp_timestamp`
 was computed in" (source: `buffer_timing.py::resolve_buffer_timing`
 docstring). Its writer's stale-map
 field "can be wrong by seconds or more after a radiod restart" (same file).
 Let the stream layer's drop/restore callback tell you the producer went away,
 start a new segment with a new anchor, and never silently splice across it.
+
+The same is true, and far more often, of **channel creation**: every dynamic
+channel starts its RTP counter near 2³¹ rather than continuing anything, so a
+recorder that restarts — which re-creates its channel — begins a fresh counter
+space each time, and two runs hours apart can carry *overlapping* RTP
+timestamps that mean completely different UTC. Three ephemeral Tier-0 channels
+created on DASI002 on 2026-08-23 (15:23Z, 17:37Z and 17:53Z) took anchors of
+`rtp_timesnap` 2147495888, 2147495888 and 2147496128 — the same value twice and
+the third one block (240 ticks, 20 ms) later, all ≈ 2³¹ + 1.02 s at 12 kHz —
+while `gps_time_ns` advanced by the real 9013.16 s between the first and the
+last. An RTP timestamp is meaningful **only within one channel incarnation**,
+and neither ka9q-radio's nor ka9q-python's documentation says so
+([docs-gap ledger row 51](../contributor/docs-gap-ledger.md)). Keep the anchor
+pair *per file*, which the Tier-0 sidecar does, and never compare raw RTP
+timestamps across two captures.
 
 **4. Re-anchoring to chase status jitter.** The pair jitters ~0.45 s on a busy
 radiod and occasionally tears between snapshots; "correcting" your timestamps

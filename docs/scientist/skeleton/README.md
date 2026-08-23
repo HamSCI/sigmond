@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond e1c4452 on 2026-08-23 — every command below run on the devbox
+> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the copyable Tier-1 scaffold (nothing else — the narrative is [becoming-a-client.md](../becoming-a-client.md))
 
 Six files that sigmond will accept as a client. They are documentation
@@ -181,6 +181,15 @@ the frequency is inside the front end's span, the sample rate is a multiple of
 `[A-Z0-9][A-Z0-9-]*[A-Z0-9]` — that last one because the same string becomes
 the systemd instance, the config stem, the env-file stem and two directories,
 so a bad id is wrong in five places at once.
+
+⚠ **The frequency check uses the wider of the two spans.** `RX888_LOW_HZ` /
+`RX888_HIGH_HZ` are the receiver's 10 kHz – 64 MHz
+(`ka9q-radio/docs/SDR/rx888.md`), while radiod's *live* front-end filter is
+narrower — 15 kHz – 60.912 MHz on AC0G/B4, 2026-08-23
+([station-capabilities.md §Frequency and bandwidth](../station-capabilities.md#frequency-and-bandwidth--what-radiod-will-hand-you)).
+So a config can validate green on a frequency your station's front end will not
+serve. Tighten the two constants to your own station's `fe filt low`/`fe filt
+high` when you copy the skeleton; the comment above them says the same thing.
 
 `inventory`, by contrast, **must never** exit nonzero — sigmond's `installed`
 flag depends on it. Point it at a config that is not there and it degrades

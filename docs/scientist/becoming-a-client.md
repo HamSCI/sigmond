@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond e1c4452 on 2026-08-23 — code (bin/smd, writer.py, ADD-A-CLIENT, CLIENT-CONTRACT, Costas-array, meteor-scatter)
+> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** graduating a capture to a sigmond client (Tier 1)
 
 [Tier 0](capture-quickstart.md) ends with bytes on a disk and a person who
@@ -129,6 +129,10 @@ smd component add https://github.com/<org>/my-recorder.git
 smd install my-recorder
 ```
 
+⚠ **On an appliance station you do not run these two commands — the fleet admin
+does.** Read the rest of this section for what they do to your repo, not as
+instructions for you; what you hand over, and why, is at the end of it.
+
 `smd component add` derives the name from the URL, clones to
 `/opt/git/sigmond/<name>/`, fast-forward-pulls if it is already there, and
 **refuses the repo if it has no `deploy.toml`** — telling you where it put the
@@ -149,9 +153,8 @@ predates install-implies-enable — [ledger row 45](../contributor/docs-gap-ledg
 fastest way to find what you got wrong
 ([ADD-A-CLIENT §7](../ADD-A-CLIENT.md#7-verify-the-drop-in)).
 
-**On an appliance station you do not run these — the fleet admin does.**
-Anything that installs, pulls, edits or repins goes through them, by the
-station's own rules
+**Hence the warning above.** Anything that installs, pulls, edits or repins
+goes through the fleet admin, by the station's own rules
 ([do-not-touch.md](../operator/do-not-touch.md#the-one-rule-behind-all-of-them)).
 Develop against your own host or a testbed, hand over a repo URL and a tested
 `deploy.toml`, and expect to be asked what your client costs in channels, CPU

@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 6f7babc on 2026-08-23 — live b4 (smd status, radiod conf) + code/docs
+> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the DASI2 station capability envelope for a new client
 
 Every number below is cited to code, to a doc, or to a dated live reading on
@@ -24,12 +24,17 @@ with fixed gain, and your choice of wire encoding. What you may **not** have: a
 channel without a `lifetime`; a stream that leaves the host as things are
 configured today; a second receiver; or more load than radiod's **20 ms** block
 deadline can absorb. Live on b4 on 2026-08-23, radiod was carrying **44
-channels** for four clients (6 + 19 + 17 + 2; source: `smd status` on b4). One
+channels** for four clients **as `smd status` counts them** (6 + 19 + 17 + 2;
+source: `smd status` on b4). radiod's true count is higher — **at least 45** —
+because a client's inventory is not radiod's channel list: hf-timestd declares
+6 and also runs the 96 kHz TS-1 BPSK-PPS channel and a 4 kHz WWVB channel from
+the same config. Budget against the higher number. One
 12 kHz complex-float32 channel costs about **96 kB/s** of disk and **~3 % of one
 core** (source: `docs/EVENT-CLIENT-PLAYBOOK.md`
 [§What "good" cost](../EVENT-CLIENT-PLAYBOOK.md#what-good-cost-for-calibration));
 one 24 kHz complex-float32 channel, continuously archived, costs **15.07 GB per
-day** on disk (measured on b4 — see [Storage](#storage-per-channel-hour)).
+day** on disk as stored (zstd-compressed; **16.59 GB/day** raw — measured on
+b4, see [Storage](#storage-per-channel-hour)).
 
 ## Frequency and bandwidth — what radiod will hand you
 
@@ -40,8 +45,15 @@ day** on disk (measured on b4 — see [Storage](#storage-per-channel-hour)).
 `ka9q-radio/docs/SDR/rx888.md` §samprate), so Nyquist is 64.8 MHz. The *live*
 front-end passband is narrower than the datasheet: radiod reports
 `fe filt low 15000 Hz`, `fe filt high 6.0912e+07 Hz` — **15 kHz to 60.9 MHz**
-(source: `metadump AC0G-B4-status.local` tags [100]/[101], live b4
-2026-08-23). Ask for anything in that band.
+(source: a STAT record from `metadump AC0G-B4-status.local`, obtained by an
+SSRC-targeted read-only poll of one 12 kHz `usb` channel — a passive `metadump`
+on b4 shows only client keepalive CMDs — front-end fields printed as tags
+`[100]`/`[101]`, live b4 2026-08-23). Ask for anything in **that** band, not
+the datasheet's: 10 kHz–64 MHz is what the receiver streams to the host, and a
+request inside it but outside `fe filt low/high` is one the front end will not
+serve. The skeleton client's `validate` deliberately checks the *wider* span
+and tells you to tighten it
+([skeleton/README.md](skeleton/README.md#run-the-contract-verbs-by-hand)).
 
 **Presets.** The menu is not fixed by the library: `ensure_channel`'s validator
 only checks that the preset is a non-empty string ≤ 32 chars (source:
@@ -65,8 +77,9 @@ conventional values are **12000 for linear modes** (`iq`, SSB, CW, AM), 24000
 for FM/PM and 48000 for wideband FM (same source). Rates actually in service on
 b4 today: **12000** (radiod's station default, used by WSPR and FT8/FT4 —
 `/etc/radio/radiod@AC0G-B4.conf:17`), **24000** (every hf-timestd IQ channel —
-`/etc/hf-timestd/timestd-config.toml` `[recorder.channel_defaults]`), and
-**96000** (the TS-1 BPSK-PPS detection channel — same file). All three are
+`/etc/hf-timestd/timestd-config.toml` `[recorder.channel_defaults]`), **96000**
+(the TS-1 BPSK-PPS detection channel — same file, `[timing.t6_pps]`) and
+**4000** (the WWVB channel on 60 kHz — same file, `[wwvb]`). All four are
 multiples of 200 Hz, as they must be.
 
 **Filter edges.** `low_edge` / `high_edge` are in Hz relative to channel centre.
@@ -108,9 +121,9 @@ client>")` and let the library derive a collision-free multicast group; with no
 `client_id` and no `destination` the call raises `ValidationError` rather than
 falling back to a shared default (source:
 `ka9q-python/ka9q/control.py::ensure_channel`, destination resolution, audit
-finding F5). Both disciplines are visible on the live wire: client keepalives on
-b4 carry `[117] lifetime 6000 frames` (source: `metadump AC0G-B4-status.local`,
-live b4 2026-08-23T14:03Z).
+finding F5). Both disciplines are visible on the live wire: the keepalive CMDs
+that a passive `metadump AC0G-B4-status.local` shows on b4 carry
+`[117] lifetime 6000 frames` (live b4 2026-08-23T14:03Z).
 
 The full knob table — every parameter with its range and the reason to care — is
 the playbook's, and is not duplicated here:
@@ -161,8 +174,8 @@ and after:
 
 - `smd status` prints the CPU-affinity block — which cores radiod owns and how
   many are left. Live b4 2026-08-23: `radiod cores: [10, 11, 12, 13] (other
-  pool: 10 CPUs)`, with a standing warning that 23 pinned processes overlap
-  radiod's cores.
+  pool: 10 CPUs)`, with a standing warning that pinned processes overlap
+  radiod's cores (the count moves with what is running; read it on the day).
 - radiod's own status carries a block-drop counter: `[77] block drops` in
   `metadump <status>.local` (live b4 2026-08-23: `219` cumulative since start).
   Use `metadump` to *read* front-end and channel status; do not use it as a
@@ -350,8 +363,9 @@ only move when the bad thing actually happens* — is the one to design to.
 
 **Event count matters more than event duration.** A ~40 ms dropped block
 invalidates up to **±25.6 s** of GRAPE spectrogram (NFFT=512 full-window
-validity masking). On 2026-08-16 `WWV_25000` recorded **80 gap events**
-averaging ~67 ms — order-of-seconds of real loss — and its spectrogram
+validity masking). On 2026-08-16 `WWV_25000` recorded **80 gap events**;
+per-event loss measured the *following* day averaged **~67 ms**, which puts
+that day's actual loss on the order of seconds — and its spectrogram
 nonetheless reported 1419/1440 min, 98.5 % complete: **21 minutes invalidated**,
 roughly 1000× amplification (source: `docs/PRODUCER-THREAT-MODEL.md` §"The
 asset"). If your product is a spectrogram, optimise for *fewer* stalls, not
