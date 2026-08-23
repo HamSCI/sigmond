@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 5d082b9 on 2026-08-23 — docs
+> **Verified against:** sigmond b6ff371 on 2026-08-23 — docs
 > **Canonical for:** how docs are organised and kept true across the HamSCI/DASI2 repos
 
 ## 1. Where things live
@@ -52,8 +52,14 @@ page was last checked — against a live host, against the code, against
 the surrounding docs tree itself (`docs`, for a page whose claims are
 about doc organisation rather than code behavior), or "not re-verified"
 if nobody has confirmed it recently — so a reader can judge trust without
-an automated staleness check. `Canonical for` names the one topic this
-page owns; pointer pages replace it with `See instead:`.
+an automated staleness check. The `<commit-or-tag>` slot should be a git
+commit sha (short form preferred, matching the rest of this repo's
+convention) when you want `scripts/docs-freshness.py` to check the page
+automatically — it matches `[0-9a-f]{7,40}` and does not resolve tags, so
+a tag name there is invisible to the checker (the page is silently
+skipped, not flagged) even though it's fine as a human-readable qualifier.
+`Canonical for` names the one topic this page owns; pointer pages replace
+it with `See instead:`.
 
 ## 4. Pointer files
 
@@ -121,8 +127,8 @@ review time than to rediscover the gap later while writing an unrelated
 guide. The rule itself, the `Verified against:` bump it requires, and the
 one-command habit that checks it live in
 [`CONTRIBUTING.md` §14, "Docs travel with behavior"](../../CONTRIBUTING.md#14-docs-travel-with-behavior)
-— it is in force now, ahead of the PR-template checkbox and CI gate that
-will make it a checked rule instead of a convention.
+— the PR template's checklist and the `docs-check` CI workflow now back
+it with a checked step, not just a convention.
 
 ## 9. Checking links and freshness
 
@@ -131,7 +137,7 @@ From the sigmond repo root:
 ```bash
 python3 scripts/docs-linkcheck.py docs README.md CONTRIBUTING.md CLAUDE.md
 python3 scripts/docs-freshness.py docs README.md CONTRIBUTING.md CLAUDE.md
-pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py
+.venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py
 ```
 
 `test_docs_cli_table.py` is the second check: it parses `bin/smd --help`
@@ -151,7 +157,13 @@ python3 ../sigmond/scripts/docs-freshness.py docs README.md
 relative link or missing anchor, so it's safe to run in CI or before a
 commit. `docs/superpowers/` (specs/plans) is skipped by the checker: those
 are working documents that legitimately forward-reference pages not yet
-written by later tasks in the same program.
+written by later tasks in the same program. Any `archive/` directory is
+skipped too, as a link *source*: archive pages are frozen history
+(`Status: historical`, §3) and are not expected to keep their outgoing
+links current. A live (non-archive) page linking *into* an `archive/`
+page is unaffected — that's an ordinary outgoing link and is still
+checked, since the archived page itself still has to exist at the path
+named.
 
 `docs-freshness.py` warns when a page's `Verified against:` sha predates
 the last commit that actually changed its content (bumping the sha alone
@@ -162,7 +174,11 @@ The `docs-check` GitHub Actions workflow
 (`.github/workflows/docs-check.yml`, reusable as
 `HamSCI/sigmond/.github/workflows/docs-check.yml@main`) runs both checkers
 plus, in sigmond itself, the three doc pytest files above on every push
-and PR to `main`.
+and PR to `main` — though the workflow's own script steps run against its
+`paths:` input, which defaults to `docs README.md` (narrower than the
+four-file surface `CONTRIBUTING.md`/`CLAUDE.md` add); it's the pytest
+trio, hardcoded to the fuller surface, that closes that gap in sigmond's
+own CI.
 
 ## 10. Software gaps found while writing
 

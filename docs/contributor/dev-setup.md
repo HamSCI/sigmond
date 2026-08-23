@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 5d082b9 on 2026-08-23 — code + commands run in the checkout
+> **Verified against:** sigmond b6ff371 on 2026-08-23 — code + commands run in the checkout
 > **Canonical for:** setting up and testing a development environment for the suite
 
 This page gets a fresh clone of `sigmond` to a state where you can run `smd`,
@@ -158,10 +158,17 @@ Four checks exist today and run against this repo's `docs/`, `README.md`,
   scripts/docs-freshness.py docs README.md CONTRIBUTING.md CLAUDE.md`
   (exits 0 unless run with `--strict`).
 
-All four run in CI on every push and PR via
+All four run in CI via
 [`.github/workflows/docs-check.yml`](../../.github/workflows/docs-check.yml)
-(reusable as `HamSCI/sigmond/.github/workflows/docs-check.yml@main` for the
-other suite repos).
+on every push and PR (reusable as
+`HamSCI/sigmond/.github/workflows/docs-check.yml@main` for the other suite
+repos) — with a scope nuance: the workflow's own `docs-linkcheck.py` /
+`docs-freshness.py` steps run against its `paths:` input, which defaults to
+`docs README.md` (narrower than the four-file scope above); it's the
+pytest trio (`test_docs_links.py`, `test_docs_cli_table.py`,
+`test_docs_freshness.py`, gated to sigmond itself) that hardcodes the
+fuller `docs`, `README.md`, `CONTRIBUTING.md`, `CLAUDE.md` surface and so
+covers all four checks against all four files.
 
 ```bash
 .venv/bin/pytest tests/test_docs_links.py tests/test_docs_cli_table.py tests/test_docs_freshness.py -q

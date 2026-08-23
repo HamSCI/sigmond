@@ -1,6 +1,10 @@
 # docs-check — link check + Verified-against freshness (warn) for any HamSCI repo.
 # Reusable: other repos call it with `uses: HamSCI/sigmond/.github/workflows/docs-check.yml@main`.
 # In sigmond itself it also runs the CLI-table and freshness pytest.
+#
+# Third-party actions are pinned to full commit SHAs (not tags) per repo
+# convention (see test.yml) -- a tag can be moved, a SHA can't. `# vN`
+# comments record which tag the SHA resolved to at pin time.
 name: docs-check
 on:
   workflow_call:
@@ -12,16 +16,19 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with: { fetch-depth: 0 }                       # freshness needs history
-      - uses: actions/checkout@v6                      # the checker lives in sigmond
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        # the checker lives in sigmond
         with: { repository: HamSCI/sigmond, path: .sigmond-tools, fetch-depth: 1 }
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: { python-version: "3.11" }
       - name: Link check (relative links + anchors; external links skipped)
-        run: python3 .sigmond-tools/scripts/docs-linkcheck.py ${{ inputs.paths || 'docs README.md' }}
+        env: { PATHS: "${{ inputs.paths || 'docs README.md' }}" }
+        run: python3 .sigmond-tools/scripts/docs-linkcheck.py $PATHS
       - name: Verified-against freshness (warn-only)
-        run: python3 .sigmond-tools/scripts/docs-freshness.py ${{ inputs.paths || 'docs README.md' }} || true
+        env: { PATHS: "${{ inputs.paths || 'docs README.md' }}" }
+        run: python3 .sigmond-tools/scripts/docs-freshness.py $PATHS || true
       - name: sigmond-only doc tests
         if: github.repository == 'HamSCI/sigmond'
         run: |

@@ -7,22 +7,45 @@ A page's header carries a line like:
     > **Verified against:** sigmond <sha> on <date> — code
 
 `stale_pages(repo_root, paths)` walks every `*.md` under the given paths
-(skipping `.venv venv node_modules graphify-out .git superpowers archive`),
-reads that header, and finds the last commit that touched the file's
-*content* — i.e. the newest commit in `git log` for the file whose diff has
-at least one changed line that is not itself a `Verified against:` line.
-(Bumping the sha alone is not a content edit, so a commit that only touches
-that one line is skipped when walking history for "last content edit".)
+(skipping `.venv venv node_modules graphify-out .git superpowers archive`
+-- `archive/` pages are frozen history and are not treated as sources of
+truth to check freshness against), reads that header, and finds the last
+commit that touched the file's *content* -- i.e. the newest commit in
+`git log` for the file whose diff has at least one changed line that is
+not itself a `Verified against:` line. (Bumping the sha alone is not a
+content edit, so a commit that only touches that one line is skipped
+when walking history for "last content edit".)
 
-A page is stale when its named sha is a *proper ancestor* of that last
-content-edit commit (`git merge-base --is-ancestor named last_content` exits
-0 and named != last_content), or when the named sha does not exist in the
-repo at all (reported with reason "unknown sha"). Pages with no header, or
-`n/a`, are skipped entirely.
+Freshness allows naming the last content edit's *first parent* as well as
+the edit itself: an author writing a content change cannot know their own
+commit's sha before committing, so the sha they bump the header to in the
+same commit is necessarily the parent they started from, not the commit
+they're creating. A page is therefore fresh iff its named sha equals the
+last content-edit commit, or equals that commit's first parent; it is
+stale iff the named sha is a **proper ancestor of the last content-edit
+commit's first parent** (i.e. older than what an author editing today
+could possibly have named) -- checked with `git merge-base --is-ancestor`.
+A named sha that does not resolve to a commit in the repo at all is
+reported separately, with reason "unknown sha". Pages with no header, or
+`n/a`, are skipped entirely (only the *first* `Verified against:` line in
+the file is consulted for either check, so a later mention of the phrase
+in prose -- e.g. this docstring's own examples -- can't be mistaken for
+the page's real header).
+
+Both the named sha and the last-content-edit sha are normalized with
+`git rev-parse --verify <x>^{commit}` before comparison, so a full
+40-character sha in the header compares equal to the short form `git log`
+reports. Tags are not supported in the header's sha slot -- the value
+must match `[0-9a-f]{7,40}`, so a tag name there is silently invisible to
+this checker (not flagged, not resolved), even though it may be a fine
+human-readable qualifier for a reader.
 
 This check is warn-only by design (spec §7: "staleness is visible, not
-enforced"): the CLI always exits 0 unless `--strict` is passed and at least
-one stale page was found, in which case it exits 1.
+enforced"): the CLI always exits 0 unless `--strict` is passed and at
+least one stale page was found, in which case it exits 1. If `git` isn't
+on PATH (or otherwise unusable), that's reported as a warning to stderr
+and the check is skipped (empty result) rather than raising -- a warn-only
+tool should never hand a caller a traceback.
 
 Usage: docs-freshness.py [--strict] PATH [PATH...]
 """
@@ -36,15 +59,24 @@ from collections import namedtuple
 from pathlib import Path
 
 HEADER_RE = re.compile(r"\*\*Verified against:\*\*\s+(?P<repo>[\w\-]+)\s+(?P<sha>[0-9a-f]{7,40})")
+VERIFIED_LINE_RE = re.compile(r"^.*\*\*Verified against:\*\*.*$", re.M)
 SKIP_DIRS = {".venv", "venv", "node_modules", "graphify-out", ".git", "superpowers", "archive"}
 
 Stale = namedtuple("Stale", "path named_sha last_content_sha")
 
 
 def _git(repo_root, *args):
-    return subprocess.run(
-        ["git", *args], cwd=repo_root, capture_output=True, text=True
-    )
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=repo_root, capture_output=True, text=True
+        )
+    except (FileNotFoundError, OSError) as e:
+        return subprocess.CompletedProcess(args, 127, "", str(e))
+
+
+def _git_available(repo_root) -> bool:
+    r = _git(repo_root, "--version")
+    return r.returncode == 0
 
 
 def iter_md(repo_root: Path, paths: list[Path]):
@@ -59,18 +91,38 @@ def iter_md(repo_root: Path, paths: list[Path]):
                     yield f.resolve()
 
 
-def _named_sha(md: Path) -> str | None:
+def _first_verified_line(md: Path) -> str | None:
+    """The first `**Verified against:**` line in the file, or None. Only this
+    line is consulted by `_named_sha`/`_has_na_header` -- a later mention of
+    the phrase elsewhere in the page's prose must not be mistaken for the
+    real header."""
     text = md.read_text(errors="replace")
-    m = HEADER_RE.search(text)
-    if m:
-        return m.group("sha")
-    # explicit n/a header (no sha) -> treated as "no header" (skip)
-    return None
+    m = VERIFIED_LINE_RE.search(text)
+    return m.group(0) if m else None
+
+
+def _named_sha(md: Path) -> str | None:
+    line = _first_verified_line(md)
+    if line is None:
+        return None
+    m = HEADER_RE.search(line)
+    return m.group("sha") if m else None
 
 
 def _has_na_header(md: Path) -> bool:
-    text = md.read_text(errors="replace")
-    return bool(re.search(r"\*\*Verified against:\*\*\s+n/a", text))
+    line = _first_verified_line(md)
+    if line is None:
+        return False
+    return bool(re.search(r"\*\*Verified against:\*\*\s+n/a", line))
+
+
+def _resolve_commit(repo_root: Path, ref: str) -> str | None:
+    """Normalize any commit-ish (short sha, full sha, `<sha>^`) to its full
+    sha, peeling through to a commit object. None if `ref` doesn't resolve."""
+    r = _git(repo_root, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
 
 
 def _last_content_commit(repo_root: Path, md: Path) -> str | None:
@@ -98,26 +150,44 @@ def _last_content_commit(repo_root: Path, md: Path) -> str | None:
 
 def stale_pages(repo_root, paths) -> list[Stale]:
     repo_root = Path(repo_root).resolve()
+    if not _git_available(repo_root):
+        print("docs-freshness: git not available; skipping freshness check (warn-only)",
+              file=sys.stderr)
+        return []
     out: list[Stale] = []
     for md in iter_md(repo_root, [Path(p) for p in paths]):
         if _has_na_header(md):
             continue
-        named = _named_sha(md)
+        named_raw = _named_sha(md)
+        if named_raw is None:
+            continue
+        last_content_raw = _last_content_commit(repo_root, md)
+        if last_content_raw is None:
+            continue
+
+        named = _resolve_commit(repo_root, named_raw)
         if named is None:
+            out.append(Stale(md, named_raw, "unknown sha"))
             continue
-        last_content = _last_content_commit(repo_root, md)
+
+        last_content = _resolve_commit(repo_root, last_content_raw)
         if last_content is None:
+            # shouldn't happen -- last_content_raw came from git log itself
             continue
-        # does the named sha even exist in this repo?
-        exists = _git(repo_root, "cat-file", "-e", named)
-        if exists.returncode != 0:
-            out.append(Stale(md, named, "unknown sha"))
-            continue
+
         if named == last_content:
-            continue
-        anc = _git(repo_root, "merge-base", "--is-ancestor", named, last_content)
+            continue  # exact match: fresh
+
+        # first parent of the last content-edit commit: the newest sha an
+        # author making that edit could have named in the same commit
+        parent = _resolve_commit(repo_root, f"{last_content}^1")
+        allowed = parent if parent is not None else last_content
+        if named == allowed:
+            continue  # fresh: named the parent (or, at the root commit, itself)
+
+        anc = _git(repo_root, "merge-base", "--is-ancestor", named, allowed)
         if anc.returncode == 0:
-            out.append(Stale(md, named, last_content))
+            out.append(Stale(md, named_raw, last_content_raw))
     return out
 
 

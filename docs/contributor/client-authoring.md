@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 5d082b9 on 2026-08-23 — code
+> **Verified against:** sigmond b6ff371 on 2026-08-23 — code
 > **Canonical for:** the route through the client-authoring documents, and the rule that a client's own `docs/` must be true
 
 Writing a new client is well covered — by four documents, a runnable
