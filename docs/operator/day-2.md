@@ -25,14 +25,14 @@ but these are where "is it actually working?" is answered with your own eyes.
 
 | Window | Address | What "good" looks like |
 |---|---|---|
-| **Live receiver** (ka9q-web) | `http://<VM address>:8081` | A waterfall with **signals in it** — bright horizontal traces, not a flat empty wash. This is the one page that proves the antenna, the RX888 and `radiod` are all doing their jobs ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)). |
+| **Live receiver** (ka9q-web) | `http://<VM address>:8081` | A waterfall with **signals in it** — bright horizontal traces, not a flat empty wash. This is the one page that proves the antenna, the [RX888](glossary.md) and [radiod](glossary.md) are all doing their jobs ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)). |
 | **Timing dashboard** (hf-timestd) | `http://<VM address>:8000` | The page loads and its health/metrology panels show **recent** timestamps and a current timing tier — the same tier `smd status` prints. (`hf-timestd/docs/REQUIREMENTS.md` `HFT-F-050`: a FastAPI dashboard on port 8000 serving station/health/metrology/stability/propagation routes.) |
 | **Magnetometer dashboard** (gmag-webui) — only if you have an RM3100 | `http://<VM address>:8082` | A trace that **moves**. Geomagnetic field readings always wiggle; a dead-flat unchanging line is a stuck sensor, not a quiet day. Report it. (Port: `lib/sigmond/gmag_webui.py`, `PORT = 8082`.) |
-| **Proxmox** (the `[host]`) | `https://<host address>:8006` | Your one decoder VM — the one named after your *designator* — shows **running**. That is all you ever need Proxmox for. |
+| **Proxmox** (the `[host]`) | `https://<host address>:8006` | Your one [decoder VM](glossary.md) — the one named after your [designator](glossary.md) — shows **running**. That is all you ever need Proxmox for. |
 
 Ports 8081, 8000 and 8082 were confirmed listening on AC0G/B4 on 2026-08-23
-(`ss -ltnp`); dasi002, which has no magnetometer, listens on 8081 and 8000
-only.
+(`ss -ltnp`); on dasi002 the same check found 8081 and 8000 only — no
+magnetometer dashboard was running there that morning.
 
 If a page will not load at all, that is a real finding — take it to
 `troubleshooting.md` *(being written)*.
@@ -58,8 +58,8 @@ systemd unit with a ✓ or ✗, then adds the CPU-affinity summary, the timing
 judge, and the network check.
 
 **A few ✗ and ⚠ are normal.** Here is real, lightly trimmed output from
-**AC0G/B4 — a healthy production station, and the fleet *canary*** — captured
-2026-08-23:
+**AC0G/B4** — a healthy production station, and the fleet
+[canary](glossary.md) — captured 2026-08-23:
 
 ```text
 sudo: a password is required
@@ -78,7 +78,7 @@ sudo: a password is required
     ✓  timestd-metrology.target: active
     ✓  timestd-fusion.service: active
     ✓  timestd-web-api.service: active
-    ...  (14 more hf-timestd services and timers, all active)
+    ...  (15 more hf-timestd services and timers, all active)
     ✓  timestd-metrology@WWV_25000.service: active
 
   ka9q-radio:
@@ -101,6 +101,8 @@ sudo: a password is required
   wspr-recorder:
     ✓  wspr-recorder@AC0G=B4.service: active
 
+  ...  (4 more client blocks: hf-timestd, mag-recorder, meteor-scatter,
+        psk-recorder — all ✓)
   ✓  wspr-recorder  v0.1.0  (d96a0a2)  contract=0.8
      AC0G-B4: 17 ch, modes=F15,F2,F30,F5,W2
 
@@ -113,14 +115,16 @@ sudo: a password is required
   ✓  619e5d2: offset +2.656 ms, rate -0.059 ppm, T4, seg 1
   ✗  1926159f: OFFSET VIOLATION — offset +9.833 ms, rate -0.058 ppm, T4, seg 1
   ✗  4ad803f2: OFFSET VIOLATION — offset +19.408 ms, rate -0.058 ppm, T4, seg 1
+  ...  (3 more sources: 1 ✓, 2 more OFFSET VIOLATION)
 
   network:
   ✓  lan-capable (checked 786m ago)
-     querier: v2 192.168.1.162 on ens18
+     querier: v2 <a LAN address> on ens18
 
 ━━━ PSWS upload not finished ━━━
   ⚠  hf-timestd: SSH key missing: /home/timestd/.ssh/id_rsa_psws
             finish:  smd config hf-timestd edit   (records locally regardless)
+  ...  (1 more: the same ⚠ for mag-recorder)
 ```
 
 **Every ✗ and ⚠ in that output is normal today.** Here is why, line by line:
@@ -139,11 +143,15 @@ sudo: a password is required
 1. **`radiod@<designator>.service: active`.** If `radiod` is down, nothing on
    the station works — no spots, no timing, no GRAPE. Everything else on the
    page is downstream of this one line.
-2. **The judge summary** — `judge T4 σ=666.9 µs age 0s gpsdo=locked`.
-   `gpsdo=locked` is the healthy word; `gpsdo=holdover` or `unlocked` means the
-   GPSDO has lost its GPS fix. dasi002 read `⚠ judge T3 σ=3107.9 µs
-   gpsdo=holdover` on the same morning — that ⚠ is the software telling the
-   truth about a real condition, and it is the shape of thing to report.
+2. **The judge summary** — `judge T4 σ=666.9 µs age 0s gpsdo=locked`. The
+   [timing tier](glossary.md) tells your admin how good the station's clock
+   evidence is right now; **the word to watch is `gpsdo=`**. That is the only
+   part of this line the software itself grades: `locked` prints ✓, while
+   `holdover` or `unlocked` prints ⚠ (`lib/sigmond/timing_judge.py`,
+   `render_status_lines`) — it means the [GPSDO](glossary.md) has lost its GPS
+   fix. dasi002 read `⚠ judge T3 σ=3107.9 µs gpsdo=holdover` on the same
+   morning: that ⚠ is the software telling the truth about a real condition,
+   and it is the shape of thing to report.
 3. **A whole client missing, or a unit `failed`.** `inactive` on a spare unit is
    fine (see the table); `failed` is not. dasi002 shows
    `✗ mag-recorder.service: failed` — that is a genuine finding, not background
@@ -155,7 +163,7 @@ If any of those three is wrong, go to step 4 and then to your fleet admin.
 
 The station can be perfectly healthy and still be shouting into a void — a
 broken upload path looks identical from inside the box. So check the outside
-world: search your *reporter ID* on wsprnet.org and your callsign as receiver
+world: search your [reporter ID](glossary.md) on [wsprnet](glossary.md) and your callsign as receiver
 on pskreporter.info.
 
 Where to look, what counts as arrived, and how long each product normally
@@ -202,7 +210,7 @@ smd doctor
 ```
 
 Healthy output is not empty. Real b4 output, 2026-08-23 (trimmed to two of
-its seven components):
+the six components it named):
 
 ```text
 ft8_lib:
@@ -253,9 +261,17 @@ A station with nothing to do says so plainly — dasi002 printed
 `✓ host is current — nothing to do` on the same morning. The plan is
 idempotent and safe to re-run.
 
+**"Current" is not always true.** The plan is only as fresh as the station's
+last fetch from the repositories; planning against cached refs means "a stale
+host will report itself current" (`bin/smd`, the `--no-fetch` help text), and
+older sigmond builds could land in that state without being asked. So if your
+fleet admin says a release is out and `smd update` answers
+`host is current`, **tell them rather than assuming**. `smd version` prints the
+actual commit of every component, and that is the number that settles it.
+
 To actually perform it: `smd update --apply`. **Do this only when your fleet
 admin tells you the release is blessed.** That is not bureaucracy — the fleet
-runs every release through one *canary* station (today, AC0G/B4) before anyone
+runs every release through one [canary](glossary.md) station (today, AC0G/B4) before anyone
 else takes it, so a bad build breaks one station instead of all of them.
 
 **Fleet-outward (the admin pushes).** Your fleet admin may roll the update to
@@ -311,9 +327,9 @@ Full list and reasoning → `do-not-touch.md` *(being written)*.
 **It comes back by itself.** Power cut, breaker trip, someone unplugging the
 wrong thing — the host boots, the decoder VM starts, `radiod` starts, the
 recorders start, and spots resume. **Allow about 10 minutes** before you judge
-it; the install itself budgets a similar wait before declaring life
-([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)).
-Do not power-cycle it again during those ten minutes.
+it — a fresh install budgets fifteen before it expects signs of life
+([INSTALL.md §9, "Fifteen minutes later — check it's alive"](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
+and a reboot is the easier case. Do not power-cycle it again while you wait.
 
 If spots have not resumed after **30 minutes**, that is a fault: check the
 antenna is still connected, then run `smd status` and send the output to your
@@ -328,7 +344,7 @@ station from another computer over the network from then on
 ([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick-when-told--done)).
 You can unplug the monitor and keyboard whenever you like.
 
-**Moving the station to a new location** — a different grid square — is a
+**Moving the station to a new location** — a different [grid square](glossary.md) — is a
 documented procedure, not a reinstall: log into the `[host]`, run
 `sigmond-setup --reconfigure`, type the new grid square, and press Enter
 through everything else. The new location flows everywhere automatically and
