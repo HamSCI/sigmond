@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond a848c21 on 2026-08-23 — code + commands run in the checkout
+> **Verified against:** sigmond 978c80a on 2026-08-23 — code + commands run in the checkout
 > **Canonical for:** setting up and testing a development environment for the suite
 
 This page gets a fresh clone of `sigmond` to a state where you can run `smd`,

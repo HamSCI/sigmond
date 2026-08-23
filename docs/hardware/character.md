@@ -2,7 +2,7 @@
 
 > **Audience:** scientist, contributor
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 55b9e68 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** how the station hardware behaves (dynamic range, AGC, loss modes, timing roles, failure modes)
 
 [shopping-list.md](shopping-list.md) says what the parts *are*.

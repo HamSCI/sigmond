@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond dac759d on 2026-08-23 — docs
+> **Verified against:** sigmond 50632bc on 2026-08-23 — docs
 > **Canonical for:** the contributor's table of contents
 
 You can read the source. This page is the order to read it in, not a

@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 8226260 on 2026-08-23 — code (bin/smd, lib/sigmond, CLAUDE.md)
+> **Verified against:** sigmond 978c80a on 2026-08-23 — code (bin/smd, lib/sigmond, CLAUDE.md)
 > **Canonical for:** sigmond's orchestration model and the smd verb→module map
 
 ## The shape

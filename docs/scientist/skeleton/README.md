@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 55b9e68 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the copyable Tier-1 scaffold (nothing else — the narrative is [becoming-a-client.md](../becoming-a-client.md))
 
 Six files that sigmond will accept as a client. They are documentation

@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 7fcb423 on 2026-08-23 — code (sigmond-appliance scripts, bin/smd, capture_prep, wizard)
+> **Verified against:** sigmond 978c80a on 2026-08-23 — code (sigmond-appliance scripts, bin/smd, capture_prep, wizard)
 > **Canonical for:** the appliance ↔ sigmond boundary — what the image bakes, what first boot does, how a change reaches a station
 
 Your change is committed. This page answers the next question: **how does it

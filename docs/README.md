@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond dac759d on 2026-08-23 — docs
+> **Verified against:** sigmond 978c80a on 2026-08-23 — docs
 > **Canonical for:** the front door
 
 Pick the door that matches you. Each path is self-contained; you will be
