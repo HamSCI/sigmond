@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond a7f01c0 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -288,9 +288,29 @@ under `sudo` and **you should expect a password prompt** (source: `bin/smd`,
 `_need_root()`). That is normal, not a failure. `smd psws status` and the login
 banner never ask.
 
-> **If you find hf-timestd's `PSWS_SETUP_GUIDE.md`, it will tell you to do
-> something else** — generate a per-recorder RSA key, then push it with
-> `ssh-copy-id` and a TOKEN from the portal. That is the **older** per-recorder
+> **Two key names, one of them stale — and you will meet both.** Your station key
+> is `/etc/hs-uploader/keys/id_ed25519_host` — note the **`_host`** suffix. That
+> is what `smd psws enroll`
+> creates (`lib/sigmond/psws.py`, `STATION_KEY`) and what the uploader manifest
+> writes into `/etc/hs-uploader/pipelines.toml`. The name **without** that
+> suffix — `/etc/hs-uploader/keys/id_ed25519` — is the *legacy shared*
+> key from an older scheme, and sigmond's own checks accept either
+> (`lib/sigmond/upload_creds.py` says so in as many words). But **mag-recorder
+> still defaults to the legacy name** (`mag_recorder/config.py:169`), so on a
+> station that has only the new key it prints
+> `⚠ uploader.ssh_key_file does not exist: /etc/hs-uploader/keys/id_ed25519` in
+> `smd status` — true about that filename, misleading about your enrolment.
+> Live 2026-08-23: dasi002 has only `id_ed25519_host` and prints the ⚠; b4 has
+> both files and does not. ⛔ Do not run the `ssh-keygen` that message suggests —
+> `smd psws enroll` is what creates the key. Tracked as
+> [docs-gap ledger row 30](../contributor/docs-gap-ledger.md).
+
+> **If you find hf-timestd's `PSWS_SETUP_GUIDE.md`, or a `↳ fix:` line naming
+> `sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh`, they will
+> tell you to do something else** — generate a per-recorder RSA key, then push it
+> with `ssh-copy-id` and a TOKEN from the portal. That script *is* that older
+> procedure, and `smd component list`'s upload-readiness block still prints it as
+> the fix. ⛔ **Do not run it.** That is the **older** per-recorder
 > procedure. On an appliance station it is superseded: one station key
 > (`/etc/hs-uploader/keys/id_ed25519_host`) serves every PSWS product, and
 > `smd psws enroll` / `smd psws verify` are the whole flow. Follow this page.
@@ -327,7 +347,13 @@ smd psws status
 
 > **The remedy that block prints is not the operator's path.** Each line of the
 > `━━━ PSWS upload not finished ━━━` block ends with
-> `finish:  smd config hf-timestd edit   (records locally regardless)`. Do
+> `finish:  smd config hf-timestd edit   (records locally regardless)`.
+> (You will also see the same verb written the other way round —
+> `smd config edit hf-timestd` — in `smd component list`'s upload-readiness
+> block. Both orders work — `smd config` has an `edit` subcommand that takes a
+> client name *and* a per-client subcommand that takes `edit` (`smd config
+> --help`, read live on b4 2026-08-23) — they are the same operation, and
+> neither is yours to run.) Do
 > **not** run it: `smd config <client> edit` opens and rewrites a client's own
 > configuration file, which is your fleet admin's job, not yours
 > ([do-not-touch.md](do-not-touch.md#the-table)). The operator path for putting

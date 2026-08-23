@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond a7f01c0 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;
@@ -58,3 +58,79 @@ if it isn't, that is a bug in the docs — tell your fleet admin.
 | **wizard** (`sigmond-setup`) | The setup questions asked on first boot — reporter ID, grid square, station name, PSWS IDs. Rerun it from the host as `sigmond-setup --reconfigure` to fix an answer. |
 | **wsprdaemon** | [wsprdaemon.org](https://wsprdaemon.org) — the aggregation service that receives a copy of the spots for fleet-wide analysis. |
 | **wsprnet** | [wsprnet.org](https://wsprnet.org) — the global WSPR spot database; where your WSPR spots land, searchable by your *reporter ID*. |
+
+---
+
+## Words you will see in command output
+
+The table above covers the words these pages *write*. This one covers words the
+station's own commands *print* at you, which is a different list. Nothing here
+is something you act on; it is here so you can read your own output.
+
+### systemd, and how the station is run
+
+| Term | What it means |
+|---|---|
+| **systemd** | The Linux service manager. It is what actually starts, stops and restarts everything on the station at boot and keeps it running. `smd` mostly talks to systemd on your behalf. |
+| **unit** | One thing systemd manages, named like `radiod@AC0G-B4.service` or `grape-daily.timer`. A `.service` is a program; a `.timer` is a schedule that starts one. The lines under each client in `smd status` are its units. |
+| **`active` / `inactive` / `failed`** | A unit's state. `active` = running. `inactive` = not running, and nobody asked it to be. `failed` = it tried to run and gave up — the only one of the three that is always worth reporting. |
+| **`enabled` / `disabled` / `linked` / `preset`** | Whether systemd starts a unit at boot. `enabled` yes, `disabled` no; `linked` means the unit file lives outside systemd's own directory and was linked in, which on this station still means "not enabled unless something enabled it". `preset: enabled` is just the packaged default. |
+| **`status=78` / `EX_CONFIG`** | A program exited with code 78, which by long Unix convention (`sysexits.h`) means *"my configuration is wrong or missing"* — not "the hardware broke". It is what `mag-recorder` exits with on a station that has no magnetometer configured. |
+| **chrony** | The clock daemon that keeps the machine's system time disciplined. The timing client feeds it; you never configure it. |
+
+### Words from `smd status`
+
+| Term | What it means |
+|---|---|
+| **`contract=0.8`** | Which version of sigmond's client contract that client implements — the agreed interface between `smd` and a recorder. Bookkeeping between components; nothing for you. |
+| **`default: 6 ch, 6 freqs`, `default: [other]`** | A client's inventory: how many radio channels its instance named `default` uses, and on how many frequencies. `[other]` means "this client does not consume radio channels". |
+| **`σ`, `age 0s`, `seg 3`, `rate +0.066 ppm`** | The timing judge's working numbers: σ is the spread of the clock evidence (smaller is better), `age` how long since it was updated, `seg` which measurement segment, and `rate` how fast a channel's error is changing in parts per million. Your admin reads these; the word you watch is `gpsdo=`. |
+| **`other pool: 12 CPUs`** | The CPUs *not* reserved for `radiod` — the ones everything else is allowed to run on. |
+| **`lan-capable`, `querier: v2 <address> on ens18`** | The network self-check: the station can carry *multicast* on its LAN, and something is issuing the periodic membership queries that keep the switch forwarding it. `ens18` is just the network interface's name. |
+| **`IQ`** | In-phase and quadrature — the pair of numbers that make up one raw radio sample. "Raw IQ" is the unprocessed recording the timing client writes, and it is what fills the disk. |
+| **`raw_buffer` / `phase2` / eviction** | Two directories under `/var/lib/timestd`: `raw_buffer` holds the raw IQ on a rolling window, `phase2` holds the derived analysis products and database. **Eviction** is the timing client deleting its own oldest data to stay under the disk limit — see [day-2.md §3](day-2.md#3-disk--df--h-). |
+| **`uploader.ssh_key_file`, `Grape uploader`** | mag-recorder's own config keys and its name for the shared upload path to *PSWS*. "Grape uploader" is the same thing as *GRAPE* above. |
+
+### Words from `smd component list` and `smd doctor`
+
+| Term | What it means |
+|---|---|
+| **VERDICT** | The state of a component's *source checkout*, not of the running station: `up to date`, `behind main (run update)`, `N unpushed commit(s)`, `on branch <name>`, `pinned to …`, or `dirty: <reason>`. Colour follows the same axis. Not an alarm — see [day-2.md](day-2.md#installed-enabled-shown). |
+| **INDEX** | How many commits deep the checkout is. A serial number, nothing more. |
+| **BEHIND** | How many commits behind its upstream branch that checkout is. `-` means level. |
+| **HEAD DATE / POLICY / `latest`** | The date of the checked-out commit, and the version policy the catalog sets for that component — `latest` means "track the branch", anything else names a pin. |
+| **`detached@<hash>` / `origin/main` / "feature branch"** | Git bookkeeping: the checkout is parked on one specific commit rather than following a branch; `origin/main` is the upstream it is compared against. |
+| **`dirty` / `detached` / `untracked` / `ownership` / `venv-skew`** | `smd doctor`'s finding categories — a tracked file changed locally, a deliberate commit pin, files git does not track, files with the wrong owner, and a virtual environment that has drifted from its checkout. All explained at [day-2.md §4](day-2.md#4-smd-doctor--only-when-something-looks-off). |
+| **`.pin`, `egg-info`** | Small housekeeping files a build leaves behind. They show up as `untracked` and are harmless. |
+
+### Words from the other verbs
+
+| Term | What it means |
+|---|---|
+| **`CONFIG` / `ENV` / `SOURCES`** (`smd admin instance list`) | Three ✓/✗ checks on one recorder instance: does it have a config file, has its environment file been rendered, and are its radio sources resolved. Three ✓ means fully wired. Anything else goes to your fleet admin. |
+| **`uploader-manifest`, pipeline, unresolved identity** (`smd config uploads status`) | See [registration.md §6](registration.md#6-confirming-everything-flows) — a *pipeline* is one product-to-destination route, and *unresolved identity* names the ids it has not been given. |
+| **`PLL`, `A-level` / `A0`, `no_fix`, `ANT`, `OUT1/OUT2 MHz`** (`smd watch gpsdo`) | The GPSDO's own report. **PLL** is its phase-locked loop — `yes` means the oscillator is locked to its reference. `A0`/`A1` is a coarse health grade with the reason spelled out beneath. `no_fix` means zero satellites. `ANT` is whether the antenna reads as connected. OUT1/OUT2 are the frequencies on its two outputs. |
+| **`FX3`** | The USB controller chip inside the *RX888*. It is the part that latches up and needs a full power-off rather than a reboot. |
+
+### Other components you may see listed
+
+`smd version` and `smd component list` name everything sigmond knows about, not
+just what your station runs. **None of these is missing from your station by
+mistake**; unless your fleet admin enabled one, it is simply not part of the
+standard DASI2 kit.
+
+| Name | What it is |
+|---|---|
+| **callhash** | A small shared library for hashing callsigns consistently across clients. |
+| **codar-sounder** | An optional client that records CODAR ocean-radar signals. |
+| **hf-tec** | An optional client for total-electron-content work from HF. |
+| **hfdl-recorder** | An optional client that decodes HFDL aircraft data links. |
+| **superdarn-sounder** | An optional client that records SuperDARN radar signals. |
+| **sigmond-rac** | The packaging of the remote-access tunnel — see [remote-access.md](remote-access.md). |
+| **ft8_lib** | The FT8/FT4 decoder library the spot recorders are built against. A build ingredient, not a service. |
+| **wsjtx** | Upstream WSJT-X source, built only for its `wsprd` and `jt9` decoders. A build ingredient, not a service. |
+| **onion** | The small C web-server library `ka9q-web` is built on. A build ingredient, not a service. |
+
+The last three have no row in `smd component list` for exactly that reason —
+they are things other components are *made of*, so they have no lifecycle of
+their own.

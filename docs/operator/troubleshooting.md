@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond a7f01c0 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** symptom-first troubleshooting of an appliance station
 
 Start with the symptom you can actually see, not with a theory. Every section
@@ -249,8 +249,16 @@ combination is not something you can fix from the station.
    It cost one of our sites an afternoon.
 2. **You searched with the suffix.** pskreporter wants the bare callsign —
    `AC0G`, not `AC0G/B4` (same section).
-3. **`psk-recorder` is not running.**
-4. **Nothing is being decoded** — see [Spots stopped](#spots-stopped-were-fine-before).
+3. **`psk-recorder` is not enabled on this station at all.** If `smd status`
+   shows **no `psk-recorder:` block**, the client is installed but switched off
+   — the same case as the wsprnet section's fourth outcome. Confirm with
+   `smd component list` (LIFECYCLE `binary, on PATH` or `configured` rather than
+   `enabled, running`) and `smd config uploads status`; if uploads are
+   `DISABLED BY POLICY` this station is not meant to be reporting FT8/FT4 and
+   there is nothing to fix
+   ([day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
+4. **`psk-recorder` is enabled but not running.**
+5. **Nothing is being decoded** — see [Spots stopped](#spots-stopped-were-fine-before).
 
 **What to check**
 
@@ -270,7 +278,10 @@ Then `[VM]`:
 smd status
 ```
 
-*Good:* `✓ psk-recorder@<designator>.service: active`.
+*Good:* `✓ psk-recorder@<designator>.service: active`. *Bad:* the unit is there
+and `failed` — that is cause 4. **No `psk-recorder:` block at all** is cause 3,
+not a fault: the client is installed and switched off, and no amount of
+searching pskreporter will find a station that is not reporting.
 
 **What to do**
 
@@ -672,6 +683,11 @@ smd admin log mag-recorder --files
 `tail -f`, it prints what is there and then waits for more, so a terminal that
 appears to hang is the command working. Press Ctrl-C when you have read enough.
 
+⚠ **Do not pipe it** into `head`, `grep` or `less`. A pipe makes the output
+block-buffered, so the terminal hangs *and* shows nothing at all — which looks
+exactly like a dead command rather than a following one. Run it bare and read
+the screen.
+
 DASI002 answers, over and over:
 
 ```text
@@ -774,11 +790,20 @@ It prints the fifteen largest directories two levels down in the three places
 station data actually lives. `-x` keeps it on the root filesystem; the
 `2>/dev/null` hides the "Permission denied" lines you will get for directories
 your account cannot read — **the result is therefore incomplete but still
-useful**, and it is the best an operator account can do. On b4 the biggest entry
-by far is the timing client's own recording buffer under `/var/lib/timestd`,
-which is expected ([day-2.md §3](day-2.md#3-disk--df--h-) has the measured
-rate). **Paste the whole output to your fleet admin** — an unexpected name near
-the top is exactly cause #2, and it is what they need to see.
+useful**, and it is the best an operator account can do. On both fleet stations the biggest
+entry by far is the timing client's own recording buffer under
+`/var/lib/timestd` — 185–196 G of a 245 G disk on dasi002 on 2026-08-23 — which
+is expected ([day-2.md §3](day-2.md#3-disk--df--h-) has the measured rate).
+
+**What "unexpected" looks like, by size.** On a 245 G station, anything under a
+gigabyte or two is noise; the two entries worth recognising before you worry
+are `/var/lib/timestd` (tens to low hundreds of gigabytes — that is the job) and
+`/var/log/journal` (**up to 4 G, and 4 G is the ceiling, not a fault** — neither
+fleet station sets `SystemMaxUse`, so systemd caps the journal at the smaller of
+10 % of the filesystem and 4 G; dasi002 sat at exactly 4.0 G on 2026-08-23).
+Anything *else* in the tens of gigabytes is the thing to name. **Paste the whole
+output to your fleet admin either way** — an unexpected name near the top is
+exactly cause #2, and it is what they need to see.
 
 ⚠ There is no `smd` verb for this. `smd admin storage` is **not** a read-only
 report — its three subcommands (`migrate-to-sqlite`, `trim`, `tune-timestd`)
@@ -788,12 +813,28 @@ live on b4, 2026-08-23).
 **What the numbers mean** —
 [day-2.md §3](day-2.md#3-disk--df--h-) owns this table and is the canonical
 version; the short form is that **80 %** is a warning and **95 %** is the number
-that costs you data: the timing client stops writing and, after ten minutes
-above that line, begins deleting your oldest recordings until the disk is back
-under 90 %.
+that costs you data: the timing client pauses all writes and alerts at once, and
+if the disk is *still* ≥95 % ten minutes later it begins deleting your oldest
+recordings until the disk is back under 90 %.
 
-That is not theoretical. In a deliberate drill on DASI002 on 2026-08-21, an
-85.5 GB archive day was evicted **two seconds** after the disk crossed 95 %.
+**How much warning do you get? Ten minutes — but only since 2026-08-22.** This
+is worth stating plainly because the two figures in circulation are both real:
+
+- **Before 2026-08-22** the guardian evicted **on the crossing**, with no grace
+  period. That is what happened in the deliberate drill on **DASI002 on
+  2026-08-21**, where an 85.5 GB archive day was deleted **two seconds** after
+  the disk crossed 95 %.
+- **Since 2026-08-22** (hf-timestd `4dfaaf7`, "resource guardian: hysteresis,
+  pause-first, granular eviction, operator gate", issue #31) it **always pauses
+  and alerts first** and deletes **only if the disk is still ≥95 % after ten
+  minutes** (`EVICT_GRACE_SEC = 600.0`), and then only down to 90 %
+  (`EVICT_LOW_WATER_PERCENT = 90.0`). The code comment names that same drill as
+  the case the grace window now protects: *"A transient hog (the 2026-08-21
+  drill) clears inside the window and costs no data."*
+
+Both fleet stations run `4dfaaf7` or later, so **ten minutes is the number that
+applies today**. It is still ten minutes, not ten hours — which is why the rule
+is to call at 80 %, not to wait and watch.
 
 **What to do**
 

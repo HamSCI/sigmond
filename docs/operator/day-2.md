@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 14a7ebf on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond a7f01c0 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -119,8 +119,11 @@ sudo: a password is required
   wspr-recorder:
     ✓  wspr-recorder@AC0G=B4.service: active
 
-  ...  (4 more client blocks: hf-timestd, mag-recorder, meteor-scatter,
-        psk-recorder — all ✓)
+  ...  (1 more client block: igmp-querier — ✓)
+
+  ─── second half: one summary line per recording client, not per unit ───
+  ...  (4 more summary lines: hf-timestd, mag-recorder, meteor-scatter,
+        psk-recorder — all ✓, none with issues under them)
   ✓  wspr-recorder  v0.1.0  (d96a0a2)  contract=0.8
      AC0G-B4: 17 ch, modes=F15,F2,F30,F5,W2
 
@@ -156,12 +159,35 @@ PSWS enrolment — added on the same morning, all of them normal:
     ✗  gmag-webui.service: inactive
   hf-timestd:
     ✗  timestd-vtec.service: inactive
+  igmp-querier:
+    ✓  igmp-querier.service: active
   mag-recorder:
     ✗  mag-recorder.service: failed
 
   mag-recorder  v0.1.0  (8551d27)  contract=0.8                       ← note: no ✓
   ⚠  station.callsign is unset
+  ⚠  uploader.ssh_key_file does not exist: /etc/hs-uploader/keys/id_ed25519
+     (shared with hf-timestd Grape uploader; ssh-keygen + register key on PSWS portal first)
 ```
+
+**Two structural things to know about that output before the table.**
+
+First, `smd status` has **two halves**. The top half is one block per client
+listing its systemd **units**, each with ✓ or ✗. The bottom half is one
+**summary line** per client — `✓ hf-timestd v7.0.0 (4dfaaf7) contract=0.8` — and
+those are different things with different rules. Second, **not every client
+produces a summary line.** Only clients that report an inventory do; on dasi002
+just two of seven did (`hf-timestd` and `mag-recorder`), and `gmag-webui`,
+`gpsdo-monitor`, `igmp-querier`, `ka9q-radio` and `ka9q-web` got a unit block and
+nothing else. **A client with no summary line is not a client with a problem** — only
+*recording* clients print one. `smd status` emits a summary line for a component
+the catalog marks `kind = "client"` and skips the rest (`bin/smd`, the inventory
+loop: `if entry.kind != 'client': continue`), so the radio, the two web servers
+and the two infrastructure services never get one. Live 2026-08-23: b4 printed
+10 unit blocks and **5** summary lines (hf-timestd, mag-recorder,
+meteor-scatter, psk-recorder, wspr-recorder); dasi002 printed 7 blocks and
+**2** (hf-timestd, mag-recorder). The glyph rules below apply only to clients
+that print one.
 
 **Every ✗ and ⚠ in either output is normal today** — except `mag-recorder`'s
 `failed`, which is the one genuine finding on that station. Here is why, line by
@@ -169,15 +195,16 @@ line:
 
 | Line | Normal? | Why |
 |---|---|---|
-| `✗ station.psws_station_id is unset (need PSWS-issued S0xxxxx)`, *before* the banner | **Normal on a station with no PSWS enrolment** | This is not a station-wide check and it is not about `/etc/sigmond/site-profile.toml`. It is **mag-recorder's own config check** — `mag_recorder/contract.py`, `_collect_issues()`, which raises `severity: fail` when `[station] psws_station_id` in `[VM]` `/etc/mag-recorder/mag-recorder-config.toml` is missing or still holds its `<YOUR_PSWS_STATION_ID>` template placeholder. It surfaces above the banner because the client is asked for its inventory before the banner prints. On a station that never enrolled in PSWS, or has no magnetometer, this is the expected state — confirm with `smd psws status`, which answers in plain English ([registration.md §1](registration.md#1-what-the-wizard-already-did)). |
+| `✗ station.psws_station_id is unset (need PSWS-issued S0xxxxx)`, *before* the banner | **Normal on a station with no PSWS enrolment** | This is not a station-wide check and it is not about `/etc/sigmond/site-profile.toml`. It is **mag-recorder's own config check** — `mag_recorder/contract.py`, `_collect_issues()`, which raises `severity: fail` when `[station] psws_station_id` in `[VM]` `/etc/mag-recorder/mag-recorder-config.toml` is missing or still holds its `<YOUR_PSWS_STATION_ID>` template placeholder. It surfaces above the banner because the client is asked for its inventory before the banner prints. On a station that never enrolled in PSWS, or has no magnetometer, this is the expected state. To see your station's PSWS position in plain English run `smd psws status` — but note it answers about the **site** profile (`[psws] disabled in site-profile.toml — nothing to do` on dasi002), not about mag-recorder's file, so it confirms "this station has no PSWS enrolment, and that is deliberate" rather than confirming this particular line ([registration.md §1](registration.md#1-what-the-wizard-already-did)). |
 | `✗ gmag-webui.service: inactive` | **Normal without a magnetometer dashboard** | `gmag-webui` is the port-8082 magnetometer web page ([the four windows](#the-four-windows)). It is installed on every station but only worth running where there is an RM3100 feeding it, so on a station without one it sits `inactive`. dasi002 printed this on 2026-08-23; b4, which has the sensor, printed `✓ active`. |
 | `✗ timestd-vtec.service: inactive` | **Normal without a dual-frequency GNSS receiver** | [vTEC](glossary.md) is the ionospheric total-electron-content product, and computing it needs an optional dual-frequency GNSS receiver (a u-blox ZED-F9P) that most stations do not have. `timestd-vtec.service` is enabled only where a GNSS receiver is configured, and left disabled elsewhere: on 2026-08-23 b4 read `UnitFileState=enabled  ActiveState=active` against its networked GNSS, while dasi002 read `UnitFileState=disabled  ActiveState=inactive`. Either way, **`inactive` on a station without a dual-frequency GNSS receiver is normal, not a fault** — you would only report it if you know your station has one. |
 | A client-summary line with **no glyph at all** — e.g. `mag-recorder  v0.1.0  (8551d27)  contract=0.8` where `hf-timestd` above it reads `✓  hf-timestd …` | **Not an error — it means "this client reported something", and the something is printed underneath** | The ✓ on those summary lines means *validated clean*: `bin/smd` sets it only when the client returned an empty issue list (`clean_tag = '✓ ' if not issues else ''`), specifically so an operator can tell "checked, clean" from "not checked". No glyph therefore means the client returned one or more issues — and every one of them is printed immediately below that line as its own ⚠ or ✗. So read the lines under a glyph-less client, not the missing glyph itself. |
 | `⚠ station.callsign is unset` on a station whose `site-profile.toml` **does** have a callsign | **Normal — different file** | Same origin as the row above: it is one of **mag-recorder's** config issues (`mag_recorder/contract.py`, `_collect_issues()` — `[station] callsign` in `[VM]` `/etc/mag-recorder/mag-recorder-config.toml`), printed under mag-recorder's glyph-less summary line. It says nothing about your station identity. `/etc/sigmond/site-profile.toml` remains the one place your identity lives ([registration.md §1](registration.md#1-what-the-wizard-already-did)), and `smd admin instance list` is what proves what your recorders actually report under. That the two look like the same key is a genuine trap — tracked as [docs-gap ledger row 24](../contributor/docs-gap-ledger.md). |
+| `⚠ uploader.ssh_key_file does not exist: /etc/hs-uploader/keys/id_ed25519 (shared with hf-timestd Grape uploader; ssh-keygen + register key on PSWS portal first)` | **Normal on a station that has not enrolled in PSWS — but the path it names is the wrong one** | Another of mag-recorder's own checks (`mag_recorder/contract.py`, `_collect_issues()`), printed under its glyph-less summary line. Two things to know. (1) On a station with no PSWS enrolment there is no upload key yet, so a missing key is the expected state and nothing is lost — the recorder still records locally. (2) **The file name is stale.** `id_ed25519` is the *legacy shared* hs-uploader key name; today's station key is `id_ed25519_host` in the same directory, which is what `smd psws enroll` creates and what the uploader actually uses ([registration.md §1](registration.md#1-what-the-wizard-already-did)). mag-recorder still defaults to the old name (`mag_recorder/config.py:169`), so it reports the old path missing even on an enrolled station. Live 2026-08-23: dasi002 has only `id_ed25519_host` and prints this ⚠; b4 has both files and does not. ⛔ **Do not run the `ssh-keygen` the message suggests** — key creation is `smd psws enroll`'s job ([registration.md §5b](registration.md#5b-register-the-key)). Tracked as [docs-gap ledger row 30](../contributor/docs-gap-ledger.md). |
 | `sudo: a password is required` (twice, before the banner) | **Normal — ignore** | A read-only command reaching for `sudo` it does not have and carrying on regardless. It is noise on stderr, not a failure, and it appears on b4 but not dasi002. Known and tracked — [docs-gap ledger row 6](../contributor/docs-gap-ledger.md). |
 | `✗ radiod@AC0G-B4-patched.service: inactive` | **Normal** | A *second, deliberately disabled* `radiod` unit. B4 keeps two `radiod` configs in `/etc/radio/` — the live one and a spare "patched" variant. `systemctl is-enabled` reads `enabled` for `radiod@AC0G-B4` and `disabled` for `-patched` (checked live, 2026-08-23). Only one radiod can own the RX888, so the other one being down is the correct state. Most stations have only one and never see this line. |
 | `✓ meteor-scatter@my-rx888.service: active [orphaned]` | **Normal-ish — mention it** | `[orphaned]` means a unit is running that the current config no longer declares. Harmless, but worth naming to your fleet admin so it gets tidied. |
-| `⚠ 22 pinned process(es) overlap radiod cores` | **Normal — every station shows it** | The station reserves CPU cores for `radiod` and pins the decoders elsewhere. This line counts userspace processes whose CPU mask still overlaps radiod's cores (`lib/sigmond/cpu.py`, `find_contending_processes`; kernel threads and ka9q-radio's own mDNS helpers are already excluded). Both fleet stations carry it — b4 22, dasi002 17–18, as of 2026-08-23 (it moves by one or two between runs as processes come and go) — while producing good data, so today it is the fleet's normal state rather than a fault. Nothing here is yours to fix; mention the number if it changes a lot. Tracked — [docs-gap ledger row 12](../contributor/docs-gap-ledger.md). |
+| `⚠ 22 pinned process(es) overlap radiod cores` | **Normal — every station shows it** | The station reserves CPU cores for `radiod` and pins the decoders elsewhere. This line counts userspace processes whose CPU mask still overlaps radiod's cores (`lib/sigmond/cpu.py`, `find_contending_processes`; kernel threads and ka9q-radio's own mDNS helpers are already excluded). Both fleet stations carry it — b4 around 22–23, dasi002 around 17–20, as of 2026-08-23; it drifts by a few between runs as processes come and go, so treat anything in the teens or twenties as normal and only mention a jump to a different order of magnitude — while producing good data, so today it is the fleet's normal state rather than a fault. Nothing here is yours to fix; mention the number if it changes a lot. Tracked — [docs-gap ledger row 12](../contributor/docs-gap-ledger.md). |
 | `✗ … OFFSET VIOLATION — offset +9.833 ms …` | **Normal today — known and tracked** | The **timing judge** compares each `radiod` channel's advertised epoch against the station's best clock evidence and flags any channel that disagrees by more than *k×σ* for longer than 60 s (`hf-timestd/src/hf_timestd/core/offset_judge.py`, `_evaluate_violation_locked`). It is a **detector, not a fault**: hf-timestd's own data labels stay corrected regardless — the judge's own log line says so ("labels remain CORRECTED … radiod's advertised epoch is contradicted"). B4 was flagging four of its six timing channels at 5–19 ms on 2026-08-23 while producing good data all day; dasi002, on the weaker T3 evidence, was flagging all six at 200–650 ms. **What matters to you is the summary line above them**: `judge T4 σ=666.9 µs gpsdo=locked`. `gpsdo=locked` is the healthy word; the tier is information for your admin about how good the clock evidence is, not something the software grades. |
 | `━━━ PSWS upload not finished ━━━` on a station that *is* enrolled | **Normal — a known contradiction** | B4 is fully enrolled (`smd psws status` reports `✓ key verified 2026-08-17`), yet `smd status` still prints this block, because it checks for the *older* per-recorder key files that a station-key host does not use. Two enrolment models coexist and disagree in your face. Tracked — [docs-gap ledger rows 7 and 10](../contributor/docs-gap-ledger.md). Confirm your real enrolment state with `smd psws status`, not with this block. |
 
@@ -231,13 +258,24 @@ That is why dasi002's `smd status` has no `wspr-recorder`, `psk-recorder` or
 HF antenna**, so its spot recorders were switched off on purpose rather than
 uninstalled, to keep a testbed out of the public databases.
 
-**The one command that shows both** — `[VM]`:
+**The command that shows both** — `[VM]`:
 
 ```bash
 smd component list
 ```
 
-Read its **LIFECYCLE** column. Live on 2026-08-23, the same three clients read:
+⚠ **It lists the catalog, not every checkout.** It printed **20** rows on
+dasi002 against `smd version`'s 23, because it walks sigmond's component catalog
+(`etc/catalog.toml`) and three of the things on disk are not catalog entries:
+**`ft8_lib`** (the FT8/FT4 decoder library other recorders link against),
+**`wsjtx`** (upstream WSJT-X, built only for its `wsprd` and `jt9` decoders) and
+**`onion`** (the small C web-server library `ka9q-web` is built on). All three
+are **build ingredients of other components, not components you run** — which is
+why they have no lifecycle to report, and why `smd doctor` can name `ft8_lib`
+and `wsjtx` while `smd component list` cannot. If you want the complete list of
+what is on the machine, that is `smd version`.
+
+Read the **LIFECYCLE** column. Live on 2026-08-23, the same three clients read:
 
 | | b4 (production) | dasi002 (testbed, no antenna) |
 |---|---|---|
@@ -253,6 +291,41 @@ Read its **LIFECYCLE** column. Live on 2026-08-23, the same three clients read:
 from the repositories first, which makes it slow; add `--no-fetch` if you only
 want the lifecycle column.
 
+⚠ **`enabled, stopped` is also what a `failed` unit reads as.** The column is
+computed from `systemctl is-active` and `is-enabled` and nothing else
+(`bin/smd`, the lifecycle branch), so a unit that crashed is "not active but
+still enabled" — which prints as the reassuring word `stopped`. dasi002's
+`mag-recorder` is `failed` in `smd status` and `systemctl`, and
+`enabled, stopped` here, on the same morning. **`smd status` is the page that
+tells you `failed`; this column never will.** Do not read `stopped` here as
+"fine".
+
+**A coloured VERDICT is git bookkeeping, not a station fault.** That column is
+about the software *checkout*, not about whether anything is working: `up to
+date`, `behind main (run update)`, `N unpushed commit(s)`, `on branch <name>`,
+`pinned to …`, or `dirty: <reason>` (`bin/smd`, where `verdict` is assigned).
+dasi002 reads `wspr-recorder … dirty` (its `uv.lock`, the benign case explained
+under [step 4](#4-smd-doctor--only-when-something-looks-off)) and
+`ka9q-radio … behind 68`. **Neither is yours to act on, and neither is an
+emergency** — the radio being 68 commits behind a moving upstream is the normal
+state of a deliberately pinned checkout. Mention it if you like; it belongs in
+the same message as your `smd doctor` output, not in a separate alarm.
+
+⛔ **Do not run what the bottom of that output tells you to run.** It ends with
+lines like:
+
+```text
+     1 component(s) have updates available: ka9q-radio
+     run: smd component update  (preview: smd component update --dry-run)
+```
+
+`smd component update` is on the forbidden list — it pulls every repository and
+then runs a full `smd apply` ([do-not-touch.md](do-not-touch.md#the-table)).
+Updates are decided by your fleet admin and taken through the
+[canary](glossary.md) station first
+([below](#updates--who-decides-and-what-you-run)). The same output also carries
+an **upload readiness** block, which is covered next.
+
 **So: report a missing block only when you expected that client to be enabled.**
 If `smd component list` says `binary, on PATH` and you thought the station was
 uploading WSPR, that *is* worth a message to your fleet admin — but it is a
@@ -263,6 +336,40 @@ why. Nothing on the station records "deliberately disabled". If you are not sure
 whether a client is off on purpose, ask — that is a one-line question with a
 one-line answer, and it is tracked as
 [docs-gap ledger row 25](../contributor/docs-gap-ledger.md).
+
+#### "Ready" and "disabled" in the same weekly check
+
+`smd component list` finishes with a block like this — and it will look like it
+contradicts the upload switch:
+
+```text
+  upload readiness — missing items block ONLY uploading; the recorder still records locally:
+    ⚠  PSWS (hf-timestd) — missing station id, instrument id, SFTP key /home/timestd/.ssh/id_rsa_psws
+    ⚠  PSWS (mag-recorder) — missing PSWS station id
+    ✓  ready: wsprnet.org, wsprdaemon.org, PSKReporter
+```
+
+while `smd config uploads status` on the very same station says
+`⚠ uploads: DISABLED BY POLICY`.
+
+**Both are true, and the policy line wins.** They answer different questions:
+
+| Line | The question it answers |
+|---|---|
+| `✓ ready: wsprnet.org, …` in `smd component list` | *"Does this path have the credentials and identity it would need?"* — `lib/sigmond/upload_creds.py`, whose `ready` field is documented as "are the required credentials/identity present?". wsprnet, wsprdaemon and PSKReporter need no registration at all ([registration.md §2–§4](registration.md#2-wsprnetorg--nothing-to-register)), so they are *always* "ready" on every station. |
+| `⚠ uploads: DISABLED BY POLICY` in `smd config uploads status` | *"Is this station allowed to upload right now?"* — the site-wide switch. |
+
+So read the readiness block as **"nothing is missing that would stop these paths
+if they were switched on"**, and `smd config uploads status` as **whether they
+are switched on**. On a policy-disabled station the honest summary is: fully
+equipped, deliberately silent. The readiness block knows nothing about the
+policy switch, which is
+[docs-gap ledger row 29](../contributor/docs-gap-ledger.md).
+
+⛔ The readiness block's `↳ fix:` lines also hand you commands — `smd config
+edit hf-timestd`, and a `sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh`.
+**Neither is yours** ([do-not-touch.md](do-not-touch.md#the-table)); the
+operator path for PSWS is [registration.md §5](registration.md#5-psws--the-one-portal-step).
 
 ### 2. Are your spots arriving?
 
@@ -306,7 +413,18 @@ safety nets for when *something else* fills the disk
 |---|---|
 | under 80% | Normal. Nothing to do. |
 | **80%** | hf-timestd logs a warning (`DISK_WARN_PERCENT = 80.0`). Worth mentioning to your fleet admin. |
-| **95%** | Hard stop: hf-timestd **pauses all writes** and alerts (`DISK_HARD_STOP_PERCENT = 95.0`). If it stays ≥95% for 10 minutes (`EVICT_GRACE_SEC = 600`), it begins **deleting your oldest recordings** — smallest regenerable unit first — until the disk is back under 90% (`EVICT_LOW_WATER_PERCENT = 90.0`). |
+| **95%** | Hard stop: hf-timestd **pauses all writes and alerts immediately** (`DISK_HARD_STOP_PERCENT = 95.0`) — *no data is deleted at this point*. Only if the disk is **still** ≥95% ten minutes later (`EVICT_GRACE_SEC = 600.0`) does it begin **deleting your oldest recordings** — smallest regenerable unit first — until the disk is back under 90% (`EVICT_LOW_WATER_PERCENT = 90.0`). See the note below the table: the ten-minute grace is new as of 2026-08-22. |
+
+**The ten-minute grace period is new.** Before 2026-08-22 the guardian evicted
+**on the crossing**, immediately — which is why you may hear that DASI002 lost an
+85.5 GB archive day *two seconds* after crossing 95 % in a drill on 2026-08-21.
+hf-timestd `4dfaaf7` ("resource guardian: hysteresis, pause-first, granular
+eviction, operator gate", issue #31, 2026-08-22) changed it to **always pause and
+alert first, and delete only after the pressure has persisted past the grace
+window**; its own comment names that drill as the case the window now protects.
+Both fleet stations run `4dfaaf7` or later, so ten minutes is the number that
+applies today. Ten minutes is not long — which is exactly why the rule below is
+to call your admin at 80 %.
 
 So 95% is the number that costs you data. Live on 2026-08-23: b4 was at **52%**
 (126 G of 252 G), dasi002 at **86%** (201 G of 245 G) — dasi002 is the one to
@@ -461,7 +579,10 @@ smd version
 ```
 
 It prints the image lineage, then every component's live commit, then the log
-of updates applied since install. The line that matters is the last one:
+of updates applied since install. **The count in `updates since install (N)` is
+the real total, but only the most recent five are printed** (`lib/sigmond/provenance.py`,
+`history[-5:]`) — so `(16):` above five lines is correct output, not truncation
+you need to report. The line that matters is the last one:
 
 ```text
 image:      v3.30   [image installed on this host — lineage only; components may have moved since (see below)]
