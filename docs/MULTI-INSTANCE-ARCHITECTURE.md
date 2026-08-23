@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** shipped
-> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — not re-verified (header only)
 > **Canonical for:** per-reporter instance shape
 
 Locks the per-reporter-instance shape that all recorder clients

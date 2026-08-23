@@ -1,5 +1,7 @@
 # Documentation Program — Phase 2 (scientist guide + hardware/character.md) Implementation Plan
 
+**Status: complete — executed 2026-08-23, close-out commit 4aec0c2, final review clean after fix wave.**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A scientist with Python and ≤ 1 week goes from "I need to listen on 14.110 MHz from Friday" to a running capture on a DASI2 station, and knows how to graduate it to a sigmond client — using only `sigmond/docs/scientist/` + `docs/hardware/character.md` and what they link.

@@ -2,7 +2,7 @@
 
 > **Audience:** scientist, contributor
 > **Status:** current
-> **Verified against:** sigmond 6a569b5 on 2026-08-23 — docs
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — docs
 > **Canonical for:** design judgment for an event/capture client
 
 New here? Start at the [scientist guide](scientist/README.md) — this page is

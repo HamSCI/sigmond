@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** shipped (phases A–C)
-> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — not re-verified (header only)
 > **Canonical for:** bring-up phase order (A–C)
 
 **Status:** Design (proposed). Captures the agreed model for turning a bare host

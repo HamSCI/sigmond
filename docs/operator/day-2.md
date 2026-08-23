@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a

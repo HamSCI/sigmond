@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — code
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — code
 > **Canonical for:** how docs are organised and kept true across the HamSCI/DASI2 repos
 
 ## 1. Where things live

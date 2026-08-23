@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 67a3a6d on 2026-08-23 — Costas-array 1e7d6f6 + eclipse-reception-report + live b4 archive listing
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — Costas-array 1e7d6f6 + eclipse-reception-report + live b4 archive listing
 > **Canonical for:** the 2026-08-12 eclipse Costas listener as a worked example
 
 On 2026-08-11 a station operator was asked to receive an experimental HamSCI
@@ -189,10 +189,14 @@ anyway.
 
 The job declares `start_utc`, `stop_utc`, `lead_in_sec` and `segment_sec`, and
 `run_capture()` does the waiting, the segment rolling and the stopping. The
-capture was launched not as a packaged service but as a transient one, on the
-station VM:
+capture was launched not as a packaged service but as a transient one.
+
+What the station operator ran on their own station (historical — a Tier-0
+scientist uses `systemd-run --user`; see capture-quickstart §Run it
+unattended):
 
 ```bash
+# historical — operator-run; not a Tier-0 instruction
 sudo systemd-run --unit=event-recorder-eclipse --collect \
   --property=Restart=on-failure --property=RestartSec=10 \
   --property=User=hamsci ... -m event_recorder -v capture --job .../eclipse-costas-14110.toml
@@ -333,7 +337,7 @@ All times UTC, all from the station's own files (read-only, 2026-08-23).
 | 08-12 17:47:06 | Greatest eclipse. That hour is one of the cleanest nulls in the set | reception report |
 | 08-12 21:26:16 | Last sample (byte-derived); at the next status tick, **21:26:30**, recorder **and** watchdog are both `inactive` — 34 min before the declared 22:00 stop | segment size ÷ 8 ÷ 12 000; status log `active=inactive wd=inactive` |
 
-Two honest readings of that table:
+Three honest readings of that table:
 
 - **The watchdog fired twice**, both times before 01:15Z, and both times on its
   *unit-inactive* branch (`ALARM unit inactive before window end`) — not the

@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page

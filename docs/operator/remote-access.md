@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, on/off, how the admin connects
 
 The setup wizard asked you for one decision about this — it ends

@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 67a3a6d on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the copyable Tier-1 scaffold (nothing else — the narrative is [becoming-a-client.md](../becoming-a-client.md))
 
 Six files that sigmond will accept as a client. They are documentation
@@ -288,9 +288,10 @@ On a station the venv is `/opt/git/sigmond/<client>/venv/` and the symlink to
 | `DEFAULT_CONFIG` in `cli.py` | a config template rendered to `/etc/<client>/` by a `kind = "render"` install step ([ADD-A-CLIENT.md §2](../../ADD-A-CLIENT.md#2-deploytoml--the-sigmond-manifest)) |
 | `config init` / `config edit` | the interactive halves, then uncomment `[contract.config]` in `deploy.toml` |
 | `deps.pypi` version, and `pyproject.toml`'s empty `dependencies` | whatever ka9q-python your client is tested against — both lists, they serve different readers |
-| no `install.sh` | the standalone installer §5 requires (see above) |
+| no `install.sh` | the standalone installer §5 requires (see above) — it must also create the `myrec` service user/group and `/etc/my-recorder/env/`, the same setup `deploy.toml`'s `mkdir`/`owner` steps do for a fleet install |
 | `[[hs_uploader.pipeline]]` — absent | a pipeline declaration, if your rows should leave the station ([becoming-a-client.md](../becoming-a-client.md#shipping-it-upstream)) |
 | `[client_features]` — absent | one block per TUI screen you want to appear on ([ADD-A-CLIENT.md §5](../../ADD-A-CLIENT.md#5-client_features--tui-registration-drop-in)) |
+| `[[deps.pypi]] ka9q-python = "3.25.2"` in `deploy.toml` | a version actually on PyPI (**3.22.0** is; 3.25.2 is not) — or the `git+https://github.com/HamSCI/ka9q-python@v3.25.2` checkout install [capture-quickstart.md](../capture-quickstart.md) uses instead |
 
 ## License
 

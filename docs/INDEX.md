@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 67a3a6d on 2026-08-23 — code
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — code
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.

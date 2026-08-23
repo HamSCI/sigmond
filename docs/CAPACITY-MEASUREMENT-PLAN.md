@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** plan, not executed
-> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — not re-verified (header only)
 > **Canonical for:** how to measure headroom (unexecuted)
 
 **Status:** action plan, ready to execute. Companion to

@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 67a3a6d on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the Tier-0 capture recipe
 
 **Tier 0 is capture only.** You create one `radiod` channel, you write its bytes
@@ -691,7 +691,7 @@ after the settle, which is radiod's other channels answering the re-poll.
 
 ```text
 Radiod reporting TTL=0 for SSRC 1038463489: Multicast data restricted to localhost loopback only!
-channel granted: ssrc=1038463489 10.000000 MHz preset=iq rate=12000 encoding=2 dest=239.183.22.68:5004
+channel granted: ssrc=1038463489 10.000000 MHz preset=iq rate=12000 encoding=2 dest=239.183.22.68:5004 (your group will differ -- the library derives it from client_id)
 settling 4.0s (radiod takes OUTPUT_ENCODING as a SEPARATE command)
 fresh poll: encoding=4 (ensure_channel said 2); verify_channel(expected=F32LE)=True
 recording 60s to /opt/git/sigmond/capture/iq_10000000_20260823T152306Z.f32
@@ -707,7 +707,7 @@ NOTE: measured 4.00 bytes/component (encoding 4); ensure_channel had reported en
 stopping: no channel teardown is sent. The lifetime simply expires and radiod reclaims the channel within ~120s -- a deliberate crash-safe trade, at the cost of up to that long streaming to nobody.
 ```
 
-Five things to read out of that:
+Six things to read out of that:
 
 - **`encoding=2` from `ensure_channel`, `encoding=4` from a poll four seconds
   later, `4.00 bytes/component` on the wire.** The grant *was* honoured — radiod
@@ -770,6 +770,9 @@ drwxrwsr-x 29 sigmond sigmond    4096 Aug 23 15:23 ..
 the absolute paths above look the way they do.)
 
 ### The sidecar
+
+(`granted.multicast_address` below is `239.183.22.68` (your group will differ
+— the library derives it from `client_id`).)
 
 ```json
 {
@@ -848,7 +851,7 @@ carried and how that compares with **both** status readings; and it pins sample
 0 of the file to an absolute UTC through radiod's GPS reference. Six months
 later, that file is still interpretable.
 
-Three readings that need care:
+Four readings that need care:
 
 - **`encoding_from_ensure_channel: 2` vs `encoding_fresh_poll: 4`.** Keep both.
   The first is what the library told you at create time; the second is what

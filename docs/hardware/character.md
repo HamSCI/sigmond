@@ -2,7 +2,7 @@
 
 > **Audience:** scientist, contributor
 > **Status:** current
-> **Verified against:** sigmond 67a3a6d on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** how the station hardware behaves (dynamic range, AGC, loss modes, timing roles, failure modes)
 
 [shopping-list.md](shopping-list.md) says what the parts *are*.
@@ -75,7 +75,8 @@ cleared only if the config specifies an attenuation (`rx888.c:298`) or a gain
 
 b4's `[rx888]` section specifies neither — it sets `queuedepth`,
 `description`, `samprate = 129600000`, `gainmode = high` and the two
-clock-logging keys, and nothing else (source: `/etc/radio/radiod@AC0G-B4.conf`,
+clock-logging keys, and, apart from `device = "rx888"` and a commented-out
+`serial`, nothing else (source: `/etc/radio/radiod@AC0G-B4.conf`,
 live b4 2026-08-23). `gainmode` is not `gain`; the driver prints "gainmode
 parameter is obsolete, now set automatically" and does not disable AGC for it
 (source: `ka9q-radio/src/rx888.c` l.303-305). So the AGC is live, and it moves:

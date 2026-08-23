@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 67a3a6d on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the DASI2 station capability envelope for a new client
 
 Every number below is cited to code, to a doc, or to a dated live reading on
@@ -94,9 +94,10 @@ last-writer-wins, the same model as gain and AGC (source:
 `ka9q-python/ka9q/control.py::ensure_channel` docstring, `low_edge`).
 
 **Encoding.** The wire formats radiod and ka9q-python agree on are S16LE (1),
-S16BE (2), Opus (3), F32LE (4), F16LE (6), Opus-VoIP (7), F32BE (8), F16BE (9),
-µ-law (10) and A-law (11) (source: `ka9q-python/ka9q/types.py::Encoding`, which
-must match `ka9q-radio/src/rtp.h`). F32LE is what the station's own archive
+S16BE (2), Opus (3), F32LE (4), AX25 (5, packet — not a sample format), F16LE
+(6), Opus-VoIP (7), F32BE (8), F16BE (9), µ-law (10) and A-law (11) (source:
+`ka9q-python/ka9q/types.py::Encoding`, which must match `ka9q-radio/src/rtp.h`).
+F32LE is what the station's own archive
 channels use (source: `/etc/hf-timestd/timestd-config.toml`, `encoding = "F32"`;
 confirmed on the wire as `[107] encoding 4 (f32le)`, live b4 2026-08-23).
 

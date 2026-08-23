@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 8aee2f1 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;

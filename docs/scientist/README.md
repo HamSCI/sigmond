@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 67a3a6d on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** the scientist's table of contents
 
 You have a signal in mind — a beacon, an eclipse experiment, a time

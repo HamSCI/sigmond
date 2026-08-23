@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** shipped
-> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — not re-verified (header only)
 > **Canonical for:** diagnosing RTP loss
 
 When RTP streams from radiod show sequence gaps, when channels stutter,

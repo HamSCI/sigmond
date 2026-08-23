@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live dasi002 + b4)
 > **Canonical for:** the operator's table of contents
 
 You are hosting a *station*: one small computer that listens to the whole

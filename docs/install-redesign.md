@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** shipped (stages 0–3); still the best explanation of install-implies-enable
-> **Verified against:** sigmond affebbd on 2026-08-23 — not re-verified (header only)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — not re-verified (header only)
 > **Canonical for:** install-implies-enable vocabulary and station patterns
 
 _Status (2026-06-23): **Stages 0–3 shipped.** Stages 0+1 (canonical dasi2,

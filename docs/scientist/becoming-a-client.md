@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 67a3a6d on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
 > **Canonical for:** graduating a capture to a sigmond client (Tier 1)
 
 [Tier 0](capture-quickstart.md) ends with bytes on a disk and a person who
@@ -99,7 +99,7 @@ python3 ~/my-recorder/my_recorder/cli.py validate  --json ; echo "exit=$?"
 ```
 
 [`skeleton/README.md`](skeleton/README.md) walks the rename, shows the real
-output of every verb, and lists what is stubbed. Two habits from it are worth
+output of every verb, and lists what is stubbed. Three habits from it are worth
 carrying into whatever you write instead:
 
 - **Nothing but JSON on stdout.** Configure logging to stderr *before*
@@ -124,14 +124,14 @@ Two commands, in this order, on the station's decoder VM (the `[VM]` half of
 a two-machines-in-one-box appliance — see the operator
 [glossary](../operator/glossary.md)):
 
+⚠ **On an appliance station you do not run these two commands — the fleet admin
+does.** Read the rest of this section for what they do to your repo, not as
+instructions for you; what you hand over, and why, is at the end of it.
+
 ```bash
 smd component add https://github.com/<org>/my-recorder.git
 smd install my-recorder
 ```
-
-⚠ **On an appliance station you do not run these two commands — the fleet admin
-does.** Read the rest of this section for what they do to your repo, not as
-instructions for you; what you hand over, and why, is at the end of it.
 
 `smd component add` derives the name from the URL, clones to
 `/opt/git/sigmond/<name>/`, fast-forward-pulls if it is already there, and

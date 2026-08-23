@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond cfe8177 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
 > **Canonical for:** what an operator must not do on a station, and why
 
 Almost nothing on a station is fragile. What *is* fragile is the small set of
