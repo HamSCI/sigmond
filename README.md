@@ -463,57 +463,14 @@ which defines a standard interface: `inventory --json`, `validate --json`,
 
 ## Development
 
-Sigmond's core `smd` command is deliberately stdlib-only so it can run from
-`/usr/local/bin/smd` without any venv. The TUI (`smd tui`) and the test
-suite do require external packages; those live in a venv driven by
-[pyproject.toml](pyproject.toml).
-
-### Dev venv
-
-uv is the standard; `.python-version` pins the interpreter and `uv.lock`
-pins resolved deps.
+`smd` core is stdlib-only; the TUI and test suite need a dev venv:
 
 ```bash
 uv sync --extra tui --extra dev        # creates .venv/ with textual, rich, pytest
 ```
 
-For the coordinated dev flow that also installs `ka9q-python` editable from a
-sibling checkout, use the hamsci-workspace meta-repo (see that README) or
-the legacy pip-based helper:
-
-```bash
-./scripts/dev-setup.sh                 # pip fallback; auto-locates ../ka9q-python
-```
-
-### Running tests
-
-```bash
-uv run pytest tests/
-# or: .venv/bin/pytest tests/
-```
-
-### Running the TUI from the repo
-
-```bash
-uv run python bin/smd tui
-# or: .venv/bin/python bin/smd tui
-```
-
-`smd tui` imports `sigmond.tui` using the current interpreter first;
-if that fails, it re-execs into the production venv at `/opt/git/sigmond/sigmond/venv/`
-(auto-created on a root install). So the dev `.venv` and the installed
-`/opt/git/sigmond/sigmond/venv` both work the same way — one declaration, two locations.
-
-### Production venv
-
-The installer creates `/opt/git/sigmond/sigmond/venv/` and installs sigmond
-(editable, with the `tui` extra) into it. When that venv exists, `smd`
-re-execs into its interpreter on **every** invocation — not just `tui` — so
-the full dependency closure (including `ka9q-python`, which the
-harmonization rules import) is always available. The re-exec is skipped only
-when the venv is absent (a fresh or dev checkout), when `smd` is already
-running from it, or when `SIGMOND_NO_VENV_REEXEC=1` is set. Keeping the core
-stdlib-only is what lets that pre-venv bootstrap and the escape hatch work.
+For prereqs, clone layout, running `smd` from the tree, tests, and docs
+checks, see [`docs/contributor/dev-setup.md`](docs/contributor/dev-setup.md) ★.
 
 ## Project
 
