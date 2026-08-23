@@ -97,7 +97,8 @@ cd Costas-array
 python3 -m venv venv && ./venv/bin/pip install '.[capture]'
 ```
 
-Write a job file — this is the eclipse job, unchanged:
+Write a job file — this is the eclipse job as published in the repo README (the file that actually ran differs in four lines — see
+[the worked example](costas-14110-worked-example.md#the-envelope-and-why)):
 
 ```toml
 name          = "eclipse-costas-14110"

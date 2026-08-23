@@ -10,7 +10,7 @@ signal on 14.110 MHz during the following day's European eclipse. Twenty-two
 hours of I/Q were on disk by the following evening. The first analysis of that
 recording concluded there was nothing in it; the second analysis — of the same
 bytes, a day later — found the transmission and settled an open question about
-the transmitter that no other station had answered.
+the transmitter.
 
 This page is that job end to end: what was decided, what was checked before the
 event, what happened during the night, what the data actually said, and what
@@ -37,10 +37,14 @@ recommends. The analysis is its
 17:47:06 UTC. There was no existing receiver for the signal, the specification
 arrived with it, and the event would happen once.
 
-The repository's first commit is dated **2026-08-11** and the capture's first
-sample is stamped **2026-08-11T23:11:20.136992Z** — 45 commits and one day
-apart (`git log --date=short`; first sidecar in the B4 archive). The README puts
-it plainly: "Built on ~1 day's notice for the 2026-08-12 European eclipse."
+The repository's first commit is stamped **2026-08-11T20:13:42Z** ("Design:
+event-recorder, ad-hoc scheduled RF capture"); the capture's first sample is
+stamped **2026-08-11T23:11:20.136992Z** — the same evening, **2 h 58 min and 28
+commits later**. By the time the analysis was finished on 08-13 the repository
+held **45 commits**, twelve of them that last day
+(`git log --date=format-local:%Y-%m-%dT%H:%M:%SZ` at `1e7d6f6`; first sidecar in
+the B4 archive). The README puts it plainly: "Built on ~1 day's notice for the
+2026-08-12 European eclipse."
 
 What the transmitting group supplied, and what the recording later confirmed:
 
@@ -86,9 +90,11 @@ disagree.
 
 ### The envelope, and why
 
-This is the job file as it stands on the station today (read-only, 2026-08-23;
-the repo README publishes a tidied version with `start_utc` set to when the
-final run actually began and the `radiod_encoding` line dropped):
+This is the job file as it stands on the station today (read-only, 2026-08-23).
+The repo README publishes a tidied version that differs in four lines: it drops
+`radiod_encoding`, `agc` and `gain_db`, and sets `start_utc` to
+`2026-08-12T01:14:11Z` — when the final run actually began — rather than the
+`23:20:38Z` the file has carried since the first night:
 
 ```toml
 name            = "eclipse-costas-14110"
@@ -224,7 +230,8 @@ The playbook says
 [prove it against a known signal](../EVENT-CLIENT-PLAYBOOK.md#prove-it-against-a-known-signal):
 tune 1 kHz below WWV and confirm the carrier lands at exactly +1000 Hz. The
 station still holds the evidence that this was done — 2026-08-11T23:06:47Z, four
-30-second segments, and the sidecar says the dial:
+short segments (three full 30 s, the fourth 8.8 s), and the sidecar says the
+dial:
 
 ```
 "core:frequency": 9999000.0,
@@ -322,16 +329,21 @@ All times UTC, all from the station's own files (read-only, 2026-08-23).
 | 08-12 01:12:34 | `f32d` on WWV measures **4.0 bytes/component** on the wire | `f32d` sidecar |
 | 08-12 01:13 | Job file edited: `radiod_encoding` `s16` → `f32` | job file mtime + content |
 | 08-12 01:13:59 | Watchdog: second `ALARM unit inactive` → restart issued 01:14:02 | watchdog log |
-| 08-12 01:14:11 | Final run begins. Twenty unbroken hourly segments follow | sidecars 01:14:11 → 21:14:11 |
+| 08-12 01:14:11 | Final run begins. Twenty unbroken hourly segments follow, then a 724 s tail | the 21 sidecars 01:14:11 → 21:14:11 |
 | 08-12 17:47:06 | Greatest eclipse. That hour is one of the cleanest nulls in the set | reception report |
-| 08-12 21:26:16 | Recorder **and** watchdog both go inactive, 34 min before the declared 22:00 stop | status log `active=inactive wd=inactive` |
+| 08-12 21:26:16 | Last sample (byte-derived); at the next status tick, **21:26:30**, recorder **and** watchdog are both `inactive` — 34 min before the declared 22:00 stop | segment size ÷ 8 ÷ 12 000; status log `active=inactive wd=inactive` |
 
 Two honest readings of that table:
 
-- **The watchdog earned its place twice**, both times before 01:15Z, and both
-  times for the failure `Restart=on-failure` does not catch. Neither restart cost
-  more than 33 seconds of coverage. Test yours by killing the live capture,
-  as the playbook says — an untested watchdog buys false confidence.
+- **The watchdog fired twice**, both times before 01:15Z, and both times on its
+  *unit-inactive* branch (`ALARM unit inactive before window end`) — not the
+  socket-timeout stall branch it was written for, which never triggered. Neither
+  restart cost more than 33 seconds of coverage. Read the second firing
+  cautiously: it came 30–60 s after the operator's edit to the job file (mtime
+  01:13) and may have raced an intentional stop rather than caught a fault. The
+  stall detector the watchdog exists for was never exercised in anger — so test
+  yours by killing the live capture, as the playbook says; an untested watchdog
+  buys false confidence.
 - **"Zero gaps" means zero gaps *inside* segments.** Four restarts in the first
   two hours left roughly **58 seconds** of wall clock unrecorded, all before
   01:15Z, all in the quiet-hours baseline, none within sixteen hours of the
@@ -359,6 +371,10 @@ Live listing of `/var/lib/event-recorder/eclipse-costas-14110/` on B4,
 | Anchored | **25 of 25** sidecars `"event:timing_state": "anchored"` |
 | `gap` annotations | **0**, across every sidecar |
 | Wire format recorded | 21 sidecars `"event:radiod_encoding": "f32"` with `asserted_encoding: 4` and `wire_bytes_per_component: 4.0`; 4 (the pre-01:14 runs) `"s16"` with no measurement |
+
+> The reception report's own §"How the capture was made" table says **23 × 1 h
+> segments** and **7.9 GB**; the archive on B4 holds **26 segments** and
+> **7,683,666,653 bytes**. This page cites the archive.
 
 The 26th data file is the **orphan** from 23:31:41 — a segment whose process died
 before its sidecar was written. That is designed for, not an accident:
