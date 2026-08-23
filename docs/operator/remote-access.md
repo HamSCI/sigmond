@@ -5,8 +5,9 @@
 > **Verified against:** sigmond 3e1a885 on 2026-08-23 — live b4 + dasi002 (`smd admin rac status` + subverb `--help` and sshd config in each VM; `sigmond-rac-host.service`, `/etc/sigmond/frpc-host.toml` and the `/etc/sigmond-appliance/rac-*` marks read-only on both Proxmox hosts; frpc channel API and the wizard summary on b4's host) + code/docs
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, on/off, how the admin connects
 
-The setup wizard asked you one question about this — *"Enable remote access?"*
-— and most operators press Enter without knowing what they just agreed to. This
+The setup wizard asked you for one decision about this — it ends
+*"Enable remote access?"* — and most operators press Enter without knowing what
+they just agreed to. This
 page is the honest answer: what it is, exactly what it lets someone see, who
 that someone is, and how to switch it off. Words you don't recognise are in the
 [glossary](glossary.md).
@@ -76,14 +77,16 @@ is reachable through the tunnel.
 
 (Source: `sigmond/scripts/proxmox/sigmond-wizard.sh`, `RAC_BASE_VMSSH=35800`,
 `RAC_BASE_VMWEB=45800`, `RAC_BASE_HSSH=50800`, `RAC_BASE_HUI=55800`; confirmed
-live against both stations' `/etc/sigmond/frpc-host.toml` — b4 is RAC #502 and
-dasi002 is RAC #504, and each one's four ports are exactly those bases plus its
-number.)
+live against both stations' `/etc/sigmond/frpc-host.toml` — on each station the
+four ports are exactly those bases plus that station's RAC number.)
 
 The **RAC number** is bookkeeping, not identity — the gateway assigns a free one
-during the install, it is written to `/etc/sigmond-appliance/rac-number`, and it
-**sticks** across a later `sigmond-setup --reconfigure` so your ports never move
-(source: `sigmond-wizard.sh` header, "the RAC number is sticky"; live on b4).
+during the install (except on the HamSCI-direct rungs, where it is derived from
+your DASI unit number instead: 220 + N, so DASI-001 is RAC #221), it is written
+to `/etc/sigmond-appliance/rac-number`, and it **sticks** across a later
+`sigmond-setup --reconfigure` so your ports never move (source:
+`sigmond-wizard.sh` header and `ask_rac()`, "the RAC number is sticky"; live on
+b4).
 
 The two VM channels do not need to know the VM's address. They point at two
 little relays on the host itself (`sigmond-vm-ssh-relay.socket` and
@@ -97,10 +100,11 @@ two socket units, read live on b4's host; `sigmond-wizard.sh` header).
 Not the public internet. Two locks, and you can check the outer one yourself:
 
 - **The gateway does not publish these ports.** From an ordinary internet
-  connection on 2026-08-23, b4's VM-ssh port (36302) and host-ssh port (51302)
-  on `gw2.wsprdaemon.org` both refused to connect, while the tunnel control port
-  35736 — the one your station dials *out* to — answered. The channel ports are
-  reachable only from the fleet gateway's private admin VPN.
+  connection on 2026-08-23, b4's VM-ssh channel port (`:3XXXX`) and host-ssh
+  channel port (`:5XXXX`) on `gw2.wsprdaemon.org` both refused to connect, while
+  the tunnel control port 35736 — the one your station dials *out* to —
+  answered. So the channel ports are not reachable from the open internet; the
+  admin reaches them over the gateway's private VPN.
 - **Then they still need a key.** Getting through the gateway only puts someone
   at your station's ssh login prompt. Logging in needs an ssh key already
   installed on your station, or the password you set.
@@ -127,6 +131,10 @@ admin can reach this station for support.  Keys, credentials and
 channel numbers are all handled automatically, and you can turn it
 off any time with:  sigmond-setup --rac-off
 
+...  (the gateways it will try, most secure first — and, if any hardware
+     was missing, a note that remote access is how somebody helps you
+     finish the build)
+
 Enable remote access? [Y/n]
 ```
 
@@ -135,10 +143,11 @@ of hardware at install time, the wizard also pressed the point — remote access
 is how somebody helps you finish the build once the missing part arrives.
 
 If it worked, the wizard's closing summary said so, and that summary is still on
-the host at `/root/sigmond-setup-summary.txt`. Real line from b4:
+the host at `/root/sigmond-setup-summary.txt`. Real line from b4, with this
+station's number and ports masked — yours prints the actual digits:
 
 ```text
- RAC:       #502 live on gw2.wsprdaemon.org via wsprdaemon (secure) — VM ssh :36302 · VM web :46302 · host ssh :51302 · Proxmox UI :56302 (off: sigmond-setup --rac-off)
+ RAC:       #<your RAC number> live on gw2.wsprdaemon.org via wsprdaemon (secure) — VM ssh :3XXXX · VM web :4XXXX · host ssh :5XXXX · Proxmox UI :5XXXX (off: sigmond-setup --rac-off)
 ```
 
 ---
@@ -266,9 +275,11 @@ Plainly:
   the trade — it is what makes "just ask, they'll fix it"
   ([INSTALL.md §11](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#11-if-something-goes-wrong))
   possible.
-- **It reaches only the station.** The tunnel forwards four named ports on the
-  station itself. It is not a route onto the rest of your home network, and no
-  other device of yours becomes reachable because of it.
+- **The tunnel itself forwards nothing but those four ports.** It is not a
+  route onto your home network: no other device of yours becomes reachable
+  *through the tunnel*. (An admin who logs in is then on your LAN like any
+  other machine in the house — that follows from the shell in the bullet above,
+  not from the tunnel.)
 - **Nothing about it is public.** The channel ports are not open to the internet
   (§2), and the station is not listed anywhere a stranger can browse.
 - **It is not needed to produce or upload data.** Every upload path works with
@@ -319,9 +330,11 @@ Its `RAC:` line either names your number and four ports, or says why not.
 used to fail for everybody, twice over, and both traps were fixed in the
 wizard rather than in anything you can reach:
 
-- Every greenfield install between **2026-07-30 and 2026-08-06** finished with
-  remote access dead, silently, because the wizard pointed at a registration
-  service that never answered.
+- Every greenfield install from **2026-07-30 until the gateway ladder landed on
+  2026-08-09** finished with remote access dead, silently, because the wizard
+  pointed at a registration service that never answered. Nobody noticed until
+  somebody needed remote support and went looking, on 2026-08-06 (source:
+  `sigmond-wizard.sh`, the RAC-ladder comment block).
 - The **v3.25 and v3.26** images then shipped a "secure" setting that no
   gateway actually served, so installs quietly fell through to a less secure
   rung (source: `sigmond-wizard.sh`, the RAC-ladder comment block, corrected
