@@ -1075,8 +1075,9 @@ chasing a fault:
 - ⛔ **Don't delete files to free disk space.** You cannot tell the station's
   scratch from the day's science. Ask.
 - ⛔ **Don't `apt upgrade`, `pip install`, or `git pull`** anywhere on the
-  station. The packages and checkouts are pinned where they are on purpose, and
-  a hand-installed one silently breaks the next update
+  station. The checkouts are pinned on purpose, and nothing on the station
+  holds the packages — which is why apt is off-limits; a hand-installed one
+  silently breaks the next update
   ([day-2.md](day-2.md#three-things-never-to-do-by-hand)).
 - ⛔ **Don't run `smd doctor --fix` or `smd update --apply`** unless your fleet
   admin has told you to. The plain forms this page uses — `smd doctor` and
