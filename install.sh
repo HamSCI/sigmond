@@ -764,6 +764,22 @@ info "Installing sigmond-rx888-irq-affinity → /usr/local/sbin/"
 $SUDO ln -sf "$REPO_DIR/scripts/sigmond-rx888-irq-affinity" /usr/local/sbin/sigmond-rx888-irq-affinity
 ok "sigmond-rx888-irq-affinity symlink installed"
 
+# qemu-guest-agent self-heal drop-in (VM guests only — the unit exists
+# only where the agent package is installed).  qemu-ga buffers a whole
+# `qm guest exec` output in memory; a large exec balloons it to GB and
+# a client timeout then leaves the agent wedged — alive, channel dead,
+# invisible to Restart=always (nothing died).  MemoryMax converts that
+# wedge into an OOM-kill + clean restart.  See the drop-in's header and
+# scripts/proxmox/pm-heartbeat.py::_check_guest_exec (the alarm side).
+if systemctl list-unit-files qemu-guest-agent.service >/dev/null 2>&1 \
+        && systemctl list-unit-files qemu-guest-agent.service 2>/dev/null | grep -q qemu-guest-agent; then
+    info "Installing qemu-guest-agent self-heal drop-in"
+    $SUDO install -d -m 0755 /etc/systemd/system/qemu-guest-agent.service.d
+    $SUDO install -m 0644 "$REPO_DIR/systemd/qemu-guest-agent-selfheal.conf" \
+        /etc/systemd/system/qemu-guest-agent.service.d/50-sigmond-selfheal.conf
+    ok "qemu-guest-agent drop-in installed (MemoryMax self-heal)"
+fi
+
 $SUDO systemctl daemon-reload
 # Enable just the unified trim timer.  ConditionPathExists=/var/lib/sigmond/sink.db
 # in the service unit keeps it inactive until a producer writes — and even
