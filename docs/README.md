@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 978c80a on 2026-08-23 — docs
+> **Verified against:** sigmond 6adfc75 on 2026-08-24 — docs
 > **Canonical for:** the front door
 
 Pick the door that matches you. Each path is self-contained; you will be
@@ -31,3 +31,13 @@ TEC, meteor scatter) that share the DASI2 station hardware; data flows
 client → shared SQLite sink → `hs-uploader` → wsprnet / pskreporter /
 wsprdaemon / PSWS. See the [architecture diagram](architecture.png) for the
 whole-suite picture.
+
+## State of the docs
+
+Verified against the code as of 2026-08-24. Every known gap between what these
+pages want to say and what the software does today is a filed issue — 65 across
+eight repos, all labeled
+[`docs-gap`](https://github.com/HamSCI/sigmond/issues?q=label%3Adocs-gap)
+(bug-class ones also carry `bug`). The
+[docs-gap ledger](contributor/docs-gap-ledger.md) lists every repo's issue
+query and collects new gaps between filing batches.
