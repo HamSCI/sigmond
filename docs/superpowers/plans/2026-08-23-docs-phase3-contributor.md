@@ -1,5 +1,7 @@
 # Documentation Program — Phase 3 (contributor guide + upkeep) Implementation Plan
 
+
+**Status: complete — executed 2026-08-23/24, close-out commit 2cd11c4, final review clean after fix wave (e05aabe); provenance archived ops 0af2e97.**
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A developer new to the suite can, from `CONTRIBUTING.md` + `sigmond/docs/contributor/`, set up a dev environment, find which module implements any `smd` verb, understand how a change reaches a station (tag → `smd update` / golden image), author a conformant client, and keep the docs true — with that last part enforced by CI (`docs-check`) and a PR checklist in every repo.
