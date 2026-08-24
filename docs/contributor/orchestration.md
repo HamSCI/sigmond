@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond b51280b on 2026-08-23 — code (bin/smd, lib/sigmond, CLAUDE.md)
+> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — code (`smd fleet --help`, `fleet.py:700,705,1028`, `tests/test_fleet.py`)
 > **Canonical for:** sigmond's orchestration model and the smd verb→module map
 
 ## The shape
@@ -140,7 +140,7 @@ left to list: the v2 removals in
 | `disable` | operator | take a component offline reversibly — stop its units, clear the topology flag | `cmd_disable` → `topology.py`, `catalog.py` | yes (root) |
 | `doctor` | station-inward update | checkout health: ownership, venv skew, dirty trees; `--fix` repairs ownership only | `cmd_doctor` → `doctor.py` | `--fix` does (root) |
 | `enable` | scripting | set `enabled = true` in topology — rarely typed, install and start do it for you | `cmd_enable` → `topology.py`, `catalog.py` | yes (root) |
-| `fleet` | fleet-outward | read-only fan-out over the inventory: `status`, `doctor`, `roster`, `pubkeys`. `--apply` is structurally impossible here, by design | `cmd_fleet` → `fleet.py` | no — the wall between the two chairs |
+| `fleet` | fleet-outward | subverbs `status`, `doctor`, `roster`, `update`, `pubkeys`. The fan-out (`status`/`doctor`/`roster`/`pubkeys`) is read-only, enforced by a test-checked whitelist; `fleet update` multiplexes the station-inward update procedure host by host, canary first | `cmd_fleet` → `fleet.py` | `update --apply` does, one host at a time |
 | `install` | installer | install + configure + enable one component, or walk catalog × topology for the whole suite | `cmd_install` → `installer.py`, `catalog.py`, `discover.py`, `preflight.py`, `topology.py` | yes (root + lock) |
 | `notify` | operator | fault-notification outbox: `test`, `status`, `list`, spooling to `/var/lib/sigmond/notify/` | `cmd_notify` — self-contained in `bin/smd` | `test` writes a spool record |
 | `psws` | registration | station-level PSWS enrolment: `status`, `enroll`, `verify`, `motd` | dispatch branch → `psws.py` | `enroll`/`verify` do (root) |
@@ -197,8 +197,10 @@ it is the only orientation a public install will ever have.
 **Fleet-outward (push)**: you are the fleet administrator deciding *when* and
 in *what order*; the mutation is still the station-inward procedure, run on
 each host in turn. The fan-out (`smd fleet status|doctor|roster|pubkeys`) can
-only ask questions — its command vocabulary is a test-enforced whitelist, and
-B4 is the declared canary.
+only ask questions — its command vocabulary is a test-enforced whitelist.
+`smd fleet update` is the administered multiplexer: it runs that same
+station-inward procedure host by host, canary first (B4 is the declared
+canary), and `--apply` is what mutates — a dry-run plan otherwise.
 
 Because every consumer venv installs its siblings **editable**, a `git pull` of
 a suite library propagates to every venv with no further action — that is what

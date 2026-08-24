@@ -2,8 +2,8 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond b6ff371 on 2026-08-23 — code
-> **Canonical for:** the route through the client-authoring documents, and the rule that a client's own `docs/` must be true
+> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — code
+> **Role:** pointer + rule — routes you through the client-authoring documents and states the rule that a client's own `docs/` must be true; the canonical client contract lives in [`CLIENT-CONTRACT.md`](../CLIENT-CONTRACT.md) ★
 
 Writing a new client is well covered — by four documents, a runnable
 scaffold and two living examples. What was *not* written down is the
@@ -183,7 +183,7 @@ Run the link checker by hand before you commit docs, in addition to
 whatever CI runs on push:
 
 ```bash
-python3 /opt/git/sigmond/sigmond/scripts/docs-linkcheck.py \
+python3 ../sigmond/scripts/docs-linkcheck.py \
     <your-repo>/docs <your-repo>/README.md
 ```
 

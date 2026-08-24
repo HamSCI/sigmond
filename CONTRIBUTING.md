@@ -113,7 +113,9 @@ host in turn, through that host's root channel:
   mutate would turn one bad afternoon on the devbox into a fleet-wide
   incident.
 * Mutation is one host at a time, **canary first** (`canary = true` in
-  the fleet inventory; B4), verify, then the rest.
+  the fleet inventory; B4), verify, then the rest — driven by
+  `smd fleet update`, the administered multiplexer that runs the
+  station-inward procedure above host by host.
 * Know each host's root channel before you need it: `smd update --apply`
   over a plain ssh session as a service user cannot self-elevate (no
   passwordless sudo — by design), and on a Proxmox-hosted station the
@@ -144,7 +146,7 @@ requires. A bare `pytest` or `python -m pytest` runs outside the venv and
 misses the dev extras (Textual, etc.); on a fresh system with no venv yet
 it fails outright with `No module named pytest`.
 
-The suite is the main asset — over 1200 tests in sigmond alone. A change
+The suite is the main asset — over 2000 tests in sigmond alone. A change
 without a test that would have failed before it is not finished.
 
 **Write the test first and watch it fail.** Several bugs this project
@@ -204,7 +206,8 @@ needs to know the mechanism exists.
   [v3.32](https://github.com/HamSCI/sigmond-appliance/releases/tag/v3.32):
   the record carries the manifest, the sha256, and the test verdict. The
   image itself stays on the artifact store — GitHub caps release assets
-  at 2 GiB and images run ~4.9 GB.
+  at 2 GiB and images run ~4.7 GB (`sigmond-appliance/docs/RELEASE.md`
+  §3 "Blessed" is authoritative for the figure).
 
 **The gate earned its keep immediately.** A v3.32 build from a proper
 tag, with a valid 22-component manifest and a verified checksum, shipped
@@ -419,6 +422,12 @@ there is **no `wiki/`** anywhere near it — skip wiki navigation entirely.
   * `update` **never drops deleted files**. After removing or renaming
     anything, do a clean rebuild or the graph keeps answering with code
     that no longer exists.
+* **This graph exists only on the devbox.** The paths above
+  (`/home/mjh/hamsci/repos/graphify-out/...`) are one contributor's
+  machine, not something a fresh clone from GitHub has. Outside the
+  devbox, either skip this section entirely (§"an aid, not a gate,"
+  above) or build your own: `graphify update <root>` against a local
+  `repos/`-style checkout root produces an equivalent local graph.
 
 ## 12. Pull requests
 

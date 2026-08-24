@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond b51280b on 2026-08-23 — code + commands run in the checkout
+> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — code + commands run in the checkout (`smd component list` re-verified, exit 0)
 > **Canonical for:** setting up and testing a development environment for the suite
 
 This page gets a fresh clone of `sigmond` to a state where you can run `smd`,
@@ -98,7 +98,7 @@ step required for the core (`CLAUDE.md` §Running `smd` from the dev tree
 without reinstalling):
 
 ```bash
-PYTHONPATH=lib ./bin/smd list           # uses your editable source tree
+PYTHONPATH=lib ./bin/smd component list # uses your editable source tree
 PYTHONPATH=lib ./bin/smd tui            # TUI also (needs .venv with [tui])
 ```
 

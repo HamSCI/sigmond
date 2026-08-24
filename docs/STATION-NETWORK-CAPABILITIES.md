@@ -13,7 +13,7 @@ is one instrument among several.
 value of adding a node to the network.
 
 **Status:** Forward-looking. Single-station capability is implemented and live
-(see [`hf-timestd/docs/PHYSICS.md`](../../hf-timestd/docs/PHYSICS.md)); the
+(see [`hf-timestd/docs/PHYSICS.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/PHYSICS.md)); the
 network capability described here is what those stations enable *collectively*.
 
 ---
@@ -248,7 +248,7 @@ not break when a transmitter, or a single mode, goes dark.
 
 ## Related documentation
 
-- [`hf-timestd/docs/PHYSICS.md`](../../hf-timestd/docs/PHYSICS.md) — single-station
+- [`hf-timestd/docs/PHYSICS.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/PHYSICS.md) — single-station
   ionospheric measurement physics (dTEC, VTEC anchoring, TID detection, mode ID).
 - [`CLIENT-CONTRACT.md`](CLIENT-CONTRACT.md) — how clients share the station's
   timing authority and shared sink.

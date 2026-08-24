@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond 978c80a on 2026-08-23 — code (sigmond-appliance scripts, bin/smd, capture_prep, wizard)
+> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — code (sigmond-appliance scripts, `bin/smd:3566-3567`, `fleet.py`, capture_prep, wizard)
 > **Canonical for:** the appliance ↔ sigmond boundary — what the image bakes, what first boot does, how a change reaches a station
 
 Your change is committed. This page answers the next question: **how does it
@@ -149,7 +149,7 @@ at a time) or **the next image**. Find your change in the left column.
 `pull` and `install` steps (`bin/smd:3527-3553`) but prints the `rebuild-radiod`,
 `wisdom` and `restart` steps as commands for a human to run — "restart not
 automated here — bounce radiod, wait for it to settle, then the recorders"
-(source: `bin/smd:3562-3566`). So `smd update --apply` exiting 0 means the new
+(source: `bin/smd:3566-3567`). So `smd update --apply` exiting 0 means the new
 source is on disk; it does not mean any process is running it. Every action in
 the plan carries its own `verify`, because the failures this planner was written
 from were uniformly of the form "looked fine, wasn't done" (source:
@@ -160,9 +160,10 @@ like a fix and changes nothing (source:
 
 Whichever path applies, the **order** is not yours to choose informally.
 Mutation is one host at a time, **canary first** (`canary = true` in the fleet
-inventory; B4 today), verify, then the rest — and the fan-out (`smd fleet
-status|doctor|roster|pubkeys`) can only ask questions, with `--apply`
-structurally impossible through it (source:
+inventory; B4 today), verify, then the rest — driven by `smd fleet update`,
+which multiplexes the same station-inward procedure host by host. The
+`status|doctor|roster|pubkeys` fan-out can only ask questions, enforced by a
+test-checked whitelist (source:
 [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) §3). That wall between the two
 orientations is the point, not a missing feature.
 

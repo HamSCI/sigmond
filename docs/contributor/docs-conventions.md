@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond b51280b on 2026-08-23 — docs
+> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — docs
 > **Canonical for:** how docs are organised and kept true across the HamSCI/DASI2 repos
 
 ## 1. Where things live
@@ -37,7 +37,9 @@ block immediately under the H1:
 > **Audience:** operator | scientist | contributor | all
 > **Status:** draft | current | shipped | historical | pointer
 > **Verified against:** <repo> <commit-or-tag> on <date> — <how: live dasi002 / live b4 / code / docs / not re-verified>
-> **Canonical for:** <topic>        (or  **See instead:** [<path>](<path>)  for pointer pages)
+> **Canonical for:** <topic>        (or  **See instead:** [<path>](<path>)  for pointer pages,
+>                                    or  **Role:** <what this page is for>  for a page that is
+>                                    neither — it owns no topic and points at no single one)
 ```
 
 `Audience` routes the reader. `Status` says how much to trust the page as
@@ -59,7 +61,12 @@ automatically — it matches `[0-9a-f]{7,40}` and does not resolve tags, so
 a tag name there is invisible to the checker (the page is silently
 skipped, not flagged) even though it's fine as a human-readable qualifier.
 `Canonical for` names the one topic this page owns; pointer pages replace
-it with `See instead:`.
+it with `See instead:`. A third kind of page is neither: it is listed
+un-starred in an `INDEX.md` (§2) because it does not own a single topic
+and there is no one canonical page to point at instead — a pointer+rule
+page that names the real canonical page elsewhere, or a working file like
+the docs-gap ledger. Such a page replaces `Canonical for` with `Role:`,
+stating in one line what the page is for instead of what it owns.
 
 ## 4. Pointer files
 

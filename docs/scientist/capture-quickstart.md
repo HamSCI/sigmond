@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 55b9e68 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 2cd11c4 on 2026-08-24 — walk-through fixes (live DASI002 + code/docs); `smd timing --json` surface added to the judge-age guidance
 > **Canonical for:** the Tier-0 capture recipe
 
 **Tier 0 is capture only.** You create one `radiod` channel, you write its bytes
@@ -901,24 +901,31 @@ every segment to have: the **tier, σ and judge age**. `utc` says *when*; only
 the tier and σ say what that number is worth, and without them you cannot
 state an uncertainty six months later.
 
-They do not come from radiod or ka9q-python — they come from hf-timestd, and
-no scientist-facing page or API publishes them
-([docs-gap ledger row 50](../contributor/docs-gap-ledger.md)). Two ways to get
-them anyway, on a station that runs hf-timestd:
+They do not come from radiod or ka9q-python — they come from hf-timestd. Tier,
+offset and σ now have a documented machine-readable surface; judge age
+specifically does not yet
+([docs-gap ledger row 50](../contributor/docs-gap-ledger.md)). Three ways to
+get them, on a station that runs hf-timestd:
 
-1. **`smd status`** — a read-only operator verb that works as an ordinary
-   station user and prints one `judge` line. Always there; a text report.
-2. **`/run/hf-timestd/offset_judge.json`** — the same numbers as data.
-   World-readable on DASI002 (`-rw-r--r-- timestd:timestd`, live
-   2026-08-23T18:02Z), carrying `"schema": "offset-judge-v1"` and a `judge`
-   block: `"tier": "T3", "sigma_ns": 3083883.8, "age_s": 0.002` beside
-   `"gpsdo_discipline": "holdover"`. hf-timestd's own spec says recorders "MAY
-   consume" it (`hf-timestd/docs/OFFSET-JUDGE-SPEC-2026-08-05.md` §3, §4.4).
-   **Prefer this when it is present** — parse it, keep the whole `judge` block,
-   and fall back to (1) when the file is absent or its mtime is stale (`smd`
-   itself treats a stale file as no reading: `lib/sigmond/timing_judge.py`,
-   `load_offset_judge`). It is a `/run` file on a station you do not own, so
-   code it as "may vanish", not as an API.
+1. **`smd timing --json`** — the documented, `--json`-capable path for tier,
+   offset, σ and the authority snapshot's own publish age (not the judge's
+   `age_s` specifically; see below). Read-only, works as an ordinary station
+   user (`orchestration.md:152`, `lib/sigmond/commands/timing_show.py`).
+   **Prefer this for tier/offset/σ.**
+2. **`/run/hf-timestd/offset_judge.json`** — the same numbers as data, plus
+   the judge-specific `age_s` that (1) does not carry. World-readable on
+   DASI002 (`-rw-r--r-- timestd:timestd`, live 2026-08-23T18:02Z), carrying
+   `"schema": "offset-judge-v1"` and a `judge` block: `"tier": "T3",
+   "sigma_ns": 3083883.8, "age_s": 0.002` beside `"gpsdo_discipline":
+   "holdover"`. hf-timestd's own spec says recorders "MAY consume" it
+   (`hf-timestd/docs/OFFSET-JUDGE-SPEC-2026-08-05.md` §3, §4.4). **Prefer this
+   when you need judge age specifically** — parse it, keep the whole `judge`
+   block, and fall back to (1) or (3) when the file is absent or its mtime is
+   stale (`smd` itself treats a stale file as no reading:
+   `lib/sigmond/timing_judge.py`, `load_offset_judge`). It is a `/run` file on
+   a station you do not own, so code it as "may vanish", not as an API.
+3. **`smd status`** — a read-only operator verb that prints one `judge` text
+   line. Last resort: use it only when neither (1) nor (2) is available.
 
 hf-timestd's own raw-buffer sidecars carry the tier as a field
 (`timing.judge_tier`,
@@ -926,8 +933,10 @@ hf-timestd's own raw-buffer sidecars carry the tier as a field
 and a Tier-1 client should subscribe to the authority properly
 ([data-and-timing.md §If you can do better](data-and-timing.md#if-you-can-do-better-subscribe-to-the-authority)).
 
-The snippet below takes route (1), because it needs nothing but `smd` on
-`$PATH` and it is the one that was run live for this page.
+The snippet below takes route (3), because it needs nothing but `smd` on
+`$PATH` and it is the one that was run live for this page. For a
+machine-readable reading, call `smd timing --json` (route (1)) instead and
+skip the ANSI-stripping helper entirely.
 
 ⚠ **This is a text capture of a human-readable report, not an interface.** The
 wording can change under you. Store the line verbatim, parse it offline, and

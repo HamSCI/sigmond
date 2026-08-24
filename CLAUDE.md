@@ -167,7 +167,7 @@ already forecloses most options).
 `bin/smd` is plain Python and works from a checkout:
 
 ```bash
-PYTHONPATH=lib ./bin/smd list           # uses your editable source tree
+PYTHONPATH=lib ./bin/smd component list # uses your editable source tree
 PYTHONPATH=lib ./bin/smd tui            # TUI also (needs .venv with [tui])
 ```
 
@@ -337,7 +337,7 @@ propagate on `git pull` with zero per-host sync work.
 
 Names listed here are *excluded* from the catalog returned by
 `load_catalog()`, so a stale `/opt/git/sigmond/<name>/deploy.toml`
-cannot revive a removed client through discovery.  `smd list` shows
+cannot revive a removed client through discovery.  `smd component list` shows
 deprecated entries in a separate section when their checkout still
 lingers on disk.  `smd remove <name>` is a full purge for these
 names — stop+disable units, remove the deploy.toml link symlinks,
