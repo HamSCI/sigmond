@@ -71,7 +71,8 @@ start_priority  = 50                                  # timing authority: start 
 [client.hamsci-physics]
 kind            = "client"
 description     = "Ionospheric science products (TEC/dTEC, TID, GRAPE/PSWS) from hf-timestd observations"
-repo            = "https://github.com/HamSCI/hamsci-physics"
+repo            = "https://github.com/mijahauan/hamsci-physics"  # staging: transfers to HamSCI/
+                                                      # (GitHub redirects this URL after the move)
 uses            = []
 requires        = ["hf-timestd", "hamsci-dsp", "hs-uploader"]  # reads hf-timestd's products; sibling pkgs for uv editable install
 contract        = "0.8"
