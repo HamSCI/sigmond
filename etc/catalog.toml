@@ -68,6 +68,22 @@ install_script  = "/opt/git/sigmond/hf-timestd/scripts/install.sh"
 topology_alias  = "grape"
 start_priority  = 50                                  # timing authority: start before wspr/psk consumers
 
+[client.hamsci-physics]
+kind            = "client"
+description     = "Ionospheric science products (TEC/dTEC, TID, GRAPE/PSWS) from hf-timestd observations"
+repo            = "https://github.com/HamSCI/hamsci-physics"
+uses            = []
+requires        = ["hf-timestd", "hamsci-dsp", "hs-uploader"]  # reads hf-timestd's products; sibling pkgs for uv editable install
+contract        = "0.8"
+install_script  = ""                                  # deploy.toml [build]/[install] drive it — no legacy install.sh
+start_priority  = 60                                  # after the timing core (50): it consumes what hf-timestd writes
+# The science half of the 2026-08-24 hf-timestd split.  It does NOT own a
+# data root: it reads and writes under hf-timestd's /var/lib/timestd, which
+# is a frozen contract of the split, so the two must be installed on the
+# same host.  Its deploy.toml carries the GRAPE→PSWS [[hs_uploader.pipeline]]
+# block that used to live in hf-timestd's — declared in exactly one repo, or
+# the manifest renderer emits the same pipeline twice.
+
 [client.mag-recorder]
 kind            = "client"
 description     = "RM3100 magnetometer recorder + PSWS uploader (non-radiod, §16 'other')"
