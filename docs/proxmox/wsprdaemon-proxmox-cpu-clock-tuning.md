@@ -912,7 +912,22 @@ done
 
 (Some IRQs are pinned to specific CPUs by their drivers and can't be moved — those will silently fail. That's expected.)
 
-To make this persistent across reboots, add it to `/etc/rc.local` or create a systemd unit. A simple approach with rc.local:
+**This hygiene now ships**: `scripts/proxmox/host-apply.sh` (VM mode)
+installs it as `sigmond-host-irq-affinity.service`, a boot-persistent
+oneshot targeting the housekeeping CPUs it derives for the fence, and it
+also sets `/proc/irq/default_smp_affinity` so IRQs registered later land
+there too. It was promoted from this section's hand-run loop after the
+vfio-msix vectors for the passed-through USB controllers were found firing
+on isolated vCPU pCPUs on a host that had everything else right
+(AI6VN-PM, 2026-08-26). The same apply step installs
+`sigmond-host-resctrl.service` — an L3 CAT partition reserving an
+exclusive cache slice for the guest radiod's pCPUs (no-op without
+`cat_l3`); see wsprdaemon's `wd-cpu-tuning.md` "What a tuned host still
+shares" for the measurement behind it, and why DRAM bandwidth still
+remains shared.
+
+On a host provisioned before those units existed, the old manual
+approach still works:
 
 ```bash
 # ON HOST

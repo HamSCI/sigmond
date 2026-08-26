@@ -174,7 +174,15 @@ qm set "$VMID" --onboot 1
 qm set "$VMID" --hookscript "local:snippets/cpu-pin-${VMID}.sh"
 qm set "$VMID" --affinity "$ISOLCPUS_RANGE"
 qm set "$VMID" --cores "$VM_CORES" --sockets 1
-qm set "$VMID" --args "-smp ${VM_VCPU_COUNT},sockets=1,cores=${VM_CORES},threads=${VM_THREADS},maxcpus=${VM_VCPU_COUNT} -cpu host,topoext=on"
+# -cpu flags beyond topoext (tuning doc Part 12, each one measured):
+#   host-cache-info=on — without it QEMU advertises a FICTIONAL cache topology
+#     (16 MB L3 claimed on an 8 MB host); FFTW plans codelets for the fake
+#     cache and the FFT thread pegs from constant DRAM evictions (12a).
+#   +kvm_pv_eoi,+kvm_pv_unhalt — Proxmox adds these from `cpu: host`, but a
+#     hand-rolled -cpu in args: silently REPLACES Proxmox's list, dropping
+#     them; fewer VM exits on interrupt EOI and spinlock waits (12b).
+#   -svm — no nested virt in an SDR guest; exposing it costs overhead (12d).
+qm set "$VMID" --args "-smp ${VM_VCPU_COUNT},sockets=1,cores=${VM_CORES},threads=${VM_THREADS},maxcpus=${VM_VCPU_COUNT} -cpu host,host-cache-info=on,topoext=on,+kvm_pv_eoi,+kvm_pv_unhalt,-svm"
 log "qm set complete"
 
 # ─── radiod VM fence + KSM hold ───────────────────────────────────────────────
@@ -217,6 +225,71 @@ FENCE
     systemctl disable --now ksmtuned >/dev/null 2>&1 || true
 else
     log "radiod-vm-fence SKIPPED: VM affinity ${ISOLCPUS_RANGE} leaves no spare CPU on a ${HOST_CPUS}-CPU host"
+fi
+
+# ─── host IRQ herding + L3 CAT partition ─────────────────────────────────────
+# Two more things isolcpus does NOT do (both observed on AI6VN-PM, 2026-08-26):
+#   1. Interrupts: the vfio-msix vectors for the passed-through USB controllers
+#      kept a wide mask and fired on isolated vCPU pCPUs — every RX888 URB
+#      completion stole time from a pinned vCPU thread.  Herd every movable
+#      host IRQ onto the housekeeping CPUs (same set the fence protects).
+#   2. Cache: the L3 is shared; decoder walls on the worker pCPUs evict
+#      radiod's FFT working set.  resctrl CLOS follows the physical cpu, so an
+#      exclusive L3 slice for radiod's pCPUs protects the guest's radiod with
+#      no guest-side support.
+# Both are boot-volatile, hence oneshot units.
+if [ -n "${FENCE_CPUS:-}" ]; then
+    read -r -a _v2p <<< "${VCPU_TO_PCPU}"
+    _radiod_pcpus=()
+    for _g in ${RADIOD_CPUS}; do _radiod_pcpus+=("${_v2p[$_g]:-$_g}"); done
+    RADIOD_PCPUS="$(printf '%s\n' "${_radiod_pcpus[@]}" | sort -n | paste -sd, -)"
+    _others=()
+    for (( _c=0; _c<HOST_CPUS; _c++ )); do
+        case ",${RADIOD_PCPUS}," in *",${_c},"*) ;; *) _others+=("$_c");; esac
+    done
+    OTHER_PCPUS="$(printf '%s\n' "${_others[@]}" | paste -sd, -)"
+
+    for _s in sigmond-host-irq-affinity.sh sigmond-host-resctrl.sh; do
+        install -m 755 "$(dirname "$0")/${_s}" "/usr/local/sbin/${_s}"
+    done
+
+    cat > /etc/systemd/system/sigmond-host-irq-affinity.service <<UNIT
+[Unit]
+Description=Pin host IRQs off VM ${VMID} isolated pCPUs
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sigmond-host-irq-affinity.sh ${FENCE_CPUS}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    cat > /etc/systemd/system/sigmond-host-resctrl.service <<UNIT
+[Unit]
+Description=L3 CAT partition for guest radiod pCPUs (VM ${VMID})
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sigmond-host-resctrl.sh ${RADIOD_PCPUS} ${OTHER_PCPUS}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    systemctl daemon-reload
+    systemctl enable --now sigmond-host-irq-affinity.service >/dev/null 2>&1 \
+        && log "host IRQs herded -> cpus ${FENCE_CPUS} (persistent)" \
+        || log "WARNING: sigmond-host-irq-affinity failed to start"
+    systemctl enable --now sigmond-host-resctrl.service >/dev/null 2>&1 \
+        && log "L3 CAT: radiod pCPUs ${RADIOD_PCPUS} get an exclusive slice (persistent; no-op without cat_l3)" \
+        || log "WARNING: sigmond-host-resctrl failed to start"
+else
+    log "host IRQ/L3 tuning SKIPPED: no housekeeping CPUs outside VM affinity"
 fi
 
 # Snapshot the working configuration alongside the originals.

@@ -244,8 +244,15 @@ print(layout_shell_vars(lay))
               WORKER_FREQ_KHZ "1400000"
 
     # ─── apply host config ────────────────────────────────────────────────────
-    info "pushing host-apply.sh + cpu-pin template to host…"
-    scp_to_host "$SCRIPT_DIR/host-apply.sh" "$SCRIPT_DIR/cpu-pin-VMID.sh.template"
+    info "pushing host-apply.sh + cpu-pin template + host tuning scripts to host…"
+    # host-apply.sh installs its companions from $(dirname $0), so everything it
+    # references must ride along.  radiod-vm-fence.sh was missing from this list
+    # — under `set -e` its install step killed /tmp/host-apply.sh in VM mode
+    # (the host-setup.sh phase-1 path runs from the repo dir and hid the gap).
+    scp_to_host "$SCRIPT_DIR/host-apply.sh" "$SCRIPT_DIR/cpu-pin-VMID.sh.template" \
+                "$SCRIPT_DIR/radiod-vm-fence.sh" \
+                "$SCRIPT_DIR/sigmond-host-irq-affinity.sh" \
+                "$SCRIPT_DIR/sigmond-host-resctrl.sh"
 
     info "running host-apply on host (this can take ~30s for initramfs)…"
     local apply_out
