@@ -7351,7 +7351,13 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     for unit_ref in sorted_units:
         core_cpus = placement.get(unit_ref.unit, set())
         label = f'radiod {unit_ref.instance or unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}'
-        if _write_affinity_drop_in(unit_ref.unit, core_cpus, label) == 'wrote':
+        # Re-pin the xhci IRQs on every radiod start: their IRQ numbers change
+        # when the RX888 re-enumerates, so the boot-time oneshot alone loses
+        # them (AI6VN, 2026-08-26).  radiod starting is exactly the moment the
+        # device is enumerated and about to be consumed.
+        if _write_affinity_drop_in(
+                unit_ref.unit, core_cpus, label,
+                exec_start_post='/usr/local/sbin/sigmond-rx888-irq-affinity') == 'wrote':
             _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
             wrote_any = True
 
@@ -7627,8 +7633,13 @@ def cmd_stop(args) -> int:
 # CLI-only helpers that need _run() / _ok() / _err() stay here.
 
 
-def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> str:
+def _write_affinity_drop_in(unit: str, cpus: set, label: str,
+                            exec_start_post: str = None) -> str:
     """Write /etc/systemd/system/<unit>.d/smd-cpu-affinity.conf.
+
+    exec_start_post is threaded through to render_drop_in(); the radiod
+    writer passes the rx888 IRQ re-pin script so the xhci IRQs follow
+    radiod across restarts and RX888 re-enumerations.
 
     Returns:
         'wrote' — file was created or its content changed.
@@ -7638,7 +7649,7 @@ def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> str:
     import tempfile
     drop_dir = Path(f'/etc/systemd/system/{unit}.d')
     drop_in  = drop_dir / _SMD_AFFINITY_DROP_IN
-    content  = _render_drop_in(cpus, label)
+    content  = _render_drop_in(cpus, label, exec_start_post=exec_start_post)
     if drop_in.exists():
         try:
             if drop_in.read_text() == content:
