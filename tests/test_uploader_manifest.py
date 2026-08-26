@@ -87,6 +87,29 @@ class SubstitutionTests(unittest.TestCase):
         self.assertEqual(missing, {"radiod_status"})
         self.assertEqual(used, {"call", "grid", "radiod_status"})
 
+    def test_unknown_token_is_treated_as_missing(self):
+        """A placeholder the token map never offers must be flagged.
+
+        Regression: the 2026-08-24 hamsci-physics split moved the GRAPE
+        pipeline declaration to a client that is not in psws.RECORDERS, so
+        resolve_tokens() never put station_id/instrument_id in the map at
+        all.  _subst() only flagged tokens that were present-but-None, so
+        the literal "{station_id}" was written into the manifest and the
+        daemon sftp'd to a user named "{station_id}" for two days.
+        """
+        used, missing = set(), set()
+        out = um._subst({"u": "{station_id}", "n": "psws:{instrument_id}"},
+                        {"call": "AC0G"}, used, missing)
+        self.assertEqual(out["u"], "{station_id}")
+        self.assertEqual(missing, {"station_id", "instrument_id"})
+
+    def test_subst_leaves_non_placeholder_braces_alone(self):
+        used, missing = set(), set()
+        out = um._subst({"a": "{}", "b": "{Not A Token}", "c": "{9x}"},
+                        {"call": "AC0G"}, used, missing)
+        self.assertEqual(out, {"a": "{}", "b": "{Not A Token}", "c": "{9x}"})
+        self.assertEqual(missing, set())
+
 
 def _coord():
     return Coordination(
@@ -138,6 +161,15 @@ name = "psws-grape-sftp:host:{station_id}"
              mock.patch.object(um.psws, "read_state",
                                return_value=_State(station="", instrument="")):
             pls = um.collect_pipelines(_Topo(["hf-timestd"]), _coord())
+        self.assertEqual(pls, [])
+
+    def test_skip_when_client_is_not_a_psws_recorder(self):
+        """Unknown-client => no identity tokens => skip, never pass through."""
+        deploy = self._write_deploy(self.GRAPE)
+        with mock.patch.object(um, "find_deploy_toml", return_value=deploy), \
+             mock.patch.object(um, "list_instances", return_value=[]), \
+             mock.patch.object(um.psws, "is_psws_recorder", return_value=False):
+            pls = um.collect_pipelines(_Topo(["hamsci-physics"]), _coord())
         self.assertEqual(pls, [])
 
     def test_substituted_when_identity_present(self):

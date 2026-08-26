@@ -46,6 +46,21 @@ RECORDERS = {
         "default_key": "/home/timestd/.ssh/id_rsa_psws",
         "key_type":   "ed25519",
     },
+    # The GRAPE science half of the 2026-08-24 hf-timestd split.  It owns the
+    # [[hs_uploader.pipeline]] declaration for grape-psws, so it -- not
+    # hf-timestd -- is the client resolve_tokens() must find an identity for.
+    # Its config uses the mag-recorder field names (`psws_station_id`), but
+    # the key stays timestd's: grape-daily runs as User=timestd and that is
+    # the key already registered with PSWS for S000170.
+    "hamsci-physics": {
+        "config":     Path("/etc/hamsci-physics/config.toml"),
+        "user":       "timestd",
+        "station":    ("station", "psws_station_id"),
+        "instrument": ("station", "instrument_id"),
+        "ssh_key":    ("uploader", "ssh_key_file"),
+        "default_key": "/home/timestd/.ssh/id_rsa_psws",
+        "key_type":   "ed25519",
+    },
     "mag-recorder": {
         "config":     Path("/etc/mag-recorder/mag-recorder-config.toml"),
         "user":       "magrec",

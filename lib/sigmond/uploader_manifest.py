@@ -38,6 +38,7 @@ than any client's ``deploy.toml``, and appended by :func:`generate` after
 from __future__ import annotations
 
 import logging
+import re
 import tomllib
 from pathlib import Path
 from typing import Optional
@@ -111,7 +112,7 @@ def _psws_station_for_host(coord: Coordination) -> Optional[str]:
     sid = getattr(coord.station, "psws_id", "") or ""
     if sid:
         return sid
-    for client in ("hf-timestd", "mag-recorder"):
+    for client in ("hamsci-physics", "hf-timestd", "mag-recorder"):
         try:
             st = psws.read_state(client)
         except Exception:
@@ -150,6 +151,12 @@ def resolve_tokens(client: str, coord: Coordination,
 # --------------------------------------------------------------------------
 
 
+# A placeholder is a lowercase identifier in braces: ``{station_id}``.  Any
+# other brace content in a declaration (``{}``, ``{Not A Token}``) is literal
+# data and must survive substitution untouched.
+_PLACEHOLDER_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
+
+
 def _subst(obj, tokens: dict, used: set, missing: set):
     if isinstance(obj, str):
         out = obj
@@ -161,6 +168,16 @@ def _subst(obj, tokens: dict, used: set, missing: set):
                     missing.add(tok)
                 else:
                     out = out.replace(ph, val)
+        # A token the map never OFFERED is just as unresolved as one it
+        # offered as None -- and more dangerous, because nothing upstream
+        # noticed it was needed.  (2026-08-24: the GRAPE pipeline moved to
+        # hamsci-physics, which is not a psws.RECORDERS client, so
+        # resolve_tokens() omitted station_id/instrument_id entirely; the
+        # literal "{station_id}" reached the manifest and the daemon sftp'd
+        # to a user by that name for two days.)  Treat both the same.
+        for tok in _PLACEHOLDER_RE.findall(out):
+            used.add(tok)
+            missing.add(tok)
         return out
     if isinstance(obj, list):
         return [_subst(x, tokens, used, missing) for x in obj]
