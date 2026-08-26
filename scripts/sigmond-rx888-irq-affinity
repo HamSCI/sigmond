@@ -13,16 +13,23 @@
 #
 # No-op when no radiod unit carries a CPUAffinity (non-radiod hosts).
 set -u
+# CPUAffinity values are SPACE-separated ("8 9") in both systemctl output and
+# the smd drop-ins, but /proc/irq/*/smp_affinity_list wants a comma list.
+# 'tr -d' used to DELETE the space, turning "8 9" into cpu "89" — an invalid
+# list the kernel rejects, so the fallback path silently pinned nothing
+# (observed on AI6VN when run from ExecStartPost, where the unit is still
+# 'activating' and only the fallback path fires).  Translate instead: "8 9"
+# becomes "8,9", and an already-valid "8-9" passes through untouched.
 cpus=""
 for u in $(systemctl list-units --type=service --state=running --no-legend "radiod@*" 2>/dev/null | awk '{print $1}'); do
-    cpus=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr -d ' ')
+    cpus=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr ' ' ',')
     [ -n "$cpus" ] && break
 done
 if [ -z "${cpus}" ]; then
     # Fall back to an enabled-but-not-yet-started radiod (boot ordering).
     for f in /etc/systemd/system/radiod@*.service.d/*.conf; do
         [ -f "$f" ] || continue
-        cpus=$(sed -n 's/^CPUAffinity=\(.\+\)/\1/p' "$f" | tail -1 | tr -d ' ')
+        cpus=$(sed -n 's/^CPUAffinity=\(.\+\)/\1/p' "$f" | tail -1 | tr ' ' ',')
         [ -n "$cpus" ] && break
     done
 fi
