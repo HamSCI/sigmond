@@ -7357,7 +7357,7 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         # device is enumerated and about to be consumed.
         if _write_affinity_drop_in(
                 unit_ref.unit, core_cpus, label,
-                exec_start_post='/usr/local/sbin/sigmond-rx888-irq-affinity') == 'wrote':
+                exec_start_post=RX888_IRQ_REPIN) == 'wrote':
             _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
             wrote_any = True
 
@@ -7631,6 +7631,13 @@ def cmd_stop(args) -> int:
 # ---------------------------------------------------------------------------
 # Pure functions and constants are in lib/sigmond/cpu.py (imported above).
 # CLI-only helpers that need _run() / _ok() / _err() stay here.
+
+
+# Single source of truth for the radiod IRQ re-pin hook: BOTH radiod
+# drop-in writers (_ensure_radiod_affinity_drop_ins and
+# cmd_diag_cpu_affinity --apply) must pass this, or each apply path
+# rewrites the file the other produced.
+RX888_IRQ_REPIN = '/usr/local/sbin/sigmond-rx888-irq-affinity'
 
 
 def _write_affinity_drop_in(unit: str, cpus: set, label: str,
@@ -7935,7 +7942,14 @@ def cmd_diag_cpu_affinity(args) -> int:
 
         for unit, cpus in radiod_plan.items():
             label = f'radiod instance → CPUs {_cpu_list_str(cpus)}'
-            res = _write_affinity_drop_in(unit, cpus, label)
+            # Same ExecStartPost as _ensure_radiod_affinity_drop_ins: the xhci
+            # IRQ numbers change when the RX888 re-enumerates, so the pin must
+            # re-run on every radiod start.  This is the diag --apply writer;
+            # the two paths must not disagree about drop-in content or each
+            # apply flips the file the other one wrote.
+            res = _write_affinity_drop_in(
+                unit, cpus, label,
+                exec_start_post=RX888_IRQ_REPIN)
             if res == 'wrote':
                 _ok(f'{unit}: {label}')
             elif res == 'noop':
