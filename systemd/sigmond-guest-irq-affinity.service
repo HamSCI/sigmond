@@ -1,0 +1,16 @@
+[Unit]
+Description=Herd non-xhci IRQs and unbound workqueues off radiod CPUs
+Documentation=file:/opt/git/sigmond/sigmond/scripts/sigmond-guest-irq-affinity
+# Companion to sigmond-rx888-irq-affinity: that unit pins the xhci IRQs
+# ONTO radiod's pair; this one moves everything else (and the unbound
+# workqueue pool) OFF it.  After radiod so the running unit's CPUAffinity
+# is readable; falls back to the smd drop-in when radiod hasn't started.
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sigmond-guest-irq-affinity
+
+[Install]
+WantedBy=multi-user.target

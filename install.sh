@@ -764,6 +764,14 @@ info "Installing sigmond-rx888-irq-affinity → /usr/local/sbin/"
 $SUDO ln -sf "$REPO_DIR/scripts/sigmond-rx888-irq-affinity" /usr/local/sbin/sigmond-rx888-irq-affinity
 ok "sigmond-rx888-irq-affinity symlink installed"
 
+# The companion sweep: everything the xhci pin deliberately leaves alone.
+# Movable non-xhci IRQs, the default mask new IRQs inherit, and the unbound
+# workqueue pool all default to EVERY cpu, radiod's included — herd them
+# onto the non-radiod set.  No-op on hosts without a managed radiod.
+info "Installing sigmond-guest-irq-affinity → /usr/local/sbin/"
+$SUDO ln -sf "$REPO_DIR/scripts/sigmond-guest-irq-affinity" /usr/local/sbin/sigmond-guest-irq-affinity
+ok "sigmond-guest-irq-affinity symlink installed"
+
 # qemu-guest-agent self-heal drop-in (VM guests only — the unit exists
 # only where the agent package is installed).  qemu-ga buffers a whole
 # `qm guest exec` output in memory; a large exec balloons it to GB and
@@ -812,6 +820,8 @@ $SUDO systemctl enable --now sigmond-gap-hourly.timer 2>/dev/null || true
 $SUDO systemctl enable sigmond-shm-precreate.service 2>/dev/null || true
 # xhci IRQ pin at boot (no-op without a CPU-affinity-managed radiod).
 $SUDO systemctl enable --now sigmond-rx888-irq-affinity.service 2>/dev/null || true
+# Herd the remaining IRQs + unbound workqueues off radiod's cpus (same condition).
+$SUDO systemctl enable --now sigmond-guest-irq-affinity.service 2>/dev/null || true
 # Timing-chain reconciler (docs/timing-chain-architecture.md, step 3): the single
 # owner of GPSDO/gpsd/chrony/hf-timestd recovery, replacing the hf-timestd watchdogs.
 # Service is ConditionFileIsExecutable=/usr/sbin/gpsd, so harmless where no local GPS.

@@ -1,0 +1,82 @@
+#!/bin/bash
+# Herd guest interrupt handling and unbound kernel work off radiod's CPUs.
+#
+# sigmond-rx888-irq-affinity co-locates the xhci (RX888) IRQs WITH radiod's
+# reserved pair — the data's consumer — and that placement is deliberate
+# (see its header and docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10.md).  But
+# every OTHER movable interrupt, the default mask that newly registered
+# IRQs inherit, and the kernel's unbound workqueue pool (writeback, crypto,
+# fs housekeeping) still default to ALL cpus, radiod's included.  Each
+# firing there steals cycles from the sample pipeline, and on a host with
+# an L3 partition the handler walks radiod's cache while it runs.
+#
+# This sweep sends every movable non-xhci IRQ (and default_smp_affinity)
+# to the two lowest non-radiod CPUs, and confines the unbound workqueue
+# pool to the full non-radiod set — workqueue work is real bulk work and
+# would choke on two CPUs, it just has to stay off radiod's.
+#
+# xhci is EXCLUDED here: touching it would fight sigmond-rx888-irq-affinity
+# across boot ordering.  Kernel-managed per-queue IRQs (virtio-net/blk)
+# refuse the write and are left alone — the kernel spreads those
+# deliberately.  Validated on AI6VN (Proxmox guest, 2026-08-26).
+#
+# No-op when no radiod unit carries a CPUAffinity (non-radiod hosts).
+# Not reboot-persistent by itself: run from sigmond-guest-irq-affinity.service.
+set -u
+
+# ── which CPUs are radiod's? (same discovery as sigmond-rx888-irq-affinity) ──
+cpus=""
+for u in $(systemctl list-units --type=service --state=running --no-legend "radiod@*" 2>/dev/null | awk '{print $1}'); do
+    cpus=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr ' ' ',')
+    [ -n "$cpus" ] && break
+done
+if [ -z "${cpus}" ]; then
+    for f in /etc/systemd/system/radiod@*.service.d/*.conf; do
+        [ -f "$f" ] || continue
+        cpus=$(sed -n 's/^CPUAffinity=\(.\+\)/\1/p' "$f" | tail -1 | tr ' ' ',')
+        [ -n "$cpus" ] && break
+    done
+fi
+[ -z "${cpus}" ] && exit 0
+
+# ── expand "8-9" / "8,9" into a membership map, build the complement ─────────
+declare -A is_radiod=()
+for part in $(echo "$cpus" | tr ',' ' '); do
+    lo=${part%%-*}; hi=${part##*-}
+    for (( c=lo; c<=hi; c++ )); do is_radiod[$c]=1; done
+done
+ncpus=$(nproc)
+others=() ; mask=0 ; toobig=0
+for (( c=0; c<ncpus; c++ )); do
+    [ -n "${is_radiod[$c]:-}" ] && continue
+    others+=("$c")
+    [ "$c" -ge 63 ] && toobig=1 || mask=$(( mask | (1 << c) ))
+done
+[ ${#others[@]} -ge 2 ] || exit 0     # nothing sensible to herd onto
+
+IRQ_CPUS="${others[0]},${others[1]}"
+IRQ_MASK=$(printf '%x' $(( (1 << others[0]) | (1 << others[1]) )))
+
+echo "$IRQ_MASK" > /proc/irq/default_smp_affinity 2>/dev/null \
+    && echo "sigmond-guest-irq: default_smp_affinity -> $IRQ_MASK (cpus $IRQ_CPUS)"
+
+xhci_irqs=" $(grep -i xhci /proc/interrupts | cut -d: -f1 | tr -d ' ' | tr '\n' ' ')"
+moved=0 kept=0 skipped=0
+for d in /proc/irq/[0-9]*; do
+    [ -f "$d/smp_affinity_list" ] || continue
+    irq=$(basename "$d")
+    case "$xhci_irqs" in *" $irq "*) skipped=$((skipped+1)); continue;; esac
+    if echo "$IRQ_CPUS" > "$d/smp_affinity_list" 2>/dev/null; then
+        moved=$((moved+1))
+    else
+        kept=$((kept+1))
+    fi
+done
+echo "sigmond-guest-irq: $moved IRQs -> cpus $IRQ_CPUS, $kept kernel-managed/immovable left alone, $skipped xhci left to sigmond-rx888-irq-affinity"
+
+if [ "$toobig" = "0" ] && [ -w /sys/devices/virtual/workqueue/cpumask ]; then
+    wq_hex=$(printf '%x' "$mask")
+    echo "$wq_hex" > /sys/devices/virtual/workqueue/cpumask 2>/dev/null \
+        && echo "sigmond-guest-irq: unbound workqueue cpumask -> $wq_hex (all non-radiod cpus)"
+fi
+exit 0
