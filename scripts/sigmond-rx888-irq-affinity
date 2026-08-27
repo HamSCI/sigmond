@@ -20,6 +20,25 @@ set -u
 # (observed on AI6VN when run from ExecStartPost, where the unit is still
 # 'activating' and only the fallback path fires).  Translate instead: "8 9"
 # becomes "8,9", and an already-valid "8-9" passes through untouched.
+#
+# Per-station override: when /etc/sigmond/rx888-irq-cpus exists and holds a
+# cpu list (e.g. "0-1"), pin the xhci IRQs THERE instead of co-locating with
+# radiod.  The bare-metal KFS-NW layout keeps ALL interrupts on the OS pair
+# and radiod's cores exclusively for fft/proc_rx888; with the guest sweep,
+# freq pinning, fence and L3 CAT now in place, a station may prefer that
+# model over the T6-era co-location.  gap-hourly.tsv is the arbiter — if
+# block slips return, delete the file and restart radiod to revert.
+if [ -s /etc/sigmond/rx888-irq-cpus ]; then
+    cpus=$(tr -d ' \n' < /etc/sigmond/rx888-irq-cpus)
+    pinned=0
+    for irq in $(grep -i xhci_hcd /proc/interrupts | cut -d: -f1 | tr -d ' '); do
+        if echo "$cpus" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null; then
+            pinned=$((pinned+1))
+        fi
+    done
+    echo "sigmond-rx888-irq-affinity: pinned $pinned xhci IRQ(s) to CPUs $cpus (override: /etc/sigmond/rx888-irq-cpus)"
+    exit 0
+fi
 cpus=""
 for u in $(systemctl list-units --type=service --state=running --no-legend "radiod@*" 2>/dev/null | awk '{print $1}'); do
     cpus=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr ' ' ',')
