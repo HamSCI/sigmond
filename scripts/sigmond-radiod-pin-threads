@@ -1,0 +1,58 @@
+#!/bin/bash
+# Pin radiod's hot threads to FIXED cpus inside its reserved pair.
+#
+# The CPU-affinity subsystem confines radiod to an HT sibling pair, but the
+# guest scheduler still bounces the fft and proc_rx888 threads BETWEEN the
+# two siblings.  Correctness doesn't care; observability does — a per-core
+# strip chart (btop, top -H with the P column) reads as two flapping lines
+# instead of one steady core per thread, and cache-warmth is marginally
+# better with each thread parked.  Convention (matches wsprdaemon's
+# radiod-pin-threads.sh on bare metal): fft → the LOWEST cpu of the set,
+# every other thread → the remaining cpu(s).
+#
+# radiod spawns fft a moment after the unit starts, so when run from
+# ExecStartPost this waits (bounded) for the thread to appear.  No-op when
+# radiod's affinity has fewer than 2 cpus, or on non-radiod hosts.
+# Always exits 0: thread pinning is polish, never worth failing a start.
+set -u
+
+for u in $(systemctl list-units --type=service --no-legend "radiod@*" 2>/dev/null | awk '{print $1}'); do
+    pid=$(systemctl show "$u" -p MainPID --value 2>/dev/null)
+    [ -n "$pid" ] && [ "$pid" != 0 ] || continue
+    cpus=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr ' ' ',')
+    [ -n "$cpus" ] || continue
+
+    # Expand "12-13" / "12,13" and split into lowest (fft) vs the rest.
+    all=$(echo "$cpus" | tr ',' ' ' | while read -r part rest; do
+        for p in $part $rest; do
+            lo=${p%%-*}; hi=${p##*-}
+            for (( c=lo; c<=hi; c++ )); do echo "$c"; done
+        done
+    done | sort -n | uniq)
+    set -- $all
+    [ $# -ge 2 ] || continue
+    fft_cpu=$1; shift
+    other_cpus=$(echo "$@" | tr ' ' ',')
+
+    # fft appears shortly after start; wait up to 20 s for it.
+    fft_tids=""
+    for _ in $(seq 1 20); do
+        fft_tids=$(for t in /proc/$pid/task/*; do
+            [ "$(cat "$t/comm" 2>/dev/null)" = fft ] && basename "$t"
+        done)
+        [ -n "$fft_tids" ] && break
+        sleep 1
+    done
+
+    pinned_fft=0 pinned_other=0
+    for t in /proc/$pid/task/*; do
+        tid=$(basename "$t")
+        if echo "$fft_tids" | grep -qx "$tid"; then
+            taskset -pc "$fft_cpu" "$tid" >/dev/null 2>&1 && pinned_fft=$((pinned_fft+1))
+        else
+            taskset -pc "$other_cpus" "$tid" >/dev/null 2>&1 && pinned_other=$((pinned_other+1))
+        fi
+    done
+    echo "sigmond-radiod-pin-threads: $u fft($pinned_fft thread) -> cpu $fft_cpu, $pinned_other others -> cpu $other_cpus"
+done
+exit 0

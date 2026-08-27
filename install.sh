@@ -792,6 +792,12 @@ info "Installing sigmond-guest-irq-affinity → /usr/local/sbin/"
 $SUDO ln -sf "$REPO_DIR/scripts/sigmond-guest-irq-affinity" /usr/local/sbin/sigmond-guest-irq-affinity
 ok "sigmond-guest-irq-affinity symlink installed"
 
+# Park fft / proc_rx888 on fixed siblings inside radiod's pair (runs from the
+# smd drop-in's ExecStartPost on every radiod start; no unit of its own).
+info "Installing sigmond-radiod-pin-threads → /usr/local/sbin/"
+$SUDO ln -sf "$REPO_DIR/scripts/sigmond-radiod-pin-threads" /usr/local/sbin/sigmond-radiod-pin-threads
+ok "sigmond-radiod-pin-threads symlink installed"
+
 # qemu-guest-agent self-heal drop-in (VM guests only — the unit exists
 # only where the agent package is installed).  qemu-ga buffers a whole
 # `qm guest exec` output in memory; a large exec balloons it to GB and

@@ -7357,7 +7357,7 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         # device is enumerated and about to be consumed.
         if _write_affinity_drop_in(
                 unit_ref.unit, core_cpus, label,
-                exec_start_post=RX888_IRQ_REPIN) == 'wrote':
+                exec_start_post=[RX888_IRQ_REPIN, RADIOD_THREAD_PIN]) == 'wrote':
             _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
             wrote_any = True
 
@@ -7638,6 +7638,9 @@ def cmd_stop(args) -> int:
 # cmd_diag_cpu_affinity --apply) must pass this, or each apply path
 # rewrites the file the other produced.
 RX888_IRQ_REPIN = '/usr/local/sbin/sigmond-rx888-irq-affinity'
+# Runs after the IRQ re-pin: park fft on the pair's lowest cpu and every
+# other radiod thread on the rest, so per-core strip charts read steady.
+RADIOD_THREAD_PIN = '/usr/local/sbin/sigmond-radiod-pin-threads'
 
 
 def _write_affinity_drop_in(unit: str, cpus: set, label: str,
@@ -7949,7 +7952,7 @@ def cmd_diag_cpu_affinity(args) -> int:
             # apply flips the file the other one wrote.
             res = _write_affinity_drop_in(
                 unit, cpus, label,
-                exec_start_post=RX888_IRQ_REPIN)
+                exec_start_post=[RX888_IRQ_REPIN, RADIOD_THREAD_PIN])
             if res == 'wrote':
                 _ok(f'{unit}: {label}')
             elif res == 'noop':
