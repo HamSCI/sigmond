@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,8 @@ def test_findings_exit_one_and_print_rule_and_path(tmp_path):
 def test_script_runs_without_sigmond_on_syspath(tmp_path):
     """CI checks out sigmond to .sigmond-tools and runs the script by path;
     it must bootstrap its own lib/ rather than needing PYTHONPATH."""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
     r = subprocess.run([sys.executable, str(SCRIPT), str(_conformant(tmp_path))],
-                       capture_output=True, text=True, cwd="/tmp")
+                       capture_output=True, text=True, cwd="/tmp", env=env)
     assert r.returncode == 0
