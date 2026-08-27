@@ -432,15 +432,24 @@ for _tool in sqlite3 lsof bc; do
 done
 unset _tool
 
-# ─── tmux mouse support for the operator ─────────────────────────────────────
+# ─── operator terminal conveniences (tmux mouse, top P column) ───────────────
 # Support sessions run inside tmux; mouse mode (scroll, pane select, resize)
-# is the fleet convention.  Ensure the invoking user's ~/.tmux.conf turns it
-# on — append rather than overwrite, and leave any existing mouse setting
-# (on or off) alone: an operator who deliberately disabled it stays in
-# charge of their own config.
-_invoker_home="$(getent passwd "$INVOKER" | cut -d: -f6)"
-if [[ -n "$_invoker_home" && -d "$_invoker_home" ]]; then
-    _tmux_conf="$_invoker_home/.tmux.conf"
+# is the fleet convention.  And the fleet debugging habit is `top -H` to watch
+# radiod's fft / proc_rx888 threads — seed a toprc that shows the P column
+# (Last Used Cpu) right of %CPU, so a thread on the wrong core is visible at
+# a glance (the whole CPU-affinity subsystem exists to put them on the right
+# ones).  Both are seeded for the INVOKING user *and* the sigmond operator
+# account: the installer often runs as root (qm guest exec, firstboot), and
+# keying off the invoker alone left the operator without either (AI6VN,
+# 2026-08-26).  Append/seed-if-absent only — an operator who changed their
+# own config stays in charge of it.
+_conv_users="$INVOKER"
+id sigmond >/dev/null 2>&1 && [[ "$INVOKER" != sigmond ]] && _conv_users="$_conv_users sigmond"
+for _conv_user in $_conv_users; do
+    _conv_home="$(getent passwd "$_conv_user" | cut -d: -f6)"
+    [[ -n "$_conv_home" && -d "$_conv_home" ]] || continue
+
+    _tmux_conf="$_conv_home/.tmux.conf"
     if ! grep -Eq '^[[:space:]]*set(-option)?[[:space:]]+(-g[[:space:]]+)?mouse[[:space:]]' \
             "$_tmux_conf" 2>/dev/null; then
         {
@@ -449,14 +458,25 @@ if [[ -n "$_invoker_home" && -d "$_invoker_home" ]]; then
         } >> "$_tmux_conf"
         # When running as root (sudo ./install.sh) a freshly created file
         # must still belong to the operator.
-        [[ $EUID -eq 0 ]] && chown "$INVOKER": "$_tmux_conf" || true
+        [[ $EUID -eq 0 ]] && chown "$_conv_user": "$_tmux_conf" || true
         ok "tmux: enabled mouse support in $_tmux_conf"
     else
         ok "tmux: mouse setting already present in $_tmux_conf"
     fi
-    unset _tmux_conf
-fi
-unset _invoker_home
+
+    # toprc: seed only when the user has none — top rewrites this file on 'W'
+    # and a hand-tuned layout must never be clobbered.  etc/toprc was written
+    # by procps-ng 4.x top itself on Debian 13 (fields screen → W), the only
+    # portable way to produce one — the fieldscur encoding is version-specific.
+    _toprc="$_conv_home/.config/procps/toprc"
+    if [[ ! -f "$_toprc" && -f "$REPO_DIR/etc/toprc" ]]; then
+        install -D -m 0644 "$REPO_DIR/etc/toprc" "$_toprc"
+        [[ $EUID -eq 0 ]] && chown -R "$_conv_user": "$_conv_home/.config/procps" || true
+        ok "top: seeded $_toprc (P column right of %CPU)"
+    fi
+    unset _tmux_conf _toprc
+done
+unset _conv_user _conv_users _conv_home
 
 # ─── avahi-browse (mDNS discovery) ───────────────────────────────────────────
 # sigmond's discovery/mdns.py and ka9q-python's discover_radiod_services
