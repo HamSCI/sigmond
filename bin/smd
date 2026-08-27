@@ -8015,6 +8015,12 @@ def cmd_diag_cpu_affinity(args) -> int:
         for unit, cpus in radiod_plan.items():
             if _apply_cpu_affinity_runtime(unit, cpus):
                 _ok(f'{unit}: applied')
+                # Runtime-apply flattens every radiod thread back to the full
+                # pair mask, silently un-parking fft/proc_rx888 (observed on
+                # AC0G-B4, 2026-08-27: parking vanished hours after a diag
+                # --apply with no radiod restart).  Re-run the parker — the
+                # ExecStartPost only covers restarts, not this path.
+                _run(['sudo', '-n', RADIOD_THREAD_PIN])
             else:
                 _info(f'{unit}: not running or set-property unsupported')
 
