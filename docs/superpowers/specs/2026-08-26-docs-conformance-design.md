@@ -71,8 +71,13 @@ between them.
 `igmp-querier`, `sigmond-rac`) and the appliance/image repo alike. It is the
 one section reaching beyond contract-conformant clients, because a docs
 surface is a property of the repo, not of the running sigmond↔client seam.
-Membership of the index *is* the binding test, which keeps one list
-authoritative instead of two.
+The binding test is `etc/catalog.toml`: an entry with
+`lifecycle = "supported"` (§2a.1) is bound, and a `REQUIREMENTS-INDEX.md` row
+is one of the things it thereby owes. The catalog is the right spine because
+it is already sigmond's answer to "what clients could be run", it is edited
+whenever a client joins or leaves, and it is what every enforcement point
+already reads. The index is a rendered view of that truth, not a second
+source of it.
 
 A repo whose only doc page is `REQUIREMENTS.md` still owes an `INDEX.md`
 (20.1). It will be a one-row table, and §20 says so explicitly: the stub is
@@ -104,6 +109,64 @@ client re-declares 0.9 on account of §20, and sigmond's version-skew warning
 ignores it. Without that carve-out a docs-only section forces a `deploy.toml`
 edit and a catalog bump on every client in the fleet for no runtime change.
 
+## 2a. Lifecycle — binding a fleet that moves
+
+The fleet is not a fixed roster. Clients are stood up for an event and torn
+down after; new ones are defined continuously; configurations are rewritten
+ad hoc for a campaign. §20 has to bind without freezing any of that.
+
+Sigmond already models this in three layers, and §20 binds to exactly one:
+
+| Layer | Source of truth | Question | §20 |
+|---|---|---|---|
+| **Existence** | `etc/catalog.toml` | what clients *could* be run | **binds here** |
+| **Enablement** | `topology.toml` `[component.<n>].enabled` | activated on this host? | blind |
+| **Dormancy** | `dormant_reason()`, `hardware_gated` | enabled but unable to run? | blind |
+
+Binding at the existence layer is what makes the rest safe. A client
+deactivated for eight months between eclipses still has a repo and still owes
+honest docs, so its obligation does not lapse. Conversely, activating a
+client, deactivating it, or rewriting its config for a special event moves
+only layers 2 and 3 and can never trip a docs check. **No enforcement point
+may consult enablement or dormancy** — a check that fails because a client is
+switched off is a check that punishes ordinary operations.
+
+One corollary worth stating in §20 itself: a special-event config change will
+stale a page's `Verified against:` header, and that is correctly a
+`docs-freshness.py` *warning*, never a §20 failure. §20 must not become
+friction on exactly the ad-hoc work it is meant to stay out of the way of.
+
+### 2a.1 A lifecycle field in the catalog
+
+"New clients defined continuously" requires that a repo be able to exist
+before it is ready to be bound. `CatalogEntry` has no lifecycle field today
+(`name`, `kind`, `description`, `repo`, `uses`, `requires`, `contract`,
+`install_script`, `topology_alias`, `start_priority`, `hardware_gated`,
+`pin`), so `lifecycle` is free to add:
+
+| Value | Meaning | §20 |
+|---|---|---|
+| `supported` (default) | a real component of the suite | **MUSTs apply** |
+| `experimental` | defined, being brought up, docs not yet owed | exempt; checks **warn** |
+| `retired` | no longer part of the suite; repo and docs remain readable | exempt; row stays |
+
+Defaulting to `supported` keeps the failure mode safe: an entry added with no
+thought about lifecycle is bound, so silence cannot buy an exemption.
+Promotion from `experimental` to `supported` is the moment the docs debt comes
+due — a deliberate, greppable act rather than a thing nobody ever notices.
+
+`retired` is what makes removal graceful. A component deleted from the catalog
+outright would leave an orphaned `REQUIREMENTS-INDEX.md` row, and B-lite would
+fail on it forever; `retired` keeps the row and its history readable while
+dropping the MUSTs. B-lite therefore checks **both directions** — every bound
+catalog entry has a row, and every row maps to a catalog entry that is not
+absent — because an index that lists components the suite no longer has is the
+same class of lie as a component the index never listed.
+
+`REQUIREMENTS-INDEX.md` gains a **Lifecycle** column, distinct from the
+existing **Maturity** column: maturity describes how complete the docs are,
+lifecycle describes whether the suite still claims the component.
+
 ## 3. One implementation, four call sites
 
 `lib/sigmond/docs_conformance.py` holds the rules. Everything else is a thin
@@ -115,6 +178,11 @@ caller, so the CI checker and the fleet checker cannot drift apart.
 | **B-lite** `tests/test_docs_requirements_index.py` | sigmond CI | catalog entry with a `contract` value and no index row | repos absent from the catalog |
 | **B-full** workflow-presence check via the GitHub API | sigmond CI | 20.3 — a missing `docs-check.yml`, the one thing A structurally cannot see | anything while the API is unreachable |
 | **C** `smd doctor --docs` | live host | 20.1/20.2/20.3 across `/opt/git/sigmond` checkouts, no network | components not installed on that host |
+
+All four filter the catalog to `lifecycle = "supported"` before doing anything
+(§2a.1), and none consults `topology.toml` or dormancy. C is blind to a
+deactivated client for free — it walks checkouts, so a client that is not
+installed here is simply not walked, never reported missing.
 
 Each catches at least one failure the others cannot. B-lite is ~20 lines and
 would have caught `hamsci-physics` on the day it was extracted.
@@ -192,6 +260,12 @@ as the existing ten, in ka9q-python, hamsci-physics and the seven.
 `sigmond-appliance`; the missing `Verified against:` header on
 `hf-timestd/docs/INDEX.md`.
 
+**Catalog and index changes (sigmond)** — add the `lifecycle` field to
+`CatalogEntry` and to `etc/catalog.toml`'s documented field list, defaulting to
+`supported` so existing entries need no edit; add the **Lifecycle** column to
+`REQUIREMENTS-INDEX.md`. Neither changes behavior for any component today; both
+are what let the fleet move afterwards.
+
 **Content note** — `hamsci-physics/docs/DRF_UPLOAD_SYSTEM.md` is a 5-line stub.
 Either fill it or make it an explicit pointer file per `docs-conventions.md` §2.
 
@@ -207,6 +281,15 @@ permanent checkout.
   INDEX without header, missing REQUIREMENTS, missing workflow, `archive/`
   and `superpowers/` exempt, and a fully conformant repo.
 - B-lite and B-full as described, B-full network-skipping.
+- Lifecycle tests, since this is where a wrong default does quiet damage: an
+  entry with no `lifecycle` is bound (default `supported`); `experimental`
+  warns and never fails; `retired` is exempt and keeps its index row; B-lite
+  fails an index row whose catalog entry has vanished entirely, and does *not*
+  fail one whose entry is `retired`.
+- A regression test that no enforcement point reads `topology.toml` or
+  dormancy: a bound component that is disabled on the host, or dormant behind
+  absent hardware, still passes every docs check. This is the property that
+  keeps activate/deactivate cheap, so it gets a test rather than a comment.
 - The step-2 gate: checker green across all 12 checkouts before A merges.
 - TDD throughout, per the repo workflow.
 
