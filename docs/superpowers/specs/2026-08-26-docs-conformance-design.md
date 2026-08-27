@@ -15,14 +15,23 @@ catch different failures.
 
 ## 1. Measured starting state
 
-Taken 2026-08-26 across the 12 checkouts in `/home/mjh/hamsci/repos`.
+Taken 2026-08-26/27 across all 19 bound components — the 12 checkouts in
+`/home/mjh/hamsci/repos` plus the 7 surveyed through the GitHub API. All are
+public and the maintainer holds ADMIN on each, so no repo is access-blocked.
 
-| Repo | `docs-check.yml` | `docs/INDEX.md` | `docs/REQUIREMENTS.md` | index row |
+| Repo(s) | `docs-check.yml` | `docs/INDEX.md` | `docs/REQUIREMENTS.md` | index row |
 |---|---|---|---|---|
 | sigmond, hf-timestd, hamsci-dsp, hs-uploader, gpsdo-monitor, mag-recorder, meteor-scatter, psk-recorder, wspr-recorder | ✅ | ✅ | ✅ | ✅ |
-| sigmond-appliance | ✅ | ✅ | ❌ | ❌ (not a bound component today — see §7) |
-| **ka9q-python** | ❌ | ❌ | ✅ | ✅ |
-| **hamsci-physics** | ❌ | ❌ | ❌ | ❌ |
+| sigmond-appliance | ✅ | ✅ | ❌ | ❌ |
+| ka9q-python | ❌ | ❌ | ✅ | ✅ |
+| hamsci-physics | ❌ | ❌ | ❌ | ❌ |
+| superdarn-sounder, codar-sounder, hfdl-recorder, hf-tec, callhash, igmp-querier, sigmond-rac | ❌ (0/7) | ❌ (0/7) | ✅ (7/7) | ✅ |
+
+The bottom row is the shape of the original mistake, seen whole: the 2026-08-23
+program wrote a `REQUIREMENTS.md` into all seven — which is what earned them
+their index rows — but gave none of them an `INDEX.md` or the CI workflow.
+Nothing declared those two artifacts as obligations, so their absence was
+invisible from the index that lists the repos as documented.
 
 `Verified against:` header census — **54 of 204 live pages carry one**
 (archive/ and superpowers/ excluded, matching the checkers):
@@ -56,11 +65,20 @@ policy; §20 references it, the same move the contract already makes with
 between them.
 
 **Scope note (20.0).** §20 binds every component listed in
-`REQUIREMENTS-INDEX.md` — clients, libraries (`ka9q-python`, `hamsci-dsp`,
-`hs-uploader`, `callhash`) and infra (`gpsdo-monitor`, `igmp-querier`,
-`sigmond-rac`) alike. It is the one section reaching beyond contract-conformant
-clients, because a docs surface is a property of the repo, not of the running
-sigmond↔client seam. Vendored upstreams (`ka9q-radio`, `ka9q-web`, `onion`,
+`REQUIREMENTS-INDEX.md` — 19 after this pass adds `hamsci-physics` and
+`sigmond-appliance` to the 17 already there. Clients, libraries (`ka9q-python`,
+`hamsci-dsp`, `hs-uploader`, `callhash`), infra (`gpsdo-monitor`,
+`igmp-querier`, `sigmond-rac`) and the appliance/image repo alike. It is the
+one section reaching beyond contract-conformant clients, because a docs
+surface is a property of the repo, not of the running sigmond↔client seam.
+Membership of the index *is* the binding test, which keeps one list
+authoritative instead of two.
+
+A repo whose only doc page is `REQUIREMENTS.md` still owes an `INDEX.md`
+(20.1). It will be a one-row table, and §20 says so explicitly: the stub is
+correct, not an oversight awaiting cleanup. An exemption for repos judged "too
+small to bother" is the exact mechanism that produced the gap this section
+closes. Vendored upstreams (`ka9q-radio`, `ka9q-web`, `onion`,
 `ft8_lib`) stay out of scope, matching the existing note in
 `REQUIREMENTS-INDEX.md`.
 
@@ -124,33 +142,64 @@ than a gate.
 
 ## 4. Ordering — the one real hazard
 
-`docs-check.yml` is consumed by ten repos on `@main`. The instant a failing
-step merges into sigmond, it runs in all of them. So the work is ordered
-green-first:
+`docs-check.yml` is consumed on `@main`, by ten repos today and nineteen once
+this pass lands. The instant a failing step merges into sigmond it runs in all
+of them, with no staging and no per-repo pin to hide behind. So the work is
+ordered green-first:
 
-1. Fix `ka9q-python` (INDEX.md + workflow) and `hamsci-physics` (INDEX.md,
-   REQUIREMENTS.md, index row, workflow); add the missing header to
-   `hf-timestd/docs/INDEX.md`.
-2. Run the new checker across all 12 checkouts and confirm it is green.
-3. Only then wire step A into the shared workflow.
+1. Do all of §5's repo work: 2 `REQUIREMENTS.md`, 9 `INDEX.md`, 9 workflow
+   files, 2 index rows, 1 header fix.
+2. Run the new checker across all 19 components and confirm it is green.
+   Adding the workflow to a repo in step 1 makes it a consumer immediately —
+   but of the *current* workflow, which cannot fail on §20, so step 1 is safe
+   to land incrementally.
+3. Only then wire step A into the shared workflow. This is the irreversible
+   moment; everything before it is additive.
 4. Land B-lite, B-full and C, which are sigmond-local and block nobody.
 
-Landing A before step 2 turns ten repos red simultaneously.
+Landing A before step 2 reds nineteen repos at once.
 
 ## 5. Repo work
 
-**ka9q-python** — `docs/INDEX.md` (12 doc pages plus README to map, `docs/audit`
-and `docs/superpowers` present; the latter is checker-exempt);
-`.github/workflows/docs-check.yml`. `REQUIREMENTS.md` and its index row already
-exist.
+19 bound components; 10 need changes. Ordered by effort, not by repo.
 
-**hamsci-physics** — `docs/INDEX.md` (4 pages plus README);
-`docs/REQUIREMENTS.md` from the template, prefix `PHY`, kind `client`,
-maturity `Active` (~370 lines, in line with its peers, derived from
-`deploy.toml` plus `inventory --json` per the index's §8 convention); a
-`REQUIREMENTS-INDEX.md` row; `.github/workflows/docs-check.yml`. Note
-`docs/DRF_UPLOAD_SYSTEM.md` is a 5-line stub — either fill it or make it an
-explicit pointer file per `docs-conventions.md` §2.
+**New `docs/REQUIREMENTS.md` (2)** — the bulk of the effort, ~370 lines each in
+line with peers, from `REQUIREMENTS-TEMPLATE.md`, §8 derived from `deploy.toml`
+plus `inventory --json` per the index convention:
+
+- `hamsci-physics` — prefix `PHY`, kind `client`, maturity `Active`.
+- `sigmond-appliance` — prefix `APP`, kind and maturity to be set when the doc
+  is written; it is an appliance/image repo, not a client, and the template's
+  §8 I/O sections will need adapting rather than deriving.
+
+**New `docs/INDEX.md` (9)** — ka9q-python (12 pages plus README, the only
+substantial mapping job), hamsci-physics (4 pages plus README), and the seven
+API-surveyed repos. Note the seven are small: superdarn-sounder 3 pages,
+hf-tec 3, codar-sounder 2, hfdl-recorder 2, and callhash, igmp-querier and
+sigmond-rac **1 page each — `REQUIREMENTS.md` itself**.
+
+A single-page repo's INDEX is a one-row table pointing at its only sibling.
+Write it anyway, and have §20 state explicitly that this is a stub *by design*:
+the alternative is an exemption resting on someone's judgement about which
+repos are "too small to bother", which is precisely the mechanism that let
+these repos slip in the first place. A future tidy-up must not be able to read
+the stub as an oversight.
+
+**New `.github/workflows/docs-check.yml` (9)** — the same 5-line reusable call
+as the existing ten, in ka9q-python, hamsci-physics and the seven.
+
+**Edits (3)** — `REQUIREMENTS-INDEX.md` rows for `hamsci-physics` and
+`sigmond-appliance`; the missing `Verified against:` header on
+`hf-timestd/docs/INDEX.md`.
+
+**Content note** — `hamsci-physics/docs/DRF_UPLOAD_SYSTEM.md` is a 5-line stub.
+Either fill it or make it an explicit pointer file per `docs-conventions.md` §2.
+
+**Working location** — the seven surveyed repos have no checkout in `repos/`.
+Clone them to the session scratchpad, edit, push. `CLAUDE.md` warns against
+re-rooting the graphify extraction on a changed `repos/`, and these are
+one-touch doc edits rather than ongoing development, so they do not earn a
+permanent checkout.
 
 ## 6. Testing
 
@@ -163,22 +212,20 @@ explicit pointer file per `docs-conventions.md` §2.
 
 ## 7. Open items carried into implementation
 
-- **Five-plus bound components have no local checkout.** `superdarn-sounder`,
-  `codar-sounder`, `hfdl-recorder`, `hf-tec`, `callhash`, `igmp-querier` and
-  `sigmond-rac` hold `REQUIREMENTS-INDEX.md` rows but are not in `repos/`. §20
-  binds them and B-full will report on them as soon as it runs. Expect that
-  wave to surface further gaps; it is out of scope for this pass, which fixes
-  what is checked out here.
-- **`sigmond-appliance` is unbound.** It has `docs-check.yml` and
-  `docs/INDEX.md` but no `REQUIREMENTS.md` and no index row, so §20 does not
-  reach it. Decide during implementation: give it a row and a requirements
-  doc, or have §20 state why appliance/image repos are exempt. Silence is the
-  one option that recreates the bug this spec exists to fix.
-- **`hamsci-physics` lives at `mijahauan/hamsci-physics`**, the only fleet
-  client outside the org since the 2026-07-01 migration. `catalog.toml`
-  already marks it "staging: transfers to HamSCI/". Nothing here blocks on the
-  move — the reusable workflow resolves cross-org because both repos are
-  public — but B-full's URL handling must not assume a `HamSCI/` owner.
+- **`sigmond-appliance` joins the bound set** (decided 2026-08-27). It gains a
+  `REQUIREMENTS.md` and an index row rather than an exemption, bringing the
+  bound set to 19. Writing requirements for an appliance/image repo against a
+  template built for clients is the one genuinely novel authoring task here.
+- **`hamsci-physics` org transfer is in hand** — Nathaniel is moving it to
+  `HamSCI/`. Nothing in this spec blocks on it: the reusable workflow already
+  resolves cross-org because both repos are public, and GitHub redirects the
+  old URL after a move. B-full must still not assume a `HamSCI/` owner, and
+  `catalog.toml`'s "staging: transfers to HamSCI/" comment should be cleared
+  once the move lands.
+- **Scale changes the ordering risk, not its shape.** Nine repos gain the
+  workflow in this pass. Each becomes a live consumer of the shared
+  `docs-check.yml` on `@main` the moment it merges, so §4's green-first
+  sequence now governs nineteen repos rather than ten.
 
 ## 8. Out of scope
 
