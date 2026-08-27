@@ -13499,7 +13499,12 @@ def cmd_wspr_watch(args) -> int:
     # cryptic error, so `smd wspr-watch` can be started ahead of
     # wspr-recorder and springs to life when it comes up.
     import time as _time
-    watch_units = [unit_pattern, 'wspr-uploader.service', 'wd-upload-hs@*']
+    # hs-uploader.service is the shared standalone uploader daemon — on stations
+    # routing WSPR through a pipelines.toml wspr_cycle source (AC0G-B4), the
+    # wsprnet POST lines land in ITS journal and nowhere else; without it this
+    # watch showed cycles but never a shipped event (2026-08-27).
+    watch_units = [unit_pattern, 'wspr-uploader.service', 'hs-uploader.service',
+                   'wd-upload-hs@*']
 
     def _journal_has_data() -> bool:
         probe = subprocess.run(
