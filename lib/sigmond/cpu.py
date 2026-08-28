@@ -657,10 +657,21 @@ def compute_affinity_plan(
 # Mutating operations (write drop-ins, remove foreign, apply runtime)
 # ---------------------------------------------------------------------------
 
-def render_drop_in(cpus: set, label: str) -> str:
-    """Render a systemd drop-in file for CPU affinity."""
+def render_drop_in(cpus: set, label: str,
+                   exec_start_post: Optional[str] = None) -> str:
+    """Render a systemd drop-in file for CPU affinity.
+
+    exec_start_post, when given, appends ExecStartPost= line(s) (run as
+    root via the '+' prefix); a string is one hook, a list runs in order.
+    The radiod drop-ins use it to re-run sigmond-rx888-irq-affinity on
+    every unit start (the RX888's xhci IRQ numbers change whenever the
+    device re-enumerates, so a boot-time oneshot alone loses the pinning
+    the next time radiod reopens the radio — AI6VN, 2026-08-26) and then
+    sigmond-radiod-pin-threads (park fft / proc_rx888 on fixed siblings
+    instead of letting the scheduler bounce them within the pair).
+    """
     cpu_str = cpu_list_str(cpus)
-    return textwrap.dedent(f"""\
+    body = textwrap.dedent(f"""\
         # CPU affinity managed by smd — do not edit manually.
         # Role: {label}
         # Regenerate: smd admin diag cpu-affinity --apply
@@ -670,6 +681,12 @@ def render_drop_in(cpus: set, label: str) -> str:
         AllowedCPUs=
         AllowedCPUs={cpu_str}
     """)
+    if exec_start_post:
+        hooks = ([exec_start_post] if isinstance(exec_start_post, str)
+                 else list(exec_start_post))
+        for hook in hooks:
+            body += f"ExecStartPost=+{hook}\n"
+    return body
 
 
 # ---------------------------------------------------------------------------

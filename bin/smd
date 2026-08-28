@@ -7351,7 +7351,13 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     for unit_ref in sorted_units:
         core_cpus = placement.get(unit_ref.unit, set())
         label = f'radiod {unit_ref.instance or unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}'
-        if _write_affinity_drop_in(unit_ref.unit, core_cpus, label) == 'wrote':
+        # Re-pin the xhci IRQs on every radiod start: their IRQ numbers change
+        # when the RX888 re-enumerates, so the boot-time oneshot alone loses
+        # them (AI6VN, 2026-08-26).  radiod starting is exactly the moment the
+        # device is enumerated and about to be consumed.
+        if _write_affinity_drop_in(
+                unit_ref.unit, core_cpus, label,
+                exec_start_post=[RX888_IRQ_REPIN, RADIOD_THREAD_PIN]) == 'wrote':
             _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
             wrote_any = True
 
@@ -7627,8 +7633,23 @@ def cmd_stop(args) -> int:
 # CLI-only helpers that need _run() / _ok() / _err() stay here.
 
 
-def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> str:
+# Single source of truth for the radiod IRQ re-pin hook: BOTH radiod
+# drop-in writers (_ensure_radiod_affinity_drop_ins and
+# cmd_diag_cpu_affinity --apply) must pass this, or each apply path
+# rewrites the file the other produced.
+RX888_IRQ_REPIN = '/usr/local/sbin/sigmond-rx888-irq-affinity'
+# Runs after the IRQ re-pin: park fft on the pair's lowest cpu and every
+# other radiod thread on the rest, so per-core strip charts read steady.
+RADIOD_THREAD_PIN = '/usr/local/sbin/sigmond-radiod-pin-threads'
+
+
+def _write_affinity_drop_in(unit: str, cpus: set, label: str,
+                            exec_start_post: str = None) -> str:
     """Write /etc/systemd/system/<unit>.d/smd-cpu-affinity.conf.
+
+    exec_start_post is threaded through to render_drop_in(); the radiod
+    writer passes the rx888 IRQ re-pin script so the xhci IRQs follow
+    radiod across restarts and RX888 re-enumerations.
 
     Returns:
         'wrote' — file was created or its content changed.
@@ -7638,7 +7659,7 @@ def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> str:
     import tempfile
     drop_dir = Path(f'/etc/systemd/system/{unit}.d')
     drop_in  = drop_dir / _SMD_AFFINITY_DROP_IN
-    content  = _render_drop_in(cpus, label)
+    content  = _render_drop_in(cpus, label, exec_start_post=exec_start_post)
     if drop_in.exists():
         try:
             if drop_in.read_text() == content:
@@ -7924,7 +7945,14 @@ def cmd_diag_cpu_affinity(args) -> int:
 
         for unit, cpus in radiod_plan.items():
             label = f'radiod instance → CPUs {_cpu_list_str(cpus)}'
-            res = _write_affinity_drop_in(unit, cpus, label)
+            # Same ExecStartPost as _ensure_radiod_affinity_drop_ins: the xhci
+            # IRQ numbers change when the RX888 re-enumerates, so the pin must
+            # re-run on every radiod start.  This is the diag --apply writer;
+            # the two paths must not disagree about drop-in content or each
+            # apply flips the file the other one wrote.
+            res = _write_affinity_drop_in(
+                unit, cpus, label,
+                exec_start_post=[RX888_IRQ_REPIN, RADIOD_THREAD_PIN])
             if res == 'wrote':
                 _ok(f'{unit}: {label}')
             elif res == 'noop':
@@ -7987,6 +8015,12 @@ def cmd_diag_cpu_affinity(args) -> int:
         for unit, cpus in radiod_plan.items():
             if _apply_cpu_affinity_runtime(unit, cpus):
                 _ok(f'{unit}: applied')
+                # Runtime-apply flattens every radiod thread back to the full
+                # pair mask, silently un-parking fft/proc_rx888 (observed on
+                # AC0G-B4, 2026-08-27: parking vanished hours after a diag
+                # --apply with no radiod restart).  Re-run the parker — the
+                # ExecStartPost only covers restarts, not this path.
+                _run(['sudo', '-n', RADIOD_THREAD_PIN])
             else:
                 _info(f'{unit}: not running or set-property unsupported')
 
@@ -13474,7 +13508,12 @@ def cmd_wspr_watch(args) -> int:
     # cryptic error, so `smd wspr-watch` can be started ahead of
     # wspr-recorder and springs to life when it comes up.
     import time as _time
-    watch_units = [unit_pattern, 'wspr-uploader.service', 'wd-upload-hs@*']
+    # hs-uploader.service is the shared standalone uploader daemon — on stations
+    # routing WSPR through a pipelines.toml wspr_cycle source (AC0G-B4), the
+    # wsprnet POST lines land in ITS journal and nowhere else; without it this
+    # watch showed cycles but never a shipped event (2026-08-27).
+    watch_units = [unit_pattern, 'wspr-uploader.service', 'hs-uploader.service',
+                   'wd-upload-hs@*']
 
     def _journal_has_data() -> bool:
         probe = subprocess.run(

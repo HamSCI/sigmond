@@ -45,9 +45,11 @@ class RadiodDropInPlacementTests(unittest.TestCase):
         """Run the writer with the filesystem and systemd stubbed out;
         return {unit: cpu_set} that it tried to write."""
         calls = {}
+        self.exec_start_posts = {}
 
-        def fake_write(unit, cpus, label):
+        def fake_write(unit, cpus, label, exec_start_post=None):
             calls[unit] = set(cpus)
+            self.exec_start_posts[unit] = exec_start_post
             return 'unchanged'          # no restart bookkeeping
 
         with mock.patch('sigmond.cpu.get_physical_cores',
@@ -83,6 +85,30 @@ class RadiodDropInPlacementTests(unittest.TestCase):
                              _UnitRef('radiod@b.service', 'b')])
         self.assertEqual(got['radiod@a.service'], {12, 13})
         self.assertEqual(got['radiod@b.service'], {14, 15})
+
+    def test_radiod_drop_in_carries_irq_repin(self):
+        """Every radiod drop-in must re-run the xhci IRQ pin on unit start:
+        the RX888's IRQ numbers change when it re-enumerates, so the
+        boot-time sigmond-rx888-irq-affinity oneshot alone loses the pin
+        the next time radiod reopens the radio (AI6VN, 2026-08-26)."""
+        self._written([_UnitRef('radiod@rx.service', 'rx')])
+        self.assertEqual(self.exec_start_posts['radiod@rx.service'],
+                         ['/usr/local/sbin/sigmond-rx888-irq-affinity',
+                          '/usr/local/sbin/sigmond-radiod-pin-threads'])
+
+
+class RenderDropInTests(unittest.TestCase):
+    def test_exec_start_post_renders_as_root_exec(self):
+        text = smd._render_drop_in(
+            {8, 9}, 'radiod rx → CPUs 8 9',
+            exec_start_post='/usr/local/sbin/sigmond-rx888-irq-affinity')
+        self.assertIn(
+            'ExecStartPost=+/usr/local/sbin/sigmond-rx888-irq-affinity\n',
+            text)
+
+    def test_no_exec_start_post_by_default(self):
+        text = smd._render_drop_in({0, 1}, 'worker')
+        self.assertNotIn('ExecStartPost', text)
 
 
 HOOKSCRIPT_SEQUENTIAL = """\

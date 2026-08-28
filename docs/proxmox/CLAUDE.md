@@ -75,6 +75,36 @@ These are non-negotiable based on the working configuration. If a future change 
 args: -smp 10,sockets=1,cores=5,threads=2,maxcpus=10 -cpu host,host-cache-info=on,topoext=on,+kvm_pv_eoi,+kvm_pv_unhalt,-svm
 ```
 
+`scripts/proxmox/host-apply.sh` now writes this full flag set itself (VM
+mode) — a VM provisioned by an older host-apply carries only
+`-cpu host,topoext=on` and needs a `qm set --args` + cold restart to pick
+up the rest (found live on AI6VN, where the guest saw the fictional 16 MB
+L3 for exactly this reason).
+
+### What host-apply additionally installs (VM mode)
+
+Alongside the hookscript and fence, `host-apply.sh` installs two oneshot
+units that make the remaining isolation persistent — both address gaps
+found on a hand-tuned host (AI6VN-PM, 2026-08-26) where `isolcpus=` alone
+was assumed to cover them:
+
+- **`sigmond-host-irq-affinity.service`** — every movable host IRQ plus
+  `default_smp_affinity` onto the housekeeping CPUs (the fence set).
+  Without it, the vfio-msix vectors for the passed-through USB
+  controllers fire on isolated vCPU pCPUs. This is Part 10's
+  "recommended hygiene", now shipped instead of hand-applied.
+- **`sigmond-host-resctrl.service`** — L3 CAT partition giving the guest
+  radiod's pCPUs an exclusive slice (way split derived from the live
+  cache geometry, default fraction 0.62). CLOS follows the physical CPU,
+  so the guest needs no support. No-op on CPUs without `cat_l3`.
+
+Inside the guest, `install.sh` pairs the existing xhci pin with
+`sigmond-guest-irq-affinity.service` (movable non-xhci IRQs + the unbound
+workqueue pool onto the non-radiod CPUs), and smd's radiod drop-ins now
+carry `ExecStartPost=+…/sigmond-rx888-irq-affinity` so the xhci pin
+follows every radiod restart — the RX888's IRQ numbers change when it
+re-enumerates, so the boot-time oneshot alone loses the pin.
+
 ### Time synchronization
 - **Use chrony, not ntpd or systemd-timesyncd** inside the VM. chrony tolerates virtualized clocks much better.
 - **The guest should use kvm-clock** as its clocksource. This is usually automatic but worth verifying with `cat /sys/devices/system/clocksource/clocksource0/current_clocksource`.
