@@ -30,6 +30,11 @@ VMID="${VMID:-}"
 : "${ISOLCPUS_RANGE:?ISOLCPUS_RANGE required}"
 : "${RADIOD_FREQ_KHZ:=3200000}"
 : "${WORKER_FREQ_KHZ:=1400000}"
+# L3 CAT way-fraction for radiod's exclusive slice.  The generic default is
+# 0.62 (10/16 ways on this generation).  AC0G-B4's measured ZERO-GAP baseline
+# (gap_hourly docstring) and the KX4AZ reference both use 13/3 on a 16 MB
+# part — pass RADIOD_L3_FRACTION=0.8125 for that split.
+: "${RADIOD_L3_FRACTION:=0.62}"
 if [[ -n "$VMID" ]]; then
     : "${VM_VCPU_COUNT:?VM_VCPU_COUNT required (VM mode)}"
     : "${VM_CORES:?VM_CORES required (VM mode)}"
@@ -275,7 +280,7 @@ After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/sigmond-host-resctrl.sh ${RADIOD_PCPUS} ${OTHER_PCPUS}
+ExecStart=/usr/local/sbin/sigmond-host-resctrl.sh ${RADIOD_PCPUS} ${OTHER_PCPUS} ${RADIOD_L3_FRACTION}
 
 [Install]
 WantedBy=multi-user.target
