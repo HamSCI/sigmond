@@ -16,8 +16,28 @@
 # Always exits 0: thread pinning is polish, never worth failing a start.
 set -u
 
-for u in $(systemctl list-units --type=service --no-legend "radiod@*" 2>/dev/null | awk '{print $1}'); do
-    pid=$(systemctl show "$u" -p MainPID --value 2>/dev/null)
+# Unit discovery must work from ExecStartPost, where the unit is still in
+# start-post and 'systemctl list-units' may not show it yet — observed on
+# AC0G-B4 2026-08-29 15:04Z: the parker silently no-oped on a real radiod
+# restart while its ExecStartPost sibling (which globs the drop-in dirs as a
+# fallback) ran fine.  Use the same two-path discovery: running units first,
+# then any radiod unit that has an smd affinity drop-in.
+units=$(systemctl list-units --type=service --no-legend "radiod@*" 2>/dev/null | awk '{print $1}')
+if [ -z "$units" ]; then
+    for d in /etc/systemd/system/radiod@*.service.d; do
+        [ -d "$d" ] || continue
+        u=$(basename "$d" .d)
+        case "$u" in radiod@.service) continue;; esac
+        units="$units $u"
+    done
+fi
+for u in $units; do
+    pid=""
+    for _ in $(seq 1 10); do
+        pid=$(systemctl show "$u" -p MainPID --value 2>/dev/null)
+        [ -n "$pid" ] && [ "$pid" != 0 ] && break
+        sleep 1
+    done
     [ -n "$pid" ] && [ "$pid" != 0 ] || continue
     cpus=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr ' ' ',')
     [ -n "$cpus" ] || continue
