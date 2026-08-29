@@ -399,6 +399,32 @@ else
     fi
 fi
 
+# ─── uhubctl (USB per-port power control) ────────────────────────────────────
+# The RX-888 recurrently disappears from the USB bus, and nothing short of a
+# power cycle of the SDR itself brings it back — not a radiod restart, not a
+# rebind, not a host reboot in every case.  Until now that meant a human at the
+# site pulling a cable.  uhubctl drives per-port power switching on any hub
+# whose descriptor advertises `ppps`, so a station with the SDR behind such a
+# hub can cut and restore VBUS to that port alone and recover unattended.
+#
+# ⚠ It installs to /usr/sbin/uhubctl, which is NOT on a non-root PATH.  Scripts
+# must call the absolute path or run as root; `command -v uhubctl` as an
+# ordinary user returns nothing even when the package is present.
+#
+# Absence degrades to a warning rather than a failed install: a station whose
+# SDR sits on a root port, or behind a hub without per-port switching, has
+# nothing for uhubctl to drive and loses only the unattended recovery.
+if command -v uhubctl &>/dev/null || [ -x /usr/sbin/uhubctl ]; then
+    ok "uhubctl: present"
+else
+    info "Installing uhubctl (USB per-port power control)…"
+    if _pkg_install uhubctl; then
+        ok "uhubctl: installed"
+    else
+        warn "uhubctl could not be installed via $_PKG_MGR — USB port power cycling unavailable; an SDR that drops off the bus will need a manual power cycle"
+    fi
+fi
+
 # ─── health-check prerequisites (sqlite3, lsof, bc) ──────────────────────────
 # These are shelled out to by watchdogs and maintenance scripts.  Each one is
 # absent from a minimal Debian image and was present on our older hosts only by
