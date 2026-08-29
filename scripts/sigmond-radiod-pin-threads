@@ -57,6 +57,10 @@ for u in $units; do
     # fft appears shortly after start; wait up to 20 s for it.
     fft_tids=""
     for _ in $(seq 1 20); do
+        # Bail immediately if radiod died mid-wait (SDR absent, patient-retry
+        # loop from sigmond-sdr-recover): dragging out a futile ExecStartPost
+        # stretches every 10 s retry cycle to ~40 s for nothing.
+        [ -d /proc/$pid ] || continue 2
         fft_tids=$(for t in /proc/$pid/task/*; do
             [ "$(cat "$t/comm" 2>/dev/null)" = fft ] && basename "$t"
         done)
