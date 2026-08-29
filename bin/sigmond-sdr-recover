@@ -249,7 +249,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if not decision.cycle:
         save_state(state)
-        if not present:
+        # Report when the card is missing, and always under --dry-run: someone
+        # who asks what this would do deserves an answer even when the answer
+        # is "nothing".  Silence reads as a broken tool.
+        if not present or args.dry_run:
             _log(f"holding: {decision.reason}")
         return 0
 
