@@ -1,0 +1,18 @@
+# sigmond drop-in for a radiod RTP consumer.  @RADIOD_UNIT@ is substituted at
+# install time from [radiod] unit in /etc/sigmond/topology.toml.
+#
+# PartOf propagates radiod's restart to this unit, so a consumer can no longer
+# be left running against a radiod that restarted underneath it.  That state is
+# silent and long-lived: a consumer holding a stale RTP anchor keeps running,
+# keeps logging, and produces nothing usable.
+#
+# ExecStartPre gates on radiod actually serving.  After= alone only orders the
+# start; systemd considers a simple service started the moment it forks, and
+# radiod needs about ten seconds after that to open the front end and mint
+# channels.  A consumer that beats it to the anchor is wrong for its whole life.
+[Unit]
+PartOf=@RADIOD_UNIT@
+After=@RADIOD_UNIT@
+
+[Service]
+ExecStartPre=/usr/local/sbin/sigmond-radiod-ready 90

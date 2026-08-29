@@ -794,6 +794,89 @@ $SUDO ln -sf "$REPO_DIR/scripts/sigmond-gap-hourly" \
         /usr/local/sbin/sigmond-gap-hourly
 ok "sigmond-gap-hourly symlink installed"
 
+# ─── SDR recovery: power-cycle a vanished RX-888, restore in order ───────────
+# The RX-888 recurrently leaves the USB bus and only a power cycle of the card
+# recovers it.  Three separate gaps kept that from being automatic, all three
+# observed on AC0G-B4 2026-08-29:
+#
+#   radiod never came back      Restart=always with StartLimitBurst=5 burns its
+#                               budget in under a second while the card is away,
+#                               then sits in `failed`.  The drop-in below
+#                               removes the rate limit so it retries patiently.
+#   consumers never followed    A recorder left running against a restarted
+#                               radiod holds a stale RTP anchor and fails
+#                               SILENTLY -- wspr-recorder did so for two days.
+#                               PartOf= now propagates radiod's restart.
+#   the consumer set was typed  Expanding it by hand at recovery time missed
+#                               wspr-recorder outright.  It is declared in
+#                               topology.toml and a pattern matching nothing is
+#                               reported rather than skipped.
+info "Installing SDR recovery helpers → /usr/local/sbin/"
+$SUDO chmod a+x "$REPO_DIR/bin/sigmond-sdr-recover" "$REPO_DIR/bin/sigmond-radiod-ready"
+$SUDO ln -sf "$REPO_DIR/bin/sigmond-sdr-recover"  /usr/local/sbin/sigmond-sdr-recover
+$SUDO ln -sf "$REPO_DIR/bin/sigmond-radiod-ready" /usr/local/sbin/sigmond-radiod-ready
+ok "sigmond-sdr-recover + sigmond-radiod-ready symlinks installed"
+
+# radiod drop-in: patient retry instead of a five-restart budget.
+if compgen -G "/etc/systemd/system/radiod@*.service" >/dev/null 2>&1 || \
+   systemctl list-unit-files "radiod@.service" &>/dev/null; then
+    $SUDO install -d -m 0755 /etc/systemd/system/radiod@.service.d
+    $SUDO install -m 0644 "$REPO_DIR/systemd/radiod-restart-forever.conf" \
+        /etc/systemd/system/radiod@.service.d/10-sigmond-restart.conf
+    ok "radiod drop-in installed (patient retry while the SDR is absent)"
+fi
+
+# Consumer drop-ins, generated from the declared list.  Nothing is guessed: a
+# station that has not declared [radiod] consumers gets no drop-ins and a note
+# saying so, rather than a silently partial recovery.
+_TOPOLOGY=/etc/sigmond/topology.toml
+if [[ -f "$_TOPOLOGY" ]]; then
+    _RADIOD_UNIT=$(python3 - "$_TOPOLOGY" <<'PYEOF' || true
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        print(tomllib.load(fh).get("radiod", {}).get("unit", ""))
+except Exception:
+    print("")
+PYEOF
+)
+    if [[ -n "$_RADIOD_UNIT" ]]; then
+        while read -r _consumer; do
+            [[ -z "$_consumer" ]] && continue
+            $SUDO install -d -m 0755 "/etc/systemd/system/${_consumer}.d"
+            sed "s|@RADIOD_UNIT@|${_RADIOD_UNIT}|g" \
+                "$REPO_DIR/systemd/sigmond-radiod-consumer.conf.in" \
+                | $SUDO tee "/etc/systemd/system/${_consumer}.d/20-sigmond-radiod.conf" >/dev/null
+            ok "consumer drop-in: $_consumer"
+        done < <(python3 - "$_TOPOLOGY" <<'PYEOF' || true
+import fnmatch, subprocess, sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        patterns = tomllib.load(fh).get("radiod", {}).get("consumers", [])
+except Exception:
+    patterns = []
+out = subprocess.run(["systemctl", "list-units", "--all", "--no-legend",
+                      "--plain", "--type=service"],
+                     capture_output=True, text=True).stdout
+units = [l.split()[0] for l in out.splitlines() if l.strip()]
+seen = []
+for pat in patterns:
+    hits = [u for u in units if fnmatch.fnmatch(u, pat)]
+    if not hits:
+        print(f"DECLARED CONSUMER NOT FOUND: {pat}", file=sys.stderr)
+    for h in hits:
+        if h not in seen:
+            seen.append(h); print(h)
+PYEOF
+)
+        $SUDO systemctl enable --now sigmond-sdr-recover.timer 2>/dev/null \
+            && ok "sigmond-sdr-recover.timer enabled" \
+            || warn "could not enable sigmond-sdr-recover.timer"
+    else
+        info "[radiod] unit not set in $_TOPOLOGY — SDR recovery not wired up"
+    fi
+fi
+
 # Timing-chain SHM pre-create (docs/timing-chain-architecture.md, step 2): give
 # the chrony/gpsd/hf-timestd refclock SHM segments a stable owner+perm before any
 # of them start, so a chrony/gpsd/fusion restart can never flip ownership and

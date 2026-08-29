@@ -1,0 +1,13 @@
+[Unit]
+Description=Check for a vanished RX-888 and recover it
+
+[Timer]
+# Every minute.  The helper's own grace window (30 s absent) and cooldown
+# (15 min between cycles) decide whether anything happens; the timer only
+# provides the opportunity, so raising its frequency changes nothing.
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

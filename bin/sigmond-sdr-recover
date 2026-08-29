@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""sigmond-sdr-recover — power-cycle a vanished RX-888 and bring the station back.
+
+The RX-888 recurrently disappears from the USB bus.  Nothing short of removing
+power from the card recovers it: not a radiod restart, not a USB rebind.  With
+the card behind a hub whose ports switch power independently, this helper cuts
+VBUS on that port alone, waits for the FX3 to re-enumerate, and then restarts
+the station in the one order that works.
+
+Two rules govern the design, and AC0G-B4 taught both the hard way.
+
+**Fire on the cause, never on a consequence.**  timestd-hpps-watchdog restarted
+the recorder four times on the night of 2026-08-29 because a chrony refclock
+had gone stale.  The actual cause was low carrier-to-noise density, which no
+restart can mend, so it churned the station and fixed nothing.  This helper
+therefore triggers on one condition only: the card is absent from the USB bus.
+A present card is never cycled, however unhappy anything downstream looks.
+
+**Declare the consumers; never discover them by hand.**  A recorder left
+running against a restarted radiod holds a stale RTP anchor and fails quietly.
+wspr-recorder ran that way for two days, logging a timing fault every two
+minutes that nobody acted on, and it was missed again during the recovery
+because the operator expanded the consumer set with a glob typed at the time.
+The set now lives in topology.toml, and a pattern that matches nothing is
+reported rather than skipped.
+
+Order matters and is not negotiable: radiod first, then everything that reads
+its RTP streams.  Starting a consumer before radiod serves gives it an anchor
+that is wrong for the rest of its life.
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, Optional, Sequence, Tuple
+
+# The card blips off the bus for a second or two whenever it re-enumerates —
+# including during its own recovery.  Cycling inside that window would
+# interrupt the very thing we are waiting for.
+ABSENT_GRACE_S = 30
+
+# If a cycle did not bring it back, another one straight away will not either.
+# A power-cycle loop is worse than a dead SDR: it denies an operator the stable
+# state they need in order to diagnose.
+CYCLE_COOLDOWN_S = 900
+
+RX888_IDS = ("04b4:00f1", "04b4:00f3")     # running, and the FX3 bootloader
+STATE_PATH = Path("/var/lib/sigmond/sdr-recover.json")
+UHUBCTL = "/usr/sbin/uhubctl"              # NOT on a non-root PATH
+CONFIG_PATH = Path("/etc/sigmond/topology.toml")
+
+
+@dataclass(frozen=True)
+class Decision:
+    cycle: bool
+    reason: str
+
+
+def should_cycle(
+    device_present: bool,
+    absent_for_s: float,
+    last_cycle_age_s: Optional[float],
+) -> Decision:
+    """Whether to cut power now, and why — or why not.
+
+    Returns the reason either way: a watchdog that cannot say why it stayed
+    its hand is as hard to trust as one that cannot say why it acted.
+    """
+    if device_present:
+        return Decision(False, "device present on the bus — nothing to recover")
+    if absent_for_s < ABSENT_GRACE_S:
+        return Decision(
+            False,
+            f"absent {absent_for_s:.0f}s — inside the {ABSENT_GRACE_S}s grace "
+            f"window, a re-enumeration looks like this",
+        )
+    if last_cycle_age_s is not None and last_cycle_age_s < CYCLE_COOLDOWN_S:
+        return Decision(
+            False,
+            f"cooldown — cycled {last_cycle_age_s:.0f}s ago, holding off until "
+            f"{CYCLE_COOLDOWN_S}s so a failed recovery cannot become a loop",
+        )
+    return Decision(True, f"device absent {absent_for_s:.0f}s — cutting VBUS")
+
+
+def expand_consumers(
+    patterns: Sequence[str], installed: Iterable[str]
+) -> List[str]:
+    """Declared unit patterns → actual units, in the declared order."""
+    return expand_consumers_checked(patterns, installed)[0]
+
+
+def expand_consumers_checked(
+    patterns: Sequence[str], installed: Iterable[str]
+) -> Tuple[List[str], List[str]]:
+    """As above, plus the patterns that matched nothing.
+
+    A pattern matching nothing means a consumer was renamed, disabled, or
+    never installed.  Restarting fewer units than declared, silently, is
+    exactly the failure this module exists to prevent — so the caller is
+    handed the misses and is expected to say so out loud.
+    """
+    units = list(installed)
+    matched: List[str] = []
+    missing: List[str] = []
+    for pattern in patterns:
+        hits = [u for u in units if fnmatch.fnmatch(u, pattern)]
+        if not hits:
+            missing.append(pattern)
+            continue
+        for hit in hits:
+            if hit not in matched:
+                matched.append(hit)
+    return matched, missing
+
+
+# ─── everything below touches the system; the logic above does not ───────────
+
+def _log(msg: str) -> None:
+    print(f"sigmond-sdr-recover: {msg}", flush=True)
+
+
+def _run(cmd: Sequence[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def device_present() -> bool:
+    out = _run(["lsusb"]).stdout
+    return any(dev_id in out for dev_id in RX888_IDS)
+
+
+def installed_units() -> List[str]:
+    out = _run(["systemctl", "list-units", "--all", "--no-legend",
+                "--plain", "--type=service"]).stdout
+    return [line.split()[0] for line in out.splitlines() if line.strip()]
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def save_state(state: dict) -> None:
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STATE_PATH.write_text(json.dumps(state))
+    except Exception as exc:            # never fail the run over bookkeeping
+        _log(f"could not persist state: {exc}")
+
+
+def read_config() -> dict:
+    try:
+        import tomllib
+        with CONFIG_PATH.open("rb") as fh:
+            return tomllib.load(fh).get("radiod", {})
+    except Exception as exc:
+        _log(f"could not read {CONFIG_PATH}: {exc}")
+        return {}
+
+
+def cycle_port(hub: str, port: str, off_seconds: int) -> bool:
+    """Cut and restore VBUS.  Returns whether uhubctl reported success.
+
+    A short cut is not enough: the FX3 holds state across a brief drop, and a
+    recovery that leaves the card in the state that needed recovering is no
+    recovery.  Verified on AC0G-B4 — with a long enough cut the card returns
+    through its bootloader (04b4:00f3) and the firmware loader promotes it.
+    """
+    _log(f"cutting VBUS on hub {hub} port {port} for {off_seconds}s")
+    result = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "cycle",
+                   "-d", str(off_seconds)], timeout=off_seconds + 60)
+    if result.returncode != 0:
+        _log(f"uhubctl failed rc={result.returncode}: {result.stderr.strip()}")
+        return False
+    return True
+
+
+def wait_for_device(timeout_s: int = 90) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if device_present():
+            return True
+        time.sleep(2)
+    return False
+
+
+def restart_station(radiod_unit: str, consumers: Sequence[str],
+                    ready_timeout_s: int = 90) -> bool:
+    """radiod first, then its consumers — the only order that works."""
+    _log(f"starting {radiod_unit}")
+    _run(["systemctl", "reset-failed", radiod_unit])
+    if _run(["systemctl", "restart", radiod_unit]).returncode != 0:
+        _log(f"{radiod_unit} failed to start — leaving consumers alone, since "
+             f"restarting them against a dead radiod only spreads the fault")
+        return False
+    ready = _run(["/usr/local/sbin/sigmond-radiod-ready", str(ready_timeout_s)])
+    if ready.returncode != 0:
+        _log("radiod did not report ready in time — consumers NOT restarted")
+        return False
+    for unit in consumers:
+        _log(f"restarting consumer {unit}")
+        _run(["systemctl", "restart", unit])
+    return True
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--off-seconds", type=int, default=10,
+                    help="how long to hold VBUS low (default 10)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="report the decision and change nothing")
+    args = ap.parse_args(argv)
+
+    cfg = read_config()
+    hub = cfg.get("recover_hub")
+    port = cfg.get("recover_port")
+    radiod_unit = cfg.get("unit")
+    patterns = cfg.get("consumers", [])
+
+    if not (hub and port and radiod_unit):
+        _log("[radiod] recover_hub / recover_port / unit not set in "
+             f"{CONFIG_PATH} — this station has no hub to cycle; exiting")
+        return 0
+
+    present = device_present()
+    state = load_state()
+    now = time.time()
+
+    if present:
+        if state.get("absent_since"):
+            _log("device returned to the bus")
+        state["absent_since"] = None
+    elif not state.get("absent_since"):
+        state["absent_since"] = now
+        _log("device absent from the bus — starting the grace window")
+
+    absent_for = (now - state["absent_since"]) if state.get("absent_since") else 0.0
+    last_cycle = state.get("last_cycle_at")
+    decision = should_cycle(present, absent_for,
+                            (now - last_cycle) if last_cycle else None)
+
+    if not decision.cycle:
+        save_state(state)
+        if not present:
+            _log(f"holding: {decision.reason}")
+        return 0
+
+    _log(decision.reason)
+    if args.dry_run:
+        _log("dry run — no power cycle performed")
+        return 0
+
+    state["last_cycle_at"] = now
+    save_state(state)
+
+    if not cycle_port(hub, str(port), args.off_seconds):
+        return 1
+    if not wait_for_device():
+        _log("card did not return after the power cycle — hardware fault, "
+             "escalating by leaving the station down rather than looping")
+        return 1
+
+    units = installed_units()
+    consumers, missing = expand_consumers_checked(patterns, units)
+    for pattern in missing:
+        _log(f"DECLARED CONSUMER NOT FOUND: {pattern} matched no installed "
+             f"unit — it will not be restarted; check topology.toml")
+    ok = restart_station(radiod_unit, consumers)
+    _log("station restored" if ok else "station NOT fully restored")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

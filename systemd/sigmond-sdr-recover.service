@@ -1,0 +1,11 @@
+[Unit]
+Description=Sigmond SDR recovery — power-cycle a vanished RX-888 and restore the station
+Documentation=file:/etc/sigmond/topology.toml
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-sdr-recover
+# The helper rate-limits itself and reports why it declined to act; it must
+# never be the reason the boot or a maintenance window fails.
+SuccessExitStatus=0 1

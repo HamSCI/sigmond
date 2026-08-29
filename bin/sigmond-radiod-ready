@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""sigmond-radiod-ready — block until radiod is serving, or time out.
+
+Consumers of radiod's RTP streams must not start until radiod is actually
+serving.  A consumer that starts too early takes an anchor that is wrong, and
+then fails quietly for as long as it runs: wspr-recorder held a stale anchor
+for two days on AC0G-B4, logging a timing fault every two minutes that nothing
+acted on.  `After=` alone does not help, because systemd considers a simple
+service started the moment it forks.
+
+⚠ What this checks, honestly stated: that the unit is active and has been for
+`--settle` seconds, which is how long radiod takes to open its front end and
+mint channels.  It is a settle gate, not a probe of the status stream.  A real
+readiness probe would ask radiod for its channel list; that needs the status
+multicast address and a ka9q client, and is worth doing if this ever proves
+too coarse.  Until then the limitation is written here rather than implied by
+a confident name.
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import time
+
+
+def unit_active_for(unit: str) -> float | None:
+    """Seconds the unit has been active, or None if it is not active."""
+    r = subprocess.run(["systemctl", "show", unit, "-p", "ActiveState",
+                        "-p", "ActiveEnterTimestampMonotonic"],
+                       capture_output=True, text=True)
+    fields = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    if fields.get("ActiveState") != "active":
+        return None
+    try:
+        entered_us = int(fields.get("ActiveEnterTimestampMonotonic", "0"))
+    except ValueError:
+        return None
+    if entered_us <= 0:
+        return None
+    return max(0.0, time.clock_gettime(time.CLOCK_MONOTONIC) - entered_us / 1e6)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("timeout", nargs="?", type=int, default=90)
+    ap.add_argument("--unit", default=None,
+                    help="radiod unit (default: the single radiod@ instance)")
+    ap.add_argument("--settle", type=float, default=15.0)
+    args = ap.parse_args()
+
+    unit = args.unit
+    if unit is None:
+        r = subprocess.run(["systemctl", "list-units", "--no-legend", "--plain",
+                            "radiod@*.service"], capture_output=True, text=True)
+        names = [l.split()[0] for l in r.stdout.splitlines() if l.strip()]
+        if len(names) != 1:
+            print(f"sigmond-radiod-ready: expected one radiod instance, "
+                  f"found {names or 'none'} — pass --unit", file=sys.stderr)
+            return 2
+        unit = names[0]
+
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        up = unit_active_for(unit)
+        if up is not None and up >= args.settle:
+            print(f"sigmond-radiod-ready: {unit} active {up:.0f}s — ready")
+            return 0
+        time.sleep(2)
+    print(f"sigmond-radiod-ready: {unit} not ready within {args.timeout}s",
+          file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
