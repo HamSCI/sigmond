@@ -35,6 +35,13 @@ for u in $units; do
     pid=""
     for _ in $(seq 1 10); do
         pid=$(systemctl show "$u" -p MainPID --value 2>/dev/null)
+        # In start-post systemd reports MainPID=0 for the whole window on
+        # some versions (observed B4 2026-08-29: the retry burned all 10 s
+        # and the parker skipped the unit silently).  Fall back to pgrep —
+        # radiod instances are one process each and the name is exact.
+        if [ -z "$pid" ] || [ "$pid" = 0 ]; then
+            pid=$(pgrep -x radiod | head -1)
+        fi
         [ -n "$pid" ] && [ "$pid" != 0 ] && break
         sleep 1
     done
