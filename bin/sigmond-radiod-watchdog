@@ -61,8 +61,14 @@ STATE_DIR = Path('/run/sigmond-radiod-watchdog')
 QUIT_RE = re.compile(r'No rx888 data for .* quitting')
 
 
-def _run(cmd: list) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+def _run(cmd: list, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+# A wedged radiod can be slow to die: on AC0G-B4 2026-08-30 systemd needed
+# 91 s to finish the stop.  Give the stop room, but never let its outcome
+# decide whether the start happens -- see _restart.
+STOP_TIMEOUT_SEC = 150
 
 
 def _active_radiod_units() -> list:
@@ -158,8 +164,29 @@ def _restart(unit: str, reason: str, now: float) -> None:
         return
     _mark_restarted(unit, now)
     # stop → USB reset → settle → start: see RESET_USB_IDS above.
-    _run(['systemctl', 'stop', unit])
-    _reset_usb_devices()
+    #
+    # Every step before the start is best-effort, and the start is issued
+    # unconditionally.  This is not defensive habit, it is the lesson of
+    # AC0G-B4 2026-08-30 03:09Z: the stop exceeded its subprocess timeout,
+    # TimeoutExpired unwound out of this function, and the start below was
+    # never reached.  systemd completed the stop on its own 31 s later, so
+    # the unit sat cleanly stopped -- a state Restart=always does not cover,
+    # because a deliberate stop is not a failure.  The station was dark for
+    # 59 minutes.  A watchdog that can stop a unit without starting it again
+    # is worse than no watchdog at all.
+    try:
+        _run(['systemctl', 'stop', unit], timeout=STOP_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        # systemd owns the stop now and will finish it; we must not abandon
+        # the unit here.  The start below queues behind the stop job.
+        print(f'  {unit}: stop exceeded {STOP_TIMEOUT_SEC}s — '
+              f'starting anyway (systemd will finish the stop first)')
+    except OSError as exc:
+        print(f'  {unit}: stop failed: {exc} — starting anyway')
+    try:
+        _reset_usb_devices()
+    except Exception as exc:        # noqa: BLE001 — never block the start
+        print(f'  usb-reset: {exc} (continuing)')
     time.sleep(3)
     _run(['systemctl', 'start', unit])
 
