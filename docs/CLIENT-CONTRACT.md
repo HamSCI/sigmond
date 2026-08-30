@@ -850,12 +850,12 @@ reload) to every service whose unit file has
 `EnvironmentFile=-/etc/sigmond/coordination.env`.
 
 > ⚠ **Name-collision hazard (2026-08-30, latent — read before wiring).**
-> Three quantities have historically shared the name . The
+> Three quantities have historically shared the name `chain_delay_ns`. The
 > contract name above denotes the per-radiod ANALOGUE PATH DELAY (order of
 > nanoseconds to microseconds) and nothing else. In particular, hf-timestd's
->  (being renamed )
+> `t6_pps.chain_delay_ns` (being renamed `edge_phase_in_named_second_ns`)
 > reads ~0.6 s — it is an edge phase, not a path delay, and wiring it into
->  by name-match would shift a
+> `utc_corrected = utc_raw - chain_delay_ns/1e9` by name-match would shift a
 > client's UTC by ~596 ms while dutifully reporting it applied. See
 > hf-timestd docs/design/TIMING_PROVENANCE_MODEL.md §4.5.
 >
