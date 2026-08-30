@@ -1,0 +1,17 @@
+[Unit]
+Description=Park radiod threads for %i (fft alone, proc+rest together)
+Documentation=file:/opt/git/sigmond/sigmond/scripts/sigmond-radiod-pin-threads
+# Companion to radiod@%i — pulled in by a Wants= drop-in on the radiod
+# template, so it runs on EVERY radiod start, in a normal runtime context.
+# Its predecessor ran as ExecStartPost inside radiod's own start sequence
+# and silently no-oped four times on real restarts (systemd introspection
+# is unreliable about a unit during that unit's own start-post window,
+# B4 2026-08-29/30) while manual runs never failed once.  Same pattern as
+# sigmond-radiod-ready, which has been flawless.
+After=radiod@%i.service
+
+[Service]
+Type=oneshot
+# RemainAfterExit deliberately OFF: the unit must return to inactive so the
+# next radiod start triggers it again.
+ExecStart=/usr/local/sbin/sigmond-radiod-pin-threads

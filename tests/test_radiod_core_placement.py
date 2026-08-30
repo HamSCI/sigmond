@@ -93,8 +93,7 @@ class RadiodDropInPlacementTests(unittest.TestCase):
         the next time radiod reopens the radio (AI6VN, 2026-08-26)."""
         self._written([_UnitRef('radiod@rx.service', 'rx')])
         self.assertEqual(self.exec_start_posts['radiod@rx.service'],
-                         ['/usr/local/sbin/sigmond-rx888-irq-affinity',
-                          '/usr/local/sbin/sigmond-radiod-pin-threads'])
+                         '/usr/local/sbin/sigmond-rx888-irq-affinity')
 
 
 class RenderDropInTests(unittest.TestCase):

@@ -666,9 +666,10 @@ def render_drop_in(cpus: set, label: str,
     The radiod drop-ins use it to re-run sigmond-rx888-irq-affinity on
     every unit start (the RX888's xhci IRQ numbers change whenever the
     device re-enumerates, so a boot-time oneshot alone loses the pinning
-    the next time radiod reopens the radio — AI6VN, 2026-08-26) and then
-    sigmond-radiod-pin-threads (park fft / proc_rx888 on fixed siblings
-    instead of letting the scheduler bounce them within the pair).
+    the next time radiod reopens the radio — AI6VN, 2026-08-26).  Thread
+    parking is NOT hooked here: sigmond-radiod-pin-threads runs from the
+    sigmond-radiod-park@%i companion unit, because start-post context
+    proved unreliable for it (B4, 2026-08-30).
     """
     cpu_str = cpu_list_str(cpus)
     body = textwrap.dedent(f"""\

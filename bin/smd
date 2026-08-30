@@ -7357,7 +7357,7 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         # device is enumerated and about to be consumed.
         if _write_affinity_drop_in(
                 unit_ref.unit, core_cpus, label,
-                exec_start_post=[RX888_IRQ_REPIN, RADIOD_THREAD_PIN]) == 'wrote':
+                exec_start_post=RX888_IRQ_REPIN) == 'wrote':
             _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
             wrote_any = True
 
@@ -7952,7 +7952,7 @@ def cmd_diag_cpu_affinity(args) -> int:
             # apply flips the file the other one wrote.
             res = _write_affinity_drop_in(
                 unit, cpus, label,
-                exec_start_post=[RX888_IRQ_REPIN, RADIOD_THREAD_PIN])
+                exec_start_post=RX888_IRQ_REPIN)
             if res == 'wrote':
                 _ok(f'{unit}: {label}')
             elif res == 'noop':

@@ -824,6 +824,14 @@ if compgen -G "/etc/systemd/system/radiod@*.service" >/dev/null 2>&1 || \
     $SUDO install -m 0644 "$REPO_DIR/systemd/radiod-restart-forever.conf" \
         /etc/systemd/system/radiod@.service.d/10-sigmond-restart.conf
     ok "radiod drop-in installed (patient retry while the SDR is absent)"
+    # Thread-parker companion: every radiod instance Wants= its
+    # sigmond-radiod-park@%i oneshot, which runs the parker in a normal
+    # runtime context after radiod starts.  Replaces the ExecStartPost
+    # hook, which silently no-oped on real restarts (B4 2026-08-30).
+    $SUDO install -m 0644 "$REPO_DIR/systemd/radiod-park.conf" \
+        /etc/systemd/system/radiod@.service.d/40-sigmond-park.conf
+    $SUDO systemctl daemon-reload
+    ok "radiod drop-in installed (thread-parker companion wired)"
 fi
 
 # Consumer drop-ins, generated from the declared list.  Nothing is guessed: a
