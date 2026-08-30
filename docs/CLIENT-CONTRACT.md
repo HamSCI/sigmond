@@ -849,6 +849,22 @@ rewrites coordination.env atomically and sends SIGHUP (or systemd
 reload) to every service whose unit file has
 `EnvironmentFile=-/etc/sigmond/coordination.env`.
 
+> ⚠ **Name-collision hazard (2026-08-30, latent — read before wiring).**
+> Three quantities have historically shared the name . The
+> contract name above denotes the per-radiod ANALOGUE PATH DELAY (order of
+> nanoseconds to microseconds) and nothing else. In particular, hf-timestd's
+>  (being renamed )
+> reads ~0.6 s — it is an edge phase, not a path delay, and wiring it into
+>  by name-match would shift a
+> client's UTC by ~596 ms while dutifully reporting it applied. See
+> hf-timestd docs/design/TIMING_PROVENANCE_MODEL.md §4.5.
+>
+> **Publication policy**: until a calibrating instance actually MEASURES a
+> chain delay, this fact is published as ABSENT — never as a plausible
+> default. Consumers must treat absence as 'apply no correction', not an
+> error.
+
+
 **Client-side requirement.**  Every client that reads RTP data from a
 radiod MUST, on startup and on reload, check for
 `RADIOD_<id>_CHAIN_DELAY_NS` in the environment and apply it to every
