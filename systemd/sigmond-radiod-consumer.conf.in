@@ -1,17 +1,29 @@
 # sigmond drop-in for a radiod RTP consumer.  @RADIOD_UNIT@ is substituted at
 # install time from [radiod] unit in /etc/sigmond/topology.toml.
 #
-# PartOf propagates radiod's restart to this unit, so a consumer can no longer
-# be left running against a radiod that restarted underneath it.  That state is
-# silent and long-lived: a consumer holding a stale RTP anchor keeps running,
-# keeps logging, and produces nothing usable.
+# ⛔ PartOf= WAS HERE AND WAS REMOVED (2026-08-31, Michael's call: "let
+# recorders self-heal").  It propagated radiod's restart so a consumer could
+# not be left running against a radiod that restarted underneath it.  The
+# premise was that such a consumer fails silently forever.  That premise did
+# not survive contact with the journal: wspr-recorder's own escalation ladder
+# re-provisioned 17 stale channels after the 2026-08-30 03:09Z radiod outage
+# and logged "recovered to 17/17 active" two and a half minutes later, unaided.
+#
+# PartOf= also cost something real.  It stops consumers when radiod stops, but
+# systemd does not propagate a START, so recovery by hand ("systemctl start
+# radiod") brought radiod back alone and left every recorder down.  A
+# deliberate stop is not a failure, so Restart=always does not cover it either.
+#
+# The recovery ladder now lives in ka9q-python and every client gets it, so
+# the consumers ride out a radiod restart the way they did before.  Wants= on
+# the radiod unit still pulls them up when radiod starts, which is the half of
+# the pairing that was always missing.
 #
 # ExecStartPre gates on radiod actually serving.  After= alone only orders the
 # start; systemd considers a simple service started the moment it forks, and
 # radiod needs about ten seconds after that to open the front end and mint
 # channels.  A consumer that beats it to the anchor is wrong for its whole life.
 [Unit]
-PartOf=@RADIOD_UNIT@
 After=@RADIOD_UNIT@
 
 [Service]
