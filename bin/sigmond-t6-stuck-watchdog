@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Restart timestd-core-recorder when T6 is stuck against a good signal.
+
+AC0G-B4, 2026-08-31: T6 sat UNLOCKED from 03:38 to 10:01Z -- six hours
+and twenty-three minutes -- and recovered the instant the recorder was
+restarted.  Nothing it depends on was unwell.  C/N0 ran 57-58 dB-Hz,
+HIGHER than while it had been working an hour earlier.  costas_locked
+stayed True; the carrier never let go.  T5/LBE-1421 reported a valid fix
+120 times out of 120 with an NMEA age of 0.3 s.  And an independent
+block-wise estimator, reading the SAME multicast, located the edge
+sample-exactly in 98% of seconds at a median detection SNR of 340.
+
+The information was there the whole time.  The software could not use it
+and had no way back on its own.  Daily T6 availability fell from 97.2%
+to 41.5%.
+
+WHY THIS IS NARROW, AND MUST STAY NARROW
+----------------------------------------
+sigmond's own watchdogs record the trap: "a watchdog that fires on a
+downstream symptom restarts things forever without fixing anything."
+timestd-hpps-watchdog restarted the recorder four times overnight on
+2026-08-29 against a stale chrony refclock when the actual cause was low
+C/N0 -- it was treating a correct response to a weak signal as a fault.
+
+So this fires ONLY when every input says the signal is good and T6 is
+nonetheless not using it.  A weak signal, an unlocked carrier or a dead
+GPS are all reasons the software is RIGHT to be unlocked, and each one
+refuses.  Missing telemetry refuses too: an absent reading is not
+evidence of health.
+
+This treats a symptom.  The underlying defect -- why the fine stage
+stops producing estimates and cannot resume -- is NOT diagnosed, and
+this must not be mistaken for a fix.  It bounds the damage from six
+hours to one cooldown.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+STATUS = os.environ.get(
+    "T6WD_STATUS", "/var/lib/timestd/status/core-recorder-status.json")
+UNIT = os.environ.get("T6WD_UNIT", "timestd-core-recorder.service")
+STATE = os.environ.get("T6WD_STATE", "/run/sigmond-t6-stuck-watchdog.json")
+
+#: Sustained unlock before acting.  T6 re-acquires on its own within a
+#: few minutes when it can; the 08-31 event ran 383 minutes.
+MIN_STUCK_SEC = int(os.environ.get("T6WD_MIN_STUCK_SEC", "1200"))
+#: Below this the software is right to be unlocked -- the measured
+#: acquisition cliff sits at 58-59 dB-Hz, so this is deliberately under
+#: it: we act only where acquisition demonstrably SHOULD succeed.
+MIN_CN0_DB_HZ = float(os.environ.get("T6WD_MIN_CN0", "56.0"))
+COOLDOWN_SEC = int(os.environ.get("T6WD_COOLDOWN_SEC", "3600"))
+MAX_PER_DAY = int(os.environ.get("T6WD_MAX_PER_DAY", "4"))
+DRY_RUN = "--dry-run" in sys.argv
+
+
+@dataclass
+class T6State:
+    authoritative: Optional[bool]
+    costas_locked: Optional[bool]
+    cn0_db_hz: Optional[float]
+    t5_valid_fix: Optional[bool]
+    stuck_for_sec: float
+
+
+def should_restart(s: T6State) -> bool:
+    """True only for: unlocked, sustained, against a demonstrably good signal."""
+    if s.authoritative is None or s.authoritative:
+        return False                      # healthy, or we cannot tell
+    if s.costas_locked is not True:
+        return False                      # carrier gone: not a stuck state
+    if s.t5_valid_fix is not True:
+        return False                      # no GPS: naming is right to fail
+    if s.cn0_db_hz is None or s.cn0_db_hz < MIN_CN0_DB_HZ:
+        return False                      # weak signal: unlocking is correct
+    return s.stuck_for_sec >= MIN_STUCK_SEC
+
+
+def cooldown_ok(now: float, last_action: Optional[float]) -> bool:
+    return last_action is None or (now - last_action) >= COOLDOWN_SEC
+
+
+def under_daily_cap(actions_today: int) -> bool:
+    return actions_today < MAX_PER_DAY
+
+
+def _load_state() -> dict:
+    try:
+        with open(STATE) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_state(d: dict) -> None:
+    try:
+        tmp = STATE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(d, fh)
+        os.replace(tmp, STATE)
+    except OSError as exc:
+        print(f"  could not persist state: {exc}")
+
+
+def read_status(now: float, st: dict) -> Optional[T6State]:
+    try:
+        with open(STATUS) as fh:
+            d = json.load(fh)
+    except Exception as exc:
+        print(f"  status unreadable ({exc}) — refusing to act")
+        return None
+    t6 = d.get("t6_pps", {})
+    auth = d.get("t6_authority", {})
+    state = auth.get("state")
+    authoritative = None if state is None else (state == "AUTHORITATIVE")
+    # Track how long we have seen it unlocked, in our own state file.
+    since = st.get("unlocked_since")
+    if authoritative is False:
+        since = since or now
+    else:
+        since = None
+    st["unlocked_since"] = since
+    return T6State(
+        authoritative=authoritative,
+        costas_locked=t6.get("costas_locked"),
+        cn0_db_hz=_cn0(d),
+        t5_valid_fix=(d.get("t5_lbe1421") or {}).get("valid_fix"),
+        stuck_for_sec=(now - since) if since else 0.0,
+    )
+
+
+#: C/N0 is NOT in core-recorder-status.json -- it is written to the
+#: authority snapshot store by the frontend probe.  Reading it from the
+#: status file returns None forever, and a watchdog whose gate is always
+#: None never fires and never says why.  So it comes from the DB, and an
+#: unreadable DB is reported rather than silently treated as unhealthy.
+AUTH_DB = os.environ.get(
+    "T6WD_AUTH_DB", "/var/lib/timestd/authority_history.db")
+
+
+def cn0_from_db(path: str = None) -> Optional[float]:
+    """Latest (baseband_power - n0) in dB-Hz, or None if unavailable."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{path or AUTH_DB}?mode=ro", uri=True,
+                              timeout=5.0)
+        try:
+            row = con.execute(
+                "SELECT t6_baseband_power, t6_n0 FROM authority_snapshot "
+                "WHERE t6_baseband_power IS NOT NULL AND t6_n0 IS NOT NULL "
+                "ORDER BY utc_published DESC LIMIT 1").fetchone()
+        finally:
+            con.close()
+    except Exception as exc:
+        print(f"  C/N0 unavailable ({exc}) — refusing to act")
+        return None
+    if not row:
+        print("  C/N0 unavailable (no rows carry it) — refusing to act")
+        return None
+    try:
+        return float(row[0]) - float(row[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _cn0(d: dict) -> Optional[float]:
+    return cn0_from_db()
+
+
+def main() -> int:
+    now = time.time()
+    st = _load_state()
+    s = read_status(now, st)
+    if s is None:
+        _save_state(st)
+        return 0
+
+    verdict = should_restart(s)
+    print(f"T6: authoritative={s.authoritative} costas={s.costas_locked} "
+          f"cn0={s.cn0_db_hz} t5_fix={s.t5_valid_fix} "
+          f"stuck={s.stuck_for_sec:.0f}s → "
+          f"{'RESTART' if verdict else 'no action'}")
+
+    if not verdict:
+        _save_state(st)
+        return 0
+
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    if st.get("day") != day:
+        st["day"], st["actions_today"] = day, 0
+    if not under_daily_cap(int(st.get("actions_today", 0))):
+        print(f"  daily cap {MAX_PER_DAY} reached — not acting")
+        _save_state(st)
+        return 0
+    if not cooldown_ok(now, st.get("last_action")):
+        print(f"  in cooldown ({int(now - st['last_action'])}s/"
+              f"{COOLDOWN_SEC}s) — not acting")
+        _save_state(st)
+        return 0
+
+    if DRY_RUN:
+        print(f"  DRY-RUN: would restart {UNIT}")
+        _save_state(st)
+        return 0
+
+    print(f"  T6 stuck {s.stuck_for_sec:.0f}s against a good signal "
+          f"(C/N0 {s.cn0_db_hz:.1f} dB-Hz, carrier locked) — restarting {UNIT}")
+    subprocess.run(["systemctl", "restart", UNIT], timeout=120)
+    st["last_action"] = now
+    st["actions_today"] = int(st.get("actions_today", 0)) + 1
+    st["unlocked_since"] = None
+    _save_state(st)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

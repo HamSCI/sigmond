@@ -815,6 +815,15 @@ info "Installing SDR recovery helpers → /usr/local/sbin/"
 $SUDO chmod a+x "$REPO_DIR/bin/sigmond-sdr-recover" "$REPO_DIR/bin/sigmond-radiod-ready"
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-sdr-recover"  /usr/local/sbin/sigmond-sdr-recover
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-radiod-ready" /usr/local/sbin/sigmond-radiod-ready
+$SUDO chmod a+x "$REPO_DIR/bin/sigmond-t6-stuck-watchdog"
+$SUDO ln -sf "$REPO_DIR/bin/sigmond-t6-stuck-watchdog" /usr/local/sbin/sigmond-t6-stuck-watchdog
+for _u in sigmond-t6-stuck-watchdog.service sigmond-t6-stuck-watchdog.timer; do
+    $SUDO install -m 0644 "$REPO_DIR/systemd/$_u" "/etc/systemd/system/$_u"
+done
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable --now sigmond-t6-stuck-watchdog.timer 2>/dev/null \
+    && ok "sigmond-t6-stuck-watchdog.timer enabled" \
+    || warn "could not enable sigmond-t6-stuck-watchdog.timer"
 ok "sigmond-sdr-recover + sigmond-radiod-ready symlinks installed"
 
 # radiod drop-in: patient retry instead of a five-restart budget.

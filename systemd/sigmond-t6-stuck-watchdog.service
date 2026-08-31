@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart timestd-core-recorder when T6 is stuck against a good signal
+Documentation=https://github.com/HamSCI/sigmond
+After=timestd-core-recorder.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-t6-stuck-watchdog
+Nice=10

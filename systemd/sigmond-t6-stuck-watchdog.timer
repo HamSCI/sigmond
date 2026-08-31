@@ -1,0 +1,12 @@
+[Unit]
+Description=Check every 5 min whether T6 is stuck against a good signal
+
+[Timer]
+# The condition itself requires a 20-minute sustained unlock, so polling
+# faster than this buys nothing; the 2026-08-31 event ran 383 minutes.
+OnBootSec=600
+OnUnitActiveSec=300
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
