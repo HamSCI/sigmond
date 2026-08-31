@@ -869,9 +869,24 @@ out = subprocess.run(["systemctl", "list-units", "--all", "--no-legend",
                       "--plain", "--type=service"],
                      capture_output=True, text=True).stdout
 units = [l.split()[0] for l in out.splitlines() if l.strip()]
+
+
+def real(u):
+    # `systemctl list-units --all` lists any instance name that RESOLVES
+    # against a linked template, not only instances someone configured.
+    # On AC0G-B4 that surfaced a phantom meteor-scatter@my-rx888 with no
+    # radiod and no config, which a glob then swept into radiod's Wants=
+    # -- wiring a guaranteed failure into every radiod restart.  Require
+    # that systemd actually knows the unit.
+    r = subprocess.run(["systemctl", "is-enabled", u],
+                       capture_output=True, text=True)
+    return r.stdout.strip() in ("enabled", "enabled-runtime", "static",
+                                "indirect")
+
+
 seen = []
 for pat in patterns:
-    hits = [u for u in units if fnmatch.fnmatch(u, pat)]
+    hits = [u for u in units if fnmatch.fnmatch(u, pat) and real(u)]
     if not hits:
         print(f"DECLARED CONSUMER NOT FOUND: {pat}", file=sys.stderr)
     for h in hits:
