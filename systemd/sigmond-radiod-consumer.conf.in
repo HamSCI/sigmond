@@ -23,8 +23,19 @@
 # start; systemd considers a simple service started the moment it forks, and
 # radiod needs about ten seconds after that to open the front end and mint
 # channels.  A consumer that beats it to the anchor is wrong for its whole life.
+# StartLimitIntervalSec=0 is the lesson of 2026-08-30.  radiod went away
+# at 03:09Z; meteor-scatter could not start without it and spent systemd's
+# default budget -- five attempts in ten seconds -- in about five, reaching
+# "restart counter is at 21 / Start request repeated too quickly".  It then
+# sat `failed` for twenty-two hours, because Restart=always does not rescue
+# a unit that has burned its start budget.  radiod itself was given the
+# same treatment for the same reason; the consumers face the same absence
+# and were left out.  RestartSec keeps patient retry from becoming a hot
+# loop.
 [Unit]
 After=@RADIOD_UNIT@
+StartLimitIntervalSec=0
 
 [Service]
+RestartSec=15
 ExecStartPre=/usr/local/sbin/sigmond-radiod-ready 90
