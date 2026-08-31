@@ -923,11 +923,87 @@ def test_heartbeat_module_does_not_reach_into_bin_smd():
     assert "SourceFileLoader" not in (names | attrs)
 
 
+def _hs_uploader_importable() -> bool:
+    """Can a fresh interpreter import hs_uploader without our PYTHONPATH?"""
+    import subprocess as _sp
+    import sys as _sys
+    return _sp.run([_sys.executable, "-c", "import hs_uploader"],
+                   capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(
+    _hs_uploader_importable(),
+    reason="hs_uploader is installed in this interpreter, so the subprocess "
+           "finds it via site-packages whatever PYTHONPATH says.  A station "
+           "does not install it into sigmond's venv -- that separation is the "
+           "point of reading the backlog out-of-process -- so this asserts "
+           "production behaviour and can only run where production's "
+           "condition holds.  The translation contract it guards is covered "
+           "unconditionally by the tests below.")
 def test_read_backlog_unreachable_module_is_unavailable(tmp_path):
     paths = HeartbeatPaths(hs_uploader_src=str(tmp_path / "no-such-src"),
                            watermarks_db=str(tmp_path / "watermarks.db"))
     with pytest.raises(ReaderUnavailable, match="hs_uploader.backlog"):
         _read_backlog(paths)
+
+
+# The contract that actually matters, tested without depending on what
+# happens to be installed: every way the out-of-process reader can fail
+# becomes ReaderUnavailable carrying a reason, never a crash and never a
+# silent zero that would read as "no backlog".
+
+def _paths(tmp_path):
+    return HeartbeatPaths(hs_uploader_src=str(tmp_path / "src"),
+                          watermarks_db=str(tmp_path / "watermarks.db"))
+
+
+def test_read_backlog_nonzero_exit_is_unavailable(tmp_path, monkeypatch):
+    import subprocess as _sp
+
+    def fake_run(*a, **k):
+        return _sp.CompletedProcess(a[0], 1, "", "ModuleNotFoundError: hs_uploader")
+    monkeypatch.setattr(_sp, "run", fake_run)
+    with pytest.raises(ReaderUnavailable, match="exited 1"):
+        _read_backlog(_paths(tmp_path))
+
+
+def test_read_backlog_unparseable_output_is_unavailable(tmp_path, monkeypatch):
+    import subprocess as _sp
+
+    def fake_run(*a, **k):
+        return _sp.CompletedProcess(a[0], 0, "not json at all", "")
+    monkeypatch.setattr(_sp, "run", fake_run)
+    with pytest.raises(ReaderUnavailable, match="unparseable"):
+        _read_backlog(_paths(tmp_path))
+
+
+def test_read_backlog_timeout_is_unavailable(tmp_path, monkeypatch):
+    import subprocess as _sp
+
+    def fake_run(*a, **k):
+        raise _sp.TimeoutExpired(a[0], 5)
+    monkeypatch.setattr(_sp, "run", fake_run)
+    with pytest.raises(ReaderUnavailable, match="timed out"):
+        _read_backlog(_paths(tmp_path))
+
+
+def test_read_backlog_oserror_is_unavailable(tmp_path, monkeypatch):
+    import subprocess as _sp
+
+    def fake_run(*a, **k):
+        raise OSError("no interpreter")
+    monkeypatch.setattr(_sp, "run", fake_run)
+    with pytest.raises(ReaderUnavailable, match="could not run"):
+        _read_backlog(_paths(tmp_path))
+
+
+def test_read_backlog_returns_the_parsed_object(tmp_path, monkeypatch):
+    import subprocess as _sp
+
+    def fake_run(*a, **k):
+        return _sp.CompletedProcess(a[0], 0, '{"pending": 7}', "")
+    monkeypatch.setattr(_sp, "run", fake_run)
+    assert _read_backlog(_paths(tmp_path)) == {"pending": 7}
 
 
 def test_read_uptime_parses_proc_uptime(tmp_path):
