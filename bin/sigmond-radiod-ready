@@ -19,9 +19,14 @@ a confident name.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                "..", "lib"))
+from sigmond import radiod_ready  # noqa: E402
 
 
 def unit_active_for(unit: str) -> float | None:
@@ -53,10 +58,13 @@ def main() -> int:
     if unit is None:
         r = subprocess.run(["systemctl", "list-units", "--no-legend", "--plain",
                             "radiod@*.service"], capture_output=True, text=True)
-        names = [l.split()[0] for l in r.stdout.splitlines() if l.strip()]
+        names = radiod_ready.candidate_units(r.stdout)
         if len(names) != 1:
+            skipped = radiod_ready.excluded_units(r.stdout)
+            detail = f"; ignored {skipped}" if skipped else ""
             print(f"sigmond-radiod-ready: expected one radiod instance, "
-                  f"found {names or 'none'} — pass --unit", file=sys.stderr)
+                  f"found {names or 'none'}{detail} — pass --unit",
+                  file=sys.stderr)
             return 2
         unit = names[0]
 

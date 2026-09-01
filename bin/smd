@@ -6959,6 +6959,7 @@ def cmd_apply(args) -> int:
         try:
             enabled = _enabled_components(topology)
             from sigmond.lifecycle import resolve_units as _resolve_units
+            from sigmond import unit_intent
             all_units = [u for u in _resolve_units(enabled, enabled) if not u.orphaned]
             radiod_units = [
                 u for u in all_units
@@ -6991,6 +6992,19 @@ def cmd_apply(args) -> int:
                     _warn(f'  Run:  smd tui  → Operate → FFT Wisdom')
                 if wisdom_ready:
                     for u in radiod_units:
+                        # An operator who MASKED a unit has said "never run
+                        # this".  Apply reconciles drift; it must not overrule
+                        # a decision.  B4 2026-09-01: a leftover
+                        # radiod@AC0G-B4-patched was enabled and started here
+                        # TWICE in one day — the second time after it had been
+                        # disabled — could not run because the real radiod
+                        # holds the RX888, and its failed state then blocked
+                        # timestd-core-recorder from starting at all.
+                        _enabled_state = _run(
+                            ['systemctl', 'is-enabled', u.unit]).stdout.strip()
+                        if not unit_intent.should_manage(u.unit, _enabled_state):
+                            _info(f'{u.unit}: masked by the operator — leaving it alone')
+                            continue
                         if _run(['systemctl', 'is-enabled', '--quiet', u.unit]).returncode != 0:
                             _run(['systemctl', 'enable', u.unit], sudo=True)
                         r_active = _run(['systemctl', 'is-active', '--quiet', u.unit])
