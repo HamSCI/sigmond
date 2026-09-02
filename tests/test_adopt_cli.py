@@ -19,7 +19,7 @@ import types
 import pytest
 
 from sigmond.adoption import StationInventory
-from sigmond.sources import SourceKey
+from sigmond.sources import KNOWN_CLIENTS as _KNOWN_CLIENTS, SourceKey
 
 
 def _smd():
@@ -1206,3 +1206,63 @@ def test_a_dry_run_names_that_step_too(tmp_path, capsys):
     _wire(mod, StationInventory(sources=(FARGO,)), tmp_path, may_elevate=False)
     assert mod.cmd_adopt(_args(str(FARGO), tmp_path, dry_run=True)) == 0
     assert "smd admin sources apply" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# What is handed to cmd_start is what the operator was shown
+# ---------------------------------------------------------------------------
+
+def test_a_component_that_will_not_start_is_not_left_enabled(tmp_path, capsys):
+    """`cmd_start` auto-enables every component NAMED to it
+    (`_autoenable_named_on_start`), whether or not it then starts.  So a name
+    the preview has just reported as "will NOT start" must not be handed to
+    it: the topology would keep `enabled = true` for it, and the next bare
+    `smd start` or `smd apply` would start it with no second adoption -- a
+    persistent state change the consent prompt never disclosed, made by the
+    same verb as the 2026-09-01 incident.
+    """
+    mod = _smd()
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    mod._adopt_start_preview = lambda comps: (
+        [c for c in comps if c != "igmp-querier"],
+        [("igmp-querier", "dormant — no multicast here")])
+
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
+    names = [e for e in started if isinstance(e, list)]
+    assert names == [["ka9q-radio", "ka9q-web"]]
+    assert "NOT started igmp-querier" in capsys.readouterr().out
+
+
+def test_a_closure_dependency_is_not_named_to_start_either(tmp_path, capsys):
+    """`_adopt_start_set` adds `requires`-closure members so the preview can
+    disclose them -- adopting a LAN radiod bounces the local one.  Disclosing
+    is not the same as naming: cmd_start pulls its own closure, and passing a
+    closure member by name would auto-enable a component the operator never
+    adopted.  Only the offer's OWN components are named."""
+    mod = _smd()
+    started = _wire(mod, StationInventory(sources=(FARGO,)), tmp_path)
+    mod._adopt_start_set = lambda comps: list(comps) + ["ka9q-radio"]
+
+    assert mod.cmd_adopt(_args(str(FARGO), tmp_path, yes=True)) == 0
+    names = [e for e in started if isinstance(e, list)]
+    assert names == [list(_KNOWN_CLIENTS)]
+    assert "ka9q-radio" not in names[0]
+
+
+def test_nothing_the_offer_named_can_start_is_a_refusal(tmp_path, capsys):
+    """Every component of the offer skipped, but an already-enabled closure
+    dependency startable: handing cmd_start an EMPTY name list would make it
+    the bare `smd start` -- start everything enabled on the station.  That is
+    the 2026-09-01 incident with the safety off."""
+    mod = _smd()
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    mod._adopt_start_set = lambda comps: list(comps) + ["hf-timestd"]
+    mod._adopt_start_preview = lambda comps: (
+        ["hf-timestd"],
+        [(c, "downloaded — needs: smd install") for c in comps
+         if c != "hf-timestd"])
+
+    rc = mod.cmd_adopt(_args(str(RX), tmp_path, yes=True))
+    assert rc != 0
+    assert started == []                      # nothing started
+    assert not list(tmp_path.iterdir())       # nothing recorded either

@@ -84,3 +84,53 @@ def test_the_shipped_roster_parses_and_is_well_formed():
         assert name.upper() == name, f"{name} should be upper-case"
         assert entry["psws_station"], f"{name} has no psws_station"
         assert entry["psws_instrument"], f"{name} has no psws_instrument"
+
+
+# ---------------------------------------------------------------------------
+# Placeholder IDs must be checkable by something other than a human's eye
+# ---------------------------------------------------------------------------
+
+def test_the_shipped_roster_declares_itself_a_placeholder(tmp_path):
+    """S000201-S000220 sit in the SAME namespace as this project's real PSWS
+    IDs (S000171, S000123), so nothing but the header comment tells them
+    apart -- unmissable to a reader, invisible to every program.
+
+    When the real pre-defined IDs land, delete the `[_meta]` block from the
+    roster and this test with it.  That is the point: the sentinel and the
+    placeholders are removed together, or a test fails.
+    """
+    import tomllib
+    from sigmond.station_identity import DEFAULT_ROSTER
+    with open(DEFAULT_ROSTER, "rb") as fh:
+        raw = tomllib.load(fh)
+    assert raw["_meta"]["placeholder"] is True
+
+
+def test_meta_is_not_a_station(tmp_path):
+    """`_meta` describes the FILE.  A roster reader that returned it as a
+    station would offer a machine named _META with no PSWS IDs."""
+    p = tmp_path / "roster.toml"
+    p.write_text('[_meta]\nplaceholder = true\n\n'
+                 '[DASI001]\npsws_station = "S1"\npsws_instrument = "I1"\n')
+    roster = load_roster(p)
+    assert set(roster) == {"DASI001"}
+
+
+def test_a_placeholder_roster_says_so_out_loud(tmp_path, capsys):
+    """The moment anyone wires the prefills through, an unguarded placeholder
+    reaches real config.  Loading one has to be audible."""
+    p = tmp_path / "roster.toml"
+    p.write_text('[_meta]\nplaceholder = true\n\n'
+                 '[DASI001]\npsws_station = "S1"\npsws_instrument = "I1"\n')
+    load_roster(p)
+    err = capsys.readouterr().err.lower()
+    assert "placeholder" in err
+    assert str(p) in err or "roster" in err
+
+
+def test_a_real_roster_is_quiet(tmp_path, capsys):
+    p = tmp_path / "roster.toml"
+    p.write_text('[DASI001]\npsws_station = "S000171"\n'
+                 'psws_instrument = "I000171"\n')
+    load_roster(p)
+    assert capsys.readouterr().err == ""

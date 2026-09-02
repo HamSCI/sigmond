@@ -51,8 +51,56 @@ def test_an_unadopted_source_is_listed():
 
 
 def test_an_adopted_source_is_not_offered():
-    lines = _smd()._adoption_section(_rx_station(), adopted=frozenset({RX}))
-    assert str(RX) not in "\n".join(lines)
+    """It is not OFFERED again -- but it is still named, under `adopted:`.
+
+    The assertion here used to be `str(RX) not in text`, which was true of a
+    section that said nothing at all about an adopted device.  Spec section 6
+    asks for detected, adopted and adoptable; a device that vanishes from
+    `smd status` the moment it is claimed leaves no record it was ever
+    claimed, which is the silence this section exists to end.
+    """
+    text = "\n".join(_smd()._adoption_section(_rx_station(),
+                                              adopted=frozenset({RX})))
+    assert "adoptable:" not in text
+    assert "run `smd adopt" not in text
+
+
+def test_an_adopted_source_is_still_named_as_adopted():
+    text = "\n".join(_smd()._adoption_section(_rx_station(),
+                                              adopted=frozenset({RX})))
+    assert "adopted:" in text
+    assert str(RX) in text
+
+
+def test_an_adopted_device_that_is_gone_says_so():
+    """Adopted and no longer on the bus is worth saying: the selection is
+    still recorded, and the component still reads it."""
+    text = "\n".join(_smd()._adoption_section(
+        StationInventory(), adopted=frozenset({RX})))
+    assert str(RX) in text
+    assert "not detected" in text.lower()
+
+
+def test_the_section_refuses_to_advertise_a_verb_that_will_refuse():
+    """The last place status and adopt could disagree.  `cmd_adopt` decides
+    this station's identity before it will act and refuses a DASI-named host
+    the roster does not list; the section that tells the operator to run it
+    has to know that too."""
+    from sigmond.station_identity import UnrosteredDasiName
+
+    mod = _smd()
+
+    def _refuse():
+        raise UnrosteredDasiName(
+            "hostname 'DASI019' matches the DASI fleet pattern but is not in "
+            "the roster")
+    mod._station_identity = _refuse
+
+    text = "\n".join(mod._adoption_section(_rx_station(),
+                                           adopted=frozenset()))
+    assert str(RX) in text                 # the device is still reported
+    assert "run `smd adopt" not in text    # ... but the verb is not advertised
+    assert "DASI019" in text               # ... and the reason is named
 
 
 def test_a_source_nothing_claims_is_shown_without_an_adopt_instruction():

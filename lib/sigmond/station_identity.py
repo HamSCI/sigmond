@@ -27,6 +27,7 @@ file is a separate, PM-side spec; this module only reads it.
 from __future__ import annotations
 
 import re
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +60,20 @@ class ManifestHostnameMismatch(Exception):
     """
 
 
+class UnreadableManifest(Exception):
+    """The manifest path exists but cannot be read.
+
+    Deliberately NOT folded into the absent case.  `smd adopt` decides this
+    station's identity BEFORE it elevates, so an unprivileged process reads
+    a manifest the PM may have written root-only; and `smd status` never
+    elevates at all.  Reading "I am not allowed to look" as "there is
+    nothing there" would drop the PM's PSWS identity and fall back to the
+    roster without a word — the silent identity loss the manifest exists to
+    prevent.  A directory in the manifest's place is the same class of fact:
+    a broken install, not an absence.
+    """
+
+
 @dataclass(frozen=True)
 class StationIdentity:
     hostname: str
@@ -67,11 +82,58 @@ class StationIdentity:
     psws_instrument: Optional[str] = None
 
 
+#: Keys in the roster that describe the FILE, not a station.  A leading
+#: underscore is not a legal DASI host name, so the two can never collide.
+_META_PREFIX = "_"
+
+#: The `[_meta]` table's own key.  A roster whose IDs are placeholders says so
+#: here, in a form a program can read.
+_META_TABLE = "_meta"
+
+#: Rosters already warned about, so a run that loads the roster on every
+#: `identify()` says this once rather than once per lookup.
+_placeholder_warned: set = set()
+
+
+def roster_is_placeholder(path: Path = DEFAULT_ROSTER) -> bool:
+    """True when this roster declares its PSWS IDs to be placeholders.
+
+    The header comment says "Nothing in this repo can tell a placeholder from
+    a real ID"; `[_meta] placeholder = true` is what makes that checkable by
+    something other than a reader's eye.  The values (S000201-S000220) sit in
+    the SAME namespace as this project's real IDs (S000171, S000123), so
+    there is no shape to test for.  A fleet build can gate on this.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return bool(tomllib.load(fh).get(_META_TABLE, {}).get("placeholder"))
+    except OSError:
+        return False
+
+
 def load_roster(path: Path = DEFAULT_ROSTER) -> Dict[str, dict]:
-    """The shipped fleet roster, keyed by upper-case host name."""
+    """The shipped fleet roster, keyed by upper-case host name.
+
+    `_meta` and any other underscore-prefixed table is metadata about the
+    file, never a station: returned as one it would become a machine named
+    `_META` with no PSWS IDs.  A roster that declares itself a placeholder is
+    announced on stderr, once per path per process — the moment anyone wires
+    `plan()`'s prefills through to real config, an unguarded placeholder ID
+    would be written to a real station.
+    """
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
-    return {k.upper(): v for k, v in data.items()}
+    meta = data.get(_META_TABLE) or {}
+    if meta.get("placeholder") and str(path) not in _placeholder_warned:
+        _placeholder_warned.add(str(path))
+        print(f"WARNING: {path} carries PLACEHOLDER PSWS IDs "
+              f"([_meta] placeholder = true). Every psws_station / "
+              f"psws_instrument in it is the right SHAPE and the wrong "
+              f"VALUE. Do not cut a fleet build from this file; replace the "
+              f"IDs with the pre-defined ones and delete the [_meta] block.",
+              file=sys.stderr)
+    return {k.upper(): v for k, v in data.items()
+            if not k.startswith(_META_PREFIX)}
 
 
 def identify(hostname: str, roster: Optional[Dict[str, dict]] = None
@@ -121,13 +183,23 @@ def read_manifest(path: Path = DEFAULT_MANIFEST) -> Dict[str, object]:
     """The station manifest, or an empty dict when there is none.
 
     A station without a PM manifest is an ordinary case — a bare install, or a
-    host with no PM — not a fault.
+    host with no PM — not a fault.  A manifest that is PRESENT and unreadable
+    is a different fact and raises `UnreadableManifest`; malformed TOML raises
+    out of `tomllib`.  See `UnreadableManifest` for why the two are split.
     """
     try:
         with open(path, "rb") as fh:
             return tomllib.load(fh)
     except (FileNotFoundError, NotADirectoryError):
         return {}
+    except (PermissionError, IsADirectoryError) as exc:
+        raise UnreadableManifest(
+            f"{path} exists but cannot be read ({type(exc).__name__}: "
+            f"{exc}). Refusing to read that as 'no manifest': this station "
+            f"may have a PSWS identity its PM recorded, and falling back to "
+            f"the roster would lose it silently. Fix the mode (0644 is "
+            f"enough — the file holds no secret) or run the verb as root."
+        ) from exc
 
 
 def identity_from_manifest(manifest: Dict[str, object],

@@ -12,8 +12,16 @@
 # only (S0002NN / I0002NN). Michael pre-defines the real PSWS Station and
 # Instrument IDs for each DASI2 machine; they are not supplied yet. Replace
 # every value in this file with the real pre-defined IDs before any fleet
-# build. Nothing in this repo can tell a placeholder from a real ID — that
-# check is on whoever cuts the fleet build.
+# build.
+#
+# The [_meta] table below is how a PROGRAM tells: `load_roster()` warns loudly
+# on it and `roster_is_placeholder()` answers it, because the values sit in the
+# same S0002NN namespace as this project's real IDs and have no distinguishing
+# shape.  Underscore-prefixed tables are never stations.  DELETE the whole
+# [_meta] block in the same commit that lands the real IDs.
+
+[_meta]
+placeholder = true
 
 [DASI001]
 psws_station = "S000201"

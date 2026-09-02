@@ -8511,17 +8511,36 @@ def cmd_reload(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _adoption_section(inv, adopted) -> list:
-    """Lines describing what is visible here and not yet adopted.
+    """Lines describing what is here: adopted, adoptable, and merely detected.
 
     Reports; never acts.  A station with hardware attached and nothing running
     should say so — silence is indistinguishable from having no hardware.
+    Spec §6 asks for all three states, and the third is not decoration: a
+    device that vanishes from `smd status` the moment it is adopted leaves no
+    record on screen that it was ever claimed, which is the same silence in a
+    later disguise.
     """
     from sigmond.adoption import (components_for as _components_for,
                                   offers as _offers)
 
+    lines: list = []
+
+    # ── adopted ───────────────────────────────────────────────────────────
+    # Every key some client has selected, whether or not it is on the bus
+    # right now.  Adopted-and-absent is a real state worth naming: the
+    # selection stays recorded and the component still reads it, so a device
+    # that has been unplugged (or a LAN radiod that has gone quiet) should
+    # not simply disappear.
+    if adopted:
+        lines += ['', 'adopted:']
+        for key in sorted(adopted, key=str):
+            here = key in inv.sources
+            lines.append(f'  {str(key):<28} adopted'
+                         + ('' if here else ' — NOT detected right now'))
+
     pending = _offers(inv, adopted)
     if not pending:
-        return []
+        return lines
 
     # Show EVERY detected-but-unadopted device — silence is the confusion this
     # section exists to end, and a KiwiSDR nobody can adopt yet is still
@@ -8533,7 +8552,18 @@ def _adoption_section(inv, adopted) -> list:
     for offer in pending:
         (claimable if _components_for(offer, inv) else unclaimed).append(offer)
 
-    lines: list = []
+    # The other half of "adopt would accept": `cmd_adopt` decides this
+    # station's identity before it will touch a component, and refuses a
+    # DASI-named host the roster does not list (or a manifest it cannot read).
+    # This was the one derived surface that never asked, so a station could
+    # print "run `smd adopt X`" for a verb that would then refuse X.
+    identity_refusal = ''
+    if claimable:
+        try:
+            _station_identity()
+        except Exception as exc:                                 # noqa: BLE001
+            identity_refusal = f'{exc}' or type(exc).__name__
+
     if claimable:
         lines += ['', 'adoptable:']
         for offer in claimable:
@@ -8543,9 +8573,13 @@ def _adoption_section(inv, adopted) -> list:
                     f'({len(offer.sources)} source(s))')
             else:
                 lines.append(f'  {offer.name:<28} detected, not adopted')
-        lines.append(
-            '  run `smd adopt <name>` to record its sources, then enable '
-            'and start what it brings')
+        if identity_refusal:
+            lines.append(f'  ⚠ `smd adopt` will refuse here until this station'
+                         f's identity can be decided: {identity_refusal}')
+        else:
+            lines.append(
+                '  run `smd adopt <name>` to record its sources, then enable '
+                'and start what it brings')
     if unclaimed:
         lines += ['', 'detected, not adoptable yet:']
         for offer in unclaimed:
@@ -8749,15 +8783,59 @@ def _adopted_sources(root=None) -> frozenset:
 
 
 def _station_identity():
-    """Who this station is, read from the hostname and the shipped roster.
+    """Who this station is: the hostname decides, the PM's manifest supplies.
 
-    Raises `UnrosteredDasiName` for a DASI-named host the roster does not
-    list — refused rather than guessed.
+    Two sources, with one rule between them.  The HOSTNAME (plus the shipped
+    roster) decides membership — `UnrosteredDasiName` is raised for a
+    DASI-named host the roster does not list, refused rather than guessed,
+    and a manifest does not rescue it: letting the PM's file add a machine to
+    the fleet would make the roster advisory, which is a policy question, not
+    this wiring.  The MANIFEST supplies the PSWS Station and Instrument IDs,
+    which are the one fact a replaced VM cannot rediscover (spec §8 step 6,
+    "Manifest READ in the VM").
+
+    Without this, `read_manifest` / `identity_from_manifest` had no caller at
+    all: a replaced VM whose PM had written /etc/sigmond/station.toml still
+    re-derived everything from the roster, and on a hostname the roster does
+    not name it came back with no PSWS identity and said nothing.
+
+    A missing manifest is the ordinary case and changes nothing.  A manifest
+    that is present and broken — unreadable, malformed, or contradicting the
+    hostname about membership — is loud.
     """
     import socket
-    from sigmond.station_identity import identify
+    from sigmond import station_identity as _si
 
-    return identify(socket.gethostname().split('.')[0])
+    hostname = socket.gethostname().split('.')[0]
+    manifest = _si.read_manifest(_si.DEFAULT_MANIFEST)
+    if not manifest:
+        return _si.identify(hostname)
+
+    # This call is what makes the promotion refusal reachable: a manifest
+    # asserting `dasi2_site` for a hostname that is not DASI-shaped would
+    # promote an ordinary station to a funded site, which is the silent
+    # promotion the hostname rule forbids.  It raises rather than returning.
+    from_manifest = _si.identity_from_manifest(manifest, hostname)
+
+    # The other half of that check — a rostered DASI name whose manifest says
+    # `dasi2_site = false` — needs the roster, which `identity_from_manifest`
+    # does not take, so the module leaves it to "whatever future caller holds
+    # both functions together".  This is that caller.  The hostname wins; the
+    # contradiction is said out loud rather than resolved in silence.
+    identity = _si.identify(hostname)
+    if identity.dasi2_site != from_manifest.dasi2_site:
+        _warn(f'{_si.DEFAULT_MANIFEST}: manifest says dasi2_site='
+              f'{bool(from_manifest.dasi2_site)}, the hostname {hostname!r} '
+              f'says {identity.dasi2_site}. Membership comes from the '
+              f'hostname, so the manifest is stale — regenerate it on the PM.')
+
+    return _si.StationIdentity(
+        hostname=identity.hostname,
+        dasi2_site=identity.dasi2_site,
+        psws_station=manifest.get('psws_station') or identity.psws_station,
+        psws_instrument=(manifest.get('psws_instrument')
+                         or identity.psws_instrument),
+    )
 
 
 def _adoption_inventory():
@@ -9027,6 +9105,28 @@ def cmd_adopt(args) -> int:
              f'Nothing was changed.')
         return 1
 
+    # What cmd_start is NAMED is the intersection: this offer's own components,
+    # minus the ones the preview just said will not start.
+    #
+    # Naming matters twice over.  cmd_start auto-enables every component named
+    # to it (`_autoenable_named_on_start`) whether or not it then starts one —
+    # so naming a component the operator was just told will NOT start leaves
+    # `enabled = true` behind in the topology, and the next bare `smd start`
+    # or `smd apply` starts it with no second adoption.  That is a persistent
+    # state change the consent prompt never disclosed, made by the same verb
+    # as the 2026-09-01 incident.  And `startable` is NOT the right list to
+    # hand over either: `_adopt_start_set` adds `requires`-closure members so
+    # the preview can DISCLOSE them (adopting a LAN radiod bounces the local
+    # one), and naming a closure member would auto-enable a component the
+    # operator never adopted.  cmd_start walks that closure itself.
+    to_start = [c for c in plan_.components if c in startable]
+    if not to_start:
+        # An empty `names` list makes cmd_start the bare `smd start` — start
+        # everything enabled on the station.  Refuse instead.
+        _err(f'adopt {match.name}: nothing this offer names can start — see '
+             f'above. Nothing was changed.')
+        return 1
+
     # A terminal we cannot ask at is a refusal, not a yes — and refusing needs
     # no privilege, so this precedes the elevation below.
     if not getattr(args, 'yes', False) and not sys.stdin.isatty():
@@ -9083,7 +9183,7 @@ def cmd_adopt(args) -> int:
             sel.save(root=root)
 
         rc = cmd_start(argparse.Namespace(
-            names=list(plan_.components),
+            names=list(to_start),
             components=None,
             topology=getattr(args, 'topology', None),
         ))
