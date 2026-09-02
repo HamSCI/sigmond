@@ -90,28 +90,17 @@ class StationIdentity:
 _META_PREFIX = "_"
 
 #: The `[_meta]` table's own key.  A roster whose IDs are placeholders says so
-#: here, in a form a program can read.
+#: here — `placeholder = true` — in a form a program can read.  The header
+#: comment above the values says the same thing to a person and nothing at all
+#: to a program, and the values sit in the SAME S0002NN namespace as this
+#: project's real PSWS IDs, so there is no shape to test for.  `load_roster()`
+#: is the one consumer; a fleet build that wants to GATE on this should read
+#: the key there rather than growing a second reader here.
 _META_TABLE = "_meta"
 
 #: Rosters already warned about, so a run that loads the roster on every
 #: `identify()` says this once rather than once per lookup.
 _placeholder_warned: set = set()
-
-
-def roster_is_placeholder(path: Path = DEFAULT_ROSTER) -> bool:
-    """True when this roster declares its PSWS IDs to be placeholders.
-
-    The header comment says "Nothing in this repo can tell a placeholder from
-    a real ID"; `[_meta] placeholder = true` is what makes that checkable by
-    something other than a reader's eye.  The values (S000201-S000220) sit in
-    the SAME namespace as this project's real IDs (S000171, S000123), so
-    there is no shape to test for.  A fleet build can gate on this.
-    """
-    try:
-        with open(path, "rb") as fh:
-            return bool(tomllib.load(fh).get(_META_TABLE, {}).get("placeholder"))
-    except OSError:
-        return False
 
 
 def load_roster(path: Path = DEFAULT_ROSTER) -> Dict[str, dict]:
@@ -153,13 +142,17 @@ def identify(hostname: str, roster: Optional[Dict[str, dict]] = None
     so the stored field could disagree with the key that was actually
     matched. Storing the stripped value keeps the two in agreement.
     """
-    if roster is None:
-        roster = load_roster()
     stripped = hostname.strip()
     match = _DASI_NAME.match(stripped)
     if match is None:
+        # An ordinary station never reads the roster: it cannot be in it, and
+        # loading it anyway would put the placeholder warning on the screen of
+        # every station the roster has nothing to say about.  Cheaper too —
+        # `smd status` reaches this on any host with adoptable hardware.
         return StationIdentity(hostname=stripped, dasi2_site=False)
 
+    if roster is None:
+        roster = load_roster()
     key = stripped.upper()
     entry = roster.get(key)
     if entry is None:

@@ -15,9 +15,8 @@
 # build.
 #
 # The [_meta] table below is how a PROGRAM tells: `load_roster()` warns loudly
-# on it and `roster_is_placeholder()` answers it, because the values sit in the
-# same S0002NN namespace as this project's real IDs and have no distinguishing
-# shape.  Underscore-prefixed tables are never stations.  DELETE the whole
+# on it, because the values sit in the same S0002NN namespace as this project's
+# real IDs and have no distinguishing shape.  Underscore-prefixed tables are never stations.  DELETE the whole
 # [_meta] block in the same commit that lands the real IDs.
 
 [_meta]

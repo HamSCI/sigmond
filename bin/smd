@@ -8574,8 +8574,9 @@ def _adoption_section(inv, adopted) -> list:
             else:
                 lines.append(f'  {offer.name:<28} detected, not adopted')
         if identity_refusal:
-            lines.append(f'  ⚠ `smd adopt` will refuse here until this station'
-                         f's identity can be decided: {identity_refusal}')
+            lines.append('  ⚠ `smd adopt` will refuse here until this '
+                         'station\'s identity can be decided: '
+                         + identity_refusal)
         else:
             lines.append(
                 '  run `smd adopt <name>` to record its sources, then enable '
