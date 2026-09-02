@@ -8559,24 +8559,37 @@ _USB_HARDWARE_DEVICES = {
 }
 
 
-def _usb_devices_for(kinds) -> set:
-    """The (vid, pid) pairs that stand for these hardware kinds."""
+def _usb_devices_for(kinds) -> dict:
+    """`{(vid, pid): hardware-kind}` for these hardware kinds.
+
+    A `None` product id in the key means "any product from this vendor".  The
+    KIND is carried, not just membership: `plan()` needs to know that
+    `usb:1dd2:2211:…` is a gpsdo and nothing else, or adopting it would start
+    every component the station could run.
+    """
     from sigmond.discovery.usb_sdr import KNOWN_SDR_DEVICES
 
-    wanted = set()
+    wanted = {}
     if 'rx888' in kinds:
         # Only the RX888 family, because that is what `_detect_local_sdr()`
         # answers True for.  Offering an Airspy we would never configure
         # would be an offer whose plan installs nothing.
-        wanted |= {vp for vp, (name, _chip) in KNOWN_SDR_DEVICES.items()
-                   if name.startswith('RX-888')}
+        for vp, (name, _chip) in KNOWN_SDR_DEVICES.items():
+            if name.startswith('RX-888'):
+                wanted[vp] = 'rx888'
     for kind in kinds:
-        wanted |= _USB_HARDWARE_DEVICES.get(kind, set())
+        for vp in _USB_HARDWARE_DEVICES.get(kind, set()):
+            wanted[vp] = kind
     return wanted
 
 
 def _local_usb_source_keys(kinds, root=None) -> tuple:
-    """Stable `usb:` SourceKeys for the locally attached hardware.
+    """`((SourceKey, hardware-kind), …)` for the locally attached hardware.
+
+    The kind travels WITH the key.  This function is the only place that
+    knows a `1dd2:` device is the GPSDO and a `04b4:00f1` is the SDR;
+    dropping that on the floor left `plan()` guessing, and its guess was
+    "every kind on the station".
 
     `sources.inventory()` deliberately projects NO usb devices — "Phase 2
     ships without USB selection", pending reliable iSerial reading across
@@ -8619,7 +8632,8 @@ def _local_usb_source_keys(kinds, root=None) -> tuple:
             pid = (dev / 'idProduct').read_text().strip().lower()
         except OSError:                 # interface dirs carry neither
             continue
-        if (vid, pid) not in wanted and (vid, None) not in wanted:
+        kind = wanted.get((vid, pid)) or wanted.get((vid, None))
+        if kind is None:
             continue
         try:
             serial = (dev / 'serial').read_text().strip()
@@ -8644,7 +8658,7 @@ def _local_usb_source_keys(kinds, root=None) -> tuple:
         if key in seen:
             continue
         seen.add(key)
-        keys.append(key)
+        keys.append((key, kind))
     return tuple(keys)
 
 
@@ -8673,13 +8687,18 @@ def _station_inventory():
     # Union, not replacement: a station can have an SDR in its hand AND
     # radiods on its LAN.  Local hardware leads — it is the more immediate
     # thing to say about a machine.
-    sources = list(_local_usb_source_keys(hardware))
+    local = _local_usb_source_keys(hardware)
+    sources = [key for key, _kind in local]
     for row in _source_inventory(observations):
         if row.key not in sources:
             sources.append(row.key)
 
+    # Discovered LAN sources carry no local hardware kind, and must not be
+    # given one: `plan()` reads a missing kind as "plan nothing", which is the
+    # safe direction.
     return StationInventory(hardware=frozenset(hardware),
-                            sources=tuple(sources))
+                            sources=tuple(sources),
+                            source_kinds=local)
 
 
 def _adopted_sources(root=None) -> frozenset:

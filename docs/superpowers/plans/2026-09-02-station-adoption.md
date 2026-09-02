@@ -570,7 +570,7 @@ class TestPlan:
     def test_an_rx888_brings_radiod_and_its_infrastructure(self):
         inv = _inv(("rx888",), [RX])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
-        assert set(p.components) >= {"ka9q-radio", "ka9q-web", "igmp-querier"}
+        assert set(p.components) == {"ka9q-radio", "ka9q-web", "igmp-querier"}
 
     def test_a_gpsdo_brings_its_monitor(self):
         inv = _inv(("gpsdo",), [GPS])
@@ -586,7 +586,7 @@ class TestPlan:
     def test_a_kit_plan_covers_every_kit_component(self):
         inv = _inv(DASI2, [RX, GPS])
         p = plan(offers(inv, frozenset())[0], inv, SITE)
-        assert set(p.components) >= {
+        assert set(p.components) == {
             "ka9q-radio", "ka9q-web", "igmp-querier",
             "gpsdo-monitor", "mag-recorder"}
 ```
@@ -1272,13 +1272,17 @@ def test_step_1_bare_install_offers_nothing():
 def test_step_3_the_attached_kit_is_not_a_dasi2_match():
     """No magnetometer, so this is not the grant kit and must not claim it."""
     inv = StationInventory(hardware=frozenset({"rx888", "gpsdo"}),
-                           sources=(RX888, MINIGPS))
+                           sources=(RX888, MINIGPS),
+                           source_kinds=((RX888, "rx888"),
+                                         (MINIGPS, "gpsdo")))
     assert recognise(inv) is None
 
 
 def test_step_3_offers_the_two_devices_separately():
     inv = StationInventory(hardware=frozenset({"rx888", "gpsdo"}),
-                           sources=(RX888, MINIGPS))
+                           sources=(RX888, MINIGPS),
+                           source_kinds=((RX888, "rx888"),
+                                         (MINIGPS, "gpsdo")))
     got = offers(inv, adopted=frozenset())
     assert {o.name for o in got} == {str(RX888), str(MINIGPS)}
     assert all(o.kind == "source" for o in got)
@@ -1286,15 +1290,17 @@ def test_step_3_offers_the_two_devices_separately():
 
 def test_adopting_the_rx888_brings_radiod_and_multicast():
     inv = StationInventory(hardware=frozenset({"rx888", "gpsdo"}),
-                           sources=(RX888,))
+                           sources=(RX888,),
+                           source_kinds=((RX888, "rx888"),))
     p = plan(offers(inv, frozenset())[0], inv, FARGO)
-    assert set(p.components) >= {"ka9q-radio", "ka9q-web", "igmp-querier"}
+    assert set(p.components) == {"ka9q-radio", "ka9q-web", "igmp-querier"}
 
 
 def test_fargo_is_asked_for_psws_identity_and_prefilled_the_rest():
     """Not a funded site, so identity is asked; the hostname supplies radiod."""
     inv = StationInventory(hardware=frozenset({"rx888", "gpsdo"}),
-                           sources=(RX888,))
+                           sources=(RX888,),
+                           source_kinds=((RX888, "rx888"),))
     p = plan(offers(inv, frozenset())[0], inv, FARGO)
     assert set(p.ask) == {"psws_station", "psws_instrument"}
     assert p.prefills["radiod_status_name"] == "fargo-1-status.local"
@@ -1302,7 +1308,9 @@ def test_fargo_is_asked_for_psws_identity_and_prefilled_the_rest():
 
 def test_after_adopting_both_nothing_remains_offered():
     inv = StationInventory(hardware=frozenset({"rx888", "gpsdo"}),
-                           sources=(RX888, MINIGPS))
+                           sources=(RX888, MINIGPS),
+                           source_kinds=((RX888, "rx888"),
+                                         (MINIGPS, "gpsdo")))
     assert offers(inv, adopted=frozenset({RX888, MINIGPS})) == []
 ```
 

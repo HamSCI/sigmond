@@ -32,9 +32,29 @@ class StationInventory:
     `hardware` holds coarse kind names ("rx888", "gpsdo", "magnetometer") as
     reported by `sigmond.hardware`.  `sources` holds the stable keys
     `sigmond.sources.inventory()` produced, which include LAN radiods.
+
+    `source_kinds` says which hardware kind each LOCAL source stands for —
+    `usb:1dd2:2211:mini01 -> "gpsdo"`.  The caller building the inventory
+    knows this at the moment it builds each key and used to throw it away;
+    without it `plan()` could only guess, and guessing meant "every kind on
+    the station", which planned radiod for a station where the operator had
+    named only the GPSDO.  A tuple of pairs rather than a dict so the whole
+    dataclass stays immutable and hashable.
     """
     hardware: FrozenSet[str] = frozenset()
     sources: Tuple[SourceKey, ...] = ()
+    source_kinds: Tuple[Tuple[SourceKey, str], ...] = ()
+
+    def kind_of(self, key: SourceKey) -> Optional[str]:
+        """The hardware kind this source stands for, or None when unknown.
+
+        None is a real answer, not a gap to fill in: a LAN radiod stands for
+        no local hardware, and an unrecognised device must plan nothing.
+        """
+        for candidate, kind in self.source_kinds:
+            if candidate == key:
+                return kind
+        return None
 
 
 @dataclass(frozen=True)
@@ -107,15 +127,30 @@ class AdoptionPlan:
 
 
 def _hardware_for(offer: Offer, inv: StationInventory) -> FrozenSet[str]:
+    """The hardware kinds adopting this offer speaks for.
+
+    A kit legitimately means every kind on the station — that is what makes it
+    one decision instead of three.  A single source means ITS OWN kind and
+    nothing else.
+
+    ⛔ It used to mean every kind on the station in BOTH cases: the loop below
+    ignored `key` and unioned `inv.hardware` for any `usb:` source.  While
+    `smd adopt` only printed, that was cosmetic.  Once it started services it
+    became the 2026-09-01 incident in miniature — adopting a Fargo miniGPS
+    would have started radiod, which nobody asked for.  An unknown source now
+    yields NO kinds: under-planning says so out loud, over-planning starts
+    services on its own.
+    """
     if offer.kind == "kit":
         return inv.hardware
-    # A single source: a local USB device implies its hardware kind; a remote
-    # radiod implies none, because the SDR is not ours.
     kinds = set()
     for key in offer.sources:
         if key.type != "usb":
+            # A remote radiod implies no local hardware — the SDR is not ours.
             continue
-        kinds |= {k for k in inv.hardware if k in _HARDWARE_COMPONENTS}
+        kind = inv.kind_of(key)
+        if kind is not None:
+            kinds.add(kind)
     return frozenset(kinds)
 
 

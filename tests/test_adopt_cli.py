@@ -44,6 +44,17 @@ MAG = SourceKey(type="usb", identifier="1ffb:2502:MAG7")
 FARGO = SourceKey(type="radiod", identifier="fargo-status.local")
 
 
+def _station(hardware, *pairs):
+    """A station whose local sources carry the hardware kind they stand for.
+
+    The kind is not decoration: `plan()` reads it to decide what adopting ONE
+    source brings.  A fixture that omits it is a station that plans nothing.
+    """
+    return StationInventory(hardware=frozenset(hardware),
+                            sources=tuple(k for k, _ in pairs),
+                            source_kinds=tuple(pairs))
+
+
 def _identity(hostname="fargo-1", **kw):
     from sigmond.station_identity import StationIdentity
     return StationIdentity(hostname=hostname, dasi2_site=False, **kw)
@@ -90,7 +101,7 @@ def _wire(mod, inv, tmp_path, identity=None, adopted=frozenset()):
 def test_adopting_an_unknown_name_fails_and_says_what_is_available(
         tmp_path, capsys):
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+    _wire(mod, _station({"rx888"}, (RX, "rx888")),
           tmp_path)
     rc = mod.cmd_adopt(_args("nope", tmp_path, dry_run=True))
     assert rc != 0
@@ -110,7 +121,7 @@ def test_an_empty_station_says_nothing_is_adoptable(tmp_path, capsys):
 
 def test_an_already_adopted_source_is_not_adoptable_again(tmp_path):
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+    _wire(mod, _station({"rx888"}, (RX, "rx888")),
           tmp_path, adopted=frozenset({RX}))
     assert mod.cmd_adopt(_args(str(RX), tmp_path, dry_run=True)) != 0
 
@@ -133,7 +144,7 @@ def test_an_unrostered_dasi_hostname_refuses_before_doing_anything(
                                          "psws_instrument": "I1"}})
 
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+    _wire(mod, _station({"rx888"}, (RX, "rx888")),
           tmp_path)
 
     def _refuse():
@@ -152,8 +163,7 @@ def test_an_unrostered_dasi_hostname_refuses_before_doing_anything(
 
 def test_dry_run_reports_the_plan_and_changes_nothing(tmp_path, capsys):
     mod = _smd()
-    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
-                                          sources=(RX,)), tmp_path)
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
     rc = mod.cmd_adopt(_args(str(RX), tmp_path, dry_run=True))
     assert rc == 0
     out = capsys.readouterr().out
@@ -167,9 +177,7 @@ def test_a_dasi2_alike_is_told_what_it_still_has_to_be_asked(
         tmp_path, capsys):
     """No roster entry means no grant identity -- ask, don't invent one."""
     mod = _smd()
-    _wire(mod, StationInventory(
-        hardware=frozenset({"rx888", "gpsdo", "magnetometer"}),
-        sources=(RX,)), tmp_path)
+    _wire(mod, _station({"rx888", "gpsdo", "magnetometer"}, (RX, "rx888")), tmp_path)
     rc = mod.cmd_adopt(_args("dasi2", tmp_path, dry_run=True))
     assert rc == 0
     out = capsys.readouterr().out
@@ -180,9 +188,7 @@ def test_a_dasi2_alike_is_told_what_it_still_has_to_be_asked(
 def test_a_rostered_dasi2_site_prefills_its_psws_identity(tmp_path, capsys):
     from sigmond.station_identity import StationIdentity
     mod = _smd()
-    _wire(mod, StationInventory(
-        hardware=frozenset({"rx888", "gpsdo", "magnetometer"}),
-        sources=(RX,)), tmp_path,
+    _wire(mod, _station({"rx888", "gpsdo", "magnetometer"}, (RX, "rx888")), tmp_path,
         identity=StationIdentity(hostname="DASI001", dasi2_site=True,
                                  psws_station="S000123",
                                  psws_instrument="I000456"))
@@ -200,8 +206,7 @@ def test_adopt_records_only_the_sources_of_the_named_offer(tmp_path):
     hardware appearing is never an instruction."""
     from sigmond.sources import ClientSources
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
-                                sources=(RX, RX2)), tmp_path)
+    _wire(mod, _station({"rx888"}, (RX, "rx888"), (RX2, "rx888")), tmp_path)
     rc = mod.cmd_adopt(_args(str(RX), tmp_path))
     assert rc == 0
 
@@ -216,7 +221,7 @@ def test_adopt_records_only_the_sources_of_the_named_offer(tmp_path):
 def test_adopting_twice_does_not_duplicate_the_selection(tmp_path):
     from sigmond.sources import ClientSources
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+    _wire(mod, _station({"rx888"}, (RX, "rx888")),
           tmp_path)
     assert mod.cmd_adopt(_args(str(RX), tmp_path)) == 0
     assert mod.cmd_adopt(_args(str(RX), tmp_path)) == 0
@@ -460,7 +465,7 @@ def test_an_adopted_source_reads_back_as_adopted(tmp_path):
     offered again on every `smd status`, forever.
     """
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+    _wire(mod, _station({"rx888"}, (RX, "rx888")),
           tmp_path)
     assert mod.cmd_adopt(_args(str(RX), tmp_path)) == 0
 
@@ -471,7 +476,7 @@ def test_an_adopted_source_reads_back_as_adopted(tmp_path):
 def test_adopt_refuses_a_source_it_already_recorded(tmp_path):
     """End to end with no stubbed reader: adopt, then adopt again."""
     mod = _smd()
-    inv = StationInventory(hardware=frozenset({"rx888"}), sources=(RX,))
+    inv = _station({"rx888"}, (RX, "rx888"))
     real_reader = mod._adopted_sources
     started = _wire(mod, inv, tmp_path)
     mod._adopted_sources = real_reader   # the real reader, on the real files
@@ -498,8 +503,7 @@ def test_adopt_enables_and_starts_what_the_offer_brings(tmp_path):
     the auto-enable, the requires closure and the radiod-first ordering --
     rather than printing a copy-paste line."""
     mod = _smd()
-    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
-                                          sources=(RX,)), tmp_path)
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
     rc = mod.cmd_adopt(_args(str(RX), tmp_path, yes=True))
     assert rc == 0
     assert ["ka9q-radio", "ka9q-web", "igmp-querier"] in started
@@ -507,8 +511,7 @@ def test_adopt_enables_and_starts_what_the_offer_brings(tmp_path):
 
 def test_the_lifecycle_lock_is_held_before_anything_starts(tmp_path):
     mod = _smd()
-    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
-                                          sources=(RX,)), tmp_path)
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
     assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
     locks = [i for i, e in enumerate(started)
              if isinstance(e, str) and e.startswith("lock:")]
@@ -521,8 +524,7 @@ def test_declining_the_confirmation_starts_nothing(tmp_path, monkeypatch,
     """The 2026-09-01 incident in one assertion: a unit nobody asked to run
     must not run."""
     mod = _smd()
-    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
-                                          sources=(RX,)), tmp_path)
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
     monkeypatch.setattr("sys.stdin", _Stdin(True))
     monkeypatch.setattr("builtins.input", lambda _p="": "n")
 
@@ -535,8 +537,7 @@ def test_declining_the_confirmation_starts_nothing(tmp_path, monkeypatch,
 
 def test_confirming_at_the_prompt_adopts(tmp_path, monkeypatch):
     mod = _smd()
-    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
-                                          sources=(RX,)), tmp_path)
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
     monkeypatch.setattr("sys.stdin", _Stdin(True))
     monkeypatch.setattr("builtins.input", lambda _p="": "y")
 
@@ -549,8 +550,7 @@ def test_an_absent_terminal_is_never_read_as_consent(tmp_path, monkeypatch,
     """A cron job or a pipe must not be able to start a station's services by
     saying nothing.  --yes is how a script consents."""
     mod = _smd()
-    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
-                                          sources=(RX,)), tmp_path)
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
     monkeypatch.setattr("sys.stdin", _Stdin(False))
 
     def _no_prompt(_p=""):
@@ -567,9 +567,7 @@ def test_an_absent_terminal_is_never_read_as_consent(tmp_path, monkeypatch,
 def test_yes_adopts_without_a_terminal(tmp_path, monkeypatch):
     """Scripted fleet provisioning: twenty DASI2 kits, no keyboard."""
     mod = _smd()
-    started = _wire(mod, StationInventory(
-        hardware=frozenset({"rx888", "gpsdo", "magnetometer"}),
-        sources=(RX,)), tmp_path)
+    started = _wire(mod, _station({"rx888", "gpsdo", "magnetometer"}, (RX, "rx888")), tmp_path)
     monkeypatch.setattr("sys.stdin", _Stdin(False))
 
     assert mod.cmd_adopt(_args("dasi2", tmp_path, yes=True)) == 0
@@ -578,7 +576,7 @@ def test_yes_adopts_without_a_terminal(tmp_path, monkeypatch):
 
 def test_a_failing_start_is_reported_not_swallowed(tmp_path):
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+    _wire(mod, _station({"rx888"}, (RX, "rx888")),
           tmp_path)
     mod.cmd_start = lambda _a: 3
     assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) != 0
@@ -593,7 +591,7 @@ def test_only_source_consuming_components_get_a_selection(tmp_path):
     alive.  Neither consumes a source, so a selection file for them would be
     a stored fact nobody reads."""
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+    _wire(mod, _station({"rx888"}, (RX, "rx888")),
           tmp_path)
     assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
 
@@ -604,9 +602,7 @@ def test_only_source_consuming_components_get_a_selection(tmp_path):
 def test_the_whole_kit_records_one_selection_per_consumer(tmp_path):
     from sigmond.sources import ClientSources
     mod = _smd()
-    _wire(mod, StationInventory(
-        hardware=frozenset({"rx888", "gpsdo", "magnetometer"}),
-        sources=(RX, MAG)), tmp_path)
+    _wire(mod, _station({"rx888", "gpsdo", "magnetometer"}, (RX, "rx888"), (MAG, "magnetometer")), tmp_path)
     assert mod.cmd_adopt(_args("dasi2", tmp_path, yes=True)) == 0
 
     written = {p.name for p in tmp_path.iterdir()}
@@ -614,3 +610,86 @@ def test_the_whole_kit_records_one_selection_per_consumer(tmp_path):
                        "mag-recorder.sources.toml"}
     # A kit is adopted as ONE thing, so every source it covers is recorded.
     assert set(ClientSources.load("ka9q-radio", root=tmp_path).selected) == {RX, MAG}
+
+
+# ---------------------------------------------------------------------------
+# Adopt what was named -- and start ONLY that
+# ---------------------------------------------------------------------------
+
+GPS = SourceKey(type="usb", identifier="1dd2:2211:mini01")
+
+
+def test_adopting_the_gpsdo_does_not_start_radiod(tmp_path):
+    """The Fargo box has an RX888 and a miniGPS.  Adopting the GPSDO alone
+    must start gpsdo-monitor and NOTHING else.
+
+    Until this fix, `_hardware_for` unioned every hardware kind on the station
+    for any usb source, so this adoption would have started radiod -- a unit
+    nobody named, which is precisely the 2026-09-01 failure.
+    """
+    mod = _smd()
+    started = _wire(mod, _station({"rx888", "gpsdo"},
+                                  (RX, "rx888"), (GPS, "gpsdo")), tmp_path)
+    assert mod.cmd_adopt(_args(str(GPS), tmp_path, yes=True)) == 0
+
+    assert started == [f"lock:adopt {GPS}", ["gpsdo-monitor"]]
+    assert "ka9q-radio" not in str(started)
+    assert {p.name for p in tmp_path.iterdir()} == {"gpsdo-monitor.sources.toml"}
+
+
+def test_the_synthesised_kinds_survive_into_the_plan(tmp_path, monkeypatch):
+    """End to end from the USB bus: a real `_station_inventory()` over a fake
+    sysfs tree, then adopt the GPSDO.  The kind has to travel all the way from
+    the vid:pid table into `plan()`, or the box starts what it was not asked
+    to."""
+    mod = _smd()
+    _no_discovery(monkeypatch, tmp_path)
+    monkeypatch.setattr(mod, "_USB_SYSFS_ROOT",
+                        _fake_sysfs(tmp_path, [
+                            ("1-3", "1dd2", "2211", "mini01"),
+                            ("1-4", "04b4", "00f1", "0009061C028B1629"),
+                        ]))
+    monkeypatch.setattr(mod, "_detect_local_sdr", lambda: True)
+    monkeypatch.setattr(mod, "_detect_gpsdo", lambda: True)
+    monkeypatch.setattr(mod, "_detect_magnetometer", lambda: False)
+
+    inv = mod._station_inventory()
+    assert dict(inv.source_kinds) == {
+        SourceKey(type="usb", identifier="1dd2:2211:mini01"): "gpsdo",
+        SourceKey(type="usb", identifier="04b4:00f1:0009061C028B1629"): "rx888",
+    }
+
+    from sigmond.adoption import offers, plan
+    gps = next(o for o in offers(inv, frozenset()) if o.name == str(GPS))
+    assert set(plan(gps, inv, _identity()).components) == {"gpsdo-monitor"}
+
+
+def test_a_discovered_lan_radiod_carries_no_local_kind(tmp_path, monkeypatch):
+    """A radiod on someone else's machine stands for no hardware here, and
+    must not inherit a kind from the station it was found from."""
+    import json
+    import sigmond.discovery as discovery
+
+    cache = tmp_path / "environment-cache.json"
+    cache.write_text(json.dumps({
+        "probed_at": 0.0,
+        "observations": [{
+            "source": "mdns", "kind": "radiod", "id": "r1",
+            "endpoint": "fargo-status.local:5006", "fields": {},
+            "observed_at": 1.0, "ok": True, "error": "",
+        }],
+        "deltas": [],
+    }))
+    mod = _smd()
+    monkeypatch.setattr(discovery, "cache_path", lambda: cache)
+    monkeypatch.setattr(mod, "_USB_SYSFS_ROOT",
+                        _fake_sysfs(tmp_path,
+                                    [("1-4", "04b4", "00f1", "0009072C56")]))
+    monkeypatch.setattr(mod, "_detect_local_sdr", lambda: True)
+    monkeypatch.setattr(mod, "_detect_gpsdo", lambda: False)
+    monkeypatch.setattr(mod, "_detect_magnetometer", lambda: False)
+
+    inv = mod._station_inventory()
+    assert inv.kind_of(FARGO) is None
+    assert inv.kind_of(
+        SourceKey(type="usb", identifier="04b4:00f1:0009072C56")) == "rx888"

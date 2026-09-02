@@ -11,8 +11,13 @@ from sigmond.adoption import DASI2_KIT, Offer, StationInventory, offers, recogni
 from sigmond.sources import SourceKey
 
 
-def _inv(hardware=(), sources=()):
-    return StationInventory(hardware=frozenset(hardware), sources=tuple(sources))
+def _inv(hardware=(), sources=(), kinds=()):
+    """`kinds` is the (key, hardware-kind) mapping a real station carries for
+    its LOCAL sources.  Omitting it means "this source stands for no local
+    hardware" -- which is what a LAN radiod is, and what plans nothing."""
+    return StationInventory(hardware=frozenset(hardware),
+                            sources=tuple(sources),
+                            source_kinds=tuple(kinds))
 
 
 DASI2 = ("rx888", "gpsdo", "magnetometer")
@@ -91,7 +96,7 @@ class TestPlan:
 
     def test_an_alike_kit_gets_the_same_components_without_identity(self):
         """Same hardware, same configuration — simply not a funded site."""
-        inv = _inv(DASI2, [RX, GPS])
+        inv = _inv(DASI2, [RX, GPS], [(RX, "rx888"), (GPS, "gpsdo")])
         site_plan = plan(offers(inv, frozenset())[0], inv, SITE)
         alike_plan = plan(offers(inv, frozenset())[0], inv, ALIKE)
         assert alike_plan.components == site_plan.components
@@ -99,29 +104,52 @@ class TestPlan:
         assert "psws_station" in alike_plan.ask
 
     def test_the_radiod_status_name_comes_from_the_hostname(self):
-        inv = _inv(("rx888",), [RX])
+        inv = _inv(("rx888",), [RX], [(RX, "rx888")])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
         assert p.prefills["radiod_status_name"] == "fargo-1-status.local"
 
     def test_an_rx888_brings_radiod_and_its_infrastructure(self):
-        inv = _inv(("rx888",), [RX])
+        """EXACTLY those three.  A superset assertion here is what let
+        `_hardware_for` union every kind on the station unnoticed."""
+        inv = _inv(("rx888",), [RX], [(RX, "rx888")])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
-        assert set(p.components) >= {"ka9q-radio", "ka9q-web", "igmp-querier"}
+        assert set(p.components) == {"ka9q-radio", "ka9q-web", "igmp-querier"}
 
     def test_a_gpsdo_brings_its_monitor(self):
-        inv = _inv(("gpsdo",), [GPS])
+        inv = _inv(("gpsdo",), [GPS], [(GPS, "gpsdo")])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
-        assert "gpsdo-monitor" in p.components
+        assert set(p.components) == {"gpsdo-monitor"}
+
+    def test_adopting_one_device_does_not_plan_the_others(self):
+        """The defect this guards: a Fargo box with an RX888 AND a miniGPS.
+        Adopting the GPSDO alone must not plan radiod -- a service nobody
+        named must never start (2026-09-01)."""
+        inv = _inv(("rx888", "gpsdo"), [RX, GPS],
+                   [(RX, "rx888"), (GPS, "gpsdo")])
+        offer = next(o for o in offers(inv, frozenset()) if o.name == str(GPS))
+        p = plan(offer, inv, ALIKE)
+        assert set(p.components) == {"gpsdo-monitor"}
+        assert "ka9q-radio" not in p.components
+
+    def test_an_unrecognised_source_plans_nothing_rather_than_everything(self):
+        """No mapping means no components.  Under-planning says so out loud;
+        over-planning starts services on its own."""
+        stray = SourceKey(type="usb", identifier="dead:beef")
+        inv = _inv(("rx888", "gpsdo"), [stray])
+        p = plan(offers(inv, frozenset())[0], inv, ALIKE)
+        assert p.components == ()
 
     def test_a_remote_radiod_brings_no_local_radiod(self):
         """The no-hardware station consumes someone else's radiod."""
         inv = _inv((), [REMOTE])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
-        assert "ka9q-radio" not in p.components
+        assert p.components == ()
 
     def test_a_kit_plan_covers_every_kit_component(self):
-        inv = _inv(DASI2, [RX, GPS])
+        """The kit branch is the one place breadth is correct: adopting the
+        kit IS the decision to run all three devices."""
+        inv = _inv(DASI2, [RX, GPS], [(RX, "rx888"), (GPS, "gpsdo")])
         p = plan(offers(inv, frozenset())[0], inv, SITE)
-        assert set(p.components) >= {
+        assert set(p.components) == {
             "ka9q-radio", "ka9q-web", "igmp-querier",
             "gpsdo-monitor", "mag-recorder"}
