@@ -269,3 +269,103 @@ def test_plan_renders_site_profile_before_manifest():
     assert render is not None, 'no site-profile render step in the plan'
     assert manifest is not None and render < manifest
     assert last_config is not None and last_config < render
+
+
+def _dasi2_with_dashboard():
+    # The live dasi2 profile as of 2026-08-08, when gmag-webui joined `clients`.
+    return Profile(
+        name='dasi2',
+        clients=('hf-timestd', 'wspr-recorder', 'psk-recorder', 'mag-recorder',
+                 'gmag-webui', 'meteor-scatter'),
+        local_radiod_infra=('igmp-querier', 'gpsdo-monitor', 'ka9q-web'),
+        optional=(),
+    )
+
+
+def test_dormant_softens_the_checkpoint_on_the_radiod_bound_track_TOO():
+    # ⛔ AC0G-ND, 2026-09-02.  `dormant` softened the checkpoint only on the
+    # Stage-3b independent track, so mag-recorder went dormant while
+    # gmag-webui — hardware-gated on the SAME magnetometer, but carried on the
+    # Stage-3a track — kept a HARD checkpoint and aborted the whole bring-up
+    # on a Fargo station that will not own a magnetometer for weeks.  Every
+    # greenfield `smd bringup dasi2` since 2026-08-08 died here.
+    #
+    # cmd_bringup already put gmag-webui in `dormant`; the plan builder simply
+    # ignored it, contradicting build_plan's own docstring.
+    p = build_plan(_dasi2_with_dashboard(), local_radiod=True,
+                   dormant=frozenset({'mag-recorder', 'gmag-webui'}))
+    ckpts = {s.label: s.hard for s in p.steps if s.kind == 'checkpoint'}
+    assert ckpts['checkpoint: gmag-webui configured'] is False, \
+        'a dormant Stage-3a client must not hard-abort the bring-up'
+    assert ckpts['checkpoint: mag-recorder configured'] is False
+    # Clients whose hardware IS present keep their hard checkpoint.
+    assert ckpts['checkpoint: wspr-recorder configured'] is True
+    assert ckpts['checkpoint: meteor-scatter configured'] is True
+
+
+def test_a_client_with_no_config_contract_is_never_configured():
+    # Softening the checkpoint is not enough on its own: with an RM3100
+    # attached gmag-webui leaves `dormant`, the checkpoint hardens again, and
+    # `smd config init gmag-webui` still exits 1 — the component is a Deno
+    # single-page app with no config surface at all (catalog: contract = "",
+    # "ka9q-web precedent"), so the `configured:` probe looks for an
+    # /etc/gmag-webui that no working station has.  Verified against live B4,
+    # which runs gmag-webui with neither that directory nor a deploy.toml.
+    #
+    # So a contract-less component gets NO config interview and NO configured
+    # checkpoint — the same treatment ka9q-web already gets by sitting in
+    # local_radiod_infra.
+    p = build_plan(_dasi2_with_dashboard(), local_radiod=True,
+                   no_config=frozenset({'gmag-webui'}))
+    assert 'configure gmag-webui' not in _labels(p, 'config')
+    assert 'checkpoint: gmag-webui configured' not in _labels(p, 'checkpoint')
+    # It is still installed, enabled and started — only the interview goes.
+    assert 'install gmag-webui' in _labels(p, 'install')
+    assert 'enable gmag-webui' in _labels(p, 'enable')
+    # Contract-conformant clients are untouched.
+    assert 'configure wspr-recorder' in _labels(p, 'config')
+    assert 'checkpoint: wspr-recorder configured' in _labels(p, 'checkpoint')
+
+
+def test_no_config_applies_to_the_independent_track_as_well():
+    # The two client loops must not disagree again — that disagreement IS the
+    # defect above.  A contract-less independent client gets the same
+    # treatment.
+    prof = Profile(name='p', clients=('mag-recorder',),
+                   local_radiod_infra=(), optional=())
+    p = build_plan(prof, local_radiod=True, no_config=frozenset({'mag-recorder'}))
+    assert 'configure mag-recorder' not in _labels(p, 'config')
+    assert 'checkpoint: mag-recorder configured' not in _labels(p, 'checkpoint')
+    assert 'install mag-recorder' in _labels(p, 'install')
+
+
+def test_shipped_dasi2_profile_excludes_its_contract_less_client():
+    # Guards the WIRING, not just the builder: cmd_bringup derives `no_config`
+    # from the catalog, and this asserts the shipped catalog + shipped profile
+    # actually produce it.  The pure tests above would pass even if the caller
+    # never computed the set — which is precisely how the live defect survived
+    # a green suite.
+    from sigmond.catalog import load_catalog, load_profiles
+    catalog = load_catalog()
+    prof = load_profiles()['dasi2']
+
+    no_config = {
+        comp for comp in tuple(prof.clients) + tuple(prof.local_radiod_infra)
+        if (entry := catalog.get(comp)) is not None
+        and not (getattr(entry, 'contract', '') or '')
+    }
+
+    # gmag-webui is the component that aborted AC0G-ND's bring-up.
+    assert 'gmag-webui' in prof.clients, \
+        'profile changed — re-check which clients have no config contract'
+    assert 'gmag-webui' in no_config
+    # Contract-conformant clients must stay OUT of the set, or this "fix"
+    # would quietly stop configuring the recorders.
+    for conformant in ('hf-timestd', 'wspr-recorder', 'psk-recorder',
+                       'mag-recorder', 'meteor-scatter'):
+        assert conformant not in no_config, \
+            f'{conformant} has a config contract and must still be configured'
+
+    p = build_plan(prof, local_radiod=True, no_config=frozenset(no_config))
+    assert 'configure gmag-webui' not in _labels(p, 'config')
+    assert 'configure wspr-recorder' in _labels(p, 'config')

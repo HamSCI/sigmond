@@ -76,7 +76,7 @@ def build_plan(profile, *, local_radiod: bool,
                remote_status_dns: Optional[str] = None,
                smd: str = 'smd', with_optional: bool = False,
                non_interactive: bool = False, skip=frozenset(),
-               dormant=frozenset(),
+               dormant=frozenset(), no_config=frozenset(),
                reporter: Optional[str] = None) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
@@ -91,6 +91,14 @@ def build_plan(profile, *, local_radiod: bool,
     again), but their "configured" checkpoint is SOFT, so a config step that
     can't fully complete without the device doesn't abort the whole bring-up
     (docs/install-redesign.md §3).  Distinct from ``skip`` (excluded entirely).
+
+    ``no_config`` names components with NO config contract — a Deno app or a
+    static server, not a contract-conformant client.  They install, enable and
+    start like anything else, but get no config interview and no ``configured:``
+    checkpoint, because neither can succeed: there is nothing to interview and
+    no config for the probe to find.  ``ka9q-web`` has always had this
+    treatment implicitly, by sitting in ``local_radiod_infra`` rather than in
+    ``clients``; ``gmag-webui`` sits in ``clients`` and needs it named.
     """
     steps: list = []
 
@@ -188,9 +196,11 @@ def build_plan(profile, *, local_radiod: bool,
     # --- Stage 2: hf-timestd (timing authority; radiod-bound) ---
     if _TIMING_AUTHORITY in profile.clients and _TIMING_AUTHORITY not in skip:
         install(STAGE2, _TIMING_AUTHORITY)
-        configure(STAGE2, _TIMING_AUTHORITY)
-        checkpoint(STAGE2, 'hf-timestd configured',
-                   check=f'configured:{_TIMING_AUTHORITY}', hard=True)
+        if _TIMING_AUTHORITY not in no_config:
+            configure(STAGE2, _TIMING_AUTHORITY)
+            checkpoint(STAGE2, 'hf-timestd configured',
+                       check=f'configured:{_TIMING_AUTHORITY}',
+                       hard=_TIMING_AUTHORITY not in dormant)
 
     # --- Stage 3a: radiod-bound spot clients ---
     for client in profile.clients:
@@ -198,9 +208,17 @@ def build_plan(profile, *, local_radiod: bool,
                 or client in skip):
             continue
         install(STAGE3A, client)
-        configure(STAGE3A, client)
-        checkpoint(STAGE3A, f'{client} configured',
-                   check=f'configured:{client}', hard=True)
+        # ⛔ Both of these guards were missing here while the Stage-3b loop
+        # below carried them, and the two loops disagreeing IS the defect:
+        # gmag-webui rides this track, so a Fargo station with no
+        # magnetometer hard-aborted its whole bring-up on a dashboard it was
+        # never going to use (AC0G-ND, 2026-09-02).  cmd_bringup had already
+        # put it in `dormant`; this loop threw that away.
+        if client not in no_config:
+            configure(STAGE3A, client)
+            checkpoint(STAGE3A, f'{client} configured',
+                       check=f'configured:{client}',
+                       hard=client not in dormant)
         # Create the per-reporter instance from the base config (status + bands
         # the config step just wrote).  `instance add` only scaffolds the files;
         # Stage 4 enables/starts it (staggered).  Without a reporter id the
@@ -231,13 +249,15 @@ def build_plan(profile, *, local_radiod: bool,
     for client in profile.clients:
         if client in _INDEPENDENT and client not in skip:
             install(STAGE3B, client)
-            configure(STAGE3B, client)
-            # Soft checkpoint for a dormant (hardware-absent) client: its config
-            # step may not fully complete without the device, and that must not
-            # abort the bring-up — it lights up when the hardware is attached.
-            checkpoint(STAGE3B, f'{client} configured',
-                       check=f'configured:{client}',
-                       hard=client not in dormant)
+            if client not in no_config:
+                configure(STAGE3B, client)
+                # Soft checkpoint for a dormant (hardware-absent) client: its
+                # config step may not fully complete without the device, and
+                # that must not abort the bring-up — it lights up when the
+                # hardware is attached.
+                checkpoint(STAGE3B, f'{client} configured',
+                           check=f'configured:{client}',
+                           hard=client not in dormant)
 
     # Provision the shared hs-uploader watermark dir.  Recorder units list
     # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it

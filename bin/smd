@@ -5453,7 +5453,7 @@ def cmd_bringup(args) -> int:
     checkpoints.  Pure plan-building lives in sigmond.bringup; this is the
     executor.  Remote-radiod hosts skip the radiod stack and the wisdom wait.
     """
-    from sigmond.catalog import load_profiles
+    from sigmond.catalog import load_profiles, load_catalog
     from sigmond.bringup import build_plan, WISDOM_FILE
 
     # Profile resolution: positional arg wins, then the back-compat --profile
@@ -5544,6 +5544,32 @@ def cmd_bringup(args) -> int:
               'frequency accuracy is degraded until a GPSDO is attached.')
         dormant.add('gpsdo-monitor')
 
+    # Components with NO config contract get no config interview and no
+    # `configured:` checkpoint.  Neither can succeed: there is nothing to
+    # interview, and the probe looks for a config the component never writes.
+    #
+    # ⛔ gmag-webui is the live case (catalog: contract = "", a Deno
+    # single-page app, "ka9q-web precedent").  Its probe wants /etc/gmag-webui,
+    # which no working station has — B4 runs gmag-webui with neither that
+    # directory nor a deploy.toml.  As a HARD checkpoint on the Stage-3a track
+    # that aborted EVERY greenfield `smd bringup dasi2` from 2026-08-08, when
+    # gmag-webui joined the profile's clients, until AC0G-ND hit it on
+    # 2026-09-02.  ka9q-web escaped only by sitting in local_radiod_infra.
+    no_config: set = set()
+    try:
+        _catalog_for_contracts = load_catalog()
+    except Exception as _exc:                                    # noqa: BLE001
+        # Do NOT fall back silently: an empty set restores the hard checkpoint
+        # that aborts the run, and the operator would see only the abort.
+        _catalog_for_contracts = {}
+        _warn(f'could not read the catalog to check config contracts '
+              f'({type(_exc).__name__}) — every component keeps its config '
+              f'interview, so a contract-less one may abort the bring-up')
+    for _comp in tuple(prof.clients) + tuple(prof.local_radiod_infra):
+        _entry = _catalog_for_contracts.get(_comp)
+        if _entry is not None and not (getattr(_entry, 'contract', '') or ''):
+            no_config.add(_comp)
+
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
 
     # --- Station identity (source it ONCE; route it to every client) ---------
@@ -5618,6 +5644,7 @@ def cmd_bringup(args) -> int:
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
                       non_interactive=getattr(args, 'non_interactive', False),
                       skip=frozenset(skip), dormant=frozenset(dormant),
+                      no_config=frozenset(no_config),
                       reporter=reporter or None)
 
     _heading(f'bringup: {prof.name}  ({"LOCAL" if local else "REMOTE"} radiod)')
