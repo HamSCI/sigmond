@@ -15,7 +15,14 @@ from sigmond.sources import KNOWN_CLIENTS, SourceKey
 def _inv(hardware=(), sources=(), kinds=()):
     """`kinds` is the (key, hardware-kind) mapping a real station carries for
     its LOCAL sources.  Omitting it means "this source stands for no local
-    hardware" -- which is what a LAN radiod is, and what plans nothing."""
+    hardware" -- which is what a LAN radiod is, and what plans nothing.
+
+    ⚠ So omitting it on a KIT fixture silently degrades the test: `offers()`
+    returns per-source offers instead of one kit, and a `plan()` built from
+    one of them has EMPTY components.  The test still passes -- on whatever
+    assertions never touched the kit.  It is the same safe default that makes
+    an unknown source kind plan nothing, and it reads as a passing test
+    either way, so state the kinds and assert `offer.kind == "kit"`."""
     return StationInventory(hardware=frozenset(hardware),
                             sources=tuple(sources),
                             source_kinds=tuple(kinds))
@@ -101,9 +108,20 @@ ALIKE = StationIdentity(hostname="fargo-1", dasi2_site=False)
 class TestPlan:
 
     def test_a_rostered_kit_asks_for_nothing(self):
-        """Fleet provisioning is meant to be zero-input."""
-        inv = _inv(DASI2, [RX, GPS])
-        p = plan(offers(inv, frozenset())[0], inv, SITE)
+        """Fleet provisioning is meant to be zero-input.
+
+        The fixture used to omit `kinds`, so `offers()` returned two SOURCE
+        offers rather than one kit and `[0]` planned no components at all --
+        the test passed on its prefill assertions while testing nothing its
+        name describes.  The kit assertions below are what make the name
+        true.
+        """
+        inv = _inv(DASI2, [RX, GPS], KITKINDS)
+        offer = offers(inv, frozenset())[0]
+        assert offer.kind == "kit"
+        assert offer.sources == (RX, GPS)
+        p = plan(offer, inv, SITE)
+        assert "mag-recorder" in p.components     # the whole kit, one decision
         assert p.ask == ()
         assert p.prefills["psws_station"] == "S000207"
         assert p.prefills["psws_instrument"] == "I000207"

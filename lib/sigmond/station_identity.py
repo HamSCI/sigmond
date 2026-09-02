@@ -36,7 +36,10 @@ from typing import Dict, Optional
 #: Anchored: `mydasi001x` is not a fleet machine.
 _DASI_NAME = re.compile(r"^DASI(\d{3})$", re.IGNORECASE)
 
-DEFAULT_ROSTER = Path(__file__).resolve().parents[2] / "config" / "dasi2-roster.toml"
+#: Shipped data lives in `etc/` in this repo (etc/catalog.toml,
+#: etc/templates/, etc/*.example.toml) — a lone top-level sibling is what
+#: a future packaging step forgets to ship.
+DEFAULT_ROSTER = Path(__file__).resolve().parents[2] / "etc" / "dasi2-roster.toml"
 
 
 class UnrosteredDasiName(Exception):

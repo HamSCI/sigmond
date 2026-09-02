@@ -79,20 +79,13 @@ def test_missing_sdr_installs_dormant_instead_of_aborting(capsys):
     assert "adopt" in out.lower()
 
 
-def test_the_consequence_is_still_stated_loudly():
-    src = _smd_source()
-    i = src.index("no RX888/SDR on the USB bus")
-    window = src[i - 200:i + 900]
-    assert "NOTHING decodes" in window
-    assert "_warn(" in window, "the consequence must still be warned about"
-
-
-def test_it_says_the_station_can_be_completed_later():
-    src = _smd_source()
-    i = src.index("no RX888/SDR on the USB bus")
-    window = src[i:i + 900]
-    assert "adopt" in window.lower(), (
-        "the operator should be told how to finish once hardware arrives")
+# The two fixed-window source scans that used to sit here are gone.  They
+# read bin/smd as text around a literal string and asserted `_warn(` and
+# "adopt" fell within N characters of it -- which passes against an
+# implementation that keeps the hard abort and merely also warns, and fails
+# on any unrelated edit that moves a line.  The behavioural test above drives
+# `cmd_bringup` with no SDR attached and asserts on what it PRINTS; that is
+# the guard.
 
 
 def test_smd_still_parses():

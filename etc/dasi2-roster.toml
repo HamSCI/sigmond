@@ -1,4 +1,4 @@
-# config/dasi2-roster.toml
+# etc/dasi2-roster.toml
 #
 # The DASI2 fleet.  A host whose name matches DASI\d{3} is a funded site if and
 # only if it appears here — an unrostered DASI name is REFUSED rather than

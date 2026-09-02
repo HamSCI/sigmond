@@ -29,7 +29,7 @@
 |---|---|
 | `lib/sigmond/adoption.py` | Pure decision layer: `StationInventory`, `recognise`, `offers`, `plan`. No I/O. |
 | `lib/sigmond/station_identity.py` | Hostname → membership → identity, against the shipped roster. Pure apart from reading the roster file. |
-| `config/dasi2-roster.toml` | The twenty DASI2 sites and their PSWS IDs. Versioned, offline-readable. |
+| `etc/dasi2-roster.toml` | The twenty DASI2 sites and their PSWS IDs. Versioned, offline-readable. |
 | `bin/smd` (≈5419, ≈8507) | Lift the rx888 abort; add the `status` adoptable section and the `adopt` verb. |
 | `tests/test_adoption.py`, `tests/test_station_identity.py`, `tests/test_adopt_cli.py` | |
 
@@ -61,14 +61,30 @@ from sigmond.adoption import DASI2_KIT, Offer, StationInventory, offers, recogni
 from sigmond.sources import SourceKey
 
 
-def _inv(hardware=(), sources=()):
-    return StationInventory(hardware=frozenset(hardware), sources=tuple(sources))
-
-
 DASI2 = ("rx888", "gpsdo", "magnetometer")
 RX = SourceKey(type="usb", identifier="04b4:00f1:0009061C028B1629")
 GPS = SourceKey(type="usb", identifier="1dd2:2211:mini01")
 REMOTE = SourceKey(type="radiod", identifier="bee3-status.local")
+
+
+def _inv(hardware=(), sources=(), kinds=()):
+    """`kinds` is the (key, hardware-kind) mapping a real station carries for
+    its LOCAL sources.  Omitting it means "this source stands for no local
+    hardware" -- which is what a LAN radiod is, and what plans nothing.
+
+    ⚠ Omitting it on a KIT fixture silently degrades the test: `offers()`
+    returns per-source offers instead of one kit, and a `plan()` built from
+    one of them has EMPTY components.  The test still passes, on assertions
+    that never touched the kit.  Same safe default that makes an unknown
+    source kind plan nothing.  (`source_kinds` is added by task 5 below; the
+    fixture carries it from the start so the task-3 tests here run verbatim.)
+    """
+    return StationInventory(hardware=frozenset(hardware), sources=tuple(sources),
+                            source_kinds=tuple(kinds))
+
+
+#: What each local key stands for -- a real station always knows this.
+KITKINDS = ((RX, "rx888"), (GPS, "gpsdo"))
 
 
 class TestRecognise:
@@ -94,7 +110,7 @@ class TestRecognise:
 class TestOffers:
 
     def test_a_matching_kit_is_offered_as_one_thing(self):
-        got = offers(_inv(DASI2, [RX, GPS]), adopted=frozenset())
+        got = offers(_inv(DASI2, [RX, GPS], KITKINDS), adopted=frozenset())
         assert [o.name for o in got] == ["dasi2"]
         assert got[0].kind == "kit"
 
@@ -162,9 +178,28 @@ class StationInventory:
     `hardware` holds coarse kind names ("rx888", "gpsdo", "magnetometer") as
     reported by `sigmond.hardware`.  `sources` holds the stable keys
     `sigmond.sources.inventory()` produced, which include LAN radiods.
+
+    `source_kinds` says which hardware kind each LOCAL source stands for —
+    `usb:1dd2:2211:mini01 -> "gpsdo"`.  Task 5 is where it earns its keep
+    (adopting one device must not plan the others), but it is declared here
+    because the task-3 fixtures need it: a kit fixture without it is not a
+    kit, and the test that thinks it exercises one quietly exercises an empty
+    plan instead.
     """
     hardware: FrozenSet[str] = frozenset()
     sources: Tuple[SourceKey, ...] = ()
+    source_kinds: Tuple[Tuple[SourceKey, str], ...] = ()
+
+    def kind_of(self, key: SourceKey) -> Optional[str]:
+        """The hardware kind this source stands for, or None when unknown.
+
+        None is a real answer: a LAN radiod stands for no local hardware, and
+        an unrecognised device must plan nothing.
+        """
+        for candidate, kind in self.source_kinds:
+            if candidate == key:
+                return kind
+        return None
 
 
 @dataclass(frozen=True)
@@ -225,7 +260,7 @@ git commit -m "adoption: what this station could adopt, as pure functions"
 ### Task 2: Station identity from the hostname
 
 **Files:**
-- Create: `lib/sigmond/station_identity.py`, `config/dasi2-roster.toml`
+- Create: `lib/sigmond/station_identity.py`, `etc/dasi2-roster.toml`
 - Test: `tests/test_station_identity.py`
 
 **Interfaces:**
@@ -325,7 +360,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'sigmond.station_identi
 Twenty entries. The PSWS IDs below are PLACEHOLDER values in the shape Michael will supply; the file is the artifact he edits. Write all twenty so the shape is fixed and nothing has to guess later.
 
 ```toml
-# config/dasi2-roster.toml
+# etc/dasi2-roster.toml
 #
 # The DASI2 fleet.  A host whose name matches DASI\d{3} is a funded site if and
 # only if it appears here — an unrostered DASI name is REFUSED rather than
@@ -450,7 +485,7 @@ from typing import Dict, Optional
 #: Anchored: `mydasi001x` is not a fleet machine.
 _DASI_NAME = re.compile(r"^DASI(\d{3})$", re.IGNORECASE)
 
-DEFAULT_ROSTER = Path(__file__).resolve().parents[2] / "config" / "dasi2-roster.toml"
+DEFAULT_ROSTER = Path(__file__).resolve().parents[2] / "etc" / "dasi2-roster.toml"
 
 
 class UnrosteredDasiName(Exception):
@@ -515,7 +550,7 @@ Expected: PASS, 8 passed
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lib/sigmond/station_identity.py config/dasi2-roster.toml tests/test_station_identity.py
+git add lib/sigmond/station_identity.py etc/dasi2-roster.toml tests/test_station_identity.py
 git commit -m "identity: the hostname says which station this is, and the roster says whether it is ours"
 ```
 
@@ -547,7 +582,7 @@ class TestPlan:
 
     def test_a_rostered_kit_asks_for_nothing(self):
         """Fleet provisioning is meant to be zero-input."""
-        inv = _inv(DASI2, [RX, GPS])
+        inv = _inv(DASI2, [RX, GPS], KITKINDS)
         p = plan(offers(inv, frozenset())[0], inv, SITE)
         assert p.ask == ()
         assert p.prefills["psws_station"] == "S000207"
@@ -555,7 +590,7 @@ class TestPlan:
 
     def test_an_alike_kit_gets_the_same_components_without_identity(self):
         """Same hardware, same configuration — simply not a funded site."""
-        inv = _inv(DASI2, [RX, GPS])
+        inv = _inv(DASI2, [RX, GPS], KITKINDS)
         site_plan = plan(offers(inv, frozenset())[0], inv, SITE)
         alike_plan = plan(offers(inv, frozenset())[0], inv, ALIKE)
         assert alike_plan.components == site_plan.components
@@ -563,17 +598,17 @@ class TestPlan:
         assert "psws_station" in alike_plan.ask
 
     def test_the_radiod_status_name_comes_from_the_hostname(self):
-        inv = _inv(("rx888",), [RX])
+        inv = _inv(("rx888",), [RX], [(RX, "rx888")])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
         assert p.prefills["radiod_status_name"] == "fargo-1-status.local"
 
     def test_an_rx888_brings_radiod_and_its_infrastructure(self):
-        inv = _inv(("rx888",), [RX])
+        inv = _inv(("rx888",), [RX], [(RX, "rx888")])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
         assert set(p.components) == {"ka9q-radio", "ka9q-web", "igmp-querier"}
 
     def test_a_gpsdo_brings_its_monitor(self):
-        inv = _inv(("gpsdo",), [GPS])
+        inv = _inv(("gpsdo",), [GPS], [(GPS, "gpsdo")])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
         assert "gpsdo-monitor" in p.components
 
@@ -584,7 +619,7 @@ class TestPlan:
         assert "ka9q-radio" not in p.components
 
     def test_a_kit_plan_covers_every_kit_component(self):
-        inv = _inv(DASI2, [RX, GPS])
+        inv = _inv(DASI2, [RX, GPS], KITKINDS)
         p = plan(offers(inv, frozenset())[0], inv, SITE)
         assert set(p.components) == {
             "ka9q-radio", "ka9q-web", "igmp-querier",
@@ -1336,4 +1371,4 @@ git commit -m "tests: predict what the Fargo box will answer, before the trip"
 - A DASI-named host absent from the roster is refused, naming both remedies.
 - The Fargo dry run passes, so the box's behaviour is predicted rather than discovered.
 - ⛔ No RAC registrar selection, ssh provisioning, or manifest push/pull — those are the PM spec.
-- ⚠ `config/dasi2-roster.toml` ships PLACEHOLDER PSWS IDs in the correct shape. The tests assert it is WELL-FORMED, not that it is CORRECT — no test can know the real values. Michael's figures must replace them before any fleet build, or twenty stations provision with wrong identities and nothing catches it.
+- ⚠ `etc/dasi2-roster.toml` ships PLACEHOLDER PSWS IDs in the correct shape. The tests assert it is WELL-FORMED, not that it is CORRECT — no test can know the real values. Michael's figures must replace them before any fleet build, or twenty stations provision with wrong identities and nothing catches it.

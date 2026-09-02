@@ -22,6 +22,10 @@ from .station_identity import StationIdentity
 #: The hardware that defines a DASI2 kit.  Membership in the funded programme
 #: is decided by the HOSTNAME (see `station_identity`), never by this — anyone
 #: who assembles the kit gets the identical configuration offered.
+#:
+#: This is the RECOGNITION set, not the start list: `recognise()` matches a
+#: superset, and `_hardware_for`'s kit branch then returns everything on the
+#: station.  See the comment there before adding a hardware kind.
 DASI2_KIT: FrozenSet[str] = frozenset({"rx888", "gpsdo", "magnetometer"})
 
 
@@ -175,6 +179,14 @@ def _hardware_for(offer: Offer, inv: StationInventory) -> FrozenSet[str]:
     services on its own.
     """
     if offer.kind == "kit":
+        # ⛔ `inv.hardware`, UNFILTERED -- and `recognise()` matches a
+        # SUPERSET, so this is every kind on a station that merely contains
+        # the kit.  Add a fourth hardware kind to `_HARDWARE_COMPONENTS` and
+        # it joins the kit's start list here, without anyone touching
+        # `DASI2_KIT` or reading this file.  That was harmless while `smd
+        # adopt` only printed; adopt now enables and starts what this
+        # returns.  If a kind should NOT come up with the kit, filter it
+        # here -- `DASI2_KIT` alone will not stop it.
         return inv.hardware
     kinds = set()
     for key in offer.sources:

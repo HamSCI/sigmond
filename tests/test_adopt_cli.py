@@ -52,6 +52,13 @@ def _station(hardware, *pairs):
 
     The kind is not decoration: `plan()` reads it to decide what adopting ONE
     source brings.  A fixture that omits it is a station that plans nothing.
+
+    ⚠ And it does not fail loudly.  Omit the kinds on a kit fixture and
+    `offers()` yields per-source offers instead of one kit, whose plan has
+    EMPTY components -- the same safe default that makes an unknown source
+    kind plan nothing.  A test written against that fixture still passes, on
+    assertions that never reached the kit.  Assert `offer.kind == "kit"` when
+    a kit is what you mean.
     """
     return StationInventory(hardware=frozenset(hardware),
                             sources=tuple(k for k, _ in pairs),
