@@ -206,3 +206,63 @@ def test_the_adopt_instruction_does_not_promise_configuration():
                                               adopted=frozenset()))
     assert "smd adopt" in text
     assert "configure" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# `smd status` is the verb you run BECAUSE something is wedged
+# ---------------------------------------------------------------------------
+
+def test_the_adoption_probe_is_bounded():
+    """`_station_inventory()` probes hardware by running `<client> inventory
+    --json`, which `sigmond.hardware` bounds at 15 s EACH.  With
+    gpsdo-monitor and mag-recorder both on PATH -- a real station -- `smd
+    status` could block ~30 s, on exactly the wedged client the operator ran
+    `smd status` to find.  The existing try/except catches errors, not
+    latency."""
+    import time
+    mod = _smd()
+
+    def _hang():
+        time.sleep(30)
+    mod._adoption_inventory = _hang
+
+    t0 = time.monotonic()
+    with pytest.raises(TimeoutError):
+        mod._adoption_inventory_bounded(deadline=0.2)
+    assert time.monotonic() - t0 < 5
+
+
+def test_the_bounded_probe_returns_the_same_picture():
+    mod = _smd()
+    inv, adopted = _rx_station(), frozenset({RX})
+    mod._adoption_inventory = lambda: (inv, adopted)
+    assert mod._adoption_inventory_bounded(deadline=5) == (inv, adopted)
+
+
+def test_the_bounded_probe_does_not_swallow_a_failure():
+    """`cmd_status` decides how to degrade; the wrapper must not decide for
+    it (a broken selection file still has to reach the existing handler)."""
+    mod = _smd()
+
+    def _boom():
+        raise ValueError("bad selection file")
+    mod._adoption_inventory = _boom
+    with pytest.raises(ValueError):
+        mod._adoption_inventory_bounded(deadline=5)
+
+
+def test_status_says_the_probe_timed_out_rather_than_going_quiet(
+        tmp_path, capsys):
+    """Timing out is a fact about the station, not a reason for silence."""
+    import time
+    mod = _smd()
+    mod._ADOPTION_PROBE_DEADLINE = 0.2
+    mod._adoption_inventory = lambda: time.sleep(30)
+
+    t0 = time.monotonic()
+    rc = mod.cmd_status(_StatusArgs(tmp_path / "topology.toml"))
+    assert time.monotonic() - t0 < 10
+    assert isinstance(rc, int)
+    out = capsys.readouterr().out.lower()
+    assert "adoption" in out
+    assert "did not answer" in out

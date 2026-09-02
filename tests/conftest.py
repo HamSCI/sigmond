@@ -4,8 +4,18 @@ Tests import `sigmond` without requiring the package to be installed.
 This mirrors what bin/smd does at runtime.
 """
 
+import os
 import sys
 from pathlib import Path
+
+# bin/smd re-execs into <repo>/venv/bin/python at module scope (install.sh's
+# layout, distinct from this checkout's dev .venv/).  Eighteen test files load
+# bin/smd with exec(); without this guard the FIRST of them replaces the
+# running pytest process via os.execv(), which does not look like a failure --
+# it looks like the suite ending early.  Each of those files sets this itself;
+# setting it here once makes it true for any file added later, and setdefault
+# leaves a caller's own override alone.
+os.environ.setdefault("SIGMOND_NO_VENV_REEXEC", "1")
 
 _LIB = Path(__file__).resolve().parent.parent / 'lib'
 if str(_LIB) not in sys.path:

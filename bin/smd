@@ -8848,6 +8848,53 @@ def _adoption_inventory():
     return _station_inventory(), _adopted_sources()
 
 
+#: How long `smd status` will wait for the adoption picture.  Deliberately
+#: short: status is the verb an operator runs BECAUSE something is wedged, and
+#: it was probe-free until this section existed.
+_ADOPTION_PROBE_DEADLINE = 5.0
+
+
+def _adoption_inventory_bounded(deadline=None):
+    """`_adoption_inventory()`, but never for longer than `deadline` seconds.
+
+    `_station_inventory()` asks each hardware-gated client whether its device
+    is present by running `<client> inventory --json`, and `sigmond.hardware`
+    bounds that at 15 s EACH.  On a real station gpsdo-monitor and
+    mag-recorder are both on PATH, so `smd status` — previously the fast,
+    probe-free verb — could block for half a minute on exactly the wedged
+    client the operator ran it to find.  The existing `try/except` around the
+    call site catches errors; it cannot catch latency.
+
+    A subprocess already running cannot be called back, so the probe moves off
+    the reporting thread and is ABANDONED rather than waited for: the daemon
+    thread dies with the process.  Raises `TimeoutError` when the deadline
+    passes; anything the probe itself raises is re-raised unchanged, because
+    `cmd_status` — not this wrapper — decides how to degrade.
+    """
+    import threading
+
+    if deadline is None:
+        deadline = _ADOPTION_PROBE_DEADLINE
+    done, failed = [], []
+
+    def _probe():
+        try:
+            done.append(_adoption_inventory())
+        except BaseException as exc:                             # noqa: BLE001
+            failed.append(exc)
+
+    worker = threading.Thread(target=_probe, name='adoption-probe', daemon=True)
+    worker.start()
+    worker.join(deadline)
+    if done:
+        return done[0]
+    if failed:
+        raise failed[0]
+    raise TimeoutError(
+        f'hardware probe did not answer within {deadline:g}s — a client\'s '
+        f'`inventory --json` is not responding')
+
+
 def _adopt_start_set(components) -> list:
     """The components `cmd_start` will act on when handed these names.
 
@@ -9429,9 +9476,16 @@ def cmd_status(args) -> int:
     # rest of `smd status` down with it.
     if _HAS_SIGMOND_LIB:
         try:
-            _adopt_inv, _adopted = _adoption_inventory()
+            _adopt_inv, _adopted = _adoption_inventory_bounded()
             for _line in _adoption_section(_adopt_inv, _adopted):
                 print(_line)
+        except TimeoutError as _exc:
+            # Loud, unlike the degrade below: a probe that hangs is a fact
+            # about this station, and it is the one an operator running
+            # `smd status` on a wedged box most needs.
+            print()
+            print(f'adoption: not reported — {_exc}. '
+                  f'`smd adopt --dry-run <name>` reads the same picture.')
         except Exception:
             pass
 
@@ -20962,6 +21016,13 @@ def main() -> int:
     # cmd_list's internal elevation), so it's not enumerated here.
     # `log set-level` likewise bypasses this via the pre-parse intercept
     # at the top of main().
+    # ⛔ `adopt` is deliberately ABSENT from this set even though it mutates.
+    # It takes `lifecycle_lock` itself, around the selection write and the
+    # start together (see cmd_adopt), so that `--dry-run` and every refusal
+    # path stay unprivileged and lock-free.  Adding it here would take the
+    # same non-reentrant flock twice and hang the one verb that starts
+    # services.  Same reason it elevates itself rather than via _need_root
+    # here.
     _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload'}
     if args.command in _MUTATING:
         if _need_root(args.command):
