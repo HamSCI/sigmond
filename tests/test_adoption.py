@@ -100,8 +100,13 @@ class TestOffers:
 from sigmond.adoption import AdoptionPlan, plan
 from sigmond.station_identity import StationIdentity
 
+# Shaped like Michael's real roster (2026-09-02): one station id, and one
+# instrument per recorder -- a DASI2 site reports GRAPE/HF and magnetometer
+# instruments under the same station.
 SITE = StationIdentity(hostname="DASI007", dasi2_site=True,
-                       psws_station="S000207", psws_instrument="I000207")
+                       psws_station="S000422",
+                       psws_instruments=(("hf-timestd", "370"),
+                                         ("mag-recorder", "371")))
 ALIKE = StationIdentity(hostname="fargo-1", dasi2_site=False)
 
 
@@ -123,8 +128,26 @@ class TestPlan:
         p = plan(offer, inv, SITE)
         assert "mag-recorder" in p.components     # the whole kit, one decision
         assert p.ask == ()
-        assert p.prefills["psws_station"] == "S000207"
-        assert p.prefills["psws_instrument"] == "I000207"
+        assert p.prefills["psws_station"] == "S000422"
+        # The kit brings mag-recorder AND ka9q-radio, so both instruments are
+        # prefilled -- one station id, two instruments, nothing typed.
+        assert p.prefills["psws_instruments"] == {"hf-timestd": "370",
+                                                  "mag-recorder": "371"}
+
+    def test_the_instruments_do_not_depend_on_what_is_being_adopted(self):
+        """A station's PSWS ids are facts about the STATION, not about the
+        offer in hand.
+
+        An earlier draft filtered the map by the offer's components and lost
+        the GRAPE instrument entirely, because it belongs to `hf-timestd` --
+        a profile client, not a component any hardware kind brings.  Adopting
+        one device gets the same identity as adopting the kit.
+        """
+        inv = _inv(("gpsdo",), [GPS], ((GPS, "gpsdo"),))
+        p = plan(offers(inv, frozenset())[0], inv, SITE)
+        assert p.components == ("gpsdo-monitor",)
+        assert p.prefills["psws_instruments"] == {"hf-timestd": "370",
+                                                  "mag-recorder": "371"}
 
     def test_an_alike_kit_gets_the_same_components_without_identity(self):
         """Same hardware, same configuration — simply not a funded site."""

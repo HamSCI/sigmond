@@ -31,7 +31,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 #: Anchored: `mydasi001x` is not a fleet machine.
 _DASI_NAME = re.compile(r"^DASI(\d{3})$", re.IGNORECASE)
@@ -79,10 +79,34 @@ class UnreadableManifest(Exception):
 
 @dataclass(frozen=True)
 class StationIdentity:
+    """Who this station is, as decided by its hostname.
+
+    A DASI2 site reports a GRAPE/HF instrument AND a magnetometer instrument
+    under one station id, so `psws_instruments` is a per-recorder map rather
+    than a single value.  That is the shape `sigmond.site_profile` already
+    uses (`instrument_for(recorder)`); this class deliberately speaks the same
+    vocabulary so the codebase holds one model of PSWS identity, not two.
+    """
+
     hostname: str
     dasi2_site: bool
     psws_station: Optional[str] = None
-    psws_instrument: Optional[str] = None
+    #: recorder name -> PSWS instrument id, e.g. {"hf-timestd": "370",
+    #: "mag-recorder": "371"}.  A tuple of pairs, not a dict, so the frozen
+    #: dataclass stays hashable.
+    psws_instruments: Tuple[Tuple[str, str], ...] = ()
+
+    def instrument_for(self, recorder: str) -> str:
+        """This station's PSWS instrument id for `recorder`, or ''.
+
+        Empty rather than a fallback: a station with no magnetometer
+        instrument must report nothing, never borrow the GRAPE id — that
+        would upload magnetometer data under the HF instrument.
+        """
+        for name, ident in self.psws_instruments:
+            if name == recorder:
+                return ident
+        return ''
 
 
 #: Keys in the roster that describe the FILE, not a station.  A leading
@@ -166,8 +190,23 @@ def identify(hostname: str, roster: Optional[Dict[str, dict]] = None
         hostname=stripped,
         dasi2_site=True,
         psws_station=entry["psws_station"],
-        psws_instrument=entry["psws_instrument"],
+        psws_instruments=_instruments_from(entry.get("psws_instruments")),
     )
+
+
+def _instruments_from(raw) -> Tuple[Tuple[str, str], ...]:
+    """A roster/manifest `psws_instruments` table as sorted (recorder, id) pairs.
+
+    Sorted so two identities built from the same data compare equal regardless
+    of TOML ordering; stringified because portal instrument numbers are written
+    bare (`370`) as often as quoted, and everything downstream wants text.
+    """
+    if not raw:
+        return ()
+    return tuple(sorted(
+        (str(k), str(v).strip()) for k, v in dict(raw).items()
+        if str(v).strip()
+    ))
 
 
 #: The PM writes this; the VM reads it.  The PM is the machine that survives a
@@ -236,5 +275,5 @@ def identity_from_manifest(manifest: Dict[str, object],
         hostname=hostname,
         dasi2_site=True,
         psws_station=manifest.get("psws_station"),
-        psws_instrument=manifest.get("psws_instrument"),
+        psws_instruments=_instruments_from(manifest.get("psws_instruments")),
     )

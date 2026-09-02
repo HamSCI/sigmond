@@ -2,102 +2,46 @@
 #
 # The DASI2 fleet.  A host whose name matches DASI\d{3} is a funded site if and
 # only if it appears here — an unrostered DASI name is REFUSED rather than
-# guessed, because guessing either way is silently wrong.
+# guessed, because guessing either way is silently wrong: called DASI2 it gets
+# the wrong registrar and no PSWS ids, called ordinary it runs forever under a
+# fleet name it does not own.
 #
 # Shipped in the repo deliberately: a field install has no network when it
 # needs this.
 #
-# ⚠⚠⚠ PLACEHOLDER VALUES — DO NOT SHIP TO A REAL FLEET ⚠⚠⚠
-# psws_station / psws_instrument below are PLACEHOLDERS in the correct shape
-# only (S0002NN / I0002NN). Michael pre-defines the real PSWS Station and
-# Instrument IDs for each DASI2 machine; they are not supplied yet. Replace
-# every value in this file with the real pre-defined IDs before any fleet
-# build.
+# ── The list is CLOSED, and short on purpose ────────────────────────────────
+# Only the stations whose PSWS ids Michael has actually defined appear here.
+# DASI001 and DASI006+ are absent because we have no ids for them, so a machine
+# carrying one of those names is refused until someone adds the entry.  That
+# refusal is the point; do not pad this file to twenty rows.
 #
-# The [_meta] table below is how a PROGRAM tells: `load_roster()` warns loudly
-# on it, because the values sit in the same S0002NN namespace as this project's
-# real IDs and have no distinguishing shape.  Underscore-prefixed tables are never stations.  DELETE the whole
-# [_meta] block in the same commit that lands the real IDs.
-
-[_meta]
-placeholder = true
-
-[DASI001]
-psws_station = "S000201"
-psws_instrument = "I000201"
+# ── Two instruments per station ─────────────────────────────────────────────
+# A DASI2 site reports a GRAPE/HF instrument AND a magnetometer instrument
+# under ONE station id.  `psws_instruments` is keyed by the recorder that owns
+# each one, which is the same shape `sigmond.site_profile` already uses
+# (`instrument_for(recorder)`), so there is one model of PSWS identity in this
+# codebase rather than two that disagree.
+#
+# ── No grid here, deliberately ──────────────────────────────────────────────
+# PSWS requires a grid at REGISTRATION, but that value is provisional: the
+# LBE-1421 (or whatever GPS unit the station carries) overwrites it on
+# deployment, and `sigmond-location-check` re-asserts the GPSDO position as
+# definitive from then on.  A grid in this file would be a stale fact waiting
+# to be believed — the registration grid for these four is FN21ok only because
+# that is where they are staged, not where they will operate.
 
 [DASI002]
-psws_station = "S000202"
-psws_instrument = "I000202"
+psws_station = "S000422"
+psws_instruments = { "hf-timestd" = "370", "mag-recorder" = "371" }
 
 [DASI003]
-psws_station = "S000203"
-psws_instrument = "I000203"
+psws_station = "S000468"
+psws_instruments = { "hf-timestd" = "380", "mag-recorder" = "381" }
 
 [DASI004]
-psws_station = "S000204"
-psws_instrument = "I000204"
+psws_station = "S000469"
+psws_instruments = { "hf-timestd" = "382", "mag-recorder" = "383" }
 
 [DASI005]
-psws_station = "S000205"
-psws_instrument = "I000205"
-
-[DASI006]
-psws_station = "S000206"
-psws_instrument = "I000206"
-
-[DASI007]
-psws_station = "S000207"
-psws_instrument = "I000207"
-
-[DASI008]
-psws_station = "S000208"
-psws_instrument = "I000208"
-
-[DASI009]
-psws_station = "S000209"
-psws_instrument = "I000209"
-
-[DASI010]
-psws_station = "S000210"
-psws_instrument = "I000210"
-
-[DASI011]
-psws_station = "S000211"
-psws_instrument = "I000211"
-
-[DASI012]
-psws_station = "S000212"
-psws_instrument = "I000212"
-
-[DASI013]
-psws_station = "S000213"
-psws_instrument = "I000213"
-
-[DASI014]
-psws_station = "S000214"
-psws_instrument = "I000214"
-
-[DASI015]
-psws_station = "S000215"
-psws_instrument = "I000215"
-
-[DASI016]
-psws_station = "S000216"
-psws_instrument = "I000216"
-
-[DASI017]
-psws_station = "S000217"
-psws_instrument = "I000217"
-
-[DASI018]
-psws_station = "S000218"
-psws_instrument = "I000218"
-
-[DASI019]
-psws_station = "S000219"
-psws_instrument = "I000219"
-
-[DASI020]
-psws_station = "S000220"
-psws_instrument = "I000220"
+psws_station = "S000470"
+psws_instruments = { "hf-timestd" = "384", "mag-recorder" = "385" }

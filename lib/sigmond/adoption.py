@@ -246,9 +246,24 @@ def plan(offer: Offer, inv: StationInventory,
     ask: list = []
     if identity.dasi2_site:
         prefills["psws_station"] = identity.psws_station
-        prefills["psws_instrument"] = identity.psws_instrument
+        # A site reports a GRAPE/HF instrument AND a magnetometer instrument
+        # under one station id, so this is the whole per-recorder map, not a
+        # single value.
+        #
+        # The WHOLE map, deliberately, not the subset this offer brings.  An
+        # earlier draft filtered by `components` and was wrong twice over: the
+        # GRAPE instrument belongs to `hf-timestd`, which is a profile client
+        # and not a component of any hardware kind, so filtering silently
+        # dropped it; and these ids are facts about the STATION, true whether
+        # or not this particular adoption touches the recorder that reports
+        # them.  Adoption does not decide identity.
+        if identity.psws_instruments:
+            prefills["psws_instruments"] = dict(identity.psws_instruments)
     else:
-        ask.extend(("psws_station", "psws_instrument"))
+        # An ordinary station is asked.  Which recorders it must supply ids for
+        # follows from what it runs, which the config flow knows and this pure
+        # function deliberately does not.
+        ask.extend(("psws_station", "psws_instruments"))
 
     return AdoptionPlan(components=components,
                         prefills=prefills, ask=tuple(ask))

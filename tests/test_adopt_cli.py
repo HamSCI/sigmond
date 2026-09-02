@@ -191,7 +191,7 @@ def test_an_unrostered_dasi_hostname_refuses_before_doing_anything(
 
     with pytest.raises(UnrosteredDasiName):
         identify("DASI019", {"DASI001": {"psws_station": "S1",
-                                         "psws_instrument": "I1"}})
+                                         "psws_instruments": {"hf-timestd": "1"}}})
 
     mod = _smd()
     _wire(mod, _station({"rx888"}, (RX, "rx888")),
@@ -242,10 +242,10 @@ def test_a_rostered_dasi2_site_prefills_its_psws_identity(tmp_path, capsys):
     _wire(mod, _station({"rx888", "gpsdo", "magnetometer"}, (RX, "rx888")), tmp_path,
         identity=StationIdentity(hostname="DASI001", dasi2_site=True,
                                  psws_station="S000123",
-                                 psws_instrument="I000456"))
+                                 psws_instruments=(("hf-timestd", "456"),)))
     assert mod.cmd_adopt(_args("dasi2", tmp_path, dry_run=True)) == 0
     out = capsys.readouterr().out
-    assert "S000123" in out and "I000456" in out
+    assert "S000123" in out and "456" in out
 
 
 # ---------------------------------------------------------------------------

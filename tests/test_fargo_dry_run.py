@@ -57,7 +57,7 @@ def test_fargo_is_asked_for_psws_identity_and_prefilled_the_rest():
                            sources=(RX888,),
                            source_kinds=((RX888, "rx888"),))
     p = plan(offers(inv, frozenset())[0], inv, FARGO)
-    assert set(p.ask) == {"psws_station", "psws_instrument"}
+    assert set(p.ask) == {"psws_station", "psws_instruments"}
     assert p.prefills["radiod_status_name"] == "fargo-1-status.local"
 
 

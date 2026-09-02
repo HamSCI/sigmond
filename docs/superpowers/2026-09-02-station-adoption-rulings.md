@@ -120,10 +120,26 @@ If you change this code, the question to keep asking is not "does it work?" but
   perform. A LAN-radiod station therefore runs four clients that are not yet
   pointed at that radiod until someone runs that command. **This is the top
   follow-up.**
-- **The roster ships placeholder PSWS IDs.** `etc/dasi2-roster.toml` carries
-  `S000201`-`S000220` / `I000201`-`I000220` and a `[_meta] placeholder = true`
-  sentinel that warns on every load. Replace both — the IDs and the sentinel —
-  in one commit before any fleet build.
+- ~~**The roster ships placeholder PSWS IDs.**~~ **CLOSED same day.** Michael
+  supplied the real ids for DASI002–DASI005; they and the `[_meta]` sentinel
+  came out together, as the ruling required.
+
+  Landing them exposed a modelling error worth recording: the roster carried a
+  single `psws_instrument`, but a DASI2 site reports a **GRAPE/HF instrument
+  AND a magnetometer instrument** under one station id. `sigmond.site_profile`
+  had already settled that shape — a per-recorder `psws_instruments` map with
+  `instrument_for(recorder)` — and the roster had invented a narrower one
+  beside it. It now speaks the same vocabulary, so this codebase holds one
+  model of PSWS identity rather than two that disagree.
+
+  The roster is also a **closed list of four**, not twenty: only stations whose
+  ids are actually defined appear, so `DASI001` and `DASI006+` are refused
+  until someone adds them. That refusal is the feature.
+
+  No grid in the roster, deliberately: PSWS requires one at registration, but
+  the LBE-1421 overwrites it on deployment and `sigmond-location-check`
+  re-asserts the GPSDO position from then on. A grid here would be a stale fact
+  waiting to be believed.
 - **Manifest push/pull, RAC registrar selection, and ssh access to PM and VM**
   belong to the separate PM-side spec. Nothing here implements them.
 - **The demotion direction** — a rostered DASI host whose manifest claims

@@ -15,9 +15,15 @@ from sigmond.station_identity import (
     StationIdentity, UnrosteredDasiName, identify, load_roster,
 )
 
+# Shaped like the real roster: one station id, one instrument PER RECORDER.
+# A DASI2 site reports GRAPE/HF and magnetometer instruments under one station.
 ROSTER = {
-    "DASI001": {"psws_station": "S000201", "psws_instrument": "I000201"},
-    "DASI007": {"psws_station": "S000207", "psws_instrument": "I000207"},
+    "DASI001": {"psws_station": "S000201",
+                "psws_instruments": {"hf-timestd": "201",
+                                     "mag-recorder": "202"}},
+    "DASI007": {"psws_station": "S000207",
+                "psws_instruments": {"hf-timestd": "370",
+                                     "mag-recorder": "371"}},
 }
 
 
@@ -25,14 +31,16 @@ def test_a_rostered_dasi_host_is_a_site():
     ident = identify("DASI007", ROSTER)
     assert ident.dasi2_site is True
     assert ident.psws_station == "S000207"
-    assert ident.psws_instrument == "I000207"
+    assert ident.instrument_for("hf-timestd") == "370"
+    assert ident.instrument_for("mag-recorder") == "371"
 
 
 def test_an_ordinary_hostname_is_not_a_site():
     ident = identify("fargo-1", ROSTER)
     assert ident.dasi2_site is False
     assert ident.psws_station is None
-    assert ident.psws_instrument is None
+    assert ident.psws_instruments == ()
+    assert ident.instrument_for("hf-timestd") == ""
 
 
 def test_a_dasi_name_not_in_the_roster_is_refused():
@@ -83,27 +91,36 @@ def test_the_shipped_roster_parses_and_is_well_formed():
     for name, entry in roster.items():
         assert name.upper() == name, f"{name} should be upper-case"
         assert entry["psws_station"], f"{name} has no psws_station"
-        assert entry["psws_instrument"], f"{name} has no psws_instrument"
+        # Every DASI2 kit carries both an RX888 and an RM3100, so a rostered
+        # site missing either instrument id is an incomplete entry, not a
+        # station that happens to lack the hardware.
+        instruments = entry.get("psws_instruments") or {}
+        assert instruments.get("hf-timestd"), f"{name} has no HF instrument"
+        assert instruments.get("mag-recorder"), f"{name} has no mag instrument"
 
 
 # ---------------------------------------------------------------------------
 # Placeholder IDs must be checkable by something other than a human's eye
 # ---------------------------------------------------------------------------
 
-def test_the_shipped_roster_declares_itself_a_placeholder(tmp_path):
-    """S000201-S000220 sit in the SAME namespace as this project's real PSWS
-    IDs (S000171, S000123), so nothing but the header comment tells them
-    apart -- unmissable to a reader, invisible to every program.
+def test_the_shipped_roster_is_no_longer_a_placeholder(tmp_path):
+    """Michael's real ids landed 2026-09-02, so the sentinel came out with
+    them.
 
-    When the real pre-defined IDs land, delete the `[_meta]` block from the
-    roster and this test with it.  That is the point: the sentinel and the
-    placeholders are removed together, or a test fails.
+    This test used to assert the OPPOSITE -- that `[_meta] placeholder = true`
+    was present -- because the shipped ids sat in the same S0002NN namespace as
+    real ones and only a sentinel could tell a program which it was holding.
+    It is inverted rather than deleted so the pair stays enforced from both
+    directions: placeholders cannot ship without a sentinel, and a sentinel
+    cannot outlive the placeholders it described.  A stale sentinel would warn
+    on every load forever, and a warning that is always wrong is one operators
+    learn to ignore.
     """
     import tomllib
     from sigmond.station_identity import DEFAULT_ROSTER
     with open(DEFAULT_ROSTER, "rb") as fh:
         raw = tomllib.load(fh)
-    assert raw["_meta"]["placeholder"] is True
+    assert "_meta" not in raw
 
 
 def test_meta_is_not_a_station(tmp_path):

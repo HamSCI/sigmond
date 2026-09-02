@@ -8892,12 +8892,15 @@ def _station_identity():
               f'says {identity.dasi2_site}. Membership comes from the '
               f'hostname, so the manifest is stale — regenerate it on the PM.')
 
+    # The manifest wins on the PSWS ids — those are what a replaced VM cannot
+    # rediscover, and they are why the PM holds a manifest at all. Membership
+    # is NOT overlaid: it came from the hostname above and stays there.
     return _si.StationIdentity(
         hostname=identity.hostname,
         dasi2_site=identity.dasi2_site,
         psws_station=manifest.get('psws_station') or identity.psws_station,
-        psws_instrument=(manifest.get('psws_instrument')
-                         or identity.psws_instrument),
+        psws_instruments=(_si._instruments_from(manifest.get('psws_instruments'))
+                          or identity.psws_instruments),
     )
 
 

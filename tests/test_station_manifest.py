@@ -22,18 +22,19 @@ from sigmond.station_identity import (
 def test_a_manifest_supplies_identity_without_the_roster():
     """A fresh VM must not need the roster to know who it is."""
     manifest = {"dasi2_site": True, "psws_station": "S000207",
-                "psws_instrument": "I000207"}
+                "psws_instruments": {"hf-timestd": "370", "mag-recorder": "371"}}
     ident = identity_from_manifest(manifest, hostname="DASI007")
     assert ident == StationIdentity(hostname="DASI007", dasi2_site=True,
                                     psws_station="S000207",
-                                    psws_instrument="I000207")
+                                    psws_instruments=(("hf-timestd", "370"),
+                                                      ("mag-recorder", "371")))
 
 
 def test_a_non_site_manifest_carries_no_identity():
     ident = identity_from_manifest({"dasi2_site": False}, hostname="fargo-1")
     assert ident.dasi2_site is False
     assert ident.psws_station is None
-    assert ident.psws_instrument is None
+    assert ident.psws_instruments == ()
 
 
 def test_a_manifest_cannot_promote_an_unmatched_hostname_to_a_site():
@@ -44,7 +45,7 @@ def test_a_manifest_cannot_promote_an_unmatched_hostname_to_a_site():
     with pytest.raises(ManifestHostnameMismatch) as exc:
         identity_from_manifest(
             {"dasi2_site": True, "psws_station": "S1",
-             "psws_instrument": "I1"},
+             "psws_instruments": {"hf-timestd": "1"}},
             hostname="fargo-1",
         )
     msg = str(exc.value).lower()
@@ -55,7 +56,7 @@ def test_a_manifest_cannot_promote_an_unmatched_hostname_to_a_site():
 
 def test_a_padded_hostname_is_stripped_in_manifest_identity():
     manifest = {"dasi2_site": True, "psws_station": "S000207",
-                "psws_instrument": "I000207"}
+                "psws_instruments": {"hf-timestd": "370", "mag-recorder": "371"}}
     ident = identity_from_manifest(manifest, hostname=" DASI007 ")
     assert ident.hostname == "DASI007"
 
@@ -78,7 +79,7 @@ def test_a_malformed_manifest_raises_rather_than_reading_as_empty(tmp_path):
 def test_a_manifest_file_round_trips(tmp_path):
     p = tmp_path / "station.toml"
     p.write_text('dasi2_site = true\npsws_station = "S1"\n'
-                 'psws_instrument = "I1"\n')
+                 'psws_instruments = { "hf-timestd" = "1" }\n')
     assert read_manifest(p)["psws_station"] == "S1"
 
 
@@ -121,12 +122,12 @@ def test_a_replaced_vm_keeps_the_psws_identity_the_pm_recorded(
     a hostname the roster does not name, came back with no PSWS identity at
     all.  The IDs are the one fact a replaced VM cannot rediscover."""
     _at(monkeypatch, tmp_path, "fargo-1",
-        'psws_station = "S000171"\npsws_instrument = "I000171"\n')
+        'psws_station = "S000171"\npsws_instruments = { "hf-timestd" = "171" }\n')
     ident = _smd()._station_identity()
     assert ident.hostname == "fargo-1"
     assert ident.dasi2_site is False        # membership still from the name
     assert ident.psws_station == "S000171"
-    assert ident.psws_instrument == "I000171"
+    assert ident.instrument_for("hf-timestd") == "171"
 
 
 def test_no_manifest_leaves_the_hostname_rule_exactly_as_it_was(
@@ -141,7 +142,7 @@ def test_the_manifest_cannot_promote_an_ordinary_station_to_a_site(
     """`identity_from_manifest` refuses this; the refusal has to be REACHED.
     Delivered-but-unreachable is how the check would rot."""
     _at(monkeypatch, tmp_path, "fargo-1",
-        'dasi2_site = true\npsws_station = "S1"\npsws_instrument = "I1"\n')
+        'dasi2_site = true\npsws_station = "S1"\npsws_instruments = { "hf-timestd" = "1" }\n')
     with pytest.raises(ManifestHostnameMismatch):
         _smd()._station_identity()
 
@@ -151,7 +152,9 @@ def test_the_hostname_outranks_a_manifest_that_demotes_it(
     """A rostered DASI name whose manifest says `dasi2_site = false` is a
     stale manifest, not a demotion: membership comes from the hostname.  The
     contradiction is said out loud rather than resolved in silence."""
-    _at(monkeypatch, tmp_path, "DASI001",
+    # DASI002 rather than DASI001: the roster is a CLOSED list of the stations
+    # whose ids Michael has defined, and DASI001 is deliberately not among them.
+    _at(monkeypatch, tmp_path, "DASI002",
         'dasi2_site = false\npsws_station = "S000999"\n')
     ident = _smd()._station_identity()
     assert ident.dasi2_site is True                 # the hostname decides
@@ -165,7 +168,7 @@ def test_a_manifest_does_not_rescue_an_unrostered_dasi_name(
     file add a machine to the fleet would make the roster advisory, which is
     new policy — not the wiring this change is."""
     _at(monkeypatch, tmp_path, "DASI099",
-        'dasi2_site = true\npsws_station = "S1"\npsws_instrument = "I1"\n')
+        'dasi2_site = true\npsws_station = "S1"\npsws_instruments = { "hf-timestd" = "1" }\n')
     with pytest.raises(UnrosteredDasiName):
         _smd()._station_identity()
 
