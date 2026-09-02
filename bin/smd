@@ -8533,17 +8533,130 @@ def _adoption_section(inv, adopted) -> list:
     return lines
 
 
-def _adoption_inventory():
-    """Best-effort live (StationInventory, adopted) pair for `smd status`.
+# --- what is visible here, and what has already been claimed ---------------
+#
+# `smd status` and `smd adopt` MUST see the identical picture: a name the
+# status listing prints has to be a name adopt accepts.  So each half has ONE
+# implementation, and `_adoption_inventory()` below is simply the pair of them.
 
-    Composes `hardware.detect_*` with the discovery cache and each client's
-    saved source selections — read-only, no probing beyond what those already
-    do.  Task 6's `smd adopt` needs the identical picture to decide what a
-    name refers to; adopt or replace this rather than duplicating it.
-    Raises on any failure — callers must decide how to degrade.
+#: Linux publishes every USB device's vendor id, product id and serial here,
+#: world-readable and without a subprocess.  Read this rather than `lsusb -v`
+#: precisely so an unprivileged `smd status` and a root `smd adopt` derive the
+#: SAME key: `lsusb -v` hides iSerial from non-root, so the two would disagree
+#: about what the device is called and adopt would refuse a name status had
+#: just printed.
+_USB_SYSFS_ROOT = Path('/sys/bus/usb/devices')
+
+#: Which USB devices stand for which hardware kind.  A `None` product id means
+#: "any product from this vendor".  Keep in sync with `sigmond.hardware`'s
+#: probes — these must agree with `_detect_gpsdo()` / `_detect_magnetometer()`
+#: or a station would report hardware it cannot name.  The RX888 family is not
+#: listed here; it comes from `discovery.usb_sdr.KNOWN_SDR_DEVICES`, which is
+#: already the one table for SDR vid:pid.
+_USB_HARDWARE_DEVICES = {
+    'gpsdo':        {('1dd2', None)},                     # Leo Bodnar LBE-14xx
+    'magnetometer': {('1ffb', '2502'), ('1ffb', '2503')},  # Pololu USB-I2C
+}
+
+
+def _usb_devices_for(kinds) -> set:
+    """The (vid, pid) pairs that stand for these hardware kinds."""
+    from sigmond.discovery.usb_sdr import KNOWN_SDR_DEVICES
+
+    wanted = set()
+    if 'rx888' in kinds:
+        # Only the RX888 family, because that is what `_detect_local_sdr()`
+        # answers True for.  Offering an Airspy we would never configure
+        # would be an offer whose plan installs nothing.
+        wanted |= {vp for vp, (name, _chip) in KNOWN_SDR_DEVICES.items()
+                   if name.startswith('RX-888')}
+    for kind in kinds:
+        wanted |= _USB_HARDWARE_DEVICES.get(kind, set())
+    return wanted
+
+
+def _local_usb_source_keys(kinds, root=None) -> tuple:
+    """Stable `usb:` SourceKeys for the locally attached hardware.
+
+    `sources.inventory()` deliberately projects NO usb devices — "Phase 2
+    ships without USB selection", pending reliable iSerial reading across
+    hosts — and that deferral is right for a shared module other clients
+    consume.  Its consequence here is not: a station with an RX888 in its
+    hand and no radiod on its LAN would report hardware but no sources,
+    `offers()` would return nothing, and the box would sit silent about the
+    device plugged into it.  Adoption therefore synthesises the missing rows
+    rather than reaching into that shared module.
+
+    ⚠ STABILITY, and its known limit.  The identifier is `vid:pid:serial`
+    wherever the kernel gives us a serial, because "already adopted" only
+    means something if a physical device keeps its name across a reboot.
+    Where the serial is missing or unusable we fall back to `vid:pid`, still
+    stable — but TWO IDENTICAL DEVICES ON ONE STATION THEN COLLIDE and appear
+    as one.  A bus/device number would separate them and is deliberately
+    rejected: it changes on replug, which would make an adopted device look
+    new.  An RX888 also re-enumerates under a different product id once
+    radiod loads its firmware (DFU 04b4:00f3 → 00f1/00bc), so a device
+    adopted before that load is offered once more afterwards under its new
+    id; re-adopting it is harmless, and a real fix belongs in a device
+    identity layer, not here.
+    """
+    from sigmond.sources import SourceKey
+
+    wanted = _usb_devices_for(kinds)
+    if not wanted:
+        return ()
+    base = Path(root) if root is not None else Path(_USB_SYSFS_ROOT)
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:                     # no sysfs at all (container, non-Linux)
+        return ()
+
+    keys = []
+    seen = set()
+    for dev in entries:
+        try:
+            vid = (dev / 'idVendor').read_text().strip().lower()
+            pid = (dev / 'idProduct').read_text().strip().lower()
+        except OSError:                 # interface dirs carry neither
+            continue
+        if (vid, pid) not in wanted and (vid, None) not in wanted:
+            continue
+        try:
+            serial = (dev / 'serial').read_text().strip()
+        except OSError:
+            serial = ''
+        key = None
+        if serial and serial != '0':
+            try:
+                key = SourceKey(type='usb', identifier=f'{vid}:{pid}:{serial}')
+            except ValueError:
+                # SourceKey refuses whitespace and shell metacharacters.  A
+                # stray byte off the USB bus degrades to the vid:pid key; it
+                # must never raise in the middle of `smd status`.
+                key = None
+        if key is None:
+            try:
+                key = SourceKey(type='usb', identifier=f'{vid}:{pid}')
+            except ValueError:
+                # Nothing stable to say about this device.  Omitting it is
+                # better than inventing an identifier that moves.
+                continue
+        if key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return tuple(keys)
+
+
+def _station_inventory():
+    """What is visible here, as an adoption.StationInventory.
+
+    Read-only: local hardware probes, the discovery cache as it was last
+    written, and the USB sysfs tree.  Nothing is started and nothing is
+    probed on the network.
     """
     from sigmond.adoption import StationInventory
-    from sigmond.sources import inventory as _source_inventory, load_all_selections
+    from sigmond.sources import inventory as _source_inventory
     from sigmond.discovery import load_cache, dict_to_obs
 
     hardware = set()
@@ -8556,14 +8669,115 @@ def _adoption_inventory():
 
     cache = load_cache()
     observations = [dict_to_obs(d) for d in cache.get('observations', [])]
-    sources = tuple(row.key for row in _source_inventory(observations))
 
-    adopted: set = set()
-    for client_sources in load_all_selections().values():
-        adopted.update(client_sources.selected)
+    # Union, not replacement: a station can have an SDR in its hand AND
+    # radiods on its LAN.  Local hardware leads — it is the more immediate
+    # thing to say about a machine.
+    sources = list(_local_usb_source_keys(hardware))
+    for row in _source_inventory(observations):
+        if row.key not in sources:
+            sources.append(row.key)
 
-    return (StationInventory(hardware=frozenset(hardware), sources=sources),
-            frozenset(adopted))
+    return StationInventory(hardware=frozenset(hardware),
+                            sources=tuple(sources))
+
+
+def _adopted_sources(root=None) -> frozenset:
+    """Every source already selected by some client."""
+    from sigmond import sources as _sources
+
+    kwargs = {'root': Path(root)} if root is not None else {}
+    adopted = set()
+    for _client, sel in _sources.load_all_selections(**kwargs).items():
+        adopted |= set(sel.selected)
+    return frozenset(adopted)
+
+
+def _station_identity():
+    """Who this station is, read from the hostname and the shipped roster.
+
+    Raises `UnrosteredDasiName` for a DASI-named host the roster does not
+    list — refused rather than guessed.
+    """
+    import socket
+    from sigmond.station_identity import identify
+
+    return identify(socket.gethostname().split('.')[0])
+
+
+def _adoption_inventory():
+    """Best-effort live (StationInventory, adopted) pair for `smd status`.
+
+    The identical picture `smd adopt` decides on — one implementation, so a
+    name status prints is a name adopt accepts.  Raises on any failure;
+    callers must decide how to degrade.
+    """
+    return _station_inventory(), _adopted_sources()
+
+
+def cmd_adopt(args) -> int:
+    """Adopt an offer: record its sources and name what it brings.
+
+    The only verb in this design that starts anything.  Everything upstream
+    of it observes and reports.  It adopts what the operator named and
+    nothing else — hardware appearing is never an instruction.
+    """
+    from sigmond import sources as _sources
+    from sigmond.adoption import offers as _offers, plan as _plan
+    from sigmond.station_identity import UnrosteredDasiName
+
+    # Seam for tests and for an alternate config tree; the default is the
+    # real /etc/sigmond/clients.
+    root = Path(getattr(args, 'clients_root', None)
+                or _sources.DEFAULT_CLIENTS_ROOT)
+    dry_run = bool(getattr(args, 'dry_run', False))
+
+    inv = _station_inventory()
+    adopted = _adopted_sources(root=root)
+    pending = _offers(inv, adopted)
+    match = next((o for o in pending if o.name == args.name), None)
+    if match is None:
+        available = ', '.join(o.name for o in pending) or 'nothing'
+        _err(f'adopt: nothing adoptable named {args.name!r}. '
+             f'Available: {available}')
+        return 1
+
+    try:
+        identity = _station_identity()
+    except UnrosteredDasiName as exc:
+        # Refuse BEFORE touching a component: a machine whose identity cannot
+        # be decided must not be half-configured under a name it may not own.
+        _err(f'adopt: {exc}')
+        return 1
+
+    plan_ = _plan(match, inv, identity)
+    _info(f'adopt {match.name}: components {list(plan_.components)}')
+    for key, value in sorted(plan_.prefills.items()):
+        _info(f'  prefill {key} = {value}')
+    for field_name in plan_.ask:
+        _info(f'  needs {field_name}')
+    if dry_run:
+        _info('adopt: dry run — nothing changed')
+        return 0
+    if not plan_.components:
+        _err(f'adopt {match.name}: no component claims this source, so there '
+             f'is nothing to configure. Adopting it would change nothing.')
+        return 1
+
+    # The write lands in /etc/sigmond/clients; a dry run above needs no
+    # privilege, and neither does refusing.
+    if _need_root('adopt'):
+        return 1
+    for client in plan_.components:
+        sel = _sources.ClientSources.load(client, root=root)
+        for key in match.sources:
+            sel.add(key)
+        sel.save(root=root)
+    comps = ','.join(plan_.components)
+    _ok(f'adopt {match.name}: sources recorded; '
+        f'run `smd install {comps.replace(",", " ")}` '
+        f'then `smd start {comps.replace(",", " ")}`')
+    return 0
 
 
 def cmd_status(args) -> int:
@@ -18406,6 +18620,7 @@ def main() -> int:
                 component  per-component status + catalog (list | install | update | add | remove | enable | disable)
                 config     show / migrate / init / edit per-client config
                 bringup    guided station bring-up from a catalog profile
+                adopt      configure + start what is attached but unadopted
 
               Diagnostics & maintenance (under `admin`):
                 admin diag | validate | verifier | wisdom | storage |
@@ -18774,6 +18989,17 @@ def main() -> int:
                    help='component names (default: all enabled)')
     p.add_argument('--components', metavar='C1,C2',
                    help='deprecated; same as positional names')
+
+    # adopt — the only verb in the adoption design that starts anything.
+    # Distinct from `smd admin manifest adopt`, which adopts a blessed IMAGE
+    # manifest; this one adopts attached hardware or a discovered source.
+    p_adopt = sub.add_parser('adopt',
+        help='adopt detected hardware or a discovered source '
+             '(the only verb that starts anything)')
+    p_adopt.add_argument('name',
+                         help='offer name, as printed by `smd status`')
+    p_adopt.add_argument('--dry-run', action='store_true',
+                         help='report the plan and change nothing')
 
     # restart (NEW)
     p = sub.add_parser('restart', help='restart managed services')
@@ -19840,6 +20066,7 @@ def main() -> int:
         'reload':  cmd_reload,
         'log':     cmd_log,
         'status':  cmd_status,
+        'adopt':   cmd_adopt,
         'tui':     cmd_tui,
         'public-ip': cmd_public_ip,
     }
