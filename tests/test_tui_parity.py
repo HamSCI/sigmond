@@ -24,6 +24,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import os
 import re
 import sys
 import unittest
@@ -69,6 +70,11 @@ def _live_verb_paths() -> set:
 
     argparse.ArgumentParser.parse_args = _patched
     old_argv = sys.argv
+    # bin/smd re-execs into <repo>/venv/bin/python (install.sh's layout) at
+    # module scope once __file__ is resolvable -- which SourceFileLoader
+    # always makes true.  Unset, this would replace the running pytest
+    # process with os.execv() mid-suite on an installed host.
+    os.environ.setdefault('SIGMOND_NO_VENV_REEXEC', '1')
     try:
         loader = importlib.machinery.SourceFileLoader('smd_argv_probe', str(_SMD_BIN))
         spec = importlib.util.spec_from_loader('smd_argv_probe', loader)
