@@ -8683,13 +8683,28 @@ def _station_inventory():
 
 
 def _adopted_sources(root=None) -> frozenset:
-    """Every source already selected by some client."""
+    """Every source already selected by some client.
+
+    Reads every `<client>.sources.toml` in the clients root, NOT just
+    `sources.KNOWN_CLIENTS`.  `plan()` maps an SDR to ka9q-radio, ka9q-web
+    and igmp-querier, and none of those three is in that list — so a reader
+    that consulted only the known four would never see what `smd adopt` had
+    just written, and an adopted device would be offered again on every
+    `smd status`, forever.  Stable identifiers would then buy nothing.
+
+    Propagates parse errors, like `load_all_selections` before it: a
+    hand-edited selection file the operator broke should be visible, and
+    `cmd_status` already decides how to degrade.
+    """
     from sigmond import sources as _sources
 
-    kwargs = {'root': Path(root)} if root is not None else {}
+    base = (Path(root) if root is not None
+            else Path(_sources.DEFAULT_CLIENTS_ROOT))
+    suffix = '.sources.toml'
     adopted = set()
-    for _client, sel in _sources.load_all_selections(**kwargs).items():
-        adopted |= set(sel.selected)
+    for path in sorted(base.glob(f'*{suffix}')):
+        client = path.name[:-len(suffix)]
+        adopted |= set(_sources.ClientSources.load(client, root=base).selected)
     return frozenset(adopted)
 
 

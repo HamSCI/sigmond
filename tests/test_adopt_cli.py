@@ -422,3 +422,35 @@ def test_the_blessed_manifest_adopt_still_parses(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         mod.main()
     assert exc.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# Adopt must see its own writes, or "already adopted" means nothing
+# ---------------------------------------------------------------------------
+
+def test_an_adopted_source_reads_back_as_adopted(tmp_path):
+    """The round trip that gives stable identifiers their point.
+
+    `plan()` maps an SDR to ka9q-radio / ka9q-web / igmp-querier, and none of
+    those is in `sources.KNOWN_CLIENTS` -- so a reader that consulted only
+    that list would never see what adopt just wrote, and the device would be
+    offered again on every `smd status`, forever.
+    """
+    mod = _smd()
+    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+          tmp_path)
+    assert mod.cmd_adopt(_args(str(RX), tmp_path)) == 0
+
+    fresh = _smd()          # no stubs: the real reader, against the real files
+    assert RX in fresh._adopted_sources(root=tmp_path)
+
+
+def test_adopt_refuses_a_source_it_already_recorded(tmp_path):
+    """End to end with no stubbed reader: adopt, then adopt again."""
+    mod = _smd()
+    inv = StationInventory(hardware=frozenset({"rx888"}), sources=(RX,))
+    mod._station_inventory = lambda: inv
+    mod._station_identity = lambda: _identity()
+    mod._need_root = lambda _name: False
+    assert mod.cmd_adopt(_args(str(RX), tmp_path)) == 0
+    assert mod.cmd_adopt(_args(str(RX), tmp_path)) != 0     # nothing left
