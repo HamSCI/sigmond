@@ -8510,6 +8510,62 @@ def cmd_reload(args) -> int:
 # smd status / list
 # ---------------------------------------------------------------------------
 
+def _adoption_section(inv, adopted) -> list:
+    """Lines describing what is visible here and not yet adopted.
+
+    Reports; never acts.  A station with hardware attached and nothing running
+    should say so — silence is indistinguishable from having no hardware.
+    """
+    from sigmond.adoption import offers as _offers
+
+    pending = _offers(inv, adopted)
+    if not pending:
+        return []
+    lines = ['', 'adoptable:']
+    for offer in pending:
+        if offer.kind == 'kit':
+            lines.append(
+                f'  {offer.name:<28} recognised kit, not adopted '
+                f'({len(offer.sources)} source(s))')
+        else:
+            lines.append(f'  {offer.name:<28} detected, not adopted')
+    lines.append('  run `smd adopt <name>` to configure, enable and start it')
+    return lines
+
+
+def _adoption_inventory():
+    """Best-effort live (StationInventory, adopted) pair for `smd status`.
+
+    Composes `hardware.detect_*` with the discovery cache and each client's
+    saved source selections — read-only, no probing beyond what those already
+    do.  Task 6's `smd adopt` needs the identical picture to decide what a
+    name refers to; adopt or replace this rather than duplicating it.
+    Raises on any failure — callers must decide how to degrade.
+    """
+    from sigmond.adoption import StationInventory
+    from sigmond.sources import inventory as _source_inventory, load_all_selections
+    from sigmond.discovery import load_cache, dict_to_obs
+
+    hardware = set()
+    if _detect_local_sdr():
+        hardware.add('rx888')
+    if _detect_gpsdo():
+        hardware.add('gpsdo')
+    if _detect_magnetometer():
+        hardware.add('magnetometer')
+
+    cache = load_cache()
+    observations = [dict_to_obs(d) for d in cache.get('observations', [])]
+    sources = tuple(row.key for row in _source_inventory(observations))
+
+    adopted: set = set()
+    for client_sources in load_all_selections().values():
+        adopted.update(client_sources.selected)
+
+    return (StationInventory(hardware=frozenset(hardware), sources=sources),
+            frozenset(adopted))
+
+
 def cmd_status(args) -> int:
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     only = _resolve_only_list(args, topology)
@@ -8733,6 +8789,19 @@ def cmd_status(args) -> int:
         _warn(f'station {_psws_pending}: upload key not confirmed at the '
               f'portal yet (data queues locally)')
         _info('       finish:  smd psws enroll   then   smd psws verify')
+
+    # Adoption — what is present here and not yet adopted.  Read-only: never
+    # adopts, installs, enables, configures or starts anything.  Any failure
+    # (discovery cache missing/unreadable, hardware probe error, …) degrades
+    # to "say nothing here" — a broken adoption section must never take the
+    # rest of `smd status` down with it.
+    if _HAS_SIGMOND_LIB:
+        try:
+            _adopt_inv, _adopted = _adoption_inventory()
+            for _line in _adoption_section(_adopt_inv, _adopted):
+                print(_line)
+        except Exception:
+            pass
 
     print()
     return 1 if any_bad else 0
