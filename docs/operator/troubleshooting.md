@@ -552,10 +552,21 @@ smd status
 - Nothing in `lsusb` → **power the whole machine off**, wait, power it back on.
   Not a reboot. If it is still missing, unplug the RX888's USB cable and plug it
   back into a blue port with no hub.
-- You do not need to start anything afterwards: `sigmond-sdr-sentinel.timer`
-  runs every two minutes and *"mints radiod once an RX888 is attached"* (its own
-  unit description, read live on b4). Give it about two minutes, then re-run
-  `smd status`.
+- Once the radio is back in `lsusb`, bring it back yourself:
+
+  ```bash
+  smd status          # the RX888 appears under "adoptable:"
+  smd adopt <name>    # the name smd status printed; it shows the plan, then asks
+  ```
+
+  Nothing starts on its own. A station that finds hardware attached reports it
+  and waits — hardware appearing is never an instruction to start decoding.
+
+  > **Changed 2026-09-02.** Until then, `sigmond-sdr-sentinel.timer` brought the
+  > station up by itself within two minutes of an RX888 being attached. It was
+  > retired: it started a station's whole stack unattended and unasked. If
+  > `smd doctor` reports `retired-unit` on your machine, that timer is still
+  > armed — the finding names the command that stops it.
 - Radio present, `radiod` active, waterfall still blank → check the coax, the
   connector and the antenna itself. Nothing on the computer will fix that.
 
@@ -1107,7 +1118,7 @@ touching one program and bouncing the whole station.
 
 | Action | Use it when | What it costs | How |
 |---|---|---|---|
-| **Replug a USB device** | The device is missing from `lsusb`, or a sensor has frozen at a constant value | Seconds of that one device's data | Unplug, wait, plug back in. The RX888 goes **straight into a blue USB-3 port, no hub**. Then restart the client that owns it (`smd restart mag-recorder`); the RX888 needs nothing — `sigmond-sdr-sentinel.timer` picks it up within two minutes |
+| **Replug a USB device** | The device is missing from `lsusb`, or a sensor has frozen at a constant value | Seconds of that one device's data | Unplug, wait, plug back in. The RX888 goes **straight into a blue USB-3 port, no hub**. Then restart the client that owns it (`smd restart mag-recorder`); for the RX888, `smd status` then `smd adopt <name>` — nothing starts on its own |
 | **Restart one *cheap* client** | `mag-recorder`, `gpsdo-monitor`, `igmp-querier` or `gmag-webui` is `failed` or stuck | A decode cycle or two of that one program — nothing else moves, **except `gmag-webui`, which drags `mag-recorder` with it** | `[VM]`: `smd restart <name>`. **Never `sudo smd`.** These four declare no radio dependency ([the table](#restarting-one-client-is-often-not-one-client)) |
 | **Restart anything else — which bounces the radio** | A spot recorder, `hf-timestd`, `ka9q-web` or the radio itself needs restarting | **The whole station**: every recorder loses its anchor, and the timing products need about ten minutes to re-settle | ⛔ Not narrow. `psk-recorder`, `wspr-recorder`, `meteor-scatter`, `hf-timestd` and `ka9q-web` all pull `ka9q-radio` in with them. Prefer `smd restart all` — one bounce, everything re-anchored together — over restarting one name and leaving the rest stale |
 | **Reboot — or power off** | Nothing above worked, and your fleet admin agrees | About ten minutes of everything | ⛔ **These are not the same thing.** A reboot holds USB power, so a wedged RX888 stays wedged; only a full **power-off** resets it (source: `sigmond-wizard.sh`). If the radio is the problem, power off. Otherwise a reboot is enough |

@@ -727,41 +727,42 @@ if [ -f /root/sigmond-appliance/sigmond-location-check ]; then
     gexec 60 "echo $(base64 -w0 /root/sigmond-appliance/sigmond-location-check) | base64 -d > /usr/local/sbin/sigmond-location-check && chmod 755 /usr/local/sbin/sigmond-location-check" \
         || say "WARN: could not install sigmond-location-check"
 fi
-say "installing the SDR bring-up sentinel in the VM"
-SENT_B64=$(base64 -w0 <<'SENTEOF'
+say "installing the location-authority timer in the VM"
+# ⛔ RETIRED 2026-09-02 — this used to be `sigmond-sdr-sentinel`, which ALSO ran
+# `smd bringup dasi2 --non-interactive` whenever it saw an RX888 and no radiod
+# conf.  That made hardware appearing an INSTRUCTION: a station brought its whole
+# stack up, unattended and unasked, within two minutes of a device being plugged
+# in.  `smd adopt` is now the only verb that starts anything, and it asks first.
+#
+# What survives here is the one job that genuinely is periodic — re-asserting the
+# GPSDO position as the location authority.  sigmond-location-check calls
+# sigmond-site-timing itself when the position moves, so a relocated station still
+# re-wires its timing chain.  Hardware that appears is reported by `smd status`
+# as adoptable and waits to be adopted.
+LOCTICK_B64=$(base64 -w0 <<'LOCEOF'
 #!/bin/bash
-# sigmond-sdr-sentinel — bridge between "RX888 attached" and "radiod decoding".
-# Installed by sigmond-setup. Nothing in smd mints a radiod instance outside
-# of bringup, and nothing watches for late/replugged SDRs — this does both.
-exec 9>/run/sigmond-sdr-sentinel.lock; flock -n 9 || exit 0
-# location authority first (GPSDO definitive) — near-free when unchanged
-[ -x /usr/local/sbin/sigmond-location-check ] && /usr/local/sbin/sigmond-location-check
-ls /etc/radio/radiod@*.conf >/dev/null 2>&1 && exit 0            # already minted
-[ -s /etc/sigmond/site-profile.toml ] || exit 0                  # no identity yet
-lsusb 2>/dev/null | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100' || exit 0   # no SDR
-echo "RX888 present and no radiod instance — running smd bringup dasi2" \
-  | systemd-cat -t sigmond-sdr-sentinel -p notice
-smd bringup dasi2 --non-interactive
-RC=$?
-# on success, wire the timing chain to the local site (idempotent)
-[ $RC -eq 0 ] && [ -x /usr/local/sbin/sigmond-site-timing ] && /usr/local/sbin/sigmond-site-timing
-exit $RC
-SENTEOF
+# sigmond-location-tick — periodic location authority (GPSDO definitive).
+# Starts NOTHING.  Hardware that appears shows up in `smd status` as adoptable
+# and waits for `smd adopt`.
+exec 9>/run/sigmond-location-tick.lock; flock -n 9 || exit 0
+[ -x /usr/local/sbin/sigmond-location-check ] || exit 0
+exec /usr/local/sbin/sigmond-location-check
+LOCEOF
 )
-SENTINST=$(cat <<INSTEOF
-echo $SENT_B64 | base64 -d > /usr/local/sbin/sigmond-sdr-sentinel
-chmod 755 /usr/local/sbin/sigmond-sdr-sentinel
-cat > /etc/systemd/system/sigmond-sdr-sentinel.service <<'UEOF'
+LOCINST=$(cat <<INSTEOF
+echo $LOCTICK_B64 | base64 -d > /usr/local/sbin/sigmond-location-tick
+chmod 755 /usr/local/sbin/sigmond-location-tick
+cat > /etc/systemd/system/sigmond-location-check.service <<'UEOF'
 [Unit]
-Description=Sigmond SDR sentinel: bring up radiod when an RX888 is present
+Description=Sigmond location authority: re-assert the GPSDO position
 [Service]
 Type=oneshot
-TimeoutStartSec=3600
-ExecStart=/usr/local/sbin/sigmond-sdr-sentinel
+TimeoutStartSec=300
+ExecStart=/usr/local/sbin/sigmond-location-tick
 UEOF
-cat > /etc/systemd/system/sigmond-sdr-sentinel.timer <<'TEOF'
+cat > /etc/systemd/system/sigmond-location-check.timer <<'TEOF'
 [Unit]
-Description=Periodic SDR sentinel (mints radiod once an RX888 is attached)
+Description=Periodic location authority (the GPSDO position is definitive)
 [Timer]
 OnBootSec=75
 OnUnitActiveSec=120
@@ -769,11 +770,17 @@ OnUnitActiveSec=120
 WantedBy=timers.target
 TEOF
 systemctl daemon-reload
-systemctl enable --now sigmond-sdr-sentinel.timer
+# Retire the predecessor wherever this wizard runs against an existing station.
+systemctl disable --now sigmond-sdr-sentinel.timer 2>/dev/null || true
+rm -f /etc/systemd/system/sigmond-sdr-sentinel.timer \\
+      /etc/systemd/system/sigmond-sdr-sentinel.service \\
+      /usr/local/sbin/sigmond-sdr-sentinel
+systemctl daemon-reload
+systemctl enable --now sigmond-location-check.timer
 INSTEOF
 )
-gexec 60 "echo $(echo "$SENTINST" | base64 -w0) | base64 -d > /tmp/sig-sentinel-install.sh && bash /tmp/sig-sentinel-install.sh && rm -f /tmp/sig-sentinel-install.sh" \
-    || say "WARN: could not install the SDR sentinel — run 'smd bringup dasi2' in the VM manually"
+gexec 60 "echo $(echo "$LOCINST" | base64 -w0) | base64 -d > /tmp/sig-locchk-install.sh && bash /tmp/sig-locchk-install.sh && rm -f /tmp/sig-locchk-install.sh" \
+    || say "WARN: could not install the location-authority timer"
 
 # ── relocation / reconfigure propagation (rob 2026-08-04) ──────────────────
 # When bringup has already run (radiod conf exists — i.e. this is a
@@ -809,7 +816,13 @@ fi
 RADIOD_STATE="unknown"
 if gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
     say "RX888 detected — starting SDR bring-up now (takes a few minutes)..."
-    gexec 30 "systemctl start --no-block sigmond-sdr-sentinel.service" || true
+    # Direct call, not a timer poke: the operator is running this wizard with the
+    # radio already plugged in, so bringing it up is what they asked for.  This is
+    # the ONE place bring-up still happens without a separate `smd adopt` — the
+    # consent is the wizard itself.  Hardware attached AFTER the install is
+    # reported by `smd status` and waits to be adopted.
+    gexec 30 "systemd-run --unit=sigmond-wizard-bringup --collect \
+        smd bringup dasi2 --non-interactive" || true
     RADIOD_STATE="bringup launched — still settling; check later with: sigmond-vm smd admin validate"
     for i in $(seq 1 30); do
         if gexec 15 "systemctl list-units --state=active 'radiod@*' --no-legend 2>/dev/null | grep -q radiod@"; then

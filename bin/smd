@@ -4411,9 +4411,63 @@ def _manifest_usable(manifest_text: Optional[str]) -> bool:
     return _parse_manifest_components(manifest_text) is not None
 
 
+#: Units this project has retired, and what an operator needs to know about
+#: each one that is still armed.  Keyed by unit; the value is the sentence
+#: doctor prints, which must say what the unit DOES, what replaced it, and how
+#: to stop it — a finding that only names a unit tells nobody anything.
+RETIRED_UNITS = {
+    'sigmond-sdr-sentinel.timer': (
+        'retired 2026-09-02 but still armed: every two minutes it runs '
+        '`smd bringup dasi2 --non-interactive` whenever it sees an RX888 and '
+        'no radiod conf, so attaching hardware starts this station\'s whole '
+        'stack unattended and unasked. `smd adopt` replaced it and asks first. '
+        'Stop it with: sudo systemctl disable --now sigmond-sdr-sentinel.timer'
+    ),
+}
+
+
+def _retired_unit_findings(is_enabled=None) -> list:
+    """Findings for retired units that are still enabled on this host.
+
+    Retiring a unit in the appliance wizard only changes NEW installs — every
+    station already in the field keeps running it.  On those machines the
+    constraint the adoption design rests on (nothing starts until asked) is
+    simply not true, and a station cannot fix what nothing reports.
+
+    Report-only, never `fixable`: disabling a timer that a running station
+    depends on is a judgement an operator makes, not one a diagnostic makes
+    for them.
+
+    `is_enabled(unit)` returns systemd's enablement word, or None when the
+    unit is absent.  Injected so the whole check tests without systemd.
+    """
+    from sigmond.doctor import Finding
+    if is_enabled is None:
+        def is_enabled(unit):
+            r = _run(['systemctl', 'is-enabled', unit], timeout=10)
+            out = (getattr(r, 'stdout', '') or '').strip()
+            # `is-enabled` exits non-zero for both "disabled" and "no such
+            # unit"; the word on stdout is what distinguishes them, and an
+            # absent unit prints nothing.
+            return out or None
+
+    findings = []
+    for unit, detail in RETIRED_UNITS.items():
+        try:
+            state = is_enabled(unit)
+        except Exception:
+            # A diagnostic has to survive the permission problems it exists to
+            # report; a host without systemd is not a finding.
+            continue
+        if state and state.startswith('enabled'):
+            findings.append(Finding(unit, 'retired-unit', detail))
+    return findings
+
+
 def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
-    """Read-only composition of the five `smd doctor` check families:
-    ownership, git state, venv skew, manifest drift, exec mismatch.
+    """Read-only composition of the six `smd doctor` check families:
+    ownership, git state, venv skew, manifest drift, exec mismatch, and
+    retired-but-still-armed units.
 
     Extracted from `cmd_doctor` so the fleet heartbeat assembler can get
     the same findings in-process, without shelling out to `smd doctor`
@@ -4708,11 +4762,19 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
                                    unverified=_exec_unverified,
                                    via=unit_via.get(m['name']))))
 
+    def _retired() -> None:
+        # Units this project has retired that are still armed here. Retiring a
+        # unit in the appliance wizard only changes NEW installs; a station
+        # already in the field keeps running it, and cannot fix what nothing
+        # reports. See RETIRED_UNITS (module level, above).
+        findings.extend(_retired_unit_findings())
+
     _guarded('ownership', _ownership)
     _guarded('git', _git)
     _guarded('venv-skew', _venv)
     _guarded('manifest', _manifest)
     _guarded('exec-mismatch', _exec)
+    _guarded('retired-unit', _retired)
 
     if unassessed:
         clean = None
@@ -4735,7 +4797,7 @@ def cmd_doctor(args) -> int:
     to a human.  Manifest drift and a running/installed binary mismatch
     are likewise judgement calls, never auto-repaired.
 
-    The five check families themselves are composed in `collect_findings`
+    The six check families themselves are composed in `collect_findings`
     (module level, above) — read-only, and reusable by the fleet
     heartbeat assembler without shelling out to `smd doctor`. `--fix`'s
     repair pass stays here: `collect_findings` never mutates anything.
