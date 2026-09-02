@@ -250,7 +250,7 @@ HAVE_GPSDO=0; HAVE_RX888=0; HAVE_TS1=0; HAVE_MAG=0; GPSDO_MODEL=""
 
 preflight_devices() {
     local usb; usb=$(lsusb 2>/dev/null || true)
-    # RX888 — same PID set the SDR sentinel matches on (line ~397).
+    # RX888 — the PID set the bring-up branch below matches on too.
     echo "$usb" | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100' && HAVE_RX888=1
     # Leo Bodnar GPSDOs, per gpsdo-monitor/models/registry.py:
     #   LBE-1420 0x2443 · LBE-1421 0x2444 · LBE-1423 0x226f · LBE-Mini 0x2211
@@ -279,10 +279,14 @@ preflight_devices() {
 
     if [ "$HAVE_RX888" = 0 ] || [ "$HAVE_GPSDO" = 0 ] || [ "$HAVE_TS1" = 0 ] || [ "$HAVE_MAG" = 0 ]; then
         echo ""
-        echo "  Missing equipment does not stop this install.  The station will"
-        echo "  come up with whatever is fitted, and anything added later is"
-        echo "  picked up automatically (the SDR sentinel watches for a late or"
-        echo "  replugged RX888).  Setup continues."
+        echo "  Missing equipment does not stop this install.  The station comes"
+        echo "  up with whatever you have fitted and stays dormant for the rest."
+        echo "  Attach the missing equipment whenever it arrives, then:"
+        echo ""
+        echo "      smd status    names what the station can now adopt"
+        echo "      smd adopt     asks first, then starts it"
+        echo ""
+        echo "  Nothing starts on its own.  Setup continues."
     fi
     echo "──────────────────────────────────────────────────────"
 }
@@ -683,17 +687,22 @@ if [ -n "${PSWS_MAG:-}" ]; then
         || say "WARN: could not fill mag-recorder identity"
 fi
 
-# ── FFT wisdom seed + SDR bring-up sentinel ────────────────────────────────
+# ── FFT wisdom seed + location authority ───────────────────────────────────
 # TWO structural gaps found on B4 + rob's Kamrui (2026-07-27/28, root-caused
 # in smd @9b015f2): (a) NOTHING in the wizard/clone flow ever mints a radiod
 # instance — `config render` only renders config for existing instances, and
 # minting lives solely in `smd config init radiod`, reached via `smd bringup`;
 # (b) nothing reacts to an RX888 that appears (or gets replugged out of an
 # FX3 wedge) after setup. Net effect: every appliance deploy ended with
-# radiod never started. The sentinel closes both: every 2 min, if an SDR is
-# on the bus and no radiod instance exists, it runs the full non-interactive
-# dasi2 bringup (identity comes from site-profile.toml, which bringup reads
-# when flags are omitted).
+# radiod never started.
+#
+# The sentinel closed both by polling, and closed (b) by STARTING the stack
+# unasked — see the retirement note below. Each gap now has its own answer.
+# The wizard closes (a) itself: it calls `smd bringup` where it can see the
+# RX888, and the operator standing at the console supplies the consent. An
+# operator closes (b) with `smd adopt`, whenever the hardware turns up. So
+# the appliance keeps a periodic job here only for the one thing that
+# genuinely repeats — re-asserting the GPSDO position.
 # Also: `smd apply` refuses to START radiod until /etc/fftw/wisdomf exists,
 # and the in-VM planner grinds >1 h on first boot — seed wisdom from the
 # build fleet first (fftw silently ignores entries foreign to the CPU).
@@ -861,15 +870,16 @@ elif [ "$HAVE_RX888" = 1 ]; then
     say "      that power-off is exactly the reset the SDR needs (a reboot"
     say "      would NOT be — the FX3 stays latched while USB power is held)."
     say ""
-    say "  Nothing else needs doing — after you power back on, radiod comes up"
-    say "  automatically within ~2 min, and this will not recur on later boots."
+    say "  After you power back on the VM enumerates the SDR cleanly, and"
+    say "  this will not recur on later boots.  Then run 'smd adopt' to start"
+    say "  radiod: the station starts no hardware it was not asked to start."
     say "  If the SDR STILL fails to appear then, unplug and replug the"
     say "  RX888's USB cable (some boards keep USB power even in soft-off)."
     say "──────────────────────────────────────────────────────"
     RADIOD_STATE="RX888 present on the host but NOT yet visible to the VM —
             expected on a first install; the POWER-OFF at the end of setup
-            resets it, and radiod starts automatically ~2 min after the
-            next power-on"
+            resets it.  After the next power-on, run 'smd adopt' to start
+            radiod"
     # The wizard's transcript does not survive the power-off that follows, so
     # the operator never sees the paragraph above (rob 2026-08-09: "after the
     # reboot I did not see any mention of the need to re-plug or power cycle").
@@ -878,8 +888,8 @@ elif [ "$HAVE_RX888" = 1 ]; then
     : > "$MARK_DIR/.rx888-needs-powercycle"
 else
     RADIOD_STATE="NO RX888 on the VM's USB bus — plug it in (or re-seat its USB
-            cable if it was already in: a wedged FX3 needs a physical replug);
-            the sentinel then brings radiod up automatically within ~2 min"
+            cable if it was already in: a wedged FX3 needs a physical replug),
+            then run 'smd adopt' to start radiod.  Nothing starts on its own"
 fi
 say "SDR/radiod: $RADIOD_STATE"
 
