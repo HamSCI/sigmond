@@ -472,20 +472,46 @@ unset _tool
 _conv_users="$INVOKER"
 id sigmond >/dev/null 2>&1 && [[ "$INVOKER" != sigmond ]] && _conv_users="$_conv_users sigmond"
 for _conv_user in $_conv_users; do
-    _conv_home="$(getent passwd "$_conv_user" | cut -d: -f6)"
+    _conv_ent="$(getent passwd "$_conv_user" || true)"
+    _conv_home="$(printf '%s' "$_conv_ent" | cut -d: -f6)"
+    _conv_shell="$(printf '%s' "$_conv_ent" | cut -d: -f7)"
     [[ -n "$_conv_home" && -d "$_conv_home" ]] || continue
+
+    # `sigmond` names a real operator on an appliance and a SERVICE account
+    # everywhere else.  On a build VM it reads
+    #     sigmond:x:999:989::/opt/git/sigmond:/usr/sbin/nologin
+    # — its home IS the source checkout.  An account with no login shell has
+    # no terminal to make convenient, so it was never an operator to seed.
+    case "$_conv_shell" in
+        */nologin|*/false|"") continue ;;
+    esac
+
+    # A home we cannot write is a home we skip, and we say which.  Silence
+    # would leave an operator wondering why their scroll wheel does nothing.
+    if [[ ! -w "$_conv_home" ]]; then
+        warn "terminal conveniences: cannot write $_conv_home — skipping $_conv_user (tmux mouse and top's P column stay unset there)"
+        continue
+    fi
 
     _tmux_conf="$_conv_home/.tmux.conf"
     if ! grep -Eq '^[[:space:]]*set(-option)?[[:space:]]+(-g[[:space:]]+)?mouse[[:space:]]' \
             "$_tmux_conf" 2>/dev/null; then
-        {
+        # Seeding a scroll-wheel setting ranks last among the things this
+        # script does, so it must never be the thing that stops it.  This
+        # exact append returned EACCES on 2026-09-02 and `set -euo pipefail`
+        # took the whole install down with it — thirty minutes upstream of a
+        # golden-VM build that could then report only "stage1 timeout".
+        if {
             echo '# added by sigmond install.sh — tmux mouse support'
             echo 'set -g mouse on'
-        } >> "$_tmux_conf"
-        # When running as root (sudo ./install.sh) a freshly created file
-        # must still belong to the operator.
-        [[ $EUID -eq 0 ]] && chown "$_conv_user": "$_tmux_conf" || true
-        ok "tmux: enabled mouse support in $_tmux_conf"
+           } >> "$_tmux_conf" 2>/dev/null; then
+            # When running as root (sudo ./install.sh) a freshly created file
+            # must still belong to the operator.
+            [[ $EUID -eq 0 ]] && chown "$_conv_user": "$_tmux_conf" || true
+            ok "tmux: enabled mouse support in $_tmux_conf"
+        else
+            warn "tmux: could not write $_tmux_conf — mouse support stays unset for $_conv_user"
+        fi
     else
         ok "tmux: mouse setting already present in $_tmux_conf"
     fi
@@ -496,13 +522,16 @@ for _conv_user in $_conv_users; do
     # portable way to produce one — the fieldscur encoding is version-specific.
     _toprc="$_conv_home/.config/procps/toprc"
     if [[ ! -f "$_toprc" && -f "$REPO_DIR/etc/toprc" ]]; then
-        install -D -m 0644 "$REPO_DIR/etc/toprc" "$_toprc"
-        [[ $EUID -eq 0 ]] && chown -R "$_conv_user": "$_conv_home/.config/procps" || true
-        ok "top: seeded $_toprc (P column right of %CPU)"
+        if install -D -m 0644 "$REPO_DIR/etc/toprc" "$_toprc" 2>/dev/null; then
+            [[ $EUID -eq 0 ]] && chown -R "$_conv_user": "$_conv_home/.config/procps" || true
+            ok "top: seeded $_toprc (P column right of %CPU)"
+        else
+            warn "top: could not seed $_toprc — the P column stays unset for $_conv_user"
+        fi
     fi
     unset _tmux_conf _toprc
 done
-unset _conv_user _conv_users _conv_home
+unset _conv_user _conv_users _conv_home _conv_ent _conv_shell
 
 # ─── avahi-browse (mDNS discovery) ───────────────────────────────────────────
 # sigmond's discovery/mdns.py and ka9q-python's discover_radiod_services
