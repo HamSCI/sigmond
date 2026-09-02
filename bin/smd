@@ -9034,12 +9034,12 @@ def _adopt_next_step(writes) -> None:
     """
     if not writes:
         return
-    _warn(f'adopt records the selection; it does NOT write client config.')
+    _warn('adopt records the selection; it does NOT write client config.')
     _info(f'  next:  {_SOURCES_APPLY_VERB}')
-    _info(f'         renders these sources into each client\'s config, then '
-          f'names the service to restart.')
-    _info(f'         (wspr-recorder is the one multi-source-aware client '
-          f'today; that verb reports the rest as deferred.)')
+    _info('         renders these sources into each client\'s config, then '
+          'names the service to restart.')
+    _info('         (wspr-recorder is the one multi-source-aware client '
+          'today; that verb reports the rest as deferred.)')
 
 
 def cmd_adopt(args) -> int:
@@ -21020,10 +21020,13 @@ def main() -> int:
     # ⛔ `adopt` is deliberately ABSENT from this set even though it mutates.
     # It takes `lifecycle_lock` itself, around the selection write and the
     # start together (see cmd_adopt), so that `--dry-run` and every refusal
-    # path stay unprivileged and lock-free.  Adding it here would take the
-    # same non-reentrant flock twice and hang the one verb that starts
-    # services.  Same reason it elevates itself rather than via _need_root
-    # here.
+    # path stay unprivileged and lock-free — and it elevates itself, after
+    # those refusals, for the same reason.  Adding it here would take that
+    # lock twice: `lifecycle_lock` flocks a FRESH fd with LOCK_NB, and flock
+    # conflicts across open file descriptions even inside one process
+    # (verified), so the inner acquisition does not queue and does not
+    # deadlock — it raises SystemExit, and the one verb that starts services
+    # dies reporting a conflict with itself.
     _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload'}
     if args.command in _MUTATING:
         if _need_root(args.command):
