@@ -69,3 +69,59 @@ class TestOffers:
     def test_a_fully_adopted_kit_offers_nothing(self):
         got = offers(_inv(DASI2, [RX, GPS]), adopted=frozenset({RX, GPS}))
         assert got == []
+
+
+from sigmond.adoption import AdoptionPlan, plan
+from sigmond.station_identity import StationIdentity
+
+SITE = StationIdentity(hostname="DASI007", dasi2_site=True,
+                       psws_station="S000207", psws_instrument="I000207")
+ALIKE = StationIdentity(hostname="fargo-1", dasi2_site=False)
+
+
+class TestPlan:
+
+    def test_a_rostered_kit_asks_for_nothing(self):
+        """Fleet provisioning is meant to be zero-input."""
+        inv = _inv(DASI2, [RX, GPS])
+        p = plan(offers(inv, frozenset())[0], inv, SITE)
+        assert p.ask == ()
+        assert p.prefills["psws_station"] == "S000207"
+        assert p.prefills["psws_instrument"] == "I000207"
+
+    def test_an_alike_kit_gets_the_same_components_without_identity(self):
+        """Same hardware, same configuration — simply not a funded site."""
+        inv = _inv(DASI2, [RX, GPS])
+        site_plan = plan(offers(inv, frozenset())[0], inv, SITE)
+        alike_plan = plan(offers(inv, frozenset())[0], inv, ALIKE)
+        assert alike_plan.components == site_plan.components
+        assert "psws_station" not in alike_plan.prefills
+        assert "psws_station" in alike_plan.ask
+
+    def test_the_radiod_status_name_comes_from_the_hostname(self):
+        inv = _inv(("rx888",), [RX])
+        p = plan(offers(inv, frozenset())[0], inv, ALIKE)
+        assert p.prefills["radiod_status_name"] == "fargo-1-status.local"
+
+    def test_an_rx888_brings_radiod_and_its_infrastructure(self):
+        inv = _inv(("rx888",), [RX])
+        p = plan(offers(inv, frozenset())[0], inv, ALIKE)
+        assert set(p.components) >= {"ka9q-radio", "ka9q-web", "igmp-querier"}
+
+    def test_a_gpsdo_brings_its_monitor(self):
+        inv = _inv(("gpsdo",), [GPS])
+        p = plan(offers(inv, frozenset())[0], inv, ALIKE)
+        assert "gpsdo-monitor" in p.components
+
+    def test_a_remote_radiod_brings_no_local_radiod(self):
+        """The no-hardware station consumes someone else's radiod."""
+        inv = _inv((), [REMOTE])
+        p = plan(offers(inv, frozenset())[0], inv, ALIKE)
+        assert "ka9q-radio" not in p.components
+
+    def test_a_kit_plan_covers_every_kit_component(self):
+        inv = _inv(DASI2, [RX, GPS])
+        p = plan(offers(inv, frozenset())[0], inv, SITE)
+        assert set(p.components) >= {
+            "ka9q-radio", "ka9q-web", "igmp-querier",
+            "gpsdo-monitor", "mag-recorder"}

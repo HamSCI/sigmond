@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import FrozenSet, List, Optional, Tuple
 
 from .sources import SourceKey
+from .station_identity import StationIdentity
 
 #: The hardware that defines a DASI2 kit.  Membership in the funded programme
 #: is decided by the HOSTNAME (see `station_identity`), never by this — anyone
@@ -70,3 +71,65 @@ def offers(inv: StationInventory,
     if kit is not None:
         return [Offer(name=kit, kind="kit", sources=remaining)]
     return [Offer(name=str(s), kind="source", sources=(s,)) for s in remaining]
+
+
+#: What each piece of hardware brings with it.  radiod needs ka9q-web and
+#: igmp-querier because multicast will not work without the querier.
+_HARDWARE_COMPONENTS = {
+    "rx888": ("ka9q-radio", "ka9q-web", "igmp-querier"),
+    "gpsdo": ("gpsdo-monitor",),
+    "magnetometer": ("mag-recorder",),
+}
+
+
+@dataclass(frozen=True)
+class AdoptionPlan:
+    """What adopting an offer would do, and what it still needs to be told."""
+    components: Tuple[str, ...] = ()
+    prefills: dict = field(default_factory=dict)
+    ask: Tuple[str, ...] = ()
+
+
+def _hardware_for(offer: Offer, inv: StationInventory) -> FrozenSet[str]:
+    if offer.kind == "kit":
+        return inv.hardware
+    # A single source: a local USB device implies its hardware kind; a remote
+    # radiod implies none, because the SDR is not ours.
+    kinds = set()
+    for key in offer.sources:
+        if key.type != "usb":
+            continue
+        kinds |= {k for k in inv.hardware if k in _HARDWARE_COMPONENTS}
+    return frozenset(kinds)
+
+
+def plan(offer: Offer, inv: StationInventory,
+         identity: "StationIdentity") -> AdoptionPlan:
+    """What adopting this offer entails.
+
+    Prefills split the way identity does: anything derivable from the kit or
+    the host is filled; grant identity comes from the roster on a site and is
+    ASKED on a DASI2-alike, which is a first-class station with no roster
+    entry rather than a degraded one.
+    """
+    hardware = _hardware_for(offer, inv)
+    components: list = []
+    for kind in sorted(hardware):
+        for comp in _HARDWARE_COMPONENTS.get(kind, ()):
+            if comp not in components:
+                components.append(comp)
+
+    prefills = {
+        # Auto-composed from the hostname — zero operator input, the rule the
+        # install redesign already locked for radiod.
+        "radiod_status_name": f"{identity.hostname}-status.local",
+    }
+    ask: list = []
+    if identity.dasi2_site:
+        prefills["psws_station"] = identity.psws_station
+        prefills["psws_instrument"] = identity.psws_instrument
+    else:
+        ask.extend(("psws_station", "psws_instrument"))
+
+    return AdoptionPlan(components=tuple(components),
+                        prefills=prefills, ask=tuple(ask))
