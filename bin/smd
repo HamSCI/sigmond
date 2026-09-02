@@ -5417,12 +5417,18 @@ def cmd_bringup(args) -> int:
         # Local-radiod profile: the upfront check is the SDR HARDWARE on the USB
         # bus, NOT whether ka9q-radio is built yet (bringup builds it).
         if not _detect_local_sdr():
-            _err('bringup: no RX888/SDR on the USB bus — without it radiod '
-                 'cannot run and NOTHING decodes (WSPR / PSK / GRAPE all dark). '
-                 'Attach the RX888 and re-run, or use --remote-radiod / the '
-                 '"client" profile to bind a remote radiod.')
-            return 1
+            # Install lays the groundwork and activates nothing.  Fargo
+            # installs with NOTHING attached and gains the RX888 after a
+            # reboot; refusing here makes the machine un-buildable at the
+            # moment it is being built.  The consequence still gets said
+            # loudly — a warning is not a refusal.
+            _warn('bringup: no RX888/SDR on the USB bus — without it radiod '
+                  'cannot run and NOTHING decodes (WSPR / PSK / GRAPE all '
+                  'dark). Installing anyway; the station stays dormant until '
+                  'an SDR is attached and adopted with `smd adopt`.')
         local = True
+        # Local-radiod means radiod installs dormant on this host; nothing
+        # starts on its own just because the hardware later shows up.
     else:
         # Client-shaped profile (no local radiod infra) — runs against a remote.
         local = False
