@@ -8749,6 +8749,65 @@ def _adoption_inventory():
     return _station_inventory(), _adopted_sources()
 
 
+def _adopt_start_preview(components):
+    """`(startable, [(name, why-not), …])` — what `cmd_start` will act on.
+
+    Reads the SAME two sources cmd_start's own gate reads: `compute_state`
+    (installed AND configured, which is `can_start`, and does not depend on
+    the topology enable cmd_start writes first) and `harmonize.dormant_reason`
+    (a hardware-gated component whose device is confidently absent).  cmd_start
+    still makes the real decision; this exists so the operator sees the truth
+    BEFORE consenting and so adopt does not claim to have started a component
+    that was skipped.  When the preview cannot be computed it claims nothing
+    extra — every component is reported startable and cmd_start's own warnings
+    stand as the record.
+    """
+    components = list(components)
+    try:
+        from sigmond.catalog import load_catalog
+        from sigmond.component_state import compute_state
+        from sigmond.harmonize import dormant_reason
+        topology = _load_topology(TOPOLOGY_PATH)
+        catalog = load_catalog()
+    except Exception:                                            # noqa: BLE001
+        return components, []
+
+    startable, skipped = [], []
+    for name in components:
+        entry = catalog.get(name)
+        if entry is not None and getattr(entry, 'kind', None) == 'library':
+            continue                       # library entries have no services
+        try:
+            hw = dormant_reason(name, enabled=True)
+            if hw:
+                skipped.append((name, f'dormant — {hw} not present'))
+                continue
+            alias = getattr(entry, 'topology_alias', None) if entry else None
+            state = compute_state(name, topology, alias=alias)
+        except Exception:                                        # noqa: BLE001
+            startable.append(name)
+            continue
+        if state.can_start or not state.cloned:
+            startable.append(name)
+        else:
+            skipped.append((name, state.display_status))
+    return startable, skipped
+
+
+def _radiod_already_running() -> bool:
+    """True when a radiod instance is active on this host.
+
+    Asked before adopting an SDR because `cmd_start` runs
+    `_ensure_radiod_affinity_drop_ins`, which restarts a running radiod whose
+    CPU pinning no longer matches the placement it computes.  We disclose the
+    possibility rather than predicting the outcome — see the report; deciding
+    it here would mean a second copy of that function's placement maths.
+    """
+    r = _run(['systemctl', 'list-units', '--no-legend', '--state=active',
+              'radiod@*.service'])
+    return bool((r.stdout or '').strip())
+
+
 def cmd_adopt(args) -> int:
     """Adopt an offer: record its sources, then enable and start what it brings.
 
@@ -8770,8 +8829,8 @@ def cmd_adopt(args) -> int:
     from contextlib import nullcontext
 
     from sigmond import sources as _sources
-    from sigmond.adoption import (SOURCE_CONSUMERS, offers as _offers,
-                                  plan as _plan)
+    from sigmond.adoption import (consumers_for as _consumers_for,
+                                  offers as _offers, plan as _plan)
     from sigmond.station_identity import UnrosteredDasiName
 
     # Seam for tests and for an alternate config tree; the default is the
@@ -8780,8 +8839,20 @@ def cmd_adopt(args) -> int:
                 or _sources.DEFAULT_CLIENTS_ROOT)
     dry_run = bool(getattr(args, 'dry_run', False))
 
-    inv = _station_inventory()
-    adopted = _adopted_sources(root=root)
+    # `cmd_status` degrades quietly when this picture cannot be built, because
+    # a broken selection file must not take the whole status page down.  Adopt
+    # must NOT degrade: acting on a partial picture is how a source gets
+    # adopted twice or a device gets missed.  So: fail, and name what broke.
+    try:
+        inv = _station_inventory()
+        adopted = _adopted_sources(root=root)
+    except Exception as exc:                                     # noqa: BLE001
+        _err(f'adopt: cannot read what this station has — {type(exc).__name__}: '
+             f'{exc}. Adoption needs a complete picture; fix the file named '
+             f'above (a hand-edited {root}/*.sources.toml, the discovery cache, '
+             f'or the roster) and try again.')
+        return 1
+
     pending = _offers(inv, adopted)
     match = next((o for o in pending if o.name == args.name), None)
     if match is None:
@@ -8797,13 +8868,28 @@ def cmd_adopt(args) -> int:
         # be decided must not be half-configured under a name it may not own.
         _err(f'adopt: {exc}')
         return 1
+    except Exception as exc:                                     # noqa: BLE001
+        _err(f'adopt: cannot decide this station\'s identity — '
+             f'{type(exc).__name__}: {exc}. Adoption will not guess it.')
+        return 1
 
     plan_ = _plan(match, inv, identity)
+
+    # Route each key to the components that actually READ it.  Adopting a kit
+    # used to write every one of its sources into every consumer's selection.
+    writes = []
+    for key in match.sources:
+        for client in _consumers_for(key, inv):
+            if client in plan_.components:
+                writes.append((client, key))
+
     _info(f'adopt {match.name}: components {list(plan_.components)}')
     for key, value in sorted(plan_.prefills.items()):
         _info(f'  prefill {key} = {value}')
     for field_name in plan_.ask:
         _info(f'  needs {field_name}')
+    for client, key in writes:
+        _info(f'  source {key} → {client}')
     if dry_run:
         _info('adopt: dry run — nothing changed')
         return 0
@@ -8812,18 +8898,37 @@ def cmd_adopt(args) -> int:
              f'is nothing to configure. Adopting it would change nothing.')
         return 1
 
-    # ── the explicit yes ────────────────────────────────────────────────────
+    startable, skipped = _adopt_start_preview(plan_.components)
+    for name, why in skipped:
+        _warn(f'  {name}: will NOT start — {why}')
+    if not startable:
+        _err(f'adopt {match.name}: nothing here can start — see above. '
+             f'Nothing was changed.')
+        return 1
+
+    # A terminal we cannot ask at is a refusal, not a yes — and refusing needs
+    # no privilege, so this precedes the elevation below.
+    if not getattr(args, 'yes', False) and not sys.stdin.isatty():
+        _err(f'adopt {match.name}: no terminal to ask at, and nothing may '
+             f'start unasked. Pass --yes to adopt non-interactively, or '
+             f'--dry-run to see the plan.')
+        return 1
+
+    # Elevate BEFORE asking.  _need_root re-execs the whole verb under sudo
+    # with the original argv, which carries no --yes: prompting first would
+    # ask the operator, re-exec, and ask again.
+    if _need_root('adopt'):
+        return 1
+
     if not getattr(args, 'yes', False):
-        if not sys.stdin.isatty():
-            # Silence is not consent.  A pipe, a cron job or a lost terminal
-            # must never be the thing that starts a station's services.
-            _err(f'adopt {match.name}: no terminal to ask at, and nothing may '
-                 f'start unasked. Pass --yes to adopt non-interactively, or '
-                 f'--dry-run to see the plan.')
-            return 1
+        if 'ka9q-radio' in startable and _radiod_already_running():
+            _warn('  radiod is already running here. Starting it again '
+                  're-checks its CPU pinning, and a placement that no longer '
+                  'matches restarts the instance — decodes stop for a few '
+                  'seconds and the timing chain re-anchors.')
         try:
             answer = input(f'\nEnable and start '
-                           f'{", ".join(plan_.components)} now? [y/N]: '
+                           f'{", ".join(startable)} now? [y/N]: '
                            ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
@@ -8831,9 +8936,6 @@ def cmd_adopt(args) -> int:
         if not answer.startswith('y'):
             _info(f'adopt {match.name}: declined — nothing started')
             return 0
-
-    if _need_root('adopt'):
-        return 1
 
     # One lock across the whole adoption, so the selection write and the start
     # cannot interleave with another lifecycle verb.  `main()` takes this lock
@@ -8843,14 +8945,13 @@ def cmd_adopt(args) -> int:
             if _HAS_SIGMOND_LIB else nullcontext())
     with lock:
         # Record the selection BEFORE starting, so a client that reads its
-        # sources at startup reads the adoption that just happened.  Only the
-        # components that actually consume a source get one: `plan_.components`
-        # is the enable list, and ka9q-web / igmp-querier read no device.
-        for client in plan_.components:
-            if client not in SOURCE_CONSUMERS:
-                continue
+        # sources at startup reads the adoption that just happened.
+        by_client = {}
+        for client, key in writes:
+            by_client.setdefault(client, []).append(key)
+        for client, keys in by_client.items():
             sel = _sources.ClientSources.load(client, root=root)
-            for key in match.sources:
+            for key in keys:
                 sel.add(key)
             sel.save(root=root)
 
@@ -8862,9 +8963,10 @@ def cmd_adopt(args) -> int:
 
     if rc != 0:
         _err(f'adopt {match.name}: sources recorded, but start reported '
-             f'failures — see above (smd status {" ".join(plan_.components)})')
+             f'failures — see above (smd status {" ".join(startable)})')
         return rc
-    _ok(f'adopt {match.name}: adopted — {", ".join(plan_.components)}')
+    _ok(f'adopt {match.name}: started {", ".join(startable)}'
+        + (f'; NOT started {", ".join(n for n, _ in skipped)}' if skipped else ''))
     return 0
 
 

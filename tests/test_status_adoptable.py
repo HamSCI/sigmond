@@ -53,7 +53,10 @@ def test_a_recognised_kit_is_named_as_one_offer():
     lines = _smd()._adoption_section(
         StationInventory(
             hardware=frozenset({"rx888", "gpsdo", "magnetometer"}),
-            sources=(RX,)),
+            sources=(RX,),
+            # A kit claims the LOCAL devices it is made of, so the fixture has
+            # to say which device this key is -- as a real station does.
+            source_kinds=((RX, "rx888"),)),
         adopted=frozenset())
     assert "dasi2" in "\n".join(lines).lower()
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import FrozenSet, List, Optional, Tuple
 
-from .sources import SourceKey
+from .sources import KNOWN_CLIENTS, SourceKey
 from .station_identity import StationIdentity
 
 #: The hardware that defines a DASI2 kit.  Membership in the funded programme
@@ -88,9 +88,23 @@ def offers(inv: StationInventory,
     if not remaining:
         return []
     kit = recognise(inv)
-    if kit is not None:
-        return [Offer(name=kit, kind="kit", sources=remaining)]
-    return [Offer(name=str(s), kind="source", sources=(s,)) for s in remaining]
+    if kit is None:
+        return [Offer(name=str(s), kind="source", sources=(s,))
+                for s in remaining]
+
+    # A kit claims the LOCAL devices it is made of, and nothing else.  It used
+    # to claim every unadopted source, so a neighbour's radiod on the LAN got
+    # swept into "dasi2" — recorded as adopted for a station that had never
+    # configured it, and gone from `smd status` for good.  Anything with no
+    # local hardware kind stands on its own, the way it would on a station
+    # that matched no kit.
+    local = tuple(s for s in remaining if inv.kind_of(s) is not None)
+    rest = tuple(s for s in remaining if inv.kind_of(s) is None)
+    out: List[Offer] = []
+    if local:
+        out.append(Offer(name=kit, kind="kit", sources=local))
+    out.extend(Offer(name=str(s), kind="source", sources=(s,)) for s in rest)
+    return out
 
 
 #: What each piece of hardware brings with it.  radiod needs ka9q-web and
@@ -116,6 +130,25 @@ SOURCE_CONSUMERS: FrozenSet[str] = frozenset({
     "gpsdo-monitor",  # reads the GPSDO's HID / CDC stream
     "mag-recorder",   # reads the RM3100 behind its USB-I2C adapter
 })
+
+
+def consumers_for(key: SourceKey, inv: StationInventory) -> Tuple[str, ...]:
+    """The components that would actually READ this source.
+
+    Narrower than the enable list, and per-key rather than per-offer: adopting
+    a kit used to write every one of its sources into every consumer's
+    selection, so mag-recorder was told the RX888 was one of its sources.
+
+    A radiod on another machine is consumed by the decode clients —
+    `sources.KNOWN_CLIENTS`, reused rather than restated so the two cannot
+    drift.  A local device is consumed by the one component that reads it.
+    Anything unrecognised is consumed by nothing, and gets no selection file.
+    """
+    if key.type == "radiod":
+        return tuple(KNOWN_CLIENTS)
+    kind = inv.kind_of(key)
+    return tuple(c for c in _HARDWARE_COMPONENTS.get(kind, ())
+                 if c in SOURCE_CONSUMERS)
 
 
 @dataclass(frozen=True)
@@ -169,6 +202,16 @@ def plan(offer: Offer, inv: StationInventory,
         for comp in _HARDWARE_COMPONENTS.get(kind, ()):
             if comp not in components:
                 components.append(comp)
+
+    # The no-local-hardware station (design §2): "a site runs no SDR; radiod
+    # lives on another machine on the LAN. sigmond should find it and offer
+    # the clients that can consume it."  Without this a discovered radiod was
+    # offered by `smd status` and then refused by `smd adopt`, because no
+    # hardware kind mapped to it.
+    if any(k.type == "radiod" for k in offer.sources):
+        for client in KNOWN_CLIENTS:
+            if client not in components:
+                components.append(client)
 
     prefills = {
         # Auto-composed from the hostname — zero operator input, the rule the

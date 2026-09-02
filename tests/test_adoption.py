@@ -7,8 +7,9 @@ and no LAN — which is what lets Fargo be dry-run before anyone travels.
 
 import pytest
 
-from sigmond.adoption import DASI2_KIT, Offer, StationInventory, offers, recognise
-from sigmond.sources import SourceKey
+from sigmond.adoption import (DASI2_KIT, Offer, StationInventory,
+                              consumers_for, offers, recognise)
+from sigmond.sources import KNOWN_CLIENTS, SourceKey
 
 
 def _inv(hardware=(), sources=(), kinds=()):
@@ -24,6 +25,9 @@ DASI2 = ("rx888", "gpsdo", "magnetometer")
 RX = SourceKey(type="usb", identifier="04b4:00f1:0009061C028B1629")
 GPS = SourceKey(type="usb", identifier="1dd2:2211:mini01")
 REMOTE = SourceKey(type="radiod", identifier="bee3-status.local")
+
+#: What each local key stands for -- a real station always knows this.
+KITKINDS = ((RX, "rx888"), (GPS, "gpsdo"))
 
 
 class TestRecognise:
@@ -49,9 +53,19 @@ class TestRecognise:
 class TestOffers:
 
     def test_a_matching_kit_is_offered_as_one_thing(self):
-        got = offers(_inv(DASI2, [RX, GPS]), adopted=frozenset())
+        got = offers(_inv(DASI2, [RX, GPS], KITKINDS), adopted=frozenset())
         assert [o.name for o in got] == ["dasi2"]
         assert got[0].kind == "kit"
+
+    def test_a_kit_does_not_swallow_a_radiod_on_the_lan(self):
+        """A neighbour's radiod is not part of this station's kit.  Swept in,
+        it was recorded as adopted for a station that had never configured it
+        and vanished from `smd status` for good."""
+        got = offers(_inv(DASI2, [RX, GPS, REMOTE], KITKINDS),
+                     adopted=frozenset())
+        assert [o.name for o in got] == ["dasi2", str(REMOTE)]
+        assert got[0].sources == (RX, GPS)
+        assert got[1].kind == "source"
 
     def test_without_a_kit_each_source_is_offered_separately(self):
         got = offers(_inv(("rx888", "gpsdo"), [RX, GPS]), adopted=frozenset())
@@ -139,11 +153,20 @@ class TestPlan:
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
         assert p.components == ()
 
-    def test_a_remote_radiod_brings_no_local_radiod(self):
-        """The no-hardware station consumes someone else's radiod."""
+    def test_a_remote_radiod_brings_the_clients_that_can_decode_from_it(self):
+        """The no-hardware station: design §2 says sigmond should find the
+        radiod on the LAN and offer the clients that can consume it.  Before
+        this, `smd status` offered it and `smd adopt` refused it."""
         inv = _inv((), [REMOTE])
         p = plan(offers(inv, frozenset())[0], inv, ALIKE)
-        assert p.components == ()
+        assert set(p.components) == set(KNOWN_CLIENTS)
+        assert "ka9q-radio" not in p.components       # the SDR is not ours
+
+    def test_the_radiod_client_list_is_not_restated(self):
+        """One place answers "who consumes a radiod?"  Two would drift."""
+        inv = _inv((), [REMOTE])
+        p = plan(offers(inv, frozenset())[0], inv, ALIKE)
+        assert tuple(p.components) == tuple(KNOWN_CLIENTS)
 
     def test_a_kit_plan_covers_every_kit_component(self):
         """The kit branch is the one place breadth is correct: adopting the
@@ -153,3 +176,30 @@ class TestPlan:
         assert set(p.components) == {
             "ka9q-radio", "ka9q-web", "igmp-querier",
             "gpsdo-monitor", "mag-recorder"}
+
+
+class TestConsumers:
+    """Which components actually READ a source -- per key, not per offer."""
+
+    def test_an_sdr_is_read_by_radiod_alone(self):
+        inv = _inv(DASI2, [RX, GPS], KITKINDS)
+        assert consumers_for(RX, inv) == ("ka9q-radio",)
+
+    def test_a_gpsdo_is_read_by_its_monitor_alone(self):
+        inv = _inv(DASI2, [RX, GPS], KITKINDS)
+        assert consumers_for(GPS, inv) == ("gpsdo-monitor",)
+
+    def test_ka9q_web_and_the_querier_read_nothing(self):
+        """They are brought up by an SDR adoption but consume no source; a
+        selection file for them stores a fact nobody reads."""
+        inv = _inv(DASI2, [RX, GPS], KITKINDS)
+        for key in (RX, GPS):
+            assert "ka9q-web" not in consumers_for(key, inv)
+            assert "igmp-querier" not in consumers_for(key, inv)
+
+    def test_a_remote_radiod_is_read_by_the_decode_clients(self):
+        assert consumers_for(REMOTE, _inv((), [REMOTE])) == tuple(KNOWN_CLIENTS)
+
+    def test_an_unrecognised_source_is_read_by_nothing(self):
+        stray = SourceKey(type="usb", identifier="dead:beef")
+        assert consumers_for(stray, _inv(DASI2, [stray])) == ()

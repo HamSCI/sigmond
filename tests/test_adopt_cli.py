@@ -73,17 +73,35 @@ class _Started(list):
         return 0
 
 
-def _wire(mod, inv, tmp_path, identity=None, adopted=frozenset()):
+def _wire(mod, inv, tmp_path, identity=None, adopted=frozenset(),
+          may_elevate=True):
     """Point the module's seams at a fabricated station.  Returns the
-    recorder standing in for `cmd_start` -- the real one drives systemctl."""
+    recorder standing in for `cmd_start` -- the real one drives systemctl.
+
+    `may_elevate=False` makes `_need_root` FAIL the test if it is called, for
+    the read-only paths: nothing that only reports may ask for sudo.  That
+    property is the whole reason `adopt` stays out of main()'s `_MUTATING`
+    set, and without this stub nothing would notice it regressing.
+    """
     mod._station_inventory = lambda: inv
     mod._adopted_sources = lambda **kw: adopted
     mod._station_identity = lambda: identity or _identity()
-    # Never elevate in a test: _need_root() os.execvp()s sudo and would
-    # replace the pytest process.
-    mod._need_root = lambda _name: False
+    # Never elevate for real in a test: _need_root() os.execvp()s sudo and
+    # would replace the pytest process.
+    if may_elevate:
+        mod._need_root = lambda _name: False
+    else:
+        def _forbidden(_name):
+            raise AssertionError(
+                "_need_root called on a path that changes nothing")
+        mod._need_root = _forbidden
     started = _Started()
     mod.cmd_start = started
+    # The real preview probes live host hardware and the real catalog; the
+    # fabricated stations here have neither.  `TestStartPreview` below covers
+    # the preview itself.
+    mod._adopt_start_preview = lambda comps: (list(comps), [])
+    mod._radiod_already_running = lambda: False
     # The real lock file lives in /var/lib; take a no-op in tests but record
     # that it was entered, and when.
     @contextlib.contextmanager
@@ -163,7 +181,8 @@ def test_an_unrostered_dasi_hostname_refuses_before_doing_anything(
 
 def test_dry_run_reports_the_plan_and_changes_nothing(tmp_path, capsys):
     mod = _smd()
-    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path,
+                    may_elevate=False)
     rc = mod.cmd_adopt(_args(str(RX), tmp_path, dry_run=True))
     assert rc == 0
     out = capsys.readouterr().out
@@ -550,7 +569,8 @@ def test_an_absent_terminal_is_never_read_as_consent(tmp_path, monkeypatch,
     """A cron job or a pipe must not be able to start a station's services by
     saying nothing.  --yes is how a script consents."""
     mod = _smd()
-    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path,
+                    may_elevate=False)
     monkeypatch.setattr("sys.stdin", _Stdin(False))
 
     def _no_prompt(_p=""):
@@ -605,11 +625,14 @@ def test_the_whole_kit_records_one_selection_per_consumer(tmp_path):
     _wire(mod, _station({"rx888", "gpsdo", "magnetometer"}, (RX, "rx888"), (MAG, "magnetometer")), tmp_path)
     assert mod.cmd_adopt(_args("dasi2", tmp_path, yes=True)) == 0
 
+    # Each key lands ONLY in the component that reads it.  This assertion used
+    # to say `ka9q-radio` was told about the magnetometer and `mag-recorder`
+    # about the RX888: adopting a kit looped components x sources.  A kit is
+    # still ONE decision; it is just no longer one undifferentiated pile.
     written = {p.name for p in tmp_path.iterdir()}
-    assert written == {"ka9q-radio.sources.toml", "gpsdo-monitor.sources.toml",
-                       "mag-recorder.sources.toml"}
-    # A kit is adopted as ONE thing, so every source it covers is recorded.
-    assert set(ClientSources.load("ka9q-radio", root=tmp_path).selected) == {RX, MAG}
+    assert written == {"ka9q-radio.sources.toml", "mag-recorder.sources.toml"}
+    assert ClientSources.load("ka9q-radio", root=tmp_path).selected == [RX]
+    assert ClientSources.load("mag-recorder", root=tmp_path).selected == [MAG]
 
 
 # ---------------------------------------------------------------------------
@@ -693,3 +716,190 @@ def test_a_discovered_lan_radiod_carries_no_local_kind(tmp_path, monkeypatch):
     assert inv.kind_of(FARGO) is None
     assert inv.kind_of(
         SourceKey(type="usb", identifier="04b4:00f1:0009072C56")) == "rx888"
+
+
+# ---------------------------------------------------------------------------
+# One prompt, in the right order, and never on a read-only path
+# ---------------------------------------------------------------------------
+
+def test_elevation_happens_before_the_prompt_not_after(tmp_path, monkeypatch):
+    """`_need_root` re-execs the whole verb under sudo with the ORIGINAL argv,
+    which carries no --yes.  Prompting first would ask the operator, re-exec,
+    and ask again."""
+    mod = _smd()
+    _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    order = []
+    mod._need_root = lambda _n: order.append("elevate") or False
+    monkeypatch.setattr("sys.stdin", _Stdin(True))
+    monkeypatch.setattr("builtins.input",
+                        lambda _p="": (order.append("prompt"), "y")[1])
+
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=False)) == 0
+    assert order == ["elevate", "prompt"]
+
+
+def test_declining_after_elevation_still_changes_nothing(tmp_path, monkeypatch):
+    """Elevation precedes the prompt (above), so a decline cannot assert that
+    sudo was never asked for.  What it CAN assert is the property that
+    matters: saying no leaves the station exactly as it was."""
+    mod = _smd()
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    monkeypatch.setattr("sys.stdin", _Stdin(True))
+    monkeypatch.setattr("builtins.input", lambda _p="": "n")
+
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=False)) == 0
+    assert started == []
+    assert not list(tmp_path.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# The no-local-hardware station: a radiod on the LAN (design §2)
+# ---------------------------------------------------------------------------
+
+def test_a_lan_radiod_is_adoptable_and_brings_the_decode_clients(tmp_path):
+    """`smd status` offered it and `smd adopt` refused it -- one of the two
+    situations the spec names as forcing this whole design."""
+    from sigmond.sources import KNOWN_CLIENTS, ClientSources
+    mod = _smd()
+    # No local hardware at all -- just a radiod discovered on the LAN.
+    started = _wire(mod, StationInventory(sources=(FARGO,)), tmp_path)
+    rc = mod.cmd_adopt(_args(str(FARGO), tmp_path, yes=True))
+    assert rc == 0
+    assert [list(KNOWN_CLIENTS)] == [e for e in started if isinstance(e, list)]
+    assert ClientSources.load("wspr-recorder", root=tmp_path).selected == [FARGO]
+
+
+def test_every_offer_status_advertises_is_one_adopt_accepts(tmp_path):
+    """The two surfaces must agree.  A station that says "run `smd adopt X`"
+    and then answers "nothing adoptable named X" is worse than silent."""
+    mod = _smd()
+    inv = StationInventory(
+        hardware=frozenset({"rx888"}),
+        sources=(RX, FARGO),
+        source_kinds=((RX, "rx888"),))
+    started = _wire(mod, inv, tmp_path)
+
+    from sigmond.adoption import offers
+    names = [o.name for o in offers(inv, frozenset())]
+    assert str(FARGO) in names and str(RX) in names
+    for name in names:
+        mod._adopted_sources = lambda **kw: frozenset()
+        assert mod.cmd_adopt(_args(name, tmp_path, dry_run=True)) == 0, name
+    assert started == []
+
+
+# ---------------------------------------------------------------------------
+# Say what actually happened
+# ---------------------------------------------------------------------------
+
+def test_a_component_that_cannot_start_is_named_not_claimed(tmp_path, capsys):
+    mod = _smd()
+    _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    mod._adopt_start_preview = lambda comps: (
+        ["ka9q-radio"],
+        [("ka9q-web", "downloaded — needs: smd install ka9q-web")])
+
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "started ka9q-radio" in out
+    assert "NOT started ka9q-web" in out
+
+
+def test_nothing_startable_is_a_refusal_not_a_success(tmp_path, capsys):
+    mod = _smd()
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    mod._adopt_start_preview = lambda comps: (
+        [], [(c, "downloaded — needs: smd install") for c in comps])
+
+    rc = mod.cmd_adopt(_args(str(RX), tmp_path, yes=True))
+    assert rc != 0
+    assert started == []
+    assert not list(tmp_path.iterdir())
+    assert "nothing here can start" in capsys.readouterr().err
+
+
+def test_a_running_radiod_is_disclosed_before_the_operator_says_yes(
+        tmp_path, monkeypatch, capsys):
+    """`cmd_start` re-checks radiod's CPU pinning and restarts an instance
+    whose placement no longer matches -- the class of event that took this
+    station's timing chain down twice on 2026-09-01."""
+    mod = _smd()
+    _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    mod._radiod_already_running = lambda: True
+    seen = {}
+    monkeypatch.setattr("sys.stdin", _Stdin(True))
+
+    def _prompt(_p=""):
+        seen["out"] = capsys.readouterr().out
+        return "y"
+    monkeypatch.setattr("builtins.input", _prompt)
+
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=False)) == 0
+    assert "already running" in seen["out"]
+    assert "restarts the instance" in seen["out"]
+
+
+# ---------------------------------------------------------------------------
+# Adopt refuses to act on a picture it could not read
+# ---------------------------------------------------------------------------
+
+def test_an_unreadable_station_is_a_clear_refusal_not_a_traceback(
+        tmp_path, capsys):
+    mod = _smd()
+    _wire(mod, StationInventory(), tmp_path)
+
+    def _broken():
+        raise ValueError("/etc/sigmond/clients/psk-recorder.sources.toml: "
+                         "'selected' must be an array of strings")
+    mod._station_inventory = _broken
+
+    rc = mod.cmd_adopt(_args("dasi2", tmp_path, dry_run=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "psk-recorder.sources.toml" in err
+    assert "Traceback" not in err
+
+
+class TestStartPreview:
+    """`_adopt_start_preview` must agree with `cmd_start`'s own gate: it is
+    what the operator is shown before consenting, and what adopt reports
+    afterwards."""
+
+    def _patch(self, monkeypatch, states, dormant=None):
+        import sigmond.catalog as catalog
+        import sigmond.component_state as component_state
+        import sigmond.harmonize as harmonize
+
+        class _S:
+            def __init__(self, can_start, cloned=True):
+                self.can_start = can_start
+                self.cloned = cloned
+                self.display_status = "downloaded — needs: smd install"
+
+        monkeypatch.setattr(catalog, "load_catalog", lambda *a, **k: {})
+        monkeypatch.setattr(component_state, "compute_state",
+                            lambda n, t=None, alias=None: _S(states[n]))
+        monkeypatch.setattr(harmonize, "dormant_reason",
+                            lambda n, enabled=True: (dormant or {}).get(n))
+
+    def test_an_installed_component_is_startable(self, monkeypatch):
+        mod = _smd()
+        self._patch(monkeypatch, {"ka9q-radio": True})
+        assert mod._adopt_start_preview(["ka9q-radio"]) == (["ka9q-radio"], [])
+
+    def test_an_uninstalled_component_is_skipped_with_its_reason(
+            self, monkeypatch):
+        mod = _smd()
+        self._patch(monkeypatch, {"ka9q-radio": False})
+        startable, skipped = mod._adopt_start_preview(["ka9q-radio"])
+        assert startable == []
+        assert skipped == [("ka9q-radio",
+                            "downloaded — needs: smd install")]
+
+    def test_absent_hardware_is_dormant_not_broken(self, monkeypatch):
+        mod = _smd()
+        self._patch(monkeypatch, {"mag-recorder": True},
+                    dormant={"mag-recorder": "magnetometer"})
+        startable, skipped = mod._adopt_start_preview(["mag-recorder"])
+        assert startable == []
+        assert "dormant" in skipped[0][1]
