@@ -10,21 +10,73 @@ The warning must stay — losing radiod means NOTHING decodes — but a warning
 is not a refusal.
 """
 
+import importlib.machinery
+import importlib.util
+import os
 import subprocess
 import sys
+from argparse import Namespace
+from pathlib import Path
+from unittest import mock
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _smd_source():
     return open("bin/smd").read()
 
 
-def test_the_missing_sdr_no_longer_returns_a_failure():
-    """The abort was `_err(...)` then `return 1` inside the local branch."""
-    src = _smd_source()
-    i = src.index("no RX888/SDR on the USB bus")
-    window = src[i:i + 900]
-    assert "return 1" not in window, (
-        "bringup still aborts when no SDR is attached")
+def _load_smd():
+    # bin/smd re-execs into the production venv unless told not to; suppress
+    # that so importing the script just defines its functions (same pattern
+    # as tests/test_start_autoenable.py).
+    os.environ.setdefault("SIGMOND_NO_VENV_REEXEC", "1")
+    loader = importlib.machinery.SourceFileLoader(
+        "smd_under_test_bringup_ungated", str(REPO / "bin" / "smd"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def _minimal_local_radiod_profile():
+    """A Profile with no clients and no gpsdo-monitor/mag-recorder infra, so
+    only the RX888 gate is in play — no magnetometer/GPSDO dormancy branches
+    fire, and the plan-builder has nothing else to resolve."""
+    from sigmond.catalog import Profile
+    return Profile(name="ungated-test", description="",
+                   clients=(), local_radiod_infra=("igmp-querier",),
+                   optional=())
+
+
+def test_missing_sdr_installs_dormant_instead_of_aborting(capsys):
+    """Drive the real decision in `cmd_bringup`'s local-radiod branch: with
+    no SDR detected, bring-up must not fail, and the operator-facing warning
+    must actually print.  Narrowest real callable that carries the decision
+    is `cmd_bringup` itself (the check lives inline, not in a helper) — run
+    it with --dry-run so it stops before touching the system (no root
+    elevation, no real install), with a minimal profile so the plan-builder
+    has nothing beyond the radiod stack to resolve, and with only the SDR
+    probe stubbed (the GPSDO/magnetometer probes are read-only and safe to
+    let run for real; with --require-hardware unset they can't fail the
+    call regardless of what they find)."""
+    smd = _load_smd()
+    prof = _minimal_local_radiod_profile()
+
+    args = Namespace(profile="ungated-test", dry_run=True,
+                      non_interactive=True)
+
+    with mock.patch.object(smd, "_detect_local_sdr", lambda: False), \
+         mock.patch("sigmond.catalog.load_profiles",
+                     lambda: {"ungated-test": prof}):
+        rc = smd.cmd_bringup(args)
+
+    assert rc == 0, "bringup must not fail when no SDR is attached"
+
+    out = capsys.readouterr().out
+    assert "no RX888/SDR on the USB bus" in out
+    assert "NOTHING decodes" in out
+    assert "adopt" in out.lower()
 
 
 def test_the_consequence_is_still_stated_loudly():

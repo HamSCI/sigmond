@@ -91,19 +91,20 @@ _PRESENCE_WORD = {"yes": "present", "no": "MISSING", "unknown": "unconfirmed",
 _PRESENCE_MARK = {"yes": "[green]\u2713[/]", "no": "[red]\u2717[/]",
                   "unknown": "[yellow]?[/]", "na": "[dim]\u2014[/]"}
 
-# The label sigmond.hardware.gate_checks gives the SDR row.  That row is the
-# ONE hard stop: on a profile with local_radiod_infra, bin/smd's cmd_bringup
-# does `if not _detect_local_sdr(): return 1` BEFORE it ever calls
-# _bringup_hardware_gate and before it elevates, so no flag can soften it —
-# whereas the GPSDO/magnetometer rows only abort under --require-hardware,
-# which this wizard never passes (see _build_argv).  Pinned by a test so a
-# rename in sigmond.hardware fails loudly instead of silently dropping the
-# annotation.
+# The label sigmond.hardware.gate_checks gives the SDR row.  A missing SDR on
+# a profile with local_radiod_infra is NOT a hard stop: bin/smd's cmd_bringup
+# warns and installs anyway — the radiod stack lands DORMANT, and nothing
+# starts until an SDR is attached and adopted (e.g. `smd adopt`).  Same shape
+# as the GPSDO/magnetometer rows below it, which are advisory for the same
+# reason: this wizard never passes --require-hardware (see _build_argv).
+# Pinned by a test so a rename in sigmond.hardware fails loudly instead of
+# silently dropping the annotation.
 _SDR_ROW_LABEL = "RX888 SDR"
-_HARD_STOP_NOTE = (
-    "[red][bold]HARD STOP[/][/] — Begin will exit immediately without "
-    "installing anything. Attach the RX888, or choose the [bold]client[/] "
-    "profile to bind a remote radiod.")
+_SDR_MISSING_NOTE = (
+    "[yellow][bold]advisory[/][/] — Begin installs the radiod stack "
+    "anyway, DORMANT: nothing decodes (WSPR / PSK / GRAPE all dark) until "
+    "an SDR is attached and adopted, e.g. with [bold]smd adopt[/]. Or "
+    "choose the [bold]client[/] profile to bind a remote radiod.")
 
 
 def _gate_checks(prof, local: bool) -> list:
@@ -283,13 +284,16 @@ class GreenfieldScreen(Vertical):
         yield Static("2 · Equipment", classes="gf-section")
         yield Static(
             "What [bold]smd bringup[/] checks before it installs anything. "
-            "Not all rows carry the same weight:\n"
-            "  • A missing [bold]RX888 SDR[/] on a local-radiod profile is a "
-            "[bold]HARD STOP[/] — bring-up exits immediately, whatever flags "
-            "are passed. Begin will fail.\n"
-            "  • The GPSDO and magnetometer rows are [bold]advisory[/] here: "
-            "this wizard does not pass --require-hardware, so those components "
-            "install DORMANT and light up when you attach the device.\n"
+            "Every row here is [bold]advisory[/]: this wizard does not pass "
+            "--require-hardware, so a missing device never blocks Begin.\n"
+            "  • A missing [bold]RX888 SDR[/] on a local-radiod profile "
+            "still means NOTHING decodes (WSPR / PSK / GRAPE all dark) "
+            "until it's attached — but Begin proceeds: the radiod stack "
+            "installs DORMANT and lights up once you attach the SDR and "
+            "adopt it, e.g. with [bold]smd adopt[/].\n"
+            "  • The GPSDO and magnetometer rows are the same shape: "
+            "their components install DORMANT and light up when you "
+            "attach the device.\n"
             "  • These probes run [bold]unelevated[/] while Begin pre-elevates, "
             "so the real run may see MORE than this panel (a GPSDO fix read off "
             "the device needs root) — never less.",
@@ -397,7 +401,7 @@ class GreenfieldScreen(Vertical):
                 if presence != "yes":
                     lines.append(f"      [dim]{hint}[/]")
                     if label == _SDR_ROW_LABEL:
-                        lines.append(f"      {_HARD_STOP_NOTE}")
+                        lines.append(f"      {_SDR_MISSING_NOTE}")
         presence, detail, armed = data.get(
             "ts1", ("unknown", "TS-1 presence undetermined", ""))
         mark = _PRESENCE_MARK.get(presence, "[yellow]?[/]")

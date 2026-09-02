@@ -327,25 +327,26 @@ class HardwareGateConsolidationTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
-class GreenfieldHardStopFramingTests(unittest.IsolatedAsyncioTestCase):
-    """The panel must not flatten two different consequences into one.
+class GreenfieldAdvisoryFramingTests(unittest.IsolatedAsyncioTestCase):
+    """The panel must not tell the operator Begin will fail when it won't.
 
-    On a local-radiod profile bin/smd's cmd_bringup does
-    `if not _detect_local_sdr(): _err(...); return 1` BEFORE it calls
-    _bringup_hardware_gate and before it elevates -- no flag softens it.
-    The GPSDO/magnetometer rows abort only under --require-hardware, which
-    this wizard never passes.  An operator who reads "MISSING" as uniformly
-    advisory, presses Begin and gets an instant exit 1 is the failure this
-    pins.
+    On a local-radiod profile, bin/smd's cmd_bringup no longer hard-stops
+    on a missing SDR (Task 4, station-adoption plan): it warns and installs
+    the radiod stack anyway, DORMANT, and points the operator at
+    `smd adopt`.  Formerly this screen called that a "HARD STOP" and told
+    the operator Begin would exit immediately -- now false.  Every row
+    (SDR included) is advisory: a missing device never blocks Begin, it
+    only means the affected component installs dormant.
     """
 
-    async def test_missing_sdr_is_marked_hard_stop(self):
+    async def test_missing_sdr_is_marked_advisory_not_hard_stop(self):
         with _stack(_patched()):
             app = _Harness.app()
             async with app.run_test(size=(120, 80)) as pilot:
                 text = await _render(pilot, "#gf-equip")
         self.assertIn("RX888 SDR", text)
-        self.assertNotIn("HARD STOP", text)   # present in the default fixture
+        self.assertNotIn("HARD STOP", text)   # never true any more
+        self.assertNotIn("advisory", text)    # only appears when SDR is missing
 
         rows = [("no", "RX888 SDR", "attach the RX888"),
                 ("no", "GPSDO (Leo Bodnar)", "attach the GPSDO on USB")]
@@ -353,14 +354,16 @@ class GreenfieldHardStopFramingTests(unittest.IsolatedAsyncioTestCase):
             app = _Harness.app()
             async with app.run_test(size=(120, 80)) as pilot:
                 text = await _render(pilot, "#gf-equip")
-        self.assertIn("HARD STOP", text)
-        self.assertIn("exit immediately", text)
+        self.assertNotIn("HARD STOP", text)
+        self.assertIn("advisory", text)
+        self.assertIn("DORMANT", text)
+        self.assertIn("smd adopt", text)
         # ...and ONLY on the SDR row: the GPSDO is MISSING in the same render
-        # but must not carry the banner.
-        self.assertEqual(text.count("HARD STOP"), 1)
+        # but must not carry the SDR-specific note.
+        self.assertEqual(text.count("advisory"), 1)
         sdr_i, gpsdo_i = text.index("RX888 SDR"), text.index("GPSDO (Leo")
-        self.assertLess(sdr_i, text.index("HARD STOP"))
-        self.assertLess(text.index("HARD STOP"), gpsdo_i)
+        self.assertLess(sdr_i, text.index("advisory"))
+        self.assertLess(text.index("advisory"), gpsdo_i)
 
     async def test_intro_states_advisory_and_unelevated_caveats(self):
         with _stack(_patched()):
@@ -368,10 +371,11 @@ class GreenfieldHardStopFramingTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(120, 80)) as pilot:
                 await pilot.pause()
                 text = await _render(pilot, "#gf-equip-intro")
-        self.assertIn("HARD STOP", text)
+        self.assertNotIn("HARD STOP", text)
         self.assertIn("advisory", text)
         self.assertIn("--require-hardware", text)
         self.assertIn("DORMANT", text)
+        self.assertIn("smd adopt", text)
         # The privilege caveat, and its direction: under-report only.
         self.assertIn("unelevated", text)
         self.assertIn("never less", text)
