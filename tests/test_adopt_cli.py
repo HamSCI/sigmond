@@ -985,24 +985,64 @@ def test_a_stopped_radiod_is_not_announced_as_running(tmp_path, capsys):
 class TestStartSet:
     """`cmd_start` walks the catalog's `requires` closure before starting
     anything.  Previewing the offer's own components alone hid the fact that
-    adopting a LAN radiod starts the LOCAL one."""
+    adopting a LAN radiod starts the LOCAL one.
 
-    def test_a_lan_radiod_pulls_in_the_local_radiod(self):
+    But `cmd_start` does not blindly start everything the closure names: only
+    the components the operator NAMED get auto-enabled
+    (`_autoenable_named_on_start`); a closure ADDITION starts only if the
+    topology already enables it (`enabled = _enabled_components(topology,
+    only)`).  `_adopt_start_set` has to apply that same test, or the preview
+    -- and the success line built from it -- claims a component `cmd_start`
+    silently drops.  These tests pin the topology with a monkeypatch rather
+    than relying on the ambient `/etc/sigmond/topology.toml` (absent on a dev
+    box, so today's defaults happen to agree, but that is a coincidence of
+    environment, not a property of the code)."""
+
+    def _topology(self, monkeypatch, mod, enabled=()):
+        monkeypatch.setattr(
+            mod, "_load_topology",
+            lambda *a, **k: {"components": {n: {"enabled": True}
+                                            for n in enabled}})
+
+    def test_a_lan_radiod_pulls_in_the_local_radiod(self, monkeypatch):
+        """The closure addition IS kept when the topology already enables
+        it -- e.g. a station whose own radiod is enabled and separately
+        adopts a neighbour's."""
         from sigmond.sources import KNOWN_CLIENTS
-        got = _smd()._adopt_start_set(list(KNOWN_CLIENTS))
+        mod = _smd()
+        self._topology(monkeypatch, mod, enabled=("ka9q-radio",))
+        got = mod._adopt_start_set(list(KNOWN_CLIENTS))
         assert got[0] == "ka9q-radio"          # deps before dependents
         assert set(KNOWN_CLIENTS) <= set(got)
 
-    def test_the_radiod_alias_is_not_reported_twice(self):
+    def test_a_dependency_never_enabled_is_dropped_not_claimed(
+            self, monkeypatch):
+        """CARRIED FIX 1.  ka9q-radio is a CLOSURE ADDITION here -- it is not
+        in the names passed in -- and nothing enables it.  Previewing it as
+        startable is exactly what claimed "started ka9q-radio" for a
+        no-local-SDR station that never installed, let alone enabled, it."""
+        mod = _smd()
+        self._topology(monkeypatch, mod, enabled=())
+        got = mod._adopt_start_set(["wspr-recorder"])
+        assert "ka9q-radio" not in got
+        assert "wspr-recorder" in got          # the NAMED component: kept
+
+    def test_the_radiod_alias_is_not_reported_twice(self, monkeypatch):
         """`_expand_requires_closure` emits `radiod` alongside `ka9q-radio`
         for cmd_start's topology filter.  Same component, second name."""
-        got = _smd()._adopt_start_set(["wspr-recorder"])
+        mod = _smd()
+        self._topology(monkeypatch, mod, enabled=("ka9q-radio",))
+        got = mod._adopt_start_set(["wspr-recorder"])
         assert got.count("ka9q-radio") == 1
         assert "radiod" not in got
 
-    def test_an_sdr_adoption_is_unchanged(self):
-        got = _smd()._adopt_start_set(["ka9q-radio", "ka9q-web",
-                                       "igmp-querier"])
+    def test_an_sdr_adoption_is_unchanged(self, monkeypatch):
+        """None of these three is a closure ADDITION -- all were named by the
+        offer itself -- so the enabled check never applies to them."""
+        mod = _smd()
+        self._topology(monkeypatch, mod, enabled=())
+        got = mod._adopt_start_set(["ka9q-radio", "ka9q-web",
+                                    "igmp-querier"])
         assert got == ["ka9q-radio", "ka9q-web", "igmp-querier"]
 
     def test_an_unreadable_catalog_falls_back_to_the_names(self, monkeypatch):
@@ -1016,16 +1056,23 @@ class TestStartSet:
 
 
 def test_adopting_a_lan_radiod_discloses_the_local_radiod_restart(
-        tmp_path, capsys):
+        tmp_path, capsys, monkeypatch):
     """The hole my own LAN-radiod mapping opened: the four decode clients
     require ka9q-radio, cmd_start's closure pulls it in, and that reaches
     _ensure_radiod_affinity_drop_ins -- the code path this disclosure exists
     to warn about.  Gating on the offer's own components missed it entirely.
+
+    A station where radiod is ALREADY RUNNING has it enabled in topology --
+    that is what "running" implies in practice -- so CARRIED FIX 1's
+    closure-additions filter must not itself silence this disclosure.
     """
     from sigmond.sources import KNOWN_CLIENTS
     mod = _smd()
     started = _wire(mod, StationInventory(sources=(FARGO,)), tmp_path)
     mod._radiod_already_running = lambda: True
+    monkeypatch.setattr(
+        mod, "_load_topology",
+        lambda *a, **k: {"components": {"ka9q-radio": {"enabled": True}}})
 
     assert mod.cmd_adopt(_args(str(FARGO), tmp_path, yes=True)) == 0
     out = capsys.readouterr().out
@@ -1036,10 +1083,35 @@ def test_adopting_a_lan_radiod_discloses_the_local_radiod_restart(
     assert [list(KNOWN_CLIENTS)] == [e for e in started if isinstance(e, list)]
 
 
-def test_the_preview_names_the_local_radiod_for_a_lan_radiod_adoption(
-        tmp_path, capsys):
+def test_the_preview_does_not_claim_a_radiod_that_was_never_enabled(
+        tmp_path, capsys, monkeypatch):
+    """CARRIED FIX 1, the headline case.  The no-local-SDR station -- one of
+    the two this whole design exists for -- has ka9q-radio neither installed
+    nor enabled.  Adopting a LAN radiod must not report "started ka9q-radio"
+    for a component it neither enabled nor started; the decode clients the
+    offer actually named are still reported."""
     mod = _smd()
     _wire(mod, StationInventory(sources=(FARGO,)), tmp_path)
+    monkeypatch.setattr(mod, "_load_topology",
+                        lambda *a, **k: {"components": {}})
+
+    assert mod.cmd_adopt(_args(str(FARGO), tmp_path, yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "started ka9q-radio" not in out
+    assert "wspr-recorder" in out
+
+
+def test_the_preview_still_claims_a_radiod_the_topology_already_enables(
+        tmp_path, capsys, monkeypatch):
+    """The other half: a station whose own radiod is already enabled, that
+    separately adopts a neighbour's radiod, DOES restart the local one (see
+    the disclosure test above) -- so its preview must still name it."""
+    mod = _smd()
+    _wire(mod, StationInventory(sources=(FARGO,)), tmp_path)
+    monkeypatch.setattr(
+        mod, "_load_topology",
+        lambda *a, **k: {"components": {"ka9q-radio": {"enabled": True}}})
+
     assert mod.cmd_adopt(_args(str(FARGO), tmp_path, yes=True)) == 0
     assert "started ka9q-radio" in capsys.readouterr().out
 

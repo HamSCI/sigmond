@@ -8783,11 +8783,17 @@ def _adopt_start_set(components) -> list:
     (`radiod`, for `ka9q-radio`) are dropped again here — same component,
     second name, and it would be reported twice.
 
-    ⚠ No topology-enabled filter, which `cmd_start` does apply to closure
-    members (it auto-enables only the NAMED components).  So a dependency that
-    is installed but disabled is previewed as starting when it will not.  That
-    errs loud: a warning that did not need to fire, rather than a silent
-    restart of a running radiod.
+    Closure-ADDED names — anything not already in the offer's own
+    `components` — are kept only if `_enabled_components` says the topology
+    already enables them, the same test `cmd_start` applies to closure
+    members (`enabled = _enabled_components(topology, only)`; it auto-enables
+    only the NAMED components, via `_autoenable_named_on_start`).  Without
+    this a LAN-radiod adoption on the no-local-SDR station — ka9q-radio
+    neither installed nor enabled there — previewed "ka9q-radio" as
+    startable, and `cmd_start` then silently dropped it at this same filter:
+    the preview claimed a component adopt neither enabled nor started.  Names
+    the operator's own offer named are kept unconditionally — `cmd_start`
+    will enable those itself.
 
     Best effort — an unreadable catalog falls back to the names themselves.
     """
@@ -8796,11 +8802,14 @@ def _adopt_start_set(components) -> list:
         from sigmond.catalog import load_catalog
         catalog = load_catalog()
         closure = _expand_requires_closure(names, catalog)
+        enabled = set(_enabled_components(_load_topology(TOPOLOGY_PATH)))
     except Exception:                                            # noqa: BLE001
         return names
     seen, out = set(), []
     for name in closure:
         if name in seen or (name not in catalog and name not in names):
+            continue
+        if name not in names and name not in enabled:
             continue
         seen.add(name)
         out.append(name)
