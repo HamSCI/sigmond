@@ -11,6 +11,7 @@ repeat that, which is why the write path is tested against a temporary
 clients root rather than mocked away.
 """
 
+import contextlib
 import importlib.util
 import os
 import types
@@ -38,6 +39,8 @@ def _smd():
 RX = SourceKey(type="usb", identifier="04b4:00f1:s")
 RX2 = SourceKey(type="usb", identifier="04b4:00f1:other")
 
+MAG = SourceKey(type="usb", identifier="1ffb:2502:MAG7")
+
 FARGO = SourceKey(type="radiod", identifier="fargo-status.local")
 
 
@@ -46,19 +49,38 @@ def _identity(hostname="fargo-1", **kw):
     return StationIdentity(hostname=hostname, dasi2_site=False, **kw)
 
 
-def _args(name, tmp_path, dry_run=False):
-    return types.SimpleNamespace(name=name, dry_run=dry_run,
-                                 clients_root=str(tmp_path))
+def _args(name, tmp_path, dry_run=False, yes=True):
+    return types.SimpleNamespace(name=name, dry_run=dry_run, yes=yes,
+                                 topology=None, clients_root=str(tmp_path))
+
+
+class _Started(list):
+    """Records every call the adoption makes into the start machinery."""
+
+    def __call__(self, start_args):
+        self.append(list(getattr(start_args, "names", []) or []))
+        return 0
 
 
 def _wire(mod, inv, tmp_path, identity=None, adopted=frozenset()):
-    """Point the module's three seams at a fabricated station."""
+    """Point the module's seams at a fabricated station.  Returns the
+    recorder standing in for `cmd_start` -- the real one drives systemctl."""
     mod._station_inventory = lambda: inv
     mod._adopted_sources = lambda **kw: adopted
     mod._station_identity = lambda: identity or _identity()
     # Never elevate in a test: _need_root() os.execvp()s sudo and would
     # replace the pytest process.
     mod._need_root = lambda _name: False
+    started = _Started()
+    mod.cmd_start = started
+    # The real lock file lives in /var/lib; take a no-op in tests but record
+    # that it was entered, and when.
+    @contextlib.contextmanager
+    def _fake_lock(reason=""):
+        started.append(f"lock:{reason}")
+        yield
+    mod.lifecycle_lock = _fake_lock
+    return started
 
 
 # ---------------------------------------------------------------------------
@@ -130,14 +152,15 @@ def test_an_unrostered_dasi_hostname_refuses_before_doing_anything(
 
 def test_dry_run_reports_the_plan_and_changes_nothing(tmp_path, capsys):
     mod = _smd()
-    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
-          tmp_path)
+    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
+                                          sources=(RX,)), tmp_path)
     rc = mod.cmd_adopt(_args(str(RX), tmp_path, dry_run=True))
     assert rc == 0
     out = capsys.readouterr().out
     assert "ka9q-radio" in out                    # the plan is reported
     assert "dry run" in out.lower()
     assert not list(tmp_path.iterdir())           # ... and nothing happened
+    assert started == []                          # ... and nothing started
 
 
 def test_a_dasi2_alike_is_told_what_it_still_has_to_be_asked(
@@ -449,8 +472,145 @@ def test_adopt_refuses_a_source_it_already_recorded(tmp_path):
     """End to end with no stubbed reader: adopt, then adopt again."""
     mod = _smd()
     inv = StationInventory(hardware=frozenset({"rx888"}), sources=(RX,))
-    mod._station_inventory = lambda: inv
-    mod._station_identity = lambda: _identity()
-    mod._need_root = lambda _name: False
+    real_reader = mod._adopted_sources
+    started = _wire(mod, inv, tmp_path)
+    mod._adopted_sources = real_reader   # the real reader, on the real files
     assert mod.cmd_adopt(_args(str(RX), tmp_path)) == 0
+    assert started
     assert mod.cmd_adopt(_args(str(RX), tmp_path)) != 0     # nothing left
+
+
+# ---------------------------------------------------------------------------
+# Adoption actually adopts -- and only after an explicit yes
+# ---------------------------------------------------------------------------
+
+class _Stdin:
+    def __init__(self, tty):
+        self._tty = tty
+
+    def isatty(self):
+        return self._tty
+
+
+def test_adopt_enables_and_starts_what_the_offer_brings(tmp_path):
+    """`smd adopt` is the verb that starts things.  It must hand the plan's
+    components to the SAME start machinery `smd start` uses -- which carries
+    the auto-enable, the requires closure and the radiod-first ordering --
+    rather than printing a copy-paste line."""
+    mod = _smd()
+    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
+                                          sources=(RX,)), tmp_path)
+    rc = mod.cmd_adopt(_args(str(RX), tmp_path, yes=True))
+    assert rc == 0
+    assert ["ka9q-radio", "ka9q-web", "igmp-querier"] in started
+
+
+def test_the_lifecycle_lock_is_held_before_anything_starts(tmp_path):
+    mod = _smd()
+    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
+                                          sources=(RX,)), tmp_path)
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
+    locks = [i for i, e in enumerate(started)
+             if isinstance(e, str) and e.startswith("lock:")]
+    assert locks, f"no lifecycle lock taken: {started}"
+    assert locks[0] < started.index(["ka9q-radio", "ka9q-web", "igmp-querier"])
+
+
+def test_declining_the_confirmation_starts_nothing(tmp_path, monkeypatch,
+                                                   capsys):
+    """The 2026-09-01 incident in one assertion: a unit nobody asked to run
+    must not run."""
+    mod = _smd()
+    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
+                                          sources=(RX,)), tmp_path)
+    monkeypatch.setattr("sys.stdin", _Stdin(True))
+    monkeypatch.setattr("builtins.input", lambda _p="": "n")
+
+    rc = mod.cmd_adopt(_args(str(RX), tmp_path, yes=False))
+    assert rc == 0                       # the operator's choice, not an error
+    assert started == []                 # nothing started
+    assert not list(tmp_path.iterdir())  # nothing recorded either
+    assert "nothing started" in capsys.readouterr().out.lower()
+
+
+def test_confirming_at_the_prompt_adopts(tmp_path, monkeypatch):
+    mod = _smd()
+    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
+                                          sources=(RX,)), tmp_path)
+    monkeypatch.setattr("sys.stdin", _Stdin(True))
+    monkeypatch.setattr("builtins.input", lambda _p="": "y")
+
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=False)) == 0
+    assert ["ka9q-radio", "ka9q-web", "igmp-querier"] in started
+
+
+def test_an_absent_terminal_is_never_read_as_consent(tmp_path, monkeypatch,
+                                                     capsys):
+    """A cron job or a pipe must not be able to start a station's services by
+    saying nothing.  --yes is how a script consents."""
+    mod = _smd()
+    started = _wire(mod, StationInventory(hardware=frozenset({"rx888"}),
+                                          sources=(RX,)), tmp_path)
+    monkeypatch.setattr("sys.stdin", _Stdin(False))
+
+    def _no_prompt(_p=""):
+        raise AssertionError("prompted with no terminal")
+    monkeypatch.setattr("builtins.input", _no_prompt)
+
+    rc = mod.cmd_adopt(_args(str(RX), tmp_path, yes=False))
+    assert rc != 0
+    assert started == []
+    assert not list(tmp_path.iterdir())
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_yes_adopts_without_a_terminal(tmp_path, monkeypatch):
+    """Scripted fleet provisioning: twenty DASI2 kits, no keyboard."""
+    mod = _smd()
+    started = _wire(mod, StationInventory(
+        hardware=frozenset({"rx888", "gpsdo", "magnetometer"}),
+        sources=(RX,)), tmp_path)
+    monkeypatch.setattr("sys.stdin", _Stdin(False))
+
+    assert mod.cmd_adopt(_args("dasi2", tmp_path, yes=True)) == 0
+    assert any(isinstance(e, list) and "ka9q-radio" in e for e in started)
+
+
+def test_a_failing_start_is_reported_not_swallowed(tmp_path):
+    mod = _smd()
+    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+          tmp_path)
+    mod.cmd_start = lambda _a: 3
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) != 0
+
+
+# ---------------------------------------------------------------------------
+# Selections are recorded only where something reads them
+# ---------------------------------------------------------------------------
+
+def test_only_source_consuming_components_get_a_selection(tmp_path):
+    """ka9q-web serves radiod's status page and igmp-querier keeps multicast
+    alive.  Neither consumes a source, so a selection file for them would be
+    a stored fact nobody reads."""
+    mod = _smd()
+    _wire(mod, StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
+          tmp_path)
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
+
+    written = {p.name for p in tmp_path.iterdir()}
+    assert written == {"ka9q-radio.sources.toml"}
+
+
+def test_the_whole_kit_records_one_selection_per_consumer(tmp_path):
+    from sigmond.sources import ClientSources
+    mod = _smd()
+    _wire(mod, StationInventory(
+        hardware=frozenset({"rx888", "gpsdo", "magnetometer"}),
+        sources=(RX, MAG)), tmp_path)
+    assert mod.cmd_adopt(_args("dasi2", tmp_path, yes=True)) == 0
+
+    written = {p.name for p in tmp_path.iterdir()}
+    assert written == {"ka9q-radio.sources.toml", "gpsdo-monitor.sources.toml",
+                       "mag-recorder.sources.toml"}
+    # A kit is adopted as ONE thing, so every source it covers is recorded.
+    assert set(ClientSources.load("ka9q-radio", root=tmp_path).selected) == {RX, MAG}

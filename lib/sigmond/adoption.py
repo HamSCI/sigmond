@@ -82,6 +82,22 @@ _HARDWARE_COMPONENTS = {
 }
 
 
+#: Of the components a kind brings, the ones that actually CONSUME the source.
+#: `_HARDWARE_COMPONENTS` above is the ENABLE list — everything adopting a kind
+#: brings up.  This is the narrower question the selection layer asks: which of
+#: them reads the device?  ka9q-web serves radiod's status page over HTTP and
+#: igmp-querier keeps multicast alive; neither reads a source, and writing
+#: `igmp-querier.sources.toml` would store a fact nobody ever reads.
+#:
+#: The two lists are deliberately kept side by side: adding a component to
+#: `_HARDWARE_COMPONENTS` should force a decision about this one.
+SOURCE_CONSUMERS: FrozenSet[str] = frozenset({
+    "ka9q-radio",     # the SDR is radiod's frontend
+    "gpsdo-monitor",  # reads the GPSDO's HID / CDC stream
+    "mag-recorder",   # reads the RM3100 behind its USB-I2C adapter
+})
+
+
 @dataclass(frozen=True)
 class AdoptionPlan:
     """What adopting an offer would do, and what it still needs to be told."""

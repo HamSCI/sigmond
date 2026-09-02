@@ -8731,14 +8731,28 @@ def _adoption_inventory():
 
 
 def cmd_adopt(args) -> int:
-    """Adopt an offer: record its sources and name what it brings.
+    """Adopt an offer: record its sources, then enable and start what it brings.
 
-    The only verb in this design that starts anything.  Everything upstream
-    of it observes and reports.  It adopts what the operator named and
-    nothing else — hardware appearing is never an instruction.
+    The only verb in this design that starts anything.  Everything upstream of
+    it observes and reports, and it acts only on the one offer the operator
+    named — hardware appearing is never an instruction.
+
+    ⛔ It asks first.  On 2026-09-01 a unit nobody asked to run was started
+    here and took the station's timing chain down twice in one day; that is why
+    "adoption is explicit" is a constraint on this design rather than a
+    courtesy.  `--yes` is how a provisioning script consents; an absent
+    terminal never counts as consent by itself.
+
+    Composes rather than reimplementing: the start is `cmd_start`, the same
+    function `smd start` dispatches to, so the auto-enable, the `requires`
+    closure, the dormant-hardware gate and the radiod-first ordering are the
+    ones already in use — not a second lifecycle.
     """
+    from contextlib import nullcontext
+
     from sigmond import sources as _sources
-    from sigmond.adoption import offers as _offers, plan as _plan
+    from sigmond.adoption import (SOURCE_CONSUMERS, offers as _offers,
+                                  plan as _plan)
     from sigmond.station_identity import UnrosteredDasiName
 
     # Seam for tests and for an alternate config tree; the default is the
@@ -8779,19 +8793,59 @@ def cmd_adopt(args) -> int:
              f'is nothing to configure. Adopting it would change nothing.')
         return 1
 
-    # The write lands in /etc/sigmond/clients; a dry run above needs no
-    # privilege, and neither does refusing.
+    # ── the explicit yes ────────────────────────────────────────────────────
+    if not getattr(args, 'yes', False):
+        if not sys.stdin.isatty():
+            # Silence is not consent.  A pipe, a cron job or a lost terminal
+            # must never be the thing that starts a station's services.
+            _err(f'adopt {match.name}: no terminal to ask at, and nothing may '
+                 f'start unasked. Pass --yes to adopt non-interactively, or '
+                 f'--dry-run to see the plan.')
+            return 1
+        try:
+            answer = input(f'\nEnable and start '
+                           f'{", ".join(plan_.components)} now? [y/N]: '
+                           ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            answer = ''
+        if not answer.startswith('y'):
+            _info(f'adopt {match.name}: declined — nothing started')
+            return 0
+
     if _need_root('adopt'):
         return 1
-    for client in plan_.components:
-        sel = _sources.ClientSources.load(client, root=root)
-        for key in match.sources:
-            sel.add(key)
-        sel.save(root=root)
-    comps = ','.join(plan_.components)
-    _ok(f'adopt {match.name}: sources recorded; '
-        f'run `smd install {comps.replace(",", " ")}` '
-        f'then `smd start {comps.replace(",", " ")}`')
+
+    # One lock across the whole adoption, so the selection write and the start
+    # cannot interleave with another lifecycle verb.  `main()` takes this lock
+    # before dispatch for the verbs in _MUTATING; adopt takes it here instead,
+    # which keeps --dry-run and every refusal path unprivileged and lock-free.
+    lock = (lifecycle_lock(reason=f'adopt {match.name}')
+            if _HAS_SIGMOND_LIB else nullcontext())
+    with lock:
+        # Record the selection BEFORE starting, so a client that reads its
+        # sources at startup reads the adoption that just happened.  Only the
+        # components that actually consume a source get one: `plan_.components`
+        # is the enable list, and ka9q-web / igmp-querier read no device.
+        for client in plan_.components:
+            if client not in SOURCE_CONSUMERS:
+                continue
+            sel = _sources.ClientSources.load(client, root=root)
+            for key in match.sources:
+                sel.add(key)
+            sel.save(root=root)
+
+        rc = cmd_start(argparse.Namespace(
+            names=list(plan_.components),
+            components=None,
+            topology=getattr(args, 'topology', None),
+        ))
+
+    if rc != 0:
+        _err(f'adopt {match.name}: sources recorded, but start reported '
+             f'failures — see above (smd status {" ".join(plan_.components)})')
+        return rc
+    _ok(f'adopt {match.name}: adopted — {", ".join(plan_.components)}')
     return 0
 
 
@@ -19015,6 +19069,10 @@ def main() -> int:
                          help='offer name, as printed by `smd status`')
     p_adopt.add_argument('--dry-run', action='store_true',
                          help='report the plan and change nothing')
+    p_adopt.add_argument('--yes', '-y', action='store_true',
+                         help='adopt without the confirmation prompt '
+                              '(for scripted fleet provisioning; an absent '
+                              'terminal is never read as consent on its own)')
 
     # restart (NEW)
     p = sub.add_parser('restart', help='restart managed services')
