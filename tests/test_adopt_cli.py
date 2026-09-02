@@ -903,3 +903,42 @@ class TestStartPreview:
         startable, skipped = mod._adopt_start_preview(["mag-recorder"])
         assert startable == []
         assert "dormant" in skipped[0][1]
+
+
+def test_a_running_radiod_is_disclosed_on_the_unattended_path_too(
+        tmp_path, capsys):
+    """`--yes` means "do not ASK me", not "do not TELL me".  An unattended
+    fleet run that silently bounces a running radiod is the 2026-09-01 event
+    itself, and the run's log is the only trace left afterwards."""
+    mod = _smd()
+    started = _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    mod._radiod_already_running = lambda: True
+
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "already running" in out
+    assert "restarts the instance" in out
+    assert started                      # ... and it did not gate the start
+
+
+def test_no_radiod_in_the_plan_means_no_restart_warning(tmp_path, capsys):
+    """Adopting a magnetometer must not warn about radiod, even on a station
+    where radiod happens to be running."""
+    mod = _smd()
+    _wire(mod, _station({"magnetometer"}, (MAG, "magnetometer")), tmp_path)
+    probed = []
+    mod._radiod_already_running = lambda: probed.append(1) or True
+
+    assert mod.cmd_adopt(_args(str(MAG), tmp_path, yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "already running" not in out
+    assert probed == []                 # not even asked -- no radiod planned
+
+
+def test_a_stopped_radiod_is_not_announced_as_running(tmp_path, capsys):
+    mod = _smd()
+    _wire(mod, _station({"rx888"}, (RX, "rx888")), tmp_path)
+    mod._radiod_already_running = lambda: False
+
+    assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
+    assert "already running" not in capsys.readouterr().out

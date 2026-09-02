@@ -8920,12 +8920,18 @@ def cmd_adopt(args) -> int:
     if _need_root('adopt'):
         return 1
 
+    # Said on BOTH paths: --yes means "do not ASK me", not "do not TELL me".
+    # An unattended fleet run that silently bounces a running radiod is the
+    # 2026-09-01 event itself, and its log is the only trace the operator would
+    # have afterwards.  Interactively this lands above the prompt; under --yes
+    # it prints before the start, with no question attached.
+    if 'ka9q-radio' in startable and _radiod_already_running():
+        _warn('  radiod is already running here. Starting it again '
+              're-checks its CPU pinning, and a placement that no longer '
+              'matches restarts the instance — decodes stop for a few '
+              'seconds and the timing chain re-anchors.')
+
     if not getattr(args, 'yes', False):
-        if 'ka9q-radio' in startable and _radiod_already_running():
-            _warn('  radiod is already running here. Starting it again '
-                  're-checks its CPU pinning, and a placement that no longer '
-                  'matches restarts the instance — decodes stop for a few '
-                  'seconds and the timing chain re-anchors.')
         try:
             answer = input(f'\nEnable and start '
                            f'{", ".join(startable)} now? [y/N]: '
