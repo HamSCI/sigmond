@@ -8544,7 +8544,8 @@ def _adoption_section(inv, adopted) -> list:
             else:
                 lines.append(f'  {offer.name:<28} detected, not adopted')
         lines.append(
-            '  run `smd adopt <name>` to configure, enable and start it')
+            '  run `smd adopt <name>` to record its sources, then enable '
+            'and start what it brings')
     if unclaimed:
         lines += ['', 'detected, not adoptable yet:']
         for offer in unclaimed:
@@ -8883,6 +8884,38 @@ def _radiod_already_running() -> bool:
     return any(line.strip() for line in (out or '').splitlines())
 
 
+#: The verb that renders a recorded selection into a client's own config.
+#: `smd adopt` writes `<client>.sources.toml` and stops there — the render
+#: lives in `_apply_sources_to_wspr_recorder`, which only `cmd_sources_apply`
+#: reaches.  Named as a constant so the two ends cannot drift.
+_SOURCES_APPLY_VERB = 'smd admin sources apply'
+
+
+def _adopt_next_step(writes) -> None:
+    """Print the one thing adopting cannot do for the operator.
+
+    Adoption RECORDS which sources a component consumes; it does not write
+    that component's config.  Rendering a selection into a client's config is
+    `smd admin sources apply`, and today only wspr-recorder is multi-source
+    aware (see `cmd_sources_apply`: psk/hfdl/codar are told their selection
+    will not take effect yet).  Teaching adopt to do the render is a design
+    question, not wiring, and is deliberately not answered here.
+
+    So the verb says what it did not do, and names the command that does it.
+    Silence would leave a station that has recorded a LAN radiod, started
+    four decode clients, and pointed none of them at it — with nothing on
+    screen to say why no spots appear.
+    """
+    if not writes:
+        return
+    _warn(f'adopt records the selection; it does NOT write client config.')
+    _info(f'  next:  {_SOURCES_APPLY_VERB}')
+    _info(f'         renders these sources into each client\'s config, then '
+          f'names the service to restart.')
+    _info(f'         (wspr-recorder is the one multi-source-aware client '
+          f'today; that verb reports the rest as deferred.)')
+
+
 def cmd_adopt(args) -> int:
     """Adopt an offer: record its sources, then enable and start what it brings.
 
@@ -8982,6 +9015,7 @@ def cmd_adopt(args) -> int:
              f'change nothing.')
         return 1
     if dry_run:
+        _adopt_next_step(writes)
         _info('adopt: dry run — nothing changed')
         return 0
 
@@ -9054,6 +9088,7 @@ def cmd_adopt(args) -> int:
             topology=getattr(args, 'topology', None),
         ))
 
+    _adopt_next_step(writes)
     if rc != 0:
         _err(f'adopt {match.name}: sources recorded, but start reported '
              f'failures — see above (smd status {" ".join(startable)})')
@@ -18903,7 +18938,7 @@ def main() -> int:
                 component  per-component status + catalog (list | install | update | add | remove | enable | disable)
                 config     show / migrate / init / edit per-client config
                 bringup    guided station bring-up from a catalog profile
-                adopt      configure + start what is attached but unadopted
+                adopt      record + start what is attached but unadopted
 
               Diagnostics & maintenance (under `admin`):
                 admin diag | validate | verifier | wisdom | storage |

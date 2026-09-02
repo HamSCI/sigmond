@@ -148,3 +148,13 @@ def test_status_survives_a_malformed_discovery_cache(tmp_path, monkeypatch, caps
     assert isinstance(rc, int)          # cmd_status returned, didn't raise
     assert "status" in out              # other status content still rendered
     assert "adoptable" not in out.lower()  # the broken section rendered nothing
+
+
+def test_the_adopt_instruction_does_not_promise_configuration():
+    """`cmd_adopt` records sources and starts components.  It configures
+    nothing -- `_apply_sources_to_wspr_recorder` is reachable only from
+    `smd admin sources apply` -- so this line may not say it does."""
+    text = "\n".join(_smd()._adoption_section(_rx_station(),
+                                              adopted=frozenset()))
+    assert "smd adopt" in text
+    assert "configure" not in text.lower()

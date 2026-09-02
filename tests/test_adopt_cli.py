@@ -1178,3 +1178,31 @@ class TestRadiodProbe:
             lambda *a, **k: types.SimpleNamespace(
                 stdout="radiod@rx888.service loaded active running\n"))
         assert mod._radiod_already_running() is True
+
+
+# ---------------------------------------------------------------------------
+# Say the one thing adopt cannot do
+# ---------------------------------------------------------------------------
+
+def test_adopt_names_the_step_it_cannot_perform(tmp_path, capsys):
+    """Adopt RECORDS a selection; it does not render it into client config.
+
+    `_apply_sources_to_wspr_recorder` is reached only from
+    `smd admin sources apply`, so a station that adopts a LAN radiod records
+    the source, starts the decode clients, and points none of them at it.
+    The verb may not fake that step -- but it must not omit it either, and
+    "somewhere there is another command" is not naming it.
+    """
+    mod = _smd()
+    _wire(mod, StationInventory(sources=(FARGO,)), tmp_path)
+    assert mod.cmd_adopt(_args(str(FARGO), tmp_path, yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "smd admin sources apply" in out
+
+
+def test_a_dry_run_names_that_step_too(tmp_path, capsys):
+    """--dry-run reports the plan; the un-performed step is part of it."""
+    mod = _smd()
+    _wire(mod, StationInventory(sources=(FARGO,)), tmp_path, may_elevate=False)
+    assert mod.cmd_adopt(_args(str(FARGO), tmp_path, dry_run=True)) == 0
+    assert "smd admin sources apply" in capsys.readouterr().out
