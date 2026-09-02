@@ -47,6 +47,18 @@ class UnrosteredDasiName(Exception):
     """
 
 
+class ManifestHostnameMismatch(Exception):
+    """A manifest claims `dasi2_site` for a hostname that isn't DASI-shaped.
+
+    Membership comes from the hostname, never from an operator answer — and
+    a manifest is close kin to an operator answer: something written down
+    elsewhere, not derived from the name in front of us.  Honoring it here
+    would let a manifest promote an ordinary station to a site, which is
+    exactly the silent-promotion the hostname rule forbids.  Refused rather
+    than guessed: either the hostname is wrong, or the manifest is stale.
+    """
+
+
 @dataclass(frozen=True)
 class StationIdentity:
     hostname: str
@@ -68,14 +80,22 @@ def identify(hostname: str, roster: Optional[Dict[str, dict]] = None
 
     Raises `UnrosteredDasiName` when the name looks like a fleet machine and
     the roster does not list it.
+
+    The stripped hostname is what lands on the returned `StationIdentity`,
+    not the raw input.  This is a deliberate behavior change (task 7, round
+    2 review): previously the raw, possibly padded, hostname was stored even
+    though the roster lookup key was always the stripped/upper-cased form —
+    so the stored field could disagree with the key that was actually
+    matched. Storing the stripped value keeps the two in agreement.
     """
     if roster is None:
         roster = load_roster()
-    match = _DASI_NAME.match(hostname.strip())
+    stripped = hostname.strip()
+    match = _DASI_NAME.match(stripped)
     if match is None:
-        return StationIdentity(hostname=hostname, dasi2_site=False)
+        return StationIdentity(hostname=stripped, dasi2_site=False)
 
-    key = hostname.strip().upper()
+    key = stripped.upper()
     entry = roster.get(key)
     if entry is None:
         raise UnrosteredDasiName(
@@ -85,7 +105,7 @@ def identify(hostname: str, roster: Optional[Dict[str, dict]] = None
             f"{key} entry to the roster."
         )
     return StationIdentity(
-        hostname=hostname,
+        hostname=stripped,
         dasi2_site=True,
         psws_station=entry["psws_station"],
         psws_instrument=entry["psws_instrument"],
@@ -115,20 +135,35 @@ def identity_from_manifest(manifest: Dict[str, object],
     """Identity as the PM recorded it.
 
     A fresh VM must not need the roster to know who it is: the PM already
-    decided, and re-deciding risks a different answer.
+    decided, and re-deciding risks a different answer.  But the hostname
+    still governs membership, never the manifest alone: when the manifest
+    asserts `dasi2_site`, the hostname must be DASI-shaped
+    (`_DASI_NAME`) or this raises `ManifestHostnameMismatch` rather than
+    returning a `StationIdentity` the hostname itself disagrees with.  That
+    much needs no roster, just the shape of the name.
 
-    `hostname` is stripped before it lands on the returned identity.
-    `identify()` strips only its roster lookup key and leaves the raw string
-    on `StationIdentity.hostname` — a pre-existing quirk, unchanged here (see
-    task-7-report.md).  This function has no lookup key to strip for, so
-    there is no reason to carry the same quirk into a new path; a manifest
-    fed a padded hostname should not be the first place raw whitespace
-    reaches a `StationIdentity`, since a later PM-side task may write this
-    object back out.
+    The reverse — a DASI-shaped, rostered hostname whose manifest asserts
+    `dasi2_site = false` (a demotion) — is deliberately NOT checked here:
+    resolving it needs the roster, which this function does not take as a
+    parameter, and belongs to whatever future caller holds both `identify()`
+    and `identity_from_manifest()` together.  Not an oversight; the
+    asymmetry is because the promotion half is decidable from the hostname
+    string alone and the demotion half is not.
+
+    `hostname` is stripped before it lands on the returned identity, the
+    same as `identify()` (task 7 round 2: both now store the stripped form,
+    so a `StationIdentity` built by either path is directly comparable).
     """
     hostname = hostname.strip()
     if not manifest.get("dasi2_site"):
         return StationIdentity(hostname=hostname, dasi2_site=False)
+    if _DASI_NAME.match(hostname) is None:
+        raise ManifestHostnameMismatch(
+            f"manifest asserts dasi2_site for hostname {hostname!r}, which "
+            f"does not match the DASI fleet pattern ({_DASI_NAME.pattern}). "
+            f"Either the hostname is wrong, or the manifest is stale/wrong "
+            f"— refusing rather than guessing which one to trust."
+        )
     return StationIdentity(
         hostname=hostname,
         dasi2_site=True,

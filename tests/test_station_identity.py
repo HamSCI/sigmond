@@ -69,6 +69,14 @@ def test_the_hostname_is_carried_through():
     assert identify("fargo-1", ROSTER).hostname == "fargo-1"
 
 
+def test_a_padded_hostname_is_stripped_before_it_lands_on_identity():
+    """identify() already strips to build its roster lookup key; storing the
+    same stripped value keeps the field consistent with the key it was
+    matched by, rather than carrying padding forward on a technicality."""
+    ident = identify(" DASI007 ", ROSTER)
+    assert ident.hostname == "DASI007"
+
+
 def test_the_shipped_roster_parses_and_is_well_formed():
     roster = load_roster()
     assert roster, "the shipped roster is empty"
