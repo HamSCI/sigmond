@@ -14,13 +14,14 @@ registrar chosen on the PM (`vpn.hamsci.org` for a site, wsprdaemon gw2 for
 everyone else).  The PM side is a separate spec; both agree on
 `/etc/sigmond/station.toml`.
 
-This module reads the roster file and nothing else: no network, no
-subprocess, and `identify()` takes the hostname as a parameter rather than
-detecting it, so the whole surface is testable without a real machine.
+This module reads files and nothing else: no network, no subprocess, and
+`identify()` takes the hostname as a parameter rather than detecting it, so
+the whole surface is testable without a real machine.
 
-A later task adds `read_manifest()` / `identity_from_manifest()` to this same
-module, for a fresh VM that gets its identity from the PM's manifest instead
-of the roster. Not implemented here.
+`read_manifest()` / `identity_from_manifest()` cover the other source of
+identity: a replaced VM that reads `/etc/sigmond/station.toml`, written by
+the PM, instead of re-deciding from the roster. Writing and mirroring that
+file is a separate, PM-side spec; this module only reads it.
 """
 
 from __future__ import annotations
@@ -88,4 +89,49 @@ def identify(hostname: str, roster: Optional[Dict[str, dict]] = None
         dasi2_site=True,
         psws_station=entry["psws_station"],
         psws_instrument=entry["psws_instrument"],
+    )
+
+
+#: The PM writes this; the VM reads it.  The PM is the machine that survives a
+#: VM replacement, so the facts that cannot be rediscovered live there.
+DEFAULT_MANIFEST = Path("/etc/sigmond/station.toml")
+
+
+def read_manifest(path: Path = DEFAULT_MANIFEST) -> Dict[str, object]:
+    """The station manifest, or an empty dict when there is none.
+
+    A station without a PM manifest is an ordinary case — a bare install, or a
+    host with no PM — not a fault.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+
+
+def identity_from_manifest(manifest: Dict[str, object],
+                            hostname: str) -> StationIdentity:
+    """Identity as the PM recorded it.
+
+    A fresh VM must not need the roster to know who it is: the PM already
+    decided, and re-deciding risks a different answer.
+
+    `hostname` is stripped before it lands on the returned identity.
+    `identify()` strips only its roster lookup key and leaves the raw string
+    on `StationIdentity.hostname` — a pre-existing quirk, unchanged here (see
+    task-7-report.md).  This function has no lookup key to strip for, so
+    there is no reason to carry the same quirk into a new path; a manifest
+    fed a padded hostname should not be the first place raw whitespace
+    reaches a `StationIdentity`, since a later PM-side task may write this
+    object back out.
+    """
+    hostname = hostname.strip()
+    if not manifest.get("dasi2_site"):
+        return StationIdentity(hostname=hostname, dasi2_site=False)
+    return StationIdentity(
+        hostname=hostname,
+        dasi2_site=True,
+        psws_station=manifest.get("psws_station"),
+        psws_instrument=manifest.get("psws_instrument"),
     )
