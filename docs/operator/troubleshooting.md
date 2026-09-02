@@ -3,6 +3,9 @@
 > **Audience:** operator
 > **Status:** current
 > **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
+> re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
+> waiting two minutes.
 > **Canonical for:** symptom-first troubleshooting of an appliance station
 
 Start with the symptom you can actually see, not with a theory. Every section

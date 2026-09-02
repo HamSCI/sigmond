@@ -246,7 +246,8 @@ instance) narrows the scope.
 | Command | Description |
 |---------|-------------|
 | `smd install [<client>]` | Install + configure a client, or run the full-suite install |
-| `smd bringup` | Guided station bring-up from a catalog profile |
+| `smd bringup` | Guided station bring-up from a catalog profile (installs dormant when hardware is absent) |
+| `smd adopt <name>` | Adopt detected hardware or a discovered source — the only verb that starts anything; asks first (`--dry-run`, `--yes`) |
 | `smd component list [--catalog]` | Per-component status (lifecycle + git ref + version policy); `--catalog` lists what's installable |
 | `smd component update [<name>]` | Pull latest and reapply per topology version policy (root) |
 | `smd component add\|remove <name>` | Clone/remove a component repo and its topology entry |

@@ -224,6 +224,18 @@ smd bringup dasi2                 # core station: install + configure + start
 smd bringup dasi2 --with-optional # also install the discretionary clients
 ```
 
+**You do not need the hardware attached.** Bring-up warns about each missing
+device — RX888, GPSDO, magnetometer — installs its components *dormant*, and
+starts nothing. Attach hardware whenever it arrives, then adopt it:
+
+```bash
+smd status          # the device appears under "adoptable:"
+smd adopt <name>    # shows the plan, then asks; --dry-run to preview, --yes to script it
+```
+
+`smd adopt` is the only verb in this design that starts anything. Hardware
+appearing is never on its own an instruction to start decoding.
+
 Or the interactive TUI, whose Installation arc is **Guided bring-up →
 ① Download & install → ② Configure → ③ Enable / start / stop**:
 

@@ -30,12 +30,46 @@ Do these in order. Each phase assumes the previous one succeeded.
 | 1 | Identity | `smd config identity` | Callsign/grid feed every client's reporter id. |
 | 2 | Topology | *(usually skip)* | `smd install` enables the component for you; pre-`enable` only to stage config first. |
 | 3 | Install | `smd install <component>` | Clones, builds native deps, runs `apply` — **and enables the component in topology**. |
-| 4 | radiod config | `smd config init radiod` | The SDR daemon needs a `[global]`+`[rx888]` conf. |
+| 4 | radiod config | `smd config init radiod` | The SDR daemon needs a `[global]`+`[rx888]` conf. **Skip if no SDR is attached yet** — see *Installing with nothing attached* below. |
 | 5 | FFT wisdom | `smd admin wisdom plan` | **Long, manual, one-time.** radiod won't start cleanly without it. |
 | 6 | Host tuning | (mostly automatic via `apply`) + `smd admin validate` | rmem_max, CPU affinity, governor — radiod RT correctness. |
 | 7 | Client config | `smd config edit <client>` | Reporter ids, PSWS station/instrument. |
 | 8 | Start + verify | `smd start` / `smd admin validate` / `smd status` | Bring it up, confirm the board is clean. |
 | 9 | PSWS key (if uploading) | `setup-psws-keys.sh` | External — register with PSWS. |
+| 10 | Hardware attached later | `smd status` → `smd adopt <name>` | Only needed if a device arrived after phase 3. Nothing starts on its own. |
+
+## Installing with nothing attached
+
+**Changed 2026-09-02.** You no longer need the hardware in hand to install. A
+station installs *present-and-dormant* whatever is or is not plugged in: bring-up
+warns about each missing device, installs its components anyway, and starts
+nothing. This is the normal path for a machine you are building before its parts
+arrive, or one you will carry to a site and finish there.
+
+Attach the device whenever it turns up, then:
+
+```bash
+smd status          # the device appears under "adoptable:"
+smd adopt <name>    # the name smd status printed
+```
+
+`smd adopt` shows what it will enable and start, then asks. Add `--dry-run` to
+see the plan without touching anything, or `--yes` to skip the question when
+provisioning a fleet from a script.
+
+Two things follow from this, and both are deliberate:
+
+- **Hardware appearing is never an instruction.** A device that shows up is
+  reported and left alone. Until 2026-09-02 a timer brought the whole station up
+  within two minutes of an RX888 being plugged in; it was retired because it
+  started a station unattended and unasked. If `smd doctor` reports
+  `retired-unit`, that timer is still armed on your machine.
+- **A station's name decides its identity.** A hostname matching `DASI` plus three
+  digits is checked against the shipped roster (`etc/dasi2-roster.toml`). In the
+  roster, it is a DASI2 grant site and its PSWS IDs come from there. Not in the
+  roster, `smd` **refuses** rather than guess — fix the hostname, or add the
+  roster entry. Any other name is an ordinary station, asked for its PSWS
+  identity in the usual way.
 
 > **What `smd install` / `smd apply` now do for you automatically** (so you don't
 > hand-run them): link every unit in each component's `systemd/` dir, write the
