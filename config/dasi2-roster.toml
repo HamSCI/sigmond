@@ -1,0 +1,96 @@
+# config/dasi2-roster.toml
+#
+# The DASI2 fleet.  A host whose name matches DASI\d{3} is a funded site if and
+# only if it appears here — an unrostered DASI name is REFUSED rather than
+# guessed, because guessing either way is silently wrong.
+#
+# Shipped in the repo deliberately: a field install has no network when it
+# needs this.
+#
+# ⚠⚠⚠ PLACEHOLDER VALUES — DO NOT SHIP TO A REAL FLEET ⚠⚠⚠
+# psws_station / psws_instrument below are PLACEHOLDERS in the correct shape
+# only (S0002NN / I0002NN). Michael pre-defines the real PSWS Station and
+# Instrument IDs for each DASI2 machine; they are not supplied yet. Replace
+# every value in this file with the real pre-defined IDs before any fleet
+# build. Nothing in this repo can tell a placeholder from a real ID — that
+# check is on whoever cuts the fleet build.
+
+[DASI001]
+psws_station = "S000201"
+psws_instrument = "I000201"
+
+[DASI002]
+psws_station = "S000202"
+psws_instrument = "I000202"
+
+[DASI003]
+psws_station = "S000203"
+psws_instrument = "I000203"
+
+[DASI004]
+psws_station = "S000204"
+psws_instrument = "I000204"
+
+[DASI005]
+psws_station = "S000205"
+psws_instrument = "I000205"
+
+[DASI006]
+psws_station = "S000206"
+psws_instrument = "I000206"
+
+[DASI007]
+psws_station = "S000207"
+psws_instrument = "I000207"
+
+[DASI008]
+psws_station = "S000208"
+psws_instrument = "I000208"
+
+[DASI009]
+psws_station = "S000209"
+psws_instrument = "I000209"
+
+[DASI010]
+psws_station = "S000210"
+psws_instrument = "I000210"
+
+[DASI011]
+psws_station = "S000211"
+psws_instrument = "I000211"
+
+[DASI012]
+psws_station = "S000212"
+psws_instrument = "I000212"
+
+[DASI013]
+psws_station = "S000213"
+psws_instrument = "I000213"
+
+[DASI014]
+psws_station = "S000214"
+psws_instrument = "I000214"
+
+[DASI015]
+psws_station = "S000215"
+psws_instrument = "I000215"
+
+[DASI016]
+psws_station = "S000216"
+psws_instrument = "I000216"
+
+[DASI017]
+psws_station = "S000217"
+psws_instrument = "I000217"
+
+[DASI018]
+psws_station = "S000218"
+psws_instrument = "I000218"
+
+[DASI019]
+psws_station = "S000219"
+psws_instrument = "I000219"
+
+[DASI020]
+psws_station = "S000220"
+psws_instrument = "I000220"
