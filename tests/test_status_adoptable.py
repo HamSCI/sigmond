@@ -31,22 +31,51 @@ def _smd():
 
 
 RX = SourceKey(type="usb", identifier="04b4:00f1:serial")
+KIWI = SourceKey(type="kiwisdr", identifier="192.0.2.7:8073")
+
+
+def _rx_station():
+    """A station that knows the RX888 key IS its rx888 -- as a real one does.
+    Without the kind nothing claims the source, and `smd adopt` would refuse
+    it; the section says so rather than advertising the verb."""
+    return StationInventory(hardware=frozenset({"rx888"}), sources=(RX,),
+                            source_kinds=((RX, "rx888"),))
 
 
 def test_an_unadopted_source_is_listed():
-    lines = _smd()._adoption_section(
-        StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
-        adopted=frozenset())
+    lines = _smd()._adoption_section(_rx_station(), adopted=frozenset())
     text = "\n".join(lines)
     assert str(RX) in text
     assert "not adopted" in text.lower()
+    assert "smd adopt" in text
 
 
 def test_an_adopted_source_is_not_offered():
-    lines = _smd()._adoption_section(
-        StationInventory(hardware=frozenset({"rx888"}), sources=(RX,)),
-        adopted=frozenset({RX}))
+    lines = _smd()._adoption_section(_rx_station(), adopted=frozenset({RX}))
     assert str(RX) not in "\n".join(lines)
+
+
+def test_a_source_nothing_claims_is_shown_without_an_adopt_instruction():
+    """A KiwiSDR is real and worth reporting -- silence is the confusion this
+    section exists to end.  But no component consumes one yet, so `smd adopt`
+    would refuse it, and telling the operator to run it would be a lie."""
+    lines = _smd()._adoption_section(
+        StationInventory(sources=(KIWI,)), adopted=frozenset())
+    text = "\n".join(lines)
+    assert str(KIWI) in text                 # still reported
+    assert "smd adopt" not in text           # but not advertised
+    assert "consumes this source yet" in text
+
+
+def test_a_claimable_and_an_unclaimable_source_are_told_apart():
+    lines = _smd()._adoption_section(
+        StationInventory(hardware=frozenset({"rx888"}), sources=(RX, KIWI),
+                         source_kinds=((RX, "rx888"),)),
+        adopted=frozenset())
+    text = "\n".join(lines)
+    adopt_at = text.index("run `smd adopt")
+    assert text.index(str(RX)) < adopt_at        # the instruction follows RX
+    assert text.index(str(KIWI)) > adopt_at      # ... and not the KiwiSDR
 
 
 def test_a_recognised_kit_is_named_as_one_offer():

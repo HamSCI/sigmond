@@ -8516,20 +8516,40 @@ def _adoption_section(inv, adopted) -> list:
     Reports; never acts.  A station with hardware attached and nothing running
     should say so — silence is indistinguishable from having no hardware.
     """
-    from sigmond.adoption import offers as _offers
+    from sigmond.adoption import (components_for as _components_for,
+                                  offers as _offers)
 
     pending = _offers(inv, adopted)
     if not pending:
         return []
-    lines = ['', 'adoptable:']
+
+    # Show EVERY detected-but-unadopted device — silence is the confusion this
+    # section exists to end, and a KiwiSDR nobody can adopt yet is still
+    # something the operator should know is plugged in.  But tell them to run
+    # `smd adopt` only where adopt would accept: `components_for` is the same
+    # function the verb refuses on, so the two surfaces cannot drift into
+    # advertising an offer that would be rejected.
+    claimable, unclaimed = [], []
     for offer in pending:
-        if offer.kind == 'kit':
-            lines.append(
-                f'  {offer.name:<28} recognised kit, not adopted '
-                f'({len(offer.sources)} source(s))')
-        else:
-            lines.append(f'  {offer.name:<28} detected, not adopted')
-    lines.append('  run `smd adopt <name>` to configure, enable and start it')
+        (claimable if _components_for(offer, inv) else unclaimed).append(offer)
+
+    lines: list = []
+    if claimable:
+        lines += ['', 'adoptable:']
+        for offer in claimable:
+            if offer.kind == 'kit':
+                lines.append(
+                    f'  {offer.name:<28} recognised kit, not adopted '
+                    f'({len(offer.sources)} source(s))')
+            else:
+                lines.append(f'  {offer.name:<28} detected, not adopted')
+        lines.append(
+            '  run `smd adopt <name>` to configure, enable and start it')
+    if unclaimed:
+        lines += ['', 'detected, not adoptable yet:']
+        for offer in unclaimed:
+            lines.append(f'  {offer.name:<28} no component on this station '
+                         f'consumes this source yet')
     return lines
 
 
@@ -8749,6 +8769,44 @@ def _adoption_inventory():
     return _station_inventory(), _adopted_sources()
 
 
+def _adopt_start_set(components) -> list:
+    """The components `cmd_start` will act on when handed these names.
+
+    `cmd_start` walks the catalog's `requires` closure before starting
+    anything, so the four decode clients a LAN radiod brings pull in
+    ka9q-radio with them — the very code path the radiod-restart disclosure
+    exists to warn about.  Previewing `plan_.components` alone reported
+    neither, so adopting a neighbour's radiod could bounce the local one in
+    silence.
+
+    Aliases `_expand_requires_closure` emits for cmd_start's topology filter
+    (`radiod`, for `ka9q-radio`) are dropped again here — same component,
+    second name, and it would be reported twice.
+
+    ⚠ No topology-enabled filter, which `cmd_start` does apply to closure
+    members (it auto-enables only the NAMED components).  So a dependency that
+    is installed but disabled is previewed as starting when it will not.  That
+    errs loud: a warning that did not need to fire, rather than a silent
+    restart of a running radiod.
+
+    Best effort — an unreadable catalog falls back to the names themselves.
+    """
+    names = list(components)
+    try:
+        from sigmond.catalog import load_catalog
+        catalog = load_catalog()
+        closure = _expand_requires_closure(names, catalog)
+    except Exception:                                            # noqa: BLE001
+        return names
+    seen, out = set(), []
+    for name in closure:
+        if name in seen or (name not in catalog and name not in names):
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def _adopt_start_preview(components):
     """`(startable, [(name, why-not), …])` — what `cmd_start` will act on.
 
@@ -8803,9 +8861,17 @@ def _radiod_already_running() -> bool:
     possibility rather than predicting the outcome — see the report; deciding
     it here would mean a second copy of that function's placement maths.
     """
-    r = _run(['systemctl', 'list-units', '--no-legend', '--state=active',
-              'radiod@*.service'])
-    return bool((r.stdout or '').strip())
+    # Bounded and exception-proof, matching harmonize._unit_active: a host
+    # without systemd, or a hung systemctl, must not take down the verb this
+    # disclosure was added to protect — and by then adopt has already elevated.
+    try:
+        out = subprocess.run(
+            ['systemctl', 'list-units', '--type=service', '--state=active',
+             '--no-legend', '--plain', 'radiod@*.service'],
+            capture_output=True, text=True, timeout=10).stdout
+    except Exception:                                            # noqa: BLE001
+        return False
+    return any(line.strip() for line in (out or '').splitlines())
 
 
 def cmd_adopt(args) -> int:
@@ -8890,15 +8956,18 @@ def cmd_adopt(args) -> int:
         _info(f'  needs {field_name}')
     for client, key in writes:
         _info(f'  source {key} → {client}')
+    if not plan_.components:
+        # Above the dry-run return: a dry run must predict its own exit, or
+        # `--dry-run` says 0 for an offer the real verb refuses with 1.
+        _err(f'adopt {match.name}: no component on this station consumes this '
+             f'source, so there is nothing to configure. Adopting it would '
+             f'change nothing.')
+        return 1
     if dry_run:
         _info('adopt: dry run — nothing changed')
         return 0
-    if not plan_.components:
-        _err(f'adopt {match.name}: no component claims this source, so there '
-             f'is nothing to configure. Adopting it would change nothing.')
-        return 1
 
-    startable, skipped = _adopt_start_preview(plan_.components)
+    startable, skipped = _adopt_start_preview(_adopt_start_set(plan_.components))
     for name, why in skipped:
         _warn(f'  {name}: will NOT start — {why}')
     if not startable:

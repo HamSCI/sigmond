@@ -41,6 +41,9 @@ RX2 = SourceKey(type="usb", identifier="04b4:00f1:other")
 
 MAG = SourceKey(type="usb", identifier="1ffb:2502:MAG7")
 
+#: Discovered, real, and consumed by nothing sigmond ships yet.
+KIWI = SourceKey(type="kiwisdr", identifier="192.0.2.7:8073")
+
 FARGO = SourceKey(type="radiod", identifier="fargo-status.local")
 
 
@@ -508,6 +511,12 @@ def test_adopt_refuses_a_source_it_already_recorded(tmp_path):
 # Adoption actually adopts -- and only after an explicit yes
 # ---------------------------------------------------------------------------
 
+def _raise(exc):
+    def _boom(*a, **k):
+        raise exc
+    return _boom
+
+
 class _Stdin:
     def __init__(self, tty):
         self._tty = tty
@@ -771,21 +780,46 @@ def test_a_lan_radiod_is_adoptable_and_brings_the_decode_clients(tmp_path):
 
 def test_every_offer_status_advertises_is_one_adopt_accepts(tmp_path):
     """The two surfaces must agree.  A station that says "run `smd adopt X`"
-    and then answers "nothing adoptable named X" is worse than silent."""
+    and then answers "nothing adoptable named X" is worse than silent.
+
+    This drives the ACTUAL status section rather than `offers()`, and takes
+    the names it advertises -- a KiwiSDR is listed but not advertised, so it
+    is correctly absent here.  It is a real check only because the empty-plan
+    refusal now sits ABOVE the dry-run return: otherwise `--dry-run` would
+    answer 0 for every name that resolves, whether or not a real adopt would
+    take it.
+    """
     mod = _smd()
     inv = StationInventory(
         hardware=frozenset({"rx888"}),
-        sources=(RX, FARGO),
+        sources=(RX, FARGO, KIWI),
         source_kinds=((RX, "rx888"),))
     started = _wire(mod, inv, tmp_path)
 
-    from sigmond.adoption import offers
-    names = [o.name for o in offers(inv, frozenset())]
-    assert str(FARGO) in names and str(RX) in names
-    for name in names:
-        mod._adopted_sources = lambda **kw: frozenset()
+    lines = mod._adoption_section(inv, frozenset())
+    text = "\n".join(lines)
+    assert "run `smd adopt" in text
+    advertised = [ln.split()[0] for ln in lines
+                  if ln.startswith('  ') and 'not adopted' in ln]
+    assert set(advertised) == {str(RX), str(FARGO)}
+    assert str(KIWI) in text                     # shown, but not advertised
+
+    for name in advertised:
         assert mod.cmd_adopt(_args(name, tmp_path, dry_run=True)) == 0, name
+    # ... and the one it did NOT advertise is exactly the one adopt refuses.
+    assert mod.cmd_adopt(_args(str(KIWI), tmp_path, dry_run=True)) == 1
     assert started == []
+
+
+def test_a_dry_run_predicts_the_real_exit_code(tmp_path):
+    """`--dry-run` that answers 0 where the real verb answers 1 is not a dry
+    run; it is a different command that happens to share a name."""
+    mod = _smd()
+    inv = StationInventory(sources=(KIWI,))
+    _wire(mod, inv, tmp_path)
+    assert mod.cmd_adopt(_args(str(KIWI), tmp_path, dry_run=True)) == 1
+    assert mod.cmd_adopt(_args(str(KIWI), tmp_path, yes=True)) == 1
+    assert not list(tmp_path.iterdir())
 
 
 # ---------------------------------------------------------------------------
@@ -942,3 +976,111 @@ def test_a_stopped_radiod_is_not_announced_as_running(tmp_path, capsys):
 
     assert mod.cmd_adopt(_args(str(RX), tmp_path, yes=True)) == 0
     assert "already running" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# What will ACTUALLY start: the requires closure, not just the offer's own
+# ---------------------------------------------------------------------------
+
+class TestStartSet:
+    """`cmd_start` walks the catalog's `requires` closure before starting
+    anything.  Previewing the offer's own components alone hid the fact that
+    adopting a LAN radiod starts the LOCAL one."""
+
+    def test_a_lan_radiod_pulls_in_the_local_radiod(self):
+        from sigmond.sources import KNOWN_CLIENTS
+        got = _smd()._adopt_start_set(list(KNOWN_CLIENTS))
+        assert got[0] == "ka9q-radio"          # deps before dependents
+        assert set(KNOWN_CLIENTS) <= set(got)
+
+    def test_the_radiod_alias_is_not_reported_twice(self):
+        """`_expand_requires_closure` emits `radiod` alongside `ka9q-radio`
+        for cmd_start's topology filter.  Same component, second name."""
+        got = _smd()._adopt_start_set(["wspr-recorder"])
+        assert got.count("ka9q-radio") == 1
+        assert "radiod" not in got
+
+    def test_an_sdr_adoption_is_unchanged(self):
+        got = _smd()._adopt_start_set(["ka9q-radio", "ka9q-web",
+                                       "igmp-querier"])
+        assert got == ["ka9q-radio", "ka9q-web", "igmp-querier"]
+
+    def test_an_unreadable_catalog_falls_back_to_the_names(self, monkeypatch):
+        import sigmond.catalog as catalog
+        mod = _smd()
+
+        def _boom(*a, **k):
+            raise FileNotFoundError("catalog.toml")
+        monkeypatch.setattr(catalog, "load_catalog", _boom)
+        assert mod._adopt_start_set(["wspr-recorder"]) == ["wspr-recorder"]
+
+
+def test_adopting_a_lan_radiod_discloses_the_local_radiod_restart(
+        tmp_path, capsys):
+    """The hole my own LAN-radiod mapping opened: the four decode clients
+    require ka9q-radio, cmd_start's closure pulls it in, and that reaches
+    _ensure_radiod_affinity_drop_ins -- the code path this disclosure exists
+    to warn about.  Gating on the offer's own components missed it entirely.
+    """
+    from sigmond.sources import KNOWN_CLIENTS
+    mod = _smd()
+    started = _wire(mod, StationInventory(sources=(FARGO,)), tmp_path)
+    mod._radiod_already_running = lambda: True
+
+    assert mod.cmd_adopt(_args(str(FARGO), tmp_path, yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "already running" in out
+    assert "restarts the instance" in out
+    # cmd_start is still handed the OFFER's components: the closure describes
+    # what will start, it must not widen what adopt auto-enables.
+    assert [list(KNOWN_CLIENTS)] == [e for e in started if isinstance(e, list)]
+
+
+def test_the_preview_names_the_local_radiod_for_a_lan_radiod_adoption(
+        tmp_path, capsys):
+    mod = _smd()
+    _wire(mod, StationInventory(sources=(FARGO,)), tmp_path)
+    assert mod.cmd_adopt(_args(str(FARGO), tmp_path, yes=True)) == 0
+    assert "started ka9q-radio" in capsys.readouterr().out
+
+
+class TestRadiodProbe:
+    """A disclosure that crashes the verb it protects is worse than none --
+    and by the time it runs, adopt has already elevated."""
+
+    def test_no_systemd_is_not_an_error(self, monkeypatch):
+        import subprocess
+        mod = _smd()
+        monkeypatch.setattr(subprocess, "run", _raise(FileNotFoundError))
+        assert mod._radiod_already_running() is False
+
+    def test_a_hung_systemctl_is_not_an_error(self, monkeypatch):
+        import subprocess
+        mod = _smd()
+        monkeypatch.setattr(
+            subprocess, "run",
+            _raise(subprocess.TimeoutExpired(cmd="systemctl", timeout=10)))
+        assert mod._radiod_already_running() is False
+
+    def test_the_call_is_bounded(self, monkeypatch):
+        import subprocess
+        mod = _smd()
+        seen = {}
+
+        def _capture(cmd, **kw):
+            seen.update(kw)
+            seen["cmd"] = cmd
+            return types.SimpleNamespace(stdout="")
+        monkeypatch.setattr(subprocess, "run", _capture)
+        mod._radiod_already_running()
+        assert seen["timeout"] == 10           # matches harmonize._unit_active
+        assert "radiod@*.service" in seen["cmd"]
+
+    def test_an_active_instance_is_reported(self, monkeypatch):
+        import subprocess
+        mod = _smd()
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: types.SimpleNamespace(
+                stdout="radiod@rx888.service loaded active running\n"))
+        assert mod._radiod_already_running() is True

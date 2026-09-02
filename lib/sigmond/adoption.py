@@ -187,17 +187,17 @@ def _hardware_for(offer: Offer, inv: StationInventory) -> FrozenSet[str]:
     return frozenset(kinds)
 
 
-def plan(offer: Offer, inv: StationInventory,
-         identity: "StationIdentity") -> AdoptionPlan:
-    """What adopting this offer entails.
+def components_for(offer: Offer, inv: StationInventory) -> Tuple[str, ...]:
+    """The components adopting this offer would bring up.
 
-    Prefills split the way identity does: anything derivable from the kit or
-    the host is filled; grant identity comes from the roster on a site and is
-    ASKED on a DASI2-alike, which is a first-class station with no roster
-    entry rather than a degraded one.
+    Identity-free on purpose, so `smd status` can ask "would adopt accept
+    this?" without deciding who the station is.  An EMPTY answer means no
+    component here claims that source, which is exactly when `smd adopt`
+    refuses — the two surfaces read this one function so they cannot drift
+    into advertising an offer the verb would reject.
     """
     hardware = _hardware_for(offer, inv)
-    components: list = []
+    components: List[str] = []
     for kind in sorted(hardware):
         for comp in _HARDWARE_COMPONENTS.get(kind, ()):
             if comp not in components:
@@ -212,6 +212,19 @@ def plan(offer: Offer, inv: StationInventory,
         for client in KNOWN_CLIENTS:
             if client not in components:
                 components.append(client)
+    return tuple(components)
+
+
+def plan(offer: Offer, inv: StationInventory,
+         identity: "StationIdentity") -> AdoptionPlan:
+    """What adopting this offer entails.
+
+    Prefills split the way identity does: anything derivable from the kit or
+    the host is filled; grant identity comes from the roster on a site and is
+    ASKED on a DASI2-alike, which is a first-class station with no roster
+    entry rather than a degraded one.
+    """
+    components = components_for(offer, inv)
 
     prefills = {
         # Auto-composed from the hostname — zero operator input, the rule the
@@ -225,5 +238,5 @@ def plan(offer: Offer, inv: StationInventory,
     else:
         ask.extend(("psws_station", "psws_instrument"))
 
-    return AdoptionPlan(components=tuple(components),
+    return AdoptionPlan(components=components,
                         prefills=prefills, ask=tuple(ask))
