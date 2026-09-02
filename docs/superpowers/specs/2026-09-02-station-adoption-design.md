@@ -177,8 +177,13 @@ Surfaces:
 Adoption COMPOSES; it adds no engine. That is the principle the install
 redesign already states for `base` and `client`, applied to the layer above.
 
-`bringup.py` gains one call: record the inventory at install time. It acts on
-none of it.
+⛔ **Struck 2026-09-02, during planning.** An earlier draft had `bringup.py`
+record the inventory at install time. Nothing reads it: `smd status` and
+`smd adopt` both compute the inventory LIVE, which is also the only correct
+thing to do, since hardware arrives after install and a stored snapshot would
+be wrong the moment it mattered. Writing data nobody reads is how a stale fact
+gets believed later. Install therefore records nothing; it simply stops
+gating.
 
 ## 7 · Testing
 
