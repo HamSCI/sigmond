@@ -8904,7 +8904,8 @@ def cmd_adopt(args) -> int:
     from contextlib import nullcontext
 
     from sigmond import sources as _sources
-    from sigmond.adoption import (consumers_for as _consumers_for,
+    from sigmond.adoption import (components_for as _components_for,
+                                  consumers_for as _consumers_for,
                                   offers as _offers, plan as _plan)
     from sigmond.station_identity import UnrosteredDasiName
 
@@ -8931,7 +8932,15 @@ def cmd_adopt(args) -> int:
     pending = _offers(inv, adopted)
     match = next((o for o in pending if o.name == args.name), None)
     if match is None:
-        available = ', '.join(o.name for o in pending) or 'nothing'
+        # Same function `smd status` reads to decide what to advertise, and
+        # the one `plan()` is built from — so the name offered here, the name
+        # `smd status` prints "run `smd adopt X`" for, and the name the next
+        # invocation of THIS verb accepts are the same set by construction.
+        # Built from every pending offer, this used to include ones adopt's
+        # own next call would refuse (a discovered KiwiSDR, say): naming it as
+        # "available" and then rejecting it is worse than not naming it.
+        claimable = [o for o in pending if _components_for(o, inv)]
+        available = ', '.join(o.name for o in claimable) or 'nothing'
         _err(f'adopt: nothing adoptable named {args.name!r}. '
              f'Available: {available}')
         return 1

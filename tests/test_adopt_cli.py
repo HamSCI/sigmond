@@ -132,6 +132,28 @@ def test_adopting_an_unknown_name_fails_and_says_what_is_available(
     assert not list(tmp_path.iterdir())
 
 
+def test_the_available_list_excludes_what_adopt_itself_would_refuse(
+        tmp_path, capsys):
+    """CARRIED FIX 2.  The 'Available: ...' list used to come from every
+    pending offer, including ones the very next `smd adopt` call would
+    reject (a discovered KiwiSDR: no component consumes it).  `smd status`
+    and `plan()` both read `components_for`; this list was the third
+    surface that had not been routed through it, so it could disagree with
+    the other two by coincidence rather than by construction."""
+    mod = _smd()
+    inv = StationInventory(
+        hardware=frozenset({"rx888"}),
+        sources=(RX, KIWI),
+        source_kinds=((RX, "rx888"),))
+    _wire(mod, inv, tmp_path)
+
+    rc = mod.cmd_adopt(_args("nope", tmp_path, dry_run=True))
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert str(RX) in err              # adopt would accept this one
+    assert str(KIWI) not in err        # adopt refuses this one -- don't offer it
+
+
 def test_an_empty_station_says_nothing_is_adoptable(tmp_path, capsys):
     mod = _smd()
     _wire(mod, StationInventory(), tmp_path)
