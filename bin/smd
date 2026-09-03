@@ -307,6 +307,27 @@ def _git_net_env() -> dict:
     return env
 
 
+def _runuser(user: str, argv: list) -> list:
+    """Build a `runuser -u <user> -- <argv>` command that actually runs.
+
+    Two things the bare name got wrong, both found on AC0G-ND 2026-09-03 when
+    `smd update --apply` died with `FileNotFoundError: 'runuser'`:
+
+      * `runuser` lives in **/usr/sbin**, which is not on an unprivileged
+        operator's PATH — `which runuser` returns nothing for the `hamsci` user
+        while `/usr/sbin/runuser` is right there.
+      * it needs root, and `smd` deliberately refuses to run under sudo, so the
+        escalation has to happen per-command — the same `sudo=True` pattern
+        `_run` already uses everywhere else.
+
+    Resolving the path and prepending sudo when we are not root makes the fleet
+    update path work as the operator who is meant to run it.
+    """
+    exe = shutil.which('runuser') or '/usr/sbin/runuser'
+    cmd = [exe, '-u', user or 'root', '--'] + list(argv)
+    return cmd if os.geteuid() == 0 else ['sudo', '-n'] + cmd
+
+
 def _run_git_net(git_cmd: list, verb: str) -> subprocess.CompletedProcess:
     """subprocess.run for a git command that talks to the network: bounded,
     non-interactive, and a timeout comes back as a FAILED result (returncode
@@ -3526,9 +3547,9 @@ def cmd_update(args) -> int:
         if not apply_:
             continue
         if step.kind == 'pull':
-            r = _run_git_net(['runuser', '-u', step.run_as or 'root', '--',
-                              'git', '-C', str(base / step.target),
-                              'pull', '--ff-only'], 'pull')
+            r = _run_git_net(_runuser(step.run_as or 'root',
+                                      ['git', '-C', str(base / step.target),
+                                       'pull', '--ff-only']), 'pull')
             last = ((r.stdout + r.stderr).strip().splitlines() or ['(no output)'])[-1]
             (_ok if r.returncode == 0 else _err)(f'{step.target}: {last}')
             if r.returncode == 0:
@@ -4020,8 +4041,8 @@ def cmd_manifest_restore(args) -> int:
             d = checkout_by_name[name]
             owner = _owner_of(d)
             r = subprocess.run(
-                ['runuser', '-u', owner or 'root', '--',
-                 'git', '-C', str(d), 'fetch', '--all', '--quiet'],
+                _runuser(owner or 'root',
+                         ['git', '-C', str(d), 'fetch', '--all', '--quiet']),
                 capture_output=True, text=True)
             if r.returncode != 0:
                 _warn(f'{name}: fetch failed — '
@@ -4108,8 +4129,8 @@ def cmd_manifest_restore(args) -> int:
         # onto main later — restore's job stops at reproducing the
         # blessed SHA.
         r = subprocess.run(
-            ['runuser', '-u', owner or 'root', '--',
-             'git', '-C', str(d), 'checkout', '--detach', to_sha],
+            _runuser(owner or 'root',
+                     ['git', '-C', str(d), 'checkout', '--detach', to_sha]),
             capture_output=True, text=True)
         if r.returncode != 0:
             _err(f'{name}: checkout failed — '
