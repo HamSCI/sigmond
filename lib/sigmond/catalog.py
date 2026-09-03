@@ -42,6 +42,11 @@ from typing import Optional
 
 # Operator override, then repo default.
 _REPO_CATALOG = Path(__file__).resolve().parent.parent.parent / 'etc' / 'catalog.toml'
+# Where sigmond clones and installs every client.  Named here so the
+# handful of places that need it stop spelling it out (and so tests can
+# point it somewhere harmless).
+SUITE_ROOT: Path = Path('/opt/git/sigmond')
+
 DEFAULT_CATALOG_PATHS: tuple[Path, ...] = (
     Path('/etc/sigmond/catalog.toml'),
     _REPO_CATALOG,
@@ -152,15 +157,25 @@ def find_client_binary(name: str) -> Optional[str]:
     """Locate a client's CLI binary.
 
     Search order:
-    1. System PATH
-    2. Pattern A venv: /opt/<name>/venv/bin/<name>
+    1. System PATH — where a client's install step symlinks its CLI.
+    2. The suite venv: /opt/git/sigmond/<name>/venv/bin/<name>.
+    3. Pattern A venv: /opt/<name>/venv/bin/<name>.
+
+    ⛔ (2) used to be missing, and its absence was invisible because most
+    clients put their CLI on PATH.  hamsci-physics does not, so the readiness
+    probe reported `client binary not found` on AC0G-B4 — a station running
+    GRAPE, with the venv sitting at exactly the path nothing looked in.  Every
+    client this fleet installs lives under SUITE_ROOT; (3) has never matched
+    anything on any station we have built, and stays only because a hand-built
+    client could still use it.
     """
     found = shutil.which(name)
     if found:
         return found
-    venv_bin = Path(f'/opt/{name}/venv/bin/{name}')
-    if venv_bin.exists():
-        return str(venv_bin)
+    for candidate in (SUITE_ROOT / name / 'venv' / 'bin' / name,
+                      Path(f'/opt/{name}/venv/bin/{name}')):
+        if candidate.exists():
+            return str(candidate)
     return None
 
 

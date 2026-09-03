@@ -405,6 +405,85 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False) -> list[str]:
     return msgs
 
 
+def run_deploy_build_steps(repo_dir: Path, *, dry_run: bool = False,
+                           runner=subprocess.run) -> tuple[bool, list[str]]:
+    """Execute a deploy.toml ``[build].steps`` sequence.  Returns (ok, messages).
+
+    The client contract (docs/CLIENT-CONTRACT.md §5) has always described
+    ``[build]`` as a phase sigmond drives, with ``produces`` naming the
+    artefacts it yields — the readiness gate already reads ``produces`` to
+    decide whether a component counts as built.  Only the code that runs the
+    steps was missing.
+
+    ⛔ What that cost.  `install_client()` fell back to a "deploy.toml-only
+    install" for a client with no install.sh: it linked the systemd units, set
+    ok=True and returned success, having never created the venv those units
+    launch from.  On the v3.37 build it printed `✓ hamsci-physics installed`
+    and the capture gate then failed on `client binary not found`.  Both were
+    true.  AC0G-B4 runs GRAPE only because someone built that venv by hand.
+
+    Two rules the implementation keeps:
+
+    * a failed step ENDS the sequence and names itself — a build that did not
+      happen must never read as one;
+    * exit 0 is not evidence.  When ``produces`` is declared, the artefacts
+      must exist afterwards, or the build failed however cheerfully its
+      commands returned.
+
+    ``produces`` doubles as the idempotence check: if every declared artefact
+    is already present, the steps are skipped.  Steps run with the repo root as
+    cwd, because the contract writes them relative to it.
+    """
+    deploy_toml = repo_dir / 'deploy.toml'
+    if not deploy_toml.exists():
+        return True, []
+    try:
+        with open(deploy_toml, 'rb') as fh:
+            config = tomllib.load(fh)
+    except Exception as exc:
+        return False, [f'  could not read {deploy_toml}: {exc}']
+
+    build = config.get('build') or {}
+    steps = list(build.get('steps') or [])
+    produces = [Path(p) for p in (build.get('produces') or [])]
+    if not steps:
+        return True, []
+
+    if produces and all(p.exists() for p in produces):
+        return True, [f'  already built ({len(produces)} artefact(s) present)'
+                      f' — skipping {len(steps)} build step(s)']
+
+    msgs: list[str] = []
+    for step in steps:
+        if dry_run:
+            msgs.append(f'  (dry-run) would run: {step}')
+            continue
+        msgs.append(f'  build: {step}')
+        try:
+            result = runner(step, shell=True, cwd=str(repo_dir),
+                            capture_output=True, text=True)
+        except OSError as exc:
+            msgs.append(f'  build step failed to start: {step}: {exc}')
+            return False, msgs
+        if result.returncode != 0:
+            tail = ((result.stderr or result.stdout or '') or '').strip()[-400:]
+            msgs.append(f'  build step FAILED (exit {result.returncode}): '
+                        f'{step}')
+            if tail:
+                msgs.append(f'    {tail}')
+            return False, msgs
+    if dry_run:
+        return True, msgs
+
+    # Exit 0 is not evidence.  Check what the steps claim to have produced.
+    absent = [str(p) for p in produces if not p.exists()]
+    if absent:
+        msgs.append('  build steps all exited 0 but declared artefact(s) are '
+                    'absent: ' + ', '.join(absent))
+        return False, msgs
+    return True, msgs
+
+
 def apply_deploy_toml_links(repo_dir: Path, dry_run: bool = False) -> list[str]:
     """Execute 'link' kind install steps from deploy.toml that are missing or wrong.
 
@@ -556,15 +635,30 @@ def install_client(
     _clone_source_only_deps(entry, catalog, dry_run=dry_run)
     script = find_install_script(entry, repo_dir)
     if script is None:
-        # No install.sh anywhere — fall back to deploy.toml-only install
-        # (link steps + systemd enables).  Only counts as success if the
-        # deploy.toml actually defined something to do.
+        # No install.sh anywhere — fall back to a deploy.toml-driven install:
+        # its [build].steps, then the link steps and systemd enables below.
+        # Only counts as success if the deploy.toml actually defined something
+        # to do.
         deploy = repo_dir / 'deploy.toml'
         if not deploy.exists():
             print(f"[err] {entry.name}: no install_script and no deploy.toml in {repo_dir}",
                   file=sys.stderr)
             return False
-        ok = True
+        # ⛔ The build runs HERE and only here — in the branch where nothing
+        # else builds the client.  hf-timestd, wspr-recorder, psk-recorder and
+        # meteor-scatter also declare [build].steps, and all four ship an
+        # install.sh that already does that work; running their steps a second
+        # time on every install would cost minutes and gain nothing.  A client
+        # that grows an install.sh later stops running them, which is right:
+        # its script owns the build from that point.
+        ok, build_msgs = run_deploy_build_steps(repo_dir, dry_run=dry_run)
+        for msg in build_msgs:
+            print(msg)
+        if not ok:
+            print(f"[err] {entry.name}: deploy.toml [build] steps failed — "
+                  f"refusing to report an install that did not build",
+                  file=sys.stderr)
+            return False
     else:
         ok = run_install_script(entry, repo_dir, dry_run=dry_run, yes=yes)
     # Apply any deploy.toml link steps not covered by install.sh (idempotent).
