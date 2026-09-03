@@ -4536,6 +4536,104 @@ def _rx888_irq_findings(read_fence=None, read_xhci_affinity=None) -> list:
     return findings
 
 
+def _chrony_captured_findings(read_chrony=None, disagree_sec: float = 1.0) -> list:
+    """Report a local refclock that has captured the system clock.
+
+    ⛔ AC0G-ND, 2026-09-03.  The RX888 sampled ~350 ppm fast because its GPSDO's
+    27 MHz never reached the ADC.  hf-timestd's FUSE derives from those samples,
+    so it inherited the error; `trust` on the FUSE refclock then told chrony to
+    believe it over the network.  chrony obeyed, drove the clock 374 ppm fast,
+    and marked all three honest NTP servers falsetickers:
+
+        #* FUSE             -174us
+        ^x 144.202.66.214  -12.3s
+        ^x 72.87.88.202    -12.2s
+        ^x 172.234.37.140  -12.0s
+
+    The station sat TWELVE SECONDS off UTC while `chronyc tracking` reported
+    stratum 1 and a 380 us system-time error, and hf-timestd published T3 at
+    -87 us.  Every number honest, every number useless: radiod's GPS_TIME IS
+    the host clock, so every RTP label drifted with it and no decoder could
+    align.  hf-timestd cannot see this on its own because it locks WWV's
+    ONE-SECOND tick and therefore measures modulo one second.
+
+    Frequency alone does not discriminate: b4 legitimately runs 81 ppm slow
+    correcting its VM's crystal and is perfectly healthy.  What separates the
+    two stations is DISAGREEMENT — several independent network sources agreeing
+    with each other and not with the selected local refclock.  That is what this
+    check reads, with chrony's own falseticker verdict as corroboration.
+
+    Report-only.  The remedy steps the clock by seconds, which disturbs every
+    recorder, so an operator sequences it.
+
+    ``read_chrony`` returns ``(tracking_csv, sources_csv)`` from
+    ``chronyc -c tracking`` / ``chronyc -c sources``, injected for testing.
+    """
+    from sigmond.doctor import Finding
+
+    if read_chrony is None:
+        def read_chrony():
+            # A host with no chrony has nothing to check here — that is not a
+            # finding and not an unassessed family, so swallow the absence.
+            try:
+                t = _run(['chronyc', '-c', 'tracking'])
+                s = _run(['chronyc', '-c', 'sources'])
+            except OSError:
+                return ('', '')
+            return (getattr(t, 'stdout', '') or '', getattr(s, 'stdout', '') or '')
+
+    got = read_chrony()
+    if not got:
+        return []
+    tracking_csv, sources_csv = got
+    try:
+        from sigmond.tui.format import parse_sources, parse_tracking
+    except Exception:                              # noqa: BLE001
+        return []
+    tracking = parse_tracking(tracking_csv)
+    sources = parse_sources(sources_csv)
+    if not sources:
+        return []
+
+    selected = [r for r in sources if r.state == '*']
+    # Network sources with a real measurement: chrony's mode '^' is a server.
+    net = [r for r in sources if r.mode == '^' and r.reach]
+    if len(net) < 2:
+        return []          # nothing independent to compare against
+    offs = sorted(r.measured_offset_sec for r in net)
+    median = offs[len(offs) // 2]
+    spread = offs[-1] - offs[0]
+    # They must agree with EACH OTHER before their disagreement means anything.
+    if spread > abs(median) / 2 or abs(median) < disagree_sec:
+        return []
+    falsetickers = [r for r in net if r.state == 'x']
+    ref = (tracking.ref_id_name if tracking else
+           (selected[0].name if selected else 'the selected source'))
+    # `chronyc -c tracking` is one line; field 7 is the frequency in ppm.
+    freq = ''
+    parts = (tracking_csv or '').strip().split(',')
+    if len(parts) > 7:
+        try:
+            freq = f", and chrony is driving the clock {float(parts[7]):+.1f} ppm"
+        except ValueError:
+            freq = ''
+    return [Finding(
+        'hf-timestd', 'chrony-refclock-captured',
+        f'{len(net)} independent network time sources agree with each other '
+        f'(spread {spread * 1000:.0f} ms) that this host is '
+        f'{median:+.3f} s from UTC, while chrony has selected {ref} and reports '
+        f'itself healthy{freq}. {len(falsetickers)} of them are marked '
+        f'falsetickers, so chrony is discarding the evidence — the signature of '
+        f'a local refclock that has captured the clock, usually a `trust` on a '
+        f'refclock whose own reference is wrong. radiod\'s GPS_TIME IS the host '
+        f'clock, so every RTP label carries this error and no decoder can align '
+        f'(hf-timestd cannot see it: it locks WWV\'s one-second tick and so '
+        f'measures modulo one second). Check that the GPSDO actually governs the '
+        f'front end — compare radiod\'s "measured sample rate" against nominal, '
+        f'which reads within ~20 ppm when locked — then drop `trust` from the '
+        f'refclock in /etc/chrony/conf.d/ until it is.')]
+
+
 def _rx888_adc_overrange_findings(read_frontend=None, quiet_sec: float = 60.0) -> list:
     """Report an RX888 whose A/D is clipping.
 
@@ -5051,6 +5149,12 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
         # _rx888_adc_overrange_findings.
         findings.extend(_rx888_adc_overrange_findings())
 
+    def _chrony_captured() -> None:
+        # Whether a local refclock has captured the system clock. ND sat 12 s
+        # off UTC for a day while chrony, hf-timestd and every service check
+        # reported healthy. See _chrony_captured_findings.
+        findings.extend(_chrony_captured_findings())
+
     _guarded('ownership', _ownership)
     _guarded('git', _git)
     _guarded('venv-skew', _venv)
@@ -5060,6 +5164,7 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
     _guarded('rx888-irq', _rx888_irq)
     _guarded('rx888-queuedepth', _rx888_queuedepth)
     _guarded('rx888-adc-overrange', _rx888_adc)
+    _guarded('chrony-refclock-captured', _chrony_captured)
 
     if unassessed:
         clean = None
