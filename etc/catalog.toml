@@ -297,7 +297,16 @@ description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetomete
 # did not install it while the station's topology.toml declared it -- the
 # service ran on B4's v3.21 install without being part of the profile that
 # provisions it.  Core clients are what bringup installs unprompted.
-clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "gmag-webui", "meteor-scatter"]
+# hamsci-physics added 2026-09-03: the profile description above promises
+# GRAPE, and hamsci-physics is what produces it — but it was never in this
+# list, so `smd bringup dasi2` never installed it.  Meanwhile hf-timestd's
+# installer enables `grape-daily` and `hamsci-physics-reanalysis` against
+# /opt/git/sigmond/hamsci-physics/venv/bin/python3 unconditionally, so both
+# units failed 203/EXEC on every boot of every station built from the image.
+# AC0G-B4 has GRAPE only because the venv was acquired by hand; AC0G-ND had
+# the checkout with no venv and no GRAPE at all.  start_priority 60 already
+# orders it after the timing core it reads from (50).
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "gmag-webui", "meteor-scatter", "hamsci-physics"]
 local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
 # Discretionary HF-science clients: NOT installed by default.  `smd bringup
 # dasi2 --with-optional` adds them; `smd install <name>` installs+enables one

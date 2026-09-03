@@ -339,6 +339,23 @@ def test_no_config_applies_to_the_independent_track_as_well():
     assert 'install mag-recorder' in _labels(p, 'install')
 
 
+def test_shipped_dasi2_profile_installs_what_produces_grape():
+    """The profile promises GRAPE; hamsci-physics is what produces it.
+
+    ⛔ It was absent from `clients` until 2026-09-03, so `smd bringup dasi2`
+    never installed it — while hf-timestd's installer unconditionally enables
+    `grape-daily` and `hamsci-physics-reanalysis` against
+    /opt/git/sigmond/hamsci-physics/venv/bin/python3.  Both units failed
+    203/EXEC on every boot of every station built from the image.  b4 had GRAPE
+    only because the venv was fetched by hand; AC0G-ND had neither.
+    """
+    from sigmond.catalog import load_profiles
+    prof = load_profiles()['dasi2']
+    assert 'hamsci-physics' in prof.clients, (
+        "the dasi2 profile describes itself as GRAPE-producing; the package "
+        "that produces GRAPE must be installed unprompted")
+
+
 def test_shipped_dasi2_profile_excludes_its_contract_less_client():
     # Guards the WIRING, not just the builder: cmd_bringup derives `no_config`
     # from the catalog, and this asserts the shipped catalog + shipped profile
