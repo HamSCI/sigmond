@@ -323,8 +323,14 @@ class ManifestRestoreCliDryRunTests(unittest.TestCase):
         fetch_calls = [c for c in fake.calls if 'fetch' in c]
         self.assertEqual(len(fetch_calls), 1)
         fc = fetch_calls[0]
-        self.assertEqual(fc[0], 'runuser')
-        self.assertEqual(fc[1], '-u')
+        # Assert the INTENT — runs as the checkout owner — not the literal
+        # argv[0].  `_runuser` resolves the binary to /usr/sbin/runuser (not on
+        # an operator's PATH) and prepends `sudo -n` when not root, so argv[0]
+        # is legitimately either.  Pinning the bare name here is what let the
+        # FileNotFoundError on AC0G-ND 2026-09-03 pass a green suite.
+        self.assertTrue(fc[0].endswith('runuser') or fc[0] == 'sudo', fc[:3])
+        i = next(n for n, a in enumerate(fc) if a.endswith('runuser'))
+        self.assertEqual(fc[i + 1], '-u')
         self.assertIn('--', fc)
         self.assertIn('git', fc)
         self.assertIn('--all', fc)
@@ -483,8 +489,10 @@ class ManifestRestoreApplyTests(unittest.TestCase):
                           if 'checkout' in c and '--detach' in c]
         self.assertEqual(len(checkout_calls), 1)
         cc = checkout_calls[0]
-        self.assertEqual(cc[0], 'runuser')
-        self.assertEqual(cc[1], '-u')
+        # Intent, not argv[0] — see the fetch test above.
+        self.assertTrue(cc[0].endswith('runuser') or cc[0] == 'sudo', cc[:3])
+        i = next(n for n, a in enumerate(cc) if a.endswith('runuser'))
+        self.assertEqual(cc[i + 1], '-u')
         self.assertIn('aaaaaaa', cc)
 
     def test_post_apply_verification_ok_reports_success(self):
