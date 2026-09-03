@@ -77,7 +77,6 @@ _FRONTEND_PROFILES: dict[str, dict] = {
             "                           # 64800000 (64.8 Msps; HF only) on Pi5 or other\n"
             "                           # CPU-limited hosts where wisdom rof1620000 was\n"
             "                           # planned instead.\n"
-            "gainmode    = high\n"
             + _RX888_QUEUEDEPTH
             # Fork clock monitor: the per-minute measured-sample-rate line is
             # radiod's only steady-state journal output — sigmond-radiod-watchdog's
@@ -91,7 +90,6 @@ _FRONTEND_PROFILES: dict[str, dict] = {
         "section": "rx888",
         "defaults": (
             "samprate    = 129600000\n"
-            "gainmode    = high\n"
             + _RX888_QUEUEDEPTH
             # Fork clock monitor: the per-minute measured-sample-rate line is
             # radiod's only steady-state journal output — sigmond-radiod-watchdog's
@@ -104,7 +102,6 @@ _FRONTEND_PROFILES: dict[str, dict] = {
         "section": "rx888",
         "defaults": (
             "samprate    = 129600000\n"
-            "gainmode    = high\n"
             + _RX888_QUEUEDEPTH
             # Fork clock monitor: the per-minute measured-sample-rate line is
             # radiod's only steady-state journal output — sigmond-radiod-watchdog's

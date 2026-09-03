@@ -25,6 +25,15 @@ ttl       = 0                  # 0 = loopback-only (single-host default,
                                # snooping) sits between this host and the
                                # consumers.  See `smd diag net` for a
                                # readiness check.
+# fft-threads: a DELIBERATE pin, not a preference.  It happens to equal
+# radiod's own default (DEFAULT_FFTW_THREADS = 1, radio.c), so it looks
+# redundant — it is not.  `fft-threads = 0` runs the forward FFT inline in
+# the proc_rx888 USB reader thread, which at 129.6 Msps intermittently
+# cannot keep up and SILENTLY drops samples: b4's WSPR decode collapsed to
+# 0-1 spots/cycle for 14 hours on 2026-06-01 and recovered the moment it
+# was reverted.  Nothing logs it — ka9q's failure_count only prints at
+# Verbose>1, so "0 overruns" in the journal is NOT evidence of health.
+# Pinned so an upstream default change cannot reintroduce it quietly.
 fft-threads = 1
 affinity  = false              # let systemd CPUAffinity= confine us
 iface     = ${IFACE}           # publish iface — ignored when ttl=0

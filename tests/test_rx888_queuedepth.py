@@ -89,6 +89,18 @@ class GeneratorEmitsQueuedepthTest(unittest.TestCase):
                     "queuedepth  = 64",
                     radiod_config._profile_for(label)["defaults"])
 
+    def test_no_profile_emits_the_obsolete_gainmode_key(self):
+        """`gainmode` does nothing but produce a warning.
+
+        rx888.c:205 annotates the key `// Obsolete`, and lines 303-305 print
+        "gainmode parameter is obsolete, now set automatically" on EVERY radiod
+        start.  We shipped it for years; it never had an effect.  Held here so
+        it cannot drift back in with a future front-end profile.
+        """
+        for label, profile in radiod_config._FRONTEND_PROFILES.items():
+            with self.subTest(frontend=label):
+                self.assertNotIn("gainmode", profile["defaults"])
+
     def test_other_front_ends_do_not_get_an_rx888_knob(self):
         for label in ("Airspy", "Airspy HF+", "SDRplay", "MysteryRadio"):
             with self.subTest(frontend=label):
