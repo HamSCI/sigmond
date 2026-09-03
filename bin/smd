@@ -392,6 +392,22 @@ def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
         if not target_user:
             return _git_refused(repo_dir, 'fetch')
         git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
+    else:
+        # Not root, and the checkout probably belongs to someone else
+        # (sigmond, timestd, wsprrec...).  A fetch needs to WRITE FETCH_HEAD
+        # and objects, so running as the invoking operator fails on every
+        # repo they do not own — and the failure used to be swallowed,
+        # leaving origin/* stale and `smd update` reporting "host is
+        # current" while components were behind (AC0G-ND 2026-09-03:
+        # gpsdo-monitor 2 behind, hf-timestd 1 behind, both reported clean).
+        # These remotes are https, so no per-user key is needed to fetch.
+        try:
+            owner = repo_dir.owner()
+        except Exception:                        # noqa: BLE001
+            owner = None
+        import getpass
+        if owner and owner != getpass.getuser():
+            git_cmd = ['sudo', '-n', '-u', owner, '-H', '--'] + git_cmd
     return _run_git_net(git_cmd, 'fetch')
 
 
@@ -3363,19 +3379,32 @@ def _refresh_upstreams(checkouts, fetch: bool = True) -> None:
     divergence is LIVE" comment in `cmd_component_list`. `smd update`
     read the same stale refs and drew the same false conclusion.
 
-    Failures are per-repo and silent by design: a checkout with no
-    remote, or one whose remote is unreachable, must not stop the other
-    components from being refreshed. The consequence of a failed fetch
-    is the stale-ref behaviour that was there before — no worse — and
-    `smd doctor` is where unreachable remotes get reported.
+    A failure must not stop the other components refreshing — but it is NOT
+    silent.  The old code swallowed it on the reasoning that a stale ref is
+    "no worse than before"; it is worse, because the planner then prints
+    "host is current — nothing to do" with the full confidence of a fresh
+    check.  A wrong answer stated confidently beats no answer only for the
+    person who does not have to act on it.  AC0G-ND 2026-09-03 is the case:
+    two components behind, fetch failing, host declared current.
     """
     if not fetch:
         return
+    stale = []
     for repo_dir in checkouts:
         try:
-            _git_fetch_as_owner(Path(repo_dir))
-        except Exception:                        # noqa: BLE001
-            continue
+            r = _git_fetch_as_owner(Path(repo_dir))
+            if getattr(r, 'returncode', 0) != 0:
+                stale.append((Path(repo_dir).name,
+                              ((r.stderr or r.stdout or '').strip()
+                               .splitlines() or ['(no output)'])[-1]))
+        except Exception as e:                   # noqa: BLE001
+            stale.append((Path(repo_dir).name, f'{e.__class__.__name__}: {e}'))
+    for name, why in stale:
+        _warn(f'{name}: fetch failed — {why}')
+    if stale:
+        _warn(f'{len(stale)} checkout(s) could not be refreshed; "behind" '
+              f'counts below are computed against STALE origin refs and may '
+              f'read 0 for a component that is not current')
 
 
 def _record_update_step(what: str) -> None:
@@ -3452,7 +3481,12 @@ def cmd_update(args) -> int:
         try:
             behind = int(r.stdout.strip())
         except ValueError:
+            # rev-list failed (no upstream configured, unreadable repo).  Not
+            # the same as "up to date" — say so rather than quietly claiming 0.
             behind = 0
+            if r.returncode != 0:
+                _warn(f'{d.name}: cannot compare against upstream — '
+                      f'{((r.stderr or "").strip().splitlines() or ["?"])[-1]}')
         try:
             owner = d.owner()
         except Exception:

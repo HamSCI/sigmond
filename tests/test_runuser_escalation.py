@@ -106,6 +106,33 @@ class RunuserEscalationTest(unittest.TestCase):
         self.assertNotIn("subprocess.run(['bash', str(sh)]", text,
                          "install.sh needs root — route it through _as_root()")
 
+    def test_a_failed_fetch_is_reported_not_swallowed(self):
+        """"Host is current" must never rest on a fetch nobody checked.
+
+        `_refresh_upstreams` used to swallow every fetch failure on the
+        reasoning that a stale ref is "no worse than before".  It is worse: the
+        planner then prints "host is current — nothing to do" with the full
+        confidence of a fresh check.  AC0G-ND 2026-09-03 — gpsdo-monitor 2
+        behind and hf-timestd 1 behind, both reported clean, because the fetch
+        could not write into checkouts the operator does not own.
+        """
+        warned = []
+        fake = type("R", (), {"returncode": 1, "stderr": "permission denied",
+                              "stdout": ""})()
+        with patch.object(smd, "_git_fetch_as_owner", return_value=fake), \
+             patch.object(smd, "_warn", side_effect=lambda m: warned.append(m)):
+            smd._refresh_upstreams([Path("/opt/git/sigmond/gpsdo-monitor")])
+        self.assertTrue(any("fetch failed" in w for w in warned), warned)
+        self.assertTrue(any("STALE origin refs" in w for w in warned), warned)
+
+    def test_a_successful_fetch_warns_about_nothing(self):
+        ok = type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+        warned = []
+        with patch.object(smd, "_git_fetch_as_owner", return_value=ok), \
+             patch.object(smd, "_warn", side_effect=lambda m: warned.append(m)):
+            smd._refresh_upstreams([Path("/opt/git/sigmond/gpsdo-monitor")])
+        self.assertEqual(warned, [])
+
     def test_no_call_site_still_uses_the_bare_name(self):
         """The bug was three identical call sites, so guard the file itself.
 
