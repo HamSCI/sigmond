@@ -52,6 +52,26 @@ class ProfileLookupTests(unittest.TestCase):
         self.assertEqual(p["section"], "rx888")
         self.assertIn("samprate", p["defaults"])
 
+    def test_every_rx888_profile_sets_queuedepth_64(self):
+        """radiod's built-in queuedepth of 16 holds only ~32 ms of URB ring.
+        A KVM guest overruns that often enough to starve the RX888 into
+        silence — AC0G-ND stalled every ~13 minutes on 2026-09-03 and lost
+        every WSPR and FT8 decode for a day, while b4 (queuedepth 64, set by
+        hand since the v3.31 soak) ran clean.  Pin the generator to 64 so no
+        greenfield station ships on the 32 ms cliff again.
+        """
+        for label in ("RX888", "RX-888", "RX-888 Mk2"):
+            with self.subTest(frontend=label):
+                defaults = radiod_config._profile_for(label)["defaults"]
+                self.assertIn("queuedepth  = 64", defaults)
+
+    def test_non_rx888_profile_omits_queuedepth(self):
+        """queuedepth names an RX888 driver knob; other front ends reject it."""
+        for label in ("Airspy", "Airspy HF+", "SDRplay"):
+            with self.subTest(frontend=label):
+                self.assertNotIn(
+                    "queuedepth", radiod_config._profile_for(label)["defaults"])
+
     def test_airspy_profile(self):
         p = radiod_config._profile_for("Airspy")
         self.assertEqual(p["section"], "airspy")

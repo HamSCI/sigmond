@@ -50,6 +50,24 @@ TEMPLATE_PATH = (
 # Adding a new front-end is two table entries: section name and defaults.
 # ---------------------------------------------------------------------------
 
+# radiod's own default URB ring holds 16 requests of 524288 B (~2.02 ms of
+# 129.6 Msps each), so the host has only ~32 ms to resubmit before the ring
+# runs dry.  When it does, the RX888's FIFO overruns and the device simply
+# stops streaming.  It flags no error of its own, so radiod counts
+# "USB xfer failures +0", steps its RTP↔GPS offset +1 s every second, and
+# ends at "No rx888 data for 5 seconds, quitting" — after which it hangs in
+# libusb teardown until sigmond-radiod-watchdog restarts it.  A KVM guest
+# overruns 32 ms often enough to hit this several times an hour: AC0G-ND on
+# 2026-09-03 stalled every ~13 minutes and lost every WSPR and FT8 decode
+# for a day.  64 requests give ~130 ms of tolerance and have run b4 clean
+# since the v3.31 soak.  b4 carried the setting by hand and this generator
+# did not, so every greenfield station shipped on the 32 ms cliff.
+_RX888_QUEUEDEPTH = (
+    "# USB URB ring: 64 x ~2 ms = ~130 ms stall tolerance "
+    "(v3.31 soak; default 16 = 32 ms cliff)\n"
+    "queuedepth  = 64\n"
+)
+
 _FRONTEND_PROFILES: dict[str, dict] = {
     "RX888": {
         "section": "rx888",
@@ -60,10 +78,11 @@ _FRONTEND_PROFILES: dict[str, dict] = {
             "                           # CPU-limited hosts where wisdom rof1620000 was\n"
             "                           # planned instead.\n"
             "gainmode    = high\n"
+            + _RX888_QUEUEDEPTH
             # Fork clock monitor: the per-minute measured-sample-rate line is
             # radiod's only steady-state journal output — sigmond-radiod-watchdog's
             # HEARTBEAT-LOST detector depends on it (silence >10 min ⇒ USB reset).
-            "clock-step-logging = yes\n"
+            + "clock-step-logging = yes\n"
             "clock-rate-log     = yes\n"
             "# gain      = 1.5            # dB; uncomment to override default\n"
         ),
@@ -73,10 +92,11 @@ _FRONTEND_PROFILES: dict[str, dict] = {
         "defaults": (
             "samprate    = 129600000\n"
             "gainmode    = high\n"
+            + _RX888_QUEUEDEPTH
             # Fork clock monitor: the per-minute measured-sample-rate line is
             # radiod's only steady-state journal output — sigmond-radiod-watchdog's
             # HEARTBEAT-LOST detector depends on it (silence >10 min ⇒ USB reset).
-            "clock-step-logging = yes\n"
+            + "clock-step-logging = yes\n"
             "clock-rate-log     = yes\n"
         ),
     },
@@ -85,10 +105,11 @@ _FRONTEND_PROFILES: dict[str, dict] = {
         "defaults": (
             "samprate    = 129600000\n"
             "gainmode    = high\n"
+            + _RX888_QUEUEDEPTH
             # Fork clock monitor: the per-minute measured-sample-rate line is
             # radiod's only steady-state journal output — sigmond-radiod-watchdog's
             # HEARTBEAT-LOST detector depends on it (silence >10 min ⇒ USB reset).
-            "clock-step-logging = yes\n"
+            + "clock-step-logging = yes\n"
             "clock-rate-log     = yes\n"
         ),
     },

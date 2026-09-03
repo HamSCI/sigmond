@@ -4536,6 +4536,66 @@ def _rx888_irq_findings(read_fence=None, read_xhci_affinity=None) -> list:
     return findings
 
 
+def _rx888_queuedepth_findings(read_configs=None) -> list:
+    """Report an RX888 radiod config that leaves `queuedepth` at the default.
+
+    ⛔ AC0G-ND, 2026-09-03.  radiod's built-in ring holds 16 URBs of 524288 B,
+    about 2.02 ms of 129.6 Msps each, so the host gets ~32 ms to resubmit
+    before the ring empties.  A KVM guest misses that deadline often enough to
+    matter: ND stalled every ~13 minutes and lost a full day of WSPR and FT8.
+    The device flags nothing when it happens, so radiod counts "USB xfer
+    failures +0", steps its RTP<->GPS offset a second per second, and lands on
+    "No rx888 data for 5 seconds, quitting" — where it then hangs in libusb
+    teardown until sigmond-radiod-watchdog restarts it.  Every recorder loses
+    its anchor across that restart and decodes nothing.
+
+    b4 has carried `queuedepth = 64` (~130 ms) by hand since the v3.31 soak and
+    does not stall.  The generator did not emit it, so the reference station and
+    every greenfield station disagreed and nothing said so — the same shape as
+    the rx888-irq override.  The generator now emits it; this check finds the
+    stations built before it did.
+
+    Report-only.  The remedy restarts radiod, and a diagnostic does not restart
+    a station's receiver.
+
+    ``read_configs`` is injected so this tests with no /etc/radio present.
+    """
+    from sigmond.doctor import Finding
+
+    if read_configs is None:
+        def read_configs():
+            out = {}
+            try:
+                for p in sorted(Path('/etc/radio').glob('radiod@*.conf')):
+                    try:
+                        out[str(p)] = p.read_text(errors='replace')
+                    except OSError:
+                        continue
+            except OSError:
+                return {}
+            return out
+
+    findings = []
+    for path, text in sorted((read_configs() or {}).items()):
+        body = '\n'.join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith('#'))
+        if '[rx888]' not in body:
+            continue           # not an RX888 station; the knob does not apply
+        if 'queuedepth' in body:
+            continue
+        findings.append(Finding(
+            'ka9q-radio', 'rx888-queuedepth-default',
+            f'{path} leaves queuedepth at radiod\'s default of 16, which holds '
+            f'only ~32 ms of USB ring. A scheduling delay past that starves the '
+            f'RX888 into silence with no USB error — radiod reports "USB xfer '
+            f'failures +0", then "No rx888 data for 5 seconds", and every '
+            f'recorder loses its RTP anchor across the restart that follows. '
+            f'b4 has run queuedepth = 64 (~130 ms) since the v3.31 soak. Add '
+            f'"queuedepth  = 64" to the [rx888] section, then: '
+            f'sudo systemctl restart radiod@<instance>'))
+    return findings
+
+
 def _retired_unit_findings(is_enabled=None) -> list:
     """Findings for retired units that are still enabled on this host.
 
@@ -4885,6 +4945,13 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
         # reports healthy. See _rx888_irq_findings.
         findings.extend(_rx888_irq_findings())
 
+    def _rx888_queuedepth() -> None:
+        # The USB ring depth radiod runs with. Same shape as rx888-irq: b4
+        # carried the setting by hand, the generator did not emit it, and the
+        # station it was missing from starved its receiver while every service
+        # reported healthy. See _rx888_queuedepth_findings.
+        findings.extend(_rx888_queuedepth_findings())
+
     _guarded('ownership', _ownership)
     _guarded('git', _git)
     _guarded('venv-skew', _venv)
@@ -4892,6 +4959,7 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
     _guarded('exec-mismatch', _exec)
     _guarded('retired-unit', _retired)
     _guarded('rx888-irq', _rx888_irq)
+    _guarded('rx888-queuedepth', _rx888_queuedepth)
 
     if unassessed:
         clean = None
