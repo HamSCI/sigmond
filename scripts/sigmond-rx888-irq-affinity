@@ -1,5 +1,11 @@
 #!/bin/bash
-# Pin xhci (USB3 host controller) IRQs onto radiod's reserved CPUs.
+# Pin the RX888's xhci (USB3 host controller) IRQs OFF radiod's reserved CPUs,
+# onto the lowest core pair the fence leaves to the OS.
+#
+# ⚠ THE DEFAULT FLIPPED 2026-09-03.  It used to CO-LOCATE the IRQs with
+# radiod.  Both models are measured and the history is kept below, because the
+# reason the default changed is not that co-location was wrong — it is that its
+# stated premise stopped holding.
 #
 # The CPU-affinity subsystem fences radiod ONTO a reserved HT pair and
 # every other unit OFF it — but hard-IRQ service obeys neither nice
@@ -13,6 +19,12 @@
 #
 # No-op when no radiod unit carries a CPUAffinity (non-radiod hosts).
 set -u
+# Test seams: a fake topology + interrupt table lets the derivation below be
+# exercised under bash with no USB bus and no radiod (tests/test_rx888_irq_affinity.py).
+CPU_ROOT=${SIGMOND_CPU_ROOT:-/sys/devices/system/cpu}
+PROC_INTERRUPTS=${SIGMOND_PROC_INTERRUPTS:-/proc/interrupts}
+IRQ_ROOT=${SIGMOND_IRQ_ROOT:-/proc/irq}
+
 # CPUAffinity values are SPACE-separated ("8 9") in both systemctl output and
 # the smd drop-ins, but /proc/irq/*/smp_affinity_list wants a comma list.
 # 'tr -d' used to DELETE the space, turning "8 9" into cpu "89" — an invalid
@@ -21,9 +33,40 @@ set -u
 # 'activating' and only the fallback path fires).  Translate instead: "8 9"
 # becomes "8,9", and an already-valid "8-9" passes through untouched.
 #
+# ⛔ WHY THE DEFAULT FLIPPED — AC0G-ND, 2026-09-03.
+#
+# Co-location rests on one premise, stated in its own comment above: radiod's
+# "reserved pair has ample headroom".  On B4 it does — 34 radiod threads, 13 of
+# 16 L3 ways.  ND runs the SAME pin on the SAME silicon with an identically
+# configured PM, and carries 50 radiod threads on 10 L3 ways, because it serves
+# 17 WSPR bands + 9 FT8 + 9 FT4 + 6 metrology channels at 129.6 Msps.  There is
+# no headroom left to lend the USB path, so co-location starved the very thing
+# it exists to protect:
+#
+#     RX888 RTP<->GPS offset STEPPED +1.000 s over 1.0 s
+#     (~129612687 samples missing; USB xfer failures +0; cumulative +164.661 s)
+#
+# The device never errored — "USB xfer failures +0" — the host simply stopped
+# draining the ring.  Every decoder broke in order of coherent integration
+# length: WSPR (120 s) first, then FT8 (12.6 s), then FT4 (4.5 s), and FT4
+# surviving longest read as "FT4 works, FT8 does not" rather than as one fault.
+#
+# A/B, same station, same config file, same channel set:
+#     IRQs on radiod's pair  -> sample loss within 6-13 min of every start
+#     IRQs on the OS pair    -> 0 steps, rate settles, FT8 back to ~100/cycle
+#
+# B4 had already migrated to this model by hand on 2026-08-28 (its override
+# file), and that migration never reached the image — so the reference station
+# and every new station disagreed, silently, for a week.  Fleet policy belongs
+# in the repo, not in a file somebody made on one machine.
+#
+# The T6-era co-location is still reachable, and reverting is still governed by
+# the same arbiter: write radiod's own CPUs into the override file and restart
+# radiod.  gap-hourly.tsv decides.
+#
 # Per-station override: when /etc/sigmond/rx888-irq-cpus exists and holds a
-# cpu list (e.g. "0-1"), pin the xhci IRQs THERE instead of co-locating with
-# radiod.  The bare-metal KFS-NW layout keeps ALL interrupts on the OS pair
+# cpu list (e.g. "0-1", or radiod's own pair to restore co-location), pin the
+# xhci IRQs THERE instead of deriving the OS pair.  The bare-metal KFS-NW layout keeps ALL interrupts on the OS pair
 # and radiod's cores exclusively for fft/proc_rx888; with the guest sweep,
 # freq pinning, fence and L3 CAT now in place, a station may prefer that
 # model over the T6-era co-location.  gap-hourly.tsv is the arbiter — if
@@ -31,8 +74,8 @@ set -u
 if [ -s /etc/sigmond/rx888-irq-cpus ]; then
     cpus=$(tr -d ' \n' < /etc/sigmond/rx888-irq-cpus)
     pinned=0
-    for irq in $(grep -i xhci_hcd /proc/interrupts | cut -d: -f1 | tr -d ' '); do
-        if echo "$cpus" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null; then
+    for irq in $(grep -i xhci_hcd "$PROC_INTERRUPTS" | cut -d: -f1 | tr -d ' '); do
+        if echo "$cpus" > "$IRQ_ROOT/$irq/smp_affinity_list" 2>/dev/null; then
             pinned=$((pinned+1))
         fi
     done
@@ -52,12 +95,63 @@ if [ -z "${cpus}" ]; then
         [ -n "$cpus" ] && break
     done
 fi
+# No fence at all: leave the kernel's own IRQ balancing alone.
 [ -z "${cpus}" ] && exit 0
+
+# ── derive the OS pair ──────────────────────────────────────────────────────
+# The lowest-numbered physical core whose SMT siblings all sit OUTSIDE
+# radiod's fence.  Derived, never hardcoded: "0-1" happens to be the answer on
+# both current stations, and would silently be the wrong answer on a machine
+# whose fence starts at 0.  If radiod owns every core there is nowhere else to
+# put them, so co-locate and say so — pinning into a fence is still better
+# than leaving the IRQs wherever the balancer drifts them.
+_in_fence() {   # $1 = cpu number; is it inside "$cpus" (comma list, may hold a-b ranges)?
+    local c want=$1 lo hi
+    for c in ${cpus//,/ }; do
+        case "$c" in
+            *-*) lo=${c%%-*}; hi=${c##*-}
+                 [ "$want" -ge "$lo" ] 2>/dev/null && [ "$want" -le "$hi" ] 2>/dev/null && return 0 ;;
+            *)   [ "$want" = "$c" ] && return 0 ;;
+        esac
+    done
+    return 1
+}
+os_pair=""
+for core_dir in $(ls -d "$CPU_ROOT"/cpu[0-9]* 2>/dev/null | sort -V); do
+    sib_file="$core_dir/topology/thread_siblings_list"
+    [ -r "$sib_file" ] || sib_file="$core_dir/topology/core_cpus_list"
+    [ -r "$sib_file" ] || continue
+    sibs=$(tr -d ' \n' < "$sib_file")
+    # expand "4-5" / "4,5" into a plain list
+    expanded=""
+    for tok in ${sibs//,/ }; do
+        case "$tok" in
+            *-*) for n in $(seq "${tok%%-*}" "${tok##*-}"); do expanded="$expanded $n"; done ;;
+            *)   expanded="$expanded $tok" ;;
+        esac
+    done
+    clear=1
+    for n in $expanded; do
+        _in_fence "$n" && { clear=0; break; }
+    done
+    if [ "$clear" = 1 ]; then
+        os_pair=$(echo $expanded | tr ' ' ',')
+        break
+    fi
+done
+if [ -n "$os_pair" ]; then
+    target=$os_pair
+    model="OS pair (radiod fence $cpus left clear)"
+else
+    target=$cpus
+    model="co-located: radiod owns every core, nowhere else to put them"
+fi
+cpus=$target
 pinned=0
-for irq in $(grep -i xhci_hcd /proc/interrupts | cut -d: -f1 | tr -d ' '); do
-    if echo "$cpus" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null; then
+for irq in $(grep -i xhci_hcd "$PROC_INTERRUPTS" | cut -d: -f1 | tr -d ' '); do
+    if echo "$cpus" > "$IRQ_ROOT/$irq/smp_affinity_list" 2>/dev/null; then
         pinned=$((pinned+1))
     fi
 done
-echo "sigmond-rx888-irq-affinity: pinned $pinned xhci IRQ(s) to CPUs $cpus"
+echo "sigmond-rx888-irq-affinity: pinned $pinned xhci IRQ(s) to CPUs $cpus — $model"
 exit 0

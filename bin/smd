@@ -4426,6 +4426,116 @@ RETIRED_UNITS = {
 }
 
 
+def _rx888_irq_findings(read_fence=None, read_xhci_affinity=None) -> list:
+    """Report the RX888's xhci IRQs sitting INSIDE radiod's CPU fence.
+
+    ⛔ AC0G-ND, 2026-09-03.  `sigmond-rx888-irq-affinity` co-located the xhci
+    IRQs with radiod by default, on the premise that radiod's reserved pair
+    "has ample headroom".  That is true on B4 (34 radiod threads, 13 of 16 L3
+    ways) and false on a station carrying 50 threads on 10 ways: the host
+    stopped draining the USB ring and radiod bled ~129.6 M samples/s with
+    "USB xfer failures +0", killing WSPR outright and reducing FT8 to a spot
+    per cycle while FT4 limped on.
+
+    B4 had been migrated by hand a week earlier through its override file, so
+    the reference station and every new station disagreed and nothing said so.
+    Finding it took an hour of comparing two machines by hand; it should take
+    one command, which is what this check is for.
+
+    Report-only.  The remedy restarts radiod, and a diagnostic does not restart
+    a station's receiver.
+
+    Both readers are injected so the comparison tests with no USB bus, no
+    radiod and no root.
+    """
+    from sigmond.doctor import Finding
+
+    def _expand(spec: str) -> set:
+        out = set()
+        for tok in (spec or '').replace(',', ' ').split():
+            if '-' in tok:
+                lo, _, hi = tok.partition('-')
+                try:
+                    out.update(range(int(lo), int(hi) + 1))
+                except ValueError:
+                    continue
+            else:
+                try:
+                    out.add(int(tok))
+                except ValueError:
+                    continue
+        return out
+
+    if read_fence is None:
+        def read_fence():
+            # `systemctl show` takes no glob, so resolve the instance first —
+            # the same order the ExecStartPost script uses: a RUNNING radiod,
+            # else whatever an enabled drop-in declares (boot ordering).
+            r = _run(['systemctl', 'list-units', '--type=service',
+                      '--state=running', '--no-legend', 'radiod@*'])
+            for line in ((getattr(r, 'stdout', '') or '').splitlines()):
+                unit = line.split()[0] if line.split() else ''
+                if not unit:
+                    continue
+                shown = _run(['systemctl', 'show', '-p', 'CPUAffinity',
+                              '--value', unit])
+                val = (getattr(shown, 'stdout', '') or '').strip()
+                if val:
+                    return val
+            import glob as _glob
+            for f in sorted(_glob.glob(
+                    '/etc/systemd/system/radiod@*.service.d/*.conf')):
+                try:
+                    for line in open(f):
+                        if line.startswith('CPUAffinity='):
+                            val = line.split('=', 1)[1].strip()
+                            if val:
+                                return val
+                except OSError:
+                    continue
+            return ''
+    if read_xhci_affinity is None:
+        def read_xhci_affinity():
+            pairs = {}
+            try:
+                with open('/proc/interrupts') as fh:
+                    for line in fh:
+                        if 'xhci_hcd' not in line:
+                            continue
+                        irq = line.split(':', 1)[0].strip()
+                        try:
+                            with open(f'/proc/irq/{irq}/smp_affinity_list') as af:
+                                pairs[irq] = af.read().strip()
+                        except OSError:
+                            continue
+            except OSError:
+                return {}
+            return pairs
+
+    fence = _expand(read_fence())
+    if not fence:
+        return []          # unfenced station: kernel balancing, nothing to say
+    findings = []
+    for irq, spec in sorted((read_xhci_affinity() or {}).items()):
+        overlap = _expand(spec) & fence
+        if not overlap:
+            continue
+        findings.append(Finding(
+            'ka9q-radio', 'rx888-irq-in-fence',
+            f'xhci IRQ {irq} is pinned to CPU(s) {spec}, inside radiod\'s '
+            f'reserved fence ({",".join(str(c) for c in sorted(fence))}). '
+            f'Hard-IRQ service obeys neither nice levels nor unit '
+            f'CPUAffinity, so the USB path and radiod\'s threads contend for '
+            f'the same core: the host stops draining the ring and samples are '
+            f'lost with no USB error, breaking decoders in order of '
+            f'integration length (WSPR first, FT4 last). Since 2026-09-03 the '
+            f'default puts them on the OS pair; a station still showing this '
+            f'either carries an override in /etc/sigmond/rx888-irq-cpus or has '
+            f'not restarted radiod since updating. Check the override, then: '
+            f'sudo systemctl restart radiod@<instance>'))
+    return findings
+
+
 def _retired_unit_findings(is_enabled=None) -> list:
     """Findings for retired units that are still enabled on this host.
 
@@ -4769,12 +4879,19 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
         # reports. See RETIRED_UNITS (module level, above).
         findings.extend(_retired_unit_findings())
 
+    def _rx888_irq() -> None:
+        # Hard-IRQ placement relative to radiod's fence. Invisible to every
+        # other check here, and it destroys a station while every service
+        # reports healthy. See _rx888_irq_findings.
+        findings.extend(_rx888_irq_findings())
+
     _guarded('ownership', _ownership)
     _guarded('git', _git)
     _guarded('venv-skew', _venv)
     _guarded('manifest', _manifest)
     _guarded('exec-mismatch', _exec)
     _guarded('retired-unit', _retired)
+    _guarded('rx888-irq', _rx888_irq)
 
     if unassessed:
         clean = None
