@@ -6518,6 +6518,75 @@ def _install_single_client(args) -> int:
         return 1
 
 
+class _InstallTargets:
+    """Each requested component, sorted by the path that can install it.
+
+    Four buckets, because four different things must happen and two of them
+    used to share one:
+
+      catalog_queue   CatalogEntry objects that ``install_client()`` drives —
+                      whether the catalog names the script or the client
+                      discovers it post-clone from its own deploy.toml.
+      natives         names sigmond builds itself (ka9q-radio, ka9q-web,
+                      gmag-webui), each with its own recipe below.
+      unknown         names absent from the catalog entirely.
+      uninstallable   names PRESENT in the catalog that declare neither an
+                      install_script nor a repo — a catalog defect, not an
+                      operator typo, and a different message.
+    """
+
+    def __init__(self):
+        self.catalog_queue = []
+        self.natives = set()
+        self.unknown = []
+        self.uninstallable = []
+
+
+# C projects without install_script — built natively by sigmond (apt-install
+# build deps + make install).  Today only ka9q-radio goes through the C path;
+# 'radiod' (the systemd service name) is a topology_alias for the same entry
+# and resolves via get_entry().
+_C_BUILD_NAMES = ('ka9q-radio',)
+_NATIVE_NAMES = ('ka9q-radio', 'ka9q-web', 'gmag-webui')
+
+
+def _classify_install_targets(components, catalog) -> '_InstallTargets':
+    """Sort *components* into the install paths that handle them.
+
+    Extracted from `_install_full_suite` so it can be tested without a root
+    check or a filesystem — the bug it now holds against was invisible to
+    every test the suite had.
+
+    ⛔ An entry with no `install_script` does NOT mean "unbuildable".  A client
+    may leave it empty on purpose and let its `deploy.toml` [build]/[install]
+    drive the work, with `install_client()` discovering the script after the
+    clone (the mag-recorder pattern, and hamsci-physics since the 2026-08-24
+    split).  The single-component path `smd install <name>` has always handled
+    that fall-through; this classifier used to sort the same entry into
+    `unknown` and skip it with a warning, so `smd install --yes` reported
+    success while never installing hamsci-physics.  A repo URL is what makes
+    the fall-through possible, so it is what this branch keys on.
+    """
+    targets = _InstallTargets()
+    for comp in components:
+        entry = get_entry(comp, catalog)
+        if entry is None:
+            targets.unknown.append(comp)
+        elif entry.install_script:
+            targets.catalog_queue.append(entry)
+        elif entry.name in _NATIVE_NAMES:
+            targets.natives.add(entry.name)
+        elif entry.kind in ('library', 'infra'):
+            # sigmond installs these itself (ka9q-python via its venv, wd-rac
+            # via _install_frpc) — no path needed here.
+            pass
+        elif entry.repo:
+            targets.catalog_queue.append(entry)
+        else:
+            targets.uninstallable.append(comp)
+    return targets
+
+
 def _install_full_suite(args) -> int:
     """Catalog-driven full-suite install.
 
@@ -6562,37 +6631,11 @@ def _install_full_suite(args) -> int:
         _err(str(exc))
         return 1
 
-    # Classify components into catalog-driven vs. native C-build.
-    catalog_queue = []    # CatalogEntry objects with install_script
-    radiod_needed = False
-    ka9q_web_needed = False
-    gmag_webui_needed = False
-    unknown = []
-
-    # C projects without install_script — built natively by sigmond
-    # (apt-install build deps + make install).  Today only ka9q-radio
-    # goes through this path; 'radiod' (the systemd service name) is a
-    # topology_alias for the same entry and resolves via get_entry().
-    C_BUILD_NAMES = ('ka9q-radio',)
-
-    for comp in components:
-        entry = get_entry(comp, catalog)
-        if entry is None:
-            unknown.append(comp)
-            continue
-        if entry.install_script:
-            catalog_queue.append(entry)
-        elif entry.name in C_BUILD_NAMES:
-            radiod_needed = True
-        elif entry.name == 'ka9q-web':
-            ka9q_web_needed = True
-        elif entry.name == 'gmag-webui':
-            gmag_webui_needed = True
-        elif entry.kind in ('library', 'infra') and not entry.install_script:
-            # Handled by sigmond itself (e.g. ka9q-python via venv, wd-rac via _install_frpc).
-            pass
-        else:
-            unknown.append(comp)
+    targets = _classify_install_targets(components, catalog)
+    catalog_queue = targets.catalog_queue
+    radiod_needed = 'ka9q-radio' in targets.natives
+    ka9q_web_needed = 'ka9q-web' in targets.natives
+    gmag_webui_needed = 'gmag-webui' in targets.natives
 
     # --- Show install plan ---
     _heading('install plan')
@@ -6603,9 +6646,25 @@ def _install_full_suite(args) -> int:
     if gmag_webui_needed:
         _info('native:       gmag-webui  (pinned Deno + static dashboard)')
     for entry in catalog_queue:
-        _info(f'catalog:      {entry.name:22s} → {entry.install_script}')
-    for comp in unknown:
+        _info(f'catalog:      {entry.name:22s} → '
+              f'{entry.install_script or "(discover in repo post-clone)"}')
+    for comp in targets.unknown:
         _warn(f'unknown:      {comp} (not in catalog, skipping)')
+
+    # ⛔ A component the operator asked for must never disappear into a
+    # warning.  hamsci-physics did exactly that on 2026-09-03: the classifier
+    # called a catalogued client "not in catalog", skipped it, and `smd install`
+    # exited 0 — so a station whose profile promises GRAPE installed cleanly
+    # and produced no GRAPE.  See tests/test_install_target_classifier.py.
+    if targets.uninstallable:
+        for comp in targets.uninstallable:
+            _err(f'{comp}: in the catalog, but it declares neither an '
+                 f'install_script nor a repo to discover one in — nothing '
+                 f'here can install it')
+        _info('fix the catalog entry (or drop the component from the '
+              'profile/topology); refusing to report success while skipping '
+              'a component that was asked for')
+        return 1
 
     wd_rac_needed = 'wd-rac' in components
     if (not catalog_queue and not radiod_needed and not ka9q_web_needed
