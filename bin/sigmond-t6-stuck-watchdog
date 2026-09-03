@@ -115,8 +115,14 @@ def read_status(now: float, st: dict) -> Optional[T6State]:
     except Exception as exc:
         print(f"  status unreadable ({exc}) — refusing to act")
         return None
-    t6 = d.get("t6_pps", {})
-    auth = d.get("t6_authority", {})
+    # `or {}`, not a .get default: a fresh station with no TS-1 writes these
+    # sections as JSON NULL rather than omitting them, and a default applies
+    # only when the KEY IS ABSENT.  A present null used to reach .get() as
+    # None and crash the watchdog on every timer tick (AC0G-ND 2026-09-03) —
+    # a watchdog reporting its own breakage as the station's.  t5_lbe1421
+    # below always had this right.
+    t6 = d.get("t6_pps") or {}
+    auth = d.get("t6_authority") or {}
     state = auth.get("state")
     authoritative = None if state is None else (state == "AUTHORITATIVE")
     # Track how long we have seen it unlocked, in our own state file.

@@ -128,3 +128,72 @@ class TestTelemetryComesFromWhereItActuallyLives(unittest.TestCase):
 
     def test_a_missing_db_refuses_rather_than_acting(self):
         self.assertIsNone(wd.cn0_from_db("/nonexistent/nope.db"))
+
+
+class NullTelemetrySectionTest(unittest.TestCase):
+    """A section present-but-null crashed the watchdog every 5 minutes.
+
+    AC0G-ND, 2026-09-03.  A fresh station has no TS-1, so core-recorder
+    writes the authority section as JSON null rather than omitting it:
+
+        t6_authority    present=True   value=None
+        t6_pps          present=False  value=None
+
+    ``d.get("t6_authority", {})`` supplies its default only when the KEY IS
+    ABSENT, so a present null came back as None and ``auth.get("state")``
+    raised::
+
+        AttributeError: 'NoneType' object has no attribute 'get'
+
+    The watchdog then failed on every timer tick.  ``t5_lbe1421`` two lines
+    below already used the ``or {}`` idiom that handles both shapes; the two
+    sections that crashed did not.  A watchdog that dies on a station with
+    nothing yet to watch reports its own breakage as the station's.
+    """
+
+    def _read(self, payload):
+        import json
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as td:
+            p = _P(td) / 'status.json'
+            p.write_text(json.dumps(payload))
+            real = wd.STATUS
+            wd.STATUS = str(p)
+            try:
+                return wd.read_status(1000.0, {})
+            finally:
+                wd.STATUS = real
+
+    def test_null_authority_section_does_not_crash(self):
+        st = self._read({'t6_authority': None})
+        self.assertIsNotNone(st, 'a readable status must still yield a state')
+        self.assertIsNone(st.authoritative,
+                          'no authority section means UNKNOWN, not False — '
+                          'False would let the watchdog start restarting')
+
+    def test_null_pps_section_does_not_crash(self):
+        st = self._read({'t6_pps': None, 't6_authority': None})
+        self.assertIsNone(st.costas_locked)
+
+    def test_all_three_sections_null_at_once(self):
+        st = self._read({'t6_authority': None, 't6_pps': None,
+                         't5_lbe1421': None})
+        self.assertIsNone(st.authoritative)
+        self.assertIsNone(st.costas_locked)
+        self.assertIsNone(st.t5_valid_fix)
+
+    def test_a_populated_status_is_still_read_correctly(self):
+        # Guards the guard: `or {}` must not swallow real telemetry.
+        st = self._read({
+            't6_authority': {'state': 'AUTHORITATIVE'},
+            't6_pps': {'costas_locked': True},
+            't5_lbe1421': {'valid_fix': True},
+        })
+        self.assertIs(st.authoritative, True)
+        self.assertIs(st.costas_locked, True)
+        self.assertIs(st.t5_valid_fix, True)
+
+    def test_a_non_authoritative_state_still_reads_false(self):
+        st = self._read({'t6_authority': {'state': 'ACQUIRING'}})
+        self.assertIs(st.authoritative, False)

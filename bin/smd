@@ -5445,6 +5445,36 @@ def _bringup_env_blockers(local_radiod: bool) -> list:
     return blockers
 
 
+def _ask_optional_yes_no(prompt: str, *, default_yes: bool = True):
+    """Ask a question whose answer is OPTIONAL.  Return None when it cannot be asked.
+
+    ⛔ `sys.stdin.isatty()` is necessary and NOT sufficient.  A DETACHED tmux
+    pane IS a terminal — isatty() returns True — and reading it then fails
+    OSError(EIO), because no client is attached to type into it.  An
+    EOFError-only guard misses that, and on AC0G-ND 2026-09-02 it ended a
+    fully successful `smd bringup dasi2` with a traceback and exit 1: radiod,
+    six metrology channels, wspr, psk and meteor-scatter had all started, and
+    the run reported failure anyway.
+
+    A block that declares itself non-blocking must never decide the exit code,
+    so every way of failing to get an answer collapses into the same "no
+    answer" the caller already handles.
+
+    Returns True / False for an answer, None when no answer can be obtained.
+    """
+    if not sys.stdin.isatty():
+        return None
+    try:
+        answer = input(prompt)
+    except (EOFError, KeyboardInterrupt, OSError):
+        print()
+        return None
+    answer = answer.strip().lower()
+    if not answer:
+        return default_yes
+    return answer in ('y', 'yes')
+
+
 def cmd_bringup(args) -> int:
     """Guided, contract-ordered station bring-up (install-orchestration Phase B).
 
@@ -5846,26 +5876,32 @@ def cmd_bringup(args) -> int:
     except Exception:
         _todo = []
     if _todo:
-        import sys as _sys
         print()
         _heading('PSWS upload setup')
         _info('these record locally now, but need PSWS credentials to UPLOAD:')
         for _rec, _st in _todo:
             _info(f'  {_rec}: {", ".join(_st.issues)}')
-        if _sys.stdin.isatty() and not getattr(args, 'non_interactive', False):
-            for _rec, _ in _todo:
-                try:
-                    _ans = input(f'  configure PSWS for {_rec} now? [Y/n] ')
-                except EOFError:
-                    _ans = 'n'
-                if _ans.strip().lower() in ('', 'y', 'yes'):
+        # Whatever we could not ask about gets the do-it-later hint instead.
+        # Losing the ability to ask part-way through (a detached pane, a
+        # closed stdin, ^C) stops the asking and prints the hint for the
+        # rest — it does not fail the bring-up.
+        _unasked = list(_todo)
+        if not getattr(args, 'non_interactive', False):
+            for _idx, (_rec, _) in enumerate(_todo):
+                _yes = _ask_optional_yes_no(
+                    f'  configure PSWS for {_rec} now? [Y/n] ')
+                if _yes is None:
+                    _unasked = _todo[_idx:]
+                    break
+                _unasked = _todo[_idx + 1:]
+                if _yes:
                     try:
                         psws.cmd_edit(_rec)   # failures here never abort bringup
                     except Exception as _exc:           # noqa: BLE001
                         _warn(f'PSWS setup for {_rec} did not complete: {_exc}')
-        else:
+        if _unasked:
             _info('  finish anytime:  '
-                  + ';   '.join(f'smd config {r} edit' for r, _ in _todo))
+                  + ';   '.join(f'smd config {r} edit' for r, _ in _unasked))
         _info('  (you will be reminded in `smd status` / `smd component` '
               'until this is done)')
 

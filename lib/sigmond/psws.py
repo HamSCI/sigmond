@@ -28,6 +28,26 @@ except ModuleNotFoundError:  # pragma: no cover
     tomllib = None  # type: ignore
 
 PSWS_HOST = "pswsnetwork.eng.ua.edu"
+
+# ONE credential per station, readable by every PSWS service user.
+#
+# The portal authenticates the STATION account; the instrument id rides in the
+# upload path, not in the key.  So a station needs exactly one registered
+# public key however many instruments it grows (Michael, 2026-09-03).
+#
+# Two key files used to exist for that one credential, and permissions were the
+# only reason: `magrec` cannot read /home/timestd/.ssh (0700 by design), and
+# live B4 carries the timestd key 0600 timestd:timestd while
+# /etc/hs-uploader/keys/id_ed25519 is 0600 hsupload:sigmond.  `magrec` belongs
+# to `dialout` alone.  A path in nobody's home, group-readable by a group that
+# names exactly "may read this station's PSWS credential", resolves it without
+# granting either account anything else.
+#
+# ⚠ This is a DEFAULT.  read_state prefers the config's own field, and every
+# station already uploading sets it — so B4 and DASI002 keep the keys they
+# registered with the portal.  Nothing migrates on its own.
+SHARED_KEY = "/etc/sigmond/psws/id_ed25519"
+SHARED_KEY_GROUP = "psws"
 PSWS_PORT = 22
 PSWS_PORTAL = "https://pswsnetwork.eng.ua.edu/"
 _PLACEHOLDER_PREFIX = "<YOUR"
@@ -43,7 +63,7 @@ RECORDERS = {
         "station":    ("station", "id"),
         "instrument": ("station", "instrument_id"),
         "ssh_key":    ("uploader", "sftp", "ssh_key"),
-        "default_key": "/home/timestd/.ssh/id_rsa_psws",
+        "default_key": SHARED_KEY,
         "key_type":   "ed25519",
     },
     # The GRAPE science half of the 2026-08-24 hf-timestd split.  It owns the
@@ -58,7 +78,7 @@ RECORDERS = {
         "station":    ("station", "psws_station_id"),
         "instrument": ("station", "instrument_id"),
         "ssh_key":    ("uploader", "ssh_key_file"),
-        "default_key": "/home/timestd/.ssh/id_rsa_psws",
+        "default_key": SHARED_KEY,
         "key_type":   "ed25519",
     },
     "mag-recorder": {
@@ -67,7 +87,7 @@ RECORDERS = {
         "station":    ("station", "psws_station_id"),
         "instrument": ("station", "instrument_id"),
         "ssh_key":    ("uploader", "ssh_key_file"),
-        "default_key": "/etc/hs-uploader/keys/id_ed25519",
+        "default_key": SHARED_KEY,
         "key_type":   "ed25519",
     },
 }
@@ -262,19 +282,79 @@ def _set_fields(recorder: str, updates: list) -> None:
     _write_text_preserving(spec["config"], text)
 
 
+def ensure_key_readable(recorder: str, key_path: str) -> list:
+    """Let this recorder's service user read a SHARED PSWS key.
+
+    Only for keys under the shared path — a key inside a user's own home needs
+    nothing, and re-grouping someone else's private key would be wrong.
+
+    Returns human-readable notes for the caller to print.  ⚠ Adding a user to
+    a group does not reach ALREADY-RUNNING processes: they keep the group set
+    they started with.  So the note says to restart, rather than leaving an
+    operator to wonder why a key that plainly exists still reads as missing.
+    """
+    if str(key_path) != SHARED_KEY:
+        return []
+    user = RECORDERS[recorder]["user"]
+    notes: list = []
+    subprocess.run([*_sudo(), "groupadd", "-f", SHARED_KEY_GROUP],
+                   capture_output=True, text=True, check=False)
+    have = subprocess.run(["id", "-nG", user], capture_output=True,
+                          text=True, check=False)
+    if SHARED_KEY_GROUP in (have.stdout or "").split():
+        return notes
+    r = subprocess.run([*_sudo(), "usermod", "-aG", SHARED_KEY_GROUP, user],
+                       capture_output=True, text=True, check=False)
+    if r.returncode == 0:
+        notes.append(f"added {user} to group {SHARED_KEY_GROUP} — RESTART "
+                     f"{recorder} before it can read the key (a running "
+                     f"process keeps the groups it started with)")
+    else:
+        notes.append(f"could not add {user} to group {SHARED_KEY_GROUP}: "
+                     f"{(r.stderr or r.stdout or '').strip()[:120]} — "
+                     f"{recorder} will not be able to read {key_path}")
+    return notes
+
+
 def _gen_key(recorder: str, key_path: str) -> tuple[bool, str]:
-    """Generate an ed25519 keypair at key_path as the recorder's service user."""
+    """Generate an ed25519 keypair at key_path.
+
+    A key at the SHARED path belongs to the station, not to one service user:
+    it is created root-owned, group ``psws``, mode 0640, so every PSWS
+    recorder can read the one credential the portal knows.  Anywhere else the
+    old per-user behaviour stands.
+    """
     spec = RECORDERS[recorder]
     user = spec["user"]
     kp = Path(key_path)
-    # ensure the parent .ssh dir exists + correct perms, as the service user
-    subprocess.run([*_sudo(), "-u", user, "install", "-d", "-m", "700",
-                    str(kp.parent)], check=False)
-    r = subprocess.run([*_sudo(), "-u", user, "ssh-keygen", "-t", "ed25519",
-                        "-f", key_path, "-N", "", "-C", f"{recorder}-psws"],
+    shared = str(key_path) == SHARED_KEY
+
+    if shared:
+        subprocess.run([*_sudo(), "groupadd", "-f", SHARED_KEY_GROUP],
+                       capture_output=True, text=True, check=False)
+        subprocess.run([*_sudo(), "install", "-d", "-m", "750", "-o", "root",
+                        "-g", SHARED_KEY_GROUP, str(kp.parent)], check=False)
+        gen_as: list = [*_sudo()]
+        comment = "psws-station"
+    else:
+        # per-user key: the service user owns its own .ssh
+        subprocess.run([*_sudo(), "-u", user, "install", "-d", "-m", "700",
+                        str(kp.parent)], check=False)
+        gen_as = [*_sudo(), "-u", user]
+        comment = f"{recorder}-psws"
+
+    r = subprocess.run([*gen_as, "ssh-keygen", "-t", "ed25519",
+                        "-f", key_path, "-N", "", "-C", comment],
                        capture_output=True, text=True, check=False)
     if r.returncode != 0:
         return False, (r.stderr or r.stdout or "ssh-keygen failed").strip()[:200]
+    if shared:
+        # 0640 root:psws — readable by the group, writable by nobody but root.
+        subprocess.run([*_sudo(), "chown", f"root:{SHARED_KEY_GROUP}",
+                        key_path, f"{key_path}.pub"], check=False)
+        subprocess.run([*_sudo(), "chmod", "640", key_path], check=False)
+        subprocess.run([*_sudo(), "chmod", "644", f"{key_path}.pub"],
+                       check=False)
     return True, key_path
 
 
@@ -709,11 +789,24 @@ def cmd_edit(recorder: str) -> int:
                 break
             print(f"  {_G}✓{_X} created {key_path}")
             pub = _pubkey(key_path)
-            print(f"\n  {_B}REGISTER THIS PUBLIC KEY{_X} at {_B}{PSWS_PORTAL}{_X} "
-                  f"(station {recorder}):\n")
+            print(f"\n  {_B}REGISTER THIS PUBLIC KEY ONCE{_X} at "
+                  f"{_B}{PSWS_PORTAL}{_X}, for your STATION account:\n")
             print(f"    {pub}\n")
+            if str(key_path) == SHARED_KEY:
+                # Said here because the alternative — an operator generating a
+                # second key for the magnetometer and registering it over the
+                # first — silently breaks the instrument that was working.
+                print(f"  {_K}one key serves every instrument on this "
+                      f"station; the instrument id rides in the upload path, "
+                      f"not in the key.{_X}\n")
             _prompt("press Enter once you've pasted it into the PSWS portal", "")
             break
+
+    # The shared key is useless to a recorder that cannot read it, and a
+    # key found rather than created needs this every bit as much: the second
+    # instrument to be configured always FINDS the first one's key.
+    for _note in ensure_key_readable(recorder, key_path):
+        print(f"  {_Y}⚠{_X} {_note}")
 
     # 2) station id + device id
     print()
