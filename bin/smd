@@ -4634,98 +4634,6 @@ def _chrony_captured_findings(read_chrony=None, disagree_sec: float = 1.0) -> li
         f'refclock in /etc/chrony/conf.d/ until it is.')]
 
 
-def _rx888_adc_overrange_findings(read_frontend=None, quiet_sec: float = 60.0) -> list:
-    """Report an RX888 whose A/D is clipping.
-
-    ⛔ AC0G-ND, 2026-09-03.  The front end ran +18.4 dB of VGA gain and the ADC
-    clipped 220-450 times a SECOND.  Clipping splatters broadband, so WSPR and
-    FT8 decoded nothing while WWV — 150+ dB SNR — stayed perfect and every
-    health check on the station read green.  Lowering the AGC's target band to
-    -31 dBFS dropped the gain to 10.0 dB, cut clipping by an order of magnitude,
-    left N0 unchanged (-131.8 -> -131.5 dB/Hz), and FT8 went from zero
-    decodable messages on 14.074 to seventeen.
-
-    Nothing in the fleet reported this.  radiod publishes the evidence in every
-    status message and no consumer read it: b4 shows its last overrange 973
-    SECONDS back, ND showed 1.4.  That single number separates the two
-    stations, so this check reads it.
-
-    Why the AGC cannot: `agc_rx888` steers on `frontend->if_power`, the
-    wideband AVERAGE, toward the midpoint of
-    [agc-low-threshold, agc-high-threshold] (rx888.c:660-668).  ND read a
-    comfortable -22.3 dBFS average while its peaks sat on the rail.  An
-    average-power loop is blind to peak clipping, so the operator needs the
-    counter.
-
-    Report-only.  The right gain depends on the site's RF environment and moves
-    the station's absolute calibration, so an operator picks it, not a
-    diagnostic.
-
-    ``read_frontend`` returns ``{'ssrc', 'samprate', 'since_samples',
-    'overranges', 'gain', 'if_pwr'}`` and is injected so this tests with no
-    radiod and no RX888.
-    """
-    from sigmond.doctor import Finding
-
-    if read_frontend is None:
-        def read_frontend():
-            # A REAL SSRC, never a guessed one: `metadump -s <guess>` makes
-            # radiod create a live 0 Hz channel.  Passive metadump prints the
-            # SSRCs it sees clients polling, so harvest one off the wire.
-            r = _run(['systemctl', 'list-units', '--type=service',
-                       '--state=running', '--no-legend', 'radiod@*'])
-            status = ''
-            for line in ((getattr(r, 'stdout', '') or '').splitlines()):
-                unit = line.split()[0] if line.split() else ''
-                m = re.match(r'radiod@(.+)\.service', unit)
-                if m:
-                    status = f'{m.group(1)}-status.local'
-                    break
-            if not status:
-                return None
-            seen = _run(['timeout', '12', 'metadump', status])
-            ssrcs = re.findall(r'\[18\]\s+SSRC\s+(\d+)',
-                               (getattr(seen, 'stdout', '') or ''))
-            if not ssrcs:
-                return None
-            got = _run(['timeout', '25', 'metadump', '-s', ssrcs[0], status])
-            txt = getattr(got, 'stdout', '') or ''
-
-            def tag(n, pat=r'([-\d.]+)'):
-                m = re.search(r'\[%d\][^[]*?%s' % (n, pat), txt)
-                return m.group(1) if m else None
-
-            samprate = tag(10)
-            since = tag(108)
-            over = tag(104)
-            if not (samprate and since and over):
-                return None
-            return {'ssrc': ssrcs[0], 'samprate': float(samprate),
-                    'since_samples': float(since), 'overranges': float(over),
-                    'gain': tag(98), 'if_pwr': tag(45)}
-
-    fe = read_frontend()
-    if not fe or not fe.get('samprate'):
-        return []          # no radiod, no RX888, or no status: say nothing
-    if fe['overranges'] <= 0:
-        return []
-    since_sec = fe['since_samples'] / fe['samprate']
-    if since_sec >= quiet_sec:
-        return []          # clipped once historically, quiet now — not a fault
-    return [Finding(
-        'ka9q-radio', 'rx888-adc-overrange',
-        f"the A/D last clipped {since_sec:.1f} s ago "
-        f"({fe['overranges']:.0f} overranges cumulative) at rf gain "
-        f"{fe['gain']} dB, IF pwr {fe['if_pwr']} dBFS. Clipping splatters "
-        f"broadband: it destroys weak-signal decoding (WSPR and FT8 first) "
-        f"while leaving strong references like WWV untouched, so timing keeps "
-        f"reading perfect. The front-end AGC steers on the wideband AVERAGE "
-        f"and cannot see peak clipping. Lower the AGC's target band in the "
-        f"[rx888] section — agc-low-threshold / agc-high-threshold — until "
-        f"this stops advancing (b4 runs ~973 s between overranges). Then: "
-        f"sudo systemctl restart radiod@<instance>")]
-
-
 def _rx888_queuedepth_findings(read_configs=None) -> list:
     """Report an RX888 radiod config that leaves `queuedepth` at the default.
 
@@ -5142,13 +5050,6 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
         # reported healthy. See _rx888_queuedepth_findings.
         findings.extend(_rx888_queuedepth_findings())
 
-    def _rx888_adc() -> None:
-        # Whether the A/D is clipping. radiod publishes this in every status
-        # message and nothing read it, so ND splattered its own band for a day
-        # while every service reported healthy. See
-        # _rx888_adc_overrange_findings.
-        findings.extend(_rx888_adc_overrange_findings())
-
     def _chrony_captured() -> None:
         # Whether a local refclock has captured the system clock. ND sat 12 s
         # off UTC for a day while chrony, hf-timestd and every service check
@@ -5163,7 +5064,6 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
     _guarded('retired-unit', _retired)
     _guarded('rx888-irq', _rx888_irq)
     _guarded('rx888-queuedepth', _rx888_queuedepth)
-    _guarded('rx888-adc-overrange', _rx888_adc)
     _guarded('chrony-refclock-captured', _chrony_captured)
 
     if unassessed:
