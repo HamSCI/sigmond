@@ -307,6 +307,17 @@ def _git_net_env() -> dict:
     return env
 
 
+def _as_root(argv: list) -> list:
+    """Prepend non-interactive sudo unless we are already root.
+
+    `smd` deliberately refuses to run under sudo, so every step that genuinely
+    needs root has to escalate for itself.  `-n` rather than a bare `sudo`: a
+    password prompt inside a captured subprocess hangs the run instead of
+    failing it, and these hosts grant NOPASSWD to the operator.
+    """
+    return list(argv) if os.geteuid() == 0 else ['sudo', '-n'] + list(argv)
+
+
 def _runuser(user: str, argv: list) -> list:
     """Build a `runuser -u <user> -- <argv>` command that actually runs.
 
@@ -324,8 +335,7 @@ def _runuser(user: str, argv: list) -> list:
     update path work as the operator who is meant to run it.
     """
     exe = shutil.which('runuser') or '/usr/sbin/runuser'
-    cmd = [exe, '-u', user or 'root', '--'] + list(argv)
-    return cmd if os.geteuid() == 0 else ['sudo', '-n'] + cmd
+    return _as_root([exe, '-u', user or 'root', '--'] + list(argv))
 
 
 def _run_git_net(git_cmd: list, verb: str) -> subprocess.CompletedProcess:
@@ -3570,7 +3580,13 @@ def cmd_update(args) -> int:
             sh = base / step.target / 'scripts' / 'install.sh'
             if not sh.exists():
                 sh = base / step.target / 'install.sh'
-            r = subprocess.run(['bash', str(sh)], capture_output=True, text=True)
+            # Every consumer's install.sh refuses to run unprivileged, and smd
+            # itself refuses to run under sudo — so the escalation belongs
+            # here.  Without it every [install] step on B4 came back
+            # "Run as root (sudo)" while the pulls above had succeeded,
+            # leaving checkouts updated and venvs stale (2026-09-03).
+            r = subprocess.run(_as_root(['bash', str(sh)]),
+                               capture_output=True, text=True)
             logpath = _write_update_log(step.target, r)
             if r.returncode == 0:
                 _ok(f'{step.target}: install.sh exit 0')
@@ -4152,7 +4168,7 @@ def cmd_manifest_restore(args) -> int:
             if not sh.exists():
                 sh = d / 'install.sh'
             if sh.exists():
-                r = subprocess.run(['bash', str(sh)],
+                r = subprocess.run(_as_root(['bash', str(sh)]),
                                    capture_output=True, text=True)
                 (_ok if r.returncode == 0 else _err)(
                     f'{name}: install.sh exit {r.returncode}')

@@ -86,6 +86,26 @@ class RunuserEscalationTest(unittest.TestCase):
              patch.object(smd.os, "geteuid", return_value=0):
             self.assertIn("root", smd._runuser("", GIT))
 
+    def test_the_install_step_escalates_too(self):
+        """Every consumer's install.sh refuses to run unprivileged.
+
+        With the pulls fixed, B4's update then reported "Run as root (sudo)"
+        for gpsdo-monitor, hf-timestd, hs-uploader and wspr-recorder — leaving
+        checkouts updated and venvs stale, which is a worse state than not
+        having run at all.
+        """
+        with patch.object(smd.os, "geteuid", return_value=1000):
+            self.assertEqual(
+                smd._as_root(["bash", "/opt/git/sigmond/x/scripts/install.sh"])[:2],
+                ["sudo", "-n"])
+        with patch.object(smd.os, "geteuid", return_value=0):
+            self.assertEqual(smd._as_root(["bash", "x"]), ["bash", "x"])
+
+    def test_no_bare_bash_install_sh_invocation_remains(self):
+        text = (REPO / "bin" / "smd").read_text()
+        self.assertNotIn("subprocess.run(['bash', str(sh)]", text,
+                         "install.sh needs root — route it through _as_root()")
+
     def test_no_call_site_still_uses_the_bare_name(self):
         """The bug was three identical call sites, so guard the file itself.
 

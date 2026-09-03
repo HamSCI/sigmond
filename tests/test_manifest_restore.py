@@ -467,7 +467,11 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
         fake = _FakeGit(changed_files={'wspr-recorder': ['pyproject.toml']})
         rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
-        self.assertTrue(any(c and c[0] == 'bash' for c in fake.calls))
+        # Intent: install.sh RUNS.  It needs root and smd refuses sudo, so the
+        # invocation is `sudo -n bash <sh>` unless we are already root — pinning
+        # argv[0] == 'bash' is the same over-specificity that hid the missing
+        # escalation on B4 (2026-09-03).
+        self.assertTrue(any('bash' in (c or []) for c in fake.calls))
         self.assertTrue(any('checkout' in c and '--detach' in c
                             for c in fake.calls))
 
