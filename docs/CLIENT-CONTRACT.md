@@ -26,6 +26,18 @@ docs/MULTI-INSTANCE-ARCHITECTURE.md Phases 3-6 and 8.
 
 v0.8 adds:
 
+- **§18.5 amendment (2026-09-04).**  Defines what "applied" means in
+  `timing_authority_applied`: the client's *labels* carry the
+  authority's correction (radiod-substrate: the §18.5 conversion;
+  host-clock: the monotonic bridge).  Reading or logging the snapshot
+  beside uncorrected labels is not applying it and reports `null`.  A
+  host-clock client that stays on the system clock SHOULD record the
+  registration's offset to it beside each block.  States the
+  producer-side basis for `provides_timing_calibration` (the instance
+  runs a publishing authority; for hf-timestd, the fusion service is in
+  its profile).  Motivation: correlation studies across simultaneous
+  consumers need one registration, or an honest record that there were
+  two.  No version bump; wire format unchanged.
 - **§19 (new) — per-reporter instance, reporter_id row tag.**
   Each templated recorder client runs one process per
   *reporter identity* (operator-meaningful, path-safe regex
@@ -2412,6 +2424,38 @@ spots, archives, peer clients) without also recording the tier and
 [`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/HamSCI/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
 §3: the annotation travels with the sample, regardless of
 substrate.
+
+**What "applied" means (amendment 2026-09-04).**  Simultaneous
+recordings on one station must share one registration, or the record
+must say that they do not — a study that correlates a wspr spot with a
+psk decode from the same minute needs to know whether their labels sit
+on the same timeline.  So the field describes the labels, not the
+client's reading habits:
+
+- A **radiod-substrate client** reports `timing_authority_applied`
+  populated only when the UTC labels it writes, and every timestamp it
+  propagates downstream, include the authority's correction — the §18.5
+  conversion above, or equivalently radiod's published anchor plus the
+  authority's offset.  Fetching the snapshot, logging it, or writing it
+  beside uncorrected labels as provenance does not count as applying
+  it; such a client reports `null`, and MAY record the snapshot under a
+  distinct provenance name so a reader can align the labels later.
+- A **non-radiod (host-clock) client** reports populated only when its
+  labels come from the §18.5 monotonic bridge.  One that labels from
+  the system clock reports `null` and SHOULD record, beside each block,
+  the station registration's offset to its host clock together with
+  the chrony reference it already logs, so the same later alignment is
+  possible.
+- The mixed state — one client applied, a peer not — stays legal
+  (§18.7), but it MUST be visible in the records themselves, not only
+  in inventory.
+
+On the producer side, `provides_timing_calibration` is `true` exactly
+when the instance runs a timing authority that publishes the §18.4
+snapshot (for hf-timestd: its service profile activates the fusion
+service, which hosts the authority manager).  It does not depend on any
+client subscribing, and a stale `[timing] authority` key in a deployed
+hf-timestd config — retired 2026-09-04 — does not make one.
 
 #### 18.6 Relationship to §8
 
