@@ -19,7 +19,7 @@ import tomllib
 from pathlib import Path
 from typing import Optional
 
-from ..coordination import Coordination, load_coordination
+from ..coordination import Coordination, load_coordination, station_identity_env
 from ..environment import load_environment
 from ..lifecycle import _find_deploy_toml
 from ..ui import err, heading, info, ok, warn
@@ -293,14 +293,13 @@ def _build_env_bag(*, client: Optional[str] = None,
     env: dict = {}
 
     coord = load_coordination()
-    if coord.host.call:
-        env["STATION_CALL"] = coord.host.call
-    if coord.host.grid:
-        env["STATION_GRID"] = coord.host.grid
-    if coord.host.lat:
-        env["STATION_LAT"] = str(coord.host.lat)
-    if coord.host.lon:
-        env["STATION_LON"] = str(coord.host.lon)
+    # ⛔ This used to rebuild the identity bag from coord.host alone —
+    # CALL/GRID/LAT/LON — and never read coord.station, so `smd config init`
+    # handed a client a smaller identity than coordination.env published.  On
+    # AC0G-ND that left hamsci-physics with no callsign and no PSWS ids, and
+    # GRAPE computed data it could never upload.  One definition now, shared
+    # with render_env().
+    env.update(station_identity_env(coord))
 
     if instance:
         env["SIGMOND_INSTANCE"] = instance

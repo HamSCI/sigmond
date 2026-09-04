@@ -488,6 +488,55 @@ def write_station_identity(reporter_id: str = '',
     return True
 
 
+def station_identity_env(coord: 'Coordination') -> dict:
+    """The STATION_* identity bag (CLIENT-CONTRACT §14.2/§14.3), defined once.
+
+    Returns name -> value for every identity field this host actually declares.
+    A field the host has not set is OMITTED rather than emitted empty: an empty
+    value would overwrite a value already sitting in a client's config.
+
+    ⛔ Two places used to build this bag independently, and they drifted.
+    `render_env()` (which writes coordination.env) emitted the full set;
+    `commands.client_config._build_env_bag()` (which feeds `smd config
+    init|edit`) read only ``coord.host`` and emitted CALL/GRID/LAT/LON.  So the
+    identity a client's own wizard saw depended on which path reached it.
+
+    AC0G-ND, 2026-09-04: enrolled with PSWS as S000111 / instrument 115, with
+    both ids sitting in coordination.env, and `smd config init hamsci-physics`
+    still wrote empty ids and reported "no PSWS station id — science runs
+    locally, GRAPE upload is skipped."  A funded station computing GRAPE it
+    could never upload, with nothing reporting a fault.
+
+    Both consumers now read this function, so a field added here reaches both.
+    """
+    env: dict = {}
+    if coord.host.call:
+        env['STATION_CALL'] = coord.host.call
+        # Compat alias: mag-recorder and hamsci-physics read STATION_CALLSIGN.
+        # Emit both so every client auto-seeds the callsign regardless of which
+        # name it expects.  STATION_CALL is canonical.
+        env['STATION_CALLSIGN'] = coord.host.call
+    if coord.host.grid:
+        env['STATION_GRID'] = coord.host.grid
+    if coord.host.lat:
+        env['STATION_LAT'] = str(coord.host.lat)
+    if coord.host.lon:
+        env['STATION_LON'] = str(coord.host.lon)
+
+    st = coord.station
+    # Names match what clients already read (mag-recorder and hamsci-physics
+    # both read STATION_PSWS_STATION_ID); the reporter-call keys are an
+    # override hook for clients whose reporter call differs from STATION_CALL.
+    for key, val in (('STATION_REPORTER_ID', st.reporter_id),
+                     ('STATION_PSWS_STATION_ID', st.psws_id),
+                     ('STATION_PSWS_INSTRUMENT_ID', st.instrument_id),
+                     ('STATION_WSPRNET_CALL', st.wsprnet_call),
+                     ('STATION_PSKREPORTER_CALL', st.pskreporter_call)):
+        if val:
+            env[key] = str(val)
+    return env
+
+
 def render_env(coord: Coordination,
                passthrough_lookup: Optional[Callable[[str], list]] = None) -> str:
     """Render the coordination as KEY=VALUE lines suitable for systemd
@@ -506,39 +555,18 @@ def render_env(coord: Coordination,
         '# Source: /etc/sigmond/coordination.toml',
         '',
     ]
-    if coord.host.call:
-        lines.append(f'STATION_CALL={coord.host.call}')
-        # Compat alias: mag-recorder (wizard + config mapping) reads
-        # STATION_CALLSIGN; emit both so every client auto-seeds the callsign
-        # regardless of which name it expects. STATION_CALL is canonical.
-        lines.append(f'STATION_CALLSIGN={coord.host.call}')
-    if coord.host.grid:
-        lines.append(f'STATION_GRID={coord.host.grid}')
-    if coord.host.lat:
-        lines.append(f'STATION_LAT={coord.host.lat}')
-    if coord.host.lon:
-        lines.append(f'STATION_LON={coord.host.lon}')
-    if any((coord.host.call, coord.host.grid, coord.host.lat, coord.host.lon)):
+    # Host identity + the station block beyond call/grid, published from
+    # site-profile.toml by `smd config render` (CLIENT-CONTRACT §14.2
+    # extension).  Both groups come from station_identity_env() so this file
+    # and `smd config init` cannot disagree about what a client is told.
+    ident = station_identity_env(coord)
+    host_keys = ('STATION_CALL', 'STATION_CALLSIGN', 'STATION_GRID',
+                 'STATION_LAT', 'STATION_LON')
+    host_lines = [f'{k}={ident[k]}' for k in host_keys if k in ident]
+    if host_lines:
+        lines.extend(host_lines)
         lines.append('')
-
-    # Station identity beyond call/grid, published from site-profile.toml by
-    # `smd config render` (CLIENT-CONTRACT §14.2 extension). Clients adopt these
-    # as wizard defaults the same way they already read STATION_CALL/STATION_GRID.
-    st = coord.station
-    st_lines = []
-    # Names match what clients already read (mag-recorder reads
-    # STATION_PSWS_STATION_ID); reporter-call keys are an override hook for
-    # clients whose reporter call differs from STATION_CALL.
-    if st.reporter_id:
-        st_lines.append(f'STATION_REPORTER_ID={st.reporter_id}')
-    if st.psws_id:
-        st_lines.append(f'STATION_PSWS_STATION_ID={st.psws_id}')
-    if st.instrument_id:
-        st_lines.append(f'STATION_PSWS_INSTRUMENT_ID={st.instrument_id}')
-    if st.wsprnet_call:
-        st_lines.append(f'STATION_WSPRNET_CALL={st.wsprnet_call}')
-    if st.pskreporter_call:
-        st_lines.append(f'STATION_PSKREPORTER_CALL={st.pskreporter_call}')
+    st_lines = [f'{k}={v}' for k, v in ident.items() if k not in host_keys]
     if st_lines:
         lines.extend(st_lines)
         lines.append('')
