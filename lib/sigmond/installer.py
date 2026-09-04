@@ -233,6 +233,11 @@ def clone_repo(
     return repo_dir
 
 
+# sigmond's published identity bag (CLIENT-CONTRACT §14.3).  Named here so
+# the preserve-list can be derived from it rather than retyped.
+COORDINATION_ENV = Path('/etc/sigmond/coordination.env')
+
+
 def find_install_script(entry: CatalogEntry, repo_dir: Path) -> Optional[Path]:
     """Locate the install script, preferring the actual repo over the catalog path.
 
@@ -280,8 +285,9 @@ def run_install_script(
     # / multicast on every fresh install — sudo's env_reset would have
     # stripped them even if smd's caller had them in its shell.
     env = dict(os.environ)
+    station_keys = []
     try:
-        with open('/etc/sigmond/coordination.env') as f:
+        with open(COORDINATION_ENV) as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#') or '=' not in line:
@@ -290,15 +296,34 @@ def run_install_script(
                 k, v = k.strip(), v.strip()
                 if k:
                     env.setdefault(k, v)
+                    if k.startswith('STATION_'):
+                        station_keys.append(k)
     except OSError:
         pass
 
-    # sudo's default env_reset drops everything not on secure_path; the
-    # contract bag has to be explicitly preserved.  Listed exhaustively
-    # rather than `--preserve-env` (which keeps *everything*) to avoid
-    # leaking unrelated user shell state into the install context.
-    preserve = ','.join([
-        'STATION_CALL', 'STATION_GRID', 'STATION_LAT', 'STATION_LON',
+    # sudo's default env_reset drops everything not on secure_path, so the
+    # contract bag has to be named explicitly.  Blanket `--preserve-env` would
+    # forward the invoking operator's WHOLE shell to a root install script, so
+    # this stays an allowlist -- but it is derived, not typed.
+    #
+    # ⛔ It used to be a hand-written list of four STATION_ names, and it
+    # drifted.  AC0G-ND is enrolled with PSWS (S000111, instrument 115) and
+    # coordination.env carried STATION_PSWS_STATION_ID,
+    # STATION_PSWS_INSTRUMENT_ID and STATION_CALLSIGN -- none of which were on
+    # the list, so sudo stripped all three and `smd config init
+    # hamsci-physics` wrote an empty callsign and empty PSWS ids.  Only
+    # grid_square landed, because STATION_GRID happened to be one of the four.
+    # The station then computed GRAPE it could never upload, and said so in a
+    # line that reads like a choice: "no PSWS station id -- science runs
+    # locally, GRAPE upload is skipped."
+    #
+    # coordination.py already emits STATION_CALLSIGN beside STATION_CALL "so
+    # every client auto-seeds the callsign regardless of which name it
+    # expects".  That intent died here.  Deriving the list from the bag keeps
+    # a new coordination.py field working without a second edit in this file,
+    # while preserving the safety property: only names sigmond itself
+    # published in a root-owned file cross the boundary.
+    preserve = ','.join(sorted(set(station_keys)) + [
         'SIGMOND_INSTANCE', 'SIGMOND_RADIOD_COUNT',
         'SIGMOND_RADIOD_INDEX', 'SIGMOND_RADIOD_STATUS',
         'SIGMOND_TIME_SOURCE', 'SIGMOND_GNSS_VTEC',
