@@ -133,3 +133,74 @@ class TestConsumerExpansion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDiscovery(unittest.TestCase):
+    """Learning the hub port while the card is present (AI6VN 2026-09-05)."""
+
+    def test_devpath_behind_a_hub(self):
+        self.assertEqual(sdr.split_devpath("4-1.4"), ("4-1", "4"))
+
+    def test_devpath_behind_a_nested_hub(self):
+        self.assertEqual(sdr.split_devpath("4-1.2.3"), ("4-1.2", "3"))
+
+    def test_devpath_straight_on_the_root_hub_names_the_bus(self):
+        self.assertEqual(sdr.split_devpath("6-2"), ("6", "2"))
+
+    def test_interfaces_and_root_hubs_are_not_devices(self):
+        self.assertIsNone(sdr.split_devpath("4-1.4:1.0"))
+        self.assertIsNone(sdr.split_devpath("usb4"))
+        self.assertIsNone(sdr.split_devpath(""))
+
+    def test_uhubctl_listing_the_port_means_switchable(self):
+        out = ("Current status for hub 4-1 [17ef:1039 USB3.0 Hub, USB 3.00, "
+               "4 ports, ppps]\n  Port 4: 0203 power 5gbps U0 enable connect "
+               "[04b4:00f1 RX888mk2]\n")
+        self.assertTrue(sdr.parse_uhubctl(out, "4"))
+
+    def test_uhubctl_with_no_compatible_hub_means_not_switchable(self):
+        out = "No compatible devices detected!\nRun with -h to get usage info.\n"
+        self.assertFalse(sdr.parse_uhubctl(out, "4"))
+
+    def test_uhubctl_permission_problem_is_unknown_not_false(self):
+        """Not being allowed to look must never be reported as 'cannot
+        switch' — that would tell an operator to move a card that is fine."""
+        out = ("There were permission problems while accessing USB.\n"
+               "No compatible devices detected!\n")
+        self.assertIsNone(sdr.parse_uhubctl(out, "4"))
+
+    def test_locate_reads_the_card_out_of_sysfs(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, vid, pid in (("2-1", "17ef", "103a"),
+                                   ("4-1", "17ef", "1039"),
+                                   ("4-1.4", "04b4", "00f1")):
+                d = root / name
+                d.mkdir()
+                (d / "idVendor").write_text(vid + "\n")
+                (d / "idProduct").write_text(pid + "\n")
+            (root / "4-1.4" / "serial").write_text("000908250A081311\n")
+            (root / "4-1.4" / "speed").write_text("5000\n")
+            (root / "4-1.4:1.0").mkdir()          # interface dir, no ids
+            loc = sdr.locate_rx888(root)
+        self.assertEqual((loc.hub, loc.port, loc.serial, loc.speed),
+                         ("4-1", "4", "000908250A081311", "5000"))
+
+    def test_peer_half_of_a_usb3_hub_port(self):
+        """uhubctl refused `-l 4-1` on the Lenovo dock but took `-l 2-1`, the
+        USB2 companion sysfs names as the port's peer (AI6VN 2026-09-05)."""
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            portdir = root / "4-1" / "4-1:1.0" / "4-1-port4"
+            portdir.mkdir(parents=True)
+            os.symlink("../../../../usb2/2-1/2-1:1.0/2-1-port4", portdir / "peer")
+            self.assertEqual(sdr.peer_of("4-1.4", root), ("2-1", "4"))
+            self.assertIsNone(sdr.peer_of("6-2", root))
+
+    def test_locate_with_no_card_is_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "usb1").mkdir()
+            self.assertIsNone(sdr.locate_rx888(Path(td)))

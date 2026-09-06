@@ -953,12 +953,16 @@ PYEOF
             ok "radiod drop-in: Wants= ${#_CONSUMERS[@]} consumer(s)"
         fi
         $SUDO systemctl daemon-reload
-        $SUDO systemctl enable --now sigmond-sdr-recover.timer 2>/dev/null \
-            && ok "sigmond-sdr-recover.timer enabled" \
-            || warn "could not enable sigmond-sdr-recover.timer"
     else
-        info "[radiod] unit not set in $_TOPOLOGY — SDR recovery not wired up"
+        info "[radiod] unit not set in $_TOPOLOGY — consumer drop-ins not generated"
     fi
+    # The timer is enabled regardless: the helper discovers the RX-888's hub
+    # port itself (and the radiod unit when there is exactly one) and says so
+    # when it has nothing to do.  Gating it on a hand-written [radiod] block
+    # left every appliance with a dead recovery path (AI6VN 2026-09-05).
+    $SUDO systemctl enable --now sigmond-sdr-recover.timer 2>/dev/null \
+        && ok "sigmond-sdr-recover.timer enabled" \
+        || warn "could not enable sigmond-sdr-recover.timer"
 fi
 
 # Timing-chain SHM pre-create (docs/timing-chain-architecture.md, step 2): give

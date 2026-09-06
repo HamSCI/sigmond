@@ -27,12 +27,25 @@ reported rather than skipped.
 Order matters and is not negotiable: radiod first, then everything that reads
 its RTP streams.  Starting a consumer before radiod serves gives it an anchor
 that is wrong for the rest of its life.
+
+**Learn the port while the card is there; you cannot learn it once it is gone.**
+Nothing in bring-up writes `[radiod] recover_hub / recover_port` to
+topology.toml, so on every appliance this helper used to exit at once with
+"no hub to cycle" (AI6VN 2026-09-05).  Now, on each run with the card present,
+it locates the RX-888 in sysfs, walks up to the hub port it hangs off, asks
+uhubctl whether that port switches power, and persists the answer.  When the
+card later vanishes, the persisted hub/port is what gets cycled.  A hub that
+cannot switch power is reported once and monitored, never cycled: the operator
+learns the card is unrecoverable from software *before* it fails, not after.
+Explicit topology.toml values still win over discovery.
 """
 from __future__ import annotations
 
 import argparse
 import fnmatch
 import json
+import os
+import re
 import subprocess
 import sys
 import time
@@ -54,6 +67,156 @@ RX888_IDS = ("04b4:00f1", "04b4:00f3")     # running, and the FX3 bootloader
 STATE_PATH = Path("/var/lib/sigmond/sdr-recover.json")
 UHUBCTL = "/usr/sbin/uhubctl"              # NOT on a non-root PATH
 CONFIG_PATH = Path("/etc/sigmond/topology.toml")
+SYSFS_USB = Path("/sys/bus/usb/devices")
+# Re-ask uhubctl this often even when nothing moved: a hub swap behind the same
+# devpath, or a fixed udev permission, should not need a state-file reset.
+REVERIFY_S = 24 * 3600
+
+
+@dataclass(frozen=True)
+class Located:
+    """Where the RX-888 sits right now: the sysfs devpath ("4-1.4"), the hub
+    and port uhubctl needs ("4-1", "4"), and the card's serial and link speed."""
+    devpath: str
+    hub: str
+    port: str
+    serial: str
+    speed: str
+    # The same physical port seen from the other half of a USB3 hub (sysfs
+    # `peer`): uhubctl refuses the SuperSpeed hub's own location for some
+    # hubs but takes the USB2 companion's, and cycles both halves from there
+    # (VIA VL817 in a Lenovo dock: `-l 4-1` fails, `-l 2-1` works).
+    peer_hub: Optional[str] = None
+    peer_port: Optional[str] = None
+
+
+def split_devpath(devpath: str) -> Optional[Tuple[str, str]]:
+    """sysfs devpath → (uhubctl hub location, port).
+
+    "4-1.4"  → ("4-1", "4")   card on port 4 of the hub at bus 4 port 1
+    "4-1.2.3"→ ("4-1.2", "3") nested hub
+    "6-2"    → ("6", "2")     card straight on the root hub (uhubctl names a
+                              root hub by its bus number)
+    """
+    if not devpath or ":" in devpath or devpath.startswith("usb"):
+        return None
+    if "." in devpath:
+        hub, port = devpath.rsplit(".", 1)
+    else:
+        bus, _, port = devpath.partition("-")
+        if not port:
+            return None
+        hub = bus
+    if not port.isdigit():
+        return None
+    return hub, port
+
+
+def parse_uhubctl(stdout: str, port: str) -> Optional[bool]:
+    """Read `uhubctl -l HUB -p PORT` output.
+
+    True  — the hub is listed and shows the port: uhubctl only lists hubs whose
+            ports it can switch, so the listing IS the capability check.
+    False — no compatible hub at that location: try the peer location before
+            concluding the port cannot be power-cycled from software.
+    None  — uhubctl could not look (permissions / not installed): unknown.
+    """
+    low = stdout.lower()
+    if "permission" in low or "no such file" in low or "command not found" in low:
+        return None
+    if "no compatible devices" in low:
+        return False
+    for line in stdout.splitlines():
+        if line.strip().lower().startswith(f"port {port}:"):
+            return True
+    return False if "current status for hub" in low else None
+
+
+def peer_of(devpath: str, root: Path = SYSFS_USB) -> Optional[Tuple[str, str]]:
+    """The other logical half of the physical hub port a device sits on.
+
+    /sys/bus/usb/devices/4-1/4-1:1.0/4-1-port4/peer → …/2-1/2-1:1.0/2-1-port4
+    gives ("2-1", "4").  None for hubs without a companion (USB2-only, root).
+    """
+    hp = split_devpath(devpath)
+    if hp is None:
+        return None
+    hub, port = hp
+    link = root / hub / f"{hub}:1.0" / f"{hub}-port{port}" / "peer"
+    try:
+        target = Path(os.readlink(link)).name          # "2-1-port4"
+    except OSError:
+        return None
+    m = re.fullmatch(r"(.+)-port(\d+)", target)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _read(p: Path) -> str:
+    try:
+        return p.read_text().strip()
+    except OSError:
+        return ""
+
+
+def locate_rx888(root: Path = SYSFS_USB) -> Optional[Located]:
+    """Find the RX-888 (running or in its FX3 bootloader) in sysfs."""
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return None
+    for dev in entries:
+        vid_pid = f"{_read(dev / 'idVendor')}:{_read(dev / 'idProduct')}"
+        if vid_pid not in RX888_IDS:
+            continue
+        hp = split_devpath(dev.name)
+        if hp is None:
+            continue
+        peer = peer_of(dev.name, root) or (None, None)
+        return Located(dev.name, hp[0], hp[1], _read(dev / "serial"),
+                       _read(dev / "speed"), peer[0], peer[1])
+    return None
+
+
+def _uhubctl_sees(hub: str, port: str, exact: bool) -> Optional[bool]:
+    try:
+        r = _run([UHUBCTL, "-l", hub, "-p", port] + (["-e"] if exact else []),
+                 timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log(f"uhubctl unavailable: {exc}")
+        return None
+    return parse_uhubctl(r.stdout + "\n" + r.stderr, port)
+
+
+def hub_switchable(loc: Located) -> Tuple[Optional[bool], List[Tuple[str, str, bool]]]:
+    """Ask uhubctl (root) which locations of the card's physical port it can
+    switch.  Returns (verdict, locations); every accepted location is kept
+    because cycle_port() must hit all of them (see there).  Candidates: the hub
+    the card enumerated under, plain then --exact (uhubctl's USB3 duality logic
+    rejects some SuperSpeed hubs' own location unless told to be exact), then
+    the peer half of the same physical port."""
+    candidates = [(loc.hub, loc.port, False), (loc.hub, loc.port, True)]
+    if loc.peer_hub and loc.peer_port:
+        candidates.append((loc.peer_hub, loc.peer_port, False))
+    accepted: List[Tuple[str, str, bool]] = []
+    unknown = False
+    for hub, port, exact in candidates:
+        seen = _uhubctl_sees(hub, port, exact)
+        if seen:
+            if not any(a[0] == hub and a[1] == port for a in accepted):
+                accepted.append((hub, port, exact))
+        elif seen is None:
+            unknown = True
+    if accepted:
+        return True, accepted
+    return (None if unknown else False), []
+
+
+def detect_radiod_unit() -> Optional[str]:
+    """The one active radiod@ instance, when [radiod].unit is not declared."""
+    out = _run(["systemctl", "list-units", "--no-legend", "--plain",
+                "--state=active", "radiod@*.service"]).stdout
+    units = [l.split()[0] for l in out.splitlines() if l.strip()]
+    return units[0] if len(units) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -127,7 +290,15 @@ def _log(msg: str) -> None:
 
 
 def _run(cmd: Sequence[str], timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    """Run and never raise on a slow child: a timeout becomes rc=124 with a log
+    line.  An uncaught TimeoutExpired mid-recovery aborted the whole run twice
+    on AI6VN (2026-09-05/06), leaving consumers on stale RTP anchors — the
+    exact silent failure this helper exists to prevent."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _log(f"timed out after {timeout}s: {' '.join(cmd)}")
+        return subprocess.CompletedProcess(list(cmd), 124, "", f"timeout {timeout}s")
 
 
 def device_present() -> bool:
@@ -166,21 +337,37 @@ def read_config() -> dict:
         return {}
 
 
-def cycle_port(hub: str, port: str, off_seconds: int) -> bool:
-    """Cut and restore VBUS.  Returns whether uhubctl reported success.
+def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> bool:
+    """Cut and restore VBUS on every known location of the physical port.
 
     A short cut is not enough: the FX3 holds state across a brief drop, and a
     recovery that leaves the card in the state that needed recovering is no
     recovery.  Verified on AC0G-B4 — with a long enough cut the card returns
     through its bootloader (04b4:00f3) and the firmware loader promotes it.
+
+    Every location, not the first that answers: a USB3 hub exposes the same
+    physical port twice, and which half's power bit actually drops VBUS is the
+    hub's business.  On AI6VN's VIA VL817 dock (2026-09-05) the USB2 half
+    reported "off" while the card streamed on regardless, and only the
+    SuperSpeed half addressed with --exact cut it.  Powering off all halves,
+    then on, is right whichever half is wired to the switch.
     """
-    _log(f"cutting VBUS on hub {hub} port {port} for {off_seconds}s")
-    result = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "cycle",
-                   "-d", str(off_seconds)], timeout=off_seconds + 60)
-    if result.returncode != 0:
-        _log(f"uhubctl failed rc={result.returncode}: {result.stderr.strip()}")
-        return False
-    return True
+    ok = True
+    for hub, port, exact in locations:
+        _log(f"cutting VBUS on hub {hub} port {port}{' (exact)' if exact else ''}")
+        r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "off"]
+                 + (["-e"] if exact else []), timeout=60)
+        if r.returncode != 0:
+            _log(f"uhubctl off failed rc={r.returncode}: {r.stderr.strip()}")
+            ok = False
+    time.sleep(off_seconds)
+    for hub, port, exact in locations:
+        r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "on"]
+                 + (["-e"] if exact else []), timeout=60)
+        if r.returncode != 0:
+            _log(f"uhubctl on failed rc={r.returncode}: {r.stderr.strip()}")
+            ok = False
+    return ok
 
 
 def wait_for_device(timeout_s: int = 90) -> bool:
@@ -193,7 +380,7 @@ def wait_for_device(timeout_s: int = 90) -> bool:
 
 
 def restart_station(radiod_unit: str, consumers: Sequence[str],
-                    ready_timeout_s: int = 90) -> bool:
+                    ready_timeout_s: int = 90, consumer_timeout_s: int = 240) -> bool:
     """radiod first, then its consumers — the only order that works."""
     _log(f"starting {radiod_unit}")
     _run(["systemctl", "reset-failed", radiod_unit])
@@ -201,14 +388,33 @@ def restart_station(radiod_unit: str, consumers: Sequence[str],
         _log(f"{radiod_unit} failed to start — leaving consumers alone, since "
              f"restarting them against a dead radiod only spreads the fault")
         return False
-    ready = _run(["/usr/local/sbin/sigmond-radiod-ready", str(ready_timeout_s)])
+    # The subprocess timeout must outlast the wait we ask for, or a slow
+    # radiod start becomes an uncaught TimeoutExpired and the consumers are
+    # never restarted (AI6VN 2026-09-05: 90 s asked, 60 s default, traceback).
+    ready = _run(["/usr/local/sbin/sigmond-radiod-ready", str(ready_timeout_s)],
+                 timeout=ready_timeout_s + 30)
     if ready.returncode != 0:
         _log("radiod did not report ready in time — consumers NOT restarted")
         return False
+    # Queue every consumer restart without waiting: a recorder can take a
+    # minute to stop and another to start (wspr-recorder@AI6VN: ~100 s), and
+    # waiting on each in turn is what let one slow unit starve the rest.
     for unit in consumers:
         _log(f"restarting consumer {unit}")
-        _run(["systemctl", "restart", unit])
-    return True
+        r = _run(["systemctl", "restart", "--no-block", unit])
+        if r.returncode != 0:
+            _log(f"restart of {unit} not accepted rc={r.returncode}: {r.stderr.strip()}")
+    # Then wait, bounded, for the whole set; name whatever is still not up.
+    deadline = time.monotonic() + consumer_timeout_s
+    pending = list(consumers)
+    while pending and time.monotonic() < deadline:
+        time.sleep(5)
+        pending = [u for u in pending
+                   if _run(["systemctl", "is-active", u]).stdout.strip() != "active"]
+    for unit in pending:
+        _log(f"consumer {unit} still not active after {consumer_timeout_s}s — "
+             f"check: systemctl status {unit}")
+    return not pending
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -217,22 +423,77 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="how long to hold VBUS low (default 10)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the decision and change nothing")
+    ap.add_argument("--probe", action="store_true",
+                    help="locate the RX-888, verify its hub port switches "
+                         "power, report, and exit (changes only the state file)")
     args = ap.parse_args(argv)
 
     cfg = read_config()
-    hub = cfg.get("recover_hub")
-    port = cfg.get("recover_port")
-    radiod_unit = cfg.get("unit")
     patterns = cfg.get("consumers", [])
-
-    if not (hub and port and radiod_unit):
-        _log("[radiod] recover_hub / recover_port / unit not set in "
-             f"{CONFIG_PATH} — this station has no hub to cycle; exiting")
-        return 0
+    radiod_unit = cfg.get("unit") or detect_radiod_unit()
 
     present = device_present()
     state = load_state()
     now = time.time()
+
+    # ── learn the hub port while the card is present ──────────────────────
+    if cfg.get("recover_hub") and cfg.get("recover_port"):
+        hub, port = str(cfg["recover_hub"]), str(cfg["recover_port"])
+        source = f"{CONFIG_PATH} [radiod]"
+    else:
+        if present:
+            loc = locate_rx888()
+            stale = (state.get("devpath") != (loc.devpath if loc else None)
+                     or state.get("switchable") is None
+                     or now - float(state.get("verified_at") or 0) > REVERIFY_S)
+            if loc and stale:
+                sw, ctl = hub_switchable(loc)
+                state.update(devpath=loc.devpath, serial=loc.serial,
+                             speed=loc.speed, switchable=sw, verified_at=now,
+                             hub=loc.hub, port=loc.port,
+                             # every location uhubctl accepted for this port
+                             locations=[list(c) for c in ctl])
+                verdict = {True: "switches power — recoverable",
+                           False: "does NOT switch power — cannot be "
+                                  "recovered from software; move the card to "
+                                  "a uhubctl-capable hub port",
+                           None: "power switching UNKNOWN (uhubctl could not "
+                                 "look — run as root, is uhubctl installed?)"}
+                via = (" (control: " + ", ".join(
+                       f"{h} p{p}{' exact' if e else ''}" for h, p, e in ctl) + ")"
+                       if ctl else "")
+                _log(f"RX-888 {loc.serial} at {loc.devpath} ({loc.speed} Mb/s) "
+                     f"on hub {loc.hub} port {loc.port}: {verdict[sw]}{via}")
+        hub, port = state.get("hub"), state.get("port")
+        source = "discovered" if hub else "nothing learned yet"
+    locations = [tuple(l) for l in state.get("locations") or []] \
+        if not cfg.get("recover_hub") else [(hub, port, False)]
+
+    if args.probe:
+        _log(f"hub={hub} port={port} ({source}) switchable={state.get('switchable')} "
+             f"control={locations or 'none'} serial={state.get('serial')} "
+             f"radiod_unit={radiod_unit} consumers={patterns or 'NONE DECLARED'}")
+        save_state(state)
+        return 0
+
+    if not (hub and port):
+        save_state(state)
+        _log("no hub/port to cycle: nothing in [radiod] and the card was never "
+             "seen on a bus this helper could inspect — "
+             + ("it is absent right now; cannot recover" if not present
+                else "unexpected while present"))
+        return 0
+    if not radiod_unit:
+        save_state(state)
+        _log("no radiod unit: [radiod].unit unset and not exactly one active "
+             "radiod@ instance — set it in topology.toml")
+        return 0
+    if state.get("switchable") is False and not cfg.get("recover_hub"):
+        save_state(state)
+        if not present:
+            _log(f"card absent but hub {hub} port {port} cannot switch power — "
+                 f"a manual replug is the only recovery")
+        return 0
 
     if present:
         if state.get("absent_since"):
@@ -264,7 +525,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     state["last_cycle_at"] = now
     save_state(state)
 
-    if not cycle_port(hub, str(port), args.off_seconds):
+    if not cycle_port(locations or [(hub, str(port), False)], args.off_seconds):
         return 1
     if not wait_for_device():
         _log("card did not return after the power cycle — hardware fault, "
@@ -272,6 +533,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     units = installed_units()
+    if not patterns:
+        _log("NO CONSUMERS DECLARED in [radiod].consumers — only radiod will be "
+             "restarted; recorders keep a stale RTP anchor until restarted by "
+             "hand (or by a PartOf= drop-in).  Declare them in topology.toml.")
     consumers, missing = expand_consumers_checked(patterns, units)
     for pattern in missing:
         _log(f"DECLARED CONSUMER NOT FOUND: {pattern} matched no installed "
