@@ -1,0 +1,11 @@
+[Unit]
+Description=sigmond mDNS guard — keep radiod's .local names resolvable (repair avahi + republish)
+Documentation=https://github.com/HamSCI/sigmond
+After=network-online.target avahi-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-mdns
+# The helper rate-limits itself and reports why it declined to act; an
+# unhealthy result is information, not a failed unit.
+SuccessExitStatus=0 1

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check every 10 minutes that radiod's mDNS names resolve
+
+[Timer]
+# avahi comes up early; give radiod time to publish before the first check.
+OnBootSec=3min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""sigmond-mdns — keep the radiod .local names resolvable, or say why not.
+
+Every consumer on a sigmond host finds its radiod by an mDNS name
+(``<id>-status.local``) that radiod publishes through avahi.  Two of N8GA's
+wsprdaemon stations recorded nothing for days (2026-09-06) after avahi-daemon
+was restarted — once by an unattended-upgrade, once by a package install —
+because avahi came back stuck in the REGISTERING state, so no .local name
+resolved, and even after avahi recovers, radiod's ``avahi-publish-address``
+records do not survive an avahi restart.  The sigmond appliance runs
+unattended-upgrades too, and nothing here checked any of this.
+
+So, on a timer:
+  1. avahi-daemon must be active and its D-Bus server state RUNNING (2);
+  2. every radiod status name this host declares must resolve.
+Repair, when allowed: restart avahi-daemon, wait for RUNNING, then bring the
+station back in the only order that works — radiod first, then the declared
+consumers (sigmond-sdr-recover's restart_station, so the two helpers cannot
+disagree about that order).  Repairs are rate-limited so a broken avahi cannot
+turn into a restart loop, and every decision is logged with its reason.
+
+Names come from /etc/sigmond/coordination.toml ``[radiod."<name>"]`` blocks
+and from ``status =`` lines in /etc/radio/radiod@*.conf (anchored — a
+commented example line must never count; see wsprdaemon 6d0101f).
+
+  sigmond-mdns            check, repair if needed (the timer's mode)
+  sigmond-mdns --report   check and report only; never repairs
+  sigmond-mdns --dry-run  say what a repair would do
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import importlib.machinery
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Sequence
+
+COORDINATION = Path("/etc/sigmond/coordination.toml")
+TOPOLOGY = Path("/etc/sigmond/topology.toml")
+RADIOD_CONF_GLOB = "/etc/radio/radiod@*.conf"
+STATE_PATH = Path("/var/lib/sigmond/mdns.json")
+REPAIR_COOLDOWN_S = 900
+AVAHI_RUNNING = 2
+AVAHI_STATE_NAMES = {0: "INVALID", 1: "REGISTERING", 2: "RUNNING",
+                     3: "COLLISION", 4: "FAILURE"}
+
+
+def _log(msg: str) -> None:
+    print(f"sigmond-mdns: {msg}", flush=True)
+
+
+def _run(cmd: Sequence[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(list(cmd), 124, "", str(exc))
+
+
+# ─── pure helpers (tested) ─────────────────────────────────────────────────────
+
+def parse_avahi_state(busctl_stdout: str) -> Optional[int]:
+    """`busctl call … GetState` prints ``i 2``; None when unparseable."""
+    m = re.search(r"\bi\s+(\d+)", busctl_stdout or "")
+    return int(m.group(1)) if m else None
+
+
+def status_names_from_toml(text: str) -> List[str]:
+    """``[radiod."AI6VN-status.local"]`` block keys that are .local names."""
+    names = []
+    for m in re.finditer(r'^\s*\[radiod\."([^"]+)"\]', text, re.M):
+        if m.group(1).endswith(".local") and m.group(1) not in names:
+            names.append(m.group(1))
+    return names
+
+
+def status_names_from_radiod_conf(text: str) -> List[str]:
+    """``status = name.local`` lines, anchored so commented examples don't count."""
+    names = []
+    for m in re.finditer(r'^\s*status\s*=\s*"?([A-Za-z0-9._-]+\.local)"?', text, re.M):
+        if m.group(1) not in names:
+            names.append(m.group(1))
+    return names
+
+
+@dataclass(frozen=True)
+class Decision:
+    repair: bool
+    reason: str
+    healthy: bool
+
+
+def decide(avahi_active: bool, avahi_state: Optional[int], missing: Sequence[str],
+           radiod_running: bool, repair_allowed: bool,
+           last_repair_age_s: Optional[float]) -> Decision:
+    """What to do, and why — the reason is logged either way."""
+    if not avahi_active:
+        return Decision(repair_allowed and _cool(last_repair_age_s),
+                        "avahi-daemon is not running — no .local name can resolve", False)
+    if avahi_state is not None and avahi_state != AVAHI_RUNNING:
+        name = AVAHI_STATE_NAMES.get(avahi_state, str(avahi_state))
+        return Decision(repair_allowed and _cool(last_repair_age_s),
+                        f"avahi-daemon is stuck in state {name} ({avahi_state}, RUNNING is 2) — "
+                        f"nothing published on this host resolves", False)
+    if missing and radiod_running:
+        return Decision(repair_allowed and _cool(last_repair_age_s),
+                        f"radiod is running but {' '.join(missing)} do not resolve — its mDNS "
+                        f"address records were lost (an avahi restart drops them)", False)
+    if missing:
+        return Decision(False, f"{' '.join(missing)} do not resolve, but no radiod is running "
+                               f"to publish them — nothing to repair here", True)
+    return Decision(False, "avahi RUNNING and every radiod status name resolves", True)
+
+
+def _cool(last_repair_age_s: Optional[float]) -> bool:
+    return last_repair_age_s is None or last_repair_age_s >= REPAIR_COOLDOWN_S
+
+
+# ─── system-touching ──────────────────────────────────────────────────────────
+
+def avahi_active() -> bool:
+    return _run(["systemctl", "is-active", "--quiet", "avahi-daemon"]).returncode == 0
+
+
+def avahi_state() -> Optional[int]:
+    r = _run(["busctl", "--system", "call", "org.freedesktop.Avahi", "/",
+              "org.freedesktop.Avahi.Server", "GetState"], timeout=15)
+    return parse_avahi_state(r.stdout) if r.returncode == 0 else None
+
+
+def declared_names() -> List[str]:
+    names: List[str] = []
+    try:
+        names += status_names_from_toml(COORDINATION.read_text())
+    except OSError:
+        pass
+    for conf in sorted(glob.glob(RADIOD_CONF_GLOB)):
+        try:
+            for n in status_names_from_radiod_conf(Path(conf).read_text()):
+                if n not in names:
+                    names.append(n)
+        except OSError:
+            pass
+    return names
+
+
+def unresolved(names: Sequence[str]) -> List[str]:
+    return [n for n in names
+            if _run(["getent", "hosts", n], timeout=10).returncode != 0]
+
+
+def active_radiod_units() -> List[str]:
+    out = _run(["systemctl", "list-units", "--no-legend", "--plain", "--state=active",
+                "radiod@*.service", "ka9q-radio@*.service"]).stdout
+    return [l.split()[0] for l in out.splitlines() if l.strip()]
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def save_state(state: dict) -> None:
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STATE_PATH.write_text(json.dumps(state))
+    except Exception as exc:
+        _log(f"could not persist state: {exc}")
+
+
+def _sdr_recover():
+    """sigmond-sdr-recover, imported for restart_station() so radiod-then-
+    consumers ordering has exactly one implementation."""
+    path = Path(__file__).resolve().parent / "sigmond-sdr-recover"
+    loader = importlib.machinery.SourceFileLoader("sigmond_sdr_recover", str(path))
+    spec = importlib.util.spec_from_file_location("sigmond_sdr_recover", str(path), loader=loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    loader.exec_module(mod)
+    return mod
+
+
+def repair(units: Sequence[str], dry_run: bool) -> bool:
+    _log("repair: restarting avahi-daemon" + (" (dry run)" if dry_run else ""))
+    if dry_run:
+        _log(f"repair: would then restart {', '.join(units) or 'no radiod'} and the declared consumers")
+        return True
+    _run(["systemctl", "restart", "avahi-daemon"], timeout=60)
+    state = None
+    for _ in range(10):
+        time.sleep(1)
+        state = avahi_state()
+        if state == AVAHI_RUNNING:
+            break
+    if state != AVAHI_RUNNING:
+        _log(f"repair FAILED: avahi-daemon is in state {state} after a restart, not RUNNING — "
+             f"see: journalctl -u avahi-daemon")
+        return False
+    if not units:
+        return True
+    sdr = _sdr_recover()
+    cfg = sdr.read_config()
+    patterns = cfg.get("consumers", [])
+    if not patterns:
+        _log("NO CONSUMERS DECLARED in [radiod].consumers — only radiod is restarted; recorders "
+             "that hit 'Name or service not known' do not recover on their own (N8GA-BL-1)")
+    consumers, missing = sdr.expand_consumers_checked(patterns, sdr.installed_units())
+    for pat in missing:
+        _log(f"DECLARED CONSUMER NOT FOUND: {pat}")
+    ok = True
+    for unit in units:
+        _log(f"repair: restarting {unit} so its mDNS records are re-published")
+        ok = sdr.restart_station(unit, consumers) and ok
+    return ok
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--report", action="store_true", help="check and report only, never repair")
+    ap.add_argument("--dry-run", action="store_true", help="report what a repair would do")
+    args = ap.parse_args(argv)
+
+    names = declared_names()
+    if not names:
+        _log("no radiod status names declared on this host — nothing to check")
+        return 0
+    units = active_radiod_units()
+    st = load_state()
+    now = time.time()
+    last = st.get("last_repair_at")
+    active = avahi_active()
+    state = avahi_state() if active else None
+    missing = unresolved(names) if active else list(names)
+    d = decide(active, state, missing, bool(units), not args.report,
+               (now - last) if last else None)
+
+    if d.healthy:
+        if st.get("unhealthy_since"):
+            _log(f"recovered: {d.reason}")
+        st["unhealthy_since"] = None
+        save_state(st)
+        if args.report or args.dry_run:
+            _log(d.reason)
+        return 0
+
+    st.setdefault("unhealthy_since", now)
+    st["unhealthy_since"] = st["unhealthy_since"] or now
+    if not d.repair:
+        why = ("repairs disabled (--report)" if args.report
+               else f"cooldown — repaired {now - last:.0f}s ago, holding off until {REPAIR_COOLDOWN_S}s"
+               if last and (now - last) < REPAIR_COOLDOWN_S else "")
+        _log(f"ERROR: {d.reason}" + (f" [{why}]" if why else ""))
+        save_state(st)
+        return 1
+    _log(f"WARNING: {d.reason}")
+    if not args.dry_run:
+        st["last_repair_at"] = now
+        save_state(st)
+    ok = repair(units, args.dry_run)
+    still = unresolved(names) if not args.dry_run else []
+    if ok and not still:
+        _log("repaired: avahi RUNNING and every radiod status name resolves")
+        st["unhealthy_since"] = None
+        save_state(st)
+        return 0
+    if still:
+        _log(f"ERROR: {' '.join(still)} still do not resolve after the repair — check "
+             f"'avahi-browse -art' and 'journalctl -u avahi-daemon'")
+    save_state(st)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
