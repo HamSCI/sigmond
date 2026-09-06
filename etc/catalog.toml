@@ -90,7 +90,12 @@ kind            = "client"
 description     = "Station data reports and documentation (metrology, ionospheric science, GNSS vTEC); reads products under /var/lib/timestd"
 repo            = "https://github.com/mijahauan/station-web"   # staging: transfers to HamSCI/
 uses            = []
-requires        = ["hf-timestd", "hamsci-physics", "hamsci-dsp"]  # reads what 50 and 60 write; gnss-vtec optional
+# The installer clones ONLY what `requires` names, and station-web's
+# deploy.toml [build] installs hs-uploader editable (hamsci-physics needs it
+# and it is not on PyPI).  Leaving it out left the build step pointing at a
+# directory that was never cloned.  gnss-vtec stays optional: station-web
+# reads its product when present and reports it not-applicable when absent.
+requires        = ["hf-timestd", "hamsci-physics", "hamsci-dsp", "hs-uploader"]
 contract        = "0.8"
 install_script  = ""                                  # deploy.toml [build]/[install] drive it
 start_priority  = 220

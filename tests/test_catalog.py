@@ -100,7 +100,13 @@ class TestLoadCatalog:
         assert sw.contract == '0.8'
         assert sw.install_script is None or sw.install_script == ''
         assert sw.start_priority == 220                 # after hf-timestd (50) and hamsci-physics (60)
-        assert set(sw.requires) == {'hf-timestd', 'hamsci-physics', 'hamsci-dsp'}
+        # hs-uploader is REQUIRED, not incidental: the installer clones only
+        # what `requires` names, and station-web's deploy.toml [build] runs
+        # `pip install -e /opt/git/sigmond/hs-uploader` (hamsci-physics needs
+        # it; it is not on PyPI).  Without it the build pointed at a directory
+        # nothing had cloned.
+        assert set(sw.requires) == {'hf-timestd', 'hamsci-physics', 'hamsci-dsp',
+                                    'hs-uploader'}
         assert 'ka9q-radio' not in sw.requires
 
     def test_station_web_in_dasi2_profile(self):
@@ -110,6 +116,40 @@ class TestLoadCatalog:
         clients = cat['profile']['dasi2']['clients']
         assert clients[-1] == 'station-web'
         assert clients.index('station-web') > clients.index('hamsci-physics')
+
+    def test_every_late_client_belongs_to_a_profile(self):
+        """Spec §17: a client no profile names is INSTALLABLE BUT NEVER
+        INSTALLED — `smd bringup <profile>` skips it, and the omission is
+        silent.  station-web nearly shipped that way.
+
+        The guard covers the decoder-chain band (start_priority >= 200),
+        where a client is discretionary enough to be forgotten.  A
+        hardware-gated client is exempt: it is dormant by design when the
+        hardware is absent.  A profile can claim a client through any of its
+        three lists — `clients`, `local_radiod_infra` or `optional`.
+        """
+        import tomllib
+        with open(REPO_CATALOG, 'rb') as fh:
+            cat = tomllib.load(fh)
+
+        claimed = set()
+        for profile in cat.get('profile', {}).values():
+            for key in ('clients', 'local_radiod_infra', 'optional'):
+                claimed.update(profile.get(key) or [])
+
+        orphans = []
+        for name, entry in cat.get('client', {}).items():
+            if entry.get('kind') != 'client':
+                continue
+            if int(entry.get('start_priority') or 0) < 200:
+                continue
+            if entry.get('hardware_gated'):
+                continue
+            if name not in claimed:
+                orphans.append(name)
+        assert not orphans, (
+            f"catalog clients no profile installs: {orphans} — add each to a "
+            f"[profile.*] clients/optional list or mark it hardware_gated")
 
 
 class TestSparseOverlay:
