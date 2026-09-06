@@ -93,6 +93,24 @@ class TestLoadCatalog:
         assert 'example' in entries
         assert entries['example'].contract == '0.5'
 
+    def test_station_web_entry(self):
+        entries = load_catalog(REPO_CATALOG)
+        sw = entries['station-web']
+        assert sw.kind == 'client'                      # 'server' means non-conformant here
+        assert sw.contract == '0.8'
+        assert sw.install_script is None or sw.install_script == ''
+        assert sw.start_priority == 220                 # after hf-timestd (50) and hamsci-physics (60)
+        assert set(sw.requires) == {'hf-timestd', 'hamsci-physics', 'hamsci-dsp'}
+        assert 'ka9q-radio' not in sw.requires
+
+    def test_station_web_in_dasi2_profile(self):
+        import tomllib
+        with open(REPO_CATALOG, 'rb') as fh:
+            cat = tomllib.load(fh)
+        clients = cat['profile']['dasi2']['clients']
+        assert clients[-1] == 'station-web'
+        assert clients.index('station-web') > clients.index('hamsci-physics')
+
 
 class TestSparseOverlay:
     """The no-path ``load_catalog()`` should layer discovery + repo

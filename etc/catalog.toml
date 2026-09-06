@@ -85,6 +85,22 @@ start_priority  = 60                                  # after the timing core (5
 # block that used to live in hf-timestd's — declared in exactly one repo, or
 # the manifest renderer emits the same pipeline twice.
 
+[client.station-web]
+kind            = "client"
+description     = "Station data reports and documentation (metrology, ionospheric science, GNSS vTEC); reads products under /var/lib/timestd"
+repo            = "https://github.com/mijahauan/station-web"   # staging: transfers to HamSCI/
+uses            = []
+requires        = ["hf-timestd", "hamsci-physics", "hamsci-dsp"]  # reads what 50 and 60 write; gnss-vtec optional
+contract        = "0.8"
+install_script  = ""                                  # deploy.toml [build]/[install] drive it
+start_priority  = 220
+# Phase 5 of the 2026-08-10 hf-timestd split (spec: hf-timestd
+# docs/superpowers/specs/2026-09-06-station-web-extraction-design.md).  The web
+# UI that used to ship inside hf-timestd as timestd-web-api.service.  It is a
+# §16.3.1 meta-client: no radiod, no data root of its own, no writes.  kind is
+# "client" because in this catalog "server" has meant not-contract-conformant
+# (see test_server_entry_has_no_contract_or_install_script).
+
 [client.mag-recorder]
 kind            = "client"
 description     = "RM3100 magnetometer recorder + PSWS uploader (non-radiod, §16 'other')"
@@ -306,7 +322,10 @@ description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetomete
 # AC0G-B4 has GRAPE only because the venv was acquired by hand; AC0G-ND had
 # the checkout with no venv and no GRAPE at all.  start_priority 60 already
 # orders it after the timing core it reads from (50).
-clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "gmag-webui", "meteor-scatter", "hamsci-physics"]
+# station-web added 2026-09-06 (split Phase 5): it replaces the web UI
+# hf-timestd used to carry, so a bringup without it leaves the station with
+# no pages.
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder", "gmag-webui", "meteor-scatter", "hamsci-physics", "station-web"]
 local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
 # Discretionary HF-science clients: NOT installed by default.  `smd bringup
 # dasi2 --with-optional` adds them; `smd install <name>` installs+enables one
