@@ -6773,6 +6773,10 @@ _RADIOD_APT_DEPS = (
     'portaudio19-dev', 'libasound2-dev', 'uuid-dev', 'rsync',
     'libogg-dev', 'libsamplerate-dev', 'libliquid-dev',
     'libbladerf-dev',
+    # libcsv: database.c since ka9q-radio 2026.09 (upstream INSTALL.md added
+    # libcsv-dev 2026-09-04); without it the build dies at `csv.h: No such
+    # file` — first seen bumping the pin to deb7bdd on AI6VN, 2026-09-05.
+    'libcsv-dev',
 )
 _RADIOD_PI_EXTRA = ('libpigpio-dev',)
 
