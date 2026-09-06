@@ -1,0 +1,9 @@
+[Unit]
+Description=sigmond time-sync check — log while the clock is not synchronised by chrony
+Documentation=https://github.com/HamSCI/sigmond
+After=chrony.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-time-sync --check
+SuccessExitStatus=0 1

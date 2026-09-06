@@ -861,6 +861,25 @@ $SUDO chmod a+x "$REPO_DIR/bin/ts1"
 $SUDO ln -sf "$REPO_DIR/bin/ts1" /usr/local/bin/ts1
 ok "ts1 console helper → /usr/local/bin/ts1"
 
+# mDNS guard + time-sync: ported from wsprdaemon after N8GA (avahi stuck in
+# REGISTERING, radiod's .local names gone, stations silent for days) and
+# N8UR (timesyncd on a dead DHCP server, clock 7 s slow), both 2026-09-06.
+info "Installing mDNS guard and time-sync → /usr/local/sbin/"
+for _h in sigmond-mdns sigmond-time-sync; do
+    $SUDO chmod a+x "$REPO_DIR/bin/$_h"
+    $SUDO ln -sf "$REPO_DIR/bin/$_h" "/usr/local/sbin/$_h"
+    for _u in "$_h.service" "$_h.timer"; do
+        $SUDO install -m 0644 "$REPO_DIR/systemd/$_u" "/etc/systemd/system/$_u"
+    done
+done
+$SUDO systemctl daemon-reload
+for _t in sigmond-mdns.timer sigmond-time-sync.timer; do
+    $SUDO systemctl enable --now "$_t" 2>/dev/null && ok "$_t enabled" || warn "could not enable $_t"
+done
+# Enforce chrony now (extra pools, makestep, waitsync) — non-fatal: the helper
+# says loudly what is wrong and the timer keeps saying it.
+$SUDO /usr/local/sbin/sigmond-time-sync --apply --wait 30 || warn "clock not synchronised yet — see /var/log/sigmond/time-sync.log"
+
 # radiod drop-in: patient retry instead of a five-restart budget.
 if compgen -G "/etc/systemd/system/radiod@*.service" >/dev/null 2>&1 || \
    systemctl list-unit-files "radiod@.service" &>/dev/null; then
