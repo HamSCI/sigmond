@@ -711,6 +711,14 @@ fi
 # touch it
 gexec 15 "mkdir -p /etc/sigmond-appliance && echo '$(cat /etc/sigmond-appliance/version 2>/dev/null || echo unknown)' > /etc/sigmond-appliance/version" \
     || say "WARN: could not stamp appliance version into the VM"
+# Component pin manifest: the importer installs the host copy, but `smd doctor`
+# and the heartbeat run IN THE VM and read the same path there -- without this
+# copy every imaged decoder VM reports "manifest: unassessed" and the drift
+# check the manifest exists for never runs (AI6VN v3.37, 2026-09-05).
+if [ -s /etc/sigmond-appliance/manifest.txt ]; then
+    gexec 30 "echo $(base64 -w0 /etc/sigmond-appliance/manifest.txt) | base64 -d > /etc/sigmond-appliance/manifest.txt" \
+        || say "WARN: could not copy the component manifest into the VM — drift check unavailable there"
+fi
 
 if [ -f /root/sigmond-appliance/wisdomf-seed ]; then
     say "seeding FFT wisdom into the VM (radiod start is gated on it)"
