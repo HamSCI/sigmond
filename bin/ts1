@@ -1,0 +1,67 @@
+#!/bin/bash
+# ts1 — console access to the Turn Island Systems TS-1 TimeSync injector.
+#
+#   ts1            open an interactive console on the TS-1 (GNU screen)
+#   ts1 port       print the TS-1's serial device and exit
+#   ts1 probe      read-only status via hf-timestd's ts1-probe.sh (STAT only)
+#
+# The TS-1's USB interface is an Adafruit Trinket M0 (239a:801e); the
+# firmware banner ("TimeSync vN.N, Board ID #...") is what makes it a TS-1.
+# Exit 1 when no TS-1 is on the bus, 2 when another process holds the port
+# (opening a CDC port asserts DTR — that wedged the TS-1 console on
+# 2026-08-08, so we never open it behind someone's back), 3 when no
+# terminal program is installed.
+#
+# Console hints: `?` lists commands, `STAT` is read-only.  TX / SAVE /
+# DEFAULT / UPDATE change the injector — only type them if you mean it.
+# Leave screen with Ctrl-A then k (kill), or Ctrl-A then d (detach).
+set -u
+BAUD=115200
+GLOB="${TS1_BYID_GLOB:-/dev/serial/by-id/usb-Adafruit_Trinket_M0_*}"
+PROBE=/opt/git/sigmond/hf-timestd/scripts/ts1-probe.sh
+
+die() { echo "ts1: $*" >&2; exit "${RC:-1}"; }
+
+port=""
+for p in $GLOB; do
+    [ -e "$p" ] && port=$(readlink -f "$p") && break
+done
+[ -n "$port" ] || RC=1 die "no TS-1 TimeSync on the USB bus (no Adafruit Trinket M0 239a:801e serial device)"
+
+case "${1:-console}" in
+    port)  echo "$port"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    probe|console) ;;
+    *) RC=1 die "unknown subcommand '$1' (try: ts1 | ts1 port | ts1 probe)" ;;
+esac
+
+# probe and console both open the port.  Re-run as root when it is not ours:
+# /dev/ttyACM* is root:dialout.
+if [ ! -w "$port" ] && [ "$(id -u)" -ne 0 ]; then
+    exec sudo -- "$0" "$@"
+fi
+
+if [ "${1:-console}" = probe ]; then
+    [ -x "$PROBE" ] || RC=1 die "hf-timestd's ts1-probe.sh not installed at $PROBE"
+    exec "$PROBE" "${2:-}"
+fi
+
+if holders=$(fuser "$port" 2>/dev/null) && [ -n "$holders" ]; then
+    echo "ts1: $port is held by another process:" >&2
+    fuser -v "$port" 2>&1 | sed 's/^/  /' >&2
+    RC=2 die "refusing to open the console behind it (DTR would be re-asserted)"
+fi
+
+term=""
+for t in screen picocom minicom; do command -v "$t" >/dev/null 2>&1 && { term=$t; break; }; done
+[ -n "$term" ] || RC=3 die "no terminal program found (apt install screen)"
+
+# raw, no local echo, and no HUP on close so leaving the console does not
+# drop DTR on the injector.
+stty -F "$port" "$BAUD" raw -echo -hupcl 2>/dev/null
+echo "ts1: TS-1 console on $port @ $BAUD via $term — '?' for commands, STAT is read-only; leave with Ctrl-A k" >&2
+case "$term" in
+    screen)  exec screen "$port" "$BAUD" ;;
+    picocom) exec picocom -b "$BAUD" "$port" ;;
+    minicom) exec minicom -D "$port" -b "$BAUD" ;;
+esac

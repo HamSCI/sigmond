@@ -855,6 +855,12 @@ $SUDO systemctl enable --now sigmond-t6-stuck-watchdog.timer 2>/dev/null \
     || warn "could not enable sigmond-t6-stuck-watchdog.timer"
 ok "sigmond-sdr-recover + sigmond-radiod-ready symlinks installed"
 
+# ts1: operator console on the TS-1 TimeSync injector (rob 2026-09-05) — on
+# every user's PATH, errors out cleanly when no TS-1 is on the bus.
+$SUDO chmod a+x "$REPO_DIR/bin/ts1"
+$SUDO ln -sf "$REPO_DIR/bin/ts1" /usr/local/bin/ts1
+ok "ts1 console helper → /usr/local/bin/ts1"
+
 # radiod drop-in: patient retry instead of a five-restart budget.
 if compgen -G "/etc/systemd/system/radiod@*.service" >/dev/null 2>&1 || \
    systemctl list-unit-files "radiod@.service" &>/dev/null; then
