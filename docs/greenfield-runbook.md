@@ -205,11 +205,15 @@ What `apply` already put in place (confirm via validate / the files):
 
 Manual extras:
 
-- **CPU freq caps (optional)** — `smd admin diag cpu-freq --apply` writes per-core
-  `scaling_max_freq` from `[cpu_freq]` in topology.toml. Usually unnecessary:
-  radiod cores default to hardware max at boot, and capping the other cores only
-  throttles your decode clients. (Note: freq caps are **not** boot-persistent —
-  there's no oneshot for them.)
+- **CPU clock policy (optional)** — `smd admin diag cpu-freq --apply` writes
+  per-core `scaling_max_freq` from `[cpu_freq]` in topology.toml, moves capped
+  cores off the `performance` governor (a cap is inert under it), sets per-core
+  boost where the driver exposes it, and installs `smd-cpu-freq.service` so the
+  policy is re-applied at every boot. `fast_mode = "fft-pair"` keeps only the
+  SMT pair holding each radiod's fft thread fast and caps the rest of radiod's
+  cores too — the thermal win measured at K6FOD (84 → 62 C, zero drops).
+  Usually unnecessary on a cool host: radiod cores default to hardware max, and
+  capping decoder cores only spends their slack.
 - **`isolcpus` (optional, needs a reboot)** — kernel-level isolation of the
   radiod cores. Incremental over the affinity isolation (which already passes
   validate): it stops kernel threads/IRQs/stray tasks from *ever* touching those

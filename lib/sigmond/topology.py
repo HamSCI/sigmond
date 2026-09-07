@@ -41,7 +41,16 @@ _DEFAULT_CPU_AFFINITY = {
 _DEFAULT_CPU_FREQ = {
     'radiod_max_mhz': 3200,
     'other_max_mhz':  1400,
+    # Which CPUs get radiod_max_mhz: 'radiod' = every CPU radiod owns (the
+    # long-standing behaviour); 'fft-pair' = only the physical core (SMT
+    # sibling pair) holding each instance's fft thread — the one thread whose
+    # latency the receiver depends on.  proc_rx888 and the demod threads run
+    # fine under other_max_mhz.  Ported from wsprdaemon FREQ_FAST_MODE:
+    # K6FOD (Ryzen 5 5500U) went from 84-87 C to 61-64 C with fft 53% of its
+    # core at 4.0 GHz, proc_rx888 17% at 2.1 GHz, zero drops.
+    'fast_mode':      'radiod',
 }
+CPU_FREQ_FAST_MODES = ('radiod', 'fft-pair')
 
 # Timing site policy.  honor_radiod_restart_request gates whether the
 # sigmond radiod watchdog acts on hf-timestd's opt-in escalation artifact
@@ -162,6 +171,13 @@ def load_topology(path: Path = TOPOLOGY_PATH,
             cpu_freq['other_max_mhz'] = int(cf['other_max_mhz'])
         except (TypeError, ValueError):
             warn(f"topology cpu_freq.other_max_mhz not an int: {cf['other_max_mhz']!r}")
+    if 'fast_mode' in cf:
+        mode = str(cf['fast_mode']).strip().lower()
+        if mode in CPU_FREQ_FAST_MODES:
+            cpu_freq['fast_mode'] = mode
+        else:
+            warn(f"topology cpu_freq.fast_mode {cf['fast_mode']!r} not one of "
+                 f"{CPU_FREQ_FAST_MODES} — using 'radiod'")
 
     return Topology(
         client_dir=client_dir,

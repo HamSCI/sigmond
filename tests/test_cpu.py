@@ -676,3 +676,59 @@ class HostLayoutAvoidsBootCoreTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ClockPolicyTests(unittest.TestCase):
+    """fft-pair clock mode (wsprdaemon FREQ_FAST_MODE, ported 2026-09-07):
+    only the sibling pair holding each instance's fft thread runs fast."""
+
+    CORES = [{0, 1}, {2, 3}, {4, 5}, {6, 7}]      # sequential SMT pairs
+
+    def test_default_mode_makes_every_radiod_cpu_fast(self):
+        from sigmond.cpu import plan_clock_policy
+        p = plan_clock_policy({'radiod@a.service': {4, 5, 6, 7}}, self.CORES, 'radiod')
+        self.assertEqual(p.mode, 'radiod')
+        self.assertEqual(set(p.fast_cpus), {4, 5, 6, 7})
+        self.assertEqual(set(p.capped_radiod_cpus), set())
+
+    def test_fft_pair_fast_is_the_pair_holding_the_lowest_cpu(self):
+        """The pinner parks fft on the LOWEST cpu of the set; its SMT sibling
+        shares the clock, so the pair is the unit of 'fast'."""
+        from sigmond.cpu import plan_clock_policy
+        p = plan_clock_policy({'radiod@a.service': {4, 5, 6, 7}}, self.CORES, 'fft-pair')
+        self.assertEqual(p.mode, 'fft-pair')
+        self.assertEqual(set(p.fast_cpus), {4, 5})
+        self.assertEqual(set(p.capped_radiod_cpus), {6, 7})
+        self.assertEqual(p.fft_cpus, {'radiod@a.service': 4})
+        self.assertEqual(p.label(), 'fft pair(s)')
+
+    def test_fft_pair_with_two_instances(self):
+        from sigmond.cpu import plan_clock_policy
+        p = plan_clock_policy({'radiod@a.service': {2, 3, 4, 5},
+                               'ka9q-radio@04b4-00f1-X.service': {6, 7}},
+                              self.CORES, 'fft-pair')
+        self.assertEqual(set(p.fast_cpus), {2, 3, 6, 7})
+        self.assertEqual(set(p.capped_radiod_cpus), {4, 5})
+
+    def test_fft_pair_on_a_one_pair_instance_caps_nothing(self):
+        """The appliance layout: radiod owns exactly one pair — nothing to cap."""
+        from sigmond.cpu import plan_clock_policy
+        p = plan_clock_policy({'radiod@a.service': {8, 9}}, self.CORES + [{8, 9}], 'fft-pair')
+        self.assertEqual(set(p.fast_cpus), {8, 9})
+        self.assertEqual(set(p.capped_radiod_cpus), set())
+
+    def test_no_smt_topology_makes_a_single_cpu_fast(self):
+        from sigmond.cpu import plan_clock_policy
+        p = plan_clock_policy({'radiod@a.service': {2, 3}}, [{0}, {1}, {2}, {3}], 'fft-pair')
+        self.assertEqual(set(p.fast_cpus), {2})
+        self.assertEqual(set(p.capped_radiod_cpus), {3})
+
+    def test_unknown_mode_and_no_units_fall_back(self):
+        from sigmond.cpu import plan_clock_policy
+        self.assertEqual(plan_clock_policy({'u': {0, 1}}, self.CORES, 'bogus').mode, 'radiod')
+        self.assertEqual(set(plan_clock_policy({}, self.CORES, 'fft-pair').fast_cpus), set())
+
+    def test_sibling_set_unknown_cpu_is_itself(self):
+        from sigmond.cpu import sibling_set
+        self.assertEqual(sibling_set(9, self.CORES), {9})
+        self.assertEqual(sibling_set(3, self.CORES), {2, 3})

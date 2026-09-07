@@ -42,12 +42,15 @@ class _FreqRow:
     target_mhz: int
     matches: bool
     note: str = ''
+    fast: bool = False             # gets radiod_max_mhz (all radiod cpus, or the fft pair)
 
 
 @dataclass
 class _FreqData:
     radiod_max_mhz: int = 3200
     other_max_mhz: int = 1400
+    fast_mode: str = 'radiod'
+    fast_cpus: set = field(default_factory=set)
     radiod_cpus: set = field(default_factory=set)
     rows: list = field(default_factory=list)     # list[_FreqRow]
     error: Optional[str] = None
@@ -63,10 +66,16 @@ def _gather_freq_data() -> _FreqData:
         topology = load_topology()
         data.radiod_max_mhz = int(topology.cpu_freq.get('radiod_max_mhz', 3200))
         data.other_max_mhz = int(topology.cpu_freq.get('other_max_mhz', 1400))
+        data.fast_mode = str(topology.cpu_freq.get('fast_mode', 'radiod'))
         try:
-            data.radiod_cpus = get_radiod_cpus()
+            from ...cpu import get_radiod_cpus_by_unit, get_physical_cores, plan_clock_policy
+            by_unit = get_radiod_cpus_by_unit()
+            data.radiod_cpus = set().union(*by_unit.values()) if by_unit else set()
+            data.fast_cpus = set(plan_clock_policy(by_unit, get_physical_cores(),
+                                                   data.fast_mode).fast_cpus)
         except Exception:
             data.radiod_cpus = set()
+            data.fast_cpus = set()
     except Exception as exc:
         data.error = str(exc)
         return data
@@ -75,14 +84,15 @@ def _gather_freq_data() -> _FreqData:
     for cpu in range(cpu_count):
         in_radiod = cpu in data.radiod_cpus
         role = 'radiod' if in_radiod else 'other'
-        target_mhz = data.radiod_max_mhz if in_radiod else data.other_max_mhz
+        fast = cpu in data.fast_cpus
+        target_mhz = data.radiod_max_mhz if fast else data.other_max_mhz
 
         freq_dir = Path(f'/sys/devices/system/cpu/cpu{cpu}/cpufreq')
         if not freq_dir.exists():
             data.rows.append(_FreqRow(
                 cpu=cpu, role=role,
                 current_mhz=None, target_mhz=target_mhz,
-                matches=False, note='no cpufreq sysfs',
+                matches=False, note='no cpufreq sysfs', fast=fast,
             ))
             continue
 
@@ -92,13 +102,13 @@ def _gather_freq_data() -> _FreqData:
             data.rows.append(_FreqRow(
                 cpu=cpu, role=role,
                 current_mhz=current_mhz, target_mhz=target_mhz,
-                matches=(current_mhz == target_mhz),
+                matches=(current_mhz == target_mhz), fast=fast,
             ))
         except (OSError, ValueError) as exc:
             data.rows.append(_FreqRow(
                 cpu=cpu, role=role,
                 current_mhz=None, target_mhz=target_mhz,
-                matches=False, note=f'read error: {exc}',
+                matches=False, note=f'read error: {exc}', fast=fast,
             ))
     return data
 

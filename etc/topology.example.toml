@@ -29,6 +29,25 @@ smd_bin = "/usr/local/sbin/smd"
 # this assignment.  See docs/HOST-CAPACITY-PLANNING.md for the broader
 # discussion of how workload tiers map onto host topology.
 
+# CPU clock policy (bare metal; inside a VM the Proxmox host hookscript
+# owns the clocks).  `smd admin diag cpu-freq --apply` writes
+# scaling_max_freq per CPU, demotes capped CPUs off the 'performance'
+# governor (a cap is inert under it), sets per-core boost where the
+# driver exposes it (acpi-cpufreq AMD), and installs a boot-time oneshot.
+#
+# fast_mode = "radiod"    every CPU radiod owns runs at radiod_max_mhz (default)
+# fast_mode = "fft-pair"  only the SMT pair holding each instance's fft thread
+#                         (the lowest CPU of its set) runs fast; radiod's other
+#                         CPUs join the other_max_mhz cap.  fft is the one thread
+#                         whose latency the receiver depends on; proc_rx888 and
+#                         the demod threads are cheap.  K6FOD (Ryzen 5 5500U):
+#                         84-87 C → 61-64 C, zero drops.
+#
+# [cpu_freq]
+# radiod_max_mhz = 3200
+# other_max_mhz  = 1400
+# fast_mode      = "fft-pair"
+
 # Timing site policy (optional).  hf-timestd's offset judge can escalate
 # a sustained radiod timing contradiction into a restart REQUEST artifact
 # (/run/hf-timestd/radiod-restart-request.json — it never restarts radiod

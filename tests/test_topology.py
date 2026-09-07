@@ -27,7 +27,8 @@ class DefaultsTests(unittest.TestCase):
             'radiod_governor': 'performance',
         })
         self.assertEqual(t.cpu_freq,
-                         {'radiod_max_mhz': 3200, 'other_max_mhz': 1400})
+                         {'radiod_max_mhz': 3200, 'other_max_mhz': 1400,
+                          'fast_mode': 'radiod'})
 
     def test_empty_file_uses_defaults(self):
         with tempfile.TemporaryDirectory() as d:
@@ -46,6 +47,18 @@ class CpuAffinityParseTests(unittest.TestCase):
             t = load_topology(p)
         self.assertEqual(t.cpu_affinity['radiod_cpus'], '0-3')
         self.assertEqual(t.cpu_affinity['other_cpus'], '4-15')
+
+    def test_fast_mode_parsed_and_validated(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'topology.toml'
+            _write(p, '[cpu_freq]\nfast_mode = "fft-pair"\n')
+            t = load_topology(p)
+        self.assertEqual(t.cpu_freq['fast_mode'], 'fft-pair')
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'topology.toml'
+            _write(p, '[cpu_freq]\nfast_mode = "turbo"\n')
+            t = load_topology(p)
+        self.assertEqual(t.cpu_freq['fast_mode'], 'radiod')
 
     def test_partial_override_keeps_defaults(self):
         with tempfile.TemporaryDirectory() as d:

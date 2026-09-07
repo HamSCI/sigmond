@@ -136,6 +136,8 @@ try:
         get_physical_cores as _get_physical_cores,
         get_radiod_instances as _get_radiod_instances,
         get_radiod_cpus   as _get_radiod_cpus,
+        get_radiod_cpus_by_unit as _get_radiod_cpus_by_unit,
+        plan_clock_policy as _plan_clock_policy,
         compute_affinity_plan as _compute_affinity_plan,
         read_proc_cpus    as _read_proc_cpus,
         thread_affinity_groups as _thread_affinity_groups,
@@ -7531,11 +7533,14 @@ def cmd_apply(args) -> int:
                 # this the governor reverted until someone ran `smd admin diag
                 # cpu-affinity --apply` by hand.  Idempotent; same writer.
                 try:
-                    _radiod_cpus = _get_radiod_cpus()
-                    if _radiod_cpus:
+                    # In fft-pair clock mode only the fft pair gets the
+                    # radiod governor; capped radiod cpus stay off
+                    # 'performance' or their cap is inert (smd cpu-freq).
+                    _fast_cpus = set(_clock_plan(topology).fast_cpus)
+                    if _fast_cpus:
                         _gov = (topology.get('cpu_affinity', {}) or {}).get(
                             'radiod_governor', 'performance')
-                        _apply_radiod_governor(_radiod_cpus, _gov)
+                        _apply_radiod_governor(_fast_cpus, _gov)
                 except Exception:
                     pass  # non-fatal; governor persistence is best-effort
                 # Check wisdom file — generation is now a deliberate user
@@ -8290,6 +8295,21 @@ def _disable_hftimestd_affinity_watcher() -> bool:
     return disabled_any
 
 
+def _clock_plan(topology, radiod_by_unit=None):
+    """ClockPlan for this host from topology.toml [cpu_freq].fast_mode.
+
+    ``radiod_by_unit`` defaults to the live per-unit CPUAffinity sets.  In
+    fft-pair mode only the sibling pair holding each instance's fft thread
+    is fast; the rest of radiod's CPUs join the capped pool (wsprdaemon
+    FREQ_FAST_MODE, ported 2026-09-07).
+    """
+    cfg = (topology.get('cpu_freq', {}) or {}) if isinstance(topology, dict) else {}
+    mode = cfg.get('fast_mode', 'radiod')
+    if radiod_by_unit is None:
+        radiod_by_unit = _get_radiod_cpus_by_unit()
+    return _plan_clock_policy(radiod_by_unit, _get_physical_cores(), mode)
+
+
 def _apply_radiod_governor(radiod_cpus, governor='performance') -> int:
     """Set scaling_governor on radiod CPUs (runtime sysfs + boot-time service).
 
@@ -8620,7 +8640,13 @@ def cmd_diag_cpu_affinity(args) -> int:
                            if radiod_plan else set())
         cpu_aff_cfg = topology.get('cpu_affinity', {}) or {}
         governor = cpu_aff_cfg.get('radiod_governor', 'performance')
-        gov_errors = _apply_radiod_governor(radiod_cpus_all, governor)
+        # fft-pair clock mode: the governor goes on the fast pair only.
+        _cp = _clock_plan(topology, radiod_plan)
+        if _cp.mode == 'fft-pair':
+            _info(f"clock policy fft-pair: governor on {_cpu_list_str(set(_cp.fast_cpus))}, "
+                  f"capped radiod cpus {_cpu_list_str(set(_cp.capped_radiod_cpus)) or 'none'} "
+                  f"handled by `smd admin diag cpu-freq --apply`")
+        gov_errors = _apply_radiod_governor(set(_cp.fast_cpus) or radiod_cpus_all, governor)
         if gov_errors:
             _err(f'{gov_errors} governor write(s) failed')
             errors += gov_errors
@@ -8635,6 +8661,48 @@ def cmd_diag_cpu_affinity(args) -> int:
     return 0
 
 
+def _install_cpu_freq_boot_unit() -> None:
+    """smd-cpu-freq.service: re-apply the clock policy at every boot.
+
+    scaling_max_freq, the capped-core governors and per-core boost all reset
+    at boot (wsprdaemon carries wd-cpu-freq.service for the same reason);
+    without this the policy silently evaporated at the first reboot.
+    Ordered after smd-cpu-governor.service so the fast set's governor is
+    already in place.  Best-effort: never fails the apply.
+    """
+    unit_content = (
+        '# Managed by `smd admin diag cpu-freq --apply`.  Re-applies the\n'
+        '# topology.toml [cpu_freq] clock policy (scaling_max_freq, capped-core\n'
+        '# governor, per-core boost) at boot; none of it survives a reboot.\n'
+        '\n'
+        '[Unit]\n'
+        'Description=smd CPU clock policy (boot-time)\n'
+        'After=smd-cpu-governor.service multi-user.target\n'
+        'ConditionPathExists=/sys/devices/system/cpu/cpu0/cpufreq\n'
+        '\n'
+        '[Service]\n'
+        'Type=oneshot\n'
+        'RemainAfterExit=yes\n'
+        f'ExecStart={INSTALL_SMD if "INSTALL_SMD" in globals() else "/usr/local/bin/smd"} '
+        'admin diag cpu-freq --apply\n'
+        '\n'
+        '[Install]\n'
+        'WantedBy=multi-user.target\n'
+    )
+    unit_path = Path('/etc/systemd/system/smd-cpu-freq.service')
+    try:
+        existing = unit_path.read_text() if unit_path.exists() else ''
+        if existing != unit_content:
+            unit_path.write_text(unit_content)
+            _run(['systemctl', 'daemon-reload'])
+        r = _run(['systemctl', 'is-enabled', 'smd-cpu-freq.service'])
+        if r.stdout.strip() != 'enabled':
+            _run(['systemctl', 'enable', 'smd-cpu-freq.service'])
+            _ok('smd-cpu-freq.service enabled — clock policy re-applied at every boot')
+    except OSError as e:
+        _warn(f'could not persist the clock policy at boot: {e}')
+
+
 def cmd_diag_cpu_freq(args) -> int:
     """Show and optionally apply per-CPU scaling_max_freq based on radiod CPU assignment."""
     # --apply writes /sys scaling_max_freq — needs root.  Auto-elevate up
@@ -8646,22 +8714,34 @@ def cmd_diag_cpu_freq(args) -> int:
     cfg       = topology.get('cpu_freq', {})
     radiod_max_mhz = cfg.get('radiod_max_mhz', 3200)
     other_max_mhz  = cfg.get('other_max_mhz',  1400)
+    fast_mode = cfg.get('fast_mode', 'radiod')
     do_apply  = getattr(args, 'apply', False)
 
     _heading('diag: CPU frequencies')
 
     # root already ensured at the top via _need_root auto-elevation
-    radiod_cpus = _get_radiod_cpus()
+    radiod_by_unit = _get_radiod_cpus_by_unit()
+    radiod_cpus = set().union(*radiod_by_unit.values()) if radiod_by_unit else set()
+    clock = _clock_plan(topology, radiod_by_unit)
+    fast_cpus = set(clock.fast_cpus)
     cpu_count   = os.cpu_count() or 1
 
-    _info(f'Policy:  radiod CPUs → {radiod_max_mhz} MHz max  |  '
-          f'other CPUs → {other_max_mhz} MHz max')
+    if clock.mode == 'fft-pair':
+        _info(f'Policy:  fft pair(s) {_cpu_list_str(fast_cpus) or "-"} → {radiod_max_mhz} MHz max  |  '
+              f'every other CPU (incl. radiod\'s non-fft cpus '
+              f'{_cpu_list_str(set(clock.capped_radiod_cpus)) or "none"}) → {other_max_mhz} MHz max')
+        for unit, fcpu in sorted(clock.fft_cpus.items()):
+            _info(f'  {unit}: fft parked on cpu{fcpu} (lowest of its set, as sigmond-radiod-pin-threads does)')
+    else:
+        _info(f'Policy:  radiod CPUs → {radiod_max_mhz} MHz max  |  '
+              f'other CPUs → {other_max_mhz} MHz max')
     if radiod_cpus:
         _info(f'Radiod CPUs (CPUAffinity): {sorted(radiod_cpus)}')
     else:
         _warn('No radiod CPUAffinity detected — radiod may not be running')
     print()
-    _info('  (Configure limits in /etc/sigmond/topology.toml  [cpu_freq])')
+    _info('  (Configure limits in /etc/sigmond/topology.toml  [cpu_freq]: '
+          'radiod_max_mhz, other_max_mhz, fast_mode = "radiod" | "fft-pair")')
     print()
 
     # --reapply: re-execute the Proxmox host hookscript via SSH so freq
@@ -8778,10 +8858,31 @@ def cmd_diag_cpu_freq(args) -> int:
 
     changes = 0
     errors  = 0
+    # Per-core boost (cpb) is the HARD lever on acpi-cpufreq AMD hosts: their
+    # P-state table is discrete and everything above the top P-state is turbo,
+    # which scaling_max_freq cannot cap — but cpb=0 pins a core at its top
+    # non-boost P-state (K6FOD: 86 → 73 C).  amd-pstate / intel_pstate hosts
+    # have no cpb file and are untouched.
+    have_cpb = Path('/sys/devices/system/cpu/cpu0/cpufreq/cpb').exists()
+    n_cpb = 0
+    n_gov = 0
+
+    def _write_sysfs(path: Path, value: str) -> bool:
+        try:
+            path.write_text(value)
+            return True
+        except OSError:
+            return False
 
     for cpu in range(cpu_count):
-        role       = 'radiod' if cpu in radiod_cpus else 'other '
-        target_mhz = radiod_max_mhz if cpu in radiod_cpus else other_max_mhz
+        is_fast = cpu in fast_cpus
+        if is_fast:
+            role = 'fft   ' if clock.mode == 'fft-pair' else 'radiod'
+        elif cpu in radiod_cpus:
+            role = 'radiod'      # capped radiod cpu (fft-pair mode)
+        else:
+            role = 'other '
+        target_mhz = radiod_max_mhz if is_fast else other_max_mhz
         target_khz = target_mhz * 1000
 
         freq_dir = Path(f'/sys/devices/system/cpu/cpu{cpu}/cpufreq')
@@ -8859,8 +8960,37 @@ def cmd_diag_cpu_freq(args) -> int:
                 _warn(f'cpu{cpu:2d}  [{role}]  {arrow}  (run with --apply to set)')
                 changes += 1
 
+        if do_apply:
+            # Governor: a cap is INERT under 'performance' (that governor
+            # drives the core to its top P-state regardless of
+            # scaling_max_freq — measured at KX4AZ-T), so capped cpus that
+            # sit on it move to powersave/schedutil, whichever the driver
+            # offers.  Fast cpus keep whatever the affinity apply set.
+            gov_path = freq_dir / 'scaling_governor'
+            try:
+                cur_gov = gov_path.read_text().strip()
+                avail = (freq_dir / 'scaling_available_governors').read_text().split()
+            except OSError:
+                cur_gov, avail = '', []
+            if not is_fast and cur_gov == 'performance':
+                slow = next((g for g in ('powersave', 'schedutil') if g in avail), None)
+                if slow and _write_sysfs(gov_path, slow):
+                    _ok(f'cpu{cpu:2d}  [{role}]  governor performance → {slow} (cap was inert)')
+                    n_gov += 1
+            if have_cpb:
+                if _write_sysfs(freq_dir / 'cpb', '1' if is_fast else '0'):
+                    n_cpb += 1
+
     print()
     if do_apply:
+        if n_cpb:
+            _info(f'acpi-cpufreq host: per-core boost (cpb) set on {n_cpb} cpu(s) — '
+                  f'ON for the fast set, OFF (hard top P-state) for the rest')
+        if n_gov:
+            _info(f'{n_gov} capped cpu(s) moved off the performance governor')
+        # Frequency and boost settings do not survive a reboot; persist the
+        # policy with a boot-time oneshot that re-runs this verb.
+        _install_cpu_freq_boot_unit()
         if errors:
             _err(f'{errors} CPU(s) failed to update')
             return 1

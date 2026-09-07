@@ -493,16 +493,23 @@ def get_radiod_instances() -> list[str]:
     return sorted(found)
 
 
-def get_radiod_cpus() -> set:
-    """Return the set of CPU numbers assigned to radiod via systemd CPUAffinity."""
+def get_radiod_cpus_by_unit() -> dict:
+    """{radiod unit: set of CPUs} from each unit's systemd CPUAffinity.
+
+    Both unit families: ``radiod@<id>.service`` under sigmond's management
+    and ``ka9q-radio@<vid>-<pid>-<serial>.service`` from ka9q-radio's udev
+    autostart — a host on the latter otherwise plans for nothing at all
+    (wsprdaemon 4261efd, ON5KQ).
+    """
     r = _run_capture(['systemctl', 'list-units', '--no-legend', '--no-pager',
-                      '--all', '--output=json', 'radiod@*.service'])
+                      '--all', '--output=json', 'radiod@*.service',
+                      'ka9q-radio@*.service'])
     try:
         units = json.loads(r.stdout)
     except Exception:
         units = []
 
-    cpus: set = set()
+    by_unit: dict = {}
     for u in units:
         name = u.get('unit', '')
         if not name:
@@ -510,8 +517,78 @@ def get_radiod_cpus() -> set:
         r2 = _run_capture(['systemctl', 'show', '-p', 'CPUAffinity', '--value', name])
         mask = r2.stdout.strip()
         if mask:
-            cpus.update(parse_cpu_mask(mask))
+            by_unit[name] = parse_cpu_mask(mask)
+    return by_unit
+
+
+def get_radiod_cpus() -> set:
+    """Return the set of CPU numbers assigned to radiod via systemd CPUAffinity."""
+    cpus: set = set()
+    for c in get_radiod_cpus_by_unit().values():
+        cpus.update(c)
     return cpus
+
+
+# ---------------------------------------------------------------------------
+# Clock policy: which CPUs run fast
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ClockPlan:
+    """Which CPUs get the radiod clock and which are capped.
+
+    ``fast_cpus`` receive ``radiod_max_mhz``; every other CPU — including,
+    in ``fft-pair`` mode, radiod's own non-fft CPUs (``capped_radiod_cpus``)
+    — receives ``other_max_mhz``.  ``fft_cpus`` names the CPU each instance's
+    fft thread is parked on (sigmond-radiod-pin-threads: the LOWEST CPU of
+    the unit's affinity set), one per unit.
+    """
+    mode: str
+    fast_cpus: frozenset
+    capped_radiod_cpus: frozenset
+    fft_cpus: dict          # {unit: cpu}
+
+    def label(self) -> str:
+        return 'fft pair(s)' if self.mode == 'fft-pair' else 'radiod cpus'
+
+
+def sibling_set(cpu: int, physical_cores: list) -> set:
+    """The SMT sibling set containing ``cpu`` (just ``{cpu}`` when unknown).
+
+    SMT siblings share ONE physical clock, so the unit of "fast" is the pair,
+    never a single thread.
+    """
+    for core in physical_cores:
+        if cpu in core:
+            return set(core)
+    return {cpu}
+
+
+def plan_clock_policy(radiod_by_unit: dict, physical_cores: list,
+                      fast_mode: str = 'radiod') -> ClockPlan:
+    """Decide the fast set from the per-unit radiod CPU sets.
+
+    ``radiod``   — every radiod CPU is fast (default, long-standing).
+    ``fft-pair`` — per instance, only the sibling pair holding its fft
+                   thread (the lowest CPU of its set, matching the pinner).
+                   The rest of radiod's CPUs join the capped pool.  A unit
+                   with an empty set contributes nothing; an unknown mode
+                   falls back to ``radiod``.
+    """
+    all_radiod: set = set()
+    for cpus in radiod_by_unit.values():
+        all_radiod.update(cpus)
+    if fast_mode != 'fft-pair' or not radiod_by_unit:
+        return ClockPlan('radiod', frozenset(all_radiod), frozenset(), {})
+    fast: set = set()
+    fft: dict = {}
+    for unit, cpus in radiod_by_unit.items():
+        if not cpus:
+            continue
+        fft_cpu = min(cpus)
+        fft[unit] = fft_cpu
+        fast.update(sibling_set(fft_cpu, physical_cores))
+    return ClockPlan('fft-pair', frozenset(fast), frozenset(all_radiod - fast), fft)
 
 
 # ---------------------------------------------------------------------------
@@ -1206,6 +1283,7 @@ def _batch_systemctl_show(unit_names: list[str]) -> dict[str, dict[str, str]]:
 
 def build_affinity_report(
     topology_cpu_affinity: Optional[dict] = None,
+    topology_cpu_freq: Optional[dict] = None,
 ) -> AffinityReport:
     """Build a complete affinity report from live host state.
 
@@ -1279,12 +1357,26 @@ def build_affinity_report(
     # 'schedutil' or another governor.
     expected_gov = (topology_cpu_affinity or {}).get(
         'radiod_governor', 'performance')
-    for cpu in sorted(radiod_cpus_set):
+    # In fft-pair clock mode only the fft pair runs the radiod governor; the
+    # rest of radiod's CPUs are capped, and a cap is inert under
+    # 'performance' (that governor drives the core to its top P-state
+    # regardless of scaling_max_freq — measured at KX4AZ-T), so they are
+    # deliberately on powersave/schedutil and must not be flagged.
+    fast_mode = (topology_cpu_freq or {}).get('fast_mode', 'radiod')
+    clock = plan_clock_policy(plan.radiod, caps.physical_cores, fast_mode)
+    for cpu in sorted(clock.fast_cpus):
         gov = caps.governors.get(cpu)
         if gov and gov != expected_gov:
             warnings.append(
                 f"governor {gov!r} on radiod cpu{cpu} — expected "
                 f"{expected_gov!r}"
+            )
+    for cpu in sorted(clock.capped_radiod_cpus):
+        gov = caps.governors.get(cpu)
+        if gov == 'performance':
+            warnings.append(
+                f"governor 'performance' on capped radiod cpu{cpu} — the "
+                f"fft-pair cap is inert under it; run `smd admin diag cpu-freq --apply`"
             )
 
     isol = caps.cmdline_isolcpus or caps.isolated_cpus
