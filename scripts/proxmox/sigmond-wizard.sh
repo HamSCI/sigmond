@@ -1005,7 +1005,14 @@ for i in 1 2 3; do
     sleep 2
 done
 if [ -z "$IP" ]; then
-    echo "sigmond-vm: the guest agent reports no IPv4 yet — check the VM's network" >&2; exit 1
+    # Agent-free fallback (AI6VN 2026-09-09): the bridge's ARP table knows
+    # the VM's address even when qemu-guest-agent is wedged.
+    _mac=$(qm config "$VMID" 2>/dev/null | grep -oE "(virtio|e1000|vmxnet3|rtl8139)=[0-9A-Fa-f:]{17}" | head -1 | cut -d= -f2 | tr A-Z a-z)
+    [ -n "$_mac" ] && IP=$(ip -4 neigh show 2>/dev/null | awk -v m="$_mac" 'tolower($5)==m && $1 !~ /^169\.254\./ {print $1; exit}')
+    [ -n "$IP" ] && echo "sigmond-vm: guest agent not answering — using ARP address $IP" >&2
+fi
+if [ -z "$IP" ]; then
+    echo "sigmond-vm: the guest agent reports no IPv4 yet and ARP has no entry — check the VM's network" >&2; exit 1
 fi
 if [ "${1:-}" = "--ip" ]; then echo "$IP"; exit 0; fi
 # dedicated known_hosts: sigmond-setup clears it when it regenerates the
@@ -1182,13 +1189,29 @@ import os, re, select, socket, subprocess, sys
 
 port = int(sys.argv[1])
 vmid = os.environ.get("SIGMOND_VMID", "120")
+ips = []
 try:
     out = subprocess.run(["qm", "agent", vmid, "network-get-interfaces"],
                          capture_output=True, text=True, timeout=10).stdout
+    ips = [ip for ip in re.findall(r'"ip-address"\s*:\s*"(\d+\.\d+\.\d+\.\d+)"', out)
+           if not ip.startswith("127.")]
 except Exception:
-    sys.exit(1)
-ips = [ip for ip in re.findall(r'"ip-address"\s*:\s*"(\d+\.\d+\.\d+\.\d+)"', out)
-       if not ip.startswith("127.")]
+    pass
+if not ips:
+    # Agent-free fallback (AI6VN 2026-09-09): a wedged qemu-guest-agent must
+    # not take the RAC channels down with it.  The host's bridge learned the
+    # VM's address from ARP; look up the VM's NIC MAC in the neighbour table.
+    try:
+        cfg = subprocess.run(["qm", "config", vmid], capture_output=True, text=True, timeout=10).stdout
+        mac = re.search(r'(?:virtio|e1000|vmxnet3|rtl8139)=([0-9A-Fa-f:]{17})', cfg)
+        neigh = subprocess.run(["ip", "-4", "neigh", "show"], capture_output=True, text=True, timeout=10).stdout
+        if mac:
+            m = mac.group(1).lower()
+            ips = [l.split()[0] for l in neigh.splitlines()
+                   if "lladdr" in l and l.split()[l.split().index("lladdr") + 1].lower() == m
+                   and not l.startswith("169.254.")]
+    except Exception:
+        pass
 if not ips:
     sys.exit(1)
 try:
