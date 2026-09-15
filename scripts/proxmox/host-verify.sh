@@ -17,7 +17,8 @@ USB_VID_DID="${USB_VID_DID:-${1:-}}"
 emit() { printf '%s=%q\n' "$1" "$2"; }
 log()  { printf '# %s\n' "$*" >&2; }
 
-mapfile -t USB_ADDRS < <(lspci -nn | grep "\[${USB_VID_DID}\]" | awk '{print $1}')
+# USB_VID_DID may be a comma-separated list of controller ids.
+mapfile -t USB_ADDRS < <(lspci -nn | grep -E "\[(${USB_VID_DID//,/|})\]" | awk '{print $1}')
 [[ ${#USB_ADDRS[@]} -gt 0 ]] || { emit VERIFY_RESULT "no_devices_match"; exit 1; }
 
 # Each USB controller must show vfio-pci as the driver in use.

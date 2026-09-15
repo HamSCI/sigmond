@@ -79,21 +79,41 @@ for line in "${USB_LINES[@]}"; do
     USB_BY_ID[$vid_did]="${USB_BY_ID[$vid_did]:-} $addr"
 done
 
-# Pick the vendor:device ID that appears at exactly the desired count (>=2,
-# and matches no non-USB device). For AMD Renoir/Cezanne this is 1022:1639.
+# Take EVERY vendor:device id that belongs only to USB controllers — not the
+# first one that wins a race.  Until 2026-09-15 this loop broke on its first
+# match while iterating "${!USB_BY_ID[@]}", which bash yields in hash order:
+# on a host with more than one kind of USB controller the winner was
+# arbitrary and every controller with a different id stayed bound to the
+# host forever, with nothing said about it.  That is what a device plugged
+# into a front USB-C port looks like — such a port is routinely a separate
+# xHCI function (or a USB4 host interface, class 0c0340, which also matches
+# the lspci filter above) from the rear Type-A ports.  The device is present
+# and healthy on the host and simply never reaches the VM.
+#
+# vfio-pci ids= already accepts a comma-separated list, and host-apply /
+# host-verify now expand it, so passing several ids costs nothing.
 USB_VID_DID=""
-for id in "${!USB_BY_ID[@]}"; do
+USB_ADDRS_FOR_ID=""
+USB_SKIPPED=""
+for id in $(printf '%s\n' "${!USB_BY_ID[@]}" | sort); do
     count_total="$(lspci -nn | grep -c "\\[${id}\\]" || true)"
     # Count matching *USB* lines: pipe one-per-line into grep -c.
     count_usb="$(printf '%s\n' "${USB_LINES[@]}" | grep -cE "\\[${id}\\]" || true)"
     if [[ "$count_total" == "$count_usb" && "$count_usb" -ge 1 ]]; then
-        USB_VID_DID="$id"
-        USB_ADDRS_FOR_ID="${USB_BY_ID[$id]## }"
-        break
+        USB_VID_DID="${USB_VID_DID:+$USB_VID_DID,}$id"
+        USB_ADDRS_FOR_ID="${USB_ADDRS_FOR_ID:+$USB_ADDRS_FOR_ID }${USB_BY_ID[$id]## }"
+    else
+        # Shares its id with a non-USB device, so binding it to vfio-pci
+        # would drag that device across too.  Not passed through — and the
+        # operator is told, because any device on it will be invisible to
+        # the VM no matter which port it is in.
+        USB_SKIPPED="${USB_SKIPPED:+$USB_SKIPPED }${id}:${USB_BY_ID[$id]## }"
+        log "USB controller $id NOT passed through (id is shared with non-USB devices): ${USB_BY_ID[$id]## }"
     fi
 done
 
 [[ -n "$USB_VID_DID" ]] || die "no USB controller vendor:device ID is unique to USB controllers — manual config needed"
+log "USB controllers passed through: $USB_VID_DID (${USB_ADDRS_FOR_ID})"
 
 # ─── verify IOMMU group isolation ─────────────────────────────────────────────
 IOMMU_OK=1
@@ -155,6 +175,7 @@ emit DISCOVERY_RESULT "ok"
 emit VMID "$VMID"
 emit USB_VID_DID "$USB_VID_DID"
 emit USB_ADDRS_FOR_ID "${USB_ADDRS_FOR_ID## }"
+emit USB_SKIPPED "$USB_SKIPPED"
 emit IOMMU_OK "$IOMMU_OK"
 emit HOST_CPU_COUNT "$HOST_CPU_COUNT"
 emit HT_PATTERN "$HT_PATTERN"

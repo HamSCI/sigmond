@@ -286,45 +286,139 @@ echo "  (you'll get a review screen to fix any answer before it's applied)"
 echo "──────────────────────────────────────────────────────"
 
 # ── external-device pre-flight ─────────────────────────────────────────────
-# Runs BEFORE the questions.  USB controller passthrough to the VM is
-# configured by firstboot AFTER this wizard (and needs a reboot), so at this
-# moment every external device is on the PROXMOX HOST — host lsusb is the
-# right place to look, not `gexec lsusb`.
+# Runs BEFORE the questions, and must ask WHICHEVER SIDE currently owns the
+# USB controllers.  On a first install that is the Proxmox host: passthrough
+# is configured by firstboot after this wizard and needs a reboot.  After
+# that reboot the controllers belong to vfio-pci and the host has no USB at
+# all, so `sigmond-setup --reconfigure` asking host lsusb reported every
+# device as NOT DETECTED even with everything plugged in and working.
+#
+# A device can also be present on the host and still never reach the VM, if
+# it sits on a USB controller that was not passed through — routinely the
+# case for a front USB-C port, which is often a separate xHCI from the rear
+# ports.  "Not detected" and "on the wrong controller" need different
+# actions, so the two are distinguished below rather than both reported as
+# absent.
 #
 # This NEVER blocks.  A station with nothing plugged in must still reach the
 # end of the wizard, because the single most valuable outcome of a failed
 # install is a working RAC tunnel: it lets a remote admin connect and finish
 # the job.  So we report what is missing, plainly, and carry on.
 HAVE_GPSDO=0; HAVE_RX888=0; HAVE_TS1=0; HAVE_MAG=0; GPSDO_MODEL=""
+RX888_ID=""; GPSDO_ID=""; MAG_ID=""; PREFLIGHT_SRC=host; PREFLIGHT_WRONG_CTRL=0
+
+# PCI address of the USB controller a given VID:PID sits behind, or "" if the
+# device is not on this machine's bus.  /sys/bus/usb/devices is flat and
+# hub-transparent — a device at 4-1.4 behind a hub at 4-1 is its own entry —
+# so hub depth is irrelevant here; the controller is the last PCI address in
+# the resolved sysfs path.
+_usb_ctrl() {
+    local id="$1" d v pr
+    for d in /sys/bus/usb/devices/*; do
+        [ -r "$d/idVendor" ] || continue
+        v=$(cat "$d/idVendor" 2>/dev/null); pr=$(cat "$d/idProduct" 2>/dev/null)
+        if [ "$v:$pr" = "$id" ]; then
+            readlink -f "$d" 2>/dev/null \
+              | grep -oE '0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]' | tail -1
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Is that controller in the set firstboot will hand to the VM?  Unknown
+# (no layout yet) is reported as unknown, never as a pass.
+_ctrl_passed() {
+    local addr="${1#0000:}" ids
+    [ -n "$addr" ] || return 2
+    ids=$(sed -n 's/^USB_VID_DID=//p' /etc/sigmond-appliance/layout.env 2>/dev/null | tr -d "'\"")
+    [ -n "$ids" ] || return 2
+    lspci -nn -s "$addr" 2>/dev/null | grep -qE "\[(${ids//,/|})\]"
+}
+
+# One line per device: found, and if found, whether the VM will actually see
+# it.  This is the sentence that distinguishes "nothing plugged in" from
+# "plugged into a port whose controller stays on the host".
+_dev_line() {
+    local ok="$1" label="$2" id="$3" note="$4" ctrl
+    if [ "$ok" != 1 ]; then
+        printf '  ✗ %-22s — NOT DETECTED (%s)\n' "$label" "$note"
+        return
+    fi
+    if [ "$PREFLIGHT_SRC" != "host" ]; then
+        printf '  ✓ %s\n' "$label"          # asked the VM: seeing it IS the proof
+        return
+    fi
+    ctrl=$(_usb_ctrl "$id")
+    if [ -z "$ctrl" ]; then
+        printf '  ✓ %s\n' "$label"
+        return
+    fi
+    _ctrl_passed "$ctrl"; local rc=$?
+    if [ "$rc" = 0 ]; then
+        printf '  ✓ %-22s (USB controller %s → passed to the VM)\n' "$label" "${ctrl#0000:}"
+    elif [ "$rc" = 2 ]; then
+        printf '  ✓ %-22s (USB controller %s)\n' "$label" "${ctrl#0000:}"
+    else
+        printf '  ! %-22s on USB controller %s, which is NOT passed to the VM\n' "$label" "${ctrl#0000:}"
+        printf '      the VM will not see it. Move it to a port on a passed-through\n'
+        printf '      controller (usually the REAR USB ports), then: sigmond-setup --reconfigure\n'
+        PREFLIGHT_WRONG_CTRL=1
+    fi
+}
 
 preflight_devices() {
-    local usb; usb=$(lsusb 2>/dev/null || true)
+    local usb
+    PREFLIGHT_SRC=host
+    PREFLIGHT_WRONG_CTRL=0
+    # Controllers already handed over?  Then the host has no USB and the VM
+    # is the only place worth asking.
+    if grep -qE '^hostpci[0-9]+:' "/etc/pve/qemu-server/${VMID}.conf" 2>/dev/null; then
+        PREFLIGHT_SRC=vm
+        usb=$(qm guest exec "$VMID" --timeout 20 -- /usr/bin/lsusb 2>/dev/null </dev/null \
+              | python3 -c 'import json,sys
+try:  print(json.load(sys.stdin).get("out-data",""))
+except Exception: pass' 2>/dev/null || true)
+    else
+        usb=$(lsusb 2>/dev/null || true)
+    fi
+    # Keep the id that actually matched, not just yes/no: the controller
+    # lookup below needs it to answer "and can the VM see it?".
     # RX888 — the PID set the bring-up branch below matches on too.
-    echo "$usb" | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100' && HAVE_RX888=1
+    RX888_ID=$(echo "$usb" | grep -oiE '04b4:00(f[013]|bc)|f4b3:0100' | head -1 | tr 'A-Z' 'a-z')
+    [ -n "$RX888_ID" ] && HAVE_RX888=1
     # Leo Bodnar GPSDOs, per gpsdo-monitor/models/registry.py:
     #   LBE-1420 0x2443 · LBE-1421 0x2444 · LBE-1423 0x226f · LBE-Mini 0x2211
-    if   echo "$usb" | grep -qiE '1dd2:2211'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-Mini"
-    elif echo "$usb" | grep -qiE '1dd2:2444'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1421"
-    elif echo "$usb" | grep -qiE '1dd2:2443'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1420"
-    elif echo "$usb" | grep -qiE '1dd2:226f'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1423"
+    if   echo "$usb" | grep -qiE '1dd2:2211'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-Mini"; GPSDO_ID="1dd2:2211"
+    elif echo "$usb" | grep -qiE '1dd2:2444'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1421"; GPSDO_ID="1dd2:2444"
+    elif echo "$usb" | grep -qiE '1dd2:2443'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1420"; GPSDO_ID="1dd2:2443"
+    elif echo "$usb" | grep -qiE '1dd2:226f'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1423"; GPSDO_ID="1dd2:226f"
     fi
     # TS-1 TimeSync: the USB interface enumerates as an Adafruit SAMD21
     # module, so the VID/PID alone is not proof — confirmed by asking the
     # CLI, which answers with a "TimeSync vN.N, Board ID #..." banner.
     echo "$usb" | grep -qiE '239a:801e' && HAVE_TS1=1
     # RM3100 magnetometer via the Pololu isolated USB-I2C adapter.
-    echo "$usb" | grep -qiE '1ffb:250[23]' && HAVE_MAG=1
+    MAG_ID=$(echo "$usb" | grep -oiE '1ffb:250[23]' | head -1 | tr 'A-Z' 'a-z')
+    [ -n "$MAG_ID" ] && HAVE_MAG=1
 
     echo ""
-    echo "  ── Attached equipment ───────────────────────────────"
-    if [ "$HAVE_RX888" = 1 ]; then echo "  ✓ RX888 SDR"
-    else echo "  ✗ RX888 SDR          — NOT DETECTED (no HF reception until fitted)"; fi
-    if [ "$HAVE_GPSDO" = 1 ]; then echo "  ✓ GPSDO ($GPSDO_MODEL)"
-    else echo "  ✗ GPSDO              — NOT DETECTED (timing falls back to NTP)"; fi
-    if [ "$HAVE_TS1" = 1 ]; then echo "  ✓ TS-1 TimeSync injector"
-    else echo "  ✗ TS-1 TimeSync      — NOT DETECTED (no ns-class timing)"; fi
-    if [ "$HAVE_MAG" = 1 ]; then echo "  ✓ RM3100 magnetometer"
-    else echo "  ✗ RM3100 magnetometer — NOT DETECTED (no magnetometer data)"; fi
+    if [ "$PREFLIGHT_SRC" = vm ]; then
+        echo "  ── Attached equipment (as seen by the decoder VM) ───"
+    else
+        echo "  ── Attached equipment (as seen by the Proxmox host) ─"
+    fi
+    _dev_line "$HAVE_RX888" "RX888 SDR"           "$RX888_ID"  "no HF reception until fitted"
+    _dev_line "$HAVE_GPSDO" "GPSDO ($GPSDO_MODEL)" "$GPSDO_ID" "timing falls back to NTP"
+    _dev_line "$HAVE_TS1"   "TS-1 TimeSync"       "239a:801e"  "no ns-class timing"
+    _dev_line "$HAVE_MAG"   "RM3100 magnetometer" "$MAG_ID"    "no magnetometer data"
+    if [ "${PREFLIGHT_WRONG_CTRL:-0}" = 1 ]; then
+        echo ""
+        echo "  One or more devices are on a USB controller that is NOT handed to"
+        echo "  the decoder VM.  They work on this host but the station cannot use"
+        echo "  them.  A hub does not cause this — a hub is transparent — but the"
+        echo "  PORT the hub is plugged into decides which controller it is on."
+    fi
 
     if [ "$HAVE_RX888" = 0 ] || [ "$HAVE_GPSDO" = 0 ] || [ "$HAVE_TS1" = 0 ] || [ "$HAVE_MAG" = 0 ]; then
         echo ""
@@ -894,7 +988,20 @@ if [ -f /root/sigmond-appliance/site-keys.tar.gz ]; then
 fi
 
 RADIOD_STATE="unknown"
-if gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
+# On a FIRST install the VM owns no USB controllers yet — firstboot binds them
+# after this wizard and reboots — so asking the guest for an RX888 is a test
+# that cannot pass, and every first install fell into the FX3-latch branch
+# below and told the operator the SDR was "NOT VISIBLE TO THE DECODER VM".
+# That message is true and useful AFTER passthrough; before it, it is just
+# the install order.  Check whether the handover has happened at all first.
+VM_HAS_USB=0
+grep -qE '^hostpci[0-9]+:' "/etc/pve/qemu-server/${VMID}.conf" 2>/dev/null && VM_HAS_USB=1
+if [ "$VM_HAS_USB" = 0 ] && [ "$HAVE_RX888" = 1 ]; then
+    say "RX888 present on the host; its USB controller is handed to the VM at the reboot that follows"
+    RADIOD_STATE="SDR bring-up runs after the reboot that completes passthrough"
+elif [ "$VM_HAS_USB" = 0 ]; then
+    RADIOD_STATE="no RX888 seen; nothing to bring up"
+elif gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
     say "RX888 detected — starting SDR bring-up now (takes a few minutes)..."
     # Direct call, not a timer poke: the operator is running this wizard with the
     # radio already plugged in, so bringing it up is what they asked for.  This is

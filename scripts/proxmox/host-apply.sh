@@ -112,7 +112,7 @@ update-initramfs -u -k all >/dev/null
 # the base config (isolcpus cmdline + vfio-pci binding) is already active.
 REBOOT_REQUIRED=1
 if grep -qw "isolcpus=${ISOLCPUS_RANGE}" /proc/cmdline; then
-    first_addr="$(lspci -nn | grep "\[${USB_VID_DID}\]" | awk '{print $1; exit}')"
+    first_addr="$(lspci -nn | grep -E "\[(${USB_VID_DID//,/|})\]" | awk '{print $1; exit}')"
     if [[ -n "$first_addr" ]] && \
        [[ "$(basename "$(readlink -f /sys/bus/pci/devices/0000:${first_addr}/driver 2>/dev/null || true)")" == "vfio-pci" ]]; then
         REBOOT_REQUIRED=0
@@ -162,7 +162,11 @@ if [[ ${#PCI_LINES[@]} -gt 0 ]]; then
 fi
 
 # Find USB controller PCI addresses (host-side, sysfs).
-mapfile -t USB_ADDRS < <(lspci -nn | grep "\[${USB_VID_DID}\]" | awk '{print $1}')
+# USB_VID_DID may name SEVERAL controller ids, comma-separated (a front
+# USB-C port is often a different xHCI from the rear ports), so match any of
+# them.  Every one of these becomes a hostpci line: a controller left behind
+# means every device on it is invisible to the VM.
+mapfile -t USB_ADDRS < <(lspci -nn | grep -E "\[(${USB_VID_DID//,/|})\]" | awk '{print $1}')
 [[ ${#USB_ADDRS[@]} -gt 0 ]] || { echo "ERROR: no PCI devices match $USB_VID_DID" >&2; exit 1; }
 
 i=0
