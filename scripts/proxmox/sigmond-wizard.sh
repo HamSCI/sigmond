@@ -104,9 +104,24 @@ HamSCI unsecured (direct)|$_hs|DIRECT|off|$RAC_PORT_UNSEC
 wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
 wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
             else
-                RAC_TIERS="HamSCI (secure)|$_hs|http://$_hs:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
-HamSCI (UNSECURED)|$_hs|http://$_hs:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC
-wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+                # NO HamSCI rung here, and that is deliberate.  Until
+                # 2026-09-15 this branch led with two rungs pointing at
+                # http://vpn.hamsci.org:35737/register.  Nothing has ever
+                # served that URL: the HamSCI gateway runs frps (35735),
+                # frps-secure (35736), the TOFU login plugin and a dashboard
+                # — there is no registrar on it at all (verified on the box,
+                # 10.3.2.1, 2026-09-15).  So both rungs always failed and the
+                # ladder walked silently on to gw2, which auto-assigns from
+                # its 500 block.  That is precisely how two Scranton installs
+                # became RAC 506 (W3USR_10) and 507 (W3USR_9) on the
+                # WSPRDAEMON gateway when they were meant to be on HamSCI.
+                #
+                # A station reaches HamSCI by the REGISTRAR-LESS DIRECT rungs
+                # above, which need a DASI number to derive RAC 220+N.  With
+                # no number there is no way to choose a HamSCI RAC, so gw2 is
+                # the only honest option — but say so out loud rather than
+                # discovering it four failed rungs later.
+                RAC_TIERS="wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
 wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
             fi
             ;;
@@ -118,6 +133,40 @@ wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNS
         RAC_TIERS="pinned|$_ps|${SIGMOND_RAC_REGISTRAR:-http://$_ps:$RAC_REG_PORT/register}|${SIGMOND_RAC_TLS:-on}|${SIGMOND_RAC_FRPS_PORT:-$RAC_PORT_SECURE}"
     fi
 }
+# A DASI station that skipped the number prompt still BELONGS on HamSCI, and
+# its name says so.  The number was asked for before the station designator
+# was even collected (ask_rac runs before ask_names), so "Enter to skip" was
+# an easy and silent way onto the wrong gateway.  Derive it from the name
+# instead and rebuild the ladder; ask_names calls this, so a re-edit on the
+# review screen re-derives too.  Anchored, like lib/sigmond/station_identity.py,
+# so an ordinary callsign site (W3USR_9) never matches.
+derive_dasi_num() {
+    [ "$RAC_PROFILE" = "dasi" ] || return 0      # operator said not-DASI; respect it
+    [ -z "$DASI_NUM" ] || return 0               # explicit number always wins
+    local _n
+    for _cand in "${DES:-}" "${REPORTER:-}"; do
+        [ -n "$_cand" ] || continue
+        # Three accepted shapes, each needing a separator or the full
+        # three-digit form.  "DASI2" alone is the PROGRAM name, not unit 2,
+        # and must never derive — it would claim RAC 222 and collide with the
+        # real DASI-002 in the roster.  Erring toward no-derivation is safe:
+        # the operator is still asked for the number.
+        _n=$(printf '%s' "$_cand" | tr 'a-z' 'A-Z' | sed -nE \
+             -e 's/^DASI2[-_ ]([0-9]{1,3})$/\1/p' \
+             -e 's/^DASI[-_ ]([0-9]{1,3})$/\1/p' \
+             -e 's/^DASI([0-9]{3})$/\1/p')
+        # 10# or bash reads a leading zero as octal and 008 is fatal, not 8.
+        [ -n "$_n" ] && _n=$((10#$_n))
+        if [ -n "$_n" ] && [ "$_n" -ge 1 ] 2>/dev/null && [ "$_n" -le 99 ]; then
+            DASI_NUM="$_n"
+            say "station name '$_cand' identifies DASI-$(printf '%03d' "$_n") — using the HamSCI gateway (RAC $((220 + _n)))"
+            build_rac_tiers
+            return 0
+        fi
+    done
+    return 0
+}
+
 build_rac_tiers
 RAC_SERVER="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
 RAC_TLS="on"
@@ -428,7 +477,10 @@ ask_rac() {
             echo "  Secure HamSCI access (vpn.hamsci.org:35736, TLS + trust-on-first-use)"
             echo "  needs no token or account — this station's key is filed on first connect."
         else
-            echo "  No DASI number — the secure HamSCI rung is skipped; falling back to gw2."
+            echo "  No DASI number yet. If the station designator names a DASI unit"
+            echo "  (DASI-007, DASI2-07) the number is taken from it at the naming step."
+            echo "  Otherwise this station registers with gw2.wsprdaemon.org, which"
+            echo "  auto-assigns a RAC in its 500 block — NOT a HamSCI number."
         fi
     fi
     build_rac_tiers
@@ -505,6 +557,7 @@ ask_names() {
     [ -z "$DES" ] && DES="$DES_DEFAULT"
     VMNAME="$DES"
     PMNAME="$DES-PM"
+    derive_dasi_num
 }
 
 # ── take the console cleanly ────────────────────────────────────────────
@@ -556,7 +609,17 @@ while :; do
     echo "  1) Reporter:  $REPORTER"
     echo "  2) Grid:      $GRID"
     echo "  3) Antenna:   ${ANTENNA:-(none)}"
-    echo "  4) Remote:    $( [ -n "$RAC_NUM" ] && echo 'enabled — VM ssh/web + host ssh + Proxmox UI (number auto-assigned)' || echo 'disabled' )"
+    if [ -n "$RAC_NUM" ]; then
+        _rgw="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
+        if [ -n "$DASI_NUM" ]; then
+            _rwhich="DASI-$(printf '%03d' "$DASI_NUM") → RAC $((220 + DASI_NUM))"
+        else
+            _rwhich="number auto-assigned by the gateway"
+        fi
+        echo "  4) Remote:    enabled via ${_rgw} ($_rwhich)"
+    else
+        echo "  4) Remote:    disabled"
+    fi
     if [ -n "$PSWS_ID" ]; then
         echo "  5) PSWS:      station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}${PSWS_MAG_STATION:+ (station $PSWS_MAG_STATION)}  (key registered after install)"
     else
