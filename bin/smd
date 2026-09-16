@@ -6356,6 +6356,67 @@ def cmd_install(args) -> int:
     return _install_full_suite(args)
 
 
+def _post_install_fixups(name: str) -> None:
+    """Deployment-environment corrections applied after a client installs.
+
+    igmp-querier bakes the NIC name into its unit at install time
+    (ExecStart ... --interface ens3).  An appliance image is built in a VM
+    whose NIC is ens3 and deployed to VMs whose NIC is ens18, so the baked
+    name is wrong on arrival: the service exits 1 immediately, systemd
+    restarts it every 5 s forever, and four journal lines per restart make it
+    the loudest thing on the station.  Found at 2,096 restarts on W3USR-9
+    (2026-09-15); seen before at AI6VN.
+
+    The NIC is resolved at each START instead, which is the only time the
+    answer is knowable.  That happens in a small helper script rather than
+    inline in ExecStart: systemd parses ExecStart with its own quoting rules,
+    not a shell's, so a nested command substitution there is a trap.  The
+    helper also fails loudly when there is no default route, instead of
+    starting the querier on the wrong NIC.
+
+    Written as a wrapper rather than upstream's `--interface auto` because
+    the released querier has no such flag (HamSCI/igmp-querier PR #1); if
+    that lands, this keeps working unchanged.
+    """
+    if name != 'igmp-querier':
+        return
+    helper = Path('/usr/local/sbin/sigmond-igmp-querier-start')
+    helper_body = (
+        '#!/bin/sh\n'
+        '# Written by smd. The NIC name is not knowable at image-build time:\n'
+        '# the golden VM builds on ens3, deployed VMs run ens18.\n'
+        'set -eu\n'
+        'IF=$(ip -4 route show default | awk \'{print $5; exit}\')\n'
+        '[ -n "$IF" ] || { echo "igmp-querier: no default-route interface" >&2; exit 1; }\n'
+        'exec /usr/bin/python3 /usr/local/bin/igmp_querier.py --interface "$IF"\n'
+    )
+    dropin = Path('/etc/systemd/system/igmp-querier.service.d/interface.conf')
+    dropin_body = (
+        '# Written by smd. See sigmond-igmp-querier-start.\n'
+        '[Service]\n'
+        'ExecStart=\n'
+        f'ExecStart={helper}\n'
+    )
+    import tempfile as _tf
+    try:
+        for target, body, mode in ((helper, helper_body, '755'),
+                                   (dropin, dropin_body, '644')):
+            with _tf.NamedTemporaryFile('w', delete=False) as tf:
+                tf.write(body)
+                tmp = tf.name
+            _run(['mkdir', '-p', str(target.parent)], sudo=True)
+            r = _run(['install', '-m', mode, tmp, str(target)], sudo=True)
+            Path(tmp).unlink(missing_ok=True)
+            if r.returncode != 0:
+                _warn(f'igmp-querier: could not write {target}: '
+                      f'{(r.stderr or "").strip()[:120]}')
+                return
+        _run(['systemctl', 'daemon-reload'], sudo=True)
+        _ok('igmp-querier: NIC resolved at start, not baked at install')
+    except OSError as exc:
+        _warn(f'igmp-querier: could not install the NIC resolver: {exc}')
+
+
 def _enable_after_install(entry, args) -> None:
     """Enable a just-installed component in topology unless --no-enable.
 
@@ -6511,6 +6572,7 @@ def _install_single_client(args) -> int:
 
     if result:
         _ok(f'{entry.name} installed successfully')
+        _post_install_fixups(entry.name)
         _enable_after_install(entry, args)
         _info(f'next: smd config init {entry.name}')
         _info(f'      smd start {entry.name}')
@@ -6740,6 +6802,7 @@ def _install_full_suite(args) -> int:
                                         catalog=catalog)
             if result:
                 _ok(f'{entry.name} installed')
+                _post_install_fixups(entry.name)
             else:
                 _err(f'{entry.name} install failed')
                 errors += 1

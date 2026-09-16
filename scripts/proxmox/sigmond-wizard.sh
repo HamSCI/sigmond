@@ -1080,6 +1080,14 @@ say "SDR/radiod: $RADIOD_STATE"
 say "setting up VM accounts (ONE password — every account tracks this host's root)"
 gexec 30 "id sigmond >/dev/null 2>&1 || useradd -m -s /bin/bash sigmond; usermod -s /bin/bash sigmond; getent group sudo >/dev/null && usermod -aG sudo sigmond || true" \
     || say "WARN: could not ensure sigmond operator user in VM"
+# ...and sudo WITHOUT a password prompt, like the hamsci account beside it
+# (rob 2026-09-15: "there's no reason for it to require").  Membership of the
+# sudo group alone still prompts, and the operator account exists to run smd,
+# systemctl and journalctl all day; on a key-only account reached over ssh
+# the prompt buys nothing.  Written with visudo -c so a malformed file can
+# never lock the account out of sudo entirely.
+gexec 20 "printf '%s\\n' 'sigmond ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/.sigmond.new && chmod 440 /etc/sudoers.d/.sigmond.new && visudo -c -q -f /etc/sudoers.d/.sigmond.new && mv /etc/sudoers.d/.sigmond.new /etc/sudoers.d/sigmond || rm -f /etc/sudoers.d/.sigmond.new" \
+    || say "WARN: could not grant sigmond passwordless sudo in VM"
 # operator accounts must read fleet state: smd status parses
 # group-readable client configs (hamsci hit Errno 13 on
 # timestd-config.toml, 2026-07-30) — grant the service groups.
