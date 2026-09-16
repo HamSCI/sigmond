@@ -1088,6 +1088,15 @@ gexec 30 "id sigmond >/dev/null 2>&1 || useradd -m -s /bin/bash sigmond; usermod
 # never lock the account out of sudo entirely.
 gexec 20 "printf '%s\\n' 'sigmond ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/.sigmond.new && chmod 440 /etc/sudoers.d/.sigmond.new && visudo -c -q -f /etc/sudoers.d/.sigmond.new && mv /etc/sudoers.d/.sigmond.new /etc/sudoers.d/sigmond || rm -f /etc/sudoers.d/.sigmond.new" \
     || say "WARN: could not grant sigmond passwordless sudo in VM"
+# ...and the shell conveniences install.sh seeds for operator accounts.
+# install.sh only seeds sigmond "if it already exists", and at image-build
+# time it does NOT: this wizard creates the account, long after the image
+# was built.  So a freshly installed station had tmux mouse support for
+# hamsci and not for sigmond, which is the account the panel tells operators
+# to use (rob 2026-09-15: "it wasn't there after installation").
+# Seed-if-absent, so an operator who set their own config keeps it.
+gexec 20 "test -e /home/sigmond/.tmux.conf || { printf '%s\\n' '# added by sigmond-setup — tmux mouse support' 'set -g mouse on' > /home/sigmond/.tmux.conf && chown sigmond:sigmond /home/sigmond/.tmux.conf; }" \
+    || say "WARN: could not seed sigmond's .tmux.conf in VM"
 # operator accounts must read fleet state: smd status parses
 # group-readable client configs (hamsci hit Errno 13 on
 # timestd-config.toml, 2026-07-30) — grant the service groups.
