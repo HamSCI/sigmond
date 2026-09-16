@@ -18121,6 +18121,66 @@ def cmd_instance_remove(args) -> int:
     return 0
 
 
+def _instance_radiod_sources(config_path) -> list:
+    """Radiod status names a per-instance config actually declares.
+
+    Accepts both shapes in the tree: `[[radiod]]` blocks with `status` or
+    `radiod_status` (psk-recorder, meteor-scatter) and a single `[radiod]`
+    table with `status` (wspr-recorder).  A name still on its shipped
+    placeholder does not count as declared.
+    """
+    try:
+        import tomllib
+        data = tomllib.loads(Path(config_path).read_text())
+    except Exception:                                   # noqa: BLE001
+        return []
+    out = []
+    blocks = data.get('radiod')
+    if isinstance(blocks, dict):
+        blocks = [blocks]
+    for b in blocks or []:
+        if not isinstance(b, dict):
+            continue
+        name = (b.get('status') or b.get('radiod_status') or '').strip()
+        if name and 'placeholder' not in name.lower() and not name.startswith('<'):
+            out.append(name)
+    return out
+
+
+def _instance_autowire_radiod(client: str, config_path) -> list:
+    """Copy the radiod sections from the client's own configurator output.
+
+    `smd config init <client>` writes /etc/<client>/<client>-config.toml with
+    a complete, correct radiod section for THIS station — band tables and all.
+    A per-instance config created by `instance add` has none, so rather than
+    synthesising one (and guessing band plans), lift the client's own.
+
+    Returns the source names wired, or [] when there is nothing to copy.
+    """
+    src = Path('/etc') / client / f'{client}-config.toml'
+    if not src.is_file():
+        return []
+    try:
+        text = src.read_text()
+    except OSError:
+        return []
+    idx = text.find('[[radiod]]')
+    if idx < 0:
+        idx = text.find('\n[radiod]')
+        idx = -1 if idx < 0 else idx + 1
+    if idx < 0:
+        return []
+    try:
+        with open(config_path, 'a') as fh:
+            fh.write('\n# --- radiod sources copied from '
+                     f'{src} by `smd admin instance enable` ---\n')
+            fh.write(text[idx:])
+    except OSError as exc:
+        _warn(f'could not wire radiod sources into {config_path}: {exc}')
+        return []
+    return _instance_radiod_sources(config_path)
+
+
 def cmd_instance_enable(args) -> int:
     if _need_root('instance enable'):
         return 1
@@ -18141,6 +18201,30 @@ def cmd_instance_enable(args) -> int:
     if not paths.config.exists():
         _err(f'{paths.config} missing — run `smd admin instance add` first')
         return 1
+
+    # A config that exists is not a config that works.  `instance add` writes
+    # a skeleton with `sources = []` and no radiod block; the recorders exit 1
+    # on it, and with Restart=always that is a crashloop, not a failure anyone
+    # sees.  W3USR-9, 2026-09-15: psk-recorder and meteor-scatter restarted
+    # every 5 s while systemd reported the units enabled, and wspr-recorder's
+    # equivalent flooded the journal at ~26 lines/s.  So: wire the source if
+    # the client's own configurator has already produced one, and otherwise
+    # refuse to enable rather than leave a unit failing in a loop.
+    _srcs = _instance_radiod_sources(paths.config)
+    if not _srcs:
+        _srcs = _instance_autowire_radiod(args.client, paths.config)
+        if _srcs:
+            _ok(f'{paths.config.name}: wired radiod source '
+                f'{", ".join(_srcs)} from the client configurator output')
+    if not _srcs:
+        _err(f'{paths.config} declares no radiod source — not enabling '
+             f'{paths.unit_name}, because it would fail on every start')
+        _info('  give it a source first, either:')
+        _info(f'    smd config init {args.client}        '
+              f'(writes this station\'s radiod + band plan)')
+        _info(f'    smd admin instance edit {args.client} {args.reporter_id}')
+        return 1
+
     import subprocess
     for action in ('enable', 'start'):
         result = subprocess.run(
