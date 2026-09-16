@@ -265,12 +265,35 @@ fi
 rd(){ read "$@" || { echo; say "stdin closed (EOF) — aborting wizard; nothing applied. Rerun: sigmond-setup"; exit 1; }; }
 
 gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
+    # A guest agent that dies mid-wizard used to poison every LATER step:
+    # each one returned "QEMU guest agent is not running", each printed its
+    # own WARN, and the wizard walked on to declare success.  That is how
+    # v3.39/v3.40 shipped a VM with no password and no ssh policy — the two
+    # steps that happen to sit right after the one that killed the agent
+    # (2026-09-16).  A dead agent is now a transient to wait out, not a
+    # silent skip: wait for it to answer again and retry the step ONCE.
+    # A command that merely exits non-zero is NOT retried — that is a real
+    # answer from a live agent.
     local t="$1"; shift
-    local out rc
-    out=$(qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>&1 </dev/null)
-    rc=$(echo "$out" | grep -o '"exitcode" *: *[0-9-]*' | grep -o '[0-9-]*$' | head -1)
-    echo "$out" >> "$LOG"
-    [ "${rc:-1}" = "0" ]
+    local out rc try i
+    for try in 1 2; do
+        out=$(qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>&1 </dev/null)
+        rc=$(echo "$out" | grep -o '"exitcode" *: *[0-9-]*' | grep -o '[0-9-]*$' | head -1)
+        echo "$out" >> "$LOG"
+        [ "${rc:-1}" = "0" ] && return 0
+        case "$out" in
+            *"guest agent is not running"*|*"got timeout"*|*"QGA"*)
+                [ "$try" = 2 ] && return 1
+                say "guest agent stopped answering — waiting for it before retrying"
+                for i in $(seq 1 24); do
+                    qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
+                    sleep 5
+                done
+                ;;
+            *) return 1 ;;
+        esac
+    done
+    return 1
 }
 
 # ── prompts ─────────────────────────────────────────────────────────────────
@@ -1095,7 +1118,16 @@ gexec 20 "printf '%s\\n' 'sigmond ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/.sigm
 # hamsci and not for sigmond, which is the account the panel tells operators
 # to use (rob 2026-09-15: "it wasn't there after installation").
 # Seed-if-absent, so an operator who set their own config keeps it.
-gexec 20 "test -e /home/sigmond/.tmux.conf || { printf '%s\\n' '# added by sigmond-setup — tmux mouse support' 'set -g mouse on' > /home/sigmond/.tmux.conf && chown sigmond:sigmond /home/sigmond/.tmux.conf; }" \
+# ASCII ONLY, and resolve the account's REAL home.  This line as first
+# written carried an em dash — the only non-ASCII byte in any gexec — and
+# wrote to a hardcoded /home/sigmond that need not exist (the template
+# already has a sigmond service account, so the useradd -m above is
+# skipped).  Live effect, v3.39 and v3.40: the guest-exec HUNG, timed out,
+# and took the qemu guest agent down with it, after which EVERY later step
+# failed "QEMU guest agent is not running" — silently skipping the password
+# hash copy and the ssh policy, so the VM shipped with no password login at
+# all (found by the nested test 2026-09-16, twice, deterministic).
+gexec 20 "H=\$(getent passwd sigmond | cut -d: -f6); [ -n \"\$H\" ] || H=/home/sigmond; mkdir -p \"\$H\" && { test -e \"\$H/.tmux.conf\" || { printf '%s\\n' '# added by sigmond-setup - tmux mouse support' 'set -g mouse on' > \"\$H/.tmux.conf\" && chown sigmond:sigmond \"\$H/.tmux.conf\"; }; }" \
     || say "WARN: could not seed sigmond's .tmux.conf in VM"
 # operator accounts must read fleet state: smd status parses
 # group-readable client configs (hamsci hit Errno 13 on
