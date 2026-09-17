@@ -337,6 +337,54 @@ def read_config() -> dict:
         return {}
 
 
+_HUB_LINE = re.compile(r"^Current status for hub (\S+)\s*\[(.*)\]\s*$")
+_PORT_LINE = re.compile(r"^\s*Port (\d+):\s*[0-9a-fA-F]{4}\s*(.*)$")
+
+
+def bootstrap_locations() -> List[Tuple[str, str, bool]]:
+    """Ports to cycle when the card has NEVER been seen, so nothing was learned.
+
+    A latched RX-888 shows up in uhubctl as a port with power (often with the
+    connect bit set, meaning something IS plugged in) and an empty device
+    bracket -- nothing enumerated.  An empty port cannot belong to a working
+    peripheral, so cycling every device-less port on every power-switching hub
+    reaches the card without touching anything that works.  Both halves of a
+    USB3 dock qualify naturally: the SuperSpeed half lists its ports empty too,
+    and cycle_port() cuts all locations before restoring any.
+    """
+    try:
+        r = _run([UHUBCTL], timeout=30)
+    except Exception as exc:                       # uhubctl missing / not root
+        _log(f"bootstrap: uhubctl unavailable: {exc}")
+        return []
+    found: List[Tuple[str, str, bool]] = []
+    hub: Optional[str] = None
+    switchable = False
+    for line in (r.stdout + "\n" + r.stderr).splitlines():
+        m = _HUB_LINE.match(line.strip())
+        if m:
+            hub, switchable = m.group(1), ("ppps" in m.group(2))
+            continue
+        m = _PORT_LINE.match(line)
+        if not (m and hub and switchable):
+            continue
+        dev = re.search(r"\[([^\]]*)\]", m.group(2))
+        if dev and dev.group(1).strip():           # a real device -- never touch
+            continue
+        found.append((hub, m.group(1), False))
+    # Address each hub the way uhubctl accepts it.  A USB3 hub is often
+    # reachable ONLY with --exact ("No compatible devices detected at location
+    # 4-1!" for the plain form on AI6VN's VIA dock), and a cycle whose commands
+    # all fail leaves the card latched while looking like it ran.
+    verified: List[Tuple[str, str, bool]] = []
+    for hub_l, port_l, _ in found:
+        for exact in (False, True):
+            if _uhubctl_sees(hub_l, port_l, exact):
+                verified.append((hub_l, port_l, exact))
+                break
+    return verified
+
+
 def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> bool:
     """Cut and restore VBUS on every known location of the physical port.
 
@@ -419,7 +467,7 @@ def restart_station(radiod_unit: str, consumers: Sequence[str],
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--off-seconds", type=int, default=10,
+    ap.add_argument("--off-seconds", type=int, default=25,
                     help="how long to hold VBUS low (default 10)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the decision and change nothing")
@@ -468,6 +516,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         source = "discovered" if hub else "nothing learned yet"
     locations = [tuple(l) for l in state.get("locations") or []] \
         if not cfg.get("recover_hub") else [(hub, port, False)]
+    bootstrapped = False
 
     if args.probe:
         _log(f"hub={hub} port={port} ({source}) switchable={state.get('switchable')} "
@@ -476,6 +525,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         save_state(state)
         return 0
 
+    if not (hub and port) and not present:
+        # Bootstrap: never seen, nothing learned -- but a latched card is
+        # visible as a device-less port on a switchable hub.  See
+        # bootstrap_locations().
+        boot = bootstrap_locations()
+        if boot:
+            locations = boot
+            hub, port = boot[0][0], boot[0][1]
+            state["switchable"] = True
+            bootstrapped = True
+            _log("bootstrap: the card was never seen here, so no port was "
+                 "learned; cycling every device-less port on a power-switching "
+                 "hub (a latched RX-888 looks exactly like that, and a port "
+                 "with a working device on it is never a candidate): "
+                 + ", ".join(f"{h} p{p}" for h, p, _ in boot))
     if not (hub and port):
         save_state(state)
         _log("no hub/port to cycle: nothing in [radiod] and the card was never "
@@ -483,11 +547,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              + ("it is absent right now; cannot recover" if not present
                 else "unexpected while present"))
         return 0
-    if not radiod_unit:
+    if not radiod_unit and not bootstrapped:
         save_state(state)
         _log("no radiod unit: [radiod].unit unset and not exactly one active "
              "radiod@ instance — set it in topology.toml")
         return 0
+    if not radiod_unit and bootstrapped:
+        # Cycling is what makes the card exist; radiod is configured after.
+        _log("no radiod unit yet — cycling anyway to bring the card back, "
+             "then bring-up can configure radiod against real hardware")
     if state.get("switchable") is False and not cfg.get("recover_hub"):
         save_state(state)
         if not present:
@@ -541,6 +609,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for pattern in missing:
         _log(f"DECLARED CONSUMER NOT FOUND: {pattern} matched no installed "
              f"unit — it will not be restarted; check topology.toml")
+    if not radiod_unit:
+        _log("card recovery done; no radiod unit to start yet — run "
+             "`smd bringup` / the wizard now that the card is present")
+        save_state(state)
+        return 0
     ok = restart_station(radiod_unit, consumers)
     _log("station restored" if ok else "station NOT fully restored")
     return 0 if ok else 1

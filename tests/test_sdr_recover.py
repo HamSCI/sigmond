@@ -204,3 +204,67 @@ class TestDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "usb1").mkdir()
             self.assertIsNone(sdr.locate_rx888(Path(td)))
+
+
+class _CP:
+    """Stand-in for subprocess.CompletedProcess, enough for _run() callers."""
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+# ── bootstrap: recovering a card that was NEVER seen ────────────────────────
+# A fresh install has no learned hub/port, so the helper used to refuse every
+# run ("no hub/port to cycle") while the card sat latched on a hub port --
+# AI6VN on v3.40, 2026-09-17.  A latched RX-888 is visible as a port with no
+# device on it, so those are the bootstrap candidates.
+
+_UHUBCTL_AI6VN = """Current status for hub 4-1 [17ef:1039 VIA Labs, Inc. USB3.0 Hub 000000000, USB 3.10, 4 ports, ppps]
+  Port 1: 02a0 power 5gbps Rx.Detect
+  Port 2: 02a0 power 5gbps Rx.Detect
+  Port 3: 02a0 power 5gbps Rx.Detect
+  Port 4: 02a0 power 5gbps Rx.Detect
+Current status for hub 2-1 [17ef:103a VIA Labs, Inc. USB2.0 Hub 000000000, USB 2.10, 5 ports, ppps]
+  Port 1: 0103 power enable connect [239a:801e Adafruit Trinket M0 650670C7]
+  Port 2: 0103 power enable connect [1dd2:2211 Leo Bodnar Electronics mini GPS Reference Clock 9DC7A57A42]
+  Port 3: 0103 power enable connect [1ffb:2503 Pololu Corporation Pololu Isolated USB-to-I2C Adapter 7A00]
+  Port 4: 0101 power connect []
+  Port 5: 0503 power highspeed enable connect [17ef:103b VIA Labs, Inc. USB Billboard Device 0000]
+Current status for hub 3 [1d6b:0002 Linux 6.1 xhci-hcd, USB 2.00, 1 ports]
+  Port 1: 0100 power
+"""
+
+
+def test_bootstrap_picks_only_device_less_ports(monkeypatch):
+    """The latched port and the SuperSpeed half, and nothing that is in use."""
+    mod = _load()
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: _CP(_UHUBCTL_AI6VN))
+    # every candidate is addressable in its plain form for this test
+    monkeypatch.setattr(mod, "_uhubctl_sees", lambda h, p, e: not e)
+    got = mod.bootstrap_locations()
+    assert ("2-1", "4", False) in got, "the latched port must be a candidate"
+    assert all(h == "4-1" for h, p, e in got if h != "2-1")
+    # the working peripherals are never cycled
+    for busy in ("1", "2", "3", "5"):
+        assert not any(h == "2-1" and p == busy for h, p, _ in got), \
+            f"2-1 port {busy} has a device on it and must never be cycled"
+
+
+def test_bootstrap_skips_hubs_without_power_switching(monkeypatch):
+    """A hub with no ppps flag cannot switch power, so it is not a candidate."""
+    mod = _load()
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: _CP(_UHUBCTL_AI6VN))
+    monkeypatch.setattr(mod, "_uhubctl_sees", lambda h, p, e: not e)
+    assert not any(h == "3" for h, p, e in mod.bootstrap_locations())
+
+
+def test_bootstrap_uses_exact_when_plain_is_refused(monkeypatch):
+    """uhubctl rejects some USB3 hubs' own location unless told --exact; a
+    cycle whose commands all fail leaves the card latched while looking fine."""
+    mod = _load()
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: _CP(_UHUBCTL_AI6VN))
+    # 4-1 answers only with exact=True, 2-1 only with exact=False
+    monkeypatch.setattr(mod, "_uhubctl_sees",
+                        lambda h, p, e: (h == "4-1") == bool(e))
+    got = mod.bootstrap_locations()
+    assert ("4-1", "4", True) in got
+    assert ("2-1", "4", False) in got
