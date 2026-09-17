@@ -489,6 +489,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     state = load_state()
     now = time.time()
 
+    # Answer the gate's question before any other guard can return early for
+    # an unrelated reason: --ensure-present asks only "is the card on the
+    # bus", and on a station that has no radiod instance yet (the exact case
+    # this gate exists for) the radiod guard below would otherwise pre-empt it.
+    if args.ensure_present and present:
+        _log("card is on the bus — nothing to do")
+        return 0
+
     # ── learn the hub port while the card is present ──────────────────────
     if cfg.get("recover_hub") and cfg.get("recover_port"):
         hub, port = str(cfg["recover_hub"]), str(cfg["recover_port"])
@@ -575,11 +583,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif not state.get("absent_since"):
         state["absent_since"] = now
         _log("device absent from the bus — starting the grace window")
-
-    if args.ensure_present and present:
-        save_state(state)
-        _log("card is on the bus — nothing to do")
-        return 0
 
     absent_for = (now - state["absent_since"]) if state.get("absent_since") else 0.0
     last_cycle = state.get("last_cycle_at")
