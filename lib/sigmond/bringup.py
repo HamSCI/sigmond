@@ -170,6 +170,25 @@ def build_plan(profile, *, local_radiod: bool,
         if with_optional:
             for opt in profile.optional:
                 install(STAGE1, opt)
+        # The RX-888 must be on the bus before `configure radiod`, not merely
+        # before radiod STARTS: config init probes the USB bus to detect the
+        # SDR, and a miss there fails the hard 'radiod configured' checkpoint
+        # below and aborts the whole bring-up.  Placing this in stage 4 (as it
+        # first was) is useless -- bring-up never gets that far.
+        #
+        # AI6VN, v3.42, 2026-09-17: the card was NOT latched, it was not ready
+        # yet.  An RX-888 enumerates first as its FX3 bootloader and only
+        # becomes 04b4:00f1 once firmware is loaded, and bring-up installs
+        # that firmware and reloads udev EARLIER IN THIS SAME RUN -- so the
+        # card appeared moments after config init had already given up.  The
+        # gate therefore waits for the card before resorting to a power cycle.
+        #
+        # Non-fatal by design: a station with no local card, or a hub that
+        # cannot switch power, still brings up everything else.
+        steps.append(Step(STAGE1, 'ensure the RX-888 is on the bus (wait for a '
+                                  'slow FX3, recover a latched card)', 'tune',
+                          argv=['/usr/local/sbin/sigmond-sdr-recover',
+                                '--ensure-present']))
         configure(STAGE1, 'radiod')
         # Tune AFTER `configure radiod`, never before: `smd apply` writes
         # per-INSTANCE affinity drop-ins and enables + starts any radiod
@@ -324,23 +343,6 @@ def build_plan(profile, *, local_radiod: bool,
                    if c not in skip and c in _INDEPENDENT]
 
     if local_radiod:
-        # The RX-888 must be ON THE BUS before radiod is started, and on a
-        # fresh install it very often is not: the card latches non-enumerating
-        # across the install's power cycles, radiod then starts against
-        # hardware that is not there, and the station comes up dead with no
-        # radiod instance to recover it (AI6VN, v3.40, 2026-09-17).  The
-        # recovery helper's own timer cannot close this: its grace window and
-        # cooldown are there to stop a hardware fault becoming a power-cycling
-        # loop, which is right for a watchdog and wrong for a gate.  So ask it
-        # once, directly: present -> returns at once; latched -> cuts VBUS on
-        # every half of the port and waits for the card.  Non-fatal by design
-        # (`|| true` semantics via check=False in the runner): a station with
-        # no local card, or a hub that cannot switch power, still brings up
-        # everything else instead of stopping here.
-        steps.append(Step(STAGE4, 'ensure the RX-888 is on the bus (recover a '
-                                  'latched card before radiod starts)', 'tune',
-                          argv=['/usr/local/sbin/sigmond-sdr-recover',
-                                '--ensure-present']))
         steps.append(Step(STAGE4, 'wait for FFT wisdom before starting radiod',
                           'wait-wisdom'))
         radiod_stack = ['ka9q-radio'] + [i for i in profile.local_radiod_infra

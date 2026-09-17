@@ -136,15 +136,24 @@ def test_radiod_config_falls_back_to_non_interactive_without_a_tty(monkeypatch):
     assert '--non-interactive' in cfg['configure radiod'].argv
 
 
-def test_radiod_is_gated_on_the_card_being_on_the_bus():
-    # A latched RX-888 must be recovered BEFORE radiod starts, or radiod comes
-    # up against hardware that is not there and the station is dead.
+def test_radiod_is_gated_on_the_card_before_CONFIG_not_just_before_start():
+    # The gate must precede `configure radiod`, not merely the radiod START.
+    # config init probes the USB bus to detect the SDR, and a miss there fails
+    # the hard 'radiod configured' checkpoint and aborts the whole bring-up --
+    # so a gate placed later never runs at all. That is exactly what happened
+    # on AI6VN with v3.42 (2026-09-17): the gate sat in stage 4, config init
+    # in stage 1 found no SDR, and bring-up aborted before reaching it.
     p = build_plan(_dasi2(), local_radiod=True)
     labels = [s.label for s in p.steps]
     ensure = next(i for i, l in enumerate(labels) if 'RX-888 is on the bus' in l)
+    config = next(i for i, l in enumerate(labels) if l.startswith('configure radiod'))
+    checkpoint = next(i for i, s in enumerate(p.steps)
+                      if s.kind == 'checkpoint' and s.check == 'radiod-configured')
     start = next(i for i, s in enumerate(p.steps)
                  if s.kind == 'start' and 'radiod' in s.label)
-    assert ensure < start, 'the SDR gate must precede the radiod start'
+    assert ensure < config, 'the SDR gate must precede CONFIGURE radiod'
+    assert ensure < checkpoint, 'the gate must precede the hard checkpoint'
+    assert config < start
     assert '--ensure-present' in p.steps[ensure].argv
 
 

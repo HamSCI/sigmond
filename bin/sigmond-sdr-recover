@@ -471,6 +471,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="how long to hold VBUS low (default 10)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the decision and change nothing")
+    ap.add_argument("--wait-seconds", type=int, default=60,
+                    help="with --ensure-present: how long to wait for a slow "
+                         "FX3 to finish enumerating before power-cycling it "
+                         "(default 60)")
     ap.add_argument("--ensure-present", action="store_true",
                     help="installer/bring-up gate: succeed at once if the card "
                          "is on the bus, otherwise recover it NOW (no grace "
@@ -493,9 +497,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # an unrelated reason: --ensure-present asks only "is the card on the
     # bus", and on a station that has no radiod instance yet (the exact case
     # this gate exists for) the radiod guard below would otherwise pre-empt it.
-    if args.ensure_present and present:
-        _log("card is on the bus — nothing to do")
-        return 0
+    if args.ensure_present:
+        if present:
+            _log("card is on the bus — nothing to do")
+            return 0
+        # Absent is not the same as latched.  An RX-888 enumerates first as
+        # its FX3 bootloader (04b4:00f3) and only becomes 04b4:00f1 once the
+        # firmware loader promotes it -- and on a fresh install bring-up
+        # installs that firmware and reloads udev in the same run, so the card
+        # can be seconds away from appearing.  Cutting VBUS at that moment
+        # throws away a card that was about to arrive (AI6VN, v3.42,
+        # 2026-09-17: config init found no SDR, the card was healthy on the
+        # bus a minute later).  So wait first, and only cycle if it really
+        # does not come.
+        for _ in range(int(args.wait_seconds / 5) or 1):
+            time.sleep(5)
+            if device_present():
+                _log(f"card appeared while waiting — nothing to recover")
+                return 0
+        _log(f"card still absent after {args.wait_seconds}s — recovering")
 
     # ── learn the hub port while the card is present ──────────────────────
     if cfg.get("recover_hub") and cfg.get("recover_port"):
