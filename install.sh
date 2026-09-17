@@ -855,6 +855,25 @@ $SUDO systemctl enable --now sigmond-t6-stuck-watchdog.timer 2>/dev/null \
     || warn "could not enable sigmond-t6-stuck-watchdog.timer"
 ok "sigmond-sdr-recover + sigmond-radiod-ready symlinks installed"
 
+# First-run bring-up: the install used to end with a configured, reachable VM
+# and NOTHING RUNNING -- no radiod, no ka9q-web, no recorders -- because
+# installing and starting the station was a separate step nobody is told to
+# run (rob 2026-09-17: "it is supposed to start up and run everything after an
+# installation").  The unit fires once, on the first boot after the wizard
+# personalizes the host, and is a no-op on every host that is already up.
+info "Installing first-run bring-up -> /usr/local/bin/"
+$SUDO chmod a+x "$REPO_DIR/bin/sigmond-firstrun-bringup"
+$SUDO ln -sf "$REPO_DIR/bin/sigmond-firstrun-bringup" /usr/local/bin/sigmond-firstrun-bringup
+$SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-firstrun-bringup.service" \
+     /etc/systemd/system/sigmond-firstrun-bringup.service
+$SUDO systemctl daemon-reload
+# enable, NOT --now: on an already-running station this must wait for a boot
+# (and its ConditionPathExists guards), never start a bring-up under the
+# operator mid-install.
+$SUDO systemctl enable sigmond-firstrun-bringup.service 2>/dev/null \
+    && ok "sigmond-firstrun-bringup.service enabled (fires once after personalization)" \
+    || warn "could not enable sigmond-firstrun-bringup.service"
+
 # ts1: operator console on the TS-1 TimeSync injector (rob 2026-09-05) — on
 # every user's PATH, errors out cleanly when no TS-1 is on the bus.
 $SUDO chmod a+x "$REPO_DIR/bin/ts1"

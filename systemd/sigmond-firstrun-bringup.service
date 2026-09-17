@@ -1,0 +1,26 @@
+[Unit]
+Description=Sigmond first-run bring-up — start the station after an install
+# Repos are cloned and packages fetched, so the network must actually be up,
+# not merely configured.
+After=network-online.target
+Wants=network-online.target
+# The wizard personalizes the host; without that there is no identity to
+# build a station around.  Checked again in the script, because this
+# condition is only re-read at boot and the script is also runnable by hand.
+ConditionPathExists=/etc/sigmond/.personalized
+ConditionPathExists=!/var/lib/sigmond/.firstrun-bringup-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/sigmond-firstrun-bringup
+# Bring-up clones, builds and starts ~25 components; on a cold box with a
+# ka9q compile this runs into the tens of minutes.  systemd's default would
+# kill it partway and leave a half-installed station.
+TimeoutStartSec=90min
+# Never fail the boot over it: the station being down is bad, a host that
+# will not finish booting is worse.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,68 @@
+#!/bin/bash
+# sigmond-firstrun-bringup — bring the station up by itself after an install.
+#
+# The appliance install ends with a configured, reachable VM and NOTHING
+# RUNNING: no radiod instance, no ka9q-web, no recorders.  Installing and
+# starting the station software was a separate operator step nobody is told
+# to run, so a fresh install looks finished while the station is dead (rob,
+# 2026-09-17: "it's supposed to start up and run everything after an
+# installation").  This unit closes that gap: once, on the first boot after
+# the wizard has personalized the host, it runs the same bring-up an operator
+# would run by hand.
+#
+# It runs ONCE and only on a host that is actually configured:
+#   - /etc/sigmond/.personalized must exist (the wizard wrote identity).  An
+#     un-personalized host has no reporter id, and bring-up would scaffold a
+#     station for nobody.
+#   - the marker below must not exist.  Bring-up is idempotent, but re-running
+#     it unprompted on every boot would fight an operator mid-maintenance.
+#
+# It does NOT require the SDR: bring-up gates radiod on the card itself
+# (sigmond-sdr-recover --ensure-present, which recovers a latched RX-888) and
+# hardware-gated clients go dormant on their own.  A station with no radio
+# still gets everything else, which is what "bring up as much as it can"
+# means.
+set -u
+
+MARKER=/var/lib/sigmond/.firstrun-bringup-done
+SENTINEL=/etc/sigmond/.personalized
+PROFILE_FILE=/etc/sigmond/site-profile.toml
+LOG=/var/log/sigmond/firstrun-bringup.log
+SMD=/usr/local/bin/smd
+
+mkdir -p "$(dirname "$LOG")" /var/lib/sigmond 2>/dev/null
+say(){ printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG"; }
+
+[ -e "$MARKER" ] && { say "already ran (marker $MARKER) — nothing to do"; exit 0; }
+if [ ! -e "$SENTINEL" ]; then
+    say "host is not personalized yet ($SENTINEL absent) — leaving the station"
+    say "alone; the wizard runs first, and this unit fires on the next boot"
+    exit 0
+fi
+[ -x "$SMD" ] || { say "no smd at $SMD — cannot bring up"; exit 0; }
+
+# The profile the site declares, defaulting to the appliance's own shape.
+PROFILE=$(sed -n 's/^[[:space:]]*profile[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+          "$PROFILE_FILE" 2>/dev/null | head -1)
+PROFILE=${PROFILE:-dasi2}
+
+say "first boot after personalization — bringing the station up (profile $PROFILE)"
+say "this takes many minutes; follow it with: tail -f $LOG"
+
+# --non-interactive because there is no operator at this console: every
+# config interview takes its defaults, which the operator refines later with
+# `smd config edit <client>`.  Better a running station with defaults than a
+# dead one waiting on a prompt nobody will answer.
+if "$SMD" bringup "$PROFILE" --non-interactive >>"$LOG" 2>&1; then
+    say "bring-up finished"
+else
+    rc=$?
+    # Do NOT retry on the next boot: a bring-up that failed for a real reason
+    # (no network, a component that will not build) would loop forever and
+    # bury the cause.  Mark it done and leave the operator a log and a verb.
+    say "bring-up exited $rc — see $LOG; re-run by hand with:"
+    say "    smd bringup $PROFILE"
+fi
+date -Iseconds > "$MARKER"
+say "marker written ($MARKER); this unit will not run again"
+exit 0
