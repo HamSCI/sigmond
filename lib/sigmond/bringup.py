@@ -11,6 +11,7 @@ See docs/install-orchestration-design.md for the staged model this implements.
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -143,7 +144,13 @@ def build_plan(profile, *, local_radiod: bool,
         # exception: it's sigmond's own inline text wizard (works here, and the
         # operator sets the antenna), so it stays interactive unless the whole
         # bring-up was invoked with --non-interactive.
-        if non_interactive or client != 'radiod':
+        # ...and also when there is no terminal to interview on.  Without
+        # this the radiod step exits 2 in any non-TTY bring-up and the station
+        # ends up with NO radiod instance at all — which is strictly worse
+        # than defaults the operator refines later with `smd config edit
+        # radiod` (AI6VN, v3.40, 2026-09-17: fresh install, bring-up run over
+        # ssh, "step exited 2: smd config init radiod", zero radiod@ units).
+        if non_interactive or client != 'radiod' or not sys.stdin.isatty():
             argv.append('--non-interactive')
         if non_interactive:
             label += ' (non-interactive)'
@@ -317,6 +324,23 @@ def build_plan(profile, *, local_radiod: bool,
                    if c not in skip and c in _INDEPENDENT]
 
     if local_radiod:
+        # The RX-888 must be ON THE BUS before radiod is started, and on a
+        # fresh install it very often is not: the card latches non-enumerating
+        # across the install's power cycles, radiod then starts against
+        # hardware that is not there, and the station comes up dead with no
+        # radiod instance to recover it (AI6VN, v3.40, 2026-09-17).  The
+        # recovery helper's own timer cannot close this: its grace window and
+        # cooldown are there to stop a hardware fault becoming a power-cycling
+        # loop, which is right for a watchdog and wrong for a gate.  So ask it
+        # once, directly: present -> returns at once; latched -> cuts VBUS on
+        # every half of the port and waits for the card.  Non-fatal by design
+        # (`|| true` semantics via check=False in the runner): a station with
+        # no local card, or a hub that cannot switch power, still brings up
+        # everything else instead of stopping here.
+        steps.append(Step(STAGE4, 'ensure the RX-888 is on the bus (recover a '
+                                  'latched card before radiod starts)', 'tune',
+                          argv=['/usr/local/sbin/sigmond-sdr-recover',
+                                '--ensure-present']))
         steps.append(Step(STAGE4, 'wait for FFT wisdom before starting radiod',
                           'wait-wisdom'))
         radiod_stack = ['ka9q-radio'] + [i for i in profile.local_radiod_infra

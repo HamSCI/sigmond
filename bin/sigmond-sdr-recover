@@ -471,6 +471,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="how long to hold VBUS low (default 10)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the decision and change nothing")
+    ap.add_argument("--ensure-present", action="store_true",
+                    help="installer/bring-up gate: succeed at once if the card "
+                         "is on the bus, otherwise recover it NOW (no grace "
+                         "window, no cooldown) and wait for it. Exit 0 only if "
+                         "the card ends up present.")
     ap.add_argument("--probe", action="store_true",
                     help="locate the RX-888, verify its hub port switches "
                          "power, report, and exit (changes only the state file)")
@@ -571,10 +576,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         state["absent_since"] = now
         _log("device absent from the bus — starting the grace window")
 
+    if args.ensure_present and present:
+        save_state(state)
+        _log("card is on the bus — nothing to do")
+        return 0
+
     absent_for = (now - state["absent_since"]) if state.get("absent_since") else 0.0
     last_cycle = state.get("last_cycle_at")
-    decision = should_cycle(present, absent_for,
-                            (now - last_cycle) if last_cycle else None)
+    if args.ensure_present:
+        # A gate, not a watchdog.  The grace window exists so a re-enumeration
+        # blip is not mistaken for a failure, and the cooldown so a hardware
+        # fault cannot become a power-cycling loop; neither applies when a
+        # human or the installer is asking, once, "make the card present".
+        # Without this a FRESH INSTALL sits with a latched card and no radiod:
+        # bring-up configures radiod against hardware that is not there, the
+        # station comes up dead, and the timer's own grace/cooldown mean it is
+        # minutes before anything even tries (AI6VN, v3.40, 2026-09-17).
+        decision = Decision(True, "ensure-present: card absent — recovering now")
+    else:
+        decision = should_cycle(present, absent_for,
+                                (now - last_cycle) if last_cycle else None)
 
     if not decision.cycle:
         save_state(state)
@@ -596,6 +617,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not cycle_port(locations or [(hub, str(port), False)], args.off_seconds):
         return 1
     if not wait_for_device():
+        if args.ensure_present:
+            _log("card did not return after the power cycle — check the cable "
+                 "and the hub's own power; bring-up cannot configure radiod "
+                 "against hardware that is not on the bus")
+            return 1
         _log("card did not return after the power cycle — hardware fault, "
              "escalating by leaving the station down rather than looping")
         return 1

@@ -1,3 +1,4 @@
+import sys
 """Unit tests for the bring-up plan builder (pure; no I/O)."""
 from sigmond.catalog import Profile
 from sigmond.bringup import (
@@ -110,16 +111,41 @@ def test_non_interactive_flag_makes_every_config_step_non_interactive():
     assert cfg and all('--non-interactive' in s.argv for s in cfg)
 
 
-def test_client_config_is_non_interactive_by_default_but_radiod_is_not():
-    # Default bring-up: client config interviews run --non-interactive (their
-    # own wizards can't run inside bring-up's nested terminal), but radiod —
-    # sigmond's own inline text wizard — stays interactive.
+def test_client_config_is_non_interactive_but_radiod_interviews_on_a_tty(monkeypatch):
+    # Default bring-up ON A TERMINAL: client config interviews run
+    # --non-interactive (their own wizards can't run inside bring-up's nested
+    # terminal), but radiod — sigmond's own inline text wizard — stays
+    # interactive so the operator can set the antenna.
+    monkeypatch.setattr(sys.stdin, 'isatty', lambda: True, raising=False)
     p = build_plan(_dasi2(), local_radiod=True, non_interactive=False)
     cfg = {s.label: s for s in p.steps if s.kind == 'config'}
     assert '--non-interactive' not in cfg['configure radiod'].argv
     for client in ('configure hf-timestd', 'configure wspr-recorder',
                    'configure psk-recorder', 'configure mag-recorder'):
         assert '--non-interactive' in cfg[client].argv, client
+
+
+def test_radiod_config_falls_back_to_non_interactive_without_a_tty(monkeypatch):
+    # No terminal to interview on (unattended install, cron, ssh without a
+    # pty): the radiod interview would exit 2 and leave the station with NO
+    # radiod instance at all, which is strictly worse than defaults the
+    # operator refines later (AI6VN, v3.40, 2026-09-17).
+    monkeypatch.setattr(sys.stdin, 'isatty', lambda: False, raising=False)
+    p = build_plan(_dasi2(), local_radiod=True, non_interactive=False)
+    cfg = {s.label: s for s in p.steps if s.kind == 'config'}
+    assert '--non-interactive' in cfg['configure radiod'].argv
+
+
+def test_radiod_is_gated_on_the_card_being_on_the_bus():
+    # A latched RX-888 must be recovered BEFORE radiod starts, or radiod comes
+    # up against hardware that is not there and the station is dead.
+    p = build_plan(_dasi2(), local_radiod=True)
+    labels = [s.label for s in p.steps]
+    ensure = next(i for i, l in enumerate(labels) if 'RX-888 is on the bus' in l)
+    start = next(i for i, s in enumerate(p.steps)
+                 if s.kind == 'start' and 'radiod' in s.label)
+    assert ensure < start, 'the SDR gate must precede the radiod start'
+    assert '--ensure-present' in p.steps[ensure].argv
 
 
 def test_every_install_is_preceded_by_a_topology_enable():
