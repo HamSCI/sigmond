@@ -58,7 +58,7 @@ The "kind" column in the tables below uses **S** (shareable), **I** (identity),
 
 | Action | For | Required? | What it involves |
 |---|---|---|---|
-| Create **PSWS account** | GRAPE / mag / IQ uploads | Opt | sign up at <https://pswsnetwork.caps.ua.edu/>; receive station id |
+| Create **PSWS account** | GRAPE / mag / IQ uploads | Opt | sign up at <https://pswsnetwork.eng.ua.edu/>; receive station id |
 | **Register PSWS SFTP public key** in the web portal | uploads | Opt | server is StrictModes, SFTP-only. `hf-timestd/scripts/setup-psws-keys.sh` generates the keypair and prints the public key — the operator **must paste it into the PSWS portal** (authorized_keys cannot be uploaded over SFTP) |
 | Create **NASA Earthdata** account | hf-timestd IONEX / DCB | Opt | register at <https://urs.earthdata.nasa.gov> |
 | Request + download **PHaRLAP 4.7.4** from DST | hf-timestd raytracing | Opt | license request to DST (Australia); multi-day latency; **not redistributable** (see EXTERNAL_PREREQUISITES.md §3) |

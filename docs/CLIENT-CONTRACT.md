@@ -2026,7 +2026,7 @@ today:
    (`sigmond.hamsci_sink.Writer.from_env()`).  The backend is
    SQLite (`/var/lib/sigmond/sink.db`).  Rows are later read by the
    separate `hs-uploader` library and shipped to upstream
-   destinations (e.g. psws.eng.ua.edu).
+   destinations (e.g. pswsnetwork.eng.ua.edu).
 
 This section makes the surface declarative so sigmond can budget
 disk and surface backpressure in `smd admin diag`.

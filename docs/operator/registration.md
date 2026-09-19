@@ -251,15 +251,19 @@ do not control — so start it early rather than last.
    **instrument ID**, a plain number. AC0G/B4 has two: `171` for GRAPE and
    `372` for the magnetometer.
 
-> **Two addresses are in circulation, and the HamSCI docs do not agree on which
-> is the portal.** Everything on the station says
-> `https://pswsnetwork.eng.ua.edu/` — that is what `smd psws enroll` prints
-> (source: `lib/sigmond/psws.py`, `PSWS_PORTAL`). But
-> `hf-timestd/docs/PSWS_SETUP_GUIDE.md` presents that as the *server* and gives
-> `pswsnetwork.caps.ua.edu` as a separate *registration portal*, and a third
-> HamSCI page gives `pswsnetwork.org`. If one does not load, try the others —
-> and please tell your fleet admin which one worked, so this paragraph can be
-> deleted (docs-gap row 9).
+> **There is one address: `https://pswsnetwork.eng.ua.edu/`.** It is both the
+> portal you register in and the SFTP server your station uploads to, and it is
+> what `smd psws enroll` prints (`lib/sigmond/psws.py`, `PSWS_PORTAL`).
+>
+> Two older names circulated in HamSCI docs — `pswsnetwork.caps.ua.edu` and
+> `pswsnetwork.org`. **Neither resolves any more** (checked 2026-09-19, from
+> three networks). If you find one in a document, it is stale; nothing is
+> served there to fall back to.
+>
+> ⚠ The portal's TLS certificate expired 2026-09-16, so a browser will warn and
+> `curl` without `-k` returns nothing. That is cosmetic for *stations*: uploads
+> go over SFTP on port 22 and are unaffected. Report it upstream rather than
+> teaching operators to bypass certificate checks.
 
 If you already gave these to the wizard, skip to 5b. If not, put them in from
 the **host** with `sigmond-setup --reconfigure` (§1) — that is easier and safer
