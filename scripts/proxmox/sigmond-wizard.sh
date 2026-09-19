@@ -1404,7 +1404,7 @@ TIEREOF
 # (systemd socket with Accept=yes): stdin/stdout is the client socket.
 # Resolves the decoder VM's CURRENT IPv4 via the qemu guest agent on every
 # connection, so the relay keeps working when DHCP moves the VM.
-import os, re, select, socket, subprocess, sys
+import os, re, select, socket, struct, subprocess, sys
 
 port = int(sys.argv[1])
 vmid = os.environ.get("SIGMOND_VMID", "120")
@@ -1433,9 +1433,43 @@ if not ips:
         pass
 if not ips:
     sys.exit(1)
+# Prefer an address on a network THIS HOST is directly attached to.  Taking
+# ips[0] blindly assumes every address the guest reports is reachable from
+# here, and that is exactly the assumption that fails when the site puts the
+# PM and its own VM in different VLANs: the VM answers with a campus lease
+# the PM cannot open a socket to, every vm-* channel dies, and the dashboard
+# link looks broken while the tunnel is perfectly healthy (DASI-019 Scranton,
+# 2026-09-19 -- ICMP hairpinned out and back at 8.9 ms while TCP 22 was
+# refused).  A host-only management NIC fixes the reachability; this makes
+# the relay actually pick it.
+def _local_nets():
+    out = subprocess.run(["ip", "-4", "-o", "addr", "show"],
+                         capture_output=True, text=True, timeout=10).stdout
+    nets = []
+    for m in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", out):
+        addr, plen = m.group(1), int(m.group(2))
+        if addr.startswith("127."):
+            continue
+        a = struct.unpack("!I", socket.inet_aton(addr))[0]
+        mask = (0xFFFFFFFF << (32 - plen)) & 0xFFFFFFFF
+        nets.append((a & mask, mask))
+    return nets
 try:
-    vm = socket.create_connection((ips[0], port), timeout=10)
-except OSError:
+    nets = _local_nets()
+    def _is_local(ip):
+        v = struct.unpack("!I", socket.inet_aton(ip))[0]
+        return any((v & m) == n for n, m in nets)
+    ips.sort(key=lambda ip: 0 if _is_local(ip) else 1)
+except Exception:
+    pass
+vm = None
+for cand in ips:                       # try every address, not just the first
+    try:
+        vm = socket.create_connection((cand, port), timeout=10)
+        break
+    except OSError:
+        continue
+if vm is None:
     sys.exit(1)
 vm.settimeout(None)
 client_open, vm_open = True, True
