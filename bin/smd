@@ -453,10 +453,31 @@ def _git_behind_main_live(repo_dir: Path, branch: str) -> tuple[int, str]:
         return 0, 'exact'
 
 
-def _ok(msg):   print(f'  \033[32m✓\033[0m  {msg}')
-def _warn(msg): print(f'  \033[33m⚠\033[0m  {msg}')
-def _err(msg):  print(f'  \033[31m✗\033[0m  {msg}', file=sys.stderr)
-def _info(msg): print(f'     {msg}')
+def _report_stream():
+    """The one stream this invocation's human-readable report goes to.
+
+    ⛔ All four helpers below MUST share it.  They used to disagree — ✓, ⚠ and
+    the plain lines on stdout, ✗ alone on stderr — which splits a single report
+    across two pipes.  Under a pager that is worse than cosmetic: `smd status
+    | less` sends 106 lines to the pager and prints the one ✗ line straight to
+    the terminal, out of order and often scrolled away.  On W3USR-019 the line
+    that went missing was the one naming the station's blocker (rob,
+    2026-09-19: "everything should go to standard out").
+
+    stdout is that stream, because that is where the overwhelming majority of
+    the report already went.  The exception is a machine-readable invocation:
+    with --json on the command line stdout belongs to the JSON document, so
+    the human lines step aside to stderr and the document stays parseable —
+    which is stricter than the old behaviour, where ✓/⚠/plain lines could
+    interleave into it.
+    """
+    return sys.stderr if '--json' in sys.argv else sys.stdout
+
+
+def _ok(msg):   print(f'  \033[32m✓\033[0m  {msg}', file=_report_stream())
+def _warn(msg): print(f'  \033[33m⚠\033[0m  {msg}', file=_report_stream())
+def _err(msg):  print(f'  \033[31m✗\033[0m  {msg}', file=_report_stream())
+def _info(msg): print(f'     {msg}', file=_report_stream())
 
 
 def _deprecated(verb: str, replacement: str) -> None:
@@ -472,7 +493,7 @@ def _deprecated(verb: str, replacement: str) -> None:
 
 
 def _heading(title: str):
-    print(f'\n\033[1m━━━ {title} ━━━\033[0m')
+    print(f'\n\033[1m━━━ {title} ━━━\033[0m', file=_report_stream())
 
 
 def _expand_requires_closure(names, catalog) -> list[str]:

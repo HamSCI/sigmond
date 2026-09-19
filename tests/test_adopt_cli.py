@@ -133,9 +133,9 @@ def test_adopting_an_unknown_name_fails_and_says_what_is_available(
           tmp_path)
     rc = mod.cmd_adopt(_args("nope", tmp_path, dry_run=True))
     assert rc != 0
-    err = capsys.readouterr().err
-    assert "nope" in err
-    assert str(RX) in err          # names what IS adoptable
+    report = capsys.readouterr().out
+    assert "nope" in report
+    assert str(RX) in report          # names what IS adoptable
     assert not list(tmp_path.iterdir())
 
 
@@ -156,9 +156,9 @@ def test_the_available_list_excludes_what_adopt_itself_would_refuse(
 
     rc = mod.cmd_adopt(_args("nope", tmp_path, dry_run=True))
     assert rc != 0
-    err = capsys.readouterr().err
-    assert str(RX) in err              # adopt would accept this one
-    assert str(KIWI) not in err        # adopt refuses this one -- don't offer it
+    report = capsys.readouterr().out
+    assert str(RX) in report              # adopt would accept this one
+    assert str(KIWI) not in report        # adopt refuses this one -- don't offer it
 
 
 def test_an_empty_station_says_nothing_is_adoptable(tmp_path, capsys):
@@ -166,7 +166,7 @@ def test_an_empty_station_says_nothing_is_adoptable(tmp_path, capsys):
     _wire(mod, StationInventory(), tmp_path)
     rc = mod.cmd_adopt(_args("dasi2", tmp_path, dry_run=True))
     assert rc != 0
-    assert "nothing" in capsys.readouterr().err.lower()
+    assert "nothing" in capsys.readouterr().out.lower()
 
 
 def test_an_already_adopted_source_is_not_adoptable_again(tmp_path):
@@ -203,7 +203,7 @@ def test_an_unrostered_dasi_hostname_refuses_before_doing_anything(
 
     rc = mod.cmd_adopt(_args(str(RX), tmp_path))       # NOT a dry run
     assert rc != 0
-    assert "DASI019" in capsys.readouterr().err
+    assert "DASI019" in capsys.readouterr().out
     assert not list(tmp_path.iterdir())                # nothing written
 
 
@@ -619,7 +619,7 @@ def test_an_absent_terminal_is_never_read_as_consent(tmp_path, monkeypatch,
     assert rc != 0
     assert started == []
     assert not list(tmp_path.iterdir())
-    assert "--yes" in capsys.readouterr().err
+    assert "--yes" in capsys.readouterr().out
 
 
 def test_yes_adopts_without_a_terminal(tmp_path, monkeypatch):
@@ -878,7 +878,7 @@ def test_nothing_startable_is_a_refusal_not_a_success(tmp_path, capsys):
     assert rc != 0
     assert started == []
     assert not list(tmp_path.iterdir())
-    assert "nothing here can start" in capsys.readouterr().err
+    assert "nothing here can start" in capsys.readouterr().out
 
 
 def test_a_running_radiod_is_disclosed_before_the_operator_says_yes(
@@ -918,9 +918,9 @@ def test_an_unreadable_station_is_a_clear_refusal_not_a_traceback(
 
     rc = mod.cmd_adopt(_args("dasi2", tmp_path, dry_run=True))
     assert rc == 1
-    err = capsys.readouterr().err
-    assert "psk-recorder.sources.toml" in err
-    assert "Traceback" not in err
+    report = capsys.readouterr().out
+    assert "psk-recorder.sources.toml" in report
+    assert "Traceback" not in report
 
 
 class TestStartPreview:
