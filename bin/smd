@@ -5724,6 +5724,30 @@ def _bringup_wait_lock_free(timeout_s: int = 180) -> None:
 # `config init` replaces it.  A config that still contains it is unconfigured.
 _CONFIG_PLACEHOLDER = '<configure-via-config-init>'
 
+# Clients do not share one placeholder spelling.  psk-recorder and
+# meteor-scatter ship `"<configure-via-config-init>"`; mag-recorder ships
+# `"<YOUR_CALL>"` / `"<YOUR_PSWS_STATION_ID>"`.  Matching only the first
+# spelling made bring-up call a template "configured" and skip the config
+# init that would have filled it — and mag-recorder then refused to start on
+# exactly the placeholders sigmond had just declared fine (W3USR-019,
+# 2026-09-18: `config still at template placeholders
+# (station.psws_station_id=<YOUR_PSWS_STATION_ID>) ... exiting EX_CONFIG`,
+# with STATION_CALLSIGN=W3USR sitting in coordination.env unused).
+#
+# So match the CONVENTION rather than one instance of it: a TOML value that
+# is entirely an angle-bracketed token.  That is the same rule mag-recorder's
+# own `unconfigured_placeholders()` applies (`val.startswith("<") and
+# val.endswith(">")`), which is the point — the two must not disagree about
+# what "configured" means.
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r'^\s*[A-Za-z_][\w.\-]*\s*=\s*"<[^"]*>"\s*(?:#.*)?$', re.M)
+
+
+def _config_is_placeholder(text: str) -> bool:
+    """True when a client config is still a template nobody has filled in."""
+    return bool(text) and (_CONFIG_PLACEHOLDER in text
+                           or _PLACEHOLDER_VALUE_RE.search(text) is not None)
+
 
 def _read_text_safe(p) -> str:
     try:
@@ -5763,7 +5787,7 @@ def _bringup_probe(check: str, smd_bin: str):
                 # config-init (with --reconfig) instead of skipping — else the
                 # radiod status stays the sentinel and the recorder can't resolve
                 # radiod (sigmond#15; greenfield: wspr came up with a placeholder).
-                if present and _CONFIG_PLACEHOLDER in _read_text_safe(p):
+                if present and _config_is_placeholder(_read_text_safe(p)):
                     return (False,
                             f"{name}: {cfgp} present but UNCONFIGURED (placeholder)")
                 return (present, f"{name}: {cfgp} {'present' if present else 'MISSING'}")
@@ -5771,7 +5795,7 @@ def _bringup_probe(check: str, smd_bin: str):
         ok = etc.is_dir()
         if ok:
             tomls = list(etc.glob('*.toml'))
-            if tomls and all(_CONFIG_PLACEHOLDER in _read_text_safe(f)
+            if tomls and all(_config_is_placeholder(_read_text_safe(f))
                              for f in tomls):
                 return (False, f"/etc/{name} present but UNCONFIGURED (placeholder)")
         return (ok, f"/etc/{name} {'present' if ok else 'missing'} (no inventory CLI)")
