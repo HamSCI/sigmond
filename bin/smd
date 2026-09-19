@@ -845,6 +845,40 @@ _NATIVE_BUILD_DEPS = ['cmake', 'build-essential', 'libssl-dev',
                       'libbsd-dev']
 
 
+# How long an apt call will WAIT for the dpkg lock before giving up.
+#
+# ⛔ Why this exists.  A freshly-installed Debian box runs
+# `unattended-upgrades` on its first boots — which is exactly when first-run
+# bring-up is doing its own apt work.  apt's default on a held lock is to fail
+# instantly:
+#
+#     E: Could not get lock /var/lib/dpkg/lock-frontend.
+#        It is held by process 2572 (unattended-upgr)
+#
+# On W3USR-019 (2026-09-18) that one collision cost the station its web UI.
+# `_install_radiod_deps` returned False, so `_build_ka9q_web_with_onion`
+# bailed, so `_write_ka9q_web_unit` never ran, so `smd start ka9q-web` ended
+# with "Unit ka9q-web.service not found" and the station's ka9q-web RAC link
+# was dead — while the SAME log shows the build succeeding minutes earlier,
+# before unattended-upgrades woke up.  A race, so it fails some installs and
+# not others.
+#
+# Waiting is the right answer: the lock is held by something that finishes on
+# its own, and ten minutes is far longer than an unattended-upgrades run while
+# still bounded.  Applies to every apt lock, not only dpkg's frontend.
+_APT_LOCK_WAIT = 600
+
+
+def _apt(*args, **kwargs):
+    """Run apt-get, told to WAIT for the dpkg lock rather than die on it.
+
+    Every apt-get invocation in smd goes through here — see _APT_LOCK_WAIT.
+    """
+    apt = shutil.which('apt-get') or 'apt-get'
+    return _run([apt, '-o', f'DPkg::Lock::Timeout={_APT_LOCK_WAIT}', *args],
+                **kwargs)
+
+
 def _ensure_native_build_deps(label: str = 'build') -> bool:
     """Ensure the apt toolchain for native C builds (cmake, a C compiler,
     pkg-config, SSL/gnutls/gcrypt/libbsd headers) is present; install it
@@ -868,8 +902,8 @@ def _ensure_native_build_deps(label: str = 'build') -> bool:
         return False
     _info(f'{label}: installing native build deps '
           f'({", ".join(_NATIVE_BUILD_DEPS)}) ...')
-    _run([apt, 'update', '-qq'], sudo=True)
-    r = _run([apt, 'install', '-y', '-q', *_NATIVE_BUILD_DEPS], sudo=True)
+    _apt('update', '-qq', sudo=True)
+    r = _apt('install', '-y', '-q', *_NATIVE_BUILD_DEPS, sudo=True)
     if r.returncode != 0:
         _err(f'{label}: build-dep install failed: {(r.stderr or "")[-300:]}')
         return False
@@ -926,6 +960,9 @@ def _build_onion(src_dir: Path) -> bool:
 _ONION_REPO   = 'https://github.com/davidmoreno/onion.git'
 _ONION_COMMIT = 'de8ea938342b36c28024fd8393ebc27b8442a161'   # master, build-validated 2026-06-01 (libonion.so.0.8.191)
 _ONION_SRC    = Path('/opt/git/sigmond/onion')      # sibling checkout (was /home/wsprdaemon/onion)
+# Where ka9q-web's own Makefile installs the binary.  Named because the build
+# reads it to decide whether a compile is needed at all.
+_KA9Q_WEB_BIN = Path('/usr/local/sbin/ka9q-web')
 
 # WSJT-X weak-signal DECODERS (jt9, wsprd) — wspr-recorder's from-source native
 # dependency, the onion analogue: sigmond builds them optimized for this host's
@@ -1233,38 +1270,14 @@ def _diag_build_manifests() -> int:
 
 
 def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
-    if not _ensure_native_build_deps(label='ka9q-web'):
-        return False
-    # ka9q-web compiles against the ka9q-radio source tree, so it needs
-    # radiod's full header set (libbsd, iniparser, opus, avahi, …), not just
-    # the generic toolchain.  Install order isn't guaranteed — ka9q-web can
-    # build before ka9q-radio's dep pass has ever run — so ensure the whole
-    # set here instead of chasing one missing header per greenfield run.
-    if not _install_radiod_deps():
-        return False
-    onion_url    = _ONION_REPO
-    onion_commit = _ONION_COMMIT
-    onion_src    = _ONION_SRC
-
-    if not onion_src.exists():
-        _info(f'Cloning onion → {onion_src} ...')
-        r = _run(['git', 'clone', onion_url, str(onion_src)])
-        if r.returncode != 0:
-            _err(f'git clone onion failed: {r.stderr.strip()}')
-            return False
-    if onion_commit and not _git_head(onion_src).startswith(onion_commit):
-        # Pin onion to the known-good commit (idempotent).  Fetch first in
-        # case an existing checkout predates the pin.
-        _run(['git', '-C', str(onion_src), 'fetch', '--quiet', '--tags', 'origin'])
-        r = _run(['git', '-C', str(onion_src), 'checkout', '--quiet', onion_commit])
-        if r.returncode != 0:
-            _err(f'onion: checkout {onion_commit[:12]} failed: {r.stderr.strip()}')
-            return False
-
-    if not _build_onion(onion_src):
-        return False
-
-    binary = Path('/usr/local/sbin/ka9q-web')
+    # ⛔ Decide whether anything needs COMPILING before touching apt, git or
+    # onion.  This used to install build deps first and ask afterwards, so a
+    # box whose binary was already current still had to get through an apt
+    # run to reach `_write_ka9q_web_unit` — and when that apt run lost a race
+    # with unattended-upgrades (W3USR-019, 2026-09-18) the whole install
+    # failed over work it did not need to do.  _APT_LOCK_WAIT stops apt
+    # failing there; this stops us asking in the first place.
+    binary = _KA9Q_WEB_BIN
     built  = src_dir / 'ka9q-web'
     rebuilt = True
     if (not _source_advanced_past_build(src_dir, 'ka9q-web')
@@ -1275,7 +1288,40 @@ def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
             _ok('ka9q-web: already installed and current')
             rebuilt = False
 
+    onion_src = _ONION_SRC
+
     if rebuilt:
+        if not _ensure_native_build_deps(label='ka9q-web'):
+            return False
+        # ka9q-web compiles against the ka9q-radio source tree, so it needs
+        # radiod's full header set (libbsd, iniparser, opus, avahi, …), not
+        # just the generic toolchain.  Install order isn't guaranteed —
+        # ka9q-web can build before ka9q-radio's dep pass has ever run — so
+        # ensure the whole set here instead of chasing one missing header per
+        # greenfield run.
+        if not _install_radiod_deps():
+            return False
+        onion_url    = _ONION_REPO
+        onion_commit = _ONION_COMMIT
+
+        if not onion_src.exists():
+            _info(f'Cloning onion → {onion_src} ...')
+            r = _run(['git', 'clone', onion_url, str(onion_src)])
+            if r.returncode != 0:
+                _err(f'git clone onion failed: {r.stderr.strip()}')
+                return False
+        if onion_commit and not _git_head(onion_src).startswith(onion_commit):
+            # Pin onion to the known-good commit (idempotent).  Fetch first in
+            # case an existing checkout predates the pin.
+            _run(['git', '-C', str(onion_src), 'fetch', '--quiet', '--tags', 'origin'])
+            r = _run(['git', '-C', str(onion_src), 'checkout', '--quiet', onion_commit])
+            if r.returncode != 0:
+                _err(f'onion: checkout {onion_commit[:12]} failed: {r.stderr.strip()}')
+                return False
+
+        if not _build_onion(onion_src):
+            return False
+
         nproc = str(os.cpu_count() or 2)
         _info(f'Building ka9q-web (make -j{nproc}) ...')
         r = _run(['make', f'-j{nproc}'], cwd=str(src_dir))
@@ -1345,11 +1391,11 @@ def _build_wsjtx_decoders() -> bool:
     # WSJT-X cmake needs the full Qt5/boost/hamlib/fftw set beyond the base
     # native toolchain (a superset of onion's deps).
     _info('wsjtx-decoders: installing WSJT-X build deps ...')
-    r = _run(['apt-get', 'install', '-y', '--no-install-recommends',
-              'gfortran', 'qtbase5-dev', 'qttools5-dev', 'qttools5-dev-tools',
-              'libqt5serialport5-dev', 'qtmultimedia5-dev',
-              'libqt5websockets5-dev', 'libboost-all-dev', 'libhamlib-dev',
-              'libfftw3-dev', 'libusb-1.0-0-dev'], sudo=True)
+    r = _apt('install', '-y', '--no-install-recommends',
+             'gfortran', 'qtbase5-dev', 'qttools5-dev', 'qttools5-dev-tools',
+             'libqt5serialport5-dev', 'qtmultimedia5-dev',
+             'libqt5websockets5-dev', 'libboost-all-dev', 'libhamlib-dev',
+             'libfftw3-dev', 'libusb-1.0-0-dev', sudo=True)
     if r.returncode != 0:
         _err(f'wsjtx-decoders: build-dep install failed: {r.stderr.strip()}')
         return False
@@ -1465,8 +1511,8 @@ def _build_jt9_decode() -> bool:
             pass
 
     _info('jt9_decode: installing build deps (Qt5Core + moc) ...')
-    r = _run(['apt-get', 'install', '-y', '--no-install-recommends',
-              'g++', 'make', 'pkg-config', 'qtbase5-dev', 'qtbase5-dev-tools'],
+    r = _apt('install', '-y', '--no-install-recommends',
+             'g++', 'make', 'pkg-config', 'qtbase5-dev', 'qtbase5-dev-tools',
              sudo=True)
     if r.returncode != 0:
         _warn(f'jt9_decode: build-dep install failed: {r.stderr.strip()}')
@@ -6860,7 +6906,7 @@ def _install_radiod_deps() -> bool:
     if _is_raspberry_pi():
         deps.extend(_RADIOD_PI_EXTRA)
     _info(f'apt: ensuring {len(deps)} build deps for ka9q-radio…')
-    r = _run(['apt-get', 'install', '-y'] + deps, sudo=True, capture=False)
+    r = _apt('install', '-y', *deps, sudo=True, capture=False)
     if r is None or (hasattr(r, 'returncode') and r.returncode != 0):
         _err('failed to install ka9q-radio build deps via apt')
         return False
