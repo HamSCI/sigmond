@@ -65,6 +65,16 @@ VMID="${SIGMOND_VMID:-120}"
 # probing.  Port bands measured live on gw2 (RAC #151, 2026-08-09):
 RAC_BASE_VMSSH=35800; RAC_BASE_VMWEB=45800
 RAC_BASE_HSSH=50800;  RAC_BASE_HUI=55800
+# The decoder VM serves THREE web UIs, not one.  ka9q-web (8081) had the only
+# channel, so station-web and the magnetometer dashboard were unreachable
+# over RAC from anywhere -- rob, 2026-09-20, looking at the HamSCI dashboard:
+# "there's additional webpages available ... make sure that page reflects all
+# the services being offered."
+# Bands are chosen clear of gw2's existing reservations: it already uses
+# 46800/47800 for a 2nd/3rd RX888's ka9q-web and 40800 for GRAPE charts, so
+# reusing those would mislabel these as ka9q-web instances.  Both sit inside
+# 35800-59999, which is what makes them shareable rather than mesh-only.
+RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800
 # Profile + DASI number stick across --reconfigure via /etc/sigmond-appliance.
 RAC_PROFILE="${SIGMOND_RAC_PROFILE:-$(cat /etc/sigmond-appliance/rac-profile 2>/dev/null || echo dasi)}"
 DASI_NUM="${SIGMOND_DASI_NUMBER:-$(cat /etc/sigmond-appliance/dasi-number 2>/dev/null)}"
@@ -1302,6 +1312,7 @@ if [ -n "$RAC_NUM" ]; then
             _racn=$((220 + DASI_NUM))
             _pvs=$((RAC_BASE_VMSSH+_racn)); _pvw=$((RAC_BASE_VMWEB+_racn))
             _phs=$((RAC_BASE_HSSH+_racn)); _phu=$((RAC_BASE_HUI+_racn))
+            _pst=$((RAC_BASE_VMSTN+_racn)); _pgm=$((RAC_BASE_VMGMAG+_racn))
             _duser="DASI-$(printf '%03d' "$DASI_NUM")"
             say "  deterministic mapping: $_duser -> RAC #$_racn (attempting, not probing)"
             _tf=$(mktemp /tmp/frpc-dasi-XXXXXX.toml)
@@ -1317,7 +1328,8 @@ if [ -n "$RAC_NUM" ]; then
                 printf '[auth]\nmethod = "token"\ntoken = ""\n'
                 printf '[transport.tls]\nenable = %s\n' "$_dtls"
                 printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
-                for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu"; do
+                for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu" \
+                             "vm-station:12224:$_pst" "vm-gmag:12225:$_pgm"; do
                     IFS=: read -r _n _lp _rp <<<"$_spec"
                     printf '[[proxies]]\nname = "%s-%s"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = %s\nremotePort = %s\n' "$SITE" "$_n" "$_lp" "$_rp"
                 done
@@ -1392,11 +1404,21 @@ TIEREOF
             say "WARN: $RAC_STATE"
         else
             eval "$REG"
+            # The two newest channels are DERIVED, never supplied.  The
+            # deterministic path computes them above; the registrar path
+            # cannot, because the gateway's JSON only carries the four
+            # original ports and it has no idea these services exist.  Every
+            # band is base+rac by construction, so deriving is not a
+            # fallback -- it is the same rule, applied here.
+            [ -n "${RACN:-}" ] && {
+                : "${P_VMSTN:=$((RAC_BASE_VMSTN+RACN))}"
+                : "${P_VMGMAG:=$((RAC_BASE_VMGMAG+RACN))}"
+            }
             # DHCP-proof relays: frpc needs a fixed local target, but the
             # VM's address can change — so the vm-* channels point at local
             # sockets whose per-connection handler asks the guest agent for
             # the VM's CURRENT IP (same trick as sigmond-vm).
-            say "installing the VM port relays (ssh, ka9q-web)"
+            say "installing the VM port relays (ssh, ka9q-web, station-web, gmag)"
             install -d /usr/local/lib/sigmond
             cat > /usr/local/lib/sigmond/vm-port-relay.py <<'RLEOF'
 #!/usr/bin/env python3
@@ -1502,7 +1524,7 @@ finally:
     vm.close()
 RLEOF
             chmod 755 /usr/local/lib/sigmond/vm-port-relay.py
-            for spec in "ssh:12222:22" "web:12223:8081"; do
+            for spec in "ssh:12222:22" "web:12223:8081" "station:12224:8000" "gmag:12225:8082"; do
                 IFS=: read -r RNAME RLPORT RVPORT <<<"$spec"
                 cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay.socket" <<SOCKEOF
 [Unit]
@@ -1527,7 +1549,8 @@ ExecStart=/usr/local/lib/sigmond/vm-port-relay.py $RVPORT
 SVCEOF
             done
             systemctl daemon-reload
-            systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket >>"$LOG" 2>&1
+            systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket \
+                sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket >>"$LOG" 2>&1
 
             # transport follows the tier that actually answered: a secure
             # tier pins the fleet CA, opportunistic (opp) encrypts without
@@ -1589,6 +1612,20 @@ type = "tcp"
 localIP = "127.0.0.1"
 localPort = 12223
 remotePort = $P_VMWEB
+
+[[proxies]]
+name = "$SITE-vm-station"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12224
+remotePort = $P_VMSTN
+
+[[proxies]]
+name = "$SITE-vm-gmag"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12225
+remotePort = $P_VMGMAG
 
 [[proxies]]
 name = "$SITE-host-ssh"
