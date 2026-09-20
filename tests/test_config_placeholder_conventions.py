@@ -48,11 +48,14 @@ def _load_smd():
 
 smd = _load_smd()
 
-# The real opening of mag-recorder's shipped template.
+# The real opening of mag-recorder's shipped template.  instrument_id ships
+# EMPTY as of 2026-09-20: PSWS issues it, and defaulting it to the sensor
+# model made an unconfigured station ship a well-formed wrong upload trigger
+# (mag-recorder#9).  Empty is also what makes bring-up prompt for it.
 MAG_TEMPLATE = '''\
 [station]
 psws_station_id  = "<YOUR_PSWS_STATION_ID>"  # e.g. "S000082"
-instrument_id    = "RM3100"
+instrument_id    = ""
 callsign         = "<YOUR_CALL>"             # e.g. "AC0G"
 grid_square      = "<YOUR_GRID>"
 elevation_m      = 0.0
@@ -60,6 +63,9 @@ elevation_m      = 0.0
 
 # What W3USR-019 actually had: location filled in by the location authority,
 # identity still a template.  This is the case that read as "configured".
+# ⛔ Do NOT modernise the instrument_id here.  This fixture is a RECORD of a
+# real file on a real station on 2026-09-18, and "RM3100" is what was in it.
+# Editing it to match today's template would falsify the incident.
 MAG_PARTIAL = '''\
 [station]
 psws_station_id  = "<YOUR_PSWS_STATION_ID>"  # e.g. "S000082"
@@ -78,7 +84,7 @@ status = "<configure-via-config-init>"
 CONFIGURED = '''\
 [station]
 psws_station_id  = "S000082"
-instrument_id    = "RM3100"
+instrument_id    = "372"
 callsign         = "W3USR"
 grid_square      = "FN21ej"
 
