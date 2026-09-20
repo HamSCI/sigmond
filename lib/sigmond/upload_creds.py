@@ -17,7 +17,7 @@ Credential requirements by path (see hs-uploader / recorder code):
   * PSWS             (hf-timestd)     — SFTP; needs station id + instrument
                                         id + an SFTP private key.
   * PSWS             (mag-recorder)   — SFTP; needs a PSWS station id
-                                        (+ instrument id, defaulted RM3100).
+                                        (+ the PSWS-issued instrument id, which has no default).
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ _FIX = {
         "(prints the public key to register at https://pswsnetwork.eng.ua.edu/)",
     "mag-recorder":
         "smd config edit mag-recorder  (set [station] psws_station_id; "
-        "instrument_id defaults RM3100)",
+        "instrument_id is PSWS-issued, a short number)",
 }
 
 

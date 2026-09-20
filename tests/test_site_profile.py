@@ -31,9 +31,11 @@ enabled       = true
 station_id    = "S000418"
 instrument_id = "367"
 
+# PSWS issues a short NUMBER per instrument -- never a sensor
+# model. Two instruments at one station get two ids.
 [psws.instruments]
 "hf-timestd"   = "367"
-"mag-recorder" = "RM3100"
+"mag-recorder" = "368"
 
 [reporters]
 reporter_id      = "ac0g/s"
@@ -65,7 +67,7 @@ class TestLoadSiteProfile(unittest.TestCase):
         self.assertEqual(sp.effective_reporter_id, "AC0G/S")
         self.assertEqual(sp.psws_station_id, "S000418")
         self.assertEqual(sp.instrument_for("hf-timestd"), "367")
-        self.assertEqual(sp.instrument_for("mag-recorder"), "RM3100")
+        self.assertEqual(sp.instrument_for("mag-recorder"), "368")
 
     def test_reporter_id_defaults_to_callsign(self):
         with TemporaryDirectory() as td:
@@ -231,7 +233,7 @@ class TestPlanPswsUpdates(unittest.TestCase):
         updates = plan_psws_updates(sp, "mag-recorder", _FakeState())
         self.assertEqual(updates, [
             ("station", "psws_station_id", "S000418"),
-            ("station", "instrument_id", "RM3100"),
+            ("station", "instrument_id", "368"),
         ])
 
     def test_current_recorder_yields_no_updates(self):
@@ -247,7 +249,7 @@ station_id = "S000418"
 """)
         # mag has no instrument id anywhere in this profile; a
         # hand-configured value must survive.
-        st = _FakeState(station="S000418", instrument="RM3100-custom")
+        st = _FakeState(station="S000418", instrument="901")
         self.assertEqual(plan_psws_updates(sp, "mag-recorder", st), [])
 
     def test_changed_id_is_updated(self):

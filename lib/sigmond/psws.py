@@ -811,8 +811,19 @@ def cmd_edit(recorder: str) -> int:
     # 2) station id + device id
     print()
     station = _prompt("PSWS station id (e.g. S000082)", st.station)
-    instrument = _prompt("instrument / device id", st.instrument
-                         or ("RM3100" if recorder == "mag-recorder" else ""))
+    # ⛔ No default, and never the sensor model.  PSWS ISSUES this per
+    # instrument and it is a short number (372 on AC0G-B4, 131 in the
+    # shared-key fixture); it rides in the upload trigger as
+    # m<dataset>_#<instrument_id>_#<upload-time>, so a wrong value uploads
+    # SUCCESSFULLY and lands where PSWS cannot match it to an instrument,
+    # with nothing failing on our side.  Offering "RM3100" here taught the
+    # wrong answer and then accepted it on a keypress -- and because
+    # upload_creds._is_placeholder() counts only empty or "<YOUR_…>" as
+    # unset, the model name also read as CONFIGURED and suppressed the
+    # credential prompt on a station that had configured nothing.
+    instrument = _prompt(
+        "instrument / device id issued by PSWS (a short number, e.g. 372)",
+        st.instrument)
 
     # 3) write
     updates = [(spec["station"][0], spec["station"][-1], station),
