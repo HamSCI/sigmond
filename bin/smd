@@ -5745,30 +5745,33 @@ def _bringup_wait_lock_free(timeout_s: int = 180) -> None:
 # `config init` replaces it.  A config that still contains it is unconfigured.
 _CONFIG_PLACEHOLDER = '<configure-via-config-init>'
 
-# Clients do not share one placeholder spelling.  psk-recorder and
-# meteor-scatter ship `"<configure-via-config-init>"`; mag-recorder ships
-# `"<YOUR_CALL>"` / `"<YOUR_PSWS_STATION_ID>"`.  Matching only the first
-# spelling made bring-up call a template "configured" and skip the config
-# init that would have filled it — and mag-recorder then refused to start on
-# exactly the placeholders sigmond had just declared fine (W3USR-019,
-# 2026-09-18: `config still at template placeholders
-# (station.psws_station_id=<YOUR_PSWS_STATION_ID>) ... exiting EX_CONFIG`,
-# with STATION_CALLSIGN=W3USR sitting in coordination.env unused).
+# ⛔ A config is a TEMPLATE only if it carries the explicit sentinel.
 #
-# So match the CONVENTION rather than one instance of it: a TOML value that
-# is entirely an angle-bracketed token.  That is the same rule mag-recorder's
-# own `unconfigured_placeholders()` applies (`val.startswith("<") and
-# val.endswith(">")`), which is the point — the two must not disagree about
-# what "configured" means.
-_PLACEHOLDER_VALUE_RE = re.compile(
-    r'^\s*[A-Za-z_][\w.\-]*\s*=\s*"<[^"]*>"\s*(?:#.*)?$', re.M)
-
-
+# This briefly matched ANY TOML value that was entirely an angle-bracketed
+# token, to catch mag-recorder's "<YOUR_CALL>" spelling.  That is too broad,
+# and it took down a station: hf-timestd's config legitimately carries three
+# OPTIONAL placeholders -- PSWS station id, instrument id, and a GNSS host --
+# which a station without PSWS enrolment or an external GNSS receiver simply
+# leaves alone.  The generic match declared that whole config unconfigured,
+# its HARD checkpoint failed, and first-run bring-up aborted outright on
+# AI6VN's v3.47 install (2026-09-21):
+#
+#     checkpoint: hf-timestd configured FAILED -- present but UNCONFIGURED
+#     aborting (hard checkpoint)
+#
+# ka9q-web and station-web never started, and the marker was written so it
+# would not retry.  A cosmetic skip for one client is not worth a dead
+# station.
+#
+# Counting does not separate the two cases either: mag-recorder had 2
+# placeholders out of ~20 settings, hf-timestd has 3.  The distinction is
+# SEMANTIC -- which fields that client needs -- so the generic probe cannot
+# make it.  The right answer is to ask the client through its own
+# `validate --json` severity, which mag-recorder already reports correctly.
+# Tracked separately; until then this stays narrow.
 def _config_is_placeholder(text: str) -> bool:
-    """True when a client config is still a template nobody has filled in."""
-    return bool(text) and (_CONFIG_PLACEHOLDER in text
-                           or _PLACEHOLDER_VALUE_RE.search(text) is not None)
-
+    """True when a client config is still an unfilled template."""
+    return bool(text) and _CONFIG_PLACEHOLDER in text
 
 def _read_text_safe(p) -> str:
     try:

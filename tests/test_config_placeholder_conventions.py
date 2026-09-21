@@ -97,18 +97,37 @@ description      = "RM3100 magnetometer via Pololu USB-I2C"
 
 class PlaceholderConventionTests(unittest.TestCase):
 
-    def test_mag_recorder_template_is_not_configured(self):
-        self.assertTrue(
-            smd._config_is_placeholder(MAG_TEMPLATE),
-            "mag-recorder's shipped template read as configured, so bring-up "
-            "skips its config init and the daemon exits EX_CONFIG")
+    def test_optional_placeholders_do_NOT_make_a_config_a_template(self):
+        """⛔ The regression that killed a station.
 
-    def test_partially_filled_identity_is_still_not_configured(self):
-        """The exact W3USR-019 file: location real, identity still template."""
-        self.assertTrue(
-            smd._config_is_placeholder(MAG_PARTIAL),
-            "a config whose callsign and PSWS id are still <YOUR_...> read as "
-            "configured; that is the live regression")
+        hf-timestd ships three OPTIONAL <YOUR_...> values (PSWS station id,
+        instrument id, GNSS host).  A station with no PSWS enrolment and no
+        external GNSS leaves them alone, and hf-timestd runs fine.  Matching
+        them made its HARD checkpoint fail and aborted first-run bring-up on
+        AI6VN's v3.47 install; ka9q-web and station-web never started.
+        """
+        hf_timestd_real = (
+            '[station]\n'
+            'id = "<YOUR_STATION_ID>"               # e.g., S000001\n'
+            'instrument_id = "<YOUR_INSTRUMENT_ID>" # e.g., 172\n'
+            'callsign = "AI6VN"\n'
+            'grid = "CM87"\n\n'
+            '[gnss]\n'
+            'host = "<YOUR_GNSS_HOST>"              # optional\n')
+        self.assertFalse(
+            smd._config_is_placeholder(hf_timestd_real),
+            "a configured hf-timestd with optional fields unset read as an "
+            "unfilled TEMPLATE -- its hard checkpoint then aborts bring-up")
+
+    def test_counting_placeholders_cannot_separate_the_cases(self):
+        """Why this is not fixable by a threshold.
+
+        mag-recorder had 2 placeholders among ~20 settings; hf-timestd has 3.
+        Any count or fraction rule puts them on the same side.  The
+        distinction is semantic -- which fields THAT client needs -- so the
+        generic probe must not try to make it.
+        """
+        self.assertEqual(MAG_PARTIAL.count('"<'), 2)
 
     def test_the_original_sentinel_still_matches(self):
         self.assertTrue(smd._config_is_placeholder(PSK_TEMPLATE))
@@ -138,10 +157,14 @@ class PlaceholderConventionTests(unittest.TestCase):
                     smd._config_is_placeholder(f"[x]\n{line}\n"),
                     f"false positive on: {line}")
 
-    def test_bracketed_token_with_trailing_comment_matches(self):
-        # mag-recorder's real template has a comment after every placeholder;
-        # a match that stops at the closing quote would miss all of them.
-        self.assertTrue(smd._config_is_placeholder(
+    def test_a_bracketed_token_alone_is_NOT_enough(self):
+        """The narrowing, stated as a rule.
+
+        `<YOUR_CALL>` on its own does not make a config a template -- see
+        test_optional_placeholders_do_NOT_make_a_config_a_template for the
+        station this cost.  Only the explicit sentinel does.
+        """
+        self.assertFalse(smd._config_is_placeholder(
             '[station]\ncallsign = "<YOUR_CALL>"   # e.g. "AC0G"\n'))
 
 
