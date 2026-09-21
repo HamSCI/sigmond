@@ -814,12 +814,28 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
             _ok('ka9q-radio: already installed and current  (use --force to rebuild)')
             return True
 
-    # Disable Fobos and HydraSDR front-ends by default: their userspace
-    # libs (libfobos, libhydrasdr) aren't in Debian/Ubuntu apt, so the
-    # default build fails on `fobos.h: No such file or directory`.
-    # Operators with those rigs should build the libs from source first,
-    # then rebuild ka9q-radio manually with these flags omitted.
-    build_flags = ['ENABLE_FOBOS=0', 'ENABLE_HYDRASDR=0']
+    # ⛔⛔ OPT IN, never merely opt out.  ka9q-radio built every front-end by
+    # default until upstream turned the SDR back-ends into dynamic drivers
+    # (rx888.so etc.) gated behind ENABLE_<X>, with `ENABLE_ALL ?= 0` and NO
+    # per-driver default.  The polarity inverted: our old flags subtracted
+    # Fobos and HydraSDR from a build that included everything, and after the
+    # change they subtract from nothing.  A plain `make` now emits radiod with
+    # NO rx888.so and NO rx888_boot — it starts, finds no device, and records
+    # nothing.  Every station we run is an RX888, and two ship to McMurdo,
+    # where that failure costs a season (found 2026-09-21 bumping the pin to
+    # 401992cd).
+    #
+    # So name what we want.  Fobos and HydraSDR stay off because libfobos and
+    # libhydrasdr are absent from Debian trixie (verified on AC0G-B4,
+    # 2026-09-21: "NOT-IN-REPOS"); Soapy stays off because we do not declare
+    # libsoapysdr-dev in _RADIOD_APT_DEPS.  The rest match the -dev packages
+    # that list does carry, so each one can actually build.
+    build_flags = [
+        'ENABLE_RX888=1',      # the whole fleet
+        'ENABLE_AIRSPY=1', 'ENABLE_AIRSPYHF=1', 'ENABLE_BLADERF=1',
+        'ENABLE_HACKRF=1', 'ENABLE_RTLSDR=1', 'ENABLE_SIG_GEN=1',
+        'ENABLE_FOBOS=0', 'ENABLE_HYDRASDR=0', 'ENABLE_SOAPY=0',
+    ]
 
     if force:
         _info('--force: running `make clean` before rebuild')
@@ -836,6 +852,23 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     if r.returncode != 0:
         _err(f'ka9q-radio install failed: {r.stderr.strip()}')
         return False
+
+    # ⛔ Fail closed on a radiod that cannot drive our hardware.
+    #
+    # The driver now ships as a dlopen'd rx888.so rather than as code linked
+    # into radiod, so `make` succeeds, `make install` succeeds, and radiod
+    # starts — then finds no device.  Nothing in the build reports this; the
+    # symptom arrives later as a station that records nothing.  We shipped
+    # exactly that class of fault before (2026-09-21), so check the artifact
+    # rather than trusting the flags that were meant to produce it.
+    if 'ENABLE_RX888=1' in build_flags:
+        _driver = Path('/usr/local/lib/ka9q-radio/rx888.so')
+        if not _driver.exists():
+            _err(f'ka9q-radio: built and installed, but {_driver} is MISSING. '
+                 'radiod would start and find no RX888. Refusing to report '
+                 'success — check ENABLE_RX888 and the Makefile driver rules.')
+            return False
+
     _ok('ka9q-radio: built and installed')
     # Record the source commit so the freshness check above can tell when a
     # later clone_repo pull has advanced the tree past this build.
