@@ -1044,13 +1044,27 @@ elif gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
     gexec 30 "systemd-run --unit=sigmond-wizard-bringup --collect \
         smd bringup dasi2 --non-interactive" || true
     RADIOD_STATE="bringup launched — still settling; check later with: sigmond-vm smd admin validate"
+    # ⛔ Say something WHILE waiting.  This printed one line and then nothing
+    # for five minutes, which is indistinguishable from a hang -- rob, at the
+    # console on 2026-09-21: "the wizard is hung at detected starting SDR".
+    # It was not hung; it was doing exactly this loop.  A bounded wait that
+    # looks like a crash is a bug in the reporting, not the waiting.
+    say "  waiting up to 5 min for radiod to come up (bring-up continues in the"
+    say "  background either way; the wizard will move on when the time is up)"
     for i in $(seq 1 30); do
         if gexec 15 "systemctl list-units --state=active 'radiod@*' --no-legend 2>/dev/null | grep -q radiod@"; then
             RADIOD_STATE="radiod ACTIVE ✓ (decoding starts within ~2 min cycles)"
+            say "  radiod is active after $(( i * 10 ))s"
             break
         fi
+        [ $(( i % 6 )) -eq 0 ] && say "  ... still waiting ($(( i / 6 )) of 5 min) — this is normal on a cold box"
         sleep 10
     done
+    case "$RADIOD_STATE" in
+        radiod\ ACTIVE*) : ;;
+        *) say "  radiod did not report active within 5 min — continuing; bring-up"
+           say "  is still running in the background (sigmond-wizard-bringup)" ;;
+    esac
 elif [ "$HAVE_RX888" = 1 ]; then
     # The pre-flight saw an RX888 on this machine, but the VM cannot.  This is
     # the first-install USB handoff, and it is expected exactly once:
