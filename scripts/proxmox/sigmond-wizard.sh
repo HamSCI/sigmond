@@ -1722,7 +1722,14 @@ systemctl disable sigmond-wizard.service 2>/dev/null
 # login prompt (/etc/issue) and after ssh login (/etc/motd), and HOLD the
 # console until the operator acknowledges — getty resets the tty the moment
 # we exit, which used to erase everything (observed 2026-07-03).
-HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+# ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
+# the decoder VM moved behind a host-only bridge this host also holds
+# 10.99.0.1.  Ordering is not guaranteed, so the panel/summary could announce
+# the management /30 -- an address reachable only from the VM -- as the
+# station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
+# need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
+[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.)' | head -1)
 SUMMARY=$(cat <<SEOF
 ──────────────────────────────────────────────────────
  Sigmond station configured: $REPORTER @ $GRID
