@@ -16,6 +16,35 @@ contract client.  The wizard:
      rest of the configurations contract (``SIGMOND_RADIOD_COUNT``,
      ``SIGMOND_RADIOD_INDEX``, ``SIGMOND_RADIOD_STATUS``) immediately
      works for every downstream client.
+
+⚠ **A SECOND RX888 on one host changes the stakes of ``serial``.**
+
+Our deployed stations carry no ``serial`` line at all (verified on AC0G-B4
+and AC0G-ND, 2026-09-21), and that is deliberate rather than an oversight:
+with one SDR per host radiod binds to whatever it finds, and the DFU
+bootstrap in ``_bootstrap_dfu_sdrs`` below depends on exactly that
+behaviour.
+
+Add a second RX888 and you must set ``serial`` to say which is which.  At
+that moment a failure mode appears that cannot happen today: upstream
+radiod parses the configured serial and, finding no match, exits with
+"device could not be found" **even when the card is plainly on the bus**.
+A stale config, or a bootloader serial that differs from the one the
+loaded firmware reports, is then enough to keep a station down.
+
+We used to carry a fork patch for this -- fall back to the sole rx888 when
+the configured serial matches nothing, and log the real one so the
+operator can fix the config.  It was retired on 2026-09-21 because with no
+serial configured it could never fire, and carrying a fork of ka9q-radio
+for unreachable code is a poor trade.  If a two-SDR host ever lands, that
+patch is worth reviving (and worth sending to Phil Karn rather than
+forking again).
+
+⛔ Do not confuse this with the RX888 VANISHING from the bus, which is a
+different fault with a different remedy.  Nothing in software recovers a
+card that is gone; the hub's per-port power switching does, and
+``sigmond-sdr-recover`` drives it.  That path is unaffected by any of the
+above -- see ``reference_rx888_power_cycle_recovery``.
 """
 
 from __future__ import annotations
