@@ -688,12 +688,42 @@ def install_client(
         ok = run_install_script(entry, repo_dir, dry_run=dry_run, yes=yes)
     # Apply any deploy.toml link steps not covered by install.sh (idempotent).
     link_msgs = apply_deploy_toml_links(repo_dir, dry_run=dry_run)
+    reload_needed = False
     if link_msgs:
         for msg in link_msgs:
             print(msg)
         # Reload systemd if we wrote any new unit files.
         if not dry_run and any('/etc/systemd' in m for m in link_msgs
                                if not m.startswith('  warning')):
-            subprocess.run(['systemctl', 'daemon-reload'],
-                           capture_output=True)
+            reload_needed = True
+
+    # ⛔ Hold radiod's consumers until a LAN that can carry multicast exists.
+    #
+    # network-online.target can come true while loopback is still the only
+    # multicast-capable interface.  A recorder started then joins a group that
+    # reaches nobody, sees no packets, and reports perfect health — a station
+    # that boots, looks right, and records nothing.  ka9q-radio ships
+    # wait-for-lan and lan.target for exactly this, and radiod's own unit
+    # already waits; its Wants= on our units pulls them in but orders nothing,
+    # so the consumers could still start first.
+    #
+    # Only components that actually talk to radiod need it, hence the catalog
+    # check — a decode-only host should not run wait-for-lan at all.
+    if 'ka9q-radio' in (getattr(entry, 'requires', None) or ()):
+        try:
+            from sigmond.lan_order import ensure_lan_ordering
+            from sigmond.lifecycle import resolve_units
+            unit_names = [u.unit for u in resolve_units([entry.name], [entry.name])]
+            lan_msgs = ensure_lan_ordering(unit_names, dry_run=dry_run)
+            for msg in lan_msgs:
+                print(msg)
+            if lan_msgs and not dry_run:
+                reload_needed = True
+        except Exception as exc:
+            # Never fail an install over the ordering hint; say so and move on.
+            print(f"  warning: could not order {entry.name} after lan.target: "
+                  f"{type(exc).__name__}: {exc}")
+
+    if reload_needed:
+        subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
     return ok
