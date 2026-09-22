@@ -1036,13 +1036,49 @@ elif [ "$VM_HAS_USB" = 0 ]; then
     RADIOD_STATE="no RX888 seen; nothing to bring up"
 elif gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
     say "RX888 detected — starting SDR bring-up now (takes a few minutes)..."
-    # Direct call, not a timer poke: the operator is running this wizard with the
-    # radio already plugged in, so bringing it up is what they asked for.  This is
-    # the ONE place bring-up still happens without a separate `smd adopt` — the
-    # consent is the wizard itself.  Hardware attached AFTER the install is
-    # reported by `smd status` and waits to be adopted.
-    gexec 30 "systemd-run --unit=sigmond-wizard-bringup --collect \
-        smd bringup dasi2 --non-interactive" || true
+    # The operator is running this wizard with the radio already plugged in, so
+    # bringing it up is what they asked for.  This is the ONE place bring-up
+    # still happens without a separate `smd adopt` — the consent is the wizard
+    # itself.  Hardware attached AFTER the install is reported by `smd status`
+    # and waits to be adopted.
+    #
+    # ⛔ START THE FIRST-RUN UNIT.  Do not launch a second bring-up here.
+    # This used to be `systemd-run --unit=sigmond-wizard-bringup smd bringup`,
+    # a transient unit with its own name — so on a fresh install the wizard's
+    # bring-up and sigmond-firstrun-bringup.service could run AT THE SAME TIME,
+    # with nothing to stop them.  Two `smd bringup` runs contend for the
+    # lifecycle lock (/var/lib/sigmond/lifecycle.lock, contract v0.5 §5.5), and
+    # the loser does not wait — it fails the step.  On AI6VN (v3.50, 2026-09-21)
+    # that cost TEN consecutive `smd install` steps, every one of them reporting
+    # "lifecycle lock held by a background smd operation", and the station came
+    # up without ka9q-web.  It read as nine broken components; it was one race.
+    #
+    # Driving the same unit both ways makes systemd the mutual exclusion:
+    # `systemctl start` on a unit that is already running JOINS the existing
+    # job instead of starting a second copy.  One implementation, one unit, one
+    # log (/var/log/sigmond/firstrun-bringup.log rather than a transient
+    # journal nobody thinks to read), and one marker.
+    #
+    # The marker is cleared first because it is what makes the boot-time run
+    # fire only once.  The wizard IS fresh consent — an operator re-running it
+    # with hardware attached means "bring this up" even if a previous bring-up
+    # already completed — so re-arm the unit rather than silently no-op.  If
+    # the unit happens to be running right now this is harmless: the marker is
+    # written when it finishes.
+    #
+    # The fallback covers a wizard newer than its decoder template: a VM built
+    # before the first-run unit existed has nothing to start, and without this
+    # the station would come up with NOTHING running and no error — the exact
+    # silent-dead-install class this whole path exists to prevent.  There is no
+    # race in that case, because the unit that would have raced does not exist.
+    if gexec 15 "systemctl cat sigmond-firstrun-bringup.service >/dev/null 2>&1"; then
+        gexec 30 "rm -f /var/lib/sigmond/.firstrun-bringup-done; \
+            systemctl start --no-block sigmond-firstrun-bringup.service" || true
+    else
+        say "  (older template: no first-run unit — running bring-up directly)"
+        gexec 30 "systemd-run --unit=sigmond-wizard-bringup --collect \
+            smd bringup dasi2 --non-interactive" || true
+    fi
     RADIOD_STATE="bringup launched — still settling; check later with: sigmond-vm smd admin validate"
     # ⛔ Say something WHILE waiting.  This printed one line and then nothing
     # for five minutes, which is indistinguishable from a hang -- rob, at the
@@ -1063,7 +1099,8 @@ elif gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
     case "$RADIOD_STATE" in
         radiod\ ACTIVE*) : ;;
         *) say "  radiod did not report active within 5 min — continuing; bring-up"
-           say "  is still running in the background (sigmond-wizard-bringup)" ;;
+           say "  is still running in the background. Follow it with:"
+           say "    sigmond-vm tail -f /var/log/sigmond/firstrun-bringup.log" ;;
     esac
 elif [ "$HAVE_RX888" = 1 ]; then
     # The pre-flight saw an RX888 on this machine, but the VM cannot.  This is
