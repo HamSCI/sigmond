@@ -108,6 +108,65 @@ def test_a_detached_head_is_reported(repo):
     assert git_state(repo)["detached"] is True
 
 
+
+
+def _detach(repo, run):
+    """Put the repo on a detached HEAD and return the full sha."""
+    sha = run('rev-parse', 'HEAD').stdout.strip()
+    run('checkout', '--detach', sha)
+    return sha
+
+
+def test_detached_at_its_pin_is_not_drift(repo):
+    """A pinned component sits on a detached HEAD BY DESIGN.
+
+    Reporting that as a fault held B4's heartbeat at INVALID for 288
+    consecutive reports in one day, on a condition nobody would act on.
+    The pin makes the state checkable: HEAD == .pin is correct.
+    """
+    import subprocess
+    run = lambda *a: subprocess.run(['git', '-C', str(repo), *a],
+                                    capture_output=True, text=True)
+    sha = _detach(repo, run)
+    (repo / '.pin').write_text(sha + "\n")
+    st = git_state(repo)
+    assert st['detached'] is True      # the raw state is still reported
+    assert st['pin'] == sha
+    assert st['at_pin'] is True        # ...and it is JUSTIFIED
+
+
+def test_detached_away_from_its_pin_is_drift(repo):
+    """The case the old check could not see: pinned, but not AT the pin."""
+    import subprocess
+    run = lambda *a: subprocess.run(['git', '-C', str(repo), *a],
+                                    capture_output=True, text=True)
+    _detach(repo, run)
+    (repo / '.pin').write_text("0" * 40 + "\n")
+    st = git_state(repo)
+    assert st['detached'] is True
+    assert st['at_pin'] is False
+
+
+def test_detached_with_no_pin_is_drift(repo):
+    """No .pin means nothing justifies the detachment -- still a finding."""
+    import subprocess
+    run = lambda *a: subprocess.run(['git', '-C', str(repo), *a],
+                                    capture_output=True, text=True)
+    _detach(repo, run)
+    st = git_state(repo)
+    assert st['detached'] is True
+    assert st['pin'] == ''
+    assert st['at_pin'] is False
+
+
+def test_abbreviated_pin_still_matches(repo):
+    """.pin files in the field hold short shas; HEAD prints full."""
+    import subprocess
+    run = lambda *a: subprocess.run(['git', '-C', str(repo), *a],
+                                    capture_output=True, text=True)
+    sha = _detach(repo, run)
+    (repo / '.pin').write_text(sha[:7] + "\n")
+    assert git_state(repo)['at_pin'] is True
 def test_git_state_on_a_non_repo_is_not_an_error(tmp_path):
     assert git_state(tmp_path)["error"] is not None
 

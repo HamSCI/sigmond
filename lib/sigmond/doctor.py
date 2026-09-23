@@ -132,7 +132,8 @@ def git_state(repo_dir, run: Optional[Callable] = None) -> dict:
     probe = runner('rev-parse', '--is-inside-work-tree')
     if probe.returncode != 0:
         return {'error': probe.stderr.strip() or 'not a git repository',
-                'dirty': [], 'untracked': [], 'ahead': 0, 'detached': False}
+                'dirty': [], 'untracked': [], 'ahead': 0, 'detached': False,
+                'pin': '', 'head': '', 'at_pin': False}
 
     # `?? path` is UNTRACKED: it does not block a pull, and calling it a
     # modification sends the operator hunting for a local edit that isn't
@@ -149,8 +150,31 @@ def git_state(repo_dir, run: Optional[Callable] = None) -> dict:
         ahead = int(ahead_out)
     except ValueError:
         ahead = 0          # no upstream configured
+    # A component PINNED to a commit legitimately sits on a detached HEAD --
+    # that is exactly what a pinned checkout looks like.  Calling it a fault
+    # held AC0G-B4's rollup verdict at INVALID for every one of 288 heartbeats
+    # in a day, on a condition nobody would ever act on, and a verdict that is
+    # permanently red reports nothing.
+    #
+    # So verify the pin instead of ignoring the state: `.pin` records the
+    # intended commit, and detached AT that commit is correct.  Detached AWAY
+    # from it -- or detached with no pin to justify it -- is real drift and
+    # still a finding.  That is a STRICTER check than the one it replaces,
+    # which could not tell a correctly pinned component from one that had
+    # wandered off its pin.
+    pin = ''
+    try:
+        pin = (repo_dir / '.pin').read_text().split()[0].strip()
+    except (OSError, IndexError):
+        pin = ''
+    head = runner('rev-parse', 'HEAD').stdout.strip()
+    # .pin may hold a full sha while HEAD prints full, or either abbreviated;
+    # compare by prefix in whichever direction is shorter.
+    at_pin = bool(pin) and bool(head) and (
+        head.startswith(pin) or pin.startswith(head))
     return {'error': None, 'dirty': dirty, 'untracked': untracked,
-            'ahead': ahead, 'detached': branch == 'HEAD'}
+            'ahead': ahead, 'detached': branch == 'HEAD',
+            'pin': pin, 'head': head, 'at_pin': at_pin}
 
 
 def venv_skew(venvs: Iterable[str], shared: str, probe: Callable) -> list:

@@ -5022,8 +5022,17 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
             if st['ahead']:
                 findings.append(Finding(
                     name, 'unpushed', f'{st["ahead"]} local commit(s) not on origin'))
-            if st['detached']:
-                findings.append(Finding(name, 'detached', 'HEAD is detached'))
+            # Detached AT the recorded pin is a correctly pinned component,
+            # not a fault.  Only drift off the pin, or a detached HEAD with
+            # no pin to justify it, is worth an operator's attention.
+            if st['detached'] and not st.get('at_pin'):
+                if st.get('pin'):
+                    detail = (f'HEAD {st.get("head", "?")[:12]} has drifted off '
+                              f'its pin {st["pin"][:12]}')
+                else:
+                    detail = ('HEAD is detached and no .pin records which '
+                              'commit it should be at')
+                findings.append(Finding(name, 'detached', detail))
 
     def _venv() -> None:
         # which venvs do NOT take one of their DECLARED editable siblings
