@@ -57,6 +57,7 @@ Front door for each audience: [docs/README.md](README.md).
 | [contributor/docs-conventions.md](contributor/docs-conventions.md) ★ | How the docs tree is organised and kept true: header block, ★-canonical rule, audience split |
 | [contributor/docs-gap-ledger.md](contributor/docs-gap-ledger.md) | Running ledger of software gaps discovered while documenting, feeding per-repo issues |
 | [CLIENT-CONTRACT.md](CLIENT-CONTRACT.md) ★ | The sigmond↔component interface contract — the authoritative statement of the integration surface every client implements |
+| [CHECKOUT-OWNERSHIP.md](CHECKOUT-OWNERSHIP.md) | Why foreign-owned paths keep recurring in `/opt/git/sigmond/<name>` — one tree serving three jobs under nine identities — and the fix that holds in BOTH the managed fleet and a standalone clone: a checkout has one writer identity, the one that owns it, never the one that ran the script |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Sigmond-overseer-only requirements baseline (retroactive v0.1); the suite-wide frame, not the component seam |
 | [REQUIREMENTS-INDEX.md](REQUIREMENTS-INDEX.md) | Front door to the whole suite's requirements baseline, one row per component repo |
 | [REQUIREMENTS-TEMPLATE.md](REQUIREMENTS-TEMPLATE.md) | Standard template + method every SigMonD-suite requirements document fills |
