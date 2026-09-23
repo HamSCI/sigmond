@@ -654,18 +654,42 @@ ask_psws() {
         echo "$PSWS_ID" | grep -qE '^S[0-9]{6}$' && break
         echo "  ✗ PSWS station IDs look like S000123 (S + 6 digits)"
     done
-    PSWS_GRAPE=""; PSWS_MAG=""; PSWS_MAG_STATION=""
+    # ONE station id per site.  The wizard used to ask for a second one just
+    # for the magnetometer; no station ever answered it differently, and two
+    # station identities per site made every "which station is this?" question
+    # ambiguous.  Instruments differ by instrument id, not by station.
+    PSWS_GRAPE=""; PSWS_MAG=""
     if [ -n "$PSWS_ID" ]; then
         rd -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
         PSWS_GRAPE=$(echo "$PSWS_GRAPE" | tr -d ' ')
         rd -r -p "  magnetometer instrument number from the portal (e.g. 84, Enter if none): " PSWS_MAG
         PSWS_MAG=$(echo "$PSWS_MAG" | tr -d ' ')
-        PSWS_MAG_STATION=""
-        if [ -n "$PSWS_MAG" ]; then
-            rd -r -p "  magnetometer PSWS station ID (Enter if same as $PSWS_ID): " PSWS_MAG_STATION
-            PSWS_MAG_STATION=$(echo "$PSWS_MAG_STATION" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
-        fi
     fi
+}
+
+# ── fleet heartbeat ────────────────────────────────────────────────────────
+# The heartbeat existed and shipped OFF: nothing in this wizard ever asked
+# about it, so every greenfield install ended silent, and the one station
+# reporting (AC0G-B4) had been hand-edited to a LAN address that would stop
+# working the moment the station moved.  Ask, default ON, and default to the
+# PUBLIC name so the answer survives the station leaving the bench.
+#
+# Re-pointing later takes no reflash: edit [heartbeat].host in
+# /etc/sigmond/site-profile.toml on the decoder VM and run `smd config render`.
+# That matters -- wd30 is a temporary home for the fleetboard.
+HB_DEFAULT_HOST="wd30.wsprdaemon.org"
+ask_heartbeat() {
+    echo
+    echo "  A status heartbeat lets the fleet dashboard show this station is"
+    echo "  alive and healthy. It sends a small report every 5 minutes, outbound"
+    echo "  only — nothing listens on this machine for it."
+    rd -r -p "Send status heartbeats? [Y/n] " _hb
+    case "${_hb:-Y}" in
+        [Nn]*) HB_ENABLED=0; HB_HOST=""; return ;;
+    esac
+    HB_ENABLED=1
+    rd -r -p "  heartbeat collector host [$HB_DEFAULT_HOST]: " HB_HOST
+    HB_HOST="${HB_HOST:-$HB_DEFAULT_HOST}"
 }
 
 ask_names() {
@@ -727,6 +751,7 @@ ask_grid
 ask_antenna
 ask_rac
 ask_psws
+ask_heartbeat
 ask_names
 
 # ── review: everything on one screen, any entry editable ───────────────────
@@ -748,23 +773,29 @@ while :; do
         echo "  4) Remote:    disabled"
     fi
     if [ -n "$PSWS_ID" ]; then
-        echo "  5) PSWS:      station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}${PSWS_MAG_STATION:+ (station $PSWS_MAG_STATION)}  (key registered after install)"
+        echo "  5) PSWS:      station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}  (key registered after install)"
     else
         echo "  5) PSWS:      (skipped)"
     fi
-    echo "  6) Names:     VM $VMNAME · Proxmox host $PMNAME"
+    if [ "${HB_ENABLED:-0}" = 1 ]; then
+        echo "  6) Heartbeat: enabled → $HB_HOST  (change later: site-profile.toml + smd config render)"
+    else
+        echo "  6) Heartbeat: disabled"
+    fi
+    echo "  7) Names:     VM $VMNAME · Proxmox host $PMNAME"
     echo "  ─────────────────────────────────────────────────────"
-    rd -r -p "Apply? [Y = apply / 1-6 = re-edit that entry / n = abort] " OK
+    rd -r -p "Apply? [Y = apply / 1-7 = re-edit that entry / n = abort] " OK
     case "${OK:-Y}" in
         1) ask_reporter;;
         2) ask_grid ask;;
         3) ask_antenna;;
         4) ask_rac;;
         5) ask_psws;;
-        6) ask_names;;
+        6) ask_heartbeat;;
+        7) ask_names;;
         [Nn]*) say "aborted by operator — nothing was applied. Rerun any time: sigmond-setup"; exit 1;;
         [Yy]*|"") break;;
-        *) echo "  ✗ Y, n, or an entry number 1-6";;
+        *) echo "  ✗ Y, n, or an entry number 1-7";;
     esac
 done
 
@@ -835,11 +866,15 @@ station_id = \"$PSWS_ID\"
 \"hf-timestd\"   = \"$PSWS_GRAPE\""
     [ -n "$PSWS_MAG" ] && PSWS_TOML="$PSWS_TOML
 \"mag-recorder\" = \"$PSWS_MAG\""
-    [ -n "$PSWS_MAG_STATION" ] && PSWS_TOML="$PSWS_TOML
-
-[psws.stations]
-\"mag-recorder\" = \"$PSWS_MAG_STATION\""
     PSWS_TOML="$PSWS_TOML
+"
+fi
+HB_TOML=""
+if [ "${HB_ENABLED:-0}" = 1 ] && [ -n "${HB_HOST:-}" ]; then
+    HB_TOML="
+[heartbeat]
+enabled  = true
+host     = \"$HB_HOST\"
 "
 fi
 PROFILE=$(cat <<PEOF
@@ -851,6 +886,7 @@ description = "$ANTENNA"
 $PSWS_TOML
 [reporters]
 reporter_id = "$REPORTER"
+$HB_TOML
 
 [host]
 hostname = "$VMNAME"
@@ -872,7 +908,7 @@ gexec 600 "smd config render" \
 # callsign/grid stay template placeholders (field gap, AC0G-B4 2026-07-30).
 # Fill them here.
 if [ -n "${PSWS_MAG:-}" ]; then
-    MAGST="${PSWS_MAG_STATION:-$PSWS_ID}"
+    MAGST="$PSWS_ID"
     gexec 30 "C=/etc/mag-recorder/mag-recorder-config.toml; [ -f \$C ] && { sed -i -e \"s|^psws_station_id  = .*|psws_station_id  = \\\"$MAGST\\\"|\" -e \"s|^callsign         = \\\"<YOUR_CALL>\\\"|callsign         = \\\"$CALLSIGN\\\"|\" -e \"s|^grid_square      = \\\"<YOUR_GRID>\\\"|grid_square      = \\\"$GRID\\\"|\" \$C; systemctl try-restart mag-recorder 2>/dev/null; }; true" \
         || say "WARN: could not fill mag-recorder identity"
 fi

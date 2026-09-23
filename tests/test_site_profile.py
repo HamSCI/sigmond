@@ -262,9 +262,15 @@ station_id = "S000418"
 if __name__ == "__main__":
     unittest.main()
 
-def test_psws_station_override_per_recorder(tmp_path):
-    """[psws.stations] gives a recorder its own portal station (AC0G mag:
-    S000082/84 vs site S000170)."""
+def test_psws_station_override_is_ignored_and_warned(capsys, tmp_path):
+    """[psws.stations] was removed 2026-09-23: one site, one station id.
+
+    A profile that still carries the section must NOT have its uploads
+    silently redirected -- every recorder resolves to [psws].station_id,
+    and the load says out loud that it dropped something, because a
+    station whose magnetometer really was enrolled elsewhere would
+    otherwise start uploading under the wrong station with no signal.
+    """
     p = tmp_path / "site-profile.toml"
     p.write_text(
         '[station]\ncallsign = "AC0G"\ngrid_square = "EM38ww"\n'
@@ -273,9 +279,28 @@ def test_psws_station_override_per_recorder(tmp_path):
         '[psws.stations]\n"mag-recorder" = "S000082"\n'
     )
     sp = load_site_profile(p)
-    assert sp.station_for("mag-recorder") == "S000082"
+    assert sp.station_for("mag-recorder") == "S000170"
     assert sp.station_for("hf-timestd") == "S000170"
+    # the instrument id still distinguishes them -- that is the whole point
     assert sp.instrument_for("mag-recorder") == "84"
+    assert sp.instrument_for("hf-timestd") == ""
+    err = capsys.readouterr().err
+    assert "[psws.stations]" in err and "IGNORED" in err
+    assert "mag-recorder" in err and "S000170" in err
+
+
+def test_psws_station_no_override_section_is_silent(capsys, tmp_path):
+    """The warning fires only on a leftover section -- a normal profile
+    must not print anything, or the noise trains operators to ignore it."""
+    p = tmp_path / "site-profile.toml"
+    p.write_text(
+        '[station]\ncallsign = "AC0G"\ngrid_square = "EM38ww"\n'
+        '[psws]\nenabled = true\nstation_id = "S000170"\n'
+        '[psws.instruments]\n"mag-recorder" = "84"\n'
+    )
+    sp = load_site_profile(p)
+    assert sp.station_for("mag-recorder") == "S000170"
+    assert capsys.readouterr().err == ""
 
 
 class UploadsPolicyProfileTests(unittest.TestCase):

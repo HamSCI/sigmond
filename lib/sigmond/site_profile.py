@@ -48,9 +48,10 @@ instrument_id = ""                 # legacy single id (= hf-timestd/GRAPE's)
 # "hf-timestd"   = "172"           # GRAPE instrument id from the portal
 # "mag-recorder" = "84"            # magnetometer instrument id from the portal
 
-[psws.stations]                    # per-recorder PSWS STATION overrides —
-# "mag-recorder" = "S000082"       # for instruments enrolled under their
-                                   # own portal station (default: [psws].station_id)
+# NOTE: [psws.stations] (per-recorder station overrides) was REMOVED
+# 2026-09-23.  One site, one PSWS station id; instruments differ by
+# instrument id, not by station.  A leftover [psws.stations] in an existing
+# profile is IGNORED and warned about, never silently honoured.
 
 [reporters]                        # default to [station].callsign when blank
 reporter_id      = ""              # WSPR/PSK reporter instance id, e.g. AC0G/S
@@ -101,7 +102,6 @@ class SiteProfile:
     psws_station_id: str = ""
     psws_instrument_id: str = ""
     psws_instruments: dict = field(default_factory=dict)
-    psws_stations: dict = field(default_factory=dict)
     reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
@@ -169,16 +169,18 @@ class SiteProfile:
         return ""
 
     def station_for(self, recorder: str) -> str:
-        """Per-recorder PSWS station id.
+        """PSWS station id for a recorder: the SITE station, always.
 
-        Instruments usually share the site station, but some live under
-        their OWN portal station (AC0G's magnetometer: station S000082 /
-        instrument 84 vs the receiver's S000170). ``[psws.stations]``
-        overrides per recorder; the site ``[psws].station_id`` is the
-        default.
+        Until 2026-09-23 a ``[psws.stations]`` table let a recorder claim
+        its own portal station, added for AC0G's magnetometer (station
+        S000082 / instrument 84 against the receiver's S000170).  No
+        station ever used it -- AC0G-B4 and AC0G-ND both upload their
+        magnetometer under the site station id -- and carrying two station
+        identities per site made every "which station is this?" question
+        ambiguous for no benefit.  One site, one station id; instruments
+        are distinguished by instrument id.
         """
-        v = str(self.psws_stations.get(recorder, "") or "").strip()
-        return v or self.psws_station_id
+        return self.psws_station_id
 
 
 def _f(v) -> float:
@@ -204,6 +206,26 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
     hb = data.get("heartbeat", {}) or {}
     up = data.get("uploads", {}) or {}
 
+    def _clean_early(v) -> str:
+        v = str(v or "").strip()
+        return "" if (v.startswith("<") and v.endswith(">")) else v
+
+    # [psws.stations] was removed 2026-09-23 (one site, one station id).  A
+    # profile that still carries it would otherwise have its uploads quietly
+    # redirected to the site station -- say so, since AI6VN was unreachable
+    # when this landed and nobody could confirm its magnetometer config.
+    _dead = psws.get("stations") or {}
+    if _dead:
+        import sys as _sys
+        print(
+            f"WARNING: {path}: [psws.stations] is no longer supported and was "
+            f"IGNORED ({', '.join(sorted(map(str, _dead)))}). Every recorder "
+            f"now uploads under [psws].station_id "
+            f"({_clean_early(psws.get('station_id')) or '<unset>'}). Remove the "
+            f"section, or open a portal ticket to move the instrument.",
+            file=_sys.stderr,
+        )
+
     def _clean(s) -> str:
         s = str(s or "").strip()
         # treat unfilled <...> placeholders as empty
@@ -222,11 +244,6 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
         psws_instruments={
             str(k): _clean(v)
             for k, v in (psws.get("instruments", {}) or {}).items()
-            if _clean(v)
-        },
-        psws_stations={
-            str(k): _clean(v)
-            for k, v in (psws.get("stations", {}) or {}).items()
             if _clean(v)
         },
         reporter_id=_clean(rep.get("reporter_id")).upper(),
