@@ -678,6 +678,13 @@ ask_psws() {
 # /etc/sigmond/site-profile.toml on the decoder VM and run `smd config render`.
 # That matters -- wd30 is a temporary home for the fleetboard.
 HB_DEFAULT_HOST="wd30.wsprdaemon.org"
+# ⛔ The PORT is not optional and its code default is WRONG for this host.
+# site_profile.py defaults [heartbeat].port to 22, but wd30 answers only on
+# 38222 (the operator's router-forward); measured 2026-09-23, :22 refuses and
+# :38222 accepts.  Writing the host without a port would give every new
+# station a heartbeat that silently never delivers -- which is how the
+# feature came to be neglected in the first place.
+HB_DEFAULT_PORT="38222"
 ask_heartbeat() {
     echo
     echo "  A status heartbeat lets the fleet dashboard show this station is"
@@ -690,6 +697,9 @@ ask_heartbeat() {
     HB_ENABLED=1
     rd -r -p "  heartbeat collector host [$HB_DEFAULT_HOST]: " HB_HOST
     HB_HOST="${HB_HOST:-$HB_DEFAULT_HOST}"
+    rd -r -p "  heartbeat collector port [$HB_DEFAULT_PORT]: " HB_PORT
+    HB_PORT=$(echo "${HB_PORT:-$HB_DEFAULT_PORT}" | tr -d ' ')
+    case "$HB_PORT" in ''|*[!0-9]*) HB_PORT="$HB_DEFAULT_PORT" ;; esac
 }
 
 ask_names() {
@@ -778,7 +788,7 @@ while :; do
         echo "  5) PSWS:      (skipped)"
     fi
     if [ "${HB_ENABLED:-0}" = 1 ]; then
-        echo "  6) Heartbeat: enabled → $HB_HOST  (change later: site-profile.toml + smd config render)"
+        echo "  6) Heartbeat: enabled → $HB_HOST:$HB_PORT  (change later: site-profile.toml + smd config render)"
     else
         echo "  6) Heartbeat: disabled"
     fi
@@ -875,6 +885,7 @@ if [ "${HB_ENABLED:-0}" = 1 ] && [ -n "${HB_HOST:-}" ]; then
 [heartbeat]
 enabled  = true
 host     = \"$HB_HOST\"
+port     = $HB_PORT
 "
 fi
 PROFILE=$(cat <<PEOF
