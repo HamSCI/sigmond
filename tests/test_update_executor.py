@@ -185,3 +185,75 @@ class HistoryPerStepTests(_Rig):
         lines = hist.read_text().splitlines()
         self.assertTrue(any("pull fakeclient" in l for l in lines), lines)
         self.assertTrue(any("install fakeclient" in l for l in lines), lines)
+
+
+class PinnedComponentTests(_Rig):
+    """Task 7: bring-up's image build and `smd align` both detach a
+    checkout onto `.pin`, and `smd update` must hold it there until
+    `--unpin` is given.  A pinned checkout sits on a DETACHED HEAD
+    (Controller ruling 5), so `--unpin` has to check out the tracking
+    branch before it can `git pull --ff-only`."""
+
+    def _pin_at_head(self):
+        """Detach the host checkout onto its current HEAD and drop a
+        `.pin` naming it — the shape bring-up / `smd align` leave behind."""
+        head = _git("rev-parse", "HEAD", cwd=self.host).stdout.strip()
+        _git("checkout", "--detach", head, cwd=self.host)
+        (self.host / ".pin").write_text(head + "\n")
+        return head
+
+    def test_a_pinned_component_is_held_not_pulled(self):
+        self._pin_at_head()
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)  # a pin hold alone must not fail the run
+        self.assertIn("pinned by smd align", text)
+        self.assertFalse((self.host / ".installed").exists(), text)
+        self.assertTrue((self.host / ".pin").exists())
+
+    def test_unpin_checks_out_the_branch_then_pulls_and_removes_pin(self):
+        self._pin_at_head()
+        args = types.SimpleNamespace(base=self.base, apply=True,
+                                     no_fetch=False, unpin=True)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = smd.cmd_update(args)
+        text = out.getvalue() + err.getvalue()
+
+        self.assertEqual(rc, 0, text)
+        self.assertFalse((self.host / ".pin").exists(), text)
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD",
+                      cwd=self.host).stdout.strip()
+        self.assertEqual(branch, "main")
+        self.assertTrue((self.host / ".installed").exists(), text)
+
+    def test_unpin_checkout_precedes_pull_and_pin_survives_a_failed_pull(self):
+        self._pin_at_head()
+        # Cache origin/main at "second" locally while the remote still
+        # works, then break it — same pattern as
+        # test_install_is_skipped_when_pull_failed.
+        _git("fetch", cwd=self.host)
+        _git("remote", "set-url", "origin", "/nonexistent/origin.git", cwd=self.host)
+
+        calls = []
+
+        def recording_run(cmd, *a, **kw):
+            calls.append(list(cmd))
+            return _run_without_runuser(cmd, *a, **kw)
+
+        with mock.patch.object(smd.subprocess, "run", side_effect=recording_run):
+            args = types.SimpleNamespace(base=self.base, apply=True,
+                                         no_fetch=True, unpin=True)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = smd.cmd_update(args)
+        text = out.getvalue() + err.getvalue()
+
+        self.assertNotEqual(rc, 0, text)
+        self.assertTrue((self.host / ".pin").exists(),
+                        "a failed pull must not remove .pin")
+
+        checkout_idx = next(i for i, c in enumerate(calls)
+                            if isinstance(c, list) and "checkout" in c and "main" in c)
+        pull_idx = next(i for i, c in enumerate(calls)
+                        if isinstance(c, list) and "pull" in c and "--ff-only" in c)
+        self.assertLess(checkout_idx, pull_idx, calls)

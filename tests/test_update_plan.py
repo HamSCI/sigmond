@@ -273,6 +273,40 @@ def test_an_unstated_installer_is_assumed_present():
     assert [a.kind for a in plan] == ['pull', 'install', 'restart']
 
 
+# ---------------------------------------------------------------------------
+# Task 7: a component pinned by bring-up / `smd align` is held, not pulled
+# ---------------------------------------------------------------------------
+#
+# `.pin` records the commit bring-up's image build or `smd align` detached
+# the checkout onto, and `doctor.git_state` already verifies it (`pin`,
+# `at_pin`).  A station fresh from an image is meant to hold every
+# component at its blessed pin — the combination the nested test has
+# seen — until an operator explicitly runs `smd update --unpin`.
+
+
+def test_a_pinned_and_at_pin_component_is_held_not_pulled():
+    plan = plan_update(_state(repos={'hf-timestd': {
+        'behind': 3, 'dirty': [], 'owner': 'timestd',
+        'pinned': 'abcdef1234567890', 'at_pin': True}}))
+
+    assert not [a for a in plan if isinstance(a, Action)]
+    pin = [s for s in plan if isinstance(s, Refusal) and s.kind == 'pin']
+    assert pin and pin[0].target == 'hf-timestd'
+    assert 'abcdef12' in pin[0].reason
+    assert '--unpin' in pin[0].reason
+
+
+def test_at_pin_false_does_not_hold_a_hand_moved_checkout():
+    """HEAD moved off the recorded pin by hand — a pin the operator already
+    left behind does not hold; this is a normal pull."""
+    plan = plan_update(_state(repos={'hf-timestd': {
+        'behind': 3, 'dirty': [], 'owner': 'timestd',
+        'pinned': 'abcdef1234567890', 'at_pin': False}}))
+
+    assert not [s for s in plan if isinstance(s, Refusal)]
+    assert [a.kind for a in plan] == ['pull', 'install', 'restart']
+
+
 def test_a_skewed_venv_that_cannot_be_repaired_refuses_rather_than_pretending():
     """venv skew is repaired BY install.sh. With no install script there
     is nothing to run, so saying nothing would leave a real defect

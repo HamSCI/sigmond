@@ -340,6 +340,23 @@ def _runuser(user: str, argv: list) -> list:
     return _as_root([exe, '-u', user or 'root', '--'] + list(argv))
 
 
+def _git_checkout_branch_as_owner(repo_dir: Path, owner: str,
+                                  branch: str) -> subprocess.CompletedProcess:
+    """`git checkout <branch>`, as the checkout's owner.
+
+    The first half of releasing a detached, pinned checkout
+    (`smd update --unpin`): bring-up and `smd align` both detach onto
+    `.pin`, and `git pull --ff-only` refuses outright on a detached HEAD
+    ("You are not currently on a branch") — so the checkout has to land
+    back on its tracking branch before the pull step even tries.  Not
+    `--detach`, and not `_run_git_net`: this is a local ref move, not a
+    network operation, so it gets no network timeout.
+    """
+    return subprocess.run(_runuser(owner or 'root',
+                                   ['git', '-C', str(repo_dir), 'checkout', branch]),
+                          capture_output=True, text=True)
+
+
 def _run_git_net(git_cmd: list, verb: str) -> subprocess.CompletedProcess:
     """subprocess.run for a git command that talks to the network: bounded,
     non-interactive, and a timeout comes back as a FAILED result (returncode
@@ -3564,6 +3581,7 @@ def cmd_update(args) -> int:
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     checkouts = component_checkouts(base)
+    unpin = getattr(args, 'unpin', False)
 
     # Fetch by default so "nothing to do" means something. Without this
     # the counts below are taken against whatever origin/* happened to
@@ -3572,23 +3590,58 @@ def cmd_update(args) -> int:
     _refresh_upstreams(checkouts, fetch=not getattr(args, 'no_fetch', False))
 
     repos = {}
+    # Only populated for a component `--unpin` is about to release from a
+    # DETACHED HEAD: name -> branch to `git checkout` before the pull, since
+    # `git pull --ff-only` refuses outright on a detached HEAD.
+    detach_release = {}
     for d in checkouts:
         st = git_state(d)
         if st['error']:
             continue
+        pin, at_pin, detached = st['pin'], st['at_pin'], st['detached']
+        # bring-up's image build and `smd align` both detach onto `.pin`
+        # deliberately — a held component's checkout legitimately has no
+        # usable @{u}, so comparing against it is noise on top of the
+        # refusal that already explains the state (Controller ruling 5).
+        # `pin_hold` is independent of `--unpin`: it is what tells a
+        # deliberately pinned checkout apart from a detached HEAD that
+        # never had a pin, or that wandered off one by hand — NEITHER of
+        # which `--unpin` is for, and both keep today's behaviour
+        # unchanged (existing warning, no pull) even with it given.
+        pin_hold = bool(pin) and at_pin
+        held = pin_hold and not unpin
         behind = 0
-        r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
-                            'rev-list', '--count', 'HEAD..@{u}'],
-                           capture_output=True, text=True)
-        try:
-            behind = int(r.stdout.strip())
-        except ValueError:
-            # rev-list failed (no upstream configured, unreadable repo).  Not
-            # the same as "up to date" — say so rather than quietly claiming 0.
-            behind = 0
-            if r.returncode != 0:
-                _warn(f'{d.name}: cannot compare against upstream — '
-                      f'{((r.stderr or "").strip().splitlines() or ["?"])[-1]}')
+        if held:
+            pass
+        elif unpin and pin_hold and detached:
+            # `--unpin` releases a detached, PINNED checkout: `HEAD..@{u}`
+            # still fails here (a detached HEAD has no upstream
+            # configured), so compare against the live default branch
+            # instead.
+            ref = _git_default_ref(d)
+            branch = ref.split('/', 1)[-1] if ref else 'main'
+            out = subprocess.run(
+                ['git', '--no-optional-locks', '-C', str(d), 'rev-list',
+                 '--count', f'HEAD..{ref or ("origin/" + branch)}'],
+                capture_output=True, text=True)
+            try:
+                behind = int(out.stdout.strip())
+            except ValueError:
+                behind = 0
+            detach_release[d.name] = branch
+        else:
+            r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
+                                'rev-list', '--count', 'HEAD..@{u}'],
+                               capture_output=True, text=True)
+            try:
+                behind = int(r.stdout.strip())
+            except ValueError:
+                # rev-list failed (no upstream configured, unreadable repo).  Not
+                # the same as "up to date" — say so rather than quietly claiming 0.
+                behind = 0
+                if r.returncode != 0:
+                    _warn(f'{d.name}: cannot compare against upstream — '
+                          f'{((r.stderr or "").strip().splitlines() or ["?"])[-1]}')
         try:
             owner = d.owner()
         except Exception:
@@ -3606,6 +3659,9 @@ def cmd_update(args) -> int:
         repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
                          'incoming': incoming, 'owner': owner,
                          'installer': installer}
+        if held:
+            repos[d.name]['pinned'] = pin
+            repos[d.name]['at_pin'] = True
 
     # Every editable sibling THIS component declares (ka9q-python,
     # hamsci-dsp, hs-uploader, ...) is checked, not just ka9q-python —
@@ -3660,6 +3716,12 @@ def cmd_update(args) -> int:
 
     plan = plan_update(state)
     held_targets = [s.target for s in plan if isinstance(s, Refusal)]
+    # A `pin` refusal is not a problem to fix — it is the intended steady
+    # state of a freshly imaged station (Controller ruling 4). It must
+    # appear in the same refusal output as any other hold, but it must
+    # never by itself push the exit code to UPDATE_EXIT_HELD.
+    blocking_targets = [s.target for s in plan if isinstance(s, Refusal)
+                        and getattr(s, 'kind', 'refuse') != 'pin']
     if not [s for s in plan if not isinstance(s, Refusal)]:
         # Nothing runnable. Either the host is current, or the only
         # entries left are deliberate holds — which is a steady state,
@@ -3669,8 +3731,8 @@ def cmd_update(args) -> int:
             reason = next(s.reason for s in plan
                           if isinstance(s, Refusal) and s.target == target)
             _warn(f'{target}: HELD — {reason}')
-        code, line = _no_actionable_outcome(held_targets)
-        (_warn if held_targets else _ok)(line)
+        code, line = _no_actionable_outcome(blocking_targets)
+        (_warn if blocking_targets else _ok)(line)
         return code
 
     apply_ = getattr(args, 'apply', False)
@@ -3684,7 +3746,8 @@ def cmd_update(args) -> int:
     for step in plan:
         if isinstance(step, Refusal):
             _warn(f'{step.target}: HELD — {step.reason}')
-            held += 1
+            if getattr(step, 'kind', 'refuse') != 'pin':
+                held += 1
             continue
         print(f'\n  [{step.kind}] {step.target}')
         if step.detail:
@@ -3693,14 +3756,37 @@ def cmd_update(args) -> int:
         if not apply_:
             continue
         if step.kind == 'pull':
+            target_dir = base / step.target
+            branch = detach_release.get(step.target)
+            if branch:
+                # --unpin releasing a detached checkout: land back on the
+                # branch first, or `pull --ff-only` refuses outright.
+                co = _git_checkout_branch_as_owner(target_dir, step.run_as, branch)
+                if co.returncode != 0:
+                    last = ((co.stdout + co.stderr).strip().splitlines()
+                            or ['(no output)'])[-1]
+                    _err(f'{step.target}: checkout {branch}: {last}')
+                    failed += 1
+                    pull_failed.add(step.target)
+                    continue
             r = _run_git_net(_runuser(step.run_as or 'root',
-                                      ['git', '-C', str(base / step.target),
+                                      ['git', '-C', str(target_dir),
                                        'pull', '--ff-only']), 'pull')
             last = ((r.stdout + r.stderr).strip().splitlines() or ['(no output)'])[-1]
             (_ok if r.returncode == 0 else _err)(f'{step.target}: {last}')
             if r.returncode == 0:
                 applied.add(f'pull {step.target}')
                 _record_update_step(f'pull {step.target}')
+                if unpin:
+                    # Only after the pull SUCCEEDS — never before, never on
+                    # failure (Controller ruling 3): a `.pin` surviving a
+                    # failed pull is what makes re-running resumable.
+                    pin_path = target_dir / '.pin'
+                    if pin_path.exists():
+                        try:
+                            pin_path.unlink()
+                        except OSError as exc:
+                            _warn(f'{step.target}: could not remove .pin: {exc}')
             else:
                 failed += 1
                 pull_failed.add(step.target)
@@ -20620,6 +20706,13 @@ def main() -> int:
                    help='skip the git fetch (faster, but plans against '
                         'cached origin/* refs — a stale host will report '
                         'itself current; fetching is the default)')
+    p.add_argument('--unpin', action='store_true',
+                   help='release components held at their .pin (written '
+                        'by bring-up\'s image build or `smd align`) and '
+                        'pull them to the branch tip. A station fresh '
+                        'from an image holds every component at its '
+                        'blessed pin by default — the exact combination '
+                        'the nested test has seen — until this is given')
 
     p = sub.add_parser('align',
         help='how far this station sits from the latest blessed appliance '

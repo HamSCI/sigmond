@@ -35,6 +35,11 @@ The traps, and how each is encoded:
   invisible in startup time.  `fft.log` is written only on a miss.
 * **restart order** — radiod first, recorders after it is stable; a
   recorder started against a restarting radiod picks up a bad anchor.
+* **a pinned checkout stays pinned** — bring-up's image build and
+  `smd align` both detach a component onto `.pin`, and that hold is the
+  point: a fresh station runs the exact combination the nested test has
+  seen.  The plan REFUSES a component that is still at its pin, and
+  `smd update --unpin` is the only way off it.
 
 Every action carries a `verify`, because today's failures were uniformly
 of the form "looked fine, wasn't done" — a deploy that restarted
@@ -129,6 +134,21 @@ def plan_update(state: dict) -> list:
                 f'{len(dirty)} modified file(s) ({", ".join(dirty[:3])}) — '
                 f'diff against origin/main before discarding; the local '
                 f'change may be a fix that never got committed'))
+            continue
+        pinned = info.get('pinned') or ''
+        if pinned and info.get('at_pin'):
+            # bring-up's image build and `smd align` both detach the
+            # checkout onto `.pin` — deliberately, and that hold is the
+            # point: a fresh station runs the exact combination the
+            # nested test has seen.  `at_pin` (doctor.git_state) is what
+            # tells this apart from a pin the operator already left
+            # behind by moving HEAD by hand; that case falls through to
+            # a normal pull below.
+            refusals.append(Refusal(
+                name,
+                f'pinned by smd align to {pinned[:8]} — '
+                f'`smd update --unpin` releases it',
+                kind='pin'))
             continue
         if info.get('behind'):
             detail = f'{info["behind"]} commit(s) behind upstream'
