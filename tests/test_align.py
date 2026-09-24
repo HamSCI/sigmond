@@ -204,12 +204,16 @@ class PlanTests(unittest.TestCase):
                                         "ka9q-radio": "401992c"}, {"hf-timestd": True})
         self.assertEqual(next(i for i in plan if i.component == "hf-timestd").status, "current")
 
-    def test_radiod_move_is_flagged(self):
+    def test_radiod_move_has_no_special_note(self):
+        # Fix round 1 / M6: the stale "--apply will not move it" note is
+        # gone now that Plan 2b actually rebuilds radiod when it moves
+        # (the dry run's own REBUILDS/RESTARTS line, in bin/smd, carries
+        # that information instead — see test_align_cli.py).
         plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": "5c8196d",
                                         "ka9q-radio": "deb7bdd"}, {})
         item = next(i for i in plan if i.component == "ka9q-radio")
         self.assertEqual(item.status, "move")
-        self.assertEqual(item.note, "radiod rebuild is Plan 2b — --apply will not move it")
+        self.assertEqual(item.note, "")
 
     def test_missing_and_stray(self):
         plan = align.plan_align(rel(), {"sigmond": "daba1f6", "ka9q-radio": "401992c",
@@ -363,8 +367,8 @@ class ClassifyTests(unittest.TestCase):
         out = align.classify([mv("x", "a1", "b2")], lambda *a: None)
         self.assertEqual(out[0].status, "refuse")
 
-    def test_radiod_forward_keeps_restart_note(self):
-        note = "radiod rebuild is Plan 2b — --apply will not move it"
+    def test_classify_preserves_an_items_note(self):
+        note = "uv.lock will be reset"
         out = align.classify([mv(align.RADIOD, "a1", "b2", note)],
                              self.anc({(align.RADIOD, "a1", "b2"): True}))
         self.assertEqual(out[0].note, note)

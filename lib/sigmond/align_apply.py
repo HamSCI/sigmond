@@ -323,6 +323,34 @@ def _roll_back(repo: Path, owner: str, from_full: str, full: str,
     return f"{why} — {done}"
 
 
+def _rollback_and_rebuild(name: str, repo: Path, owner: str, from_full: str, full: str,
+                          prev_pin: Optional[str], branch: str, why: str, ctx: Ctx) -> str:
+    """`_roll_back`, then — for a BUILT_COMPONENTS failure only — rebuild
+    at the commit it just rolled back to.
+
+    Fix round 1 / I1: `_build_ka9q_radio` is not atomic. It runs `make
+    clean`, `make`, then `sudo make install`, and only afterwards checks
+    for rx888.so, so a failed build can leave a NEW-commit radiod binary
+    installed even though the checkout (and .pin) have just rolled back
+    to ``from_full``. Rebuilding there too closes that gap. When
+    ``ctx.build`` was never wired at all, no `make install` ever ran, so
+    there is nothing on disk to reconcile — the plain rollback detail is
+    enough."""
+    detail = _roll_back(repo, owner, from_full, full, prev_pin, branch, why, ctx)
+    if "rollback FAILED" in detail:
+        return f"{detail} — do NOT restart radiod"
+    if ctx.build is None:
+        return detail
+    try:
+        rc = ctx.build(name, repo)
+    except Exception:  # noqa: BLE001 — a builder is foreign code
+        rc = 1
+    if rc == 0:
+        return f"{why} — rolled back to {from_full[:8]} and rebuilt it"
+    return (f"{why}; rebuild at {from_full[:8]} ALSO failed — installed radiod may not "
+           f"match the checkout; rebuild by hand, do NOT restart radiod")
+
+
 def _move(it: Item, ctx: Ctx) -> Step:
     """Steps 1-7 of a forward move (or an allowed rollback) for one
     component. Any ApplyError from a helper becomes Step("failed", …) —
@@ -416,7 +444,8 @@ def _move(it: Item, ctx: Ctx) -> Step:
                 why = f"build exit {rc}" if rc else ""
         if why:
             return Step(name, "failed",
-                        _roll_back(repo, owner, from_full, full, prev_pin, branch, why, ctx), fetched)
+                        _rollback_and_rebuild(name, repo, owner, from_full, full, prev_pin,
+                                             branch, why, ctx), fetched)
     elif changed & INSTALL_TRIGGERS and ctx.run_install is not None:
         ctx.say(f"  {name}: running install.sh …")
         try:

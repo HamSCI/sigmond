@@ -4636,21 +4636,55 @@ def _align_radiod_built_at() -> Optional[float]:
 _ALIGN_RADIOD_READY = '/usr/local/sbin/sigmond-radiod-ready'
 
 
-def _align_restart_unit(unit, *, run, say) -> object:
+def _align_run(argv, *, run, timeout, action) -> object:
+    """`run(argv, capture_output=True, text=True, timeout=timeout)`, with a
+    hung or unrunnable command turned into a synthetic non-zero result
+    instead of a raised TimeoutExpired/OSError — every caller in
+    `_align_restart` gets something to build a Step detail from, never a
+    traceback mid-restart (Fix round 1 / I3)."""
+    try:
+        return run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 1, '', f'{action} timed out after {timeout}s')
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 1, '', f'{action} could not run: {exc}')
+
+
+def _align_is_active(unit, *, run, timeout=15) -> bool:
+    """`systemctl is-active <unit>` (timeout 15) — True only on a clean
+    "active" stdout. Anything else — inactive, failed, unknown, or a
+    timed-out/unrunnable systemctl — reads as not-active: a service that
+    is not running is never started by align (Fix round 1 / I2)."""
+    r = _align_run(['systemctl', 'is-active', unit], run=run, timeout=timeout,
+                   action=f'systemctl is-active {unit}')
+    return (r.stdout or '').strip() == 'active'
+
+
+def _align_restart_unit(unit, *, run, say, timeout=300) -> object:
     """`systemctl reset-failed <unit>`, then `systemctl restart <unit>` —
     in-process, never `smd restart` (the held lifecycle_lock would make
-    that child exit "another lifecycle operation is in progress")."""
+    that child exit "another lifecycle operation is in progress"). The
+    caller has already confirmed ``unit`` is active."""
     say(f'  restarting {unit} …')
-    run(['systemctl', 'reset-failed', unit], capture_output=True, text=True)
-    return run(['systemctl', 'restart', unit], capture_output=True, text=True)
+    _align_run(['systemctl', 'reset-failed', unit], run=run, timeout=timeout,
+               action=f'systemctl reset-failed {unit}')
+    return _align_run(['systemctl', 'restart', unit], run=run, timeout=timeout,
+                      action=f'systemctl restart {unit}')
 
 
 def _align_restart(radiod_first: bool, components: list, services: dict, *,
-                   run=subprocess.run, say=print, sleep=time.sleep) -> list:
+                   run=subprocess.run, say=print) -> list:
     """Restart what an alignment left stale: radiod first (with a
-    readiness wait), then every listed component — never `smd restart`
-    (Controller: a restart runs in-process; the held lifecycle_lock would
-    make a child `smd restart` exit immediately).
+    per-unit readiness wait), then every listed component — never `smd
+    restart` (Controller: a restart runs in-process; the held
+    lifecycle_lock would make a child `smd restart` exit immediately).
+
+    A unit that is not currently active is left alone — starting a
+    stopped service is not alignment, and restarting a dead sibling
+    radiod@ would strand its consumers waiting on a readiness check that
+    can never pass (Fix round 1 / I2). When no radiod unit is active,
+    radiod counts as not restarted and the listed components restart as
+    a plain component restart, exactly as when ``radiod_first`` is False.
 
     ``components`` is the already-decided restart list (align_live.
     restart_sequence / restart_sequence's caller); this function does not
@@ -4665,29 +4699,46 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
 
     steps = []
     if radiod_first:
-        fail_detail = None
+        active_units = []
         for unit in services.get(RADIOD, []):
-            r = _align_restart_unit(unit, run=run, say=say)
-            if r.returncode != 0 and fail_detail is None:
-                lines = (r.stderr or '').strip().splitlines()
-                last = lines[-1] if lines else ''
-                fail_detail = f'systemctl restart {unit}: {last}'
-        if fail_detail is None:
-            r = run([_ALIGN_RADIOD_READY, '90'], capture_output=True, text=True)
-            if r.returncode != 0:
-                fail_detail = f'{_ALIGN_RADIOD_READY} 90: exit {r.returncode}'
-        if fail_detail is not None:
-            steps.append(align_apply.Step(RADIOD, 'failed', fail_detail))
-            steps.extend(align_apply.Step(c, 'skipped', 'radiod did not come back')
-                        for c in components)
-            return steps
-        steps.append(align_apply.Step(RADIOD, 'restarted', 'ready'))
+            if _align_is_active(unit, run=run):
+                active_units.append(unit)
+            else:
+                say(f'  {unit} not running — left alone')
+        if active_units:
+            fail_detail = None
+            for unit in active_units:
+                r = _align_restart_unit(unit, run=run, say=say)
+                if r.returncode != 0 and fail_detail is None:
+                    lines = (r.stderr or '').strip().splitlines()
+                    last = lines[-1] if lines else ''
+                    fail_detail = f'systemctl restart {unit}: {last}'
+            if fail_detail is None:
+                for unit in active_units:
+                    r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, '90'],
+                                   run=run, timeout=120, action='sigmond-radiod-ready')
+                    if r.returncode != 0:
+                        lines = (r.stderr or '').strip().splitlines()
+                        last = lines[-1] if lines else f'exit {r.returncode}'
+                        fail_detail = f'{_ALIGN_RADIOD_READY} --unit {unit} 90: {last}'
+                        break
+            if fail_detail is not None:
+                steps.append(align_apply.Step(RADIOD, 'failed', fail_detail))
+                steps.extend(align_apply.Step(c, 'skipped', 'radiod did not come back')
+                            for c in components)
+                return steps
+            steps.append(align_apply.Step(RADIOD, 'restarted', 'ready'))
+        # else: no radiod unit is active — radiod counts as not restarted;
+        # the components below restart as a plain component restart.
 
     refs = [UnitRef(component=c, unit=u, template=None, instance=None,
                     kind='service', source='align')
            for c in components for u in services.get(c, [])]
     failed: dict = {}
     for ref in order_units(refs):
+        if not _align_is_active(ref.unit, run=run):
+            say(f'  {ref.unit} not running — left alone')
+            continue
         r = _align_restart_unit(ref.unit, run=run, say=say)
         if r.returncode != 0 and ref.component not in failed:
             lines = (r.stderr or '').strip().splitlines()
@@ -5032,15 +5083,16 @@ def _align_apply(args) -> int:
         items = [it for it in items if it.component not in skipped_budget]
 
         # Fix round 1 / M4: ka9q-radio has no install.sh of its own — smd
-        # builds it in-tree (_install_radiod_native). A missing checkout is
-        # therefore a refusal here, not an install attempt Plan 2b hasn't
-        # built yet (install_missing would otherwise clone it and then fail
-        # trying to run an install.sh that doesn't exist).
+        # builds it in-tree (_install_radiod_native / _align_build). A
+        # missing checkout is therefore a refusal here: there's no
+        # install.sh to clone-and-run, so install_missing's generic path
+        # (which expects one) would just fail confusingly.
         radiod_missing = [it for it in items
                           if it.status == 'missing' and it.component == align.RADIOD]
         extra_steps += [
             align_apply.Step(it.component, 'refused',
-                             'radiod build is Plan 2b — install it with smd install ka9q-radio')
+                             'ka9q-radio is not installed — install it with '
+                             'smd install ka9q-radio')
             for it in radiod_missing]
         items = [it for it in items if it not in radiod_missing]
 

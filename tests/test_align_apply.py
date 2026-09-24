@@ -843,17 +843,59 @@ class FinalReviewMoveTests(unittest.TestCase):
             self.assertEqual(steps[0].outcome, "moved")
             self.assertEqual(calls, [("ka9q-radio", repo)])
 
-    def test_ka9q_radio_build_failure_rolls_back(self):
+    # --- Fix round 1 / I1: _build_ka9q_radio is not atomic (make clean,
+    # make, sudo make install, THEN the rx888.so check) — a failed build
+    # can leave a new-commit radiod installed even though the checkout
+    # rolled back. Rebuild at the rolled-back commit too. ---
+
+    def test_ka9q_radio_build_failure_then_successful_rebuild_at_old_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _repo(base, "ka9q-radio")
             git = _MultiFakeGit()
-            ctx = _ctx(base, git, ["ka9q-radio"], build=lambda name, r: 2)
+            calls = []
+            results = iter([1, 0])
+
+            def build(name, r):
+                calls.append((name, r))
+                return next(results)
+            ctx = _ctx(base, git, ["ka9q-radio"], build=build)
             items = [align.Item("ka9q-radio", "forward", LIVE, TARGET)]
             steps = align_apply.apply_plan(rel(), items, ctx)
             self.assertEqual(steps[0].outcome, "failed")
-            self.assertEqual(steps[0].detail, "build exit 2 — rolled back to 11111111")
+            self.assertEqual(steps[0].detail,
+                             "build exit 1 — rolled back to 11111111 and rebuilt it")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], calls[1])
             self.assertEqual(_detach_targets(git), [TARGET, LIVE])
+
+    def test_ka9q_radio_build_failure_and_rebuild_at_old_commit_also_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "ka9q-radio")
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["ka9q-radio"], build=lambda name, r: 1)
+            items = [align.Item("ka9q-radio", "forward", LIVE, TARGET)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "failed")
+            self.assertEqual(
+                steps[0].detail,
+                "build exit 1; rebuild at 11111111 ALSO failed — installed radiod "
+                "may not match the checkout; rebuild by hand, do NOT restart radiod")
+            self.assertEqual(_detach_targets(git), [TARGET, LIVE])
+
+    def test_ka9q_radio_rollback_failure_says_do_not_restart_radiod(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "ka9q-radio")
+            git = _MultiFakeGit()
+            git.fail_checkout_to.add(LIVE)
+            ctx = _ctx(base, git, ["ka9q-radio"], build=lambda name, r: 1)
+            items = [align.Item("ka9q-radio", "forward", LIVE, TARGET)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "failed")
+            self.assertIn("rollback FAILED", steps[0].detail)
+            self.assertIn("do NOT restart radiod", steps[0].detail)
 
     def test_ka9q_radio_with_no_builder_wired_fails_and_rolls_back(self):
         with tempfile.TemporaryDirectory() as tmp:

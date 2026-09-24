@@ -135,7 +135,6 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
 
 
 RADIOD = "ka9q-radio"
-_RADIOD_NOTE = "radiod rebuild is Plan 2b — --apply will not move it"
 _DIRTY_NOTE = "uncommitted changes — commit, stash or discard first"
 _UVLOCK_NOTE = "uv.lock will be reset"
 
@@ -196,7 +195,7 @@ def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict]
         elif _dirt(dirty.get(name))[0]:
             items.append(Item(name, "refuse", head, target, _DIRTY_NOTE))
         else:
-            notes = [_RADIOD_NOTE] if name == RADIOD else []
+            notes = []
             if _dirt(dirty.get(name))[1]:
                 notes.append(_UVLOCK_NOTE)
             items.append(Item(name, "move", head, target, "; ".join(notes)))
