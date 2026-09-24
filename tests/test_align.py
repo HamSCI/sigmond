@@ -271,5 +271,52 @@ class ProbeTests(unittest.TestCase):
         self.assertIsNone(align.recorded_release("/nonexistent/version"))
 
 
+class DraftTests(unittest.TestCase):
+    def test_draft_or_prerelease_refuses(self):
+        for flag in ("draft", "prerelease"):
+            meta = json.loads(release_json())
+            meta[flag] = True
+            fake = FakeUrlopen({align.RELEASES_API + "/latest": json.dumps(meta).encode(),
+                                "https://example/manifest": MANIFEST.encode()})
+            with self.assertRaises(align.LookupError_) as cm:
+                align.fetch_release(urlopen=fake)
+            self.assertIn("not blessed", str(cm.exception))
+
+
+def mv(name, live, target, note=""):
+    return align.Item(name, "move", live, target, note)
+
+
+class ClassifyTests(unittest.TestCase):
+    def anc(self, table):
+        return lambda name, a, b: table.get((name, a, b), False)
+
+    def test_forward(self):
+        out = align.classify([mv("hf-tec", "a1", "b2")], self.anc({("hf-tec", "a1", "b2"): True}))
+        self.assertEqual(out[0].status, "forward")
+
+    def test_ahead_is_left(self):
+        out = align.classify([mv("sigmond", "c3", "b2")], self.anc({("sigmond", "b2", "c3"): True}))
+        self.assertEqual(out[0].status, "ahead")
+        self.assertIn("--allow-rollback", out[0].note)
+
+    def test_diverged(self):
+        out = align.classify([mv("x", "a1", "b2")], self.anc({}))
+        self.assertEqual(out[0].status, "diverged")
+
+    def test_unknown_ancestry_refuses(self):
+        out = align.classify([mv("x", "a1", "b2")], lambda *a: None)
+        self.assertEqual(out[0].status, "refuse")
+
+    def test_radiod_forward_keeps_restart_note(self):
+        out = align.classify([mv(align.RADIOD, "a1", "b2", "RESTARTS radiod on --apply")],
+                             self.anc({(align.RADIOD, "a1", "b2"): True}))
+        self.assertIn("RESTARTS radiod", out[0].note)
+
+    def test_non_move_items_pass_through(self):
+        cur = align.Item("hf-timestd", "current", "5c8196d", "5c8196d")
+        self.assertEqual(align.classify([cur], lambda *a: True), [cur])
+
+
 if __name__ == "__main__":
     unittest.main()

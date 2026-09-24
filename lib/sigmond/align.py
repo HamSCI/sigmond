@@ -72,6 +72,8 @@ class Release:
     manifest_text: str
     appliance_commit: Optional[str]
     components: dict
+    draft: bool = False
+    prerelease: bool = False
 
 
 def _preamble(text: str, key: str) -> Optional[str]:
@@ -102,6 +104,8 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
         meta = json.loads(_get(url, urlopen, timeout))
     except ValueError as exc:
         raise LookupError_(f"{url} did not return JSON: {exc}") from exc
+    if meta.get("draft") or meta.get("prerelease"):
+        raise LookupError_(f"release {meta.get('tag_name')} is a draft or prerelease — not blessed")
     asset = next((a for a in meta.get("assets", [])
                   if a.get("name", "").endswith(".manifest.txt")), None)
     if asset is None:
@@ -122,7 +126,8 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
             f"match the release tag {tag_name!r}")
     return Release(tag=tag_name, manifest_text=text,
                    appliance_commit=_preamble(text, "appliance_commit"),
-                   components=components)
+                   components=components,
+                   draft=bool(meta.get("draft")), prerelease=bool(meta.get("prerelease")))
 
 
 RADIOD = "ka9q-radio"
@@ -162,6 +167,30 @@ def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict]
               for n, h in live.items() if n not in release.components]
     items.sort(key=lambda i: (i.component != "sigmond", i.component))
     return items + sorted(strays, key=lambda i: i.component)
+
+
+AHEAD_NOTE = "ahead of the pin — left; --allow-rollback moves it back"
+DIVERGED_NOTE = "diverged from the pin — resolve by hand"
+
+
+def classify(items: list, is_ancestor: Callable) -> list:
+    """Turn each 'move' into forward / ahead / diverged. Pure; ancestry is injected."""
+    out = []
+    for it in items:
+        if it.status != "move":
+            out.append(it)
+            continue
+        fwd = is_ancestor(it.component, it.live, it.target)
+        back = is_ancestor(it.component, it.target, it.live)
+        if fwd is None or back is None:
+            out.append(Item(it.component, "refuse", it.live, it.target, "ancestry unknown — run a fetch first"))
+        elif fwd:
+            out.append(Item(it.component, "forward", it.live, it.target, it.note))
+        elif back:
+            out.append(Item(it.component, "ahead", it.live, it.target, AHEAD_NOTE))
+        else:
+            out.append(Item(it.component, "diverged", it.live, it.target, DIVERGED_NOTE))
+    return out
 
 
 RAW_BASE = "https://raw.githubusercontent.com/HamSCI/sigmond-appliance"
