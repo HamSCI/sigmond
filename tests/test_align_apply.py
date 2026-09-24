@@ -185,6 +185,26 @@ class WritePinTests(unittest.TestCase):
             self.assertEqual(exclude_again.count(".pin"), 1)
 
 
+class EnsurePinExcludedTests(unittest.TestCase):
+    def test_adds_the_line_and_reports_true(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".git" / "info").mkdir(parents=True)
+            added = align_apply.ensure_pin_excluded(str(repo))
+            self.assertTrue(added)
+            self.assertIn(".pin", (repo / ".git" / "info" / "exclude").read_text().splitlines())
+
+    def test_already_present_reports_false_and_does_not_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".git" / "info").mkdir(parents=True)
+            (repo / ".git" / "info" / "exclude").write_text(".pin\n")
+            added = align_apply.ensure_pin_excluded(str(repo))
+            self.assertFalse(added)
+            exclude = (repo / ".git" / "info" / "exclude").read_text()
+            self.assertEqual(exclude.count(".pin"), 1)
+
+
 class NormalizeRepoTests(unittest.TestCase):
     def test_ssh_and_https_forms_are_equal(self):
         self.assertEqual(
@@ -210,6 +230,7 @@ class _MultiFakeGit:
         self.head = {}             # name -> SHA the last --detach checkout set
         self.branch = {}           # name -> branch symbolic-ref reports
         self.branch_tip = {}       # name -> SHA `checkout <branch>` lands on
+        self.resolve_map = {}      # short ref (as passed to rev-parse) -> full SHA
 
     @staticmethod
     def _name(argv):
@@ -239,6 +260,8 @@ class _MultiFakeGit:
             sha = argv[-1].split("^")[0]
             if sha == "HEAD":   # where the last --detach checkout left it
                 sha = self.head.get(name, "0" * 40)
+            else:
+                sha = self.resolve_map.get(sha, sha)
             return types.SimpleNamespace(returncode=0, stdout=sha + "\n", stderr="")
         if sub == "for-each-ref":
             present = name not in self.not_in_origin
@@ -724,8 +747,8 @@ class FinalReviewMoveTests(unittest.TestCase):
             events = []
             self._one(base, git, say=events.append,
                       run_install=lambda r: events.append("INSTALL") or 0)
-            self.assertIn("sigmond: running install.sh …", events)
-            self.assertLess(events.index("sigmond: running install.sh …"),
+            self.assertIn("  sigmond: running install.sh …", events)
+            self.assertLess(events.index("  sigmond: running install.sh …"),
                             events.index("INSTALL"))
 
     def test_rollback_onto_a_branch_whose_tip_moved_is_reported(self):
@@ -777,6 +800,22 @@ class FinalReviewMoveTests(unittest.TestCase):
             steps = self._one(base, git, run_install=lambda r: calls.append(r) or 0)
             self.assertEqual(steps[0].outcome, "moved")
             self.assertEqual(calls, [base / "sigmond"])
+
+    # --- B4 finding: a short `live` SHA must not shorten the "moved"
+    # detail to fewer than 8 chars on the left side. ---
+
+    def test_moved_detail_shortens_a_short_live_sha_to_eight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            live_short, live_full = "1" * 7, "1" * 40
+            git.resolve_map[live_short] = live_full
+            ctx = _ctx(base, git, ["sigmond"])
+            items = [align.Item("sigmond", "forward", live_short, "2" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertEqual(steps[0].detail, "11111111 -> 22222222")
 
     # --- minor: .git/info chowned too ---
 
@@ -920,11 +959,30 @@ class FinalReviewMoveTests(unittest.TestCase):
             base = Path(tmp)
             repo = _repo(base, "sigmond")
             (repo / ".pin").write_text(TARGET + "\n")
+            (repo / ".git" / "info" / "exclude").write_text(".pin\n")
             git = _MultiFakeGit()
             steps = self._current(base, git)
             self.assertEqual(steps[0].outcome, "current")
             self.assertEqual(steps[0].detail, "")
             self.assertEqual(git.calls, [])
+
+    # --- B4 finding: a matching pin whose exclude line was never written
+    # (e.g. a checkout pinned before write_pin grew the exclude step) must
+    # still get it — otherwise `.pin` shows as untracked forever. ---
+
+    def test_current_with_matching_pin_but_missing_exclude_gets_it_added(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = _repo(base, "sigmond")
+            (repo / ".pin").write_text(TARGET + "\n")
+            git = _MultiFakeGit()
+            chowned = []
+            steps = self._current(base, git, chown=lambda p, o: chowned.append(p))
+            self.assertEqual(steps[0].outcome, "current")
+            self.assertEqual(steps[0].detail, "pin excluded from git")
+            exclude = (repo / ".git" / "info" / "exclude").read_text()
+            self.assertIn(".pin", exclude.splitlines())
+            self.assertIn(repo / ".pin", chowned)
 
     def test_current_whose_target_will_not_resolve_is_left_and_says_why(self):
         with tempfile.TemporaryDirectory() as tmp:

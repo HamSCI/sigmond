@@ -4672,11 +4672,18 @@ def _align_repair_ownership(base) -> None:
     the owner's next `git`/`uv` run then trips over it. For each checkout
     directory under ``base``, every path INSIDE a `*.egg-info` directory
     (and the directory itself) whose uid/gid differs from the checkout
-    directory's gets that checkout's uid/gid. Nothing else is touched:
-    venvs (any directory holding pyvenv.cfg, or named .venv/venv), build
-    trees and .git are pruned from the walk, and symlinks are never
-    followed. A chown that fails is printed, never raised — a repair is
-    not a reason to fail an alignment that already happened.
+    directory's gets that checkout's uid/gid. Build trees and .git are
+    pruned from the walk, and symlinks are never followed.
+
+    `<checkout>/venv` (top level only) gets the same repair: install.sh's
+    own `uv venv` + `uv sync`, run as root, leaves the in-checkout venv
+    root-owned too — a B4 finding from the first live alignment. Only the
+    checkout's OWN immediate `venv` counts: `.venv` and any deeper `venv`
+    (e.g. under a build tree) stay pruned exactly as before, and a `venv`
+    that is itself a symlink is never descended into.
+
+    A chown that fails is printed, never raised — a repair is not a
+    reason to fail an alignment that already happened.
     """
     base = Path(base)
     try:
@@ -4701,10 +4708,18 @@ def _align_repair_ownership(base) -> None:
             except OSError as exc:
                 print(f'  ownership repair: {path}: {exc}')
 
+        repo_str = str(repo)
         for root, dirs, files in os.walk(repo):
             keep = []
             for d in dirs:
                 sub = Path(root) / d
+                if (root == repo_str and d == 'venv' and not sub.is_symlink()
+                        and (sub / 'pyvenv.cfg').exists()):
+                    fix(sub)
+                    for vroot, vdirs, vfiles in os.walk(sub):
+                        for n in vdirs + vfiles:
+                            fix(Path(vroot) / n)
+                    continue
                 if (d in _ALIGN_REPAIR_SKIP or d in ('.venv', 'venv')
                         or sub.is_symlink() or (sub / 'pyvenv.cfg').exists()):
                     continue
@@ -5003,6 +5018,8 @@ def cmd_align(args) -> int:
             print(f'  catalog unreadable ({exc}) — commit distances skipped')
             catalog = {}
     rate_limited = None       # first commit_distance error naming a rate limit
+    ahead_components = set()  # 'move' items commit_distance found already
+                               # ahead of the target — left, not moved
     for it in plan:
         if it.status == 'current':
             line = f'{(it.live or "")[:8]:<8}              current'
@@ -5021,17 +5038,25 @@ def cmd_align(args) -> int:
                 d = align.commit_distance(slug, it.live, it.target)
                 if 'error' not in d:
                     ahead, behind, nfiles = d['ahead'], d['behind'], d['files']
-                    if ahead > 0 and behind == 0:
-                        phrase = f'behind by {ahead}'
-                    elif behind > 0 and ahead == 0:
-                        phrase = f'AHEAD by {behind} — would roll back'
-                    elif ahead > 0 and behind > 0:
-                        phrase = f'diverged ({ahead}/{behind})'
+                    if behind > 0 and ahead == 0:
+                        # The target is BEHIND live — --apply would roll it
+                        # back, and align never does that on its own; a
+                        # B4 finding: the old text read as a "move" this
+                        # run would make, when it never does.
+                        ahead_components.add(it.component)
+                        line = (f'{it.live[:8]} -> {it.target[:8]}   left — '
+                                f'ahead by {behind}; --apply leaves it '
+                                f'(--allow-rollback moves it back)')
                     else:
-                        phrase = 'no commit difference'
-                    file_part = ('files ?' if nfiles is None
-                                else f"{nfiles} file{'s' if nfiles != 1 else ''}")
-                    line += f'   {phrase}, {file_part}'
+                        if ahead > 0 and behind == 0:
+                            phrase = f'behind by {ahead}'
+                        elif ahead > 0 and behind > 0:
+                            phrase = f'diverged ({ahead}/{behind})'
+                        else:
+                            phrase = 'no commit difference'
+                        file_part = ('files ?' if nfiles is None
+                                    else f"{nfiles} file{'s' if nfiles != 1 else ''}")
+                        line += f'   {phrase}, {file_part}'
                 else:
                     line += '   distance unknown'
                     if d['error'].startswith('GitHub API rate limit') and not rate_limited:
@@ -5061,8 +5086,15 @@ def cmd_align(args) -> int:
               'pm-align (Plan 3)')
     counts = {s: sum(1 for i in plan if i.status == s)
               for s in ('move', 'refuse', 'missing', 'stray')}
-    print(f"  summary: {counts['move']} to move, {counts['refuse']} refused, "
-          f"{counts['missing']} missing, {counts['stray']} stray, "
+    # A 'move' item commit_distance proved already ahead of the target was
+    # counted under 'move' above (plan_align itself never classifies it
+    # separately) — pull it out into its own bucket so the exit code, and
+    # the summary line, don't call it pending work.
+    counts['ahead'] = len(ahead_components)
+    counts['move'] -= counts['ahead']
+    print(f"  summary: {counts['move']} to move, {counts['ahead']} left ahead, "
+          f"{counts['refuse']} refused, {counts['missing']} missing, "
+          f"{counts['stray']} stray, "
           f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh")
     if unverified:
         names = ', '.join(f['path'] for f in unverified)

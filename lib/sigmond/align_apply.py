@@ -193,18 +193,28 @@ def changed_files(repo, a, b, *, run: Callable = subprocess.run) -> set:
 INSTALL_TRIGGERS = {"pyproject.toml", "uv.lock", "install.sh", "scripts/install.sh"}
 
 
+def ensure_pin_excluded(repo) -> bool:
+    """Add `.pin` to `.git/info/exclude` when it's not already listed there,
+    so git never sees it as untracked cruft. Returns True when it had to
+    add the line."""
+    repo_path = Path(repo)
+    exclude_path = repo_path / ".git" / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = exclude_path.read_text().splitlines() if exclude_path.exists() else []
+    if ".pin" in lines:
+        return False
+    lines.append(".pin")
+    exclude_path.write_text("\n".join(lines) + "\n")
+    return True
+
+
 def write_pin(repo, full) -> None:
     """Record the pinned SHA at <repo>/.pin, and keep git from seeing it as
     untracked cruft by adding it to .git/info/exclude (once). Plain file I/O;
     the caller chowns."""
     repo_path = Path(repo)
     (repo_path / ".pin").write_text(full + "\n")
-    exclude_path = repo_path / ".git" / "info" / "exclude"
-    exclude_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = exclude_path.read_text().splitlines() if exclude_path.exists() else []
-    if ".pin" not in lines:
-        lines.append(".pin")
-        exclude_path.write_text("\n".join(lines) + "\n")
+    ensure_pin_excluded(repo_path)
 
 
 def normalize_repo(url: str) -> str:
@@ -385,7 +395,7 @@ def _move(it: Item, ctx: Ctx) -> Step:
         return Step(name, "failed",
                     _roll_back(repo, owner, from_full, full, prev_pin, branch, str(e), ctx), fetched)
     if changed & INSTALL_TRIGGERS and ctx.run_install is not None:
-        ctx.say(f"{name}: running install.sh …")
+        ctx.say(f"  {name}: running install.sh …")
         try:
             rc = ctx.run_install(repo)
         except Exception as e:  # noqa: BLE001 — an installer is foreign code
@@ -396,15 +406,22 @@ def _move(it: Item, ctx: Ctx) -> Step:
             return Step(name, "failed",
                         _roll_back(repo, owner, from_full, full, prev_pin, branch, why, ctx), fetched)
 
-    # 7. moved
-    return Step(name, "moved", f"{detail_prefix}{it.live[:8]} -> {full[:8]}", fetched)
+    # 7. moved. from_full[:8], not it.live[:8]: Item.live can be a 7-char
+    # short SHA, which would shorten the left side of the detail to fewer
+    # characters than the right — a B4 finding.
+    return Step(name, "moved", f"{detail_prefix}{from_full[:8]} -> {full[:8]}", fetched)
 
 
 def _refresh_pin(it: Item, ctx: Ctx) -> Step:
     """A `current` component whose .pin is absent or names another commit
     gets .pin rewritten to the release's commit — otherwise `smd update`
     would not hold it, and the pin would disagree with the release this
-    run records."""
+    run records.
+
+    A pin that already matches still needs its exclude line checked: a
+    checkout pinned before `write_pin` grew the exclude step (or one whose
+    `.git/info/exclude` predates it) never got `.pin` added, so git shows
+    it as untracked forever — B4's ft8_lib, found in the first live run."""
     name = it.component
     repo = ctx.base / name
     try:
@@ -412,6 +429,13 @@ def _refresh_pin(it: Item, ctx: Ctx) -> Step:
     except OSError as e:
         return Step(name, "current", f"pin not refreshed: {e}")
     if pinned and _sha_equal(pinned, it.target):
+        try:
+            if ensure_pin_excluded(repo):
+                owner = ctx.owner_of(repo)
+                _chown_pin(repo, owner, ctx)
+                return Step(name, "current", "pin excluded from git")
+        except (KeyError, OSError) as e:
+            return Step(name, "current", f"pin not refreshed: {e}")
         return Step(name, "current")
     try:
         owner = ctx.owner_of(repo)

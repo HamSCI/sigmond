@@ -188,7 +188,29 @@ class AlignCliTests(unittest.TestCase):
                         return_value={"ahead": 0, "behind": 4, "files": 2}):
             rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                           no_cost=False)
-        self.assertIn("AHEAD by 4 — would roll back", out)
+        self.assertIn("left — ahead by 4; --apply leaves it (--allow-rollback moves it back)", out)
+
+    # --- B4 finding: an ahead component is left, not counted toward the
+    # exit-code "pending" tally; an unmeasurable distance stays a move. ---
+
+    def test_dry_run_ahead_only_component_exits_0(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance",
+                        return_value={"ahead": 0, "behind": 4, "files": 2}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False, recorded="v3.53")
+        self.assertEqual(rc, 0)
+        self.assertIn("left — ahead by", out)
+        self.assertIn("1 left ahead", out)
+
+    def test_dry_run_ahead_with_unknown_distance_still_pending_exits_1(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance", return_value={"error": "no route"}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False, recorded="v3.53")
+        self.assertEqual(rc, 1)
 
     def test_move_direction_diverged(self):
         catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
@@ -1098,6 +1120,80 @@ class AlignRepairOwnershipTests(unittest.TestCase):
             self.assertEqual(sorted(calls),
                              sorted([(egg, me.st_uid, me.st_gid),
                                      (egg / "PKG-INFO", me.st_uid, me.st_gid)]))
+
+    # --- B4 finding: install.sh (run as root) also leaves the in-checkout
+    # venv root-owned; repair it too, but only the top-level `<repo>/venv`,
+    # never a symlink and never a deeper venv. ---
+
+    def test_venv_pyvenv_cfg_and_bin_python_chowned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = base / "hf-timestd"
+            (repo / ".git").mkdir(parents=True)
+            venv = repo / "venv"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "pyvenv.cfg").write_text("")
+            (venv / "bin" / "python").write_text("x")
+            root_owned = {venv / "pyvenv.cfg", venv / "bin" / "python"}
+            real_lstat = os.lstat
+            me = os.stat(repo)
+
+            def fake_lstat(p, *a, **k):
+                st = real_lstat(p, *a, **k)
+                if Path(p) in root_owned:
+                    return types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=st.st_mode)
+                return st
+            calls = []
+            with mock.patch("os.lstat", side_effect=fake_lstat), \
+                 mock.patch("os.chown", side_effect=lambda p, u, g, **k: calls.append(
+                     (Path(p), u, g))):
+                smd._align_repair_ownership(base)
+            self.assertEqual(sorted(calls),
+                             sorted([(venv / "pyvenv.cfg", me.st_uid, me.st_gid),
+                                     (venv / "bin" / "python", me.st_uid, me.st_gid)]))
+
+    def test_venv_symlink_left_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = base / "hf-timestd"
+            (repo / ".git").mkdir(parents=True)
+            real_venv = base / "real-venv"
+            (real_venv / "bin").mkdir(parents=True)
+            (real_venv / "pyvenv.cfg").write_text("")
+            (real_venv / "bin" / "python").write_text("x")
+            (repo / "venv").symlink_to(real_venv, target_is_directory=True)
+            real_lstat = os.lstat
+
+            def fake_lstat(p, *a, **k):
+                st = real_lstat(p, *a, **k)
+                return types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=st.st_mode)
+            calls = []
+            with mock.patch("os.lstat", side_effect=fake_lstat), \
+                 mock.patch("os.chown",
+                            side_effect=lambda p, u, g, **k: calls.append(Path(p))):
+                smd._align_repair_ownership(base)
+            self.assertEqual(calls, [])
+
+    def test_venv_nested_under_a_subdir_is_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = base / "hf-timestd"
+            (repo / ".git").mkdir(parents=True)
+            nested = repo / "sub" / "venv"
+            (nested / "bin").mkdir(parents=True)
+            (nested / "pyvenv.cfg").write_text("")
+            (nested / "bin" / "python").write_text("x")
+            real_lstat = os.lstat
+
+            def fake_lstat(p, *a, **k):
+                st = real_lstat(p, *a, **k)
+                return types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=st.st_mode)
+            calls = []
+            with mock.patch("os.lstat", side_effect=fake_lstat), \
+                 mock.patch("os.chown",
+                            side_effect=lambda p, u, g, **k: calls.append(Path(p))):
+                smd._align_repair_ownership(base)
+            self.assertEqual(calls, [])
 
     def test_a_chown_error_is_reported_not_raised(self):
         with tempfile.TemporaryDirectory() as tmp:
