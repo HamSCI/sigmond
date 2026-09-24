@@ -4849,12 +4849,25 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
       (`_align_head_moved_at`); an empty reflog reads None, never stale
       (ruling 7).  ``moved_at[RADIOD]`` is the radiod BINARY's mtime
       instead (ruling 1): radiod runs what was built, not what is checked
-      out.
+      out — but only when the ka9q-radio CHECKOUT also moved after radiod
+      started; otherwise None (final review / P1).  A same-bytes rebuild by
+      `smd update` or `smd install --force` bumps the binary's mtime alone
+      and must not restart radiod.  A build an earlier run left
+      un-restarted is still caught: its checkout moved too.
     * ``radiod_consumers``: the running services whose catalog kind is
       "client" (ruling 3); a component absent from the catalog counts as
       one.  Nothing finer than "every running client" is detected here —
       a client that does not in fact read radiod's streams still restarts
       after radiod; working out which ones truly do is out of scope.
+    * A radiod consumer that started BEFORE radiod's earliest start is
+      stale too — "radiod restarted after it started" (final review / I3).
+      Stateless: a run whose consumer restarts failed, or was
+      interrupted, leaves them for the next run to find.
+    * ``hs-uploader``: its daemon (uploader.SERVICE) is stale when it is
+      active and started before the hs-uploader checkout's reflog move
+      (final review / I5).  The catalog calls hs-uploader a library, so
+      the services map may never list it; when it does, the ordinary
+      check above already covers it.
     """
     from sigmond import align_live
     RADIOD = align_live.RADIOD
@@ -4877,7 +4890,12 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
             continue
         moved_at[n] = _align_head_moved_at(Path(base) / n)
     if RADIOD in services:
-        moved_at[RADIOD] = _align_radiod_built_at()
+        built = _align_radiod_built_at()
+        checkout = _align_head_moved_at(Path(base) / RADIOD)
+        start = started_at.get(RADIOD)
+        if start is not None and (checkout is None or checkout <= start):
+            built = None      # only the binary moved: a same-bytes rebuild
+        moved_at[RADIOD] = built
 
     def _kind(c):
         entry = catalog.get(c) if catalog else None
@@ -4885,6 +4903,19 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
 
     radiod_consumers = {c for c in running if c != RADIOD and _kind(c) == 'client'}
     stale = align_live.stale_components(running, moved_at, started_at, consumes)
+    radiod_start = started_at.get(RADIOD)
+    if radiod_start is not None:
+        why = 'radiod restarted after it started'
+        for c in sorted(radiod_consumers):
+            if started_at[c] < radiod_start:
+                stale[c] = f'{stale[c]}; {why}' if c in stale else why
+    if 'hs-uploader' not in services:
+        from sigmond.commands.uploader import SERVICE
+        up_start = _align_units_started_at([SERVICE], run=run)
+        up_moved = _align_head_moved_at(Path(base) / 'hs-uploader')
+        moved_at.setdefault('hs-uploader', up_moved)
+        if up_start is not None and up_moved is not None and up_moved > up_start:
+            stale['hs-uploader'] = 'its checkout moved after it started'
     return {'stale': stale, 'running': running, 'consumes': consumes,
             'radiod_consumers': radiod_consumers, 'started_at': started_at,
             'moved_at': moved_at}
@@ -4898,7 +4929,8 @@ def _align_plan_restarts(move_steps, bringup_steps, staleness, *, say=print):
     radiod that does not come back strands every recorder. A blocking
     outcome already stops the run before this stage; this guards the
     ordering if that ever changes. ``uploader`` is True when bring-up's
-    manifest step reports "manifest changed" (ruling 4)."""
+    manifest step reports "manifest changed" (ruling 4), or when the
+    staleness read found the hs-uploader daemon stale (final review / I5)."""
     from sigmond import align_live
     RADIOD = align_live.RADIOD
     stale = staleness['stale']
@@ -4909,8 +4941,9 @@ def _align_plan_restarts(move_steps, bringup_steps, staleness, *, say=print):
         say("  radiod not restarted: this run's ka9q-radio step failed — see above")
     radiod_first, comps = align_live.restart_sequence(
         stale, radiod_stale, staleness['running'], staleness['radiod_consumers'])
-    uploader = any(s.component == 'admin uploader manifest --write'
-                   and s.detail == 'manifest changed' for s in bringup_steps)
+    uploader = (any(s.component == 'admin uploader manifest --write'
+                    and s.detail == 'manifest changed' for s in bringup_steps)
+                or 'hs-uploader' in stale)
     return radiod_first, comps, uploader
 
 
@@ -5047,11 +5080,12 @@ def _align_print_restarts(base, moving, *, catalog=None, say=print) -> int:
     radiod = pred_radiod or now_radiod
     rows = []
     if radiod:
-        why = ('its binary was rebuilt after it started' if now_radiod
+        why = ('ka9q-radio moved and its binary was rebuilt after it started' if now_radiod
                else 'ka9q-radio moves and is rebuilt')
         rows.append(('radiod', f'{why}; restarts first — recording gap of about '
                                f'{align_live.RADIOD_GAP_ESTIMATE_S} s'))
-    for c in sorted(set(predicted) | set(now_comps)):
+    uploader_now = 'hs-uploader' in stale and 'hs-uploader' not in now_comps
+    for c in sorted(set(predicted) | set(now_comps) | ({'hs-uploader'} if uploader_now else set())):
         if c in stale:
             rows.append((c, f'stale now — {stale[c]}'))
         elif c in moving:
@@ -5065,7 +5099,7 @@ def _align_print_restarts(base, moving, *, catalog=None, say=print) -> int:
         say('    none')
     for name, why in rows:
         say(f'    {name:<16} {why}')
-    return len(now_comps) + (1 if now_radiod else 0)
+    return len(now_comps) + (1 if now_radiod else 0) + (1 if uploader_now else 0)
 
 
 def _align_verify(args) -> int:

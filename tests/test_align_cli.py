@@ -2219,6 +2219,24 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         self.assertEqual(m["record_live"].call_args[0][1]["restarted"], ["hs-uploader"])
         self.assertEqual(m["checks"].call_args[0][0].count(uploader.SERVICE), 1)
 
+    def test_stale_hs_uploader_restarts_once_with_the_manifest_unchanged(self):
+        # Final review / I5: its checkout moved after the daemon started.
+        from sigmond.commands import uploader
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 0, "active\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        rc, out, m = self._run(
+            bringup=[align_apply.Step("admin uploader manifest --write", "ran", "")],
+            staleness=_staleness(stale={"hs-uploader": "its checkout moved after it started"}),
+            extra_patches=[mock.patch("subprocess.run", fake_run)])
+        restarts = [a for a in calls if a[:2] == ["systemctl", "restart"]]
+        self.assertEqual(restarts, [["systemctl", "restart", uploader.SERVICE]])
+        self.assertEqual(rc, 0)
+
     def test_manifest_unchanged_never_touches_hs_uploader(self):
         from sigmond.commands import uploader
         calls = []
@@ -2332,7 +2350,77 @@ class AlignStalenessTests(unittest.TestCase):
                               started={"radiod@a.service": 100.0}, built_at=50.0)
         self.assertEqual(st["moved_at"][align_live.RADIOD], 50.0)
         self.assertNotIn(align_live.RADIOD, st["stale"])
-        self.assertNotIn(align_live.RADIOD, seen)
+
+    # --- Final review / P1: radiod is stale only when its binary AND its
+    # checkout both moved after it started. A same-bytes rebuild by smd
+    # update / smd install --force bumps the mtime alone. ---
+
+    def test_radiod_binary_new_checkout_old_is_not_stale(self):
+        st, seen = self._read({align_live.RADIOD: ["radiod@a.service"]}, {},
+                              moved={align_live.RADIOD: 50.0},
+                              started={"radiod@a.service": 100.0}, built_at=200.0)
+        self.assertNotIn(align_live.RADIOD, st["stale"])
+        self.assertIsNone(st["moved_at"][align_live.RADIOD])
+        self.assertIn(align_live.RADIOD, seen)
+
+    def test_radiod_binary_and_checkout_both_new_is_stale(self):
+        st, _ = self._read({align_live.RADIOD: ["radiod@a.service"]}, {},
+                           moved={align_live.RADIOD: 150.0},
+                           started={"radiod@a.service": 100.0}, built_at=200.0)
+        self.assertIn(align_live.RADIOD, st["stale"])
+        self.assertEqual(st["moved_at"][align_live.RADIOD], 200.0)
+
+    def test_radiod_checkout_new_binary_old_is_not_stale(self):
+        st, _ = self._read({align_live.RADIOD: ["radiod@a.service"]}, {},
+                           moved={align_live.RADIOD: 150.0},
+                           started={"radiod@a.service": 100.0}, built_at=50.0)
+        self.assertNotIn(align_live.RADIOD, st["stale"])
+
+    # --- Final review / I3: a radiod consumer that started before radiod
+    # did is stale — stateless, so a later run finds it. ---
+
+    def test_consumer_started_before_radiod_is_stale(self):
+        st, _ = self._read({align_live.RADIOD: ["radiod@a.service"], "psk-recorder": ["psk"]}, {},
+                           moved={}, started={"radiod@a.service": 200.0, "psk": 100.0})
+        self.assertEqual(st["stale"], {"psk-recorder": "radiod restarted after it started"})
+
+    def test_consumer_started_after_radiod_is_not_stale(self):
+        st, _ = self._read({align_live.RADIOD: ["radiod@a.service"], "psk-recorder": ["psk"]}, {},
+                           moved={}, started={"radiod@a.service": 200.0, "psk": 300.0})
+        self.assertEqual(st["stale"], {})
+
+    def test_non_client_started_before_radiod_is_not_stale(self):
+        cat = {"igmp-querier": types.SimpleNamespace(kind="infra")}
+        st, _ = self._read({align_live.RADIOD: ["radiod@a.service"], "igmp-querier": ["igmp"]},
+                           cat, moved={}, started={"radiod@a.service": 200.0, "igmp": 100.0})
+        self.assertEqual(st["stale"], {})
+
+    def test_stale_consumer_older_than_radiod_keeps_both_reasons(self):
+        st, _ = self._read({align_live.RADIOD: ["radiod@a.service"], "psk-recorder": ["psk"]}, {},
+                           moved={"psk-recorder": 150.0},
+                           started={"radiod@a.service": 200.0, "psk": 100.0})
+        self.assertEqual(st["stale"]["psk-recorder"],
+                         "its checkout moved after it started; radiod restarted after it started")
+
+    # --- Final review / I5: the hs-uploader daemon, which the services map
+    # may never list, is stale when its checkout moved after it started. ---
+
+    def test_hs_uploader_checkout_moved_after_its_service_started_is_stale(self):
+        from sigmond.commands import uploader
+        st, _ = self._read({"hf-timestd": ["hf"]}, {}, moved={"hs-uploader": 200.0},
+                           started={"hf": 100.0, uploader.SERVICE: 100.0})
+        self.assertEqual(st["stale"].get("hs-uploader"), "its checkout moved after it started")
+
+    def test_hs_uploader_started_after_its_checkout_moved_is_not_stale(self):
+        from sigmond.commands import uploader
+        st, _ = self._read({"hf-timestd": ["hf"]}, {}, moved={"hs-uploader": 50.0},
+                           started={"hf": 100.0, uploader.SERVICE: 100.0})
+        self.assertNotIn("hs-uploader", st["stale"])
+
+    def test_hs_uploader_not_running_is_not_stale(self):
+        st, _ = self._read({"hf-timestd": ["hf"]}, {}, moved={"hs-uploader": 200.0},
+                           started={"hf": 100.0})
+        self.assertNotIn("hs-uploader", st["stale"])
 
     def test_running_is_components_with_an_active_unit(self):
         st, _ = self._read({"hf-timestd": ["hf"], "psk-recorder": ["psk"]}, {},
@@ -2520,6 +2608,15 @@ class AlignDryRunRestartsTests(unittest.TestCase):
         self.assertIn("restarts first", section)
         self.assertIn("psk-recorder", section)
         self.assertIn("follows radiod", section)
+
+    def test_stale_hs_uploader_is_named_and_counted(self):
+        said = []
+        with mock.patch.object(smd, "_align_services", return_value={}), \
+             mock.patch.object(smd, "_align_staleness", return_value=_staleness(
+                 stale={"hs-uploader": "its checkout moved after it started"})):
+            n = smd._align_print_restarts("/opt/git/sigmond", [], catalog={}, say=said.append)
+        self.assertEqual(n, 1)
+        self.assertTrue(any("hs-uploader" in l and "stale now" in l for l in said), said)
 
     def test_nothing_stale_or_moving_prints_none(self):
         rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
