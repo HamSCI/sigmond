@@ -5410,6 +5410,23 @@ def _align_target_has_align(base, full) -> bool:
     return r.returncode == 0
 
 
+def _align_target_supports(base, full, flag) -> bool:
+    """Whether sigmond's bin/smd at ``full`` names ``flag`` at all — a read
+    (`git cat-file -p <full>:bin/smd`), in `_align_target_has_align`'s
+    pattern (final review / I9).  The re-exec passes `--no-restart` on only
+    when the smd it execs knows it; an older one would reject the argument
+    or, worse, go on to restart.  An unreadable target reads False."""
+    repo = Path(base) / 'sigmond'
+    try:
+        r = subprocess.run(
+            ['git', '-c', f'safe.directory={repo}', '-C', str(repo),
+             'cat-file', '-p', f'{full}:bin/smd'],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and flag in (r.stdout or '')
+
+
 def _align_chown(path, owner) -> None:
     """Set ``path``'s uid/gid to match the checkout directory it lives
     under — `os.stat`, never a name lookup (controller ruling 4): the
@@ -5870,6 +5887,15 @@ def _align_apply(args) -> int:
                 align_apply.record_history(rel, boot_steps,
                                            history=lambda e: record_update(HISTORY_FILE, e),
                                            now=_now)
+                # Final review / I9: --no-restart must survive the re-exec,
+                # and an smd too old to know it must never be exec'd with
+                # the operator believing nothing will restart.
+                if getattr(args, 'no_restart', False):
+                    if not _align_target_supports(base, sigmond_item.target, '--no-restart'):
+                        print('the new smd has no --no-restart; stopping before it would '
+                              'restart anything')
+                        return 1
+                    passthrough.append('--no-restart')
                 sys.stdout.flush()
                 sys.stderr.flush()
                 # M1: the lifecycle lock's fd is close-on-exec (PEP 446) — the

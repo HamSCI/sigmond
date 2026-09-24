@@ -546,7 +546,7 @@ def _no_real_record_live():
 def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY_REL,
              live=None, need_root=False, verify_error=None, ancestor=lambda c, a, b: True,
              apply_plan_result=None, target_has_align=True, base="/opt/git/sigmond",
-             no_cost=True):
+             no_cost=True, no_restart=False, target_supports=True):
     """Drives `smd align --apply` (or the flag-without-apply guard) with
     every side-effecting collaborator patched. Returns (rc, out, mocks) —
     `mocks` is the dict of the patched callables, for call-order/arg
@@ -554,7 +554,8 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
     live = live if live is not None else {"sigmond": "459bee6", "hf-timestd": "5c8196d",
                                           "ka9q-radio": "401992c"}
     args = argparse.Namespace(release=None, base=base, no_cost=no_cost, apply=apply,
-                              allow_rollback=allow_rollback, max_bytes=max_bytes)
+                              allow_rollback=allow_rollback, max_bytes=max_bytes,
+                              no_restart=no_restart)
 
     m_need_root = mock.Mock(return_value=need_root)
     m_lock = mock.Mock(side_effect=lambda reason=None: contextlib.nullcontext())
@@ -563,12 +564,14 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
     m_apply_plan = mock.Mock(return_value=apply_plan_result if apply_plan_result is not None else [])
     m_record = mock.Mock()
     m_target_has_align = mock.Mock(return_value=target_has_align)
+    m_target_supports = mock.Mock(return_value=target_supports)
     m_execv = mock.Mock()
     m_verify = mock.Mock(side_effect=verify_error) if verify_error else mock.Mock(return_value=None)
 
     mocks = dict(need_root=m_need_root, lock=m_lock, live_state=m_live_state,
                 ancestry=m_ancestry, apply_plan=m_apply_plan, record=m_record,
-                target_has_align=m_target_has_align, execv=m_execv, verify=m_verify)
+                target_has_align=m_target_has_align, execv=m_execv, verify=m_verify,
+                target_supports=m_target_supports)
 
     patches = [
         _quiet_live_stages(),
@@ -587,6 +590,7 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
         mock.patch.object(smd, "_align_live_state", m_live_state),
         mock.patch.object(smd, "_align_ancestry", m_ancestry),
         mock.patch.object(smd, "_align_target_has_align", m_target_has_align),
+        mock.patch.object(smd, "_align_target_supports", m_target_supports),
         mock.patch("sigmond.align_apply.verify_release", m_verify),
         mock.patch("sigmond.align_apply.apply_plan", m_apply_plan),
         mock.patch("sigmond.align_apply.record", m_record),
@@ -718,6 +722,50 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
         self.assertIn("--allow-rollback", exec_args)
         self.assertIn("--max-bytes", exec_args)
         self.assertIn("500", exec_args)
+
+    # --- Final review / I9: --no-restart survives the re-exec, but only
+    # into an smd that knows it ---
+
+    def test_no_restart_passes_through_when_the_target_supports_it(self):
+        boot_step = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
+        rc, out, mocks = run_apply(
+            live={"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+            apply_plan_result=[boot_step], target_has_align=True, no_restart=True)
+        mocks["execv"].assert_called_once()
+        self.assertIn("--no-restart", mocks["execv"].call_args[0][1])
+        mocks["target_supports"].assert_called_once_with("/opt/git/sigmond", "daba1f6",
+                                                         "--no-restart")
+
+    def test_no_restart_into_an_smd_without_it_stops_before_the_exec(self):
+        boot_step = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
+        out = io.StringIO()
+        m_execv = mock.Mock()
+        with contextlib.ExitStack() as st:
+            m_record, m_history = _apply_patches(
+                st, rel=APPLY_REL,
+                live={"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"})
+            st.enter_context(mock.patch.object(smd, "_align_target_has_align", return_value=True))
+            st.enter_context(mock.patch.object(smd, "_align_target_supports", return_value=False))
+            st.enter_context(mock.patch("sigmond.align_apply.apply_plan", return_value=[boot_step]))
+            st.enter_context(mock.patch("os.execv", m_execv))
+            st.enter_context(contextlib.redirect_stdout(out))
+            rc = smd.cmd_align(_apply_args("/opt/git/sigmond", no_restart=True))
+        self.assertEqual(rc, 1)
+        m_execv.assert_not_called()
+        m_record.assert_not_called()
+        self.assertIn("the new smd has no --no-restart; stopping before it would restart "
+                      "anything", out.getvalue())
+        m_history.assert_called_once()
+        self.assertEqual(m_history.call_args[0][1], [boot_step])
+
+    def test_without_no_restart_the_target_is_not_probed(self):
+        boot_step = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
+        rc, out, mocks = run_apply(
+            live={"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+            apply_plan_result=[boot_step], target_has_align=True, target_supports=False)
+        mocks["execv"].assert_called_once()
+        self.assertNotIn("--no-restart", mocks["execv"].call_args[0][1])
+        mocks["target_supports"].assert_not_called()
 
     def test_sigmond_forward_target_lacks_align_continues_without_exec(self):
         boot_step = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
@@ -1607,6 +1655,32 @@ class AlignAncestryFactoryTests(unittest.TestCase):
             is_ancestor("hf-timestd", "a", "b")
             is_ancestor("hf-timestd", "b", "a")
         say.assert_called_once()
+
+
+class AlignTargetSupportsTests(unittest.TestCase):
+    """Final review / I9: a read of the target's bin/smd at <full>."""
+
+    def test_true_when_the_target_smd_names_the_flag(self):
+        body = "p.add_argument('--no-restart', action='store_true')\n"
+        with mock.patch("subprocess.run",
+                        return_value=subprocess.CompletedProcess([], 0, body, "")) as m:
+            self.assertTrue(smd._align_target_supports("/opt/git/sigmond", "abc1234",
+                                                       "--no-restart"))
+        argv = m.call_args[0][0]
+        self.assertEqual(argv[-3:], ["cat-file", "-p", "abc1234:bin/smd"])
+        self.assertIn("safe.directory=/opt/git/sigmond/sigmond", argv)
+
+    def test_false_when_it_does_not(self):
+        with mock.patch("subprocess.run",
+                        return_value=subprocess.CompletedProcess([], 0, "--allow-rollback\n", "")):
+            self.assertFalse(smd._align_target_supports("/opt/git/sigmond", "abc", "--no-restart"))
+
+    def test_false_when_git_fails_or_cannot_run(self):
+        with mock.patch("subprocess.run",
+                        return_value=subprocess.CompletedProcess([], 128, "--no-restart", "")):
+            self.assertFalse(smd._align_target_supports("/opt/git/sigmond", "abc", "--no-restart"))
+        with mock.patch("subprocess.run", side_effect=OSError("no git")):
+            self.assertFalse(smd._align_target_supports("/opt/git/sigmond", "abc", "--no-restart"))
 
 
 class AlignTargetHasAlignTests(unittest.TestCase):
