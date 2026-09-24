@@ -105,6 +105,14 @@ class FetchReleaseTests(unittest.TestCase):
         self.assertIn("not a release tag", str(cm.exception))
         self.assertEqual(fake.seen, [])
 
+    def test_latest_release_with_a_malformed_tag_name_refuses(self):
+        for bad in ("v3.53/../x", "latest", "", "v3"):
+            fake = FakeUrlopen({align.RELEASES_API + "/latest": release_json(bad),
+                                "https://example/manifest": MANIFEST.encode()})
+            with self.assertRaises(align.LookupError_) as cm:
+                align.fetch_release(urlopen=fake)
+            self.assertIn("not a release tag", str(cm.exception))
+
     def test_preamble_tag_mismatch_refuses(self):
         mismatched = MANIFEST.replace("appliance_tag: v3.53", "appliance_tag: v9.99")
         fake = FakeUrlopen({align.RELEASES_API + "/latest": release_json(),
@@ -201,7 +209,7 @@ class PlanTests(unittest.TestCase):
                                         "ka9q-radio": "deb7bdd"}, {})
         item = next(i for i in plan if i.component == "ka9q-radio")
         self.assertEqual(item.status, "move")
-        self.assertIn("RESTARTS radiod", item.note)
+        self.assertEqual(item.note, "radiod rebuild is Plan 2b — --apply will not move it")
 
     def test_missing_and_stray(self):
         plan = align.plan_align(rel(), {"sigmond": "daba1f6", "ka9q-radio": "401992c",
@@ -215,6 +223,53 @@ class PlanTests(unittest.TestCase):
         plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": None,
                                         "ka9q-radio": "401992c"}, {})
         self.assertEqual(next(i for i in plan if i.component == "hf-timestd").status, "refuse")
+
+    # --- Final review ---
+
+    def test_libraries_move_before_their_consumers(self):
+        r = align.Release(tag="v3.53", manifest_text="", appliance_commit=None,
+                          components={"codar-sounder": "aaaaaaa", "hf-tec": "bbbbbbb",
+                                      "ka9q-python": "ccccccc", "sigmond": "ddddddd"})
+        plan = align.plan_align(r, {"codar-sounder": "1111111", "hf-tec": "2222222",
+                                    "ka9q-python": "3333333", "sigmond": "4444444"}, {})
+        self.assertEqual([i.component for i in plan],
+                         ["sigmond", "ka9q-python", "codar-sounder", "hf-tec"])
+
+    def test_libraries_first_keeps_its_own_order(self):
+        comps = {n: "aaaaaaa" for n in ("hs-uploader", "callhash", "hamsci-dsp",
+                                        "ka9q-python", "aardvark", "sigmond")}
+        r = align.Release(tag="v3.53", manifest_text="", appliance_commit=None, components=comps)
+        plan = align.plan_align(r, {n: "1111111" for n in comps}, {})
+        self.assertEqual([i.component for i in plan],
+                         ["sigmond", "ka9q-python", "hamsci-dsp", "callhash", "hs-uploader",
+                          "aardvark"])
+
+    def test_uvlock_only_dirt_is_planned_as_a_move_with_a_note(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": "4595c00",
+                                        "ka9q-radio": "401992c"}, {"hf-timestd": ["uv.lock"]})
+        item = next(i for i in plan if i.component == "hf-timestd")
+        self.assertEqual(item.status, "move")
+        self.assertIn("uv.lock will be reset", item.note)
+
+    def test_uvlock_plus_pin_dirt_is_still_uvlock_only(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": "4595c00",
+                                        "ka9q-radio": "401992c"},
+                                {"hf-timestd": [".pin", "uv.lock"]})
+        self.assertEqual(next(i for i in plan if i.component == "hf-timestd").status, "move")
+
+    def test_other_listed_dirt_refuses(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": "4595c00",
+                                        "ka9q-radio": "401992c"},
+                                {"hf-timestd": ["uv.lock", "src/x.py"]})
+        item = next(i for i in plan if i.component == "hf-timestd")
+        self.assertEqual(item.status, "refuse")
+        self.assertIn("uncommitted", item.note)
+
+    def test_an_empty_dirt_list_is_clean(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": "4595c00",
+                                        "ka9q-radio": "401992c"}, {"hf-timestd": []})
+        item = next(i for i in plan if i.component == "hf-timestd")
+        self.assertEqual((item.status, item.note), ("move", ""))
 
 
 import hashlib
@@ -309,9 +364,10 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(out[0].status, "refuse")
 
     def test_radiod_forward_keeps_restart_note(self):
-        out = align.classify([mv(align.RADIOD, "a1", "b2", "RESTARTS radiod on --apply")],
+        note = "radiod rebuild is Plan 2b — --apply will not move it"
+        out = align.classify([mv(align.RADIOD, "a1", "b2", note)],
                              self.anc({(align.RADIOD, "a1", "b2"): True}))
-        self.assertIn("RESTARTS radiod", out[0].note)
+        self.assertEqual(out[0].note, note)
 
     def test_non_move_items_pass_through(self):
         cur = align.Item("hf-timestd", "current", "5c8196d", "5c8196d")

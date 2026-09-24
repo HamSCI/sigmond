@@ -104,6 +104,10 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
         meta = json.loads(_get(url, urlopen, timeout))
     except ValueError as exc:
         raise LookupError_(f"{url} did not return JSON: {exc}") from exc
+    if tag is None and not RELEASE_TAG_RE.match(str(meta.get("tag_name") or "")):
+        # /latest names its own tag; it goes into the re-exec argv and the
+        # records, so it gets the same check an operator-supplied tag does.
+        raise LookupError_(f"not a release tag: {meta.get('tag_name')!r}")
     if meta.get("draft") or meta.get("prerelease"):
         raise LookupError_(f"release {meta.get('tag_name')} is a draft or prerelease — not blessed")
     asset = next((a for a in meta.get("assets", [])
@@ -131,7 +135,35 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
 
 
 RADIOD = "ka9q-radio"
+_RADIOD_NOTE = "radiod rebuild is Plan 2b — --apply will not move it"
 _DIRTY_NOTE = "uncommitted changes — commit, stash or discard first"
+_UVLOCK_NOTE = "uv.lock will be reset"
+
+# Shared libraries move before the components that import them, so no
+# consumer is ever checked out against a library older than its pin.
+LIBRARIES_FIRST = ("ka9q-python", "hamsci-dsp", "callhash", "hs-uploader")
+
+
+def _plan_order(name: str) -> tuple:
+    """sigmond, then LIBRARIES_FIRST in its own order, then the rest A-Z."""
+    if name == "sigmond":
+        return (0, 0, name)
+    if name in LIBRARIES_FIRST:
+        return (1, LIBRARIES_FIRST.index(name), name)
+    return (2, 0, name)
+
+
+def _dirt(value) -> tuple:
+    """(refuses, uvlock_only) from a dirty-map value: a bool (the older
+    form) or the list of dirty files. A list that is exactly uv.lock,
+    once .pin is dropped, is the one dirt --apply resets rather than
+    refuses."""
+    if isinstance(value, (list, tuple)):
+        files = [f for f in value if f != ".pin"]
+        if files == ["uv.lock"]:
+            return False, True
+        return bool(files), False
+    return bool(value), False
 
 
 @dataclass(frozen=True)
@@ -144,7 +176,10 @@ class Item:
 
 
 def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict] = None) -> list:
-    """What aligning to ``release`` would do, component by component. Pure."""
+    """What aligning to ``release`` would do, component by component. Pure.
+
+    ``dirty`` maps a component to its dirty files (a list) or, in the
+    older form, a bool. Only dirt beyond a lone uv.lock refuses."""
     errors = errors or {}
     items = []
     for name, target in release.components.items():
@@ -158,14 +193,16 @@ def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict]
             items.append(Item(name, "current", head, target))
         elif errors.get(name):
             items.append(Item(name, "refuse", head, target, f"state unreadable: {errors[name]}"))
-        elif dirty.get(name):
+        elif _dirt(dirty.get(name))[0]:
             items.append(Item(name, "refuse", head, target, _DIRTY_NOTE))
         else:
-            note = "RESTARTS radiod on --apply" if name == RADIOD else ""
-            items.append(Item(name, "move", head, target, note))
+            notes = [_RADIOD_NOTE] if name == RADIOD else []
+            if _dirt(dirty.get(name))[1]:
+                notes.append(_UVLOCK_NOTE)
+            items.append(Item(name, "move", head, target, "; ".join(notes)))
     strays = [Item(n, "stray", h, None, "not in the release manifest; left alone")
               for n, h in live.items() if n not in release.components]
-    items.sort(key=lambda i: (i.component != "sigmond", i.component))
+    items.sort(key=lambda i: _plan_order(i.component))
     return items + sorted(strays, key=lambda i: i.component)
 
 

@@ -68,7 +68,8 @@ class AlignCliTests(unittest.TestCase):
         rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "deb7bdd"})
         self.assertEqual(rc, 1)
         self.assertIn("459bee6 -> daba1f6", out)
-        self.assertIn("RESTARTS radiod", out)
+        self.assertIn("radiod rebuild is Plan 2b — --apply will not move it", out)
+        self.assertNotIn("RESTARTS radiod", out)
         self.assertIn("check it with pm-align (Plan 3)", out)
 
     def test_differing_image_file_exits_1(self):
@@ -161,6 +162,13 @@ class AlignCliTests(unittest.TestCase):
         rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                       dirty={"sigmond": True})
         self.assertIn("459bee6 -> daba1f6   refuse", out)
+
+    def test_dry_run_shows_uvlock_only_dirt_as_a_move_that_resets_it(self):
+        rc, out = run({"sigmond": "daba1f6", "hf-timestd": "4595c00", "ka9q-radio": "401992c"},
+                      dirty={"hf-timestd": ["uv.lock"]})
+        line = next(l for l in out.splitlines() if "hf-timestd" in l)
+        self.assertIn("move", line)
+        self.assertIn("uv.lock will be reset", line)
 
     # --- Fix round 2 -----------------------------------------------------
 
