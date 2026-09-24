@@ -53,6 +53,14 @@ Dry-run by default.  `smd align --apply` acts.
 - **`smd update` must not undo an alignment:** a component at its `.pin` stays held unless the operator passes `--unpin`.
 - **Three records stay separate:** the install-time version file (never rewritten), a new aligned-release record, and the host's level (Plan 3).
 
+### Decisions for Plan 2b (mjh, 2026-09-24, after B4's first live alignment)
+
+- **`--apply` restarts by default what the move made stale.** A unit is stale when it started before its own checkout's HEAD last moved, or before an editable sibling it consumes (ka9q-python, hamsci-dsp, …) moved. Staleness is read from the station itself — the unit's start time against git's reflog — so it needs no state file, and a later run finds restarts an earlier run left undone. `--no-restart` opts out. The dry run names every restart it would do.
+- **radiod rebuilds and restarts only when ka9q-radio moved.** Then: build, restart radiod, wait until it is ready, then restart every radiod consumer. The dry run says `RESTARTS radiod — recording gap of about N s`.
+- **Bring-up re-runs and the image-carried file refresh happen after the moves and before the restarts**, so restarted services start on current configuration. A failure there stops the run before any restart.
+- **Verification comes in two speeds.** `--apply` checks at once: every restarted unit is active and stays active for 120 s, hf-timestd's authority is fresh (≤ 60 s old) when hf-timestd runs, and one heartbeat is emitted. The gap and upload verdicts run on an hourly sampler, so `smd align --verify`, run later, reads them against the alignment time.
+- **install.sh keeps running as root** (every consumer's script refuses otherwise). The ownership repair after it covers each checkout's own `venv/` as well as its `*.egg-info` — B4's first alignment left two in-checkout venvs root-owned.
+
 `--apply` ships in two plans: **2a** moves the components (steps 2 and 4, recording, the `smd update` hold); **2b** makes the moved code live (radiod rebuild and consumer restarts, service restarts, image-carried files, bring-up re-runs, production verification).
 
 ## 4. `pm-align` on the Proxmox host
