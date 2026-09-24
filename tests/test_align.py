@@ -81,5 +81,56 @@ class FetchReleaseTests(unittest.TestCase):
         self.assertIn("could not reach", str(cm.exception))
 
 
+def rel(**over):
+    comps = {"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"}
+    comps.update(over)
+    return align.Release(tag="v3.53", manifest_text="", appliance_commit=None, components=comps)
+
+
+class PlanTests(unittest.TestCase):
+    def test_all_current(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6aa", "hf-timestd": "5c8196d",
+                                        "ka9q-radio": "401992cdecaa"}, {})
+        self.assertEqual({i.status for i in plan}, {"current"})
+
+    def test_move_and_order_sigmond_first(self):
+        plan = align.plan_align(rel(), {"sigmond": "459bee6", "hf-timestd": "4595c00",
+                                        "ka9q-radio": "401992c"}, {})
+        self.assertEqual(plan[0].component, "sigmond")
+        self.assertEqual([i.status for i in plan[:2]], ["move", "move"])
+
+    def test_dirty_checkout_that_would_move_refuses(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": "4595c00",
+                                        "ka9q-radio": "401992c"}, {"hf-timestd": True})
+        item = next(i for i in plan if i.component == "hf-timestd")
+        self.assertEqual(item.status, "refuse")
+        self.assertIn("uncommitted", item.note)
+
+    def test_dirty_but_current_is_not_refused(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": "5c8196d",
+                                        "ka9q-radio": "401992c"}, {"hf-timestd": True})
+        self.assertEqual(next(i for i in plan if i.component == "hf-timestd").status, "current")
+
+    def test_radiod_move_is_flagged(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": "5c8196d",
+                                        "ka9q-radio": "deb7bdd"}, {})
+        item = next(i for i in plan if i.component == "ka9q-radio")
+        self.assertEqual(item.status, "move")
+        self.assertIn("RESTARTS radiod", item.note)
+
+    def test_missing_and_stray(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "ka9q-radio": "401992c",
+                                        "codar-sounder": "eeeeeee"}, {})
+        by = {i.component: i.status for i in plan}
+        self.assertEqual(by["hf-timestd"], "missing")
+        self.assertEqual(by["codar-sounder"], "stray")
+        self.assertEqual(plan[-1].component, "codar-sounder")
+
+    def test_unreadable_head_is_a_refusal_not_a_move(self):
+        plan = align.plan_align(rel(), {"sigmond": "daba1f6", "hf-timestd": None,
+                                        "ka9q-radio": "401992c"}, {})
+        self.assertEqual(next(i for i in plan if i.component == "hf-timestd").status, "refuse")
+
+
 if __name__ == "__main__":
     unittest.main()

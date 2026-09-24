@@ -12,7 +12,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from sigmond.doctor import _parse_manifest_components
+from sigmond.doctor import _parse_manifest_components, _sha_equal
 
 RELEASES_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
 _MAX_BODY = 1 << 20          # no reply we read is anywhere near 1 MiB
@@ -71,3 +71,39 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
     return Release(tag=meta.get("tag_name") or (tag or "?"), manifest_text=text,
                    appliance_commit=_preamble(text, "appliance_commit"),
                    components=components)
+
+
+RADIOD = "ka9q-radio"
+_DIRTY_NOTE = "uncommitted changes — commit, stash or discard first"
+
+
+@dataclass(frozen=True)
+class Item:
+    component: str
+    status: str            # current | move | refuse | missing | stray
+    live: Optional[str]
+    target: Optional[str]
+    note: str = ""
+
+
+def plan_align(release: Release, live: dict, dirty: dict) -> list:
+    """What aligning to ``release`` would do, component by component. Pure."""
+    items = []
+    for name, target in release.components.items():
+        if name not in live:
+            items.append(Item(name, "missing", None, target, "no checkout on this station"))
+            continue
+        head = live[name]
+        if head is None:
+            items.append(Item(name, "refuse", None, target, "HEAD unreadable"))
+        elif _sha_equal(head, target):
+            items.append(Item(name, "current", head, target))
+        elif dirty.get(name):
+            items.append(Item(name, "refuse", head, target, _DIRTY_NOTE))
+        else:
+            note = "RESTARTS radiod on --apply" if name == RADIOD else ""
+            items.append(Item(name, "move", head, target, note))
+    strays = [Item(n, "stray", h, None, "not in the release manifest; left alone")
+              for n, h in live.items() if n not in release.components]
+    items.sort(key=lambda i: (i.component != "sigmond", i.component))
+    return items + sorted(strays, key=lambda i: i.component)
