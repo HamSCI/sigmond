@@ -190,5 +190,372 @@ class NormalizeRepoTests(unittest.TestCase):
             align_apply.normalize_repo("https://github.com/hamsci/sigmond/"))
 
 
+class _MultiFakeGit:
+    """Fakes git across several component checkouts for apply_plan tests —
+    one table per git subcommand, keyed by the component name (the repo
+    path's last segment, robust to an as_owner wrapper in front of "git").
+    Records every argv called."""
+
+    def __init__(self):
+        self.calls = []
+        self.dirty = {}            # name -> list of dirty files
+        self.unresolvable = set()  # names whose rev-parse fails
+        self.changed = {}          # name -> set of changed files (git diff)
+        self.not_in_origin = set() # names for which in_origin_history is False
+        self.fetch_stderr = {}     # name -> git's progress stderr
+
+    @staticmethod
+    def _name(argv):
+        return Path(argv[argv.index("-C") + 1]).name
+
+    @staticmethod
+    def _subcommand(argv):
+        i = argv.index("git") + 1
+        while argv[i] in ("-c", "-C"):
+            i += 2
+        return argv[i]
+
+    def __call__(self, argv, **kw):
+        self.calls.append(argv)
+        name = self._name(argv)
+        sub = self._subcommand(argv)
+        ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        if sub == "fetch":
+            return types.SimpleNamespace(returncode=0, stdout="",
+                                         stderr=self.fetch_stderr.get(name, ""))
+        if sub == "rev-parse":
+            if name in self.unresolvable:
+                return types.SimpleNamespace(returncode=128, stdout="",
+                                             stderr="fatal: ambiguous argument\n")
+            sha = argv[-1].split("^")[0]
+            return types.SimpleNamespace(returncode=0, stdout=sha + "\n", stderr="")
+        if sub == "for-each-ref":
+            present = name not in self.not_in_origin
+            return types.SimpleNamespace(
+                returncode=0, stdout="refs/remotes/origin/main\n" if present else "", stderr="")
+        if sub == "status":
+            files = self.dirty.get(name, [])
+            return types.SimpleNamespace(returncode=0,
+                                         stdout="".join(f" M {f}\n" for f in files), stderr="")
+        if sub == "checkout":
+            return ok
+        if sub == "diff":
+            files = self.changed.get(name, set())
+            return types.SimpleNamespace(returncode=0,
+                                         stdout="".join(f"{f}\n" for f in files), stderr="")
+        return ok
+
+
+def _catalog(names):
+    return {n: types.SimpleNamespace(repo=f"https://github.com/HamSCI/{n}") for n in names}
+
+
+def _ctx(base, git, names, **overrides):
+    catalog = overrides.pop("catalog", None) or _catalog(names)
+    origins = overrides.pop("origins", None) or {n: catalog[n].repo for n in names if n in catalog}
+    kwargs = dict(
+        base=base,
+        run=git,
+        as_owner=lambda o, a: ["as", o, *a],
+        owner_of=lambda p: "sigmond",
+        catalog=catalog,
+        origins=origins,
+        say=lambda msg: None,
+    )
+    kwargs.update(overrides)
+    return align_apply.Ctx(**kwargs)
+
+
+def _repo(base, name):
+    """A tmp checkout directory with .git/info, so write_pin has somewhere real
+    to write .pin and the exclude file."""
+    d = Path(base) / name
+    (d / ".git" / "info").mkdir(parents=True, exist_ok=True)
+    return d
+
+
+class ApplyPlanTests(unittest.TestCase):
+    def test_forward_move_checks_out_and_writes_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["sigmond"])
+            live, target = "1" * 40, "2" * 40
+            items = [align.Item("sigmond", "forward", live, target)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            checkout_calls = [c for c in git.calls if git._subcommand(c) == "checkout"
+                              and "--detach" in c]
+            self.assertTrue(checkout_calls)
+            self.assertIn(target, checkout_calls[-1])
+            self.assertEqual((base / "sigmond" / ".pin").read_text(), target + "\n")
+
+    def test_ahead_without_flag_is_left_no_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["sigmond"])
+            items = [align.Item("sigmond", "ahead", "2" * 40, "1" * 40, align.AHEAD_NOTE)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "left")
+            self.assertEqual(steps[0].detail, align.AHEAD_NOTE)
+            self.assertFalse(any(git._subcommand(c) == "checkout" for c in git.calls))
+
+    def test_ahead_with_allow_rollback_moves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["sigmond"], allow_rollback=True)
+            items = [align.Item("sigmond", "ahead", "2" * 40, "1" * 40, align.AHEAD_NOTE)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertTrue(any(git._subcommand(c) == "checkout" and "--detach" in c
+                                for c in git.calls))
+
+    def test_uvlock_only_dirt_resets_before_the_detach_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            git.dirty["sigmond"] = ["uv.lock"]
+            ctx = _ctx(base, git, ["sigmond"])
+            items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            reset_idx = next(i for i, c in enumerate(git.calls)
+                             if git._subcommand(c) == "checkout" and "uv.lock" in c)
+            detach_idx = next(i for i, c in enumerate(git.calls)
+                              if git._subcommand(c) == "checkout" and "--detach" in c)
+            self.assertLess(reset_idx, detach_idx)
+
+    def test_other_dirt_refuses_no_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            git.dirty["sigmond"] = ["foo.py"]
+            ctx = _ctx(base, git, ["sigmond"])
+            items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "refused")
+            self.assertIn("dirty working tree", steps[0].detail)
+            self.assertIn("foo.py", steps[0].detail)
+            self.assertFalse(any(git._subcommand(c) == "checkout" for c in git.calls))
+
+    def test_origin_mismatch_refuses_no_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            catalog = _catalog(["sigmond"])
+            origins = {"sigmond": "https://github.com/someone-else/sigmond"}
+            ctx = _ctx(base, git, ["sigmond"], catalog=catalog, origins=origins)
+            items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "refused")
+            self.assertIn("origin points at", steps[0].detail)
+            self.assertFalse(any(git._subcommand(c) == "fetch" for c in git.calls))
+
+    def test_resolve_failure_on_second_of_three_stops_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            names = ["sigmond", "hf-timestd", "wspr-recorder"]
+            for n in names:
+                _repo(base, n)
+            git = _MultiFakeGit()
+            git.unresolvable.add("hf-timestd")
+            ctx = _ctx(base, git, names)
+            items = [
+                align.Item("sigmond", "forward", "1" * 40, "2" * 40),
+                align.Item("hf-timestd", "forward", "3" * 40, "4" * 40),
+                align.Item("wspr-recorder", "forward", "5" * 40, "6" * 40),
+            ]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual([s.outcome for s in steps], ["moved", "failed", "skipped"])
+            self.assertIn("stopped after hf-timestd failed", steps[2].detail)
+
+    def test_pyproject_toml_change_triggers_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            git.changed["sigmond"] = {"pyproject.toml"}
+            calls = []
+            ctx = _ctx(base, git, ["sigmond"],
+                      run_install=lambda repo: calls.append(repo) or 0)
+            items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertEqual(calls, [base / "sigmond"])
+
+    def test_readme_only_change_skips_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            git.changed["sigmond"] = {"README.md"}
+            calls = []
+            ctx = _ctx(base, git, ["sigmond"],
+                      run_install=lambda repo: calls.append(repo) or 0)
+            items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertEqual(calls, [])
+
+    def test_byte_budget_exceeded_skips_later_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            names = ["sigmond", "hf-timestd"]
+            for n in names:
+                _repo(base, n)
+            git = _MultiFakeGit()
+            git.fetch_stderr["sigmond"] = \
+                "Receiving objects: 100% (1/1), 2.00 MiB | 2.00 MiB/s, done.\n"
+            ctx = _ctx(base, git, names, max_bytes=1_000_000)
+            items = [
+                align.Item("sigmond", "forward", "1" * 40, "2" * 40),
+                align.Item("hf-timestd", "forward", "3" * 40, "4" * 40),
+            ]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertEqual(steps[1].outcome, "skipped")
+            self.assertIn("byte budget", steps[1].detail)
+
+    def test_missing_with_installer_installs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            git = _MultiFakeGit()
+            calls = []
+            ctx = _ctx(base, git, ["sigmond"],
+                      install_missing=lambda name, target: calls.append((name, target)))
+            items = [align.Item("sigmond", "missing", None, "2" * 40, "no checkout on this station")]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "installed")
+            self.assertEqual(calls, [("sigmond", "2" * 40)])
+
+    def test_missing_without_installer_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["sigmond"])
+            items = [align.Item("sigmond", "missing", None, "2" * 40, "no checkout on this station")]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "refused")
+            self.assertIn("no installer wired", steps[0].detail)
+
+    def test_fetch_argv_never_contains_a_sha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["sigmond"])
+            live, target = "1" * 40, "2" * 40
+            items = [align.Item("sigmond", "forward", live, target)]
+            align_apply.apply_plan(rel(), items, ctx)
+            fetch_calls = [c for c in git.calls if git._subcommand(c) == "fetch"]
+            self.assertTrue(fetch_calls)
+            for c in fetch_calls:
+                self.assertNotIn(live, c)
+                self.assertNotIn(target, c)
+
+    # --- Controller rulings ---
+
+    def test_prefetched_component_skips_fetch_but_its_bytes_still_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            names = ["sigmond", "hf-timestd"]
+            for n in names:
+                _repo(base, n)
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, names, max_bytes=1_000_000,
+                      prefetched={"sigmond": 2_000_000})
+            items = [
+                align.Item("sigmond", "forward", "1" * 40, "2" * 40),
+                align.Item("hf-timestd", "forward", "3" * 40, "4" * 40),
+            ]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertEqual(steps[1].outcome, "skipped")
+            self.assertIn("byte budget", steps[1].detail)
+            self.assertFalse(any(git._subcommand(c) == "fetch" and git._name(c) == "sigmond"
+                                 for c in git.calls))
+
+    def test_chown_applied_to_pin_and_exclude(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            chown_calls = []
+            ctx = _ctx(base, git, ["sigmond"], chown=lambda p, o: chown_calls.append((p, o)))
+            items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            repo = base / "sigmond"
+            self.assertIn((repo / ".pin", "sigmond"), chown_calls)
+            self.assertIn((repo / ".git" / "info" / "exclude", "sigmond"), chown_calls)
+
+    def test_pin_alone_is_not_dirt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            git.dirty["sigmond"] = [".pin"]
+            ctx = _ctx(base, git, ["sigmond"])
+            items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+
+    # --- current / stray / refuse / diverged pass through untouched ---
+
+    def test_current_and_stray_do_nothing(self):
+        base = Path(tempfile.mkdtemp())
+        git = _MultiFakeGit()
+        ctx = _ctx(base, git, ["sigmond", "old-client"])
+        items = [
+            align.Item("sigmond", "current", "1" * 40, "1" * 40),
+            align.Item("old-client", "stray", "9" * 40, None,
+                      "not in the release manifest; left alone"),
+        ]
+        steps = align_apply.apply_plan(rel(), items, ctx)
+        self.assertEqual(steps[0].outcome, "current")
+        self.assertEqual(steps[1].outcome, "left")
+        self.assertEqual(git.calls, [])
+
+    def test_refuse_and_diverged_pass_through_the_note(self):
+        base = Path(tempfile.mkdtemp())
+        git = _MultiFakeGit()
+        ctx = _ctx(base, git, ["sigmond"])
+        items = [align.Item("sigmond", "diverged", "1" * 40, "2" * 40, align.DIVERGED_NOTE)]
+        steps = align_apply.apply_plan(rel(), items, ctx)
+        self.assertEqual(steps[0].outcome, "refused")
+        self.assertEqual(steps[0].detail, align.DIVERGED_NOTE)
+
+    # --- the Plan 2b notice ---
+
+    def test_say_notice_after_a_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            messages = []
+            ctx = _ctx(base, git, ["sigmond"], say=messages.append)
+            items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
+            align_apply.apply_plan(rel(), items, ctx)
+            self.assertIn("services still run the old code until restarted — Plan 2b", messages)
+
+    def test_no_say_notice_without_a_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            git = _MultiFakeGit()
+            messages = []
+            ctx = _ctx(base, git, ["sigmond"], say=messages.append)
+            items = [align.Item("sigmond", "current", "1" * 40, "1" * 40)]
+            align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(messages, [])
+
+
 if __name__ == "__main__":
     unittest.main()
