@@ -202,11 +202,53 @@ class PinnedComponentTests(_Rig):
         (self.host / ".pin").write_text(head + "\n")
         return head
 
+    def _add_plain_component(self, name):
+        """A second, ordinary checkout under base: not pinned, genuinely
+        one commit behind, clean, and with no install script to
+        complicate the plan — "no installer issue" per the fix request."""
+        root = Path(self._tmp.name)
+        origin = root / f"{name}-origin.git"
+        _git("init", "--bare", "-b", "main", str(origin), cwd=root)
+        seed = root / f"{name}-seed"
+        _git("clone", str(origin), str(seed), cwd=root)
+        (seed / "a.txt").write_text("a\n")
+        _git("add", "-A", cwd=seed)
+        _git("commit", "-m", "first", cwd=seed)
+        _git("push", "-u", "origin", "main", cwd=seed)
+        host = self.base / name
+        _git("clone", str(origin), str(host), cwd=root)
+        (seed / "b.txt").write_text("b\n")
+        _git("add", "-A", cwd=seed)
+        _git("commit", "-m", "second", cwd=seed)
+        _git("push", "origin", "main", cwd=seed)
+        expected_sha = _git("rev-parse", "HEAD", cwd=seed).stdout.strip()
+        return host, expected_sha
+
     def test_a_pinned_component_is_held_not_pulled(self):
         self._pin_at_head()
         rc, text = self._update()
         self.assertEqual(rc, 0, text)  # a pin hold alone must not fail the run
         self.assertIn("pinned by smd align", text)
+        self.assertFalse((self.host / ".installed").exists(), text)
+        self.assertTrue((self.host / ".pin").exists())
+
+    def test_a_pin_hold_does_not_block_or_fail_the_rest_of_the_plan(self):
+        """A held component sharing a plan with a real, runnable pull must
+        neither block that pull nor push the run's exit code to
+        UPDATE_EXIT_HELD — the pin refusal is informational (Controller
+        ruling 4), and that must hold in the mixed-plan case, not just
+        the all-held ("nothing to do") one."""
+        self._pin_at_head()
+        other, expected_sha = self._add_plain_component("otherclient")
+
+        rc, text = self._update()
+
+        self.assertEqual(rc, 0, text)
+        self.assertIn("[pull] otherclient", text)
+        self.assertNotIn("[pull] fakeclient", text)
+        other_head = _git("rev-parse", "HEAD", cwd=other).stdout.strip()
+        self.assertEqual(other_head, expected_sha, text)
+        # The pinned component stayed untouched.
         self.assertFalse((self.host / ".installed").exists(), text)
         self.assertTrue((self.host / ".pin").exists())
 
@@ -227,7 +269,7 @@ class PinnedComponentTests(_Rig):
         self.assertTrue((self.host / ".installed").exists(), text)
 
     def test_unpin_checkout_precedes_pull_and_pin_survives_a_failed_pull(self):
-        self._pin_at_head()
+        pin = self._pin_at_head()
         # Cache origin/main at "second" locally while the remote still
         # works, then break it — same pattern as
         # test_install_is_skipped_when_pull_failed.
@@ -257,3 +299,30 @@ class PinnedComponentTests(_Rig):
         pull_idx = next(i for i, c in enumerate(calls)
                         if isinstance(c, list) and "pull" in c and "--ff-only" in c)
         self.assertLess(checkout_idx, pull_idx, calls)
+
+        # A failed pull after a successful branch checkout leaves the
+        # checkout ON the branch, OFF its .pin — say so, and how to return.
+        self.assertIn(f"off its .pin ({pin[:8]})", text)
+        self.assertIn(f"git checkout --detach {pin}", text)
+        self.assertIn("install skipped — pull failed above", text)
+
+    def test_unpin_install_skip_says_checkout_failed_when_checkout_failed(self):
+        """The install-skip message must name the step that actually
+        failed — a checkout failure is not a pull failure, and printing
+        "pull failed above" when the pull never even ran is misleading."""
+        self._pin_at_head()
+        broken = subprocess.CompletedProcess(
+            ["git", "checkout", "main"], 1, "", "error: local changes would be overwritten")
+        with mock.patch.object(smd, "_git_checkout_branch_as_owner",
+                               return_value=broken):
+            args = types.SimpleNamespace(base=self.base, apply=True,
+                                         no_fetch=False, unpin=True)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = smd.cmd_update(args)
+        text = out.getvalue() + err.getvalue()
+
+        self.assertNotEqual(rc, 0, text)
+        self.assertIn("install skipped — checkout failed above", text)
+        self.assertNotIn("install skipped — pull failed above", text)
+        self.assertTrue((self.host / ".pin").exists())

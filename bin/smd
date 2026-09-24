@@ -3628,7 +3628,7 @@ def cmd_update(args) -> int:
                 behind = int(out.stdout.strip())
             except ValueError:
                 behind = 0
-            detach_release[d.name] = branch
+            detach_release[d.name] = (branch, pin)
         else:
             r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
                                 'rev-list', '--count', 'HEAD..@{u}'],
@@ -3743,6 +3743,10 @@ def cmd_update(args) -> int:
     held = 0
     failed = 0
     pull_failed: set = set()
+    # Distinguishes WHICH step failed for a target in `pull_failed`, so the
+    # [install]-skip message below names the step that actually broke
+    # rather than always blaming "pull" (sigmond review, Fix round 1 #3).
+    checkout_failed: set = set()
     for step in plan:
         if isinstance(step, Refusal):
             _warn(f'{step.target}: HELD — {step.reason}')
@@ -3757,7 +3761,8 @@ def cmd_update(args) -> int:
             continue
         if step.kind == 'pull':
             target_dir = base / step.target
-            branch = detach_release.get(step.target)
+            release = detach_release.get(step.target)
+            branch = release[0] if release else None
             if branch:
                 # --unpin releasing a detached checkout: land back on the
                 # branch first, or `pull --ff-only` refuses outright.
@@ -3768,6 +3773,7 @@ def cmd_update(args) -> int:
                     _err(f'{step.target}: checkout {branch}: {last}')
                     failed += 1
                     pull_failed.add(step.target)
+                    checkout_failed.add(step.target)
                     continue
             r = _run_git_net(_runuser(step.run_as or 'root',
                                       ['git', '-C', str(target_dir),
@@ -3790,6 +3796,16 @@ def cmd_update(args) -> int:
             else:
                 failed += 1
                 pull_failed.add(step.target)
+                if branch:
+                    # The checkout above SUCCEEDED — the checkout is real,
+                    # committed, and now sits on `branch`, off its `.pin`.
+                    # Nothing else says this; a re-run (or a manual
+                    # `git checkout --detach`) is how an operator gets back.
+                    pin_sha = release[1]
+                    _warn(f'{step.target}: now on {branch}, off its .pin '
+                          f'({pin_sha[:8]}) — the pull failed; re-run '
+                          f'`smd update --apply --unpin` or `git checkout '
+                          f'--detach {pin_sha}` to return')
         elif step.kind == 'install':
             if step.target in pull_failed:
                 # sigmond#48: install.sh on a checkout whose pull just
@@ -3797,7 +3813,8 @@ def cmd_update(args) -> int:
                 # wipe the venv (#47).  The step is not "done", and it is
                 # not another failure either — it is skipped because its
                 # precondition failed.
-                _warn(f'{step.target}: install skipped — pull failed above')
+                which = 'checkout' if step.target in checkout_failed else 'pull'
+                _warn(f'{step.target}: install skipped — {which} failed above')
                 continue
             sh = base / step.target / 'scripts' / 'install.sh'
             if not sh.exists():
