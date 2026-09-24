@@ -81,5 +81,61 @@ class ManifestTests(unittest.TestCase):
             identity.manifest("dom0", str(self.tmp))
 
 
+FRPC = """\
+serverAddr = "gw.example"
+serverPort = 35736
+user = "0123456789abcdef"
+
+[metadatas]
+pubkey = "ssh-ed25519 AAAA..."
+site = "TEST_SITE"
+
+[auth]
+method = "token"
+token = "s3cret-token-value"
+
+[[proxies]]
+name = "TEST_SITE-host-ssh"
+"""
+
+
+class RacCredentialTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "etc/sigmond").mkdir(parents=True)
+        (self.root / "etc/sigmond/frpc-host.toml").write_text(FRPC)
+        _keygen(self.root / "etc/ssh/ssh_host_ed25519_key")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_only_credential_fields_are_taken(self):
+        self.assertEqual(identity.rac_credential(str(self.root)), {
+            "user": "0123456789abcdef",
+            "auth.method": "token",
+            "auth.token": "s3cret-token-value",
+        })
+
+    def test_pm_manifest_names_fields_but_holds_no_values(self):
+        m = identity.manifest("pm", str(self.root))
+        self.assertEqual(m["rac_credential"]["fields"],
+                         ["auth.method", "auth.token", "user"])
+        text = json.dumps(m)
+        self.assertNotIn("s3cret-token-value", text)
+        self.assertNotIn("0123456789abcdef", text)
+
+    def test_pm_without_rac_config_records_none(self):
+        (self.root / "etc/sigmond/frpc-host.toml").unlink()
+        self.assertIsNone(identity.manifest("pm", str(self.root))["rac_credential"])
+
+    def test_token_change_changes_the_digest(self):
+        before = identity.manifest("pm", str(self.root))["rac_credential"]["sha256"]
+        (self.root / "etc/sigmond/frpc-host.toml").write_text(
+            FRPC.replace("s3cret-token-value", "another-token"))
+        after = identity.manifest("pm", str(self.root))["rac_credential"]["sha256"]
+        self.assertNotEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main()
