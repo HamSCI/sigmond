@@ -44,6 +44,17 @@ Dry-run by default.  `smd align --apply` acts.
 
 **Resuming.**  Every step checks before it acts, so re-running `smd align --apply` after a failure picks up where it stopped.
 
+### Decisions for `--apply` (mjh, 2026-09-24, after Plan 1's final review)
+
+- **A component AHEAD of its pin stays where it sits.**  A hotfix deployed by fast-forward before the next image gets blessed survives an alignment.  `align` reports it (`ahead by N — left; --allow-rollback moves it back`), and only `--allow-rollback` moves it backward.  A component that has DIVERGED (ahead and behind) always refuses.
+- **A component the release names but the station lacks gets installed**, at its pin, as bring-up would have.  The release says the station carries it; aligning means carrying it.
+- **Dirt confined to `uv.lock` gets reset, then the move proceeds.**  Every component's `install.sh` regenerates that file, so the committed copy loses nothing.  `align` logs exactly what it discarded.  Any other uncommitted change still refuses.
+- **Before any checkout,** `align` verifies that the release tag points at the manifest's `appliance_commit`, fetches from origin by ref (never by SHA), resolves each pin to a full commit (refusing an ambiguous abbreviation), requires that commit to sit in origin's history, and checks the checkout's `origin` against the catalog's repo.
+- **`smd update` must not undo an alignment:** a component at its `.pin` stays held unless the operator passes `--unpin`.
+- **Three records stay separate:** the install-time version file (never rewritten), a new aligned-release record, and the host's level (Plan 3).
+
+`--apply` ships in two plans: **2a** moves the components (steps 2 and 4, recording, the `smd update` hold); **2b** makes the moved code live (radiod rebuild and consumer restarts, service restarts, image-carried files, bring-up re-runs, production verification).
+
 ## 4. `pm-align` on the Proxmox host
 
 The host carries no `smd` — only `python3` and a shell — so its step stays a standalone script, as the identity module and the host heartbeat emitter do.
