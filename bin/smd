@@ -5609,11 +5609,13 @@ def _align_install_missing(name, sha, *, base, catalog):
     _align_chown(repo / '.git' / 'info', owner)
 
 
-def _align_refresh_image_files(tag) -> list:
+def _align_refresh_image_files(ref) -> list:
     """The `--apply` write half of `align.image_file_drift`'s read-only
     compare: every image-carried helper script (`align.IMAGE_FILES`) found
-    'differs' or 'absent' gets replaced from the release tag's copy via
-    `align_apply.refresh_image_file`. A 'current' file is left alone (no
+    'differs' or 'absent' gets replaced from sigmond-appliance's copy at
+    ``ref`` via `align_apply.refresh_image_file`.  ``ref`` is the release's
+    appliance_commit (final review / I7) — verified against the tag — so
+    the compare and the refresh both read the verified bytes. A 'current' file is left alone (no
     Step — nothing happened to it); an 'unknown' status — the probe itself
     could not reach raw.githubusercontent.com or read the local file —
     is refused rather than silently left stale (matching align.py's own
@@ -5623,10 +5625,10 @@ def _align_refresh_image_files(tag) -> list:
     from sigmond import align, align_apply
     names = dict(align.IMAGE_FILES)
     steps = []
-    for d in align.image_file_drift(tag):
+    for d in align.image_file_drift(ref):
         path = d['path']
         if d['status'] in ('differs', 'absent'):
-            steps.append(align_apply.refresh_image_file(tag, names[path], Path(path)))
+            steps.append(align_apply.refresh_image_file(ref, names[path], Path(path)))
         elif d['status'] == 'unknown':
             steps.append(align_apply.Step(path, 'refused', 'could not compare — not refreshed'))
         # 'current': nothing to do, no Step.
@@ -5977,7 +5979,9 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         _align_print_summary(move_steps)
         return 1
 
-    image_steps = _align_refresh_image_files(rel.tag)
+    # I7: at the verified appliance_commit, not the tag (verify_release
+    # refused a release without one).
+    image_steps = _align_refresh_image_files(rel.appliance_commit)
     _align_print_steps(image_steps)
     if any(s.outcome in ('failed', 'refused') for s in image_steps):
         print('  bring-up not re-run and nothing restarted: an image-carried file '

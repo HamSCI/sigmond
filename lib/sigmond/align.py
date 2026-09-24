@@ -266,13 +266,19 @@ def _read_local(path: str) -> Optional[bytes]:
         return None
 
 
-def image_file_drift(tag: str, read_local: Optional[Callable] = None,
+def image_file_drift(ref: str, read_local: Optional[Callable] = None,
                      urlopen: Optional[Callable] = None, timeout: float = 20.0) -> list:
+    """Each image-carried file against sigmond-appliance's copy at ``ref``.
+
+    The dry run passes the release tag (all it has before verification);
+    ``--apply`` passes the release's appliance_commit, already verified to
+    be what the tag points at, so the compare and the refresh read the
+    very bytes the verification covered (final review / I7)."""
     read_local = read_local or _read_local
     out = []
     for vm_path, repo_path in IMAGE_FILES:
         try:
-            want = _get(f"{RAW_BASE}/{tag}/{repo_path}", urlopen or _default_urlopen, timeout)
+            want = _get(f"{RAW_BASE}/{ref}/{repo_path}", urlopen or _default_urlopen, timeout)
         except LookupError_ as exc:
             out.append({"path": vm_path, "status": "unknown", "note": str(exc)})
             continue
@@ -282,7 +288,7 @@ def image_file_drift(tag: str, read_local: Optional[Callable] = None,
         elif hashlib.sha256(have).digest() == hashlib.sha256(want).digest():
             out.append({"path": vm_path, "status": "current", "note": ""})
         else:
-            out.append({"path": vm_path, "status": "differs", "note": f"differs from {tag}"})
+            out.append({"path": vm_path, "status": "differs", "note": f"differs from {ref}"})
     return out
 
 

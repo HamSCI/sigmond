@@ -1430,20 +1430,36 @@ class RefreshImageFileTests(unittest.TestCase):
             self.assertEqual(list(Path(tmp).iterdir()), [])
             m_chown.assert_not_called()
 
-    def test_leading_whitespace_before_shebang_is_still_accepted(self):
-        # lstrip only — a script fetched through a proxy that prepends a
-        # blank line is still a script, not "not a script".
-        body = b"\n#!/bin/sh\necho hi\n"
+    def test_shebang_must_be_at_byte_0(self):
+        # Final review / M3: the kernel only honours `#!` at byte 0; a body
+        # with anything before it would install a root-owned 0755 file
+        # that exec() refuses (or hands to /bin/sh).
+        for body in (b"\n#!/bin/sh\necho hi\n", b" #!/bin/sh\n", b"\xef\xbb\xbf#!/bin/sh\n"):
+            def urlopen(url, timeout=None, body=body):
+                return _FakeHTTPResponse(200, body)
+
+            with tempfile.TemporaryDirectory() as tmp:
+                dest = Path(tmp) / "sigmond-site-timing"
+                with mock.patch("os.chown") as m_chown:
+                    step = align_apply.refresh_image_file(
+                        "v3.53", "sigmond-site-timing", dest, urlopen=urlopen)
+                self.assertEqual(step.outcome, "failed", body)
+                self.assertIn("not a script", step.detail)
+                self.assertFalse(dest.exists())
+                m_chown.assert_not_called()
+
+    def test_fetches_at_the_ref_it_is_given(self):
+        # Final review / I7: --apply passes the verified appliance_commit.
+        seen = []
 
         def urlopen(url, timeout=None):
-            return _FakeHTTPResponse(200, body)
+            seen.append(url)
+            return _FakeHTTPResponse(200, b"#!/bin/sh\n")
 
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "sigmond-site-timing"
-            with mock.patch("os.chown"):
-                step = align_apply.refresh_image_file(
-                    "v3.53", "sigmond-site-timing", dest, urlopen=urlopen)
-            self.assertEqual(step.outcome, "refreshed")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("os.chown"):
+            align_apply.refresh_image_file("c" * 40, "sigmond-site-timing",
+                                           Path(tmp) / "s", urlopen=urlopen)
+        self.assertEqual(seen, [f"{align.RAW_BASE}/{'c' * 40}/sigmond-site-timing"])
 
     # --- Fix round 1 / M3: a write-phase failure after the tmp file was
     # created must not leave it behind at the real /usr/local/sbin path. ---

@@ -623,12 +623,15 @@ def record_live(aligned_path: Path, live: dict) -> None:
     os.replace(tmp, aligned_path)
 
 
-def refresh_image_file(tag: str, name: str, dest: Path, *,
+def refresh_image_file(ref: str, name: str, dest: Path, *,
                        urlopen: Callable = urllib.request.urlopen,
                        timeout: float = 20.0) -> Step:
     """Replace one image-carried helper script (`align.IMAGE_FILES`) with
-    the release tag's copy from sigmond-appliance — the write half of
-    `align.image_file_drift`'s read-only compare.
+    sigmond-appliance's copy at ``ref`` — the write half of
+    `align.image_file_drift`'s read-only compare.  ``--apply`` passes the
+    release's appliance_commit, which `verify_release` has already matched
+    to the tag, never the tag itself: a tag can move between the verify
+    and this fetch (final review / I7).
 
     Unlike a component checkout, there is no operator owner to preserve:
     these scripts run as root under cron/systemd, so the refreshed file is
@@ -638,15 +641,15 @@ def refresh_image_file(tag: str, name: str, dest: Path, *,
 
     Fix round 1 / I2: a 200 response is not proof of a script — a captive
     portal, a rate-limit page, or a misconfigured CDN can all answer 200
-    with HTML. Refuse anything whose body (after stripping leading
-    whitespace) doesn't start with a shebang, before it is ever made
-    root-owned and executable.
+    with HTML. Refuse anything whose body does not start with a shebang
+    at byte 0 (final review / M3: the kernel honours `#!` nowhere else),
+    before it is ever made root-owned and executable.
 
     Fix round 1 / M3: once the tmp file exists, any of chmod/chown/replace
     raising must not leave it behind at the real path (`/usr/local/sbin`
     on a station) — remove it and report failed instead."""
     dest = Path(dest)
-    url = f"{RAW_BASE}/{tag}/{name}"
+    url = f"{RAW_BASE}/{ref}/{name}"
     try:
         with urlopen(url, timeout=timeout) as resp:
             status = getattr(resp, "status", 200)
@@ -657,7 +660,7 @@ def refresh_image_file(tag: str, name: str, dest: Path, *,
         return Step(str(dest), "failed", f"{url}: HTTP {status}")
     if not body:
         return Step(str(dest), "failed", f"{url}: empty body")
-    if not body.lstrip().startswith(b"#!"):
+    if not body.startswith(b"#!"):
         return Step(str(dest), "failed", f"{url}: not a script — refused")
     tmp = dest.with_name(dest.name + ".tmp")
     tmp.write_bytes(body)

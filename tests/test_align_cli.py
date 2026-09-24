@@ -1068,6 +1068,20 @@ class AlignRefreshImageFilesTests(unittest.TestCase):
         self.assertEqual(steps[0].detail, "could not compare — not refreshed")
 
 
+class _FakeHTTPResponse:
+    def __init__(self, status, body):
+        self.status, self._body = status, body
+
+    def read(self, *a):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def _completed(rc, out="", err=""):
     return subprocess.CompletedProcess([], rc, out, err)
 
@@ -2164,6 +2178,41 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         restart_lines = [c[0][1]["what"] for c in m["update"].call_args_list
                          if "restarted" in c[0][1]["what"]]
         self.assertEqual(restart_lines, ["smd align --apply v3.53: hf-timestd restarted"])
+
+    def test_apply_compares_and_refreshes_image_files_at_the_appliance_commit(self):
+        # Final review / I7: --apply fetches RAW_BASE/<appliance_commit>/<name>
+        # (verified against the tag), never RAW_BASE/<tag>/<name>.
+        real_refresh_files = smd._align_refresh_image_files
+        real_refresh = align_apply.refresh_image_file
+        urls = []
+
+        def urlopen(url, timeout=None):
+            urls.append(url)
+            return _FakeHTTPResponse(200, b"#!/bin/sh\nnew\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            def refresh(ref, name, dest, **kw):
+                return real_refresh(ref, name, Path(tmp) / name, urlopen=urlopen)
+
+            def drift(ref, **kw):
+                urls.append(f"{align.RAW_BASE}/{ref}/(compare)")
+                return [{"path": "/usr/local/sbin/sigmond-site-timing", "status": "differs",
+                         "note": ""}]
+            out = io.StringIO()
+            with contextlib.ExitStack() as st:
+                _apply_patches(st, rel=APPLY_REL, live=LIVE_ALIGNED,
+                               _align_refresh_image_files=real_refresh_files)
+                st.enter_context(mock.patch("sigmond.align_apply.apply_plan",
+                                            return_value=[align_apply.Step("sigmond", "current")]))
+                st.enter_context(mock.patch("sigmond.align.image_file_drift", side_effect=drift))
+                st.enter_context(mock.patch("sigmond.align_apply.refresh_image_file",
+                                            side_effect=refresh))
+                st.enter_context(mock.patch("os.chown"))
+                st.enter_context(contextlib.redirect_stdout(out))
+                smd.cmd_align(_apply_args("/opt/git/sigmond"))
+        commit = APPLY_REL.appliance_commit
+        self.assertEqual(urls, [f"{align.RAW_BASE}/{commit}/(compare)",
+                                f"{align.RAW_BASE}/{commit}/sigmond-site-timing"])
+        self.assertFalse(any(f"/{APPLY_REL.tag}/" in u for u in urls), urls)
 
     def test_bringup_re_runs_site_timing_only_when_this_run_refreshed_it(self):
         rc, out, m = self._run(
