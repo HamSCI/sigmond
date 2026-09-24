@@ -137,5 +137,68 @@ class RacCredentialTests(unittest.TestCase):
         self.assertNotEqual(before, after)
 
 
+import io
+import sys
+import tarfile
+
+IDENTITY_SRC = Path(identity.__file__).read_bytes()
+
+
+class ExportTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_export_round_trip_keeps_content_and_mode(self):
+        root = _vm_root(self.tmp)
+        os.chmod(root / "etc/ssh/ssh_host_ed25519_key", 0o600)
+        buf = io.BytesIO()
+        m = identity.export("vm", buf, str(root))
+        buf.seek(0)
+        with tarfile.open(fileobj=buf) as tar:
+            names = tar.getnames()
+            key = tar.getmember("etc/ssh/ssh_host_ed25519_key")
+            self.assertEqual(key.mode, 0o600)
+            self.assertEqual(tar.extractfile(key).read(),
+                             (root / "etc/ssh/ssh_host_ed25519_key").read_bytes())
+            inner = json.loads(tar.extractfile(identity.MANIFEST_MEMBER).read())
+        self.assertEqual(names[-1], identity.MANIFEST_MEMBER)
+        self.assertEqual({n for n in names if not n.startswith("identity/")},
+                         {e["path"].lstrip("/") for e in m["files"]})
+        self.assertEqual(inner, m)
+
+    def test_pm_export_carries_the_credential_member(self):
+        root = self.tmp / "pm"
+        (root / "etc/sigmond").mkdir(parents=True)
+        (root / "etc/sigmond/frpc-host.toml").write_text(FRPC)
+        buf = io.BytesIO()
+        identity.export("pm", buf, str(root))
+        buf.seek(0)
+        with tarfile.open(fileobj=buf) as tar:
+            member = tar.getmember(identity.RAC_MEMBER)
+            cred = json.loads(tar.extractfile(member).read())
+        self.assertEqual(member.mode, 0o600)
+        self.assertEqual(cred["auth.token"], "s3cret-token-value")
+
+    def test_fingerprints_runs_from_piped_source(self):
+        # Exactly how site-identity runs it on a station with no sigmond.
+        root = _vm_root(self.tmp)
+        out = subprocess.run(
+            [sys.executable, "-", "fingerprints", "--plane", "vm", "--root", str(root)],
+            input=IDENTITY_SRC, capture_output=True, check=True)
+        self.assertEqual(json.loads(out.stdout), identity.manifest("vm", str(root)))
+
+    def test_export_runs_from_piped_source(self):
+        root = _vm_root(self.tmp)
+        out = subprocess.run(
+            [sys.executable, "-", "export", "--plane", "vm", "--root", str(root)],
+            input=IDENTITY_SRC, capture_output=True, check=True)
+        with tarfile.open(fileobj=io.BytesIO(out.stdout)) as tar:
+            self.assertIn("etc/ssh/ssh_host_ed25519_key", tar.getnames())
+
+
 if __name__ == "__main__":
     unittest.main()

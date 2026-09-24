@@ -151,3 +151,54 @@ def manifest(plane: str, root: str = "/") -> dict:
             "sha256": hashlib.sha256(_canonical(cred)).hexdigest(),
         }
     return m
+
+
+def _add_bytes(tar: tarfile.TarFile, name: str, data: bytes, mode: int) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    info.mode = mode
+    info.uname = info.gname = "root"
+    tar.addfile(info, io.BytesIO(data))
+
+
+def export(plane: str, out, root: str = "/") -> dict:
+    """Write the plane's identity as an uncompressed tar stream; return its manifest.
+
+    Members keep their owner, group and mode, so a restore can put them back
+    exactly.  The manifest goes last, as identity/manifest.json.
+    """
+    m = manifest(plane, root)
+    with tarfile.open(fileobj=out, mode="w|") as tar:
+        for entry in m["files"]:
+            rel = entry["path"].lstrip("/")
+            tar.add(os.path.join(root, rel), arcname=rel, recursive=False)
+        if plane == "pm":
+            cred = rac_credential(root)
+            if cred is not None:
+                _add_bytes(tar, RAC_MEMBER, _canonical(cred), 0o600)
+        _add_bytes(tar, MANIFEST_MEMBER,
+                   json.dumps(m, indent=2, sort_keys=True).encode(), 0o644)
+    return m
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="identity", description="Read a station plane's identity files.")
+    verbs = parser.add_subparsers(dest="verb", required=True)
+    for verb, text in (("export", "write the identity tar to stdout"),
+                       ("fingerprints", "print the manifest (no secrets) as JSON")):
+        p = verbs.add_parser(verb, help=text)
+        p.add_argument("--plane", required=True, choices=PLANES)
+        p.add_argument("--root", default="/")
+    args = parser.parse_args(argv)
+    if args.verb == "fingerprints":
+        json.dump(manifest(args.plane, args.root), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+    export(args.plane, sys.stdout.buffer, args.root)
+    sys.stdout.buffer.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
