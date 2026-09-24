@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -311,29 +312,57 @@ class AlignLiveStateTests(unittest.TestCase):
 
 
 class AlignHeadMovedAtTests(unittest.TestCase):
-    def test_reflog_newest_entry_is_the_move_time(self):
-        calls = []
+    """Fix round 1 / C-A: the time HEAD MOVED, from .git/logs/HEAD — never
+    a commit date (`git log -g --format=%ct` prints the commit's)."""
 
-        def fake_run(argv, **kw):
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, stdout="1790270000\n", stderr="")
+    def _git(self, repo, *args, date=None):
+        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null",
+                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        if date:
+            env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        return subprocess.run(["git", "-C", str(repo), *args], env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
 
-        got = smd._align_head_moved_at("/opt/git/sigmond/psk-recorder", run=fake_run)
-        self.assertEqual(got, 1790270000.0)
-        self.assertIn("-g", calls[0])
-        self.assertIn("--no-optional-locks", calls[0])
+    def test_checkout_of_an_old_commit_reads_now_not_the_commit_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"
+            repo.mkdir()
+            self._git(repo, "init", "-q")
+            (repo / "f").write_text("1")
+            self._git(repo, "add", "f")
+            self._git(repo, "commit", "-q", "-m", "old", date="2020-01-01T00:00:00Z")
+            first = self._git(repo, "rev-parse", "HEAD")
+            (repo / "f").write_text("2")
+            self._git(repo, "commit", "-q", "-am", "new", date="2020-01-01T00:00:00Z")
+            self._git(repo, "checkout", "-q", "--detach", first)
+            got = smd._align_head_moved_at(repo)
+        self.assertIsNotNone(got)
+        self.assertNotEqual(got, 1577836800.0)
+        self.assertLess(abs(got - time.time()), 60)
 
-    def test_nonzero_returncode_is_none(self):
-        def fake_run(argv, **kw):
-            return subprocess.CompletedProcess(argv, 128, stdout="", stderr="fatal: bad reflog")
+    def test_last_line_timestamp_after_the_email(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / ".git" / "logs"
+            logs.mkdir(parents=True)
+            (logs / "HEAD").write_text(
+                f"{'0' * 40} {'1' * 40} A Name <a@b> 1600000000 +0000\tclone: from x\n"
+                f"{'1' * 40} {'2' * 40} Name With > Odd <a@b> 1790270000 -0500\tcheckout: moving\n")
+            self.assertEqual(smd._align_head_moved_at(tmp), 1790270000.0)
 
-        self.assertIsNone(smd._align_head_moved_at("/opt/git/sigmond/x", run=fake_run))
+    def test_missing_logs_head_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            self.assertIsNone(smd._align_head_moved_at(tmp))
 
-    def test_empty_stdout_is_none(self):
-        def fake_run(argv, **kw):
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-        self.assertIsNone(smd._align_head_moved_at("/opt/git/sigmond/x", run=fake_run))
+    def test_empty_or_unparsable_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / ".git" / "logs"
+            logs.mkdir(parents=True)
+            (logs / "HEAD").write_text("")
+            self.assertIsNone(smd._align_head_moved_at(tmp))
+            (logs / "HEAD").write_text("garbage without an email\n")
+            self.assertIsNone(smd._align_head_moved_at(tmp))
 
 
 class AlignUnitsStartedAtTests(unittest.TestCase):
@@ -2173,7 +2202,7 @@ class AlignStalenessTests(unittest.TestCase):
     def _read(self, services, catalog, moved, started, built_at=500.0, consumes=None):
         seen = []
 
-        def head(repo, run=None):
+        def head(repo):
             seen.append(Path(repo).name)
             return moved.get(Path(repo).name)
         with mock.patch.object(smd, "_align_head_moved_at", side_effect=head), \
@@ -2297,7 +2326,7 @@ class AlignDryRunRestartsTests(unittest.TestCase):
         with mock.patch.object(smd, "_align_units_started_at",
                                side_effect=lambda units, run=None: 100.0), \
              mock.patch.object(smd, "_align_head_moved_at",
-                               side_effect=lambda repo, run=None:
+                               side_effect=lambda repo:
                                200.0 if Path(repo).name == "hf-timestd" else 50.0), \
              mock.patch.object(smd, "_align_consumes", return_value={}), \
              mock.patch.object(smd, "_align_radiod_built_at", return_value=None), \
@@ -2332,7 +2361,7 @@ class AlignDryRunRestartsTests(unittest.TestCase):
                align_live.RADIOD: types.SimpleNamespace(kind="server")}
         with mock.patch.object(smd, "_align_units_started_at",
                                side_effect=lambda units, run=None: 100.0), \
-             mock.patch.object(smd, "_align_head_moved_at", side_effect=lambda repo, run=None: 50.0), \
+             mock.patch.object(smd, "_align_head_moved_at", side_effect=lambda repo: 50.0), \
              mock.patch.object(smd, "_align_consumes", return_value={}), \
              mock.patch.object(smd, "_align_radiod_built_at", return_value=50.0):
             args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=True)

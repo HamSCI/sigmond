@@ -4525,22 +4525,41 @@ def _align_live_state(base: str):
     return live, dirty, origins, errors
 
 
-def _align_head_moved_at(repo, run=subprocess.run) -> Optional[float]:
+def _align_head_moved_at(repo) -> Optional[float]:
     """When ``repo``'s HEAD last moved — a checkout, a pull or a clone —
-    read from the reflog's newest entry (`git log -g -1`), not the commit
-    date: a `checkout <old-sha>` moves HEAD without creating a commit, and
-    a `pull --ff-only` HEAD-moves to a commit authored long ago. None when
-    the call fails (no reflog, unreadable checkout) or prints nothing."""
-    r = run(['git', '--no-optional-locks', '-c', f'safe.directory={repo}',
-             '-C', str(repo), 'log', '-g', '-1', '--format=%ct', 'HEAD'],
-            capture_output=True, text=True)
-    if r.returncode != 0:
+    read from the newest line of ``<repo>/.git/logs/HEAD`` as a plain
+    file (no git, no subprocess).
+
+    Fix round 1 / C-A: `git log -g -1 --format=%ct` prints the COMMIT's
+    committer date, not the reflog entry's — a 2020 commit checked out
+    today read 2020, so staleness depended on commit dates.  The reflog
+    line is ``<old> <new> <name> <email> <unix-ts> <tz>\t<message>``; the
+    timestamp follows the ``>`` closing the email.  A ``.git`` FILE
+    (``gitdir: <path>``) is followed to its git dir.  Missing file, empty
+    file or an unparsable line -> None (never stale)."""
+    git = Path(repo) / '.git'
+    try:
+        if git.is_file():
+            text = git.read_text().strip()
+            if not text.startswith('gitdir:'):
+                return None
+            gd = Path(text[len('gitdir:'):].strip())
+            git = gd if gd.is_absolute() else (Path(repo) / gd)
+        lines = [ln for ln in (git / 'logs' / 'HEAD').read_text(errors='replace').splitlines()
+                 if ln.strip()]
+    except OSError:
         return None
-    out = (r.stdout or '').strip()
-    if not out:
+    if not lines:
+        return None
+    head = lines[-1].split('\t', 1)[0]
+    close = head.rfind('>')
+    if close < 0:
+        return None
+    rest = head[close + 1:].split()
+    if not rest:
         return None
     try:
-        return float(out)
+        return float(int(rest[0]))
     except ValueError:
         return None
 
@@ -4835,7 +4854,7 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
     for n in sorted(set(names) | libs):
         if n == RADIOD:
             continue
-        moved_at[n] = _align_head_moved_at(Path(base) / n, run=run)
+        moved_at[n] = _align_head_moved_at(Path(base) / n)
     if RADIOD in services:
         moved_at[RADIOD] = _align_radiod_built_at()
 
