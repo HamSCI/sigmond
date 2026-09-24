@@ -55,6 +55,45 @@ say "this takes many minutes; follow it with: tail -f $LOG"
 # dead one waiting on a prompt nobody will answer.
 if "$SMD" bringup "$PROFILE" --non-interactive >>"$LOG" 2>&1; then
     say "bring-up finished"
+
+    # ⛔ RE-RUN THE SITE WIRING.  The wizard already ran sigmond-site-timing,
+    # but it ran it BEFORE this bring-up existed -- before hf-timestd was
+    # installed and before its config was written.  Its step 3 needs
+    # /etc/hf-timestd/ to be there, so it skipped, silently, and nothing
+    # re-ran it.  The result is a station with NO metrology channels at all:
+    # zero timestd-metrology@ units, /etc/hf-timestd/metrology-channels/
+    # never created, fusion reading "0 entries from 6 channels", no T3 --
+    # and every unit green, so nothing anywhere says it is broken.
+    #
+    # B4 ran that way from its reflash until 2026-09-23; rob's lab station
+    # did the same on v3.53 and needed the command run by hand.  An appliance
+    # that requires a manual step after an unattended install is not
+    # unattended, and this one is invisible.
+    #
+    # Here is the correct moment: bring-up has just finished, so hf-timestd
+    # and its config now exist.  sigmond-site-timing is idempotent -- every
+    # other step of it skips when already satisfied -- so re-running it costs
+    # a few seconds and fixes the one step that could not run earlier.
+    ST=/usr/local/sbin/sigmond-site-timing
+    if [ -x "$ST" ]; then
+        say "re-running site wiring now that hf-timestd exists ($ST)"
+        if "$ST" >>"$LOG" 2>&1; then
+            say "site wiring complete"
+        else
+            say "site wiring exited $? — see $LOG; re-run by hand with: sudo $ST"
+        fi
+        _mc=$(systemctl list-units 'timestd-metrology@*' --no-legend --plain 2>/dev/null | wc -l)
+        # Say the NUMBER.  "site wiring complete" with zero channels is the
+        # exact shape of the failure this block exists to end.
+        if [ "${_mc:-0}" -gt 0 ]; then
+            say "metrology channels running: $_mc"
+        else
+            say "⚠ NO metrology channels are running — this station measures nothing."
+            say "  check: journalctl -t sigmond-site-timing ; ls /etc/hf-timestd/metrology-channels/"
+        fi
+    else
+        say "⚠ $ST not present — metrology channels will NOT exist; timing chain unwired"
+    fi
 else
     rc=$?
     # Do NOT retry on the next boot: a bring-up that failed for a real reason
