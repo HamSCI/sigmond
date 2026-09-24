@@ -1852,6 +1852,55 @@ class AlignRepairOwnershipTests(unittest.TestCase):
                              sorted([(venv / "pyvenv.cfg", me.st_uid, me.st_gid),
                                      (venv / "bin" / "python", me.st_uid, me.st_gid)]))
 
+    # --- Final review / I6: inside <checkout>/venv only uid-0 paths are
+    # re-owned, to the venv directory's own owner — hf-timestd's venv is
+    # timestd:timestd, not the checkout's owner. ---
+
+    def _venv_repair(self, owners):
+        """Run the repair over a checkout with a venv; ``owners`` maps a path
+        relative to the checkout to the (uid, gid) its lstat reports."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = base / "hf-timestd"
+            (repo / ".git").mkdir(parents=True)
+            venv = repo / "venv"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "lib").mkdir()
+            (venv / "pyvenv.cfg").write_text("")
+            (venv / "bin" / "python").write_text("x")
+            (venv / "lib" / "mine.py").write_text("x")
+            real_lstat = os.lstat
+            fake = {repo / k: v for k, v in owners.items()}
+
+            def fake_lstat(p, *a, **k):
+                st = real_lstat(p, *a, **k)
+                if Path(p) in fake:
+                    uid, gid = fake[Path(p)]
+                    return types.SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=st.st_mode)
+                return st
+            calls = []
+            with mock.patch("os.lstat", side_effect=fake_lstat), \
+                 mock.patch("os.chown", side_effect=lambda p, u, g, **k: calls.append(
+                     (str(Path(p).relative_to(repo)), u, g))):
+                smd._align_repair_ownership(base)
+            return sorted(calls), os.stat(repo)
+
+    def test_root_owned_file_in_a_venv_goes_to_the_venv_owner(self):
+        calls, me = self._venv_repair({"venv": (1234, 1235), "venv/bin/python": (0, 0)})
+        self.assertEqual(calls, [("venv/bin/python", 1234, 1235)])
+
+    def test_non_root_file_in_a_venv_is_untouched(self):
+        calls, me = self._venv_repair({"venv": (1234, 1235), "venv/bin/python": (1234, 1235),
+                                       "venv/lib/mine.py": (5678, 5678),
+                                       "venv/pyvenv.cfg": (1234, 0)})
+        self.assertEqual(calls, [])
+
+    def test_root_owned_venv_dir_goes_to_the_checkout_owner(self):
+        calls, me = self._venv_repair({"venv": (0, 0), "venv/bin/python": (0, 0),
+                                       "venv/lib/mine.py": (5678, 5678)})
+        self.assertEqual(calls, [("venv", me.st_uid, me.st_gid),
+                                 ("venv/bin/python", me.st_uid, me.st_gid)])
+
     def test_venv_symlink_left_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
