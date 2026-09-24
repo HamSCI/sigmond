@@ -4525,6 +4525,16 @@ def _align_live_state(base: str):
     return live, dirty, origins, errors
 
 
+def _align_aligned_release():
+    """The release aligned.json records, or None when it is absent or unreadable."""
+    import json
+    from sigmond import align_apply
+    try:
+        return json.loads(align_apply.ALIGNED_RECORD.read_text()).get('release')
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def _align_head_moved_at(repo) -> Optional[float]:
     """When ``repo``'s HEAD last moved — a checkout, a pull or a clone —
     read from the newest line of ``<repo>/.git/logs/HEAD`` as a plain
@@ -5746,9 +5756,12 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     # Fix round 1 / I-3: nothing moved or installed, no image file
     # refreshed, nothing stale — a no-op. No bring-up, no record (record
     # would rewrite aligned.json and erase the previous live block).
+    # A no-op also needs aligned.json to name this release already: after a
+    # sigmond-only release the re-exec'd child sees sigmond current and
+    # nothing stale, yet has still to write the record under the new code.
     changed = any(s.outcome in ('moved', 'installed') for s in move_steps)
     refreshed = any(s.outcome == 'refreshed' for s in image_steps)
-    if not changed and not refreshed:
+    if not changed and not refreshed and _align_aligned_release() == rel.tag:
         try:
             quiet = not _align_staleness(base, _align_services(), catalog or None)['stale']
         except Exception:

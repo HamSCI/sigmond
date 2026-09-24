@@ -1968,7 +1968,8 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
 
     def _run(self, *, moves=None, images=(), bringup=(), staleness=None,
              services=None, restart_steps=None, restarted_units=(), checks=None,
-             no_restart=False, fast_checks=None, extra_patches=()):
+             no_restart=False, fast_checks=None, extra_patches=(),
+             aligned_release=APPLY_REL.tag):
         order = []
         moves = moves if moves is not None else [
             align_apply.Step("sigmond", "current"),
@@ -2005,6 +2006,8 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
             st.enter_context(mock.patch("sigmond.align_apply.record_live", m_record_live))
             # Never the real /run/hf-timestd/authority.json (Fix round 1 audit).
             st.enter_context(mock.patch("sigmond.heartbeat._read_authority", return_value={}))
+            st.enter_context(mock.patch.object(smd, "_align_aligned_release",
+                                               return_value=aligned_release))
             for p in extra_patches:
                 st.enter_context(p)
             st.enter_context(contextlib.redirect_stdout(out))
@@ -2151,6 +2154,27 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         m["restart"].assert_not_called()
         m["record_live"].assert_not_called()
         m["history"].assert_not_called()
+
+    def test_aligned_release_reads_the_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            rec = Path(d) / "aligned.json"
+            with mock.patch.object(align_apply, "ALIGNED_RECORD", rec):
+                self.assertIsNone(smd._align_aligned_release())
+                rec.write_text('{"release": "v3.53"}')
+                self.assertEqual(smd._align_aligned_release(), "v3.53")
+                rec.write_text("[1, 2]")
+                self.assertIsNone(smd._align_aligned_release())
+
+    def test_nothing_changed_but_not_yet_recorded_is_not_a_no_op(self):
+        # A sigmond-only release: the re-exec'd child sees sigmond current and
+        # nothing stale, but aligned.json does not name this release yet.
+        for recorded in (None, "v3.52"):
+            rc, out, m = self._run(moves=[align_apply.Step("sigmond", "current")],
+                                   staleness=_staleness(running={"hf-timestd"}),
+                                   aligned_release=recorded)
+            self.assertNotIn("nothing to do", out)
+            m["bringup"].assert_called_once()
+            m["record"].assert_called_once()
 
     def test_only_stale_services_still_runs_bringup_record_and_restarts(self):
         rc, out, m = self._run(
