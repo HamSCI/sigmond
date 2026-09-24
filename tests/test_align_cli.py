@@ -299,6 +299,142 @@ class AlignLiveStateTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Plan 2b / Task 3 — reading the station: reflog, systemctl, editable
+# siblings, units-per-component, the radiod binary's mtime. Every probe
+# here is faked; no git, no systemctl, no real filesystem outside tmp.
+# ---------------------------------------------------------------------------
+
+
+class AlignHeadMovedAtTests(unittest.TestCase):
+    def test_reflog_newest_entry_is_the_move_time(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="1790270000\n", stderr="")
+
+        got = smd._align_head_moved_at("/opt/git/sigmond/psk-recorder", run=fake_run)
+        self.assertEqual(got, 1790270000.0)
+        self.assertIn("-g", calls[0])
+        self.assertIn("--no-optional-locks", calls[0])
+
+    def test_nonzero_returncode_is_none(self):
+        def fake_run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 128, stdout="", stderr="fatal: bad reflog")
+
+        self.assertIsNone(smd._align_head_moved_at("/opt/git/sigmond/x", run=fake_run))
+
+    def test_empty_stdout_is_none(self):
+        def fake_run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        self.assertIsNone(smd._align_head_moved_at("/opt/git/sigmond/x", run=fake_run))
+
+
+class AlignUnitsStartedAtTests(unittest.TestCase):
+    def _run_for(self, states):
+        """``states``: {unit: (ActiveState, 'unix-ts-or-None')} — mirrors
+        `systemctl show --timestamp=unix -p ActiveState -p ActiveEnterTimestamp`."""
+
+        def fake_run(argv, **kw):
+            unit = argv[-1]
+            active_state, ts = states[unit]
+            lines = [f"ActiveState={active_state}"]
+            lines.append(f"ActiveEnterTimestamp={ts if ts is not None else 'n/a'}")
+            return subprocess.CompletedProcess(argv, 0, stdout="\n".join(lines) + "\n", stderr="")
+
+        return fake_run
+
+    def test_min_over_two_active_units(self):
+        run = self._run_for({"a.service": ("active", "@100"), "b.service": ("active", "@50")})
+        got = smd._align_units_started_at(["a.service", "b.service"], run=run)
+        self.assertEqual(got, 50.0)
+
+    def test_inactive_unit_excluded_active_unit_wins(self):
+        run = self._run_for({"a.service": ("inactive", None), "b.service": ("active", "@70")})
+        got = smd._align_units_started_at(["a.service", "b.service"], run=run)
+        self.assertEqual(got, 70.0)
+
+    def test_all_inactive_is_none(self):
+        run = self._run_for({"a.service": ("inactive", None), "b.service": ("failed", None)})
+        self.assertIsNone(smd._align_units_started_at(["a.service", "b.service"], run=run))
+
+    def test_malformed_timestamp_line_ignored(self):
+        def fake_run(argv, **kw):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="ActiveState=active\nActiveEnterTimestamp=garbage\n", stderr="")
+
+        self.assertIsNone(smd._align_units_started_at(["a.service"], run=fake_run))
+
+
+class AlignConsumesTests(unittest.TestCase):
+    def test_editable_sibling_under_base_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "ka9q-python").mkdir()
+            with mock.patch.object(smd, "_editable_siblings",
+                                   return_value={"ka9q-python": base / "ka9q-python"}):
+                got = smd._align_consumes(str(base), ["psk-recorder"])
+            self.assertEqual(got, {"psk-recorder": {"ka9q-python"}})
+
+    def test_path_outside_base_is_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with mock.patch.object(smd, "_editable_siblings",
+                                   return_value={"elsewhere": Path("/etc/passwd-not-here")}):
+                got = smd._align_consumes(str(base), ["psk-recorder"])
+            self.assertEqual(got, {})
+
+
+class AlignServicesTests(unittest.TestCase):
+    def test_orphaned_unit_dropped(self):
+        u1 = smd.UnitRef(component="psk-recorder", unit="psk-recorder@a.service",
+                         template="psk-recorder@.service", instance="a",
+                         kind="service", source="deploy.toml:x")
+        u2 = smd.UnitRef(component="psk-recorder", unit="psk-recorder@b.service",
+                         template="psk-recorder@.service", instance="b",
+                         kind="service", source="deploy.toml:x", orphaned=True)
+        topo = {"components": {"psk-recorder": {"enabled": True}}}
+        with mock.patch.object(smd, "_load_topology", return_value=topo), \
+            mock.patch.object(smd, "resolve_units", return_value=[u1, u2]):
+            out = smd._align_services()
+        self.assertEqual(out, {"psk-recorder": ["psk-recorder@a.service"]})
+
+    def test_rejected_component_is_skipped_not_raised(self):
+        good = smd.UnitRef(component="hf-timestd", unit="hf-timestd.service",
+                           template=None, instance=None, kind="service", source="x")
+
+        def fake_resolve(components, enabled):
+            if components == ["broken-comp"]:
+                raise ValueError("component 'broken-comp' not found in enabled components")
+            return [good]
+
+        topo = {"components": {"broken-comp": {"enabled": True},
+                               "hf-timestd": {"enabled": True}}}
+        with mock.patch.object(smd, "_load_topology", return_value=topo), \
+            mock.patch.object(smd, "resolve_units", side_effect=fake_resolve):
+            out = smd._align_services()
+        self.assertEqual(out, {"hf-timestd": ["hf-timestd.service"]})
+
+
+class AlignRadiodBuiltAtTests(unittest.TestCase):
+    def test_mtime_of_installed_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "radiod"
+            binary.write_text("x")
+            with mock.patch.object(smd, "_ALIGN_RADIOD_BINARY", binary):
+                got = smd._align_radiod_built_at()
+            self.assertEqual(got, binary.stat().st_mtime)
+
+    def test_absent_binary_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "radiod"
+            with mock.patch.object(smd, "_ALIGN_RADIOD_BINARY", binary):
+                got = smd._align_radiod_built_at()
+            self.assertIsNone(got)
+
+
+# ---------------------------------------------------------------------------
 # --apply — Plan 2a: verify, classify, sigmond bootstrap, apply, record
 # ---------------------------------------------------------------------------
 

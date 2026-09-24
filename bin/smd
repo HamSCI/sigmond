@@ -4525,6 +4525,114 @@ def _align_live_state(base: str):
     return live, dirty, origins, errors
 
 
+def _align_head_moved_at(repo, run=subprocess.run) -> Optional[float]:
+    """When ``repo``'s HEAD last moved — a checkout, a pull or a clone —
+    read from the reflog's newest entry (`git log -g -1`), not the commit
+    date: a `checkout <old-sha>` moves HEAD without creating a commit, and
+    a `pull --ff-only` HEAD-moves to a commit authored long ago. None when
+    the call fails (no reflog, unreadable checkout) or prints nothing."""
+    r = run(['git', '--no-optional-locks', '-c', f'safe.directory={repo}',
+             '-C', str(repo), 'log', '-g', '-1', '--format=%ct', 'HEAD'],
+            capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    out = (r.stdout or '').strip()
+    if not out:
+        return None
+    try:
+        return float(out)
+    except ValueError:
+        return None
+
+
+def _align_units_started_at(units, run=subprocess.run) -> Optional[float]:
+    """The EARLIEST ``ActiveEnterTimestamp`` among ``units`` that are
+    currently active — one component's ``started_at`` for align_live.
+    None when none of ``units`` is active (align_live then never calls
+    a stopped component stale; starting it is not alignment's job)."""
+    times = []
+    for unit in units:
+        r = run(['systemctl', 'show', '--timestamp=unix',
+                 '-p', 'ActiveState', '-p', 'ActiveEnterTimestamp', unit],
+                capture_output=True, text=True)
+        if r.returncode != 0:
+            continue
+        state = None
+        ts = None
+        for line in (r.stdout or '').splitlines():
+            if line.startswith('ActiveState='):
+                state = line.split('=', 1)[1].strip()
+            elif line.startswith('ActiveEnterTimestamp='):
+                raw = line.split('=', 1)[1].strip()
+                if raw.startswith('@'):
+                    try:
+                        ts = float(raw[1:])
+                    except ValueError:
+                        ts = None
+        if state == 'active' and ts is not None:
+            times.append(ts)
+    return min(times) if times else None
+
+
+def _align_consumes(base, names) -> dict:
+    """{component: {library component names it imports editable}} — from
+    each component's own declared ``[tool.uv.sources]`` (`_editable_siblings`),
+    resolved to the checkout directory name under ``base``.  A declared
+    sibling whose path is not itself directly under ``base`` is dropped —
+    it is not one of this station's own checkouts, so align_live has no
+    ``moved_at`` for it anyway."""
+    base = Path(base)
+    out = {}
+    for name in names:
+        libs = set()
+        for path in _editable_siblings(base / name).values():
+            path = Path(path)
+            if path.parent == base:
+                libs.add(path.name)
+        if libs:
+            out[name] = libs
+    return out
+
+
+def _align_services(topology_path=None) -> dict:
+    """{component: [unit names]} for every enabled component that has
+    units — a library (ka9q-python, hamsci-dsp, …) resolves to no units
+    and is therefore absent, which is what lets align_live tell "library"
+    from "service".  Orphaned units are dropped: an orphan is a leftover
+    instance nothing configures any more, not something a restart could
+    make current.  A component `resolve_units` rejects is skipped with a
+    printed note — one unresolvable component must not abort the read of
+    every other one."""
+    topology = _load_topology(topology_path or TOPOLOGY_PATH)
+    enabled = _enabled_components(topology)
+    out: dict = {}
+    for name in enabled:
+        try:
+            units = resolve_units([name], enabled)
+        except ValueError as exc:
+            _warn(f'align: {name}: {exc} — skipped')
+            continue
+        kept = [u.unit for u in units if not u.orphaned]
+        if kept:
+            out[name] = kept
+    return out
+
+
+_ALIGN_RADIOD_BINARY = Path('/usr/local/sbin/radiod')
+
+
+def _align_radiod_built_at() -> Optional[float]:
+    """When the installed radiod BINARY was built.  ka9q-radio runs as a
+    compiled C binary, not an interpreted checkout, so its "moved" time
+    for align_live.stale_components is this file's mtime — set by
+    `_build_ka9q_radio`'s `make install` (prefix /usr/local) — not the
+    checkout's HEAD.  None when the binary is absent (never built)."""
+    try:
+        return _ALIGN_RADIOD_BINARY.stat().st_mtime
+    except OSError:
+        return None
+
+
 _ALIGN_BYTE_UNITS = {'': 1, 'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3}
 _ALIGN_BYTES_RE = re.compile(r'^(\d+)([KMGkmg]?)$')
 
