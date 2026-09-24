@@ -4432,7 +4432,7 @@ def _parse_bytes(s: str) -> int:
     return int(n) * _ALIGN_BYTE_UNITS[unit.upper()]
 
 
-def _align_ancestry(base, prefetched, max_bytes, say):
+def _align_ancestry(base, prefetched, max_bytes, say, skipped):
     """Factory for the `is_ancestor(component, a, b)` callback `align.classify`
     calls twice per `move` item (live->target, then target->live).
 
@@ -4447,10 +4447,21 @@ def _align_ancestry(base, prefetched, max_bytes, say):
     exceeds ``max_bytes``, no further component is fetched here — it is
     still classified from whatever git objects already happen to be local
     (usually enough to refuse it "ancestry unknown", never a crash).
+    Every component name this crosses is added to ``skipped`` (the same
+    set object the caller passed in, mutated in place — mirrors
+    ``prefetched``) — Fix round 1 / I1: the caller uses it to keep those
+    components away from `apply_plan`'s own move step entirely, which
+    would otherwise re-fetch anything absent from `prefetched` and spend
+    MORE than the budget this phase just refused to spend.
 
     Controller ruling 3: a fetch that raises ApplyError is reported via
     ``say`` and answered as None (classify then refuses the component) —
     never lets one unreachable remote take down the whole run.
+
+    Fix round 1 / M7: `repo.owner()` can raise `KeyError` (a uid with no
+    passwd entry — orphaned ownership, common on a host that lost a
+    system user). Reported via ``say`` and answered None, same as a
+    fetch failure — never a crash.
     """
     from sigmond import align_apply
     total = 0
@@ -4465,8 +4476,14 @@ def _align_ancestry(base, prefetched, max_bytes, say):
             if max_bytes is not None and total > max_bytes:
                 # Budget already spent by an earlier component in the plan —
                 # fetch no further; classify from whatever is local.
+                skipped.add(component)
                 return align_apply.is_ancestor(repo, a, b, run=subprocess.run)
-            owner = repo.owner()
+            try:
+                owner = repo.owner()
+            except KeyError:
+                say(f'{component}: cannot resolve checkout owner — skipped')
+                failed.add(component)
+                return None
             try:
                 fetched = align_apply.fetch(repo, owner, run=subprocess.run,
                                             as_owner=_runuser)
@@ -4511,13 +4528,26 @@ def _align_chown(path, owner) -> None:
 def _align_run_install(repo: Path) -> int:
     """scripts/install.sh else install.sh, run as root — the same
     invocation `admin manifest restore --apply` uses (bin/smd ~4297-4316).
-    0 when no installer is found on disk (nothing to run, not a failure)."""
+    0 when no installer is found on disk (nothing to run, not a failure).
+
+    Fix round 1 / M3: `stdin=subprocess.DEVNULL` — an install.sh that
+    tries to prompt (e.g. a stray `read`) must fail fast, not hang a
+    --apply run with nothing attached to its stdin. On a non-zero exit
+    the last few stderr lines print immediately, since `align_apply._move`
+    (already built) only carries the bare exit code into its Step detail
+    — this is the only place that ever sees the script's own output.
+    """
     sh = repo / 'scripts' / 'install.sh'
     if not sh.exists():
         sh = repo / 'install.sh'
     if not sh.exists():
         return 0
-    r = subprocess.run(_as_root(['bash', str(sh)]), capture_output=True, text=True)
+    r = subprocess.run(_as_root(['bash', str(sh)]), capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
+    if r.returncode:
+        tail = (r.stderr or '').strip().splitlines()[-5:]
+        for line in tail:
+            print(f'  | {line}')
     return r.returncode
 
 
@@ -4525,14 +4555,34 @@ def _align_install_missing(name, sha, *, base, catalog):
     """A component the release pins but this station has no checkout of at
     all: clone it at the pinned commit and run its installer. Never flips
     it on in topology — install is not the same as enable, and whether
-    alignment should also enable it is Plan 2b's decision, not this one's."""
+    alignment should also enable it is Plan 2b's decision, not this one's.
+
+    Fix round 1 / I3: a cloned-but-unpinned checkout looks, to the NEXT
+    `smd align`, exactly like a component nobody ever touched — plan_align
+    only trusts `.pin` (see `component_versions`/`_align_live_state`), so
+    without one this install would repeat forever. Resolve the pinned SHA
+    and write `.pin` the same way a move does, then chown it (and the
+    `.git/info` directory `write_pin` may have just created as root, plus
+    the `exclude` file inside it) to the checkout's own owner.
+    """
+    from sigmond import align_apply
     entry = catalog.get(name) if catalog else None
     if entry is None:
         raise RuntimeError(f'{name}: not in the catalog — cannot install')
+    repo = Path(base) / name
     _clone_repo(entry, base=Path(base), ref=sha)
-    rc = _align_run_install(Path(base) / name)
+    rc = _align_run_install(repo)
     if rc:
         raise RuntimeError(f'{name}: install.sh exited {rc}')
+    full = align_apply.resolve(repo, sha, run=subprocess.run)
+    align_apply.write_pin(repo, full)
+    try:
+        owner = repo.owner()
+    except (KeyError, OSError):
+        owner = ''
+    _align_chown(repo / '.pin', owner)
+    _align_chown(repo / '.git' / 'info' / 'exclude', owner)
+    _align_chown(repo / '.git' / 'info', owner)
 
 
 def _align_apply(args) -> int:
@@ -4546,9 +4596,13 @@ def _align_apply(args) -> int:
     `cmd_align`'s source that no git-mutating call sits in that function —
     this is where those calls actually live.
     """
+    import dataclasses
     from sigmond import align, align_apply
     from sigmond.provenance import record_update, HISTORY_FILE
     from datetime import datetime, timezone
+
+    def _now() -> str:
+        return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     if _need_root('align --apply'):
         return 1
@@ -4568,9 +4622,35 @@ def _align_apply(args) -> int:
         live, dirty, origins, errors = _align_live_state(base)
         items = align.plan_align(rel, live, dirty, errors)
         prefetched: dict = {}
-        is_ancestor = _align_ancestry(base, prefetched,
-                                      getattr(args, 'max_bytes', None), print)
+        skipped_budget: set = set()
+        max_bytes = getattr(args, 'max_bytes', None)
+        is_ancestor = _align_ancestry(base, prefetched, max_bytes, print, skipped_budget)
         items = align.classify(items, is_ancestor)
+
+        # Fix round 1 / I1: a component the prefetch skipped for budget must
+        # never reach apply_plan's own move step — that step re-fetches
+        # anything absent from ctx.prefetched, which would spend MORE than
+        # the budget this phase just refused to spend. Pull it out here,
+        # as a plain fact ("byte budget reached"), rather than let it ride
+        # through classify's ancestry-unknown refusal (which would blame
+        # the wrong thing) or apply_plan's own move step (which would
+        # ignore the refusal and fetch anyway).
+        extra_steps = [align_apply.Step(name, 'skipped', 'byte budget reached')
+                       for name in skipped_budget]
+        items = [it for it in items if it.component not in skipped_budget]
+
+        # Fix round 1 / M4: ka9q-radio has no install.sh of its own — smd
+        # builds it in-tree (_install_radiod_native). A missing checkout is
+        # therefore a refusal here, not an install attempt Plan 2b hasn't
+        # built yet (install_missing would otherwise clone it and then fail
+        # trying to run an install.sh that doesn't exist).
+        radiod_missing = [it for it in items
+                          if it.status == 'missing' and it.component == align.RADIOD]
+        extra_steps += [
+            align_apply.Step(it.component, 'refused',
+                             'radiod build is Plan 2b — install it with smd install ka9q-radio')
+            for it in radiod_missing]
+        items = [it for it in items if it not in radiod_missing]
 
         catalog = {}
         try:
@@ -4583,7 +4663,7 @@ def _align_apply(args) -> int:
             base=Path(base), run=subprocess.run, as_owner=_runuser,
             owner_of=lambda p: Path(p).owner(), catalog=catalog, origins=origins,
             allow_rollback=bool(getattr(args, 'allow_rollback', False)),
-            max_bytes=getattr(args, 'max_bytes', None),
+            max_bytes=max_bytes,
             install_missing=lambda name, sha: _align_install_missing(
                 name, sha, base=base, catalog=catalog),
             run_install=_align_run_install, say=print, prefetched=prefetched,
@@ -4592,8 +4672,8 @@ def _align_apply(args) -> int:
         passthrough = ['--base', str(base)]
         if getattr(args, 'allow_rollback', False):
             passthrough.append('--allow-rollback')
-        if getattr(args, 'max_bytes', None) is not None:
-            passthrough += ['--max-bytes', str(args.max_bytes)]
+        if max_bytes is not None:
+            passthrough += ['--max-bytes', str(max_bytes)]
 
         sigmond_item = next((it for it in items if it.component == 'sigmond'), None)
         if sigmond_item is not None and sigmond_item.status == 'forward':
@@ -4602,6 +4682,25 @@ def _align_apply(args) -> int:
             boot = boot_steps[0]
             print(f'  sigmond: {boot.outcome}' + (f' — {boot.detail}' if boot.detail else ''))
             if boot.outcome == 'moved' and _align_target_has_align(base, sigmond_item.target):
+                # Fix round 1 / I2: this process is about to replace itself —
+                # nothing after os.execv runs, so the move must already be on
+                # durable record before it. Without this, a crash in the
+                # re-exec'd process (or an operator killing it) would leave
+                # sigmond visibly moved with no trace in the manifest or
+                # history — exactly the "looked fine, wasn't done" failure
+                # mode `smd update`'s own history recording exists to avoid.
+                align_apply.record(rel, boot_steps, manifest_path=MANIFEST_PATH,
+                                   history=lambda e: record_update(HISTORY_FILE, e),
+                                   now=_now)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                # M1: the lifecycle lock's fd is close-on-exec (PEP 446) — the
+                # kernel drops it at exec, and the re-exec'd child re-takes
+                # `lifecycle_lock()` itself a few lines into its own run. A
+                # second `smd` could in principle slip into that gap and grab
+                # the lock first; the child then exits "another lifecycle
+                # operation is in progress" having only moved sigmond — safe
+                # (nothing else was touched), and a re-run resumes from there.
                 os.execv(sys.executable,
                         [sys.executable, str(Path(base) / 'sigmond' / 'bin' / 'smd'),
                          'align', '--apply', '--release', rel.tag, *passthrough])
@@ -4609,20 +4708,43 @@ def _align_apply(args) -> int:
             if boot.outcome == 'moved':
                 print(f'sigmond moved to {sigmond_item.target}, which predates smd '
                       f'align — continuing with the code already loaded')
-                # A fresh apply_plan call means the byte budget restarts here —
-                # same acceptable restart controller ruling 5 names for the
-                # re-exec path; the two calls do not share one running total.
-                steps = boot_steps + align_apply.apply_plan(rel, other_items, ctx)
+                # Fix round 1 / I1: apply_plan's own total_bytes tracker
+                # starts at 0 on EVERY call — without carrying the boot
+                # move's own cost forward, this second call would get a
+                # full fresh allowance on top of what sigmond alone already
+                # spent. dataclasses.replace keeps everything else (notably
+                # the SAME ctx.prefetched dict) shared with the boot ctx.
+                remaining = (max_bytes - (boot.bytes or 0)) if max_bytes is not None else None
+                if remaining is not None and remaining <= 0:
+                    # The sigmond move alone already spent the whole budget
+                    # (or more) — no further forward move may fetch
+                    # ANYTHING, not even the first one apply_plan would
+                    # otherwise attempt before its own budget check ever
+                    # fires (that check only runs AFTER a move, never
+                    # before one).
+                    forced = [it for it in other_items
+                             if it.status == 'forward'
+                             or (it.status == 'ahead' and ctx.allow_rollback)]
+                    rest = [it for it in other_items if it not in forced]
+                    ctx2 = dataclasses.replace(ctx, max_bytes=remaining)
+                    steps = (boot_steps + align_apply.apply_plan(rel, rest, ctx2)
+                            + [align_apply.Step(it.component, 'skipped', 'byte budget reached')
+                               for it in forced])
+                else:
+                    ctx2 = (dataclasses.replace(ctx, max_bytes=remaining)
+                           if remaining is not None else ctx)
+                    steps = boot_steps + align_apply.apply_plan(rel, other_items, ctx2)
             else:
-                steps = boot_steps + [
-                    align_apply.Step(it.component, 'skipped',
-                                     f'stopped after sigmond {boot.outcome}')
-                    for it in other_items]
+                # M5: sigmond itself did not move cleanly — nothing else
+                # moves under an smd in an unknown state, on purpose.
+                detail = (f'sigmond {boot.outcome} — nothing else moves under '
+                         f'an smd in an unknown state')
+                steps = boot_steps + [align_apply.Step(it.component, 'skipped', detail)
+                                      for it in other_items]
         else:
             steps = align_apply.apply_plan(rel, items, ctx)
 
-        def _now() -> str:
-            return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        steps = steps + extra_steps
 
         align_apply.record(rel, steps, manifest_path=MANIFEST_PATH,
                            history=lambda e: record_update(HISTORY_FILE, e), now=_now)
