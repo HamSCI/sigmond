@@ -250,11 +250,19 @@ def unexpected_stations(conn, roster, now, window_s=DEFAULT_WINDOW_S):
     table: a host nobody declared is a provisioning question, not a
     fleet member, and letting it pad the roster view would make the
     fleet look larger and healthier than it was declared to be.
+
+    "Known" means a match on an entry's EFFECTIVE heartbeat_station —
+    the declared value, or `name` when undeclared — never the bare
+    `name` as well when a mapping was declared. An entry that declares
+    a mapping is telling the board its station will arrive under a
+    DIFFERENT string than its own name; treating the bare name as also
+    known would let an arrival under it (the mapping disagreeing with
+    what the station actually sends — a stale or wrong fleet.toml
+    entry) go unreported while the roster row silently reads "never
+    heard". A mapping that disagrees with reality must go red, never
+    vanish.
     """
-    known = set()
-    for e in roster:
-        known.add(e.get("name"))
-        known.add(e.get("heartbeat_station") or e.get("name"))
+    known = {(e.get("heartbeat_station") or e.get("name")) for e in roster}
     cutoff = float(now) - float(window_s)
     rows = conn.execute(
         "SELECT station, COUNT(*), MAX(received_at) FROM heartbeats"

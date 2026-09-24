@@ -793,6 +793,47 @@ def test_unexpected_stations_matches_by_heartbeat_station_too(db_path):
     assert unexpected == []
 
 
+def test_unexpected_stations_flags_arrival_under_the_bare_name_when_a_mapping_is_declared(
+        db_path):
+    """A mapping that disagrees with what the station actually sends must
+    go red, never vanish. The entry declares heartbeat_station="AC0G/B4",
+    so ONLY that string is the effective known name — a heartbeat arriving
+    under the bare roster name "b4" is exactly as unaccounted-for as one
+    from a name nobody declared at all, and the roster row must still
+    read never-heard (the lookup is keyed by the declared mapping, which
+    never arrived)."""
+    roster = [{"name": "b4", "profile": "dasi2",
+              "heartbeat_station": "AC0G/B4"}]
+    seed(db_path, "b4", NOW - 30)
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, roster, NOW)
+        unexpected = fleetboard.unexpected_stations(conn, roster, NOW)
+    finally:
+        conn.close()
+
+    assert "b4" in [u["station"] for u in unexpected]
+    [status] = statuses
+    assert status["availability"]["reason"] == "never heard"
+
+
+def test_unexpected_stations_undeclared_entry_matches_its_own_name(db_path):
+    """An entry with no heartbeat_station at all: its effective mapping
+    is its own name, so an arrival under that name is expected, not a
+    stranger."""
+    roster = [{"name": "dasi002", "profile": "dasi2"}]
+    seed(db_path, "dasi002", NOW - 30)
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        unexpected = fleetboard.unexpected_stations(conn, roster, NOW)
+    finally:
+        conn.close()
+
+    assert unexpected == []
+
+
 def test_unexpected_window_excludes_stale_strangers(db_path):
     seed(db_path, "MYSTERY-1", NOW - 90000)
 
