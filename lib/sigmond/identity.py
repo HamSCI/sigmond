@@ -10,6 +10,30 @@ Standard library only, Python 3.11+.  ops/bin/site-identity pipes this file's
 source to `python3 -` on stations that may carry no sigmond at all — the
 Proxmox host has none.  It only reads.
 
+Bundle format (schema 1)
+------------------------
+A plane's tar (what `export()` writes) holds files only, no directory
+members, so a restore must create the parent directories itself, with the
+right owner and mode: `/home/timestd/.ssh` 0700 timestd, and
+`/etc/hs-uploader/keys`.  Tar member names are root-relative with no leading
+slash (`etc/ssh/ssh_host_...`); the matching manifest entry's `path` field is
+the same name WITH a leading slash.
+
+Each member carries both the owner/group NAMES and the station-local numeric
+ids tar always stores.  A restore sets ownership by NAME from the manifest,
+and fails loudly when a name does not resolve on the new station, rather
+than falling back to the numeric id, which names a different account there.
+For the same reason a restore must never extract with tarfile's `data`
+filter (Python 3.12's new default `filter=` behaviour) — it strips
+uid/gid/uname/gname from every member.
+
+`identity/manifest.json` is always the tar's last member.  On the pm plane a
+further member, `identity/rac-credential.json`, holds the RAC credential's
+three fields flattened: `user`, `auth.method`, `auth.token`.
+
+The devbox's outer bundle — what `capture` in ops/bin/site-identity encrypts
+— wraps both planes' tars unchanged, as `pm.tar` and `vm.tar`.
+
 Design: sigmond-appliance/docs/superpowers/specs/2026-09-24-station-identity-design.md
 """
 from __future__ import annotations
@@ -90,7 +114,13 @@ def _name(lookup, ident: int) -> str:
         return str(ident)
 
 
-def _file_entry(root: str, rel: str) -> dict:
+def _read_entry(root: str, rel: str) -> tuple[dict, bytes]:
+    """The manifest entry AND the file's bytes, from one read.
+
+    export() needs both: the entry for the manifest, the bytes for the tar
+    member.  Returning them together from one read keeps the two from ever
+    describing different content.
+    """
     path = os.path.join(root, rel)
     st = os.stat(path)
     with open(path, "rb") as f:
@@ -108,6 +138,11 @@ def _file_entry(root: str, rel: str) -> dict:
         fp = ssh_fingerprint(data.decode("utf-8", "replace"))
         if fp:
             entry["ssh_fingerprint"] = fp
+    return entry, data
+
+
+def _file_entry(root: str, rel: str) -> dict:
+    entry, _ = _read_entry(root, rel)
     return entry
 
 
@@ -166,14 +201,26 @@ def export(plane: str, out, root: str = "/") -> dict:
 
     Members keep their owner, group and mode, so a restore can put them back
     exactly.  The manifest goes last, as identity/manifest.json.
+
+    Each file is read once: the same bytes back both the manifest's sha256
+    and the tar member, so the two can never disagree about what got
+    exported.  Same for the RAC credential on the pm plane.
     """
-    m = manifest(plane, root)
+    _check_plane(plane)
+    files = []
     with tarfile.open(fileobj=out, mode="w|") as tar:
-        for entry in m["files"]:
-            rel = entry["path"].lstrip("/")
-            tar.add(os.path.join(root, rel), arcname=rel, recursive=False)
+        for rel in matched_files(plane, root):
+            entry, data = _read_entry(root, rel)
+            files.append(entry)
+            path = os.path.join(root, rel)
+            tar.addfile(tar.gettarinfo(path, arcname=rel), io.BytesIO(data))
+        m = {"schema": SCHEMA, "plane": plane, "files": files}
         if plane == "pm":
             cred = rac_credential(root)
+            m["rac_credential"] = None if cred is None else {
+                "fields": sorted(cred),
+                "sha256": hashlib.sha256(_canonical(cred)).hexdigest(),
+            }
             if cred is not None:
                 _add_bytes(tar, RAC_MEMBER, _canonical(cred), 0o600)
         _add_bytes(tar, MANIFEST_MEMBER,

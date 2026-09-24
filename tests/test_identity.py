@@ -137,11 +137,51 @@ class RacCredentialTests(unittest.TestCase):
         self.assertNotEqual(before, after)
 
 
+import builtins
+import hashlib
 import io
 import sys
 import tarfile
+from unittest import mock
 
 IDENTITY_SRC = Path(identity.__file__).read_bytes()
+
+
+class _OpenCounter:
+    """Counts real opens of one path.
+
+    tarfile binds `bltn_open = builtins.open` (via `from builtins import open
+    as bltn_open`) once at its own import time, so patching `builtins.open`
+    alone is invisible to tar.add()'s internal read.  Patch both references.
+    """
+
+    def __init__(self, target_path: str):
+        self.target = os.path.realpath(target_path)
+        self.opens: list[str] = []
+
+    def _wrap(self, real):
+        def wrapped(path, *a, **kw):
+            p = path.decode() if isinstance(path, bytes) else str(path)
+            try:
+                if os.path.realpath(p) == self.target:
+                    self.opens.append(p)
+            except OSError:
+                pass
+            return real(path, *a, **kw)
+        return wrapped
+
+    def __enter__(self):
+        self._patches = [
+            mock.patch("builtins.open", self._wrap(builtins.open)),
+            mock.patch("tarfile.bltn_open", self._wrap(tarfile.bltn_open)),
+        ]
+        for p in self._patches:
+            p.start()
+        return self
+
+    def __exit__(self, *exc):
+        for p in self._patches:
+            p.stop()
 
 
 class ExportTests(unittest.TestCase):
@@ -198,6 +238,36 @@ class ExportTests(unittest.TestCase):
             input=IDENTITY_SRC, capture_output=True, check=True)
         with tarfile.open(fileobj=io.BytesIO(out.stdout)) as tar:
             self.assertIn("etc/ssh/ssh_host_ed25519_key", tar.getnames())
+
+    def test_export_reads_each_file_exactly_once(self):
+        # A file read twice (once for the manifest digest, once again for the
+        # tar member) is the bug this test catches: two reads of the SAME
+        # bytes happen to agree today, but the second read is pure waste, and
+        # a manifest built from one read and a tar member built from another
+        # is exactly how the two could disagree.
+        root = _vm_root(self.tmp)
+        with _OpenCounter(str(root / "etc/ssh/ssh_host_ed25519_key")) as counter:
+            buf = io.BytesIO()
+            m = identity.export("vm", buf, str(root))
+        self.assertEqual(len(counter.opens), 1,
+                          f"file opened {len(counter.opens)} times, want 1")
+
+        buf.seek(0)
+        with tarfile.open(fileobj=buf) as tar:
+            data = tar.extractfile("etc/ssh/ssh_host_ed25519_key").read()
+        entry = next(e for e in m["files"]
+                     if e["path"] == "/etc/ssh/ssh_host_ed25519_key")
+        self.assertEqual(hashlib.sha256(data).hexdigest(), entry["sha256"])
+
+    def test_pm_export_reads_the_rac_config_exactly_once(self):
+        root = self.tmp / "pm"
+        (root / "etc/sigmond").mkdir(parents=True)
+        (root / "etc/sigmond/frpc-host.toml").write_text(FRPC)
+        with _OpenCounter(str(root / "etc/sigmond/frpc-host.toml")) as counter:
+            buf = io.BytesIO()
+            identity.export("pm", buf, str(root))
+        self.assertEqual(len(counter.opens), 1,
+                          f"frpc-host.toml opened {len(counter.opens)} times, want 1")
 
 
 if __name__ == "__main__":
