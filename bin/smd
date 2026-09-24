@@ -5178,18 +5178,27 @@ def _align_fast_checks(restarted_units, *, run=subprocess.run, sleep=time.sleep,
             'heartbeat_sent': heartbeat_sent, 'notes': notes}
 
 
+def _align_component_units(component, services) -> list:
+    """The `.service` units belonging to ``component`` in ``services`` —
+    hs-uploader maps to uploader.SERVICE when the services map does not
+    list it (the catalog calls it a library, so it may never appear
+    there).  Shared resolution for `_align_recheck_units` and the
+    carried-forward-failure check in `_align_make_live` (final review /
+    I2), so both agree on what a component's units are."""
+    from sigmond.commands.uploader import SERVICE
+    units = services.get(component)
+    if units is None and component == 'hs-uploader':
+        units = [SERVICE]
+    return _align_service_units(units or [])
+
+
 def _align_recheck_units(components, services) -> list:
     """The `.service` units, active now, of ``components`` — a previous live
     block's ``restarted`` list, whose checks never finished or failed
-    (final review / I2).  hs-uploader maps to uploader.SERVICE when the
-    services map does not list it.  Nothing is restarted here."""
-    from sigmond.commands.uploader import SERVICE
+    (final review / I2).  Nothing is restarted here."""
     out = []
     for c in components or ():
-        units = services.get(c)
-        if units is None and c == 'hs-uploader':
-            units = [SERVICE]
-        for u in _align_service_units(units or []):
+        for u in _align_component_units(c, services):
             if _align_is_active(u, run=subprocess.run):
                 out.append(u)
     return out
@@ -6112,16 +6121,36 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     checks_ok = True
     restarted = [s.component for s in restart_steps if s.outcome == 'restarted']
     failed = [s.component for s in restart_steps if s.outcome == 'failed']
-    # A component whose restart failed on an earlier run and that is still
-    # not running reads as neither stale nor running, so nothing here would
-    # touch it again. Carry it forward, loud, so no later run calls the
-    # station aligned while it is down.
-    still_down = [c for c in ((prior_live or {}).get('failed') or [])
-                  if c not in failed and c not in restarted
-                  and c not in staleness['running']]
+    # Final review / I2: a prior restart stage that did not finish and pass
+    # is re-examined component by component, not dropped by
+    # `_align_recheck_units`'s active-only filter (A) or by
+    # `staleness['running']`, which never lists hs-uploader — the catalog
+    # calls it a library (C).  Every component from that stage's
+    # ``restarted`` + ``failed`` lists with any resolved unit still not
+    # active now is a failure of THIS run, loud, so no later run calls the
+    # station aligned while it is down.  A component with no resolvable
+    # unit at all (e.g. an uninstalled checkout) counts as down too — there
+    # is nothing here to confirm it recovered.
+    still_down = []
+    carryforward_notes = []
+    if prior_live is not None and not _align_live_passed(prior_live):
+        carried = list(dict.fromkeys(
+            list(prior_live.get('restarted') or ()) + list(prior_live.get('failed') or ())))
+        for c in carried:
+            if c in failed or c in restarted:
+                continue
+            units = _align_component_units(c, services)
+            down_units = [u for u in units if not _align_is_active(u, run=subprocess.run)]
+            if not units or down_units:
+                still_down.append(c)
+            for u in down_units:
+                carryforward_notes.append(
+                    f'{u} is not running (was restarted by an earlier align run)')
     for c in still_down:
         print(f'  {c} failed to restart on an earlier run and is not running — '
               f'start it by hand, then re-run')
+    for note in carryforward_notes:
+        print(f'  {note}')
     failed = failed + still_down
     # Final review / I2: the fast checks also re-run over what the last
     # live block restarted, when that stage did not finish and pass — on
@@ -6132,7 +6161,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     check_units = list(dict.fromkeys(check_units))
     live = {'at': now(), 'restarted': restarted, 'failed': failed,
             'units_stable': None, 'authority_fresh': None, 'heartbeat_sent': None,
-            'notes': [], 'complete': False}
+            'notes': list(carryforward_notes), 'complete': False}
     if check_units:
         # Written BEFORE the 120 s wait: a Ctrl-C inside it leaves
         # complete: false, which the next run will not call a no-op.
@@ -6154,6 +6183,9 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         checks_ok = bool(checks['units_stable'] and sent is not False
                          and fresh is not False)
         live.update(checks)
+        # The carried-forward notes (above) describe units this run never
+        # asked the fast checks about — never let `live.update` erase them.
+        live['notes'] = carryforward_notes + (checks.get('notes') or [])
     live['complete'] = True
     align_apply.record_live(align_apply.ALIGNED_RECORD, dict(live))
     checks_ok = checks_ok and not still_down

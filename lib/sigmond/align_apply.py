@@ -593,13 +593,26 @@ def record(rel: Release, steps: list, *, manifest_path: Path,
     if ok:
         _atomic_write_keeping_prev(manifest_path, rel.manifest_text)
         aligned_path.parent.mkdir(parents=True, exist_ok=True)
-        aligned_path.write_text(json.dumps({
+        record_dict = {
             "release": rel.tag,
             "appliance_commit": rel.appliance_commit,
             "at": now(),
             "components": dict(rel.components),
             "left": {s.component: s.detail for s in steps if s.outcome == "left"},
-        }, indent=2) + "\n")
+        }
+        # Final review / I2 (B): this rewrite must not erase a live block a
+        # prior restart stage wrote — --no-restart and a failed staleness
+        # read both return without ever writing a new one, so without this
+        # a carried `failed: [...]` would just vanish here. A new release
+        # starts a new block: the prior restarts belonged to different code.
+        try:
+            old = json.loads(aligned_path.read_text())
+        except (OSError, ValueError):
+            old = None
+        if (isinstance(old, dict) and old.get("release") == rel.tag
+                and isinstance(old.get("live"), dict)):
+            record_dict["live"] = old["live"]
+        aligned_path.write_text(json.dumps(record_dict, indent=2) + "\n")
 
     record_history(rel, steps, history=history, now=now)
 

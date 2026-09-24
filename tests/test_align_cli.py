@@ -4,6 +4,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
@@ -2514,10 +2515,66 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         self.assertIn("ka9q-radio failed to restart on an earlier run and is not running", out)
 
     def test_an_earlier_failure_now_running_is_dropped(self):
+        # Final review / I2 (C): the drop is decided per component now (any
+        # of its .service units active), not via staleness['running'] —
+        # so this exercises a real `systemctl is-active`, not just a set
+        # membership test.
+        def fake_run(argv, **kw):
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 0, "active\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
         prior = dict(_LIVE_PASSED, failed=["hf-timestd"], restarted=[])
         rc, out, m = self._run(moves=[align_apply.Step("sigmond", "current")],
                                staleness=_staleness(running={"hf-timestd"}),
-                               aligned_live=prior, restart_steps=[])
+                               aligned_live=prior, restart_steps=[],
+                               extra_patches=[mock.patch("subprocess.run", fake_run)])
+        self.assertEqual(m["record_live"].call_args[0][1]["failed"], [])
+        self.assertEqual(rc, 0)
+
+    # --- Final review / I2 (A): a unit that died after a failed check is
+    # never silently forgotten by _align_recheck_units's active-only filter ---
+
+    def test_prior_restart_left_a_unit_dead_becomes_a_failure_this_run(self):
+        # Run N restarted hf-timestd, but its fast check never passed
+        # (units_stable false). Run N+1 finds that unit dead:
+        # _align_recheck_units's active-only filter must not be the only
+        # thing standing between it and "aligned — nothing to do".
+        def fake_run(argv, **kw):
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 3, "inactive\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        prior = dict(_LIVE_PASSED, restarted=["hf-timestd"], failed=[], units_stable=False)
+        rc, out, m = self._quiet_run(prior, extra_patches=[mock.patch("subprocess.run", fake_run)])
+        self.assertEqual(rc, 1)
+        live = m["record_live"].call_args[0][1]
+        self.assertIn("hf-timestd", live["failed"])
+        self.assertIn("hf-a.service", " ".join(live["notes"]))
+        self.assertIn("is not running (was restarted by an earlier align run)",
+                      " ".join(live["notes"]))
+        m["checks"].assert_not_called()
+
+    def test_prior_restart_unit_now_active_and_stable_is_not_a_failure(self):
+        def fake_run(argv, **kw):
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 0, "active\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        prior = dict(_LIVE_PASSED, restarted=["hf-timestd"], failed=[], units_stable=False)
+        rc, out, m = self._quiet_run(prior, extra_patches=[mock.patch("subprocess.run", fake_run)])
+        self.assertEqual(rc, 0)
+        live = m["record_live"].call_args[0][1]
+        self.assertEqual(live["failed"], [])
+
+    def test_hs_uploader_failure_now_running_is_dropped(self):
+        # Final review / I2 (C): hs-uploader is never in staleness['running']
+        # (the catalog calls it a library) — the old test used that map and
+        # latched rc 1 forever; the fix resolves uploader.SERVICE directly.
+        def fake_run(argv, **kw):
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 0, "active\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        prior = dict(_LIVE_PASSED, failed=["hs-uploader"], restarted=[])
+        rc, out, m = self._quiet_run(prior, extra_patches=[mock.patch("subprocess.run", fake_run)])
+        self.assertEqual(rc, 0)
         self.assertEqual(m["record_live"].call_args[0][1]["failed"], [])
 
     def test_every_restart_failed_still_writes_the_live_block(self):
@@ -2661,6 +2718,66 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
                                       lambda argv, **kw: calls.append(argv)
                                       or subprocess.CompletedProcess(argv, 0, "active\n", ""))])
         self.assertFalse(any(uploader.SERVICE in a for a in calls))
+
+
+class AlignRecordSurvivesNoRestartTests(unittest.TestCase):
+    """Final review / I2 (B), end to end through `smd align --apply
+    --no-restart`: `align_apply.record` runs FOR REAL here (unlike
+    AlignMakeLiveApplyTests, which mocks it), so this is the one place that
+    proves a real aligned.json rewrite does not erase a live block the
+    --no-restart path never gets to rewrite itself."""
+
+    def test_no_restart_after_a_failed_restart_keeps_the_failure_next_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            aligned_path = Path(tmp) / "aligned.json"
+            manifest_path = Path(tmp) / "manifest.txt"
+            rel = APPLY_REL
+            # An earlier run recorded this exact release, with hf-timestd's
+            # restart still failed.
+            aligned_path.write_text(json.dumps({
+                "release": rel.tag, "appliance_commit": rel.appliance_commit,
+                "at": "t0", "components": dict(rel.components), "left": {},
+                "live": {"at": "t0", "restarted": [], "failed": ["hf-timestd"],
+                         "units_stable": False, "authority_fresh": None,
+                         "heartbeat_sent": None, "notes": [], "complete": True}}))
+            with contextlib.ExitStack() as st:
+                st.enter_context(mock.patch.object(smd, "_need_root", return_value=False))
+                st.enter_context(mock.patch.object(
+                    smd, "lifecycle_lock", lambda reason=None: contextlib.nullcontext()))
+                st.enter_context(mock.patch.object(
+                    smd, "_align_live_state", return_value=(dict(rel.components), {}, {}, {})))
+                st.enter_context(mock.patch("sigmond.align.fetch_release", return_value=rel))
+                st.enter_context(mock.patch("sigmond.align_apply.verify_release", return_value=None))
+                st.enter_context(mock.patch.object(
+                    smd, "_align_ancestry", return_value=lambda c, a, b: True))
+                st.enter_context(mock.patch.object(smd, "_align_target_has_align",
+                                                   return_value=False))
+                st.enter_context(mock.patch("sigmond.catalog.load_catalog", return_value={}))
+                st.enter_context(mock.patch("sigmond.align_apply.apply_plan", return_value=[
+                    align_apply.Step("sigmond", "current"),
+                    align_apply.Step("hf-timestd", "current"),
+                    align_apply.Step("ka9q-radio", "current")]))
+                st.enter_context(mock.patch.object(align_apply, "ALIGNED_RECORD", aligned_path))
+                # record()'s own `aligned_path` default is bound at def
+                # time from the module attribute above, so patching that
+                # attribute alone does not reach it — _align_make_live
+                # calls record() without passing aligned_path explicitly.
+                st.enter_context(mock.patch.dict(
+                    align_apply.record.__kwdefaults__, {"aligned_path": aligned_path}))
+                st.enter_context(mock.patch.object(smd, "MANIFEST_PATH", manifest_path))
+                st.enter_context(mock.patch.object(smd, "_align_refresh_image_files",
+                                                   return_value=[]))
+                st.enter_context(mock.patch.object(smd, "_align_bringup", return_value=[]))
+                st.enter_context(mock.patch.object(
+                    smd, "_align_services", return_value={"hf-timestd": ["hf-a.service"]}))
+                st.enter_context(mock.patch.object(
+                    smd, "_align_staleness", return_value=_staleness(running={"hf-timestd"})))
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = smd.cmd_align(_apply_args(tmp, no_restart=True))
+            data = json.loads(aligned_path.read_text())
+            self.assertEqual(data["live"]["failed"], ["hf-timestd"])
+            self.assertEqual(data["release"], rel.tag)
 
 
 class AlignRestartUploaderTests(unittest.TestCase):

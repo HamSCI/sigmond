@@ -1355,6 +1355,61 @@ class RecordTests(unittest.TestCase):
         src = inspect.getsource(align_apply.record)
         self.assertNotIn("version", src.lower())
 
+    # --- Final review / I2 (B): record() must not erase a live block a
+    # prior restart stage wrote — --no-restart and a failed staleness read
+    # both return without writing a new one. ---
+
+    def test_record_keeps_the_live_block_over_the_same_release(self):
+        release = align.Release(tag="v3.53", manifest_text="m\n", appliance_commit=C,
+                                components={"sigmond": "2" * 40})
+        with tempfile.TemporaryDirectory() as tmp:
+            aligned_path = Path(tmp) / "aligned.json"
+            aligned_path.write_text(json.dumps({
+                "release": "v3.53", "appliance_commit": C, "at": "t0",
+                "components": {"sigmond": "1" * 40}, "left": {},
+                "live": {"at": "t0", "restarted": [], "failed": ["hf-timestd"],
+                         "units_stable": False, "authority_fresh": None,
+                         "heartbeat_sent": None, "notes": [], "complete": True}}))
+            align_apply.record(release, [align_apply.Step("sigmond", "current")],
+                               manifest_path=Path(tmp) / "manifest.txt",
+                               aligned_path=aligned_path,
+                               history=lambda e: None, now=lambda: "t1")
+            data = json.loads(aligned_path.read_text())
+            self.assertEqual(data["live"]["failed"], ["hf-timestd"])
+            # The rest of the record still reflects THIS run, not the old one.
+            self.assertEqual(data["components"], release.components)
+            self.assertEqual(data["at"], "t1")
+
+    def test_record_drops_the_live_block_on_a_new_release(self):
+        release = align.Release(tag="v3.54", manifest_text="m\n", appliance_commit=C,
+                                components={"sigmond": "2" * 40})
+        with tempfile.TemporaryDirectory() as tmp:
+            aligned_path = Path(tmp) / "aligned.json"
+            aligned_path.write_text(json.dumps({
+                "release": "v3.53", "appliance_commit": C, "at": "t0",
+                "components": {"sigmond": "1" * 40}, "left": {},
+                "live": {"at": "t0", "restarted": [], "failed": ["hf-timestd"],
+                         "units_stable": False, "authority_fresh": None,
+                         "heartbeat_sent": None, "notes": [], "complete": True}}))
+            align_apply.record(release, [align_apply.Step("sigmond", "current")],
+                               manifest_path=Path(tmp) / "manifest.txt",
+                               aligned_path=aligned_path,
+                               history=lambda e: None, now=lambda: "t1")
+            data = json.loads(aligned_path.read_text())
+            self.assertNotIn("live", data)
+
+    def test_record_with_no_prior_aligned_json_writes_no_live_block(self):
+        release = align.Release(tag="v3.53", manifest_text="m\n", appliance_commit=C,
+                                components={"sigmond": "2" * 40})
+        with tempfile.TemporaryDirectory() as tmp:
+            aligned_path = Path(tmp) / "aligned.json"
+            align_apply.record(release, [align_apply.Step("sigmond", "current")],
+                               manifest_path=Path(tmp) / "manifest.txt",
+                               aligned_path=aligned_path,
+                               history=lambda e: None, now=lambda: "t1")
+            data = json.loads(aligned_path.read_text())
+            self.assertNotIn("live", data)
+
 
 class _FakeHTTPResponse:
     """A urlopen(...) context-manager stand-in carrying a status and body."""
