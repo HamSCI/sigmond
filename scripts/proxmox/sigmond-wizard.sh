@@ -914,6 +914,19 @@ say "rendering site config in VM..."
 gexec 600 "smd config render" \
     || say "WARN: smd config render reported issues (continuing; rerun inside VM)"
 
+# sigmond-heartbeat.timer ships installed everywhere but never auto-enabled
+# by design — answering "yes" above only wrote [heartbeat] into the site
+# profile, which is how v3.52 shipped a station that never reported
+# (sigmond#94).  Arm (or, on a rerun that turned it off, disarm) the timer
+# to match what was just written.
+if [ "${HB_ENABLED:-0}" = 1 ]; then
+    gexec 30 "systemctl enable --now sigmond-heartbeat.timer" \
+        && say "fleet heartbeat timer enabled" \
+        || say "WARN: could not enable the fleet heartbeat timer — run in the VM: systemctl enable --now sigmond-heartbeat.timer"
+else
+    gexec 30 "systemctl disable --now sigmond-heartbeat.timer 2>/dev/null; true"
+fi
+
 # mag-recorder identity: render pushes the SITE PSWS station id, but the
 # magnetometer often lives under its OWN portal station, and the config's
 # callsign/grid stay template placeholders (field gap, AC0G-B4 2026-07-30).
