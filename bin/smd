@@ -4636,14 +4636,16 @@ def _align_radiod_built_at() -> Optional[float]:
 _ALIGN_RADIOD_READY = '/usr/local/sbin/sigmond-radiod-ready'
 
 
-def _align_run(argv, *, run, timeout, action) -> object:
-    """`run(argv, capture_output=True, text=True, timeout=timeout)`, with a
-    hung or unrunnable command turned into a synthetic non-zero result
-    instead of a raised TimeoutExpired/OSError — every caller in
-    `_align_restart` gets something to build a Step detail from, never a
-    traceback mid-restart (Fix round 1 / I3)."""
+def _align_run(argv, *, run, timeout, action, **kw) -> object:
+    """`run(argv, capture_output=True, text=True, timeout=timeout, **kw)`,
+    with a hung or unrunnable command turned into a synthetic non-zero
+    result instead of a raised TimeoutExpired/OSError — every caller in
+    `_align_restart` (and `_align_bringup`) gets something to build a Step
+    detail from, never a traceback mid-restart (Fix round 1 / I3). ``**kw``
+    lets `_align_bringup` add `stdin=subprocess.DEVNULL` without every
+    other caller having to pass it too."""
     try:
-        return run(argv, capture_output=True, text=True, timeout=timeout)
+        return run(argv, capture_output=True, text=True, timeout=timeout, **kw)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(argv, 1, '', f'{action} timed out after {timeout}s')
     except OSError as exc:
@@ -5032,6 +5034,124 @@ def _align_install_missing(name, sha, *, base, catalog):
     _align_chown(repo / '.pin', owner)
     _align_chown(repo / '.git' / 'info' / 'exclude', owner)
     _align_chown(repo / '.git' / 'info', owner)
+
+
+def _align_refresh_image_files(tag) -> list:
+    """The `--apply` write half of `align.image_file_drift`'s read-only
+    compare: every image-carried helper script (`align.IMAGE_FILES`) found
+    'differs' or 'absent' gets replaced from the release tag's copy via
+    `align_apply.refresh_image_file`. A 'current' file is left alone (no
+    Step — nothing happened to it); an 'unknown' status — the probe itself
+    could not reach raw.githubusercontent.com or read the local file —
+    is refused rather than silently left stale (matching align.py's own
+    dry-run posture: an unknown image-file status already blocks a plan's
+    exit 0) or silently overwritten from a comparison that never actually
+    ran."""
+    from sigmond import align, align_apply
+    names = dict(align.IMAGE_FILES)
+    steps = []
+    for d in align.image_file_drift(tag):
+        path = d['path']
+        if d['status'] in ('differs', 'absent'):
+            steps.append(align_apply.refresh_image_file(tag, names[path], Path(path)))
+        elif d['status'] == 'unknown':
+            steps.append(align_apply.Step(path, 'refused', 'could not compare — not refreshed'))
+        # 'current': nothing to do, no Step.
+    return steps
+
+
+_ALIGN_SITE_TIMING = '/usr/local/sbin/sigmond-site-timing'
+
+
+def _align_bringup(*, run=subprocess.run, say=print) -> list:
+    """Re-run bring-up's own steps, in bring-up's own order, stopping at
+    the first failure: `sigmond-site-timing` (idempotent — skips wiring
+    already done, and may restart chrony itself), `config render`,
+    `admin uploader manifest --write` (never `--enable`: whether to
+    restart a running hs-uploader over a changed manifest is Task 7's
+    call, keyed off the "manifest changed" detail this step returns),
+    `doctor --fix`.
+
+    Every step runs as a CHILD `smd` (or the site-timing script) via the
+    injected ``run`` — never in-process — because each is a full
+    sub-command with its own root/argument handling.  That is safe against
+    the lifecycle lock this run (`_align_apply`, once Task 7 wires this
+    in) is already holding: `config`, `admin` and `doctor` are all absent
+    from `main()`'s `_MUTATING = {'install', 'apply', 'start', 'stop',
+    'restart', 'reload'}` (checked by reading `main()`'s own dispatch
+    around the `_MUTATING` set — none of these three verbs takes
+    `lifecycle_lock`), so a child `smd config render` /
+    `smd admin uploader manifest --write` / `smd doctor --fix` never
+    tries to re-acquire the lock and never exits "another lifecycle
+    operation is in progress" the way a child `smd restart` would.
+
+    Stopping at the first failure matters because these steps build on
+    each other in the same order bring-up already runs them: a `config
+    render` failure means `coordination.env` is not what the later steps
+    should assume; running the uploader manifest or `doctor --fix`
+    against that half-rendered state would be reasoning from a
+    contradiction. A re-run is idempotent and simply starts over from
+    site-timing.
+    """
+    from sigmond import align_apply
+    from sigmond import uploader_manifest as um
+
+    def _tail(r) -> str:
+        for stream in (r.stdout, r.stderr):
+            lines = [ln for ln in (stream or '').strip().splitlines() if ln.strip()]
+            if lines:
+                return lines[-1]
+        return ''
+
+    steps = []
+
+    if os.access(_ALIGN_SITE_TIMING, os.X_OK):
+        r = _align_run([_ALIGN_SITE_TIMING], run=run, timeout=300,
+                       action='sigmond-site-timing', stdin=subprocess.DEVNULL)
+        detail = _tail(r)
+        if r.returncode != 0:
+            steps.append(align_apply.Step('sigmond-site-timing', 'failed', detail))
+            return steps
+        steps.append(align_apply.Step('sigmond-site-timing', 'ran', detail))
+    else:
+        say(f'  {_ALIGN_SITE_TIMING} not executable — skipped')
+
+    r = _align_run([sys.executable, str(_SCRIPT), 'config', 'render'],
+                   run=run, timeout=120, action='config render', stdin=subprocess.DEVNULL)
+    detail = _tail(r)
+    if r.returncode != 0:
+        steps.append(align_apply.Step('config render', 'failed', detail))
+        return steps
+    steps.append(align_apply.Step('config render', 'ran', detail))
+
+    try:
+        before = um.MANIFEST_PATH.read_bytes()
+    except OSError:
+        before = None
+    r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'uploader', 'manifest', '--write'],
+                   run=run, timeout=120, action='admin uploader manifest --write',
+                   stdin=subprocess.DEVNULL)
+    detail = _tail(r)
+    if r.returncode != 0:
+        steps.append(align_apply.Step('admin uploader manifest --write', 'failed', detail))
+        return steps
+    try:
+        after = um.MANIFEST_PATH.read_bytes()
+    except OSError:
+        after = None
+    if before != after:
+        detail = 'manifest changed'
+    steps.append(align_apply.Step('admin uploader manifest --write', 'ran', detail))
+
+    r = _align_run([sys.executable, str(_SCRIPT), 'doctor', '--fix'],
+                   run=run, timeout=120, action='doctor --fix', stdin=subprocess.DEVNULL)
+    detail = _tail(r)
+    if r.returncode >= 2:
+        steps.append(align_apply.Step('doctor --fix', 'failed', detail))
+        return steps
+    steps.append(align_apply.Step('doctor --fix', 'ran', detail))
+
+    return steps
 
 
 def _align_apply(args) -> int:

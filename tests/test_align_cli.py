@@ -929,6 +929,155 @@ class AlignInstallMissingTests(unittest.TestCase):
             self.assertFalse((repo / ".pin").exists())
 
 
+class AlignRefreshImageFilesTests(unittest.TestCase):
+    """_align_refresh_image_files — the `--apply` glue between
+    align.image_file_drift (read-only compare) and align_apply.refresh_image_file
+    (the write). Task 6 of Plan 2b."""
+
+    def test_differs_is_refreshed_by_name_current_is_left_alone(self):
+        files = [
+            {"path": "/usr/local/sbin/sigmond-site-timing", "status": "differs",
+             "note": "differs from v3.53"},
+            {"path": "/usr/local/sbin/sigmond-location-check", "status": "current", "note": ""},
+        ]
+        with mock.patch("sigmond.align.image_file_drift", return_value=files), \
+             mock.patch("sigmond.align_apply.refresh_image_file",
+                        return_value=align_apply.Step("x", "refreshed")) as m_refresh:
+            steps = smd._align_refresh_image_files("v3.53")
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].outcome, "refreshed")
+        m_refresh.assert_called_once_with(
+            "v3.53", "sigmond-site-timing", Path("/usr/local/sbin/sigmond-site-timing"))
+
+    def test_absent_is_also_refreshed(self):
+        files = [{"path": "/usr/local/sbin/sigmond-location-check", "status": "absent",
+                  "note": "not installed"}]
+        with mock.patch("sigmond.align.image_file_drift", return_value=files), \
+             mock.patch("sigmond.align_apply.refresh_image_file",
+                        return_value=align_apply.Step("x", "refreshed")) as m_refresh:
+            steps = smd._align_refresh_image_files("v3.53")
+        m_refresh.assert_called_once_with(
+            "v3.53", "sigmond-location-check", Path("/usr/local/sbin/sigmond-location-check"))
+        self.assertEqual(steps[0].outcome, "refreshed")
+
+    def test_unknown_status_is_refused_not_refreshed(self):
+        files = [{"path": "/usr/local/sbin/sigmond-site-timing", "status": "unknown",
+                  "note": "could not reach raw.githubusercontent.com"}]
+        with mock.patch("sigmond.align.image_file_drift", return_value=files), \
+             mock.patch("sigmond.align_apply.refresh_image_file") as m_refresh:
+            steps = smd._align_refresh_image_files("v3.53")
+        m_refresh.assert_not_called()
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].component, "/usr/local/sbin/sigmond-site-timing")
+        self.assertEqual(steps[0].outcome, "refused")
+        self.assertEqual(steps[0].detail, "could not compare — not refreshed")
+
+
+def _completed(rc, out="", err=""):
+    return subprocess.CompletedProcess([], rc, out, err)
+
+
+class _FakeBringupRun:
+    """Answers `_align_bringup`'s child-process calls in call order; each
+    answer is a (returncode, stdout, stderr) triple. Records every argv it
+    was called with, and every keyword `_align_run` passed through."""
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.calls = []
+        self.kwargs = []
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        self.kwargs.append(kw)
+        rc, out, err = self.answers.pop(0) if self.answers else (0, "", "")
+        return _completed(rc, out, err)
+
+
+class AlignBringupTests(unittest.TestCase):
+    """_align_bringup — re-runs bring-up's own steps in bring-up's own
+    order. Task 6 of Plan 2b; not yet wired into `_align_apply` (Task 7)."""
+
+    def _run(self, answers, say=None):
+        fake = _FakeBringupRun(answers)
+        with mock.patch("os.access", return_value=True):
+            steps = smd._align_bringup(run=fake, say=say or (lambda *a, **k: None))
+        return steps, fake
+
+    def test_order_is_site_timing_render_manifest_doctor(self):
+        steps, fake = self._run([(0, "", "")] * 4)
+        self.assertEqual(
+            [s.component for s in steps],
+            ["sigmond-site-timing", "config render",
+             "admin uploader manifest --write", "doctor --fix"])
+        self.assertIn("sigmond-site-timing", fake.calls[0][-1])
+        self.assertEqual(fake.calls[1][-2:], ["config", "render"])
+        self.assertEqual(fake.calls[2][-4:], ["admin", "uploader", "manifest", "--write"])
+        self.assertEqual(fake.calls[3][-2:], ["doctor", "--fix"])
+        for kw in fake.kwargs:
+            self.assertEqual(kw.get("stdin"), subprocess.DEVNULL)
+        for step in steps:
+            self.assertEqual(step.outcome, "ran")
+
+    def test_site_timing_failure_stops_before_render(self):
+        steps, fake = self._run([(1, "", "chrony restart failed")])
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].component, "sigmond-site-timing")
+        self.assertEqual(steps[0].outcome, "failed")
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_doctor_findings_still_counts_as_ran(self):
+        steps, fake = self._run([(0, "", ""), (0, "", ""), (0, "", ""),
+                                 (1, "3 findings", "")])
+        self.assertEqual(len(fake.calls), 4)
+        self.assertEqual(steps[-1].component, "doctor --fix")
+        self.assertEqual(steps[-1].outcome, "ran")
+
+    def test_doctor_crash_is_failed(self):
+        steps, fake = self._run([(0, "", ""), (0, "", ""), (0, "", ""),
+                                 (2, "", "traceback")])
+        self.assertEqual(steps[-1].component, "doctor --fix")
+        self.assertEqual(steps[-1].outcome, "failed")
+
+    def test_manifest_bytes_changed_reports_manifest_changed(self):
+        from sigmond import uploader_manifest as um
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pipelines.toml"
+            path.write_text("before\n")
+
+            def run(argv, **kw):
+                if "manifest" in argv and "--write" in argv:
+                    path.write_text("after\n")
+                return _completed(0)
+
+            with mock.patch("os.access", return_value=True), \
+                 mock.patch.object(um, "MANIFEST_PATH", path):
+                steps = smd._align_bringup(run=run, say=lambda *a, **k: None)
+        manifest_step = next(s for s in steps if s.component == "admin uploader manifest --write")
+        self.assertEqual(manifest_step.detail, "manifest changed")
+
+    def test_manifest_bytes_unchanged_no_manifest_changed_detail(self):
+        from sigmond import uploader_manifest as um
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pipelines.toml"
+            path.write_text("same\n")
+
+            def run(argv, **kw):
+                return _completed(0)
+
+            with mock.patch("os.access", return_value=True), \
+                 mock.patch.object(um, "MANIFEST_PATH", path):
+                steps = smd._align_bringup(run=run, say=lambda *a, **k: None)
+        manifest_step = next(s for s in steps if s.component == "admin uploader manifest --write")
+        self.assertNotEqual(manifest_step.detail, "manifest changed")
+
+    def test_not_executable_site_timing_is_skipped_not_failed(self):
+        with mock.patch("os.access", return_value=False):
+            steps = smd._align_bringup(run=_FakeBringupRun([(0, "", "")] * 3),
+                                       say=lambda *a, **k: None)
+        self.assertEqual([s.component for s in steps],
+                         ["config render", "admin uploader manifest --write", "doctor --fix"])
+
+
 class AlignChownTests(unittest.TestCase):
     def test_uses_checkout_dir_uid_and_gid_not_swapped(self):
         # M8: mutating the implementation to swap st_uid/st_gid must make

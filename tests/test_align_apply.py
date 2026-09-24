@@ -4,7 +4,9 @@ import json
 import tempfile
 import types
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from sigmond import align, align_apply
 
@@ -1352,6 +1354,61 @@ class RecordTests(unittest.TestCase):
         # not just by behaviour: no path in its source ever names it.
         src = inspect.getsource(align_apply.record)
         self.assertNotIn("version", src.lower())
+
+
+class _FakeHTTPResponse:
+    """A urlopen(...) context-manager stand-in carrying a status and body."""
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class RefreshImageFileTests(unittest.TestCase):
+    """align_apply.refresh_image_file — the one function in this module that
+    writes a plain file rather than running git; Task 6 of Plan 2b."""
+
+    def test_200_writes_mode_0o755_and_removes_the_tmp_file(self):
+        body = b"#!/bin/sh\necho hi\n"
+        seen = []
+
+        def urlopen(url, timeout=None):
+            seen.append((url, timeout))
+            return _FakeHTTPResponse(200, body)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "sigmond-site-timing"
+            with mock.patch("os.chown") as m_chown:
+                step = align_apply.refresh_image_file(
+                    "v3.53", "sigmond-site-timing", dest, urlopen=urlopen)
+            self.assertEqual(step.outcome, "refreshed")
+            self.assertEqual(step.component, str(dest))
+            self.assertEqual(dest.read_bytes(), body)
+            self.assertEqual(dest.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(list(Path(tmp).glob("*.tmp")), [])
+            m_chown.assert_called_once()
+            self.assertEqual(m_chown.call_args.args[1:], (0, 0))
+        self.assertEqual(seen, [(f"{align.RAW_BASE}/v3.53/sigmond-site-timing", 20.0)])
+
+    def test_404_is_failed_and_dest_is_untouched(self):
+        def urlopen(url, timeout=None):
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "sigmond-site-timing"
+            step = align_apply.refresh_image_file(
+                "v3.53", "sigmond-site-timing", dest, urlopen=urlopen)
+            self.assertEqual(step.outcome, "failed")
+            self.assertFalse(dest.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
 
 if __name__ == "__main__":

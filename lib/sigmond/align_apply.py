@@ -11,11 +11,13 @@ import json
 import os
 import re
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from sigmond.align import AHEAD_NOTE, RADIOD, Item, Release
+from sigmond.align import AHEAD_NOTE, RADIOD, RAW_BASE, Item, Release
 from sigmond.doctor import _sha_equal
 
 APPLIANCE_REPO = "https://github.com/HamSCI/sigmond-appliance"
@@ -600,3 +602,35 @@ def record(rel: Release, steps: list, *, manifest_path: Path,
         }, indent=2) + "\n")
 
     record_history(rel, steps, history=history, now=now)
+
+
+def refresh_image_file(tag: str, name: str, dest: Path, *,
+                       urlopen: Callable = urllib.request.urlopen,
+                       timeout: float = 20.0) -> Step:
+    """Replace one image-carried helper script (`align.IMAGE_FILES`) with
+    the release tag's copy from sigmond-appliance — the write half of
+    `align.image_file_drift`'s read-only compare.
+
+    Unlike a component checkout, there is no operator owner to preserve:
+    these scripts run as root under cron/systemd, so the refreshed file is
+    written root:root, mode 0o755 — the same posture the image build gives
+    them. tmp-then-``os.replace`` keeps a reader from ever seeing a
+    half-written script."""
+    dest = Path(dest)
+    url = f"{RAW_BASE}/{tag}/{name}"
+    try:
+        with urlopen(url, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200)
+            body = resp.read()
+    except (urllib.error.URLError, OSError) as exc:
+        return Step(str(dest), "failed", f"{url}: {exc}")
+    if status != 200:
+        return Step(str(dest), "failed", f"{url}: HTTP {status}")
+    if not body:
+        return Step(str(dest), "failed", f"{url}: empty body")
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_bytes(body)
+    os.chmod(tmp, 0o755)
+    os.chown(tmp, 0, 0)
+    os.replace(tmp, dest)
+    return Step(str(dest), "refreshed")
