@@ -69,6 +69,10 @@ FILE_PATTERNS: dict[str, tuple[str, ...]] = {
         # account trusts it for the PM -> VM hop.
         "root/.ssh/id_ed25519",
         "root/.ssh/id_ed25519.pub",
+        # The pm-heartbeat emitter's SFTP key, authorized on the fleetboard
+        # server (sigmond-appliance#9).
+        "etc/pm-heartbeat/id_ed25519",
+        "etc/pm-heartbeat/id_ed25519.pub",
     ),
 }
 

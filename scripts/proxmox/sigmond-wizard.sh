@@ -927,6 +927,29 @@ else
     gexec 30 "systemctl disable --now sigmond-heartbeat.timer 2>/dev/null; true"
 fi
 
+# The PM (this Proxmox host, not the VM) ships its own heartbeat emitter —
+# firstboot unpacks the whole sigmond tree to /root/sigmond-appliance/sigmond/,
+# pm-heartbeat-setup.sh included — but nothing ever ran it, so every PM row
+# on the fleet board stayed silent after a fresh install (sigmond-appliance#9).
+# The station name is the reporter id plus "-pm"; the inventory maps that to
+# its fleet name (heartbeat_station, sigmond#95).
+PM_HEARTBEAT_SETUP=/root/sigmond-appliance/sigmond/scripts/proxmox/pm-heartbeat-setup.sh
+if [ "${HB_ENABLED:-0}" = 1 ]; then
+    if [ -x "$PM_HEARTBEAT_SETUP" ]; then
+        if "$PM_HEARTBEAT_SETUP" --station "${REPORTER}-pm" --vmid "$VMID" \
+                --dest-host "$HB_HOST" --dest-port "$HB_PORT" >>"$LOG" 2>&1; then
+            say "host heartbeat enabled — authorize its public key on the fleetboard server:"
+            say "$(cat /etc/pm-heartbeat/id_ed25519.pub 2>/dev/null)"
+        else
+            say "WARN: host heartbeat setup failed — rerun by hand: $PM_HEARTBEAT_SETUP --station ${REPORTER}-pm --vmid $VMID --dest-host $HB_HOST --dest-port $HB_PORT"
+        fi
+    else
+        say "WARN: host heartbeat setup script missing at $PM_HEARTBEAT_SETUP — rerun by hand once present: pm-heartbeat-setup.sh --station ${REPORTER}-pm --vmid $VMID --dest-host $HB_HOST --dest-port $HB_PORT"
+    fi
+else
+    systemctl disable --now pm-heartbeat.timer 2>/dev/null; true
+fi
+
 # mag-recorder identity: render pushes the SITE PSWS station id, but the
 # magnetometer often lives under its OWN portal station, and the config's
 # callsign/grid stay template placeholders (field gap, AC0G-B4 2026-07-30).

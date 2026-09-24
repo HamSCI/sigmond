@@ -125,6 +125,12 @@ class RacCredentialTests(unittest.TestCase):
         self.assertNotIn("s3cret-token-value", text)
         self.assertNotIn("0123456789abcdef", text)
 
+    def test_pm_manifest_lists_the_heartbeat_keypair(self):
+        _keygen(self.root / "etc/pm-heartbeat/id_ed25519")
+        paths = {e["path"] for e in identity.manifest("pm", str(self.root))["files"]}
+        self.assertIn("/etc/pm-heartbeat/id_ed25519", paths)
+        self.assertIn("/etc/pm-heartbeat/id_ed25519.pub", paths)
+
     def test_pm_without_rac_config_records_none(self):
         (self.root / "etc/sigmond/frpc-host.toml").unlink()
         self.assertIsNone(identity.manifest("pm", str(self.root))["rac_credential"])
