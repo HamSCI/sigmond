@@ -39,7 +39,8 @@ def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=Tru
     args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=no_cost, **ns)
     patches = [
         # Task 7: the dry run's restarts section reads the station's
-        # services; none here, so nothing touches systemctl or git.
+        # services; none here, so nothing touches systemctl or git — and
+        # never the real catalog (Fix round 1 / I-2).
         mock.patch.object(smd, "_align_services", return_value={}),
         mock.patch.object(smd, "_align_live_state",
                           return_value=(live, dirty or {}, origins or {}, errors or {})),
@@ -51,6 +52,11 @@ def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=Tru
         patches.append(mock.patch("sigmond.align.fetch_release", side_effect=release))
     else:
         patches.append(mock.patch("sigmond.align.fetch_release", return_value=release))
+    # Never the real catalog (Fix round 1 / I-2) — unless the test has
+    # already put its own in place.
+    import sigmond.catalog
+    if not isinstance(sigmond.catalog.load_catalog, mock.NonCallableMock):
+        patches.append(mock.patch("sigmond.catalog.load_catalog", return_value={}))
     out = io.StringIO()
     with contextlib.ExitStack() as st:
         for p in patches:
@@ -545,6 +551,15 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
 
     patches = [
         _quiet_live_stages(),
+        # Fix round 1 / I-1: with apply=False this drives the real dry run,
+        # which must reach neither the network nor /etc.
+        mock.patch("sigmond.align.image_file_drift", return_value=[]),
+        mock.patch("sigmond.align.recorded_release", return_value="v3.53"),
+        mock.patch("sigmond.align.commit_distance",
+                   side_effect=AssertionError("commit_distance reached the network")),
+        # The bootstrap path writes history before execv; never the real
+        # /var/lib/sigmond/update-history.jsonl (Fix round 1 audit).
+        mock.patch("sigmond.provenance.record_update"),
         mock.patch.object(smd, "_need_root", m_need_root),
         mock.patch.object(smd, "lifecycle_lock", m_lock),
         mock.patch.object(smd, "_align_live_state", m_live_state),
@@ -1063,13 +1078,20 @@ class _RaisingOnNthCall:
         return _completed(0)
 
 
+# Never the real /etc/hs-uploader/pipelines.toml (Fix round 1 audit); a
+# test that needs the manifest patches its own path on top of this.
+@mock.patch("sigmond.uploader_manifest.MANIFEST_PATH",
+            Path(tempfile.gettempdir()) / "align-test-absent" / "pipelines.toml")
 class AlignBringupTests(unittest.TestCase):
     """_align_bringup — re-runs bring-up's own steps in bring-up's own
     order. Task 6 of Plan 2b; not yet wired into `_align_apply` (Task 7)."""
 
     def _run(self, answers, say=None):
         fake = _FakeBringupRun(answers)
-        with mock.patch("os.access", return_value=True):
+        # Never read the real /etc/hs-uploader/pipelines.toml (Fix round 1 audit).
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("sigmond.uploader_manifest.MANIFEST_PATH", Path(tmp) / "pipelines.toml"), \
+             mock.patch("os.access", return_value=True):
             steps = smd._align_bringup(run=fake, say=say or (lambda *a, **k: None))
         return steps, fake
 
@@ -1207,6 +1229,11 @@ class AlignChownTests(unittest.TestCase):
             self.assertEqual(m_chown.call_args[0][0], exclude)
 
 
+# order_units() reads the catalog for start priorities; never the real one
+# (/opt/git deploy.toml files, /etc/sigmond/catalog.toml) — Fix round 1 audit.
+_NO_REAL_CATALOG = mock.patch("sigmond.catalog.load_catalog", new=lambda *a, **k: {})
+
+
 class _FakeRestartRun:
     """Records every argv it's called with; answers by subcommand:
     `systemctl is-active <unit>` reports "inactive" for any unit in
@@ -1252,6 +1279,7 @@ class _FakeRestartRun:
         return self.calls.index(argv)
 
 
+@_NO_REAL_CATALOG
 class AlignRestartTests(unittest.TestCase):
     """Task 4 + Fix round 1 (I2, I3): radiod first (with a per-unit
     readiness wait), then its consumers — restarting only units that are
@@ -1401,9 +1429,11 @@ class AlignApplyExitCodeTests(unittest.TestCase):
         self.assertEqual(rc, 1)
 
     def test_record_called_with_the_final_steps(self):
-        steps = [align_apply.Step("sigmond", "current")]
+        # A move, so this is not the no-op run (Fix round 1 / I-3).
+        steps = [align_apply.Step("sigmond", "current"),
+                 align_apply.Step("hf-timestd", "moved", "a -> b", 10)]
         rc, out, mocks = run_apply(
-            live={"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+            live={"sigmond": "daba1f6", "hf-timestd": "459bee6", "ka9q-radio": "401992c"},
             apply_plan_result=steps)
         mocks["record"].assert_called_once()
         args_, kwargs = mocks["record"].call_args
@@ -1973,6 +2003,8 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
                                         side_effect=lambda rel, items, ctx:
                                         order.append("moves") or list(moves)))
             st.enter_context(mock.patch("sigmond.align_apply.record_live", m_record_live))
+            # Never the real /run/hf-timestd/authority.json (Fix round 1 audit).
+            st.enter_context(mock.patch("sigmond.heartbeat._read_authority", return_value={}))
             for p in extra_patches:
                 st.enter_context(p)
             st.enter_context(contextlib.redirect_stdout(out))
@@ -2106,6 +2138,63 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         self.assertEqual(m["record_live"].call_args[0][1]["restarted"],
                          ["hf-timestd", "hs-uploader"])
 
+    # --- Fix round 1 / I-3: a run with nothing to do stays a no-op ---
+
+    def test_nothing_to_do_is_a_no_op(self):
+        rc, out, m = self._run(moves=[align_apply.Step("sigmond", "current"),
+                                      align_apply.Step("hf-timestd", "left", align.AHEAD_NOTE)],
+                               staleness=_staleness(running={"hf-timestd"}))
+        self.assertEqual(rc, 0)
+        self.assertIn("  aligned — nothing to do", out)
+        m["bringup"].assert_not_called()
+        m["record"].assert_not_called()
+        m["restart"].assert_not_called()
+        m["record_live"].assert_not_called()
+        m["history"].assert_not_called()
+
+    def test_only_stale_services_still_runs_bringup_record_and_restarts(self):
+        rc, out, m = self._run(
+            moves=[align_apply.Step("sigmond", "current")],
+            restart_steps=[align_apply.Step("hf-timestd", "restarted")],
+            restarted_units=["hf-a.service"])
+        self.assertEqual(m["order"], ["moves", "images", "bringup", "record", "restart", "checks"])
+        self.assertNotIn("nothing to do", out)
+        self.assertEqual(rc, 0)
+
+    def test_a_refreshed_image_file_is_not_a_no_op(self):
+        rc, out, m = self._run(
+            moves=[align_apply.Step("sigmond", "current")], staleness=_staleness(),
+            images=[align_apply.Step("/usr/local/sbin/sigmond-site-timing", "refreshed")])
+        m["bringup"].assert_called_once()
+        m["record"].assert_called_once()
+
+    def test_heartbeat_not_checked_passes_and_prints_n_a(self):
+        rc, out, m = self._run(
+            restart_steps=[align_apply.Step("hf-timestd", "restarted")],
+            restarted_units=["hf-a.service"],
+            checks=dict(_CHECKS_PASS, heartbeat_sent=None))
+        self.assertEqual(rc, 0)
+        self.assertIn("heartbeat sent:  n/a", out)
+
+    def test_hs_uploader_restarts_at_most_once(self):
+        # Minor: even if a component list somehow names hs-uploader too.
+        from sigmond.commands import uploader
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 0, "active\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        rc, out, m = self._run(
+            bringup=[align_apply.Step("admin uploader manifest --write", "ran", "manifest changed")],
+            restart_steps=[align_apply.Step("hs-uploader", "restarted")],
+            restarted_units=[uploader.SERVICE],
+            extra_patches=[mock.patch("subprocess.run", fake_run)])
+        self.assertEqual(calls.count(["systemctl", "restart", uploader.SERVICE]), 0)
+        self.assertEqual(m["record_live"].call_args[0][1]["restarted"], ["hs-uploader"])
+        self.assertEqual(m["checks"].call_args[0][0].count(uploader.SERVICE), 1)
+
     def test_manifest_unchanged_never_touches_hs_uploader(self):
         from sigmond.commands import uploader
         calls = []
@@ -2144,6 +2233,7 @@ class AlignRestartUploaderTests(unittest.TestCase):
         self.assertEqual(step.outcome, "failed")
 
 
+@_NO_REAL_CATALOG
 class AlignRestartUnitsOutTests(unittest.TestCase):
     def test_units_out_lists_only_units_whose_restart_succeeded(self):
         fake = _FakeRestartRun(fail_units={"psk.service"}, inactive_units={"wspr.service"})
@@ -2251,7 +2341,7 @@ class AlignStalenessTests(unittest.TestCase):
 
 
 class AlignFastChecksTests(unittest.TestCase):
-    def _fake(self, before, after, heartbeat_rc=0):
+    def _fake(self, before, after, heartbeat_rc=0, timer_state="enabled"):
         state = {"calls": []}
         seen = {}
 
@@ -2265,13 +2355,38 @@ class AlignFastChecksTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, f"NRestarts={n}\nActiveState={active}\n", "")
             if argv[:2] == ["systemctl", "start"]:
                 return subprocess.CompletedProcess(argv, heartbeat_rc, "", "failed\n" if heartbeat_rc else "")
+            if argv[:2] == ["systemctl", "is-enabled"]:
+                return subprocess.CompletedProcess(argv, 0 if timer_state == "enabled" else 1,
+                                                   timer_state + "\n", "")
             return subprocess.CompletedProcess(argv, 0, "", "")
         return run, state
 
+    # --- Fix round 1 / I-4: heartbeat off on this station ---
+
+    def test_timer_not_enabled_means_heartbeat_not_checked(self):
+        for timer_state in ("disabled", "masked", ""):
+            run, state = self._fake({"a.service": (0, "active")}, {"a.service": (0, "active")},
+                                    timer_state=timer_state)
+            r = smd._align_fast_checks(["a.service"], run=run, sleep=lambda s: None,
+                                       now=lambda: 0.0, hf_timestd_running=False)
+            self.assertIsNone(r["heartbeat_sent"], timer_state)
+            self.assertIn(["systemctl", "is-enabled", "sigmond-heartbeat.timer"], state["calls"])
+            self.assertNotIn(["systemctl", "start", "sigmond-heartbeat.service"], state["calls"])
+
+    def test_authority_reader_surprise_is_not_fresh_with_the_exception_noted(self):
+        # Minor: non-dict JSON makes _read_authority raise AttributeError.
+        run, _ = self._fake({"a.service": (0, "active")}, {"a.service": (0, "active")})
+        with mock.patch("sigmond.heartbeat._read_authority",
+                        side_effect=AttributeError("'list' object has no attribute 'get'")):
+            r = smd._align_fast_checks(["a.service"], run=run, sleep=lambda s: None,
+                                       now=lambda: 0.0, hf_timestd_running=True)
+        self.assertFalse(r["authority_fresh"])
+        self.assertIn("AttributeError", " ".join(r["notes"]))
+
     def test_stable_units_pass_and_the_wait_is_120_s(self):
-        run, state = self._fake({"a": (0, "active")}, {"a": (0, "active")})
+        run, state = self._fake({"a.service": (0, "active")}, {"a.service": (0, "active")})
         sleep = mock.Mock()
-        r = smd._align_fast_checks(["a"], run=run, sleep=sleep, now=lambda: 1000.0,
+        r = smd._align_fast_checks(["a.service"], run=run, sleep=sleep, now=lambda: 1000.0,
                                    hf_timestd_running=False)
         sleep.assert_called_once_with(120)
         self.assertEqual(r["units_stable"], True)
@@ -2280,23 +2395,23 @@ class AlignFastChecksTests(unittest.TestCase):
         self.assertIn(["systemctl", "start", "sigmond-heartbeat.service"], state["calls"])
 
     def test_nrestarts_rise_is_unstable(self):
-        run, _ = self._fake({"a": (0, "active"), "b": (2, "active")},
-                            {"a": (0, "active"), "b": (3, "active")})
-        r = smd._align_fast_checks(["a", "b"], run=run, sleep=lambda s: None,
+        run, _ = self._fake({"a.service": (0, "active"), "b.service": (2, "active")},
+                            {"a.service": (0, "active"), "b.service": (3, "active")})
+        r = smd._align_fast_checks(["a.service", "b.service"], run=run, sleep=lambda s: None,
                                    now=lambda: 0.0, hf_timestd_running=False)
         self.assertFalse(r["units_stable"])
-        self.assertTrue(any("b" in n and "NRestarts" in n for n in r["notes"]))
+        self.assertTrue(any("b.service" in n and "NRestarts" in n for n in r["notes"]))
 
     def test_unit_no_longer_active_is_unstable(self):
-        run, _ = self._fake({"a": (0, "active")}, {"a": (0, "failed")})
-        r = smd._align_fast_checks(["a"], run=run, sleep=lambda s: None,
+        run, _ = self._fake({"a.service": (0, "active")}, {"a.service": (0, "failed")})
+        r = smd._align_fast_checks(["a.service"], run=run, sleep=lambda s: None,
                                    now=lambda: 0.0, hf_timestd_running=False)
         self.assertFalse(r["units_stable"])
 
     def test_authority_fresh_when_hf_timestd_runs(self):
-        run, _ = self._fake({"a": (0, "active")}, {"a": (0, "active")})
+        run, _ = self._fake({"a.service": (0, "active")}, {"a.service": (0, "active")})
         with mock.patch("sigmond.heartbeat._read_authority", return_value={"snapshot_age_s": 3}) as m:
-            r = smd._align_fast_checks(["a"], run=run, sleep=lambda s: None,
+            r = smd._align_fast_checks(["a.service"], run=run, sleep=lambda s: None,
                                        now=lambda: 1234.0, hf_timestd_running=True)
         self.assertTrue(r["authority_fresh"])
         from sigmond import heartbeat
@@ -2305,17 +2420,17 @@ class AlignFastChecksTests(unittest.TestCase):
 
     def test_stale_authority_fails_with_its_reason(self):
         from sigmond import heartbeat
-        run, _ = self._fake({"a": (0, "active")}, {"a": (0, "active")})
+        run, _ = self._fake({"a.service": (0, "active")}, {"a.service": (0, "active")})
         with mock.patch("sigmond.heartbeat._read_authority",
                         side_effect=heartbeat.ReaderUnavailable("authority.json stale (90s old)")):
-            r = smd._align_fast_checks(["a"], run=run, sleep=lambda s: None,
+            r = smd._align_fast_checks(["a.service"], run=run, sleep=lambda s: None,
                                        now=lambda: 0.0, hf_timestd_running=True)
         self.assertFalse(r["authority_fresh"])
         self.assertIn("authority.json stale (90s old)", " ".join(r["notes"]))
 
     def test_heartbeat_start_failure(self):
-        run, _ = self._fake({"a": (0, "active")}, {"a": (0, "active")}, heartbeat_rc=1)
-        r = smd._align_fast_checks(["a"], run=run, sleep=lambda s: None,
+        run, _ = self._fake({"a.service": (0, "active")}, {"a.service": (0, "active")}, heartbeat_rc=1)
+        r = smd._align_fast_checks(["a.service"], run=run, sleep=lambda s: None,
                                    now=lambda: 0.0, hf_timestd_running=False)
         self.assertFalse(r["heartbeat_sent"])
 
@@ -2443,12 +2558,22 @@ class AlignVerifyTests(unittest.TestCase):
     def test_both_valid_with_a_newer_row_exits_0(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = _write_aligned(tmp, at="2026-09-24T11:00:00Z", live_at="2026-09-24T12:05:00Z")
-            rc, out = self._verify(p, self._gap("2026-09-24T13:00Z"), self.GOOD_BACKLOG)
+            rc, out = self._verify(p, self._gap("2026-09-24T13:05Z"), self.GOOD_BACKLOG)
         self.assertEqual(rc, 0)
         self.assertIn("VALID", out)
         self.assertIn("0 gap events over 6.00 channel-hours", out)
         self.assertIn("no backlog, no dead letters", out)
         self.assertNotIn("has not run since", out)
+
+    def test_row_within_the_hour_after_the_alignment_is_not_enough(self):
+        # Fix round 1 / C5: the row covers the trailing hour, so it must be
+        # stamped a full hour after the alignment.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = _write_aligned(tmp, live_at="2026-09-24T12:05:00Z")
+            rc, out = self._verify(p, self._gap("2026-09-24T13:04Z"), self.GOOD_BACKLOG)
+        self.assertEqual(rc, 1)
+        self.assertIn("gap sampler has not run since the alignment — "
+                      "re-run --verify after the next hour", out)
 
     def test_top_level_at_used_when_there_is_no_live_block(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2562,6 +2687,7 @@ HF_TIMESTD_SERVICES = ["timestd-core-recorder.service", "timestd-fusion.service"
                        "timestd-metrology@wwv5.service"]
 
 
+@_NO_REAL_CATALOG
 class AlignServiceUnitsOnlyTests(unittest.TestCase):
     """Fix round 1 / C-B: only .service units are restarted, timed and
     watched. A timer or target has no NRestarts, and restarting a target

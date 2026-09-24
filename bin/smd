@@ -4906,6 +4906,7 @@ def _align_plan_restarts(move_steps, bringup_steps, staleness, *, say=print):
 
 _ALIGN_FAST_CHECK_WAIT_S = 120
 _ALIGN_HEARTBEAT_UNIT = 'sigmond-heartbeat.service'
+_ALIGN_HEARTBEAT_TIMER = 'sigmond-heartbeat.timer'
 
 
 def _align_unit_state(unit, *, run):
@@ -4939,13 +4940,15 @@ def _align_fast_checks(restarted_units, *, run=subprocess.run, sleep=time.sleep,
     heartbeat's own AUTHORITY_FRESHNESS_SEC (`heartbeat._read_authority`,
     which measures its age by mtime).  Last, `systemctl start
     sigmond-heartbeat.service` must return 0; the unit is a oneshot, so
-    `start` returns once the emit has finished.
+    `start` returns once the emit has finished.  When
+    `sigmond-heartbeat.timer` is not enabled, heartbeat is off here:
+    ``heartbeat_sent`` is None and nothing is started.
 
     Returns {"units_stable", "authority_fresh" (None when hf-timestd does
     not run), "heartbeat_sent", "notes": [one sentence per problem]}."""
     from sigmond import heartbeat
     notes = []
-    restarted_units = _align_service_units(restarted_units)
+    restarted_units = list(dict.fromkeys(_align_service_units(restarted_units)))
     before = {u: _align_unit_state(u, run=run) for u in restarted_units}
     sleep(_ALIGN_FAST_CHECK_WAIT_S)
     stable = True
@@ -4974,17 +4977,27 @@ def _align_fast_checks(restarted_units, *, run=subprocess.run, sleep=time.sleep,
         except heartbeat.ReaderUnavailable as exc:
             authority_fresh = False
             notes.append(f'hf-timestd: {exc}')
-        except (OSError, ValueError) as exc:
+        except Exception as exc:
+            # Fix round 1 minor: a surprise (non-dict JSON raises
+            # AttributeError) is a failed check, never a traceback.
             authority_fresh = False
             notes.append(f'hf-timestd: authority.json unreadable ({exc.__class__.__name__}: {exc})')
 
-    r = _align_run(['systemctl', 'start', _ALIGN_HEARTBEAT_UNIT], run=run, timeout=120,
-                   action=f'systemctl start {_ALIGN_HEARTBEAT_UNIT}')
-    heartbeat_sent = r.returncode == 0
-    if not heartbeat_sent:
-        lines = (r.stderr or '').strip().splitlines()
-        last = lines[-1] if lines else f'exit {r.returncode}'
-        notes.append(f'heartbeat: systemctl start {_ALIGN_HEARTBEAT_UNIT}: {last}')
+    # Fix round 1 / I-4: a station with heartbeats off has nothing to
+    # check — heartbeat_sent is None (a pass), and the service is never
+    # started.
+    r = _align_run(['systemctl', 'is-enabled', _ALIGN_HEARTBEAT_TIMER], run=run, timeout=15,
+                   action=f'systemctl is-enabled {_ALIGN_HEARTBEAT_TIMER}')
+    if (r.stdout or '').strip() != 'enabled':
+        heartbeat_sent = None
+    else:
+        r = _align_run(['systemctl', 'start', _ALIGN_HEARTBEAT_UNIT], run=run, timeout=120,
+                       action=f'systemctl start {_ALIGN_HEARTBEAT_UNIT}')
+        heartbeat_sent = r.returncode == 0
+        if not heartbeat_sent:
+            lines = (r.stderr or '').strip().splitlines()
+            last = lines[-1] if lines else f'exit {r.returncode}'
+            notes.append(f'heartbeat: systemctl start {_ALIGN_HEARTBEAT_UNIT}: {last}')
     return {'units_stable': stable, 'authority_fresh': authority_fresh,
             'heartbeat_sent': heartbeat_sent, 'notes': notes}
 
@@ -4995,7 +5008,7 @@ def _align_label(component) -> str:
     return 'radiod' if component == RADIOD else component
 
 
-def _align_print_restarts(base, moving, *, say=print) -> int:
+def _align_print_restarts(base, moving, *, catalog=None, say=print) -> int:
     """The dry run's ``restarts:`` section: what an --apply would restart.
 
     Two sources, merged: what is stale NOW (a component moved by an
@@ -5010,7 +5023,7 @@ def _align_print_restarts(base, moving, *, say=print) -> int:
     say('  restarts:')
     try:
         services = _align_services()
-        st = _align_staleness(base, services)
+        st = _align_staleness(base, services, catalog or None)
     except Exception as exc:
         say(f"    could not read this station's services ({exc.__class__.__name__}: {exc}) "
             f"— restarts unknown")
@@ -5052,8 +5065,8 @@ def _align_verify(args) -> int:
     board means: gaps (`_read_gap_tsv` -> `_map_gaps`) and uploads
     (`_read_backlog` -> `_map_uploads`).
 
-    Exit 0 when both are VALID and the gap row was written after the
-    alignment (the live record's `at`, else the record's own `at`); 1
+    Exit 0 when both are VALID and the gap row was written at least an
+    hour after the alignment (the row covers the trailing hour) (the live record's `at`, else the record's own `at`); 1
     otherwise; 2 when there is no aligned record to measure from."""
     import json
     from datetime import datetime, timezone
@@ -5093,7 +5106,10 @@ def _align_verify(args) -> int:
         try:
             row_at = datetime.strptime(row_utc, heartbeat.GAP_ROW_UTC_FORMAT).replace(
                 tzinfo=timezone.utc)
-            newer = row_at > at
+            # Fix round 1 / C5: the row covers the TRAILING hour, so only
+            # one stamped a full hour after the alignment covers nothing
+            # from before it.
+            newer = (row_at - at).total_seconds() >= 3600
         except ValueError:
             newer = False
     if row_utc and not newer:
@@ -5727,6 +5743,20 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         _align_print_summary(move_steps + image_steps)
         return 1
 
+    # Fix round 1 / I-3: nothing moved or installed, no image file
+    # refreshed, nothing stale — a no-op. No bring-up, no record (record
+    # would rewrite aligned.json and erase the previous live block).
+    changed = any(s.outcome in ('moved', 'installed') for s in move_steps)
+    refreshed = any(s.outcome == 'refreshed' for s in image_steps)
+    if not changed and not refreshed:
+        try:
+            quiet = not _align_staleness(base, _align_services(), catalog or None)['stale']
+        except Exception:
+            quiet = False     # unknown staleness is not "nothing to do"
+        if quiet:
+            print('  aligned — nothing to do')
+            return 0
+
     bringup_steps = _align_bringup()
     _align_print_steps(bringup_steps)
     steps = move_steps + image_steps + bringup_steps
@@ -5776,7 +5806,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         restart_steps = _align_restart(radiod_first, comps, services,
                                        run=subprocess.run, say=indented,
                                        units_out=restarted_units)
-    if uploader:
+    if uploader and not any(s.component == 'hs-uploader' for s in restart_steps):
         restart_steps.append(_align_restart_uploader(run=subprocess.run, say=indented,
                                                      units_out=restarted_units))
     if not restart_steps:
@@ -5797,6 +5827,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     restarted = [s.component for s in restart_steps if s.outcome == 'restarted']
     if restarted_units:
         print(f'  checks: (waiting {_ALIGN_FAST_CHECK_WAIT_S} s for the restarted units to settle)')
+        restarted_units = list(dict.fromkeys(restarted_units))
         checks = _align_fast_checks(restarted_units, run=subprocess.run, sleep=time.sleep,
                                     now=time.time,
                                     hf_timestd_running='hf-timestd' in staleness['running'])
@@ -5804,10 +5835,12 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         print(f"    units stable:    {'yes' if checks['units_stable'] else 'NO'}")
         print(f"    authority fresh: "
               f"{'n/a (hf-timestd not running)' if fresh is None else ('yes' if fresh else 'NO')}")
-        print(f"    heartbeat sent:  {'yes' if checks['heartbeat_sent'] else 'NO'}")
+        sent = checks.get('heartbeat_sent')
+        print(f"    heartbeat sent:  "
+              f"{'n/a (heartbeat timer not enabled)' if sent is None else ('yes' if sent else 'NO')}")
         for note in checks.get('notes') or []:
             print(f'    {note}')
-        checks_ok = bool(checks['units_stable'] and checks['heartbeat_sent']
+        checks_ok = bool(checks['units_stable'] and sent is not False
                          and fresh is not False)
         align_apply.record_live(align_apply.ALIGNED_RECORD,
                                 {'at': now(), 'restarted': restarted, **checks})
@@ -5944,7 +5977,9 @@ def cmd_align(args) -> int:
               'pm-align (Plan 3)')
     moving = [it.component for it in plan
               if it.status in ('move', 'missing') and it.component not in ahead_components]
-    stale_now = _align_print_restarts(base, moving)
+    # The catalog cmd_align already read (empty under --no-cost, and then
+    # _align_staleness reads it itself: the kinds decide radiod consumers).
+    stale_now = _align_print_restarts(base, moving, catalog=catalog)
     counts = {s: sum(1 for i in plan if i.status == s)
               for s in ('move', 'refuse', 'missing', 'stray')}
     # A 'move' item commit_distance proved already ahead of the target was
