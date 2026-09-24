@@ -4682,7 +4682,7 @@ def _align_restart_unit(unit, *, run, say, timeout=300) -> object:
 
 
 def _align_restart(radiod_first: bool, components: list, services: dict, *,
-                   run=subprocess.run, say=print) -> list:
+                   run=subprocess.run, say=print, units_out=None) -> list:
     """Restart what an alignment left stale: radiod first (with a
     per-unit readiness wait), then every listed component — never `smd
     restart` (Controller: a restart runs in-process; the held
@@ -4701,11 +4701,16 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     {component: [unit, …]} — already orphan-filtered, so re-resolving
     here would risk re-adding an orphan `resolve_units` would otherwise
     have dropped.
+
+    ``units_out``, when given, receives every unit whose ``systemctl
+    restart`` returned 0 — the list Task 7's fast checks watch.
     """
     from sigmond import align_apply
     from sigmond.align_live import RADIOD
     from sigmond.lifecycle import UnitRef, order_units
 
+    if units_out is None:
+        units_out = []
     steps = []
     if radiod_first:
         active_units = []
@@ -4718,6 +4723,8 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
             fail_detail = None
             for unit in active_units:
                 r = _align_restart_unit(unit, run=run, say=say)
+                if r.returncode == 0:
+                    units_out.append(unit)
                 if r.returncode != 0 and fail_detail is None:
                     lines = (r.stderr or '').strip().splitlines()
                     last = lines[-1] if lines else ''
@@ -4751,6 +4758,8 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
             continue
         touched.add(ref.component)
         r = _align_restart_unit(ref.unit, run=run, say=say)
+        if r.returncode == 0:
+            units_out.append(ref.unit)
         if r.returncode != 0 and ref.component not in failed:
             lines = (r.stderr or '').strip().splitlines()
             last = lines[-1] if lines else ''
@@ -4765,6 +4774,302 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
             # and align never starts what is not running.
             steps.append(align_apply.Step(c, 'left', 'not running — left alone'))
     return steps
+
+
+def _align_restart_uploader(*, run=subprocess.run, say=print, units_out=None):
+    """Restart hs-uploader over a manifest bring-up just changed (Controller
+    ruling 4). Its unit comes from uploader.py's own SERVICE constant, not
+    `_align_services`: the catalog calls hs-uploader a library, so the
+    services map may never list it. Restarted only when `systemctl
+    is-active` says active — align never starts what is not running."""
+    from sigmond import align_apply
+    from sigmond.commands.uploader import SERVICE
+    if not _align_is_active(SERVICE, run=run):
+        say(f'  {SERVICE} not running — left alone')
+        return align_apply.Step('hs-uploader', 'left', 'not running — left alone')
+    r = _align_restart_unit(SERVICE, run=run, say=say)
+    if r.returncode != 0:
+        lines = (r.stderr or '').strip().splitlines()
+        last = lines[-1] if lines else ''
+        return align_apply.Step('hs-uploader', 'failed', f'systemctl restart {SERVICE}: {last}')
+    if units_out is not None:
+        units_out.append(SERVICE)
+    return align_apply.Step('hs-uploader', 'restarted', '')
+
+
+def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) -> dict:
+    """What an alignment has left stale on this station right now — the
+    inputs align_live needs, read from the station itself, so a run finds
+    restarts an earlier run left undone.  Read-only: `systemctl show`,
+    each checkout's reflog, the radiod binary's mtime.
+
+    * ``started_at[c]``: the earliest start among c's active units; a
+      component is ``running`` when that is not None (ruling 5).
+    * ``moved_at[x]``: each service's and each consumed library's reflog
+      (`_align_head_moved_at`); an empty reflog reads None, never stale
+      (ruling 7).  ``moved_at[RADIOD]`` is the radiod BINARY's mtime
+      instead (ruling 1): radiod runs what was built, not what is checked
+      out.
+    * ``radiod_consumers``: the running services whose catalog kind is
+      "client" (ruling 3); a component absent from the catalog counts as
+      one.  Nothing finer than "every running client" is detected here —
+      a client that does not in fact read radiod's streams still restarts
+      after radiod; working out which ones truly do is out of scope.
+    """
+    from sigmond import align_live
+    RADIOD = align_live.RADIOD
+    if catalog is None:
+        try:
+            from sigmond.catalog import load_catalog
+            catalog = load_catalog()
+        except Exception:
+            catalog = {}
+    names = sorted(services)
+    started_at = {c: _align_units_started_at(services[c], run=run) for c in names}
+    running = {c for c in names if started_at[c] is not None}
+    consumes = _align_consumes(base, [c for c in names if c != RADIOD])
+    libs = set()
+    for v in consumes.values():
+        libs |= set(v)
+    moved_at = {}
+    for n in sorted(set(names) | libs):
+        if n == RADIOD:
+            continue
+        moved_at[n] = _align_head_moved_at(Path(base) / n, run=run)
+    if RADIOD in services:
+        moved_at[RADIOD] = _align_radiod_built_at()
+
+    def _kind(c):
+        entry = catalog.get(c) if catalog else None
+        return getattr(entry, 'kind', 'client') if entry is not None else 'client'
+
+    radiod_consumers = {c for c in running if c != RADIOD and _kind(c) == 'client'}
+    stale = align_live.stale_components(running, moved_at, started_at, consumes)
+    return {'stale': stale, 'running': running, 'consumes': consumes,
+            'radiod_consumers': radiod_consumers, 'started_at': started_at,
+            'moved_at': moved_at}
+
+
+def _align_plan_restarts(move_steps, bringup_steps, staleness, *, say=print):
+    """(radiod_first, [components], uploader) that --apply restarts now.
+
+    Controller ruling 2: radiod never restarts in a run whose ka9q-radio
+    Step failed — the installed binary may not match any checkout, and a
+    radiod that does not come back strands every recorder. A blocking
+    outcome already stops the run before this stage; this guards the
+    ordering if that ever changes. ``uploader`` is True when bring-up's
+    manifest step reports "manifest changed" (ruling 4)."""
+    from sigmond import align_live
+    RADIOD = align_live.RADIOD
+    stale = staleness['stale']
+    radiod_stale = RADIOD in stale
+    if radiod_stale and any(s.component == RADIOD and s.outcome == 'failed'
+                            for s in move_steps):
+        radiod_stale = False
+        say("  radiod not restarted: this run's ka9q-radio step failed — see above")
+    radiod_first, comps = align_live.restart_sequence(
+        stale, radiod_stale, staleness['running'], staleness['radiod_consumers'])
+    uploader = any(s.component == 'admin uploader manifest --write'
+                   and s.detail == 'manifest changed' for s in bringup_steps)
+    return radiod_first, comps, uploader
+
+
+_ALIGN_FAST_CHECK_WAIT_S = 120
+_ALIGN_HEARTBEAT_UNIT = 'sigmond-heartbeat.service'
+
+
+def _align_unit_state(unit, *, run):
+    """(ActiveState, NRestarts) from `systemctl show`; either is None when
+    it could not be read."""
+    r = _align_run(['systemctl', 'show', '-p', 'NRestarts', '-p', 'ActiveState', unit],
+                   run=run, timeout=15, action=f'systemctl show {unit}')
+    state = n = None
+    if r.returncode == 0:
+        for line in (r.stdout or '').splitlines():
+            key, _, val = line.partition('=')
+            if key == 'ActiveState':
+                state = val.strip()
+            elif key == 'NRestarts':
+                try:
+                    n = int(val.strip())
+                except ValueError:
+                    n = None
+    return state, n
+
+
+def _align_fast_checks(restarted_units, *, run=subprocess.run, sleep=time.sleep,
+                       now=time.time, hf_timestd_running=False) -> dict:
+    """What can be known within minutes of the restarts, not hours.
+
+    Snapshot each restarted unit's NRestarts and ActiveState, wait 120 s,
+    and require each still ``active`` with NRestarts unchanged — a unit
+    that crash-loops under Restart= reads "active" at almost any instant,
+    and only the counter shows it came back more than once.  When
+    hf-timestd runs, authority.json must be readable and no older than
+    heartbeat's own AUTHORITY_FRESHNESS_SEC (`heartbeat._read_authority`,
+    which measures its age by mtime).  Last, `systemctl start
+    sigmond-heartbeat.service` must return 0; the unit is a oneshot, so
+    `start` returns once the emit has finished.
+
+    Returns {"units_stable", "authority_fresh" (None when hf-timestd does
+    not run), "heartbeat_sent", "notes": [one sentence per problem]}."""
+    from sigmond import heartbeat
+    notes = []
+    before = {u: _align_unit_state(u, run=run) for u in restarted_units}
+    sleep(_ALIGN_FAST_CHECK_WAIT_S)
+    stable = True
+    for u in restarted_units:
+        state0, n0 = before[u]
+        state1, n1 = _align_unit_state(u, run=run)
+        if state1 != 'active':
+            stable = False
+            notes.append(f'{u}: {state1 or "state unreadable"} {_ALIGN_FAST_CHECK_WAIT_S} s '
+                         f'after its restart, not active')
+        elif n0 is None or n1 is None:
+            stable = False
+            notes.append(f'{u}: NRestarts unreadable — cannot tell whether it restarted again')
+        elif n1 != n0:
+            stable = False
+            notes.append(f'{u}: NRestarts rose {n0} -> {n1} within '
+                         f'{_ALIGN_FAST_CHECK_WAIT_S} s — it is restarting on its own')
+
+    authority_fresh = None
+    if hf_timestd_running:
+        try:
+            heartbeat._read_authority(heartbeat.AUTHORITY_PATH,
+                                      freshness_sec=heartbeat.AUTHORITY_FRESHNESS_SEC,
+                                      now=now())
+            authority_fresh = True
+        except heartbeat.ReaderUnavailable as exc:
+            authority_fresh = False
+            notes.append(f'hf-timestd: {exc}')
+        except (OSError, ValueError) as exc:
+            authority_fresh = False
+            notes.append(f'hf-timestd: authority.json unreadable ({exc.__class__.__name__}: {exc})')
+
+    r = _align_run(['systemctl', 'start', _ALIGN_HEARTBEAT_UNIT], run=run, timeout=120,
+                   action=f'systemctl start {_ALIGN_HEARTBEAT_UNIT}')
+    heartbeat_sent = r.returncode == 0
+    if not heartbeat_sent:
+        lines = (r.stderr or '').strip().splitlines()
+        last = lines[-1] if lines else f'exit {r.returncode}'
+        notes.append(f'heartbeat: systemctl start {_ALIGN_HEARTBEAT_UNIT}: {last}')
+    return {'units_stable': stable, 'authority_fresh': authority_fresh,
+            'heartbeat_sent': heartbeat_sent, 'notes': notes}
+
+
+def _align_label(component) -> str:
+    """radiod's component key is its checkout, ka9q-radio; say radiod."""
+    from sigmond.align_live import RADIOD
+    return 'radiod' if component == RADIOD else component
+
+
+def _align_print_restarts(base, moving, *, say=print) -> int:
+    """The dry run's ``restarts:`` section: what an --apply would restart.
+
+    Two sources, merged: what is stale NOW (a component moved by an
+    earlier run, or by hand, whose units started before it moved — B4's
+    already-moved components show here), and `predicted_restarts` over
+    what this run would move.  Read-only: `systemctl show`, reflogs,
+    mtimes.  Returns how many services are stale now — pending work the
+    dry run's exit code counts (1 when the services could not be read:
+    unknown staleness is not "aligned")."""
+    from sigmond import align_live
+    RADIOD = align_live.RADIOD
+    say('  restarts:')
+    try:
+        services = _align_services()
+        st = _align_staleness(base, services)
+    except Exception as exc:
+        say(f"    could not read this station's services ({exc.__class__.__name__}: {exc}) "
+            f"— restarts unknown")
+        return 1
+    stale, running = st['stale'], st['running']
+    pred_radiod, predicted = align_live.predicted_restarts(
+        moving=moving, running=running, consumes=st['consumes'],
+        radiod_consumers=st['radiod_consumers'])
+    now_radiod, now_comps = align_live.restart_sequence(
+        stale, RADIOD in stale, running, st['radiod_consumers'])
+    radiod = pred_radiod or now_radiod
+    rows = []
+    if radiod:
+        why = ('its binary was rebuilt after it started' if now_radiod
+               else 'ka9q-radio moves and is rebuilt')
+        rows.append(('radiod', f'{why}; restarts first — recording gap of about '
+                               f'{align_live.RADIOD_GAP_ESTIMATE_S} s'))
+    for c in sorted(set(predicted) | set(now_comps)):
+        if c in stale:
+            rows.append((c, f'stale now — {stale[c]}'))
+        elif c in moving:
+            rows.append((c, 'restarts after its move'))
+        elif set(st['consumes'].get(c, ())) & set(moving):
+            libs = ', '.join(sorted(set(st['consumes'][c]) & set(moving)))
+            rows.append((c, f'restarts after {libs} moves'))
+        else:
+            rows.append((c, 'follows radiod'))
+    if not rows:
+        say('    none')
+    for name, why in rows:
+        say(f'    {name:<16} {why}')
+    return len(now_comps) + (1 if now_radiod else 0)
+
+
+def _align_verify(args) -> int:
+    """`smd align --verify` — read-only, no root, no lock: has the station
+    run cleanly since its last alignment?  Two verdicts, each from the
+    heartbeat's own reader and mapper, so the answer means what the fleet
+    board means: gaps (`_read_gap_tsv` -> `_map_gaps`) and uploads
+    (`_read_backlog` -> `_map_uploads`).
+
+    Exit 0 when both are VALID and the gap row was written after the
+    alignment (the live record's `at`, else the record's own `at`); 1
+    otherwise; 2 when there is no aligned record to measure from."""
+    import json
+    from datetime import datetime, timezone
+    from sigmond import align_apply, heartbeat
+
+    path = align_apply.ALIGNED_RECORD
+    try:
+        rec = json.loads(Path(path).read_text())
+        live = rec.get('live') if isinstance(rec.get('live'), dict) else None
+        at_text = (live or {}).get('at') or rec.get('at')
+        at = datetime.strptime(at_text, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        print(f'smd align --verify: no aligned record at {path} ({exc.__class__.__name__}) — '
+              f'run smd align --apply first')
+        return 2
+    which = 'live record' if live and live.get('at') else 'alignment record'
+    print(f'smd align --verify — aligned {rec.get("release") or "?"} at {at_text} ({which})')
+
+    try:
+        gap_raw = heartbeat._read_gap_tsv()
+        gaps = heartbeat._map_gaps(gap_raw)
+    except heartbeat.ReaderUnavailable as exc:
+        gap_raw = {}
+        gaps = {'verdict': 'INDETERMINATE', 'reason': str(exc)}
+    try:
+        uploads = heartbeat._map_uploads(heartbeat._read_backlog(heartbeat.HeartbeatPaths()))
+    except heartbeat.ReaderUnavailable as exc:
+        uploads = {'verdict': 'INDETERMINATE', 'reason': str(exc)}
+
+    row_utc = (gap_raw or {}).get('row_utc')
+    row_note = f' (row {row_utc})' if row_utc else ''
+    print(f'  gaps:    {gaps["verdict"]} — {gaps["reason"]}{row_note}')
+    print(f'  uploads: {uploads["verdict"]} — {uploads["reason"]}')
+
+    newer = False
+    if row_utc:
+        try:
+            row_at = datetime.strptime(row_utc, heartbeat.GAP_ROW_UTC_FORMAT).replace(
+                tzinfo=timezone.utc)
+            newer = row_at > at
+        except ValueError:
+            newer = False
+    if row_utc and not newer:
+        print('  gap sampler has not run since the alignment — '
+              're-run --verify after the next hour')
+    ok = gaps['verdict'] == 'VALID' and uploads['verdict'] == 'VALID' and newer
+    return 0 if ok else 1
 
 
 _ALIGN_BYTE_UNITS = {'': 1, 'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3}
@@ -5082,8 +5387,8 @@ def _align_bringup(*, run=subprocess.run, say=print) -> list:
     Every step runs as a CHILD `smd` (or the site-timing script) via the
     injected ``run`` — never in-process — because each is a full
     sub-command with its own root/argument handling.  That is safe against
-    the lifecycle lock this run (`_align_apply`, once Task 7 wires this
-    in) is already holding: `config`, `admin` and `doctor` are all absent
+    the lifecycle lock this run (`_align_apply`, via `_align_make_live`)
+    is already holding: `config`, `admin` and `doctor` are all absent
     from `main()`'s `_MUTATING = {'install', 'apply', 'start', 'stop',
     'restart', 'reload'}` (checked by reading `main()`'s own dispatch
     around the `_MUTATING` set — none of these three verbs takes
@@ -5326,26 +5631,159 @@ def _align_apply(args) -> int:
             steps = align_apply.apply_plan(rel, items, ctx)
 
         steps = steps + extra_steps
+        return _align_make_live(args, rel, steps, base=base, catalog=catalog, now=_now)
 
-        align_apply.record(rel, steps, manifest_path=MANIFEST_PATH,
-                           history=lambda e: record_update(HISTORY_FILE, e), now=_now)
 
-        for step in steps:
-            line = f'  {step.component}: {step.outcome}'
-            if step.detail:
-                line += f' — {step.detail}'
-            print(line)
-        outcomes = ('moved', 'installed', 'left', 'refused', 'failed', 'skipped')
-        counts = {o: sum(1 for s in steps if s.outcome == o) for o in outcomes}
-        fetched_mib = sum(s.bytes or 0 for s in steps) / (1024 * 1024)
-        if counts['moved']:
-            print('  services still run the old code until restarted — Plan 2b')
-        print(f"  summary: moved {counts['moved']}, installed {counts['installed']}, "
-              f"left {counts['left']}, refused {counts['refused']}, "
-              f"failed {counts['failed']}, skipped {counts['skipped']}, "
-              f"fetched {fetched_mib:.1f} MiB")
-        bad = any(s.outcome in ('failed', 'refused', 'skipped') for s in steps)
-        return 1 if bad else 0
+_ALIGN_BLOCKING = ('failed', 'refused', 'skipped')
+
+
+def _align_print_steps(steps) -> None:
+    for step in steps:
+        line = f'  {step.component}: {step.outcome}'
+        if step.detail:
+            line += f' — {step.detail}'
+        print(line)
+
+
+def _align_print_summary(steps) -> None:
+    outcomes = ('moved', 'installed', 'left', 'refused', 'failed', 'skipped', 'restarted')
+    counts = {o: sum(1 for s in steps if s.outcome == o) for o in outcomes}
+    fetched_mib = sum(s.bytes or 0 for s in steps) / (1024 * 1024)
+    print(f"  summary: moved {counts['moved']}, installed {counts['installed']}, "
+          f"left {counts['left']}, refused {counts['refused']}, "
+          f"failed {counts['failed']}, skipped {counts['skipped']}, "
+          f"restarted {counts['restarted']}, fetched {fetched_mib:.1f} MiB")
+
+
+def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
+    """Everything `--apply` does after the moves, in order (Plan 2b):
+
+    image-file refresh -> bring-up re-runs -> records -> restart of stale
+    services (radiod first) -> fast checks -> live record.
+
+    A blocking move outcome stops before any of it (Plan 2a's own record
+    still runs: history lines only, since the manifest is written only on
+    a clean run).  A failed or refused image refresh stops before
+    bring-up; a failed bring-up step stops before the record — so the
+    manifest and aligned.json never claim an alignment whose bring-up did
+    not finish — and nothing restarts after either.  The moves' history
+    lines are still written then: those checkouts did move.
+
+    Called with the lifecycle lock already held by `_align_apply`.
+    Restarts run in-process (`_align_restart`), never a child `smd
+    restart`, which would find the lock taken and exit.
+    """
+    from sigmond import align_apply
+    from sigmond.align_live import RADIOD
+    from sigmond.provenance import record_update, HISTORY_FILE
+
+    def history(e):
+        record_update(HISTORY_FILE, e)
+
+    _align_print_steps(move_steps)
+    if any(s.outcome in _ALIGN_BLOCKING for s in move_steps):
+        align_apply.record(rel, move_steps, manifest_path=MANIFEST_PATH,
+                           history=history, now=now)
+        _align_print_summary(move_steps)
+        return 1
+
+    image_steps = _align_refresh_image_files(rel.tag)
+    _align_print_steps(image_steps)
+    if any(s.outcome in ('failed', 'refused') for s in image_steps):
+        print('  bring-up not re-run and nothing restarted: an image-carried file '
+              'did not refresh — see above')
+        align_apply.record_history(rel, move_steps + image_steps, history=history, now=now)
+        _align_print_summary(move_steps + image_steps)
+        return 1
+
+    bringup_steps = _align_bringup()
+    _align_print_steps(bringup_steps)
+    steps = move_steps + image_steps + bringup_steps
+    if any(s.outcome in ('failed', 'refused') for s in bringup_steps):
+        print('  not recorded and nothing restarted: a bring-up step failed — see above')
+        align_apply.record_history(rel, steps, history=history, now=now)
+        _align_print_summary(steps)
+        return 1
+
+    align_apply.record(rel, steps, manifest_path=MANIFEST_PATH, history=history, now=now)
+
+    try:
+        services = _align_services()
+        staleness = _align_staleness(base, services, catalog or None)
+    except Exception as exc:
+        # Recorded already: the alignment itself happened. Only the
+        # restarts are unknown, so nothing restarts and the run exits 1.
+        step = align_apply.Step('restarts', 'failed',
+                                f"could not read this station's services "
+                                f"({exc.__class__.__name__}: {exc}) — nothing restarted")
+        _align_print_steps([step])
+        _align_print_summary(steps + [step])
+        return 1
+    radiod_first, comps, uploader = _align_plan_restarts(move_steps, bringup_steps, staleness)
+
+    if getattr(args, 'no_restart', False):
+        from sigmond.commands.uploader import SERVICE
+        names = ([_align_label(RADIOD)] if radiod_first else []) + list(comps)
+        if uploader and _align_is_active(SERVICE, run=subprocess.run):
+            names.append('hs-uploader')
+        if names:
+            n = len(names)
+            verb = 'services still run' if n != 1 else 'service still runs'
+            print(f"  {n} {verb} old code: {', '.join(names)} — "
+                  f"re-run smd align --apply to restart them")
+        _align_print_summary(steps)
+        return 0
+
+    print('  restarts:')
+
+    def indented(msg):
+        print('  ' + msg)
+
+    restarted_units: list = []
+    restart_steps = []
+    if radiod_first or comps:
+        restart_steps = _align_restart(radiod_first, comps, services,
+                                       run=subprocess.run, say=indented,
+                                       units_out=restarted_units)
+    if uploader:
+        restart_steps.append(_align_restart_uploader(run=subprocess.run, say=indented,
+                                                     units_out=restarted_units))
+    if not restart_steps:
+        print('    nothing stale — no restarts')
+    for step in restart_steps:
+        line = f'    {_align_label(step.component)}: {step.outcome}'
+        if step.detail:
+            line += f' — {step.detail}'
+        print(line)
+    for step in restart_steps:
+        if step.outcome in ('restarted', 'failed'):
+            history({'at': now(),
+                     'what': f'smd align --apply {rel.tag}: {step.component} {step.outcome}'
+                             + (f' {step.detail}' if step.detail else '')})
+    steps = steps + restart_steps
+
+    checks_ok = True
+    restarted = [s.component for s in restart_steps if s.outcome == 'restarted']
+    if restarted_units:
+        print(f'  checks: (waiting {_ALIGN_FAST_CHECK_WAIT_S} s for the restarted units to settle)')
+        checks = _align_fast_checks(restarted_units, run=subprocess.run, sleep=time.sleep,
+                                    now=time.time,
+                                    hf_timestd_running='hf-timestd' in staleness['running'])
+        fresh = checks.get('authority_fresh')
+        print(f"    units stable:    {'yes' if checks['units_stable'] else 'NO'}")
+        print(f"    authority fresh: "
+              f"{'n/a (hf-timestd not running)' if fresh is None else ('yes' if fresh else 'NO')}")
+        print(f"    heartbeat sent:  {'yes' if checks['heartbeat_sent'] else 'NO'}")
+        for note in checks.get('notes') or []:
+            print(f'    {note}')
+        checks_ok = bool(checks['units_stable'] and checks['heartbeat_sent']
+                         and fresh is not False)
+        align_apply.record_live(align_apply.ALIGNED_RECORD,
+                                {'at': now(), 'restarted': restarted, **checks})
+
+    _align_print_summary(steps)
+    bad = any(s.outcome in _ALIGN_BLOCKING for s in steps)
+    return 1 if (bad or not checks_ok) else 0
 
 
 def cmd_align(args) -> int:
@@ -5357,15 +5795,25 @@ def cmd_align(args) -> int:
     verified current — an unreachable probe never counts as aligned),
     1 alignment available, 2 target could not be established.
 
-    `--apply` (Plan 2a) performs the mechanical steps; see `_align_apply`,
-    kept out of this function's own body so the read-only guard test can
-    keep proving this plain verb never changes a station.
+    `--apply` performs the mechanical steps and then makes them live
+    (image files, bring-up, restarts, fast checks); see `_align_apply`
+    and `_align_make_live`, kept out of this function's own body so the
+    read-only guard test can keep proving this plain verb never changes a
+    station.  `--verify` (read-only) reads the gap and upload verdicts
+    since the last alignment; see `_align_verify`.
+
+    The dry run's ``restarts:`` section counts a service that is stale NOW
+    (its code moved after it started) as pending work: exit 1, since
+    --apply would restart it.
     """
     if not getattr(args, 'apply', False) and (
             getattr(args, 'allow_rollback', False)
-            or getattr(args, 'max_bytes', None) is not None):
-        print('smd align: --allow-rollback and --max-bytes only apply with --apply')
+            or getattr(args, 'max_bytes', None) is not None
+            or getattr(args, 'no_restart', False)):
+        print('smd align: --allow-rollback, --max-bytes and --no-restart only apply with --apply')
         return 2
+    if getattr(args, 'verify', False):
+        return _align_verify(args)
     if getattr(args, 'apply', False):
         return _align_apply(args)
     from sigmond import align
@@ -5463,6 +5911,9 @@ def cmd_align(args) -> int:
     if recorded and recorded != rel.tag:
         print('  Proxmox host: level not measured from here — check it with '
               'pm-align (Plan 3)')
+    moving = [it.component for it in plan
+              if it.status in ('move', 'missing') and it.component not in ahead_components]
+    stale_now = _align_print_restarts(base, moving)
     counts = {s: sum(1 for i in plan if i.status == s)
               for s in ('move', 'refuse', 'missing', 'stray')}
     # A 'move' item commit_distance proved already ahead of the target was
@@ -5474,13 +5925,16 @@ def cmd_align(args) -> int:
     print(f"  summary: {counts['move']} to move, {counts['ahead']} left ahead, "
           f"{counts['refuse']} refused, {counts['missing']} missing, "
           f"{counts['stray']} stray, "
-          f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh")
+          f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh, "
+          f"{stale_now} service{'s' if stale_now != 1 else ''} to restart")
     if unverified:
         names = ', '.join(f['path'] for f in unverified)
         print(f"  {len(unverified)} file{'s' if len(unverified) != 1 else ''} "
               f"could not be checked: {names}")
-    print('  apply: re-run with --apply to align this station (Plan 2a)')
-    pending = counts['move'] or counts['refuse'] or counts['missing'] or stale or unverified
+    print('  apply: re-run with --apply to align this station and restart what is stale '
+          '(--no-restart leaves services alone)')
+    pending = (counts['move'] or counts['refuse'] or counts['missing'] or stale or unverified
+               or stale_now)
     return 1 if pending else 0
 
 
@@ -21240,9 +21694,18 @@ def main() -> int:
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
     p.add_argument('--no-cost', action='store_true',
                    help='skip the per-component commit-distance lookups')
-    p.add_argument('--apply', action='store_true',
-                   help='perform the mechanical steps (default: dry run) — '
-                        'Plan 2a; services still need a restart (Plan 2b)')
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument('--apply', action='store_true',
+                      help='perform the steps (default: dry run): move components, '
+                           'refresh image files, re-run bring-up, restart stale '
+                           'services (radiod first), then fast checks')
+    mode.add_argument('--verify', action='store_true',
+                      help='read-only: gap and upload verdicts since the last '
+                           'alignment (exit 0 clean, 1 not yet or not clean, '
+                           '2 no aligned record)')
+    p.add_argument('--no-restart', action='store_true',
+                   help='with --apply: move and record, but restart nothing — '
+                        'name the services that still run old code')
     p.add_argument('--allow-rollback', action='store_true',
                    help='also move a component that is ahead of the pin back '
                         'to it (only with --apply)')

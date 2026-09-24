@@ -539,8 +539,8 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
                 stopped = f"stopped after {it.component} failed"
             elif ctx.max_bytes is not None and total_bytes > ctx.max_bytes:
                 stopped = "byte budget reached"
-    # The "services still run the old code — Plan 2b" notice is the CLI's
-    # to print, once, after the step list (bin/smd _align_apply).
+    # Restarting what these moves left stale is the CLI's next stage
+    # (bin/smd _align_apply), never apply_plan's.
     return steps
 
 
@@ -602,6 +602,25 @@ def record(rel: Release, steps: list, *, manifest_path: Path,
         }, indent=2) + "\n")
 
     record_history(rel, steps, history=history, now=now)
+
+
+def record_live(aligned_path: Path, live: dict) -> None:
+    """Merge ``{"live": live}`` into the aligned.json this run's `record`
+    wrote: what restarted, when, and how the fast checks came out.
+    tmp + ``os.replace``, so a reader never sees half a file.  When
+    aligned.json is absent (or unreadable), nothing is written: a live
+    block with no alignment beneath it would describe nothing."""
+    aligned_path = Path(aligned_path)
+    try:
+        data = json.loads(aligned_path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    data["live"] = live
+    tmp = aligned_path.with_name(aligned_path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, aligned_path)
 
 
 def refresh_image_file(tag: str, name: str, dest: Path, *,

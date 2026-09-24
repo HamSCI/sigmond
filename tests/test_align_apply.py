@@ -582,9 +582,9 @@ class ApplyPlanTests(unittest.TestCase):
         self.assertEqual(steps[0].outcome, "refused")
         self.assertEqual(steps[0].detail, align.DIVERGED_NOTE)
 
-    # --- the Plan 2b notice: the CLI prints it after the step list ---
+    # --- restart messaging belongs to the CLI's restart stage, not apply_plan ---
 
-    def test_apply_plan_leaves_the_plan_2b_notice_to_the_cli(self):
+    def test_apply_plan_leaves_restart_messaging_to_the_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _repo(base, "sigmond")
@@ -594,7 +594,7 @@ class ApplyPlanTests(unittest.TestCase):
             items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
             steps = align_apply.apply_plan(rel(), items, ctx)
             self.assertEqual(steps[0].outcome, "moved")
-            self.assertFalse(any("Plan 2b" in m for m in messages))
+            self.assertFalse(any("Plan 2b" in m or "old code" in m for m in messages))
 
     def test_no_say_notice_without_a_move(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1467,3 +1467,45 @@ class RefreshImageFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecordLiveTests(unittest.TestCase):
+    """Task 7: record_live merges {"live": …} into this run's aligned.json."""
+
+    def _aligned(self, tmp):
+        release = align.Release(tag="v3.53", manifest_text="m\n", appliance_commit=C,
+                                components={"sigmond": "2" * 40, "hf-timestd": "4" * 40})
+        ap = Path(tmp) / "aligned.json"
+        align_apply.record(release, [align_apply.Step("sigmond", "moved", "a -> b"),
+                                     align_apply.Step("hf-timestd", "left", align.AHEAD_NOTE)],
+                           manifest_path=Path(tmp) / "manifest.txt", aligned_path=ap,
+                           history=lambda e: None, now=lambda: "2026-09-24T12:00:00Z")
+        return release, ap
+
+    def test_merges_live_keeping_components_and_left(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            release, ap = self._aligned(tmp)
+            live = {"at": "2026-09-24T12:05:00Z", "restarted": ["hf-timestd"],
+                    "units_stable": True, "authority_fresh": None,
+                    "heartbeat_sent": True, "notes": []}
+            align_apply.record_live(ap, live)
+            data = json.loads(ap.read_text())
+            self.assertEqual(data["live"], live)
+            self.assertEqual(data["components"], release.components)
+            self.assertEqual(data["left"], {"hf-timestd": align.AHEAD_NOTE})
+            self.assertEqual(data["at"], "2026-09-24T12:00:00Z")
+            self.assertEqual(data["release"], "v3.53")
+            self.assertFalse((Path(tmp) / "aligned.json.tmp").exists())
+
+    def test_absent_aligned_json_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ap = Path(tmp) / "aligned.json"
+            align_apply.record_live(ap, {"at": "t"})
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_replaces_an_earlier_live_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ap = self._aligned(tmp)
+            align_apply.record_live(ap, {"at": "one"})
+            align_apply.record_live(ap, {"at": "two"})
+            self.assertEqual(json.loads(ap.read_text())["live"], {"at": "two"})
