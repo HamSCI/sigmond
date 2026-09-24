@@ -47,9 +47,15 @@ class PredictedTests(unittest.TestCase):
 
     def test_ka9q_radio_moving_restarts_radiod_and_every_running_consumer(self):
         got = L.predicted_restarts(
-            moving={L.RADIOD}, running={"radiod", "psk-recorder", "hf-timestd"},
+            moving={L.RADIOD}, running={L.RADIOD, "psk-recorder", "hf-timestd"},
             consumes={}, radiod_consumers={"psk-recorder", "hf-timestd", "wspr-recorder"})
         self.assertEqual(got, (True, ["hf-timestd", "psk-recorder"]))
+
+    def test_predicted_uses_the_topology_key(self):
+        got = L.predicted_restarts(
+            moving={"ka9q-radio"}, running={"ka9q-radio", "psk-recorder"},
+            consumes={}, radiod_consumers={"psk-recorder"})
+        self.assertEqual(got, (True, ["psk-recorder"]))
 
 
 class GuardTests(unittest.TestCase):

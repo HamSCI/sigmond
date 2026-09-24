@@ -50,11 +50,11 @@ def predicted_restarts(*, moving: Iterable[str], running: Iterable[str],
     never in the list; the bool carries it.
     """
     moving, running = set(moving), set(running)
-    radiod = RADIOD in moving and "radiod" in running
+    radiod = RADIOD in moving and RADIOD in running
     names = set()
     if radiod:
         names |= set(radiod_consumers) & running
-    for c in running - {"radiod"}:
+    for c in running - {RADIOD}:
         if c in moving or set(consumes.get(c, ())) & moving:
             names.add(c)
     return radiod, sorted(names)
