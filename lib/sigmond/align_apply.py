@@ -86,9 +86,13 @@ def resolve(repo, sha, *, run: Callable = subprocess.run) -> str:
 
 
 def in_origin_history(repo, full, *, run: Callable = subprocess.run) -> bool:
-    """Whether ``full`` is reachable from any origin remote-tracking ref or tag."""
+    """Whether ``full`` is reachable from any origin remote-tracking branch.
+
+    refs/tags is deliberately excluded: a tag created locally (or left over
+    from another remote) must never make an unpublished commit look
+    published."""
     argv = git(repo, "for-each-ref", "--contains", full, "--format=%(refname)",
-               "refs/remotes/origin", "refs/tags")
+               "refs/remotes/origin")
     r = run(argv, capture_output=True, text=True, timeout=30)
     return bool((r.stdout or "").strip())
 

@@ -116,6 +116,15 @@ class InOriginHistoryTests(unittest.TestCase):
         fake = _FakeGit({"for-each-ref": (0, "", "")})
         self.assertFalse(align_apply.in_origin_history("/repo", "a" * 40, run=fake))
 
+    def test_argv_checks_origin_remote_only_not_tags(self):
+        # A tag created locally (or left from another remote) must never
+        # make an unpublished commit look published.
+        fake = _FakeGit({"for-each-ref": (0, "", "")})
+        align_apply.in_origin_history("/repo", "a" * 40, run=fake)
+        argv = fake.calls[-1]
+        self.assertIn("refs/remotes/origin", argv)
+        self.assertNotIn("refs/tags", argv)
+
 
 class DirtyFilesTests(unittest.TestCase):
     def test_parses_porcelain_paths(self):
