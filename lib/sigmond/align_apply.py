@@ -294,8 +294,13 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
             if ctx.install_missing is None:
                 steps.append(Step(it.component, "refused", "no installer wired"))
             else:
-                ctx.install_missing(it.component, it.target)
-                steps.append(Step(it.component, "installed"))
+                try:
+                    ctx.install_missing(it.component, it.target)
+                except Exception as e:  # noqa: BLE001 — an installer is foreign code
+                    steps.append(Step(it.component, "failed", f"install failed: {e}"))
+                    stopped = f"stopped after {it.component} failed"
+                else:
+                    steps.append(Step(it.component, "installed"))
         elif it.status in ("refuse", "diverged"):
             steps.append(Step(it.component, "refused", it.note))
         elif it.status == "ahead" and not ctx.allow_rollback:
@@ -347,6 +352,7 @@ def record(rel: Release, steps: list, *, manifest_path: Path,
             "appliance_commit": rel.appliance_commit,
             "at": now(),
             "components": dict(rel.components),
+            "left": {s.component: s.detail for s in steps if s.outcome == "left"},
         }, indent=2) + "\n")
 
     for step in steps:
