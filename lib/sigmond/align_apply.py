@@ -7,6 +7,8 @@ a real checkout.  Stdlib only.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -310,3 +312,44 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
     if any(s.outcome == "moved" for s in steps):
         ctx.say("services still run the old code until restarted — Plan 2b")
     return steps
+
+
+ALIGNED_RECORD = Path("/etc/sigmond-appliance/aligned.json")
+
+_LOGGED_OUTCOMES = ("moved", "installed", "failed")
+
+
+def _atomic_write_keeping_prev(path: Path, text: str) -> None:
+    """tmp + os.replace, keeping whatever the path held before as <path>.prev."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    if path.exists():
+        os.replace(path, path.with_name(path.name + ".prev"))
+    os.replace(tmp, path)
+
+
+def record(rel: Release, steps: list, *, manifest_path: Path,
+          aligned_path: Path = ALIGNED_RECORD,
+          history: Callable[[dict], None], now: Callable[[], str]) -> None:
+    """Persist a completed alignment. The manifest and the aligned-release
+    marker are written only when every step succeeded (none failed or was
+    skipped); a history line is appended for each component that moved,
+    installed, or failed, whichever way the run as a whole came out."""
+    manifest_path = Path(manifest_path)
+    aligned_path = Path(aligned_path)
+    ok = not any(s.outcome in ("failed", "skipped") for s in steps)
+    if ok:
+        _atomic_write_keeping_prev(manifest_path, rel.manifest_text)
+        aligned_path.parent.mkdir(parents=True, exist_ok=True)
+        aligned_path.write_text(json.dumps({
+            "release": rel.tag,
+            "appliance_commit": rel.appliance_commit,
+            "at": now(),
+            "components": dict(rel.components),
+        }, indent=2) + "\n")
+
+    for step in steps:
+        if step.outcome in _LOGGED_OUTCOMES:
+            history({"at": now(),
+                    "what": f"smd align --apply {rel.tag}: {step.component} {step.outcome} {step.detail}"})

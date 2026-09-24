@@ -1,4 +1,6 @@
 """Tests for sigmond.align_apply — git is faked; nothing touches a real checkout."""
+import inspect
+import json
 import tempfile
 import types
 import unittest
@@ -555,6 +557,116 @@ class ApplyPlanTests(unittest.TestCase):
             items = [align.Item("sigmond", "current", "1" * 40, "1" * 40)]
             align_apply.apply_plan(rel(), items, ctx)
             self.assertEqual(messages, [])
+
+
+class RecordTests(unittest.TestCase):
+    def test_clean_run_writes_manifest_aligned_json_and_prev(self):
+        release = align.Release(tag="v3.53", manifest_text="sigmond: 2222222\n",
+                                appliance_commit=C,
+                                components={"sigmond": "2" * 40, "hf-timestd": "4" * 40})
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.txt"
+            manifest_path.write_text("old manifest\n")
+            aligned_path = Path(tmp) / "aligned.json"
+            history_calls = []
+            steps = [
+                align_apply.Step("sigmond", "moved", "11111111 -> 22222222", 100),
+                align_apply.Step("hf-timestd", "current"),
+            ]
+            align_apply.record(release, steps, manifest_path=manifest_path,
+                               aligned_path=aligned_path,
+                               history=history_calls.append, now=lambda: "2026-09-24T00:00:00Z")
+
+            self.assertEqual(manifest_path.read_text(), release.manifest_text)
+            prev_path = manifest_path.with_name(manifest_path.name + ".prev")
+            self.assertEqual(prev_path.read_text(), "old manifest\n")
+
+            data = json.loads(aligned_path.read_text())
+            self.assertEqual(data["release"], release.tag)
+            self.assertEqual(data["appliance_commit"], release.appliance_commit)
+            self.assertEqual(data["at"], "2026-09-24T00:00:00Z")
+            self.assertEqual(data["components"], release.components)
+
+            self.assertEqual(len(history_calls), 1)
+            self.assertEqual(history_calls[0]["at"], "2026-09-24T00:00:00Z")
+            self.assertEqual(history_calls[0]["what"],
+                             "smd align --apply v3.53: sigmond moved 11111111 -> 22222222")
+
+    def test_no_prev_written_when_manifest_path_did_not_exist(self):
+        release = align.Release(tag="v3.53", manifest_text="sigmond: 2222222\n",
+                                appliance_commit=C, components={"sigmond": "2" * 40})
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.txt"
+            aligned_path = Path(tmp) / "aligned.json"
+            steps = [align_apply.Step("sigmond", "moved", "11111111 -> 22222222", 100)]
+            align_apply.record(release, steps, manifest_path=manifest_path,
+                               aligned_path=aligned_path,
+                               history=lambda e: None, now=lambda: "t")
+            self.assertTrue(manifest_path.exists())
+            self.assertFalse(manifest_path.with_name(manifest_path.name + ".prev").exists())
+
+    def test_a_failed_step_writes_neither_file_but_still_logs_the_failure(self):
+        release = align.Release(tag="v3.53", manifest_text="sigmond: 2222222\n",
+                                appliance_commit=C, components={"sigmond": "2" * 40})
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.txt"
+            manifest_path.write_text("old manifest\n")
+            aligned_path = Path(tmp) / "aligned.json"
+            history_calls = []
+            steps = [
+                align_apply.Step("sigmond", "moved", "11111111 -> 22222222", 100),
+                align_apply.Step("hf-timestd", "failed", "boom"),
+                align_apply.Step("wspr-recorder", "skipped", "stopped after hf-timestd failed"),
+            ]
+            align_apply.record(release, steps, manifest_path=manifest_path,
+                               aligned_path=aligned_path,
+                               history=history_calls.append, now=lambda: "t")
+
+            self.assertEqual(manifest_path.read_text(), "old manifest\n")
+            self.assertFalse(aligned_path.exists())
+            whats = [h["what"] for h in history_calls]
+            self.assertEqual(len(whats), 2)
+            self.assertIn("smd align --apply v3.53: sigmond moved 11111111 -> 22222222", whats)
+            self.assertIn("smd align --apply v3.53: hf-timestd failed boom", whats)
+
+    def test_installed_step_also_logs_a_history_line(self):
+        release = align.Release(tag="v3.53", manifest_text="", appliance_commit=C,
+                                components={"sigmond": "2" * 40})
+        with tempfile.TemporaryDirectory() as tmp:
+            history_calls = []
+            steps = [align_apply.Step("sigmond", "installed")]
+            align_apply.record(release, steps,
+                               manifest_path=Path(tmp) / "manifest.txt",
+                               aligned_path=Path(tmp) / "aligned.json",
+                               history=history_calls.append, now=lambda: "t")
+            self.assertEqual(len(history_calls), 1)
+            self.assertEqual(history_calls[0]["what"], "smd align --apply v3.53: sigmond installed ")
+
+    def test_left_refused_and_current_steps_are_not_logged(self):
+        release = align.Release(tag="v3.53", manifest_text="", appliance_commit=C,
+                                components={"sigmond": "2" * 40})
+        with tempfile.TemporaryDirectory() as tmp:
+            history_calls = []
+            steps = [
+                align_apply.Step("sigmond", "current"),
+                align_apply.Step("old-client", "left"),
+                align_apply.Step("hf-timestd", "refused", "diverged"),
+            ]
+            align_apply.record(release, steps,
+                               manifest_path=Path(tmp) / "manifest.txt",
+                               aligned_path=Path(tmp) / "aligned.json",
+                               history=history_calls.append, now=lambda: "t")
+            self.assertEqual(history_calls, [])
+
+    def test_default_aligned_path_is_the_appliance_state_file(self):
+        self.assertEqual(align_apply.ALIGNED_RECORD, Path("/etc/sigmond-appliance/aligned.json"))
+
+    def test_record_never_names_the_version_file(self):
+        # ALIGNED_RECORD is aligned.json, a separate record; record() must
+        # never touch /etc/sigmond-appliance/version — check by construction,
+        # not just by behaviour: no path in its source ever names it.
+        src = inspect.getsource(align_apply.record)
+        self.assertNotIn("version", src.lower())
 
 
 if __name__ == "__main__":
