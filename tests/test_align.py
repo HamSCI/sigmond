@@ -132,5 +132,52 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(next(i for i in plan if i.component == "hf-timestd").status, "refuse")
 
 
+import hashlib
+
+
+class ProbeTests(unittest.TestCase):
+    def test_github_slug(self):
+        self.assertEqual(align.github_slug("https://github.com/ka9q/ka9q-radio"), "ka9q/ka9q-radio")
+        self.assertEqual(align.github_slug("https://github.com/HamSCI/sigmond.git/"), "HamSCI/sigmond")
+        self.assertIsNone(align.github_slug("https://gitlab.com/x/y"))
+
+    def test_commit_distance(self):
+        url = "https://api.github.com/repos/HamSCI/hf-timestd/compare/4595c00...5c8196d"
+        body = json.dumps({"ahead_by": 20, "behind_by": 0,
+                           "files": [{}] * 22}).encode()
+        got = align.commit_distance("HamSCI/hf-timestd", "4595c00", "5c8196d",
+                                    urlopen=FakeUrlopen({url: body}))
+        self.assertEqual(got, {"ahead": 20, "behind": 0, "files": 22})
+
+    def test_commit_distance_failure_is_reported_not_raised(self):
+        got = align.commit_distance("HamSCI/x", "a", "b", urlopen=FakeUrlopen({}))
+        self.assertIn("error", got)
+
+    def test_image_file_drift(self):
+        good, stale = b"#!/bin/bash\nnew\n", b"#!/bin/bash\nold\n"
+        routes = {f"{align.RAW_BASE}/v3.53/sigmond-site-timing": good,
+                  f"{align.RAW_BASE}/v3.53/sigmond-location-check": good}
+        local = {"/usr/local/sbin/sigmond-site-timing": stale,
+                 "/usr/local/sbin/sigmond-location-check": None}
+        got = {d["path"]: d["status"] for d in align.image_file_drift(
+            "v3.53", read_local=local.get, urlopen=FakeUrlopen(routes))}
+        self.assertEqual(got["/usr/local/sbin/sigmond-site-timing"], "differs")
+        self.assertEqual(got["/usr/local/sbin/sigmond-location-check"], "absent")
+
+    def test_image_file_unreachable_is_unknown(self):
+        got = align.image_file_drift("v3.53", read_local=lambda p: b"x", urlopen=FakeUrlopen({}))
+        self.assertEqual({d["status"] for d in got}, {"unknown"})
+
+    def test_recorded_release(self):
+        import tempfile, os
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("v3.36\n")
+        try:
+            self.assertEqual(align.recorded_release(f.name), "v3.36")
+        finally:
+            os.unlink(f.name)
+        self.assertIsNone(align.recorded_release("/nonexistent/version"))
+
+
 if __name__ == "__main__":
     unittest.main()
