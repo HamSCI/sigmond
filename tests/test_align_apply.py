@@ -207,6 +207,9 @@ class _MultiFakeGit:
         self.fetch_stderr = {}     # name -> git's progress stderr
         self.raise_on = {}         # subcommand -> exception to raise
         self.fail_checkout_to = set()  # SHAs a --detach checkout to fails
+        self.head = {}             # name -> SHA the last --detach checkout set
+        self.branch = {}           # name -> branch symbolic-ref reports
+        self.branch_tip = {}       # name -> SHA `checkout <branch>` lands on
 
     @staticmethod
     def _name(argv):
@@ -234,6 +237,8 @@ class _MultiFakeGit:
                 return types.SimpleNamespace(returncode=128, stdout="",
                                              stderr="fatal: ambiguous argument\n")
             sha = argv[-1].split("^")[0]
+            if sha == "HEAD":   # where the last --detach checkout left it
+                sha = self.head.get(name, "0" * 40)
             return types.SimpleNamespace(returncode=0, stdout=sha + "\n", stderr="")
         if sub == "for-each-ref":
             present = name not in self.not_in_origin
@@ -243,10 +248,19 @@ class _MultiFakeGit:
             files = self.dirty.get(name, [])
             return types.SimpleNamespace(returncode=0,
                                          stdout="".join(f" M {f}\n" for f in files), stderr="")
+        if sub == "symbolic-ref":
+            b = self.branch.get(name)
+            return types.SimpleNamespace(returncode=0 if b else 1,
+                                         stdout=(b + "\n") if b else "", stderr="")
         if sub == "checkout":
+            if argv[-1] == self.branch.get(name):
+                self.head[name] = self.branch_tip.get(name, "0" * 40)
+                return ok
             if "--detach" in argv and argv[-1] in self.fail_checkout_to:
                 return types.SimpleNamespace(returncode=1, stdout="",
                                              stderr="error: cannot checkout\n")
+            if "--detach" in argv:
+                self.head[name] = argv[-1]
             return ok
         if sub == "diff":
             files = self.changed.get(name, set())
@@ -714,6 +728,32 @@ class FinalReviewMoveTests(unittest.TestCase):
             self.assertLess(events.index("sigmond: running install.sh …"),
                             events.index("INSTALL"))
 
+    def test_rollback_onto_a_branch_whose_tip_moved_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            git.changed["sigmond"] = {"pyproject.toml"}
+            git.branch["sigmond"] = "main"
+            git.branch_tip["sigmond"] = "7" * 40      # not LIVE
+            steps = self._one(base, git, run_install=lambda r: 1)
+            self.assertIn("rollback FAILED: main HEAD is 77777777 after the rollback, "
+                          "not 11111111", steps[0].detail)
+
+    def test_rollback_onto_the_branch_says_which(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "sigmond")
+            git = _MultiFakeGit()
+            git.changed["sigmond"] = {"pyproject.toml"}
+            git.branch["sigmond"] = "main"
+            git.branch_tip["sigmond"] = LIVE
+            steps = self._one(base, git, run_install=lambda r: 1)
+            self.assertEqual(steps[0].detail, "install.sh exit 1 — rolled back to 11111111 on main")
+            back = [c for c in git.calls if git._subcommand(c) == "checkout"][-1]
+            self.assertEqual(back[:2], ["as", "sigmond"])
+            self.assertEqual(back[-1], "main")
+
     # --- T2 / T4 ---
 
     def test_pin_not_in_origin_history_refuses_without_a_checkout(self):
@@ -897,6 +937,99 @@ class FinalReviewMoveTests(unittest.TestCase):
             self.assertIn("pin not refreshed", steps[0].detail)
             self.assertIn("does not resolve", steps[0].detail)
             self.assertFalse((repo / ".pin").exists())
+
+
+class RollbackRealGitTests(unittest.TestCase):
+    """Fix round 2 (N1, N2): _roll_back against a REAL tmp git repo — an
+    install.sh that regenerates uv.lock and then fails, and a checkout
+    that sat on a branch."""
+
+    def _git(self, repo, *args):
+        import subprocess
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _two_commits(self, base):
+        """sigmond/ with commit A (uv.lock "a") on main and commit B
+        (uv.lock "b") on `next`; origin/main -> B so origin vouches for it.
+        Returns (repo, A, B) with main checked out at A."""
+        repo = base / "sigmond"
+        repo.mkdir()
+        self._git(repo, "init", "-q", "-b", "main")
+        self._git(repo, "config", "user.name", "T")
+        self._git(repo, "config", "user.email", "t@example.com")
+        (repo / "uv.lock").write_text("a\n")
+        self._git(repo, "add", "uv.lock")
+        self._git(repo, "commit", "-q", "-m", "A")
+        a = self._git(repo, "rev-parse", "HEAD")
+        self._git(repo, "checkout", "-q", "-b", "next")
+        (repo / "uv.lock").write_text("b\n")
+        self._git(repo, "commit", "-q", "-am", "B")
+        b = self._git(repo, "rev-parse", "HEAD")
+        self._git(repo, "checkout", "-q", "main")
+        self._git(repo, "update-ref", "refs/remotes/origin/main", b)
+        return repo, a, b
+
+    def _apply(self, base, a, b):
+        import subprocess
+
+        def failing_install(repo):
+            (repo / "uv.lock").write_text("regenerated by uv sync\n")
+            return 1
+        ctx = align_apply.Ctx(base=base, run=subprocess.run, as_owner=lambda o, argv: argv,
+                              owner_of=lambda p: "me", catalog={}, origins={},
+                              prefetched={"sigmond": None}, run_install=failing_install,
+                              say=lambda m: None)
+        return align_apply.apply_plan(rel(), [align.Item("sigmond", "forward", a, b)], ctx)
+
+    def test_install_that_regenerates_uvlock_then_fails_still_rolls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, a, b = self._two_commits(base)
+            self._git(repo, "checkout", "-q", "--detach", a)
+            (repo / ".pin").write_text(a + "\n")
+            steps = self._apply(base, a, b)
+            self.assertEqual(steps[0].outcome, "failed")
+            self.assertIn("rolled back to", steps[0].detail)
+            self.assertIn("reset uv.lock", steps[0].detail)
+            self.assertNotIn("FAILED", steps[0].detail)
+            self.assertEqual(self._git(repo, "rev-parse", "HEAD"), a)
+            self.assertEqual((repo / ".pin").read_text(), a + "\n")
+
+    def test_a_checkout_on_a_branch_returns_to_that_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, a, b = self._two_commits(base)          # on main, at A
+            steps = self._apply(base, a, b)
+            self.assertEqual(steps[0].outcome, "failed")
+            self.assertIn("rolled back to", steps[0].detail)
+            self.assertEqual(self._git(repo, "symbolic-ref", "-q", "--short", "HEAD"), "main")
+            self.assertEqual(self._git(repo, "rev-parse", "HEAD"), a)
+            self.assertFalse((repo / ".pin").exists())
+
+    def test_a_rollback_that_cannot_complete_says_install_will_not_be_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, a, b = self._two_commits(base)
+            self._git(repo, "checkout", "-q", "--detach", a)
+            import subprocess
+
+            def install_dirties_more(r):
+                (r / "uv.lock").write_text("regenerated\n")
+                (r / "extra.txt").write_text("x")
+                self._git(r, "add", "extra.txt")          # tracked dirt beyond uv.lock
+                return 1
+            ctx = align_apply.Ctx(base=base, run=subprocess.run,
+                                  as_owner=lambda o, argv: argv, owner_of=lambda p: "me",
+                                  catalog={}, origins={}, prefetched={"sigmond": None},
+                                  run_install=install_dirties_more, say=lambda m: None)
+            steps = align_apply.apply_plan(rel(), [align.Item("sigmond", "forward", a, b)], ctx)
+            d = steps[0].detail
+            self.assertIn("rollback FAILED:", d)
+            self.assertIn(f"checkout left at {b[:8]}", d)
+            self.assertIn("a re-run will NOT retry install.sh — run "
+                          f"{repo}/install.sh (or scripts/install.sh) by hand, then re-run", d)
+            self.assertFalse((repo / ".pin").exists())    # .pin restored before the checkout
 
 
 class RecordTests(unittest.TestCase):

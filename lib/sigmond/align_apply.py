@@ -166,6 +166,21 @@ def checkout(repo, owner, full, *, run: Callable = subprocess.run,
         raise ApplyError(f"{repo}: git checkout --detach {full} failed: {(r.stderr or '').strip()}")
 
 
+def current_branch(repo, *, run: Callable = subprocess.run) -> str:
+    """The branch HEAD sits on, or "" when HEAD is detached. Read-only."""
+    r = _run(run, git(repo, "symbolic-ref", "-q", "--short", "HEAD"), repo, "symbolic-ref", 30)
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def checkout_branch(repo, owner, branch, *, run: Callable = subprocess.run,
+                    as_owner: Callable = _default_as_owner) -> None:
+    """Put HEAD back on ``branch`` as the checkout's owner."""
+    argv = as_owner(owner, git(repo, "checkout", branch))
+    r = _run(run, argv, repo, "checkout", 60)
+    if r.returncode != 0:
+        raise ApplyError(f"{repo}: git checkout {branch} failed: {(r.stderr or '').strip()}")
+
+
 def changed_files(repo, a, b, *, run: Callable = subprocess.run) -> set:
     """Paths that differ between two commits — drives the install-trigger check."""
     argv = git(repo, "diff", "--name-only", a, b)
@@ -252,23 +267,43 @@ def _read_pin(repo: Path) -> Optional[str]:
 
 
 def _roll_back(repo: Path, owner: str, from_full: str, full: str,
-               prev_pin: Optional[str], why: str, ctx: Ctx) -> str:
-    """Undo a forward checkout whose follow-through failed: detach back
-    onto ``from_full`` as the owner and put .pin back exactly as it was
-    (its old text, or no file at all). Returns the Step detail. A re-run
-    then sees the component where it started, so the move — and its
-    install.sh — runs again rather than reading as current."""
+               prev_pin: Optional[str], branch: str, why: str, ctx: Ctx) -> str:
+    """Undo a forward checkout whose follow-through failed. Returns the
+    Step detail. A re-run then sees the component where it started, so the
+    move — and its install.sh — runs again rather than reading as current.
+
+    Order matters. (a) .pin first, back to its old text or removed, so
+    even a checkout that cannot be undone no longer claims the new pin.
+    (b) A uv.lock-only change — an install.sh that ran `uv sync` and then
+    failed — is reset, the one discard this plan allows; otherwise git
+    refuses the checkout over it. (c) The checkout: back onto ``branch``
+    when the component sat on one (so `smd update` can still pull it),
+    else detached onto ``from_full``; then HEAD is verified."""
+    notes = []
     try:
-        checkout(repo, owner, from_full, run=ctx.run, as_owner=ctx.as_owner)
         pin = repo / ".pin"
         if prev_pin is None:
             if pin.exists():
                 pin.unlink()
         else:
             pin.write_text(prev_pin)
+        if [f for f in dirty_files(repo, run=ctx.run) if f != ".pin"] == ["uv.lock"]:
+            reset_uvlock(repo, owner, run=ctx.run, as_owner=ctx.as_owner)
+            notes.append("reset uv.lock")
+        if branch:
+            checkout_branch(repo, owner, branch, run=ctx.run, as_owner=ctx.as_owner)
+        else:
+            checkout(repo, owner, from_full, run=ctx.run, as_owner=ctx.as_owner)
+        now = resolve(repo, "HEAD", run=ctx.run)
+        if now != from_full:
+            where = f"{branch} " if branch else ""
+            raise ApplyError(f"{where}HEAD is {now[:8]} after the rollback, not {from_full[:8]}")
     except (ApplyError, OSError) as exc:
-        return f"{why} — rollback FAILED: {exc} — checkout left at {full[:8]}"
-    return f"{why} — rolled back to {from_full[:8]}"
+        return (f"{why} — rollback FAILED: {exc} — checkout left at {full[:8]}; a re-run "
+                f"will NOT retry install.sh — run {repo}/install.sh (or scripts/install.sh) "
+                f"by hand, then re-run")
+    done = "; ".join(notes + [f"rolled back to {from_full[:8]}" + (f" on {branch}" if branch else "")])
+    return f"{why} — {done}"
 
 
 def _move(it: Item, ctx: Ctx) -> Step:
@@ -334,6 +369,7 @@ def _move(it: Item, ctx: Ctx) -> Step:
     try:
         from_full = resolve(repo, it.live, run=ctx.run)
         prev_pin = _read_pin(repo)
+        branch = current_branch(repo, run=ctx.run)
         checkout(repo, owner, full, run=ctx.run, as_owner=ctx.as_owner)
     except (ApplyError, OSError) as e:
         return Step(name, "failed", str(e), fetched)
@@ -347,7 +383,7 @@ def _move(it: Item, ctx: Ctx) -> Step:
         changed = changed_files(repo, from_full, full, run=ctx.run)
     except (ApplyError, OSError) as e:
         return Step(name, "failed",
-                    _roll_back(repo, owner, from_full, full, prev_pin, str(e), ctx), fetched)
+                    _roll_back(repo, owner, from_full, full, prev_pin, branch, str(e), ctx), fetched)
     if changed & INSTALL_TRIGGERS and ctx.run_install is not None:
         ctx.say(f"{name}: running install.sh …")
         try:
@@ -358,7 +394,7 @@ def _move(it: Item, ctx: Ctx) -> Step:
             why = f"install.sh exit {rc}" if rc else ""
         if why:
             return Step(name, "failed",
-                        _roll_back(repo, owner, from_full, full, prev_pin, why, ctx), fetched)
+                        _roll_back(repo, owner, from_full, full, prev_pin, branch, why, ctx), fetched)
 
     # 7. moved
     return Step(name, "moved", f"{detail_prefix}{it.live[:8]} -> {full[:8]}", fetched)
