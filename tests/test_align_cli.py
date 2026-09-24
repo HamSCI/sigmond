@@ -68,8 +68,10 @@ class AlignCliTests(unittest.TestCase):
         rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "deb7bdd"})
         self.assertEqual(rc, 1)
         self.assertIn("459bee6 -> daba1f6", out)
-        self.assertIn("radiod rebuild is Plan 2b — --apply will not move it", out)
-        self.assertNotIn("RESTARTS radiod", out)
+        self.assertIn("deb7bdd -> 401992c", out)
+        self.assertIn("REBUILDS and RESTARTS radiod", out)
+        self.assertIn(f"recording gap of about {align_live.RADIOD_GAP_ESTIMATE_S} s", out)
+        self.assertNotIn("--apply will not move it", out)
         self.assertIn("check it with pm-align (Plan 3)", out)
 
     def test_differing_image_file_exits_1(self):
@@ -432,6 +434,27 @@ class AlignRadiodBuiltAtTests(unittest.TestCase):
             with mock.patch.object(smd, "_ALIGN_RADIOD_BINARY", binary):
                 got = smd._align_radiod_built_at()
             self.assertIsNone(got)
+
+
+class AlignBuildTests(unittest.TestCase):
+    """Task 5: the Ctx.build hook — never restarts radiod itself (Task 7's
+    restart stage does that, from staleness)."""
+
+    def test_prints_before_building_and_returns_0_on_success(self):
+        repo = Path("/opt/git/sigmond/ka9q-radio")
+        with mock.patch.object(smd, "_build_ka9q_radio", return_value=True) as m_build:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = smd._align_build("ka9q-radio", repo)
+        self.assertEqual(rc, 0)
+        m_build.assert_called_once_with(repo, force=True)
+        self.assertIn("building ka9q-radio (radiod) …", out.getvalue())
+
+    def test_returns_1_on_build_failure(self):
+        repo = Path("/opt/git/sigmond/ka9q-radio")
+        with mock.patch.object(smd, "_build_ka9q_radio", return_value=False):
+            rc = smd._align_build("ka9q-radio", repo)
+        self.assertEqual(rc, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -1291,6 +1314,26 @@ class AlignFinalReviewCliTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         m_run.assert_called_once_with(Path("/srv/base/hf-timestd"))
         m_repair.assert_called_once_with(Path("/srv/base"))
+
+    # --- Task 5: Ctx.build wired to _align_build ---
+
+    def test_ctx_build_wires_to_align_build(self):
+        seen = {}
+
+        def fake_apply_plan(rel, items, ctx):
+            seen["ctx"] = ctx
+            return []
+        with contextlib.ExitStack() as st:
+            _apply_patches(st, rel=APPLY_REL,
+                           live={"sigmond": "daba1f6", "hf-timestd": "5c8196d",
+                                 "ka9q-radio": "401992c"})
+            st.enter_context(mock.patch("sigmond.align_apply.apply_plan", fake_apply_plan))
+            st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            smd.cmd_align(_apply_args("/srv/base"))
+        with mock.patch.object(smd, "_build_ka9q_radio", return_value=True) as m_build:
+            rc = seen["ctx"].build("ka9q-radio", Path("/srv/base/ka9q-radio"))
+        self.assertEqual(rc, 0)
+        m_build.assert_called_once_with(Path("/srv/base/ka9q-radio"), force=True)
 
 
 class AlignRepairOwnershipTests(unittest.TestCase):

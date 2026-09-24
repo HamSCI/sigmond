@@ -828,19 +828,54 @@ class FinalReviewMoveTests(unittest.TestCase):
             self._one(base, git, chown=lambda p, o: chowned.append(p))
             self.assertIn(repo / ".git" / "info", chowned)
 
-    # --- minor: radiod never moves in 2a ---
+    # --- Task 5: radiod rebuilds when ka9q-radio moves ---
 
-    def test_forward_ka9q_radio_is_refused_and_never_checked_out(self):
+    def test_ka9q_radio_forward_moves_and_calls_the_build_hook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = _repo(base, "ka9q-radio")
+            git = _MultiFakeGit()
+            calls = []
+            ctx = _ctx(base, git, ["ka9q-radio"],
+                      build=lambda name, r: calls.append((name, r)) or 0)
+            items = [align.Item("ka9q-radio", "forward", LIVE, TARGET)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertEqual(calls, [("ka9q-radio", repo)])
+
+    def test_ka9q_radio_build_failure_rolls_back(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _repo(base, "ka9q-radio")
             git = _MultiFakeGit()
-            ctx = _ctx(base, git, ["ka9q-radio"], allow_rollback=True)
-            items = [align.Item("ka9q-radio", "forward", LIVE, TARGET),
-                     align.Item("ka9q-radio", "ahead", TARGET, LIVE, align.AHEAD_NOTE)]
+            ctx = _ctx(base, git, ["ka9q-radio"], build=lambda name, r: 2)
+            items = [align.Item("ka9q-radio", "forward", LIVE, TARGET)]
             steps = align_apply.apply_plan(rel(), items, ctx)
-            self.assertEqual([s.outcome for s in steps], ["refused", "refused"])
-            self.assertEqual(steps[0].detail, "radiod rebuild is Plan 2b — not moved")
+            self.assertEqual(steps[0].outcome, "failed")
+            self.assertEqual(steps[0].detail, "build exit 2 — rolled back to 11111111")
+            self.assertEqual(_detach_targets(git), [TARGET, LIVE])
+
+    def test_ka9q_radio_with_no_builder_wired_fails_and_rolls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _repo(base, "ka9q-radio")
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["ka9q-radio"])  # build defaults to None
+            items = [align.Item("ka9q-radio", "forward", LIVE, TARGET)]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "failed")
+            self.assertIn("no builder wired", steps[0].detail)
+            self.assertEqual(_detach_targets(git), [TARGET, LIVE])
+
+    def test_missing_ka9q_radio_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["ka9q-radio"])
+            items = [align.Item("ka9q-radio", "missing", None, TARGET,
+                                "no checkout on this station")]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "refused")
             self.assertEqual(git.calls, [])
 
     # --- I3 ---

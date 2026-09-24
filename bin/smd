@@ -4918,6 +4918,16 @@ def _align_install_and_repair(repo: Path, base) -> int:
         _align_repair_ownership(Path(base))
 
 
+def _align_build(name: str, repo: Path) -> int:
+    """`Ctx.build` for BUILT_COMPONENTS (ka9q-radio): rebuild radiod
+    in-tree, always forced (the checkout just moved, so the freshness
+    check `_build_ka9q_radio` would otherwise apply is meaningless here).
+    Never restarts radiod — Task 7's restart stage does that, driven by
+    staleness, once the whole plan (and the record) has gone through."""
+    print(f'  building {name} (radiod) …')
+    return 0 if _build_ka9q_radio(repo, force=True) else 1
+
+
 def _align_install_missing(name, sha, *, base, catalog):
     """A component the release pins but this station has no checkout of at
     all: clone it at the pinned commit and run its installer. Never flips
@@ -5050,7 +5060,7 @@ def _align_apply(args) -> int:
                 name, sha, base=base, catalog=catalog),
             run_install=lambda repo: _align_install_and_repair(repo, base),
             say=print, prefetched=prefetched,
-            chown=_align_chown)
+            chown=_align_chown, build=_align_build)
 
         passthrough = ['--base', str(base)]
         if getattr(args, 'allow_rollback', False):
@@ -5246,7 +5256,11 @@ def cmd_align(args) -> int:
                 line = f'{"":8} -> {it.target[:8]}   {it.status}'
             else:
                 line = it.status
-        if it.note:
+        if it.component == align.RADIOD and it.status == 'move':
+            from sigmond import align_live
+            line += (f'   — REBUILDS and RESTARTS radiod — recording gap of about '
+                     f'{align_live.RADIOD_GAP_ESTIMATE_S} s')
+        elif it.note:
             line += f'   {it.note}'
         print(f'    {it.component:<16} {line}')
     if rate_limited:

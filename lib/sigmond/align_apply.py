@@ -192,6 +192,12 @@ def changed_files(repo, a, b, *, run: Callable = subprocess.run) -> set:
 
 INSTALL_TRIGGERS = {"pyproject.toml", "uv.lock", "install.sh", "scripts/install.sh"}
 
+# Components _move builds in-tree (via ctx.build) instead of running
+# install.sh on an install-trigger file change — radiod is a compiled C
+# binary, not an interpreted checkout; see Ctx.build and BUILT_COMPONENTS'
+# use in _move.
+BUILT_COMPONENTS = {RADIOD}
+
 
 def ensure_pin_excluded(repo) -> bool:
     """Add `.pin` to `.git/info/exclude` when it's not already listed there,
@@ -251,6 +257,7 @@ class Ctx:
     say: Callable[[str], None] = print
     prefetched: dict = field(default_factory=dict)
     chown: Optional[Callable[[Path, str], None]] = None
+    build: Optional[Callable[[str, Path], int]] = None
 
 
 @dataclass
@@ -384,17 +391,33 @@ def _move(it: Item, ctx: Ctx) -> Step:
     except (ApplyError, OSError) as e:
         return Step(name, "failed", str(e), fetched)
 
-    # 6. pin, then install.sh when a dependency-shaped file changed. From
-    # here on a failure must not leave the checkout at the pin: a re-run
-    # would read it as current and never run install.sh again.
+    # 6. pin, then either the build hook (BUILT_COMPONENTS — radiod is a
+    # compiled C binary, not an interpreted checkout) or install.sh when a
+    # dependency-shaped file changed. From here on a failure must not
+    # leave the checkout at the pin: a re-run would read it as current and
+    # never run install.sh/the build again.
     try:
         write_pin(repo, full)
         _chown_pin(repo, owner, ctx)
-        changed = changed_files(repo, from_full, full, run=ctx.run)
+        changed = set() if name in BUILT_COMPONENTS else changed_files(
+            repo, from_full, full, run=ctx.run)
     except (ApplyError, OSError) as e:
         return Step(name, "failed",
                     _roll_back(repo, owner, from_full, full, prev_pin, branch, str(e), ctx), fetched)
-    if changed & INSTALL_TRIGGERS and ctx.run_install is not None:
+    if name in BUILT_COMPONENTS:
+        if ctx.build is None:
+            why = "no builder wired"
+        else:
+            try:
+                rc = ctx.build(name, repo)
+            except Exception as e:  # noqa: BLE001 — a builder is foreign code
+                why = f"build raised: {e}"
+            else:
+                why = f"build exit {rc}" if rc else ""
+        if why:
+            return Step(name, "failed",
+                        _roll_back(repo, owner, from_full, full, prev_pin, branch, why, ctx), fetched)
+    elif changed & INSTALL_TRIGGERS and ctx.run_install is not None:
         ctx.say(f"  {name}: running install.sh …")
         try:
             rc = ctx.run_install(repo)
@@ -447,9 +470,6 @@ def _refresh_pin(it: Item, ctx: Ctx) -> Step:
     return Step(name, "current", "pin refreshed")
 
 
-_RADIOD_REFUSAL = "radiod rebuild is Plan 2b — not moved"
-
-
 def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
     """Move each item toward ``rel``, in plan order (sigmond first), stopping
     at the first failed component — everything after it stays untouched."""
@@ -477,10 +497,6 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
                     steps.append(Step(it.component, "installed"))
         elif it.status in ("refuse", "diverged"):
             steps.append(Step(it.component, "refused", it.note))
-        elif it.component == RADIOD and it.status in ("forward", "ahead"):
-            # 2a never checks out radiod's source: a new tree with the old
-            # binary running is a station that lies about its own version.
-            steps.append(Step(it.component, "refused", _RADIOD_REFUSAL))
         elif it.status == "ahead" and not ctx.allow_rollback:
             steps.append(Step(it.component, "left", AHEAD_NOTE))
         else:  # forward, or an ahead item with allow_rollback set
