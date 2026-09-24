@@ -4415,15 +4415,254 @@ def _align_live_state(base: str):
     return live, dirty, origins, errors
 
 
+_ALIGN_BYTE_UNITS = {'': 1, 'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3}
+_ALIGN_BYTES_RE = re.compile(r'^(\d+)([KMGkmg]?)$')
+
+
+def _parse_bytes(s: str) -> int:
+    """A byte count for `--max-bytes`: a plain integer, or one with a binary
+    K/M/G suffix (case-insensitive) — `20M` -> 20971520.  Anything else is
+    an argparse usage error, not a traceback."""
+    m = _ALIGN_BYTES_RE.match((s or '').strip())
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f'not a byte count: {s!r} (use a plain integer, or a suffix '
+            f'like 500K, 20M, 1G)')
+    n, unit = m.groups()
+    return int(n) * _ALIGN_BYTE_UNITS[unit.upper()]
+
+
+def _align_ancestry(base, prefetched, max_bytes, say):
+    """Factory for the `is_ancestor(component, a, b)` callback `align.classify`
+    calls twice per `move` item (live->target, then target->live).
+
+    Fetches each component's origin AT MOST ONCE — the second call for the
+    same component reuses whatever the first already learned. Bytes spent
+    land in ``prefetched`` (the same dict later handed to `Ctx(prefetched=)`,
+    so `apply_plan`'s own move step never re-pays for a fetch this phase
+    already made).
+
+    Controller ruling 2: the byte budget binds this prefetch too. A running
+    total is kept across the whole plan (not per component); once it
+    exceeds ``max_bytes``, no further component is fetched here — it is
+    still classified from whatever git objects already happen to be local
+    (usually enough to refuse it "ancestry unknown", never a crash).
+
+    Controller ruling 3: a fetch that raises ApplyError is reported via
+    ``say`` and answered as None (classify then refuses the component) —
+    never lets one unreachable remote take down the whole run.
+    """
+    from sigmond import align_apply
+    total = 0
+    failed = set()
+
+    def is_ancestor(component, a, b):
+        nonlocal total
+        if component in failed:
+            return None
+        repo = Path(base) / component
+        if component not in prefetched:
+            if max_bytes is not None and total > max_bytes:
+                # Budget already spent by an earlier component in the plan —
+                # fetch no further; classify from whatever is local.
+                return align_apply.is_ancestor(repo, a, b, run=subprocess.run)
+            owner = repo.owner()
+            try:
+                fetched = align_apply.fetch(repo, owner, run=subprocess.run,
+                                            as_owner=_runuser)
+            except align_apply.ApplyError as exc:
+                say(f'{component}: fetch failed: {exc}')
+                failed.add(component)
+                return None
+            prefetched[component] = fetched
+            if fetched:
+                total += fetched
+        return align_apply.is_ancestor(repo, a, b, run=subprocess.run)
+
+    return is_ancestor
+
+
+def _align_target_has_align(base, full) -> bool:
+    """Whether sigmond at ``full`` carries `smd align` at all — the blessed
+    v3.53 pin (daba1f6) predates it, so a station bootstrapping sigmond
+    forward must not re-exec into a checkout that lacks the very command
+    it is running."""
+    repo = Path(base) / 'sigmond'
+    r = subprocess.run(
+        ['git', '-c', f'safe.directory={repo}', '-C', str(repo),
+         'cat-file', '-e', f'{full}:lib/sigmond/align_apply.py'],
+        capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _align_chown(path, owner) -> None:
+    """Set ``path``'s uid/gid to match the checkout directory it lives
+    under — `os.stat`, never a name lookup (controller ruling 4): the
+    checkout's owner may be a system account NSS resolves inconsistently
+    from where git's own idea of `owner` came from."""
+    p = Path(path)
+    d = p.parent
+    while not (d / '.git').exists() and d != d.parent:
+        d = d.parent
+    st = os.stat(d)
+    os.chown(p, st.st_uid, st.st_gid)
+
+
+def _align_run_install(repo: Path) -> int:
+    """scripts/install.sh else install.sh, run as root — the same
+    invocation `admin manifest restore --apply` uses (bin/smd ~4297-4316).
+    0 when no installer is found on disk (nothing to run, not a failure)."""
+    sh = repo / 'scripts' / 'install.sh'
+    if not sh.exists():
+        sh = repo / 'install.sh'
+    if not sh.exists():
+        return 0
+    r = subprocess.run(_as_root(['bash', str(sh)]), capture_output=True, text=True)
+    return r.returncode
+
+
+def _align_install_missing(name, sha, *, base, catalog):
+    """A component the release pins but this station has no checkout of at
+    all: clone it at the pinned commit and run its installer. Never flips
+    it on in topology — install is not the same as enable, and whether
+    alignment should also enable it is Plan 2b's decision, not this one's."""
+    entry = catalog.get(name) if catalog else None
+    if entry is None:
+        raise RuntimeError(f'{name}: not in the catalog — cannot install')
+    _clone_repo(entry, base=Path(base), ref=sha)
+    rc = _align_run_install(Path(base) / name)
+    if rc:
+        raise RuntimeError(f'{name}: install.sh exited {rc}')
+
+
+def _align_apply(args) -> int:
+    """The `--apply` path for `smd align` (Plan 2a): verify the release,
+    classify every component, bring sigmond forward first if it needs it
+    (re-exec'ing into it once it can run `align` itself), move/install
+    everything else, then record what happened.
+
+    Kept out of `cmd_align`'s own body on purpose: the dry-run guard test
+    (`test_dry_run_cannot_move_anything`) proves by inspecting
+    `cmd_align`'s source that no git-mutating call sits in that function —
+    this is where those calls actually live.
+    """
+    from sigmond import align, align_apply
+    from sigmond.provenance import record_update, HISTORY_FILE
+    from datetime import datetime, timezone
+
+    if _need_root('align --apply'):
+        return 1
+    with lifecycle_lock(reason='align'):
+        base = getattr(args, 'base', None) or '/opt/git/sigmond'
+        try:
+            rel = align.fetch_release(getattr(args, 'release', None))
+        except align.LookupError_ as exc:
+            print(f'smd align --apply: cannot establish the target — {exc}')
+            return 2
+        try:
+            align_apply.verify_release(rel, run=subprocess.run)
+        except align_apply.ApplyError as exc:
+            print(f'smd align --apply: {exc}')
+            return 2
+
+        live, dirty, origins, errors = _align_live_state(base)
+        items = align.plan_align(rel, live, dirty, errors)
+        prefetched: dict = {}
+        is_ancestor = _align_ancestry(base, prefetched,
+                                      getattr(args, 'max_bytes', None), print)
+        items = align.classify(items, is_ancestor)
+
+        catalog = {}
+        try:
+            from sigmond.catalog import load_catalog
+            catalog = load_catalog()
+        except Exception:
+            catalog = {}
+
+        ctx = align_apply.Ctx(
+            base=Path(base), run=subprocess.run, as_owner=_runuser,
+            owner_of=lambda p: Path(p).owner(), catalog=catalog, origins=origins,
+            allow_rollback=bool(getattr(args, 'allow_rollback', False)),
+            max_bytes=getattr(args, 'max_bytes', None),
+            install_missing=lambda name, sha: _align_install_missing(
+                name, sha, base=base, catalog=catalog),
+            run_install=_align_run_install, say=print, prefetched=prefetched,
+            chown=_align_chown)
+
+        passthrough = ['--base', str(base)]
+        if getattr(args, 'allow_rollback', False):
+            passthrough.append('--allow-rollback')
+        if getattr(args, 'max_bytes', None) is not None:
+            passthrough += ['--max-bytes', str(args.max_bytes)]
+
+        sigmond_item = next((it for it in items if it.component == 'sigmond'), None)
+        if sigmond_item is not None and sigmond_item.status == 'forward':
+            other_items = [it for it in items if it.component != 'sigmond']
+            boot_steps = align_apply.apply_plan(rel, [sigmond_item], ctx)
+            boot = boot_steps[0]
+            print(f'  sigmond: {boot.outcome}' + (f' — {boot.detail}' if boot.detail else ''))
+            if boot.outcome == 'moved' and _align_target_has_align(base, sigmond_item.target):
+                os.execv(sys.executable,
+                        [sys.executable, str(Path(base) / 'sigmond' / 'bin' / 'smd'),
+                         'align', '--apply', '--release', rel.tag, *passthrough])
+                return 0   # os.execv never returns on success; only reached under test
+            if boot.outcome == 'moved':
+                print(f'sigmond moved to {sigmond_item.target}, which predates smd '
+                      f'align — continuing with the code already loaded')
+                # A fresh apply_plan call means the byte budget restarts here —
+                # same acceptable restart controller ruling 5 names for the
+                # re-exec path; the two calls do not share one running total.
+                steps = boot_steps + align_apply.apply_plan(rel, other_items, ctx)
+            else:
+                steps = boot_steps + [
+                    align_apply.Step(it.component, 'skipped',
+                                     f'stopped after sigmond {boot.outcome}')
+                    for it in other_items]
+        else:
+            steps = align_apply.apply_plan(rel, items, ctx)
+
+        def _now() -> str:
+            return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        align_apply.record(rel, steps, manifest_path=MANIFEST_PATH,
+                           history=lambda e: record_update(HISTORY_FILE, e), now=_now)
+
+        for step in steps:
+            line = f'  {step.component}: {step.outcome}'
+            if step.detail:
+                line += f' — {step.detail}'
+            print(line)
+        outcomes = ('moved', 'installed', 'left', 'refused', 'failed', 'skipped')
+        counts = {o: sum(1 for s in steps if s.outcome == o) for o in outcomes}
+        fetched_mib = sum(s.bytes or 0 for s in steps) / (1024 * 1024)
+        print(f"  summary: moved {counts['moved']}, installed {counts['installed']}, "
+              f"left {counts['left']}, refused {counts['refused']}, "
+              f"failed {counts['failed']}, skipped {counts['skipped']}, "
+              f"fetched {fetched_mib:.1f} MiB")
+        bad = any(s.outcome in ('failed', 'refused', 'skipped') for s in steps)
+        return 1 if bad else 0
+
+
 def cmd_align(args) -> int:
     """`smd align` — how far this station sits from the latest blessed release.
 
-    Dry run only (Plan 1 of docs/superpowers/specs/2026-09-24-smd-align-design.md):
+    Dry run by default (Plan 1 of docs/superpowers/specs/2026-09-24-smd-align-design.md):
     it reads local state and makes small HTTPS GETs, and changes nothing.
     Exit 0 aligned (every component current/stray AND every image file
     verified current — an unreachable probe never counts as aligned),
     1 alignment available, 2 target could not be established.
+
+    `--apply` (Plan 2a) performs the mechanical steps; see `_align_apply`,
+    kept out of this function's own body so the read-only guard test can
+    keep proving this plain verb never changes a station.
     """
+    if not getattr(args, 'apply', False) and (
+            getattr(args, 'allow_rollback', False)
+            or getattr(args, 'max_bytes', None) is not None):
+        print('smd align: --allow-rollback and --max-bytes only apply with --apply')
+        return 2
+    if getattr(args, 'apply', False):
+        return _align_apply(args)
     from sigmond import align
     import socket
     base = getattr(args, 'base', None) or '/opt/git/sigmond'
@@ -4514,7 +4753,7 @@ def cmd_align(args) -> int:
         names = ', '.join(f['path'] for f in unverified)
         print(f"  {len(unverified)} file{'s' if len(unverified) != 1 else ''} "
               f"could not be checked: {names}")
-    print('  apply: not built yet (Plan 2)')
+    print('  apply: re-run with --apply to align this station (Plan 2a)')
     pending = counts['move'] or counts['refuse'] or counts['missing'] or stale or unverified
     return 1 if pending else 0
 
@@ -20262,12 +20501,22 @@ def main() -> int:
 
     p = sub.add_parser('align',
         help='how far this station sits from the latest blessed appliance '
-             'release (dry run; changes nothing)')
+             'release (dry run unless --apply)')
     p.add_argument('--release', help='compare against this blessed release tag '
                                      '(default: the latest)')
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
     p.add_argument('--no-cost', action='store_true',
                    help='skip the per-component commit-distance lookups')
+    p.add_argument('--apply', action='store_true',
+                   help='perform the mechanical steps (default: dry run) — '
+                        'Plan 2a; services still need a restart (Plan 2b)')
+    p.add_argument('--allow-rollback', action='store_true',
+                   help='also move a component that is ahead of the pin back '
+                        'to it (only with --apply)')
+    p.add_argument('--max-bytes', type=_parse_bytes, metavar='N',
+                   help='stop fetching once this many bytes have been '
+                        'transferred (plain integer, or a suffix like 500K, '
+                        '20M, 1G; only with --apply)')
 
     p = sub.add_parser('version',
                        help='what is actually installed (image lineage + live commits)')
