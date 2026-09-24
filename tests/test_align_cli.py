@@ -42,6 +42,12 @@ def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=Tru
         # services; none here, so nothing touches systemctl or git — and
         # never the real catalog (Fix round 1 / I-2).
         mock.patch.object(smd, "_align_services", return_value={}),
+        # ...and the staleness read's own probes (hs-uploader's daemon and
+        # checkout, final review / I5; the radiod binary) never reach
+        # systemctl or /opt/git either.
+        mock.patch.object(smd, "_align_units_started_at", return_value=None),
+        mock.patch.object(smd, "_align_head_moved_at", return_value=None),
+        mock.patch.object(smd, "_align_radiod_built_at", return_value=None),
         mock.patch.object(smd, "_align_live_state",
                           return_value=(live, dirty or {}, origins or {}, errors or {})),
         mock.patch("sigmond.align.image_file_drift", return_value=files or [
@@ -2221,6 +2227,11 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
                                                return_value=aligned_release))
             st.enter_context(mock.patch.object(smd, "_align_aligned_live",
                                                return_value=aligned_live))
+            # Never the real systemctl (the I2 re-check asks is-active); a
+            # test that needs answers patches subprocess.run again, inside.
+            st.enter_context(mock.patch("subprocess.run",
+                                        lambda argv, **kw: subprocess.CompletedProcess(
+                                            argv, 0, "", "")))
             for p in extra_patches:
                 st.enter_context(p)
             st.enter_context(contextlib.redirect_stdout(out))
