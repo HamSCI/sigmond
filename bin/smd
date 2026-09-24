@@ -4638,18 +4638,25 @@ _ALIGN_RADIOD_READY = '/usr/local/sbin/sigmond-radiod-ready'
 
 def _align_run(argv, *, run, timeout, action, **kw) -> object:
     """`run(argv, capture_output=True, text=True, timeout=timeout, **kw)`,
-    with a hung or unrunnable command turned into a synthetic non-zero
-    result instead of a raised TimeoutExpired/OSError — every caller in
+    with a hung or unrunnable command turned into a synthetic result
+    instead of a raised TimeoutExpired/OSError — every caller in
     `_align_restart` (and `_align_bringup`) gets something to build a Step
     detail from, never a traceback mid-restart (Fix round 1 / I3). ``**kw``
     lets `_align_bringup` add `stdin=subprocess.DEVNULL` without every
-    other caller having to pass it too."""
+    other caller having to pass it too.
+
+    Fix round 1 / C1: the synthetic returncode is -1, a value no real
+    child process ever exits with (POSIX exit codes are 0-255) — so it
+    reads as failure everywhere `!= 0` is the test, AND is distinguishable
+    from an ordinary `doctor --fix` findings-exit (1) by callers, like
+    `_align_bringup`'s doctor step, that otherwise tolerate a specific
+    positive code."""
     try:
         return run(argv, capture_output=True, text=True, timeout=timeout, **kw)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(argv, 1, '', f'{action} timed out after {timeout}s')
+        return subprocess.CompletedProcess(argv, -1, '', f'{action} timed out after {timeout}s')
     except OSError as exc:
-        return subprocess.CompletedProcess(argv, 1, '', f'{action} could not run: {exc}')
+        return subprocess.CompletedProcess(argv, -1, '', f'{action} could not run: {exc}')
 
 
 def _align_is_active(unit, *, run, timeout=15) -> bool:
@@ -5146,7 +5153,11 @@ def _align_bringup(*, run=subprocess.run, say=print) -> list:
     r = _align_run([sys.executable, str(_SCRIPT), 'doctor', '--fix'],
                    run=run, timeout=120, action='doctor --fix', stdin=subprocess.DEVNULL)
     detail = _tail(r)
-    if r.returncode >= 2:
+    # Fix round 1 / C1: rc -1 is `_align_run`'s synthetic result for a
+    # timed-out or unrunnable child (never a real `doctor --fix` exit —
+    # it only ever exits 0 or 1, findings-or-not) and must fail here too,
+    # not just an ordinary crash (rc >= 2).
+    if r.returncode == -1 or r.returncode >= 2:
         steps.append(align_apply.Step('doctor --fix', 'failed', detail))
         return steps
     steps.append(align_apply.Step('doctor --fix', 'ran', detail))

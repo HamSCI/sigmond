@@ -615,7 +615,17 @@ def refresh_image_file(tag: str, name: str, dest: Path, *,
     these scripts run as root under cron/systemd, so the refreshed file is
     written root:root, mode 0o755 — the same posture the image build gives
     them. tmp-then-``os.replace`` keeps a reader from ever seeing a
-    half-written script."""
+    half-written script.
+
+    Fix round 1 / I2: a 200 response is not proof of a script — a captive
+    portal, a rate-limit page, or a misconfigured CDN can all answer 200
+    with HTML. Refuse anything whose body (after stripping leading
+    whitespace) doesn't start with a shebang, before it is ever made
+    root-owned and executable.
+
+    Fix round 1 / M3: once the tmp file exists, any of chmod/chown/replace
+    raising must not leave it behind at the real path (`/usr/local/sbin`
+    on a station) — remove it and report failed instead."""
     dest = Path(dest)
     url = f"{RAW_BASE}/{tag}/{name}"
     try:
@@ -628,9 +638,18 @@ def refresh_image_file(tag: str, name: str, dest: Path, *,
         return Step(str(dest), "failed", f"{url}: HTTP {status}")
     if not body:
         return Step(str(dest), "failed", f"{url}: empty body")
+    if not body.lstrip().startswith(b"#!"):
+        return Step(str(dest), "failed", f"{url}: not a script — refused")
     tmp = dest.with_name(dest.name + ".tmp")
     tmp.write_bytes(body)
-    os.chmod(tmp, 0o755)
-    os.chown(tmp, 0, 0)
-    os.replace(tmp, dest)
+    try:
+        os.chmod(tmp, 0o755)
+        os.chown(tmp, 0, 0)
+        os.replace(tmp, dest)
+    except OSError as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return Step(str(dest), "failed", f"{dest}: {exc}")
     return Step(str(dest), "refreshed")

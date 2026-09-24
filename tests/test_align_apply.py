@@ -1410,6 +1410,60 @@ class RefreshImageFileTests(unittest.TestCase):
             self.assertFalse(dest.exists())
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
+    # --- Fix round 1 / I2: a 200 body that isn't a script must never be
+    # installed root:root 0755 at a path cron/systemd will execute. ---
+
+    def test_non_script_body_is_refused_and_dest_untouched(self):
+        html = b"<html><body>404 rate limited</body></html>\n"
+
+        def urlopen(url, timeout=None):
+            return _FakeHTTPResponse(200, html)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "sigmond-site-timing"
+            with mock.patch("os.chown") as m_chown:
+                step = align_apply.refresh_image_file(
+                    "v3.53", "sigmond-site-timing", dest, urlopen=urlopen)
+            self.assertEqual(step.outcome, "failed")
+            self.assertIn("not a script", step.detail)
+            self.assertFalse(dest.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+            m_chown.assert_not_called()
+
+    def test_leading_whitespace_before_shebang_is_still_accepted(self):
+        # lstrip only — a script fetched through a proxy that prepends a
+        # blank line is still a script, not "not a script".
+        body = b"\n#!/bin/sh\necho hi\n"
+
+        def urlopen(url, timeout=None):
+            return _FakeHTTPResponse(200, body)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "sigmond-site-timing"
+            with mock.patch("os.chown"):
+                step = align_apply.refresh_image_file(
+                    "v3.53", "sigmond-site-timing", dest, urlopen=urlopen)
+            self.assertEqual(step.outcome, "refreshed")
+
+    # --- Fix round 1 / M3: a write-phase failure after the tmp file was
+    # created must not leave it behind at the real /usr/local/sbin path. ---
+
+    def test_replace_failure_removes_tmp_and_reports_failed(self):
+        body = b"#!/bin/sh\necho hi\n"
+
+        def urlopen(url, timeout=None):
+            return _FakeHTTPResponse(200, body)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "sigmond-site-timing"
+            with mock.patch("os.chown"), \
+                 mock.patch("os.replace", side_effect=OSError("cross-device link")):
+                step = align_apply.refresh_image_file(
+                    "v3.53", "sigmond-site-timing", dest, urlopen=urlopen)
+            self.assertEqual(step.outcome, "failed")
+            self.assertFalse(dest.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

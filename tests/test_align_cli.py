@@ -993,6 +993,22 @@ class _FakeBringupRun:
         return _completed(rc, out, err)
 
 
+class _RaisingOnNthCall:
+    """A fake `run` that answers 0/ok for every call except the Nth
+    (1-indexed), where it raises `exc` — for exercising `_align_run`'s own
+    TimeoutExpired/OSError handling from inside `_align_bringup`, rather
+    than a pre-built CompletedProcess."""
+    def __init__(self, n, exc):
+        self.n, self.exc = n, exc
+        self.calls = 0
+
+    def __call__(self, argv, **kw):
+        self.calls += 1
+        if self.calls == self.n:
+            raise self.exc
+        return _completed(0)
+
+
 class AlignBringupTests(unittest.TestCase):
     """_align_bringup — re-runs bring-up's own steps in bring-up's own
     order. Task 6 of Plan 2b; not yet wired into `_align_apply` (Task 7)."""
@@ -1037,6 +1053,27 @@ class AlignBringupTests(unittest.TestCase):
                                  (2, "", "traceback")])
         self.assertEqual(steps[-1].component, "doctor --fix")
         self.assertEqual(steps[-1].outcome, "failed")
+
+    # --- Fix round 1 / C1: a timed-out or unrunnable doctor --fix must
+    # not read as "ran" — `_align_run`'s synthetic returncode for
+    # TimeoutExpired/OSError is -1, and every _align_bringup step
+    # (doctor included) must treat -1 as failed. ---
+
+    def test_doctor_timeout_is_failed(self):
+        run = _RaisingOnNthCall(4, subprocess.TimeoutExpired(cmd="doctor", timeout=120))
+        with mock.patch("os.access", return_value=True):
+            steps = smd._align_bringup(run=run, say=lambda *a, **k: None)
+        self.assertEqual(steps[-1].component, "doctor --fix")
+        self.assertEqual(steps[-1].outcome, "failed")
+        self.assertIn("timed out", steps[-1].detail)
+
+    def test_doctor_oserror_is_failed(self):
+        run = _RaisingOnNthCall(4, OSError("no such file or directory"))
+        with mock.patch("os.access", return_value=True):
+            steps = smd._align_bringup(run=run, say=lambda *a, **k: None)
+        self.assertEqual(steps[-1].component, "doctor --fix")
+        self.assertEqual(steps[-1].outcome, "failed")
+        self.assertIn("could not run", steps[-1].detail)
 
     def test_manifest_bytes_changed_reports_manifest_changed(self):
         from sigmond import uploader_manifest as um
