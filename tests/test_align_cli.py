@@ -5,6 +5,8 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import subprocess
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -31,11 +33,11 @@ REL = align.Release(tag="v3.53", manifest_text="", appliance_commit=None,
 
 
 def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=True,
-       origins=None, **ns):
+       origins=None, errors=None, **ns):
     args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=no_cost, **ns)
     patches = [
         mock.patch.object(smd, "_align_live_state",
-                          return_value=(live, dirty or {}, origins or {})),
+                          return_value=(live, dirty or {}, origins or {}, errors or {})),
         mock.patch("sigmond.align.image_file_drift", return_value=files or [
             {"path": "/usr/local/sbin/sigmond-site-timing", "status": "current", "note": ""}]),
         mock.patch("sigmond.align.recorded_release", return_value=recorded),
@@ -66,7 +68,7 @@ class AlignCliTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("459bee6 -> daba1f6", out)
         self.assertIn("RESTARTS radiod", out)
-        self.assertIn("run pm-align", out)
+        self.assertIn("check it with pm-align (Plan 3)", out)
 
     def test_differing_image_file_exits_1(self):
         rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
@@ -116,7 +118,7 @@ class AlignCliTests(unittest.TestCase):
                         return_value={"ahead": 39, "behind": 0, "files": 51}):
             rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                           no_cost=False)
-        self.assertIn("39 commits, 51 files", out)
+        self.assertIn("behind by 39, 51 files", out)
 
     def test_no_cost_false_catalog_unreadable_no_crash(self):
         with mock.patch("sigmond.catalog.load_catalog", side_effect=ValueError("bad toml")):
@@ -142,7 +144,7 @@ class AlignCliTests(unittest.TestCase):
             rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                           no_cost=False,
                           origins={"sigmond": "https://github.com/HamSCI/sigmond"})
-        self.assertIn("39 commits, 51 files", out)
+        self.assertIn("behind by 39, 51 files", out)
 
     def test_commit_distance_singular_grammar(self):
         catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
@@ -151,14 +153,118 @@ class AlignCliTests(unittest.TestCase):
                         return_value={"ahead": 1, "behind": 0, "files": 1}):
             rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                           no_cost=False)
-        self.assertIn("1 commit, 1 file", out)
-        self.assertNotIn("1 commits", out)
+        self.assertIn("behind by 1, 1 file", out)
         self.assertNotIn("1 files", out)
 
     def test_refuse_row_shows_shas(self):
         rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                       dirty={"sigmond": True})
         self.assertIn("459bee6 -> daba1f6   refuse", out)
+
+    # --- Fix round 2 -----------------------------------------------------
+
+    def test_move_direction_behind(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance",
+                        return_value={"ahead": 5, "behind": 0, "files": 3}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False)
+        self.assertIn("behind by 5, 3 files", out)
+
+    def test_move_direction_ahead_would_roll_back(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance",
+                        return_value={"ahead": 0, "behind": 4, "files": 2}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False)
+        self.assertIn("AHEAD by 4 — would roll back", out)
+
+    def test_move_direction_diverged(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance",
+                        return_value={"ahead": 3, "behind": 2, "files": 7}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False)
+        self.assertIn("diverged (3/2)", out)
+
+    def test_move_direction_files_unknown(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance",
+                        return_value={"ahead": 5, "behind": 0, "files": None}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False)
+        self.assertIn("behind by 5, files ?", out)
+
+    def test_install_time_release_label(self):
+        rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                      recorded="v3.53")
+        self.assertIn("install-time release: v3.53   (the image this VM was first installed "
+                      "from)", out)
+        self.assertNotIn("station recorded release", out)
+
+    def test_recorded_differs_names_proxmox_host_not_measured(self):
+        rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                      recorded="v3.36")
+        self.assertIn("Proxmox host: level not measured from here — check it with pm-align "
+                      "(Plan 3)", out)
+        self.assertNotIn("host: recorded", out)
+
+    def test_error_entry_would_move_refuses(self):
+        rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                      dirty={"sigmond": True}, errors={"sigmond": "not a git repository"})
+        self.assertIn("state unreadable: not a git repository", out)
+
+    def test_rate_limit_stops_further_compares(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond"),
+                  "hf-timestd": types.SimpleNamespace(repo="https://github.com/HamSCI/hf-timestd")}
+        calls = mock.Mock(side_effect=[
+            {"error": "GitHub API rate limit reached (resets 03:15Z)"},
+            {"ahead": 1, "behind": 0, "files": 1}])
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance", calls):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "4595c00",
+                          "ka9q-radio": "401992c"}, no_cost=False)
+        self.assertEqual(calls.call_count, 1)
+        self.assertIn("commit distances skipped: GitHub API rate limit reached "
+                      "(resets 03:15Z)", out)
+
+
+class AlignLiveStateTests(unittest.TestCase):
+    """Exercises _align_live_state against REAL git checkouts (never
+    /opt/git) — the one place this fix wave requires real git behaviour."""
+
+    def _git(self, *args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, check=True,
+                       capture_output=True, text=True)
+
+    def test_unreadable_head_maps_to_none_and_readable_head_is_a_sha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+
+            good = base / "good-comp"
+            good.mkdir()
+            self._git("init", "-q", cwd=good)
+            self._git("config", "user.name", "Test", cwd=good)
+            self._git("config", "user.email", "test@example.com", cwd=good)
+            (good / "f.txt").write_text("x")
+            self._git("add", "f.txt", cwd=good)
+            self._git("commit", "-q", "-m", "init", cwd=good)
+
+            broken = base / "broken-comp"
+            broken.mkdir()
+            (broken / ".git").write_text("gitdir: /nonexistent/nowhere\n")
+
+            live, dirty, origins, errors = smd._align_live_state(str(base))
+
+            self.assertIsNotNone(live["good-comp"])
+            self.assertIsNone(live["broken-comp"])
+            self.assertIn("broken-comp", errors)
+            self.assertFalse(dirty["good-comp"])
+            self.assertTrue(dirty["broken-comp"])
 
 
 if __name__ == "__main__":

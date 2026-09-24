@@ -8,10 +8,13 @@ never reach the network.  Standard library only, like the rest of core smd.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import re
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from sigmond.doctor import _parse_manifest_components, _sha_equal
@@ -30,11 +33,36 @@ def _default_urlopen(url: str, timeout: float):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def _rate_limit_reset(headers) -> str:
+    reset = headers.get("X-RateLimit-Reset") if headers else None
+    if not reset:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(int(reset), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return ""
+    return f" (resets {dt.strftime('%H:%MZ')})"
+
+
 def _get(url: str, urlopen, timeout: float) -> bytes:
     try:
         with urlopen(url, timeout=timeout) as resp:
             return resp.read(_MAX_BODY)
-    except Exception as exc:  # noqa: BLE001 — every failure means "no answer"
+    except urllib.error.HTTPError as exc:
+        headers = exc.headers or {}
+        try:
+            body = exc.read(_MAX_BODY)
+        except Exception:  # noqa: BLE001 — reading the error body is best-effort
+            body = b""
+        body_text = body.decode("utf-8", "replace") if body else ""
+        remaining = headers.get("X-RateLimit-Remaining") if headers else None
+        if exc.code in (403, 429) and (remaining == "0" or "rate limit" in body_text.lower()):
+            raise LookupError_(
+                f"GitHub API rate limit reached{_rate_limit_reset(headers)}") from exc
+        if exc.code == 404 and "/releases/tags/" in url:
+            raise LookupError_(f"no such release: {url.rsplit('/', 1)[-1]}") from exc
+        raise LookupError_(f"HTTP {exc.code} from {url}") from exc
+    except (urllib.error.URLError, OSError, http.client.HTTPException, TimeoutError) as exc:
         raise LookupError_(f"could not reach {url}: {exc}") from exc
 
 
@@ -53,9 +81,21 @@ def _preamble(text: str, key: str) -> Optional[str]:
     return None
 
 
+# The trust boundary: everything above this point is our own code; a
+# manifest's component/sha rows and its self-declared tag come from a
+# release asset on GitHub — reachable by anyone who can push a release
+# to the appliance repo. A malformed row must refuse the WHOLE manifest
+# rather than let a partially-bad table drive a later `--apply`.
+COMPONENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+(\.\d+)?$")
+
+
 def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
                   timeout: float = 20.0) -> Release:
     """The blessed release ``tag`` (default: the latest) and its manifest."""
+    if tag is not None and not RELEASE_TAG_RE.match(tag):
+        raise LookupError_(f"not a release tag: {tag}")
     urlopen = urlopen or _default_urlopen
     url = f"{RELEASES_API}/tags/{tag}" if tag else f"{RELEASES_API}/latest"
     try:
@@ -70,7 +110,17 @@ def fetch_release(tag: Optional[str] = None, urlopen: Optional[Callable] = None,
     components = _parse_manifest_components(text)
     if components is None:
         raise LookupError_(f"release {meta.get('tag_name')}: manifest is missing or truncated")
-    return Release(tag=meta.get("tag_name") or (tag or "?"), manifest_text=text,
+    tag_name = meta.get("tag_name") or (tag or "?")
+    for name, sha in components.items():
+        if not COMPONENT_NAME_RE.match(name) or not SHA_RE.match(sha):
+            raise LookupError_(
+                f"release {tag_name}: manifest entry {name!r} {sha!r} is malformed")
+    preamble_tag = _preamble(text, "appliance_tag") or _preamble(text, "image_version")
+    if preamble_tag is not None and preamble_tag != tag_name:
+        raise LookupError_(
+            f"release {tag_name}: manifest preamble tag {preamble_tag!r} does not "
+            f"match the release tag {tag_name!r}")
+    return Release(tag=tag_name, manifest_text=text,
                    appliance_commit=_preamble(text, "appliance_commit"),
                    components=components)
 
@@ -88,8 +138,9 @@ class Item:
     note: str = ""
 
 
-def plan_align(release: Release, live: dict, dirty: dict) -> list:
+def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict] = None) -> list:
     """What aligning to ``release`` would do, component by component. Pure."""
+    errors = errors or {}
     items = []
     for name, target in release.components.items():
         if name not in live:
@@ -100,6 +151,8 @@ def plan_align(release: Release, live: dict, dirty: dict) -> list:
             items.append(Item(name, "refuse", None, target, "HEAD unreadable"))
         elif _sha_equal(head, target):
             items.append(Item(name, "current", head, target))
+        elif errors.get(name):
+            items.append(Item(name, "refuse", head, target, f"state unreadable: {errors[name]}"))
         elif dirty.get(name):
             items.append(Item(name, "refuse", head, target, _DIRTY_NOTE))
         else:
@@ -125,13 +178,19 @@ def github_slug(repo_url: str) -> Optional[str]:
 
 def commit_distance(slug: str, base: str, head: str, urlopen: Optional[Callable] = None,
                     timeout: float = 20.0) -> dict:
-    url = f"https://api.github.com/repos/{slug}/compare/{base}...{head}"
+    # per_page=1: the compare response otherwise carries every commit and
+    # its full patch — hundreds of KB for a large move, on links this is
+    # meant to be cheap on. GitHub does not paginate `files` by per_page
+    # on this endpoint, so it may be absent or capped (~300); when the
+    # key is missing we report "unknown", never a false zero.
+    url = f"https://api.github.com/repos/{slug}/compare/{base}...{head}?per_page=1"
     try:
         doc = json.loads(_get(url, urlopen or _default_urlopen, timeout))
     except (LookupError_, ValueError) as exc:
         return {"error": str(exc)}
+    files = len(doc["files"]) if "files" in doc and doc["files"] is not None else None
     return {"ahead": int(doc.get("ahead_by", 0)), "behind": int(doc.get("behind_by", 0)),
-            "files": len(doc.get("files") or [])}
+            "files": files}
 
 
 def _read_local(path: str) -> Optional[bytes]:

@@ -4380,19 +4380,39 @@ def _align_origin_url(repo_dir) -> Optional[str]:
 
 
 def _align_live_state(base: str):
-    """(live HEADs, dirty flags, origin URLs) for every component checkout
-    under ``base``."""
+    """(live HEADs, dirty flags, origin URLs, state-read errors) for every
+    component checkout under ``base``.
+
+    ``component_versions`` silently DROPS a checkout whose ``rev-parse``
+    fails (e.g. a ``.git`` file pointing nowhere) rather than returning it
+    with a None head — so every checkout it did not return is filled in
+    here as ``live[name] = None``, which is what lets ``plan_align``'s
+    "HEAD unreadable" refusal fire instead of the checkout silently
+    reading as a normal `missing` (a station with a broken checkout is
+    not the same as a station with none at all).
+    """
     from sigmond.doctor import component_checkouts, git_state
     from sigmond.provenance import component_versions
     checkouts = component_checkouts(Path(base))
     live = component_versions(checkouts)
-    dirty = {}
-    origins = {}
     for p in checkouts:
         name = Path(p).name
-        dirty[name] = bool(git_state(p).get('dirty'))
+        if name not in live:
+            live[name] = None
+    dirty = {}
+    origins = {}
+    errors = {}
+    for p in checkouts:
+        name = Path(p).name
+        st = git_state(p)
+        err = st.get('error')
+        if err:
+            errors[name] = err
+        # A git_state error carries `dirty: []` — that reads as clean
+        # unless the error itself also counts as dirty.
+        dirty[name] = bool(st.get('dirty')) or bool(err)
         origins[name] = _align_origin_url(p)
-    return live, dirty, origins
+    return live, dirty, origins, errors
 
 
 def cmd_align(args) -> int:
@@ -4412,12 +4432,13 @@ def cmd_align(args) -> int:
     except align.LookupError_ as exc:
         print(f'smd align: cannot establish the target — {exc}')
         return 2
-    live, dirty, origins = _align_live_state(base)
-    plan = align.plan_align(rel, live, dirty)
+    live, dirty, origins, errors = _align_live_state(base)
+    plan = align.plan_align(rel, live, dirty, errors)
     print(f'smd align — {socket.gethostname()} against blessed {rel.tag} '
           f'(dry run: nothing changes)')
     recorded = align.recorded_release()
-    print(f'  station recorded release: {recorded or "unknown"}')
+    print(f'  install-time release: {recorded or "unknown"}   '
+          f'(the image this VM was first installed from)')
     print('  components:')
     catalog = {}
     if not getattr(args, 'no_cost', False):
@@ -4427,6 +4448,7 @@ def cmd_align(args) -> int:
         except Exception as exc:
             print(f'  catalog unreadable ({exc}) — commit distances skipped')
             catalog = {}
+    rate_limited = None       # first commit_distance error naming a rate limit
     for it in plan:
         if it.status == 'current':
             line = f'{(it.live or "")[:8]:<8}              current'
@@ -4439,14 +4461,27 @@ def cmd_align(args) -> int:
                 # itself) — fall back to the local clone's own origin.
                 repo_url = origins.get(it.component) or ''
             slug = align.github_slug(repo_url) if repo_url else None
-            if slug:
+            if slug and rate_limited:
+                line += '   distance unknown'
+            elif slug:
                 d = align.commit_distance(slug, it.live, it.target)
                 if 'error' not in d:
-                    ahead, nfiles = d['ahead'], d['files']
-                    line += (f"   {ahead} commit{'s' if ahead != 1 else ''}, "
-                             f"{nfiles} file{'s' if nfiles != 1 else ''}")
+                    ahead, behind, nfiles = d['ahead'], d['behind'], d['files']
+                    if ahead > 0 and behind == 0:
+                        phrase = f'behind by {ahead}'
+                    elif behind > 0 and ahead == 0:
+                        phrase = f'AHEAD by {behind} — would roll back'
+                    elif ahead > 0 and behind > 0:
+                        phrase = f'diverged ({ahead}/{behind})'
+                    else:
+                        phrase = 'no commit difference'
+                    file_part = ('files ?' if nfiles is None
+                                else f"{nfiles} file{'s' if nfiles != 1 else ''}")
+                    line += f'   {phrase}, {file_part}'
                 else:
                     line += '   distance unknown'
+                    if d['error'].startswith('GitHub API rate limit') and not rate_limited:
+                        rate_limited = d['error']
         else:
             if it.live and it.target:
                 line = f'{it.live[:8]} -> {it.target[:8]}   {it.status}'
@@ -4459,6 +4494,8 @@ def cmd_align(args) -> int:
         if it.note:
             line += f'   {it.note}'
         print(f'    {it.component:<16} {line}')
+    if rate_limited:
+        print(f'  commit distances skipped: {rate_limited}')
     files = align.image_file_drift(rel.tag)
     stale = [f for f in files if f['status'] in ('differs', 'absent')]
     unverified = [f for f in files if f['status'] == 'unknown']
@@ -4466,8 +4503,8 @@ def cmd_align(args) -> int:
     for f in files:
         print(f"    {f['path']:<40} {f['note'] or f['status']}")
     if recorded and recorded != rel.tag:
-        print(f'  host: recorded {recorded}, blessed {rel.tag} — run pm-align on the '
-              f'Proxmox host (Plan 3)')
+        print('  Proxmox host: level not measured from here — check it with '
+              'pm-align (Plan 3)')
     counts = {s: sum(1 for i in plan if i.status == s)
               for s in ('move', 'refuse', 'missing', 'stray')}
     print(f"  summary: {counts['move']} to move, {counts['refuse']} refused, "

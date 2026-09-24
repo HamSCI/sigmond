@@ -1,7 +1,9 @@
 """Tests for sigmond.align — no test touches the network."""
+import http.client
 import io
 import json
 import unittest
+import urllib.error
 
 from sigmond import align
 
@@ -58,7 +60,7 @@ class FetchReleaseTests(unittest.TestCase):
 
     def test_named_release_uses_the_tags_endpoint(self):
         fake = FakeUrlopen({align.RELEASES_API + "/tags/v3.51": release_json("v3.51"),
-                            "https://example/manifest": MANIFEST.encode()})
+                            "https://example/manifest": MANIFEST.replace("v3.53", "v3.51").encode()})
         align.fetch_release("v3.51", urlopen=fake)
         self.assertIn(align.RELEASES_API + "/tags/v3.51", fake.seen)
 
@@ -79,6 +81,89 @@ class FetchReleaseTests(unittest.TestCase):
         with self.assertRaises(align.LookupError_) as cm:
             align.fetch_release(urlopen=FakeUrlopen({}))
         self.assertIn("could not reach", str(cm.exception))
+
+    def test_malformed_component_name_refuses(self):
+        bad = MANIFEST.replace("sigmond ", "sig!mond ", 1)
+        fake = FakeUrlopen({align.RELEASES_API + "/latest": release_json(),
+                            "https://example/manifest": bad.encode()})
+        with self.assertRaises(align.LookupError_) as cm:
+            align.fetch_release(urlopen=fake)
+        self.assertIn("malformed", str(cm.exception))
+
+    def test_malformed_sha_refuses(self):
+        bad = MANIFEST.replace("daba1f6", "ZZZZZZZ")
+        fake = FakeUrlopen({align.RELEASES_API + "/latest": release_json(),
+                            "https://example/manifest": bad.encode()})
+        with self.assertRaises(align.LookupError_) as cm:
+            align.fetch_release(urlopen=fake)
+        self.assertIn("malformed", str(cm.exception))
+
+    def test_invalid_release_tag_refuses_before_building_a_url(self):
+        fake = FakeUrlopen({})
+        with self.assertRaises(align.LookupError_) as cm:
+            align.fetch_release("not-a-tag", urlopen=fake)
+        self.assertIn("not a release tag", str(cm.exception))
+        self.assertEqual(fake.seen, [])
+
+    def test_preamble_tag_mismatch_refuses(self):
+        mismatched = MANIFEST.replace("appliance_tag: v3.53", "appliance_tag: v9.99")
+        fake = FakeUrlopen({align.RELEASES_API + "/latest": release_json(),
+                            "https://example/manifest": mismatched.encode()})
+        with self.assertRaises(align.LookupError_) as cm:
+            align.fetch_release(urlopen=fake)
+        self.assertIn("v9.99", str(cm.exception))
+
+
+class GetErrorTests(unittest.TestCase):
+    """align._get narrows what it catches, and names rate limits and HTTP
+    status codes instead of flattening everything to 'could not reach'."""
+
+    def test_rate_limit_names_the_limit_and_reset(self):
+        import email.message
+
+        hdrs = email.message.Message()
+        hdrs["X-RateLimit-Remaining"] = "0"
+        hdrs["X-RateLimit-Reset"] = "1790306100"  # 2026-09-25 03:15:00 UTC
+
+        def fake(url, timeout=None):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", hdrs, io.BytesIO(b"rate limit"))
+
+        with self.assertRaises(align.LookupError_) as cm:
+            align._get("https://api.github.com/x", fake, 5.0)
+        msg = str(cm.exception)
+        self.assertIn("rate limit", msg.lower())
+        self.assertIn("03:15Z", msg)
+
+    def test_404_on_tags_reports_no_such_release(self):
+        def fake(url, timeout=None):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
+
+        with self.assertRaises(align.LookupError_) as cm:
+            align._get(align.RELEASES_API + "/tags/v9.99", fake, 5.0)
+        self.assertIn("no such release: v9.99", str(cm.exception))
+
+    def test_other_http_error_names_the_status(self):
+        def fake(url, timeout=None):
+            raise urllib.error.HTTPError(url, 500, "Internal Server Error", {}, io.BytesIO(b""))
+
+        with self.assertRaises(align.LookupError_) as cm:
+            align._get("https://api.github.com/x", fake, 5.0)
+        self.assertIn("HTTP 500", str(cm.exception))
+
+    def test_network_error_is_could_not_reach(self):
+        def fake(url, timeout=None):
+            raise urllib.error.URLError("no route")
+
+        with self.assertRaises(align.LookupError_) as cm:
+            align._get("https://api.github.com/x", fake, 5.0)
+        self.assertIn("could not reach", str(cm.exception))
+
+    def test_programming_error_propagates(self):
+        def fake(url, timeout=None):
+            raise TypeError("boom")
+
+        with self.assertRaises(TypeError):
+            align._get("https://api.github.com/x", fake, 5.0)
 
 
 def rel(**over):
@@ -142,12 +227,19 @@ class ProbeTests(unittest.TestCase):
         self.assertIsNone(align.github_slug("https://gitlab.com/x/y"))
 
     def test_commit_distance(self):
-        url = "https://api.github.com/repos/HamSCI/hf-timestd/compare/4595c00...5c8196d"
+        url = "https://api.github.com/repos/HamSCI/hf-timestd/compare/4595c00...5c8196d?per_page=1"
         body = json.dumps({"ahead_by": 20, "behind_by": 0,
                            "files": [{}] * 22}).encode()
         got = align.commit_distance("HamSCI/hf-timestd", "4595c00", "5c8196d",
                                     urlopen=FakeUrlopen({url: body}))
         self.assertEqual(got, {"ahead": 20, "behind": 0, "files": 22})
+
+    def test_commit_distance_files_absent_is_unknown_not_zero(self):
+        url = "https://api.github.com/repos/HamSCI/hf-timestd/compare/4595c00...5c8196d?per_page=1"
+        body = json.dumps({"ahead_by": 20, "behind_by": 0}).encode()  # no 'files' key
+        got = align.commit_distance("HamSCI/hf-timestd", "4595c00", "5c8196d",
+                                    urlopen=FakeUrlopen({url: body}))
+        self.assertIsNone(got["files"])
 
     def test_commit_distance_failure_is_reported_not_raised(self):
         got = align.commit_distance("HamSCI/x", "a", "b", urlopen=FakeUrlopen({}))
