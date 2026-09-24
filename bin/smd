@@ -3819,6 +3819,9 @@ def cmd_fleet(args) -> int:
         for entry in roster:
             line = (f"{entry['name']}  profile={entry['profile']} "
                     f"role={entry['role']}")
+            if entry.get('heartbeat_station') and \
+                    entry['heartbeat_station'] != entry['name']:
+                line += f" reports-as={entry['heartbeat_station']}"
             if entry['frozen']:
                 line += f" [FROZEN: {entry['frozen']}]"
             if entry['canary']:

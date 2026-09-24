@@ -36,6 +36,24 @@ class TestLoadFleet:
         assert fleet['beta'].frozen.startswith('capture window')
         assert fleet['alpha'].frozen is None
 
+    def test_load_fleet_reads_heartbeat_station(self, tmp_path):
+        """A station reports its reporter id (``AC0G/B4``); the inventory
+        calls it ``b4``.  The block may declare the mapping — and when it
+        does not, the loader must leave it None rather than defaulting it
+        here (the default-to-name behaviour belongs to fleet_roster)."""
+        p = tmp_path / 'fleet.toml'
+        p.write_text(
+            '[host.b4]\n'
+            'reach = "root@b4.example"\n'
+            'heartbeat_station = "AC0G/B4"\n'
+            '\n'
+            '[host.dasi002]\n'
+            'reach = "root@dasi002.example"\n'
+        )
+        fleet = load_fleet(str(p))
+        assert fleet['b4'].heartbeat_station == 'AC0G/B4'
+        assert fleet['dasi002'].heartbeat_station is None
+
     def test_reach_is_opaque(self, tmp_path):
         """The loader records WHERE, and never parses it into parts.
 
@@ -1473,15 +1491,30 @@ class TestFleetRoster:
         roster = fleet_roster(fleet, profile='bee')
         assert [e['name'] for e in roster] == ['bee1']
 
-    def test_entry_shape_is_exactly_five_fields(self):
+    def test_entry_shape_is_exactly_six_fields(self):
         fleet = _fleet(Host(name='b4', reach='root@b4.example',
                             hop='sigmond@10.0.0.1', profile='dasi2',
                             role='field', frozen=None, canary=True))
         [entry] = fleet_roster(fleet, profile='dasi2')
         assert entry == {
             'name': 'b4', 'profile': 'dasi2', 'role': 'field',
-            'frozen': None, 'canary': True,
+            'frozen': None, 'canary': True, 'heartbeat_station': 'b4',
         }
+
+    def test_heartbeat_station_is_declared_value_or_defaults_to_name(self):
+        """The key is ALWAYS present, so a board consumer needs no
+        fallback of its own: declared, it is the reporter id a station's
+        envelopes actually carry; undeclared, it is the inventory name
+        (the envelope carries ``name`` in that case)."""
+        fleet = _fleet(
+            Host(name='b4', reach='r', profile='dasi2',
+                heartbeat_station='AC0G/B4'),
+            Host(name='dasi002', reach='r', profile='dasi2'),
+        )
+        roster = fleet_roster(fleet, profile='dasi2')
+        by_name = {e['name']: e for e in roster}
+        assert by_name['b4']['heartbeat_station'] == 'AC0G/B4'
+        assert by_name['dasi002']['heartbeat_station'] == 'dasi002'
 
     def test_reach_and_hop_are_absent(self):
         """The roster travels to a server; access topology must not."""

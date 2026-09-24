@@ -143,6 +143,13 @@ def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
     statuses = []
     for entry in roster:
         station = entry.get("name")
+        # A station reports under its OWN idea of its name — usually its
+        # reporter id (e.g. "AC0G/B4") — which the inventory may map to
+        # a different roster name ("b4").  heartbeat_station, when
+        # declared, is what the db was actually written under; absent
+        # (an older roster.json, or a host with no mapping) falls back
+        # to the roster name itself.  See sigmond#95.
+        heartbeat_station = entry.get("heartbeat_station") or station
         status = {
             "station": station,
             "profile": entry.get("profile"),
@@ -157,8 +164,14 @@ def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
             # parseable envelope has actually arrived — a station never
             # heard from gets no tag, same as a plain station.
             "envelope_role": None,
+            # The envelope name this row's heartbeats actually arrive
+            # under, ONLY when it differs from the roster name — None
+            # when they are the same, so a consumer can test truthiness
+            # instead of comparing two fields.
+            "reports_as": (heartbeat_station
+                          if heartbeat_station != station else None),
         }
-        row = _latest(conn, station)
+        row = _latest(conn, heartbeat_station)
         if row is None:
             status["availability"] = _verdict("INDETERMINATE", "never heard")
             status["top"] = _verdict("INDETERMINATE", "never heard")
@@ -238,7 +251,10 @@ def unexpected_stations(conn, roster, now, window_s=DEFAULT_WINDOW_S):
     fleet member, and letting it pad the roster view would make the
     fleet look larger and healthier than it was declared to be.
     """
-    known = {e.get("name") for e in roster}
+    known = set()
+    for e in roster:
+        known.add(e.get("name"))
+        known.add(e.get("heartbeat_station") or e.get("name"))
     cutoff = float(now) - float(window_s)
     rows = conn.execute(
         "SELECT station, COUNT(*), MAX(received_at) FROM heartbeats"
@@ -394,6 +410,9 @@ def render_html(statuses, unexpected, rejects, generated_at):
             tags.append("canary")
         if status.get("frozen"):
             tags.append(f"frozen: {status['frozen']}")
+        reports_as = status.get("reports_as")
+        if reports_as and reports_as != status.get("station"):
+            tags.append(f"reports as: {reports_as}")
         tag_html = (f'<br><span class="tag">{_e(", ".join(tags))}</span>'
                     if tags else "")
         out.append("<tr>")

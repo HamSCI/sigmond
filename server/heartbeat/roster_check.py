@@ -35,13 +35,28 @@ def read_roster(path):
         # every command still reported success.
         raise ValueError(f"{path}: roster is EMPTY — refusing to proceed")
     names = []
+    heartbeat_station_of = {}
     for entry in data:
         if not isinstance(entry, dict):
             raise ValueError(f"{path}: roster entry {entry!r} is not an object")
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"{path}: roster entry {entry!r} has no name")
-        names.append(name.strip())
+        name = name.strip()
+        names.append(name)
+        # Undeclared defaults to the entry's own name (fleet_roster's
+        # rule) — which is by construction unique, so it never collides.
+        # Two entries that DECLARE the same heartbeat_station would both
+        # match the same heartbeats.station row: two board rows reading
+        # one station's arrivals, which is a fleet.toml authoring bug
+        # that belongs caught here, not discovered on the live board.
+        hb = entry.get("heartbeat_station") or name
+        if hb in heartbeat_station_of:
+            raise ValueError(
+                f"{path}: heartbeat_station {hb!r} is claimed by both "
+                f"{heartbeat_station_of[hb]!r} and {name!r} — two roster "
+                f"rows would show the same station's heartbeats")
+        heartbeat_station_of[hb] = name
     return names
 
 

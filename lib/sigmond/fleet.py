@@ -85,6 +85,10 @@ class Host:
         canary: Whether this host leads a fleet update. Exactly one
             host carries it; see :func:`choose_canary` for why it is
             declared rather than inferred.
+        heartbeat_station: The `station` name this host's heartbeat
+            envelopes carry, when it differs from `name` (a station
+            reports its reporter id, e.g. `AC0G/B4`; the inventory
+            calls it `b4`). None means the envelope carries `name`.
     """
 
     name: str
@@ -94,6 +98,7 @@ class Host:
     role: Optional[str] = None
     frozen: Optional[str] = None
     canary: bool = False
+    heartbeat_station: Optional[str] = None
 
 
 def _resolve_path() -> Optional[Path]:
@@ -138,6 +143,7 @@ def _host_from_block(name: str, block, source: Path) -> Host:
         role=block.get('role'),
         frozen=block.get('frozen'),
         canary=bool(block.get('canary', False)),
+        heartbeat_station=block.get('heartbeat_station'),
     )
 
 
@@ -222,9 +228,12 @@ def fleet_roster(fleet: dict, profile: str = 'dasi2') -> list[dict]:
     travel with it. Everything here is safe to publish.
 
     Returns:
-        One ``{name, profile, role, frozen, canary}`` dict per matching
-        host, in inventory order. ``frozen`` is the reason string, or
-        None when the host may be changed.
+        One ``{name, profile, role, frozen, canary, heartbeat_station}``
+        dict per matching host, in inventory order. ``frozen`` is the
+        reason string, or None when the host may be changed.
+        ``heartbeat_station`` is ALWAYS present — the host's declared
+        value, or ``name`` when undeclared — so a consumer (the
+        fleetboard) never needs a fallback of its own.
     """
     return [
         {
@@ -233,6 +242,7 @@ def fleet_roster(fleet: dict, profile: str = 'dasi2') -> list[dict]:
             'role': host.role,
             'frozen': host.frozen,
             'canary': host.canary,
+            'heartbeat_station': host.heartbeat_station or host.name,
         }
         for host in filter_fleet(fleet, profile).values()
     ]

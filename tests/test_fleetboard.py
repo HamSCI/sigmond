@@ -699,6 +699,29 @@ def test_absent_role_renders_no_tag():
     assert '<span class="tag">' not in html
 
 
+def test_render_html_shows_reports_as_when_it_differs_from_station():
+    status = crafted_statuses()[0]
+    status["station"] = "b4"
+    status["reports_as"] = "AC0G/B4"
+    html = fleetboard.render_html(
+        [status], [], {"count": 0, "window_s": 86400, "recent": []}, 1.0)
+    assert "reports as: AC0G/B4" in html
+
+
+def test_render_html_omits_reports_as_when_equal_or_absent():
+    status = crafted_statuses()[0]
+    status["station"] = "b4"
+    status["reports_as"] = "b4"
+    html_equal = fleetboard.render_html(
+        [status], [], {"count": 0, "window_s": 86400, "recent": []}, 1.0)
+    assert "reports as:" not in html_equal
+
+    status["reports_as"] = None
+    html_absent = fleetboard.render_html(
+        [status], [], {"count": 0, "window_s": 86400, "recent": []}, 1.0)
+    assert "reports as:" not in html_absent
+
+
 def test_silent_pm_row_flips_invalid_same_as_a_station(db_path):
     """Absence detection gets NO PM-specific carve-out: a silent PM row
     is INVALID exactly like a silent station row (see
@@ -753,6 +776,23 @@ def test_unexpected_station_is_segregated_never_merged(db_path):
                            "last_seen": pytest.approx(NOW - 20)}]
 
 
+def test_unexpected_stations_matches_by_heartbeat_station_too(db_path):
+    """A station reporting under its declared heartbeat_station must not
+    be misfiled as a stranger just because that string is not the
+    roster's `name`."""
+    roster = [{"name": "b4", "profile": "dasi2",
+              "heartbeat_station": "AC0G/B4"}]
+    seed(db_path, "AC0G/B4", NOW - 30)
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        unexpected = fleetboard.unexpected_stations(conn, roster, NOW)
+    finally:
+        conn.close()
+
+    assert unexpected == []
+
+
 def test_unexpected_window_excludes_stale_strangers(db_path):
     seed(db_path, "MYSTERY-1", NOW - 90000)
 
@@ -779,6 +819,54 @@ def test_rejects_summary_counts_the_window(db_path, drop_dir):
     assert summary["count"] == 1
     assert summary["window_s"] == 86400
     assert summary["recent"][0]["station_guess"] == "AC0G-B4"
+
+
+# ---------------------------------------------------------------------------
+# 3b. heartbeat_station translation (sigmond#95) — the inventory maps a
+# station's heartbeat name to its fleet name, and the board translates.
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_station_lookup_translates_the_reporter_id(db_path):
+    """The roster knows the host as 'b4'; its envelopes carry the
+    reporter id 'AC0G/B4'.  The board must look the db up by the
+    declared heartbeat_station, still label the row with the roster
+    name, and never fall into unexpected_stations for the reporter id
+    it was told to expect."""
+    roster = [{"name": "b4", "profile": "dasi2", "role": "field",
+              "frozen": None, "canary": False,
+              "heartbeat_station": "AC0G/B4"}]
+    seed(db_path, "AC0G/B4", NOW - 30, make_envelope(station="AC0G/B4"))
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, roster, NOW)
+        unexpected = fleetboard.unexpected_stations(conn, roster, NOW)
+    finally:
+        conn.close()
+
+    [status] = statuses
+    assert status["station"] == "b4"
+    assert status["availability"]["verdict"] == "VALID"
+    assert status["reports_as"] == "AC0G/B4"
+    assert unexpected == []
+
+
+def test_old_style_roster_entry_without_heartbeat_station_still_matches_by_name(
+        db_path):
+    """A roster.json rsynced to the server before this feature has no
+    heartbeat_station key at all — it must keep matching by name."""
+    roster = [{"name": "AC0G-B4", "profile": "dasi2", "role": "reference",
+              "frozen": None, "canary": True}]
+    seed(db_path, "AC0G-B4", NOW - 30)
+
+    conn = ingest.open_db(str(db_path))
+    try:
+        [status] = fleetboard.derive_status(conn, roster, NOW)
+    finally:
+        conn.close()
+
+    assert status["availability"]["verdict"] == "VALID"
+    assert status.get("reports_as") is None
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +1044,29 @@ def test_roster_check_prints_names(tmp_path, capsys):
 def test_roster_check_refuses_a_nameless_entry(tmp_path):
     path = write_roster(tmp_path, [{"profile": "dasi2"}])
     assert roster_check.main(["--check", str(path)]) == 1
+
+
+def test_roster_check_refuses_duplicate_heartbeat_station(tmp_path, capsys):
+    """Two roster rows claiming the same heartbeat_station would both
+    show the same station's heartbeats — a fleet.toml authoring bug
+    that belongs caught here, not discovered as a mysteriously doubled
+    row on the board."""
+    path = write_roster(tmp_path, [
+        {"name": "b4", "heartbeat_station": "AC0G/B4"},
+        {"name": "b4-2", "heartbeat_station": "AC0G/B4"},
+    ])
+    assert roster_check.main(["--check", str(path)]) == 1
+    assert "AC0G/B4" in capsys.readouterr().err
+
+
+def test_roster_check_allows_entries_with_no_heartbeat_station(tmp_path):
+    """Old-style entries, or a station with no declared mapping — undeclared
+    never collides with anything, since each defaults to its own name."""
+    path = write_roster(tmp_path, [
+        {"name": "AC0G-B4"},
+        {"name": "DASI002"},
+    ])
+    assert roster_check.main(["--check", str(path)]) == 0
 
 
 # ---------------------------------------------------------------------------
