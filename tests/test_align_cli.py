@@ -1086,46 +1086,81 @@ class AlignBringupTests(unittest.TestCase):
     """_align_bringup — re-runs bring-up's own steps in bring-up's own
     order. Task 6 of Plan 2b; not yet wired into `_align_apply` (Task 7)."""
 
-    def _run(self, answers, say=None):
+    def _run(self, answers, say=None, refreshed=False):
         fake = _FakeBringupRun(answers)
         # Never read the real /etc/hs-uploader/pipelines.toml (Fix round 1 audit).
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch("sigmond.uploader_manifest.MANIFEST_PATH", Path(tmp) / "pipelines.toml"), \
              mock.patch("os.access", return_value=True):
-            steps = smd._align_bringup(run=fake, say=say or (lambda *a, **k: None))
+            steps = smd._align_bringup(run=fake, say=say or (lambda *a, **k: None),
+                                       site_timing_refreshed=refreshed)
         return steps, fake
 
     def test_order_is_site_timing_render_manifest_doctor(self):
-        steps, fake = self._run([(0, "", "")] * 4)
+        steps, fake = self._run([(0, "", "")] * 5, refreshed=True)
         self.assertEqual(
             [s.component for s in steps],
             ["sigmond-site-timing", "config render",
              "admin uploader manifest --write", "doctor --fix"])
         self.assertIn("sigmond-site-timing", fake.calls[0][-1])
-        self.assertEqual(fake.calls[1][-2:], ["config", "render"])
-        self.assertEqual(fake.calls[2][-4:], ["admin", "uploader", "manifest", "--write"])
-        self.assertEqual(fake.calls[3][-2:], ["doctor", "--fix"])
+        self.assertEqual(fake.calls[1][:3], ["journalctl", "-t", "sigmond-site-timing"])
+        self.assertEqual(fake.calls[2][-3:], ["config", "render", "--if-present"])
+        self.assertEqual(fake.calls[3][-4:], ["admin", "uploader", "manifest", "--write"])
+        self.assertEqual(fake.calls[4][-2:], ["doctor", "--fix"])
         for kw in fake.kwargs:
             self.assertEqual(kw.get("stdin"), subprocess.DEVNULL)
         for step in steps:
             self.assertEqual(step.outcome, "ran")
 
     def test_site_timing_failure_stops_before_render(self):
-        steps, fake = self._run([(1, "", "chrony restart failed")])
+        steps, fake = self._run([(1, "", "chrony restart failed")], refreshed=True)
         self.assertEqual(len(steps), 1)
         self.assertEqual(steps[0].component, "sigmond-site-timing")
         self.assertEqual(steps[0].outcome, "failed")
-        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(len(fake.calls), 2)          # the script, then its journal
+        self.assertEqual(fake.calls[1][0], "journalctl")
+
+    # --- Final review / P2 + C1: site-timing re-runs only when this run
+    # refreshed it; otherwise its wiring (profile full, enable --now on
+    # every metrology channel, chrony restart) is left to bring-up. ---
+
+    def test_unrefreshed_site_timing_is_not_re_run(self):
+        steps, fake = self._run([(0, "", "")] * 3)
+        self.assertEqual(steps[0], align_apply.Step(
+            "sigmond-site-timing", "ran", "not re-run — unchanged; its wiring is bring-up's"))
+        for argv in fake.calls:
+            self.assertFalse(any("sigmond-site-timing" in str(a) for a in argv), argv)
+            self.assertNotEqual(argv[0], "journalctl")
+        self.assertEqual(fake.calls[0][-3:], ["config", "render", "--if-present"])
+
+    def test_refreshed_site_timing_runs_and_its_detail_carries_the_journal_lines(self):
+        journal = "".join(f"[site-timing] line {i}\n" for i in range(1, 26))
+        steps, fake = self._run([(0, "done\n", ""), (0, journal, "")] + [(0, "", "")] * 3,
+                                refreshed=True)
+        self.assertEqual(fake.calls[0], ["/usr/local/sbin/sigmond-site-timing"])
+        j = fake.calls[1]
+        self.assertEqual(j[:3], ["journalctl", "-t", "sigmond-site-timing"])
+        since = j[j.index("--since") + 1]
+        self.assertTrue(since.startswith("@") and since[1:].isdigit(), since)
+        self.assertIn("-o", j)
+        self.assertEqual(j[j.index("-o") + 1], "cat")
+        self.assertIn("--no-pager", j)
+        detail = steps[0].detail
+        self.assertEqual(steps[0].outcome, "ran")
+        self.assertIn("[site-timing] line 25", detail)
+        self.assertIn("[site-timing] line 6", detail)
+        self.assertNotIn("[site-timing] line 5\n", detail + "\n")
+        self.assertEqual(sum(1 for l in detail.splitlines() if "[site-timing] line" in l), 20)
 
     def test_doctor_findings_still_counts_as_ran(self):
-        steps, fake = self._run([(0, "", ""), (0, "", ""), (0, "", ""),
+        steps, fake = self._run([(0, "", ""), (0, "", ""),
                                  (1, "3 findings", "")])
-        self.assertEqual(len(fake.calls), 4)
+        self.assertEqual(len(fake.calls), 3)
         self.assertEqual(steps[-1].component, "doctor --fix")
         self.assertEqual(steps[-1].outcome, "ran")
 
     def test_doctor_crash_is_failed(self):
-        steps, fake = self._run([(0, "", ""), (0, "", ""), (0, "", ""),
+        steps, fake = self._run([(0, "", ""), (0, "", ""),
                                  (2, "", "traceback")])
         self.assertEqual(steps[-1].component, "doctor --fix")
         self.assertEqual(steps[-1].outcome, "failed")
@@ -1136,7 +1171,7 @@ class AlignBringupTests(unittest.TestCase):
     # (doctor included) must treat -1 as failed. ---
 
     def test_doctor_timeout_is_failed(self):
-        run = _RaisingOnNthCall(4, subprocess.TimeoutExpired(cmd="doctor", timeout=120))
+        run = _RaisingOnNthCall(3, subprocess.TimeoutExpired(cmd="doctor", timeout=120))
         with mock.patch("os.access", return_value=True):
             steps = smd._align_bringup(run=run, say=lambda *a, **k: None)
         self.assertEqual(steps[-1].component, "doctor --fix")
@@ -1144,7 +1179,7 @@ class AlignBringupTests(unittest.TestCase):
         self.assertIn("timed out", steps[-1].detail)
 
     def test_doctor_oserror_is_failed(self):
-        run = _RaisingOnNthCall(4, OSError("no such file or directory"))
+        run = _RaisingOnNthCall(3, OSError("no such file or directory"))
         with mock.patch("os.access", return_value=True):
             steps = smd._align_bringup(run=run, say=lambda *a, **k: None)
         self.assertEqual(steps[-1].component, "doctor --fix")
@@ -1186,7 +1221,7 @@ class AlignBringupTests(unittest.TestCase):
     def test_not_executable_site_timing_is_skipped_not_failed(self):
         with mock.patch("os.access", return_value=False):
             steps = smd._align_bringup(run=_FakeBringupRun([(0, "", "")] * 3),
-                                       say=lambda *a, **k: None)
+                                       say=lambda *a, **k: None, site_timing_refreshed=True)
         self.assertEqual([s.component for s in steps],
                          ["config render", "admin uploader manifest --write", "doctor --fix"])
 
@@ -2035,6 +2070,16 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         restart_lines = [c[0][1]["what"] for c in m["update"].call_args_list
                          if "restarted" in c[0][1]["what"]]
         self.assertEqual(restart_lines, ["smd align --apply v3.53: hf-timestd restarted"])
+
+    def test_bringup_re_runs_site_timing_only_when_this_run_refreshed_it(self):
+        rc, out, m = self._run(
+            images=[align_apply.Step("/usr/local/sbin/sigmond-site-timing", "refreshed")])
+        self.assertIs(m["bringup"].call_args.kwargs.get("site_timing_refreshed"), True)
+        rc, out, m = self._run(
+            images=[align_apply.Step("/usr/local/sbin/sigmond-location-check", "refreshed")])
+        self.assertIs(m["bringup"].call_args.kwargs.get("site_timing_refreshed"), False)
+        rc, out, m = self._run()
+        self.assertIs(m["bringup"].call_args.kwargs.get("site_timing_refreshed"), False)
 
     def test_bringup_failure_means_no_record_and_no_restart(self):
         rc, out, m = self._run(

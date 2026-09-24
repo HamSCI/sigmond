@@ -5466,10 +5466,12 @@ def _align_refresh_image_files(tag) -> list:
 _ALIGN_SITE_TIMING = '/usr/local/sbin/sigmond-site-timing'
 
 
-def _align_bringup(*, run=subprocess.run, say=print) -> list:
+_ALIGN_SITE_TIMING_JOURNAL_LINES = 20
+
+
+def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool = False) -> list:
     """Re-run bring-up's own steps, in bring-up's own order, stopping at
-    the first failure: `sigmond-site-timing` (idempotent — skips wiring
-    already done, and may restart chrony itself), `config render`,
+    the first failure: `sigmond-site-timing`, `config render --if-present`,
     `admin uploader manifest --write` (never `--enable`: whether to
     restart a running hs-uploader over a changed manifest is Task 7's
     call, keyed off the "manifest changed" detail this step returns),
@@ -5495,6 +5497,17 @@ def _align_bringup(*, run=subprocess.run, say=print) -> list:
     against that half-rendered state would be reasoning from a
     contradiction. A re-run is idempotent and simply starts over from
     site-timing.
+
+    Final review / P2 + C1: `sigmond-site-timing` runs ONLY when this run
+    refreshed its file (``site_timing_refreshed``) — when its own code
+    changed.  It does more than read: it sets the timestd profile to
+    `full`, runs `enable --now` on every metrology channel env file
+    (starting a channel an operator stopped on purpose), sets
+    `lb1421_enabled` and try-restarts core-recorder, and restarts chrony.
+    Otherwise its Step says "not re-run — unchanged; its wiring is
+    bring-up's".  It logs only to the journal, so when it does run, the
+    lines it logged this run (`journalctl -t sigmond-site-timing --since
+    @<start>`, the last 20) go into its Step detail.
     """
     from sigmond import align_apply
     from sigmond import uploader_manifest as um
@@ -5508,10 +5521,26 @@ def _align_bringup(*, run=subprocess.run, say=print) -> list:
 
     steps = []
 
-    if os.access(_ALIGN_SITE_TIMING, os.X_OK):
+    if not site_timing_refreshed:
+        steps.append(align_apply.Step('sigmond-site-timing', 'ran',
+                                      "not re-run — unchanged; its wiring is bring-up's"))
+    elif os.access(_ALIGN_SITE_TIMING, os.X_OK):
+        start = int(time.time())
         r = _align_run([_ALIGN_SITE_TIMING], run=run, timeout=300,
                        action='sigmond-site-timing', stdin=subprocess.DEVNULL)
         detail = _tail(r)
+        j = _align_run(['journalctl', '-t', 'sigmond-site-timing', '--since', f'@{start}',
+                        '-o', 'cat', '--no-pager'],
+                       run=run, timeout=15, action='journalctl -t sigmond-site-timing',
+                       stdin=subprocess.DEVNULL)
+        logged = ([ln for ln in (j.stdout or '').splitlines() if ln.strip()]
+                  if j.returncode == 0 else [])
+        if logged:
+            shown = logged[-_ALIGN_SITE_TIMING_JOURNAL_LINES:]
+            head = (f'{len(logged) - len(shown)} earlier lines not shown'
+                    if len(logged) > len(shown) else 'it logged')
+            detail = ((detail + '; ') if detail else '') + head + ':' + ''.join(
+                f'\n      | {ln}' for ln in shown)
         if r.returncode != 0:
             steps.append(align_apply.Step('sigmond-site-timing', 'failed', detail))
             return steps
@@ -5519,7 +5548,7 @@ def _align_bringup(*, run=subprocess.run, say=print) -> list:
     else:
         say(f'  {_ALIGN_SITE_TIMING} not executable — skipped')
 
-    r = _align_run([sys.executable, str(_SCRIPT), 'config', 'render'],
+    r = _align_run([sys.executable, str(_SCRIPT), 'config', 'render', '--if-present'],
                    run=run, timeout=120, action='config render', stdin=subprocess.DEVNULL)
     detail = _tail(r)
     if r.returncode != 0:
@@ -5804,7 +5833,8 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
             print('  aligned — nothing to do')
             return 0
 
-    bringup_steps = _align_bringup()
+    bringup_steps = _align_bringup(site_timing_refreshed=any(
+        s.component == _ALIGN_SITE_TIMING and s.outcome == 'refreshed' for s in image_steps))
     _align_print_steps(bringup_steps)
     steps = move_steps + image_steps + bringup_steps
     if any(s.outcome in ('failed', 'refused') for s in bringup_steps):
