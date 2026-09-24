@@ -508,6 +508,12 @@ APPLY_REL = align.Release(tag="v3.53", manifest_text="manifest text",
 _CHECKS_PASS = {"units_stable": True, "authority_fresh": None,
                 "heartbeat_sent": True, "notes": []}
 
+# aligned.json's live block after a finished, passing restart stage — the
+# precondition (with the release) for a no-op run (final review / I2).
+_LIVE_PASSED = {"at": "2026-09-24T12:00:00Z", "restarted": ["hf-timestd"], "failed": [],
+                "units_stable": True, "authority_fresh": True, "heartbeat_sent": True,
+                "notes": [], "complete": True}
+
 
 def _quiet_live_stages():
     """Task 7 wired image refresh, bring-up, restarts and fast checks into
@@ -519,7 +525,22 @@ def _quiet_live_stages():
         _align_bringup=lambda **kw: [],
         _align_services=lambda *a, **k: {},
         _align_restart=lambda *a, **k: [],
-        _align_fast_checks=lambda *a, **k: dict(_CHECKS_PASS))
+        _align_fast_checks=lambda *a, **k: dict(_CHECKS_PASS),
+        # Never the real /etc/sigmond-appliance/aligned.json (final review / M5).
+        _align_aligned_release=lambda: None,
+        _align_aligned_live=lambda: None,
+        # Never the real systemctl or /opt/git reflogs: the staleness read
+        # also asks after hs-uploader's own daemon (final review / I5).
+        _align_staleness=lambda *a, **k: _staleness())
+
+
+def _no_real_record_live():
+    """record_live reads, then rewrites, /etc/sigmond-appliance/aligned.json,
+    and every run that reaches the restart stage now writes a live block
+    (final review / I2) — so every harness that stubs the live stages
+    stubs this too. A test that watches record_live patches it again,
+    inside."""
+    return mock.patch("sigmond.align_apply.record_live", new=lambda *a, **k: None)
 
 
 def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY_REL,
@@ -551,6 +572,7 @@ def run_apply(*, apply=True, allow_rollback=False, max_bytes=None, release=APPLY
 
     patches = [
         _quiet_live_stages(),
+        _no_real_record_live(),
         # Fix round 1 / I-1: with apply=False this drives the real dry run,
         # which must reach neither the network nor /etc.
         mock.patch("sigmond.align.image_file_drift", return_value=[]),
@@ -626,6 +648,7 @@ class AlignApplyFlagTests(unittest.TestCase):
 
 
 @_quiet_live_stages()
+@_no_real_record_live()
 class AlignApplyOrderTests(unittest.TestCase):
     def test_apply_calls_need_root_before_fetch_release(self):
         calls = []
@@ -663,6 +686,7 @@ class AlignApplyOrderTests(unittest.TestCase):
 
 
 @_quiet_live_stages()
+@_no_real_record_live()
 class AlignApplySigmondBootstrapTests(unittest.TestCase):
     def test_sigmond_forward_target_has_align_execs(self):
         # M8: tightened — the executable, the re-exec'd script path, and
@@ -781,6 +805,7 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
 
 
 @_quiet_live_stages()
+@_no_real_record_live()
 class AlignApplyBudgetCarryoverTests(unittest.TestCase):
     """I1: --max-bytes actually holds, both across the prefetch phase and
     across the sigmond-bootstrap's two apply_plan calls."""
@@ -888,6 +913,7 @@ class AlignApplyBudgetCarryoverTests(unittest.TestCase):
 
 
 @_quiet_live_stages()
+@_no_real_record_live()
 class AlignApplyRadiodMissingTests(unittest.TestCase):
     def test_missing_ka9q_radio_is_refused_not_installed(self):
         # M4: ka9q-radio has no install.sh of its own (smd builds it
@@ -1599,6 +1625,7 @@ def _apply_patches(st, *, rel, live, dirty=None, ancestry=None, **extra):
     m_history = mock.Mock()
     for p in [
         _quiet_live_stages(),
+        _no_real_record_live(),
         mock.patch.object(smd, "_need_root", return_value=False),
         mock.patch.object(smd, "lifecycle_lock", lambda reason=None: contextlib.nullcontext()),
         mock.patch.object(smd, "_align_live_state", return_value=(live, dirty or {}, {}, {})),
@@ -2015,7 +2042,7 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
     def _run(self, *, moves=None, images=(), bringup=(), staleness=None,
              services=None, restart_steps=None, restarted_units=(), checks=None,
              no_restart=False, fast_checks=None, extra_patches=(),
-             aligned_release=APPLY_REL.tag):
+             aligned_release=APPLY_REL.tag, aligned_live=_LIVE_PASSED):
         order = []
         moves = moves if moves is not None else [
             align_apply.Step("sigmond", "current"),
@@ -2032,7 +2059,8 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         m_bringup = mock.Mock(side_effect=lambda **kw: order.append("bringup") or list(bringup))
         m_checks = fast_checks or mock.Mock(
             side_effect=lambda *a, **k: order.append("checks") or dict(checks or _CHECKS_PASS))
-        m_record_live = mock.Mock()
+        m_record_live = mock.Mock(side_effect=lambda path, live: order.append(
+            f"live:{live.get('complete')}"))
         m_update = mock.Mock()
         out = io.StringIO()
         with contextlib.ExitStack() as st:
@@ -2054,6 +2082,8 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
             st.enter_context(mock.patch("sigmond.heartbeat._read_authority", return_value={}))
             st.enter_context(mock.patch.object(smd, "_align_aligned_release",
                                                return_value=aligned_release))
+            st.enter_context(mock.patch.object(smd, "_align_aligned_live",
+                                               return_value=aligned_live))
             for p in extra_patches:
                 st.enter_context(p)
             st.enter_context(contextlib.redirect_stdout(out))
@@ -2068,7 +2098,8 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
             bringup=[align_apply.Step("config render", "ran")],
             restart_steps=[align_apply.Step("hf-timestd", "restarted")],
             restarted_units=["hf-a.service"])
-        self.assertEqual(m["order"], ["moves", "images", "bringup", "record", "restart", "checks"])
+        self.assertEqual(m["order"], ["moves", "images", "bringup", "record", "restart",
+                                      "live:False", "checks", "live:True"])
         self.assertEqual(rc, 0)
         self.assertIn("  restarts:", out)
         self.assertIn("  checks:", out)
@@ -2076,8 +2107,11 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         live = m["record_live"].call_args[0][1]
         self.assertEqual(m["record_live"].call_args[0][0], align_apply.ALIGNED_RECORD)
         self.assertEqual(live["restarted"], ["hf-timestd"])
+        self.assertEqual(live["failed"], [])
+        self.assertIs(live["complete"], True)
         self.assertTrue(live["units_stable"])
         self.assertIn("at", live)
+        self.assertIn("baseline", m["checks"].call_args.kwargs)
         restart_lines = [c[0][1]["what"] for c in m["update"].call_args_list
                          if "restarted" in c[0][1]["what"]]
         self.assertEqual(restart_lines, ["smd align --apply v3.53: hf-timestd restarted"])
@@ -2158,10 +2192,15 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         self.assertFalse(live["units_stable"])
         self.assertIn("hf-a.service", " ".join(live["notes"]))
 
-    def test_nothing_restarted_writes_no_live_record(self):
+    def test_nothing_restarted_writes_a_complete_live_record(self):
+        # Final review / I2: the restart stage ran, so the live block is
+        # written — without it the next run could never be a no-op.
         rc, out, m = self._run(staleness=_staleness())
         m["checks"].assert_not_called()
-        m["record_live"].assert_not_called()
+        m["record_live"].assert_called_once()
+        live = m["record_live"].call_args[0][1]
+        self.assertEqual((live["restarted"], live["failed"], live["complete"]), ([], [], True))
+        self.assertIsNone(live["units_stable"])
         self.assertEqual(rc, 0)
 
     def test_failed_restart_exits_1(self):
@@ -2192,7 +2231,7 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
             extra_patches=[mock.patch("subprocess.run", fake_run)])
         self.assertEqual(rc, 0)
         self.assertIn(["systemctl", "restart", uploader.SERVICE], calls)
-        self.assertEqual(m["order"][-2:], ["restart", "checks"])
+        self.assertEqual(m["order"][-4:], ["restart", "live:False", "checks", "live:True"])
         self.assertIn(uploader.SERVICE, m["checks"].call_args[0][0])
         self.assertEqual(m["record_live"].call_args[0][1]["restarted"],
                          ["hf-timestd", "hs-uploader"])
@@ -2210,6 +2249,123 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         m["restart"].assert_not_called()
         m["record_live"].assert_not_called()
         m["history"].assert_not_called()
+
+    # --- Final review / I2: a failed or interrupted restart stage is
+    # never a no-op ---
+
+    def _quiet_run(self, aligned_live, **kw):
+        """Nothing moved, nothing stale, aligned.json names this release."""
+        return self._run(moves=[align_apply.Step("sigmond", "current")],
+                         staleness=_staleness(running={"hf-timestd"}),
+                         aligned_live=aligned_live, **kw)
+
+    def test_complete_passing_live_block_is_a_no_op(self):
+        rc, out, m = self._quiet_run(dict(_LIVE_PASSED))
+        self.assertIn("aligned — nothing to do", out)
+        m["bringup"].assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_no_live_block_is_not_a_no_op(self):
+        rc, out, m = self._quiet_run(None)
+        self.assertNotIn("nothing to do", out)
+        m["bringup"].assert_called_once()
+        m["record"].assert_called_once()
+        self.assertIs(m["record_live"].call_args[0][1]["complete"], True)
+
+    def test_incomplete_live_block_is_not_a_no_op_and_rechecks_what_it_restarted(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 0, "active\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        rc, out, m = self._quiet_run(dict(_LIVE_PASSED, complete=False),
+                                     services={"hf-timestd": ["hf-a.service", "hf-t.timer"],
+                                               "psk-recorder": ["psk.service"]},
+                                     extra_patches=[mock.patch("subprocess.run", fake_run)])
+        self.assertNotIn("nothing to do", out)
+        m["bringup"].assert_called_once()
+        m["restart"].assert_not_called()
+        self.assertEqual(m["checks"].call_args[0][0], ["hf-a.service"])
+        self.assertFalse(any(a[:2] == ["systemctl", "restart"] for a in calls))
+        self.assertEqual(m["order"][-3:], ["live:False", "checks", "live:True"])
+        self.assertEqual(m["record_live"].call_args[0][1]["restarted"], [])
+        self.assertEqual(rc, 0)
+
+    def test_recheck_skips_a_unit_no_longer_running(self):
+        def fake_run(argv, **kw):
+            if argv[:2] == ["systemctl", "is-active"]:
+                return subprocess.CompletedProcess(argv, 3, "inactive\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        rc, out, m = self._quiet_run(dict(_LIVE_PASSED, complete=False),
+                                     extra_patches=[mock.patch("subprocess.run", fake_run)])
+        m["checks"].assert_not_called()
+
+    def test_live_block_with_a_failed_restart_is_not_a_no_op(self):
+        rc, out, m = self._quiet_run(dict(_LIVE_PASSED, failed=["psk-recorder"]))
+        self.assertNotIn("nothing to do", out)
+        m["bringup"].assert_called_once()
+
+    def test_live_block_with_a_failed_check_is_not_a_no_op(self):
+        for key in ("units_stable", "authority_fresh", "heartbeat_sent"):
+            rc, out, m = self._quiet_run(dict(_LIVE_PASSED, **{key: False}))
+            self.assertNotIn("nothing to do", out, key)
+            m["bringup"].assert_called_once()
+
+    def test_live_block_from_older_code_without_complete_is_not_a_no_op(self):
+        old = {k: v for k, v in _LIVE_PASSED.items() if k not in ("complete", "failed")}
+        rc, out, m = self._quiet_run(old)
+        self.assertNotIn("nothing to do", out)
+
+    def test_every_restart_failed_still_writes_the_live_block(self):
+        rc, out, m = self._run(restart_steps=[align_apply.Step("hf-timestd", "failed", "x")])
+        self.assertEqual(rc, 1)
+        live = m["record_live"].call_args[0][1]
+        self.assertEqual(live["failed"], ["hf-timestd"])
+        self.assertEqual(live["restarted"], [])
+        self.assertIs(live["complete"], True)
+
+    def test_ctrl_c_during_the_wait_leaves_complete_false(self):
+        seen = []
+        m_live = mock.Mock(side_effect=lambda path, live: seen.append(dict(live)))
+
+        def interrupted(*a, **k):
+            raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self._run(restart_steps=[align_apply.Step("hf-timestd", "restarted")],
+                      restarted_units=["hf-a.service"],
+                      fast_checks=mock.Mock(side_effect=interrupted),
+                      extra_patches=[mock.patch("sigmond.align_apply.record_live", m_live)])
+        self.assertEqual(len(seen), 1)
+        self.assertIs(seen[0]["complete"], False)
+        self.assertEqual(seen[0]["restarted"], ["hf-timestd"])
+
+    # --- Final review / I8: a stale authority fails the run ---
+
+    def test_stale_authority_exits_1(self):
+        rc, out, m = self._run(
+            restart_steps=[align_apply.Step("hf-timestd", "restarted")],
+            restarted_units=["hf-a.service"],
+            checks=dict(_CHECKS_PASS, authority_fresh=False,
+                        notes=["hf-timestd: authority.json stale (90s old)"]))
+        self.assertEqual(rc, 1)
+        self.assertIn("authority fresh: NO", out)
+        self.assertIs(m["record_live"].call_args[0][1]["authority_fresh"], False)
+
+    def test_aligned_live_reads_the_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            rec = Path(d) / "aligned.json"
+            with mock.patch.object(align_apply, "ALIGNED_RECORD", rec):
+                self.assertIsNone(smd._align_aligned_live())
+                rec.write_text('{"release": "v3.53"}')
+                self.assertIsNone(smd._align_aligned_live())
+                rec.write_text('{"release": "v3.53", "live": {"complete": true}}')
+                self.assertEqual(smd._align_aligned_live(), {"complete": True})
+                rec.write_text('{"release": "v3.53", "live": [1]}')
+                self.assertIsNone(smd._align_aligned_live())
+                rec.write_text("[1, 2]")
+                self.assertIsNone(smd._align_aligned_live())
 
     def test_aligned_release_reads_the_record(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2237,7 +2393,8 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
             moves=[align_apply.Step("sigmond", "current")],
             restart_steps=[align_apply.Step("hf-timestd", "restarted")],
             restarted_units=["hf-a.service"])
-        self.assertEqual(m["order"], ["moves", "images", "bringup", "record", "restart", "checks"])
+        self.assertEqual(m["order"], ["moves", "images", "bringup", "record", "restart",
+                                      "live:False", "checks", "live:True"])
         self.assertNotIn("nothing to do", out)
         self.assertEqual(rc, 0)
 

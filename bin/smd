@@ -4535,6 +4535,35 @@ def _align_aligned_release():
         return None
 
 
+def _align_aligned_live():
+    """aligned.json's ``live`` block (a dict), or None when the file or the
+    block is absent or unreadable."""
+    import json
+    from sigmond import align_apply
+    try:
+        live = json.loads(align_apply.ALIGNED_RECORD.read_text()).get('live')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return live if isinstance(live, dict) else None
+
+
+_ALIGN_LIVE_CHECKS = ('units_stable', 'authority_fresh', 'heartbeat_sent')
+
+
+def _align_live_passed(live) -> bool:
+    """Whether a ``live`` block records a restart stage that FINISHED and
+    passed: ``complete`` is True, ``failed`` is an empty list, and no check
+    reads False (None — not checked — passes).  Final review / I2: only
+    then may a run with nothing else to do be a no-op; a block written
+    before the 120 s wait and never finished (a Ctrl-C) reads
+    ``complete: false`` and fails this."""
+    if not isinstance(live, dict) or live.get('complete') is not True:
+        return False
+    if live.get('failed') != []:
+        return False
+    return all(live.get(k) is not False for k in _ALIGN_LIVE_CHECKS)
+
+
 def _align_head_moved_at(repo) -> Optional[float]:
     """When ``repo``'s HEAD last moved — a checkout, a pull or a clone —
     read from the newest line of ``<repo>/.git/logs/HEAD`` as a plain
@@ -5147,6 +5176,23 @@ def _align_fast_checks(restarted_units, *, run=subprocess.run, sleep=time.sleep,
             notes.append(f'heartbeat: systemctl start {_ALIGN_HEARTBEAT_UNIT}: {last}')
     return {'units_stable': stable, 'authority_fresh': authority_fresh,
             'heartbeat_sent': heartbeat_sent, 'notes': notes}
+
+
+def _align_recheck_units(components, services) -> list:
+    """The `.service` units, active now, of ``components`` — a previous live
+    block's ``restarted`` list, whose checks never finished or failed
+    (final review / I2).  hs-uploader maps to uploader.SERVICE when the
+    services map does not list it.  Nothing is restarted here."""
+    from sigmond.commands.uploader import SERVICE
+    out = []
+    for c in components or ():
+        units = services.get(c)
+        if units is None and c == 'hs-uploader':
+            units = [SERVICE]
+        for u in _align_service_units(units or []):
+            if _align_is_active(u, run=subprocess.run):
+                out.append(u)
+    return out
 
 
 def _align_label(component) -> str:
@@ -5926,9 +5972,16 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     # A no-op also needs aligned.json to name this release already: after a
     # sigmond-only release the re-exec'd child sees sigmond current and
     # nothing stale, yet has still to write the record under the new code.
+    #
+    # Final review / I2: it also needs aligned.json's live block to record a
+    # restart stage that finished and passed. A failed or interrupted one
+    # is never a no-op: this run re-checks what it restarted (below).
+    # Read before `record` rewrites aligned.json without it.
+    prior_live = _align_aligned_live()
     changed = any(s.outcome in ('moved', 'installed') for s in move_steps)
     refreshed = any(s.outcome == 'refreshed' for s in image_steps)
-    if not changed and not refreshed and _align_aligned_release() == rel.tag:
+    if (not changed and not refreshed and _align_aligned_release() == rel.tag
+            and _align_live_passed(prior_live)):
         try:
             quiet = not _align_staleness(base, _align_services(), catalog or None)['stale']
         except Exception:
@@ -6008,10 +6061,23 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
 
     checks_ok = True
     restarted = [s.component for s in restart_steps if s.outcome == 'restarted']
-    if restarted_units:
+    failed = [s.component for s in restart_steps if s.outcome == 'failed']
+    # Final review / I2: the fast checks also re-run over what the last
+    # live block restarted, when that stage did not finish and pass — on
+    # whichever of those components' units run now.
+    check_units = list(restarted_units)
+    if prior_live is not None and not _align_live_passed(prior_live):
+        check_units += _align_recheck_units(prior_live.get('restarted'), services)
+    check_units = list(dict.fromkeys(check_units))
+    live = {'at': now(), 'restarted': restarted, 'failed': failed,
+            'units_stable': None, 'authority_fresh': None, 'heartbeat_sent': None,
+            'notes': [], 'complete': False}
+    if check_units:
+        # Written BEFORE the 120 s wait: a Ctrl-C inside it leaves
+        # complete: false, which the next run will not call a no-op.
+        align_apply.record_live(align_apply.ALIGNED_RECORD, dict(live))
         print(f'  checks: (waiting {_ALIGN_FAST_CHECK_WAIT_S} s for the restarted units to settle)')
-        restarted_units = list(dict.fromkeys(restarted_units))
-        checks = _align_fast_checks(restarted_units, run=subprocess.run, sleep=time.sleep,
+        checks = _align_fast_checks(check_units, run=subprocess.run, sleep=time.sleep,
                                     now=time.time,
                                     hf_timestd_running='hf-timestd' in staleness['running'],
                                     baseline=baseline)
@@ -6026,8 +6092,9 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
             print(f'    {note}')
         checks_ok = bool(checks['units_stable'] and sent is not False
                          and fresh is not False)
-        align_apply.record_live(align_apply.ALIGNED_RECORD,
-                                {'at': now(), 'restarted': restarted, **checks})
+        live.update(checks)
+    live['complete'] = True
+    align_apply.record_live(align_apply.ALIGNED_RECORD, dict(live))
 
     _align_print_summary(steps)
     bad = any(s.outcome in _ALIGN_BLOCKING for s in steps)
