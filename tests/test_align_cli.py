@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -29,10 +30,12 @@ REL = align.Release(tag="v3.53", manifest_text="", appliance_commit=None,
                                 "ka9q-radio": "401992c"})
 
 
-def run(live, dirty=None, files=None, recorded="v3.36", release=REL, **ns):
-    args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=True, **ns)
+def run(live, dirty=None, files=None, recorded="v3.36", release=REL, no_cost=True,
+       origins=None, **ns):
+    args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=no_cost, **ns)
     patches = [
-        mock.patch.object(smd, "_align_live_state", return_value=(live, dirty or {})),
+        mock.patch.object(smd, "_align_live_state",
+                          return_value=(live, dirty or {}, origins or {})),
         mock.patch("sigmond.align.image_file_drift", return_value=files or [
             {"path": "/usr/local/sbin/sigmond-site-timing", "status": "current", "note": ""}]),
         mock.patch("sigmond.align.recorded_release", return_value=recorded),
@@ -89,6 +92,73 @@ class AlignCliTests(unittest.TestCase):
         body = inspect.getsource(smd.cmd_align)
         for word in ("checkout", "'fetch'", '"fetch"', "install.sh", "systemctl", "_run_git"):
             self.assertNotIn(word, body)
+
+    # --- Fix round 1 -----------------------------------------------------
+
+    def test_unverified_image_file_blocks_exit_0(self):
+        """An 'unknown' image-file status (probe unreachable) must not let
+        the run silently claim alignment — exit 1, and name the file(s)."""
+        rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                      files=[{"path": "/usr/local/sbin/sigmond-site-timing",
+                              "status": "unknown", "note": "could not reach raw.githubusercontent.com"},
+                             {"path": "/usr/local/sbin/sigmond-location-check",
+                              "status": "unknown", "note": "could not reach raw.githubusercontent.com"}],
+                      recorded="v3.53")
+        self.assertEqual(rc, 1)
+        self.assertIn("could not be checked", out)
+        self.assertIn("/usr/local/sbin/sigmond-site-timing", out)
+        self.assertIn("/usr/local/sbin/sigmond-location-check", out)
+
+    def test_no_cost_false_shows_commit_distance(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance",
+                        return_value={"ahead": 39, "behind": 0, "files": 51}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False)
+        self.assertIn("39 commits, 51 files", out)
+
+    def test_no_cost_false_catalog_unreadable_no_crash(self):
+        with mock.patch("sigmond.catalog.load_catalog", side_effect=ValueError("bad toml")):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("catalog unreadable", out)
+
+    def test_no_cost_false_commit_distance_error_shows_unknown(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance", return_value={"error": "no route"}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False)
+        self.assertIn("distance unknown", out)
+
+    def test_origin_fallback_when_catalog_has_no_repo(self):
+        """sigmond has no catalog entry/repo; _align_live_state's origin-URL
+        fallback should still let a commit distance be computed."""
+        with mock.patch("sigmond.catalog.load_catalog", return_value={}), \
+             mock.patch("sigmond.align.commit_distance",
+                        return_value={"ahead": 39, "behind": 0, "files": 51}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False,
+                          origins={"sigmond": "https://github.com/HamSCI/sigmond"})
+        self.assertIn("39 commits, 51 files", out)
+
+    def test_commit_distance_singular_grammar(self):
+        catalog = {"sigmond": types.SimpleNamespace(repo="https://github.com/HamSCI/sigmond")}
+        with mock.patch("sigmond.catalog.load_catalog", return_value=catalog), \
+             mock.patch("sigmond.align.commit_distance",
+                        return_value={"ahead": 1, "behind": 0, "files": 1}):
+            rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                          no_cost=False)
+        self.assertIn("1 commit, 1 file", out)
+        self.assertNotIn("1 commits", out)
+        self.assertNotIn("1 files", out)
+
+    def test_refuse_row_shows_shas(self):
+        rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                      dirty={"sigmond": True})
+        self.assertIn("459bee6 -> daba1f6   refuse", out)
 
 
 if __name__ == "__main__":

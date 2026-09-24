@@ -4357,14 +4357,42 @@ def cmd_manifest_restore(args) -> int:
     return 1
 
 
+def _align_origin_url(repo_dir) -> Optional[str]:
+    """Best-effort ``origin`` remote URL for a checkout, HTTPS-normalized.
+
+    Read-only (``git remote get-url``, never touches the index) and never
+    raises — a missing or unreadable remote just means no fallback repo
+    slug for commit-distance lookups, not a failed align run. Used when
+    the catalog has no ``repo`` for a component (e.g. sigmond itself).
+    """
+    try:
+        r = subprocess.run(
+            ['git', '-C', str(repo_dir), 'remote', 'get-url', 'origin'],
+            capture_output=True, text=True, check=False, timeout=10)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    url = r.stdout.strip()
+    if url.startswith('git@github.com:'):
+        url = 'https://github.com/' + url[len('git@github.com:'):]
+    return url or None
+
+
 def _align_live_state(base: str):
-    """(live HEADs, dirty flags) for every component checkout under ``base``."""
+    """(live HEADs, dirty flags, origin URLs) for every component checkout
+    under ``base``."""
     from sigmond.doctor import component_checkouts, git_state
     from sigmond.provenance import component_versions
     checkouts = component_checkouts(Path(base))
     live = component_versions(checkouts)
-    dirty = {Path(p).name: bool(git_state(p).get('dirty')) for p in checkouts}
-    return live, dirty
+    dirty = {}
+    origins = {}
+    for p in checkouts:
+        name = Path(p).name
+        dirty[name] = bool(git_state(p).get('dirty'))
+        origins[name] = _align_origin_url(p)
+    return live, dirty, origins
 
 
 def cmd_align(args) -> int:
@@ -4372,7 +4400,9 @@ def cmd_align(args) -> int:
 
     Dry run only (Plan 1 of docs/superpowers/specs/2026-09-24-smd-align-design.md):
     it reads local state and makes small HTTPS GETs, and changes nothing.
-    Exit 0 aligned, 1 alignment available, 2 target could not be established.
+    Exit 0 aligned (every component current/stray AND every image file
+    verified current — an unreachable probe never counts as aligned),
+    1 alignment available, 2 target could not be established.
     """
     from sigmond import align
     import socket
@@ -4382,7 +4412,7 @@ def cmd_align(args) -> int:
     except align.LookupError_ as exc:
         print(f'smd align: cannot establish the target — {exc}')
         return 2
-    live, dirty = _align_live_state(base)
+    live, dirty, origins = _align_live_state(base)
     plan = align.plan_align(rel, live, dirty)
     print(f'smd align — {socket.gethostname()} against blessed {rel.tag} '
           f'(dry run: nothing changes)')
@@ -4394,7 +4424,8 @@ def cmd_align(args) -> int:
         try:
             from sigmond.catalog import load_catalog
             catalog = load_catalog()
-        except (FileNotFoundError, OSError):
+        except Exception as exc:
+            print(f'  catalog unreadable ({exc}) — commit distances skipped')
             catalog = {}
     for it in plan:
         if it.status == 'current':
@@ -4402,18 +4433,35 @@ def cmd_align(args) -> int:
         elif it.status == 'move':
             line = f'{it.live[:8]} -> {it.target[:8]}   move'
             entry = catalog.get(it.component)
-            slug = align.github_slug(getattr(entry, 'repo', '')) if entry else None
+            repo_url = getattr(entry, 'repo', '') if entry else ''
+            if not repo_url:
+                # catalog has no repo for this component (e.g. sigmond
+                # itself) — fall back to the local clone's own origin.
+                repo_url = origins.get(it.component) or ''
+            slug = align.github_slug(repo_url) if repo_url else None
             if slug:
                 d = align.commit_distance(slug, it.live, it.target)
-                line += ('   ' + (f"{d['ahead']} commits, {d['files']} files"
-                                  if 'error' not in d else 'distance unknown'))
+                if 'error' not in d:
+                    ahead, nfiles = d['ahead'], d['files']
+                    line += (f"   {ahead} commit{'s' if ahead != 1 else ''}, "
+                             f"{nfiles} file{'s' if nfiles != 1 else ''}")
+                else:
+                    line += '   distance unknown'
         else:
-            line = f'{it.status}'
+            if it.live and it.target:
+                line = f'{it.live[:8]} -> {it.target[:8]}   {it.status}'
+            elif it.live:
+                line = f'{it.live[:8]:<8}              {it.status}'
+            elif it.target:
+                line = f'{"":8} -> {it.target[:8]}   {it.status}'
+            else:
+                line = it.status
         if it.note:
             line += f'   {it.note}'
         print(f'    {it.component:<16} {line}')
     files = align.image_file_drift(rel.tag)
     stale = [f for f in files if f['status'] in ('differs', 'absent')]
+    unverified = [f for f in files if f['status'] == 'unknown']
     print('  image-carried files:')
     for f in files:
         print(f"    {f['path']:<40} {f['note'] or f['status']}")
@@ -4425,8 +4473,12 @@ def cmd_align(args) -> int:
     print(f"  summary: {counts['move']} to move, {counts['refuse']} refused, "
           f"{counts['missing']} missing, {counts['stray']} stray, "
           f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh")
+    if unverified:
+        names = ', '.join(f['path'] for f in unverified)
+        print(f"  {len(unverified)} file{'s' if len(unverified) != 1 else ''} "
+              f"could not be checked: {names}")
     print('  apply: not built yet (Plan 2)')
-    pending = counts['move'] or counts['refuse'] or counts['missing'] or stale
+    pending = counts['move'] or counts['refuse'] or counts['missing'] or stale or unverified
     return 1 if pending else 0
 
 
