@@ -1092,6 +1092,13 @@ class AlignRestartTests(unittest.TestCase):
         self.assertEqual(fake.restart_argv("c2.service"), [])
         self.assertEqual(steps, [align_apply.Step("c", "restarted")])
 
+    def test_component_whose_only_unit_is_inactive_is_left_not_restarted(self):
+        fake = _FakeRestartRun(inactive_units={"c1.service"})
+        steps = smd._align_restart(False, ["c"], {"c": ["c1.service"]}, run=fake,
+                                   say=lambda *_: None)
+        self.assertEqual(fake.restart_argv("c1.service"), [])
+        self.assertEqual(steps, [align_apply.Step("c", "left", "not running — left alone")])
+
     def test_no_active_radiod_unit_makes_radiod_not_restarted_consumers_proceed(self):
         fake = _FakeRestartRun(inactive_units={"radiod@default.service"})
         services = {align_live.RADIOD: ["radiod@default.service"],

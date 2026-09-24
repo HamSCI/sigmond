@@ -4735,10 +4735,12 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
                     kind='service', source='align')
            for c in components for u in services.get(c, [])]
     failed: dict = {}
+    touched: set = set()
     for ref in order_units(refs):
         if not _align_is_active(ref.unit, run=run):
             say(f'  {ref.unit} not running — left alone')
             continue
+        touched.add(ref.component)
         r = _align_restart_unit(ref.unit, run=run, say=say)
         if r.returncode != 0 and ref.component not in failed:
             lines = (r.stderr or '').strip().splitlines()
@@ -4747,8 +4749,12 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     for c in components:
         if c in failed:
             steps.append(align_apply.Step(c, 'failed', failed[c]))
-        else:
+        elif c in touched:
             steps.append(align_apply.Step(c, 'restarted'))
+        else:
+            # Every unit it lists was already down: nothing was restarted,
+            # and align never starts what is not running.
+            steps.append(align_apply.Step(c, 'left', 'not running — left alone'))
     return steps
 
 
