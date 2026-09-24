@@ -1277,15 +1277,19 @@ class _FakeRestartRun:
     ``ready_rc``; everything else 0. ``raise_on`` maps an exact argv (as a
     tuple) to an exception instance to raise instead of answering — for
     exercising the TimeoutExpired/OSError paths."""
-    def __init__(self, fail_units=None, ready_rc=0, inactive_units=None, raise_on=None):
+    def __init__(self, fail_units=None, ready_rc=0, inactive_units=None, raise_on=None,
+                 show=None):
         self.calls = []
+        self.kwargs = []
         self.fail_units = fail_units or set()
         self.ready_rc = ready_rc
         self.inactive_units = inactive_units or set()
         self.raise_on = raise_on or {}
+        self.show = show      # callable(argv) -> stdout for `systemctl show`, or None
 
     def __call__(self, argv, **kw):
         self.calls.append(argv)
+        self.kwargs.append(kw)
         exc = self.raise_on.get(tuple(argv))
         if exc is not None:
             raise exc
@@ -1295,12 +1299,19 @@ class _FakeRestartRun:
                 argv, 0 if active else 3, "active\n" if active else "inactive\n", "")
         if argv[0] == "/usr/local/sbin/sigmond-radiod-ready":
             return subprocess.CompletedProcess(argv, self.ready_rc, "", "")
-        if argv[:2] == ["systemctl", "restart"] and argv[2] in self.fail_units:
-            return subprocess.CompletedProcess(argv, 1, "", f"failed: {argv[2]}\n")
+        if argv[:2] == ["systemctl", "restart"]:
+            bad = [u for u in argv[2:] if u in self.fail_units]
+            if bad:
+                return subprocess.CompletedProcess(argv, 1, "", f"failed: {bad[0]}\n")
+        if argv[:2] == ["systemctl", "show"] and self.show is not None:
+            return subprocess.CompletedProcess(argv, 0, self.show(argv), "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     def restart_argv(self, unit):
-        return [c for c in self.calls if c[:2] == ["systemctl", "restart"] and c[2] == unit]
+        return [c for c in self.calls if c[:2] == ["systemctl", "restart"] and unit in c[2:]]
+
+    def restarts(self):
+        return [c for c in self.calls if c[:2] == ["systemctl", "restart"]]
 
     def is_active_argv(self, unit):
         return [c for c in self.calls if c[:2] == ["systemctl", "is-active"] and c[2] == unit]
@@ -2846,11 +2857,18 @@ class AlignMakeLiveRobustnessTests(unittest.TestCase):
         self.assertIn("topology broke", out.getvalue())
 
 
-HF_TIMESTD_UNITS = ["timestd-core-recorder.service", "timestd-fusion.service",
-                    "timestd-metrology.target", "timestd-l2-calibration.timer",
-                    "timestd-physics.timer", "timestd-metrology@wwv5.service"]
+# hf-timestd's real [systemd] units (hf-timestd/deploy.toml), with two
+# metrology@ instances the templated unit expands to on a station.
+HF_TIMESTD_UNITS = ["timestd-core-recorder.service", "timestd-metrology.target",
+                    "timestd-fusion.service", "timestd-l2-calibration.service",
+                    "timestd-radiod-monitor.service", "timestd-vtec.service",
+                    "timestd-chrony-monitor.timer", "timestd-pipeline-watchdog.timer",
+                    "timestd-hpps-watchdog.timer", "timestd-prune.timer",
+                    "timestd-metrology@wwv5.service", "timestd-metrology@wwv10.service"]
 HF_TIMESTD_SERVICES = ["timestd-core-recorder.service", "timestd-fusion.service",
-                       "timestd-metrology@wwv5.service"]
+                       "timestd-l2-calibration.service", "timestd-radiod-monitor.service",
+                       "timestd-vtec.service", "timestd-metrology@wwv5.service",
+                       "timestd-metrology@wwv10.service"]
 
 
 @_NO_REAL_CATALOG
@@ -2865,8 +2883,16 @@ class AlignServiceUnitsOnlyTests(unittest.TestCase):
         said = []
         steps = smd._align_restart(False, ["hf-timestd"], {"hf-timestd": HF_TIMESTD_UNITS},
                                    run=fake, say=said.append, units_out=units)
-        restarted = [c[2] for c in fake.calls if c[:2] == ["systemctl", "restart"]]
-        self.assertEqual(sorted(restarted), sorted(HF_TIMESTD_SERVICES))
+        # Final review / I1: ONE restart argv for the whole component —
+        # its units Require each other, so one at a time would restart
+        # fusion and every metrology channel twice.
+        restarts = fake.restarts()
+        self.assertEqual(len(restarts), 1, restarts)
+        self.assertEqual(sorted(restarts[0][2:]), sorted(HF_TIMESTD_SERVICES))
+        resets = [c for c in fake.calls if c[:2] == ["systemctl", "reset-failed"]]
+        self.assertEqual(len(resets), 1, resets)
+        self.assertEqual(sorted(resets[0][2:]), sorted(HF_TIMESTD_SERVICES))
+        self.assertLess(fake.index_of(resets[0]), fake.index_of(restarts[0]))
         self.assertEqual(sorted(units), sorted(HF_TIMESTD_SERVICES))
         for c in fake.calls:
             self.assertFalse(any(str(a).endswith((".timer", ".target")) for a in c), c)
@@ -2902,3 +2928,112 @@ class AlignServiceUnitsOnlyTests(unittest.TestCase):
         self.assertEqual(smd._align_units_started_at(["a.timer", "m.target", "s.service"], run=run),
                          100.0)
         self.assertIsNone(smd._align_units_started_at(["a.timer", "m.target"], run=run))
+
+
+@_NO_REAL_CATALOG
+class AlignRestartTimeoutTests(unittest.TestCase):
+    """Final review / I1: the restart's client timeout comes from the units'
+    own TimeoutStartUSec + TimeoutStopUSec — core-recorder alone has
+    TimeoutStartSec=300, so a flat 300 s could fire while systemd still
+    waits on it."""
+
+    SHOW = {"a.service": "TimeoutStartUSec=5min\nTimeoutStopUSec=1min 30s\n",
+            "b.service": "TimeoutStartUSec=1min 30s\nTimeoutStopUSec=1min 30s\n"}
+
+    def _show(self, argv):
+        units = [a for a in argv if a.endswith(".service")]
+        return "\n".join(self.SHOW.get(u, "") for u in units)
+
+    def _restart_timeout(self, fake):
+        i = next(i for i, c in enumerate(fake.calls) if c[:2] == ["systemctl", "restart"])
+        return fake.kwargs[i]["timeout"]
+
+    def test_timeout_is_the_max_start_plus_stop_plus_60(self):
+        fake = _FakeRestartRun(show=self._show)
+        smd._align_restart(False, ["c"], {"c": ["a.service", "b.service"]}, run=fake,
+                           say=lambda m: None)
+        show = [c for c in fake.calls if c[:2] == ["systemctl", "show"]
+                and "TimeoutStartUSec" in c][0]
+        self.assertEqual(show, ["systemctl", "show", "-p", "TimeoutStartUSec",
+                                "-p", "TimeoutStopUSec", "a.service", "b.service"])
+        self.assertEqual(self._restart_timeout(fake), 300 + 90 + 60)
+
+    def test_unreadable_timeouts_default_to_600(self):
+        for out in ("", "TimeoutStartUSec=infinity\nTimeoutStopUSec=infinity\n", "garbage"):
+            fake = _FakeRestartRun(show=lambda argv, out=out: out)
+            smd._align_restart(False, ["c"], {"c": ["a.service"]}, run=fake, say=lambda m: None)
+            self.assertEqual(self._restart_timeout(fake), 600, out)
+
+    def test_parse_usec_forms(self):
+        p = smd._align_parse_usec
+        self.assertEqual(p("5min"), 300.0)
+        self.assertEqual(p("1min 30s"), 90.0)
+        self.assertEqual(p("1h 2min 3s"), 3723.0)
+        self.assertEqual(p("500ms"), 0.5)
+        self.assertEqual(p("45"), 45.0)
+        self.assertIsNone(p("infinity"))
+        self.assertIsNone(p(""))
+        self.assertIsNone(p("5 parsecs"))
+
+    def test_radiod_restarts_in_one_argv_then_readiness_per_unit(self):
+        fake = _FakeRestartRun()
+        steps = smd._align_restart(True, [], {align_live.RADIOD: ["radiod@a.service",
+                                                                   "radiod@b.service"]},
+                                   run=fake, say=lambda m: None)
+        self.assertEqual(fake.restarts(),
+                         [["systemctl", "restart", "radiod@a.service", "radiod@b.service"]])
+        self.assertEqual(len(fake.readiness_argv("radiod@a.service")), 1)
+        self.assertEqual(len(fake.readiness_argv("radiod@b.service")), 1)
+        self.assertEqual(steps, [align_apply.Step(align_live.RADIOD, "restarted", "ready")])
+
+    # --- M1: NRestarts snapshotted right after each component's restart ---
+
+    def test_nrestarts_snapshot_right_after_the_restart(self):
+        def show(argv):
+            return "NRestarts=3\nActiveState=active\n" if "NRestarts" in argv else ""
+        fake = _FakeRestartRun(show=show)
+        snap = {}
+        smd._align_restart(False, ["c"], {"c": ["a.service", "b.service"]}, run=fake,
+                           say=lambda m: None, nrestarts_out=snap)
+        self.assertEqual(snap, {"a.service": 3, "b.service": 3})
+        restart_i = fake.index_of(fake.restarts()[0])
+        shows = [i for i, c in enumerate(fake.calls)
+                 if c[:2] == ["systemctl", "show"] and "NRestarts" in c]
+        self.assertTrue(shows and all(i > restart_i for i in shows))
+
+    def test_fast_checks_measure_from_the_snapshot(self):
+        # A unit that restarted once more between its own restart and the
+        # start of the 120 s window is unstable.
+        def run(argv, **kw):
+            if argv[:2] == ["systemctl", "show"]:
+                return subprocess.CompletedProcess(argv, 0, "NRestarts=1\nActiveState=active\n", "")
+            if argv[:2] == ["systemctl", "is-enabled"]:
+                return subprocess.CompletedProcess(argv, 1, "disabled\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        r = smd._align_fast_checks(["a.service"], run=run, sleep=lambda s: None,
+                                   now=lambda: 0.0, hf_timestd_running=False,
+                                   baseline={"a.service": 0})
+        self.assertFalse(r["units_stable"])
+        r = smd._align_fast_checks(["a.service"], run=run, sleep=lambda s: None,
+                                   now=lambda: 0.0, hf_timestd_running=False)
+        self.assertTrue(r["units_stable"])
+
+
+class AlignUnitsStartedAtRobustnessTests(unittest.TestCase):
+    """M2: systemctl through _align_run, timeout 15; an error ignores that unit."""
+
+    def test_oserror_or_timeout_ignores_that_unit(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(kw.get("timeout"))
+            if argv[-1] == "bad.service":
+                raise OSError("no systemctl")
+            if argv[-1] == "slow.service":
+                raise subprocess.TimeoutExpired(argv, 15)
+            return subprocess.CompletedProcess(
+                argv, 0, "ActiveState=active\nActiveEnterTimestamp=@100\n", "")
+        self.assertEqual(smd._align_units_started_at(
+            ["bad.service", "slow.service", "ok.service"], run=run), 100.0)
+        self.assertEqual(seen, [15, 15, 15])
+        self.assertIsNone(smd._align_units_started_at(["bad.service"], run=run))

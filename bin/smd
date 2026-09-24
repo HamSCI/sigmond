@@ -4590,9 +4590,11 @@ def _align_units_started_at(units, run=subprocess.run) -> Optional[float]:
     a stopped component stale; starting it is not alignment's job)."""
     times = []
     for unit in _align_service_units(units):
-        r = run(['systemctl', 'show', '--timestamp=unix',
-                 '-p', 'ActiveState', '-p', 'ActiveEnterTimestamp', unit],
-                capture_output=True, text=True)
+        # M2: through _align_run — a hung or missing systemctl ignores
+        # that unit (rc -1), never raises out of the staleness read.
+        r = _align_run(['systemctl', 'show', '--timestamp=unix',
+                        '-p', 'ActiveState', '-p', 'ActiveEnterTimestamp', unit],
+                       run=run, timeout=15, action=f'systemctl show {unit}')
         if r.returncode != 0:
             continue
         state = None
@@ -4707,20 +4709,97 @@ def _align_is_active(unit, *, run, timeout=15) -> bool:
     return (r.stdout or '').strip() == 'active'
 
 
-def _align_restart_unit(unit, *, run, say, timeout=300) -> object:
-    """`systemctl reset-failed <unit>`, then `systemctl restart <unit>` —
-    in-process, never `smd restart` (the held lifecycle_lock would make
-    that child exit "another lifecycle operation is in progress"). The
-    caller has already confirmed ``unit`` is active."""
-    say(f'  restarting {unit} …')
-    _align_run(['systemctl', 'reset-failed', unit], run=run, timeout=timeout,
-               action=f'systemctl reset-failed {unit}')
-    return _align_run(['systemctl', 'restart', unit], run=run, timeout=timeout,
-                      action=f'systemctl restart {unit}')
+_ALIGN_USEC_UNITS = {'us': 1e-6, 'usec': 1e-6, 'ms': 1e-3, 'msec': 1e-3,
+                     's': 1.0, 'sec': 1.0, 'min': 60.0, 'h': 3600.0, 'hr': 3600.0,
+                     'd': 86400.0, 'w': 604800.0}
+_ALIGN_USEC_RE = re.compile(r'(\d+(?:\.\d+)?)([a-z]*)')
+_ALIGN_RESTART_TIMEOUT_DEFAULT = 600
+_ALIGN_RESTART_TIMEOUT_SLACK = 60
+
+
+def _align_parse_usec(text) -> Optional[float]:
+    """Seconds from a systemd time span as `systemctl show` prints one
+    (`5min`, `1min 30s`, `500ms`, a bare `45`); None for `infinity`, an
+    empty value or anything else it cannot read."""
+    text = (text or '').strip()
+    if not text or text == 'infinity':
+        return None
+    total = 0.0
+    pos = 0
+    for m in _ALIGN_USEC_RE.finditer(text):
+        if text[pos:m.start()].strip():
+            return None
+        unit = m.group(2) or 's'
+        if unit not in _ALIGN_USEC_UNITS:
+            return None
+        total += float(m.group(1)) * _ALIGN_USEC_UNITS[unit]
+        pos = m.end()
+    if pos == 0 or text[pos:].strip():
+        return None
+    return total
+
+
+def _align_restart_timeout(units, *, run) -> int:
+    """The client timeout for one `systemctl restart <units…>`: the largest
+    TimeoutStartUSec + TimeoutStopUSec among ``units``, plus 60 s — read
+    with ONE `systemctl show` (final review / I1).  hf-timestd's
+    core-recorder alone has TimeoutStartSec=300, so a flat 300 s could fire
+    while systemd is still inside it.  600 s when nothing is readable."""
+    r = _align_run(['systemctl', 'show', '-p', 'TimeoutStartUSec', '-p', 'TimeoutStopUSec',
+                    *units], run=run, timeout=15, action='systemctl show timeouts')
+    if r.returncode != 0:
+        return _ALIGN_RESTART_TIMEOUT_DEFAULT
+    best = None
+    for block in re.split(r'\n\s*\n', r.stdout or ''):
+        vals = {}
+        for line in block.splitlines():
+            key, _, val = line.partition('=')
+            vals[key.strip()] = _align_parse_usec(val)
+        start, stop = vals.get('TimeoutStartUSec'), vals.get('TimeoutStopUSec')
+        if start is None or stop is None:
+            continue
+        best = max(best or 0.0, start + stop)
+    if best is None:
+        return _ALIGN_RESTART_TIMEOUT_DEFAULT
+    return int(best + 0.999) + _ALIGN_RESTART_TIMEOUT_SLACK
+
+
+def _align_restart_units(units, *, run, say) -> object:
+    """ONE `systemctl reset-failed <units…>`, then ONE `systemctl restart
+    <units…>` — in-process, never `smd restart` (the held lifecycle_lock
+    would make that child exit "another lifecycle operation is in
+    progress").  Final review / I1: a component's units go in a single
+    command, which systemd merges into one transaction; hf-timestd's units
+    Require each other, and restarting them one at a time restarted fusion
+    and every metrology channel twice.  The caller has already confirmed
+    every unit in ``units`` is active."""
+    units = list(units)
+    say(f'  restarting {" ".join(units)} …')
+    timeout = _align_restart_timeout(units, run=run)
+    _align_run(['systemctl', 'reset-failed', *units], run=run, timeout=15,
+               action='systemctl reset-failed')
+    return _align_run(['systemctl', 'restart', *units], run=run, timeout=timeout,
+                      action=f'systemctl restart {" ".join(units)}')
+
+
+def _align_snapshot_nrestarts(units, *, run, out) -> None:
+    """M1: each unit's NRestarts right after its component's restart, into
+    ``out`` — the baseline `_align_fast_checks` measures from, so a unit
+    that restarts again before the 120 s window opens still shows."""
+    if out is None:
+        return
+    for u in units:
+        out[u] = _align_unit_state(u, run=run)[1]
+
+
+def _align_restart_fail_detail(units, r) -> str:
+    lines = (r.stderr or '').strip().splitlines()
+    last = lines[-1] if lines else ''
+    return f'systemctl restart {" ".join(units)}: {last}'
 
 
 def _align_restart(radiod_first: bool, components: list, services: dict, *,
-                   run=subprocess.run, say=print, units_out=None) -> list:
+                   run=subprocess.run, say=print, units_out=None, nrestarts_out=None) -> list:
     """Restart what an alignment left stale: radiod first (with a
     per-unit readiness wait), then every listed component — never `smd
     restart` (Controller: a restart runs in-process; the held
@@ -4733,6 +4812,12 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     radiod counts as not restarted and the listed components restart as
     a plain component restart, exactly as when ``radiod_first`` is False.
 
+    Final review / I1: each component — radiod included — restarts with
+    ONE `systemctl reset-failed` and ONE `systemctl restart` naming all of
+    its active `.service` units (`_align_restart_units`), with a client
+    timeout from the units' own start + stop timeouts.  Components go in
+    `order_units` order (the first unit of each decides its place).
+
     ``components`` is the already-decided restart list (align_live.
     restart_sequence / restart_sequence's caller); this function does not
     re-derive staleness. ``services`` is `_align_services()`'s
@@ -4741,9 +4826,11 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     have dropped.
 
     ``units_out``, when given, receives every unit whose ``systemctl
-    restart`` returned 0 — the list Task 7's fast checks watch.  Only
-    ``.service`` units are ever restarted (`_align_service_units`); a
-    component whose units are all timers/targets is left, never restarted.
+    restart`` returned 0 — the list the fast checks watch.
+    ``nrestarts_out``, when given, receives {unit: NRestarts} read right
+    after that restart (M1).  Only ``.service`` units are ever restarted
+    (`_align_service_units`); a component whose units are all
+    timers/targets is left, never restarted.
     """
     from sigmond import align_apply
     from sigmond.align_live import RADIOD
@@ -4761,14 +4848,12 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
                 say(f'  {unit} not running — left alone')
         if active_units:
             fail_detail = None
-            for unit in active_units:
-                r = _align_restart_unit(unit, run=run, say=say)
-                if r.returncode == 0:
-                    units_out.append(unit)
-                if r.returncode != 0 and fail_detail is None:
-                    lines = (r.stderr or '').strip().splitlines()
-                    last = lines[-1] if lines else ''
-                    fail_detail = f'systemctl restart {unit}: {last}'
+            r = _align_restart_units(active_units, run=run, say=say)
+            if r.returncode == 0:
+                units_out.extend(active_units)
+                _align_snapshot_nrestarts(active_units, run=run, out=nrestarts_out)
+            else:
+                fail_detail = _align_restart_fail_detail(active_units, r)
             if fail_detail is None:
                 for unit in active_units:
                     r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, '90'],
@@ -4790,20 +4875,25 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     refs = [UnitRef(component=c, unit=u, template=None, instance=None,
                     kind='service', source='align')
            for c in components for u in _align_service_units(services.get(c, []))]
+    order = list(dict.fromkeys(ref.component for ref in order_units(refs)))
     failed: dict = {}
     touched: set = set()
-    for ref in order_units(refs):
-        if not _align_is_active(ref.unit, run=run):
-            say(f'  {ref.unit} not running — left alone')
+    for c in order:
+        active_units = []
+        for unit in _align_service_units(services.get(c, [])):
+            if _align_is_active(unit, run=run):
+                active_units.append(unit)
+            else:
+                say(f'  {unit} not running — left alone')
+        if not active_units:
             continue
-        touched.add(ref.component)
-        r = _align_restart_unit(ref.unit, run=run, say=say)
+        touched.add(c)
+        r = _align_restart_units(active_units, run=run, say=say)
         if r.returncode == 0:
-            units_out.append(ref.unit)
-        if r.returncode != 0 and ref.component not in failed:
-            lines = (r.stderr or '').strip().splitlines()
-            last = lines[-1] if lines else ''
-            failed[ref.component] = f'systemctl restart {ref.unit}: {last}'
+            units_out.extend(active_units)
+            _align_snapshot_nrestarts(active_units, run=run, out=nrestarts_out)
+        else:
+            failed[c] = _align_restart_fail_detail(active_units, r)
     for c in components:
         if c in failed:
             steps.append(align_apply.Step(c, 'failed', failed[c]))
@@ -4816,9 +4906,11 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     return steps
 
 
-def _align_restart_uploader(*, run=subprocess.run, say=print, units_out=None):
+def _align_restart_uploader(*, run=subprocess.run, say=print, units_out=None,
+                            nrestarts_out=None):
     """Restart hs-uploader over a manifest bring-up just changed (Controller
-    ruling 4). Its unit comes from uploader.py's own SERVICE constant, not
+    ruling 4), or because its checkout moved after it started (final review
+    / I5). Its unit comes from uploader.py's own SERVICE constant, not
     `_align_services`: the catalog calls hs-uploader a library, so the
     services map may never list it. Restarted only when `systemctl
     is-active` says active — align never starts what is not running."""
@@ -4827,13 +4919,13 @@ def _align_restart_uploader(*, run=subprocess.run, say=print, units_out=None):
     if not _align_is_active(SERVICE, run=run):
         say(f'  {SERVICE} not running — left alone')
         return align_apply.Step('hs-uploader', 'left', 'not running — left alone')
-    r = _align_restart_unit(SERVICE, run=run, say=say)
+    r = _align_restart_units([SERVICE], run=run, say=say)
     if r.returncode != 0:
-        lines = (r.stderr or '').strip().splitlines()
-        last = lines[-1] if lines else ''
-        return align_apply.Step('hs-uploader', 'failed', f'systemctl restart {SERVICE}: {last}')
+        return align_apply.Step('hs-uploader', 'failed',
+                                _align_restart_fail_detail([SERVICE], r))
     if units_out is not None:
         units_out.append(SERVICE)
+    _align_snapshot_nrestarts([SERVICE], run=run, out=nrestarts_out)
     return align_apply.Step('hs-uploader', 'restarted', '')
 
 
@@ -4972,7 +5064,7 @@ def _align_unit_state(unit, *, run):
 
 
 def _align_fast_checks(restarted_units, *, run=subprocess.run, sleep=time.sleep,
-                       now=time.time, hf_timestd_running=False) -> dict:
+                       now=time.time, hf_timestd_running=False, baseline=None) -> dict:
     """What can be known within minutes of the restarts, not hours.
 
     Snapshot each restarted unit's NRestarts and ActiveState, wait 120 s,
@@ -4987,12 +5079,24 @@ def _align_fast_checks(restarted_units, *, run=subprocess.run, sleep=time.sleep,
     `sigmond-heartbeat.timer` is not enabled, heartbeat is off here:
     ``heartbeat_sent`` is None and nothing is started.
 
+    ``baseline`` ({unit: NRestarts}, M1) is the count `_align_restart`
+    read right after each unit's restart; a unit in it measures from that
+    count, so a restart between its own restart and the start of this
+    window still shows.  A unit absent from it (or None there) is read
+    now.
+
     Returns {"units_stable", "authority_fresh" (None when hf-timestd does
     not run), "heartbeat_sent", "notes": [one sentence per problem]}."""
     from sigmond import heartbeat
     notes = []
+    baseline = baseline or {}
     restarted_units = list(dict.fromkeys(_align_service_units(restarted_units)))
-    before = {u: _align_unit_state(u, run=run) for u in restarted_units}
+    before = {}
+    for u in restarted_units:
+        if baseline.get(u) is not None:
+            before[u] = ('active', baseline[u])
+        else:
+            before[u] = _align_unit_state(u, run=run)
     sleep(_ALIGN_FAST_CHECK_WAIT_S)
     stable = True
     for u in restarted_units:
@@ -5878,14 +5982,16 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         print('  ' + msg)
 
     restarted_units: list = []
+    baseline: dict = {}
     restart_steps = []
     if radiod_first or comps:
         restart_steps = _align_restart(radiod_first, comps, services,
                                        run=subprocess.run, say=indented,
-                                       units_out=restarted_units)
+                                       units_out=restarted_units, nrestarts_out=baseline)
     if uploader and not any(s.component == 'hs-uploader' for s in restart_steps):
         restart_steps.append(_align_restart_uploader(run=subprocess.run, say=indented,
-                                                     units_out=restarted_units))
+                                                     units_out=restarted_units,
+                                                     nrestarts_out=baseline))
     if not restart_steps:
         print('    nothing stale — no restarts')
     for step in restart_steps:
@@ -5907,7 +6013,8 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         restarted_units = list(dict.fromkeys(restarted_units))
         checks = _align_fast_checks(restarted_units, run=subprocess.run, sleep=time.sleep,
                                     now=time.time,
-                                    hf_timestd_running='hf-timestd' in staleness['running'])
+                                    hf_timestd_running='hf-timestd' in staleness['running'],
+                                    baseline=baseline)
         fresh = checks.get('authority_fresh')
         print(f"    units stable:    {'yes' if checks['units_stable'] else 'NO'}")
         print(f"    authority fresh: "
