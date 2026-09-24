@@ -4357,6 +4357,79 @@ def cmd_manifest_restore(args) -> int:
     return 1
 
 
+def _align_live_state(base: str):
+    """(live HEADs, dirty flags) for every component checkout under ``base``."""
+    from sigmond.doctor import component_checkouts, git_state
+    from sigmond.provenance import component_versions
+    checkouts = component_checkouts(Path(base))
+    live = component_versions(checkouts)
+    dirty = {Path(p).name: bool(git_state(p).get('dirty')) for p in checkouts}
+    return live, dirty
+
+
+def cmd_align(args) -> int:
+    """`smd align` — how far this station sits from the latest blessed release.
+
+    Dry run only (Plan 1 of docs/superpowers/specs/2026-09-24-smd-align-design.md):
+    it reads local state and makes small HTTPS GETs, and changes nothing.
+    Exit 0 aligned, 1 alignment available, 2 target could not be established.
+    """
+    from sigmond import align
+    import socket
+    base = getattr(args, 'base', None) or '/opt/git/sigmond'
+    try:
+        rel = align.fetch_release(getattr(args, 'release', None))
+    except align.LookupError_ as exc:
+        print(f'smd align: cannot establish the target — {exc}')
+        return 2
+    live, dirty = _align_live_state(base)
+    plan = align.plan_align(rel, live, dirty)
+    print(f'smd align — {socket.gethostname()} against blessed {rel.tag} '
+          f'(dry run: nothing changes)')
+    recorded = align.recorded_release()
+    print(f'  station recorded release: {recorded or "unknown"}')
+    print('  components:')
+    catalog = {}
+    if not getattr(args, 'no_cost', False):
+        try:
+            from sigmond.catalog import load_catalog
+            catalog = load_catalog()
+        except (FileNotFoundError, OSError):
+            catalog = {}
+    for it in plan:
+        if it.status == 'current':
+            line = f'{(it.live or "")[:8]:<8}              current'
+        elif it.status == 'move':
+            line = f'{it.live[:8]} -> {it.target[:8]}   move'
+            entry = catalog.get(it.component)
+            slug = align.github_slug(getattr(entry, 'repo', '')) if entry else None
+            if slug:
+                d = align.commit_distance(slug, it.live, it.target)
+                line += ('   ' + (f"{d['ahead']} commits, {d['files']} files"
+                                  if 'error' not in d else 'distance unknown'))
+        else:
+            line = f'{it.status}'
+        if it.note:
+            line += f'   {it.note}'
+        print(f'    {it.component:<16} {line}')
+    files = align.image_file_drift(rel.tag)
+    stale = [f for f in files if f['status'] in ('differs', 'absent')]
+    print('  image-carried files:')
+    for f in files:
+        print(f"    {f['path']:<40} {f['note'] or f['status']}")
+    if recorded and recorded != rel.tag:
+        print(f'  host: recorded {recorded}, blessed {rel.tag} — run pm-align on the '
+              f'Proxmox host (Plan 3)')
+    counts = {s: sum(1 for i in plan if i.status == s)
+              for s in ('move', 'refuse', 'missing', 'stray')}
+    print(f"  summary: {counts['move']} to move, {counts['refuse']} refused, "
+          f"{counts['missing']} missing, {counts['stray']} stray, "
+          f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh")
+    print('  apply: not built yet (Plan 2)')
+    pending = counts['move'] or counts['refuse'] or counts['missing'] or stale
+    return 1 if pending else 0
+
+
 def cmd_admin_heartbeat_emit(args) -> int:
     """`smd admin heartbeat emit [--dry-run]` — assemble one fleet
     situational-awareness heartbeat and write it to the spool
@@ -20098,6 +20171,15 @@ def main() -> int:
                         'cached origin/* refs — a stale host will report '
                         'itself current; fetching is the default)')
 
+    p = sub.add_parser('align',
+        help='how far this station sits from the latest blessed appliance '
+             'release (dry run; changes nothing)')
+    p.add_argument('--release', help='compare against this blessed release tag '
+                                     '(default: the latest)')
+    p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
+    p.add_argument('--no-cost', action='store_true',
+                   help='skip the per-component commit-distance lookups')
+
     p = sub.add_parser('version',
                        help='what is actually installed (image lineage + live commits)')
     p.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
@@ -21499,6 +21581,7 @@ def main() -> int:
         'version': cmd_version,
         'doctor':  cmd_doctor,
         'update':  cmd_update,
+        'align':   cmd_align,
         'fleet':   cmd_fleet,
         'enable':  cmd_enable,
         'disable': cmd_disable,
