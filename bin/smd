@@ -4483,8 +4483,14 @@ def _align_origin_url(repo_dir) -> Optional[str]:
 
 
 def _align_live_state(base: str):
-    """(live HEADs, dirty flags, origin URLs, state-read errors) for every
-    component checkout under ``base``.
+    """(live HEADs, dirty file lists, origin URLs, state-read errors) for
+    every component checkout under ``base``.
+
+    ``dirty[name]`` lists the TRACKED files with changes — git_state's
+    own definition, so untracked files are not dirt, and a uv.lock-only
+    list reaches `plan_align` intact (it plans that as a move that resets
+    uv.lock, the same test `align_apply._move` applies). An empty list
+    means clean.
 
     ``component_versions`` silently DROPS a checkout whose ``rev-parse``
     fails (e.g. a ``.git`` file pointing nowhere) rather than returning it
@@ -4513,7 +4519,8 @@ def _align_live_state(base: str):
             errors[name] = err
         # A git_state error carries `dirty: []` — that reads as clean
         # unless the error itself also counts as dirty.
-        dirty[name] = bool(st.get('dirty')) or bool(err)
+        dirty[name] = (list(st.get('dirty') or [])
+                       or (['<git state unreadable>'] if err else []))
         origins[name] = _align_origin_url(p)
     return live, dirty, origins, errors
 
@@ -4654,6 +4661,72 @@ def _align_run_install(repo: Path) -> int:
     return r.returncode
 
 
+_ALIGN_REPAIR_SKIP = frozenset({'.git', 'build', 'dist', 'node_modules', '__pycache__'})
+
+
+def _align_repair_ownership(base) -> None:
+    """Give back what install.sh, run as root, built inside the checkouts.
+
+    install.sh runs as root (it installs system units), and a `pip
+    install -e` inside it leaves `*.egg-info` root-owned in the checkout;
+    the owner's next `git`/`uv` run then trips over it. For each checkout
+    directory under ``base``, every path INSIDE a `*.egg-info` directory
+    (and the directory itself) whose uid/gid differs from the checkout
+    directory's gets that checkout's uid/gid. Nothing else is touched:
+    venvs (any directory holding pyvenv.cfg, or named .venv/venv), build
+    trees and .git are pruned from the walk, and symlinks are never
+    followed. A chown that fails is printed, never raised — a repair is
+    not a reason to fail an alignment that already happened.
+    """
+    base = Path(base)
+    try:
+        checkouts = sorted(d for d in base.iterdir()
+                           if d.is_dir() and not d.is_symlink() and (d / '.git').exists())
+    except OSError as exc:
+        print(f'  ownership repair skipped: cannot list {base}: {exc}')
+        return
+    for repo in checkouts:
+        try:
+            want = os.stat(repo)
+        except OSError as exc:
+            print(f'  ownership repair skipped for {repo}: {exc}')
+            continue
+        uid, gid = want.st_uid, want.st_gid
+
+        def fix(path):
+            try:
+                st = os.lstat(path)
+                if (st.st_uid, st.st_gid) != (uid, gid):
+                    os.chown(path, uid, gid, follow_symlinks=False)
+            except OSError as exc:
+                print(f'  ownership repair: {path}: {exc}')
+
+        for root, dirs, files in os.walk(repo):
+            keep = []
+            for d in dirs:
+                sub = Path(root) / d
+                if (d in _ALIGN_REPAIR_SKIP or d in ('.venv', 'venv')
+                        or sub.is_symlink() or (sub / 'pyvenv.cfg').exists()):
+                    continue
+                if d.endswith('.egg-info'):
+                    fix(sub)
+                    for eroot, edirs, efiles in os.walk(sub):
+                        for n in edirs + efiles:
+                            fix(Path(eroot) / n)
+                    continue
+                keep.append(d)
+            dirs[:] = keep
+
+
+def _align_install_and_repair(repo: Path, base) -> int:
+    """`_align_run_install`, then `_align_repair_ownership(base)` whatever
+    the exit — a failed install.sh can leave root-owned egg-info too."""
+    try:
+        return _align_run_install(repo)
+    finally:
+        _align_repair_ownership(Path(base))
+
+
 def _align_install_missing(name, sha, *, base, catalog):
     """A component the release pins but this station has no checkout of at
     all: clone it at the pinned commit and run its installer. Never flips
@@ -4667,17 +4740,32 @@ def _align_install_missing(name, sha, *, base, catalog):
     and write `.pin` the same way a move does, then chown it (and the
     `.git/info` directory `write_pin` may have just created as root, plus
     the `exclude` file inside it) to the checkout's own owner.
+
+    Final review / C1: the clone did not exist before this run, so any
+    failure before `.pin` is written (install.sh non-zero, the pin not
+    resolving) removes it entirely and re-raises — a re-run then sees
+    the component `missing` again and repeats the whole install, rather
+    than finding a checkout at the pin and calling it current.
     """
+    import shutil
     from sigmond import align_apply
     entry = catalog.get(name) if catalog else None
     if entry is None:
         raise RuntimeError(f'{name}: not in the catalog — cannot install')
     repo = Path(base) / name
+    existed = repo.exists()
     _clone_repo(entry, base=Path(base), ref=sha)
-    rc = _align_run_install(repo)
-    if rc:
-        raise RuntimeError(f'{name}: install.sh exited {rc}')
-    full = align_apply.resolve(repo, sha, run=subprocess.run)
+    try:
+        print(f'  {name}: running install.sh …')
+        rc = _align_install_and_repair(repo, base)
+        if rc:
+            raise RuntimeError(f'{name}: install.sh exited {rc}')
+        full = align_apply.resolve(repo, sha, run=subprocess.run)
+    except Exception as exc:
+        if not existed:
+            shutil.rmtree(repo, ignore_errors=True)
+            raise RuntimeError(f'{exc} — fresh clone removed') from exc
+        raise
     align_apply.write_pin(repo, full)
     try:
         owner = repo.owner()
@@ -4738,8 +4826,8 @@ def _align_apply(args) -> int:
         # through classify's ancestry-unknown refusal (which would blame
         # the wrong thing) or apply_plan's own move step (which would
         # ignore the refusal and fetch anyway).
-        extra_steps = [align_apply.Step(name, 'skipped', 'byte budget reached')
-                       for name in skipped_budget]
+        extra_steps = [align_apply.Step(it.component, 'skipped', 'byte budget reached')
+                       for it in items if it.component in skipped_budget]
         items = [it for it in items if it.component not in skipped_budget]
 
         # Fix round 1 / M4: ka9q-radio has no install.sh of its own — smd
@@ -4769,7 +4857,8 @@ def _align_apply(args) -> int:
             max_bytes=max_bytes,
             install_missing=lambda name, sha: _align_install_missing(
                 name, sha, base=base, catalog=catalog),
-            run_install=_align_run_install, say=print, prefetched=prefetched,
+            run_install=lambda repo: _align_install_and_repair(repo, base),
+            say=print, prefetched=prefetched,
             chown=_align_chown)
 
         passthrough = ['--base', str(base)]
@@ -4785,16 +4874,15 @@ def _align_apply(args) -> int:
             boot = boot_steps[0]
             print(f'  sigmond: {boot.outcome}' + (f' — {boot.detail}' if boot.detail else ''))
             if boot.outcome == 'moved' and _align_target_has_align(base, sigmond_item.target):
-                # Fix round 1 / I2: this process is about to replace itself —
-                # nothing after os.execv runs, so the move must already be on
-                # durable record before it. Without this, a crash in the
-                # re-exec'd process (or an operator killing it) would leave
-                # sigmond visibly moved with no trace in the manifest or
-                # history — exactly the "looked fine, wasn't done" failure
-                # mode `smd update`'s own history recording exists to avoid.
-                align_apply.record(rel, boot_steps, manifest_path=MANIFEST_PATH,
-                                   history=lambda e: record_update(HISTORY_FILE, e),
-                                   now=_now)
+                # This process is about to replace itself — nothing after
+                # os.execv runs, so the sigmond move goes into HISTORY now
+                # (a crash in the re-exec'd child must not leave it
+                # untraced). History only (final review / I6): the manifest
+                # and aligned.json describe a finished alignment, and only
+                # the child, having run the whole plan, may write them.
+                align_apply.record_history(rel, boot_steps,
+                                           history=lambda e: record_update(HISTORY_FILE, e),
+                                           now=_now)
                 sys.stdout.flush()
                 sys.stderr.flush()
                 # M1: the lifecycle lock's fd is close-on-exec (PEP 446) — the
@@ -4860,6 +4948,8 @@ def _align_apply(args) -> int:
         outcomes = ('moved', 'installed', 'left', 'refused', 'failed', 'skipped')
         counts = {o: sum(1 for s in steps if s.outcome == o) for o in outcomes}
         fetched_mib = sum(s.bytes or 0 for s in steps) / (1024 * 1024)
+        if counts['moved']:
+            print('  services still run the old code until restarted — Plan 2b')
         print(f"  summary: moved {counts['moved']}, installed {counts['installed']}, "
               f"left {counts['left']}, refused {counts['refused']}, "
               f"failed {counts['failed']}, skipped {counts['skipped']}, "

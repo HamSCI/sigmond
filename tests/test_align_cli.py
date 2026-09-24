@@ -495,14 +495,15 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
             live={"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"})
         mocks["lock"].assert_called_once_with(reason="align")
 
-    def test_record_called_with_boot_steps_before_execv_and_flush(self):
-        # I2: the sigmond self-move must be on durable record, and stdout/
-        # stderr flushed, BEFORE the process replaces itself — verified by
-        # call ordering on a shared list across three otherwise-independent
-        # mocks.
+    def test_history_written_for_boot_steps_before_execv_and_flush(self):
+        # I2, as amended by final review I6: the sigmond self-move must be
+        # in HISTORY, and stdout/stderr flushed, BEFORE the process
+        # replaces itself — while the manifest and aligned.json wait for
+        # the child's full run (record is never called here).
         boot_step = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
         call_order = []
         m_record = mock.Mock(side_effect=lambda *a, **k: call_order.append("record"))
+        m_history = mock.Mock(side_effect=lambda *a, **k: call_order.append("history"))
         m_execv = mock.Mock(side_effect=lambda *a, **k: call_order.append("execv"))
         with mock.patch.object(smd, "_need_root", return_value=False), \
              mock.patch.object(smd, "lifecycle_lock",
@@ -516,6 +517,7 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
              mock.patch("sigmond.align_apply.apply_plan", return_value=[boot_step]), \
              mock.patch.object(smd, "_align_target_has_align", return_value=True), \
              mock.patch("sigmond.align_apply.record", m_record), \
+             mock.patch("sigmond.align_apply.record_history", m_history), \
              mock.patch("sigmond.catalog.load_catalog", return_value={}), \
              mock.patch("os.execv", m_execv), \
              mock.patch.object(sys.stdout, "flush",
@@ -525,8 +527,8 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
             args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=True,
                                       apply=True, allow_rollback=False, max_bytes=None)
             smd.cmd_align(args)
-        self.assertEqual(call_order, ["record", "flush_stdout", "flush_stderr", "execv"])
-        called_rel, called_steps = m_record.call_args[0][:2]
+        self.assertEqual(call_order, ["history", "flush_stdout", "flush_stderr", "execv"])
+        called_rel, called_steps = m_history.call_args[0][:2]
         self.assertEqual(called_steps, [boot_step])
 
 
@@ -805,8 +807,9 @@ class AlignApplyExitCodeTests(unittest.TestCase):
             live={"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
             apply_plan_result=steps)
         mocks["record"].assert_called_once()
-        _, kwargs = mocks["record"].call_args
+        args_, kwargs = mocks["record"].call_args
         self.assertEqual(kwargs["manifest_path"], smd.MANIFEST_PATH)
+        self.assertEqual(args_[1], steps)
 
 
 class AlignAncestryFactoryTests(unittest.TestCase):
@@ -901,6 +904,321 @@ class AlignTargetHasAlignTests(unittest.TestCase):
     def test_false_when_cat_file_fails(self):
         with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1)):
             self.assertFalse(smd._align_target_has_align("/opt/git/sigmond", "daba1f6"))
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review of Plan 2a
+# ---------------------------------------------------------------------------
+
+def _apply_args(base, **over):
+    ns = dict(release=None, base=str(base), no_cost=True, apply=True,
+              allow_rollback=False, max_bytes=None)
+    ns.update(over)
+    return argparse.Namespace(**ns)
+
+
+def _apply_patches(st, *, rel, live, dirty=None, ancestry=None, **extra):
+    """The collaborators every --apply CLI test below stubs; returns the
+    record / record_history mocks."""
+    m_record = mock.Mock()
+    m_history = mock.Mock()
+    for p in [
+        mock.patch.object(smd, "_need_root", return_value=False),
+        mock.patch.object(smd, "lifecycle_lock", lambda reason=None: contextlib.nullcontext()),
+        mock.patch.object(smd, "_align_live_state", return_value=(live, dirty or {}, {}, {})),
+        mock.patch("sigmond.align.fetch_release", return_value=rel),
+        mock.patch("sigmond.align_apply.verify_release", return_value=None),
+        mock.patch.object(smd, "_align_ancestry",
+                          ancestry or mock.Mock(return_value=lambda c, a, b: True)),
+        mock.patch.object(smd, "_align_target_has_align", return_value=False),
+        mock.patch("sigmond.align_apply.record", m_record),
+        mock.patch("sigmond.align_apply.record_history", m_history),
+        mock.patch("sigmond.catalog.load_catalog", return_value={}),
+        mock.patch("os.execv"),
+        *[mock.patch.object(smd, k, v) for k, v in extra.items()],
+    ]:
+        st.enter_context(p)
+    return m_record, m_history
+
+
+class AlignFinalReviewCliTests(unittest.TestCase):
+
+    # --- I2: uv.lock-only dirt reaches the reset ---
+
+    def test_uvlock_only_dirt_reaches_apply_and_resets_before_the_checkout(self):
+        from tests.test_align_apply import _MultiFakeGit
+        rel = align.Release(tag="v3.53", manifest_text="m", appliance_commit="a" * 40,
+                            components={"sigmond": "daba1f6", "hf-timestd": "5c8196d"})
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for n in ("sigmond", "hf-timestd"):
+                (base / n / ".git" / "info").mkdir(parents=True)
+            (base / "sigmond" / ".pin").write_text("daba1f6\n")
+            git = _MultiFakeGit()
+            git.dirty["hf-timestd"] = ["uv.lock"]
+            out = io.StringIO()
+            with contextlib.ExitStack() as st:
+                _apply_patches(st, rel=rel, live={"sigmond": "daba1f6", "hf-timestd": "4595c00"},
+                               dirty={"hf-timestd": ["uv.lock"]},
+                               _align_chown=mock.Mock())
+                st.enter_context(mock.patch("subprocess.run", git))
+                st.enter_context(mock.patch.object(Path, "owner", return_value="sigmond"))
+                st.enter_context(contextlib.redirect_stdout(out))
+                rc = smd.cmd_align(_apply_args(base))
+            hf = [c for c in git.calls if git._name(c) == "hf-timestd"]
+            reset = next(i for i, c in enumerate(hf)
+                         if git._subcommand(c) == "checkout" and "uv.lock" in c)
+            detach = next(i for i, c in enumerate(hf)
+                          if git._subcommand(c) == "checkout" and "--detach" in c)
+            self.assertLess(reset, detach)
+            self.assertIn("hf-timestd: moved — reset uv.lock; ", out.getvalue())
+            self.assertEqual(rc, 0)
+
+    # --- I6: the bootstrap writes history only ---
+
+    def test_bootstrap_writes_history_not_records_before_execv(self):
+        boot_step = align_apply.Step("sigmond", "moved", "459bee6 -> daba1f6", 100)
+        order = []
+        with contextlib.ExitStack() as st:
+            m_record, m_history = _apply_patches(
+                st, rel=APPLY_REL,
+                live={"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"})
+            m_history.side_effect = lambda *a, **k: order.append("history")
+            st.enter_context(mock.patch.object(smd, "_align_target_has_align", return_value=True))
+            st.enter_context(mock.patch("sigmond.align_apply.apply_plan", return_value=[boot_step]))
+            st.enter_context(mock.patch("os.execv", side_effect=lambda *a: order.append("execv")))
+            st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            smd.cmd_align(_apply_args("/opt/git/sigmond"))
+        m_record.assert_not_called()
+        self.assertEqual(order, ["history", "execv"])
+        self.assertEqual(m_history.call_args[0][1], [boot_step])
+
+    # --- minor: skipped-for-budget steps in plan order ---
+
+    def test_budget_skips_are_reported_in_plan_order(self):
+        names = ["ka9q-python", "hamsci-dsp", "alpha", "bravo", "charlie", "delta", "echo",
+                 "foxtrot", "golf"]
+        rel = align.Release(tag="v3.53", manifest_text="m", appliance_commit="a" * 40,
+                            components={"sigmond": "daba1f6", **{n: "1111111" for n in names}})
+        live = {"sigmond": "daba1f6", **{n: "2222222" for n in names}}
+
+        def ancestry(base, prefetched, max_bytes, say, skipped):
+            skipped.update(names)
+            return lambda c, a, b: True
+        out = io.StringIO()
+        with contextlib.ExitStack() as st:
+            _apply_patches(st, rel=rel, live=live, ancestry=ancestry)
+            st.enter_context(mock.patch("sigmond.align_apply.apply_plan",
+                                        return_value=[align_apply.Step("sigmond", "current")]))
+            st.enter_context(contextlib.redirect_stdout(out))
+            smd.cmd_align(_apply_args("/opt/git/sigmond"))
+        reported = [l.split(":")[0].strip() for l in out.getvalue().splitlines()
+                    if "byte budget reached" in l]
+        self.assertEqual(reported, names)
+
+    # --- minor: the Plan 2b notice follows the step list ---
+
+    def test_plan_2b_notice_prints_after_the_step_list(self):
+        steps = [align_apply.Step("sigmond", "current"),
+                 align_apply.Step("hf-timestd", "moved", "a -> b", 10)]
+        rc, out, mocks = run_apply(
+            live={"sigmond": "daba1f6", "hf-timestd": "459bee6", "ka9q-radio": "401992c"},
+            apply_plan_result=steps)
+        notice = "services still run the old code until restarted — Plan 2b"
+        self.assertIn(notice, out)
+        self.assertEqual(out.count(notice), 1)
+        self.assertGreater(out.index(notice), out.index("hf-timestd: moved"))
+
+    def test_no_plan_2b_notice_when_nothing_moved(self):
+        rc, out, mocks = run_apply(
+            live={"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+            apply_plan_result=[align_apply.Step("sigmond", "current")])
+        self.assertNotIn("Plan 2b", out.replace("radiod rebuild is Plan 2b", ""))
+
+    # --- I4: install.sh runs as root; ownership repaired after it ---
+
+    def test_ctx_run_install_repairs_ownership_even_after_a_failure(self):
+        seen = {}
+
+        def fake_apply_plan(rel, items, ctx):
+            seen["ctx"] = ctx
+            return []
+        with contextlib.ExitStack() as st:
+            _apply_patches(st, rel=APPLY_REL,
+                           live={"sigmond": "daba1f6", "hf-timestd": "5c8196d",
+                                 "ka9q-radio": "401992c"})
+            st.enter_context(mock.patch("sigmond.align_apply.apply_plan", fake_apply_plan))
+            st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            smd.cmd_align(_apply_args("/srv/base"))
+        with mock.patch.object(smd, "_align_run_install", return_value=1) as m_run, \
+             mock.patch.object(smd, "_align_repair_ownership") as m_repair:
+            rc = seen["ctx"].run_install(Path("/srv/base/hf-timestd"))
+        self.assertEqual(rc, 1)
+        m_run.assert_called_once_with(Path("/srv/base/hf-timestd"))
+        m_repair.assert_called_once_with(Path("/srv/base"))
+
+
+class AlignRepairOwnershipTests(unittest.TestCase):
+    """I4: only paths inside *.egg-info directories, only where the owner
+    differs from the checkout directory's — never venvs or build trees."""
+
+    def test_chowns_only_egg_info_contents_that_differ(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo = base / "hf-timestd"
+            (repo / ".git").mkdir(parents=True)
+            egg = repo / "src" / "hf_timestd.egg-info"
+            egg.mkdir(parents=True)
+            (egg / "PKG-INFO").write_text("x")
+            (egg / "SOURCES.txt").write_text("x")          # already right: left alone
+            (repo / "README.md").write_text("x")            # root-owned but not egg-info
+            venv_egg = repo / ".venv" / "lib" / "site-packages" / "dep.egg-info"
+            venv_egg.mkdir(parents=True)
+            (repo / ".venv" / "pyvenv.cfg").write_text("")
+            build_egg = repo / "build" / "lib" / "x.egg-info"
+            build_egg.mkdir(parents=True)
+            other_venv_egg = repo / "env2" / "y.egg-info"
+            other_venv_egg.mkdir(parents=True)
+            (repo / "env2" / "pyvenv.cfg").write_text("")
+            root_owned = {egg, egg / "PKG-INFO", repo / "README.md", venv_egg, build_egg,
+                          other_venv_egg}
+            real_lstat = os.lstat
+            me = os.stat(repo)
+
+            def fake_lstat(p, *a, **k):
+                st = real_lstat(p, *a, **k)
+                if Path(p) in root_owned:
+                    return types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=st.st_mode)
+                return st
+            calls = []
+            with mock.patch("os.lstat", side_effect=fake_lstat), \
+                 mock.patch("os.chown", side_effect=lambda p, u, g, **k: calls.append(
+                     (Path(p), u, g))):
+                smd._align_repair_ownership(base)
+            self.assertEqual(sorted(calls),
+                             sorted([(egg, me.st_uid, me.st_gid),
+                                     (egg / "PKG-INFO", me.st_uid, me.st_gid)]))
+
+    def test_a_chown_error_is_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            egg = base / "c" / "c.egg-info"
+            (base / "c" / ".git").mkdir(parents=True)
+            egg.mkdir()
+            real_lstat = os.lstat
+
+            def fake_lstat(p, *a, **k):
+                st = real_lstat(p, *a, **k)
+                if Path(p) == egg:
+                    return types.SimpleNamespace(st_uid=0, st_gid=0, st_mode=st.st_mode)
+                return st
+            out = io.StringIO()
+            with mock.patch("os.lstat", side_effect=fake_lstat), \
+                 mock.patch("os.chown", side_effect=PermissionError("nope")), \
+                 contextlib.redirect_stdout(out):
+                smd._align_repair_ownership(base)
+            self.assertIn("nope", out.getvalue())
+
+
+class AlignInstallMissingFinalReviewTests(unittest.TestCase):
+    """C1 for a fresh clone: an install failure removes the clone so a
+    re-run sees the component missing again."""
+
+    def _install(self, base, rc, *, pre_existing=False, resolve=None):
+        repo = base / "hf-timestd"
+        if pre_existing:
+            repo.mkdir()
+
+        def fake_clone(entry, base, ref):
+            (base / "hf-timestd" / ".git" / "info").mkdir(parents=True, exist_ok=True)
+            (base / "hf-timestd" / "pyproject.toml").write_text("x")
+            return base / "hf-timestd"
+        catalog = {"hf-timestd": types.SimpleNamespace(name="hf-timestd")}
+        events = []
+        out = io.StringIO()
+        with mock.patch.object(smd, "_clone_repo", side_effect=fake_clone), \
+             mock.patch.object(smd, "_align_run_install",
+                               side_effect=lambda r: events.append("INSTALL") or rc), \
+             mock.patch.object(smd, "_align_repair_ownership",
+                               side_effect=lambda b: events.append(("REPAIR", b))), \
+             mock.patch("sigmond.align_apply.resolve", resolve or mock.Mock(return_value="d" * 40)), \
+             mock.patch.object(smd, "_align_chown"), \
+             contextlib.redirect_stdout(out):
+            try:
+                smd._align_install_missing("hf-timestd", "abc1234", base=base, catalog=catalog)
+                err = None
+            except RuntimeError as e:
+                err = e
+        return repo, err, events, out.getvalue()
+
+    def test_install_failure_removes_the_fresh_clone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, err, events, out = self._install(Path(tmp), 1)
+            self.assertIsNotNone(err)
+            self.assertIn("install.sh exited 1", str(err))
+            self.assertFalse(repo.exists())
+
+    def test_a_resolve_failure_after_install_also_removes_the_clone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = mock.Mock(side_effect=align_apply.ApplyError("no such commit"))
+            repo, err, events, out = self._install(Path(tmp), 0, resolve=bad)
+            self.assertIsNotNone(err)
+            self.assertFalse(repo.exists())
+
+    def test_a_directory_that_existed_before_is_never_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, err, events, out = self._install(Path(tmp), 1, pre_existing=True)
+            self.assertIsNotNone(err)
+            self.assertTrue(repo.exists())
+
+    def test_says_running_install_and_repairs_ownership_after_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, err, events, out = self._install(base, 0)
+            self.assertIsNone(err)
+            self.assertIn("hf-timestd: running install.sh …", out)
+            self.assertEqual(events, ["INSTALL", ("REPAIR", base)])
+
+    def test_repairs_ownership_even_when_install_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, err, events, out = self._install(base, 2)
+            self.assertIn(("REPAIR", base), events)
+
+
+class AlignLiveStateFileListTests(unittest.TestCase):
+    """I2: _align_live_state reports each checkout's dirty FILES; untracked
+    files are not dirt. Real git, in a tmp dir only."""
+
+    def _git(self, *args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+    def _repo(self, base, name):
+        d = base / name
+        d.mkdir()
+        self._git("init", "-q", cwd=d)
+        self._git("config", "user.name", "Test", cwd=d)
+        self._git("config", "user.email", "test@example.com", cwd=d)
+        (d / "uv.lock").write_text("a")
+        self._git("add", "uv.lock", cwd=d)
+        self._git("commit", "-q", "-m", "init", cwd=d)
+        return d
+
+    def test_dirty_is_a_file_list_and_untracked_is_not_dirt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (self._repo(base, "untracked-only") / "stray.txt").write_text("x")
+            (self._repo(base, "uvlock-only") / "uv.lock").write_text("b")
+            live, dirty, origins, errors = smd._align_live_state(str(base))
+            self.assertEqual(dirty["untracked-only"], [])
+            self.assertEqual(dirty["uvlock-only"], ["uv.lock"])
+            rel = align.Release(tag="v3.53", manifest_text="", appliance_commit=None,
+                                components={"untracked-only": "1111111",
+                                            "uvlock-only": "2222222"})
+            plan = {i.component: i for i in align.plan_align(rel, live, dirty, errors)}
+            self.assertEqual(plan["untracked-only"].status, "move")
+            self.assertEqual(plan["uvlock-only"].status, "move")
+            self.assertIn("uv.lock will be reset", plan["uvlock-only"].note)
 
 
 if __name__ == "__main__":

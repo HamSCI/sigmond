@@ -543,9 +543,9 @@ class ApplyPlanTests(unittest.TestCase):
         self.assertEqual(steps[0].outcome, "refused")
         self.assertEqual(steps[0].detail, align.DIVERGED_NOTE)
 
-    # --- the Plan 2b notice ---
+    # --- the Plan 2b notice: the CLI prints it after the step list ---
 
-    def test_say_notice_after_a_move(self):
+    def test_apply_plan_leaves_the_plan_2b_notice_to_the_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _repo(base, "sigmond")
@@ -553,8 +553,9 @@ class ApplyPlanTests(unittest.TestCase):
             messages = []
             ctx = _ctx(base, git, ["sigmond"], say=messages.append)
             items = [align.Item("sigmond", "forward", "1" * 40, "2" * 40)]
-            align_apply.apply_plan(rel(), items, ctx)
-            self.assertIn("services still run the old code until restarted — Plan 2b", messages)
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertFalse(any("Plan 2b" in m for m in messages))
 
     def test_no_say_notice_without_a_move(self):
         with tempfile.TemporaryDirectory() as tmp:

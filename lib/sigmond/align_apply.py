@@ -432,8 +432,8 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
                 stopped = f"stopped after {it.component} failed"
             elif ctx.max_bytes is not None and total_bytes > ctx.max_bytes:
                 stopped = "byte budget reached"
-    if any(s.outcome == "moved" for s in steps):
-        ctx.say("services still run the old code until restarted — Plan 2b")
+    # The "services still run the old code — Plan 2b" notice is the CLI's
+    # to print, once, after the step list (bin/smd _align_apply).
     return steps
 
 
