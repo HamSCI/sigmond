@@ -4633,6 +4633,74 @@ def _align_radiod_built_at() -> Optional[float]:
         return None
 
 
+_ALIGN_RADIOD_READY = '/usr/local/sbin/sigmond-radiod-ready'
+
+
+def _align_restart_unit(unit, *, run, say) -> object:
+    """`systemctl reset-failed <unit>`, then `systemctl restart <unit>` —
+    in-process, never `smd restart` (the held lifecycle_lock would make
+    that child exit "another lifecycle operation is in progress")."""
+    say(f'  restarting {unit} …')
+    run(['systemctl', 'reset-failed', unit], capture_output=True, text=True)
+    return run(['systemctl', 'restart', unit], capture_output=True, text=True)
+
+
+def _align_restart(radiod_first: bool, components: list, services: dict, *,
+                   run=subprocess.run, say=print, sleep=time.sleep) -> list:
+    """Restart what an alignment left stale: radiod first (with a
+    readiness wait), then every listed component — never `smd restart`
+    (Controller: a restart runs in-process; the held lifecycle_lock would
+    make a child `smd restart` exit immediately).
+
+    ``components`` is the already-decided restart list (align_live.
+    restart_sequence / restart_sequence's caller); this function does not
+    re-derive staleness. ``services`` is `_align_services()`'s
+    {component: [unit, …]} — already orphan-filtered, so re-resolving
+    here would risk re-adding an orphan `resolve_units` would otherwise
+    have dropped.
+    """
+    from sigmond import align_apply
+    from sigmond.align_live import RADIOD
+    from sigmond.lifecycle import UnitRef, order_units
+
+    steps = []
+    if radiod_first:
+        fail_detail = None
+        for unit in services.get(RADIOD, []):
+            r = _align_restart_unit(unit, run=run, say=say)
+            if r.returncode != 0 and fail_detail is None:
+                lines = (r.stderr or '').strip().splitlines()
+                last = lines[-1] if lines else ''
+                fail_detail = f'systemctl restart {unit}: {last}'
+        if fail_detail is None:
+            r = run([_ALIGN_RADIOD_READY, '90'], capture_output=True, text=True)
+            if r.returncode != 0:
+                fail_detail = f'{_ALIGN_RADIOD_READY} 90: exit {r.returncode}'
+        if fail_detail is not None:
+            steps.append(align_apply.Step(RADIOD, 'failed', fail_detail))
+            steps.extend(align_apply.Step(c, 'skipped', 'radiod did not come back')
+                        for c in components)
+            return steps
+        steps.append(align_apply.Step(RADIOD, 'restarted', 'ready'))
+
+    refs = [UnitRef(component=c, unit=u, template=None, instance=None,
+                    kind='service', source='align')
+           for c in components for u in services.get(c, [])]
+    failed: dict = {}
+    for ref in order_units(refs):
+        r = _align_restart_unit(ref.unit, run=run, say=say)
+        if r.returncode != 0 and ref.component not in failed:
+            lines = (r.stderr or '').strip().splitlines()
+            last = lines[-1] if lines else ''
+            failed[ref.component] = f'systemctl restart {ref.unit}: {last}'
+    for c in components:
+        if c in failed:
+            steps.append(align_apply.Step(c, 'failed', failed[c]))
+        else:
+            steps.append(align_apply.Step(c, 'restarted'))
+    return steps
+
+
 _ALIGN_BYTE_UNITS = {'': 1, 'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3}
 _ALIGN_BYTES_RE = re.compile(r'^(\d+)([KMGkmg]?)$')
 

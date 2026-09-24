@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from sigmond import align, align_apply
+from sigmond import align, align_apply, align_live
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -938,6 +938,83 @@ class AlignChownTests(unittest.TestCase):
             self.assertEqual(m_stat.call_args, mock.call(repo))
             m_chown.assert_called_once()
             self.assertEqual(m_chown.call_args[0][0], exclude)
+
+
+class _FakeRestartRun:
+    """Records every argv it's called with; answers by subcommand — a
+    `systemctl restart <unit>` for a unit in ``fail_units`` returns 1,
+    the readiness probe returns ``ready_rc``, everything else 0."""
+    def __init__(self, fail_units=None, ready_rc=0):
+        self.calls = []
+        self.fail_units = fail_units or set()
+        self.ready_rc = ready_rc
+
+    def __call__(self, argv, **kw):
+        self.calls.append(argv)
+        if argv[0] == "/usr/local/sbin/sigmond-radiod-ready":
+            return subprocess.CompletedProcess(argv, self.ready_rc, "", "")
+        if argv[:2] == ["systemctl", "restart"] and argv[2] in self.fail_units:
+            return subprocess.CompletedProcess(argv, 1, "", f"failed: {argv[2]}\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def restart_argv(self, unit):
+        return [c for c in self.calls if c[:2] == ["systemctl", "restart"] and c[2] == unit]
+
+    def index_of(self, argv):
+        return self.calls.index(argv)
+
+
+class AlignRestartTests(unittest.TestCase):
+    """Task 4: radiod first (with a readiness wait), then its consumers —
+    all in-process, never a child `smd restart`."""
+
+    def test_radiod_first_orders_before_ready_before_consumers(self):
+        fake = _FakeRestartRun()
+        services = {align_live.RADIOD: ["radiod@default.service"],
+                   "psk-recorder": ["psk-recorder@default.service"]}
+        smd._align_restart(True, ["psk-recorder"], services, run=fake,
+                           say=lambda *_: None, sleep=lambda *_: None)
+        radiod_restart = fake.restart_argv("radiod@default.service")[0]
+        consumer_restart = fake.restart_argv("psk-recorder@default.service")[0]
+        ready = next(c for c in fake.calls
+                    if c[0] == "/usr/local/sbin/sigmond-radiod-ready")
+        self.assertLess(fake.index_of(radiod_restart), fake.index_of(ready))
+        self.assertLess(fake.index_of(ready), fake.index_of(consumer_restart))
+
+    def test_readiness_failure_skips_consumers_without_restarting_them(self):
+        fake = _FakeRestartRun(ready_rc=1)
+        services = {align_live.RADIOD: ["radiod@default.service"],
+                   "psk-recorder": ["psk-recorder@default.service"]}
+        steps = smd._align_restart(True, ["psk-recorder"], services, run=fake,
+                                   say=lambda *_: None, sleep=lambda *_: None)
+        by_component = {s.component: s for s in steps}
+        self.assertEqual(by_component[align_live.RADIOD].outcome, "failed")
+        self.assertEqual(by_component["psk-recorder"].outcome, "skipped")
+        self.assertEqual(by_component["psk-recorder"].detail, "radiod did not come back")
+        self.assertEqual(fake.restart_argv("psk-recorder@default.service"), [])
+
+    def test_one_failed_component_does_not_stop_the_rest(self):
+        fake = _FakeRestartRun(fail_units={"b-recorder@default.service"})
+        services = {"a": ["a-recorder@default.service"],
+                   "b": ["b-recorder@default.service"],
+                   "c": ["c-recorder@default.service"]}
+        steps = smd._align_restart(False, ["a", "b", "c"], services, run=fake,
+                                   say=lambda *_: None, sleep=lambda *_: None)
+        by_component = {s.component: s for s in steps}
+        self.assertEqual(by_component["a"].outcome, "restarted")
+        self.assertEqual(by_component["b"].outcome, "failed")
+        self.assertEqual(by_component["c"].outcome, "restarted")
+        self.assertEqual(fake.restart_argv("c-recorder@default.service"),
+                         [["systemctl", "restart", "c-recorder@default.service"]])
+
+    def test_argv_never_contains_a_child_smd(self):
+        fake = _FakeRestartRun()
+        services = {align_live.RADIOD: ["radiod@default.service"],
+                   "psk-recorder": ["psk-recorder@default.service"]}
+        smd._align_restart(True, ["psk-recorder"], services, run=fake,
+                           say=lambda *_: None, sleep=lambda *_: None)
+        for argv in fake.calls:
+            self.assertNotIn("smd", argv)
 
 
 class AlignApplyExitCodeTests(unittest.TestCase):

@@ -58,6 +58,22 @@ class PredictedTests(unittest.TestCase):
         self.assertEqual(got, (True, ["psk-recorder"]))
 
 
+class RestartSequenceTests(unittest.TestCase):
+    def test_stale_component_not_radiod(self):
+        got = L.restart_sequence({"a": "its checkout moved after it started"}, False,
+                                 {"a"}, set())
+        self.assertEqual(got, (False, ["a"]))
+
+    def test_radiod_stale_with_running_consumers(self):
+        got = L.restart_sequence({}, True, {L.RADIOD, "a", "b", "c"}, {"a", "b"})
+        self.assertEqual(got, (True, ["a", "b"]))
+
+    def test_radiod_stale_but_not_running(self):
+        got = L.restart_sequence({"x": "its checkout moved after it started"}, True,
+                                 {"x"}, {"y"})
+        self.assertEqual(got, (False, ["x"]))
+
+
 class GuardTests(unittest.TestCase):
     def test_align_live_never_imports_subprocess(self):
         self.assertNotIn("subprocess", inspect.getsource(L))

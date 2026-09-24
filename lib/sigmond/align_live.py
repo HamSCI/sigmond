@@ -58,3 +58,15 @@ def predicted_restarts(*, moving: Iterable[str], running: Iterable[str],
         if c in moving or set(consumes.get(c, ())) & moving:
             names.add(c)
     return radiod, sorted(names)
+
+
+def restart_sequence(stale: Mapping[str, str], radiod_stale: bool, running: Iterable[str],
+                     radiod_consumers: Iterable[str]) -> tuple:
+    """(radiod_first, [components]) to restart now. radiod first when it is stale,
+    then every running radiod consumer; otherwise just the stale ones."""
+    running = set(running)
+    names = set(stale) & running
+    if radiod_stale and RADIOD in running:
+        names |= set(radiod_consumers) & running
+    names.discard(RADIOD)
+    return bool(radiod_stale and RADIOD in running), sorted(names)
