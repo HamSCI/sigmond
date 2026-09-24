@@ -6112,6 +6112,17 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     checks_ok = True
     restarted = [s.component for s in restart_steps if s.outcome == 'restarted']
     failed = [s.component for s in restart_steps if s.outcome == 'failed']
+    # A component whose restart failed on an earlier run and that is still
+    # not running reads as neither stale nor running, so nothing here would
+    # touch it again. Carry it forward, loud, so no later run calls the
+    # station aligned while it is down.
+    still_down = [c for c in ((prior_live or {}).get('failed') or [])
+                  if c not in failed and c not in restarted
+                  and c not in staleness['running']]
+    for c in still_down:
+        print(f'  {c} failed to restart on an earlier run and is not running — '
+              f'start it by hand, then re-run')
+    failed = failed + still_down
     # Final review / I2: the fast checks also re-run over what the last
     # live block restarted, when that stage did not finish and pass — on
     # whichever of those components' units run now.
@@ -6145,6 +6156,7 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
         live.update(checks)
     live['complete'] = True
     align_apply.record_live(align_apply.ALIGNED_RECORD, dict(live))
+    checks_ok = checks_ok and not still_down
 
     _align_print_summary(steps)
     bad = any(s.outcome in _ALIGN_BLOCKING for s in steps)

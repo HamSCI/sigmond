@@ -2501,6 +2501,25 @@ class AlignMakeLiveApplyTests(unittest.TestCase):
         rc, out, m = self._quiet_run(old)
         self.assertNotIn("nothing to do", out)
 
+    def test_a_failure_still_down_is_carried_forward_not_forgotten(self):
+        # Run N: radiod's restart failed. Run N+1: radiod is not running, so
+        # nothing reads stale — the failure must stay recorded, and fail the run.
+        prior = dict(_LIVE_PASSED, failed=["ka9q-radio"], restarted=[])
+        rc, out, m = self._run(moves=[align_apply.Step("sigmond", "current")],
+                               staleness=_staleness(running={"hf-timestd"}),
+                               aligned_live=prior, restart_steps=[])
+        self.assertEqual(rc, 1)
+        live = m["record_live"].call_args[0][1]
+        self.assertEqual(live["failed"], ["ka9q-radio"])
+        self.assertIn("ka9q-radio failed to restart on an earlier run and is not running", out)
+
+    def test_an_earlier_failure_now_running_is_dropped(self):
+        prior = dict(_LIVE_PASSED, failed=["hf-timestd"], restarted=[])
+        rc, out, m = self._run(moves=[align_apply.Step("sigmond", "current")],
+                               staleness=_staleness(running={"hf-timestd"}),
+                               aligned_live=prior, restart_steps=[])
+        self.assertEqual(m["record_live"].call_args[0][1]["failed"], [])
+
     def test_every_restart_failed_still_writes_the_live_block(self):
         rc, out, m = self._run(restart_steps=[align_apply.Step("hf-timestd", "failed", "x")])
         self.assertEqual(rc, 1)
