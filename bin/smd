@@ -4564,13 +4564,22 @@ def _align_head_moved_at(repo) -> Optional[float]:
         return None
 
 
+def _align_service_units(units) -> list:
+    """Only the ``.service`` units — the ones align restarts, times and
+    watches (Fix round 1 / C-B).  A ``.timer`` has no NRestarts, and
+    restarting a ``.target`` re-restarts every PartOf= member a second
+    time; both are normal in a component's unit list, so they are dropped
+    without comment."""
+    return [u for u in units if str(u).endswith('.service')]
+
+
 def _align_units_started_at(units, run=subprocess.run) -> Optional[float]:
     """The EARLIEST ``ActiveEnterTimestamp`` among ``units`` that are
     currently active — one component's ``started_at`` for align_live.
     None when none of ``units`` is active (align_live then never calls
     a stopped component stale; starting it is not alignment's job)."""
     times = []
-    for unit in units:
+    for unit in _align_service_units(units):
         r = run(['systemctl', 'show', '--timestamp=unix',
                  '-p', 'ActiveState', '-p', 'ActiveEnterTimestamp', unit],
                 capture_output=True, text=True)
@@ -4722,7 +4731,9 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     have dropped.
 
     ``units_out``, when given, receives every unit whose ``systemctl
-    restart`` returned 0 — the list Task 7's fast checks watch.
+    restart`` returned 0 — the list Task 7's fast checks watch.  Only
+    ``.service`` units are ever restarted (`_align_service_units`); a
+    component whose units are all timers/targets is left, never restarted.
     """
     from sigmond import align_apply
     from sigmond.align_live import RADIOD
@@ -4733,7 +4744,7 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     steps = []
     if radiod_first:
         active_units = []
-        for unit in services.get(RADIOD, []):
+        for unit in _align_service_units(services.get(RADIOD, [])):
             if _align_is_active(unit, run=run):
                 active_units.append(unit)
             else:
@@ -4768,7 +4779,7 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
 
     refs = [UnitRef(component=c, unit=u, template=None, instance=None,
                     kind='service', source='align')
-           for c in components for u in services.get(c, [])]
+           for c in components for u in _align_service_units(services.get(c, []))]
     failed: dict = {}
     touched: set = set()
     for ref in order_units(refs):
@@ -4934,6 +4945,7 @@ def _align_fast_checks(restarted_units, *, run=subprocess.run, sleep=time.sleep,
     not run), "heartbeat_sent", "notes": [one sentence per problem]}."""
     from sigmond import heartbeat
     notes = []
+    restarted_units = _align_service_units(restarted_units)
     before = {u: _align_unit_state(u, run=run) for u in restarted_units}
     sleep(_ALIGN_FAST_CHECK_WAIT_S)
     stable = True

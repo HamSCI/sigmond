@@ -2553,3 +2553,60 @@ class AlignMakeLiveRobustnessTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         m_restart.assert_not_called()
         self.assertIn("topology broke", out.getvalue())
+
+
+HF_TIMESTD_UNITS = ["timestd-core-recorder.service", "timestd-fusion.service",
+                    "timestd-metrology.target", "timestd-l2-calibration.timer",
+                    "timestd-physics.timer", "timestd-metrology@wwv5.service"]
+HF_TIMESTD_SERVICES = ["timestd-core-recorder.service", "timestd-fusion.service",
+                       "timestd-metrology@wwv5.service"]
+
+
+class AlignServiceUnitsOnlyTests(unittest.TestCase):
+    """Fix round 1 / C-B: only .service units are restarted, timed and
+    watched. A timer or target has no NRestarts, and restarting a target
+    re-restarts its PartOf= members."""
+
+    def test_restart_touches_only_service_units_all_active(self):
+        fake = _FakeRestartRun()
+        units = []
+        said = []
+        steps = smd._align_restart(False, ["hf-timestd"], {"hf-timestd": HF_TIMESTD_UNITS},
+                                   run=fake, say=said.append, units_out=units)
+        restarted = [c[2] for c in fake.calls if c[:2] == ["systemctl", "restart"]]
+        self.assertEqual(sorted(restarted), sorted(HF_TIMESTD_SERVICES))
+        self.assertEqual(sorted(units), sorted(HF_TIMESTD_SERVICES))
+        for c in fake.calls:
+            self.assertFalse(any(str(a).endswith((".timer", ".target")) for a in c), c)
+        self.assertFalse(any(".timer" in m or ".target" in m for m in said))
+        self.assertEqual(steps, [align_apply.Step("hf-timestd", "restarted")])
+
+        # ...and the fast checks over exactly those units, NRestarts unchanged.
+        def run(argv, **kw):
+            if argv[:2] == ["systemctl", "show"]:
+                if not argv[-1].endswith(".service"):
+                    return subprocess.CompletedProcess(argv, 0, "NRestarts=\nActiveState=active\n", "")
+                return subprocess.CompletedProcess(argv, 0, "NRestarts=0\nActiveState=active\n", "")
+            if argv[:2] == ["systemctl", "is-enabled"]:
+                return subprocess.CompletedProcess(argv, 0, "enabled\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        r = smd._align_fast_checks(units, run=run, sleep=lambda s: None, now=lambda: 0.0,
+                                   hf_timestd_running=False)
+        self.assertTrue(r["units_stable"], r["notes"])
+
+    def test_component_with_only_timers_is_not_restarted(self):
+        fake = _FakeRestartRun()
+        steps = smd._align_restart(False, ["hamsci-physics"],
+                                   {"hamsci-physics": ["physics-a.timer", "physics-b.timer"]},
+                                   run=fake, say=lambda m: None)
+        self.assertEqual([c for c in fake.calls if c[:2] == ["systemctl", "restart"]], [])
+        self.assertNotEqual(steps[0].outcome, "restarted")
+
+    def test_started_at_ignores_timers_and_targets(self):
+        def run(argv, **kw):
+            ts = {"a.timer": "@10", "m.target": "@20", "s.service": "@100"}[argv[-1]]
+            return subprocess.CompletedProcess(
+                argv, 0, f"ActiveState=active\nActiveEnterTimestamp={ts}\n", "")
+        self.assertEqual(smd._align_units_started_at(["a.timer", "m.target", "s.service"], run=run),
+                         100.0)
+        self.assertIsNone(smd._align_units_started_at(["a.timer", "m.target"], run=run))
