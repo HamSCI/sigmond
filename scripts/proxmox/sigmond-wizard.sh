@@ -1558,20 +1558,72 @@ TIEREOF
 #!/usr/bin/env python3
 # vm-port-relay.py <vm-port> — inetd-style relay for ONE accepted connection
 # (systemd socket with Accept=yes): stdin/stdout is the client socket.
-# Resolves the decoder VM's CURRENT IPv4 via the qemu guest agent on every
-# connection, so the relay keeps working when DHCP moves the VM.
+#
+# ⛔ THE GUEST AGENT IS NOT ON THE HOT PATH.  It used to be: this script asked
+# `qm agent <vmid> network-get-interfaces` on EVERY accepted connection, "so
+# the relay keeps working when DHCP moves the VM".  Since v3.44 DHCP cannot
+# move the VM -- it sits on a host-only /30 at a fixed address, and the PM is
+# the other end of that /30.
+#
+# Meanwhile the cost of asking is not zero, it is the agent's TIMEOUT.  On
+# AI6VN (v3.53, 2026-09-24) the guest agent was running inside the VM with its
+# virtio port present, but the PM's qemu process had no chardev for it, so
+# every `qm agent` call spent ~3.8 s before failing.  Per connection.  Every
+# page load, asset and ssh session paid it:
+#
+#     PM -> VM direct  (10.99.0.2:8081)   0.0006 s
+#     PM -> this relay (127.0.0.1:12223)  4.5590 s
+#
+# The services were perfect and the station looked broken.  rob: "AI6VN is
+# not present -web and the ssh is slow but functions."
+#
+# So: try the management peer FIRST -- one cheap TCP connect to an address we
+# already know -- and only consult the agent if that fails.  The agent stays
+# as a fallback for pre-v3.44 topologies where the VM really can move.
 import os, re, select, socket, struct, subprocess, sys
 
 port = int(sys.argv[1])
 vmid = os.environ.get("SIGMOND_VMID", "120")
 ips = []
-try:
-    out = subprocess.run(["qm", "agent", vmid, "network-get-interfaces"],
-                         capture_output=True, text=True, timeout=10).stdout
-    ips = [ip for ip in re.findall(r'"ip-address"\s*:\s*"(\d+\.\d+\.\d+\.\d+)"', out)
-           if not ip.startswith("127.")]
-except Exception:
-    pass
+
+def _mgmt_peer():
+    """The other end of the host-only /30 the decoder VM lives on.
+
+    Derived, not hardcoded: read the PM's own address on a /30 and flip the
+    host bit.  10.99.0.1 -> 10.99.0.2.  Returns None if this PM has no /30,
+    which is exactly the pre-v3.44 case that still needs the agent.
+    """
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show"],
+                             capture_output=True, text=True, timeout=5).stdout
+        for m in re.finditer(r'inet (\d+\.\d+\.\d+\.\d+)/30\b', out):
+            a = struct.unpack("!I", socket.inet_aton(m.group(1)))[0]
+            # /30: .0 network, .1 and .2 usable, .3 broadcast.  We are one of
+            # the two usable ones; the VM is the other.
+            peer = (a & 0xFFFFFFFC) | (3 - (a & 3))
+            if (a & 3) in (1, 2):
+                return socket.inet_ntoa(struct.pack("!I", peer))
+    except Exception:
+        pass
+    return None
+
+_peer = _mgmt_peer()
+if _peer:
+    try:
+        _probe = socket.create_connection((_peer, port), timeout=2)
+        _probe.close()
+        ips = [_peer]
+    except Exception:
+        ips = []      # fixed address did not answer — fall through to the agent
+
+if not ips:
+    try:
+        out = subprocess.run(["qm", "agent", vmid, "network-get-interfaces"],
+                             capture_output=True, text=True, timeout=10).stdout
+        ips = [ip for ip in re.findall(r'"ip-address"\s*:\s*"(\d+\.\d+\.\d+\.\d+)"', out)
+               if not ip.startswith("127.")]
+    except Exception:
+        pass
 if not ips:
     # Agent-free fallback (AI6VN 2026-09-09): a wedged qemu-guest-agent must
     # not take the RAC channels down with it.  The host's bridge learned the
