@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -38,6 +39,16 @@ BACKUP_BASE = "/var/lib/pm-align/backup"
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 _TIMEOUT = 30
 _geteuid = os.geteuid
+
+FRPC = "/usr/local/sbin/frpc"
+FRPC_TOML = "/etc/sigmond/frpc-host.toml"
+RAC_UNIT = "sigmond-rac-host.service"
+RAC_NUMBER_FILE = "/etc/sigmond-appliance/rac-number"
+FRPC_API = "http://127.0.0.1:7500/api/status"
+TUNNEL_RESULT = "/var/lib/pm-align/tunnel-result.json"
+BANDS = {"vm-ssh": 35800, "vm-web": 45800, "host-ssh": 50800, "host-ui": 55800,
+         "vm-station": 48800, "vm-gmag": 49800}
+LOCAL = {"vm-station": 12224, "vm-gmag": 12225}
 
 
 class PmAlignError(Exception):
@@ -354,13 +365,190 @@ def write_record(root: Path, rel: Release, written: list, now: str) -> Path:
     return p
 
 
+def declared_proxies(toml_text: str) -> list:
+    return re.findall(r'^name\s*=\s*"([^"]+)"\s*$', toml_text, re.M)
+
+
+def _remote_ports(toml_text: str) -> dict:
+    """{proxy name: remotePort} by reading each [[proxies]] block in order."""
+    out, name = {}, None
+    for line in toml_text.splitlines():
+        m = re.match(r'^name\s*=\s*"([^"]+)"', line)
+        if m:
+            name = m.group(1)
+        m = re.match(r'^remotePort\s*=\s*(\d+)', line)
+        if m and name:
+            out[name] = int(m.group(1))
+            name = None
+    return out
+
+
+def tunnel_plan(toml_text: str, rac_marker: Optional[str]):
+    """(new text, [names added]).  The RAC number is the marker's, and must
+    agree with the vm-ssh proxy's remotePort − 35800; without a marker the
+    port decides.  Only a missing vm-station / vm-gmag block is appended."""
+    ports = _remote_ports(toml_text)
+    ssh = next(((n, p) for n, p in ports.items() if n.endswith("-vm-ssh")), None)
+    if ssh is None:
+        raise PmAlignError(f"{FRPC_TOML} declares no -vm-ssh proxy — not a sigmond host tunnel")
+    site = ssh[0][: -len("-vm-ssh")]
+    from_port = ssh[1] - BANDS["vm-ssh"]
+    rac = from_port
+    if rac_marker and rac_marker.strip():
+        rac = int(rac_marker.strip())
+        if rac != from_port:
+            raise PmAlignError(f"RAC number {rac} (rac-number) disagrees with the vm-ssh port "
+                               f"{ssh[1]} (RAC {from_port}) — refused")
+    names = set(declared_proxies(toml_text))
+    added, blocks = [], []
+    for ch in ("vm-station", "vm-gmag"):
+        name = f"{site}-{ch}"
+        if name in names:
+            continue
+        added.append(name)
+        blocks.append(f'\n[[proxies]]\nname = "{name}"\ntype = "tcp"\nlocalIP = "127.0.0.1"\n'
+                      f'localPort = {LOCAL[ch]}\nremotePort = {BANDS[ch] + rac}\n')
+    if not added:
+        return toml_text, []
+    text = toml_text if toml_text.endswith("\n") else toml_text + "\n"
+    return text + "".join(blocks), added
+
+
+def proxies_running(api_json: str, user: str, names) -> bool:
+    try:
+        doc = json.loads(api_json or "{}")
+    except ValueError:
+        return False
+    status = {p.get("name"): p.get("status") for p in doc.get("tcp", [])}
+    return all(status.get(f"{user}.{n}") == "running" for n in names)
+
+
+def _fetch_status() -> str:
+    try:
+        with urllib.request.urlopen(FRPC_API, timeout=5) as r:
+            return r.read().decode()
+    except (OSError, urllib.error.URLError):
+        return ""
+
+
+def _wait_running(user, names, *, fetch_status, sleep, wait_s) -> bool:
+    deadline = wait_s
+    while True:
+        if proxies_running(fetch_status(), user, names):
+            return True
+        if deadline <= 0:
+            return False
+        sleep(5)
+        deadline -= 5
+
+
+def _read_rac_marker(root: Path) -> Optional[str]:
+    try:
+        return _under(root, RAC_NUMBER_FILE).read_text()
+    except OSError:
+        return None
+
+
+def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.sleep,
+                 wait_s: int = 90) -> dict:
+    """Add the missing channels to the host tunnel, or leave it exactly as it was.
+
+    frpc verify first (a config frpc rejects never reaches the unit), then
+    install, restart, and require EVERY declared proxy "running" within
+    ``wait_s``.  Otherwise the previous file goes back, the unit restarts on
+    it, and the outcome says rolled-back — or failed, if even the old
+    config does not come back up (then the station needs hands)."""
+    path = _under(root, FRPC_TOML)
+    old = path.read_text()
+    new, added = tunnel_plan(old, _read_rac_marker(root))
+    if not added:
+        return {"outcome": "current", "detail": "every channel already declared"}
+    m = re.search(r'^user\s*=\s*"([^"]*)"', old, re.M)
+    if not m:
+        return {"outcome": "failed", "detail": f"{FRPC_TOML} declares no user — cannot verify proxies"}
+    user = m.group(1)
+    cand = path.with_name(path.name + ".pm-align-new")
+    cand.write_text(new)
+    os.chmod(cand, 0o600)
+    r = run([FRPC, "verify", "-c", str(cand)], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        cand.unlink()
+        return {"outcome": "failed", "detail": f"frpc verify refused: {(r.stderr or r.stdout).strip()}"}
+    backup = path.with_name(path.name + ".pm-align-prev")
+    backup.write_text(old)
+    os.chmod(backup, 0o600)
+    os.replace(cand, path)
+    run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
+    if _wait_running(user, declared_proxies(new), fetch_status=fetch_status, sleep=sleep,
+                     wait_s=wait_s):
+        return {"outcome": "applied", "detail": f"added {', '.join(added)}; every channel running"}
+    os.replace(backup, path)
+    run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
+    if _wait_running(user, declared_proxies(old), fetch_status=fetch_status, sleep=sleep,
+                     wait_s=wait_s):
+        return {"outcome": "rolled-back",
+                "detail": f"{', '.join(added)} did not come up; previous tunnel restored and running"}
+    return {"outcome": "failed", "detail": "previous tunnel restored but NOT all running — needs hands"}
+
+
+def write_tunnel_result(root: Path, out: dict, now: str) -> Path:
+    p = _under(root, TUNNEL_RESULT)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    doc = dict(out)
+    doc["at"] = now
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n")
+    os.replace(tmp, p)
+    return p
+
+
 def _say(msg=""):
     print(msg, flush=True)
 
 
+def _launch_tunnel_step(root: Path, run) -> int:
+    """Launch ``--tunnel-step`` detached via systemd-run so it (and the frpc
+    restart it may do) survives this ssh session dropping.  Runs from the
+    just-installed /usr/local/sbin/pm-align when the file step wrote one,
+    else this process's own script.  Returns the rc to propagate from
+    --apply: 0 if launched, 1 if systemd-run itself failed."""
+    installed = _under(root, "/usr/local/sbin/pm-align")
+    script = installed if installed.exists() else Path(__file__).resolve()
+    r = run(["systemd-run", "--unit", "pm-align-tunnel", "--collect", "--quiet",
+             sys.executable, str(script), "--tunnel-step"],
+            capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        _say(f"  tunnel: systemd-run failed: {(r.stderr or r.stdout or '').strip()}")
+        return 1
+    return 0
+
+
+def _apply_tunnel(root: Path, run) -> int:
+    """The tunnel step of --apply: skip if there's no host tunnel, refuse if
+    the plan disagrees with the RAC number, else launch it detached."""
+    tpath = _under(root, FRPC_TOML)
+    if not tpath.exists():
+        _say("  tunnel: no host tunnel configured — skipped")
+        return 0
+    try:
+        _, added = tunnel_plan(tpath.read_text(), _read_rac_marker(root))
+    except PmAlignError as exc:
+        _say(f"  tunnel: REFUSED — {exc}")
+        return 0
+    if not added:
+        _say("  tunnel: every channel declared")
+        return 0
+    rc = _launch_tunnel_step(root, run)
+    if rc == 0:
+        _say("  tunnel: adding " + ", ".join(added) + " — running detached (pm-align-tunnel).")
+        _say("  This ssh session may drop while the tunnel restarts. Reconnect in ~2 minutes,")
+        _say("  then: pm-align --status")
+    return rc
+
+
 def _do_apply(changes: list, rel: Release, root: Path, run, now) -> int:
-    """The --apply steps, in order.  Later tasks (tunnel, heartbeat, VM
-    record push) append further steps here after write_record."""
+    """The --apply steps, in order.  Later tasks (heartbeat, VM record push)
+    append further steps here after write_record."""
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     backup_dir = _under(root, f"{BACKUP_BASE}/{stamp}")
     written = apply_files(changes, root, backup_dir)
@@ -371,19 +559,59 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now) -> int:
         _say(f"  wrote {path}")
     _say(f"  backup: {backup_dir}")
     _say(f"  record: {record}")
-    return 0
+    return _apply_tunnel(root, run)
+
+
+def _dry_run_tunnel_note(root: Path) -> tuple:
+    """(message, pending) for the dry-run tunnel status line."""
+    tpath = _under(root, FRPC_TOML)
+    if not tpath.exists():
+        return "tunnel: no host tunnel configured", False
+    try:
+        _, added = tunnel_plan(tpath.read_text(), _read_rac_marker(root))
+    except PmAlignError as exc:
+        return f"tunnel: REFUSED — {exc}", True
+    if added:
+        return f"tunnel: would add {', '.join(added)}", True
+    return "tunnel: every channel declared", False
+
+
+def _print_status(root: Path) -> None:
+    tpath = _under(root, TUNNEL_RESULT)
+    _say(f"tunnel result ({tpath}):")
+    _say(tpath.read_text().rstrip("\n") if tpath.exists() else "  none yet")
+    rpath = _under(root, RECORD)
+    _say(f"alignment record ({rpath}):")
+    _say(rpath.read_text().rstrip("\n") if rpath.exists() else "  none yet")
 
 
 def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.request.urlopen,
          run=None, now=None) -> int:
-    """Exit 0 aligned (or --apply succeeded), 1 alignment available,
-    2 target could not be established, or --apply refused (not root)."""
+    """Exit 0 aligned (or --apply/--tunnel-step succeeded), 1 alignment
+    available (or --tunnel-step did not fully come up), 2 target could not
+    be established, or --apply refused (not root)."""
     run = run or subprocess.run
     now = now or datetime.now(timezone.utc)
     ap = argparse.ArgumentParser(prog="pm-align", description=__doc__.splitlines()[0])
     ap.add_argument("--release", help="a blessed tag (default: the latest)")
     ap.add_argument("--apply", action="store_true", help="write the refresh set, as root")
+    ap.add_argument("--tunnel-step", action="store_true", dest="tunnel_step",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--status", action="store_true",
+                    help="print the last alignment and tunnel-step results")
     args = ap.parse_args(argv)
+
+    if args.status:
+        _print_status(root)
+        return 0
+
+    if args.tunnel_step:
+        out = tunnel_apply(root, run=run)
+        now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        write_tunnel_result(root, out, now_iso)
+        _say(json.dumps(out))
+        return 0 if out["outcome"] in ("applied", "current") else 1
+
     vmid = host_vmid(root)
     try:
         rel = fetch_release(args.release, urlopen=urlopen)
@@ -407,8 +635,10 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
             _say("pm-align --apply: run as root")
             return 2
         return _do_apply(changes, rel, root, run, now)
+    tunnel_msg, tunnel_pending = _dry_run_tunnel_note(root)
+    _say(f"  {tunnel_msg}")
     _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
-    return 1 if pending else 0
+    return 1 if (pending or tunnel_pending) else 0
 
 
 if __name__ == "__main__":

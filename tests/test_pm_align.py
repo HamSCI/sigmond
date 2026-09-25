@@ -335,3 +335,275 @@ def test_main_dry_run_exit_codes(tmp_path, monkeypatch):
         raise pm_align.PmAlignError("no release")
     monkeypatch.setattr(pm_align, "fetch_release", _raise)
     assert pm_align.main([], root=tmp_path) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 4: the tunnel step
+
+TOML4 = '''serverAddr = "gw2.wsprdaemon.org"
+serverPort = 35736
+user = "dd986638365fd1d7"
+
+[webServer]
+addr = "127.0.0.1"
+port = 7500
+
+[[proxies]]
+name = "AC0G_ND-vm-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12222
+remotePort = 36305
+
+[[proxies]]
+name = "AC0G_ND-vm-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12223
+remotePort = 46305
+'''
+
+
+def test_tunnel_plan_appends_only_the_missing_channels():
+    new, added = pm_align.tunnel_plan(TOML4, "505")
+    assert added == ["AC0G_ND-vm-station", "AC0G_ND-vm-gmag"]
+    assert new.startswith(TOML4)                       # existing text byte-for-byte
+    assert 'name = "AC0G_ND-vm-station"' in new and "remotePort = 49305" in new
+    assert "localPort = 12225" in new and "remotePort = 50305" in new
+
+
+def test_tunnel_plan_is_a_no_op_when_complete():
+    full, _ = pm_align.tunnel_plan(TOML4, "505")
+    assert pm_align.tunnel_plan(full, "505") == (full, [])
+
+
+def test_tunnel_plan_refuses_a_rac_number_that_disagrees_with_the_ports():
+    with pytest.raises(pm_align.PmAlignError, match="RAC"):
+        pm_align.tunnel_plan(TOML4, "506")
+
+
+def test_tunnel_plan_derives_the_rac_number_without_a_marker():
+    _, added = pm_align.tunnel_plan(TOML4, None)
+    assert added == ["AC0G_ND-vm-station", "AC0G_ND-vm-gmag"]
+
+
+def _api(user, names, status="running"):
+    return json.dumps({"tcp": [{"name": f"{user}.{n}", "status": status} for n in names]})
+
+
+def test_proxies_running_needs_every_declared_name():
+    names = ["A-vm-ssh", "A-vm-web"]
+    assert pm_align.proxies_running(_api("u", names), "u", names)
+    assert not pm_align.proxies_running(_api("u", names[:1]), "u", names)
+    assert not pm_align.proxies_running(_api("u", names, "start error"), "u", names)
+
+
+def _tunnel_root(tmp_path, text=TOML4):
+    (tmp_path / "etc/sigmond").mkdir(parents=True)
+    (tmp_path / "etc/sigmond-appliance").mkdir(parents=True)
+    (tmp_path / "etc/sigmond/frpc-host.toml").write_text(text)
+    (tmp_path / "etc/sigmond-appliance/rac-number").write_text("505\n")
+    return tmp_path
+
+
+def test_tunnel_apply_installs_when_every_proxy_comes_up(tmp_path):
+    root = _tunnel_root(tmp_path)
+    calls = []
+    names = pm_align.declared_proxies(pm_align.tunnel_plan(TOML4, "505")[0])
+    out = pm_align.tunnel_apply(root, run=_fake_run(calls),
+                                fetch_status=lambda: _api("dd986638365fd1d7", names),
+                                sleep=lambda s: None)
+    assert out["outcome"] == "applied"
+    assert "AC0G_ND-vm-gmag" in (root / "etc/sigmond/frpc-host.toml").read_text()
+    assert any(c[:2] == ["/usr/local/sbin/frpc", "verify"] for c in calls)
+    assert ["systemctl", "restart", "sigmond-rac-host.service"] in calls
+
+
+def test_tunnel_apply_rolls_back_when_a_proxy_stays_down(tmp_path):
+    root = _tunnel_root(tmp_path)
+    calls = []
+    out = pm_align.tunnel_apply(root, run=_fake_run(calls),
+                                fetch_status=lambda: _api("dd986638365fd1d7",
+                                                          ["AC0G_ND-vm-ssh", "AC0G_ND-vm-web"]),
+                                sleep=lambda s: None, wait_s=10)
+    assert out["outcome"] == "rolled-back"
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
+    assert calls.count(["systemctl", "restart", "sigmond-rac-host.service"]) == 2
+
+
+def test_tunnel_apply_refuses_a_config_frpc_rejects(tmp_path):
+    root = _tunnel_root(tmp_path)
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(list(argv))
+        rc = 1 if argv[:2] == ["/usr/local/sbin/frpc", "verify"] else 0
+        return subprocess.CompletedProcess(argv, rc, "", "bad")
+    out = pm_align.tunnel_apply(root, run=run, fetch_status=lambda: "{}", sleep=lambda s: None)
+    assert out["outcome"] == "failed"
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
+    assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
+
+
+def test_tunnel_apply_fails_without_touching_anything_when_no_user_line(tmp_path):
+    text = TOML4.replace('user = "dd986638365fd1d7"\n', "")
+    root = _tunnel_root(tmp_path, text=text)
+    calls = []
+    out = pm_align.tunnel_apply(root, run=_fake_run(calls), fetch_status=lambda: "{}",
+                                sleep=lambda s: None)
+    assert out["outcome"] == "failed"
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == text
+    assert calls == []
+
+
+def test_tunnel_apply_current_when_every_channel_already_declared(tmp_path):
+    full, _ = pm_align.tunnel_plan(TOML4, "505")
+    root = _tunnel_root(tmp_path, text=full)
+    calls = []
+    out = pm_align.tunnel_apply(root, run=_fake_run(calls), fetch_status=lambda: "{}",
+                                sleep=lambda s: None)
+    assert out == {"outcome": "current", "detail": "every channel already declared"}
+    assert calls == []
+
+
+# --- dry run / --apply / --tunnel-step / --status wiring ---
+
+def _src_with_pm_align():
+    return pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ, 100),
+                            {"pm-heartbeat.py": b"hb", "pm-align.py": b"#!/usr/bin/env python3\n"})
+
+
+def _mock_release(monkeypatch, src_factory=_src):
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, ""))
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src_factory())
+
+
+def test_main_dry_run_reports_no_host_tunnel_configured(tmp_path, monkeypatch, capsys):
+    _mock_release(monkeypatch)
+    pm_align.main([], root=tmp_path)
+    assert "tunnel: no host tunnel configured" in capsys.readouterr().out
+
+
+def test_main_dry_run_reports_would_add_and_counts_as_pending(tmp_path, monkeypatch, capsys):
+    _mock_release(monkeypatch)
+    _tunnel_root(tmp_path)
+    rc = pm_align.main([], root=tmp_path)
+    out = capsys.readouterr().out
+    assert "tunnel: would add AC0G_ND-vm-station, AC0G_ND-vm-gmag" in out
+    assert rc == 1
+
+
+def test_main_dry_run_reports_every_channel_declared(tmp_path, monkeypatch, capsys):
+    _mock_release(monkeypatch)
+    full, _ = pm_align.tunnel_plan(TOML4, "505")
+    _tunnel_root(tmp_path, text=full)
+    pm_align.main([], root=tmp_path)
+    assert "tunnel: every channel declared" in capsys.readouterr().out
+
+
+def test_main_dry_run_reports_refused_on_rac_disagreement(tmp_path, monkeypatch, capsys):
+    _mock_release(monkeypatch)
+    _tunnel_root(tmp_path)
+    (tmp_path / "etc/sigmond-appliance/rac-number").write_text("506\n")
+    rc = pm_align.main([], root=tmp_path)
+    out = capsys.readouterr().out
+    assert "tunnel: REFUSED — " in out and "RAC" in out
+    assert rc == 1
+
+
+def test_main_apply_skips_tunnel_when_not_configured(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    calls = []
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run(calls))
+    assert rc == 0
+    assert "tunnel: no host tunnel configured — skipped" in capsys.readouterr().out
+    assert not any(c[0] == "systemd-run" for c in calls)
+
+
+def test_main_apply_prints_refused_and_still_succeeds_on_rac_disagreement(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    _tunnel_root(tmp_path)
+    (tmp_path / "etc/sigmond-appliance/rac-number").write_text("506\n")
+    calls = []
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run(calls))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tunnel: REFUSED — " in out and "RAC" in out
+    assert not any(c[0] == "systemd-run" for c in calls)
+
+
+def test_main_apply_launches_the_detached_tunnel_step_via_the_real_script(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)          # _src(): no pm-align.py among proxmox sources
+    _tunnel_root(tmp_path)
+    calls = []
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run(calls))
+    assert rc == 0
+    launch = next(c for c in calls if c[0] == "systemd-run")
+    assert launch[:5] == ["systemd-run", "--unit", "pm-align-tunnel", "--collect", "--quiet"]
+    assert launch[5] == sys.executable
+    assert launch[6] == str((PROXMOX / "pm-align.py").resolve())
+    assert launch[7] == "--tunnel-step"
+    out = capsys.readouterr().out
+    assert "tunnel: adding AC0G_ND-vm-station, AC0G_ND-vm-gmag" in out
+    assert "pm-align --status" in out
+
+
+def test_main_apply_launches_the_detached_tunnel_step_via_the_installed_script(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch, src_factory=_src_with_pm_align)
+    _tunnel_root(tmp_path)
+    calls = []
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run(calls))
+    assert rc == 0
+    launch = next(c for c in calls if c[0] == "systemd-run")
+    assert launch[6] == str(tmp_path / "usr/local/sbin/pm-align")
+
+
+def test_main_apply_returns_1_when_systemd_run_itself_fails(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    _tunnel_root(tmp_path)
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(list(argv))
+        rc = 1 if argv[0] == "systemd-run" else 0
+        return subprocess.CompletedProcess(argv, rc, "", "no systemd")
+    rc = pm_align.main(["--apply"], root=tmp_path, run=run)
+    assert rc == 1
+    assert "no systemd" in capsys.readouterr().out
+
+
+def test_tunnel_step_writes_the_result_and_returns_matching_exit_code(tmp_path, monkeypatch):
+    root = _tunnel_root(tmp_path)
+    monkeypatch.setattr(pm_align, "tunnel_apply", lambda root, run, **kw:
+                        {"outcome": "applied", "detail": "added everything"})
+    rc = pm_align.main(["--tunnel-step"], root=root, run=_fake_run([]))
+    assert rc == 0
+    doc = json.loads((root / "var/lib/pm-align/tunnel-result.json").read_text())
+    assert doc["outcome"] == "applied" and doc["detail"] == "added everything" and "at" in doc
+
+    monkeypatch.setattr(pm_align, "tunnel_apply", lambda root, run, **kw:
+                        {"outcome": "rolled-back", "detail": "x did not come up"})
+    rc = pm_align.main(["--tunnel-step"], root=root, run=_fake_run([]))
+    assert rc == 1
+
+
+def test_status_prints_tunnel_result_and_record_or_none_yet(tmp_path, capsys):
+    rc = pm_align.main(["--status"], root=tmp_path)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "none yet" in out
+
+    rel = pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, "")
+    pm_align.write_record(tmp_path, rel, ["/x"], "2026-09-25T12:00:00Z")
+    pm_align.write_tunnel_result(tmp_path, {"outcome": "current", "detail": "d"},
+                                 "2026-09-25T12:01:00Z")
+    pm_align.main(["--status"], root=tmp_path)
+    out = capsys.readouterr().out
+    assert '"release": "v3.53"' in out
+    assert '"outcome": "current"' in out
