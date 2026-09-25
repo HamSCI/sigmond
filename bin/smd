@@ -5466,10 +5466,14 @@ def _align_run_install(repo: Path) -> int:
         sh = repo / 'install.sh'
     if not sh.exists():
         return 0
-    r = subprocess.run(_as_root(['bash', str(sh)]), capture_output=True, text=True,
-                       stdin=subprocess.DEVNULL)
+    # --yes, as bring-up passes it: an install.sh that asks to replace a
+    # running service ("Stop and replace …? [y/N]") under `set -e` otherwise
+    # dies on the empty stdin — igmp-querier did, on AC0G-ND 2026-09-25.
+    r = subprocess.run(_as_root(['bash', str(sh), '--yes']), capture_output=True,
+                       text=True, stdin=subprocess.DEVNULL)
     if r.returncode:
-        tail = (r.stderr or '').strip().splitlines()[-5:]
+        # These scripts print their errors with plain echo, to stdout.
+        tail = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()[-5:]
         for line in tail:
             print(f'  | {line}')
     return r.returncode

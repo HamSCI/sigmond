@@ -1033,6 +1033,33 @@ class AlignRunInstallTests(unittest.TestCase):
             self.assertIn(f"line{i}", printed)
         self.assertNotIn("line4", printed)
 
+    def test_passes_yes_like_bringup_does(self):
+        # An install.sh that asks "Stop and replace existing installation?"
+        # under set -e dies on stdin=DEVNULL unless it is told --yes, the flag
+        # bring-up already passes (ND 2026-09-25: igmp-querier exit 1).
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "install.sh").write_text("#!/bin/sh\n")
+            with mock.patch("subprocess.run",
+                            return_value=subprocess.CompletedProcess([], 0, "", "")) as m:
+                smd._align_run_install(repo)
+        argv = m.call_args.args[0]
+        self.assertEqual(argv[-1], "--yes")
+        self.assertIn(str(repo / "install.sh"), argv)
+
+    def test_failure_tail_includes_stdout(self):
+        # install.sh scripts print their errors with plain echo (stdout).
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "install.sh").write_text("#!/bin/sh\n")
+            with mock.patch("subprocess.run",
+                            return_value=subprocess.CompletedProcess(
+                                [], 1, "[ERROR] Service failed to start\n", "")):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    smd._align_run_install(repo)
+        self.assertIn("[ERROR] Service failed to start", out.getvalue())
+
     def test_no_installer_on_disk_is_zero_not_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(smd._align_run_install(Path(tmp)), 0)
