@@ -978,6 +978,34 @@ def test_main_apply_heartbeat_failure_warns_sets_rc_1_but_still_runs_the_tunnel(
     assert any(c[0] == "systemd-run" for c in calls)      # the tunnel step still launched
 
 
+def test_main_apply_heartbeat_refuses_when_opted_in_without_a_configured_reporter(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch, src_factory=_src_with_heartbeat)
+    calls = []
+    rc = pm_align.main(["--apply", "--heartbeat"], root=tmp_path, run=_fake_run(calls))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "heartbeat: REFUSED —" in out and "reporter" in out
+    # the refusal must not block the (unconfigured, so skipped) tunnel step
+    assert "tunnel: no host tunnel configured — skipped" in out
+
+
+def test_main_apply_heartbeat_refuses_when_the_existing_config_is_missing_a_key(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch, src_factory=_src_with_heartbeat)
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text('station = "b4-pm"\nvmid = 100\n')
+    calls = []
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run(calls))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "heartbeat: REFUSED —" in out
+    assert "config.toml" in out and "dest_host" in out
+    assert "tunnel: no host tunnel configured — skipped" in out
+
+
 def test_main_dry_run_reports_heartbeat_not_set_up(tmp_path, monkeypatch, capsys):
     _mock_release(monkeypatch)
     pm_align.main([], root=tmp_path)
