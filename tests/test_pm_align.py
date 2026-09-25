@@ -28,6 +28,8 @@ pm_align = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = pm_align
 _spec.loader.exec_module(pm_align)
 
+WIZARD = (PROXMOX / "sigmond-wizard.sh").read_text()
+
 FB = "#!/bin/bash\necho @@VERSION@@\ncat > /usr/local/lib/sigmond-net.sh <<'NETLIBEOF'\nnet\nNETLIBEOF\n"
 FB_RENDERED = FB.replace("@@VERSION@@", "v3.53")
 
@@ -1095,3 +1097,43 @@ def test_main_apply_record_push_orders_after_record_and_before_heartbeat(tmp_pat
     assert rc == 0
     out = capsys.readouterr().out
     assert out.index("record:") < out.index("recorded (VM copy:") < out.index("heartbeat:")
+
+
+# ── wizard static-text checks: sigmond-wizard.sh, not pm-align.py ──────────
+#
+# These read the real wizard shell script as text (no execution) and check
+# for the three defects Task 7 fixes: the --rac-off/--rac-on toggles only
+# touching 2 of 4 relay sockets, the tunnel-verify loop hardcoding "4" when
+# frpc-host.toml actually carries 6 proxies, and the wizard never installing
+# pm-align onto the host.
+
+def test_wizard_rac_toggles_name_all_four_relay_sockets():
+    for flag in ("--rac-off", "--rac-on"):
+        i = WIZARD.index(f"{flag})") if f"{flag})" in WIZARD else WIZARD.index(flag)
+        block = WIZARD[i:i + 1500]
+        for name in ("ssh", "web", "station", "gmag"):
+            assert f"sigmond-vm-{name}-relay.socket" in block, (flag, name)
+
+
+def test_wizard_verify_counts_every_declared_proxy_not_four():
+    i = WIZARD.index("PROVE the tunnel")
+    block = WIZARD[i:i + 2500]
+    assert "-ge 4" not in block
+    assert "grep -c '^name *=' /etc/sigmond/frpc-host.toml" in block
+
+
+def test_wizard_rac_number_gated_on_the_same_dynamic_threshold():
+    # The success branch that records rac-number must be gated by the SAME
+    # "$_want" threshold the loop waits on -- not a bare "$RUNNING" check
+    # that would still record success on a partial (e.g. 4-of-6) tunnel.
+    i = WIZARD.index("PROVE the tunnel")
+    block = WIZARD[i:i + 2500]
+    want_i = block.index('_want=$(grep')
+    gate_i = block.index('if [ "$RUNNING" -ge "$_want" ]')
+    rac_number_i = block.index('rac-number')
+    assert want_i < gate_i < rac_number_i
+
+
+def test_wizard_installs_pm_align_on_the_host():
+    assert "install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py " \
+           "/usr/local/sbin/pm-align" in WIZARD

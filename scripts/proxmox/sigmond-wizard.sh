@@ -192,7 +192,8 @@ mkdir -p "$MARK_DIR"
 case "${1:-}" in
     --rac-off)
         systemctl disable --now sigmond-rac-host.service \
-            sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket 2>/dev/null
+            sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket \
+            sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket 2>/dev/null
         say "remote access (RAC) disabled — tunnel is down, config kept."
         say "re-enable any time:  sigmond-setup --rac-on"
         exit 0;;
@@ -241,8 +242,8 @@ TIEREOF
             say "no RAC config on this host yet — run: sigmond-setup --reconfigure"
             exit 1
         fi
-        systemctl enable --now sigmond-vm-ssh-relay.socket \
-            sigmond-vm-web-relay.socket 2>/dev/null
+        systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket \
+            sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket 2>/dev/null
         systemctl enable --now sigmond-rac-host.service
         say "remote access (RAC) re-enabled$( [ -s "$MARK_DIR/rac-number" ] && echo " (RAC #$(cat "$MARK_DIR/rac-number"))" )"
         exit 0;;
@@ -1738,6 +1739,9 @@ SVCEOF
             systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket \
                 sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket >>"$LOG" 2>&1
 
+            install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py /usr/local/sbin/pm-align 2>/dev/null \
+                || say "WARN: pm-align not installed (sigmond tree lacks it)"
+
             # transport follows the tier that actually answered: a secure
             # tier pins the fleet CA, opportunistic (opp) encrypts without
             # pinning (server cert is self-signed — vpn.hamsci.org today),
@@ -1833,15 +1837,21 @@ TOMLEOF
 
             # PROVE the tunnel (don't just claim it): frpc's local admin API
             # reports per-proxy status once the server has accepted them.
+            # _want is however many proxies the writer above actually put in
+            # frpc-host.toml (6 today: vm-ssh/vm-web/vm-station/vm-gmag/
+            # host-ssh/host-ui) — NOT a hardcoded count that silently accepts
+            # a partial tunnel once a proxy is added or removed.
+            _want=$(grep -c '^name *=' /etc/sigmond/frpc-host.toml 2>/dev/null)
+            [ -n "$_want" ] && [ "$_want" -gt 0 ] || _want=6
             RUNNING=0
             for i in $(seq 1 12); do
                 # grep -o|wc -l, NOT grep -c: the API is one line of JSON and
                 # grep -c counts LINES — it reported 1/4 with all 4 running.
                 RUNNING=$(curl -s http://127.0.0.1:7500/api/status 2>/dev/null | grep -o '"status":"running"' | wc -l)
-                [ "$RUNNING" -ge 4 ] && break
+                [ "$RUNNING" -ge "$_want" ] && break
                 sleep 5
             done
-            if [ "$RUNNING" -ge 4 ]; then
+            if [ "$RUNNING" -ge "$_want" ]; then
                 RAC_STATE="#$RACN live on $SRV via $RAC_TIER_LABEL — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI (off: sigmond-setup --rac-off)"
                 if [ "$RAC_TLS" = "off" ]; then
                     RAC_STATE="$RAC_STATE
@@ -1850,7 +1860,7 @@ TOMLEOF
                 fi
                 echo "$RACN" > "$MARK_DIR/rac-number"
             else
-                RAC_STATE="FAILED — registered, but only $RUNNING/4 channels came up; journalctl -u sigmond-rac-host"
+                RAC_STATE="FAILED — registered, but only $RUNNING/$_want channels came up; journalctl -u sigmond-rac-host"
                 say "WARN: $RAC_STATE"
             fi
         fi
