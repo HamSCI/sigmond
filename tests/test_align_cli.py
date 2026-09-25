@@ -3513,7 +3513,11 @@ class AlignRestartTimeoutTests(unittest.TestCase):
         i = next(i for i, c in enumerate(fake.calls) if c[:2] == ["systemctl", "restart"])
         return fake.kwargs[i]["timeout"]
 
-    def test_timeout_is_the_max_start_plus_stop_plus_60(self):
+    def test_timeout_is_the_longest_stop_plus_every_start_plus_60(self):
+        # One transaction stops its units together but starts them in
+        # After= order, so a chain's start timeouts add: hf-timestd's
+        # core-recorder (300 s) comes before fusion and the metrology
+        # channels, and the single-unit maximum (450 s) undercut that.
         fake = _FakeRestartRun(show=self._show)
         smd._align_restart(False, ["c"], {"c": ["a.service", "b.service"]}, run=fake,
                            say=lambda m: None)
@@ -3521,7 +3525,7 @@ class AlignRestartTimeoutTests(unittest.TestCase):
                 and "TimeoutStartUSec" in c][0]
         self.assertEqual(show, ["systemctl", "show", "-p", "TimeoutStartUSec",
                                 "-p", "TimeoutStopUSec", "a.service", "b.service"])
-        self.assertEqual(self._restart_timeout(fake), 300 + 90 + 60)
+        self.assertEqual(self._restart_timeout(fake), 90 + (300 + 90) + 60)
 
     def test_unreadable_timeouts_default_to_600(self):
         for out in ("", "TimeoutStartUSec=infinity\nTimeoutStopUSec=infinity\n", "garbage"):

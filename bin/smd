@@ -4799,16 +4799,20 @@ def _align_parse_usec(text) -> Optional[float]:
 
 
 def _align_restart_timeout(units, *, run) -> int:
-    """The client timeout for one `systemctl restart <units…>`: the largest
-    TimeoutStartUSec + TimeoutStopUSec among ``units``, plus 60 s — read
-    with ONE `systemctl show` (final review / I1).  hf-timestd's
-    core-recorder alone has TimeoutStartSec=300, so a flat 300 s could fire
-    while systemd is still inside it.  600 s when nothing is readable."""
+    """The client timeout for one `systemctl restart <units…>`: the longest
+    TimeoutStopUSec among ``units`` plus the SUM of their TimeoutStartUSec,
+    plus 60 s — read with ONE `systemctl show` (final review / I1).  The
+    transaction stops its units together but starts them in After= order,
+    so a chain's start timeouts add: hf-timestd's core-recorder
+    (TimeoutStartSec=300) starts before fusion and the metrology channels.
+    systemd enforces each unit's own timeout, so this bound only ever
+    fires on a systemctl that hangs; too long costs a late report, too
+    short a false failure.  600 s when nothing is readable."""
     r = _align_run(['systemctl', 'show', '-p', 'TimeoutStartUSec', '-p', 'TimeoutStopUSec',
                     *units], run=run, timeout=15, action='systemctl show timeouts')
     if r.returncode != 0:
         return _ALIGN_RESTART_TIMEOUT_DEFAULT
-    best = None
+    starts, stops = [], []
     for block in re.split(r'\n\s*\n', r.stdout or ''):
         vals = {}
         for line in block.splitlines():
@@ -4817,10 +4821,11 @@ def _align_restart_timeout(units, *, run) -> int:
         start, stop = vals.get('TimeoutStartUSec'), vals.get('TimeoutStopUSec')
         if start is None or stop is None:
             continue
-        best = max(best or 0.0, start + stop)
-    if best is None:
+        starts.append(start)
+        stops.append(stop)
+    if not starts:
         return _ALIGN_RESTART_TIMEOUT_DEFAULT
-    return int(best + 0.999) + _ALIGN_RESTART_TIMEOUT_SLACK
+    return int(max(stops) + sum(starts) + 0.999) + _ALIGN_RESTART_TIMEOUT_SLACK
 
 
 def _align_restart_units(units, *, run, say) -> object:
