@@ -59,6 +59,7 @@ HB_DEFAULT = ("wd30.wsprdaemon.org", "38222")      # sigmond-wizard.sh:680, 687
 HB_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
             "pm-heartbeat-setup.sh")
 HB_REQUIRED_KEYS = ("station", "vmid", "dest_host")   # pm-heartbeat.py's own _REQUIRED_KEYS
+HB_KEY_PATH = "/etc/pm-heartbeat/id_ed25519"          # pm-heartbeat-setup.sh's KEY_PATH default
 
 
 class PmAlignError(Exception):
@@ -691,8 +692,16 @@ def heartbeat_args(root: Path, *, opt_in: bool, vmid: int, dest: Optional[str]):
         missing = [k for k in HB_REQUIRED_KEYS if doc.get(k) in (None, "")]
         if missing:
             raise PmAlignError(f"{HB_CONFIG} is missing required key(s): {', '.join(missing)}")
-        return ["--station", str(doc["station"]), "--vmid", str(doc["vmid"]),
+        key_path = doc.get("key_path", HB_KEY_PATH)
+        if key_path != HB_KEY_PATH:
+            raise PmAlignError(f"{HB_CONFIG} key_path is {key_path!r}, not {HB_KEY_PATH!r} — "
+                               "re-running with a different key would silently de-authorize "
+                               "this host on the fleetboard server")
+        args = ["--station", str(doc["station"]), "--vmid", str(doc["vmid"]),
                 "--dest-host", str(doc["dest_host"]), "--dest-port", str(doc.get("dest_port", 22))]
+        if doc.get("expect_cat") is True:
+            args.append("--expect-cat")
+        return args
     if not opt_in:
         return None
     try:

@@ -779,6 +779,39 @@ def test_existing_heartbeat_config_is_rerun_even_without_opt_in_or_dest_being_ho
                     "--dest-host", "h.example", "--dest-port", "1234"]
 
 
+def test_heartbeat_args_passes_expect_cat_when_the_config_wants_it(tmp_path):
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text(
+        _HB_FULL_CONFIG.replace("expect_cat = false", "expect_cat = true"))
+    args = pm_align.heartbeat_args(tmp_path, opt_in=False, vmid=100, dest=None)
+    assert args[-1] == "--expect-cat"
+
+
+def test_heartbeat_args_omits_expect_cat_when_the_config_says_false(tmp_path):
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text(_HB_FULL_CONFIG)
+    args = pm_align.heartbeat_args(tmp_path, opt_in=False, vmid=100, dest=None)
+    assert "--expect-cat" not in args
+
+
+def test_heartbeat_args_refuses_a_non_default_key_path(tmp_path):
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text(
+        _HB_FULL_CONFIG.replace('key_path = "/etc/pm-heartbeat/id_ed25519"',
+                                'key_path = "/root/other-key"'))
+    with pytest.raises(pm_align.PmAlignError, match="config.toml") as exc_info:
+        pm_align.heartbeat_args(tmp_path, opt_in=False, vmid=100, dest=None)
+    assert "/root/other-key" in str(exc_info.value)
+
+
+def test_heartbeat_args_accepts_a_missing_key_path_key_as_the_default(tmp_path):
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    text = "\n".join(l for l in _HB_FULL_CONFIG.splitlines() if not l.startswith("key_path"))
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text(text)
+    args = pm_align.heartbeat_args(tmp_path, opt_in=False, vmid=100, dest=None)
+    assert args[:2] == ["--station", "b4-pm"]
+
+
 def test_heartbeat_args_on_a_config_missing_a_required_key_names_the_file(tmp_path):
     (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
     (tmp_path / "etc/pm-heartbeat/config.toml").write_text('station = "b4-pm"\nvmid = 100\n')
