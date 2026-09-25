@@ -4547,6 +4547,28 @@ def _align_aligned_live():
     return live if isinstance(live, dict) else None
 
 
+def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned.json'),
+                     version_path=Path('/etc/sigmond-appliance/version')) -> str:
+    """The Proxmox host's level as the VM knows it: pm-align's record, pushed
+    in by pm-align itself (``push_record``, scripts/proxmox/pm-align.py);
+    failing that, the install-time version (the wizard stamps it in). The
+    VM only reports the host's level here; it never acts on the host."""
+    import json
+    try:
+        doc = json.loads(path.read_text())
+        rel, at = doc.get('release', '?'), doc.get('at', '?')
+        tail = '' if rel == release_tag else f' — {release_tag} available: run pm-align on the host'
+        return f'  host: {rel} (pm-align {at}){tail}'
+    except (OSError, ValueError):
+        pass
+    try:
+        v = version_path.read_text().strip() or '?'
+    except OSError:
+        v = 'unknown'
+    return (f'  host: {v} (install-time) — never aligned; '
+            f'{release_tag} available: run pm-align on the host')
+
+
 _ALIGN_LIVE_CHECKS = ('units_stable', 'authority_fresh', 'heartbeat_sent')
 
 
@@ -6378,6 +6400,7 @@ def cmd_align(args) -> int:
           f"{counts['stray']} stray, "
           f"{len(stale)} file{'s' if len(stale) != 1 else ''} to refresh, "
           f"{stale_now} service{'s' if stale_now != 1 else ''} to restart")
+    print(_align_host_line(rel.tag))
     if unverified:
         names = ', '.join(f['path'] for f in unverified)
         print(f"  {len(unverified)} file{'s' if len(unverified) != 1 else ''} "

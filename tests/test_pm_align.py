@@ -4,6 +4,7 @@ A PM runs no sigmond and has no git; pm-align is one stdlib file, loaded
 here by path (its filename has a dash).  Every host path is joined under a
 temp root and every command goes through an injected ``run``.
 """
+import base64
 import hashlib
 import http.client
 import importlib.util
@@ -1018,3 +1019,79 @@ def test_main_dry_run_reports_heartbeat_configured(tmp_path, monkeypatch, capsys
     (tmp_path / "etc/pm-heartbeat/config.toml").write_text('station = "b4-pm"\n')
     pm_align.main([], root=tmp_path)
     assert "heartbeat: configured (re-run on --apply)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Task 6: push the host record into the VM
+
+def test_push_record_writes_the_same_path_in_the_vm(tmp_path):
+    rec = tmp_path / "host-aligned.json"
+    rec.write_text('{"release": "v3.53"}\n')
+    calls = []
+    assert pm_align.push_record(rec, 100, run=_fake_run(calls, stdout='{"exitcode": 0}'))
+    argv = calls[0]
+    assert argv[:4] == ["qm", "guest", "exec", "100"]
+    assert "/etc/sigmond-appliance/host-aligned.json" in argv[-1]
+    assert base64.b64encode(rec.read_bytes()).decode() in argv[-1]
+
+
+def test_push_record_returns_false_on_a_nonzero_guest_exitcode(tmp_path):
+    rec = tmp_path / "host-aligned.json"
+    rec.write_text('{"release": "v3.53"}\n')
+    calls = []
+    assert not pm_align.push_record(rec, 100, run=_fake_run(calls, stdout='{"exitcode": 1}'))
+
+
+def test_main_apply_pushes_the_record_into_the_vm(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    calls = []
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run(calls, stdout='{"exitcode": 0}'))
+    assert rc == 0
+    qm_call = next(c for c in calls if c[:3] == ["qm", "guest", "exec"])
+    assert qm_call[3] == "100"
+    out = capsys.readouterr().out
+    assert "recorded (VM copy: yes)" in out
+
+
+def test_main_apply_push_failure_is_informational_and_does_not_affect_rc(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(list(argv))
+        if argv[:3] == ["qm", "guest", "exec"]:
+            raise subprocess.TimeoutExpired(argv, 30)
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    rc = pm_align.main(["--apply"], root=tmp_path, run=run)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "recorded (VM copy: no — " in out
+    assert "TimeoutExpired" in out
+
+
+def test_main_apply_pushes_even_when_nothing_new_was_written(tmp_path, monkeypatch, capsys):
+    """The record already exists and every file is current -- still push
+    (the VM may have been reinstalled since the last alignment)."""
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    pm_align.main(["--apply"], root=tmp_path, run=_fake_run([], stdout='{"exitcode": 0}'))
+    calls = []
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run(calls, stdout='{"exitcode": 0}'))
+    assert rc == 0
+    assert any(c[:3] == ["qm", "guest", "exec"] for c in calls)
+    out = capsys.readouterr().out
+    assert "recorded (VM copy: yes)" in out
+
+
+def test_main_apply_record_push_orders_after_record_and_before_heartbeat(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run([], stdout='{"exitcode": 0}'))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.index("record:") < out.index("recorded (VM copy:") < out.index("heartbeat:")

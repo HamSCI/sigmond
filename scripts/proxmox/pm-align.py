@@ -16,6 +16,7 @@ Design: sigmond docs/superpowers/specs/2026-09-24-smd-align-design.md §4.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -374,6 +375,38 @@ def write_record(root: Path, rel: Release, written: list, now: str) -> Path:
     return p
 
 
+def push_record(record_path: Path, vmid: int, *, run) -> bool:
+    """Copy the host record into the VM at the same path, via the guest
+    agent (the way the wizard stamps the version, sigmond-wizard.sh:985).
+
+    The record on the HOST (``record_path``, already written by
+    ``write_record``) is what --apply and --status report from; this is
+    only a courtesy copy for ``smd align`` to read on the VM side. A
+    wedged or absent guest agent must never raise here in a way that
+    ``_apply_record_push`` cannot turn into an informational line --
+    this function itself only reports what the agent actually said."""
+    b64 = base64.b64encode(record_path.read_bytes()).decode()
+    cmd = (f"mkdir -p /etc/sigmond-appliance && echo {b64} | base64 -d "
+           f"> {RECORD}.tmp && mv {RECORD}.tmp {RECORD}")
+    r = run(["qm", "guest", "exec", str(vmid), "--timeout", "30", "--", "bash", "-lc", cmd],
+            capture_output=True, text=True, timeout=60)
+    return r.returncode == 0 and re.search(r'"exitcode"\s*:\s*0\b', r.stdout or "") is not None
+
+
+def _apply_record_push(record: Path, vmid: int, *, run) -> str:
+    """"yes" or "no — <why>" for --apply's informational VM-copy line.
+
+    Never raises and never signals failure back to the caller: the
+    record on the host is what matters (already written before this
+    runs); a guest agent that is wedged, absent, or on a VM that isn't
+    up yet must not turn into a failed --apply."""
+    try:
+        ok = push_record(record, vmid, run=run)
+    except BaseException as exc:
+        return f"no — raised {exc!r}"
+    return "yes" if ok else "no — the guest agent did not confirm the copy"
+
+
 def declared_proxies(toml_text: str) -> list:
     return re.findall(r'^name\s*=\s*"([^"]+)"\s*$', toml_text, re.M)
 
@@ -704,8 +737,9 @@ def _apply_heartbeat(root: Path, src: Sources, *, run, vmid: int, opt_in: bool,
 
 def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources, vmid: int,
              heartbeat_opt_in: bool, heartbeat_dest: Optional[str]) -> int:
-    """The --apply steps, in order: files, relays, record, heartbeat, then
-    the tunnel launch LAST (it may drop the operator's ssh session)."""
+    """The --apply steps, in order: files, relays, record, push to VM,
+    heartbeat, then the tunnel launch LAST (it may drop the operator's
+    ssh session)."""
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     backup_dir = _under(root, f"{BACKUP_BASE}/{stamp}")
     written = apply_files(changes, root, backup_dir)
@@ -716,6 +750,9 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources
         _say(f"  wrote {path}")
     _say(f"  backup: {backup_dir}")
     _say(f"  record: {record}")
+    # Always push, even when nothing above changed and the record already
+    # existed -- the VM may have been reinstalled since the last alignment.
+    _say(f"  recorded (VM copy: {_apply_record_push(record, vmid, run=run)})")
     hb_rc = _apply_heartbeat(root, src, run=run, vmid=vmid, opt_in=heartbeat_opt_in,
                              dest=heartbeat_dest)
     tunnel_rc = _apply_tunnel(root, run)

@@ -3606,3 +3606,37 @@ class AlignUnitsStartedAtRobustnessTests(unittest.TestCase):
             ["bad.service", "slow.service", "ok.service"], run=run), 100.0)
         self.assertEqual(seen, [15, 15, 15])
         self.assertIsNone(smd._align_units_started_at(["bad.service"], run=run))
+
+
+class AlignHostLineTests(unittest.TestCase):
+    def test_host_aligned_to_the_release_reads_current(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "host-aligned.json"
+            p.write_text('{"release": "v3.53", "at": "2026-09-25T12:00:00Z"}')
+            line = smd._align_host_line("v3.53", path=p, version_path=Path(d) / "none")
+        self.assertIn("host: v3.53 (pm-align", line)
+        self.assertNotIn("run pm-align", line)
+
+    def test_host_never_aligned_names_its_install_release_and_the_step(self):
+        with tempfile.TemporaryDirectory() as d:
+            v = Path(d) / "version"
+            v.write_text("v3.36\n")
+            line = smd._align_host_line("v3.53", path=Path(d) / "absent", version_path=v)
+        self.assertIn("host: v3.36 (install-time)", line)
+        self.assertIn("run pm-align on the host", line)
+
+    def test_host_behind_the_release_names_the_target(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "host-aligned.json"
+            p.write_text('{"release": "v3.50", "at": "2026-09-20T00:00:00Z"}')
+            line = smd._align_host_line("v3.53", path=p, version_path=Path(d) / "none")
+        self.assertIn("host: v3.50 (pm-align", line)
+        self.assertIn("v3.53 available: run pm-align on the host", line)
+
+    def test_cmd_align_dry_run_prints_the_host_line_after_the_summary(self):
+        rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
+                      recorded="v3.53")
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        summary_i = next(i for i, l in enumerate(lines) if l.strip().startswith("summary:"))
+        self.assertIn("host:", lines[summary_i + 1])
