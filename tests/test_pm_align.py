@@ -248,3 +248,90 @@ def test_not_touched_lists_every_global_constraint_area():
     text = " ".join(pm_align.NOT_TOUCHED)
     for phrase in ("/var/lib/vz/snippets", "initramfs", "modules", "sigmond-netfix.service"):
         assert phrase in text
+
+
+def _fake_run(calls, rc=0, stdout=""):
+    def run(argv, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, rc, stdout, "")
+    return run
+
+
+def test_apply_files_backs_up_then_writes_with_mode(tmp_path):
+    old = tmp_path / "usr/local/sbin/sigmond-issue"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"old")
+    f = pm_align.HostFile("/usr/local/sbin/sigmond-issue", b"new", 0o755, "t")
+    written = pm_align.apply_files([pm_align.Change(f, "changed")], tmp_path, tmp_path / "bk")
+    assert written == ["/usr/local/sbin/sigmond-issue"]
+    assert old.read_bytes() == b"new"
+    assert oct(old.stat().st_mode & 0o777) == oct(0o755)
+    assert (tmp_path / "bk/usr/local/sbin/sigmond-issue").read_bytes() == b"old"
+
+
+def test_apply_files_skips_current(tmp_path):
+    f = pm_align.HostFile("/a", b"x", 0o644, "t")
+    assert pm_align.apply_files([pm_align.Change(f, "current")], tmp_path, tmp_path / "bk") == []
+    assert not (tmp_path / "a").exists()
+
+
+def test_enable_new_relays_enables_only_sockets_that_were_missing():
+    calls = []
+    ch = [pm_align.Change(pm_align.HostFile(
+              "/etc/systemd/system/sigmond-vm-station-relay.socket", b"", 0o644, "t"), "missing"),
+          pm_align.Change(pm_align.HostFile(
+              "/etc/systemd/system/sigmond-vm-ssh-relay.socket", b"", 0o644, "t"), "changed")]
+    enabled = pm_align.enable_new_relays(ch, run=_fake_run(calls))
+    assert enabled == ["sigmond-vm-station-relay.socket"]
+    assert ["systemctl", "daemon-reload"] in calls
+    assert ["systemctl", "enable", "--now", "sigmond-vm-station-relay.socket"] in calls
+    assert not any("sigmond-vm-ssh-relay.socket" in c for c in calls if "enable" in c)
+
+
+def test_write_record_names_the_release(tmp_path):
+    rel = pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, "")
+    p = pm_align.write_record(tmp_path, rel, ["/x"], "2026-09-25T12:00:00Z")
+    doc = json.loads(p.read_text())
+    assert doc["release"] == "v3.53" and doc["files_written"] == ["/x"]
+    assert doc["wizard_commit"] == "d" * 40
+    assert p == tmp_path / "etc/sigmond-appliance/host-aligned.json"
+
+
+def test_main_apply_refuses_when_not_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 1000)
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, ""))
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: _src())
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run([]))
+    assert rc == 2
+    assert not (tmp_path / "etc/sigmond-appliance/host-aligned.json").exists()
+
+
+def test_main_apply_writes_files_and_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, ""))
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: _src())
+    calls = []
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run(calls))
+    assert rc == 0
+    assert (tmp_path / "usr/local/sbin/sigmond-setup").exists()
+    assert json.loads((tmp_path / "etc/sigmond-appliance/host-aligned.json").read_text())["release"] == "v3.53"
+
+
+def test_main_dry_run_exit_codes(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, ""))
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: _src())
+    assert pm_align.main([], root=tmp_path) == 1
+
+    for f in pm_align.desired_files(_src(), pm_align.host_vmid(tmp_path)):
+        dest = pm_align._under(tmp_path, f.path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f.content)
+    assert pm_align.main([], root=tmp_path) == 0
+
+    def _raise(tag=None, urlopen=None):
+        raise pm_align.PmAlignError("no release")
+    monkeypatch.setattr(pm_align, "fetch_release", _raise)
+    assert pm_align.main([], root=tmp_path) == 2

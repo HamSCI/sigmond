@@ -18,12 +18,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -31,8 +33,11 @@ RELEASES_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
 RAW = "https://raw.githubusercontent.com/HamSCI"
 PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
                  "pm-heartbeat-setup.sh", "pm-align.py")
+RECORD = "/etc/sigmond-appliance/host-aligned.json"
+BACKUP_BASE = "/var/lib/pm-align/backup"
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 _TIMEOUT = 30
+_geteuid = os.geteuid
 
 
 class PmAlignError(Exception):
@@ -295,16 +300,89 @@ def topology_note(root: Path) -> Optional[str]:
             "behind the host on vmbr1 — pm-align does not move it (a reinstall-class change)")
 
 
+def apply_files(changes: list, root: Path, backup_dir: Path) -> list:
+    """Write every changed or missing file: the old bytes to ``backup_dir``
+    first (same relative path), then the new ones via a temp file and
+    os.replace, so a reader never sees half a file."""
+    written = []
+    for ch in changes:
+        if ch.state == "current":
+            continue
+        dest = _under(root, ch.file.path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            bk = _under(backup_dir, ch.file.path)
+            bk.parent.mkdir(parents=True, exist_ok=True)
+            bk.write_bytes(dest.read_bytes())
+        tmp = dest.with_name(dest.name + ".pm-align-new")
+        tmp.write_bytes(ch.file.content)
+        os.chmod(tmp, ch.file.mode)
+        os.replace(tmp, dest)
+        written.append(ch.file.path)
+    return written
+
+
+def enable_new_relays(changes: list, *, run) -> list:
+    """daemon-reload once any unit changed; then enable --now each relay
+    socket that did not exist before.  A socket that already existed keeps
+    its state — --rac-off may have stopped it on purpose."""
+    units = [c for c in changes if c.state != "current"
+             and c.file.path.startswith("/etc/systemd/system/")]
+    if not units:
+        return []
+    run(["systemctl", "daemon-reload"], capture_output=True, text=True, timeout=60)
+    enabled = []
+    for c in units:
+        name = Path(c.file.path).name
+        if c.state == "missing" and name.startswith("sigmond-vm-") and name.endswith("-relay.socket"):
+            r = run(["systemctl", "enable", "--now", name], capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                enabled.append(name)
+            else:
+                _say(f"  WARN: systemctl enable --now {name} failed: {(r.stderr or '').strip()}")
+    return enabled
+
+
+def write_record(root: Path, rel: Release, written: list, now: str) -> Path:
+    p = _under(root, RECORD)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"release": rel.tag, "appliance_commit": rel.appliance_commit,
+           "wizard_commit": rel.wizard_commit, "at": now, "files_written": written}
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n")
+    os.replace(tmp, p)
+    return p
+
+
 def _say(msg=""):
     print(msg, flush=True)
 
 
+def _do_apply(changes: list, rel: Release, root: Path, run, now) -> int:
+    """The --apply steps, in order.  Later tasks (tunnel, heartbeat, VM
+    record push) append further steps here after write_record."""
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = _under(root, f"{BACKUP_BASE}/{stamp}")
+    written = apply_files(changes, root, backup_dir)
+    enable_new_relays(changes, run=run)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    record = write_record(root, rel, written, now_iso)
+    for path in written:
+        _say(f"  wrote {path}")
+    _say(f"  backup: {backup_dir}")
+    _say(f"  record: {record}")
+    return 0
+
+
 def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.request.urlopen,
-         run=None) -> int:
-    """Exit 0 aligned, 1 alignment available, 2 target could not be established."""
+         run=None, now=None) -> int:
+    """Exit 0 aligned (or --apply succeeded), 1 alignment available,
+    2 target could not be established, or --apply refused (not root)."""
     run = run or subprocess.run
+    now = now or datetime.now(timezone.utc)
     ap = argparse.ArgumentParser(prog="pm-align", description=__doc__.splitlines()[0])
     ap.add_argument("--release", help="a blessed tag (default: the latest)")
+    ap.add_argument("--apply", action="store_true", help="write the refresh set, as root")
     args = ap.parse_args(argv)
     vmid = host_vmid(root)
     try:
@@ -324,6 +402,11 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
     for line in NOT_TOUCHED:
         _say(f"    - {line}")
     pending = [c for c in changes if c.state != "current"]
+    if args.apply:
+        if _geteuid() != 0:
+            _say("pm-align --apply: run as root")
+            return 2
+        return _do_apply(changes, rel, root, run, now)
     _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
     return 1 if pending else 0
 
