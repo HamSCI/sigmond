@@ -283,6 +283,28 @@ class AlignCliTests(unittest.TestCase):
                       "(resets 03:15Z)", out)
 
 
+class AlignLineBufferedTests(unittest.TestCase):
+    """ND 2026-09-25: `smd align --apply | tee` in tmux sat silent for
+    minutes while radiod built — stdout to a pipe is block-buffered, so
+    the log looked hung. cmd_align line-buffers stdout first."""
+
+    def test_cmd_align_line_buffers_stdout(self):
+        class _Out(io.StringIO):
+            seen = None
+            def reconfigure(self, **kw):
+                type(self).seen = kw
+        out = _Out()
+        args = argparse.Namespace(apply=False, no_restart=True)
+        with contextlib.redirect_stdout(out):
+            smd.cmd_align(args)
+        self.assertEqual(_Out.seen, {"line_buffering": True})
+
+    def test_a_stdout_without_reconfigure_is_fine(self):
+        args = argparse.Namespace(apply=False, no_restart=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(smd.cmd_align(args), 2)
+
+
 class AlignLiveStateTests(unittest.TestCase):
     """Exercises _align_live_state against REAL git checkouts (never
     /opt/git) — the one place this fix wave requires real git behaviour."""
@@ -854,7 +876,11 @@ class AlignApplySigmondBootstrapTests(unittest.TestCase):
             args = argparse.Namespace(release=None, base="/opt/git/sigmond", no_cost=True,
                                       apply=True, allow_rollback=False, max_bytes=None)
             smd.cmd_align(args)
-        self.assertEqual(call_order, ["history", "flush_stdout", "flush_stderr", "execv"])
+        # From history on: cmd_align's line-buffering reconfigure flushes
+        # stdout once at entry, which this ordering does not concern.
+        self.assertEqual(call_order[call_order.index("history"):],
+                         ["history", "flush_stdout", "flush_stderr", "execv"])
+        self.assertNotIn("record", call_order)
         called_rel, called_steps = m_history.call_args[0][:2]
         self.assertEqual(called_steps, [boot_step])
 
@@ -1400,8 +1426,9 @@ class _FakeRestartRun:
     tuple) to an exception instance to raise instead of answering — for
     exercising the TimeoutExpired/OSError paths."""
     def __init__(self, fail_units=None, ready_rc=0, inactive_units=None, raise_on=None,
-                 show=None):
+                 show=None, activating_units=None):
         self.calls = []
+        self.activating_units = activating_units or set()
         self.kwargs = []
         self.fail_units = fail_units or set()
         self.ready_rc = ready_rc
@@ -1416,6 +1443,8 @@ class _FakeRestartRun:
         if exc is not None:
             raise exc
         if argv[:2] == ["systemctl", "is-active"]:
+            if argv[2] in self.activating_units:
+                return subprocess.CompletedProcess(argv, 3, "activating\n", "")
             active = argv[2] not in self.inactive_units
             return subprocess.CompletedProcess(
                 argv, 0 if active else 3, "active\n" if active else "inactive\n", "")
@@ -1534,6 +1563,27 @@ class AlignRestartTests(unittest.TestCase):
                                    say=lambda *_: None)
         self.assertEqual(fake.restart_argv("c1.service"), [])
         self.assertEqual(steps, [align_apply.Step("c", "left", "not running — left alone")])
+
+    # --- ND 2026-09-25: wspr-recorder crashed when radiod restarted and sat
+    # in systemd's restart backoff ("activating") when align reached it.
+    # align called it "not running" and left it; it is meant to be running. ---
+
+    def test_consumer_in_restart_backoff_is_restarted_after_radiod(self):
+        fake = _FakeRestartRun(activating_units={"wspr.service"})
+        services = {align_live.RADIOD: ["radiod@default.service"],
+                   "wspr-recorder": ["wspr.service"]}
+        steps = smd._align_restart(True, ["wspr-recorder"], services, run=fake,
+                                   say=lambda *_: None)
+        self.assertEqual(fake.restart_argv("wspr.service"),
+                         [["systemctl", "restart", "wspr.service"]])
+        self.assertIn(align_apply.Step("wspr-recorder", "restarted"), steps)
+
+    def test_backoff_unit_is_named_as_such(self):
+        fake = _FakeRestartRun(activating_units={"wspr.service"})
+        said = []
+        smd._align_restart(False, ["wspr-recorder"], {"wspr-recorder": ["wspr.service"]},
+                           run=fake, say=said.append)
+        self.assertTrue(any("wspr.service" in m and "activating" in m for m in said), said)
 
     def test_no_active_radiod_unit_makes_radiod_not_restarted_consumers_proceed(self):
         fake = _FakeRestartRun(inactive_units={"radiod@default.service"})
@@ -2986,17 +3036,28 @@ class AlignStalenessTests(unittest.TestCase):
                            moved={}, started={"hf": 100.0, "psk": None})
         self.assertEqual(st["running"], {"hf-timestd"})
 
-    def test_radiod_consumers_are_running_catalog_clients_only(self):
-        cat = {"psk-recorder": types.SimpleNamespace(kind="client"),
-               "igmp-querier": types.SimpleNamespace(kind="infra"),
-               "ka9q-web": types.SimpleNamespace(kind="server"),
-               align_live.RADIOD: types.SimpleNamespace(kind="server")}
-        services = {n: [n] for n in ("psk-recorder", "igmp-querier", "ka9q-web",
-                                     "mystery-recorder", "stopped-recorder", align_live.RADIOD)}
+    def test_radiod_consumers_are_running_components_that_require_ka9q_radio(self):
+        # The catalog's `requires` is the declaration the installer already
+        # uses to order radiod's consumers after lan.target (installer.py).
+        # kind was a guess: it restarted station-web and hamsci-physics, which
+        # read no RTP, and skipped ka9q-web, which does (Plan 2b / C4).
+        def entry(kind, *requires):
+            return types.SimpleNamespace(kind=kind, requires=tuple(requires))
+        cat = {"psk-recorder": entry("client", "ka9q-python", align_live.RADIOD),
+               "ka9q-web": entry("server", align_live.RADIOD),
+               "station-web": entry("client", "hf-timestd", "hamsci-dsp"),
+               "hamsci-physics": entry("client", "hf-timestd"),
+               "igmp-querier": entry("infra"),
+               "stopped-recorder": entry("client", align_live.RADIOD),
+               align_live.RADIOD: entry("server")}
+        services = {n: [n] for n in ("psk-recorder", "ka9q-web", "station-web",
+                                     "hamsci-physics", "igmp-querier", "mystery-recorder",
+                                     "stopped-recorder", align_live.RADIOD)}
         started = {n: 100.0 for n in services}
         started["stopped-recorder"] = None
         st, _ = self._read(services, cat, moved={}, started=started)
-        self.assertEqual(st["radiod_consumers"], {"psk-recorder", "mystery-recorder"})
+        self.assertEqual(st["radiod_consumers"],
+                         {"psk-recorder", "ka9q-web", "mystery-recorder"})
 
     def test_empty_reflog_reads_as_not_stale(self):
         st, _ = self._read({"hf-timestd": ["hf"]}, {}, moved={"hf-timestd": None},
@@ -3143,7 +3204,8 @@ class AlignDryRunRestartsTests(unittest.TestCase):
 
     def test_moving_running_component_is_predicted_and_radiod_line_shown(self):
         live = {"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "deb7bdd"}
-        cat = {"psk-recorder": types.SimpleNamespace(kind="client"),
+        cat = {"psk-recorder": types.SimpleNamespace(kind="client",
+                                                     requires=(align_live.RADIOD,)),
                align_live.RADIOD: types.SimpleNamespace(kind="server")}
         with mock.patch.object(smd, "_align_units_started_at",
                                side_effect=lambda units, run=None: 100.0), \

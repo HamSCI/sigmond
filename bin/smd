@@ -4728,14 +4728,44 @@ def _align_run(argv, *, run, timeout, action, **kw) -> object:
         return subprocess.CompletedProcess(argv, -1, '', f'{action} could not run: {exc}')
 
 
-def _align_is_active(unit, *, run, timeout=15) -> bool:
-    """`systemctl is-active <unit>` (timeout 15) — True only on a clean
-    "active" stdout. Anything else — inactive, failed, unknown, or a
-    timed-out/unrunnable systemctl — reads as not-active: a service that
-    is not running is never started by align (Fix round 1 / I2)."""
+_ALIGN_RUNNING_STATES = ('active', 'activating')
+
+
+def _align_active_state(unit, *, run, timeout=15) -> str:
+    """`systemctl is-active <unit>` stdout (timeout 15); '' when systemctl
+    timed out or could not run."""
     r = _align_run(['systemctl', 'is-active', unit], run=run, timeout=timeout,
                    action=f'systemctl is-active {unit}')
-    return (r.stdout or '').strip() == 'active'
+    return (r.stdout or '').strip()
+
+
+def _align_is_active(unit, *, run, timeout=15) -> bool:
+    """True when ``unit`` is meant to be running: "active", or "activating"
+    — starting, or waiting out systemd's restart backoff after a crash.
+    Anything else — inactive, failed, unknown, or a timed-out/unrunnable
+    systemctl — reads as not running, and align never starts a service
+    that is not running (Fix round 1 / I2)."""
+    return _align_active_state(unit, run=run, timeout=timeout) in _ALIGN_RUNNING_STATES
+
+
+def _align_running_units(units, *, run, say) -> list:
+    """The ``.service`` units in ``units`` that are meant to be running,
+    naming each one left alone and each one caught mid-start.
+
+    ND 2026-09-25: wspr-recorder crashed when radiod restarted and sat in
+    systemd's restart backoff ("activating") when align reached it. Reading
+    only "active", align called it not running and left it — though systemd
+    was about to start it again anyway, and a restart now is that start."""
+    kept = []
+    for unit in _align_service_units(units):
+        state = _align_active_state(unit, run=run)
+        if state == 'activating':
+            say(f'  {unit} activating (starting, or in its restart backoff) — restarting it')
+        if state in _ALIGN_RUNNING_STATES:
+            kept.append(unit)
+        else:
+            say(f'  {unit} not running — left alone')
+    return kept
 
 
 _ALIGN_USEC_UNITS = {'us': 1e-6, 'usec': 1e-6, 'ms': 1e-3, 'msec': 1e-3,
@@ -4869,12 +4899,7 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
         units_out = []
     steps = []
     if radiod_first:
-        active_units = []
-        for unit in _align_service_units(services.get(RADIOD, [])):
-            if _align_is_active(unit, run=run):
-                active_units.append(unit)
-            else:
-                say(f'  {unit} not running — left alone')
+        active_units = _align_running_units(services.get(RADIOD, []), run=run, say=say)
         if active_units:
             fail_detail = None
             r = _align_restart_units(active_units, run=run, say=say)
@@ -4908,12 +4933,7 @@ def _align_restart(radiod_first: bool, components: list, services: dict, *,
     failed: dict = {}
     touched: set = set()
     for c in order:
-        active_units = []
-        for unit in _align_service_units(services.get(c, [])):
-            if _align_is_active(unit, run=run):
-                active_units.append(unit)
-            else:
-                say(f'  {unit} not running — left alone')
+        active_units = _align_running_units(services.get(c, []), run=run, say=say)
         if not active_units:
             continue
         touched.add(c)
@@ -4975,11 +4995,12 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
       `smd update` or `smd install --force` bumps the binary's mtime alone
       and must not restart radiod.  A build an earlier run left
       un-restarted is still caught: its checkout moved too.
-    * ``radiod_consumers``: the running services whose catalog kind is
-      "client" (ruling 3); a component absent from the catalog counts as
-      one.  Nothing finer than "every running client" is detected here —
-      a client that does not in fact read radiod's streams still restarts
-      after radiod; working out which ones truly do is out of scope.
+    * ``radiod_consumers``: the running services whose catalog entry
+      ``requires`` ka9q-radio — the declaration the installer already uses
+      to order radiod's consumers after lan.target.  A component absent
+      from the catalog counts as one.  (Ruling 3 used kind == "client",
+      which restarted station-web and hamsci-physics, which read no RTP,
+      and skipped ka9q-web, which does.)
     * A radiod consumer that started BEFORE radiod's earliest start is
       stale too — "radiod restarted after it started" (final review / I3).
       Stateless: a run whose consumer restarts failed, or was
@@ -5018,11 +5039,16 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
             built = None      # only the binary moved: a same-bytes rebuild
         moved_at[RADIOD] = built
 
-    def _kind(c):
+    def _reads_radiod(c):
+        # The catalog's `requires` — the same declaration the installer
+        # orders after lan.target.  Absent from the catalog: assume it
+        # does; one restart too many costs less than a stale RTP anchor.
         entry = catalog.get(c) if catalog else None
-        return getattr(entry, 'kind', 'client') if entry is not None else 'client'
+        if entry is None:
+            return True
+        return RADIOD in (getattr(entry, 'requires', None) or ())
 
-    radiod_consumers = {c for c in running if c != RADIOD and _kind(c) == 'client'}
+    radiod_consumers = {c for c in running if c != RADIOD and _reads_radiod(c)}
     stale = align_live.stale_components(running, moved_at, started_at, consumes)
     radiod_start = started_at.get(RADIOD)
     if radiod_start is not None:
@@ -6219,6 +6245,11 @@ def cmd_align(args) -> int:
     (its code moved after it started) as pending work: exit 1, since
     --apply would restart it.
     """
+    # A pipe (`| tee` under tmux) is block-buffered: on ND the log sat
+    # silent for minutes while radiod built and looked hung.
+    reconfigure = getattr(sys.stdout, 'reconfigure', None)
+    if reconfigure is not None:
+        reconfigure(line_buffering=True)
     if not getattr(args, 'apply', False) and (
             getattr(args, 'allow_rollback', False)
             or getattr(args, 'max_bytes', None) is not None
