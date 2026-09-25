@@ -304,7 +304,14 @@ def test_write_record_names_the_release(tmp_path):
     doc = json.loads(p.read_text())
     assert doc["release"] == "v3.53" and doc["files_written"] == ["/x"]
     assert doc["wizard_commit"] == "d" * 40
+    assert doc["tunnel"] == "n/a"                  # default when the caller says nothing
     assert p == tmp_path / "etc/sigmond-appliance/host-aligned.json"
+
+
+def test_write_record_carries_an_explicit_tunnel_value(tmp_path):
+    rel = pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, "")
+    p = pm_align.write_record(tmp_path, rel, ["/x"], "2026-09-25T12:00:00Z", tunnel="pending")
+    assert json.loads(p.read_text())["tunnel"] == "pending"
 
 
 def test_main_apply_refuses_when_not_root(tmp_path, monkeypatch):
@@ -1209,6 +1216,95 @@ def test_main_apply_record_push_orders_after_record_and_before_heartbeat(tmp_pat
     assert rc == 0
     out = capsys.readouterr().out
     assert out.index("record:") < out.index("recorded (VM copy:") < out.index("heartbeat:")
+
+
+# ---------------------------------------------------------------------------
+# final review item 3: the record's `tunnel` field, and the --tunnel-step merge
+
+def _record_tunnel(root):
+    return json.loads((root / "etc/sigmond-appliance/host-aligned.json").read_text())["tunnel"]
+
+
+def test_apply_record_tunnel_is_n_a_when_no_host_tunnel(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run([]))
+    assert rc == 0
+    assert _record_tunnel(tmp_path) == "n/a"
+
+
+def test_apply_record_tunnel_is_n_a_when_every_channel_declared(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    full, _ = pm_align.tunnel_plan(TOML4, "505")
+    _tunnel_root(tmp_path, text=full)
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run([]))
+    assert rc == 0
+    assert _record_tunnel(tmp_path) == "n/a"
+
+
+def test_apply_record_tunnel_is_pending_when_a_channel_will_be_added(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    _tunnel_root(tmp_path)
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run([]))
+    assert rc == 0
+    assert _record_tunnel(tmp_path) == "pending"
+
+
+def test_apply_record_tunnel_is_refused_on_a_rac_disagreement(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    _tunnel_root(tmp_path)
+    (tmp_path / "etc/sigmond-appliance/rac-number").write_text("506\n")
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run([]))
+    assert rc == 0
+    assert _record_tunnel(tmp_path) == "refused"
+
+
+def test_tunnel_step_merges_the_outcome_into_the_existing_record_and_repushes(tmp_path, monkeypatch):
+    root = _tunnel_root(tmp_path)
+    (root / "etc/systemd/system").mkdir(parents=True)
+    (root / "etc/systemd/system/sigmond-vm-ssh-relay@.service").write_text(
+        "Environment=SIGMOND_VMID=100\n")
+    rel = pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, "")
+    pm_align.write_record(root, rel, ["/x"], "2026-09-25T12:00:00Z", tunnel="pending")
+    monkeypatch.setattr(pm_align, "tunnel_apply", lambda root, run, **kw:
+                        {"outcome": "applied", "detail": "added everything"})
+    calls = []
+    rc = pm_align.main(["--tunnel-step"], root=root, run=_fake_run(calls, stdout='{"exitcode": 0}'))
+    assert rc == 0
+    assert _record_tunnel(root) == "applied"
+    qm_call = next(c for c in calls if c[:3] == ["qm", "guest", "exec"])
+    assert qm_call[3] == "100"
+
+
+def test_tunnel_step_merge_is_a_no_op_when_there_is_no_existing_record(tmp_path, monkeypatch):
+    root = _tunnel_root(tmp_path)
+    monkeypatch.setattr(pm_align, "tunnel_apply", lambda root, run, **kw:
+                        {"outcome": "applied", "detail": "added everything"})
+    calls = []
+    rc = pm_align.main(["--tunnel-step"], root=root, run=_fake_run(calls))
+    assert rc == 0
+    assert not (root / "etc/sigmond-appliance/host-aligned.json").exists()
+    assert not any(c[:3] == ["qm", "guest", "exec"] for c in calls)
+
+
+def test_tunnel_step_merge_push_failure_is_informational(tmp_path, monkeypatch):
+    root = _tunnel_root(tmp_path)
+    rel = pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, "")
+    pm_align.write_record(root, rel, ["/x"], "2026-09-25T12:00:00Z", tunnel="pending")
+    monkeypatch.setattr(pm_align, "tunnel_apply", lambda root, run, **kw:
+                        {"outcome": "applied", "detail": "added everything"})
+
+    def run(argv, **kw):
+        if argv[:3] == ["qm", "guest", "exec"]:
+            raise subprocess.TimeoutExpired(argv, 30)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    rc = pm_align.main(["--tunnel-step"], root=root, run=run)
+    assert rc == 0
+    assert _record_tunnel(root) == "applied"       # the local merge still landed
 
 
 # ── wizard static-text checks: sigmond-wizard.sh, not pm-align.py ──────────

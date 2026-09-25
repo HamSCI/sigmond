@@ -3649,6 +3649,37 @@ class AlignHostLineTests(unittest.TestCase):
             self.assertIn("host: v3.36 (install-time)", line)
             self.assertIn("run pm-align on the host", line)
 
+    def test_host_line_appends_tunnel_when_pending(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "host-aligned.json"
+            p.write_text(json.dumps({"release": "v3.53", "at": "2026-09-25T12:00:00Z",
+                                     "tunnel": "pending"}))
+            line = smd._align_host_line("v3.53", path=p, version_path=Path(d) / "none")
+        self.assertIn("tunnel: pending", line)
+
+    def test_host_line_appends_tunnel_when_refused_or_rolled_back(self):
+        for value in ("refused", "rolled-back", "failed"):
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "host-aligned.json"
+                p.write_text(json.dumps({"release": "v3.53", "at": "t", "tunnel": value}))
+                line = smd._align_host_line("v3.53", path=p, version_path=Path(d) / "none")
+            self.assertIn(f"tunnel: {value}", line)
+
+    def test_host_line_omits_tunnel_for_the_quiet_values(self):
+        for value in ("applied", "current", "skipped", "n/a"):
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "host-aligned.json"
+                p.write_text(json.dumps({"release": "v3.53", "at": "t", "tunnel": value}))
+                line = smd._align_host_line("v3.53", path=p, version_path=Path(d) / "none")
+            self.assertNotIn("tunnel:", line)
+
+    def test_host_line_omits_tunnel_when_the_key_is_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "host-aligned.json"
+            p.write_text(json.dumps({"release": "v3.53", "at": "t"}))
+            line = smd._align_host_line("v3.53", path=p, version_path=Path(d) / "none")
+        self.assertNotIn("tunnel:", line)
+
     def test_cmd_align_dry_run_prints_the_host_line_after_the_summary(self):
         rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                       recorded="v3.53")

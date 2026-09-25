@@ -4552,14 +4552,23 @@ def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned
     """The Proxmox host's level as the VM knows it: pm-align's record, pushed
     in by pm-align itself (``push_record``, scripts/proxmox/pm-align.py);
     failing that, the install-time version (the wizard stamps it in). The
-    VM only reports the host's level here; it never acts on the host."""
+    VM only reports the host's level here; it never acts on the host.
+
+    The record's own ``tunnel`` field (pm-align's write_record/
+    _merge_tunnel_result) is appended when it names something worth a
+    look -- anything other than the quiet values applied/current/skipped/
+    n/a (and its absence, on an older record)."""
     import json
+    _QUIET_TUNNEL = ('applied', 'current', 'skipped', 'n/a')
     try:
         doc = json.loads(path.read_text())
         if isinstance(doc, dict):
             rel, at = doc.get('release', '?'), doc.get('at', '?')
             tail = ('' if rel == release_tag
                     else f' — {release_tag} available: run pm-align on the host')
+            tunnel = doc.get('tunnel')
+            if tunnel is not None and tunnel not in _QUIET_TUNNEL:
+                tail += f' — tunnel: {tunnel}'
             return f'  host: {rel} (pm-align {at}){tail}'
     except (OSError, ValueError):
         pass

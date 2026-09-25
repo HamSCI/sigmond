@@ -364,15 +364,45 @@ def enable_new_relays(changes: list, *, run) -> list:
     return enabled
 
 
-def write_record(root: Path, rel: Release, written: list, now: str) -> Path:
+def write_record(root: Path, rel: Release, written: list, now: str, *, tunnel: str = "n/a") -> Path:
+    """``tunnel`` is the tunnel step's outcome as known AT WRITE TIME:
+    "pending" when --apply is about to launch it, "n/a" when there is
+    nothing to launch, "refused" when the plan itself was invalid.  The
+    real outcome (applied/rolled-back/failed/...), known only after the
+    detached step runs, is merged in later by _merge_tunnel_result --
+    write_record must never claim it up front."""
     p = _under(root, RECORD)
     p.parent.mkdir(parents=True, exist_ok=True)
     doc = {"release": rel.tag, "appliance_commit": rel.appliance_commit,
-           "wizard_commit": rel.wizard_commit, "at": now, "files_written": written}
+           "wizard_commit": rel.wizard_commit, "at": now, "files_written": written,
+           "tunnel": tunnel}
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(doc, indent=2) + "\n")
     os.replace(tmp, p)
     return p
+
+
+def _merge_tunnel_result(root: Path, outcome: str, *, run) -> None:
+    """Merge {"tunnel": outcome} into the existing alignment record, if
+    any, and re-push it to the VM.  Called after --tunnel-step writes
+    TUNNEL_RESULT.  Entirely informational: a missing record, an
+    unparsable one, or a push failure must never affect --tunnel-step's
+    own exit code."""
+    p = _under(root, RECORD)
+    try:
+        doc = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(doc, dict):
+        return
+    doc["tunnel"] = outcome
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n")
+    os.replace(tmp, p)
+    try:
+        push_record(p, host_vmid(root), run=run)
+    except BaseException:
+        pass
 
 
 def push_record(record_path: Path, vmid: int, *, run) -> bool:
@@ -716,26 +746,52 @@ def _launch_tunnel_step(root: Path, run) -> int:
     return 0
 
 
-def _apply_tunnel(root: Path, run) -> int:
-    """The tunnel step of --apply: skip if there's no host tunnel, refuse if
-    the plan disagrees with the RAC number, else launch it detached."""
+def _tunnel_decision(root: Path):
+    """(kind, added, note) -- the single read of what the tunnel step would
+    do, shared by the dry-run note, --apply's tunnel step, and the record's
+    `tunnel` field so all three agree:
+      "absent"  -- no host tunnel configured
+      "refused" -- tunnel_plan raised (e.g. a RAC-number disagreement);
+                   ``note`` is the PmAlignError text
+      "current" -- every channel already declared
+      "pending" -- ``added`` lists the channels a launch would install
+    """
     tpath = _under(root, FRPC_TOML)
     if not tpath.exists():
-        _say("  tunnel: no host tunnel configured — skipped")
-        return 0
+        return "absent", [], None
     try:
         _, added = tunnel_plan(tpath.read_text(), _read_rac_marker(root))
     except PmAlignError as exc:
-        _say(f"  tunnel: REFUSED — {exc}")
-        return 0
+        return "refused", [], str(exc)
     if not added:
+        return "current", [], None
+    return "pending", added, None
+
+
+_TUNNEL_RECORD_VALUE = {"absent": "n/a", "current": "n/a", "refused": "refused", "pending": "pending"}
+
+
+def _apply_tunnel(root: Path, run) -> int:
+    """The tunnel step of --apply: skip if there's no host tunnel, refuse if
+    the plan disagrees with the RAC number, else launch it detached."""
+    kind, added, note = _tunnel_decision(root)
+    if kind == "absent":
+        _say("  tunnel: no host tunnel configured — skipped")
+        return 0
+    if kind == "refused":
+        _say(f"  tunnel: REFUSED — {note}")
+        return 0
+    if kind == "current":
         _say("  tunnel: every channel declared")
         return 0
+    tres = _under(root, TUNNEL_RESULT)
+    if tres.exists():
+        os.replace(tres, tres.with_name(tres.name + ".prev"))
     rc = _launch_tunnel_step(root, run)
     if rc == 0:
         _say("  tunnel: adding " + ", ".join(added) + " — running detached (pm-align-tunnel).")
-        _say("  This ssh session may drop while the tunnel restarts. Reconnect in ~2 minutes,")
-        _say("  then: pm-align --status")
+        _say("  This ssh session may drop while the tunnel restarts. Reconnect in ~5 minutes")
+        _say("  (longer if it rolls back), then: pm-align --status")
     return rc
 
 
@@ -784,7 +840,8 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources
     written = apply_files(changes, root, backup_dir)
     enable_new_relays(changes, run=run)
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    record = write_record(root, rel, written, now_iso)
+    tunnel_kind, _, _ = _tunnel_decision(root)
+    record = write_record(root, rel, written, now_iso, tunnel=_TUNNEL_RECORD_VALUE[tunnel_kind])
     for path in written:
         _say(f"  wrote {path}")
     _say(f"  backup: {backup_dir}")
@@ -800,16 +857,14 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources
 
 def _dry_run_tunnel_note(root: Path) -> tuple:
     """(message, pending) for the dry-run tunnel status line."""
-    tpath = _under(root, FRPC_TOML)
-    if not tpath.exists():
+    kind, added, note = _tunnel_decision(root)
+    if kind == "absent":
         return "tunnel: no host tunnel configured", False
-    try:
-        _, added = tunnel_plan(tpath.read_text(), _read_rac_marker(root))
-    except PmAlignError as exc:
-        return f"tunnel: REFUSED — {exc}", True
-    if added:
-        return f"tunnel: would add {', '.join(added)}", True
-    return "tunnel: every channel declared", False
+    if kind == "refused":
+        return f"tunnel: REFUSED — {note}", True
+    if kind == "current":
+        return "tunnel: every channel declared", False
+    return f"tunnel: would add {', '.join(added)}", True
 
 
 def _dry_run_heartbeat_note(root: Path) -> str:
@@ -871,6 +926,7 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
             out = {"outcome": "failed", "detail": f"tunnel_apply raised {exc!r} — needs hands"}
         now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         write_tunnel_result(root, out, now_iso)
+        _merge_tunnel_result(root, out["outcome"], run=run)
         _say(json.dumps(out))
         return 0 if out["outcome"] in ("applied", "current", "skipped") else 1
 
