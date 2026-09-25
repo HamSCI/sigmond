@@ -132,3 +132,113 @@ def test_fetch_sources_refuses_a_raised_timeout_on_pm_align():
     op = _urlopen(routes)
     with pytest.raises(pm_align.PmAlignError):
         pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+
+
+WIZ = '''#!/bin/bash
+VMID="${SIGMOND_VMID:-120}"
+cat > /usr/local/bin/sigmond-vm <<'VMEOF'
+#!/bin/bash
+VMID="${SIGMOND_VMID:-120}"
+VMEOF
+            cat > /usr/local/lib/sigmond/vm-port-relay.py <<'RLEOF'
+#!/usr/bin/env python3
+print("relay")
+RLEOF
+            for spec in "ssh:12222:22" "web:12223:8081" "station:12224:8000" "gmag:12225:8082"; do
+                IFS=: read -r RNAME RLPORT RVPORT <<<"$spec"
+                cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay.socket" <<SOCKEOF
+[Unit]
+Description=Relay 127.0.0.1:$RLPORT → decoder VM :$RVPORT (IP via guest agent)
+[Socket]
+ListenStream=127.0.0.1:$RLPORT
+Accept=yes
+[Install]
+WantedBy=sockets.target
+SOCKEOF
+                cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay@.service" <<SVCEOF
+[Unit]
+Description=decoder-VM $RNAME relay (%i)
+CollectMode=inactive-or-failed
+[Service]
+Type=simple
+Environment=SIGMOND_VMID=$VMID
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+ExecStart=/usr/local/lib/sigmond/vm-port-relay.py $RVPORT
+SVCEOF
+            done
+'''
+FB_FULL = ("cat > /usr/local/lib/sigmond-net.sh <<'NETLIBEOF'\nnet lib\nNETLIBEOF\n"
+           "cat > /usr/local/sbin/sigmond-import.sh <<'IMPEOF'\n"
+           "cat > /nested/inside <<'X'\nnope\nX\nIMPEOF\n"
+           "cat > /usr/local/sbin/sigmond-issue <<'ISSEOF'\nissue\nISSEOF\n"
+           "cat > /etc/systemd/system/sigmond-issue.service <<'ISVCEOF'\nsvc\nISVCEOF\n"
+           "cat > /etc/systemd/system/sigmond-issue.timer <<'ITEOF'\ntimer\nITEOF\n"
+           "cat > /etc/sigmond-appliance/version <<EOF\n$VERSION\nEOF\n")
+
+
+def _src():
+    return pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ, 100),
+                            {"pm-heartbeat.py": b"hb"})
+
+
+def test_extract_heredocs_takes_quoted_top_level_bodies_only():
+    docs = pm_align.extract_heredocs(FB_FULL)
+    assert docs["/usr/local/lib/sigmond-net.sh"] == "net lib\n"
+    assert "/nested/inside" not in docs            # inside another heredoc's body
+    assert "/etc/sigmond-appliance/version" not in docs   # unquoted: site config
+
+
+def test_extract_heredocs_allows_an_indented_start():
+    assert pm_align.extract_heredocs(WIZ)["/usr/local/lib/sigmond/vm-port-relay.py"] \
+        == '#!/usr/bin/env python3\nprint("relay")\n'
+
+
+def test_relay_units_match_the_wizard_template_for_all_four():
+    units = {f.path: f.content.decode() for f in pm_align.relay_units(WIZ, 100)}
+    assert len(units) == 8
+    sock = units["/etc/systemd/system/sigmond-vm-gmag-relay.socket"]
+    assert "ListenStream=127.0.0.1:12225" in sock and ":8082" in sock
+    svc = units["/etc/systemd/system/sigmond-vm-station-relay@.service"]
+    assert "Environment=SIGMOND_VMID=100" in svc
+    assert "vm-port-relay.py 8000" in svc
+
+
+def test_desired_files_is_exactly_the_refresh_set():
+    paths = {f.path for f in pm_align.desired_files(_src(), 100)}
+    assert "/usr/local/sbin/sigmond-setup" in paths
+    assert "/usr/local/bin/sigmond-vm" in paths
+    assert "/usr/local/sbin/sigmond-import.sh" not in paths
+    assert not any("netfix" in p or "setnet" in p for p in paths)
+
+
+def test_desired_files_renders_sigmond_vm_with_the_host_vmid():
+    f = next(f for f in pm_align.desired_files(_src(), 100) if f.path == "/usr/local/bin/sigmond-vm")
+    assert b"SIGMOND_VMID:-100" in f.content
+
+
+def test_plan_files_states(tmp_path):
+    a = pm_align.HostFile("/x/current", b"same", 0o644, "t")
+    b = pm_align.HostFile("/x/changed", b"new", 0o644, "t")
+    c = pm_align.HostFile("/x/missing", b"m", 0o644, "t")
+    (tmp_path / "x").mkdir()
+    (tmp_path / "x" / "current").write_bytes(b"same")
+    (tmp_path / "x" / "changed").write_bytes(b"old")
+    states = {ch.file.path: ch.state for ch in pm_align.plan_files([a, b, c], tmp_path)}
+    assert states == {"/x/current": "current", "/x/changed": "changed", "/x/missing": "missing"}
+
+
+def test_host_vmid_reads_the_existing_relay_unit(tmp_path):
+    d = tmp_path / "etc/systemd/system"
+    d.mkdir(parents=True)
+    (d / "sigmond-vm-ssh-relay@.service").write_text("Environment=SIGMOND_VMID=107\n")
+    assert pm_align.host_vmid(tmp_path) == 107
+
+
+def test_topology_note_names_a_vm_on_the_lan(tmp_path):
+    (tmp_path / "etc/network").mkdir(parents=True)
+    (tmp_path / "etc/network/interfaces").write_text("auto vmbr0\niface vmbr0 inet dhcp\n")
+    assert "LAN" in pm_align.topology_note(tmp_path)
+    (tmp_path / "etc/network/interfaces").write_text("auto vmbr0\nauto vmbr1\n")
+    assert pm_align.topology_note(tmp_path) is None

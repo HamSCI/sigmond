@@ -15,9 +15,11 @@ Design: sigmond docs/superpowers/specs/2026-09-24-smd-align-design.md §4.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -139,3 +141,190 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
                 continue
             raise
     return Sources(firstboot, wizard, proxmox)
+
+
+_HEREDOC_START = re.compile(r"""^\s*cat\s+>\s*"?(/[^"\s]+)"?\s+<<\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2\s*$""")
+
+
+def extract_heredocs(text: str, *, quoted_only: bool = True) -> dict:
+    """{absolute path: body} for every top-level ``cat > PATH <<'DELIM'``.
+
+    A quoted delimiter makes the body literal — the same bytes on every host —
+    which is what makes it code.  An unquoted one substitutes site values, so
+    it is skipped unless ``quoted_only`` is False (relay_units reads the
+    wizard's unquoted templates that way).  A start line inside another
+    heredoc's body is part of that body, never a heredoc of its own.  The
+    closing delimiter must stand alone at column 0, as bash requires."""
+    out = {}
+    lines = text.splitlines(keepends=True)
+    i = 0
+    while i < len(lines):
+        m = _HEREDOC_START.match(lines[i].rstrip("\n"))
+        if not m:
+            i += 1
+            continue
+        path, quote, delim = m.group(1), m.group(2), m.group(3)
+        j = i + 1
+        while j < len(lines) and lines[j].rstrip("\n") != delim:
+            j += 1
+        if j >= len(lines):
+            raise PmAlignError(f"heredoc for {path} (<<{delim}) never closes")
+        if quote or not quoted_only:
+            out[path] = "".join(lines[i + 1:j])
+        i = j + 1
+    return out
+
+
+@dataclass
+class HostFile:
+    path: str
+    content: bytes
+    mode: int
+    source: str
+
+
+@dataclass
+class Change:
+    file: HostFile
+    state: str          # current | changed | missing
+
+
+FIRSTBOOT_FILES = {                          # path -> mode
+    "/usr/local/lib/sigmond-net.sh": 0o644,
+    "/usr/local/sbin/sigmond-issue": 0o755,
+    "/etc/systemd/system/sigmond-issue.service": 0o644,
+    "/etc/systemd/system/sigmond-issue.timer": 0o644,
+}
+WIZARD_HEREDOCS = {
+    "/usr/local/bin/sigmond-vm": 0o755,
+    "/usr/local/lib/sigmond/vm-port-relay.py": 0o755,
+}
+RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
+          ("station", 12224, 8000), ("gmag", 12225, 8082))
+NOT_TOUCHED = (
+    "network: /etc/network/interfaces, vmbr1 + NAT + sysctl, sigmond-netfix / sigmond-setnet",
+    "tuning: grub isolcpus/IOMMU, vfio, radiod-vm-fence, host IRQ affinity, resctrl (CAT)",
+    "Proxmox itself and every apt package",
+    "the hostname, /etc/pve, and the VM's own configuration (qm set)",
+    "the host's ssh key (/root/.ssh/id_ed25519) — it is the RAC identity",
+)
+
+
+def relay_units(wizard: str, vmid: int) -> list:
+    """The 8 relay units, rendered from the wizard's own SOCKEOF/SVCEOF
+    templates — so a unit the wizard changes, pm-align changes the same way."""
+    tmpl = extract_heredocs(wizard, quoted_only=False)
+    sock = tmpl.get("/etc/systemd/system/sigmond-vm-$RNAME-relay.socket")
+    svc = tmpl.get("/etc/systemd/system/sigmond-vm-$RNAME-relay@.service")
+    if sock is None or svc is None:
+        raise PmAlignError("the release's wizard carries no relay unit templates")
+    out = []
+    for name, lport, vport in RELAYS:
+        def render(t):
+            return (t.replace("$RNAME", name).replace("$RLPORT", str(lport))
+                     .replace("$RVPORT", str(vport)).replace("$VMID", str(vmid)))
+        out.append(HostFile(f"/etc/systemd/system/sigmond-vm-{name}-relay.socket",
+                            render(sock).encode(), 0o644, "wizard relay template"))
+        out.append(HostFile(f"/etc/systemd/system/sigmond-vm-{name}-relay@.service",
+                            render(svc).encode(), 0o644, "wizard relay template"))
+    return out
+
+
+def desired_files(src: Sources, vmid: int) -> list:
+    """The refresh set (plan Decision 2): what the release says these host
+    files hold.  Nothing outside it is ever written."""
+    fb = extract_heredocs(src.firstboot)
+    wz = extract_heredocs(src.wizard)
+    out = []
+    for path, mode in FIRSTBOOT_FILES.items():
+        if path not in fb:
+            raise PmAlignError(f"the release's firstboot no longer writes {path}")
+        out.append(HostFile(path, fb[path].encode(), mode, "firstboot-v3.sh"))
+    out.append(HostFile("/usr/local/sbin/sigmond-setup", src.wizard.encode(), 0o755,
+                        "sigmond-wizard.sh"))
+    for path, mode in WIZARD_HEREDOCS.items():
+        if path not in wz:
+            raise PmAlignError(f"the release's wizard no longer writes {path}")
+        out.append(HostFile(path, wz[path].encode(), mode, "sigmond-wizard.sh"))
+    out.extend(relay_units(src.wizard, vmid))
+    if "pm-align.py" in src.proxmox:
+        out.append(HostFile("/usr/local/sbin/pm-align", src.proxmox["pm-align.py"], 0o755,
+                            "scripts/proxmox/pm-align.py"))
+    return out
+
+
+def _under(root: Path, path: str) -> Path:
+    return Path(root) / path.lstrip("/")
+
+
+def plan_files(desired: list, root: Path) -> list:
+    out = []
+    for f in desired:
+        p = _under(root, f.path)
+        try:
+            state = "current" if p.read_bytes() == f.content else "changed"
+        except FileNotFoundError:
+            state = "missing"
+        out.append(Change(f, state))
+    return out
+
+
+def host_vmid(root: Path) -> int:
+    """The decoder VM's id, from the existing ssh relay unit (every host since
+    v3.3x has it); 100, the v3 convention, when it cannot be read."""
+    p = _under(root, "/etc/systemd/system/sigmond-vm-ssh-relay@.service")
+    try:
+        m = re.search(r"^Environment=SIGMOND_VMID=(\d+)\s*$", p.read_text(), re.M)
+        if m:
+            return int(m.group(1))
+    except OSError:
+        pass
+    return 100
+
+
+def topology_note(root: Path) -> Optional[str]:
+    try:
+        text = _under(root, "/etc/network/interfaces").read_text()
+    except OSError:
+        return None
+    if re.search(r"^\s*(auto|iface)\s+vmbr1\b", text, re.M):
+        return None
+    return ("the decoder VM sits on the LAN (pre-v3.4x topology); current installs put it "
+            "behind the host on vmbr1 — pm-align does not move it (a reinstall-class change)")
+
+
+def _say(msg=""):
+    print(msg, flush=True)
+
+
+def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.request.urlopen,
+         run=None) -> int:
+    """Exit 0 aligned, 1 alignment available, 2 target could not be established."""
+    run = run or subprocess.run
+    ap = argparse.ArgumentParser(prog="pm-align", description=__doc__.splitlines()[0])
+    ap.add_argument("--release", help="a blessed tag (default: the latest)")
+    args = ap.parse_args(argv)
+    vmid = host_vmid(root)
+    try:
+        rel = fetch_release(args.release, urlopen=urlopen)
+        src = fetch_sources(rel, vmid=vmid, urlopen=urlopen)
+        changes = plan_files(desired_files(src, vmid), root)
+    except PmAlignError as exc:
+        _say(f"pm-align: cannot establish the target — {exc}")
+        return 2
+    _say(f"pm-align: this host against {rel.tag} (VM {vmid})")
+    for ch in changes:
+        _say(f"  {ch.state:8} {ch.file.path}   ({ch.file.source})")
+    note = topology_note(root)
+    if note:
+        _say(f"  topology: {note}")
+    _say("  not touched, by design:")
+    for line in NOT_TOUCHED:
+        _say(f"    - {line}")
+    pending = [c for c in changes if c.state != "current"]
+    _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
+    return 1 if pending else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
