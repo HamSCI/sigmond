@@ -464,3 +464,67 @@ class TestGroupWritablePerms(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCrossThreadUse(unittest.TestCase):
+    """AC0G-ND, 2026-09-24/25: wspr-recorder's batcher thread opened the
+    wspr.noise connection; at shutdown the main thread's close() flushed
+    the last rows through it, sqlite3 refused ("SQLite objects created in
+    a thread can only be used in that same thread"), and the rows were
+    lost on every exit. SpotSink also calls insert() from several
+    BandRecorder threads, relying on the Writer to serialize itself."""
+
+    def setUp(self):
+        self.path = _temp_db_path()
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            Path(self.path + suffix).unlink(missing_ok=True)
+
+    def _count(self):
+        with sqlite3.connect(self.path) as c:
+            return c.execute("SELECT COUNT(*) FROM pending_uploads").fetchone()[0]
+
+    def test_close_on_another_thread_flushes_what_a_worker_buffered(self):
+        import threading
+        w = Writer("wspr", "noise", batch_rows=2, auto_flush_seconds=0,
+                   config=SqliteConfig(path=self.path))
+
+        def worker():
+            w.insert([{"n": 1}, {"n": 2}])   # size-flush opens the connection here
+            w.insert([{"n": 3}])             # buffered, not yet flushed
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        with self.assertNoLogs("sigmond.hamsci_sink", level="WARNING"):
+            w.close()
+        self.assertEqual(self._count(), 3)
+
+    def test_concurrent_inserts_lose_no_rows(self):
+        # In a child process with a hard timeout: an unserialized Writer
+        # sharing one connection across threads can deadlock inside sqlite
+        # while holding the GIL, which no in-process join timeout survives.
+        import subprocess
+        import textwrap
+        script = textwrap.dedent(f"""
+            import sys, threading
+            sys.path.insert(0, {str(Path(__file__).resolve().parent.parent / "lib")!r})
+            from sigmond.hamsci_sink import SqliteConfig, Writer
+            w = Writer("wspr", "spots", batch_rows=7, auto_flush_seconds=0,
+                       config=SqliteConfig(path={self.path!r}))
+            w._buffer_max = 10_000
+            def worker(k):
+                for i in range(250):
+                    w.insert([{{"k": k, "i": i}}])
+            ts = [threading.Thread(target=worker, args=(k,)) for k in range(8)]
+            for t in ts: t.start()
+            for t in ts: t.join()
+            w.close()
+        """)
+        try:
+            subprocess.run([sys.executable, "-c", script], timeout=60, check=True,
+                           capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            self.fail("concurrent inserts hung")
+        self.assertEqual(self._count(), 8 * 250)

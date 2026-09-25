@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -160,6 +161,14 @@ class Writer:
 
     Use `Writer.from_env(...)` to construct from coordination.env.
     Pass `connect_factory` in tests to inject a fake connection.
+
+    Thread-safe: `insert`, `flush` and `close` hold one re-entrant lock,
+    and the default connection is opened with ``check_same_thread=False``
+    — safe because every use of it holds that lock.  AC0G-ND 2026-09-25:
+    wspr-recorder's batcher thread opened the connection, the main
+    thread's close() flushed through it at shutdown, sqlite3 refused, and
+    the last rows were lost on every exit.  Unlocked, concurrent inserts
+    also wrote rows twice (two flushes of one buffer).
     """
 
     def __init__(
@@ -181,6 +190,7 @@ class Writer:
         self._buffer_max = batch_rows * 2
         self._config = config
         self._connect_factory = connect_factory or _default_connect_factory
+        self._lock = threading.RLock()
         self._buffer: list = []
         self._conn: Optional[sqlite3.Connection] = None
         self._schema_initialized = False
@@ -262,81 +272,84 @@ class Writer:
           last successful flush.  Bounds the in-memory residency time
           so a low-rate stream's rows still land on disk promptly.
         """
-        if self.is_noop or not rows:
-            return
-        self._buffer.extend(rows)
-        if len(self._buffer) > self._buffer_max:
-            self._health = HEALTH_DEGRADED
-            buffered = len(self._buffer)
-            self._buffer = self._buffer[: self._buffer_max]
-            raise BufferFull(
-                f"hamsci_sink buffer overflow: {buffered} rows pending, "
-                f"max {self._buffer_max} (SQLite unwritable at "
-                f"{self._config.path if self._config else '?'})"
+        with self._lock:
+            if self.is_noop or not rows:
+                return
+            self._buffer.extend(rows)
+            if len(self._buffer) > self._buffer_max:
+                self._health = HEALTH_DEGRADED
+                buffered = len(self._buffer)
+                self._buffer = self._buffer[: self._buffer_max]
+                raise BufferFull(
+                    f"hamsci_sink buffer overflow: {buffered} rows pending, "
+                    f"max {self._buffer_max} (SQLite unwritable at "
+                    f"{self._config.path if self._config else '?'})"
+                )
+            size_trigger = len(self._buffer) >= self.batch_rows
+            age_trigger = (
+                self.auto_flush_seconds > 0
+                and self._buffer
+                and time.monotonic() - self._last_flush_monotonic
+                >= self.auto_flush_seconds
             )
-        size_trigger = len(self._buffer) >= self.batch_rows
-        age_trigger = (
-            self.auto_flush_seconds > 0
-            and self._buffer
-            and time.monotonic() - self._last_flush_monotonic
-            >= self.auto_flush_seconds
-        )
-        if size_trigger or age_trigger:
-            self.flush()
+            if size_trigger or age_trigger:
+                self.flush()
 
     def flush(self) -> None:
         """Force a flush. Quiet on transient failures (buffer retained)."""
-        if self.is_noop or not self._buffer:
-            return
-        try:
-            conn = self._connect()
-            if not self._schema_initialized:
-                self._init_schema(conn)
-            now_iso = datetime.now(timezone.utc).isoformat()
-            params = [
-                (
-                    self.database,
-                    self.table,
-                    self.schema_version,
-                    json.dumps(row, default=_json_default),
-                    now_iso,
+        with self._lock:
+            if self.is_noop or not self._buffer:
+                return
+            try:
+                conn = self._connect()
+                if not self._schema_initialized:
+                    self._init_schema(conn)
+                now_iso = datetime.now(timezone.utc).isoformat()
+                params = [
+                    (
+                        self.database,
+                        self.table,
+                        self.schema_version,
+                        json.dumps(row, default=_json_default),
+                        now_iso,
+                    )
+                    for row in self._buffer
+                ]
+                conn.executemany(
+                    "INSERT INTO pending_uploads "
+                    "(target_db, target_table, schema_version, payload_json, queued_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    params,
                 )
-                for row in self._buffer
-            ]
-            conn.executemany(
-                "INSERT INTO pending_uploads "
-                "(target_db, target_table, schema_version, payload_json, queued_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                params,
-            )
-            conn.commit()
-            self._buffer = []
-            self._last_flush_monotonic = time.monotonic()
-            self._health = HEALTH_OK
-        except BufferFull:
-            raise
-        except Exception as e:
-            # Drop the handle so a stale/locked DB gets reopened on retry.
-            self._conn = None
-            self._schema_initialized = False
-            if self._health != HEALTH_DEGRADED:
-                self._health = HEALTH_UNREACHABLE
-            logger.warning(
-                "hamsci_sink: flush failed for %s.%s "
-                "(%d rows buffered): %s",
-                self.database, self.table, len(self._buffer), e,
-            )
+                conn.commit()
+                self._buffer = []
+                self._last_flush_monotonic = time.monotonic()
+                self._health = HEALTH_OK
+            except BufferFull:
+                raise
+            except Exception as e:
+                # Drop the handle so a stale/locked DB gets reopened on retry.
+                self._conn = None
+                self._schema_initialized = False
+                if self._health != HEALTH_DEGRADED:
+                    self._health = HEALTH_UNREACHABLE
+                logger.warning(
+                    "hamsci_sink: flush failed for %s.%s "
+                    "(%d rows buffered): %s",
+                    self.database, self.table, len(self._buffer), e,
+                )
 
     def close(self) -> None:
-        try:
-            self.flush()
-        finally:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
-            self._conn = None
+        with self._lock:
+            try:
+                self.flush()
+            finally:
+                if self._conn is not None:
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                self._conn = None
 
     def __enter__(self) -> "Writer":
         return self
@@ -411,7 +424,10 @@ def _default_connect_factory(config: SqliteConfig) -> sqlite3.Connection:
     # Default isolation_level keeps explicit transactions around each
     # flush so a crash mid-batch loses at most the in-memory buffer,
     # never a partial batch on disk.
-    return sqlite3.connect(config.path, timeout=30.0)
+    # check_same_thread=False: the Writer serializes every use of this
+    # connection under its own lock, and its last flush often runs on a
+    # different thread (shutdown) from the one that opened it.
+    return sqlite3.connect(config.path, timeout=30.0, check_same_thread=False)
 
 
 def _resolve_db_alias(mode: str, env: Optional[dict] = None) -> str:
