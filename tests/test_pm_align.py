@@ -5,6 +5,7 @@ here by path (its filename has a dash).  Every host path is joined under a
 temp root and every command goes through an injected ``run``.
 """
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -253,6 +254,11 @@ def test_not_touched_lists_every_global_constraint_area():
 def _fake_run(calls, rc=0, stdout=""):
     def run(argv, **kw):
         calls.append(list(argv))
+        # tunnel_apply's active check comes first and needs "active" to
+        # proceed; nothing outside the tunnel tests calls is-active, so this
+        # is a no-op for every other caller of _fake_run.
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
         return subprocess.CompletedProcess(argv, rc, stdout, "")
     return run
 
@@ -431,15 +437,36 @@ def test_tunnel_apply_rolls_back_when_a_proxy_stays_down(tmp_path):
     assert calls.count(["systemctl", "restart", "sigmond-rac-host.service"]) == 2
 
 
+_IS_ACTIVE = ["systemctl", "is-active", pm_align.RAC_UNIT]
+_OLD_NAMES = ["AC0G_ND-vm-ssh", "AC0G_ND-vm-web"]
+
+
+def _is_active_run(calls, extra=None):
+    """A run() that answers is-active with "active" and defers everything
+    else to ``extra`` (default: rc 0, empty output)."""
+    def run(argv, **kw):
+        calls.append(list(argv))
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
+        if extra is not None:
+            return extra(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return run
+
+
 def test_tunnel_apply_refuses_a_config_frpc_rejects(tmp_path):
     root = _tunnel_root(tmp_path)
     calls = []
 
     def run(argv, **kw):
         calls.append(list(argv))
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
         rc = 1 if argv[:2] == ["/usr/local/sbin/frpc", "verify"] else 0
         return subprocess.CompletedProcess(argv, rc, "", "bad")
-    out = pm_align.tunnel_apply(root, run=run, fetch_status=lambda: "{}", sleep=lambda s: None)
+    out = pm_align.tunnel_apply(root, run=run,
+                                fetch_status=lambda: _api("dd986638365fd1d7", _OLD_NAMES),
+                                sleep=lambda s: None)
     assert out["outcome"] == "failed"
     assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
     assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
@@ -453,17 +480,93 @@ def test_tunnel_apply_fails_without_touching_anything_when_no_user_line(tmp_path
                                 sleep=lambda s: None)
     assert out["outcome"] == "failed"
     assert (root / "etc/sigmond/frpc-host.toml").read_text() == text
-    assert calls == []
+    assert not any(c[:2] in (["systemctl", "restart"], [pm_align.FRPC, "verify"]) for c in calls)
 
 
 def test_tunnel_apply_current_when_every_channel_already_declared(tmp_path):
     full, _ = pm_align.tunnel_plan(TOML4, "505")
     root = _tunnel_root(tmp_path, text=full)
     calls = []
-    out = pm_align.tunnel_apply(root, run=_fake_run(calls), fetch_status=lambda: "{}",
+    names = pm_align.declared_proxies(full)
+    out = pm_align.tunnel_apply(root, run=_fake_run(calls),
+                                fetch_status=lambda: _api("dd986638365fd1d7", names),
                                 sleep=lambda s: None)
     assert out == {"outcome": "current", "detail": "every channel already declared"}
-    assert calls == []
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == full
+    assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
+
+
+# --- fix round 1: active check, baseline check, guaranteed rollback ---
+
+def test_tunnel_apply_skips_when_the_tunnel_is_off(tmp_path):
+    root = _tunnel_root(tmp_path)
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "inactive\n", "")
+
+    def _boom():
+        raise AssertionError("fetch_status must not be called when the tunnel is off")
+
+    out = pm_align.tunnel_apply(root, run=run, fetch_status=_boom, sleep=lambda s: None)
+    assert out == {"outcome": "skipped", "detail": "tunnel is off — not changed"}
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
+    assert calls == [_IS_ACTIVE]
+
+
+def test_tunnel_apply_refuses_when_the_baseline_is_not_up(tmp_path):
+    root = _tunnel_root(tmp_path)
+    calls = []
+    run = _is_active_run(calls)
+    # vm-web missing from the fake API response: the existing tunnel isn't
+    # fully up before any change is even planned.
+    out = pm_align.tunnel_apply(root, run=run,
+                                fetch_status=lambda: _api("dd986638365fd1d7", _OLD_NAMES[:1]),
+                                sleep=lambda s: None)
+    assert out == {"outcome": "failed", "detail": "tunnel not fully up before the change — refused"}
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
+    assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
+
+
+def test_tunnel_apply_rolls_back_when_the_first_restart_raises(tmp_path):
+    root = _tunnel_root(tmp_path)
+    calls = []
+    restarts = {"n": 0}
+
+    def extra(argv):
+        if argv[:2] == ["systemctl", "restart"]:
+            restarts["n"] += 1
+            if restarts["n"] == 1:
+                raise subprocess.TimeoutExpired(argv, 60)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    run = _is_active_run(calls, extra)
+    out = pm_align.tunnel_apply(root, run=run,
+                                fetch_status=lambda: _api("dd986638365fd1d7", _OLD_NAMES),
+                                sleep=lambda s: None)
+    assert out["outcome"] != "applied"
+    assert "TimeoutExpired" in out["detail"]
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
+    assert restarts["n"] == 2                     # the failed attempt, then the rollback restart
+
+
+def test_tunnel_apply_rolls_back_when_fetch_status_raises_after_install(tmp_path):
+    root = _tunnel_root(tmp_path)
+    calls = []
+    seen = {"n": 0}
+
+    def fetch_status():
+        seen["n"] += 1
+        if seen["n"] == 1:                        # the baseline check, before any change
+            return _api("dd986638365fd1d7", _OLD_NAMES)
+        raise http.client.IncompleteRead(b"")
+
+    run = _is_active_run(calls)
+    out = pm_align.tunnel_apply(root, run=run, fetch_status=fetch_status, sleep=lambda s: None)
+    assert out["outcome"] != "applied"
+    assert "IncompleteRead" in out["detail"]
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
 
 
 # --- dry run / --apply / --tunnel-step / --status wiring ---
@@ -591,6 +694,24 @@ def test_tunnel_step_writes_the_result_and_returns_matching_exit_code(tmp_path, 
                         {"outcome": "rolled-back", "detail": "x did not come up"})
     rc = pm_align.main(["--tunnel-step"], root=root, run=_fake_run([]))
     assert rc == 1
+
+    monkeypatch.setattr(pm_align, "tunnel_apply", lambda root, run, **kw:
+                        {"outcome": "skipped", "detail": "tunnel is off — not changed"})
+    rc = pm_align.main(["--tunnel-step"], root=root, run=_fake_run([]))
+    assert rc == 0
+
+
+def test_tunnel_step_writes_a_failed_result_when_tunnel_apply_raises(tmp_path, monkeypatch):
+    root = _tunnel_root(tmp_path)
+
+    def _raise(root, run, **kw):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(pm_align, "tunnel_apply", _raise)
+    rc = pm_align.main(["--tunnel-step"], root=root, run=_fake_run([]))
+    assert rc == 1
+    doc = json.loads((root / "var/lib/pm-align/tunnel-result.json").read_text())
+    assert doc["outcome"] == "failed"
+    assert "boom" in doc["detail"]
 
 
 def test_status_prints_tunnel_result_and_record_or_none_yet(tmp_path, capsys):

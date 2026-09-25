@@ -427,7 +427,10 @@ def _fetch_status() -> str:
     try:
         with urllib.request.urlopen(FRPC_API, timeout=5) as r:
             return r.read().decode()
-    except (OSError, urllib.error.URLError):
+    except Exception:
+        # Any transient failure (connection, a truncated/invalid HTTP
+        # response, undecodable bytes) reads as "not running yet", never
+        # as an exception a caller must handle.
         return ""
 
 
@@ -449,46 +452,93 @@ def _read_rac_marker(root: Path) -> Optional[str]:
         return None
 
 
+def _rollback(path: Path, backup: Path, old_names: list, user: str, run, fetch_status,
+             sleep, wait_s: int, reason: str) -> dict:
+    """Restore the previous config and restart, tolerating a second failure
+    at each of the three steps so it can never mask ``reason`` (the first
+    failure) and a second exception can never skip the restore that follows
+    it.  Called only once the live file has already been swapped to the new
+    (unconfirmed) config, so every path here ends in either "rolled-back"
+    (old tunnel back and running) or "failed" (needs hands)."""
+    try:
+        os.replace(backup, path)
+    except BaseException as exc:
+        return {"outcome": "failed",
+                "detail": f"{reason}; restoring the previous config raised {exc!r} — needs hands"}
+    try:
+        run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
+    except BaseException as exc:
+        return {"outcome": "failed",
+                "detail": f"{reason}; previous config restored but the restart raised {exc!r} — "
+                          "needs hands"}
+    try:
+        up = _wait_running(user, old_names, fetch_status=fetch_status, sleep=sleep, wait_s=wait_s)
+    except BaseException as exc:
+        return {"outcome": "failed",
+                "detail": f"{reason}; previous config restored but checking it raised {exc!r} — "
+                          "needs hands"}
+    if up:
+        return {"outcome": "rolled-back", "detail": f"{reason}; previous tunnel restored and running"}
+    return {"outcome": "failed",
+            "detail": f"{reason}; previous tunnel restored but NOT all running — needs hands"}
+
+
 def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.sleep,
                  wait_s: int = 90) -> dict:
     """Add the missing channels to the host tunnel, or leave it exactly as it was.
 
-    frpc verify first (a config frpc rejects never reaches the unit), then
-    install, restart, and require EVERY declared proxy "running" within
-    ``wait_s``.  Otherwise the previous file goes back, the unit restarts on
-    it, and the outcome says rolled-back — or failed, if even the old
-    config does not come back up (then the station needs hands)."""
+    In order: (a) refuse to touch a tunnel the operator switched off
+    (``sigmond-setup --rac-off`` disables the unit but keeps the config);
+    (b) refuse unless every currently-declared proxy is already running —
+    installing on top of an already-broken tunnel would misattribute the
+    break; (c) plan, verify with frpc, install, restart, and require EVERY
+    declared proxy "running" within ``wait_s`` — guaranteed rollback: any
+    exception from here on (a raised restart, a raised status fetch, a
+    decode failure) is treated exactly like "didn't come up" and drives the
+    same restore-and-recheck path, so the live file is never left on an
+    unconfirmed config."""
     path = _under(root, FRPC_TOML)
     old = path.read_text()
-    new, added = tunnel_plan(old, _read_rac_marker(root))
-    if not added:
-        return {"outcome": "current", "detail": "every channel already declared"}
+
+    # (a) active check
+    r = run(["systemctl", "is-active", RAC_UNIT], capture_output=True, text=True, timeout=30)
+    if (getattr(r, "stdout", "") or "").strip() != "active":
+        return {"outcome": "skipped", "detail": "tunnel is off — not changed"}
+
     m = re.search(r'^user\s*=\s*"([^"]*)"', old, re.M)
     if not m:
         return {"outcome": "failed", "detail": f"{FRPC_TOML} declares no user — cannot verify proxies"}
     user = m.group(1)
+    old_names = declared_proxies(old)
+
+    # (b) baseline check
+    if not proxies_running(fetch_status(), user, old_names):
+        return {"outcome": "failed", "detail": "tunnel not fully up before the change — refused"}
+
+    # (c) plan / verify / install / restart / wait, with guaranteed rollback
+    new, added = tunnel_plan(old, _read_rac_marker(root))
+    if not added:
+        return {"outcome": "current", "detail": "every channel already declared"}
     cand = path.with_name(path.name + ".pm-align-new")
     cand.write_text(new)
     os.chmod(cand, 0o600)
-    r = run([FRPC, "verify", "-c", str(cand)], capture_output=True, text=True, timeout=30)
-    if r.returncode != 0:
+    rv = run([FRPC, "verify", "-c", str(cand)], capture_output=True, text=True, timeout=30)
+    if rv.returncode != 0:
         cand.unlink()
-        return {"outcome": "failed", "detail": f"frpc verify refused: {(r.stderr or r.stdout).strip()}"}
+        return {"outcome": "failed", "detail": f"frpc verify refused: {(rv.stderr or rv.stdout).strip()}"}
     backup = path.with_name(path.name + ".pm-align-prev")
     backup.write_text(old)
     os.chmod(backup, 0o600)
     os.replace(cand, path)
-    run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
-    if _wait_running(user, declared_proxies(new), fetch_status=fetch_status, sleep=sleep,
-                     wait_s=wait_s):
-        return {"outcome": "applied", "detail": f"added {', '.join(added)}; every channel running"}
-    os.replace(backup, path)
-    run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
-    if _wait_running(user, declared_proxies(old), fetch_status=fetch_status, sleep=sleep,
-                     wait_s=wait_s):
-        return {"outcome": "rolled-back",
-                "detail": f"{', '.join(added)} did not come up; previous tunnel restored and running"}
-    return {"outcome": "failed", "detail": "previous tunnel restored but NOT all running — needs hands"}
+    try:
+        run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
+        if _wait_running(user, declared_proxies(new), fetch_status=fetch_status, sleep=sleep,
+                         wait_s=wait_s):
+            return {"outcome": "applied", "detail": f"added {', '.join(added)}; every channel running"}
+        reason = f"{', '.join(added)} did not come up"
+    except BaseException as exc:
+        reason = f"installing {', '.join(added)} raised {exc!r}"
+    return _rollback(path, backup, old_names, user, run, fetch_status, sleep, wait_s, reason)
 
 
 def write_tunnel_result(root: Path, out: dict, now: str) -> Path:
@@ -606,11 +656,18 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
         return 0
 
     if args.tunnel_step:
-        out = tunnel_apply(root, run=run)
+        try:
+            out = tunnel_apply(root, run=run)
+        except BaseException as exc:
+            # Belt and braces: tunnel_apply's own guaranteed-rollback path
+            # should already catch everything it can, but a result file
+            # must exist however this ends, so nothing gets read as "still
+            # running" when it silently died instead.
+            out = {"outcome": "failed", "detail": f"tunnel_apply raised {exc!r} — needs hands"}
         now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         write_tunnel_result(root, out, now_iso)
         _say(json.dumps(out))
-        return 0 if out["outcome"] in ("applied", "current") else 1
+        return 0 if out["outcome"] in ("applied", "current", "skipped") else 1
 
     vmid = host_vmid(root)
     try:
