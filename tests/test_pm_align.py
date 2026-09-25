@@ -9,6 +9,7 @@ import http.client
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -567,6 +568,29 @@ def test_tunnel_apply_rolls_back_when_fetch_status_raises_after_install(tmp_path
     assert out["outcome"] != "applied"
     assert "IncompleteRead" in out["detail"]
     assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
+
+
+def test_tunnel_apply_rolls_back_when_the_install_rename_itself_raises(tmp_path, monkeypatch):
+    """The install (os.replace(cand, path)) must itself be inside the
+    guarded region — an exception right there must still produce a result
+    dict, not propagate, and must leave no .pm-align-new litter behind."""
+    root = _tunnel_root(tmp_path)
+    calls = []
+    run = _is_active_run(calls)
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        if str(src).endswith(".pm-align-new"):
+            raise OSError("simulated rename failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(pm_align.os, "replace", flaky_replace)
+    out = pm_align.tunnel_apply(root, run=run,
+                                fetch_status=lambda: _api("dd986638365fd1d7", _OLD_NAMES),
+                                sleep=lambda s: None)
+    assert out["outcome"] != "applied"
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
+    assert not list(root.glob("etc/sigmond/frpc-host.toml.pm-align-new"))
 
 
 # --- dry run / --apply / --tunnel-step / --status wiring ---

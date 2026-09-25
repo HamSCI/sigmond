@@ -491,12 +491,13 @@ def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.slee
     (``sigmond-setup --rac-off`` disables the unit but keeps the config);
     (b) refuse unless every currently-declared proxy is already running —
     installing on top of an already-broken tunnel would misattribute the
-    break; (c) plan, verify with frpc, install, restart, and require EVERY
-    declared proxy "running" within ``wait_s`` — guaranteed rollback: any
-    exception from here on (a raised restart, a raised status fetch, a
-    decode failure) is treated exactly like "didn't come up" and drives the
-    same restore-and-recheck path, so the live file is never left on an
-    unconfirmed config."""
+    break; (c) plan, verify with frpc, then install, restart, and require
+    EVERY declared proxy "running" within ``wait_s`` — guaranteed rollback:
+    from the install onward, any exception (the rename itself, a raised
+    restart, a raised status fetch, a decode failure) is treated exactly
+    like "didn't come up" and drives the same restore-and-recheck path, so
+    the live file is never left on an unconfirmed config and no exception
+    ever escapes this function once the backup has been written."""
     path = _under(root, FRPC_TOML)
     old = path.read_text()
 
@@ -529,8 +530,8 @@ def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.slee
     backup = path.with_name(path.name + ".pm-align-prev")
     backup.write_text(old)
     os.chmod(backup, 0o600)
-    os.replace(cand, path)
     try:
+        os.replace(cand, path)
         run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
         if _wait_running(user, declared_proxies(new), fetch_status=fetch_status, sleep=sleep,
                          wait_s=wait_s):
@@ -538,6 +539,16 @@ def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.slee
         reason = f"{', '.join(added)} did not come up"
     except BaseException as exc:
         reason = f"installing {', '.join(added)} raised {exc!r}"
+        # If the rename itself is what failed, cand is still sitting there
+        # (os.replace is atomic: it either completes or leaves both files
+        # exactly as before) — clean up the litter. Restoring the backup
+        # below is harmless either way: when the install never happened,
+        # path already holds `old`, and backup holds those same bytes.
+        try:
+            if cand.exists():
+                cand.unlink()
+        except OSError:
+            pass
     return _rollback(path, backup, old_names, user, run, fetch_status, sleep, wait_s, reason)
 
 
