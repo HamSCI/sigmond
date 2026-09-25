@@ -407,15 +407,22 @@ def _apply_record_push(record: Path, vmid: int, *, run) -> str:
     return "yes" if ok else "no — the guest agent did not confirm the copy"
 
 
+_PROXY_NAME_RE = re.compile(r'^name\s*=\s*"([^"]+)"\s*$', re.M)
+
+
 def declared_proxies(toml_text: str) -> list:
-    return re.findall(r'^name\s*=\s*"([^"]+)"\s*$', toml_text, re.M)
+    return _PROXY_NAME_RE.findall(toml_text)
 
 
 def _remote_ports(toml_text: str) -> dict:
-    """{proxy name: remotePort} by reading each [[proxies]] block in order."""
+    """{proxy name: remotePort} by reading each [[proxies]] block in order.
+
+    Uses the SAME name regex as ``declared_proxies`` (``_PROXY_NAME_RE``) --
+    they used to disagree (this one had no end anchor), so a name line with
+    trailing text was seen by one parser and not the other."""
     out, name = {}, None
     for line in toml_text.splitlines():
-        m = re.match(r'^name\s*=\s*"([^"]+)"', line)
+        m = _PROXY_NAME_RE.match(line)
         if m:
             name = m.group(1)
         m = re.match(r'^remotePort\s*=\s*(\d+)', line)
@@ -423,6 +430,18 @@ def _remote_ports(toml_text: str) -> dict:
             out[name] = int(m.group(1))
             name = None
     return out
+
+
+def _check_proxy_names_agree(toml_text: str) -> Optional[str]:
+    """None if the two parsers agree on a non-empty set that includes a
+    -vm-ssh proxy; otherwise a detail string naming the disagreement, for
+    tunnel_apply to refuse on before writing anything."""
+    declared = set(declared_proxies(toml_text))
+    ported = set(_remote_ports(toml_text))
+    if declared == ported and declared and any(n.endswith("-vm-ssh") for n in declared):
+        return None
+    return (f"{FRPC_TOML} proxy names disagree between declared_proxies "
+            f"{sorted(declared)} and _remote_ports {sorted(ported)} — refused")
 
 
 def tunnel_plan(toml_text: str, rac_marker: Optional[str]):
@@ -460,6 +479,9 @@ def proxies_running(api_json: str, user: str, names) -> bool:
     try:
         doc = json.loads(api_json or "{}")
     except ValueError:
+        return False
+    names = list(names)
+    if not names:
         return False
     status = {p.get("name"): p.get("status") for p in doc.get("tcp", [])}
     return all(status.get(f"{user}.{n}") == "running" for n in names)
@@ -552,6 +574,9 @@ def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.slee
     if not m:
         return {"outcome": "failed", "detail": f"{FRPC_TOML} declares no user — cannot verify proxies"}
     user = m.group(1)
+    mismatch = _check_proxy_names_agree(old)
+    if mismatch:
+        return {"outcome": "failed", "detail": mismatch}
     old_names = declared_proxies(old)
 
     # (b) baseline check

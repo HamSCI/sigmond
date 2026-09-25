@@ -500,6 +500,46 @@ def test_tunnel_apply_current_when_every_channel_already_declared(tmp_path):
     assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
 
 
+# --- final review item 1: the two proxy-name parsers must agree ---
+
+def test_proxies_running_with_no_names_is_false():
+    assert not pm_align.proxies_running(_api("u", []), "u", [])
+    assert not pm_align.proxies_running("{}", "u", [])
+
+
+def test_tunnel_apply_refuses_when_the_vm_ssh_name_is_missed_by_one_parser(tmp_path):
+    # A trailing comment on the vm-ssh name line: with a SHARED regex both
+    # declared_proxies and _remote_ports miss it identically (so they don't
+    # disagree with each other), but the -vm-ssh name then appears in
+    # NEITHER set -- which is exactly the case that must still refuse,
+    # since a missed vm-ssh entry means the tunnel's basic identity can't
+    # be established.
+    text = TOML4.replace('name = "AC0G_ND-vm-ssh"', 'name = "AC0G_ND-vm-ssh"  # trailing comment')
+    root = _tunnel_root(tmp_path, text=text)
+    calls = []
+    out = pm_align.tunnel_apply(root, run=_fake_run(calls), fetch_status=lambda: "{}",
+                                sleep=lambda s: None)
+    assert out["outcome"] == "failed"
+    assert "disagree" in out["detail"] or "vm-ssh" in out["detail"]
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == text
+    assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
+
+
+def test_tunnel_apply_refuses_when_a_proxy_is_declared_with_no_remoteport(tmp_path):
+    # declared_proxies sees the name; _remote_ports never records it because
+    # no remotePort line follows -- a genuine disagreement between the two
+    # parses, not just a shared miss.
+    text = TOML4 + '\n[[proxies]]\nname = "AC0G_ND-vm-extra"\ntype = "tcp"\n'
+    root = _tunnel_root(tmp_path, text=text)
+    calls = []
+    out = pm_align.tunnel_apply(root, run=_fake_run(calls), fetch_status=lambda: "{}",
+                                sleep=lambda s: None)
+    assert out["outcome"] == "failed"
+    assert "disagree" in out["detail"]
+    assert (root / "etc/sigmond/frpc-host.toml").read_text() == text
+    assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
+
+
 # --- fix round 1: active check, baseline check, guaranteed rollback ---
 
 def test_tunnel_apply_skips_when_the_tunnel_is_off(tmp_path):
