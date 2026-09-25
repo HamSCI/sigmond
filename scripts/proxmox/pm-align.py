@@ -202,10 +202,12 @@ WIZARD_HEREDOCS = {
 RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
           ("station", 12224, 8000), ("gmag", 12225, 8082))
 NOT_TOUCHED = (
-    "network: /etc/network/interfaces, vmbr1 + NAT + sysctl, sigmond-netfix / sigmond-setnet",
-    "tuning: grub isolcpus/IOMMU, vfio, radiod-vm-fence, host IRQ affinity, resctrl (CAT)",
+    "network: /etc/network/*, vmbr1 + NAT + sysctl, sigmond-netfix / sigmond-setnet "
+    "and their unit (sigmond-netfix.service)",
+    "tuning: grub, vfio, kernel modules, initramfs, radiod-vm-fence, host IRQ affinity, "
+    "resctrl (CAT), and the VM's CPU-pinning hookscript (/var/lib/vz/snippets/*)",
     "Proxmox itself and every apt package",
-    "the hostname, /etc/pve, and the VM's own configuration (qm set)",
+    "the hostname, /etc/pve, and the VM's own configuration (qm set, of any kind)",
     "the host's ssh key (/root/.ssh/id_ed25519) — it is the RAC identity",
 )
 

@@ -242,3 +242,9 @@ def test_topology_note_names_a_vm_on_the_lan(tmp_path):
     assert "LAN" in pm_align.topology_note(tmp_path)
     (tmp_path / "etc/network/interfaces").write_text("auto vmbr0\nauto vmbr1\n")
     assert pm_align.topology_note(tmp_path) is None
+
+
+def test_not_touched_lists_every_global_constraint_area():
+    text = " ".join(pm_align.NOT_TOUCHED)
+    for phrase in ("/var/lib/vz/snippets", "initramfs", "modules", "sigmond-netfix.service"):
+        assert phrase in text
