@@ -399,6 +399,11 @@ def test_tunnel_plan_refuses_a_rac_number_that_disagrees_with_the_ports():
         pm_align.tunnel_plan(TOML4, "506")
 
 
+def test_tunnel_plan_refuses_a_non_integer_rac_marker():
+    with pytest.raises(pm_align.PmAlignError, match="RAC"):
+        pm_align.tunnel_plan(TOML4, "not-a-number")
+
+
 def test_tunnel_plan_derives_the_rac_number_without_a_marker():
     _, added = pm_align.tunnel_plan(TOML4, None)
     assert added == ["AC0G_ND-vm-station", "AC0G_ND-vm-gmag"]
@@ -692,6 +697,30 @@ def test_rollback_retry_restart_raising_stops_immediately(tmp_path):
     assert calls.count(["systemctl", "restart", pm_align.RAC_UNIT]) == 2
 
 
+def test_tunnel_apply_writes_the_candidate_and_backup_private_from_the_start(tmp_path, monkeypatch):
+    """The frpc config carries an auth token (``user``); a create-then-chmod
+    pattern leaves the file briefly at the process's default (umask-masked)
+    mode. Both files must be created 0o600 via os.open, so no separate
+    os.chmod call on either is needed -- catch a regression by making any
+    os.chmod call raise."""
+    root = _tunnel_root(tmp_path)
+
+    def _no_chmod(path, mode):
+        raise AssertionError(f"unexpected os.chmod({path!r}, {mode!r})")
+
+    monkeypatch.setattr(pm_align.os, "chmod", _no_chmod)
+    calls = []
+    names = pm_align.declared_proxies(pm_align.tunnel_plan(TOML4, "505")[0])
+    out = pm_align.tunnel_apply(root, run=_fake_run(calls),
+                                fetch_status=lambda: _api("dd986638365fd1d7", names),
+                                sleep=lambda s: None)
+    assert out["outcome"] == "applied"
+    p = root / "etc/sigmond/frpc-host.toml"
+    assert oct(p.stat().st_mode & 0o777) == oct(0o600)
+    backup = root / "etc/sigmond/frpc-host.toml.pm-align-prev"
+    assert oct(backup.stat().st_mode & 0o777) == oct(0o600)
+
+
 def test_tunnel_apply_rolls_back_when_the_install_rename_itself_raises(tmp_path, monkeypatch):
     """The install (os.replace(cand, path)) must itself be inside the
     guarded region — an exception right there must still produce a result
@@ -937,6 +966,48 @@ def test_main_apply_launches_the_detached_tunnel_step_via_the_real_script(tmp_pa
     out = capsys.readouterr().out
     assert "tunnel: adding AC0G_ND-vm-station, AC0G_ND-vm-gmag" in out
     assert "pm-align --status" in out
+
+
+def test_main_apply_reconnect_message_mentions_rollback(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    _tunnel_root(tmp_path)
+    pm_align.main(["--apply"], root=tmp_path, run=_fake_run([]))
+    out = capsys.readouterr().out
+    assert "~5 minutes (longer if it rolls back)" in out
+
+
+def test_main_apply_moves_a_stale_tunnel_result_aside_before_launching(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    root = _tunnel_root(tmp_path)
+    tres = root / "var/lib/pm-align/tunnel-result.json"
+    tres.parent.mkdir(parents=True)
+    tres.write_text('{"outcome": "applied", "at": "stale"}\n')
+    rc = pm_align.main(["--apply"], root=root, run=_fake_run([]))
+    assert rc == 0
+    assert not tres.exists()
+    prev = root / "var/lib/pm-align/tunnel-result.json.prev"
+    assert '"outcome": "applied"' in prev.read_text()
+
+
+def test_main_apply_does_not_touch_tunnel_result_when_nothing_to_launch(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    root = tmp_path
+    tres = root / "var/lib/pm-align/tunnel-result.json"
+    tres.parent.mkdir(parents=True)
+    tres.write_text('{"outcome": "applied", "at": "stale"}\n')
+    rc = pm_align.main(["--apply"], root=root, run=_fake_run([]))
+    assert rc == 0
+    assert tres.exists()
+    assert not (root / "var/lib/pm-align/tunnel-result.json.prev").exists()
+
+
+def test_status_mentions_the_detached_step_log(tmp_path, capsys):
+    pm_align.main(["--status"], root=tmp_path)
+    out = capsys.readouterr().out
+    assert "journalctl -u pm-align-tunnel" in out
 
 
 def test_main_apply_launches_the_detached_tunnel_step_via_the_installed_script(tmp_path, monkeypatch):

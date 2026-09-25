@@ -487,7 +487,11 @@ def tunnel_plan(toml_text: str, rac_marker: Optional[str]):
     from_port = ssh[1] - BANDS["vm-ssh"]
     rac = from_port
     if rac_marker and rac_marker.strip():
-        rac = int(rac_marker.strip())
+        try:
+            rac = int(rac_marker.strip())
+        except ValueError as exc:
+            raise PmAlignError(f"{RAC_NUMBER_FILE} contains a non-integer RAC number "
+                               f"{rac_marker.strip()!r}") from exc
         if rac != from_port:
             raise PmAlignError(f"RAC number {rac} (rac-number) disagrees with the vm-ssh port "
                                f"{ssh[1]} (RAC {from_port}) — refused")
@@ -592,6 +596,17 @@ def _rollback(path: Path, backup: Path, old_names: list, user: str, run, fetch_s
                       f"{_ROLLBACK_ATTEMPTS} attempts — needs hands"}
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Write ``text`` to a NEW file at ``path``, created 0o600 from the
+    first byte via os.open -- a write_text()-then-chmod pattern briefly
+    creates the file at the process's (umask-masked) default mode first,
+    which for the frpc config (it carries an auth token in ``user``) is a
+    real, if brief, window of exposure."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
 def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.sleep,
                  wait_s: int = 90) -> dict:
     """Add the missing channels to the host tunnel, or leave it exactly as it was.
@@ -633,15 +648,13 @@ def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.slee
     if not added:
         return {"outcome": "current", "detail": "every channel already declared"}
     cand = path.with_name(path.name + ".pm-align-new")
-    cand.write_text(new)
-    os.chmod(cand, 0o600)
+    _write_private(cand, new)
     rv = run([FRPC, "verify", "-c", str(cand)], capture_output=True, text=True, timeout=30)
     if rv.returncode != 0:
         cand.unlink()
         return {"outcome": "failed", "detail": f"frpc verify refused: {(rv.stderr or rv.stdout).strip()}"}
     backup = path.with_name(path.name + ".pm-align-prev")
-    backup.write_text(old)
-    os.chmod(backup, 0o600)
+    _write_private(backup, old)
     try:
         os.replace(cand, path)
         run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
@@ -799,8 +812,8 @@ def _apply_tunnel(root: Path, run) -> int:
     rc = _launch_tunnel_step(root, run)
     if rc == 0:
         _say("  tunnel: adding " + ", ".join(added) + " — running detached (pm-align-tunnel).")
-        _say("  This ssh session may drop while the tunnel restarts. Reconnect in ~5 minutes")
-        _say("  (longer if it rolls back), then: pm-align --status")
+        _say("  This ssh session may drop while the tunnel restarts. Reconnect in ~5 minutes "
+             "(longer if it rolls back), then: pm-align --status")
     return rc
 
 
@@ -888,6 +901,7 @@ def _print_status(root: Path) -> None:
     tpath = _under(root, TUNNEL_RESULT)
     _say(f"tunnel result ({tpath}):")
     _say(tpath.read_text().rstrip("\n") if tpath.exists() else "  none yet")
+    _say("  detached step log: journalctl -u pm-align-tunnel")
     rpath = _under(root, RECORD)
     _say(f"alignment record ({rpath}):")
     _say(rpath.read_text().rstrip("\n") if rpath.exists() else "  none yet")
