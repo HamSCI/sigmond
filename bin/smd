@@ -4556,9 +4556,11 @@ def _align_host_line(release_tag, path=Path('/etc/sigmond-appliance/host-aligned
     import json
     try:
         doc = json.loads(path.read_text())
-        rel, at = doc.get('release', '?'), doc.get('at', '?')
-        tail = '' if rel == release_tag else f' — {release_tag} available: run pm-align on the host'
-        return f'  host: {rel} (pm-align {at}){tail}'
+        if isinstance(doc, dict):
+            rel, at = doc.get('release', '?'), doc.get('at', '?')
+            tail = ('' if rel == release_tag
+                    else f' — {release_tag} available: run pm-align on the host')
+            return f'  host: {rel} (pm-align {at}){tail}'
     except (OSError, ValueError):
         pass
     try:

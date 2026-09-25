@@ -3633,6 +3633,22 @@ class AlignHostLineTests(unittest.TestCase):
         self.assertIn("host: v3.50 (pm-align", line)
         self.assertIn("v3.53 available: run pm-align on the host", line)
 
+    def test_host_record_that_is_not_a_json_object_falls_back(self):
+        # A torn guest-exec copy or a hand edit can leave valid JSON that
+        # isn't an object -- `null`, a list, a bare string.  doc.get(...)
+        # would raise AttributeError on any of these; the fallback must
+        # read exactly as a missing/unparsable record does, with no
+        # exception escaping this read-only dry-run helper.
+        for body in ("null", "[]"):
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "host-aligned.json"
+                p.write_text(body)
+                v = Path(d) / "version"
+                v.write_text("v3.36\n")
+                line = smd._align_host_line("v3.53", path=p, version_path=v)
+            self.assertIn("host: v3.36 (install-time)", line)
+            self.assertIn("run pm-align on the host", line)
+
     def test_cmd_align_dry_run_prints_the_host_line_after_the_summary(self):
         rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                       recorded="v3.53")
