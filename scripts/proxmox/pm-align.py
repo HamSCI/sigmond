@@ -19,18 +19,11 @@ import hashlib
 import json
 import re
 import sys
-import types
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
-
-# dataclasses (with `from __future__ import annotations`) resolves each
-# field's string annotation against ``sys.modules[cls.__module__]`` — which
-# is absent when this file is loaded by path (spec_from_file_location +
-# exec_module) rather than imported, as a PM's dash-named script always is.
-# Register a stand-in so the dataclasses below don't crash on that lookup.
-sys.modules.setdefault(__name__, types.ModuleType(__name__))
 
 RELEASES_API = "https://api.github.com/repos/HamSCI/sigmond-appliance/releases"
 RAW = "https://raw.githubusercontent.com/HamSCI"
@@ -61,14 +54,24 @@ class Sources:
 
 
 def _get(url: str, urlopen: Callable) -> bytes:
+    """GET ``url``.  On failure, raise PmAlignError with ``.status`` set to
+    the HTTP status code when the failure was an HTTPError (e.g. 404), else
+    None -- so a caller can distinguish "this commit doesn't carry the
+    file" from a transient or server failure that must not be swallowed."""
     req = urllib.request.Request(url, headers={"User-Agent": "pm-align"})
     try:
         with urlopen(req, timeout=_TIMEOUT) as r:
             return r.read()
     except PmAlignError:
         raise
+    except urllib.error.HTTPError as exc:
+        err = PmAlignError(f"GET {url}: {exc}")
+        err.status = exc.code
+        raise err from exc
     except Exception as exc:
-        raise PmAlignError(f"GET {url}: {exc}") from exc
+        err = PmAlignError(f"GET {url}: {exc}")
+        err.status = None
+        raise err from exc
 
 
 def _preamble(text: str) -> dict:
@@ -115,7 +118,9 @@ def render_wizard(text: str, vmid: int) -> str:
 def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request.urlopen) -> Sources:
     """firstboot-v3.sh at appliance_commit, rendered with the tag and checked
     against firstboot_sha256; the wizard and PROXMOX_FILES at wizard_commit.
-    A PROXMOX_FILES entry the commit does not carry is simply absent."""
+    A 404 fetching pm-align.py means that commit predates the tool and is
+    simply absent; any other failure, on pm-align.py or any other name,
+    raises."""
     raw_fb = _get(f"{RAW}/sigmond-appliance/{rel.appliance_commit}/firstboot-v3.sh",
                   urlopen).decode("utf-8")
     firstboot = raw_fb.replace("@@VERSION@@", rel.tag)
@@ -129,7 +134,8 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
     for name in PROXMOX_FILES:
         try:
             proxmox[name] = _get(f"{base}/{name}", urlopen)
-        except PmAlignError:
-            if name != "pm-align.py":
-                raise
+        except PmAlignError as exc:
+            if name == "pm-align.py" and getattr(exc, "status", None) == 404:
+                continue
+            raise
     return Sources(firstboot, wizard, proxmox)

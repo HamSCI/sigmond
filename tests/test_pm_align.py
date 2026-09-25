@@ -9,6 +9,8 @@ import importlib.util
 import io
 import json
 import subprocess
+import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,10 @@ REPO = Path(__file__).resolve().parent.parent
 PROXMOX = REPO / "scripts" / "proxmox"
 _spec = importlib.util.spec_from_file_location("pm_align", PROXMOX / "pm-align.py")
 pm_align = importlib.util.module_from_spec(_spec)
+# Register before exec: pm-align.py's dataclasses (with `from __future__
+# import annotations`) resolve field annotations against
+# sys.modules[__name__], which a bare exec_module never populates.
+sys.modules[_spec.name] = pm_align
 _spec.loader.exec_module(pm_align)
 
 FB = "#!/bin/bash\necho @@VERSION@@\ncat > /usr/local/lib/sigmond-net.sh <<'NETLIBEOF'\nnet\nNETLIBEOF\n"
@@ -37,10 +43,15 @@ class _Resp(io.BytesIO):
 
 
 def _urlopen(routes):
+    """routes maps a URL substring to a body (str/bytes) or a BaseException
+    instance to raise (e.g. urllib.error.HTTPError, OSError) -- so a fake
+    route can stand in for a real fetch failure, not just a real fetch."""
     def op(req, timeout=None):
         url = req if isinstance(req, str) else req.full_url
         for key, body in routes.items():
             if key in url:
+                if isinstance(body, BaseException):
+                    raise body
                 return _Resp(body if isinstance(body, bytes) else body.encode())
         raise AssertionError(f"unexpected URL {url}")
     return op
@@ -94,3 +105,30 @@ def test_fetch_sources_renders_the_wizard_vmid_as_the_build_does():
     op = _urlopen(_source_routes())
     src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
     assert src.wizard == 'VMID="${SIGMOND_VMID:-100}"\n'
+
+
+_PM_ALIGN_KEY = "sigmond/" + "d" * 40 + "/scripts/proxmox/pm-align.py"
+
+
+def test_fetch_sources_treats_a_404_on_pm_align_as_absent():
+    routes = _source_routes()
+    routes[_PM_ALIGN_KEY] = urllib.error.HTTPError(_PM_ALIGN_KEY, 404, "Not Found", None, None)
+    op = _urlopen(routes)
+    src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+    assert "pm-align.py" not in src.proxmox
+
+
+def test_fetch_sources_refuses_a_non_404_http_failure_on_pm_align():
+    routes = _source_routes()
+    routes[_PM_ALIGN_KEY] = urllib.error.HTTPError(_PM_ALIGN_KEY, 500, "Server Error", None, None)
+    op = _urlopen(routes)
+    with pytest.raises(pm_align.PmAlignError):
+        pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+
+
+def test_fetch_sources_refuses_a_raised_timeout_on_pm_align():
+    routes = _source_routes()
+    routes[_PM_ALIGN_KEY] = TimeoutError("timed out")
+    op = _urlopen(routes)
+    with pytest.raises(pm_align.PmAlignError):
+        pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
