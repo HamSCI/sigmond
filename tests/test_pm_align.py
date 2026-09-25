@@ -593,6 +593,111 @@ def test_tunnel_apply_rolls_back_when_the_install_rename_itself_raises(tmp_path,
     assert not list(root.glob("etc/sigmond/frpc-host.toml.pm-align-new"))
 
 
+# ---------------------------------------------------------------------------
+# Task 5: the host heartbeat
+
+_HB_FULL_CONFIG = (
+    'station = "b4-pm"\n'
+    "vmid = 100\n"
+    'dest_host = "h.example"\n'
+    "dest_port = 1234\n"
+    'sftp_user = "hamsci-hb"\n'
+    'remote_path = "incoming"\n'
+    "interval_sec = 300\n"
+    'key_path = "/etc/pm-heartbeat/id_ed25519"\n'
+    "expect_cat = false\n"
+)
+
+
+def _src_with_heartbeat():
+    return pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ, 100),
+                            {n: f"#{n}\n".encode() for n in pm_align.HB_FILES})
+
+
+def test_heartbeat_absent_and_not_opted_in_is_skipped(tmp_path):
+    assert pm_align.heartbeat_args(tmp_path, opt_in=False, vmid=100, dest=None) is None
+
+
+def test_heartbeat_opt_in_derives_station_from_the_configured_reporter(tmp_path):
+    (tmp_path / "etc/sigmond-appliance").mkdir(parents=True)
+    (tmp_path / "etc/sigmond-appliance/.configured").write_text("AC0G/ND EN16ov 2026-09-02\n")
+    args = pm_align.heartbeat_args(tmp_path, opt_in=True, vmid=100, dest=None)
+    assert args == ["--station", "AC0G/ND-pm", "--vmid", "100",
+                    "--dest-host", "wd30.wsprdaemon.org", "--dest-port", "38222"]
+
+
+def test_heartbeat_opt_in_uses_an_explicit_dest(tmp_path):
+    (tmp_path / "etc/sigmond-appliance").mkdir(parents=True)
+    (tmp_path / "etc/sigmond-appliance/.configured").write_text("AC0G/ND EN16ov 2026-09-02\n")
+    args = pm_align.heartbeat_args(tmp_path, opt_in=True, vmid=100, dest="h.example:9999")
+    assert args == ["--station", "AC0G/ND-pm", "--vmid", "100",
+                    "--dest-host", "h.example", "--dest-port", "9999"]
+
+
+def test_heartbeat_opt_in_without_a_reporter_refuses(tmp_path):
+    with pytest.raises(pm_align.PmAlignError, match="reporter"):
+        pm_align.heartbeat_args(tmp_path, opt_in=True, vmid=100, dest=None)
+
+
+def test_existing_heartbeat_config_is_rerun_with_its_own_values(tmp_path):
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text(_HB_FULL_CONFIG)
+    args = pm_align.heartbeat_args(tmp_path, opt_in=False, vmid=100, dest=None)
+    assert args == ["--station", "b4-pm", "--vmid", "100",
+                    "--dest-host", "h.example", "--dest-port", "1234"]
+
+
+def test_existing_heartbeat_config_is_rerun_even_without_opt_in_or_dest_being_honored(tmp_path):
+    """A configured host is re-run with ITS OWN values -- opt_in/dest passed
+    by the caller are for the never-configured path only."""
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text(_HB_FULL_CONFIG)
+    args = pm_align.heartbeat_args(tmp_path, opt_in=True, vmid=999, dest="other:1")
+    assert args == ["--station", "b4-pm", "--vmid", "100",
+                    "--dest-host", "h.example", "--dest-port", "1234"]
+
+
+def test_heartbeat_args_on_a_config_missing_a_required_key_names_the_file(tmp_path):
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text('station = "b4-pm"\nvmid = 100\n')
+    with pytest.raises(pm_align.PmAlignError, match="config.toml") as exc_info:
+        pm_align.heartbeat_args(tmp_path, opt_in=False, vmid=100, dest=None)
+    assert "dest_host" in str(exc_info.value)
+
+
+def test_heartbeat_step_runs_the_release_setup_from_a_staged_dir(tmp_path):
+    src = pm_align.Sources("", "", {n: f"#{n}\n".encode() for n in pm_align.PROXMOX_FILES})
+    calls = []
+    out = pm_align.heartbeat_step(tmp_path, src, ["--station", "x-pm"], run=_fake_run(calls),
+                                  tmpdir=tmp_path / "stage")
+    assert out == "set up"
+    assert calls[0][0] == str(tmp_path / "stage" / "pm-heartbeat-setup.sh")
+    assert (tmp_path / "stage" / "pm-heartbeat.py").read_bytes() == b"#pm-heartbeat.py\n"
+
+
+def test_heartbeat_step_reports_re_run_when_the_config_already_existed(tmp_path):
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text(_HB_FULL_CONFIG)
+    out = pm_align.heartbeat_step(tmp_path, _src_with_heartbeat(), ["--station", "b4-pm"],
+                                  run=_fake_run([]), tmpdir=tmp_path / "stage")
+    assert out == "re-run"
+
+
+def test_heartbeat_step_skips_when_the_release_carries_no_heartbeat_files(tmp_path):
+    src = pm_align.Sources("", "", {})
+    out = pm_align.heartbeat_step(tmp_path, src, ["--station", "x-pm"], run=_fake_run([]),
+                                  tmpdir=tmp_path / "stage")
+    assert out == "skipped: the release carries no pm-heartbeat.py"
+
+
+def test_heartbeat_step_reports_failed_with_the_setup_scripts_last_line(tmp_path):
+    calls = []
+    run = _fake_run(calls, rc=1, stdout="step one\nno destination — pass --cohort dasi2|public\n")
+    out = pm_align.heartbeat_step(tmp_path, _src_with_heartbeat(), ["--station", "x-pm"],
+                                  run=run, tmpdir=tmp_path / "stage")
+    assert out == "failed: no destination — pass --cohort dasi2|public"
+
+
 # --- dry run / --apply / --tunnel-step / --status wiring ---
 
 def _src_with_pm_align():
@@ -752,3 +857,136 @@ def test_status_prints_tunnel_result_and_record_or_none_yet(tmp_path, capsys):
     out = capsys.readouterr().out
     assert '"release": "v3.53"' in out
     assert '"outcome": "current"' in out
+
+
+# --- Task 5: --heartbeat / --heartbeat-dest wiring ---
+
+def test_apply_refuses_a_heartbeat_dest_with_no_colon_before_anything_happens(tmp_path, monkeypatch):
+    def _boom(*a, **kw):
+        raise AssertionError("fetch_release must not run")
+    monkeypatch.setattr(pm_align, "fetch_release", _boom)
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    rc = pm_align.main(["--apply", "--heartbeat", "--heartbeat-dest", "noport"], root=tmp_path)
+    assert rc == 2
+    assert not (tmp_path / "etc/sigmond-appliance/host-aligned.json").exists()
+
+
+def test_apply_refuses_a_heartbeat_dest_with_a_non_numeric_port(tmp_path, monkeypatch):
+    def _boom(*a, **kw):
+        raise AssertionError("fetch_release must not run")
+    monkeypatch.setattr(pm_align, "fetch_release", _boom)
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    rc = pm_align.main(["--apply", "--heartbeat", "--heartbeat-dest", "h.example:abc"], root=tmp_path)
+    assert rc == 2
+    assert not (tmp_path / "etc/sigmond-appliance/host-aligned.json").exists()
+
+
+def _hb_setup_run(calls, hb_rc=0, hb_stdout="", hb_stderr="", side_effect=None):
+    def run(argv, **kw):
+        calls.append(list(argv))
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
+        if argv[0].endswith("pm-heartbeat-setup.sh"):
+            if side_effect:
+                side_effect()
+            return subprocess.CompletedProcess(argv, hb_rc, hb_stdout, hb_stderr)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return run
+
+
+def _configured(tmp_path, reporter="AC0G/ND EN16ov 2026-09-02\n"):
+    (tmp_path / "etc/sigmond-appliance").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "etc/sigmond-appliance/.configured").write_text(reporter)
+
+
+def test_main_apply_prints_not_set_up_when_never_configured_and_not_opted_in(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    rc = pm_align.main(["--apply"], root=tmp_path, run=_fake_run([]))
+    assert rc == 0
+    assert "heartbeat: not set up — add --heartbeat to set it up" in capsys.readouterr().out
+
+
+def test_main_apply_sets_up_heartbeat_when_opted_in_and_prints_the_pubkey(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch, src_factory=_src_with_heartbeat)
+    _configured(tmp_path)
+    calls = []
+
+    def _write_pubkey():
+        d = tmp_path / "etc/pm-heartbeat"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "id_ed25519.pub").write_text("ssh-ed25519 AAAAfake pm-heartbeat@AC0G/ND-pm\n")
+
+    rc = pm_align.main(["--apply", "--heartbeat"], root=tmp_path,
+                       run=_hb_setup_run(calls, side_effect=_write_pubkey))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "heartbeat: set up" in out
+    assert "ssh-ed25519 AAAAfake" in out
+    assert "authorize-stations.sh" in out
+    setup_call = next(c for c in calls if c[0].endswith("pm-heartbeat-setup.sh"))
+    assert setup_call[1:] == ["--station", "AC0G/ND-pm", "--vmid", "100",
+                              "--dest-host", "wd30.wsprdaemon.org", "--dest-port", "38222"]
+
+
+def test_main_apply_heartbeat_orders_after_record_and_before_tunnel(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch, src_factory=_src_with_heartbeat)
+    _tunnel_root(tmp_path)
+    _configured(tmp_path)
+    rc = pm_align.main(["--apply", "--heartbeat"], root=tmp_path, run=_hb_setup_run([]))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.index("record:") < out.index("heartbeat:") < out.index("tunnel:")
+
+
+def test_main_apply_removes_the_staged_heartbeat_tmpdir_after_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch, src_factory=_src_with_heartbeat)
+    _configured(tmp_path)
+    staged = tmp_path / "hb-stage"
+
+    def _fake_mkdtemp(prefix=""):
+        return str(staged)
+    monkeypatch.setattr(pm_align.tempfile, "mkdtemp", _fake_mkdtemp)
+    rc = pm_align.main(["--apply", "--heartbeat"], root=tmp_path, run=_hb_setup_run([]))
+    assert rc == 0
+    assert not staged.exists()
+
+
+def test_main_apply_heartbeat_skip_is_informational_and_does_not_affect_rc(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)                    # default _src(): only pm-heartbeat.py present
+    _configured(tmp_path)
+    rc = pm_align.main(["--apply", "--heartbeat"], root=tmp_path, run=_fake_run([]))
+    assert rc == 0
+    assert "heartbeat: skipped: the release carries no pm-heartbeat.service" in capsys.readouterr().out
+
+
+def test_main_apply_heartbeat_failure_warns_sets_rc_1_but_still_runs_the_tunnel(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch, src_factory=_src_with_heartbeat)
+    _tunnel_root(tmp_path)
+    _configured(tmp_path)
+    calls = []
+    rc = pm_align.main(["--apply", "--heartbeat"], root=tmp_path,
+                       run=_hb_setup_run(calls, hb_rc=1, hb_stdout="no destination\n"))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "heartbeat: WARN" in out and "no destination" in out
+    assert any(c[0] == "systemd-run" for c in calls)      # the tunnel step still launched
+
+
+def test_main_dry_run_reports_heartbeat_not_set_up(tmp_path, monkeypatch, capsys):
+    _mock_release(monkeypatch)
+    pm_align.main([], root=tmp_path)
+    assert "heartbeat: not set up — add --heartbeat to set it up" in capsys.readouterr().out
+
+
+def test_main_dry_run_reports_heartbeat_configured(tmp_path, monkeypatch, capsys):
+    _mock_release(monkeypatch)
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text('station = "b4-pm"\n')
+    pm_align.main([], root=tmp_path)
+    assert "heartbeat: configured (re-run on --apply)" in capsys.readouterr().out

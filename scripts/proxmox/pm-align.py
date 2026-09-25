@@ -20,9 +20,12 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -49,6 +52,12 @@ TUNNEL_RESULT = "/var/lib/pm-align/tunnel-result.json"
 BANDS = {"vm-ssh": 35800, "vm-web": 45800, "host-ssh": 50800, "host-ui": 55800,
          "vm-station": 48800, "vm-gmag": 49800}
 LOCAL = {"vm-station": 12224, "vm-gmag": 12225}
+
+HB_CONFIG = "/etc/pm-heartbeat/config.toml"
+HB_DEFAULT = ("wd30.wsprdaemon.org", "38222")      # sigmond-wizard.sh:680, 687
+HB_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
+            "pm-heartbeat-setup.sh")
+HB_REQUIRED_KEYS = ("station", "vmid", "dest_host")   # pm-heartbeat.py's own _REQUIRED_KEYS
 
 
 class PmAlignError(Exception):
@@ -563,6 +572,57 @@ def write_tunnel_result(root: Path, out: dict, now: str) -> Path:
     return p
 
 
+def heartbeat_args(root: Path, *, opt_in: bool, vmid: int, dest: Optional[str]):
+    """Arguments for the release's pm-heartbeat-setup.sh, or None to skip.
+
+    Configured before: re-run with its own station and destination (the
+    setup script is idempotent and keeps its key) -- ``opt_in``/``dest``
+    are then irrelevant, they only steer the never-configured path.  Never
+    configured: only with --heartbeat, as the wizard asks first; the
+    station is the configured reporter plus "-pm" (sigmond-wizard.sh:941)."""
+    cfg = _under(root, HB_CONFIG)
+    if cfg.exists():
+        try:
+            doc = tomllib.loads(cfg.read_text())
+        except tomllib.TOMLDecodeError as exc:
+            raise PmAlignError(f"{HB_CONFIG} is not valid TOML: {exc}")
+        missing = [k for k in HB_REQUIRED_KEYS if doc.get(k) in (None, "")]
+        if missing:
+            raise PmAlignError(f"{HB_CONFIG} is missing required key(s): {', '.join(missing)}")
+        return ["--station", str(doc["station"]), "--vmid", str(doc["vmid"]),
+                "--dest-host", str(doc["dest_host"]), "--dest-port", str(doc.get("dest_port", 22))]
+    if not opt_in:
+        return None
+    try:
+        reporter = _under(root, "/etc/sigmond-appliance/.configured").read_text().split()[0]
+    except (OSError, IndexError):
+        raise PmAlignError("--heartbeat: no configured reporter in "
+                           "/etc/sigmond-appliance/.configured — run sigmond-setup first")
+    host, port = (dest.rsplit(":", 1) if dest else HB_DEFAULT)
+    return ["--station", f"{reporter}-pm", "--vmid", str(vmid),
+            "--dest-host", host, "--dest-port", str(port)]
+
+
+def heartbeat_step(root: Path, src: Sources, argv_tail: list, *, run, tmpdir: Path) -> str:
+    """Stage the release's heartbeat files in ``tmpdir`` (the setup script
+    installs from its own directory) and run its setup.  ``tmpdir`` is the
+    caller's to create and remove; this function only writes into it."""
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    for name in HB_FILES:
+        if name not in src.proxmox:
+            return f"skipped: the release carries no {name}"
+        p = tmpdir / name
+        p.write_bytes(src.proxmox[name])
+        os.chmod(p, 0o755 if name.endswith((".sh", ".py")) else 0o644)
+    existed = _under(root, HB_CONFIG).exists()
+    r = run([str(tmpdir / "pm-heartbeat-setup.sh"), *argv_tail],
+            capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:]
+        return f"failed: {tail[0] if tail else 'exit ' + str(r.returncode)}"
+    return "re-run" if existed else "set up"
+
+
 def _say(msg=""):
     print(msg, flush=True)
 
@@ -607,9 +667,45 @@ def _apply_tunnel(root: Path, run) -> int:
     return rc
 
 
-def _do_apply(changes: list, rel: Release, root: Path, run, now) -> int:
-    """The --apply steps, in order.  Later tasks (heartbeat, VM record push)
-    append further steps here after write_record."""
+def _apply_heartbeat(root: Path, src: Sources, *, run, vmid: int, opt_in: bool,
+                     dest: Optional[str]) -> int:
+    """The heartbeat step of --apply: skip when never configured and not
+    opted in, else stage the release's own setup script into a scratch
+    dir (removed after, success or failure) and run it.  A "failed: ..."
+    result is a WARN and makes --apply's exit code 1; "skipped: ..." (the
+    release carries no heartbeat files) is informational only -- neither
+    stops the tunnel step that follows."""
+    try:
+        hb = heartbeat_args(root, opt_in=opt_in, vmid=vmid, dest=dest)
+    except PmAlignError as exc:
+        _say(f"  heartbeat: REFUSED — {exc}")
+        return 1
+    if hb is None:
+        _say("  heartbeat: not set up — add --heartbeat to set it up")
+        return 0
+    tmpdir = Path(tempfile.mkdtemp(prefix="pm-align-hb-"))
+    try:
+        out = heartbeat_step(root, src, hb, run=run, tmpdir=tmpdir)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    if out.startswith("failed"):
+        _say(f"  heartbeat: WARN — {out}")
+        return 1
+    _say(f"  heartbeat: {out}")
+    if out == "set up":
+        pub = _under(root, "/etc/pm-heartbeat/id_ed25519.pub")
+        try:
+            _say(f"  heartbeat pubkey: {pub.read_text().strip()}")
+        except OSError:
+            pass
+        _say("  authorize it on the fleetboard server (server/heartbeat/authorize-stations.sh)")
+    return 0
+
+
+def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources, vmid: int,
+             heartbeat_opt_in: bool, heartbeat_dest: Optional[str]) -> int:
+    """The --apply steps, in order: files, relays, record, heartbeat, then
+    the tunnel launch LAST (it may drop the operator's ssh session)."""
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     backup_dir = _under(root, f"{BACKUP_BASE}/{stamp}")
     written = apply_files(changes, root, backup_dir)
@@ -620,7 +716,10 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now) -> int:
         _say(f"  wrote {path}")
     _say(f"  backup: {backup_dir}")
     _say(f"  record: {record}")
-    return _apply_tunnel(root, run)
+    hb_rc = _apply_heartbeat(root, src, run=run, vmid=vmid, opt_in=heartbeat_opt_in,
+                             dest=heartbeat_dest)
+    tunnel_rc = _apply_tunnel(root, run)
+    return max(hb_rc, tunnel_rc)
 
 
 def _dry_run_tunnel_note(root: Path) -> tuple:
@@ -635,6 +734,14 @@ def _dry_run_tunnel_note(root: Path) -> tuple:
     if added:
         return f"tunnel: would add {', '.join(added)}", True
     return "tunnel: every channel declared", False
+
+
+def _dry_run_heartbeat_note(root: Path) -> str:
+    """The dry-run heartbeat status line.  Purely a read of whether the
+    host has ever been configured -- opt_in/dest only matter to --apply."""
+    if _under(root, HB_CONFIG).exists():
+        return "heartbeat: configured (re-run on --apply)"
+    return "heartbeat: not set up — add --heartbeat to set it up"
 
 
 def _print_status(root: Path) -> None:
@@ -660,7 +767,18 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
                     help=argparse.SUPPRESS)
     ap.add_argument("--status", action="store_true",
                     help="print the last alignment and tunnel-step results")
+    ap.add_argument("--heartbeat", action="store_true",
+                    help="set up the host heartbeat if this host has never had one")
+    ap.add_argument("--heartbeat-dest", dest="heartbeat_dest", metavar="HOST:PORT",
+                    help="override the heartbeat destination (only used the first time "
+                         "the heartbeat is set up; an existing config keeps its own)")
     args = ap.parse_args(argv)
+
+    if args.heartbeat_dest is not None:
+        host, sep, port = args.heartbeat_dest.rpartition(":")
+        if not sep or not port.isdigit():
+            _say(f"pm-align: --heartbeat-dest must be HOST:PORT, got {args.heartbeat_dest!r}")
+            return 2
 
     if args.status:
         _print_status(root)
@@ -702,9 +820,11 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
         if _geteuid() != 0:
             _say("pm-align --apply: run as root")
             return 2
-        return _do_apply(changes, rel, root, run, now)
+        return _do_apply(changes, rel, root, run, now, src=src, vmid=vmid,
+                         heartbeat_opt_in=args.heartbeat, heartbeat_dest=args.heartbeat_dest)
     tunnel_msg, tunnel_pending = _dry_run_tunnel_note(root)
     _say(f"  {tunnel_msg}")
+    _say(f"  {_dry_run_heartbeat_note(root)}")
     _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
     return 1 if (pending or tunnel_pending) else 0
 
