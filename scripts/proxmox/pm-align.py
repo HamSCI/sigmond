@@ -516,35 +516,49 @@ def _read_rac_marker(root: Path) -> Optional[str]:
         return None
 
 
+_ROLLBACK_ATTEMPTS = 4          # the first attempt, then up to 3 retries
+
+
 def _rollback(path: Path, backup: Path, old_names: list, user: str, run, fetch_status,
              sleep, wait_s: int, reason: str) -> dict:
     """Restore the previous config and restart, tolerating a second failure
-    at each of the three steps so it can never mask ``reason`` (the first
-    failure) and a second exception can never skip the restore that follows
-    it.  Called only once the live file has already been swapped to the new
+    at each step so it can never mask ``reason`` (the first failure) and a
+    second exception can never skip the restore that follows it.  Called
+    only once the live file has already been swapped to the new
     (unconfirmed) config, so every path here ends in either "rolled-back"
-    (old tunnel back and running) or "failed" (needs hands)."""
+    (old tunnel back and running) or "failed" (needs hands).
+
+    frpc's loginFailExit defaults true, so the FIRST login after a restart
+    can itself fail even on a config that is fine -- one restart+wait is
+    not reliable.  If the wait comes back False (not raised), the restart
+    is retried up to _ROLLBACK_ATTEMPTS - 1 more times, each attempt
+    guarded exactly like the first: any raised exception (restart or
+    check) still returns "failed" immediately, never looping past it."""
     try:
         os.replace(backup, path)
     except BaseException as exc:
         return {"outcome": "failed",
                 "detail": f"{reason}; restoring the previous config raised {exc!r} — needs hands"}
-    try:
-        run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
-    except BaseException as exc:
-        return {"outcome": "failed",
-                "detail": f"{reason}; previous config restored but the restart raised {exc!r} — "
-                          "needs hands"}
-    try:
-        up = _wait_running(user, old_names, fetch_status=fetch_status, sleep=sleep, wait_s=wait_s)
-    except BaseException as exc:
-        return {"outcome": "failed",
-                "detail": f"{reason}; previous config restored but checking it raised {exc!r} — "
-                          "needs hands"}
-    if up:
-        return {"outcome": "rolled-back", "detail": f"{reason}; previous tunnel restored and running"}
+    for attempt in range(1, _ROLLBACK_ATTEMPTS + 1):
+        try:
+            run(["systemctl", "restart", RAC_UNIT], capture_output=True, text=True, timeout=60)
+        except BaseException as exc:
+            return {"outcome": "failed",
+                    "detail": f"{reason}; previous config restored but the restart raised {exc!r} — "
+                              "needs hands"}
+        try:
+            up = _wait_running(user, old_names, fetch_status=fetch_status, sleep=sleep,
+                               wait_s=wait_s)
+        except BaseException as exc:
+            return {"outcome": "failed",
+                    "detail": f"{reason}; previous config restored but checking it raised {exc!r} — "
+                              "needs hands"}
+        if up:
+            return {"outcome": "rolled-back",
+                    "detail": f"{reason}; previous tunnel restored and running"}
     return {"outcome": "failed",
-            "detail": f"{reason}; previous tunnel restored but NOT all running — needs hands"}
+            "detail": f"{reason}; previous tunnel restored but NOT all running after "
+                      f"{_ROLLBACK_ATTEMPTS} attempts — needs hands"}
 
 
 def tunnel_apply(root: Path, *, run, fetch_status=_fetch_status, sleep=time.sleep,

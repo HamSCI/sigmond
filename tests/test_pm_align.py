@@ -613,6 +613,78 @@ def test_tunnel_apply_rolls_back_when_fetch_status_raises_after_install(tmp_path
     assert (root / "etc/sigmond/frpc-host.toml").read_text() == TOML4
 
 
+def test_rollback_recovers_on_the_third_retry_attempt(tmp_path):
+    # frpc's loginFailExit defaults true: the first login after a restart
+    # can fail even though the config is fine, so a single rollback
+    # restart+wait isn't guaranteed to bring frpc back. This exercises
+    # _rollback directly.
+    path = tmp_path / "frpc-host.toml"
+    path.write_text("new-config\n")
+    backup = tmp_path / "frpc-host.toml.pm-align-prev"
+    backup.write_text("old-config\n")
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    seen = {"n": 0}
+
+    def fetch_status():
+        seen["n"] += 1
+        if seen["n"] == 3:                 # the 3rd rollback attempt
+            return _api("u", ["A"])
+        return "{}"
+
+    out = pm_align._rollback(path, backup, ["A"], "u", run, fetch_status, lambda s: None, 0,
+                             "reason")
+    assert out["outcome"] == "rolled-back"
+    assert path.read_text() == "old-config\n"
+    assert calls.count(["systemctl", "restart", pm_align.RAC_UNIT]) == 3
+
+
+def test_rollback_gives_up_after_1_plus_3_restarts(tmp_path):
+    path = tmp_path / "frpc-host.toml"
+    path.write_text("new-config\n")
+    backup = tmp_path / "frpc-host.toml.pm-align-prev"
+    backup.write_text("old-config\n")
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    out = pm_align._rollback(path, backup, ["A"], "u", run, lambda: "{}", lambda s: None, 0,
+                             "reason")
+    assert out["outcome"] == "failed"
+    assert "needs hands" in out["detail"]
+    assert path.read_text() == "old-config\n"
+    assert calls.count(["systemctl", "restart", pm_align.RAC_UNIT]) == 4
+
+
+def test_rollback_retry_restart_raising_stops_immediately(tmp_path):
+    """Each retry attempt is guarded like the first -- an exception on a
+    LATER restart attempt must still return "failed" immediately, not loop
+    past it."""
+    path = tmp_path / "frpc-host.toml"
+    path.write_text("new-config\n")
+    backup = tmp_path / "frpc-host.toml.pm-align-prev"
+    backup.write_text("old-config\n")
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(list(argv))
+        if len(calls) == 2:                # the first retry's restart
+            raise subprocess.TimeoutExpired(argv, 60)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    out = pm_align._rollback(path, backup, ["A"], "u", run, lambda: "{}", lambda s: None, 0,
+                             "reason")
+    assert out["outcome"] == "failed"
+    assert "TimeoutExpired" in out["detail"]
+    assert calls.count(["systemctl", "restart", pm_align.RAC_UNIT]) == 2
+
+
 def test_tunnel_apply_rolls_back_when_the_install_rename_itself_raises(tmp_path, monkeypatch):
     """The install (os.replace(cand, path)) must itself be inside the
     guarded region — an exception right there must still produce a result
