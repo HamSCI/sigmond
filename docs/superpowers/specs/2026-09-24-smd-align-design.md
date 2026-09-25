@@ -75,6 +75,25 @@ The host carries no `smd` — only `python3` and a shell — so its step stays a
 - **It never touches Proxmox itself** (apt owns that), **the host's network, or its CPU / IRQ / cache tuning** without an explicit flag.  Those take a station off the air.
 - The host heartbeat reports the host's release, so the board can show a host behind too.
 
+### Amended 2026-09-25 (pm-align plan)
+
+1. **Source of each host file.** The release ships no host-file list. pm-align derives code files from the release's own sources: quoted heredocs (`cat > /abs/path <<'DELIM'`) in `firstboot-v3.sh` and `sigmond-wizard.sh` are literal, identical on every host, and extractable; unquoted heredocs substitute site values and are config, not code. The allowlist below is the refresh set; anything else stays as it is.
+2. **Refresh set** (path — source — mode):
+   - `/usr/local/lib/sigmond-net.sh` — firstboot heredoc `NETLIBEOF` — 0644
+   - `/usr/local/sbin/sigmond-issue` — firstboot `ISSEOF` — 0755
+   - `/etc/systemd/system/sigmond-issue.service` — firstboot `ISVCEOF` — 0644
+   - `/etc/systemd/system/sigmond-issue.timer` — firstboot `ITEOF` — 0644
+   - `/usr/local/sbin/sigmond-setup` — the wizard, VMID-rendered as build-usb-v3.sh:262-263 does — 0755
+   - `/usr/local/bin/sigmond-vm` — wizard heredoc `VMEOF`, VMID-rendered — 0755
+   - `/usr/local/lib/sigmond/vm-port-relay.py` — wizard heredoc `RLEOF` — 0755
+   - the 8 relay units `sigmond-vm-{ssh,web,station,gmag}-relay.socket` / `@.service` — rendered from the wizard's own `SOCKEOF`/`SVCEOF` templates with the host's VMID — 0644
+   - `/usr/local/sbin/pm-align` — itself, from `wizard_commit` when that commit carries it — 0755
+3. **Topology is reported, never changed.** A host whose `/etc/network/interfaces` lacks `vmbr1` has its VM on the LAN (pre-v3.4x). pm-align says so and that v3.53 installs put the VM behind the host; moving it is a reinstall-class change.
+4. **Two tunnel channels are added, never re-registered.** The RAC number comes from `/etc/sigmond-appliance/rac-number`, cross-checked against the `vm-ssh` proxy's remotePort − 35800; disagreement refuses the step. Only the missing `-vm-station` / `-vm-gmag` proxies are appended; existing text stays byte-for-byte.
+5. **Heartbeat is opt-in on a host that never had it.** An existing `/etc/pm-heartbeat/config.toml` is re-run with its own station/dest (the setup script is idempotent). An absent one is set up only with `--heartbeat`, as the wizard asks before it.
+6. **The host's level is recorded, and the VM learns it.** `/etc/sigmond-appliance/host-aligned.json` on the host, copied into the VM at the same path via the guest agent; `smd align` prints it. The install-time `version` file is never rewritten.
+7. **Out of scope:** the fleet board's host column (spec §7.3); pm-heartbeat reporting the release (its wire contract forbids a manifest block — a contract change of its own).
+
 ## 5. Who runs it
 
 - **A DASI site user:** `smd align`, read the plan, then `smd align --apply`, on their own station.
