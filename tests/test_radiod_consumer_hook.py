@@ -250,5 +250,44 @@ class RestartStaleConsumersCmdTests(unittest.TestCase):
         self.assertTrue([c for c in calls if c[:2] == ["systemctl", "restart"]])
 
 
+class ConsumerHookUnitTests(unittest.TestCase):
+    """Task 2: the companion unit and its wiring — static checks only."""
+
+    UNIT = (REPO / "systemd" / "sigmond-radiod-consumers@.service")
+    DROP = (REPO / "systemd" / "radiod-consumers.conf")
+
+    def test_companion_runs_the_verb_after_radiod_and_returns_to_inactive(self):
+        t = self.UNIT.read_text()
+        self.assertIn("After=radiod@%i.service", t)
+        self.assertIn("Type=oneshot", t)
+        self.assertNotIn("RemainAfterExit=yes", t)
+        self.assertIn("ExecStart=/usr/local/bin/smd admin radiod restart-stale-consumers "
+                      "--unit radiod@%i.service", t)
+
+    def test_drop_in_pulls_the_companion_on_every_radiod_start(self):
+        self.assertIn("Wants=sigmond-radiod-consumers@%i.service", self.DROP.read_text())
+
+    def test_install_sh_installs_both(self):
+        t = (REPO / "install.sh").read_text()
+        self.assertIn("systemd/radiod-consumers.conf", t)
+        self.assertIn("radiod@.service.d/45-sigmond-consumers.conf", t)
+        self.assertIn("systemd/sigmond-radiod-consumers@.service", t)
+
+    def test_no_partof_anywhere(self):
+        for p in (self.UNIT, self.DROP):
+            self.assertNotIn("PartOf=", p.read_text())
+
+    def test_drop_in_never_puts_radiods_start_job_behind_the_hook(self):
+        """Binding controller note (Task 1 review): the drop-in must only
+        Wants= the companion — never ExecStartPost, Requires=, or Before=,
+        any of which would make radiod's own start job wait on a oneshot
+        that can block up to 600 s on the lifecycle lock.  smd align holds
+        that lock while it restarts radiod; if radiod's start waited on
+        this hook, the two would deadlock."""
+        t = self.DROP.read_text()
+        for forbidden in ("ExecStartPost", "Requires=", "Before="):
+            self.assertNotIn(forbidden, t)
+
+
 if __name__ == "__main__":
     unittest.main()

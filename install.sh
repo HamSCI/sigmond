@@ -912,8 +912,14 @@ if compgen -G "/etc/systemd/system/radiod@*.service" >/dev/null 2>&1 || \
     # hook, which silently no-oped on real restarts (B4 2026-08-30).
     $SUDO install -m 0644 "$REPO_DIR/systemd/radiod-park.conf" \
         /etc/systemd/system/radiod@.service.d/40-sigmond-park.conf
+    # Consumer-restart companion: on every radiod start, restart the RTP
+    # consumers that predate it (they hold the old radiod's anchor).
+    $SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-radiod-consumers@.service" \
+        /etc/systemd/system/sigmond-radiod-consumers@.service
+    $SUDO install -m 0644 "$REPO_DIR/systemd/radiod-consumers.conf" \
+        /etc/systemd/system/radiod@.service.d/45-sigmond-consumers.conf
     $SUDO systemctl daemon-reload
-    ok "radiod drop-in installed (thread-parker companion wired)"
+    ok "radiod drop-in installed (thread-parker + consumer-restart companions wired)"
 fi
 
 # Consumer drop-ins, generated from the declared list.  Nothing is guessed: a

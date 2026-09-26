@@ -1,0 +1,24 @@
+[Unit]
+Description=Restart radiod %i's consumers that predate its current start
+Documentation=file:/opt/git/sigmond/sigmond/docs/superpowers/plans/2026-09-26-radiod-consumer-restart-hook.md
+# Companion to radiod@%i — pulled in by a Wants= drop-in on the radiod
+# template, so it runs on EVERY radiod start, systemd's own crash-restarts
+# included, in a normal runtime context (the pattern sigmond-radiod-park@
+# proved; an ExecStartPost hook silently no-oped on real restarts).
+#
+# Why: a recorder left running across a radiod restart keeps the old
+# radiod's RTP->UTC anchor.  ka9q-python's recovery ladder brings its
+# channels back; it does not bring its timing back.  AC0G-ND 2026-09-25/26:
+# psk-recorder decoded 40/40 slots and 0 spots for a day after each crash.
+# The verb waits for radiod to serve, then restarts only consumers older
+# than this radiod — at boot that is none.  It never stops anything when
+# radiod stops (that was the old PartOf directive, removed 2026-08-31 for
+# good reasons).
+After=radiod@%i.service
+
+[Service]
+Type=oneshot
+# RemainAfterExit deliberately OFF: the unit must return to inactive so the
+# next radiod start triggers it again.
+ExecStart=/usr/local/bin/smd admin radiod restart-stale-consumers --unit radiod@%i.service
+TimeoutStartSec=1200
