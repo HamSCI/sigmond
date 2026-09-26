@@ -20801,9 +20801,15 @@ def _wait_lifecycle_lock(reason, *, deadline_s=900, poll_s=5,
 
 _RADIOD_CONSUMERS_BASE = '/opt/git/sigmond'
 _RADIOD_CONSUMERS_MAX_PASSES = 3
+#: R2: the lifecycle-lock wait is a single budget for the WHOLE run, shared
+#: by every pass — not reset each pass.  3 independent 900s waits could
+#: together blow past the unit's TimeoutStartSec; one shared 900s budget
+#: cannot.
+_RADIOD_CONSUMERS_LOCK_BUDGET_S = 900
 
 
-def _radiod_restart_pass(unit, args, catalog, *, run, sleep) -> tuple:
+def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotonic,
+                         lock_deadline_at) -> tuple:
     """One pass: wait for radiod to serve, take the lifecycle lock, restart
     what is stale. Returns ``(rc, radiod_start)`` — ``radiod_start`` is the
     monotonic instant this pass restarted against, or None when the pass
@@ -20811,7 +20817,13 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep) -> tuple:
     out): the caller (final review / I-2) uses that to tell "this pass ran
     to completion" from "this pass never got that far", and re-reads radiod's
     monotonic start afterwards to see whether radiod restarted again while
-    this pass ran."""
+    this pass ran.
+
+    ``lock_deadline_at``: the absolute instant (on ``clock``) the shared,
+    run-wide lock budget runs out (final review / R2) — the SAME instant is
+    passed to every pass of one run, so time already spent waiting for the
+    lock in an earlier pass is not given back.  A pass that finds the
+    budget already spent returns 3 without even trying the lock."""
 
     def _radiod_ready() -> bool:
         r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, str(args.wait_ready)],
@@ -20823,8 +20835,17 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep) -> tuple:
         _info(f'radiod-consumers: {unit} not serving — nothing restarted')
         return 2, None
 
-    ctx = contextlib.nullcontext() if args.dry_run else \
-        _wait_lifecycle_lock('radiod consumer restart', sleep=sleep)
+    if args.dry_run:
+        ctx = contextlib.nullcontext()
+    else:
+        remaining = lock_deadline_at - clock()
+        if remaining <= 0:
+            _err(f'radiod-consumers: lifecycle lock budget '
+                 f'({_RADIOD_CONSUMERS_LOCK_BUDGET_S}s) already spent by an '
+                 'earlier pass this run — nothing restarted')
+            return 3, None
+        ctx = _wait_lifecycle_lock('radiod consumer restart', deadline_s=remaining,
+                                   sleep=sleep, clock=clock)
     try:
         with ctx:
             # radiod can crash-restart AGAIN while we waited (up to 900 s)
@@ -20881,7 +20902,7 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep) -> tuple:
 
 
 def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
-                                       sleep=time.sleep) -> int:
+                                       sleep=time.sleep, clock=time.monotonic) -> int:
     """`smd admin radiod restart-stale-consumers` — restart the radiod
     consumers still running from before radiod's current start.
 
@@ -20905,6 +20926,30 @@ def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
     never fires on its own.  So after a pass, this re-reads radiod's
     monotonic start; a change means running again from the readiness
     check, up to `_RADIOD_CONSUMERS_MAX_PASSES` passes total.
+
+    final review / R1: the post-pass recheck reading ``None`` (radiod not
+    active right now — inside its own start job, in ExecStartPost, or
+    crashed again mid-pass) counts as CHANGED, exactly like a different
+    monotonic value — never as "unchanged, done".  That radiod start, whose
+    own `Wants=` job merged into this still-running invocation, would
+    otherwise never be handled.  The retry pass's own readiness wait then
+    decides what it can do (radiod that never comes back up → that pass
+    itself returns 2).
+
+    final review / R2: the lifecycle lock's 900s wait
+    (`_RADIOD_CONSUMERS_LOCK_BUDGET_S`) is drawn from ONE budget for the
+    whole run, shared across every pass — computed once, here, as an
+    absolute deadline on ``clock`` and handed unchanged to each pass.  A
+    pass that finds the budget already spent by an earlier pass returns 3
+    without restarting.
+
+    final review / R3: the run returns the WORST rc seen across all
+    passes, by precedence 4 > 3 > 2 > 1 > 0 (catalog-load failure worst,
+    then a lock timeout, then radiod not ready / unit unknown, then a
+    failed restart, then a clean pass) — the exit codes are already
+    numbered in ascending severity, so this is exactly `max()` over every
+    pass's rc.  A failed restart in an early pass is never hidden by a
+    later, clean pass.
     """
     unit = args.unit
     try:
@@ -20913,23 +20958,26 @@ def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
         _info(f'radiod-consumers: catalog did not load ({exc}) — nothing restarted')
         return 4
 
-    rc = 1
+    lock_deadline_at = clock() + _RADIOD_CONSUMERS_LOCK_BUDGET_S
+    worst_rc = 0
     for attempt in range(1, _RADIOD_CONSUMERS_MAX_PASSES + 1):
         _info(f'radiod-consumers: pass {attempt}/{_RADIOD_CONSUMERS_MAX_PASSES}')
-        rc, radiod_start = _radiod_restart_pass(unit, args, catalog, run=run, sleep=sleep)
+        rc, radiod_start = _radiod_restart_pass(unit, args, catalog, run=run, sleep=sleep,
+                                                clock=clock, lock_deadline_at=lock_deadline_at)
+        worst_rc = max(worst_rc, rc)
         if radiod_start is None:
-            return rc
+            return worst_rc
         new_start = _radiod_unit_started_at_monotonic(unit, run=run)
-        if new_start is None or new_start == radiod_start:
-            return rc
+        if new_start == radiod_start:
+            return worst_rc
         if attempt < _RADIOD_CONSUMERS_MAX_PASSES:
             _info(f'radiod-consumers: {unit} restarted again during this run '
                   '— retrying from the readiness check')
             continue
         _info(f'radiod-consumers: {unit} kept restarting through '
               f'{_RADIOD_CONSUMERS_MAX_PASSES} passes — giving up')
-        return 1
-    return rc
+        return max(worst_rc, 1)
+    return worst_rc
 
 
 def cmd_config_catalog_prune(args) -> int:

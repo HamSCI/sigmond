@@ -352,7 +352,7 @@ class RestartStaleConsumersCmdTests(unittest.TestCase):
     def test_lock_timeout_restarts_nothing(self):
         """Fix round 1 / finding 2c."""
         @contextlib.contextmanager
-        def timeout_lock(reason, sleep=None):
+        def timeout_lock(reason, sleep=None, deadline_s=None, clock=None):
             raise TimeoutError("still held")
             yield
 
@@ -486,6 +486,95 @@ class RadiodConsumerRetryPassesTests(unittest.TestCase):
         self.assertIn("pass 3/3", out)
         self.assertIn("giving up", out)
 
+    def test_radiod_not_active_at_the_recheck_counts_as_changed(self):
+        """R1: ``None`` at the post-pass recheck -- radiod inside its own
+        start job, in ExecStartPost, or crashed again mid-pass -- must not
+        read as "unchanged, done".  It means CHANGED, exactly like a
+        different monotonic value, and earns its own pass (whose own
+        readiness wait decides what that pass can do)."""
+        rc, out = self._cmd([100.0, None, 150.0, 150.0])
+        self.assertEqual(rc, 0)
+        self.assertIn("pass 2/3", out)
+        self.assertNotIn("pass 3/3", out)
+
+
+class RadiodConsumerLockBudgetTests(unittest.TestCase):
+    """R2: the 900s lifecycle-lock wait is a single RUN-WIDE budget shared
+    by every pass, not reset each pass -- otherwise 3 passes could each
+    wait up to 900s and blow well past the unit's TimeoutStartSec."""
+
+    def test_pass_2_finds_the_run_wide_budget_spent_and_times_out(self):
+        t = [0.0]
+        busy = [True]
+        flipped = [False]
+
+        def sleep(s):
+            t[0] += s
+            if not flipped[0] and t[0] >= 800.0:
+                busy[0] = False
+                flipped[0] = True
+
+        @contextlib.contextmanager
+        def lock(reason=None):
+            if busy[0]:
+                raise SystemExit("busy")
+            yield
+            # released -- another smd operation grabs it right away, so
+            # pass 2 finds it busy again with only the leftover budget.
+            busy[0] = True
+
+        run, calls = _fake_run()
+        st = {"radiod_consumers": set()}
+        args = argparse.Namespace(unit=RADIOD_UNIT, dry_run=False, wait_ready=90)
+        with mock.patch.object(smd, "_align_services", return_value=SERVICES), \
+             mock.patch.object(smd, "_align_staleness", return_value=st), \
+             mock.patch.object(smd, "load_catalog", return_value={}), \
+             mock.patch.object(smd, "lifecycle_lock", lock), \
+             mock.patch.object(smd, "_radiod_unit_started_at_monotonic",
+                              side_effect=[100.0, 150.0]), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = smd.cmd_radiod_restart_stale_consumers(
+                args, run=run, sleep=sleep, clock=lambda: t[0])
+        text = out.getvalue()
+        self.assertEqual(rc, 3)
+        self.assertIn("pass 1/3", text)
+        self.assertIn("pass 2/3", text)
+        self.assertNotIn("pass 3/3", text)
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "restart"]])
+        # The discriminating assertion: pass 2 must time out at the
+        # SHARED deadline (~900s of simulated time total), not get a
+        # fresh 900s budget of its own (~1700s) -- a per-pass reset would
+        # still eventually time out (the lock is busy forever), so rc==3
+        # alone does not prove the budget is run-wide; the elapsed clock
+        # does.
+        self.assertLess(t[0], 950.0)
+
+
+class RadiodConsumerWorstRcTests(unittest.TestCase):
+    """R3: the run returns the WORST rc across all passes, by precedence
+    4 > 3 > 2 > 1 > 0 -- a failed restart in an early pass must not be
+    erased by a later, clean pass."""
+
+    def test_pass1_failed_restart_survives_a_later_clean_pass(self):
+        run, calls = _fake_run(restart_rc=1)
+        staleness_calls = [
+            {"radiod_consumers": {"psk-recorder"}},
+            {"radiod_consumers": set()},
+        ]
+        args = argparse.Namespace(unit=RADIOD_UNIT, dry_run=False, wait_ready=90)
+        with mock.patch.object(smd, "_align_services", return_value=SERVICES), \
+             mock.patch.object(smd, "_align_staleness", side_effect=staleness_calls), \
+             mock.patch.object(smd, "load_catalog", return_value={}), \
+             mock.patch.object(smd, "lifecycle_lock",
+                              lambda reason=None: contextlib.nullcontext()), \
+             mock.patch.object(smd, "_radiod_unit_started_at_monotonic",
+                              side_effect=[100.0, 150.0, 150.0, 150.0]), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = smd.cmd_radiod_restart_stale_consumers(args, run=run, sleep=lambda s: None)
+        restarts = [c for c in calls if c[:2] == ["systemctl", "restart"]]
+        self.assertEqual(restarts, [["systemctl", "restart", "psk.service"]])
+        self.assertEqual(rc, 1)
+
 
 class ConsumerHookUnitTests(unittest.TestCase):
     """Task 2: the companion unit and its wiring — static checks only."""
@@ -532,10 +621,12 @@ class ConsumerHookUnitTests(unittest.TestCase):
         self.assertIn("Environment=PYTHONUNBUFFERED=1", self.UNIT.read_text())
 
     def test_timeout_covers_three_passes_plus_the_lock_wait(self):
-        """M-4: 3 passes x (90s readiness wait + restart time) + 900s lock
-        wait must fit inside TimeoutStartSec."""
+        """R2/M-4: 3 passes x 2 readiness checks x (90s wait_ready + 30s
+        buffer) + one RUN-WIDE 900s lock budget (shared across all passes,
+        not reset each pass) + 3 passes' restart allowance (600s each) =
+        3420s worst case; TimeoutStartSec must cover it."""
         t = self.UNIT.read_text()
-        self.assertIn("TimeoutStartSec=1500", t)
+        self.assertIn("TimeoutStartSec=3600", t)
 
 
 if __name__ == "__main__":

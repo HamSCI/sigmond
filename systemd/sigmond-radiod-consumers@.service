@@ -11,9 +11,12 @@ Documentation=file:/opt/git/sigmond/sigmond/docs/superpowers/plans/2026-09-26-ra
 # channels back; it does not bring its timing back.  AC0G-ND 2026-09-25/26:
 # psk-recorder decoded 40/40 slots and 0 spots for a day after each crash.
 # The verb waits for radiod to serve, then restarts only consumers older
-# than this radiod — at boot that is none.  It never stops anything when
-# radiod stops (that was the old PartOf directive, removed 2026-08-31 for
-# good reasons).
+# than this radiod (monotonic clock, plus sigmond-radiod-ready's settle
+# allowance) -- "at boot that is none" holds ONLY where a consumer's own
+# drop-in declares After=radiod (+ an ExecStartPre gate); AC0G-ND has no
+# such drop-ins, so even a boot can leave a consumer racing radiod's settle
+# window.  It never stops anything when radiod stops (that was the old
+# PartOf directive, removed 2026-08-31 for good reasons).
 After=radiod@%i.service
 
 [Service]
@@ -26,6 +29,9 @@ Type=oneshot
 # exited (M-1).
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/local/bin/smd admin radiod restart-stale-consumers --unit radiod@%i.service
-# 3 passes x (90s readiness wait + restart time) + up to 900s waiting on the
-# lifecycle lock (final review / I-2, M-4) — 1200s was sized for one pass.
-TimeoutStartSec=1500
+# Worst case (final review / R2, M-4): 3 passes x 2 readiness checks per
+# pass x (90s wait_ready + 30s subprocess buffer) = 720s, + ONE run-wide
+# 900s lifecycle-lock budget shared across all passes (not 900s EACH), +
+# a 600s restart allowance per pass x 3 = 1800s.  720 + 900 + 1800 = 3420s;
+# rounded up to 3600s.
+TimeoutStartSec=3600
