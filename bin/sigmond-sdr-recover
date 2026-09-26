@@ -42,6 +42,8 @@ Explicit topology.toml values still win over discovery.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import fnmatch
 import json
 import os
@@ -52,6 +54,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                "..", "lib"))
+from sigmond.paths import LIFECYCLE_LOCK  # noqa: E402
 
 # The card blips off the bus for a second or two whenever it re-enumerates —
 # including during its own recovery.  Cycling inside that window would
@@ -427,6 +433,50 @@ def wait_for_device(timeout_s: int = 90) -> bool:
     return False
 
 
+# final review / I-3: `smd admin radiod restart-stale-consumers` runs on
+# every radiod start and restarts the same consumers this helper does, under
+# smd's own lifecycle lock.  Without sharing that lock the two can race and
+# double-restart a consumer.  Retry, never fail: a vanished RX-888 must still
+# be recovered even if smd happens to be mid-operation.
+LIFECYCLE_LOCK_WAIT_S = 600
+LIFECYCLE_LOCK_POLL_S = 5
+
+
+@contextlib.contextmanager
+def _with_lifecycle_lock():
+    """Hold the same lifecycle lock `smd` uses (LIFECYCLE_LOCK, LOCK_EX) for
+    the duration of the `with` block. Waits up to LIFECYCLE_LOCK_WAIT_S,
+    polling every LIFECYCLE_LOCK_POLL_S. Still held at the deadline: log
+    loudly and proceed WITHOUT it — a vanished card must still be recovered
+    even if smd is mid-operation."""
+    try:
+        LIFECYCLE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(LIFECYCLE_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError as exc:
+        _log(f"could not open the lifecycle lock ({exc}) — proceeding without it")
+        yield
+        return
+    deadline = time.monotonic() + LIFECYCLE_LOCK_WAIT_S
+    held = False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    _log(f"lifecycle lock still held after {LIFECYCLE_LOCK_WAIT_S}s — "
+                         "proceeding WITHOUT it (a vanished card must still be recovered)")
+                    break
+                time.sleep(LIFECYCLE_LOCK_POLL_S)
+        yield
+    finally:
+        if held:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def restart_station(radiod_unit: str, consumers: Sequence[str],
                     ready_timeout_s: int = 90, consumer_timeout_s: int = 240) -> bool:
     """radiod first, then its consumers — the only order that works."""
@@ -663,7 +713,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "`smd bringup` / the wizard now that the card is present")
         save_state(state)
         return 0
-    ok = restart_station(radiod_unit, consumers)
+    with _with_lifecycle_lock():
+        ok = restart_station(radiod_unit, consumers)
     _log("station restored" if ok else "station NOT fully restored")
     return 0 if ok else 1
 

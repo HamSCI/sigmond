@@ -268,3 +268,62 @@ def test_bootstrap_uses_exact_when_plain_is_refused(monkeypatch):
     got = mod.bootstrap_locations()
     assert ("4-1", "4", True) in got
     assert ("2-1", "4", False) in got
+
+
+# ─── final review / I-3: restart_station must run under the lifecycle lock ──
+# `smd admin radiod restart-stale-consumers` and this helper's restart_station
+# both restart radiod's consumers; without a shared lock they can race and
+# double-restart the same unit.  sdr-recover holds smd's own lifecycle lock
+# (the same file sigmond.lifecycle.LIFECYCLE_LOCK names) around the call —
+# waiting, never failing: a vanished card must still be recovered even if smd
+# is mid-operation, so a lock that stays busy through the deadline is logged
+# loudly and the recovery proceeds without it.
+
+def test_lifecycle_lock_is_held_around_restart_station(monkeypatch, tmp_path):
+    mod = _load()
+    monkeypatch.setattr(mod, "LIFECYCLE_LOCK", tmp_path / "lifecycle.lock")
+    events = []
+    real_flock = mod.fcntl.flock
+
+    def spy_flock(fd, op):
+        if op & mod.fcntl.LOCK_UN:
+            events.append("unlocked")
+        elif op & mod.fcntl.LOCK_EX:
+            events.append("locked")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(mod.fcntl, "flock", spy_flock)
+    monkeypatch.setattr(mod, "_run", lambda cmd, timeout=60: _CP(returncode=0))
+
+    with mod._with_lifecycle_lock():
+        events.append("restart_station")
+        ok = mod.restart_station("radiod@x.service", [])
+
+    assert ok
+    assert events == ["locked", "restart_station", "unlocked"]
+
+
+def test_proceeds_without_the_lock_if_still_busy_at_the_deadline(monkeypatch, tmp_path, capsys):
+    import fcntl as _fcntl
+    import os as _os
+
+    mod = _load()
+    lock_path = tmp_path / "lifecycle.lock"
+    monkeypatch.setattr(mod, "LIFECYCLE_LOCK", lock_path)
+    monkeypatch.setattr(mod, "LIFECYCLE_LOCK_WAIT_S", 0)
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    other_fd = _os.open(str(lock_path), _os.O_CREAT | _os.O_RDWR, 0o644)
+    _fcntl.flock(other_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    try:
+        entered = False
+        with mod._with_lifecycle_lock():
+            entered = True
+        assert entered
+    finally:
+        _fcntl.flock(other_fd, _fcntl.LOCK_UN)
+        _os.close(other_fd)
+
+    out = capsys.readouterr().out
+    assert "proceeding" in out.lower()
