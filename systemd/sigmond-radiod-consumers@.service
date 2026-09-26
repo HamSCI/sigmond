@@ -20,5 +20,12 @@ After=radiod@%i.service
 Type=oneshot
 # RemainAfterExit deliberately OFF: the unit must return to inactive so the
 # next radiod start triggers it again.
+# PYTHONUNBUFFERED: this is a oneshot that can run for minutes (up to 3
+# passes, each waiting on radiod's readiness and a possibly-busy lifecycle
+# lock) — block-buffered stdout meant nothing reached the journal until it
+# exited (M-1).
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/local/bin/smd admin radiod restart-stale-consumers --unit radiod@%i.service
-TimeoutStartSec=1200
+# 3 passes x (90s readiness wait + restart time) + up to 900s waiting on the
+# lifecycle lock (final review / I-2, M-4) — 1200s was sized for one pass.
+TimeoutStartSec=1500

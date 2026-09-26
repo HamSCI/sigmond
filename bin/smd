@@ -126,6 +126,7 @@ try:
     from sigmond.catalog           import load_catalog, CatalogEntry, get_entry, resolve_name, find_client_binary
     from sigmond.installer         import install_client as _do_install_client, clone_repo as _clone_repo, git_head_ref as _git_head_ref
     from sigmond.paths             import SIGMOND_VENV
+    from sigmond.radiod_ready       import READY_SETTLE_S
     from sigmond.log_cmd           import (
         follow_journal, follow_files, flatten_log_paths,
         get_inventory_log_paths, set_log_level, send_sighup,
@@ -20715,46 +20716,168 @@ def cmd_radiod_migrate(args) -> int:
 
 def _radiod_unit_started_at(unit, *, run=subprocess.run) -> Optional[float]:
     """radiod ``unit``'s current ActiveEnterTimestamp (unix s), or None when
-    it is not active — the moment consumers must be younger than.
+    it is not active.
 
     Delegates to `_align_units_started_at` (`_align_staleness`'s own
     started_at reader) instead of re-parsing `systemctl show` itself: same
     "earliest ActiveEnterTimestamp among the active .service units" rule,
-    applied to the single radiod unit named here (Fix round 1 / finding 3)."""
+    applied to the single radiod unit named here (Fix round 1 / finding 3).
+    Wall-clock; kept for callers wanting a human timestamp. The hook itself
+    compares on the MONOTONIC clock (`_radiod_unit_started_at_monotonic`,
+    final review / I-1) — these stations step their host clock, and a
+    wall-clock comparison would misjudge staleness across a step."""
     return _align_units_started_at([unit], run=run)
+
+
+def _radiod_unit_started_at_monotonic(unit, *, run=subprocess.run) -> Optional[float]:
+    """radiod ``unit``'s current ActiveEnterTimestampMonotonic, in seconds
+    since boot — the moment consumers must be younger than, plus the settle
+    allowance (final review / I-1). Delegates to
+    `_align_units_started_at(..., monotonic=True)`."""
+    return _align_units_started_at([unit], run=run, monotonic=True)
 
 
 def _radiod_stale_consumers(radiod_start, staleness) -> list:
     """The radiod consumers still running from before ``radiod_start`` — they
     hold the previous radiod's RTP→UTC anchor (AC0G-ND 2026-09-25/26: psk
-    decoded 40/40 slots, 0 spots, for a day after each radiod crash)."""
+    decoded 40/40 slots, 0 spots, for a day after each radiod crash).
+
+    A pure comparison: ``radiod_start`` and ``staleness['started_at']`` may
+    be wall-clock or monotonic seconds, as long as both are the same clock —
+    the hook itself always passes monotonic seconds plus the settle
+    allowance (final review / I-1), read fresh per component rather than
+    relying on `_align_staleness`'s own (wall-clock) started_at."""
     started = staleness.get('started_at', {})
     return sorted(c for c in staleness.get('radiod_consumers', ())
                   if started.get(c) is not None and started[c] < radiod_start)
 
 
+def _radiod_consumer_verdict(component, mono_start, radiod_start, threshold) -> str:
+    """One line per consumer considered, printed on every run whether or not
+    anything restarts (final review / I-4): its label, its monotonic start
+    relative to radiod's, and the verdict."""
+    label = _align_label(component)
+    if mono_start is None:
+        return f'  {label}: not running'
+    delta = mono_start - radiod_start
+    verdict = 'stale' if mono_start < threshold else 'fresh'
+    return f'  {label}: {delta:+.1f}s — {verdict}'
+
+
 @contextlib.contextmanager
-def _wait_lifecycle_lock(reason, *, deadline_s=600, poll_s=5,
-                         sleep=time.sleep, clock=time.monotonic):
+def _wait_lifecycle_lock(reason, *, deadline_s=900, poll_s=5,
+                         sleep=time.sleep, clock=time.monotonic, say=_info):
     """lifecycle_lock, waited for: a radiod restart made by another smd
     operation (align, restart) holds the lock while that operation restarts
     the consumers itself — wait, then re-read staleness, rather than fail or
-    restart them a second time."""
+    restart them a second time.
+
+    M-2: prints once when the lock is first found busy, and once when it is
+    acquired after having waited — up to 900 s (M-4: the verb's default,
+    covers 3 passes' readiness waits plus the restarts themselves) of
+    silence looks exactly like a hang from the unit's own log."""
     end = clock() + deadline_s
+    waited = False
     while True:
         try:
             cm = lifecycle_lock(reason)
             cm.__enter__()
         except SystemExit:
+            if not waited:
+                say('waiting for the lifecycle lock (held by another smd operation)')
+                waited = True
             if clock() >= end:
                 raise TimeoutError(f'lifecycle lock still held after {deadline_s} s')
             sleep(poll_s)
             continue
+        if waited:
+            say('lifecycle lock acquired')
         try:
             yield
         finally:
             cm.__exit__(None, None, None)
         return
+
+
+_RADIOD_CONSUMERS_BASE = '/opt/git/sigmond'
+_RADIOD_CONSUMERS_MAX_PASSES = 3
+
+
+def _radiod_restart_pass(unit, args, catalog, *, run, sleep) -> tuple:
+    """One pass: wait for radiod to serve, take the lifecycle lock, restart
+    what is stale. Returns ``(rc, radiod_start)`` — ``radiod_start`` is the
+    monotonic instant this pass restarted against, or None when the pass
+    ended before reading it (radiod not ready, not active, or the lock timed
+    out): the caller (final review / I-2) uses that to tell "this pass ran
+    to completion" from "this pass never got that far", and re-reads radiod's
+    monotonic start afterwards to see whether radiod restarted again while
+    this pass ran."""
+
+    def _radiod_ready() -> bool:
+        r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, str(args.wait_ready)],
+                       run=run, timeout=args.wait_ready + 30,
+                       action='sigmond-radiod-ready')
+        return r.returncode == 0
+
+    if not _radiod_ready():
+        _info(f'radiod-consumers: {unit} not serving — nothing restarted')
+        return 2, None
+
+    ctx = contextlib.nullcontext() if args.dry_run else \
+        _wait_lifecycle_lock('radiod consumer restart', sleep=sleep)
+    try:
+        with ctx:
+            # radiod can crash-restart AGAIN while we waited (up to 900 s)
+            # for the lock — ND's RX888 stalls crash it repeatedly.  Confirm
+            # it is still serving before trusting anything read under the
+            # lock (Fix round 1 / finding 1): otherwise this run would read
+            # a newer radiod's start time nobody confirmed as ready, and the
+            # hook invocation for THAT start may fold into this still-running
+            # job and never fire on its own.
+            if not args.dry_run and not _radiod_ready():
+                _info(f'radiod-consumers: {unit} not serving — nothing restarted')
+                return 2, None
+            radiod_start = _radiod_unit_started_at_monotonic(unit, run=run)
+            if radiod_start is None:
+                _info(f'radiod-consumers: {unit} not active — nothing restarted')
+                return 2, None
+            services = _align_services()
+            st = _align_staleness(_RADIOD_CONSUMERS_BASE, services, catalog=catalog, run=run)
+            consumers = st.get('radiod_consumers', set())
+            threshold = radiod_start + READY_SETTLE_S
+            # final review / I-1: read every consumer's OWN monotonic start
+            # here, fresh, rather than trust _align_staleness's wall-clock
+            # started_at — only WHICH services count as consumers comes from
+            # staleness.
+            mono_started = {c: _align_units_started_at(services.get(c, []), run=run,
+                                                        monotonic=True)
+                            for c in consumers}
+            # final review / I-4: every consumer considered, printed on
+            # every run, dry or not.
+            for c in sorted(consumers):
+                _info(_radiod_consumer_verdict(c, mono_started[c], radiod_start, threshold))
+            stale = _radiod_stale_consumers(
+                threshold, {'radiod_consumers': consumers, 'started_at': mono_started})
+            if not stale:
+                _info(f"radiod-consumers: nothing older than {unit}'s start "
+                      '— nothing to do')
+                return 0, radiod_start
+            for comp in stale:
+                _info(f'  {comp}: started before {unit} — restarting')
+            if args.dry_run:
+                _info('  (dry run — nothing restarted)')
+                return 0, radiod_start
+            steps = _align_restart(False, stale, services, run=run, say=print)
+            for step in steps:
+                line = f'  {_align_label(step.component)}: {step.outcome}'
+                if step.detail:
+                    line += f' — {step.detail}'
+                print(line)
+            failed = any(step.outcome == 'failed' for step in steps)
+            return (1 if failed else 0), radiod_start
+    except TimeoutError as exc:
+        _err(f'radiod-consumers: {exc}')
+        return 3, None
 
 
 def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
@@ -20767,59 +20890,46 @@ def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
     stalls make radiod crash and systemd restart it; recorders that keep
     running hold the old radiod's RTP→UTC anchor and decode nothing until
     they too are restarted. radiod itself is never restarted by this verb.
+
+    final review / I-4: the catalog is loaded HERE, once, rather than left
+    to `_align_staleness`'s own best-effort fallback — that fallback treats
+    a load failure as "every running service is a consumer" (safe for
+    align_live, which only ever restarts what it already found stale by
+    other means, but not safe for an unattended hook that would then
+    restart sigmond-rac, gpsdo-monitor, station-web, ...).  A catalog that
+    does not load here restarts nothing at all.
+
+    final review / I-2: radiod can restart again WHILE this run is
+    restarting its own consumers (ND's RX888 stalls repeat), and that
+    restart's own hook invocation folds into this still-running job and
+    never fires on its own.  So after a pass, this re-reads radiod's
+    monotonic start; a change means running again from the readiness
+    check, up to `_RADIOD_CONSUMERS_MAX_PASSES` passes total.
     """
     unit = args.unit
-
-    def _radiod_ready() -> bool:
-        r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, str(args.wait_ready)],
-                       run=run, timeout=args.wait_ready + 30,
-                       action='sigmond-radiod-ready')
-        return r.returncode == 0
-
-    if not _radiod_ready():
-        _info(f'radiod-consumers: {unit} not serving — nothing restarted')
-        return 2
-
-    ctx = contextlib.nullcontext() if args.dry_run else \
-        _wait_lifecycle_lock('radiod consumer restart', sleep=sleep)
     try:
-        with ctx:
-            # radiod can crash-restart AGAIN while we waited (up to 600 s)
-            # for the lock — ND's RX888 stalls crash it repeatedly.  Confirm
-            # it is still serving before trusting anything read under the
-            # lock (Fix round 1 / finding 1): otherwise this run would read
-            # a newer radiod's start time nobody confirmed as ready, and the
-            # hook invocation for THAT start may fold into this still-running
-            # job and never fire on its own.
-            if not _radiod_ready():
-                _info(f'radiod-consumers: {unit} not serving — nothing restarted')
-                return 2
-            radiod_start = _radiod_unit_started_at(unit, run=run)
-            if radiod_start is None:
-                _info(f'radiod-consumers: {unit} not active — nothing restarted')
-                return 2
-            services = _align_services()
-            st = _align_staleness('/opt/git/sigmond', services, run=run)
-            stale = _radiod_stale_consumers(radiod_start, st)
-            if not stale:
-                _info(f"radiod-consumers: nothing older than {unit}'s start "
-                      '— nothing to do')
-                return 0
-            for comp in stale:
-                _info(f'  {comp}: started before {unit} — restarting')
-            if args.dry_run:
-                _info('  (dry run — nothing restarted)')
-                return 0
-            steps = _align_restart(False, stale, services, run=run, say=print)
-            for step in steps:
-                line = f'  {_align_label(step.component)}: {step.outcome}'
-                if step.detail:
-                    line += f' — {step.detail}'
-                print(line)
-            return 1 if any(step.outcome == 'failed' for step in steps) else 0
-    except TimeoutError as exc:
-        _err(f'radiod-consumers: {exc}')
-        return 3
+        catalog = load_catalog()
+    except Exception as exc:
+        _info(f'radiod-consumers: catalog did not load ({exc}) — nothing restarted')
+        return 4
+
+    rc = 1
+    for attempt in range(1, _RADIOD_CONSUMERS_MAX_PASSES + 1):
+        _info(f'radiod-consumers: pass {attempt}/{_RADIOD_CONSUMERS_MAX_PASSES}')
+        rc, radiod_start = _radiod_restart_pass(unit, args, catalog, run=run, sleep=sleep)
+        if radiod_start is None:
+            return rc
+        new_start = _radiod_unit_started_at_monotonic(unit, run=run)
+        if new_start is None or new_start == radiod_start:
+            return rc
+        if attempt < _RADIOD_CONSUMERS_MAX_PASSES:
+            _info(f'radiod-consumers: {unit} restarted again during this run '
+                  '— retrying from the readiness check')
+            continue
+        _info(f'radiod-consumers: {unit} kept restarting through '
+              f'{_RADIOD_CONSUMERS_MAX_PASSES} passes — giving up')
+        return 1
+    return rc
 
 
 def cmd_config_catalog_prune(args) -> int:
