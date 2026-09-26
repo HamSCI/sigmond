@@ -24,9 +24,11 @@ radiod instance". Discovery must say so itself rather than handing the
 operator an ambiguity it could have resolved.
 """
 
-import pytest
+from pathlib import Path
 
 from sigmond import radiod_ready
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 # Exactly the shape `systemctl list-units --no-legend --plain` emits:
@@ -75,3 +77,19 @@ def test_no_units_at_all_yields_nothing():
 def test_blank_and_ragged_lines_are_ignored():
     listing = "\n".join(["", "   ", HEALTHY, ""])
     assert radiod_ready.candidate_units(listing) == ["radiod@AC0G-B4.service"]
+
+
+class TestReadySettleConstant:
+    """final review / I-1: the settle window is a shared constant, not a
+    literal duplicated between sigmond-radiod-ready's own default and
+    whatever else needs to know how long radiod takes to open its front
+    end (the radiod-consumers hook, ruling I-1) — never a second `15.0`."""
+
+    def test_constant_is_fifteen_seconds(self):
+        assert radiod_ready.READY_SETTLE_S == 15.0
+
+    def test_cli_imports_and_uses_the_shared_constant_not_a_literal(self):
+        src = (REPO / "bin" / "sigmond-radiod-ready").read_text()
+        assert "from sigmond import radiod_ready" in src
+        assert 'default=radiod_ready.READY_SETTLE_S' in src
+        assert "default=15.0" not in src

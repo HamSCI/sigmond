@@ -29,6 +29,17 @@ from __future__ import annotations
 
 from typing import List
 
+#: How long radiod must have been active before a consumer waiting on
+#: `sigmond-radiod-ready` may treat it as serving — the time radiod itself
+#: takes to open its front end and mint channels.  Shared so nothing else
+#: hardcodes a second `15.0`: `sigmond-radiod-ready`'s own `--settle` default
+#: reads it, and the radiod-consumers hook (`smd admin radiod
+#: restart-stale-consumers`) uses it as the same settle allowance on the
+#: MONOTONIC clock — a consumer that took its anchor inside this window
+#: after radiod started is stale even though it started "after" radiod by
+#: the wall clock (final review / I-1).
+READY_SETTLE_S = 15.0
+
 #: `systemctl list-units --no-legend --plain` emits
 #: ``UNIT LOAD ACTIVE SUB DESCRIPTION...``
 _LOAD = 1

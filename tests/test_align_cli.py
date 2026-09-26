@@ -435,6 +435,52 @@ class AlignUnitsStartedAtTests(unittest.TestCase):
 
         self.assertIsNone(smd._align_units_started_at(["a.service"], run=fake_run))
 
+    def test_default_path_argv_is_byte_for_byte_unchanged(self):
+        """final review / I-1: adding the monotonic opt-in must not touch
+        the wall-clock argv/parsing align already relies on."""
+        def fake_run(argv, **kw):
+            self.assertEqual(argv, ["systemctl", "show", "--timestamp=unix",
+                                    "-p", "ActiveState", "-p", "ActiveEnterTimestamp",
+                                    "a.service"])
+            return subprocess.CompletedProcess(
+                argv, 0, "ActiveState=active\nActiveEnterTimestamp=@100\n", "")
+        self.assertEqual(smd._align_units_started_at(["a.service"], run=fake_run), 100.0)
+
+
+class AlignUnitsStartedAtMonotonicTests(unittest.TestCase):
+    """final review / I-1: `monotonic=True` reads ActiveEnterTimestampMonotonic
+    (systemd prints it as integer microseconds since boot) instead — immune
+    to a host clock step, which these stations do."""
+
+    def test_reads_monotonic_field_in_seconds(self):
+        def run(argv, **kw):
+            self.assertNotIn("--timestamp=unix", argv)
+            self.assertIn("ActiveEnterTimestampMonotonic", argv)
+            return subprocess.CompletedProcess(
+                argv, 0, "ActiveState=active\nActiveEnterTimestampMonotonic=5000000\n", "")
+        got = smd._align_units_started_at(["a.service"], run=run, monotonic=True)
+        self.assertEqual(got, 5.0)
+
+    def test_min_over_two_active_units(self):
+        def run(argv, **kw):
+            us = {"a.service": 100_000_000, "b.service": 50_000_000}[argv[-1]]
+            return subprocess.CompletedProcess(
+                argv, 0, f"ActiveState=active\nActiveEnterTimestampMonotonic={us}\n", "")
+        got = smd._align_units_started_at(["a.service", "b.service"], run=run, monotonic=True)
+        self.assertEqual(got, 50.0)
+
+    def test_inactive_unit_is_none(self):
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(
+                argv, 0, "ActiveState=inactive\nActiveEnterTimestampMonotonic=0\n", "")
+        self.assertIsNone(smd._align_units_started_at(["a.service"], run=run, monotonic=True))
+
+    def test_malformed_monotonic_value_ignored(self):
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(
+                argv, 0, "ActiveState=active\nActiveEnterTimestampMonotonic=garbage\n", "")
+        self.assertIsNone(smd._align_units_started_at(["a.service"], run=run, monotonic=True))
+
 
 class AlignConsumesTests(unittest.TestCase):
     def test_editable_sibling_under_base_is_kept(self):

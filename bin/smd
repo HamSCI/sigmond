@@ -4646,18 +4646,30 @@ def _align_service_units(units) -> list:
     return [u for u in units if str(u).endswith('.service')]
 
 
-def _align_units_started_at(units, run=subprocess.run) -> Optional[float]:
+def _align_units_started_at(units, run=subprocess.run, monotonic=False) -> Optional[float]:
     """The EARLIEST ``ActiveEnterTimestamp`` among ``units`` that are
     currently active — one component's ``started_at`` for align_live.
     None when none of ``units`` is active (align_live then never calls
-    a stopped component stale; starting it is not alignment's job)."""
+    a stopped component stale; starting it is not alignment's job).
+
+    ``monotonic=True`` reads ``ActiveEnterTimestampMonotonic`` instead —
+    systemd prints it as an integer number of microseconds since boot, so
+    it is immune to a host clock step (final review / I-1: AC0G-ND and
+    AC0G-B4 both step their clocks, and the radiod-consumers hook compares
+    a consumer's start against radiod's on this clock, never wall-clock).
+    Returned in seconds either way. ``monotonic=False`` (the default,
+    align_live's own path) is byte-for-byte unchanged: same argv, same
+    field, same parsing."""
+    field = 'ActiveEnterTimestampMonotonic' if monotonic else 'ActiveEnterTimestamp'
     times = []
     for unit in _align_service_units(units):
+        argv = ['systemctl', 'show']
+        if not monotonic:
+            argv.append('--timestamp=unix')
+        argv += ['-p', 'ActiveState', '-p', field, unit]
         # M2: through _align_run — a hung or missing systemctl ignores
         # that unit (rc -1), never raises out of the staleness read.
-        r = _align_run(['systemctl', 'show', '--timestamp=unix',
-                        '-p', 'ActiveState', '-p', 'ActiveEnterTimestamp', unit],
-                       run=run, timeout=15, action=f'systemctl show {unit}')
+        r = _align_run(argv, run=run, timeout=15, action=f'systemctl show {unit}')
         if r.returncode != 0:
             continue
         state = None
@@ -4665,9 +4677,15 @@ def _align_units_started_at(units, run=subprocess.run) -> Optional[float]:
         for line in (r.stdout or '').splitlines():
             if line.startswith('ActiveState='):
                 state = line.split('=', 1)[1].strip()
-            elif line.startswith('ActiveEnterTimestamp='):
+            elif line.startswith(f'{field}='):
                 raw = line.split('=', 1)[1].strip()
-                if raw.startswith('@'):
+                if monotonic:
+                    try:
+                        us = int(raw)
+                        ts = us / 1e6 if us > 0 else None
+                    except ValueError:
+                        ts = None
+                elif raw.startswith('@'):
                     try:
                         ts = float(raw[1:])
                     except ValueError:

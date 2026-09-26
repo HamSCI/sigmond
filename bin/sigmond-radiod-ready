@@ -51,7 +51,7 @@ def main() -> int:
     ap.add_argument("timeout", nargs="?", type=int, default=90)
     ap.add_argument("--unit", default=None,
                     help="radiod unit (default: the single radiod@ instance)")
-    ap.add_argument("--settle", type=float, default=15.0)
+    ap.add_argument("--settle", type=float, default=radiod_ready.READY_SETTLE_S)
     args = ap.parse_args()
 
     unit = args.unit
