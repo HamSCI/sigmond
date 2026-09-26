@@ -56,6 +56,10 @@ def _show(active, ts):
 
 
 class RadiodUnitStartedAtTests(unittest.TestCase):
+    """_radiod_unit_started_at delegates to _align_units_started_at (Fix
+    round 1 / finding 3) — same fakes, same semantics, no duplicated
+    ActiveEnterTimestamp parsing."""
+
     def test_active_unit_reads_its_start(self):
         run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, _show("active", 1790000000), "")
         self.assertEqual(smd._radiod_unit_started_at("radiod@x.service", run=run), 1790000000.0)
@@ -63,6 +67,13 @@ class RadiodUnitStartedAtTests(unittest.TestCase):
     def test_inactive_unit_reads_none(self):
         run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, _show("inactive", 1), "")
         self.assertIsNone(smd._radiod_unit_started_at("radiod@x.service", run=run))
+
+    def test_delegates_to_align_units_started_at(self):
+        with mock.patch.object(smd, "_align_units_started_at",
+                              return_value=42.0) as delegate:
+            self.assertEqual(
+                smd._radiod_unit_started_at("radiod@x.service", run="RUN"), 42.0)
+        delegate.assert_called_once_with(["radiod@x.service"], run="RUN")
 
 
 class WaitLifecycleLockTests(unittest.TestCase):
@@ -103,29 +114,42 @@ class RestartStaleConsumersCmdTests(unittest.TestCase):
     SERVICES = {"ka9q-radio": ["radiod@x.service"], "psk-recorder": ["psk.service"],
                 "wspr-recorder": ["wspr.service"]}
 
-    def _run(self, *, ready_rc=0, radiod_active=True):
+    def _run(self, *, ready_rc=0, radiod_active=True, ready_rcs=None, restart_rc=0):
         calls = []
+        ready_iter = iter(ready_rcs) if ready_rcs is not None else None
 
         def run(argv, **kw):
             calls.append(list(argv))
             if argv[0] == "/usr/local/sbin/sigmond-radiod-ready":
-                return subprocess.CompletedProcess(argv, ready_rc, "", "")
+                if ready_iter is not None:
+                    rc = next(ready_iter, ready_rcs[-1])
+                else:
+                    rc = ready_rc
+                return subprocess.CompletedProcess(argv, rc, "", "")
             if argv[:2] == ["systemctl", "show"] and "radiod@x.service" in argv:
                 return subprocess.CompletedProcess(
                     argv, 0, _show("active" if radiod_active else "inactive", 200), "")
             if argv[:2] == ["systemctl", "is-active"]:
                 return subprocess.CompletedProcess(argv, 0, "active\n", "")
+            if argv[:2] == ["systemctl", "restart"]:
+                return subprocess.CompletedProcess(
+                    argv, restart_rc, "", "boom" if restart_rc else "")
             return subprocess.CompletedProcess(argv, 0, "", "")
         return run, calls
 
-    def _cmd(self, run, *, dry_run=False, stale_started=None):
-        started = stale_started or {"psk-recorder": 100.0, "wspr-recorder": 300.0}
-        st = {"radiod_consumers": {"psk-recorder", "wspr-recorder"}, "started_at": started,
-              "running": set(started)}
+    def _cmd(self, run, *, dry_run=False, stale_started=None, lock=None, staleness=None):
         args = argparse.Namespace(unit="radiod@x.service", dry_run=dry_run, wait_ready=90)
+        lock_fn = lock if lock is not None else (lambda reason=None: contextlib.nullcontext())
+        if callable(staleness):
+            staleness_patch = mock.patch.object(smd, "_align_staleness", side_effect=staleness)
+        else:
+            started = stale_started or {"psk-recorder": 100.0, "wspr-recorder": 300.0}
+            st = staleness or {"radiod_consumers": {"psk-recorder", "wspr-recorder"},
+                               "started_at": started, "running": set(started)}
+            staleness_patch = mock.patch.object(smd, "_align_staleness", return_value=st)
         with mock.patch.object(smd, "_align_services", return_value=self.SERVICES), \
-             mock.patch.object(smd, "_align_staleness", return_value=st), \
-             mock.patch.object(smd, "lifecycle_lock", lambda reason=None: contextlib.nullcontext()), \
+             staleness_patch, \
+             mock.patch.object(smd, "lifecycle_lock", lock_fn), \
              contextlib.redirect_stdout(io.StringIO()) as out:
             rc = smd.cmd_radiod_restart_stale_consumers(args, run=run, sleep=lambda s: None)
         return rc, out.getvalue()
@@ -158,6 +182,72 @@ class RestartStaleConsumersCmdTests(unittest.TestCase):
         rc, out = self._cmd(run, stale_started={"psk-recorder": 300.0, "wspr-recorder": 300.0})
         self.assertEqual(rc, 0)
         self.assertFalse([c for c in calls if c[:2] == ["systemctl", "restart"]])
+
+    def test_radiod_not_ready_on_the_post_lock_recheck_restarts_nothing(self):
+        """Fix round 1 / finding 1: radiod can crash-restart again while
+        this run waited for the lock — the post-lock recheck must catch
+        that and refuse, not trust a start time nobody confirmed ready."""
+        run, calls = self._run(ready_rcs=[0, 1])
+        rc, _ = self._cmd(run)
+        self.assertEqual(rc, 2)
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "restart"]])
+        ready_calls = [c for c in calls if c[0] == "/usr/local/sbin/sigmond-radiod-ready"]
+        self.assertEqual(len(ready_calls), 2)
+
+    def test_staleness_is_read_only_after_the_lock_is_acquired(self):
+        """Fix round 1 / finding 2a: concurrent-align safety depends on
+        staleness being read AFTER the lock, never before."""
+        order = []
+
+        @contextlib.contextmanager
+        def lock(reason=None):
+            order.append("acquired")
+            yield
+
+        def fake_staleness(base, services, run=None):
+            self.assertIn("acquired", order)
+            return {"radiod_consumers": {"psk-recorder"},
+                    "started_at": {"psk-recorder": 100.0}, "running": {"psk-recorder"}}
+
+        run, calls = self._run()
+        rc, _ = self._cmd(run, lock=lock, staleness=fake_staleness)
+        self.assertEqual(rc, 0)
+        self.assertIn("acquired", order)
+        self.assertEqual([c for c in calls if c[:2] == ["systemctl", "restart"]],
+                         [["systemctl", "restart", "psk.service"]])
+
+    def test_zero_restarts_when_the_post_lock_read_finds_nothing_stale(self):
+        """Fix round 1 / finding 2b: only the read taken after the lock
+        decides — a fresh look (e.g. another align already restarted the
+        consumer while this run waited) wins over anything read earlier."""
+        def fake_staleness(base, services, run=None):
+            return {"radiod_consumers": {"psk-recorder"},
+                    "started_at": {"psk-recorder": 200.0}, "running": {"psk-recorder"}}
+
+        run, calls = self._run()
+        rc, _ = self._cmd(run, staleness=fake_staleness)
+        self.assertEqual(rc, 0)
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "restart"]])
+
+    def test_lock_timeout_restarts_nothing(self):
+        """Fix round 1 / finding 2c."""
+        @contextlib.contextmanager
+        def timeout_lock(reason, sleep=None):
+            raise TimeoutError("still held")
+            yield
+
+        run, calls = self._run()
+        with mock.patch.object(smd, "_wait_lifecycle_lock", timeout_lock):
+            rc, _ = self._cmd(run)
+        self.assertEqual(rc, 3)
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "restart"]])
+
+    def test_a_failed_restart_returns_1(self):
+        """Fix round 1 / finding 2d."""
+        run, calls = self._run(restart_rc=1)
+        rc, _ = self._cmd(run)
+        self.assertEqual(rc, 1)
+        self.assertTrue([c for c in calls if c[:2] == ["systemctl", "restart"]])
 
 
 if __name__ == "__main__":

@@ -20697,21 +20697,13 @@ def cmd_radiod_migrate(args) -> int:
 
 def _radiod_unit_started_at(unit, *, run=subprocess.run) -> Optional[float]:
     """radiod ``unit``'s current ActiveEnterTimestamp (unix s), or None when
-    it is not active — the moment consumers must be younger than."""
-    r = _align_run(['systemctl', 'show', '--timestamp=unix', '-p', 'ActiveState',
-                    '-p', 'ActiveEnterTimestamp', unit],
-                   run=run, timeout=15, action=f'systemctl show {unit}')
-    state = ts = None
-    for line in (r.stdout or '').splitlines():
-        key, _, val = line.partition('=')
-        if key == 'ActiveState':
-            state = val.strip()
-        elif key == 'ActiveEnterTimestamp' and val.strip().startswith('@'):
-            try:
-                ts = float(val.strip()[1:])
-            except ValueError:
-                ts = None
-    return ts if state == 'active' else None
+    it is not active — the moment consumers must be younger than.
+
+    Delegates to `_align_units_started_at` (`_align_staleness`'s own
+    started_at reader) instead of re-parsing `systemctl show` itself: same
+    "earliest ActiveEnterTimestamp among the active .service units" rule,
+    applied to the single radiod unit named here (Fix round 1 / finding 3)."""
+    return _align_units_started_at([unit], run=run)
 
 
 def _radiod_stale_consumers(radiod_start, staleness) -> list:
@@ -20759,10 +20751,14 @@ def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
     they too are restarted. radiod itself is never restarted by this verb.
     """
     unit = args.unit
-    r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, str(args.wait_ready)],
-                   run=run, timeout=args.wait_ready + 30,
-                   action='sigmond-radiod-ready')
-    if r.returncode != 0:
+
+    def _radiod_ready() -> bool:
+        r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, str(args.wait_ready)],
+                       run=run, timeout=args.wait_ready + 30,
+                       action='sigmond-radiod-ready')
+        return r.returncode == 0
+
+    if not _radiod_ready():
         _info(f'radiod-consumers: {unit} not serving — nothing restarted')
         return 2
 
@@ -20770,6 +20766,16 @@ def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
         _wait_lifecycle_lock('radiod consumer restart', sleep=sleep)
     try:
         with ctx:
+            # radiod can crash-restart AGAIN while we waited (up to 600 s)
+            # for the lock — ND's RX888 stalls crash it repeatedly.  Confirm
+            # it is still serving before trusting anything read under the
+            # lock (Fix round 1 / finding 1): otherwise this run would read
+            # a newer radiod's start time nobody confirmed as ready, and the
+            # hook invocation for THAT start may fold into this still-running
+            # job and never fire on its own.
+            if not _radiod_ready():
+                _info(f'radiod-consumers: {unit} not serving — nothing restarted')
+                return 2
             radiod_start = _radiod_unit_started_at(unit, run=run)
             if radiod_start is None:
                 _info(f'radiod-consumers: {unit} not active — nothing restarted')
