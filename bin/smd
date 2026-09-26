@@ -86,6 +86,7 @@ if (_VENV_PY.is_file()
 
 import argparse
 import configparser
+import contextlib
 import math
 import pwd
 import re
@@ -20694,6 +20695,109 @@ def cmd_radiod_migrate(args) -> int:
     return 0
 
 
+def _radiod_unit_started_at(unit, *, run=subprocess.run) -> Optional[float]:
+    """radiod ``unit``'s current ActiveEnterTimestamp (unix s), or None when
+    it is not active — the moment consumers must be younger than."""
+    r = _align_run(['systemctl', 'show', '--timestamp=unix', '-p', 'ActiveState',
+                    '-p', 'ActiveEnterTimestamp', unit],
+                   run=run, timeout=15, action=f'systemctl show {unit}')
+    state = ts = None
+    for line in (r.stdout or '').splitlines():
+        key, _, val = line.partition('=')
+        if key == 'ActiveState':
+            state = val.strip()
+        elif key == 'ActiveEnterTimestamp' and val.strip().startswith('@'):
+            try:
+                ts = float(val.strip()[1:])
+            except ValueError:
+                ts = None
+    return ts if state == 'active' else None
+
+
+def _radiod_stale_consumers(radiod_start, staleness) -> list:
+    """The radiod consumers still running from before ``radiod_start`` — they
+    hold the previous radiod's RTP→UTC anchor (AC0G-ND 2026-09-25/26: psk
+    decoded 40/40 slots, 0 spots, for a day after each radiod crash)."""
+    started = staleness.get('started_at', {})
+    return sorted(c for c in staleness.get('radiod_consumers', ())
+                  if started.get(c) is not None and started[c] < radiod_start)
+
+
+@contextlib.contextmanager
+def _wait_lifecycle_lock(reason, *, deadline_s=600, poll_s=5,
+                         sleep=time.sleep, clock=time.monotonic):
+    """lifecycle_lock, waited for: a radiod restart made by another smd
+    operation (align, restart) holds the lock while that operation restarts
+    the consumers itself — wait, then re-read staleness, rather than fail or
+    restart them a second time."""
+    end = clock() + deadline_s
+    while True:
+        try:
+            cm = lifecycle_lock(reason)
+            cm.__enter__()
+        except SystemExit:
+            if clock() >= end:
+                raise TimeoutError(f'lifecycle lock still held after {deadline_s} s')
+            sleep(poll_s)
+            continue
+        try:
+            yield
+        finally:
+            cm.__exit__(None, None, None)
+        return
+
+
+def cmd_radiod_restart_stale_consumers(args, *, run=subprocess.run,
+                                       sleep=time.sleep) -> int:
+    """`smd admin radiod restart-stale-consumers` — restart the radiod
+    consumers still running from before radiod's current start.
+
+    Run by sigmond-radiod-consumers@.service on every radiod start (Task 2
+    of the 2026-09-26 radiod-consumer-restart-hook plan): AC0G-ND's RX888
+    stalls make radiod crash and systemd restart it; recorders that keep
+    running hold the old radiod's RTP→UTC anchor and decode nothing until
+    they too are restarted. radiod itself is never restarted by this verb.
+    """
+    unit = args.unit
+    r = _align_run([_ALIGN_RADIOD_READY, '--unit', unit, str(args.wait_ready)],
+                   run=run, timeout=args.wait_ready + 30,
+                   action='sigmond-radiod-ready')
+    if r.returncode != 0:
+        _info(f'radiod-consumers: {unit} not serving — nothing restarted')
+        return 2
+
+    ctx = contextlib.nullcontext() if args.dry_run else \
+        _wait_lifecycle_lock('radiod consumer restart', sleep=sleep)
+    try:
+        with ctx:
+            radiod_start = _radiod_unit_started_at(unit, run=run)
+            if radiod_start is None:
+                _info(f'radiod-consumers: {unit} not active — nothing restarted')
+                return 2
+            services = _align_services()
+            st = _align_staleness('/opt/git/sigmond', services, run=run)
+            stale = _radiod_stale_consumers(radiod_start, st)
+            if not stale:
+                _info(f"radiod-consumers: nothing older than {unit}'s start "
+                      '— nothing to do')
+                return 0
+            for comp in stale:
+                _info(f'  {comp}: started before {unit} — restarting')
+            if args.dry_run:
+                _info('  (dry run — nothing restarted)')
+                return 0
+            steps = _align_restart(False, stale, services, run=run, say=print)
+            for step in steps:
+                line = f'  {_align_label(step.component)}: {step.outcome}'
+                if step.detail:
+                    line += f' — {step.detail}'
+                print(line)
+            return 1 if any(step.outcome == 'failed' for step in steps) else 0
+    except TimeoutError as exc:
+        _err(f'radiod-consumers: {exc}')
+        return 3
+
+
 def cmd_config_catalog_prune(args) -> int:
     """Trim /etc/sigmond/catalog.toml so it carries only the entries
     that diverge from the in-repo catalog.
@@ -22507,6 +22611,23 @@ def main() -> int:
         help='actually rewrite the files (requires root); '
              'without this, only the per-file diff is printed')
 
+    p_r_rsc = radiod_sub.add_parser(
+        'restart-stale-consumers',
+        help="restart the radiod consumers still running from before "
+             "radiod's current start (run by sigmond-radiod-consumers@."
+             "service on every radiod start)")
+    p_r_rsc.add_argument(
+        '--unit', required=True,
+        help='the radiod unit that just (re)started, '
+             'e.g. radiod@rx888-0.service')
+    p_r_rsc.add_argument(
+        '--wait-ready', type=int, default=90,
+        help='seconds to wait for radiod to serve before giving up '
+             '(default: 90)')
+    p_r_rsc.add_argument(
+        '--dry-run', action='store_true',
+        help='print what would restart; change nothing')
+
     # start
     # All four lifecycle verbs accept positional component names (systemctl
     # style) or the literal keyword `all`.  Bare `smd start` (no args) is
@@ -24029,6 +24150,10 @@ def main() -> int:
         rc = getattr(args, 'radiod_command', None)
         if rc == 'migrate':
             return cmd_radiod_migrate(args)
+        if rc == 'restart-stale-consumers':
+            if not args.dry_run and _need_root('admin radiod restart-stale-consumers'):
+                return 1
+            return cmd_radiod_restart_stale_consumers(args)
         p_radiod.print_help()
         return 0
 
