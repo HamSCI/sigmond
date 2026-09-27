@@ -46,11 +46,42 @@ _DROPIN_RELPATHS = [
 ]
 
 
+def _fake_install(cmd):
+    """Stand-in for `install -m ... -o root -g root ...`: performs the
+    equivalent file/dir operation WITHOUT the real chown, since the test
+    process isn't root — the point of the test is the recorded argv (that
+    -o/-g root were requested), not that this fake actually changes
+    ownership. Handles both the `-d` (directory) and file-copy forms."""
+    args = cmd[1:]
+    is_dir = '-d' in args
+    paths = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ('-m', '-o', '-g'):
+            i += 2
+            continue
+        if a == '-d':
+            i += 1
+            continue
+        paths.append(a)
+        i += 1
+    if is_dir:
+        for p in paths:
+            Path(p).mkdir(parents=True, exist_ok=True)
+    else:
+        src, dest = paths
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(Path(src).read_bytes())
+    return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+
 def _fake_run(calls, unit_installed=True):
     """Stand-in for `_run`: fakes `systemctl cat`/`daemon-reload` (no real
-    systemd involved), and passes everything else (mkdir/mv/chmod) through
-    to a real subprocess so files actually land under the tmp systemd_dir.
-    Records every argv so tests can assert what was (and was not) run."""
+    systemd involved) and `install` (see `_fake_install` — no real chown),
+    and passes everything else through to a real subprocess so files
+    actually land under the tmp systemd_dir. Records every argv so tests
+    can assert what was (and was not) run."""
     def run(cmd, **kwargs):
         calls.append(list(cmd))
         if cmd[:2] == ['systemctl', 'cat']:
@@ -58,6 +89,8 @@ def _fake_run(calls, unit_installed=True):
                 returncode=0 if unit_installed else 1, stdout='', stderr='')
         if cmd[:2] == ['systemctl', 'daemon-reload']:
             return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+        if cmd and cmd[0] == 'install':
+            return _fake_install(cmd)
         return subprocess.run(cmd, capture_output=True, text=True)
     return run
 
@@ -135,6 +168,50 @@ class RadiodDropinsWriterTests(unittest.TestCase):
         for c in calls:
             self.assertNotIn('restart', c)
             self.assertNotIn('start', c)
+
+    def test_writes_land_root_owned_not_the_invoking_user(self):
+        """I1: `mv` keeps the temp file's owner, so a plain `sudo mv` +
+        `chmod 644` leaves these root-run units owned by whichever user ran
+        `smd doctor --fix` (its fix branch only elevates for foreign-owned
+        checkout paths). The writer must use `install -o root -g root`
+        (dirs via `install -d -m 0755 -o root -g root`) so root — not the
+        invoking user — always owns them."""
+        calls = []
+        run = _fake_run(calls, unit_installed=True)
+        smd._ensure_radiod_dropins(systemd_dir=self.systemd_dir, src_dir=self.src_dir, run=run)
+
+        install_dir_calls = [c for c in calls if c[:2] == ['install', '-d']]
+        self.assertTrue(install_dir_calls, 'expected an `install -d ...` dir-creation call')
+        for c in install_dir_calls:
+            self.assertIn('-o', c)
+            self.assertEqual(c[c.index('-o') + 1], 'root')
+            self.assertIn('-g', c)
+            self.assertEqual(c[c.index('-g') + 1], 'root')
+            self.assertIn('-m', c)
+            self.assertEqual(c[c.index('-m') + 1], '0755')
+
+        install_file_calls = [
+            c for c in calls
+            if c[:1] == ['install'] and '-d' not in c
+        ]
+        self.assertEqual(len(install_file_calls), 5)
+        for c in install_file_calls:
+            self.assertIn('-o', c)
+            self.assertEqual(c[c.index('-o') + 1], 'root')
+            self.assertIn('-g', c)
+            self.assertEqual(c[c.index('-g') + 1], 'root')
+            self.assertIn('-m', c)
+            self.assertEqual(c[c.index('-m') + 1], '0644')
+
+    def test_temp_file_removed_after_install(self):
+        """The staged tempfile in /tmp must not be left behind once
+        `install` has copied it to its destination."""
+        before = set(Path(tempfile.gettempdir()).iterdir())
+        smd._ensure_radiod_dropins(
+            systemd_dir=self.systemd_dir, src_dir=self.src_dir,
+            run=_fake_run([], unit_installed=True))
+        after = set(Path(tempfile.gettempdir()).iterdir())
+        self.assertEqual(before, after, f'leaked temp file(s): {after - before}')
 
 
 class RadiodDropinsMissingTests(unittest.TestCase):
@@ -216,6 +293,70 @@ class RadiodDropinsDoctorTests(unittest.TestCase):
              mock.patch.object(smd, 'collect_findings', return_value=(True, [])):
             smd.cmd_doctor(args)
         self.assertEqual(calls, [True])
+
+
+class InstallRadiodNativeOrderTests(unittest.TestCase):
+    """I2: on a fresh install, `_ensure_radiod_running()` used to run
+    BEFORE `_ensure_radiod_dropins()`, so the first radiod run happened
+    with none of 10-sigmond-restart.conf (patient retry), park, or
+    consumers in place — with the RX888 absent it burns 5 restarts and
+    lands failed. `_ensure_radiod_dropins()` must run first; `make
+    install` has already written radiod@.service by the time either is
+    called."""
+
+    def test_dropins_written_before_radiod_started(self):
+        calls = []
+
+        with mock.patch.object(smd, 'get_entry', return_value=mock.Mock()), \
+             mock.patch.object(smd, '_install_radiod_deps', return_value=True), \
+             mock.patch.object(smd, '_ensure_radio_user', return_value=True), \
+             mock.patch.object(smd, '_ensure_fftw_dir', return_value=True), \
+             mock.patch.object(smd, '_ka9q_radio_pin', return_value=None), \
+             mock.patch.object(smd, '_clone_repo', return_value=Path('/tmp/fake-ka9q-radio')), \
+             mock.patch.object(smd, '_build_ka9q_radio', return_value=True), \
+             mock.patch.object(smd, '_reload_udev_for_sdrs'), \
+             mock.patch.object(smd, '_install_wisdom_service'), \
+             mock.patch.object(
+                 smd, '_ensure_radiod_running',
+                 side_effect=lambda: calls.append('running')), \
+             mock.patch.object(
+                 smd, '_ensure_radiod_dropins',
+                 side_effect=lambda: calls.append('dropins') or []):
+            ok = smd._install_radiod_native(catalog={})
+
+        self.assertTrue(ok)
+        self.assertEqual(calls, ['dropins', 'running'])
+
+
+class EnsureRadiodRunningBareTemplateTests(unittest.TestCase):
+    """M4: the `radiod@*.service.d` glob also matches the bare template
+    dir `radiod@.service.d` (`*` matches zero characters), which would try
+    `systemctl enable --now radiod@.service` — not a real instance. Must
+    be skipped, mirroring the `'@.' in unit_name` guard the CPU-affinity
+    cleanup already uses."""
+
+    def test_bare_template_instance_never_queried_or_started(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            if cmd[:2] == ['systemctl', 'list-units']:
+                return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+            if cmd[:2] == ['systemctl', 'is-active']:
+                return types.SimpleNamespace(returncode=0, stdout='active\n', stderr='')
+            return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+        with mock.patch.object(smd, '_run', side_effect=fake_run), \
+             mock.patch('glob.glob', return_value=[
+                 '/etc/systemd/system/radiod@.service.d',
+                 '/etc/systemd/system/radiod@foo.service.d',
+             ]):
+            smd._ensure_radiod_running()
+
+        for c in calls:
+            self.assertNotIn('radiod@.service', c)
+        self.assertTrue(any('radiod@foo.service' in c for c in calls),
+                        'the real instance radiod@foo.service was never queried')
 
 
 if __name__ == '__main__':

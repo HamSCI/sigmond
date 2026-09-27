@@ -9265,14 +9265,18 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     _reload_udev_for_sdrs()
     # First-boot wisdom generation (FFTW plans for radiod's transforms).
     _install_wisdom_service()
-    _ensure_radiod_running()
-    # Now that make install has written radiod@.service, lay down its
-    # template drop-ins + companion units — this is the path that closes
-    # the gap install.sh's own radiod block cannot: install.sh only runs
-    # BEFORE ka9q-radio exists on a fresh image, so its `if radiod@.service
-    # exists` guard never fires there (AC0G-B4, rebuilt 2026-09-23).
+    # `make install` has already written radiod@.service by this point, so
+    # lay down its template drop-ins + companion units BEFORE the first
+    # start — this is the path that closes the gap install.sh's own radiod
+    # block cannot: install.sh only runs BEFORE ka9q-radio exists on a
+    # fresh image, so its `if radiod@.service exists` guard never fires
+    # there (AC0G-B4, rebuilt 2026-09-23). Ordering matters (I2): started
+    # first, a fresh install's first radiod run has neither
+    # 10-sigmond-restart.conf (patient retry — with the RX888 absent it
+    # burns 5 restarts and lands failed) nor park/consumers in place.
     for p in _ensure_radiod_dropins():
         _ok(f'radiod drop-in: wrote {p}')
+    _ensure_radiod_running()
     return True
 
 
@@ -9559,10 +9563,15 @@ def _ensure_radiod_running() -> None:
     import glob as _glob
     seen: set[str] = set()
 
-    # Instances with drop-in config dirs
+    # Instances with drop-in config dirs. `*` also matches the bare
+    # template dir radiod@.service.d (zero-width match) — that's the
+    # template, not an instance, so skip it (mirrors the '@.' in unit_name
+    # guard _ensure_radiod_affinity_drop_ins uses for the same glob shape).
     for d in _glob.glob('/etc/systemd/system/radiod@*.service.d'):
         name = Path(d).name  # radiod@foo.service.d
         unit = name[:-len('.d')]   # radiod@foo.service
+        if '@.' in unit:
+            continue
         seen.add(unit)
 
     # Instances systemd already knows about (running or stopped)
@@ -10262,9 +10271,14 @@ def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
     """Idempotently install radiod's template drop-ins + companion units.
 
     Writes a file only when its bytes differ from this checkout's systemd/
-    copy (temp file + `mv`, the same sudo-aware mechanism
-    `_write_affinity_drop_in` uses below — never a bare `open()` on /etc),
-    runs `systemctl daemon-reload` exactly once if anything changed, and
+    copy — staged to a temp file, then `sudo install -m 0644 -o root -g
+    root <tmp> <dest>` (dirs via `install -d -m 0755 -o root -g root`),
+    never a bare `mv` (which would keep the temp file's OWNER — the
+    invoking user, not root — on units that run as root; see I1 in
+    docs/superpowers/plans/2026-09-27-radiod-dropins-lockwait-cleanups.md)
+    and never a bare `open()` on /etc. The temp file is removed afterward
+    since `install` copies rather than moves. Runs `systemctl
+    daemon-reload` exactly once if anything changed, and
     NEVER starts or restarts any unit: radiod (and the companion units'
     Wants=) pick the change up on their own next normal start.  Returns the
     list of paths written.
@@ -10297,25 +10311,36 @@ def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
         except OSError:
             pass  # missing (or its parent dir is) — fall through and write
 
-        r = run(['mkdir', '-p', str(dest.parent)], sudo=True)
+        r = run(['install', '-d', '-m', '0755', '-o', 'root', '-g', 'root',
+                 str(dest.parent)], sudo=True)
         if getattr(r, 'returncode', 0) != 0:
             _err(f'radiod drop-ins: cannot create {dest.parent}')
             continue
+        tmp = None
         try:
-            with tempfile.NamedTemporaryFile(delete=False, dir='/tmp') as f:
-                f.write(content)
-                tmp = f.name
-        except OSError as e:
-            _err(f'radiod drop-ins: cannot stage {dest}: {e}')
-            continue
-        r = run(['mv', tmp, str(dest)], sudo=True)
-        if getattr(r, 'returncode', 0) != 0:
-            _err(f'radiod drop-ins: mv failed for {dest}')
-            continue
-        # 644 so non-root processes can read it, matching the affinity
-        # drop-in writer's convention.
-        run(['chmod', '644', str(dest)], sudo=True)
-        written.append(str(dest))
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, dir='/tmp') as f:
+                    f.write(content)
+                    tmp = f.name
+            except OSError as e:
+                _err(f'radiod drop-ins: cannot stage {dest}: {e}')
+                continue
+            # root:root, 0644 — these are root-run units' config; a bare
+            # `mv` would instead keep the temp file's owner (whoever ran
+            # `smd doctor --fix`), silently handing a root-run service's
+            # drop-in to a non-root owner.
+            r = run(['install', '-m', '0644', '-o', 'root', '-g', 'root',
+                     tmp, str(dest)], sudo=True)
+            if getattr(r, 'returncode', 0) != 0:
+                _err(f'radiod drop-ins: install failed for {dest}')
+                continue
+            written.append(str(dest))
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     if written:
         run(['systemctl', 'daemon-reload'], sudo=True)
