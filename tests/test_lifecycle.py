@@ -376,6 +376,36 @@ class TestLifecycleLockWait:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    def test_sleep_exception_closes_fd_and_propagates(self, tmp_path, monkeypatch):
+        """Fix round 1: an exception out of sleep() (KeyboardInterrupt on a
+        real time.sleep, or anything from an injected sleep) must still
+        close OUR fd before propagating — the acquire phase has no
+        exception-safety otherwise. Reproduced by the reviewer: a
+        contending fd held, wait_s>0, sleep raises KeyboardInterrupt ->
+        /proc/self/fd grew by 1."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        fake = _FakeClock()
+
+        def boom_sleep(seconds):
+            raise KeyboardInterrupt()
+
+        fds_before = len(os.listdir('/proc/self/fd'))
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                with lifecycle_lock(reason='timer',
+                                     env={'INVOCATION_ID': 'abc'},
+                                     isatty=lambda: False,
+                                     wait_s=30, sleep=boom_sleep,
+                                     clock=fake.clock, poll_s=5.0):
+                    pass  # pragma: no cover
+            fds_after = len(os.listdir('/proc/self/fd'))
+            assert fds_after == fds_before
+        finally:
+            self._release_lock(held_fd)
+
     def test_explicit_wait_s_overrides_environment(self, tmp_path, monkeypatch):
         """Passing wait_s explicitly (as the consumer-restart hook does)
         skips the environment decision entirely."""

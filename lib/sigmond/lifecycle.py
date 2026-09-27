@@ -477,30 +477,36 @@ def lifecycle_lock(reason: str = "", *, wait_s=None, poll_s: float = 5.0,
     start = clock()
     end = start + wait_s
     waited = False
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            break
-        except OSError:
-            if wait_s <= 0 or clock() >= end:
-                os.close(fd)
-                if waited:
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if wait_s <= 0 or clock() >= end:
+                    if waited:
+                        raise SystemExit(
+                            f"smd: another lifecycle operation is still in "
+                            f"progress after {wait_s} s (lock held on {lock_path})"
+                        )
                     raise SystemExit(
-                        f"smd: another lifecycle operation is still in "
-                        f"progress after {wait_s} s (lock held on {lock_path})"
+                        f"smd: another lifecycle operation is in progress "
+                        f"(lock held on {lock_path})"
                     )
-                raise SystemExit(
-                    f"smd: another lifecycle operation is in progress "
-                    f"(lock held on {lock_path})"
-                )
-            if not waited:
-                print(
-                    "smd: waiting for the lifecycle lock "
-                    "(held by another smd operation) …",
-                    file=sys.stderr,
-                )
-                waited = True
-            sleep(poll_s)
+                if not waited:
+                    print(
+                        "smd: waiting for the lifecycle lock "
+                        "(held by another smd operation) …",
+                        file=sys.stderr,
+                    )
+                    waited = True
+                sleep(poll_s)
+    except BaseException:
+        # Any exception before the lock is ours — a give-up SystemExit,
+        # or anything raised out of sleep() (KeyboardInterrupt on a real
+        # time.sleep, or from an injected sleep) — must not leak this fd.
+        os.close(fd)
+        raise
 
     if waited:
         elapsed = clock() - start
