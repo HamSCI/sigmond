@@ -6993,9 +6993,10 @@ def _retired_unit_findings(is_enabled=None) -> list:
 
 
 def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
-    """Read-only composition of the six `smd doctor` check families:
-    ownership, git state, venv skew, manifest drift, exec mismatch, and
-    retired-but-still-armed units.
+    """Read-only composition of the ten `smd doctor` check families:
+    ownership, git state, venv skew, manifest drift, exec mismatch,
+    retired-but-still-armed units, rx888 IRQ placement, rx888 queue
+    depth, chrony refclock capture, and radiod's systemd drop-ins.
 
     Extracted from `cmd_doctor` so the fleet heartbeat assembler can get
     the same findings in-process, without shelling out to `smd doctor`
@@ -7357,14 +7358,15 @@ def cmd_doctor(args) -> int:
     drift, and running-vs-installed binary mismatches.
 
     Each check corresponds to something that blocked the DASI002 update
-    on 2026-08-15, discovered one failed command at a time.  Ownership is
-    the only class --fix repairs: the correct owner is unambiguous (the
-    checkout's own) and the repair is idempotent.  A dirty tree may be a
-    real uncommitted fix — it was on DASI002 — so it is reported and left
-    to a human.  Manifest drift and a running/installed binary mismatch
-    are likewise judgement calls, never auto-repaired.
+    on 2026-08-15, discovered one failed command at a time.  Ownership
+    and radiod's systemd drop-ins are the only classes --fix repairs:
+    each has an unambiguous correct state (the checkout's own owner; this
+    checkout's systemd/ bytes) and an idempotent repair.  A dirty tree may
+    be a real uncommitted fix — it was on DASI002 — so it is reported and
+    left to a human.  Manifest drift and a running/installed binary
+    mismatch are likewise judgement calls, never auto-repaired.
 
-    The six check families themselves are composed in `collect_findings`
+    The ten check families themselves are composed in `collect_findings`
     (module level, above) — read-only, and reusable by the fleet
     heartbeat assembler without shelling out to `smd doctor`. `--fix`'s
     repair pass stays here: `collect_findings` never mutates anything.
@@ -24610,8 +24612,12 @@ def main() -> int:
     # lock twice: `lifecycle_lock` flocks a FRESH fd with LOCK_NB, and flock
     # conflicts across open file descriptions even inside one process
     # (verified), so the inner acquisition does not queue and does not
-    # deadlock — it raises SystemExit, and the one verb that starts services
-    # dies reporting a conflict with itself.
+    # deadlock — interactively it raises SystemExit at once; under systemd
+    # (INVOCATION_ID set, no tty) it instead WAITS up to the lifecycle-lock
+    # bound (SIGMOND_LOCK_WAIT_S, default 900s) — against its own outer
+    # lock, which it can never release meanwhile — before giving up with
+    # SystemExit.  Either way the one verb that starts services dies
+    # reporting a conflict with itself.
     _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload'}
     if args.command in _MUTATING:
         if _need_root(args.command):
