@@ -12,6 +12,8 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+import time
 import tomllib
 import warnings
 from dataclasses import dataclass
@@ -429,8 +431,16 @@ def _unit_kind(unit_name: str) -> str:
 # Lifecycle lock (CONTRACT §5.5)
 # ---------------------------------------------------------------------------
 
+#: Default bound (seconds) a systemd-started smd waits for a busy lifecycle
+#: lock before giving up.  Overridable per-invocation via
+#: ``SIGMOND_LOCK_WAIT_S`` (0 = never wait, i.e. today's immediate refusal).
+_DEFAULT_SYSTEMD_LOCK_WAIT_S = 900
+
+
 @contextlib.contextmanager
-def lifecycle_lock(reason: str = ""):
+def lifecycle_lock(reason: str = "", *, wait_s=None, poll_s: float = 5.0,
+                    sleep=time.sleep, clock=time.monotonic,
+                    env=os.environ, isatty=sys.stdin.isatty):
     """Acquire an exclusive flock on the lifecycle lock file.
 
     Every mutating verb (install, apply, start, stop, restart, reload,
@@ -438,19 +448,64 @@ def lifecycle_lock(reason: str = ""):
     lock-free.
 
     Uses LOCK_NB so a second ``smd`` fails immediately rather than
-    queueing behind the first.
+    queueing behind the first — that's the right answer for an operator
+    at a terminal.  But a systemd-started ``smd`` (a timer/oneshot unit
+    such as ``sigmond-storage-trim-all.service``) landing on a busy lock
+    is not a conflict an operator can retry; it's invisible until the
+    next scheduled run.  On 2026-09-26 AC0G-B4's storage-trim timer hit
+    exactly this — the radiod consumer-restart hook held the lock — and
+    failed outright instead of simply going next.  So: when
+    ``INVOCATION_ID`` is set (systemd started us) AND stdin is not a TTY,
+    and ``wait_s`` was left at its default (``None``), we poll for the
+    lock instead of failing immediately, up to ``SIGMOND_LOCK_WAIT_S``
+    seconds (default 900; 0 = never wait). Interactive use keeps today's
+    immediate refusal. Passing ``wait_s`` explicitly (e.g. the radiod
+    consumer-restart hook, which owns its own run-wide wait budget via
+    ``_wait_lifecycle_lock`` and passes ``wait_s=0`` here so the two
+    waits never nest) always wins over the environment-based decision.
     """
+    if wait_s is None:
+        if 'INVOCATION_ID' in env and not isatty():
+            wait_s = int(env.get('SIGMOND_LOCK_WAIT_S', _DEFAULT_SYSTEMD_LOCK_WAIT_S))
+        else:
+            wait_s = 0
+
     lock_path = LIFECYCLE_LOCK
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        raise SystemExit(
-            f"smd: another lifecycle operation is in progress "
-            f"(lock held on {lock_path})"
-        )
+
+    start = clock()
+    end = start + wait_s
+    waited = False
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if wait_s <= 0 or clock() >= end:
+                os.close(fd)
+                if waited:
+                    raise SystemExit(
+                        f"smd: another lifecycle operation is still in "
+                        f"progress after {wait_s} s (lock held on {lock_path})"
+                    )
+                raise SystemExit(
+                    f"smd: another lifecycle operation is in progress "
+                    f"(lock held on {lock_path})"
+                )
+            if not waited:
+                print(
+                    "smd: waiting for the lifecycle lock "
+                    "(held by another smd operation) …",
+                    file=sys.stderr,
+                )
+                waited = True
+            sleep(poll_s)
+
+    if waited:
+        elapsed = clock() - start
+        print(f"smd: lifecycle lock acquired after {elapsed:.0f} s",
+              file=sys.stderr)
     try:
         yield
     finally:

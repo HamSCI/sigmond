@@ -230,6 +230,175 @@ class TestLifecycleLock:
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle lock WAIT tests (systemd-started smd waits instead of failing —
+# 2026-09-26 AC0G-B4 sigmond-storage-trim-all.service incident)
+# ---------------------------------------------------------------------------
+
+class _FakeClock:
+    """Deterministic monotonic clock driven by an explicit sleep()."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class TestLifecycleLockWait:
+
+    def _hold_lock(self, lock_file):
+        """Hold the lock on a SECOND fd, like a real contending process."""
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+
+    def _release_lock(self, fd):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    def test_interactive_busy_immediate_system_exit(self, tmp_path, monkeypatch):
+        """No INVOCATION_ID (or a TTY stdin) → today's immediate refusal,
+        message unchanged, regardless of the new wait machinery."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+        try:
+            with pytest.raises(SystemExit, match='another lifecycle operation'):
+                with lifecycle_lock(reason='interactive', env={},
+                                     isatty=lambda: True):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
+    def test_systemd_busy_then_freed_acquires_and_logs(self, tmp_path, monkeypatch,
+                                                        capsys):
+        """systemd-started + busy, freed after N polls → acquires; logs
+        'waiting' once and 'acquired' once."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        fake = _FakeClock()
+        polls = {'n': 0}
+
+        def fake_sleep(seconds):
+            polls['n'] += 1
+            fake.sleep(seconds)
+            if polls['n'] == 3:
+                self._release_lock(held_fd)
+
+        with lifecycle_lock(reason='timer', env={'INVOCATION_ID': 'abc'},
+                             isatty=lambda: False,
+                             sleep=fake_sleep, clock=fake.clock,
+                             poll_s=5.0):
+            pass
+
+        assert polls['n'] == 3
+        err = capsys.readouterr().err
+        assert err.count('waiting for the lifecycle lock') == 1
+        assert err.count('lifecycle lock acquired') == 1
+
+    def test_systemd_busy_past_bound_times_out(self, tmp_path, monkeypatch):
+        """systemd-started + busy past the wait bound → SystemExit naming
+        the wait, and the fd is not leaked."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        fake = _FakeClock()
+        try:
+            with pytest.raises(SystemExit, match='still in progress after'):
+                with lifecycle_lock(reason='timer',
+                                     env={'INVOCATION_ID': 'abc',
+                                          'SIGMOND_LOCK_WAIT_S': '20'},
+                                     isatty=lambda: False,
+                                     sleep=fake.sleep, clock=fake.clock,
+                                     poll_s=5.0):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
+    def test_sigmond_lock_wait_s_zero_is_immediate(self, tmp_path, monkeypatch):
+        """SIGMOND_LOCK_WAIT_S=0 under systemd → immediate refusal, no wait."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        def _boom_sleep(seconds):
+            raise AssertionError('should never sleep when wait bound is 0')
+
+        try:
+            with pytest.raises(SystemExit, match='another lifecycle operation'):
+                with lifecycle_lock(reason='timer',
+                                     env={'INVOCATION_ID': 'abc',
+                                          'SIGMOND_LOCK_WAIT_S': '0'},
+                                     isatty=lambda: False,
+                                     sleep=_boom_sleep):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
+    def test_lock_never_held_while_sleeping_no_fd_leak(self, tmp_path, monkeypatch):
+        """While polling, our fd must not hold the lock (a second contender's
+        fd is what we're waiting on) and our own fd must not leak on
+        timeout."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        fake = _FakeClock()
+
+        def fake_sleep(seconds):
+            fake.sleep(seconds)
+
+        try:
+            with pytest.raises(SystemExit, match='still in progress after'):
+                with lifecycle_lock(reason='timer',
+                                     env={'INVOCATION_ID': 'abc',
+                                          'SIGMOND_LOCK_WAIT_S': '10'},
+                                     isatty=lambda: False,
+                                     sleep=fake_sleep, clock=fake.clock,
+                                     poll_s=5.0):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
+        # No fd leak: we should be able to acquire the lock ourselves now
+        # that the contending holder has released it too.
+        fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_explicit_wait_s_overrides_environment(self, tmp_path, monkeypatch):
+        """Passing wait_s explicitly (as the consumer-restart hook does)
+        skips the environment decision entirely."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        def _boom_sleep(seconds):
+            raise AssertionError('should never sleep when wait_s=0 is explicit')
+
+        try:
+            with pytest.raises(SystemExit, match='another lifecycle operation'):
+                # Systemd-shaped environment, but wait_s=0 is explicit.
+                with lifecycle_lock(reason='hook',
+                                     env={'INVOCATION_ID': 'abc'},
+                                     isatty=lambda: False,
+                                     wait_s=0, sleep=_boom_sleep):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
+
+# ---------------------------------------------------------------------------
 # Start ordering tests (CONTRACT §5.4)
 # ---------------------------------------------------------------------------
 

@@ -118,7 +118,7 @@ class WaitLifecycleLockTests(unittest.TestCase):
         attempts = []
 
         @contextlib.contextmanager
-        def lock(reason=None):
+        def lock(reason=None, **kwargs):
             attempts.append(1)
             if len(attempts) < 3:
                 raise SystemExit("busy")
@@ -133,7 +133,7 @@ class WaitLifecycleLockTests(unittest.TestCase):
 
     def test_gives_up_at_the_deadline(self):
         @contextlib.contextmanager
-        def lock(reason=None):
+        def lock(reason=None, **kwargs):
             raise SystemExit("busy")
             yield
 
@@ -152,7 +152,7 @@ class WaitLifecycleLockTests(unittest.TestCase):
         attempts = []
 
         @contextlib.contextmanager
-        def lock(reason=None):
+        def lock(reason=None, **kwargs):
             attempts.append(1)
             raise SystemExit("busy")
             yield
@@ -179,7 +179,7 @@ class WaitLifecycleLockMessagingTests(unittest.TestCase):
         attempts = []
 
         @contextlib.contextmanager
-        def lock(reason=None):
+        def lock(reason=None, **kwargs):
             attempts.append(1)
             if len(attempts) < 3:
                 raise SystemExit("busy")
@@ -200,10 +200,27 @@ class WaitLifecycleLockMessagingTests(unittest.TestCase):
     def test_no_message_when_the_lock_is_free_immediately(self):
         msgs = []
         with mock.patch.object(smd, "lifecycle_lock",
-                              lambda reason=None: contextlib.nullcontext()):
+                              lambda reason=None, **kwargs: contextlib.nullcontext()):
             with smd._wait_lifecycle_lock("x", say=msgs.append):
                 pass
         self.assertEqual(msgs, [])
+
+    def test_passes_wait_s_zero_so_its_own_budget_stays_authoritative(self):
+        """The hook owns the only wait loop here (its run-wide deadline_s
+        budget) — it must call lifecycle_lock with wait_s=0 so
+        lifecycle_lock's own systemd-detected wait never nests inside it
+        (global-constraints: 'Lock wait')."""
+        seen_kwargs = []
+
+        @contextlib.contextmanager
+        def lock(reason=None, **kwargs):
+            seen_kwargs.append(kwargs)
+            yield
+
+        with mock.patch.object(smd, "lifecycle_lock", lock):
+            with smd._wait_lifecycle_lock("x", say=lambda m: None):
+                pass
+        self.assertEqual(seen_kwargs, [{"wait_s": 0}])
 
 
 # ─── shared harness for the end-to-end cmd tests below ──────────────────────
@@ -256,7 +273,7 @@ def _run_cmd(run, *, dry_run=False, lock=None, staleness=None, wait_ready=90):
     `_align_staleness`, `lifecycle_lock` and `load_catalog` mocked — the
     consumer-selection math and restart machinery are exercised for real."""
     args = argparse.Namespace(unit=RADIOD_UNIT, dry_run=dry_run, wait_ready=wait_ready)
-    lock_fn = lock if lock is not None else (lambda reason=None: contextlib.nullcontext())
+    lock_fn = lock if lock is not None else (lambda reason=None, **kwargs: contextlib.nullcontext())
     if callable(staleness):
         staleness_patch = mock.patch.object(smd, "_align_staleness", side_effect=staleness)
     else:
@@ -320,7 +337,7 @@ class RestartStaleConsumersCmdTests(unittest.TestCase):
         order = []
 
         @contextlib.contextmanager
-        def lock(reason=None):
+        def lock(reason=None, **kwargs):
             order.append("acquired")
             yield
 
@@ -464,7 +481,7 @@ class RadiodConsumerRetryPassesTests(unittest.TestCase):
              mock.patch.object(smd, "_align_staleness", return_value=st), \
              mock.patch.object(smd, "load_catalog", return_value={}), \
              mock.patch.object(smd, "lifecycle_lock",
-                              lambda reason=None: contextlib.nullcontext()), \
+                              lambda reason=None, **kwargs: contextlib.nullcontext()), \
              mock.patch.object(smd, "_radiod_unit_started_at_monotonic",
                               side_effect=mono_sequence), \
              contextlib.redirect_stdout(io.StringIO()) as out:
@@ -515,7 +532,7 @@ class RadiodConsumerLockBudgetTests(unittest.TestCase):
                 flipped[0] = True
 
         @contextlib.contextmanager
-        def lock(reason=None):
+        def lock(reason=None, **kwargs):
             if busy[0]:
                 raise SystemExit("busy")
             yield
@@ -566,7 +583,7 @@ class RadiodConsumerWorstRcTests(unittest.TestCase):
              mock.patch.object(smd, "_align_staleness", side_effect=staleness_calls), \
              mock.patch.object(smd, "load_catalog", return_value={}), \
              mock.patch.object(smd, "lifecycle_lock",
-                              lambda reason=None: contextlib.nullcontext()), \
+                              lambda reason=None, **kwargs: contextlib.nullcontext()), \
              mock.patch.object(smd, "_radiod_unit_started_at_monotonic",
                               side_effect=[100.0, 150.0, 150.0, 150.0]), \
              contextlib.redirect_stdout(io.StringIO()) as out:

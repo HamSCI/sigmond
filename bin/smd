@@ -20956,12 +20956,17 @@ def _wait_lifecycle_lock(reason, *, deadline_s=900, poll_s=5,
     M-2: prints once when the lock is first found busy, and once when it is
     acquired after having waited — up to 900 s (M-4: the verb's default,
     covers 3 passes' readiness waits plus the restarts themselves) of
-    silence looks exactly like a hang from the unit's own log."""
+    silence looks exactly like a hang from the unit's own log.
+
+    Passes ``wait_s=0`` to ``lifecycle_lock`` — this hook owns the only
+    wait budget in play here (this run-wide ``deadline_s``); letting
+    ``lifecycle_lock``'s own systemd-detected wait fire too would nest
+    one poll loop inside the other."""
     end = clock() + deadline_s
     waited = False
     while True:
         try:
-            cm = lifecycle_lock(reason)
+            cm = lifecycle_lock(reason, wait_s=0)
             cm.__enter__()
         except SystemExit:
             if not waited:
