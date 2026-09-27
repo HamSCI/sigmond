@@ -6411,9 +6411,6 @@ def cmd_align(args) -> int:
     print('  image-carried files:')
     for f in files:
         print(f"    {f['path']:<40} {f['note'] or f['status']}")
-    if recorded and recorded != rel.tag:
-        print('  Proxmox host: level not measured from here — check it with '
-              'pm-align (Plan 3)')
     moving = [it.component for it in plan
               if it.status in ('move', 'missing') and it.component not in ahead_components]
     # The catalog cmd_align already read (empty under --no-cost, and then

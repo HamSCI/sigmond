@@ -89,7 +89,7 @@ class AlignCliTests(unittest.TestCase):
         self.assertIn("REBUILDS and RESTARTS radiod", out)
         self.assertIn(f"recording gap of about {align_live.RADIOD_GAP_ESTIMATE_S} s", out)
         self.assertNotIn("--apply will not move it", out)
-        self.assertIn("check it with pm-align (Plan 3)", out)
+        self.assertIn("  host:", out)
 
     def test_differing_image_file_exits_1(self):
         rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
@@ -256,12 +256,12 @@ class AlignCliTests(unittest.TestCase):
                       "from)", out)
         self.assertNotIn("station recorded release", out)
 
-    def test_recorded_differs_names_proxmox_host_not_measured(self):
+    def test_recorded_differs_prints_exactly_one_host_line_no_old_placeholder(self):
         rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                       recorded="v3.36")
-        self.assertIn("Proxmox host: level not measured from here — check it with pm-align "
-                      "(Plan 3)", out)
-        self.assertNotIn("host: recorded", out)
+        host_lines = [l for l in out.splitlines() if l.startswith("  host:")]
+        self.assertEqual(len(host_lines), 1)
+        self.assertNotIn("level not measured", out)
 
     def test_error_entry_would_move_refuses(self):
         rc, out = run({"sigmond": "459bee6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
