@@ -24,11 +24,20 @@ exposure once per run but takes no action.
 
 import ipaddress
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 OVERRIDE = Path("/etc/sigmond/allow-public-ip")
+
+# `smd` mutating verbs started under systemd (INVOCATION_ID set, no tty —
+# true here, sigmond-netguard.service) now wait up to SIGMOND_LOCK_WAIT_S
+# (default 900s) for the lifecycle lock instead of refusing immediately
+# (lib/sigmond/lifecycle.py). This subprocess's own timeout is 600s, so
+# left uncapped `smd stop` could still be mid-wait when THIS timeout fires
+# and kills it. Cap the wait comfortably under that 600s budget.
+_SMD_STOP_LOCK_WAIT_S = "540"
 
 
 def public_addrs():
@@ -87,7 +96,9 @@ def main() -> int:
         subprocess.run(["wall", msg], timeout=10)
         smd = "/usr/local/bin/smd"
         if Path(smd).exists():
-            subprocess.run([smd, "stop"], timeout=600)
+            env = dict(os.environ)
+            env["SIGMOND_LOCK_WAIT_S"] = _SMD_STOP_LOCK_WAIT_S
+            subprocess.run([smd, "stop"], timeout=600, env=env)
     return 1
 
 
