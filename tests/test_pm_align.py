@@ -697,6 +697,19 @@ def test_rollback_retry_restart_raising_stops_immediately(tmp_path):
     assert calls.count(["systemctl", "restart", pm_align.RAC_UNIT]) == 2
 
 
+def test_write_private_narrows_a_pre_existing_wider_mode_file(tmp_path):
+    """os.open's mode argument only applies when it CREATES the file -- a
+    pre-existing file at a wider mode (e.g. left over at 0o644 from some
+    other writer) would otherwise keep that mode through _write_private.
+    The explicit fchmod after os.open narrows it to 0o600 either way."""
+    p = tmp_path / "frpc-host.toml"
+    p.write_text("old")
+    os.chmod(p, 0o644)
+    pm_align._write_private(p, "new")
+    assert oct(p.stat().st_mode & 0o777) == oct(0o600)
+    assert p.read_text() == "new"
+
+
 def test_tunnel_apply_writes_the_candidate_and_backup_private_from_the_start(tmp_path, monkeypatch):
     """The frpc config carries an auth token (``user``); a create-then-chmod
     pattern leaves the file briefly at the process's default (umask-masked)
@@ -989,6 +1002,36 @@ def test_main_apply_moves_a_stale_tunnel_result_aside_before_launching(tmp_path,
     assert not tres.exists()
     prev = root / "var/lib/pm-align/tunnel-result.json.prev"
     assert '"outcome": "applied"' in prev.read_text()
+
+
+def test_main_apply_continues_launch_when_moving_the_stale_result_raises(tmp_path, monkeypatch,
+                                                                          capsys):
+    """_apply_tunnel's os.replace(TUNNEL_RESULT -> .prev) is a courtesy move
+    so a stale result from a previous launch is never read as this run's --
+    an OSError there (e.g. a permissions hiccup) must warn and continue on
+    to launch the tunnel step, never abort --apply."""
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    root = _tunnel_root(tmp_path)
+    tres = root / "var/lib/pm-align/tunnel-result.json"
+    tres.parent.mkdir(parents=True)
+    tres.write_text('{"outcome": "applied", "at": "stale"}\n')
+
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        if str(dst).endswith(".prev"):
+            raise OSError("permission denied")
+        return real_replace(src, dst)
+    monkeypatch.setattr(pm_align.os, "replace", flaky_replace)
+
+    calls = []
+    rc = pm_align.main(["--apply"], root=root, run=_fake_run(calls))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WARN" in out
+    assert tres.exists()                              # never moved aside
+    assert any(c[0] == "systemd-run" for c in calls)   # launch still happened
 
 
 def test_main_apply_does_not_touch_tunnel_result_when_nothing_to_launch(tmp_path, monkeypatch):
@@ -1366,6 +1409,23 @@ def test_apply_record_tunnel_is_refused_on_a_rac_disagreement(tmp_path, monkeypa
     assert _record_tunnel(tmp_path) == "refused"
 
 
+def test_apply_record_tunnel_becomes_launch_failed_when_systemd_run_fails(tmp_path, monkeypatch):
+    """write_record stamps "pending" before the detached step is launched
+    (final review item 3). When systemd-run itself fails, that launch
+    never happened -- leaving "pending" on the record would misreport a
+    launch in flight forever. --apply must rewrite it to "launch-failed"."""
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    _mock_release(monkeypatch)
+    _tunnel_root(tmp_path)
+
+    def run(argv, **kw):
+        rc = 1 if argv[0] == "systemd-run" else 0
+        return subprocess.CompletedProcess(argv, rc, "", "no systemd")
+    rc = pm_align.main(["--apply"], root=tmp_path, run=run)
+    assert rc == 1
+    assert _record_tunnel(tmp_path) == "launch-failed"
+
+
 def test_tunnel_step_merges_the_outcome_into_the_existing_record_and_repushes(tmp_path, monkeypatch):
     root = _tunnel_root(tmp_path)
     (root / "etc/systemd/system").mkdir(parents=True)
@@ -1409,6 +1469,36 @@ def test_tunnel_step_merge_push_failure_is_informational(tmp_path, monkeypatch):
     rc = pm_align.main(["--tunnel-step"], root=root, run=run)
     assert rc == 0
     assert _record_tunnel(root) == "applied"       # the local merge still landed
+
+
+def test_tunnel_step_merge_local_write_failure_never_crashes_out_from_under_the_outcome(
+        tmp_path, monkeypatch, capsys):
+    """write_tunnel_result has already landed the real outcome by the time
+    _merge_tunnel_result runs (main() writes TUNNEL_RESULT first) -- an
+    OSError updating the record's local copy (its own tmp.write_text +
+    os.replace) must never propagate out of --tunnel-step and crash it;
+    it exits by the outcome it already wrote, with a WARN printed."""
+    root = _tunnel_root(tmp_path)
+    rel = pm_align.Release("v3.53", "a" * 40, "d" * 40, "f" * 64, "")
+    pm_align.write_record(root, rel, ["/x"], "2026-09-25T12:00:00Z", tunnel="pending")
+    monkeypatch.setattr(pm_align, "tunnel_apply", lambda root, run, **kw:
+                        {"outcome": "applied", "detail": "added everything"})
+
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        if str(src).endswith("host-aligned.json.tmp"):
+            raise OSError("disk full")
+        return real_replace(src, dst)
+    monkeypatch.setattr(pm_align.os, "replace", flaky_replace)
+
+    rc = pm_align.main(["--tunnel-step"], root=root, run=_fake_run([]))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WARN" in out
+    doc = json.loads((root / "var/lib/pm-align/tunnel-result.json").read_text())
+    assert doc["outcome"] == "applied"              # the real result still landed
+    assert _record_tunnel(root) == "pending"         # local merge never got applied
 
 
 # ── wizard static-text checks: sigmond-wizard.sh, not pm-align.py ──────────

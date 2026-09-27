@@ -398,8 +398,17 @@ def _merge_tunnel_result(root: Path, outcome: str, *, run) -> None:
         return
     doc["tunnel"] = outcome
     tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(doc, indent=2) + "\n")
-    os.replace(tmp, p)
+    try:
+        tmp.write_text(json.dumps(doc, indent=2) + "\n")
+        os.replace(tmp, p)
+    except OSError as exc:
+        # --tunnel-step has already written TUNNEL_RESULT by the time this
+        # runs (main() writes it first) -- that IS the real outcome; this
+        # merge into the record is a courtesy copy, and an OSError here
+        # (e.g. a permissions hiccup, a full filesystem) must never crash
+        # --tunnel-step out from under the outcome it already landed.
+        _say(f"  WARN: could not update {RECORD} with the tunnel outcome: {exc!r}")
+        return
     try:
         push_record(p, host_vmid(root), run=run)
     except BaseException:
@@ -597,12 +606,19 @@ def _rollback(path: Path, backup: Path, old_names: list, user: str, run, fetch_s
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Write ``text`` to a NEW file at ``path``, created 0o600 from the
-    first byte via os.open -- a write_text()-then-chmod pattern briefly
-    creates the file at the process's (umask-masked) default mode first,
-    which for the frpc config (it carries an auth token in ``user``) is a
-    real, if brief, window of exposure."""
+    """Write ``text`` to ``path``, ending at mode 0o600 -- a
+    write_text()-then-chmod pattern briefly creates the file at the
+    process's (umask-masked) default mode first, which for the frpc config
+    (it carries an auth token in ``user``) is a real, if brief, window of
+    exposure.  ``os.open``'s mode only applies when it CREATES the file, so
+    a pre-existing file at a wider mode (e.g. left over at 0o644) would
+    keep it; the explicit fchmod narrows that case too."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
     with os.fdopen(fd, "w") as f:
         f.write(text)
 
@@ -808,12 +824,22 @@ def _apply_tunnel(root: Path, run) -> int:
         return 0
     tres = _under(root, TUNNEL_RESULT)
     if tres.exists():
-        os.replace(tres, tres.with_name(tres.name + ".prev"))
+        try:
+            os.replace(tres, tres.with_name(tres.name + ".prev"))
+        except OSError as exc:
+            _say(f"  WARN: could not move aside the stale {TUNNEL_RESULT}: {exc!r} — continuing")
     rc = _launch_tunnel_step(root, run)
     if rc == 0:
         _say("  tunnel: adding " + ", ".join(added) + " — running detached (pm-align-tunnel).")
         _say("  This ssh session may drop while the tunnel restarts. Reconnect in ~5 minutes "
              "(longer if it rolls back), then: pm-align --status")
+    else:
+        # write_record already stamped "pending" for this apply (the record
+        # is written before this function runs) -- the launch itself never
+        # happened, so leaving "pending" would misreport a launch in flight
+        # forever. Merge the real outcome in, the same informational path
+        # --tunnel-step uses once it finishes.
+        _merge_tunnel_result(root, "launch-failed", run=run)
     return rc
 
 
