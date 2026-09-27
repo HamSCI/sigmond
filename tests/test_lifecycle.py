@@ -274,6 +274,53 @@ class TestLifecycleLockWait:
         finally:
             self._release_lock(held_fd)
 
+    def test_no_invocation_id_and_not_a_tty_immediate_system_exit(
+            self, tmp_path, monkeypatch):
+        """I3: the wait gate is INVOCATION_ID present AND not-a-tty
+        together. No INVOCATION_ID + isatty()=False (e.g. stdin piped/closed
+        but not systemd-started) must still refuse immediately, never wait
+        — a mutation that keeps only `if not isatty()` (dropping the
+        INVOCATION_ID half) would wait here instead."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        def _boom_sleep(seconds):
+            raise AssertionError('should never sleep: no INVOCATION_ID')
+
+        try:
+            with pytest.raises(SystemExit, match='another lifecycle operation'):
+                with lifecycle_lock(reason='no-invocation-id', env={},
+                                     isatty=lambda: False,
+                                     sleep=_boom_sleep):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
+    def test_invocation_id_set_but_is_a_tty_immediate_system_exit(
+            self, tmp_path, monkeypatch):
+        """I3: INVOCATION_ID present + isatty()=True (an interactive
+        session that happens to carry a stale/inherited INVOCATION_ID) must
+        still refuse immediately, never wait — a mutation that keeps only
+        `if 'INVOCATION_ID' in env` (dropping the isatty half) would wait
+        here instead."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        def _boom_sleep(seconds):
+            raise AssertionError('should never sleep: isatty() is True')
+
+        try:
+            with pytest.raises(SystemExit, match='another lifecycle operation'):
+                with lifecycle_lock(reason='interactive-invocation-id',
+                                     env={'INVOCATION_ID': 'abc'},
+                                     isatty=lambda: True,
+                                     sleep=_boom_sleep):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
     def test_systemd_busy_then_freed_acquires_and_logs(self, tmp_path, monkeypatch,
                                                         capsys):
         """systemd-started + busy, freed after N polls → acquires; logs
