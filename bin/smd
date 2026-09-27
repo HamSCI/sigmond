@@ -92,6 +92,7 @@ import pwd
 import re
 import shutil
 import subprocess
+import tempfile
 import textwrap
 import time
 import tomllib
@@ -7327,6 +7328,13 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
         # reported healthy. See _chrony_captured_findings.
         findings.extend(_chrony_captured_findings())
 
+    def _radiod_dropins() -> None:
+        # radiod's template drop-ins + companion units, missing whenever
+        # sigmond installed before ka9q-radio on a fresh image (AC0G-B4,
+        # 2026-09-23) — install.sh's own radiod block never fires there.
+        # See _radiod_dropins_findings / _ensure_radiod_dropins.
+        findings.extend(_radiod_dropins_findings())
+
     _guarded('ownership', _ownership)
     _guarded('git', _git)
     _guarded('venv-skew', _venv)
@@ -7336,6 +7344,7 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
     _guarded('rx888-irq', _rx888_irq)
     _guarded('rx888-queuedepth', _rx888_queuedepth)
     _guarded('chrony-refclock-captured', _chrony_captured)
+    _guarded('radiod-dropins', _radiod_dropins)
 
     if unassessed:
         clean = None
@@ -7398,6 +7407,12 @@ def cmd_doctor(args) -> int:
                     chown=_chown_tree, rescan=foreign_owned)
                 if repaired:
                     _ok(f'{d.name}: repaired {repaired} path(s)')
+
+        # radiod's template drop-ins + companion units: idempotent, so
+        # always safe to run — a no-op when already current or when no
+        # radiod@.service template unit exists yet.
+        for p in _ensure_radiod_dropins():
+            _ok(f'radiod drop-in: wrote {p}')
 
     _, findings = collect_findings(base)
 
@@ -9254,6 +9269,13 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     # First-boot wisdom generation (FFTW plans for radiod's transforms).
     _install_wisdom_service()
     _ensure_radiod_running()
+    # Now that make install has written radiod@.service, lay down its
+    # template drop-ins + companion units — this is the path that closes
+    # the gap install.sh's own radiod block cannot: install.sh only runs
+    # BEFORE ka9q-radio exists on a fresh image, so its `if radiod@.service
+    # exists` guard never fires there (AC0G-B4, rebuilt 2026-09-23).
+    for p in _ensure_radiod_dropins():
+        _ok(f'radiod drop-in: wrote {p}')
     return True
 
 
@@ -10161,6 +10183,165 @@ def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
 # ---------------------------------------------------------------------------
 # smd start / stop / restart / reload
 # ---------------------------------------------------------------------------
+
+# The radiod template drop-in set, exactly — source in this checkout's
+# systemd/ -> installed path relative to /etc/systemd/system. install.sh
+# (~line 903) writes these `if` a radiod@.service unit already exists, so a
+# fresh image where sigmond installs BEFORE ka9q-radio (AC0G-B4, rebuilt
+# 2026-09-23) gets none of them. _ensure_radiod_dropins() below is the
+# idempotent path that closes that gap: called from _install_radiod_native
+# after ka9q-radio's `make install` has written radiod@.service, and from
+# `smd doctor --fix` for hosts that already missed it.
+_RADIOD_DROPIN_SRC_DIR = Path(__file__).resolve().parent.parent / 'systemd'
+_RADIOD_DROPINS = (
+    ('radiod-restart-forever.conf',
+     'radiod@.service.d/10-sigmond-restart.conf'),
+    ('radiod-park.conf',
+     'radiod@.service.d/40-sigmond-park.conf'),
+    ('radiod-consumers.conf',
+     'radiod@.service.d/45-sigmond-consumers.conf'),
+    # Companion units, installed alongside the drop-ins that Want= them.
+    ('sigmond-radiod-park@.service', 'sigmond-radiod-park@.service'),
+    ('sigmond-radiod-consumers@.service', 'sigmond-radiod-consumers@.service'),
+)
+
+
+def _radiod_template_installed(run) -> bool:
+    """True when a `radiod@.service` TEMPLATE unit is installed — i.e.
+    ka9q-radio's `make install` has run.  `systemctl cat` exits 0 only when
+    it found a unit file to show; on a host where sigmond installed before
+    ka9q-radio (or ka9q-radio was never installed) it exits non-zero, and
+    there is nothing to drop the radiod conf-tree drop-ins onto yet.
+
+    `run` is injected (mirrors `_unit_exec_expected`'s convention) so this
+    is testable without a real systemd.
+    """
+    r = run(['systemctl', 'cat', 'radiod@.service'], capture=True)
+    return r.returncode == 0
+
+
+def _radiod_dropins_missing(*, systemd_dir: Path = Path('/etc/systemd/system'),
+                            src_dir: Path = None, run=None) -> list:
+    """Installed radiod drop-in / companion-unit paths (str) that are
+    missing, or whose bytes differ from this checkout's systemd/ copy.
+
+    Returns `[]` both when everything already matches AND when no
+    `radiod@.service` template unit is installed yet — the latter is not a
+    fault to report; there is nothing to compare against (see
+    _ensure_radiod_dropins, which shares this same gate).
+
+    ``systemd_dir``/``src_dir``/``run`` are injectable so tests run against
+    a tmp tree instead of the real `/etc/systemd/system`.
+    """
+    run = run or _run
+    src_dir = Path(src_dir) if src_dir is not None else _RADIOD_DROPIN_SRC_DIR
+    systemd_dir = Path(systemd_dir)
+
+    if not _radiod_template_installed(run):
+        return []
+
+    missing = []
+    for src_name, rel_dest in _RADIOD_DROPINS:
+        dest = systemd_dir / rel_dest
+        try:
+            src_bytes = (src_dir / src_name).read_bytes()
+        except OSError:
+            # Can't read our own source — report the installed path as
+            # missing so it's visible rather than silently skipped.
+            missing.append(str(dest))
+            continue
+        try:
+            dest_bytes = dest.read_bytes()
+        except OSError:
+            missing.append(str(dest))
+            continue
+        if dest_bytes != src_bytes:
+            missing.append(str(dest))
+    return missing
+
+
+def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
+                           src_dir: Path = None, run=None) -> list:
+    """Idempotently install radiod's template drop-ins + companion units.
+
+    Writes a file only when its bytes differ from this checkout's systemd/
+    copy (temp file + `mv`, the same sudo-aware mechanism
+    `_write_affinity_drop_in` uses below — never a bare `open()` on /etc),
+    runs `systemctl daemon-reload` exactly once if anything changed, and
+    NEVER starts or restarts any unit: radiod (and the companion units'
+    Wants=) pick the change up on their own next normal start.  Returns the
+    list of paths written.
+
+    Returns `[]` and writes nothing when no `radiod@.service` template unit
+    is installed yet (a fresh image where sigmond ran before ka9q-radio —
+    see docs/superpowers/plans/2026-09-27-radiod-dropins-lockwait-cleanups.md).
+
+    ``systemd_dir``/``src_dir``/``run`` are injectable so tests run against
+    a tmp tree instead of the real `/etc/systemd/system`.
+    """
+    run = run or _run
+    src_dir = Path(src_dir) if src_dir is not None else _RADIOD_DROPIN_SRC_DIR
+    systemd_dir = Path(systemd_dir)
+
+    if not _radiod_template_installed(run):
+        return []
+
+    written = []
+    for src_name, rel_dest in _RADIOD_DROPINS:
+        dest = systemd_dir / rel_dest
+        try:
+            content = (src_dir / src_name).read_bytes()
+        except OSError as e:
+            _err(f'radiod drop-ins: cannot read source {src_dir / src_name}: {e}')
+            continue
+        try:
+            if dest.read_bytes() == content:
+                continue  # already current
+        except OSError:
+            pass  # missing (or its parent dir is) — fall through and write
+
+        r = run(['mkdir', '-p', str(dest.parent)], sudo=True)
+        if getattr(r, 'returncode', 0) != 0:
+            _err(f'radiod drop-ins: cannot create {dest.parent}')
+            continue
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, dir='/tmp') as f:
+                f.write(content)
+                tmp = f.name
+        except OSError as e:
+            _err(f'radiod drop-ins: cannot stage {dest}: {e}')
+            continue
+        r = run(['mv', tmp, str(dest)], sudo=True)
+        if getattr(r, 'returncode', 0) != 0:
+            _err(f'radiod drop-ins: mv failed for {dest}')
+            continue
+        # 644 so non-root processes can read it, matching the affinity
+        # drop-in writer's convention.
+        run(['chmod', '644', str(dest)], sudo=True)
+        written.append(str(dest))
+
+    if written:
+        run(['systemctl', 'daemon-reload'], sudo=True)
+    return written
+
+
+def _radiod_dropins_findings(*, systemd_dir: Path = Path('/etc/systemd/system'),
+                             src_dir: Path = None, run=None) -> list:
+    """`smd doctor` finding for _radiod_dropins_missing(): one aggregated,
+    fixable Finding naming every missing/stale path, or [] when clean (or
+    when there's no radiod@.service template to compare against — see
+    _radiod_dropins_missing's docstring)."""
+    from sigmond.doctor import Finding
+    missing = _radiod_dropins_missing(systemd_dir=systemd_dir, src_dir=src_dir, run=run)
+    if not missing:
+        return []
+    head = ', '.join(missing[:3]) + (' ...' if len(missing) > 3 else '')
+    return [Finding(
+        'ka9q-radio', 'radiod-dropins-missing',
+        f'{len(missing)} radiod drop-in/companion-unit path(s) missing or '
+        f'stale: {head} (smd doctor --fix)',
+        fixable=True)]
+
 
 def _ensure_radiod_affinity_drop_ins(radiod_units: list,
                                      topology_cpu_affinity=None) -> bool:
