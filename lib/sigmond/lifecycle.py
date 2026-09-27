@@ -440,7 +440,7 @@ _DEFAULT_SYSTEMD_LOCK_WAIT_S = 900
 @contextlib.contextmanager
 def lifecycle_lock(reason: str = "", *, wait_s=None, poll_s: float = 5.0,
                     sleep=time.sleep, clock=time.monotonic,
-                    env=os.environ, isatty=sys.stdin.isatty):
+                    env=os.environ, isatty=None):
     """Acquire an exclusive flock on the lifecycle lock file.
 
     Every mutating verb (install, apply, start, stop, restart, reload,
@@ -463,10 +463,36 @@ def lifecycle_lock(reason: str = "", *, wait_s=None, poll_s: float = 5.0,
     consumer-restart hook, which owns its own run-wide wait budget via
     ``_wait_lifecycle_lock`` and passes ``wait_s=0`` here so the two
     waits never nest) always wins over the environment-based decision.
+
+    ``isatty`` defaults to ``None``, meaning "consult ``sys.stdin.isatty``,
+    but lazily — at call time, not at import time".  A systemd-managed
+    process's stdin can be closed or reassigned after this module was
+    first imported, and binding the bound method once as a default
+    argument (the old behaviour) would keep calling the STALE stdin
+    object forever.  Whichever callable ends up in use (the default or an
+    injected one), any exception it raises is treated as "not a tty"
+    rather than propagated — a closed fd's ``.isatty()`` raising
+    ``OSError`` must not crash a mutating ``smd`` invocation.
     """
+    def _is_tty() -> bool:
+        try:
+            fn = isatty if isatty is not None else sys.stdin.isatty
+            return bool(fn())
+        except Exception:
+            return False
+
     if wait_s is None:
-        if 'INVOCATION_ID' in env and not isatty():
-            wait_s = int(env.get('SIGMOND_LOCK_WAIT_S', _DEFAULT_SYSTEMD_LOCK_WAIT_S))
+        if 'INVOCATION_ID' in env and not _is_tty():
+            raw_wait_s = env.get('SIGMOND_LOCK_WAIT_S', _DEFAULT_SYSTEMD_LOCK_WAIT_S)
+            try:
+                wait_s = int(raw_wait_s)
+            except (TypeError, ValueError):
+                print(
+                    f"smd: SIGMOND_LOCK_WAIT_S={raw_wait_s!r} is not an "
+                    f"integer — using the default {_DEFAULT_SYSTEMD_LOCK_WAIT_S}s",
+                    file=sys.stderr,
+                )
+                wait_s = _DEFAULT_SYSTEMD_LOCK_WAIT_S
         else:
             wait_s = 0
 

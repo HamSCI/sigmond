@@ -474,6 +474,142 @@ class TestLifecycleLockWait:
         finally:
             self._release_lock(held_fd)
 
+    def test_default_isatty_resolved_lazily_from_current_sys_stdin(
+            self, tmp_path, monkeypatch):
+        """M6: `isatty` defaults to None and is resolved from the CURRENT
+        `sys.stdin` at call time, not bound once when lifecycle.py was
+        imported (a stale binding would ignore this monkeypatch and use
+        whatever sys.stdin was at import time — typically pytest's
+        captured, non-tty stdin — and try to wait instead of refusing)."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        class _FakeInteractiveStdin:
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(sys, 'stdin', _FakeInteractiveStdin())
+
+        def _boom_sleep(seconds):
+            raise AssertionError('should never sleep: sys.stdin.isatty() is True')
+
+        try:
+            with pytest.raises(SystemExit, match='another lifecycle operation'):
+                with lifecycle_lock(reason='lazy-isatty',
+                                     env={'INVOCATION_ID': 'abc'},
+                                     sleep=_boom_sleep):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
+    def test_default_isatty_error_treated_as_not_a_tty(self, tmp_path, monkeypatch):
+        """M6: if sys.stdin.isatty() raises (e.g. a closed fd under
+        systemd), that must be treated as "not a tty" — never propagate —
+        so a systemd-started smd still gets the wait behaviour instead of
+        crashing."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        class _FakeBrokenStdin:
+            def isatty(self):
+                raise OSError('bad file descriptor')
+
+        monkeypatch.setattr(sys, 'stdin', _FakeBrokenStdin())
+
+        fake = _FakeClock()
+        polls = {'n': 0}
+
+        def fake_sleep(seconds):
+            polls['n'] += 1
+            fake.sleep(seconds)
+            if polls['n'] == 1:
+                self._release_lock(held_fd)
+
+        with lifecycle_lock(reason='broken-stdin', env={'INVOCATION_ID': 'abc'},
+                             sleep=fake_sleep, clock=fake.clock, poll_s=5.0):
+            pass
+
+        assert polls['n'] == 1
+
+    def test_injected_isatty_error_treated_as_not_a_tty(self, tmp_path, monkeypatch):
+        """M6: an injected `isatty` callable that raises is likewise
+        treated as "not a tty", not propagated."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        def _boom_isatty():
+            raise RuntimeError('isatty exploded')
+
+        fake = _FakeClock()
+        polls = {'n': 0}
+
+        def fake_sleep(seconds):
+            polls['n'] += 1
+            fake.sleep(seconds)
+            if polls['n'] == 1:
+                self._release_lock(held_fd)
+
+        with lifecycle_lock(reason='broken-injected-isatty',
+                             env={'INVOCATION_ID': 'abc'}, isatty=_boom_isatty,
+                             sleep=fake_sleep, clock=fake.clock, poll_s=5.0):
+            pass
+
+        assert polls['n'] == 1
+
+    def test_malformed_sigmond_lock_wait_s_defaults_to_900_with_warning(
+            self, tmp_path, monkeypatch, capsys):
+        """M6: SIGMOND_LOCK_WAIT_S must be parsed defensively — a
+        non-integer value falls back to the 900s default (with a one-line
+        stderr warning) rather than raising ValueError out of a mutating
+        smd invocation."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        # Never freed -> times out against the fallback bound (900s) so the
+        # test proves the fallback value, not just that it didn't crash.
+        fake = _FakeClock()
+        try:
+            with pytest.raises(SystemExit, match='still in progress after 900'):
+                with lifecycle_lock(reason='malformed-wait-s',
+                                     env={'INVOCATION_ID': 'abc',
+                                          'SIGMOND_LOCK_WAIT_S': 'banana'},
+                                     isatty=lambda: False,
+                                     sleep=fake.sleep, clock=fake.clock,
+                                     poll_s=100.0):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
+        err = capsys.readouterr().err
+        assert 'SIGMOND_LOCK_WAIT_S' in err
+        assert 'banana' in err
+
+    def test_sigmond_lock_wait_s_zero_string_variants_still_parse(
+            self, tmp_path, monkeypatch):
+        """A well-formed integer string must still parse normally after
+        the defensive-parsing change (no false-positive fallback)."""
+        lock_file = tmp_path / 'lifecycle.lock'
+        monkeypatch.setattr('sigmond.lifecycle.LIFECYCLE_LOCK', lock_file)
+        held_fd = self._hold_lock(lock_file)
+
+        def _boom_sleep(seconds):
+            raise AssertionError('should never sleep when wait bound is 0')
+
+        try:
+            with pytest.raises(SystemExit, match='another lifecycle operation'):
+                with lifecycle_lock(reason='well-formed-zero',
+                                     env={'INVOCATION_ID': 'abc',
+                                          'SIGMOND_LOCK_WAIT_S': '0'},
+                                     isatty=lambda: False,
+                                     sleep=_boom_sleep):
+                    pass  # pragma: no cover
+        finally:
+            self._release_lock(held_fd)
+
 
 # ---------------------------------------------------------------------------
 # Start ordering tests (CONTRACT §5.4)
