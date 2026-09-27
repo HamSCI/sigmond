@@ -567,6 +567,36 @@ class RadiodConsumerLockBudgetTests(unittest.TestCase):
         self.assertLess(t[0], 950.0)
 
 
+class RadiodConsumerPassBudgetSpentAtStartTests(unittest.TestCase):
+    """The `remaining <= 0` short-circuit at the top of `_radiod_restart_pass`
+    (final review / R2): a pass that finds the run-wide lock budget already
+    spent -- ``lock_deadline_at <= clock()`` -- must return 3 WITHOUT ever
+    calling the lock, neither `lifecycle_lock` nor `_wait_lifecycle_lock`.
+    Previously exercised only indirectly (RadiodConsumerLockBudgetTests
+    reaches this via a busy lock across two passes); this hits the
+    already-spent-at-entry branch of `_radiod_restart_pass` directly."""
+
+    def test_budget_already_spent_returns_3_without_touching_the_lock(self):
+        run, calls = _fake_run()
+        args = argparse.Namespace(unit=RADIOD_UNIT, dry_run=False, wait_ready=90)
+        lock_calls = []
+
+        def lock(reason=None, **kwargs):
+            lock_calls.append((reason, kwargs))
+            return contextlib.nullcontext()
+
+        with mock.patch.object(smd, "lifecycle_lock", lock), \
+             mock.patch.object(smd, "_wait_lifecycle_lock") as wait_lock:
+            rc, radiod_start = smd._radiod_restart_pass(
+                RADIOD_UNIT, args, {}, run=run, sleep=lambda s: None,
+                clock=lambda: 100.0, lock_deadline_at=100.0)
+        self.assertEqual(rc, 3)
+        self.assertIsNone(radiod_start)
+        self.assertFalse(lock_calls)
+        wait_lock.assert_not_called()
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "restart"]])
+
+
 class RadiodConsumerWorstRcTests(unittest.TestCase):
     """R3: the run returns the WORST rc across all passes, by precedence
     4 > 3 > 2 > 1 > 0 -- a failed restart in an early pass must not be
