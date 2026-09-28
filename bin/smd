@@ -1464,12 +1464,17 @@ def _build_wsjtx_decoders() -> bool:
         return False
     # WSJT-X cmake needs the full Qt5/boost/hamlib/fftw set beyond the base
     # native toolchain (a superset of onion's deps).
+    #
+    # portaudio19-dev: FindPortaudio is a hard cmake requirement.  It used to
+    # arrive only via _RADIOD_APT_DEPS, so every host that built radiod first
+    # hid its absence here; a decode-only client host (AC0G-B2, no local
+    # radiod, 2026-09-28) failed with "Portaudio_INCLUDE_DIR=<not found>".
     _info('wsjtx-decoders: installing WSJT-X build deps ...')
     r = _apt('install', '-y', '--no-install-recommends',
              'gfortran', 'qtbase5-dev', 'qttools5-dev', 'qttools5-dev-tools',
              'libqt5serialport5-dev', 'qtmultimedia5-dev',
              'libqt5websockets5-dev', 'libboost-all-dev', 'libhamlib-dev',
-             'libfftw3-dev', 'libusb-1.0-0-dev', sudo=True)
+             'libfftw3-dev', 'libusb-1.0-0-dev', 'portaudio19-dev', sudo=True)
     if r.returncode != 0:
         _err(f'wsjtx-decoders: build-dep install failed: {r.stderr.strip()}')
         return False
@@ -2774,7 +2779,22 @@ def _install_radiod_watchdog(sigmond_dir: Path) -> bool:
     return ok
 
 
-def _install_loopback_multicast_route(sigmond_dir: Path) -> bool:
+def _host_has_local_radiod(radiod_needed: bool = False) -> bool:
+    """True when this host runs, or is about to run, its own radiod.
+
+    Any one suffices: radiod is part of the current install, the binary is
+    already built, or an instance config exists.  A decode-only client host
+    (AC0G-B2, 2026-09-28) has none of them and finds its radiods on the LAN
+    through ka9q-python's mDNS discovery.
+    """
+    if radiod_needed or Path('/usr/local/sbin/radiod').exists():
+        return True
+    return any(not p.name.startswith('radiod@bootstrap-fw')
+               for p in Path('/etc/radio').glob('radiod@*.conf'))
+
+
+def _install_loopback_multicast_route(sigmond_dir: Path,
+                                      local_radiod: bool = True) -> bool:
     """Route 239.0.0.0/8 via loopback on single-host stations.
 
     ka9q's ttl=0 model keeps every stream on-host, but the kernel still
@@ -2789,7 +2809,17 @@ def _install_loopback_multicast_route(sigmond_dir: Path) -> bool:
     remote radiod's control group would be swallowed by a blanket
     239/8→lo route, so multi-host topologies must manage multicast
     routing per-site instead.
+
+    Skipped, too, when this host has no local radiod at all
+    (``local_radiod`` False).  There is nothing on-host to keep on loopback,
+    and the route would send every IGMP join for a LAN radiod's groups out
+    ``lo``: a client-only host would then hear nothing.  It must not depend on
+    coordination naming the remote radiods -- clients find them by mDNS.
     """
+    if not local_radiod:
+        _info('loopback-multicast: no local radiod on this host — skipping '
+              'the 239/8→lo route (radiods are found on the LAN by mDNS)')
+        return True
     coord = Path('/etc/sigmond/coordination.toml')
     if coord.exists():
         try:
@@ -8996,7 +9026,8 @@ def _install_full_suite(args) -> int:
     _install_smd_itself(sigmond_dir, smd_bin)
     _install_timing_watchdog(sigmond_dir)
     _install_radiod_watchdog(sigmond_dir)
-    _install_loopback_multicast_route(sigmond_dir)
+    _install_loopback_multicast_route(
+        sigmond_dir, local_radiod=_host_has_local_radiod(radiod_needed))
     if not _ensure_sigmond_venv():
         _warn('TUI venv setup failed — smd tui will not work')
         errors += 1
