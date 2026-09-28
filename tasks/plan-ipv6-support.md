@@ -1,5 +1,10 @@
 # plan: IPv6 support for the appliance (McMurdo)
 
+**Status — 2026-09-28: CASE A VALIDATED ON A BENCH.** The architecture in §3
+works. An unmodified IPv4-only decoder VM reached every upstream in §1 across a
+genuinely IPv6-only site. See "§6 Bench validation" at the end for the setup,
+the results, and the six changes it proved are required.
+
 **Status — 2026-09-23: STUDY ONLY. No code written, nothing decided.**
 Prompted by Nathaniel: *McMurdo uses ONLY IPv6.* This note is the survey rob
 asked for before any commits. It ends with three questions that must be
@@ -187,3 +192,78 @@ anywhere near Antarctica, where nobody can move a cable.
 Related: `sigmond-appliance/firstboot-v3.sh` (netfix, setnet, NAT/DNAT),
 `sigmond/scripts/proxmox/sigmond-wizard.sh` (RAC tier ladder), and
 `docs/networking.md` (IGMP-snooping, the other network-silent-failure note).
+
+
+---
+
+# §6 Bench validation — 2026-09-28
+
+## The bench
+
+A Raspberry Pi (`WD-DEV-PI`) emulating McMurdo: `radvd` + `unbound` DNS64 +
+`tayga` NAT64 on an isolated segment, IPv4 upstream only. AI6VN-PM's site NIC
+was moved onto it, so `vmbr0` had **no IPv4 address and no IPv4 route** —
+verified, not assumed. A Wi-Fi management path (no default route) kept the host
+reachable; the VM has no Wi-Fi path, so the VM's result is clean.
+
+`jool` was the first choice for the NAT64 and does **not** build on kernel 6.18
+(`struct flowi4` lost `flowi4_tos`); `tayga` is userspace and kernel-agnostic.
+A **network-specific prefix** was used, not the well-known `64:ff9b::/96`,
+because RFC 6052 §3.1 forbids the well-known prefix with private IPv4 and a
+station must reach RFC1918 hosts too.
+
+## Result: the VM, unmodified, IPv4-only
+
+```
+github:443                       OK
+wsprnet:80                       OK
+RAC frps vpn.hamsci.org:35735    OK      <- remote access survives
+PSWS pswsnetwork.eng.ua.edu:22   OK
+git ls-remote HamSCI/sigmond     OK
+curl https://github.com          HTTP 200 in 0.38 s
+```
+
+`clatd` (Debian 2.1.0) discovered the site's prefix by RFC 7050 unaided and
+built the CLAT. `apt-get install` ran on the host with zero IPv4 addresses.
+**The VM never learned IPv6 and needed no change**, which was the bet in §3.
+
+## The six changes this proved are required
+
+1. **`MASQUERADE` must also target the CLAT.** `firstboot-v3.sh:751` writes
+   `-s 10.99.0.0/30 -o vmbr0` only. With no IPv4 on `vmbr0` the VM is cut off —
+   measured. Adding `-o clat` restored it immediately. **One line.**
+2. **`clatd` must be installed and enabled on the PM**, and is packaged.
+3. **The PM must serve DNS to the VM over IPv4.** Nothing does today. The guest
+   is IPv4-only; the site resolver is IPv6-only and unreachable from it. dnsmasq
+   on `vmbr1` forwarding to the site resolver over IPv6 works — plus
+   **`filter-AAAA`**, because the site's DNS64 synthesises AAAA the guest has no
+   route for and happy-eyeballs will wait on them.
+4. ⛔ **Nothing consumes RDNSS.** Proxmox has no `rdnssd` and no
+   `systemd-resolved`, so a v6-only station comes up with **no resolver at all**
+   while `resolv.conf` still names a dead IPv4 server. This blocks everything
+   else, including NAT64 discovery. Hard requirement.
+5. ⛔ **`accept_ra=2` is required.** `vmbr0` has `forwarding=1` (it routes for
+   the VM) and Linux **ignores RAs on a forwarding interface** at the default
+   `accept_ra=1`. SLAAC silently did nothing until it was set. **Every sigmond
+   PM forwards**, so this hits every station.
+6. ⚠ **A stale DHCP lease survives the move.** `vmbr0` kept `10.22.23.31/24`
+   and its default route on a LAN where neither existed. "No IPv4 address"
+   cannot be used to detect a v6-only site; the lease must be released.
+
+## Also found
+
+- `sigmond-net-probe` called a working station dead — two bugs, fixed in
+  sigmond-appliance `5275cbe`.
+- The CLAT route carries **MTU 1260**. Nothing broke at this scale, but PMTUD
+  blackholes are the classic 464XLAT failure and are not exercised by these
+  tests.
+- Both `pswsnetwork.caps.ua.edu` (NXDOMAIN) and `pswsnetwork.eng.ua.edu` (live)
+  appear in the deploy tree. Unrelated to IPv6; worth chasing.
+
+## NOT yet tested
+
+- **The PVE installer** (`answer.toml:11 source = "from-dhcp"`, §2). It fails
+  before any of the above can run, and needs a fresh install on a v6-only LAN —
+  a scratch machine or a nested install, not this host.
+- Sustained operation: radiod capture, decode, upload over hours.
+- Case B/C from §3 (no NAT64 at the site).
