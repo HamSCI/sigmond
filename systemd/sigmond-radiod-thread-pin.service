@@ -1,9 +1,11 @@
 [Unit]
 Description=Deterministic per-thread CPU placement for radiod (FFT alone on its own core)
 Documentation=file:/etc/sigmond/radiod-thread-pin.conf
-After=multi-user.target
-# No BindsTo: the daemon finds radiod itself and stands by when it is absent,
-# so it survives radiod restarts and per-instance renames without a template.
+# No BindsTo and no After=: the daemon finds radiod itself and stands by when it
+# is absent, so it survives radiod restarts and per-instance renames without a
+# template.  Do NOT add After=multi-user.target -- being both WantedBy= and
+# After= the same target makes systemd start this last, ~80 s into boot on
+# W3USR-06, leaving radiod's threads unplaced for that whole window.
 
 [Service]
 Type=simple
