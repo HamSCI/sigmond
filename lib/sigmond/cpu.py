@@ -88,6 +88,13 @@ AFFINITY_UNITS = {
     'hs-uploader.service':               'other',
     'sigmond-timing-watchdog.service':   'other',
     'sigmond-radiod-watchdog.service':   'other',
+    # station-web — the same regression this map exists to prevent, third
+    # occurrence (bee1 2026-05-09, B4-100 2026-05-30, W3USR-06 2026-09-28).
+    # Found with Cpus_allowed_list 0-13 and threads observed running on
+    # pCPU 12, radiod's FFT core.  It serves a browser UI, so its load is
+    # bursty and operator-triggered — exactly the kind of spike that reads
+    # as cache/DRAM contention on radiod's strip chart when it lands there.
+    'station-web@.service':              'other',
 }
 
 

@@ -30,6 +30,10 @@ VMID="${VMID:-}"
 : "${ISOLCPUS_RANGE:?ISOLCPUS_RANGE required}"
 : "${RADIOD_FREQ_KHZ:=3200000}"
 : "${WORKER_FREQ_KHZ:=1400000}"
+# The fence pair outside the VM's affinity idles; hold it at the worker clock
+# unless a host genuinely needs it faster.  See the HOUSEKEEPING_CPUS comment
+# in cpu-pin-VMID.sh.template for what this does and does not buy.
+: "${HOUSEKEEPING_FREQ_KHZ:=${WORKER_FREQ_KHZ}}"
 # L3 CAT way-fraction for radiod's exclusive slice.  The generic default is
 # 0.62 (10/16 ways on this generation).  AC0G-B4's measured ZERO-GAP baseline
 # (gap_hourly docstring) and the KX4AZ reference both use 13/3 on a 16 MB
@@ -130,9 +134,22 @@ fi
 
 mkdir -p /var/lib/vz/snippets
 
+# The fence pair = every pCPU outside the VM's affinity.  Derived here rather
+# than hardcoded, and hoisted above the render because the hookscript now caps
+# it too; the radiod-vm-fence / IRQ-herding block further down reuses these.
+FENCE_HI="${ISOLCPUS_RANGE##*-}"
+FENCE_LO=$((FENCE_HI + 1))
+HOST_CPUS="$(nproc)"
+HOUSEKEEPING_CPUS=""
+if [ "$FENCE_LO" -le $((HOST_CPUS - 1)) ]; then
+    FENCE_CPUS="${FENCE_LO}-$((HOST_CPUS - 1))"
+    HOUSEKEEPING_CPUS="$(seq -s' ' "$FENCE_LO" $((HOST_CPUS - 1)))"
+fi
+
 # Render the hookscript by parameter substitution. The template uses sentinel
 # placeholders: @@VMID@@, @@RADIOD_CPUS@@, @@WORKER_CPUS@@, @@VCPU_TO_PCPU@@,
-# @@RADIOD_FREQ_KHZ@@, @@WORKER_FREQ_KHZ@@.
+# @@RADIOD_FREQ_KHZ@@, @@WORKER_FREQ_KHZ@@, @@HOUSEKEEPING_CPUS@@,
+# @@HOUSEKEEPING_FREQ_KHZ@@.
 sed \
     -e "s|@@VMID@@|${VMID}|g" \
     -e "s|@@RADIOD_CPUS@@|${RADIOD_CPUS}|g" \
@@ -140,6 +157,8 @@ sed \
     -e "s|@@VCPU_TO_PCPU@@|${VCPU_TO_PCPU}|g" \
     -e "s|@@RADIOD_FREQ_KHZ@@|${RADIOD_FREQ_KHZ}|g" \
     -e "s|@@WORKER_FREQ_KHZ@@|${WORKER_FREQ_KHZ}|g" \
+    -e "s|@@HOUSEKEEPING_CPUS@@|${HOUSEKEEPING_CPUS}|g" \
+    -e "s|@@HOUSEKEEPING_FREQ_KHZ@@|${HOUSEKEEPING_FREQ_KHZ}|g" \
     "$TEMPLATE" > "$SNIPPET"
 chmod +x "$SNIPPET"
 log "wrote $SNIPPET"
@@ -205,11 +224,8 @@ log "qm set complete"
 # -> ~8 s/day/channel).  It was hand-applied there on 2026-08-14 and was NOT in
 # the image — so every DASI unit has been running without it.
 # Target = the CPUs OUTSIDE the VM's affinity, derived rather than hardcoded.
-FENCE_HI="${ISOLCPUS_RANGE##*-}"
-FENCE_LO=$((FENCE_HI + 1))
-HOST_CPUS="$(nproc)"
-if [ "$FENCE_LO" -le $((HOST_CPUS - 1)) ]; then
-    FENCE_CPUS="${FENCE_LO}-$((HOST_CPUS - 1))"
+# FENCE_LO / FENCE_CPUS / HOST_CPUS were derived above the hookscript render.
+if [ -n "${FENCE_CPUS:-}" ]; then
     install -m 755 "$(dirname "$0")/radiod-vm-fence.sh" \
         /usr/local/sbin/radiod-vm-fence.sh
     cat > /etc/systemd/system/radiod-vm-fence.service <<FENCE

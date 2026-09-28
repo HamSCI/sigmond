@@ -11,6 +11,18 @@ RADIOD_CPUS=(@@RADIOD_CPUS@@)
 RADIOD_FREQ_KHZ=@@RADIOD_FREQ_KHZ@@
 WORKER_CPUS=(@@WORKER_CPUS@@)
 WORKER_FREQ_KHZ=@@WORKER_FREQ_KHZ@@
+# The pCPUs OUTSIDE the VM's affinity — the fence pair that carries the VM's
+# non-vCPU QEMU threads and every herded host IRQ.  They idle at 1-8 % busy,
+# so letting them boost to full turbo buys nothing; it only lifts the hottest-
+# core temperature the package reports.  Measured on W3USR-06 2026-09-28,
+# 3 interleaved rounds: package power UNCHANGED (11.77 W stock vs 12.02 W
+# capped, sign flips between rounds) but k10temp 56.3 C -> 48.4 C every round.
+# k10temp is Tctl/Tdie, a max across sensors, so a single core boosting to
+# 4.4 GHz dominates the reading without moving total energy.  Capping them
+# therefore buys a truthful thermal reading and lower peak junction
+# temperature, NOT lower power — do not quote it as a power saving.
+HOUSEKEEPING_CPUS=(@@HOUSEKEEPING_CPUS@@)
+HOUSEKEEPING_FREQ_KHZ=@@HOUSEKEEPING_FREQ_KHZ@@
 # Guest vCPU i -> host pCPU map (index = guest vCPU). On a sequential-HT
 # host this is the identity; on a split-HT host ({0,8},{1,9}…) it is the
 # interleave that keeps each guest sibling pair on a real host sibling pair
@@ -46,6 +58,10 @@ if [ "$PHASE" = "post-start" ] && [ "$EVT_VMID" = "$VMID" ]; then
         done
         for c in "${WORKER_CPUS[@]}"; do
             pin_freq "$c" "$WORKER_FREQ_KHZ" worker
+        done
+        # Empty on a host whose VM affinity covers every pCPU (no fence pair).
+        for c in "${HOUSEKEEPING_CPUS[@]}"; do
+            pin_freq "$c" "$HOUSEKEEPING_FREQ_KHZ" housekeeping
         done
     } | logger -t cpu-pin-${VMID}
 
