@@ -651,6 +651,73 @@ def recommended_isolcpus(plan: "AffinityPlan") -> set:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Guest-side kernel isolation (tuning doc Part 4b)
+# ---------------------------------------------------------------------------
+#
+# CPUAffinity= and AllowedCPUs= keep *sigmond's own services* off radiod's
+# cores.  Neither keeps the GUEST KERNEL off them, nor anything sigmond does not
+# manage.  On W3USR-06 on 2026-09-28 that meant chronyd, systemd-udevd, qemu-ga,
+# unattended-upgrades and ~30 other names were all free to run on radiod's pair.
+#
+# AFFINITY_UNITS is a hand-maintained list, so it grows holes: station-web was
+# the third service found unconfined (bee1 2026-05-09, B4-100 2026-05-30,
+# W3USR-06 2026-09-28).  isolcpus= fences everything at once and does not need
+# maintaining, which is why it is the durable half of the answer.
+#
+# It CANNOT be baked into an image: the set depends on where this host's radiod
+# landed, which is computed from its topology.  The tuning doc's table says
+# isolcpus=0-(2N-1), assuming radiod on the low CPUs; smd placed radiod at 12-13
+# on W3USR-06, so following that table literally would have fenced the decoders
+# and left radiod exposed — the exact inverse.  Always derive it from the plan.
+
+GUEST_ISOLATION_PATH = Path('/etc/default/grub.d/sigmond-cpu-isolation.cfg')
+
+
+def is_hypervisor_host() -> bool:
+    """True on a Proxmox host, where scripts/proxmox/host-apply.sh owns grub.
+
+    That writes /etc/default/grub.d/sigmond.cfg with an isolcpus= covering the
+    VM's whole affinity range, for a different reason (keep the *host*
+    scheduler off the vCPUs).  Two writers with two meanings on one file set is
+    how a host ends up isolating the wrong cores, so this side stands down.
+    """
+    return Path('/etc/pve').is_dir() or Path('/usr/sbin/qm').exists()
+
+
+def render_guest_isolation(cpus: set) -> str:
+    """grub.d drop-in fencing the guest kernel off radiod's cores."""
+    cpu_str = _cpus_to_range_str(sorted(cpus))
+    return textwrap.dedent(f"""\
+        # /etc/default/grub.d/sigmond-cpu-isolation.cfg — managed by smd.
+        # Do not edit: regenerate with `smd admin diag cpu-affinity --apply`.
+        #
+        # Fences the guest kernel off radiod's cores (tuning doc Part 4b).
+        # Derived from this host's computed radiod placement — NOT from the
+        # doc's 0-(2N-1) table, which assumes radiod on the low CPUs and would
+        # isolate the wrong cores wherever smd placed radiod elsewhere.
+        #
+        # nohz_full also gives the guest the same VIRT_CPU_ACCOUNTING_GEN the
+        # Proxmox host uses.  Without it the guest under-reports its own CPU by
+        # several points against both the host and MPERF/TSC, so the operator's
+        # in-guest numbers disagree with the host's for no visible reason.
+        GRUB_CMDLINE_LINUX_DEFAULT="${{GRUB_CMDLINE_LINUX_DEFAULT}} isolcpus={cpu_str} nohz_full={cpu_str} rcu_nocbs={cpu_str}"
+        """)
+
+
+def guest_isolation_reboot_pending(want: set, cmdline: Optional[str] = None) -> bool:
+    """True when the running kernel does not yet isolate ``want``.
+
+    Writing the drop-in changes nothing until the next boot, so every caller
+    has to be able to say "staged, reboot required" rather than "done".
+    """
+    if not want:
+        return False
+    if cmdline is None:
+        cmdline = _read_text_or_none('/proc/cmdline') or ''
+    return not want.issubset(parse_cmdline_cpu_param(cmdline, 'isolcpus'))
+
+
 def compute_affinity_plan(
     topology_cpu_affinity: Optional[dict] = None,
     *,
@@ -1387,12 +1454,25 @@ def build_affinity_report(
             )
 
     isol = caps.cmdline_isolcpus or caps.isolated_cpus
-    if isol and radiod_cpus_set and not radiod_cpus_set.issubset(isol):
+    if radiod_cpus_set and not radiod_cpus_set.issubset(isol):
         outside = sorted(radiod_cpus_set - isol)
-        warnings.append(
-            f"radiod plan uses cpus outside isolated pool: {outside} "
-            f"(isolated={sorted(isol)})"
-        )
+        if not isol:
+            # The `if isol and ...` guard this replaces made the WORST case --
+            # nothing isolated at all -- the one case that said nothing.  That
+            # is how W3USR-06 ran without guest isolation from build until
+            # 2026-09-28 with a clean bill of health from this very check.
+            warnings.append(
+                f"guest kernel is NOT fenced off radiod's cores {outside}: "
+                f"no isolcpus= on the kernel cmdline. Everything unmanaged "
+                f"(chronyd, udev, unattended-upgrades, the guest's own "
+                f"kworkers) is free to run there. Fix: "
+                f"`smd admin diag cpu-affinity --apply`, then reboot."
+            )
+        else:
+            warnings.append(
+                f"radiod plan uses cpus outside isolated pool: {outside} "
+                f"(isolated={sorted(isol)})"
+            )
 
     # Split-L3 segregation needs the kernel to keep all non-pinned work off
     # radiod's *whole* L3 island, not just its pinned cores.  Recommend the

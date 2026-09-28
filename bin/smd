@@ -9920,6 +9920,11 @@ def cmd_apply(args) -> int:
         try:
             if _ensure_other_affinity_drop_ins(topology.get('cpu_affinity')):
                 something_changed = True
+            # The drop-ins above confine sigmond's own services.  This fences
+            # the guest KERNEL, and everything not in AFFINITY_UNITS, off
+            # radiod's cores.  Staged only — takes effect at the next reboot.
+            if _ensure_guest_cpu_isolation(topology.get('cpu_affinity')):
+                something_changed = True
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
@@ -10445,6 +10450,79 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         _run(['systemctl', 'restart', unit], sudo=True)
 
     return wrote_any or bool(units_to_restart)
+
+
+def _ensure_guest_cpu_isolation(topology_cpu_affinity=None) -> bool:
+    """Fence the guest kernel off radiod's cores via a grub.d drop-in.
+
+    The systemd drop-ins written elsewhere in this file confine sigmond's own
+    services.  They do nothing about the guest kernel, or about any service not
+    in AFFINITY_UNITS -- a hand-maintained list that has now grown a hole three
+    times.  isolcpus= fences everything at once and needs no maintenance.
+
+    Returns True if the drop-in changed (caller reports "reboot required"), and
+    is a no-op on a Proxmox host, where host-apply.sh owns grub for a different
+    purpose.  Writing the file changes nothing until the next boot; this never
+    reboots anything.
+    """
+    try:
+        from sigmond.cpu import (compute_affinity_plan as _cplan,
+                                 recommended_isolcpus as _want_isol,
+                                 render_guest_isolation as _render_isol,
+                                 guest_isolation_reboot_pending as _isol_pending,
+                                 is_hypervisor_host as _is_hv,
+                                 GUEST_ISOLATION_PATH as _ISOL_PATH)
+    except ImportError:
+        return False
+
+    if _is_hv():
+        return False
+
+    plan = _cplan(topology_cpu_affinity)
+    want = _want_isol(plan)
+    if not want:
+        return False                      # no local radiod: nothing to fence
+
+    desired = _render_isol(want)
+    try:
+        current = _ISOL_PATH.read_text()
+    except OSError:
+        current = None
+    if current == desired:
+        # Already staged.  Still say so if the running kernel predates it --
+        # otherwise a box sits "configured" and unisolated indefinitely, which
+        # is precisely how W3USR-06 went unnoticed.
+        if _isol_pending(want):
+            _warn(f'cpu isolation staged for cpus {sorted(want)} but NOT active '
+                  f'— the running kernel has no isolcpus for them; reboot to apply')
+        return False
+
+    try:
+        _ISOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ISOL_PATH.write_text(desired)
+        _ISOL_PATH.chmod(0o644)
+    except OSError as exc:
+        _warn(f'could not write {_ISOL_PATH}: {exc}')
+        return False
+
+    # grub.d drop-ins only reach the kernel through a regenerated grub.cfg.
+    # Report the failure rather than let the file imply an isolation that will
+    # never happen.
+    rc = subprocess.run(['update-grub'], capture_output=True, text=True)
+    if rc.returncode != 0:
+        rc = subprocess.run(['grub-mkconfig', '-o', '/boot/grub/grub.cfg'],
+                            capture_output=True, text=True)
+    if rc.returncode != 0:
+        _warn(f'wrote {_ISOL_PATH} but update-grub failed (rc={rc.returncode}); '
+              f'isolation will NOT take effect: {rc.stderr.strip()[:200]}')
+        return True
+
+    _info(f'cpu isolation: wrote {_ISOL_PATH} — isolcpus/nohz_full/rcu_nocbs '
+          f'= {sorted(want)}')
+    if _isol_pending(want):
+        _warn('cpu isolation takes effect at the NEXT REBOOT; until then the '
+              'guest kernel still schedules on radiod\'s cores')
+    return True
 
 
 def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> bool:
@@ -11056,6 +11134,15 @@ def cmd_diag_cpu_affinity(args) -> int:
                 _info(f'{unit}: already up-to-date ({label})')
             else:
                 errors += 1
+        print()
+
+        # Fence the guest KERNEL off radiod's cores too.  The drop-ins above
+        # only bind units listed in AFFINITY_UNITS -- a hand-maintained list
+        # that has grown a hole three times.  This must run here as well as in
+        # cmd_apply, because the warning in build_affinity_report names THIS
+        # command as the remedy; a fix-it message that does not fix it is worse
+        # than no message.
+        _ensure_guest_cpu_isolation(topology.get('cpu_affinity'))
         print()
 
         _info('Running systemctl daemon-reload ...')
