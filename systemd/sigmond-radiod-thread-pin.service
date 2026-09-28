@@ -1,0 +1,21 @@
+[Unit]
+Description=Deterministic per-thread CPU placement for radiod (FFT alone on its own core)
+Documentation=file:/etc/sigmond/radiod-thread-pin.conf
+After=multi-user.target
+# No BindsTo: the daemon finds radiod itself and stands by when it is absent,
+# so it survives radiod restarts and per-instance renames without a template.
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/sigmond-radiod-thread-pin
+Restart=on-failure
+RestartSec=5
+Nice=-5
+# It must set other processes' affinity; everything else it does is read-only.
+AmbientCapabilities=CAP_SYS_NICE
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=
+
+[Install]
+WantedBy=multi-user.target

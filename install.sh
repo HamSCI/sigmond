@@ -823,6 +823,32 @@ $SUDO ln -sf "$REPO_DIR/scripts/sigmond-gap-hourly" \
         /usr/local/sbin/sigmond-gap-hourly
 ok "sigmond-gap-hourly symlink installed"
 
+# Helper daemon for sigmond-radiod-thread-pin.service.  systemd's CPUAffinity=
+# confines radiod to a SET of CPUs; inside that set the load balancer moves
+# threads around, and it does -- W3USR-06's fft thread changed cores twice in
+# five minutes with no config change.  This holds the FFT on one core alone so
+# a rise on that core's strip chart can only be a stall, never another thread
+# landing there.  Symlinked so a `git pull` updates it.
+info "Installing sigmond-radiod-thread-pin → /usr/local/sbin/"
+$SUDO chmod a+x "$REPO_DIR/scripts/sigmond-radiod-thread-pin"
+$SUDO ln -sf "$REPO_DIR/scripts/sigmond-radiod-thread-pin" \
+        /usr/local/sbin/sigmond-radiod-thread-pin
+if [[ ! -f /etc/sigmond/radiod-thread-pin.conf ]]; then
+    $SUDO mkdir -p /etc/sigmond
+    $SUDO tee /etc/sigmond/radiod-thread-pin.conf >/dev/null <<'PINCONF'
+# Deterministic thread placement inside the CPU set systemd granted radiod.
+# "auto" = the lowest granted CPU carries the FFT alone, the rest carry
+# everything else.  Override only to force a specific split.
+FFT_CPUS=auto
+REST_CPUS=auto
+FFT_COMMS=fft
+UNPINNED_COMMS=radiod
+INTERVAL=2
+WARN_BUSY_PCT=85
+PINCONF
+fi
+ok "sigmond-radiod-thread-pin symlink installed"
+
 # ─── SDR recovery: power-cycle a vanished RX-888, restore in order ───────────
 # The RX-888 recurrently leaves the USB bus and only a power cycle of the card
 # recovers it.  Three separate gaps kept that from being automatic, all three

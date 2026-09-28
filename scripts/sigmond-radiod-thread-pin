@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""sigmond-radiod-thread-pin — deterministic per-thread CPU placement for radiod.
+
+WHY THIS EXISTS
+---------------
+systemd's CPUAffinity= (managed by `smd admin diag cpu-affinity --apply`) confines
+radiod to a *set* of CPUs -- on a DASI box, vCPU 12 and 13.  Inside that set the
+Linux load balancer places threads wherever it likes, and it moves them: on
+W3USR-06 on 2026-09-27 the fft thread sat on vCPU 13 at 23:45 and on vCPU 12 from
+23:50, with no configuration change in between.
+
+That is fine for throughput and useless for diagnosis.  The operator watches the
+per-core strip charts to tell contention apart from work: if vCPU 12 runs the FFT
+*and nothing else*, then a rise in vCPU 12 is unambiguously a stall -- L3 or DRAM
+contention -- because no other thread could have landed there.  The moment the
+scheduler is free to migrate work onto that core, the chart stops answering that
+question.
+
+radiod's own `affinity` option is not the answer either: it pins each thread to
+whichever CPU it happens to wake up on, which is exactly the nondeterminism this
+removes.  radiod@.conf therefore keeps `affinity = false`.
+
+WHAT IT DOES
+------------
+fft            -> FFT_CPUS   (alone, by design)
+everything else-> REST_CPUS  (proc_rx888, agc_rx888, libusb_event, the per-channel
+                              `linear <ssrc>` demods and the `radio stat` threads)
+
+Threads are created and destroyed as channels come and go, so this runs as a
+supervisor rather than a one-shot at start: it rechecks every INTERVAL seconds and
+only issues a syscall for a thread whose mask is actually wrong.
+
+SAFETY
+------
+It refuses to place a thread outside the mask systemd already granted the process.
+If FFT_CPUS or REST_CPUS falls outside that set the daemon logs the conflict and
+makes no change, so a stale local config can never widen radiod's confinement or
+contradict smd.
+
+Pinning removes the load balancer's ability to relieve a saturated core, so the
+REST side is watched: sustained high utilisation there is logged as a warning
+rather than left to show up as sample loss.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+
+CONF = "/etc/sigmond/radiod-thread-pin.conf"
+DEFAULTS = {
+    # "auto" derives the split from the CPUs systemd granted radiod: the lowest
+    # granted CPU carries the FFT alone, the rest carry everything else.  smd
+    # places each radiod on a hyperthread sibling pair, so "auto" means "the
+    # first of radiod's pair" and works on any layout without per-host config.
+    # Pin them explicitly only to override that.
+    "FFT_CPUS": "auto",
+    "REST_CPUS": "auto",
+    "INTERVAL": "2",
+    "FFT_COMMS": "fft",
+    # Threads left with the full mask systemd granted.  The main thread is
+    # here on purpose: a process's affinity is read from its main thread, so
+    # pinning it makes `smd admin diag cpu-affinity` report radiod's actual
+    # CPUs as "13" and blame radiod for "overriding systemd affinity via
+    # sched_setaffinity()" -- which radiod does not do (`affinity = false`).
+    # That reads as a radiod fault to whoever runs the diag next.  The main
+    # thread costs ~0 %, so leaving it unpinned keeps the diagnostic honest
+    # at no measurable cost.
+    "UNPINNED_COMMS": "radiod",
+    "WARN_BUSY_PCT": "85",
+}
+
+
+def load_conf() -> dict:
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONF) as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln or ln.startswith("#") or "=" not in ln:
+                    continue
+                k, v = ln.split("=", 1)
+                cfg[k.strip()] = v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+def cpuset(spec: str) -> set:
+    """Parse '12', '12,13', '0-3,12' into a set of ints."""
+    out = set()
+    for part in spec.replace(" ", ",").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    return out
+
+
+def log(msg: str) -> None:
+    # stdout goes to the journal under the unit name; no timestamp needed.
+    print(msg, flush=True)
+
+
+def granted_cpus(pid: int) -> set:
+    """What systemd granted the unit — NOT the live process mask.
+
+    A process's affinity is read from its main thread, so once anything has
+    narrowed that thread the process mask no longer describes the grant.  This
+    daemon narrows threads for a living, so reading the grant from the process
+    would let a previous run's result become the next run's input and ratchet
+    the allowed set down a CPU at a time.  Ask systemd, which owns the grant.
+    Fall back to the union of the threads' masks (the daemon only ever
+    partitions within the grant, so the union preserves it), then to the
+    process mask.
+    """
+    unit = None
+    try:
+        with open("/proc/%d/cgroup" % pid) as f:
+            for ln in f:
+                for part in ln.strip().split("/"):
+                    if part.endswith(".service"):
+                        unit = part
+    except OSError:
+        pass
+    if unit:
+        try:
+            out = subprocess.run(
+                ["systemctl", "show", unit, "-p", "CPUAffinity", "--value"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            if out:
+                got = cpuset(out.replace(" ", ","))
+                if got:
+                    return got
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    union: set = set()
+    try:
+        for tid in os.listdir("/proc/%d/task" % pid):
+            try:
+                union |= os.sched_getaffinity(int(tid))
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    return union or os.sched_getaffinity(pid)
+
+
+def radiod_pids() -> list:
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open("/proc/%s/comm" % d) as f:
+                if f.read().strip() == "radiod":
+                    out.append(int(d))
+        except OSError:
+            continue
+    return sorted(out)
+
+
+def thread_comm(pid: int, tid: str) -> str | None:
+    """comm may contain spaces ('linear 16799737') -- read it from comm, not stat."""
+    try:
+        with open("/proc/%d/task/%s/comm" % (pid, tid)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def busy_pct(cpu: int, prev: dict) -> float | None:
+    """Rolling busy% for one CPU from /proc/stat; prev carries the last reading."""
+    try:
+        with open("/proc/stat") as f:
+            for ln in f:
+                if ln.startswith("cpu%d " % cpu):
+                    v = [int(x) for x in ln.split()[1:9]]
+                    tot, idle = sum(v), v[3]
+                    last = prev.get(cpu)
+                    prev[cpu] = (tot, idle)
+                    if last is None or tot <= last[0]:
+                        return None
+                    return 100.0 * (1.0 - (idle - last[1]) / (tot - last[0]))
+    except OSError:
+        pass
+    return None
+
+
+def main() -> int:
+    cfg = load_conf()
+    auto_split = (cfg["FFT_CPUS"].strip().lower() == "auto"
+                  or cfg["REST_CPUS"].strip().lower() == "auto")
+    fft_cpus = set() if auto_split else cpuset(cfg["FFT_CPUS"])
+    rest_cpus = set() if auto_split else cpuset(cfg["REST_CPUS"])
+    fft_comms = {c.strip() for c in cfg["FFT_COMMS"].split(",") if c.strip()}
+    unpinned = {c.strip() for c in cfg["UNPINNED_COMMS"].split(",") if c.strip()}
+    interval = float(cfg["INTERVAL"])
+    warn_at = float(cfg["WARN_BUSY_PCT"])
+
+    if not auto_split and fft_cpus & rest_cpus:
+        log("FATAL: FFT_CPUS and REST_CPUS overlap (%s) — the whole point is that "
+            "they do not" % sorted(fft_cpus & rest_cpus))
+        return 2
+
+    pid = None
+    allowed: set = set()
+    placed: dict = {}          # tid -> mask we last set
+    prev_stat: dict = {}
+    warned_conflict = False
+    warned_multi = False
+    hot_since = None
+
+    while True:
+        pids = radiod_pids()
+        if len(pids) > 1:
+            if not warned_multi:
+                log("REFUSING to pin: %d radiod instances running (%s). This daemon "
+                    "splits ONE radiod across ONE CPU pair and has no way to tell "
+                    "which instance owns which pair. Leaving the scheduler alone."
+                    % (len(pids), pids))
+                warned_multi = True
+            time.sleep(interval)
+            continue
+        warned_multi = False
+        cur = pids[0] if pids else None
+        if cur is None:
+            if pid is not None:
+                log("radiod is gone; standing by")
+                pid, placed = None, {}
+            time.sleep(interval)
+            continue
+
+        if cur != pid:
+            pid = cur
+            placed = {}
+            try:
+                allowed = granted_cpus(pid)
+            except OSError as exc:
+                log("cannot read radiod affinity: %s" % exc)
+                time.sleep(interval)
+                continue
+            if auto_split:
+                low = min(allowed)
+                fft_cpus, rest_cpus = {low}, set(allowed) - {low}
+                if not rest_cpus:
+                    log("REFUSING to pin: radiod was granted a single CPU (%s); there "
+                        "is no second CPU to move the other threads to." % sorted(allowed))
+                    time.sleep(interval)
+                    continue
+            log("radiod pid %d, systemd granted CPUs %s; fft -> %s, rest -> %s"
+                % (pid, sorted(allowed), sorted(fft_cpus), sorted(rest_cpus)))
+            warned_conflict = False
+
+        # Never widen what systemd granted, and never contradict smd.
+        want = fft_cpus | rest_cpus
+        if not want <= allowed:
+            if not warned_conflict:
+                log("REFUSING to pin: configured CPUs %s are not inside radiod's "
+                    "granted set %s — fix %s or re-run `smd admin diag cpu-affinity "
+                    "--apply`. Leaving the scheduler alone."
+                    % (sorted(want - allowed), sorted(allowed), CONF))
+                warned_conflict = True
+            time.sleep(interval)
+            continue
+
+        try:
+            tids = os.listdir("/proc/%d/task" % pid)
+        except OSError:
+            time.sleep(interval)
+            continue
+
+        live = set()
+        moved = 0
+        for tid in tids:
+            comm = thread_comm(pid, tid)
+            if comm is None:
+                continue
+            live.add(tid)
+            if comm in unpinned:
+                target = allowed
+            else:
+                target = fft_cpus if comm in fft_comms else rest_cpus
+            if placed.get(tid) == target:
+                continue
+            try:
+                if os.sched_getaffinity(int(tid)) == target:
+                    placed[tid] = target
+                    continue
+                os.sched_setaffinity(int(tid), target)
+                placed[tid] = target
+                moved += 1
+                log("pinned %-18s tid %-7s -> cpu %s"
+                    % (comm[:18], tid, ",".join(str(c) for c in sorted(target))))
+            except (OSError, ValueError, ProcessLookupError):
+                placed.pop(tid, None)      # thread died mid-flight; harmless
+        for dead in set(placed) - live:
+            placed.pop(dead, None)
+        if moved:
+            log("%d thread(s) repositioned; %d tracked" % (moved, len(placed)))
+
+        # Pinning removes the balancer's escape hatch, so say so if REST saturates.
+        for c in sorted(rest_cpus):
+            b = busy_pct(c, prev_stat)
+            if b is None:
+                continue
+            if b >= warn_at:
+                if hot_since is None:
+                    hot_since = time.monotonic()
+                elif time.monotonic() - hot_since > 30:
+                    log("WARNING: cpu%d (the non-FFT side) at %.0f%% for >30 s. "
+                        "Pinned threads cannot migrate — widen REST_CPUS or move "
+                        "work off radiod before this becomes sample loss." % (c, b))
+                    hot_since = time.monotonic()
+            else:
+                hot_since = None
+
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)
