@@ -1,0 +1,92 @@
+#!/bin/bash
+# sigmond-isolation-reboot — activate staged guest CPU isolation, at most once.
+#
+# `smd apply` STAGES isolcpus/nohz_full/rcu_nocbs in a grub.d drop-in.  A
+# drop-in changes nothing until the kernel is reloaded, so a station that is
+# never rebooted runs indefinitely with the guest kernel still scheduling
+# chronyd, udev and its own kworkers on radiod's cores.  That is the state
+# W3USR-06 sat in from build until 2026-09-28, undetected, because the only
+# check for it was silent when nothing was isolated at all.
+#
+# A station must never run long-term unisolated.  First boot is the one moment
+# where a reboot is free: bring-up has finished and nothing is decoding yet.
+#
+# WHY THIS IS ITS OWN SCRIPT
+# A station that reboots itself is exactly the code that must be testable
+# without rebooting anything.  Every external is injectable:
+#
+#   SIGMOND_ISOL_CFG      grub.d drop-in to read the staged set from
+#   SIGMOND_ISOL_MARKER   one-shot marker; its presence forbids a second reboot
+#   SIGMOND_ISOL_CMDLINE  file to read the running kernel's cmdline from
+#   SIGMOND_ISOL_REBOOT   command to run instead of `systemctl reboot`
+#
+# Exit codes: 0 nothing to do (already active, or nothing staged)
+#             10 reboot invoked
+#             20 staged but NOT active and the one reboot is already spent
+set -u
+
+CFG="${SIGMOND_ISOL_CFG:-/etc/default/grub.d/sigmond-cpu-isolation.cfg}"
+MARKER="${SIGMOND_ISOL_MARKER:-/var/lib/sigmond/.isolation-reboot}"
+CMDLINE="${SIGMOND_ISOL_CMDLINE:-/proc/cmdline}"
+REBOOT="${SIGMOND_ISOL_REBOOT:-systemctl reboot}"
+TAG=sigmond-isolation-reboot
+
+say() { printf '%s\n' "$*"; logger -t "$TAG" -- "$*" 2>/dev/null || true; }
+
+# Compare SETS, not strings: the drop-in renders a range ("12-13") while a
+# hand-written or older cmdline may carry a list ("12,13").  Those mean the
+# same thing, and a string compare would reboot the station forever chasing a
+# difference that is not one.
+_isol_cpus() {
+    python3 -c '
+import re, sys
+m = re.search(r"[\s\"]isolcpus=([0-9,\-]+)", " " + sys.stdin.read())
+if not m:
+    raise SystemExit(0)
+out = set()
+for part in m.group(1).split(","):
+    if not part:
+        continue
+    if "-" in part:
+        a, b = part.split("-", 1)
+        out.update(range(int(a), int(b) + 1))
+    else:
+        out.add(int(part))
+print(",".join(str(c) for c in sorted(out)))
+' 2>/dev/null
+}
+
+want=$(cat "$CFG" 2>/dev/null | _isol_cpus)
+have=$(cat "$CMDLINE" 2>/dev/null | _isol_cpus)
+
+if [ -z "${want:-}" ]; then
+    say "cpu isolation: nothing staged ($CFG absent or carries no isolcpus) — no reboot"
+    exit 0
+fi
+
+if [ "${want}" = "${have:-}" ]; then
+    say "cpu isolation ACTIVE on cpus ${have} — no reboot needed"
+    exit 0
+fi
+
+# Marker BEFORE the reboot, never after.  If isolation can never take effect --
+# update-grub failed, a kernel without CONFIG_NO_HZ_FULL, an operator who
+# deleted the drop-in -- a reboot-until-it-works loop would bury the cause and
+# leave the station unreachable in between.  One attempt, then say so and stop.
+if [ -e "$MARKER" ]; then
+    say "⚠ cpu isolation staged for cpus ${want} but the running kernel has '${have:-none}',"
+    say "  and the one permitted activation reboot already happened ($(cat "$MARKER" 2>/dev/null))."
+    say "  NOT rebooting again — a reboot loop would hide whatever is wrong."
+    say "  This station is running WITHOUT guest isolation: the guest kernel can"
+    say "  schedule on radiod's cores. Investigate before trusting its timing:"
+    say "    grep isolcpus /boot/grub/grub.cfg ; update-grub ; smd admin validate"
+    exit 20
+fi
+
+mkdir -p "$(dirname "$MARKER")" 2>/dev/null || true
+date -Iseconds > "$MARKER"
+say "cpu isolation staged for cpus ${want}; running kernel has '${have:-none}'"
+say "rebooting ONCE to activate it — bring-up is done and nothing is decoding yet"
+say "  (marker $MARKER written first, so this reboot cannot repeat)"
+$REBOOT
+exit 10

@@ -104,4 +104,19 @@ else
 fi
 date -Iseconds > "$MARKER"
 say "marker written ($MARKER); this unit will not run again"
+
+# ─── activate CPU isolation ──────────────────────────────────────────────────
+# `smd apply` (inside bring-up above) STAGES isolcpus/nohz_full/rcu_nocbs in a
+# grub.d drop-in; a drop-in changes nothing until the kernel is reloaded.  A
+# station must never run long-term unisolated, and first boot is the one moment
+# a reboot is free -- nothing is decoding yet.  The decision lives in its own
+# script because code that reboots a station must be testable without rebooting
+# one; it reboots AT MOST once and says so loudly if it cannot.
+_IR=/usr/local/sbin/sigmond-isolation-reboot
+if [ -x "$_IR" ]; then
+    "$_IR" 2>&1 | while IFS= read -r _l; do say "$_l"; done
+else
+    say "⚠ $_IR missing — CPU isolation will stay staged but inactive until a reboot"
+fi
+
 exit 0

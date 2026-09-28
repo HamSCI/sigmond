@@ -849,6 +849,16 @@ PINCONF
 fi
 ok "sigmond-radiod-thread-pin symlink installed"
 
+# Invoked by sigmond-firstrun-bringup once bring-up has finished.  `smd apply`
+# only STAGES isolcpus in a grub.d drop-in; without this the station runs its
+# whole first session with the guest kernel still on radiod's cores.  Reboots
+# at most once, marker-guarded.
+info "Installing sigmond-isolation-reboot → /usr/local/sbin/"
+$SUDO chmod a+x "$REPO_DIR/bin/sigmond-isolation-reboot"
+$SUDO ln -sf "$REPO_DIR/bin/sigmond-isolation-reboot" \
+        /usr/local/sbin/sigmond-isolation-reboot
+ok "sigmond-isolation-reboot symlink installed"
+
 # ─── SDR recovery: power-cycle a vanished RX-888, restore in order ───────────
 # The RX-888 recurrently leaves the USB bus and only a power cycle of the card
 # recovers it.  Three separate gaps kept that from being automatic, all three
