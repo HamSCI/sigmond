@@ -81,6 +81,27 @@ def run(gpsdo_id: str, model: str, grid_from_device: str = "",
     return p.stdout.decode()
 
 
+def preflight_note(monitor) -> str:
+    """Run the equipment-list annotation with a stubbed monitor reading."""
+    if monitor is None:
+        report = "gpsdo_lock_report(){ return 1; }"
+    else:
+        fix, sats, grid = monitor
+        report = ('gpsdo_lock_report(){ '
+                  f'GPSDO_FIX="{fix}"; GPSDO_SATS="{sats}"; '
+                  f'GPSDO_GRID_UBX="{grid}"; return 0; }}')
+    script = textwrap.dedent(f"""
+        set -u
+        GPSDO_FIX=""; GPSDO_SATS=""; GPSDO_GRID_UBX=""
+        {report}
+        {shell_func("gpsdo_preflight_note")}
+        gpsdo_preflight_note
+    """)
+    p = subprocess.run(["bash", "-c", script], capture_output=True,
+                       text=True, timeout=30)
+    return p.stdout
+
+
 class GpsdoMessageTests(unittest.TestCase):
     MINI = "1dd2:2211"
     SERIAL = "1dd2:2444"          # LBE-1421, has a real NMEA serial node
@@ -154,12 +175,63 @@ class GpsdoMessageTests(unittest.TestCase):
         out = run(self.SERIAL, "LBE-1421", monitor=self.NO_FIX)
         self.assertIn("NO GPS LOCK", out)
 
+    def test_equipment_list_flags_an_unlocked_gpsdo(self):
+        """⚡ rob looked for it here, where device state belongs.
+
+        "where in the dialog will it print out the gpsdo has no sats? I don't
+        see that in the attached equipment list."  A bare "✓ GPSDO (LBE-Mini)"
+        reads as all-good for a unit flashing red with zero satellites.
+        """
+        out = preflight_note(("no_fix", 0, ""))
+        self.assertIn("NO GPS LOCK", out)
+        self.assertIn("0 satellites in use", out)
+        self.assertIn("undisciplined", out)
+
+    def test_equipment_list_reports_a_good_lock(self):
+        out = preflight_note(("3d", 11, "CM87tj"))
+        self.assertIn("GPS lock 3d, 11 satellites", out)
+        self.assertNotIn("NO GPS LOCK", out)
+
+    def test_equipment_list_stays_quiet_when_lock_is_unknown(self):
+        """Unknown is explained at the grid step; don't half-say it twice."""
+        self.assertEqual(preflight_note(None).strip(), "")
+
     def test_both_no_grid_cases_point_at_the_status_command(self):
         for gid, model in ((self.MINI, "LBE-Mini"), (self.SERIAL, "LBE-1421")):
             with self.subTest(model=model):
                 out = run(gid, model)
                 self.assertIn("smd gpsdo status", out)
                 self.assertIn("only used until then", out)
+
+
+class PreflightWiringTests(unittest.TestCase):
+    """⛔ A helper that is never called is the same as one that does not exist.
+
+    This is the third time in one session that shape has bitten: the Wi-Fi step
+    existed but was never called; the failed-join branch existed but its status
+    was thrown away; and here, removing the call site from preflight_devices
+    left every behaviour test green.  Test the wiring, not only the function.
+    """
+
+    def setUp(self):
+        self.text = WIZARD.read_text()
+        self.preflight = shell_func("preflight_devices")
+
+    def test_the_equipment_list_actually_calls_the_note(self):
+        self.assertIn("gpsdo_preflight_note", self.preflight,
+                      "gpsdo_preflight_note is defined but preflight_devices "
+                      "never calls it — the equipment list would say nothing "
+                      "about lock state")
+
+    def test_the_note_follows_the_gpsdo_line_it_annotates(self):
+        gpsdo_line = self.preflight.index('_dev_line "$HAVE_GPSDO"')
+        note = self.preflight.index("gpsdo_preflight_note")
+        self.assertLess(gpsdo_line, note)
+
+    def test_the_note_is_guarded_on_a_gpsdo_being_present(self):
+        """No GPSDO must not produce a stray blank annotation."""
+        self.assertIn('[ "$HAVE_GPSDO" = 1 ] && gpsdo_preflight_note',
+                      self.preflight)
 
 
 if __name__ == "__main__":

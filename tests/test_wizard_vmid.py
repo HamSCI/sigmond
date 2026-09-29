@@ -82,6 +82,54 @@ class ResolveVmidTests(unittest.TestCase):
         self.assertEqual(run(NO_QM), "120")
 
 
+def shell_func(name: str) -> str:
+    lines, keep, out = WIZARD.read_text().splitlines(True), False, []
+    for ln in lines:
+        if ln.startswith(f"{name}() {{") or ln.startswith(f"{name}(){{"):
+            keep = True
+        if keep:
+            out.append(ln)
+            if ln.rstrip() == "}":
+                break
+    assert out, f"{name} not found"
+    return "".join(out)
+
+
+class MgmtVmIpTests(unittest.TestCase):
+    """The repair path must NOT go through the guest agent.
+
+    The agent is the broken thing; ssh over the host-only /30 is the
+    independent route, so the wizard has to work out the VM's address on that
+    link without asking the agent for it.
+    """
+
+    def _run(self, body: str, env: str = "") -> str:
+        script = textwrap.dedent(f"""
+            set -u
+            {env}
+            {body}
+            {shell_func("mgmt_vm_ip")}
+            mgmt_vm_ip
+        """)
+        p = subprocess.run(["bash", "-c", script], capture_output=True,
+                           text=True, timeout=30)
+        return p.stdout.strip()
+
+    NO_IP = "ip(){ return 1; }"
+    A_30 = (r"ip(){ printf '3: vmbr1    inet 10.99.0.1/30 brd 10.99.0.3 "
+            r"scope global vmbr1\n'; }")
+
+    def test_env_override_wins(self):
+        self.assertEqual(self._run(self.A_30, "export SIGMOND_MGMT_VM=10.5.5.9"),
+                         "10.5.5.9")
+
+    def test_derives_the_peer_of_the_host_only_30(self):
+        self.assertEqual(self._run(self.A_30), "10.99.0.2")
+
+    def test_falls_back_when_there_is_no_30(self):
+        self.assertEqual(self._run(self.NO_IP), "10.99.0.2")
+
+
 class WaitLoopTests(unittest.TestCase):
     """A five-minute wait must not be silent, and must say what to try."""
 
@@ -99,6 +147,24 @@ class WaitLoopTests(unittest.TestCase):
     def test_stale_agent_channel_is_named_in_the_failure(self):
         """Active inside the guest, 'not running' from the host — seen 09-29."""
         self.assertIn("systemctl restart qemu-guest-agent", self.text)
+
+    def test_the_wizard_repairs_a_stale_channel_itself(self):
+        """⚡ Waiting 5 min then telling the operator to fix it by hand is not
+        a fix when the VM is reachable over the host-only link."""
+        self.assertIn("mgmt_vm_ip", self.text)
+        self.assertIn("the channel may be stale rather than the", self.text)
+
+    def test_repair_is_attempted_before_the_full_timeout(self):
+        """It must not wait out all 300s before trying."""
+        self.assertIn('[ "$i" = 6 ]', self.text)
+
+    def test_repair_is_attempted_only_once(self):
+        """A VM that is genuinely down must not be ssh-hammered for 5 minutes."""
+        self.assertIn("_healed=1", self.text)
+
+    def test_interrupt_leaves_a_clean_message(self):
+        """Ctrl-C is the observed trigger for the stale channel."""
+        self.assertIn("interrupted — nothing was applied", self.text)
 
 
 class _unit:

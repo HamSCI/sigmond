@@ -281,6 +281,11 @@ if [ -e "$CONF_MARK" ] && [ "${1:-}" != "--reconfigure" ]; then
     exit 0
 fi
 
+# Ctrl-C is the observed trigger for the stale-channel fault below, so leave
+# the operator knowing both that nothing was applied and that the next run may
+# have to clear the channel (it now does that itself).
+trap 'echo; say "interrupted — nothing was applied. Rerun: sigmond-setup --reconfigure"; exit 130' INT
+
 # ── wait for decoder VM + guest agent ───────────────────────────────────────
 say "waiting for decoder VM $VMID and its guest agent..."
 # </dev/null on every qm call: qm inherits our stdin and can slurp piped
@@ -297,9 +302,50 @@ if ! qm status "$VMID" >/dev/null 2>&1 </dev/null; then
     say "      SIGMOND_VMID=<id> sigmond-setup --reconfigure"
     exit 1
 fi
+# The VM's address on the host-only /30 (PM .1, VM .2).  Needed because the
+# repair below must NOT go through the guest agent — that is the thing that is
+# broken.  ssh over the private link is the independent path.
+mgmt_vm_ip() {
+    [ -n "${SIGMOND_MGMT_VM:-}" ] && { printf '%s\n' "${SIGMOND_MGMT_VM}"; return; }
+    local a
+    a=$(ip -4 -o addr show 2>/dev/null \
+        | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
+    if [ -n "$a" ]; then
+        awk -v ip="$a" 'BEGIN{n=split(ip,o,"."); printf "%s.%s.%s.%d\n",o[1],o[2],o[3],o[4]+1}'
+        return
+    fi
+    printf '10.99.0.2\n'
+}
+_vmip=$(mgmt_vm_ip)
+_healed=0
 for i in $(seq 1 60); do
     qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
     [ "$i" = 1 ] && qm start "$VMID" >/dev/null 2>&1 </dev/null
+    # ⚡ SELF-HEAL A STALE CHANNEL.  Observed repeatedly on AI6VN 2026-09-29:
+    # the agent is `active` inside the guest with NRestarts=0, having served
+    # requests moments earlier, while the host insists "QEMU guest agent is
+    # not running".  It is the host<->guest channel that has desynced, not the
+    # agent, and restarting the agent inside the VM clears it every time.
+    # Empirically the trigger is interrupting the wizard (Ctrl-C) — rob hit it
+    # three times in a row that way.
+    #
+    # Waiting five minutes and then telling the operator to go and do this by
+    # hand is not a fix when we can reach the VM ourselves over the host-only
+    # link, which does not involve the agent at all.  Try ONCE, after 30s, so
+    # a VM that is merely still booting is given a fair chance first.
+    if [ "$i" = 6 ] && [ "$_healed" = 0 ]; then
+        _healed=1
+        say "  no answer after 30s — the channel may be stale rather than the"
+        say "  VM down. Restarting qemu-guest-agent inside the VM via $_vmip"
+        if ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no \
+               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=6 \
+               "sigmond@${_vmip}" 'sudo -n systemctl restart qemu-guest-agent' \
+               >/dev/null 2>&1; then
+            say "  restarted — waiting for it to answer"
+        else
+            say "  could not reach the VM over ssh; continuing to wait"
+        fi
+    fi
     [ $((i % 3)) = 0 ] && say "  still waiting for the guest agent ($((i * 5))s of 300s)..."
     sleep 5
 done
@@ -488,6 +534,14 @@ except Exception: pass' 2>/dev/null || true)
     fi
     _dev_line "$HAVE_RX888" "RX888 SDR"           "$RX888_ID"  "no HF reception until fitted"
     _dev_line "$HAVE_GPSDO" "GPSDO ($GPSDO_MODEL)" "$GPSDO_ID" "timing falls back to NTP"
+    # ⚡ PRESENT IS NOT THE SAME AS LOCKED, and this list is where an operator
+    # looks for device state -- a bare "✓ GPSDO (LBE-Mini)" reads as "all
+    # good" for a unit that is flashing red with no satellites.  rob, looking
+    # for it here and not finding it (2026-09-29): "where in the dialog will
+    # it print out the gpsdo has no sats? I don't see that in the attached
+    # equipment list."  The grid step says it, but that is several questions
+    # later and only in passing.  Say it where it is looked for.
+    [ "$HAVE_GPSDO" = 1 ] && gpsdo_preflight_note
     _dev_line "$HAVE_TS1"   "TS-1 TimeSync"       "239a:801e"  "no ns-class timing"
     _dev_line "$HAVE_MAG"   "RM3100 magnetometer" "$MAG_ID"    "no magnetometer data"
     if [ "${PREFLIGHT_WRONG_CTRL:-0}" = 1 ]; then
@@ -576,6 +630,21 @@ print("%s|%s|%s" % (fix or "", "" if sats is None else sats, grid or ""))
     GPSDO_SATS=$(echo "$parsed" | cut -d'|' -f2)
     GPSDO_GRID_UBX=$(echo "$parsed" | cut -d'|' -f3)
     return 0
+}
+
+# The equipment list's lock annotation.  Kept a function, not inlined in
+# preflight_devices, so it can be tested without standing up the whole
+# pre-flight (which needs a live VM, USB controller lookups and a guest agent).
+gpsdo_preflight_note() {
+    gpsdo_lock_report || return 0        # unknown: say nothing here, the grid
+                                         # step explains it properly
+    case "$GPSDO_FIX" in
+        ""|"no_fix"|"none")
+            printf '      ⚠ but NO GPS LOCK — %s satellites in use. Needs an antenna with\n' "${GPSDO_SATS:-0}"
+            printf '        sky view; until it locks its output is undisciplined.\n' ;;
+        *)
+            printf '      GPS lock %s, %s satellites\n' "$GPSDO_FIX" "${GPSDO_SATS:-?}" ;;
+    esac
 }
 
 # One line describing lock state, for whichever branch needs it.
