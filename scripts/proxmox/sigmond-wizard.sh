@@ -576,6 +576,128 @@ ask_antenna() {
     rd -r -p "Antenna description (optional, Enter to skip): " ANTENNA
 }
 
+# ── Wi-Fi ───────────────────────────────────────────────────────────────────
+# ⚡ On a DASI station Wi-Fi is PREFERRED over wired, and the reason is
+# physical, not convenience (rob, 2026-09-28): "the wired interface introduces
+# potential for radio interference into the SDR."  1000BASE-T runs at a 125 MHz
+# symbol rate; its harmonics and the PHY's switching noise land in HF, and
+# unshielded twisted pair entering the shack carries that in as common-mode
+# current on what is electrically an antenna.  2.4/5 GHz is nowhere near the
+# receiver's passband.  Removing the Ethernet cable removes a conducted noise
+# path into the instrument, and the station is a measuring instrument first.
+#
+# Every DASI box has a radio, so this is offered at EVERY install, not only
+# when there is no cable.  It stays declinable: a station already on Ethernet
+# is working, and we do not disturb a working install without being asked.
+# Both injectable so the step can be exercised without a radio and without
+# writing to /usr/local/sbin (same convention as sigmond-wifi's SIGMOND_WIFI_DEV).
+WIFI_TOOL="${SIGMOND_WIFI_TOOL:-/usr/local/sbin/sigmond-wifi}"
+WIFI_SYSFS="${SIGMOND_WIFI_SYSFS:-/sys/class/net}"
+
+wifi_radio_dev(){
+    [ -n "${SIGMOND_WIFI_DEV:-}" ] && { printf '%s\n' "$SIGMOND_WIFI_DEV"; return; }
+    local d
+    for d in "$WIFI_SYSFS"/*/wireless; do
+        [ -e "$d" ] || continue
+        basename "$(dirname "$d")"; return
+    done
+}
+
+ask_wifi() {
+    WIFI_SUMMARY=""
+    local dev; dev=$(wifi_radio_dev)
+    if [ -z "$dev" ]; then
+        WIFI_SUMMARY="no Wi-Fi radio on this host"
+        return
+    fi
+    if [ ! -x "$WIFI_TOOL" ]; then
+        # The tool rides on the stick and firstboot installs it; if it is
+        # absent the offline-debs payload did not apply, which is worth saying
+        # out loud rather than silently offering nothing.
+        WIFI_SUMMARY="radio $dev found, but sigmond-wifi is missing (offline-debs did not apply)"
+        return
+    fi
+    # ⛔ NEVER prompt when stdin is not a tty.  A piped answer file has a fixed
+    # number of lines in a fixed order; a new prompt would eat the answer meant
+    # for the NEXT question and desync every prompt after it — invisibly, since
+    # bash suppresses `read -p` prompts on non-tty stdin.  That is exactly the
+    # 2026-08-11 nested-test failure recorded at the "Press Enter to begin"
+    # guard below.  An unattended install keeps whatever link brought it up.
+    if [ ! -t 0 ]; then
+        WIFI_SUMMARY="radio $dev found — skipped (unattended run)"
+        return
+    fi
+
+    echo ""
+    echo "  ── Wi-Fi ───────────────────────────────────────────"
+    echo "  Wi-Fi radio found: $dev"
+    echo "  On a DASI station Wi-Fi is usually the BETTER link. An Ethernet"
+    echo "  cable entering the shack is a conducted noise path into the HF"
+    echo "  receiver; 2.4/5 GHz is nowhere near its passband. Going cable-free"
+    echo "  lowers your noise floor."
+    if [ -n "$(ip -o addr show scope global 2>/dev/null | grep -v " $dev " | head -1)" ]; then
+        echo "  (This host already has a working link, so this is optional —"
+        echo "   joining Wi-Fi will not disturb it.)"
+    else
+        echo "  ⚠ No other network is up. Wi-Fi may be the only way to reach"
+        echo "    this station after install."
+    fi
+    rd -r -p "Set up Wi-Fi now? [y/N] " _wq
+    case "${_wq:-N}" in
+        [Yy]*) ;;
+        *) WIFI_SUMMARY="declined (radio $dev available; run 'sigmond-wifi scan' any time)"; return ;;
+    esac
+
+    local _scan _n _pick _ssid _pass _line
+    while :; do
+        echo ""
+        _scan=$("$WIFI_TOOL" scan 2>/dev/null | grep ' dBm ')
+        if [ -z "$_scan" ]; then
+            echo "  No networks found. The AP may be hidden, or out of range."
+        else
+            _n=0
+            echo "$_scan" | while IFS= read -r _line; do
+                _n=$((_n+1)); printf '  %2d)%s\n' "$_n" "$_line"
+            done
+            # ⚠ the loop above runs in a subshell, so recount here for the prompt
+            _n=$(printf '%s\n' "$_scan" | wc -l)
+            echo ""
+            echo "  ⚠ below -70 dBm the link is marginal. On a DASI station that"
+            echo "    is still often the right trade — weigh it against the noise"
+            echo "    a cable puts into the receiver."
+        fi
+        echo ""
+        rd -r -p "Pick a number, type an SSID (hidden networks), r = rescan, Enter = skip: " _pick
+        case "$_pick" in
+            "")  WIFI_SUMMARY="skipped at the network list (radio $dev available)"; return ;;
+            [Rr]) continue ;;
+            ''|*[!0-9]*) _ssid="$_pick" ;;                       # not a number → an SSID
+            *)   _ssid=$(printf '%s\n' "$_scan" | sed -n "${_pick}p" \
+                         | sed 's/^ *//; s/  .*//')
+                 if [ -z "$_ssid" ]; then echo "  ✗ no entry $_pick"; continue; fi ;;
+        esac
+        [ -n "$_ssid" ] || { echo "  ✗ please enter an SSID"; continue; }
+
+        # -s: the passphrase must not be echoed to a console that, during an
+        # install, is routinely being watched by whoever is in the room.
+        echo ""
+        rd -rs -p "Passphrase for \"$_ssid\" (Enter if open): " _pass
+        echo ""
+        echo "  joining $_ssid ..."
+        if printf '%s' "$_pass" | "$WIFI_TOOL" join "$_ssid" 2>&1 | sed 's/^/    /'; then
+            WIFI_SUMMARY="joined \"$_ssid\" on $dev"
+            _pass=""
+            break
+        fi
+        _pass=""
+        echo "  ✗ could not bring up \"$_ssid\"."
+        rd -r -p "Try again? [Y/n] " _wq
+        case "${_wq:-Y}" in
+            [Nn]*) WIFI_SUMMARY="join of \"$_ssid\" failed (radio $dev available)"; return ;;
+        esac
+    done
+}
+
 ask_rac() {
     echo ""
     # Station class decides the gateway ladder (rob 2026-08-09): DASI = the
@@ -760,6 +882,9 @@ preflight_devices
 ask_reporter
 ask_grid
 ask_antenna
+# Before ask_rac on purpose: remote access is only meaningful over a link that
+# works, and on a cable-free DASI box this is the step that creates one.
+ask_wifi
 ask_rac
 ask_psws
 ask_heartbeat
@@ -794,8 +919,15 @@ while :; do
         echo "  6) Heartbeat: disabled"
     fi
     echo "  7) Names:     VM $VMNAME · Proxmox host $PMNAME"
+    echo "  8) Wi-Fi:     ${WIFI_SUMMARY:-(not offered)}"
+    # Every other answer is inert until Apply; a Wi-Fi join is a live link the
+    # moment it succeeds.  Say so rather than let the header above imply
+    # otherwise — an operator who aborts here still has the association.
+    case "$WIFI_SUMMARY" in
+        joined*) echo "                (already live — a link, not a setting applied later)";;
+    esac
     echo "  ─────────────────────────────────────────────────────"
-    rd -r -p "Apply? [Y = apply / 1-7 = re-edit that entry / n = abort] " OK
+    rd -r -p "Apply? [Y = apply / 1-8 = re-edit that entry / n = abort] " OK
     case "${OK:-Y}" in
         1) ask_reporter;;
         2) ask_grid ask;;
@@ -804,9 +936,10 @@ while :; do
         5) ask_psws;;
         6) ask_heartbeat;;
         7) ask_names;;
+        8) ask_wifi;;
         [Nn]*) say "aborted by operator — nothing was applied. Rerun any time: sigmond-setup"; exit 1;;
         [Yy]*|"") break;;
-        *) echo "  ✗ Y, n, or an entry number 1-7";;
+        *) echo "  ✗ Y, n, or an entry number 1-8";;
     esac
 done
 

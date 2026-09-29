@@ -1,6 +1,17 @@
 # plan: Wi-Fi bring-up during the wizard (v3.55)
 
-**Status — 2026-09-28: REQUESTED, not built.** rob, in three passes, each of
+**Status — 2026-09-29: the wizard step is BUILT** (`ask_wifi`, offered at every
+install between the antenna and RAC questions, declinable, with the -70 dBm
+warning).  What remains unbuilt is item 3 below: **preferring** Wi-Fi over an
+existing wired link in the routing, as opposed to offering it.
+
+v3.55 shipped the `sigmond-wifi` CLI, the console help text and this document,
+but no wizard step — so rob installed AI6VN on 2026-09-29 and was never asked.
+A step that exists and is never called is indistinguishable from an absent one;
+`tests/test_wizard_wifi.py::WiringTests` now tests the call site, not just the
+function.
+
+Originally — **2026-09-28: REQUESTED, not built.** rob, in three passes, each of
 which widened it:
 
 1. During wizard installation, probe for a Wi-Fi interface and let the operator
