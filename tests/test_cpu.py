@@ -508,6 +508,23 @@ class CacheAwarePlanTests(unittest.TestCase):
         self.assertEqual(plan.reserved_idle_cpus, {8, 9, 10, 11, 12, 13})
         self.assertEqual(recommended_isolcpus(plan), set(range(8, 16)))
 
+    def test_one_radiod_per_island_isolates_only_radiod_cores(self):
+        # AC0G-B1: two RX888s, one radiod per CCX, kernel isolating 2,3,10,11.
+        # The islands then cover every CPU; isolating them would fence the
+        # whole machine (rendered isolcpus=0-15 on 2026-09-29).
+        cores = [{0, 1}, {2, 3}, {4, 5}, {6, 7},
+                 {8, 9}, {10, 11}, {12, 13}, {14, 15}]
+        with mock.patch('sigmond.cpu.get_physical_cores', return_value=cores), \
+             mock.patch('sigmond.cpu.get_radiod_instances',
+                        return_value=['radiod@ac0g-b1-a.service',
+                                      'radiod@ac0g-b1-b.service']):
+            plan = compute_affinity_plan(None, l3_islands=SPLIT_L3,
+                                         logical_cpus=16,
+                                         isolated_cpus={2, 3, 10, 11})
+        self.assertEqual(plan.radiod['radiod@ac0g-b1-a.service'], {2, 3})
+        self.assertEqual(plan.radiod['radiod@ac0g-b1-b.service'], {10, 11})
+        self.assertEqual(recommended_isolcpus(plan), {2, 3, 10, 11})
+
     def test_unified_is_legacy_behaviour(self):
         plan = self._plan(UNIFIED_L3)
         self.assertFalse(plan.cache_split)

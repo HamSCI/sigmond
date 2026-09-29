@@ -642,8 +642,15 @@ def recommended_isolcpus(plan: "AffinityPlan") -> set:
     sharing radiod's L3 slice stays quiet (cores beyond radiod's own pin sit
     idle by design — that is the cost of an uncontested L3 half).  Otherwise it
     is just radiod's own cores.
+
+    The whole island is used only when the plan actually segregated it, i.e.
+    other work was kept out of it.  With one radiod on each island (AC0G-B1,
+    Ryzen 5700U, two RX888s, 2026-09-29) the islands cover every CPU, the
+    plan does not segregate, and taking them anyway rendered
+    ``isolcpus=0-15``: every CPU fenced off from the general scheduler.
     """
-    if plan.cache_split and plan.radiod_l3_cpus:
+    if (plan.cache_split and plan.radiod_l3_cpus
+            and plan.radiod_l3_cpus.isdisjoint(plan.other_cpus)):
         return set(plan.radiod_l3_cpus)
     out: set = set()
     for cpus in plan.radiod.values():
