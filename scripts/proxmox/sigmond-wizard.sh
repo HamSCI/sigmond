@@ -560,11 +560,27 @@ gpsdo_grid() {
 
 ask_reporter() {
     REPORTER=""
+    # Name the destination, not just the field.  This value is what appears on
+    # wsprnet.org as the reporter, and it has to be one wsprnet will accept --
+    # which is the constraint the operator is actually working under, and not
+    # something they can infer from "Reporter ID" (rob, 2026-09-29).
+    echo ""
+    echo "  Your wsprnet.org reporter ID. This is the name your spots are"
+    echo "  filed under on wsprnet.org, so it must be one wsprnet accepts."
     while [ -z "$REPORTER" ]; do
-        rd -r -p "Reporter ID — your callsign, optionally /suffix (e.g. AC0G/B4 — required): " REPORTER
+        rd -r -p "wsprnet.org reporter ID — callsign, optionally /suffix (e.g. AC0G/B4 — required): " REPORTER
         REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         if [ -z "$REPORTER" ]; then echo "  ✗ required — please enter your callsign"; continue; fi
-        echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; }
+        echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; continue; }
+        # A WARNING, never a rejection.  Neither sigmond nor either uploader
+        # enforces a length, and wsprnet's exact cap is not documented here --
+        # so refusing a long id on a guessed limit could lock out a legitimate
+        # compound callsign.  Flag it and let the operator decide.
+        if [ "${#REPORTER}" -gt 10 ]; then
+            echo "  ⚠ $REPORTER is ${#REPORTER} characters. wsprnet.org limits the reporter"
+            echo "    field and may refuse it — check it is accepted there before"
+            echo "    relying on uploads. (Nothing here enforces a length.)"
+        fi
     done
     CALLSIGN="${REPORTER%%/*}"
 }
@@ -695,7 +711,18 @@ ask_wifi() {
     local _scan _n _pick _ssid _pass _line _out _rc
     while :; do
         echo ""
-        _scan=$("$WIFI_TOOL" scan 2>/dev/null | grep ' dBm ')
+        # ⛔ Match a NETWORK ROW, not merely a line containing "dBm".  The tool's
+        # own closing advice says "below -70 dBm the link is marginal", so a
+        # bare `grep ' dBm '` numbered that sentence as a selectable network:
+        #
+        #   13)  Portola 5A   5GHz   -79 dBm  WPA3   ⚠ weak ...
+        #   14)  ⚠ below -70 dBm the link is marginal. On a DASI station that is
+        #
+        # Picking 14 would have handed a fragment of prose to `join` as an SSID
+        # (rob, 2026-09-29).  A real row always carries a band token, so require
+        # one: band, then the signal, then the literal dBm.
+        _scan=$("$WIFI_TOOL" scan 2>/dev/null \
+                | grep -E '(2\.4GHz|5GHz)[[:space:]]+-?[0-9]+ dBm')
         if [ -z "$_scan" ]; then
             echo "  No networks found. The AP may be hidden, or out of range."
         else
@@ -732,7 +759,12 @@ ask_wifi() {
             echo ""
             rd -rs -p "Passphrase for \"$_ssid\" (Enter if open): " _pass
             echo ""
-            echo "  joining $_ssid ..."
+            # Say how long this takes.  Association, DHCP/SLAAC and -- on an
+            # IPv6-only AP -- standing up the resolver and CLAT add up to tens
+            # of seconds of silence, which rob read as a possible hang
+            # (2026-09-29): "I wasn't sure whether it was hanging or not."
+            echo "  joining $_ssid ... (this can take 10-30 s: association,"
+            echo "  then an address, then a resolver if it is an IPv6-only AP)"
             # ⛔ CAPTURE THE STATUS — never test the pipeline.  `cmd | sed`
             # reports SED's exit status, which is 0 no matter what the join
             # did, so EVERY failed join was recorded as a success and the

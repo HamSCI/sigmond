@@ -132,6 +132,26 @@ class WifiStepTests(unittest.TestCase):
         self.assertIn("HomeAP", out)
         self.assertIn('joined "HomeAP"', out)
 
+    def test_advisory_text_is_not_offered_as_a_network(self):
+        """The tool's own advice contains "-70 dBm" and must not be selectable.
+
+        A bare `grep ' dBm '` numbered it as an extra network; picking it would
+        have passed a fragment of prose to `join` as an SSID.
+        """
+        with _fake_tool() as tool:
+            out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
+                      stdin=b"y\n\n", tty=True)
+        self.assertIn("2)", out)                  # both real networks listed
+        self.assertNotIn("3)", out)               # and nothing beyond them
+        self.assertNotIn("3)  ⚠", out)
+
+    def test_join_warns_it_takes_time(self):
+        """rob: "I wasn't sure whether it was hanging or not"."""
+        with _fake_tool() as tool:
+            out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
+                      stdin=b"y\n1\nsecret\n", tty=True)
+        self.assertIn("can take", out)
+
     def test_weak_signal_is_flagged(self):
         with _fake_tool() as tool:
             out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
@@ -234,10 +254,17 @@ class WiringTests(unittest.TestCase):
 class _fake_tool:
     """A stand-in `sigmond-wifi` with a stable scan list."""
 
+    # ⛔ Includes the tool's REAL trailing advice, which contains "-70 dBm".
+    # Without it the stub could not reproduce the bug where that sentence was
+    # numbered as network 14 and offered for selection (rob, 2026-09-29).
     SCAN = (
         "  HomeAP                       2.4GHz    -48 dBm  WPA2\n"
         "  FarAP                        5GHz      -78 dBm  WPA2"
         "  ⚠ weak — a cable may be more reliable\n"
+        "\n"
+        "  ⚠ below -70 dBm the link is marginal. On a DASI station that is\n"
+        "    still often the right trade: an Ethernet cable is a noise path into\n"
+        "    the receiver. Weigh reliability against your noise floor.\n"
     )
 
     def __init__(self, fail_joins=0):
