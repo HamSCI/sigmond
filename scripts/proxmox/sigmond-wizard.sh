@@ -34,8 +34,8 @@ set -u
 # wait five minutes for a VM that does not exist, printing nothing, and read as
 # a hang (rob, AI6VN-PM 2026-09-29, where the VM is 100).
 #
-# So DISCOVER it, most authoritative source first, and keep 120 only as the
-# last resort it always was.
+# So DISCOVER it, most authoritative source first, falling back to the v3
+# fleet convention only when nothing on the host can answer.
 resolve_vmid(){
     [ -n "${SIGMOND_VMID:-}" ] && { printf '%s\n' "$SIGMOND_VMID"; return; }
     local v
@@ -50,7 +50,14 @@ resolve_vmid(){
     if [ "$(printf '%s\n' "$v" | grep -c .)" = 1 ] && [ -n "$v" ]; then
         printf '%s\n' "$v"; return
     fi
-    printf '120\n'
+    # ⛔ 100, not 120.  The decoder VM is VMID 100 by v3 fleet convention; the
+    # wizard's historical default was 120, and build-usb-v3.sh sed-rewrote
+    # `SIGMOND_VMID:-120` to `:-100` on its way onto the stick to correct it.
+    # Refactoring this into a resolver removed that literal, so the sed
+    # silently stopped matching and the build warned "wizard still mentions
+    # 120 somewhere".  Carrying the right number here is better than relying
+    # on a rewrite that a refactor can quietly disarm.
+    printf '100\n'
 }
 VMID="$(resolve_vmid)"
 # ── RAC endpoint ladder ────────────────────────────────────────────────
@@ -1787,7 +1794,7 @@ if [ -z "$VMID" ]; then
     _v=$(qm list 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}')
     [ "$(printf '%s\n' "$_v" | grep -c .)" = 1 ] && VMID="$_v"
 fi
-VMID="${VMID:-120}"
+VMID="${VMID:-100}"
 if ! qm status "$VMID" >/dev/null 2>&1; then
     echo "sigmond-vm: VM $VMID does not exist. Known VMs:" >&2
     qm list 2>/dev/null >&2

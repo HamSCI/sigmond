@@ -76,10 +76,18 @@ class ResolveVmidTests(unittest.TestCase):
 
     def test_refuses_to_guess_between_two_vms(self):
         """Guessing here would reconfigure the wrong VM."""
-        self.assertEqual(run(TWO_VMS), "120")
+        self.assertEqual(run(TWO_VMS), "100")
 
-    def test_last_resort_is_unchanged(self):
-        self.assertEqual(run(NO_QM), "120")
+    def test_last_resort_is_the_v3_fleet_convention(self):
+        """100, not the historical 120.
+
+        build-usb-v3.sh used to sed `SIGMOND_VMID:-120` to `:-100` on the way
+        onto the stick.  Refactoring this into a resolver removed that literal,
+        so the rewrite silently stopped matching — the build said as much
+        ("wizard still mentions 120 somewhere").  Carrying the right number
+        here beats relying on a rewrite a refactor can disarm.
+        """
+        self.assertEqual(run(NO_QM), "100")
 
 
 def shell_func(name: str) -> str:
