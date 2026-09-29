@@ -591,20 +591,40 @@ ask_grid() {
     # no fix yet, or the device is not on a port we can read.
     local GRID_DEFAULT=""
     if [ "$HAVE_GPSDO" = 1 ]; then
-        printf "Reading position from the GPSDO (%s)... " "$GPSDO_MODEL"
-        GRID_DEFAULT=$(gpsdo_grid || true)
-        if [ -n "$GRID_DEFAULT" ]; then
-            echo "$GRID_DEFAULT"
+        # ⛔ "not readable here" conflated two very different things, and on the
+        # commonest DASI GPSDO it was actively misleading.  The LBE-Mini
+        # (1dd2:2211) is HID-only -- UBX on interrupt-IN, NO serial node at all
+        # -- so this wizard can never read a grid from it, with a perfect sky
+        # view or none.  Printing "not readable" invites the operator to go
+        # hunting for a fault that does not exist (rob, 2026-09-29, whose
+        # LBE-Mini was attached, powered and flashing red for want of antenna
+        # signal).  Say which of the two situations this actually is.
+        if [ "${GPSDO_ID:-}" = "1dd2:2211" ]; then
+            echo "GPSDO present (LBE-Mini). It reports over USB HID (UBX), not"
+            echo "  NMEA, so this wizard cannot read a position from it — that"
+            echo "  is normal and is not a fault."
         else
-            echo "not readable here"
-            # Either an LBE-Mini (HID/UBX only, no serial node) or no fix
-            # yet.  Not a problem: sigmond-location-check runs before
+            printf "Reading position from the GPSDO (%s)... " "$GPSDO_MODEL"
+            GRID_DEFAULT=$(gpsdo_grid || true)
+            if [ -n "$GRID_DEFAULT" ]; then
+                echo "$GRID_DEFAULT"
+            else
+                echo "no position yet"
+                echo "  The GPSDO is attached but is not holding a GPS fix. It"
+                echo "  needs an antenna with a view of the sky; a flashing red"
+                echo "  LED on a Leo Bodnar unit means exactly that — powered,"
+                echo "  no satellite lock."
+            fi
+        fi
+        if [ -z "$GRID_DEFAULT" ]; then
+            # Not a problem either way: sigmond-location-check runs before
             # bring-up and treats a live GPSDO position as DEFINITIVE,
             # rewriting site-profile grid/lat/lon and propagating to
             # hf-timestd, the metrology envs and mag-recorder via
             # sigmond-site-timing.  Whatever is entered now is provisional.
-            echo "  (your GPSDO will set the grid automatically after setup —"
-            echo "   the value below is only used until then)"
+            echo "  Your GPSDO will set the grid automatically once it locks —"
+            echo "  the value below is only used until then."
+            echo "  To see what it is reporting:  smd gpsdo status"
         fi
     fi
     # A live GPSDO fix IS the answer — don't ask (mjh 2026-08-11).  The
