@@ -218,11 +218,33 @@ def hub_switchable(loc: Located) -> Tuple[Optional[bool], List[Tuple[str, str, b
 
 
 def detect_radiod_unit() -> Optional[str]:
-    """The one active radiod@ instance, when [radiod].unit is not declared."""
-    out = _run(["systemctl", "list-units", "--no-legend", "--plain",
-                "--state=active", "radiod@*.service"]).stdout
-    units = [l.split()[0] for l in out.splitlines() if l.strip()]
-    return units[0] if len(units) == 1 else None
+    """The radiod@ instance to restart, when [radiod].unit is not declared.
+
+    ⛔ MUST NOT REQUIRE AN *ACTIVE* INSTANCE.  This helper exists for the case
+    where the card has vanished — and radiod cannot serve without the card, so
+    it is never active then: it sits in activating/auto-restart, or failed.
+    Filtering on --state=active therefore made the helper refuse to run in
+    precisely the situation it was written for.
+
+    AI6VN, 2026-09-29: the RX-888 vanished, radiod@AI6VN went to
+    auto-restart with NRestarts=15, and every single run of this helper logged
+    "not exactly one active radiod@ instance — set it in topology.toml" and
+    exited 0.  The card's hub and port were already learned and persisted, the
+    hub supports per-port power switching, uhubctl was installed — and nothing
+    happened, once a minute, indefinitely.
+
+    So: prefer a single ACTIVE instance (unambiguous), and fall back to a
+    single LOADED instance whatever its state.  Two or more is still ambiguous
+    and still returns None — guessing which radiod to restart is worse than
+    asking topology.toml to say.
+    """
+    for extra in (["--state=active"], ["--all"]):
+        out = _run(["systemctl", "list-units", "--no-legend", "--plain",
+                    *extra, "radiod@*.service"]).stdout
+        units = [l.split()[0] for l in out.splitlines() if l.strip()]
+        if len(units) == 1:
+            return units[0]
+    return None
 
 
 @dataclass(frozen=True)

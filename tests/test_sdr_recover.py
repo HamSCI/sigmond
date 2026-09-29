@@ -327,3 +327,73 @@ def test_proceeds_without_the_lock_if_still_busy_at_the_deadline(monkeypatch, tm
 
     out = capsys.readouterr().out
     assert "proceeding" in out.lower()
+
+
+class DetectRadiodUnitTests(unittest.TestCase):
+    """⛔ The resolver must work when radiod is DOWN — that is the whole case.
+
+    This helper runs because the RX-888 vanished, and radiod cannot serve
+    without the card, so it is never `active` then: it sits in
+    activating/auto-restart, or failed.  The resolver used to filter on
+    `--state=active`, so it returned nothing and the helper exited — once a
+    minute, indefinitely, in exactly the situation it exists for.
+
+    AI6VN, 2026-09-29: card gone, radiod@AI6VN in auto-restart with
+    NRestarts=15, hub and port already learned and persisted, uhubctl present,
+    the hub advertising per-port power switching — and every run logged
+    "not exactly one active radiod@ instance" and did nothing.
+    """
+
+    ACTIVE = "radiod@AI6VN.service   loaded active running AI6VN radio receiver\n"
+    RESTARTING = ("radiod@AI6VN.service   loaded activating auto-restart "
+                  "AI6VN radio receiver\n")
+    TWO = (RESTARTING +
+           "radiod@OTHER.service   loaded active running OTHER radio receiver\n")
+
+    def _resolve(self, by_state):
+        """by_state: {tuple(extra_args): stdout}"""
+        calls = []
+
+        class R:
+            def __init__(self, out): self.stdout = out
+
+        def fake_run(cmd, *a, **k):
+            extra = tuple(x for x in cmd if x.startswith("--state") or x == "--all")
+            calls.append(extra)
+            return R(by_state.get(extra, ""))
+
+        orig = sdr._run
+        sdr._run = fake_run
+        try:
+            return sdr.detect_radiod_unit(), calls
+        finally:
+            sdr._run = orig
+
+    def test_single_active_instance_is_used(self):
+        unit, _ = self._resolve({("--state=active",): self.ACTIVE})
+        self.assertEqual(unit, "radiod@AI6VN.service")
+
+    def test_restarting_instance_is_found_when_none_is_active(self):
+        """The regression: a card-less radiod is activating, never active."""
+        unit, calls = self._resolve({
+            ("--state=active",): "",            # nothing active — card is gone
+            ("--all",): self.RESTARTING,
+        })
+        self.assertEqual(unit, "radiod@AI6VN.service")
+        self.assertIn(("--all",), calls, "must fall back past --state=active")
+
+    def test_active_is_preferred_over_the_broader_query(self):
+        unit, _ = self._resolve({
+            ("--state=active",): self.ACTIVE,
+            ("--all",): self.TWO,
+        })
+        self.assertEqual(unit, "radiod@AI6VN.service")
+
+    def test_two_instances_stay_ambiguous(self):
+        """Guessing which radiod to restart is worse than asking topology."""
+        unit, _ = self._resolve({("--state=active",): "", ("--all",): self.TWO})
+        self.assertIsNone(unit)
+
+    def test_no_instances_at_all(self):
+        unit, _ = self._resolve({})
+        self.assertIsNone(unit)
