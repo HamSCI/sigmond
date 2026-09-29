@@ -692,7 +692,7 @@ ask_wifi() {
         *) WIFI_SUMMARY="declined (radio $dev available; run 'sigmond-wifi scan' any time)"; return ;;
     esac
 
-    local _scan _n _pick _ssid _pass _line
+    local _scan _n _pick _ssid _pass _line _out _rc
     while :; do
         echo ""
         _scan=$("$WIFI_TOOL" scan 2>/dev/null | grep ' dBm ')
@@ -722,23 +722,48 @@ ask_wifi() {
         esac
         [ -n "$_ssid" ] || { echo "  ✗ please enter an SSID"; continue; }
 
-        # -s: the passphrase must not be echoed to a console that, during an
-        # install, is routinely being watched by whoever is in the room.
-        echo ""
-        rd -rs -p "Passphrase for \"$_ssid\" (Enter if open): " _pass
-        echo ""
-        echo "  joining $_ssid ..."
-        if printf '%s' "$_pass" | "$WIFI_TOOL" join "$_ssid" 2>&1 | sed 's/^/    /'; then
-            WIFI_SUMMARY="joined \"$_ssid\" on $dev"
+        # An inner loop, so a mistyped passphrase costs a retype and not a
+        # rescan and a re-pick.  rob, 2026-09-29, after a rejected passphrase:
+        # "it should go back and prompt and repeat, or quit ... the user should
+        # have repeated opportunities to select the SSID and enter a password."
+        while :; do
+            # -s: the passphrase must not be echoed to a console that, during
+            # an install, is routinely being watched by whoever is in the room.
+            echo ""
+            rd -rs -p "Passphrase for \"$_ssid\" (Enter if open): " _pass
+            echo ""
+            echo "  joining $_ssid ..."
+            # ⛔ CAPTURE THE STATUS — never test the pipeline.  `cmd | sed`
+            # reports SED's exit status, which is 0 no matter what the join
+            # did, so EVERY failed join was recorded as a success and the
+            # wizard walked straight on.  rob hit this on the first real use:
+            # "it says failed ... and then it went on. That's not what I
+            # wanted."  The join itself was reporting the failure correctly;
+            # the wizard was throwing the answer away.
+            _out=$(printf '%s' "$_pass" | "$WIFI_TOOL" join "$_ssid" 2>&1)
+            _rc=$?
             _pass=""
-            break
-        fi
-        _pass=""
-        echo "  ✗ could not bring up \"$_ssid\"."
-        rd -r -p "Try again? [Y/n] " _wq
-        case "${_wq:-Y}" in
-            [Nn]*) WIFI_SUMMARY="join of \"$_ssid\" failed (radio $dev available)"; return ;;
-        esac
+            printf '%s\n' "$_out" | sed 's/^/    /'
+            if [ "$_rc" = 0 ]; then
+                WIFI_SUMMARY="joined \"$_ssid\" on $dev"
+                return
+            fi
+            echo "  ✗ could not join \"$_ssid\"."
+            case "$_out" in
+                *WRONG_KEY*|*4-Way*|*4-way*|*handshake*|*auth*)
+                    echo "    The access point rejected that passphrase." ;;
+            esac
+            while :; do
+                rd -r -p "  [p] re-enter passphrase · [s] select another network · [q] skip Wi-Fi: " _wq
+                case "${_wq:-p}" in
+                    [Pp]*) break ;;        # same SSID, ask for the passphrase again
+                    [Ss]*) continue 3 ;;   # back out to the scan + picker
+                    [Qq]*) WIFI_SUMMARY="not joined — \"$_ssid\" refused the passphrase (radio $dev available)"
+                           return ;;
+                    *) echo "  ✗ please answer p, s, or q" ;;
+                esac
+            done
+        done
     done
 }
 

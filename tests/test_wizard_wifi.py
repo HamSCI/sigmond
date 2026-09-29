@@ -139,6 +139,64 @@ class WifiStepTests(unittest.TestCase):
         self.assertIn("-70 dBm", out)
 
 
+class RejectedPassphraseTests(unittest.TestCase):
+    """⛔ A rejected passphrase must stop the wizard, not slip past it.
+
+    rob, 2026-09-29, first real use: he picked sigmond-v6, guessed the
+    passphrase, and "it says failed ... and then it went on. That's not what I
+    wanted."  The join was reporting the failure correctly; the wizard threw
+    the answer away, because it tested a PIPELINE:
+
+        if printf '%s' "$_pass" | sigmond-wifi join "$_ssid" | sed 's/^/    /'
+
+    A pipeline's status is its LAST command's, so this asked sed whether the
+    join worked, and sed always says yes.  Every failed join was a success.
+
+    The original stub here always succeeded, so the suite was green while the
+    bug shipped — which is the real lesson: a stub that cannot fail cannot test
+    a failure.
+    """
+
+    def test_failure_is_not_reported_as_success(self):
+        with _fake_tool(fail_joins=1) as tool:
+            out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
+                      stdin=b"y\n1\nwrongpass\nq\n", tty=True)
+        self.assertIn("could not join", out)
+        self.assertNotIn('SUMMARY=joined', out)
+
+    def test_rejection_is_named_as_such(self):
+        with _fake_tool(fail_joins=1) as tool:
+            out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
+                      stdin=b"y\n1\nwrongpass\nq\n", tty=True)
+        self.assertIn("rejected that passphrase", out)
+
+    def test_can_retype_the_passphrase_without_rescanning(self):
+        """rob: 'it should go back and prompt and repeat'."""
+        with _fake_tool(fail_joins=1) as tool:
+            out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
+                      stdin=b"y\n1\nwrongpass\np\nrightpass\n", tty=True)
+        self.assertIn('SUMMARY=joined "HomeAP"', out)
+
+    def test_repeated_failures_keep_offering_the_choice(self):
+        """'repeated opportunities' — not one retry and out."""
+        with _fake_tool(fail_joins=3) as tool:
+            out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
+                      stdin=b"y\n1\nbad1\np\nbad2\np\nbad3\np\ngood\n", tty=True)
+        self.assertIn('SUMMARY=joined "HomeAP"', out)
+
+    def test_can_quit_out_of_a_failing_join(self):
+        with _fake_tool(fail_joins=1) as tool:
+            out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
+                      stdin=b"y\n1\nwrongpass\nq\n", tty=True)
+        self.assertIn("refused the passphrase", out)
+
+    def test_can_go_back_and_pick_another_network(self):
+        with _fake_tool(fail_joins=1) as tool:
+            out = run({"SIGMOND_WIFI_DEV": "wlan0", "SIGMOND_WIFI_TOOL": tool},
+                      stdin=b"y\n1\nwrongpass\ns\n2\ngood\n", tty=True)
+        self.assertIn('SUMMARY=joined "FarAP"', out)
+
+
 class WiringTests(unittest.TestCase):
     """⛔ The bug that started this was a step that existed but was never CALLED.
 
@@ -182,15 +240,32 @@ class _fake_tool:
         "  ⚠ weak — a cable may be more reliable\n"
     )
 
+    def __init__(self, fail_joins=0):
+        """fail_joins: how many join attempts fail before one succeeds.
+
+        The first version of this stub always succeeded, which is exactly why
+        the suite passed while every real failed join was being reported as a
+        success (rob, 2026-09-29).  A stub that cannot fail cannot test a
+        failure path.
+        """
+        self.fail_joins = fail_joins
+
     def __enter__(self):
         import tempfile
         self.d = tempfile.mkdtemp()
         p = Path(self.d) / "sigmond-wifi"
         p.write_text(
             "#!/bin/bash\n"
+            f"N={self.fail_joins}\n"
+            f"C={self.d}/attempts\n"
             "case \"$1\" in\n"
             f"  scan) printf '%s' {shquote(self.SCAN)} ;;\n"
-            "  join) cat >/dev/null; printf '  joined ok\\n' ;;\n"
+            "  join) cat >/dev/null\n"
+            "        n=$(cat \"$C\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$C\"\n"
+            "        if [ \"$n\" -le \"$N\" ]; then\n"
+            "            printf '  WRONG_KEY - the AP rejected the passphrase\\n'; exit 1\n"
+            "        fi\n"
+            "        printf '  joined ok\\n' ;;\n"
             "esac\n"
         )
         p.chmod(0o755)
