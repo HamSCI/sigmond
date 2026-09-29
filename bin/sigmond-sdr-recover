@@ -429,15 +429,31 @@ def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> 
     then on, is right whichever half is wired to the switch.
     """
     ok = True
+    # ⛔ ONLY the locations we actually switched OFF may be reported as left
+    # dark.  Bus paths renumber across boots -- AI6VN saw three different
+    # numberings in three boots -- so a stale location routinely names a hub
+    # that does not exist this boot.  uhubctl then says "No compatible devices
+    # detected at location 4-1", nothing was powered off there, and there is
+    # nothing to leave off.  Treating that as POWER LEFT OFF sent rob to the
+    # bench to look at a card that was powered and streaming (2026-09-29).
+    powered_off: List[Tuple[str, str, bool]] = []
     for hub, port, exact in locations:
         _log(f"cutting VBUS on hub {hub} port {port}{' (exact)' if exact else ''}")
         r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "off"]
-                 + (["-e"] if exact else []), timeout=60)
+                 + (["-e"] if exact else []), timeout=20)
         if r.returncode != 0:
-            _log(f"uhubctl off failed rc={r.returncode}: {r.stderr.strip()}")
-            ok = False
+            missing = "no compatible devices" in (r.stderr or "").lower()
+            _log(f"uhubctl off failed rc={r.returncode}: {r.stderr.strip()}"
+                 + (" — that hub is not on this bus, so nothing was switched"
+                    " off there" if missing else ""))
+            # A hub that is not here is not a failure of THIS cycle: the union
+            # with every device-less port is what finds the card now.
+            if not missing:
+                ok = False
+            continue
+        powered_off.append((hub, port, exact))
     time.sleep(off_seconds)
-    for hub, port, exact in locations:
+    for hub, port, exact in powered_off:
         r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "on"]
                  + (["-e"] if exact else []), timeout=20)
         if r.returncode != 0:

@@ -480,3 +480,87 @@ class StaleBusPathTests(unittest.TestCase):
         """The union is only safe because bootstrap skips populated ports."""
         self.assertIn("if dev and dev.group(1).strip():           "
                       "# a real device -- never touch", self.SRC)
+
+class MissingHubIsNotADarkPortTests(unittest.TestCase):
+    """⛔ "That hub is not here" must never be reported as "I left power off".
+
+    Bus paths renumber across boots — AI6VN saw three different numberings in
+    three boots (4-1/3-1, then 5-1/4-1, then 5-1/3-1).  A stale location
+    therefore routinely names a hub that does not exist this boot, uhubctl says
+    "No compatible devices detected at location 4-1", and NOTHING was switched
+    off there.  Reporting that as POWER LEFT OFF sent rob to the bench to look
+    at an RX-888 that was powered and streaming (2026-09-29):
+
+        POWER LEFT OFF on hub 4-1 port 4 — both forms failed (rc=1)
+        hub 5-1 Port 4: 0203 power 5gbps U0 enable connect [RX888mk2]
+    """
+
+    def _cycle(self, locations, results):
+        log = []
+
+        class R:
+            def __init__(self, rc, err=""):
+                self.returncode = rc; self.stdout = ""; self.stderr = err
+
+        def fake_run(cmd, *a, **k):
+            hub = cmd[cmd.index("-l") + 1]
+            action = cmd[cmd.index("-a") + 1]
+            rc, err = results.get((hub, action), (0, ""))
+            return R(rc, err)
+
+        orig_run, orig_sleep, orig_log = sdr._run, sdr.time.sleep, sdr._log
+        sdr._run, sdr.time.sleep, sdr._log = fake_run, (lambda *_: None), log.append
+        try:
+            ok = sdr.cycle_port(locations, off_seconds=6)
+        finally:
+            sdr._run, sdr.time.sleep, sdr._log = orig_run, orig_sleep, orig_log
+        return ok, log
+
+    ABSENT = (1, "No compatible devices detected at location 4-1!")
+
+    def test_absent_hub_is_not_reported_as_power_left_off(self):
+        ok, log = self._cycle([("4-1", "4", False)],
+                              {("4-1", "off"): self.ABSENT})
+        self.assertFalse(any("POWER LEFT OFF" in m for m in log),
+                         "a hub that is not on the bus left nothing dark")
+
+    def test_absent_hub_does_not_fail_the_cycle(self):
+        """The union with device-less ports is what finds the card now."""
+        ok, _ = self._cycle([("4-1", "4", False), ("5-1", "4", True)],
+                            {("4-1", "off"): self.ABSENT})
+        self.assertTrue(ok)
+
+    def test_absent_hub_is_explained_not_just_dumped(self):
+        _, log = self._cycle([("4-1", "4", False)],
+                             {("4-1", "off"): self.ABSENT})
+        self.assertTrue(any("not on this bus" in m for m in log))
+
+    def test_a_port_we_really_switched_off_still_reports_when_left_dark(self):
+        """The real warning must survive — it is the one that needs a human."""
+        _, log = self._cycle([("5-1", "4", True)],
+                             {("5-1", "on"): (124, "timeout")})
+        self.assertTrue(any("POWER LEFT OFF" in m for m in log))
+
+    def test_on_is_not_attempted_for_a_hub_that_was_never_off(self):
+        calls = []
+
+        class R:
+            def __init__(self, rc, err=""):
+                self.returncode = rc; self.stdout = ""; self.stderr = err
+
+        def fake_run(cmd, *a, **k):
+            hub = cmd[cmd.index("-l") + 1]; action = cmd[cmd.index("-a") + 1]
+            calls.append((hub, action))
+            if hub == "4-1" and action == "off":
+                return R(*self.ABSENT)
+            return R(0)
+
+        orig_run, orig_sleep, orig_log = sdr._run, sdr.time.sleep, sdr._log
+        sdr._run, sdr.time.sleep, sdr._log = fake_run, (lambda *_: None), (lambda m: None)
+        try:
+            sdr.cycle_port([("4-1", "4", False)], off_seconds=1)
+        finally:
+            sdr._run, sdr.time.sleep, sdr._log = orig_run, orig_sleep, orig_log
+        self.assertNotIn(("4-1", "on"), calls,
+                         "do not try to power on a hub that is not there")
+
