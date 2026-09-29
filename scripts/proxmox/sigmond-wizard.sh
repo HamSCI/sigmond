@@ -25,7 +25,34 @@
 #              --rac-upgrade   climb to a more secure gateway tier if one
 #                              has since come up (see the RAC ladder below)
 set -u
-VMID="${SIGMOND_VMID:-120}"
+
+# ── which VM are we configuring? ────────────────────────────────────────────
+# ⛔ NEVER fall straight back to a hardcoded id.  firstboot's own units carry
+# `Environment=SIGMOND_VMID=<n>`, so the wizard gets the right VM when systemd
+# starts it — but an operator running `sigmond-setup --reconfigure` from a root
+# shell has no such environment.  The old default of 120 then made the wizard
+# wait five minutes for a VM that does not exist, printing nothing, and read as
+# a hang (rob, AI6VN-PM 2026-09-29, where the VM is 100).
+#
+# So DISCOVER it, most authoritative source first, and keep 120 only as the
+# last resort it always was.
+resolve_vmid(){
+    [ -n "${SIGMOND_VMID:-}" ] && { printf '%s\n' "$SIGMOND_VMID"; return; }
+    local v
+    # what firstboot recorded for itself — the same number its units use
+    v=$(sed -n 's/^Environment=SIGMOND_VMID=\([0-9][0-9]*\).*/\1/p' \
+        "${SIGMOND_IMPORT_UNIT:-/etc/systemd/system/sigmond-import.service}" \
+        2>/dev/null | head -1)
+    [ -n "$v" ] && { printf '%s\n' "$v"; return; }
+    # exactly one VM on this host is unambiguous; more than one is not, so
+    # do not guess — fall through and let the wait loop report it.
+    v=$(qm list 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}')
+    if [ "$(printf '%s\n' "$v" | grep -c .)" = 1 ] && [ -n "$v" ]; then
+        printf '%s\n' "$v"; return
+    fi
+    printf '120\n'
+}
+VMID="$(resolve_vmid)"
 # ── RAC endpoint ladder ────────────────────────────────────────────────
 # Two policies, split on whether this is a DASI station (rob 2026-08-09):
 #
@@ -259,14 +286,31 @@ say "waiting for decoder VM $VMID and its guest agent..."
 # </dev/null on every qm call: qm inherits our stdin and can slurp piped
 # answers — one stolen line desynced every later prompt (nested test,
 # 2026-08-11: nine grid rejections = exactly one line short).
+# Say something while waiting.  This loop can run five minutes, and printing
+# nothing for five minutes is indistinguishable from a hang — which is exactly
+# how it was reported (rob, 2026-09-29).  A wait that names what it is waiting
+# for, and counts, is a wait; a silent one is a bug report.
+if ! qm status "$VMID" >/dev/null 2>&1 </dev/null; then
+    say "  VM $VMID does not exist on this host. Known VMs:"
+    qm list 2>/dev/null </dev/null | sed 's/^/    /'
+    say "  If the decoder VM has a different id, rerun as:"
+    say "      SIGMOND_VMID=<id> sigmond-setup --reconfigure"
+    exit 1
+fi
 for i in $(seq 1 60); do
     qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
     [ "$i" = 1 ] && qm start "$VMID" >/dev/null 2>&1 </dev/null
+    [ $((i % 3)) = 0 ] && say "  still waiting for the guest agent ($((i * 5))s of 300s)..."
     sleep 5
 done
 if ! qm agent "$VMID" ping >/dev/null 2>&1 </dev/null; then
-    say "ERROR: guest agent in VM $VMID not answering — is the decoder VM imported and running?"
-    say "        (plug in the Sigmond USB to trigger import, then rerun sigmond-setup)"
+    say "ERROR: guest agent in VM $VMID not answering after 300s."
+    say "  The VM can be up and reachable over ssh while the agent channel is"
+    say "  stale — the service inside the guest shows active, but the host still"
+    say "  says 'QEMU guest agent is not running' (seen on AI6VN 2026-09-29)."
+    say "  Try, inside the VM:   sudo systemctl restart qemu-guest-agent"
+    say "  Then rerun: sigmond-setup --reconfigure"
+    say "  If the VM was never imported, plug in the Sigmond USB to trigger it."
     exit 1
 fi
 
@@ -1486,9 +1530,23 @@ cat > /usr/local/bin/sigmond-vm <<'VMEOF'
 #   sigmond-vm             interactive shell
 #   sigmond-vm <cmd...>    run a command in the VM
 #   sigmond-vm --ip        just print the VM's current IPv4
-VMID="${SIGMOND_VMID:-120}"
+# Same discovery the wizard uses: a hardcoded 120 sends this at a VM that does
+# not exist on a host whose decoder VM is 100.
+VMID="${SIGMOND_VMID:-}"
+if [ -z "$VMID" ]; then
+    VMID=$(sed -n 's/^Environment=SIGMOND_VMID=\([0-9][0-9]*\).*/\1/p' \
+           /etc/systemd/system/sigmond-import.service 2>/dev/null | head -1)
+fi
+if [ -z "$VMID" ]; then
+    _v=$(qm list 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}')
+    [ "$(printf '%s\n' "$_v" | grep -c .)" = 1 ] && VMID="$_v"
+fi
+VMID="${VMID:-120}"
 if ! qm status "$VMID" >/dev/null 2>&1; then
-    echo "sigmond-vm: VM $VMID does not exist" >&2; exit 1
+    echo "sigmond-vm: VM $VMID does not exist. Known VMs:" >&2
+    qm list 2>/dev/null >&2
+    echo "sigmond-vm: if it has another id: SIGMOND_VMID=<id> sigmond-vm" >&2
+    exit 1
 fi
 if ! qm status "$VMID" | grep -q running; then
     echo "sigmond-vm: VM $VMID is not running — try: qm start $VMID" >&2; exit 1
