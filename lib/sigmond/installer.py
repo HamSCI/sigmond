@@ -154,6 +154,30 @@ def _checkout_ref(repo_dir: Path, ref: str) -> None:
         )
 
 
+def _warn_offline(repo_dir: Path, r, action: str) -> None:
+    """Report a failed refresh that we are deliberately continuing past.
+
+    Must be LOUD: the station is now running code that may be older than the
+    catalog says, and the only evidence is this line.  Keep the git error --
+    "Could not connect to server" and "Could not resolve host" want different
+    fixes, and on this fleet the first one usually means the host's NAT64/CLAT
+    translation is down rather than the internet being out.
+    """
+    # git's stderr is several lines and the LAST one is often a fragment of its
+    # stock advice ("and the repository exists."), which tells the operator
+    # nothing.  The first fatal:/error: line is the one that names the cause.
+    err = [ln.strip() for ln in (r.stderr or '').splitlines() if ln.strip()]
+    detail = next((ln for ln in err
+                   if ln.startswith(('fatal:', 'error:'))),
+                  err[0] if err else 'no error output')
+    print(f"  warning: could not refresh {repo_dir.name} from its remote — "
+          f"{action}.\n"
+          f"           git said: {detail}\n"
+          f"           the checkout on disk is used as-is; re-run "
+          f"`smd component update` once the network is back.",
+          file=sys.stderr)
+
+
 def clone_repo(
     entry: CatalogEntry,
     *,
@@ -176,9 +200,19 @@ def clone_repo(
             if ref is not None:
                 r = _git(repo_dir, 'fetch', 'origin')
                 if r.returncode != 0:
-                    raise RuntimeError(
-                        f"git fetch failed in {repo_dir}: {r.stderr.strip()}"
-                    )
+                    # Offline/degraded network.  The checkout is ALREADY here —
+                    # a failed *refresh* must not destroy an install we can
+                    # complete from disk.  Only a ref we don't actually have is
+                    # fatal.  See the note in the `else` branch below.
+                    have = _git(repo_dir, 'rev-parse', '--verify', '--quiet',
+                                f'{ref}^{{commit}}')
+                    if have.returncode != 0:
+                        raise RuntimeError(
+                            f"git fetch failed in {repo_dir} and pinned ref "
+                            f"{ref!r} is not in the local checkout: "
+                            f"{r.stderr.strip()}"
+                        )
+                    _warn_offline(repo_dir, r, f'staying on pinned ref {ref}')
                 # Shallow-aware: deepen the clone if `ref` (e.g. ka9q-radio's
                 # compat pin) isn't in the --depth 1 history (sigmond#13).
                 _checkout_ref(repo_dir, ref)
@@ -188,9 +222,28 @@ def clone_repo(
                 # a previous pinned-ref checkout), so we use fetch + checkout -B.
                 r = _git(repo_dir, 'fetch', 'origin')
                 if r.returncode != 0:
-                    raise RuntimeError(
-                        f"git fetch failed in {repo_dir}: {r.stderr.strip()}"
-                    )
+                    # ⛔ A FAILED REFRESH IS NOT A FAILED INSTALL.  The appliance
+                    # image ships every client checkout precisely so bring-up
+                    # needs no internet; raising here threw that away and turned
+                    # a transient network outage into a half-installed station.
+                    #
+                    # AI6VN, 2026-09-29: the host's CLAT had not come up, so the
+                    # IPv4-only decoder VM had no egress for the first minutes of
+                    # first-boot.  Five components -- igmp-querier, gpsdo-monitor,
+                    # gmag-webui, ka9q-radio and ka9q-web -- aborted here with
+                    # "Failed to connect to github.com port 443 after 2 ms" even
+                    # though their source was sitting on disk, fully usable.  For
+                    # ka9q-web the knock-on was worse than a missed update: the
+                    # install returns before `_write_ka9q_web_unit`, so the
+                    # station got no ka9q-web.service at all and bring-up failed
+                    # four times with "Unit ka9q-web.service not found".
+                    #
+                    # So: warn loudly, keep what we have, and let the install
+                    # finish.  The operator gets a working station running
+                    # slightly older code, which is strictly better than a
+                    # broken one, and `smd component update` fixes it later.
+                    _warn_offline(repo_dir, r, 'keeping the on-disk checkout')
+                    return repo_dir
                 # Discover the remote's default branch (usually main).
                 sym = _git(repo_dir, 'symbolic-ref',
                            '--short', 'refs/remotes/origin/HEAD')

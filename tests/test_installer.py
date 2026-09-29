@@ -279,3 +279,60 @@ class TestCheckoutRefShallow:
         self._git(tmp_path, 'clone', '--quiet', f'file://{upstream}', str(repo))
         with pytest.raises(RuntimeError):
             _checkout_ref(repo, 'deadbeef' * 5)      # 40-char sha that doesn't exist
+
+
+class TestCloneRepoOffline(TestCheckoutRefShallow):
+    """A failed *refresh* must not fail the install.
+
+    The appliance image ships every client checkout so that bring-up needs no
+    internet.  clone_repo used to raise on any `git fetch` failure, which threw
+    that away: on AI6VN (2026-09-29) the host's CLAT had not come up, the
+    IPv4-only decoder VM had no egress, and five components aborted here with
+    "Failed to connect to github.com port 443 after 2 ms" while their source sat
+    on disk fully usable.  ka9q-web fared worst — its systemd unit is written at
+    the END of the install, so the early abort left the station with no
+    ka9q-web.service at all.
+
+    Inherits the real-git helpers above; an unreachable remote is simulated by
+    pointing origin at a path that does not exist, which makes `git fetch` fail
+    exactly as a dead network does.
+    """
+
+    def _clone_with_dead_remote(self, tmp_path):
+        upstream = tmp_path / 'up'
+        old, new = self._make_upstream(upstream)
+        repo = tmp_path / 'fake-client'
+        self._git(tmp_path, 'clone', '--quiet', f'file://{upstream}', str(repo))
+        self._git(repo, 'remote', 'set-url', 'origin',
+                  f'file://{tmp_path}/no-such-repo')
+        assert self._git(repo, 'fetch', 'origin').returncode != 0
+        return repo, old, new
+
+    def test_failed_fetch_keeps_the_on_disk_checkout(self, tmp_path):
+        repo, old, new = self._clone_with_dead_remote(tmp_path)
+        entry = _entry(repo=None)        # no remote URL to normalise
+        result = clone_repo(entry, base=tmp_path, pull_if_exists=True)
+        assert result == repo
+        # and it left the checkout intact rather than mangling it
+        assert self._git(repo, 'rev-parse', 'HEAD').stdout.strip() == new
+
+    def test_failed_fetch_still_checks_out_a_pin_we_already_have(self, tmp_path):
+        repo, old, new = self._clone_with_dead_remote(tmp_path)
+        entry = _entry(repo=None)
+        result = clone_repo(entry, base=tmp_path, ref=old)
+        assert result == repo
+        assert self._git(repo, 'rev-parse', 'HEAD').stdout.strip() == old
+
+    def test_failed_fetch_with_an_absent_pin_STILL_RAISES(self, tmp_path):
+        """The guard on the tolerance above.
+
+        Continuing past a dead remote is only safe because we verified the ref
+        is genuinely present.  If someone widens the except to swallow every
+        fetch failure, this test fails — the install would otherwise proceed on
+        whatever commit happened to be checked out, silently building the wrong
+        code against a pin the operator asked for.
+        """
+        repo, old, new = self._clone_with_dead_remote(tmp_path)
+        entry = _entry(repo=None)
+        with pytest.raises(RuntimeError, match='not in the local checkout'):
+            clone_repo(entry, base=tmp_path, ref='deadbeef' * 5)
