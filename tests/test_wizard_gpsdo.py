@@ -29,31 +29,49 @@ REPO = Path(__file__).resolve().parent.parent
 WIZARD = REPO / "scripts" / "proxmox" / "sigmond-wizard.sh"
 
 
-def ask_grid() -> str:
+def shell_func(name: str) -> str:
+    """Lift a top-level shell function verbatim out of the wizard."""
     text, keep, out = WIZARD.read_text().splitlines(True), False, []
     for ln in text:
-        if ln.startswith("ask_grid() {"):
+        if ln.startswith(f"{name}() {{") or ln.startswith(f"{name}(){{"):
             keep = True
         if keep:
             out.append(ln)
             if ln.rstrip() == "}":
                 break
-    assert out, "ask_grid not found"
+    assert out, f"{name} not found in the wizard"
     return "".join(out)
 
 
-def run(gpsdo_id: str, model: str, grid_from_device: str = "") -> str:
+def ask_grid() -> str:
+    return shell_func("ask_grid")
+
+
+def run(gpsdo_id: str, model: str, grid_from_device: str = "",
+        monitor=None) -> str:
+    """monitor: None = gpsdo-monitor does not answer; else (fix, sats, grid)."""
     stub = (f'gpsdo_grid(){{ printf "%s\\n" "{grid_from_device}"; '
             f'[ -n "{grid_from_device}" ]; }}')
+    if monitor is None:
+        report = "gpsdo_lock_report(){ return 1; }"
+    else:
+        fix, sats, grid = monitor
+        report = ('gpsdo_lock_report(){ '
+                  f'GPSDO_FIX="{fix}"; GPSDO_SATS="{sats}"; '
+                  f'GPSDO_GRID_UBX="{grid}"; return 0; }}')
     script = textwrap.dedent(f"""
         set -u
         rd(){{ read "$@" || true; }}
         say(){{ printf '%s\\n' "$*"; }}
         HAVE_GPSDO=1
+        PREFLIGHT_SRC=vm
         GPSDO_ID="{gpsdo_id}"
         GPSDO_MODEL="{model}"
+        GPSDO_FIX=""; GPSDO_SATS=""; GPSDO_GRID_UBX=""
         GRID=""
         {stub}
+        {report}
+        {shell_func("gpsdo_say_lock")}
         {ask_grid()}
         ask_grid
         printf 'GRID=%s\\n' "$GRID"
@@ -96,6 +114,45 @@ class GpsdoMessageTests(unittest.TestCase):
         out = run(self.SERIAL, "LBE-1421", grid_from_device="EM38ww")
         self.assertIn("EM38ww", out)
         self.assertNotIn("not holding a GPS fix", out)
+
+    # ── lock state must actually be REPORTED ────────────────────────────────
+    # rob, 2026-09-29: "Where does it pronounce the LBE-Mini doesn't have a
+    # lock? I see it listed as present, but no mention of it having no lock.
+    # This is the only place that would present that information."
+    NO_FIX = ("no_fix", 0, "")
+    LOCKED = ("3d", 11, "CM87tj")
+
+    def test_mini_says_it_has_no_lock(self):
+        out = run(self.MINI, "LBE-Mini", monitor=self.NO_FIX)
+        self.assertIn("NO GPS LOCK", out)
+        self.assertIn("0 in use", out)
+
+    def test_mini_no_lock_warns_the_clock_is_undisciplined(self):
+        """A station in this state still captures — against a free clock."""
+        out = run(self.MINI, "LBE-Mini", monitor=self.NO_FIX)
+        self.assertIn("undisciplined", out)
+        self.assertIn("free-running clock", out)
+
+    def test_mini_reports_a_lock_when_it_has_one(self):
+        out = run(self.MINI, "LBE-Mini", monitor=self.LOCKED)
+        self.assertIn("GPS lock: 3d (11 satellites)", out)
+        self.assertNotIn("NO GPS LOCK", out)
+
+    def test_mini_can_now_supply_a_grid_via_the_monitor(self):
+        """The NMEA path never could; going through gpsdo-monitor can."""
+        out = run(self.MINI, "LBE-Mini", monitor=self.LOCKED)
+        self.assertIn("position from the GPSDO: CM87tj", out)
+        self.assertIn("GRID=CM87tj", out)
+
+    def test_mini_says_so_when_the_monitor_cannot_be_reached(self):
+        """Unknown must not be reported as 'no lock' — they differ."""
+        out = run(self.MINI, "LBE-Mini", monitor=None)
+        self.assertIn("LOCK STATE UNKNOWN", out)
+        self.assertNotIn("NO GPS LOCK", out)
+
+    def test_serial_model_also_reports_lock_when_nmea_is_silent(self):
+        out = run(self.SERIAL, "LBE-1421", monitor=self.NO_FIX)
+        self.assertIn("NO GPS LOCK", out)
 
     def test_both_no_grid_cases_point_at_the_status_command(self):
         for gid, model in ((self.MINI, "LBE-Mini"), (self.SERIAL, "LBE-1421")):

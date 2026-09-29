@@ -520,6 +520,78 @@ except Exception: pass' 2>/dev/null || true)
 # device here.  This value is only the PROMPT DEFAULT; the authoritative
 # position is re-asserted from the GPSDO after bring-up by
 # sigmond-location-check ("location authority first (GPSDO definitive)").
+# Run a command in the guest and hand back its STDOUT.  gexec returns only an
+# exit code; preflight_devices already needed the output and open-coded this.
+guest_out() {
+    local t="$1"; shift
+    qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>/dev/null </dev/null \
+      | python3 -c 'import json,sys
+try:  print(json.load(sys.stdin).get("out-data",""))
+except Exception: pass' 2>/dev/null || true
+}
+
+# ── is the GPSDO actually locked? ───────────────────────────────────────────
+# ⚡ The wizard is the ONLY place this surfaces during an install, and it was
+# not being said: the pre-flight listed the GPSDO as present and the grid step
+# explained it could not be read, but nothing reported whether it had a fix
+# (rob, 2026-09-29, whose LBE-Mini was present and flashing red).
+#
+# The LBE-Mini speaks UBX over HID, which this shell cannot parse — but
+# gpsdo-monitor can, and it runs in the decoder VM where the GPSDO is passed
+# through.  So ask it.  This also means an LBE-Mini CAN supply a grid after
+# all, by way of the monitor, which the NMEA path could never do.
+#
+# Sets GPSDO_FIX / GPSDO_SATS / GPSDO_GRID_UBX; returns 1 if nothing answered.
+gpsdo_lock_report() {
+    GPSDO_FIX=""; GPSDO_SATS=""; GPSDO_GRID_UBX=""
+    # If the GPSDO was seen on the HOST, passthrough has not happened yet and
+    # the VM cannot see the device at all — asking it would report a spurious
+    # "no GPSDO" rather than the truth.
+    [ "${PREFLIGHT_SRC:-host}" = "vm" ] || return 1
+    local json
+    json=$(guest_out 35 'for b in /usr/local/bin/gpsdo-monitor \
+                             /opt/gpsdo-monitor/venv/bin/gpsdo-monitor; do
+                           [ -x "$b" ] && exec "$b" status 2>/dev/null
+                         done')
+    [ -n "$json" ] || return 1
+    local parsed
+    parsed=$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if isinstance(d, list):
+    d = d[0] if d else {}
+h = (d or {}).get("health") or {}
+fix = h.get("gps_fix")
+sats = h.get("sats_used")
+grid = h.get("grid")
+if h.get("gps_locked") and not fix:
+    fix = "lock"
+print("%s|%s|%s" % (fix or "", "" if sats is None else sats, grid or ""))
+' 2>/dev/null) || return 1
+    [ -n "$parsed" ] || return 1
+    GPSDO_FIX="${parsed%%|*}"
+    GPSDO_SATS=$(echo "$parsed" | cut -d'|' -f2)
+    GPSDO_GRID_UBX=$(echo "$parsed" | cut -d'|' -f3)
+    return 0
+}
+
+# One line describing lock state, for whichever branch needs it.
+gpsdo_say_lock() {
+    case "$GPSDO_FIX" in
+        ""|"no_fix"|"none")
+            echo "  ⚠ NO GPS LOCK: the GPSDO is powered and running but is not"
+            echo "    tracking satellites (${GPSDO_SATS:-0} in use). It needs an antenna with a"
+            echo "    view of the sky; a flashing red LED means exactly this."
+            echo "    Its output keeps running undisciplined until it locks, so"
+            echo "    the station will capture against a free-running clock." ;;
+        *)
+            echo "  GPS lock: $GPSDO_FIX (${GPSDO_SATS:-?} satellites)" ;;
+    esac
+}
+
 gpsdo_grid() {
     [ "$HAVE_GPSDO" = 1 ] || return 1
     # Find the GPSDO's OWN serial node.  Never walk /dev/ttyACM* blindly:
@@ -601,8 +673,28 @@ ask_grid() {
         # signal).  Say which of the two situations this actually is.
         if [ "${GPSDO_ID:-}" = "1dd2:2211" ]; then
             echo "GPSDO present (LBE-Mini). It reports over USB HID (UBX), not"
-            echo "  NMEA, so this wizard cannot read a position from it — that"
-            echo "  is normal and is not a fault."
+            echo "  NMEA, so this wizard cannot read it directly — that is"
+            echo "  normal and is not a fault. Asking gpsdo-monitor in the"
+            printf "  decoder VM, which speaks UBX... "
+            if gpsdo_lock_report; then
+                echo "answered."
+                gpsdo_say_lock
+                GRID_DEFAULT="$GPSDO_GRID_UBX"
+                [ -n "$GRID_DEFAULT" ] && echo "  position from the GPSDO: $GRID_DEFAULT"
+            else
+                echo "no answer."
+                # UNKNOWN is not the same as NO LOCK, and must never be printed
+                # as one.  Two quite different things produce it, and the
+                # operator can act on both.
+                echo "  ⚠ LOCK STATE UNKNOWN — this is not the same as 'no lock'."
+                echo "    Either gpsdo-monitor is not running in the VM yet (it is"
+                echo "    installed during bring-up), or the guest agent channel"
+                echo "    has gone stale — seen on AI6VN twice on 2026-09-29, with"
+                echo "    the agent 'active' inside the guest while the host said"
+                echo "    'QEMU guest agent is not running'. Clear that with, in"
+                echo "    the VM:  sudo systemctl restart qemu-guest-agent"
+                echo "    Then:  smd gpsdo status"
+            fi
         else
             printf "Reading position from the GPSDO (%s)... " "$GPSDO_MODEL"
             GRID_DEFAULT=$(gpsdo_grid || true)
@@ -610,10 +702,18 @@ ask_grid() {
                 echo "$GRID_DEFAULT"
             else
                 echo "no position yet"
-                echo "  The GPSDO is attached but is not holding a GPS fix. It"
-                echo "  needs an antenna with a view of the sky; a flashing red"
-                echo "  LED on a Leo Bodnar unit means exactly that — powered,"
-                echo "  no satellite lock."
+                # NMEA gave us nothing.  Say WHY, using the monitor's own view
+                # rather than guessing between "no fix" and "cannot read".
+                if gpsdo_lock_report; then
+                    gpsdo_say_lock
+                    GRID_DEFAULT="$GPSDO_GRID_UBX"
+                    [ -n "$GRID_DEFAULT" ] && echo "  position from the GPSDO: $GRID_DEFAULT"
+                else
+                    echo "  The GPSDO is attached but is not holding a GPS fix. It"
+                    echo "  needs an antenna with a view of the sky; a flashing red"
+                    echo "  LED on a Leo Bodnar unit means exactly that — powered,"
+                    echo "  no satellite lock."
+                fi
             fi
         fi
         if [ -z "$GRID_DEFAULT" ]; then
