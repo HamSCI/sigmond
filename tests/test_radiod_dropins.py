@@ -42,6 +42,9 @@ _DROPIN_RELPATHS = [
     'radiod@.service.d/40-sigmond-park.conf',
     'radiod@.service.d/45-sigmond-consumers.conf',
     'sigmond-radiod-park@.service',
+    # The re-park timer: the one-shot park runs 0.2 s after radiod starts and
+    # the demod threads do not exist for another ~70 s (AI6VN 2026-09-29).
+    'sigmond-radiod-park@.timer',
     'sigmond-radiod-consumers@.service',
 ]
 
@@ -107,6 +110,7 @@ class RadiodDropinsWriterTests(unittest.TestCase):
             'radiod-park.conf',
             'radiod-consumers.conf',
             'sigmond-radiod-park@.service',
+            'sigmond-radiod-park@.timer',
             'sigmond-radiod-consumers@.service',
         ]
         for i, name in enumerate(self.src_names):
@@ -121,12 +125,12 @@ class RadiodDropinsWriterTests(unittest.TestCase):
         self.assertEqual(list(self.systemd_dir.rglob('*')), [])
         self.assertFalse(any(c[:2] == ['systemctl', 'daemon-reload'] for c in calls))
 
-    def test_empty_tree_writes_all_five_with_source_bytes(self):
+    def test_empty_tree_writes_every_unit_with_source_bytes(self):
         calls = []
         run = _fake_run(calls, unit_installed=True)
         written = smd._ensure_radiod_dropins(
             systemd_dir=self.systemd_dir, src_dir=self.src_dir, run=run)
-        self.assertEqual(len(written), 5)
+        self.assertEqual(len(written), len(_DROPIN_RELPATHS))
         for src_name, rel in zip(self.src_names, _DROPIN_RELPATHS):
             dest = self.systemd_dir / rel
             self.assertTrue(dest.exists(), f'{dest} not written')
@@ -194,7 +198,9 @@ class RadiodDropinsWriterTests(unittest.TestCase):
             c for c in calls
             if c[:1] == ['install'] and '-d' not in c
         ]
-        self.assertEqual(len(install_file_calls), 5)
+        # Derived, not hardcoded: this list grows (the re-park timer was
+        # the sixth), and a literal here fails for the wrong reason.
+        self.assertEqual(len(install_file_calls), len(_DROPIN_RELPATHS))
         for c in install_file_calls:
             self.assertIn('-o', c)
             self.assertEqual(c[c.index('-o') + 1], 'root')
@@ -226,6 +232,7 @@ class RadiodDropinsMissingTests(unittest.TestCase):
             'radiod-park.conf',
             'radiod-consumers.conf',
             'sigmond-radiod-park@.service',
+            'sigmond-radiod-park@.timer',
             'sigmond-radiod-consumers@.service',
         ]
         for i, name in enumerate(self.src_names):
@@ -361,3 +368,63 @@ class EnsureRadiodRunningBareTemplateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ParkTimerTests(unittest.TestCase):
+    """⛔ A one-shot park cannot see threads that do not exist yet.
+
+    sigmond-radiod-park@%i.service is ordered After=radiod@%i.service, so it
+    runs a fraction of a second after radiod starts.  radiod creates one
+    demodulator thread per channel as the config is applied — on AI6VN that was
+    51 to 69 seconds later:
+
+        radiod start:            19:34:54.77
+        park finished:           19:34:55      <- 0.2 s after
+        linear 92657894 created: 19:35:45.71   <- 51 s after
+        linear 54702558 created: 19:36:03.81   <- 69 s after
+
+    Those threads inherited the whole fence pair as their mask and the
+    scheduler put several on the fft core, so the core carried fft + a linear
+    demod + agc_rx888 + radio stat.  rob saw the core at 57% while the fft
+    thread was at 52% and correctly inferred a second tenant (2026-09-29).
+    Running the pinner by hand fixed it instantly: "fft(1 thread) -> cpu 8,
+    50 others -> cpu 9".
+
+    radiod also creates and destroys channel threads at RUNTIME, so the fix
+    is a cadence, not a better-timed one-shot.
+    """
+
+    REPO = Path(__file__).resolve().parent.parent
+    TIMER = REPO / "systemd" / "sigmond-radiod-park@.timer"
+    DROPIN = REPO / "systemd" / "radiod-park.conf"
+
+    def test_the_timer_exists(self):
+        self.assertTrue(self.TIMER.is_file(),
+                        "the re-park timer is what keeps the fence clean")
+
+    def test_the_timer_repeats(self):
+        body = self.TIMER.read_text()
+        self.assertIn("OnUnitActiveSec=", body,
+                      "a timer that fires once is just the one-shot again")
+
+    def test_the_timer_first_fires_inside_the_thread_creation_window(self):
+        """Channels appeared up to ~70 s after start; 30 s catches most."""
+        body = self.TIMER.read_text()
+        self.assertIn("OnActiveSec=30s", body)
+
+    def test_the_timer_drives_the_park_service(self):
+        self.assertIn("Unit=sigmond-radiod-park@%i.service",
+                      self.TIMER.read_text())
+
+    def test_radiod_pulls_the_timer_not_only_the_oneshot(self):
+        body = self.DROPIN.read_text()
+        self.assertIn("Wants=sigmond-radiod-park@%i.timer", body,
+                      "without this the timer is never started for an instance")
+        self.assertIn("Wants=sigmond-radiod-park@%i.service", body,
+                      "the immediate park at start is still wanted")
+
+    def test_smd_installs_the_timer(self):
+        smd = (self.REPO / "bin" / "smd").read_text()
+        self.assertIn("('sigmond-radiod-park@.timer', "
+                      "'sigmond-radiod-park@.timer')", smd,
+                      "a unit absent from the install list never reaches a station")

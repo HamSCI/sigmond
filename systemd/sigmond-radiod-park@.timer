@@ -1,0 +1,38 @@
+# Re-park radiod %i's threads periodically.
+#
+# ⛔ WHY A TIMER AND NOT JUST THE START-TRIGGERED ONESHOT.
+# sigmond-radiod-park@%i.service is ordered After=radiod@%i.service, so it runs
+# within a fraction of a second of radiod starting -- and at that moment the
+# demodulator threads DO NOT EXIST YET.  radiod creates one per channel as the
+# config is applied, which on AI6VN was 51 to 69 seconds after start:
+#
+#     radiod start:            19:34:54.77
+#     park finished:           19:34:55        <- 0.2 s later
+#     linear 92657894 created: 19:35:45.71     <- 51 s later
+#     linear 54702558 created: 19:36:03.81     <- 69 s later
+#
+# Those threads inherited the process mask (the whole fence pair) and the
+# scheduler put several of them on the fft core.  The result was an fft core
+# carrying fft + a linear demod + agc_rx888 + radio stat, which is exactly what
+# the fence exists to prevent: rob saw the core at 57% while the fft thread
+# itself was at 52% and correctly inferred a second tenant (2026-09-29).
+#
+# A one-shot can never win this race, and it would not be enough even if it
+# could: radiod creates and destroys channel threads at RUNTIME, so any
+# `smd apply` or channel change re-introduces unparked threads.  Re-park on a
+# cadence instead.  The pinner is a handful of sched_setaffinity calls and
+# no-ops when nothing has moved, so this is cheap to run often.
+[Unit]
+Description=Re-park radiod %i's threads as channels come and go
+Documentation=file:/opt/git/sigmond/sigmond/scripts/sigmond-radiod-pin-threads
+
+[Timer]
+# First pass soon after radiod settles, then steadily: the creation window
+# above is ~70 s, so 30 s catches most of it and the repeat catches the rest.
+OnActiveSec=30s
+OnUnitActiveSec=120s
+AccuracySec=5s
+Unit=sigmond-radiod-park@%i.service
+
+[Install]
+WantedBy=timers.target

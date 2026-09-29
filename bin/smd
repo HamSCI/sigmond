@@ -10246,6 +10246,9 @@ _RADIOD_DROPINS = (
      'radiod@.service.d/45-sigmond-consumers.conf'),
     # Companion units, installed alongside the drop-ins that Want= them.
     ('sigmond-radiod-park@.service', 'sigmond-radiod-park@.service'),
+    # The timer re-parks as channels appear: the oneshot above runs 0.2 s after
+    # radiod starts, and the demod threads are created up to ~70 s later.
+    ('sigmond-radiod-park@.timer', 'sigmond-radiod-park@.timer'),
     ('sigmond-radiod-consumers@.service', 'sigmond-radiod-consumers@.service'),
 )
 
