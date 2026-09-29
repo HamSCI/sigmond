@@ -386,6 +386,7 @@ def bootstrap_locations() -> List[Tuple[str, str, bool]]:
         _log(f"bootstrap: uhubctl unavailable: {exc}")
         return []
     found: List[Tuple[str, str, bool]] = []
+    occupied: set = set()          # (hub, port) that hold a device
     hub: Optional[str] = None
     switchable = False
     for line in (r.stdout + "\n" + r.stderr).splitlines():
@@ -398,8 +399,33 @@ def bootstrap_locations() -> List[Tuple[str, str, bool]]:
             continue
         dev = re.search(r"\[([^\]]*)\]", m.group(2))
         if dev and dev.group(1).strip():           # a real device -- never touch
+            occupied.add((hub, m.group(1)))
             continue
         found.append((hub, m.group(1), False))
+
+    # ⛔ A PORT IS NOT EMPTY JUST BECAUSE *THIS* HALF OF IT IS.
+    # A USB3 hub presents each physical port twice, and a USB2-only device
+    # shows up on the SuperSpeed half as an empty port -- while sharing that
+    # port's VBUS.  Cutting the "empty" half therefore cuts the device.
+    #
+    # AI6VN, 2026-09-29: recovering the RX-888 cut 5-1 ports 1, 2 and 3 because
+    # they listed empty, and took the GPSDO, the TS-1 and the magnetometer down
+    # with them -- they live on physical ports 1-3 and enumerate on the USB2
+    # half (3-1).  They came back after the ~6 s cut, but knocking a GPSDO off
+    # its lock on every recovery is not acceptable collateral.
+    #
+    # The kernel already knows the pairing: /sys/.../<hub>-port<N>/peer.  Use
+    # it, and drop any candidate whose peer half is occupied.
+    paired: List[Tuple[str, str, bool]] = []
+    for hub_c, port_c, exact_c in found:
+        pr = peer_of(f"{hub_c}.{port_c}")
+        if pr and pr in occupied:
+            _log(f"not cycling hub {hub_c} port {port_c}: its peer "
+                 f"{pr[0]} port {pr[1]} has a device, and both halves share "
+                 f"VBUS — cutting it would drop that device too")
+            continue
+        paired.append((hub_c, port_c, exact_c))
+    found = paired
     # Address each hub the way uhubctl accepts it.  A USB3 hub is often
     # reachable ONLY with --exact ("No compatible devices detected at location
     # 4-1!" for the plain form on AI6VN's VIA dock), and a cycle whose commands

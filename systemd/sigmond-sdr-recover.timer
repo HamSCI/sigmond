@@ -5,9 +5,26 @@ Description=Check for a vanished RX-888 and recover it
 # Every minute.  The helper's own grace window (30 s absent) and cooldown
 # (15 min between cycles) decide whether anything happens; the timer only
 # provides the opportunity, so raising its frequency changes nothing.
-OnBootSec=3min
-OnUnitActiveSec=1min
-AccuracySec=10s
+# ⛔ THE CARD IS MOST OFTEN MISSING AT COLD BOOT, so the first check must not
+# be three minutes late.  AI6VN, 2026-09-29, uncontrolled power cycle:
+#
+#     20:07:07  VM booted
+#     20:08:20  radiod's first attempt — rx888_usb_init() failed, card absent
+#     20:10:07  this timer's FIRST RUN        <- OnBootSec=3min
+#     20:11:07  "device absent 60s — cutting VBUS"
+#     20:12:19  station restored
+#
+# 6 min 5 s from power-on, of which the recovery itself was 72 s.  Nothing was
+# watching for the 107 s between radiod failing and the first check, and the
+# 60 s tick then turned a 30 s grace window into a 60 s wait.  rob: "why did it
+# take so long to come up."
+#
+# 45 s still lands after the VM's services are up (radiod was failing by 73 s),
+# and the ABSENT_GRACE_S window — not this timer — is what protects a card that
+# is merely slow to enumerate, so checking sooner cannot cycle a healthy card.
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

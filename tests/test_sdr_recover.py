@@ -564,3 +564,116 @@ class MissingHubIsNotADarkPortTests(unittest.TestCase):
         self.assertNotIn(("4-1", "on"), calls,
                          "do not try to power on a hub that is not there")
 
+
+
+class RecoveryTimerScheduleTests(unittest.TestCase):
+    """⛔ The card is most often missing at COLD BOOT, so the first check must
+    not be three minutes late.
+
+    AI6VN, 2026-09-29, uncontrolled power cycle:
+
+        20:07:07  VM booted
+        20:08:20  radiod's first attempt — rx888_usb_init() failed
+        20:10:07  this timer's FIRST RUN        <- OnBootSec=3min
+        20:11:07  "device absent 60s — cutting VBUS"
+        20:12:19  station restored
+
+    6 min 5 s from power-on, of which the recovery itself was 72 s.  Nothing
+    watched for the 107 s between radiod failing and the first check, and the
+    60 s tick turned a 30 s grace window into a 60 s wait.  rob: "why did it
+    take so long to come up."
+
+    Checking sooner cannot cycle a healthy card: ABSENT_GRACE_S is what
+    protects a card that is merely slow to enumerate, not this schedule.
+    """
+
+    TIMER = (Path(__file__).resolve().parent.parent
+             / "systemd" / "sigmond-sdr-recover.timer")
+
+    def _val(self, key):
+        for line in self.TIMER.read_text().splitlines():
+            line = line.strip()
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1]
+        return None
+
+    def test_first_check_is_not_minutes_late(self):
+        v = self._val("OnBootSec")
+        self.assertEqual(v, "45s",
+                         "a 3min first check left radiod failing unwatched")
+
+    def test_tick_is_finer_than_the_grace_window(self):
+        """A 60s tick makes a 30s grace window behave like 60s."""
+        tick = self._val("OnUnitActiveSec")
+        self.assertEqual(tick, "30s")
+        self.assertLessEqual(int(tick.rstrip("s")), sdr.ABSENT_GRACE_S)
+
+    def test_the_grace_window_still_guards_a_slow_card(self):
+        """Tightening the schedule must not remove the real protection."""
+        self.assertGreaterEqual(sdr.ABSENT_GRACE_S, 30)
+
+
+class PeerHalfIsNotAnEmptyPortTests(unittest.TestCase):
+    """⛔ A port is not empty just because THIS half of it is.
+
+    A USB3 hub presents every physical port twice.  A USB2-only device shows up
+    on the SuperSpeed half as an empty port — while sharing that port's VBUS.
+    Cutting the "empty" half cuts the device.
+
+    AI6VN, 2026-09-29: recovering the RX-888 cut 5-1 ports 1, 2 and 3 because
+    uhubctl listed them empty, and took the GPSDO, the TS-1 and the
+    magnetometer with them — all three live on physical ports 1-3 and enumerate
+    on the USB2 half (3-1).  rob watched them drop.  They returned after the
+    ~6 s cut, but knocking a GPSDO off its lock on every recovery is not
+    acceptable collateral for recovering a different device.
+    """
+
+    UHUBCTL = (
+        "Current status for hub 5-1 [17ef:1039 VIA Labs USB3.0 Hub, USB 3.10, 4 ports, ppps]\n"
+        "  Port 1: 02a0 power 5gbps Rx.Detect\n"
+        "  Port 2: 02a0 power 5gbps Rx.Detect\n"
+        "  Port 3: 02a0 power 5gbps Rx.Detect\n"
+        "  Port 4: 0100 power\n"
+        "Current status for hub 3-1 [17ef:103a VIA Labs USB2.0 Hub, USB 2.10, 5 ports, ppps]\n"
+        "  Port 1: 0103 power enable connect [1dd2:2211 Leo Bodnar mini GPS Reference Clock]\n"
+        "  Port 2: 0103 power enable connect [239a:801e Adafruit Trinket M0]\n"
+        "  Port 3: 0103 power enable connect [1ffb:2503 Pololu Isolated USB-to-I2C]\n"
+        "  Port 4: 0000 off\n"
+    )
+    # physical ports 1-3 are paired; port 4 holds the RX-888 (USB3, so its
+    # USB2 half is genuinely empty)
+    PEERS = {("5-1", "1"): ("3-1", "1"), ("5-1", "2"): ("3-1", "2"),
+             ("5-1", "3"): ("3-1", "3"), ("5-1", "4"): ("3-1", "4"),
+             ("3-1", "4"): ("5-1", "4")}
+
+    def _bootstrap(self):
+        class R:
+            stdout = PeerHalfIsNotAnEmptyPortTests.UHUBCTL
+            stderr = ""
+            returncode = 0
+
+        def fake_peer(devpath, root=None):
+            hp = sdr.split_devpath(devpath)
+            return self.PEERS.get(hp) if hp else None
+
+        orig = (sdr._run, sdr.peer_of, sdr._uhubctl_sees, sdr._log)
+        sdr._run = lambda *a, **k: R()
+        sdr.peer_of = fake_peer
+        sdr._uhubctl_sees = lambda h, p, e: not e     # plain form works
+        sdr._log = lambda m: None
+        try:
+            return sdr.bootstrap_locations()
+        finally:
+            sdr._run, sdr.peer_of, sdr._uhubctl_sees, sdr._log = orig
+
+    def test_does_not_cut_the_gpsdo_s_superspeed_half(self):
+        got = {(h, p) for h, p, _ in self._bootstrap()}
+        for port in ("1", "2", "3"):
+            self.assertNotIn(("5-1", port), got,
+                             f"5-1 port {port} shares VBUS with a live device")
+
+    def test_still_finds_the_card_s_own_port(self):
+        """The whole point — the RX-888's port must stay in the set."""
+        got = {(h, p) for h, p, _ in self._bootstrap()}
+        self.assertTrue(("5-1", "4") in got or ("3-1", "4") in got,
+                        "the vanished card's port must still be cycled")
