@@ -439,10 +439,24 @@ def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> 
     time.sleep(off_seconds)
     for hub, port, exact in locations:
         r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "on"]
-                 + (["-e"] if exact else []), timeout=60)
+                 + (["-e"] if exact else []), timeout=20)
         if r.returncode != 0:
-            _log(f"uhubctl on failed rc={r.returncode}: {r.stderr.strip()}")
-            ok = False
+            # ⛔ A FAILED "on" LEAVES THE PORT DEAD.  That is strictly worse
+            # than never having cycled: the card cannot come back until a human
+            # reaches the hub.  On AI6VN the --exact form of "on" HUNG and was
+            # killed at 60 s (rc=124) while the plain form returned instantly,
+            # so always try the other addressing before giving up.
+            _log(f"uhubctl on failed rc={r.returncode}: {r.stderr.strip()} "
+                 f"— retrying the other addressing so the port is not left off")
+            r2 = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "on"]
+                      + ([] if exact else ["-e"]), timeout=20)
+            if r2.returncode != 0:
+                _log(f"POWER LEFT OFF on hub {hub} port {port} — both forms "
+                     f"failed (rc={r2.returncode}); this needs a human")
+                ok = False
+            else:
+                _log(f"power restored on hub {hub} port {port} via the "
+                     f"{'plain' if exact else 'exact'} form")
     return ok
 
 
@@ -709,7 +723,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     state["last_cycle_at"] = now
     save_state(state)
 
-    if not cycle_port(locations or [(hub, str(port), False)], args.off_seconds):
+    # ⛔ LEARNED LOCATIONS ARE BUS PATHS, AND BUS PATHS MOVE ACROSS A REBOOT.
+    # "5-1" is not a hub, it is wherever the kernel happened to enumerate a hub
+    # this boot.  AI6VN, 2026-09-29: the card was learned at hub 4-1 port 4
+    # while 4-1 WAS the USB3 hub; after a reboot the buses renumbered so that
+    # 4-1 became the USB2 hub and the card's real home became 5-1.  The card
+    # had already vanished by the time the system came up, so there was never a
+    # moment with the card present in which to re-learn -- and the helper then
+    # dutifully cut power on the USB2 hub's port 4, which was EMPTY, once per
+    # attempt, while the card sat unpowered-at on the SuperSpeed half.  rob
+    # replugged the cable by hand and it came straight back at 5 Gbps.
+    #
+    # So when the card is ABSENT, never trust the learned path alone.  Union it
+    # with every device-less port on every power-switching hub -- which is what
+    # bootstrap_locations() already finds, and which by construction includes
+    # the card's real port however the buses were numbered this boot.  A port
+    # with a working device on it is never in that set, so the GPSDO, the TS-1
+    # and the magnetometer are never touched.
+    targets = list(locations or [])
+    if not present:
+        extra = [l for l in bootstrap_locations() if l not in targets]
+        if extra:
+            _log(f"card absent — also cycling every device-less port, since a "
+                 f"learned bus path can point at different hardware after a "
+                 f"reboot: {extra}")
+            targets += extra
+    if not targets:
+        targets = [(hub, str(port), False)]
+    if not cycle_port(targets, args.off_seconds):
         return 1
     if not wait_for_device():
         if args.ensure_present:

@@ -397,3 +397,86 @@ class DetectRadiodUnitTests(unittest.TestCase):
     def test_no_instances_at_all(self):
         unit, _ = self._resolve({})
         self.assertIsNone(unit)
+
+
+class PowerOnMustNotLeavePortDeadTests(unittest.TestCase):
+    """⛔ A failed `on` is worse than never cycling.
+
+    The port stays unpowered and the card cannot return until a human reaches
+    the hub — the exact outcome this helper exists to avoid.  On AI6VN
+    (2026-09-29) the `--exact` form of `on` HUNG and was killed at 60 s
+    (rc=124) while the plain form returned instantly, so a single-form attempt
+    could have left the port dark.
+    """
+
+    def _cycle(self, results):
+        """results: {(port, action, exact): returncode} → (ok, calls, log)"""
+        calls, log = [], []
+
+        class R:
+            def __init__(self, rc): self.returncode = rc; self.stdout = ""; self.stderr = "boom"
+
+        def fake_run(cmd, *a, **k):
+            exact = "-e" in cmd
+            action = cmd[cmd.index("-a") + 1]
+            port = cmd[cmd.index("-p") + 1]
+            calls.append((port, action, exact))
+            return R(results.get((port, action, exact), 0))
+
+        orig_run, orig_sleep, orig_log = sdr._run, sdr.time.sleep, sdr._log
+        sdr._run = fake_run
+        sdr.time.sleep = lambda *_: None
+        sdr._log = lambda m: log.append(m)
+        try:
+            ok = sdr.cycle_port([("5-1", "4", True)], off_seconds=6)
+        finally:
+            sdr._run, sdr.time.sleep, sdr._log = orig_run, orig_sleep, orig_log
+        return ok, calls, log
+
+    def test_exact_on_that_hangs_is_retried_plain(self):
+        ok, calls, log = self._cycle({("4", "on", True): 124})
+        self.assertTrue(ok, "a working fallback must count as success")
+        self.assertIn(("4", "on", False), calls, "must retry the other form")
+        self.assertTrue(any("power restored" in m for m in log))
+
+    def test_both_forms_failing_is_reported_loudly(self):
+        ok, _, log = self._cycle({("4", "on", True): 124, ("4", "on", False): 1})
+        self.assertFalse(ok)
+        self.assertTrue(any("POWER LEFT OFF" in m for m in log),
+                        "a dark port must be stated, not buried in an rc")
+
+    def test_a_clean_cycle_does_not_retry(self):
+        ok, calls, _ = self._cycle({})
+        self.assertTrue(ok)
+        self.assertEqual([c for c in calls if c[1] == "on"], [("4", "on", True)])
+
+
+class StaleBusPathTests(unittest.TestCase):
+    """⛔ Learned locations are BUS PATHS, and bus paths move across a reboot.
+
+    AI6VN, 2026-09-29.  The card was learned at hub 4-1 port 4 while 4-1 WAS
+    the USB3 hub.  After a reboot the buses renumbered — 4-1 became the USB2
+    hub, and the card's real home became 5-1 — and because the card had already
+    vanished before the system came up, there was never a moment with it
+    present in which to re-learn.  The helper cut power on the USB2 hub's port
+    4, which was EMPTY, while the card sat on the SuperSpeed half untouched.
+    rob replugged by hand and it returned instantly at 5 Gbps.
+
+    So an absent card must cycle the learned path AND every device-less port.
+    """
+
+    SRC = (REPO / "bin" / "sigmond-sdr-recover").read_text()
+
+    def test_absent_card_unions_the_learned_path_with_bootstrap(self):
+        self.assertIn("extra = [l for l in bootstrap_locations() "
+                      "if l not in targets]", self.SRC)
+
+    def test_the_union_happens_only_when_the_card_is_absent(self):
+        """A present card is never cycled — that rule is not relaxed here."""
+        i = self.SRC.index("targets = list(locations or [])")
+        self.assertIn("if not present:", self.SRC[i:i + 200])
+
+    def test_bootstrap_still_refuses_ports_with_devices(self):
+        """The union is only safe because bootstrap skips populated ports."""
+        self.assertIn("if dev and dev.group(1).strip():           "
+                      "# a real device -- never touch", self.SRC)
