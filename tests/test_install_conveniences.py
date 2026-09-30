@@ -80,6 +80,49 @@ class Conveniences(unittest.TestCase):
         self.sigmond.mkdir()
         self.addCleanup(self.tmp.cleanup)
 
+    def test_top_p_column_is_system_wide_not_per_user(self):
+        """⛔ Per-user seeding has to GUESS which accounts a human will use.
+
+        It guessed wrong.  install.sh seeded $INVOKER (root, during firstboot)
+        and `sigmond`, while rob logs into the decoder VM as `hamsci` -- and
+        saw stock columns on the one box where `top -H` is the whole point,
+        because every CPU-affinity decision is checked with it.  rob,
+        2026-09-30: "make it a global so that any user who invokes top gets
+        that processor column, rather than trying to patch it into each of the
+        users' private toprcs."
+
+        procps-ng 4.x reads /etc/topdefaultrc as "defaults for users who have
+        not saved their own configuration file" (top(1) 6c).  A user who
+        presses `W` writes their own and takes over, so this cannot clobber a
+        tuned layout.
+        """
+        src = (REPO / 'install.sh').read_text()
+        self.assertIn('/etc/topdefaultrc', src,
+                      'the P column must be installed system-wide')
+        self.assertNotIn('.config/procps/toprc', src,
+                         'per-user seeding must be gone: it misses the '
+                         'accounts operators actually log in as')
+
+    def test_never_writes_the_top_restrictions_file(self):
+        """⚠ /etc/toprc is NOT the defaults file.
+
+        It is the SYSTEM RESTRICTIONS file (top(1) 6d): its presence FORBIDS
+        ordinary users from kill, renice and changing the delay interval.  The
+        two names are one character apart and the wrong one silently strips
+        capabilities from every operator on the station, which is a far worse
+        outcome than a missing column.
+        """
+        for line in (REPO / 'install.sh').read_text().splitlines():
+            bare = line.split('#', 1)[0]
+            # The repo's own source file is etc/toprc, so a bare substring
+            # match hits "$REPO_DIR/etc/toprc" -- the thing we READ.  Only a
+            # write to the absolute system path is the bug.
+            bare = bare.replace('"$REPO_DIR/etc/toprc"', '').replace(
+                '$REPO_DIR/etc/toprc', '')
+            self.assertNotIn('/etc/toprc', bare,
+                             'writing /etc/toprc restricts users; '
+                             'the defaults file is /etc/topdefaultrc')
+
     def test_an_unwritable_operator_home_does_not_kill_the_install(self):
         """The build-VM case: sigmond's home is the checkout, mode rwxrwsr-x,
         and the installer runs as someone else."""

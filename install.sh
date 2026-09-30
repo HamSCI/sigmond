@@ -516,22 +516,41 @@ for _conv_user in $_conv_users; do
         ok "tmux: mouse setting already present in $_tmux_conf"
     fi
 
-    # toprc: seed only when the user has none — top rewrites this file on 'W'
-    # and a hand-tuned layout must never be clobbered.  etc/toprc was written
-    # by procps-ng 4.x top itself on Debian 13 (fields screen → W), the only
-    # portable way to produce one — the fieldscur encoding is version-specific.
-    _toprc="$_conv_home/.config/procps/toprc"
-    if [[ ! -f "$_toprc" && -f "$REPO_DIR/etc/toprc" ]]; then
-        if install -D -m 0644 "$REPO_DIR/etc/toprc" "$_toprc" 2>/dev/null; then
-            [[ $EUID -eq 0 ]] && chown -R "$_conv_user": "$_conv_home/.config/procps" || true
-            ok "top: seeded $_toprc (P column right of %CPU)"
-        else
-            warn "top: could not seed $_toprc — the P column stays unset for $_conv_user"
-        fi
-    fi
-    unset _tmux_conf _toprc
+    unset _tmux_conf
 done
 unset _conv_user _conv_users _conv_home _conv_ent _conv_shell
+
+# ─── top's P (processor) column, for EVERY user ──────────────────────────────
+# ⛔ SYSTEM-WIDE, not per-user.  rob, 2026-09-30: "make it a global so that any
+# user who invokes top gets that processor column, rather than trying to patch
+# it into each of the users' private toprcs."
+#
+# He is right twice over.  Seeding per user also has to GUESS which accounts a
+# human will use, and this guessed wrong: it seeded $INVOKER (root, during
+# firstboot) and `sigmond`, while rob logs into the decoder VM as `hamsci` and
+# saw stock columns -- on the box where `top -H` is the whole point, because
+# every CPU-affinity decision is checked with it.
+#
+# procps-ng 4.x reads /etc/topdefaultrc as "defaults for users who have not
+# saved their own configuration file", in the same format as a personal one
+# (top(1) 6c).  A user who presses `W` writes their own and takes over, which
+# is the right precedence -- so this never clobbers a tuned layout either.
+#
+# ⚠ /etc/toprc IS A DIFFERENT FILE AND MUST NOT BE USED FOR THIS.  It is the
+# SYSTEM RESTRICTIONS file (top(1) 6d): its presence FORBIDS ordinary users
+# from kill, renice and changing the delay interval.  A field layout written
+# there would silently strip capabilities from every operator on the station.
+#
+# etc/toprc in this repo was written by procps-ng 4.x top itself (fields screen
+# -> W), the only portable way to produce one: the fieldscur encoding is
+# version-specific.
+if [[ -f "$REPO_DIR/etc/toprc" ]]; then
+    if install -D -m 0644 "$REPO_DIR/etc/toprc" /etc/topdefaultrc 2>/dev/null; then
+        ok "top: P column right of %CPU for every user (/etc/topdefaultrc)"
+    else
+        warn "top: could not write /etc/topdefaultrc — top keeps its stock columns"
+    fi
+fi
 
 # ─── avahi-browse (mDNS discovery) ───────────────────────────────────────────
 # sigmond's discovery/mdns.py and ka9q-python's discover_radiod_services
