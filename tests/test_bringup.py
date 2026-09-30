@@ -251,13 +251,63 @@ def test_stage4_radiod_bound_clients_are_staggered():
     assert all(s.settle_s == CLIENT_STAGGER_S for s in staggered)
 
 
-def test_stage4_independent_client_started_unstaggered_after_bound():
-    # mag-recorder present (not skipped): started on the independent track,
-    # not gated/staggered against radiod.
+def test_stage4_independent_clients_start_before_the_radiod_gate():
+    # ⛔ ORDER IS THE POINT.  A client that does not use radiod must not wait
+    # for it: CLIENT_STAGGER_S exists only to stop simultaneous channel
+    # provisioning starving radiod's control plane, and something that opens
+    # no channel cannot starve anything.  Queued behind the staggered set they
+    # arrive minutes late -- on a dasi2 install, four staggered clients plus a
+    # wait-for-streaming -- and those are exactly the pages an operator looks
+    # at first.  rob watched a healthy station show no station-web and no
+    # magnetometer for ~15 minutes after radiod was up (v3.63, 2026-09-30).
     s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
     indep = [s for s in s4 if '(independent)' in s.label]
     assert [s.argv[-1] for s in indep] == ['mag-recorder']
     assert all(s.settle_s == 0 for s in indep)
+
+    kinds = [s.kind for s in s4]
+    first_indep = next(i for i, s in enumerate(s4) if '(independent)' in s.label)
+    # before the wisdom wait, the radiod start, and the streaming gate
+    for gate in ('wait-wisdom', 'wait-streaming'):
+        assert kinds.index(gate) > first_indep, f'{gate} must come after the independents'
+    first_staggered = next(i for i, s in enumerate(s4) if s.settle_s)
+    assert first_indep < first_staggered
+
+
+def test_station_web_and_physics_are_independent_of_radiod():
+    # These were classified radiod-bound purely by omission, so they inherited
+    # the stagger and the streaming gate.  Neither opens a radiod channel:
+    # station-web serves reports off the filesystem and hamsci-physics
+    # post-processes files already on disk.
+    # ⚠ gpsdo-monitor and igmp-querier are deliberately NOT independent -- they
+    # look it and are not.  radiod's transport is multicast and its sample
+    # clock is disciplined against the GPSDO, so they belong to its stack.
+    from sigmond.bringup import _INDEPENDENT
+    # ⛔ gmag-webui is here because RUNNING the plan on a live station showed it
+    # still staggered -- it is not in the profile's `clients` tuple (it comes
+    # from the catalog), so reading the plan statically missed it.  It is the
+    # magnetometer dashboard: the page the operator is actually waiting on.
+    assert {'mag-recorder', 'station-web', 'hamsci-physics',
+            'gmag-webui'} <= _INDEPENDENT
+    assert 'gpsdo-monitor' not in _INDEPENDENT
+    assert 'igmp-querier' not in _INDEPENDENT
+    assert 'wspr-recorder' not in _INDEPENDENT
+    assert 'hf-timestd' not in _INDEPENDENT
+
+
+def test_radiod_bound_clients_still_stagger():
+    # The whole reason the stagger exists: simultaneous channel provisioning
+    # starves radiod's control plane and yields 0 channels.  Loosening the
+    # independents must not loosen this.
+    p = build_plan(_dasi2(), local_radiod=True)
+    s4 = _stage4(p)
+    bound = [s for s in s4 if '(staggered)' in s.label]
+    assert bound, 'radiod-bound clients must still be staggered'
+    assert all(s.settle_s == CLIENT_STAGGER_S for s in bound)
+    # and they must still sit behind the streaming gate
+    kinds = [s.kind for s in s4]
+    first_bound = next(i for i, s in enumerate(s4) if '(staggered)' in s.label)
+    assert kinds.index('wait-streaming') < first_bound
 
 
 def test_stage4_remote_has_no_streaming_gate_but_still_staggers():

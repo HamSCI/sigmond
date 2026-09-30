@@ -32,11 +32,40 @@ STAGE3A = 'Stage 3a — radiod-bound clients'
 STAGE3B = 'Stage 3b — independent clients'
 STAGE4 = 'Stage 4 — start + verify'
 
-# hf-timestd gets its own stage (timing authority, before consumers);
-# mag-recorder is radiod-independent (§16) and runs on the 3b track.  Both are
-# therefore skipped by the radiod-bound 3a loop.
+# hf-timestd gets its own stage (timing authority, before consumers); the
+# independent set runs on the 3b track.  Both are therefore skipped by the
+# radiod-bound 3a loop.
+#
+# ⛔ INDEPENDENT MEANS "DOES NOT USE RADIOD", AND THAT DECIDES WHEN IT STARTS.
+# rob, 2026-09-30: "the ones independent of radiod should start as soon as the
+# VM is up ... only things that use the radio services" wait for it.
+#
+#   mag-recorder    talks to an RM3100 over a USB I2C adapter
+#   station-web     serves reports and documentation off the filesystem
+#   hamsci-physics  post-processes files already on disk (timer-driven)
+#   gmag-webui      the magnetometer dashboard; reads mag-recorder's feed
+#
+# ⛔ gmag-webui was found still staggered by RUNNING the new plan on a live
+# station, not by reading it: it is not in the profile's `clients` tuple (it
+# arrives via the catalog), so a static read of the plan missed it.  It is the
+# magnetometer page -- the exact thing the operator is waiting on -- and it
+# touches radiod not at all.
+#
+# None of them opens a radiod channel, so none of them can starve radiod's
+# control plane -- which is the ONLY thing CLIENT_STAGGER_S protects.  They
+# were nevertheless queued behind the whole staggered set, because the start
+# phase was one flat ordered list.  On a dasi2 install that is four staggered
+# clients plus a wait-for-streaming ahead of them: rob watched a healthy
+# station show no station-web and no magnetometer for about fifteen minutes
+# after radiod was up, with nothing wrong (v3.63, AI6VN-PM, 2026-09-30).
+#
+# ⚠ gpsdo-monitor and igmp-querier are NOT here on purpose.  They look
+# independent and are not: radiod's transport is multicast (igmp-querier) and
+# its sample clock is disciplined against the GPSDO.  They belong to the
+# radiod stack and start with it.
 _TIMING_AUTHORITY = 'hf-timestd'
-_INDEPENDENT = frozenset({'mag-recorder'})
+_INDEPENDENT = frozenset({'mag-recorder', 'station-web', 'hamsci-physics',
+                          'gmag-webui'})
 
 # Clients that take a per-reporter instance (`<client>@<reporter-id>`).  When a
 # reporter id is supplied, bring-up creates + enables the instance instead of
@@ -342,6 +371,16 @@ def build_plan(profile, *, local_radiod: bool,
     independent = [c for c in profile.clients
                    if c not in skip and c in _INDEPENDENT]
 
+    # Independent clients first, and deliberately BEFORE the radiod wait: they
+    # need nothing from radiod, so making them wait for it buys nothing and
+    # costs the operator the whole stagger.  They are also what an operator
+    # looks at first -- the station page and the magnetometer -- so bringing
+    # them up early is the difference between a station that looks alive while
+    # it builds and one that looks broken.
+    for client in independent:
+        steps.append(Step(STAGE4, f'start {client} (independent)', 'start',
+                          argv=[smd, 'start', '--components', client]))
+
     if local_radiod:
         steps.append(Step(STAGE4, 'wait for FFT wisdom before starting radiod',
                           'wait-wisdom'))
@@ -364,10 +403,6 @@ def build_plan(profile, *, local_radiod: bool,
             steps.append(Step(STAGE4, f'start {client} (staggered)', 'start',
                               argv=[smd, 'start', '--components', client],
                               settle_s=CLIENT_STAGGER_S))
-    for client in independent:
-        steps.append(Step(STAGE4, f'start {client} (independent)', 'start',
-                          argv=[smd, 'start', '--components', client]))
-
     steps.append(Step(STAGE4, 'start any remaining enabled components', 'start',
                       argv=[smd, 'start']))
 
