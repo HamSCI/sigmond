@@ -20770,6 +20770,15 @@ def _instance_radiod_sources(config_path) -> list:
         name = (b.get('status') or b.get('radiod_status') or '').strip()
         if name and 'placeholder' not in name.lower() and not name.startswith('<'):
             out.append(name)
+    # `[[source]]` tables are what `smd admin sources apply` writes and what
+    # wspr-recorder reads first.  Ignoring them refused two instances whose
+    # source had just been applied (AC0G-B2, 2026-09-30).
+    for b in data.get('source') or []:
+        if not isinstance(b, dict):
+            continue
+        name = (b.get('status') or '').strip()
+        if name and not name.startswith('<') and name not in out:
+            out.append(name)
     return out
 
 

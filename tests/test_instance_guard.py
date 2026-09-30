@@ -53,6 +53,19 @@ PLACEHOLDER = SKELETON + '''
 status = "<YOUR_RADIOD>-status.local"
 '''
 
+# What `smd admin sources apply` wrote on AC0G-B2 (2026-09-30): the legacy
+# [radiod] status still on its placeholder, the real source in [[source]].
+SOURCES_APPLIED = SKELETON + '''
+[radiod]
+status = "<configure-via-config-init>"
+port = 5004
+
+[[source]]
+key = "radiod:ac0g-b1-a-status.local"
+status = "ac0g-b1-a-status.local"
+label = "AC0G @EM38ww B1-a longwire"
+'''
+
 
 class TestDeclaredSources(unittest.TestCase):
     def _write(self, text):
@@ -78,6 +91,10 @@ class TestDeclaredSources(unittest.TestCase):
 
     def test_placeholder_is_not_a_source(self):
         self.assertEqual(radiod_sources(self._write(PLACEHOLDER)), [])
+
+    def test_source_tables_from_sources_apply(self):
+        self.assertEqual(radiod_sources(self._write(SOURCES_APPLIED)),
+                         ['ac0g-b1-a-status.local'])
 
     def test_unreadable_or_malformed_is_not_a_source(self):
         d = Path(tempfile.mkdtemp())
