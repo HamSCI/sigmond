@@ -42,7 +42,14 @@ STAGE4 = 'Stage 4 — start + verify'
 #
 #   mag-recorder    talks to an RM3100 over a USB I2C adapter
 #   station-web     serves reports and documentation off the filesystem
-#   hamsci-physics  post-processes files already on disk
+#   hamsci-physics  post-processes files already on disk (timer-driven)
+#   gmag-webui      the magnetometer dashboard; reads mag-recorder's feed
+#
+# ⛔ gmag-webui was found still staggered by RUNNING the new plan on a live
+# station, not by reading it: it is not in the profile's `clients` tuple (it
+# arrives via the catalog), so a static read of the plan missed it.  It is the
+# magnetometer page -- the exact thing the operator is waiting on -- and it
+# touches radiod not at all.
 #
 # None of them opens a radiod channel, so none of them can starve radiod's
 # control plane -- which is the ONLY thing CLIENT_STAGGER_S protects.  They
@@ -57,7 +64,8 @@ STAGE4 = 'Stage 4 — start + verify'
 # its sample clock is disciplined against the GPSDO.  They belong to the
 # radiod stack and start with it.
 _TIMING_AUTHORITY = 'hf-timestd'
-_INDEPENDENT = frozenset({'mag-recorder', 'station-web', 'hamsci-physics'})
+_INDEPENDENT = frozenset({'mag-recorder', 'station-web', 'hamsci-physics',
+                          'gmag-webui'})
 
 # Clients that take a per-reporter instance (`<client>@<reporter-id>`).  When a
 # reporter id is supplied, bring-up creates + enables the instance instead of

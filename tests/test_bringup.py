@@ -283,7 +283,12 @@ def test_station_web_and_physics_are_independent_of_radiod():
     # look it and are not.  radiod's transport is multicast and its sample
     # clock is disciplined against the GPSDO, so they belong to its stack.
     from sigmond.bringup import _INDEPENDENT
-    assert {'mag-recorder', 'station-web', 'hamsci-physics'} <= _INDEPENDENT
+    # ⛔ gmag-webui is here because RUNNING the plan on a live station showed it
+    # still staggered -- it is not in the profile's `clients` tuple (it comes
+    # from the catalog), so reading the plan statically missed it.  It is the
+    # magnetometer dashboard: the page the operator is actually waiting on.
+    assert {'mag-recorder', 'station-web', 'hamsci-physics',
+            'gmag-webui'} <= _INDEPENDENT
     assert 'gpsdo-monitor' not in _INDEPENDENT
     assert 'igmp-querier' not in _INDEPENDENT
     assert 'wspr-recorder' not in _INDEPENDENT
