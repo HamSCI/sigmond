@@ -2779,6 +2779,15 @@ def _install_radiod_watchdog(sigmond_dir: Path) -> bool:
     return ok
 
 
+def _psws_recorder_names() -> tuple:
+    """Every recorder `smd config <recorder> {status|validate|edit}` accepts."""
+    try:
+        from sigmond.psws import RECORDERS
+        return tuple(RECORDERS)
+    except Exception:
+        return ('hf-timestd', 'hamsci-physics', 'mag-recorder')
+
+
 def _host_has_local_radiod(radiod_needed: bool = False) -> bool:
     """True when this host runs, or is about to run, its own radiod.
 
@@ -24117,7 +24126,11 @@ def main() -> int:
 
     # Recorder-first PSWS config: `smd config <recorder> {status|validate|edit}`.
     # Guided, runnable-anytime upload-credential setup for the PSWS recorders.
-    for _rec in ('hf-timestd', 'mag-recorder'):
+    # The names come from psws.RECORDERS, the same table the login banner and
+    # `smd psws status` walk.  A hand-kept list here once omitted
+    # hamsci-physics, so the banner told operators to run a verb that did not
+    # exist (AC0G-B4, 2026-09-30).
+    for _rec in _psws_recorder_names():
         p_rec = config_sub.add_parser(
             _rec, help=f'PSWS upload config for {_rec} '
                        f'(status | validate | edit)')
@@ -24538,7 +24551,7 @@ def main() -> int:
             p_config.print_help()
             return 0
         # Recorder-first PSWS config: smd config <recorder> {status|validate|edit}
-        if sub_cmd in ('hf-timestd', 'mag-recorder'):
+        if sub_cmd in _psws_recorder_names():
             from sigmond import psws
             verb = getattr(args, 'psws_verb', None) or 'status'
             if verb == 'validate':
