@@ -64,6 +64,7 @@ AFFINITY_UNITS = {
     'igmp-querier.service': 'other',
     'gpsdo-monitor.service':    'other',
     'ka9q-web.service':         'other',
+    'ka9q-web@.service':        'other',
     # hf-timestd / grape group
     'timestd-core-recorder.service':     'other',
     'timestd-fusion.service':            'other',
