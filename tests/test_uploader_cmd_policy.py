@@ -13,7 +13,7 @@ from sigmond import uploader_manifest as um
 
 
 class SuppressedPipelinesLineTests(unittest.TestCase):
-    def _check(self, suppressed):
+    def _check(self, suppressed, mode="hold"):
         d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
         path = Path(d.name) / "pipelines.toml"
         path.write_text("[[pipeline]]\nname = \"heartbeat\"\n")
@@ -22,6 +22,7 @@ class SuppressedPipelinesLineTests(unittest.TestCase):
                                return_value="[[pipeline]]\nname = \"heartbeat\"\n"), \
              mock.patch.object(um, "suppressed_pipelines", return_value=suppressed), \
              mock.patch.object(um, "MANIFEST_PATH", path), \
+             mock.patch.object(um, "effective_mode", return_value=mode), \
              contextlib.redirect_stdout(out):
             rc = up_cmd.cmd_uploader_manifest(types.SimpleNamespace(write=False))
         return rc, out.getvalue()
@@ -29,8 +30,16 @@ class SuppressedPipelinesLineTests(unittest.TestCase):
     def test_names_suppressed_pipelines(self):
         rc, out = self._check(["wspr-wsprdaemon", "psk-pskreporter"])
         self.assertEqual(rc, 0)
-        self.assertIn("DISABLED BY POLICY", out)
+        self.assertIn("HELD BY POLICY", out)
         self.assertIn("wspr-wsprdaemon, psk-pskreporter", out)
+
+    def test_discard_is_not_reported_as_held(self):
+        # Seen on B4 2026-10-01: discard rendered every pipeline, yet this
+        # line said "DISABLED BY POLICY ... suppressed", the hold wording.
+        rc, out = self._check(["wspr-wsprdaemon"], mode="discard")
+        self.assertEqual(rc, 0)
+        self.assertIn("DISCARD MODE", out)
+        self.assertNotIn("HELD", out)
 
     def test_silent_when_policy_enabled(self):
         rc, out = self._check([])

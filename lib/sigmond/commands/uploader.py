@@ -106,9 +106,18 @@ def cmd_uploader_manifest(args) -> int:
     except Exception:  # pragma: no cover - defensive
         suppressed = []
     if suppressed:
-        print("uploader: OUTBOUND DATA PIPELINES DISABLED BY POLICY "
-              "([uploads] enabled = false) — suppressed: "
-              + ", ".join(suppressed))
+        try:
+            from ..coordination import load_coordination
+            mode = um.effective_mode(load_coordination())
+        except Exception:  # pragma: no cover - defensive
+            mode = "hold"
+        if mode == "discard":
+            print("uploader: DISCARD MODE — these pipelines ack without "
+                  "shipping: " + ", ".join(suppressed))
+        else:
+            print("uploader: OUTBOUND DATA PIPELINES HELD BY POLICY "
+                  "([uploads] enabled = false) — not rendered: "
+                  + ", ".join(suppressed))
 
     path = um.MANIFEST_PATH
     installed = path.read_text() if path.exists() else ""
