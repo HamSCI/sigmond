@@ -79,7 +79,6 @@ AFFINITY_UNITS = {
     'timestd-prune.service':             'other',
     'timestd-raw-cleanup.service':       'other',
     'grape-daily.service':               'other',
-    'grape-upload-retry.service':        'other',
     'timestd-web-api.service':           'other',
     # sibling uploader + decoders + our own watchdogs — found unconfined on
     # B4-100 2026-07-20 (running on radiod's HT pair 0-1, the exact L1/L2
