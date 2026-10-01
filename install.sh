@@ -558,9 +558,14 @@ unset _conv_user _conv_users _conv_home _conv_ent _conv_shell
 # ⚠ And report WHY.  The old message could not distinguish "not root" from
 # "read-only /etc" from "no such file", so nobody could act on it even if they
 # had read it.
+#
+# ⛔ The assignment lives INSIDE the `if`.  A bare `_toprc_err=$(failing cmd)`
+# carries the command's exit status, and under `set -e` that ends install.sh
+# right there, silently -- the 2026-09-02 build-VM death this section's guard
+# exists to prevent (tests/test_install_conveniences.py caught it in CI).
 if [[ -f "$REPO_DIR/etc/toprc" ]]; then
-    _toprc_err=$($SUDO install -D -m 0644 "$REPO_DIR/etc/toprc" /etc/topdefaultrc 2>&1)
-    if [[ -z "$_toprc_err" ]] && [[ -f /etc/topdefaultrc ]]; then
+    if _toprc_err=$($SUDO install -D -m 0644 "$REPO_DIR/etc/toprc" /etc/topdefaultrc 2>&1) \
+       && [[ -f /etc/topdefaultrc ]]; then
         ok "top: P column right of %CPU for every user (/etc/topdefaultrc)"
     else
         warn "top: could not write /etc/topdefaultrc — top keeps its stock columns: ${_toprc_err:-unknown error}"

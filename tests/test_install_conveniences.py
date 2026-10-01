@@ -39,6 +39,9 @@ ok()   { echo "OK: $*"; }
 warn() { echo "WARN: $*"; }
 say()  { echo "SAY: $*"; }
 INVOKER="alice"
+# install.sh resolves $SUDO near its top, outside the extracted block.  Empty
+# here: the harness must never escalate, so /etc/topdefaultrc fails and warns.
+SUDO=""
 REPO_DIR="__REPO__"
 # The sigmond account exists, the way it does on any host sigmond has installed.
 id() { case "$*" in *sigmond*) return 0 ;; *) command id "$@" ;; esac; }

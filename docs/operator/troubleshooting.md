@@ -870,7 +870,7 @@ At 80 %. Not at 94 %.
 machine's USB ports belong to the [decoder VM](glossary.md) — the radio needs
 them — so the physical keyboard stops working and the monitor shows a login
 panel with both addresses instead. That is correct and deliberate
-([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick-when-told--done);
+([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on);
 [day-2.md](day-2.md#power-loss-reboots-and-moving-the-box)).
 
 **What to do:** drive the station from another computer over the network. You

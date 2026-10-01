@@ -636,7 +636,7 @@ following installation, the USB ports belong to the decoder VM — the radio
 needs them. The physical keyboard stops working and the monitor shows a login
 panel with both addresses. That is correct and deliberate; you drive the
 station from another computer over the network from then on
-([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick-when-told--done)).
+([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on)).
 You can unplug the monitor and keyboard whenever you like.
 
 **Moving the station to a new location** — a different [grid square](glossary.md) — is a
