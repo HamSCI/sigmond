@@ -141,11 +141,11 @@ spot recorders are not [enabled](glossary.md) and uploads are off by policy
 (§6). Confirm which it is — `[VM]`:
 
 ```bash
-smd config uploads status
+smd upload status
 smd component list
 ```
 
-`⚠ uploads: DISABLED BY POLICY` in the first, or a LIFECYCLE of
+`⚠ uploads: HOLD` or `⚠ uploads: DISCARD` in the first, or a LIFECYCLE of
 `binary, on PATH` / `configured` rather than `enabled, running` for
 `wspr-recorder` and `psk-recorder` in the second, and you have your answer:
 nothing is wrong, this station is not meant to be uploading spots
@@ -439,21 +439,23 @@ reporting — start at
 So a station finished on Tuesday afternoon shows spots the same afternoon and
 its first PSWS products on Wednesday. Don't judge PSWS on day one.
 
-> **One switch that stops everything at once.** A station can have all its
-> outbound uploads turned off by policy — a testbed with no antenna, for
-> instance, should not pollute the databases. Check it with `smd config uploads
-> status` — `[VM]`:
+> **One switch that stops everything at once.** A station runs in one of three
+> upload modes, and it can stop shipping on purpose. Check which with
+> `smd upload status` — `[VM]`:
 >
 > ```bash
-> smd config uploads status
+> smd upload status
 > ```
 >
-> `✓ uploads: enabled` is normal. `⚠ uploads: DISABLED BY POLICY` with a reason
-> means someone turned them off deliberately (DASI002 reads
-> `no HF antenna; no PSWS station/instrument ids`). Ask your fleet admin before
-> changing it. The station's 5-minute [heartbeat](glossary.md) is never subject
-> to this switch, so a station with uploads off still shows up on the fleet
-> board.
+> | It says | Meaning |
+> |---|---|
+> | `✓ uploads: on (store and ship)` | normal |
+> | `⚠ uploads: HOLD — stored, not shipped` | deliberately paused; the station keeps everything, and `smd upload on` ships the backlog. DASI002 reads `no HF antenna; no PSWS station/instrument ids` |
+> | `⚠ uploads: DISCARD — data pipelines ack without shipping` | a machine on the bench, being provisioned or tested before it goes to its site. Nothing it records ever ships, even after `smd upload on` |
+>
+> Ask your fleet admin before changing it. The station's 5-minute
+> [heartbeat](glossary.md) obeys none of these modes, so a station that ships
+> nothing still shows up on the fleet board.
 >
 > On a station that has not enrolled in PSWS the command also prints one or more
 > lines like `uploader-manifest: skipping pipeline grape-psws (hf-timestd) —
@@ -506,7 +508,7 @@ yourself; the full diagnosis for each lives in
 |---|---|---|
 | **No spots on wsprnet** after 30 minutes | `smd watch uploads` — three answers to tell apart. If it **returns at once** with `✗ uploads-watch: no active uploader on this host`, this station's recorders are switched off and zero spots is expected ([above](#when-it-says-no-active-uploader)). If it sits there printing **nothing at all**, the problem is decoding, not registration. If it prints `wsprnet=posted:0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
 | **Nothing on pskreporter** | Search your callsign **as receiver**, not sender (§3) — that is the answer more often than not | [troubleshooting.md → *Nothing on pskreporter*](troubleshooting.md#nothing-on-pskreporter) |
-| **Uploads pending, and the number keeps growing** | `smd config uploads status` first (§6) — uploads may be off by policy | [troubleshooting.md → *Uploads pending and growing*](troubleshooting.md#uploads-pending-and-growing) |
+| **Uploads pending, and the number keeps growing** | `smd upload status` first (§6) — uploads may be off by policy | [troubleshooting.md → *Uploads pending and growing*](troubleshooting.md#uploads-pending-and-growing) |
 | **PSWS not verified** | `smd psws verify` and read which of the two failures it reports (§5c) | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |
 | **PSWS has GRAPE data but no magnetometer data** | Nothing to fix locally — tell your fleet admin, and quote §5d | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |
 

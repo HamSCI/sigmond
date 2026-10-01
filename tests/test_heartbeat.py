@@ -1300,3 +1300,15 @@ def test_resources_without_disk_field_is_unchanged():
     env = assemble(NOW, CONFIG, rich_readers(resources=lambda: {
         "llc": {"available": False}, "irqs": {}, "radiod": {}}))
     assert env["blocks"]["resources"]["verdict"] == "VALID"
+
+
+def test_uploads_discard_mode_reads_valid_and_says_discard():
+    """Discard ships nothing on purpose; the board must not read it as hold
+    (which keeps a backlog) or as a fault."""
+    env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
+        "readable": True, "pipelines": [], "cursors": [],
+        "policy": {"enabled": False, "mode": "discard", "reason": "bench"}}))
+    block = env["blocks"]["uploads"]
+    assert block["verdict"] == "VALID"
+    assert block["reason"] == (
+        "discard mode (bench) — data acked locally, nothing shipped")

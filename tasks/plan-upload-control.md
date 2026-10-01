@@ -1,6 +1,10 @@
 # plan: upload control — what a station keeps, and how it ships it
 
-**Status — 2026-10-01: PROPOSED, nothing built.**  Michael asked for it, then
+**Status — 2026-10-01: the three modes are BUILT** (`smd upload status | on |
+hold | off | discard`; hs-uploader `DiscardTransport`).  Nothing in §2 —
+outage handling, caps, windows, forecast — exists yet.
+
+Michael asked for it, then
 widened it the same day: *"make this intelligent and adaptable to network
 conditions."*  A station must handle an ordinary office link, a link that
 fails without warning, a link that never runs fast, and a link that opens
@@ -43,9 +47,28 @@ cursor to the source's current head first.  Nothing recorded on the bench,
 under the bench's antenna and perhaps the wrong identity, ever reaches PSWS.
 Leaving `hold` does the opposite: it ships the whole backlog, oldest first.
 
-`discard` still lets the recorders run and write.  It stops the cache from
-growing, by trimming each product to a short working window (an hour, say)
-so that diagnostics have something to read.
+`discard` still lets the recorders run and write, and hs-uploader still runs
+every data pipeline.  Each pipeline marked `discard = true` wraps its real
+transport in `DiscardTransport`, which acknowledges every batch without
+touching the network.  The ack lands on the real destination's cursor (the
+wrapper borrows the real transport's `name`, the watermark key), so the cursor
+keeps pace with the data, and a delete-on-ack source empties as it would after
+a real upload.  Leaving discard therefore needs no cursor surgery: nothing
+stands behind the cursor to ship.
+
+Two limits, as built:
+
+- **Keep-retention products stay on disk.**  GRAPE datasets
+  (`retention = "keep"`) get marked shipped and never upload, but they occupy
+  the disk until their own retention removes them.  The same holds for psk
+  spots, whose source does not delete on commit; the 24-hour trim removes
+  those.
+- **An older hs-uploader would ship.**  It ignores the unknown `discard` key.
+  So sigmond asks the service's own interpreter
+  (`/opt/hs-uploader/venv/bin/python`) whether it can import
+  `hs_uploader.transports.discard`.  `smd upload discard` refuses when it
+  cannot, and the manifest renderer falls back to HOLD for a policy file that
+  says discard on such a host.  Both directions fail toward keeping data.
 
 The heartbeat obeys none of these modes.  A station in `discard` or `hold`
 still reports itself, and the fleetboard shows the mode and its reason.
@@ -222,11 +245,10 @@ Three lessons for the design:
 
 ## 6. Steps
 
-1. **Modes in sigmond.**  `smd upload status | on | hold | off | discard`;
-   cursor advance on leaving `discard`; trimming to a working window under
-   `discard`; the `smd config uploads` alias.  Confirm the cursor reading in
-   §3 before building on it.  Tests: `discard` then `on` ships nothing from
-   the gap; `hold` then `on` ships all of it.
+1. **Modes — BUILT 2026-10-01.**  `smd upload status | on | hold | off |
+   discard`, `smd config uploads` kept as an alias, `DiscardTransport` in
+   hs-uploader.  Still to confirm on a live host: that `hold` then `on` ships
+   the backlog (§3's first finding, read from the code only).
 2. **Outage handling in hs-uploader** — the (a) case, which every station
    needs.  A per-destination probe; failure kinds (down vs permanent); no
    dead letters for down; backlog age and size in `hs-uploader status`.

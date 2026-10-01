@@ -261,4 +261,5 @@ class UploadsPolicyWiringTests(HeartbeatCliTestCase):
              contextlib.redirect_stderr(io.StringIO()):
             smd.cmd_admin_heartbeat_emit(args)
         self.assertEqual(dr.call_args.kwargs.get("uploads_policy"),
-                         {"enabled": False, "reason": "no HF antenna"})
+                         {"enabled": False, "mode": "hold",
+                          "reason": "no HF antenna"})

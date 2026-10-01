@@ -704,7 +704,8 @@ def cmd_config_render(args) -> int:
     uploads = None
     if profile.uploads_declared:
         uploads = Uploads(enabled=profile.uploads_enabled,
-                          reason=profile.uploads_reason)
+                          reason=profile.uploads_reason,
+                          mode=profile.uploads_mode)
 
     if getattr(args, 'dry_run', False):
         coord = load_coordination(COORDINATION_PATH)
@@ -950,6 +951,11 @@ def _patch_uploads_block(path: Path, up: Uploads) -> None:
     keys — preserving every other block verbatim. Mirrors
     _patch_heartbeat_block: the block is always written whole."""
     body = ['[uploads]', f'enabled = {"true" if up.enabled else "false"}']
+    # mode is written only for discard: hold and upload say all they need
+    # through `enabled`, and an older sigmond that ignores `mode` reads a
+    # discard file as enabled = false, i.e. hold — safe in both directions.
+    if up.mode == 'discard':
+        body.append('mode = "discard"')
     if up.reason:
         body.append(f'reason = {_toml_str(up.reason)}')
     body.append('')
@@ -995,13 +1001,42 @@ def _regenerate_uploader_manifest() -> int:
     return cmd_uploader_manifest(types.SimpleNamespace(write=True, enable=True))
 
 
-def cmd_config_uploads(args) -> int:
-    """``smd config uploads status | disable [--reason ..] | enable``.
+# Operator verbs → modes.  `off` means hold, because losing data should take
+# a deliberate word; `enable`/`disable` keep `smd config uploads` working.
+UPLOAD_VERBS = {
+    'on': 'upload', 'enable': 'upload',
+    'hold': 'hold', 'off': 'hold', 'disable': 'hold',
+    'discard': 'discard',
+}
 
-    The policy is written to BOTH site-profile.toml (the one-file identity
+
+def _confirm_discard(args) -> bool:
+    """Discard throws data away, so a person at a terminal confirms it.
+    Scripts pass --yes; a non-interactive caller without it is refused."""
+    import sys
+    if getattr(args, 'yes', False):
+        return True
+    if not sys.stdin.isatty():
+        err('discard needs --yes when not run at a terminal')
+        return False
+    try:
+        answer = input('Discard: data recorded from now on will never ship. '
+                       'Type "discard" to confirm: ')
+    except EOFError:
+        return False
+    return answer.strip().lower() == 'discard'
+
+
+def cmd_config_uploads(args) -> int:
+    """``smd upload status | on | hold | off | discard`` (and the older
+    ``smd config uploads status | enable | disable``).
+
+    The policy goes into BOTH site-profile.toml (the one-file identity
     source `smd config render` copies from — so a re-render keeps it) and
-    coordination.toml (what the renderer and the heartbeat read), then the
-    uploader manifest is regenerated (heartbeat-only when disabled).
+    coordination.toml (what the renderer and the heartbeat read).  Then the
+    uploader manifest regenerates: every pipeline for ``upload``, the
+    heartbeat alone for ``hold``, every pipeline marked ``discard = true``
+    for ``discard``.
     """
     from .. import uploader_manifest as um
 
@@ -1010,18 +1045,25 @@ def cmd_config_uploads(args) -> int:
 
     if verb == 'status':
         up = coord.uploads
-        if up.enabled:
-            ok('uploads: enabled (outbound data pipelines render normally)')
+        why = f' — {up.reason}' if up.reason else ''
+        if up.mode == 'upload':
+            ok('uploads: on (store and ship)')
+        elif up.mode == 'discard':
+            warn(f'uploads: DISCARD — data pipelines ack without shipping{why}')
+            if um.effective_mode(coord) != 'discard':
+                err('hs-uploader on this host predates discard, so the manifest '
+                    'renders HOLD instead; update hs-uploader')
         else:
-            warn('uploads: DISABLED BY POLICY'
-                 + (f' — {up.reason}' if up.reason else ''))
+            warn(f'uploads: HOLD — stored, not shipped{why}')
+        if up.mode != 'upload':
             try:
                 sup = um.suppressed_pipelines(coord=coord)
             except Exception as exc:  # pragma: no cover - defensive
                 sup = []
-                warn(f'could not enumerate suppressed pipelines: {exc}')
+                warn(f'could not enumerate affected pipelines: {exc}')
             if sup:
-                info('suppressed pipelines: ' + ', '.join(sup))
+                info(('discarding: ' if up.mode == 'discard' else 'holding: ')
+                     + ', '.join(sup))
             info('heartbeat is never subject to this policy')
         prof = load_site_profile(SITE_PROFILE_PATH) if SITE_PROFILE_PATH.exists() else None
         if prof is not None and not prof.uploads_declared:
@@ -1029,33 +1071,53 @@ def cmd_config_uploads(args) -> int:
                  '(coordination.toml is authoritative until it does)')
         return 0
 
-    if verb not in ('enable', 'disable'):
-        err(f'config uploads: unknown verb {verb!r} (status|enable|disable)')
+    mode = UPLOAD_VERBS.get(verb)
+    if mode is None:
+        err(f'upload: unknown verb {verb!r} (status|on|hold|off|discard)')
         return 2
 
     reason = (getattr(args, 'reason', None) or '').strip()
-    up = Uploads(enabled=(verb == 'enable'), reason='' if verb == 'enable' else reason)
-    if not up.enabled and not reason:
-        warn('no --reason given; the board will say "disabled by policy" '
+    if mode == 'discard':
+        if not reason:
+            err('discard needs --reason, e.g. --reason "bench provisioning '
+                'for DASI-021"; the fleetboard shows it')
+            return 2
+        if not um.hs_uploader_supports_discard():
+            err(f'{um.HS_UPLOADER_PYTHON} cannot import '
+                'hs_uploader.transports.discard: this hs-uploader would ignore '
+                'discard and SHIP.  Update hs-uploader first; policy unchanged.')
+            return 1
+        if not _confirm_discard(args):
+            info('discard not confirmed; policy unchanged')
+            return 1
+    elif mode == 'hold' and not reason:
+        warn('no --reason given; the board will say "held by policy" '
              'with no why — consider re-running with --reason')
 
+    up = Uploads(mode=mode, reason='' if mode == 'upload' else reason)
+
     try:
-        if SITE_PROFILE_PATH.exists():
-            _patch_uploads_block(SITE_PROFILE_PATH, up)
-            ok(f'{SITE_PROFILE_PATH}: [uploads] enabled = '
-               f'{"true" if up.enabled else "false"}')
-        _patch_uploads_block(COORDINATION_PATH, up)
-        ok(f'{COORDINATION_PATH}: [uploads] enabled = '
-           f'{"true" if up.enabled else "false"}')
+        for path in (SITE_PROFILE_PATH, COORDINATION_PATH):
+            if path is COORDINATION_PATH or path.exists():
+                _patch_uploads_block(path, up)
+                ok(f'{path}: [uploads] mode = {mode}')
     except PermissionError:
-        err(f'permission denied writing the policy; re-run smd as root')
+        err('permission denied writing the policy; re-run smd as root')
         return 1
 
     rc = _regenerate_uploader_manifest()
-    if up.enabled:
-        ok('uploads enabled — outbound data pipelines restored in the manifest')
+    if mode == 'upload':
+        ok('uploads on — outbound data pipelines restored in the manifest')
+        if coord.uploads.mode == 'discard':
+            info('nothing recorded during discard will ship: hs-uploader '
+                 'acknowledged it as it arrived')
+        elif coord.uploads.mode == 'hold':
+            info('the backlog stored during hold ships now, oldest first')
+    elif mode == 'discard':
+        ok('discard mode — data pipelines ack without shipping'
+           + (f' ({reason})' if reason else ''))
     else:
-        ok('uploads disabled by policy — manifest is heartbeat-only'
+        ok('uploads held — manifest is heartbeat-only'
            + (f' ({reason})' if reason else ''))
     return rc
 

@@ -349,18 +349,18 @@ contradicts the upload switch:
     ✓  ready: wsprnet.org, wsprdaemon.org, PSKReporter
 ```
 
-while `smd config uploads status` on the very same station says
-`⚠ uploads: DISABLED BY POLICY`.
+while `smd upload status` on the very same station says
+`⚠ uploads: HOLD` or `⚠ uploads: DISCARD`.
 
 **Both are true, and the policy line wins.** They answer different questions:
 
 | Line | The question it answers |
 |---|---|
 | `✓ ready: wsprnet.org, …` in `smd component list` | *"Does this path have the credentials and identity it would need?"* — `lib/sigmond/upload_creds.py`, whose `ready` field is documented as "are the required credentials/identity present?". wsprnet, wsprdaemon and PSKReporter need no registration at all ([registration.md §2–§4](registration.md#2-wsprnetorg--nothing-to-register)), so they are *always* "ready" on every station. |
-| `⚠ uploads: DISABLED BY POLICY` in `smd config uploads status` | *"Is this station allowed to upload right now?"* — the site-wide switch. |
+| `⚠ uploads: HOLD` or `⚠ uploads: DISCARD` in `smd upload status` | *"Is this station allowed to upload right now?"* — the site-wide switch. |
 
 So read the readiness block as **"nothing is missing that would stop these paths
-if they were switched on"**, and `smd config uploads status` as **whether they
+if they were switched on"**, and `smd upload status` as **whether they
 are switched on**. On a policy-disabled station the honest summary is: fully
 equipped, deliberately silent. The readiness block knows nothing about the
 policy switch, which is
@@ -394,10 +394,10 @@ station still being built, is deliberately kept out of the public databases.
 Check once, and you never have to wonder again — `[VM]`:
 
 ```bash
-smd config uploads status
+smd upload status
 ```
 
-If it answers `⚠ uploads: DISABLED BY POLICY` with a reason, **zero spots is the
+If it answers `⚠ uploads: HOLD` or `⚠ uploads: DISCARD` with a reason, **zero spots is the
 expected result and there is nothing to report**; do not turn it back on
 yourself. The full explanation is the closing blockquote of
 [registration.md §6 — Confirming everything flows](registration.md#6-confirming-everything-flows).

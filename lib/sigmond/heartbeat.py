@@ -443,6 +443,12 @@ def _map_uploads(raw) -> dict:
             f"{total} deliverables retrying ({named})", disabled), data)
     # A fully-idle pipeline is ABSENT from `pipelines`, so an empty list
     # on a readable store genuinely means nothing is stuck.
+    if disabled and policy.get("mode") == "discard":
+        why = str(policy.get("reason") or "").strip()
+        return _block("VALID",
+                      f"discard mode ({why}) — data acked locally, nothing shipped"
+                      if why else "discard mode — data acked locally, nothing shipped",
+                      data)
     if disabled:
         why = str(policy.get("reason") or "").strip()
         return _block("VALID",

@@ -188,8 +188,8 @@ It follows the uploader until you press Ctrl-C; it changes nothing. There are
 | It **returns immediately** with `✗ uploads-watch: no active uploader on this host (wspr-uploader.service, wspr-recorder@*, psk-recorder@*, wd-upload-hs@* all inactive).` | The spot recorders and uploaders are **not running on this station** — usually because they were deliberately switched off (no antenna, or a station still being built). This is DASI002's answer, and it is correct there. Nothing has failed and there is nothing to Ctrl-C. |
 
 That fourth answer is the one most likely to be mistaken for a crash. Confirm it
-with the next two commands: if `smd config uploads status` says
-`DISABLED BY POLICY`, or `smd component list` shows `wspr-recorder` and
+with the next two commands: if `smd upload status` says
+`HOLD` or `DISCARD`, or `smd component list` shows `wspr-recorder` and
 `psk-recorder` at LIFECYCLE `binary, on PATH` rather than `enabled, running`,
 then this station is not meant to be uploading spots
 ([registration.md → *when it says "no active uploader"*](registration.md#when-it-says-no-active-uploader);
@@ -211,12 +211,12 @@ value is in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id`.
 Then check the upload switch — `[VM]`:
 
 ```bash
-smd config uploads status
+smd upload status
 ```
 
 *Good:* `✓ uploads: enabled (outbound data pipelines render normally)` — b4's
 answer. *Bad, but deliberate:*
-`⚠ uploads: DISABLED BY POLICY — no HF antenna; no PSWS station/instrument ids`
+`⚠ uploads: HOLD — stored, not shipped — no HF antenna; no PSWS station/instrument ids`
 — DASI002's answer, and correct for that station.
 
 **What to do**
@@ -228,7 +228,7 @@ answer. *Bad, but deliberate:*
   [Spots stopped](#spots-stopped-were-fine-before). (Only if it **sat there**
   silently. An *immediate* `✗ … no active uploader on this host` is the fourth
   row of the table above, and does not belong on that path.)
-- `DISABLED BY POLICY` → **do not turn it back on yourself.** Somebody set that
+- `HOLD` or `DISCARD` → **do not turn it back on yourself.** Somebody set that
   for a reason ([registration.md §6](registration.md#6-confirming-everything-flows)).
   Ask your [fleet admin](glossary.md).
 
@@ -256,8 +256,8 @@ combination is not something you can fix from the station.
    shows **no `psk-recorder:` block**, the client is installed but switched off
    — the same case as the wsprnet section's fourth outcome. Confirm with
    `smd component list` (LIFECYCLE `binary, on PATH` or `configured` rather than
-   `enabled, running`) and `smd config uploads status`; if uploads are
-   `DISABLED BY POLICY` this station is not meant to be reporting FT8/FT4 and
+   `enabled, running`) and `smd upload status`; if uploads are
+   `HOLD` or `DISCARD` this station is not meant to be reporting FT8/FT4 and
    there is nothing to fix
    ([day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
 4. **`psk-recorder` is enabled but not running.**
@@ -425,12 +425,12 @@ all four destinations — that gap is row 8 of the
 `[VM]`, in this order:
 
 ```bash
-smd config uploads status
+smd upload status
 smd watch uploads
 ```
 
 *Good:* `✓ uploads: enabled`, then counters moving each cycle. *Bad:*
-`⚠ uploads: DISABLED BY POLICY — <reason>` (deliberate; ask before changing), or
+`⚠ uploads: HOLD — … <reason>` or `⚠ uploads: DISCARD — … <reason>` (deliberate; ask before changing), or
 counters flat while cycles keep printing.
 
 Then check the outside world:
@@ -1158,7 +1158,7 @@ which image you *started from*, not what you are running now —
 
 | If your symptom was | Also send |
 |---|---|
-| Anything about spots or uploads | `smd config uploads status`, and a minute of `smd watch uploads` |
+| Anything about spots or uploads | `smd upload status`, and a minute of `smd watch uploads` |
 | PSWS | `smd psws status` |
 | GPS or timing | `smd watch gpsdo --once` |
 | A failed unit | `systemctl --failed --no-pager`, then `systemctl status <unit> --no-pager` and `smd admin log <client> --files` (that last one follows the log until you press Ctrl-C; it changes nothing) |

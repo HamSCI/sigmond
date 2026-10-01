@@ -87,6 +87,8 @@ require = []                       # e.g. ["earthdata", "rac"]
 # enabled = false                  # false: uploader manifest is heartbeat-only — a station
 #                                  # with no antenna / no PSWS ids must not ship junk upstream
 # reason  = "no HF antenna"        # echoed on the fleetboard and in pipelines.toml
+# mode    = "discard"              # upload | hold | discard (bench provisioning: ship
+#                                  # nothing, keep no backlog); overrides enabled
 """
 
 
@@ -132,6 +134,7 @@ class SiteProfile:
     uploads_declared:       bool = False
     uploads_enabled:        bool = True
     uploads_reason:         str = ""
+    uploads_mode:           str = ""        # upload | hold | discard; "" = from enabled
     source_path: Optional[Path] = None
 
     @property
@@ -267,5 +270,6 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
         uploads_declared="uploads" in data,
         uploads_enabled=bool(up.get("enabled", True)),
         uploads_reason=_clean(up.get("reason")),
+        uploads_mode=_clean(up.get("mode")).lower(),
         source_path=path,
     )

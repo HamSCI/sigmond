@@ -109,9 +109,25 @@ class Uploads:
     it says "disabled by policy" — never INCONCLUSIVE.  The heartbeat is
     never subject to this switch.  Absent ``[uploads]`` parses to enabled:
     today's behaviour on every existing host.  ``reason`` is free text,
-    echoed verbatim on the fleetboard and in the manifest header."""
+    echoed verbatim on the fleetboard and in the manifest header.
+
+    ``mode`` names the three operator modes (tasks/plan-upload-control.md):
+    ``upload`` (store and ship), ``hold`` (store, ship nothing — today's
+    ``enabled = false``) and ``discard`` (ship nothing and keep no backlog,
+    for bench provisioning of a machine bound for another site).  ``enabled``
+    stays for every existing reader and means ``mode == "upload"``.  A file
+    that names no mode derives it from ``enabled``."""
     enabled: bool = True
     reason:  str  = ""
+    mode:    str  = ""
+
+    def __post_init__(self):
+        if self.mode not in UPLOAD_MODES:
+            self.mode = "upload" if self.enabled else "hold"
+        self.enabled = self.mode == "upload"
+
+
+UPLOAD_MODES = ("upload", "hold", "discard")
 
 
 @dataclass
@@ -316,6 +332,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
     uploads = Uploads(
         enabled=bool(up_raw.get('enabled', True)),
         reason=str(up_raw.get('reason', '') or ''),
+        mode=str(up_raw.get('mode', '') or '').strip().lower(),
     )
 
     return Coordination(

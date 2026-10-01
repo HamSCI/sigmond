@@ -425,3 +425,69 @@ class UploadsPolicyRenderTests(unittest.TestCase):
                              ["grape-psws"])
             self.assertEqual(um.suppressed_pipelines(
                 _Topo(["hf-timestd"]), self._coord(enabled=True)), [])
+
+
+class DiscardRenderTests(UploadsPolicyRenderTests):
+    """tasks/plan-upload-control.md: `[uploads] mode = "discard"` renders
+    every client pipeline with `discard = true`, never the heartbeat; and
+    falls back to HOLD when the hs-uploader the service runs predates
+    discard, since an older one would ignore the key and ship."""
+
+    def _discard(self, reason="bench provisioning"):
+        from sigmond.coordination import Uploads
+        c = self._coord(enabled=False, reason=reason)
+        c.uploads = Uploads(mode="discard", reason=reason)
+        return c
+
+    def _gen(self, coord, supports):
+        with mock.patch.object(um, "hs_uploader_supports_discard",
+                               return_value=supports):
+            return self._generate(coord)
+
+    def test_discard_marks_data_pipelines_and_spares_the_heartbeat(self):
+        text = self._gen(self._discard(), True)
+        pipes = {p["name"]: p for p in tomllib.loads(text)["pipeline"]}
+        self.assertEqual(sorted(pipes), ["grape-psws", "heartbeat"])
+        self.assertIs(pipes["grape-psws"].get("discard"), True)
+        self.assertNotIn("discard", pipes["heartbeat"])
+        self.assertIn("DISCARD MODE", text)
+        self.assertIn("bench provisioning", text)
+
+    def test_an_hs_uploader_without_discard_gets_hold_not_ship(self):
+        text = self._gen(self._discard(), False)
+        pipes = [p["name"] for p in tomllib.loads(text)["pipeline"]]
+        self.assertEqual(pipes, ["heartbeat"])
+        self.assertIn("predates discard", text)
+
+    def test_discarded_pipelines_are_reported_by_name(self):
+        coord = self._discard()
+        deploy = Path(tempfile.mkdtemp()) / "deploy.toml"
+        deploy.write_text(CollectTests.GRAPE)
+        with mock.patch.object(um, "find_deploy_toml", return_value=deploy), \
+             mock.patch.object(um, "list_instances", return_value=[]), \
+             mock.patch.object(um.psws, "is_psws_recorder", return_value=True), \
+             mock.patch.object(um.psws, "read_state",
+                               return_value=_State(station="S000418",
+                                                   instrument="367")), \
+             mock.patch.object(um, "host_key_file", return_value="/k"):
+            self.assertEqual(um.suppressed_pipelines(_Topo(["hf-timestd"]), coord),
+                             ["grape-psws"])
+
+    def test_hs_uploader_builds_the_rendered_discard_manifest(self):
+        """Cross-repo: the key sigmond writes is the key hs-uploader reads."""
+        src = Path(__file__).resolve().parent.parent.parent / "hs-uploader" / "src"
+        if not (src / "hs_uploader" / "transports" / "discard.py").is_file():
+            raise unittest.SkipTest(f"no hs-uploader with discard at {src}")
+        sys.path.insert(0, str(src))
+        from hs_uploader.pipeline_factory import build_pipelines
+        from hs_uploader.transports.discard import DiscardTransport
+        from hs_uploader.watermark.sqlite import SqliteWatermarkStore
+        built = {p.name: p for p in build_pipelines(
+            tomllib.loads(self._gen(self._discard(), True)),
+            watermark=SqliteWatermarkStore(":memory:"))}
+        self.assertIsInstance(built["grape-psws"].transport, DiscardTransport)
+        self.assertNotIsInstance(built["heartbeat"].transport, DiscardTransport)
+
+    def test_supports_discard_asks_the_service_interpreter(self):
+        missing = Path(tempfile.mkdtemp()) / "no-such-python"
+        self.assertFalse(um.hs_uploader_supports_discard(missing))

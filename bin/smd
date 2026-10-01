@@ -33,6 +33,7 @@ Operate (run things now, may need sudo):
     smd restart     [<component> [<instance>]]
     smd reload      [--via=auto|systemd|socket]  [<component>]
     smd timing            [--json]                               timing authority + accuracy
+    smd upload      status | on | hold | off | discard [--reason R]  what the station ships (sudo)
     smd tui                                                      launch interactive TUI
 
 Topology file (default: /etc/sigmond/topology.toml) controls which
@@ -672,6 +673,29 @@ def _autoenable_named_on_start(args, topology_path) -> bool:
             _ok(f'{name}: enabled (start)')
             changed = True
     return changed
+
+
+def _add_upload_verbs(p) -> None:
+    """The upload-mode verbs, shared by `smd upload` and the older
+    `smd config uploads` (tasks/plan-upload-control.md)."""
+    vs = p.add_subparsers(dest='uploads_command')
+    vs.add_parser('status', help='show the mode and the pipelines it affects')
+    for verb, text in (('on', 'store and ship (normal operation)'),
+                       ('enable', 'same as on'),
+                       ('hold', 'store everything, ship nothing; `on` ships the backlog'),
+                       ('off', 'same as hold — keeps the data'),
+                       ('disable', 'same as hold')):
+        v = vs.add_parser(verb, help=text)
+        if verb not in ('on', 'enable'):
+            v.add_argument('--reason', help='why (on the fleetboard and in the '
+                                            'manifest), e.g. "no HF antenna"')
+    d = vs.add_parser('discard',
+                      help='ship nothing and keep no backlog (bench provisioning, '
+                           'diagnostics); ending it ships nothing from before')
+    d.add_argument('--reason', required=True,
+                   help='why, e.g. "bench provisioning for DASI-021"')
+    d.add_argument('--yes', action='store_true',
+                   help='skip the typed confirmation (for scripts)')
 
 
 def _need_root(cmd_name: str) -> bool:
@@ -6543,6 +6567,7 @@ def cmd_admin_heartbeat_emit(args) -> int:
         # sigmond#53: the uploads block must say "disabled by policy",
         # not INCONCLUSIVE, on a station that has switched uploads off.
         uploads_policy={'enabled': coord.uploads.enabled,
+                        'mode': coord.uploads.mode,
                         'reason': coord.uploads.reason})
     envelope = assemble(datetime.now(timezone.utc), config, readers,
                         uptime_s=read_uptime())
@@ -24096,14 +24121,7 @@ def main() -> int:
     p = config_sub.add_parser('uploads',
                               help='site-level OUTBOUND-UPLOADS POLICY: status | disable '
                                    '[--reason ..] | enable (heartbeat is never subject to it)')
-    uploads_sub = p.add_subparsers(dest='uploads_command')
-    uploads_sub.add_parser('status', help='show the policy and what it suppresses')
-    pu = uploads_sub.add_parser('disable',
-                                help='stop rendering every client pipeline (heartbeat only); '
-                                     'regenerates the uploader manifest')
-    pu.add_argument('--reason', help='why (echoed on the fleetboard and in the manifest), '
-                                     'e.g. "no HF antenna; no PSWS ids"')
-    uploads_sub.add_parser('enable', help='restore outbound data pipelines')
+    _add_upload_verbs(p)
 
     p = config_sub.add_parser('render',
                               help='render coordination.toml/.env from the single '
@@ -24222,6 +24240,11 @@ def main() -> int:
     # collected at install time (appliance wizard → site-profile.toml); the
     # key handshake happens later from a real terminal: enroll prints the
     # station pubkey to paste into the portal, verify proves the login live.
+    p_upload = sub.add_parser('upload',
+        help='what this station ships: status | on (store + ship) | hold / off '
+             '(store, ship nothing) | discard (ship nothing, keep no backlog)')
+    _add_upload_verbs(p_upload)
+
     p_psws = sub.add_parser('psws',
         help='PSWS enrollment: status | enroll (print key + portal steps) | '
              'verify (live SFTP login test)')
@@ -24355,6 +24378,12 @@ def main() -> int:
             return cmd_secrets_bundle(args)
         p_secrets.print_help()
         return 0
+
+    if args.command == 'upload':
+        verb = getattr(args, 'uploads_command', None) or 'status'
+        if verb != 'status' and _need_root(f'upload {verb}'):
+            return 1
+        return cmd_config_uploads(args)
 
     if args.command == 'psws':
         from sigmond import psws
@@ -24670,7 +24699,7 @@ def main() -> int:
             # status is read-only; enable/disable write site-profile.toml +
             # coordination.toml and regenerate the uploader manifest (root).
             verb = getattr(args, 'uploads_command', None) or 'status'
-            if verb in ('enable', 'disable') and _need_root('config uploads'):
+            if verb != 'status' and _need_root('config uploads'):
                 return 1
             return cmd_config_uploads(args)
         if sub_cmd == 'upload':

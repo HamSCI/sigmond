@@ -427,7 +427,7 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertTrue(prof.uploads_declared)
         self.assertFalse(prof.uploads_enabled)
         self.regen_mock.assert_called_once()
-        self.assertIn("disabled", out)
+        self.assertIn("held", out)
 
     def test_enable_flips_back_and_regenerates(self):
         from sigmond.coordination import load_coordination
@@ -437,7 +437,7 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(load_coordination(self.coord).uploads.enabled)
         self.regen_mock.assert_called_once()
-        self.assertIn("enabled", out)
+        self.assertIn("uploads on", out)
 
     def test_status_reports_policy_and_suppressed_pipelines(self):
         self._run(uploads_command="disable", reason="no HF antenna")
@@ -445,7 +445,7 @@ class ConfigUploadsVerbTests(unittest.TestCase):
                         return_value=["wspr-wsprdaemon", "psk-pskreporter"]):
             rc, out = self._run(uploads_command="status")
         self.assertEqual(rc, 0)
-        self.assertIn("disabled", out.lower())
+        self.assertIn("hold", out.lower())
         self.assertIn("no HF antenna", out)
         self.assertIn("wspr-wsprdaemon", out)
 
@@ -454,7 +454,7 @@ class ConfigUploadsVerbTests(unittest.TestCase):
                         return_value=[]):
             rc, out = self._run(uploads_command="status")
         self.assertEqual(rc, 0)
-        self.assertIn("enabled", out)
+        self.assertIn("uploads: on", out)
         self.regen_mock.assert_not_called()
 
     def test_profile_absent_still_patches_coordination(self):
@@ -464,3 +464,61 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(load_coordination(self.coord).uploads.enabled)
         self.assertFalse(self.profile.exists())
+
+    # -- discard (tasks/plan-upload-control.md) -------------------------------
+
+    def _supports(self, yes):
+        p = mock.patch("sigmond.uploader_manifest.hs_uploader_supports_discard",
+                       return_value=yes)
+        p.start(); self.addCleanup(p.stop)
+
+    def test_discard_writes_mode_to_both_files(self):
+        from sigmond.coordination import load_coordination
+        from sigmond.site_profile import load_site_profile
+        self._supports(True)
+        rc, out = self._run(uploads_command="discard", reason="bench", yes=True)
+        self.assertEqual(rc, 0, out)
+        up = load_coordination(self.coord).uploads
+        self.assertEqual((up.mode, up.enabled, up.reason), ("discard", False, "bench"))
+        self.assertEqual(load_site_profile(self.profile).uploads_mode, "discard")
+        self.regen_mock.assert_called_once()
+
+    def test_discard_refuses_an_hs_uploader_that_would_ship(self):
+        # An hs-uploader without DiscardTransport ignores `discard = true`
+        # and ships the pipeline; the policy must not change.
+        from sigmond.coordination import load_coordination
+        self._supports(False)
+        rc, out = self._run(uploads_command="discard", reason="bench", yes=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(load_coordination(self.coord).uploads.mode, "upload")
+        self.regen_mock.assert_not_called()
+
+    def test_discard_needs_a_reason(self):
+        self._supports(True)
+        rc, _ = self._run(uploads_command="discard", reason="", yes=True)
+        self.assertEqual(rc, 2)
+        self.regen_mock.assert_not_called()
+
+    def test_discard_unconfirmed_off_a_terminal_changes_nothing(self):
+        from sigmond.coordination import load_coordination
+        self._supports(True)
+        with mock.patch("sys.stdin.isatty", return_value=False):
+            rc, _ = self._run(uploads_command="discard", reason="bench", yes=False)
+        self.assertEqual(rc, 1)
+        self.assertEqual(load_coordination(self.coord).uploads.mode, "upload")
+
+    def test_off_means_hold_and_keeps_the_data(self):
+        from sigmond.coordination import load_coordination
+        rc, _ = self._run(uploads_command="off", reason="pause")
+        self.assertEqual(rc, 0)
+        self.assertEqual(load_coordination(self.coord).uploads.mode, "hold")
+
+    def test_on_after_discard_restores_upload_and_drops_mode(self):
+        from sigmond.coordination import load_coordination
+        self._supports(True)
+        self._run(uploads_command="discard", reason="bench", yes=True)
+        rc, out = self._run(uploads_command="on")
+        self.assertEqual(rc, 0)
+        self.assertEqual(load_coordination(self.coord).uploads.mode, "upload")
+        self.assertNotIn("mode", self.coord.read_text())
+        self.assertIn("nothing recorded during discard will ship", out)

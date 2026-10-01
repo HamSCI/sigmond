@@ -115,7 +115,7 @@ is something you act on; it is here so you can read your own output.
 | Term | What it means |
 |---|---|
 | **`CONFIG` / `ENV` / `SOURCES`** (`smd admin instance list`) | Three ✓/✗ checks on one recorder instance: does it have a config file, has its environment file been rendered, and are its radio sources resolved. Three ✓ means fully wired. Anything else goes to your fleet admin. |
-| **`uploader-manifest`, pipeline, unresolved identity** (`smd config uploads status`) | See [registration.md §6](registration.md#6-confirming-everything-flows) — a *pipeline* is one product-to-destination route, and *unresolved identity* names the ids it has not been given. |
+| **`uploader-manifest`, pipeline, unresolved identity** (`smd upload status`) | See [registration.md §6](registration.md#6-confirming-everything-flows) — a *pipeline* is one product-to-destination route, and *unresolved identity* names the ids it has not been given. |
 | **`PLL`, `A-level` / `A0`, `no_fix`, `ANT`, `OUT1/OUT2 MHz`** (`smd watch gpsdo`) | The GPSDO's own report. **PLL** is its phase-locked loop — `yes` means the oscillator is locked to its reference. `A0`/`A1` is a coarse health grade with the reason spelled out beneath. `no_fix` means zero satellites. `ANT` is whether the antenna reads as connected. OUT1/OUT2 are the frequencies on its two outputs. |
 | **`FX3`** | The USB controller chip inside the *RX888*. It is the part that latches up and needs a full power-off rather than a reboot. |
 

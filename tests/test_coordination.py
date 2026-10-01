@@ -538,6 +538,26 @@ class UploadsPolicyTests(unittest.TestCase):
         self.assertFalse(coord.uploads.enabled)
         self.assertEqual(coord.uploads.reason, "no HF antenna; no PSWS ids")
 
+    def test_parse_discard_mode_overrides_enabled(self):
+        import tomllib
+        coord = parse_coordination(tomllib.loads(
+            '[uploads]\nenabled = true\nmode = "discard"\nreason = "bench"\n'))
+        self.assertEqual(coord.uploads.mode, "discard")
+        self.assertFalse(coord.uploads.enabled)
+
+    def test_parse_mode_derives_from_enabled_when_absent(self):
+        import tomllib
+        held = parse_coordination(tomllib.loads('[uploads]\nenabled = false\n'))
+        self.assertEqual(held.uploads.mode, "hold")
+        on = parse_coordination(tomllib.loads('[host]\ncall = "AC0G"\n'))
+        self.assertEqual(on.uploads.mode, "upload")
+
+    def test_an_unknown_mode_falls_back_to_enabled_not_to_shipping(self):
+        import tomllib
+        c = parse_coordination(tomllib.loads(
+            '[uploads]\nenabled = false\nmode = "dicsard"\n'))
+        self.assertEqual(c.uploads.mode, "hold")
+
     def test_parse_absent_block_is_enabled(self):
         import tomllib
         coord = parse_coordination(tomllib.loads('[host]\ncall = "AC0G"\n'))

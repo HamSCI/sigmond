@@ -54,6 +54,8 @@ logger = logging.getLogger(__name__)
 MANIFEST_PATH = Path("/etc/hs-uploader/pipelines.toml")
 KEYS_DIR = Path("/etc/hs-uploader/keys")
 SINK_PATH = "/var/lib/sigmond/sink.db"
+# The interpreter hs-uploader.service runs (its unit's ExecStart venv).
+HS_UPLOADER_PYTHON = Path("/opt/hs-uploader/venv/bin/python")
 PUMP_INTERVAL_SEC = 30
 
 # Reporter-keyed clients whose per-instance reporter id is the host's upstream
@@ -365,56 +367,115 @@ def render_manifest(pipelines: list, identity: dict,
     return "\n".join(lines) + "\n"
 
 
-def policy_banner(coord: Coordination) -> list:
+def hs_uploader_supports_discard(python: Path = HS_UPLOADER_PYTHON) -> bool:
+    """Whether the hs-uploader that the service runs understands a
+    pipeline's ``discard = true``.
+
+    It must, or discard turns dangerous: an older hs-uploader ignores the
+    unknown key and SHIPS the pipeline.  So sigmond asks the service's own
+    interpreter, not this checkout, and treats any doubt as "no"."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            [str(python), "-c", "import hs_uploader.transports.discard"],
+            capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def effective_mode(coord: Coordination, *, supports_discard=None) -> str:
+    """The mode the manifest actually renders: the policy's, except that
+    ``discard`` falls back to ``hold`` when hs-uploader cannot honour it.
+    Hold ships nothing too, so the fallback can only keep data, never send
+    it."""
+    mode = coord.uploads.mode
+    if mode != "discard":
+        return mode
+    ok = (hs_uploader_supports_discard() if supports_discard is None
+          else supports_discard)
+    return "discard" if ok else "hold"
+
+
+def policy_banner(coord: Coordination, mode: Optional[str] = None) -> list:
     """Header lines announcing the uploads policy (sigmond#53), or ``[]``
     when outbound uploads are enabled.  Rendered into the manifest so the
-    file itself explains why it is heartbeat-only — the next person to
-    open it must not mistake policy for a rendering bug."""
+    file itself explains why it is heartbeat-only or discarding — the next
+    person to open it must not mistake policy for a rendering bug."""
     up = coord.uploads
-    if up.enabled:
+    mode = mode or up.mode
+    if mode == "upload":
         return []
     why = f" ({up.reason})" if up.reason else ""
-    return [
+    if mode == "discard":
+        return [
+            "#",
+            "# *** DISCARD MODE: DATA PIPELINES ACK WITHOUT SHIPPING ***",
+            f"# coordination.toml [uploads] mode = \"discard\"{why}",
+            "# Nothing leaves this host except the heartbeat, and no backlog",
+            "# accrues: ending discard ships nothing recorded before it.",
+            "#   smd upload on      (then the manifest regenerates)",
+        ]
+    lines = [
         "#",
         "# *** OUTBOUND DATA PIPELINES DISABLED BY POLICY ***",
         f"# coordination.toml [uploads] enabled = false{why}",
         "# Only the station heartbeat is shipped. Re-enable with:",
-        "#   smd config uploads enable   (then the manifest regenerates)",
+        "#   smd upload on      (then the manifest regenerates)",
     ]
+    if up.mode == "discard":
+        lines[2:2] = ["# [uploads] mode = \"discard\", but the hs-uploader this host",
+                      "# runs predates discard, so sigmond renders HOLD instead."]
+    return lines
 
 
 def suppressed_pipelines(topology: Optional[Topology] = None,
                          coord: Optional[Coordination] = None) -> list:
-    """Names of the client pipelines the uploads policy is suppressing —
-    ``[]`` when uploads are enabled.  Lets the command layer print what a
-    disabled policy is actually holding back, by name."""
+    """Names of the client pipelines the uploads policy is holding back or
+    discarding — ``[]`` when uploads are enabled.  Lets the command layer
+    print, by name, what the policy actually affects."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
-    if coord.uploads.enabled:
+    if coord.uploads.mode == "upload":
         return []
     return [p["name"] for p in collect_pipelines(topology, coord)]
 
 
 def generate(topology: Optional[Topology] = None,
-             coord: Optional[Coordination] = None) -> str:
+             coord: Optional[Coordination] = None,
+             *, supports_discard=None) -> str:
     """Full pipeline: collect declarations + identity, render the manifest.
 
-    ``[uploads] enabled = false`` (sigmond#53) skips every client pipeline
-    and renders the heartbeat alone, with a loud banner; the heartbeat is
-    never subject to the policy."""
+    ``upload`` renders every client pipeline.  ``hold`` (``enabled =
+    false``, sigmond#53) renders the heartbeat alone, with a loud banner.
+    ``discard`` renders every client pipeline with ``discard = true``:
+    hs-uploader acks each batch against the real destination's cursor and
+    ships nothing.  The heartbeat never obeys the policy."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
     call = reporter_call(coord)
-    if coord.uploads.enabled:
+    reason = f": {coord.uploads.reason}" if coord.uploads.reason else ""
+    mode = effective_mode(coord, supports_discard=supports_discard)
+    if mode == "upload":
         pipelines = collect_pipelines(topology, coord)
+    elif mode == "discard":
+        pipelines = [dict(p, discard=True)
+                     for p in collect_pipelines(topology, coord)]
+        logger.warning("uploader-manifest: DISCARD MODE%s — data pipelines "
+                       "ack without shipping", reason)
     else:
         pipelines = []
-        logger.warning(
-            "uploader-manifest: OUTBOUND DATA PIPELINES DISABLED BY POLICY "
-            "([uploads] enabled = false%s) — rendering heartbeat only",
-            f": {coord.uploads.reason}" if coord.uploads.reason else "")
+        if coord.uploads.mode == "discard":
+            logger.error(
+                "uploader-manifest: [uploads] mode = discard, but %s cannot "
+                "import hs_uploader.transports.discard — rendering HOLD "
+                "(heartbeat only) instead; update hs-uploader", HS_UPLOADER_PYTHON)
+        else:
+            logger.warning(
+                "uploader-manifest: OUTBOUND DATA PIPELINES DISABLED BY POLICY "
+                "([uploads] enabled = false%s) — rendering heartbeat only", reason)
     hb_pipeline = heartbeat_pipeline(coord)
     if hb_pipeline is not None:
         pipelines.append(hb_pipeline)
     identity = build_identity(coord, call)
-    return render_manifest(pipelines, identity, banner=policy_banner(coord))
+    return render_manifest(pipelines, identity, banner=policy_banner(coord, mode))

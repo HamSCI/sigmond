@@ -148,7 +148,7 @@ No permission needed, any time, as often as you like. All `[VM]` unless noted.
   nothing ([day-2.md](day-2.md#updates--who-decides-and-what-you-run)).
 - **`smd watch <thing>`** — `gpsdo`, `uploads`, `mag` and friends: live views,
   read-only.
-- **`smd psws status`**, **`smd config uploads status`** — status verbs, all read-only.
+- **`smd psws status`**, **`smd upload status`** — status verbs, all read-only.
 - **`smd component list`** — every installed component and whether it is
   [enabled](glossary.md) ([day-2.md](day-2.md#installed-enabled-shown)). By
   default it runs `git fetch` for each component first, so it needs internet and
