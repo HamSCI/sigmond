@@ -309,16 +309,11 @@ banner never ask.
 > `smd psws enroll` is what creates the key. Tracked as
 > [docs-gap ledger row 30](../contributor/docs-gap-ledger.md).
 
-> **If you find hf-timestd's `PSWS_SETUP_GUIDE.md`, or a `↳ fix:` line naming
-> `sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh`, they will
-> tell you to do something else** — generate a per-recorder RSA key, then push it
-> with `ssh-copy-id` and a TOKEN from the portal. That script *is* that older
-> procedure, and `smd component list`'s upload-readiness block still prints it as
-> the fix. ⛔ **Do not run it.** That is the **older** per-recorder
-> procedure. On an appliance station it is superseded: one station key
-> (`/etc/hs-uploader/keys/id_ed25519_host`) serves every PSWS product, and
-> `smd psws enroll` / `smd psws verify` are the whole flow. Follow this page.
-> (The two documents contradicting each other is docs-gap row 10.)
+> **Older guides describe something else** — a per-recorder RSA key pushed with
+> `ssh-copy-id` and a TOKEN from the portal, via a `setup-psws-keys.sh` script.
+> That procedure is retired (2026-10-01).  One key per uploading machine,
+> `/etc/hs-uploader/keys/id_ed25519_host`, serves every PSWS product, and
+> `smd psws enroll` / `smd psws verify` are the whole flow.  Follow this page.
 
 Nothing is lost while you wait to do this. The recorders keep recording and the
 day's files queue up locally; they upload once the key is accepted.

@@ -59,7 +59,7 @@ The "kind" column in the tables below uses **S** (shareable), **I** (identity),
 | Action | For | Required? | What it involves |
 |---|---|---|---|
 | Create **PSWS account** | GRAPE / mag / IQ uploads | Opt | sign up at <https://pswsnetwork.eng.ua.edu/>; receive station id |
-| **Register PSWS SFTP public key** in the web portal | uploads | Opt | server is StrictModes, SFTP-only. `hf-timestd/scripts/setup-psws-keys.sh` generates the keypair and prints the public key — the operator **must paste it into the PSWS portal** (authorized_keys cannot be uploaded over SFTP) |
+| **Register PSWS SFTP public key** in the web portal | uploads | Opt | server is StrictModes, SFTP-only. `smd psws enroll` generates this machine's keypair and prints the public key — the operator **must paste it into the PSWS portal** (authorized_keys cannot be uploaded over SFTP) |
 | Create **NASA Earthdata** account | hf-timestd IONEX / DCB | Opt | register at <https://urs.earthdata.nasa.gov> |
 | Request + download **PHaRLAP 4.7.4** from DST | hf-timestd raytracing | Opt | license request to DST (Australia); multi-day latency; **not redistributable** (see EXTERNAL_PREREQUISITES.md §3) |
 | Obtain **RAC tunnel user/token** | rac (frpc) | Opt | from `wd-admin` (Rob's gateway): `RAC_USER`, `RAC_TOKEN` |
@@ -301,11 +301,12 @@ per-site bundle. (`age` is required only for the bundle channel: `apt install ag
 The crucial realisation: the SSH-key secrets are **generated on the host**, so
 they are never delivered and are already image-clone-safe:
 
-- **PSWS SSH key** — `setup-psws-keys.sh` runs `ssh-keygen` on the host; the
-  private key never leaves. Per-host. Only the *public* key is registered via
-  the PSWS portal (the un-automatable human step, §3).
-- **hs-uploader SSH key** — auto-generated (`ed25519`) on first use at
-  `/etc/hs-uploader/keys/`. Per-host.
+- **PSWS / hs-uploader SSH key** — ONE key per uploading machine,
+  `/etc/hs-uploader/keys/id_ed25519_host`, used by every hs-uploader pipeline.
+  `smd psws enroll` creates it (or it self-generates on first use); the
+  private key never leaves the machine.  Only the *public* key is registered,
+  via the PSWS portal, on each station the machine uploads for (the
+  un-automatable human step, §3).
 
 So the genuinely **delivered** secrets reduce to **two, both optional**:
 

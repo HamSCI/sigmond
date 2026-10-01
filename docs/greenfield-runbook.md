@@ -35,7 +35,7 @@ Do these in order. Each phase assumes the previous one succeeded.
 | 6 | Host tuning | (mostly automatic via `apply`) + `smd admin validate` | rmem_max, CPU affinity, governor — radiod RT correctness. |
 | 7 | Client config | `smd config edit <client>` | Reporter ids, PSWS station/instrument. |
 | 8 | Start + verify | `smd start` / `smd admin validate` / `smd status` | Bring it up, confirm the board is clean. |
-| 9 | PSWS key (if uploading) | `setup-psws-keys.sh` | External — register with PSWS. |
+| 9 | PSWS key (if uploading) | `smd psws enroll` → `smd psws verify` | External — register this machine's key with PSWS. |
 | 10 | Hardware attached later | `smd status` → `smd adopt <name>` | Only needed if a device arrived after phase 3. Nothing starts on its own. |
 
 ## Installing with nothing attached
@@ -313,11 +313,14 @@ with a GPSDO plugged in, see the udev row in Troubleshooting below.
 ## Phase 9 — PSWS upload key (only if uploading to PSWS)
 
 External, one-time, yours to do — the timers are already active and will upload
-once the key is registered:
+once the key is registered.  One key per uploading machine serves every PSWS
+product (GRAPE, magnetometer); register it on each station this machine uploads
+for:
 
 ```bash
-sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh
-# then register the printed public key with PSWS for your station_id
+smd psws enroll    # creates this machine's key, prints the public key
+# register that public key in the PSWS portal for your station_id, then:
+smd psws verify    # proves the SFTP login
 ```
 
 ---
@@ -384,5 +387,5 @@ smd start
 smd admin validate && smd status
 
 # 9. PSWS key (only if uploading)
-sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh
+smd psws enroll && smd psws verify
 ```

@@ -1,14 +1,17 @@
 """Guided PSWS (HamSCI Personal Space Weather Station) upload configuration.
 
-Both hf-timestd and mag-recorder ship their data to the SAME PSWS SFTP server
-(pswsnetwork.eng.ua.edu) with the SAME key-based mechanism — they differ only
-in the station id, the device/instrument id, and which key file they read.  So
-the whole guided flow lives here, once, parameterized by a small per-recorder
-field map, and is exposed as:
+hs-uploader ships every PSWS product (GRAPE from hamsci-physics, the
+magnetometer from mag-recorder) to the same SFTP server, pswsnetwork.eng.ua.edu,
+with ONE key per uploading machine.  The recorders differ only in the station
+id and instrument id they carry, so the guided flow lives here once,
+parameterized by a small per-recorder field map, and is exposed as:
 
     smd config <recorder> status     # what's set / missing (read-only)
     smd config <recorder> validate   # live SFTP login test against PSWS
-    smd config <recorder> edit       # guided wizard: key -> ids -> validate
+    smd config <recorder> edit       # guided wizard: ids -> validate
+
+The key itself is the machine's, not a recorder's: `smd psws enroll` makes it
+and shows the public key to register; `smd psws verify` proves the login.
 
 `status`/`validate` never touch anything; `edit` is the only mutator.  None of
 them is required for the recorder to RUN — the daemon records to its local sink
@@ -29,66 +32,51 @@ except ModuleNotFoundError:  # pragma: no cover
 
 PSWS_HOST = "pswsnetwork.eng.ua.edu"
 
-# ONE credential per station, readable by every PSWS service user.
+# ONE key per UPLOADING MACHINE (mjh, 2026-10-01: "for security it should
+# remain unique per uploading machine").  PSWS accepts whatever key an
+# authorized PSWS user registers for a station, so that user registers this
+# machine's one public key on every station it uploads for.  A compromise then
+# exposes only the stations this machine serves, and revoking it touches only
+# them.
 #
-# The portal authenticates the STATION account; the instrument id rides in the
-# upload path, not in the key.  So a station needs exactly one registered
-# public key however many instruments it grows (Michael, 2026-09-03).
-#
-# Two key files used to exist for that one credential, and permissions were the
-# only reason: `magrec` cannot read /home/timestd/.ssh (0700 by design), and
-# live B4 carries the timestd key 0600 timestd:timestd while
-# /etc/hs-uploader/keys/id_ed25519 is 0600 hsupload:sigmond.  `magrec` belongs
-# to `dialout` alone.  A path in nobody's home, group-readable by a group that
-# names exactly "may read this station's PSWS credential", resolves it without
-# granting either account anything else.
-#
-# ⚠ This is a DEFAULT.  read_state prefers the config's own field, and every
-# station already uploading sets it — so B4 and DASI002 keep the keys they
-# registered with the portal.  Nothing migrates on its own.
-SHARED_KEY = "/etc/sigmond/psws/id_ed25519"
-SHARED_KEY_GROUP = "psws"
+# The key is hs-uploader's host key, the one uploader_manifest puts on every
+# pipeline.  It used to be reported from a per-recorder config field, else a
+# "shared" /etc/sigmond/psws/id_ed25519 (2026-09-03) that no upload ever read,
+# so this module could call a host configured while hs-uploader held no key.
+# Asking uploader_manifest for the path keeps the report and the uploads on
+# the same file by construction.
+def host_key() -> str:
+    """Path of this machine's PSWS upload key (hs-uploader's host key)."""
+    from .uploader_manifest import host_key_file
+    return host_key_file()
+
+
 PSWS_PORT = 22
 PSWS_PORTAL = "https://pswsnetwork.eng.ua.edu/"
 _PLACEHOLDER_PREFIX = "<YOUR"
 
 
 # Per-recorder PSWS field map.  Tuple values are the dotted TOML path to the
-# field (section..key).  `user` is the systemd service user the key belongs to
-# (keygen + the SFTP test run as that user).
+# field (section..key).  No key field: the key is the machine's (host_key()).
 RECORDERS = {
     "hf-timestd": {
         "config":     Path("/etc/hf-timestd/timestd-config.toml"),
-        "user":       "timestd",
         "station":    ("station", "id"),
         "instrument": ("station", "instrument_id"),
-        "ssh_key":    ("uploader", "sftp", "ssh_key"),
-        "default_key": SHARED_KEY,
-        "key_type":   "ed25519",
     },
     # The GRAPE science half of the 2026-08-24 hf-timestd split.  It owns the
     # [[hs_uploader.pipeline]] declaration for grape-psws, so it -- not
     # hf-timestd -- is the client resolve_tokens() must find an identity for.
-    # Its config uses the mag-recorder field names (`psws_station_id`), but
-    # the key stays timestd's: grape-daily runs as User=timestd and that is
-    # the key already registered with PSWS for S000170.
+    # Its config uses the mag-recorder field names (`psws_station_id`).
     "hamsci-physics": {
         "config":     Path("/etc/hamsci-physics/config.toml"),
-        "user":       "timestd",
         "station":    ("station", "psws_station_id"),
         "instrument": ("station", "instrument_id"),
-        "ssh_key":    ("uploader", "ssh_key_file"),
-        "default_key": SHARED_KEY,
-        "key_type":   "ed25519",
     },
     "mag-recorder": {
         "config":     Path("/etc/mag-recorder/mag-recorder-config.toml"),
-        "user":       "magrec",
         "station":    ("station", "psws_station_id"),
         "instrument": ("station", "instrument_id"),
-        "ssh_key":    ("uploader", "ssh_key_file"),
-        "default_key": SHARED_KEY,
-        "key_type":   "ed25519",
     },
 }
 
@@ -163,7 +151,7 @@ def read_state(recorder: str) -> PswsState:
     data = tomllib.loads(text) if (tomllib and text) else {}
     station = _dig(data, spec["station"])
     instrument = _dig(data, spec["instrument"])
-    key_path = _dig(data, spec["ssh_key"]) or spec["default_key"]
+    key_path = host_key()
     st.station = "" if is_placeholder(station) else str(station)
     st.instrument = "" if is_placeholder(instrument) else str(instrument)
     st.key_path = str(key_path)
@@ -173,7 +161,9 @@ def read_state(recorder: str) -> PswsState:
     if not st.instrument:
         st.issues.append("instrument/device id not set")
     if not st.key_present:
-        st.issues.append(f"SSH key missing: {st.key_path}")
+        st.issues.append(f"SSH key missing: {st.key_path} (this machine's PSWS "
+                         f"upload key: `smd psws enroll` creates it and shows "
+                         f"the public key to register)")
     return st
 
 
@@ -186,39 +176,17 @@ def tcp_reachable(timeout: float = 6.0) -> bool:
 
 
 def sftp_login_ok(recorder: str, st: PswsState | None = None) -> tuple[bool, str]:
-    """Live test: can the recorder's service user SFTP-login to PSWS as its
-    station id with its key?  Returns (ok, detail)."""
-    spec = RECORDERS[recorder]
+    """Live test: can this machine SFTP-login to PSWS as the recorder's
+    station id with the machine's key?  The same probe `smd psws verify`
+    runs: the key is the machine's, so the login is too.  Returns (ok, detail)."""
     st = st or read_state(recorder)
     if not st.station:
         return False, "station id not set"
-    if not st.key_present:
-        return False, f"SSH key not found: {st.key_path}"
-    if not tcp_reachable():
-        return False, f"cannot reach {PSWS_HOST}:{PSWS_PORT} (network/firewall?)"
-    cmd = [*_sudo(), "-u", spec["user"], "sftp",
-           "-i", st.key_path,
-           "-o", "BatchMode=yes",
-           "-o", "ConnectTimeout=10",
-           "-o", "StrictHostKeyChecking=accept-new",
-           f"{st.station}@{PSWS_HOST}"]
-    try:
-        r = subprocess.run(cmd, input="quit\n", capture_output=True,
-                           text=True, timeout=30, check=False)
-    except subprocess.TimeoutExpired:
-        return False, f"SFTP login timed out to {PSWS_HOST}"
-    except FileNotFoundError:
-        return False, "sftp client not installed"
-    if r.returncode == 0:
-        return True, f"SFTP login OK as {st.station}@{PSWS_HOST}"
-    err = (r.stderr or r.stdout or "").strip().splitlines()
-    tail = err[-1] if err else "unknown error"
-    return False, (f"SFTP login FAILED as {st.station}@{PSWS_HOST} — "
-                   f"public key not registered at the portal yet? ({tail[:160]})")
+    return sftp_station_login_ok(st.station, st.key_path)
 
 
 # ---------------------------------------------------------------------------
-# Mutation: TOML field writer (preserves comments + owner/mode) + key setup
+# Mutation: TOML field writer (preserves comments + owner/mode)
 # ---------------------------------------------------------------------------
 import re as _re
 import tempfile as _tempfile
@@ -280,82 +248,6 @@ def _set_fields(recorder: str, updates: list) -> None:
     for section, key, value in updates:
         text = _set_toml_field(text, section, key, value)
     _write_text_preserving(spec["config"], text)
-
-
-def ensure_key_readable(recorder: str, key_path: str) -> list:
-    """Let this recorder's service user read a SHARED PSWS key.
-
-    Only for keys under the shared path — a key inside a user's own home needs
-    nothing, and re-grouping someone else's private key would be wrong.
-
-    Returns human-readable notes for the caller to print.  ⚠ Adding a user to
-    a group does not reach ALREADY-RUNNING processes: they keep the group set
-    they started with.  So the note says to restart, rather than leaving an
-    operator to wonder why a key that plainly exists still reads as missing.
-    """
-    if str(key_path) != SHARED_KEY:
-        return []
-    user = RECORDERS[recorder]["user"]
-    notes: list = []
-    subprocess.run([*_sudo(), "groupadd", "-f", SHARED_KEY_GROUP],
-                   capture_output=True, text=True, check=False)
-    have = subprocess.run(["id", "-nG", user], capture_output=True,
-                          text=True, check=False)
-    if SHARED_KEY_GROUP in (have.stdout or "").split():
-        return notes
-    r = subprocess.run([*_sudo(), "usermod", "-aG", SHARED_KEY_GROUP, user],
-                       capture_output=True, text=True, check=False)
-    if r.returncode == 0:
-        notes.append(f"added {user} to group {SHARED_KEY_GROUP} — RESTART "
-                     f"{recorder} before it can read the key (a running "
-                     f"process keeps the groups it started with)")
-    else:
-        notes.append(f"could not add {user} to group {SHARED_KEY_GROUP}: "
-                     f"{(r.stderr or r.stdout or '').strip()[:120]} — "
-                     f"{recorder} will not be able to read {key_path}")
-    return notes
-
-
-def _gen_key(recorder: str, key_path: str) -> tuple[bool, str]:
-    """Generate an ed25519 keypair at key_path.
-
-    A key at the SHARED path belongs to the station, not to one service user:
-    it is created root-owned, group ``psws``, mode 0640, so every PSWS
-    recorder can read the one credential the portal knows.  Anywhere else the
-    old per-user behaviour stands.
-    """
-    spec = RECORDERS[recorder]
-    user = spec["user"]
-    kp = Path(key_path)
-    shared = str(key_path) == SHARED_KEY
-
-    if shared:
-        subprocess.run([*_sudo(), "groupadd", "-f", SHARED_KEY_GROUP],
-                       capture_output=True, text=True, check=False)
-        subprocess.run([*_sudo(), "install", "-d", "-m", "750", "-o", "root",
-                        "-g", SHARED_KEY_GROUP, str(kp.parent)], check=False)
-        gen_as: list = [*_sudo()]
-        comment = "psws-station"
-    else:
-        # per-user key: the service user owns its own .ssh
-        subprocess.run([*_sudo(), "-u", user, "install", "-d", "-m", "700",
-                        str(kp.parent)], check=False)
-        gen_as = [*_sudo(), "-u", user]
-        comment = f"{recorder}-psws"
-
-    r = subprocess.run([*gen_as, "ssh-keygen", "-t", "ed25519",
-                        "-f", key_path, "-N", "", "-C", comment],
-                       capture_output=True, text=True, check=False)
-    if r.returncode != 0:
-        return False, (r.stderr or r.stdout or "ssh-keygen failed").strip()[:200]
-    if shared:
-        # 0640 root:psws — readable by the group, writable by nobody but root.
-        subprocess.run([*_sudo(), "chown", f"root:{SHARED_KEY_GROUP}",
-                        key_path, f"{key_path}.pub"], check=False)
-        subprocess.run([*_sudo(), "chmod", "640", key_path], check=False)
-        subprocess.run([*_sudo(), "chmod", "644", f"{key_path}.pub"],
-                       check=False)
-    return True, key_path
 
 
 def _pubkey(key_path: str) -> str:
@@ -740,8 +632,9 @@ def _prompt(label: str, default: str = "") -> str:
 
 
 def cmd_edit(recorder: str) -> int:
-    """Guided wizard: SSH key (find / enter / create) → station + device id →
-    write → live validate.  Interactive; refuses to run without a TTY."""
+    """Guided wizard: station + device id → write → live validate.  The key
+    is the machine's, made by `smd psws enroll`, so this never creates or
+    writes one.  Interactive; refuses to run without a TTY."""
     import sys
     spec = RECORDERS[recorder]
     if not read_state(recorder).config_exists:
@@ -757,56 +650,13 @@ def cmd_edit(recorder: str) -> int:
     print(f"{_B}PSWS setup — {recorder}{_X}  (records locally regardless; "
           f"this enables PSWS UPLOAD)\n")
 
-    # 1) SSH key: find / enter / create
-    key_path = st.key_path
-    if _exists(Path(key_path)):
-        print(f"  {_G}✓{_X} SSH key found: {key_path}")
+    # 1) the machine's key: report it, never make a per-recorder one
+    if st.key_present:
+        print(f"  {_G}✓{_X} PSWS upload key: {st.key_path}")
     else:
-        print(f"  {_Y}⚠{_X} no SSH key at {key_path}")
-        while True:
-            choice = _prompt("(c)reate a new key, (e)nter an existing key "
-                             "path, or (s)kip", "c").lower()
-            if choice.startswith("s"):
-                print(f"  {_Y}skipping key — upload stays disabled.{_X}")
-                break
-            if choice.startswith("e"):
-                p = _prompt("path to existing private key")
-                if p and _exists(Path(p)):
-                    key_path = p
-                    print(f"  {_G}✓{_X} using {key_path}")
-                    break
-                print(f"  {_R}not found:{_X} {p}")
-                continue
-            # create
-            ok, res = _gen_key(recorder, key_path)
-            if not ok:
-                print(f"  {_R}keygen failed:{_X} {res}")
-                p = _prompt("enter an existing key path instead (or blank to "
-                            "skip)")
-                if p and _exists(Path(p)):
-                    key_path = p
-                    break
-                break
-            print(f"  {_G}✓{_X} created {key_path}")
-            pub = _pubkey(key_path)
-            print(f"\n  {_B}REGISTER THIS PUBLIC KEY ONCE{_X} at "
-                  f"{_B}{PSWS_PORTAL}{_X}, for your STATION account:\n")
-            print(f"    {pub}\n")
-            if str(key_path) == SHARED_KEY:
-                # Said here because the alternative — an operator generating a
-                # second key for the magnetometer and registering it over the
-                # first — silently breaks the instrument that was working.
-                print(f"  {_K}one key serves every instrument on this "
-                      f"station; the instrument id rides in the upload path, "
-                      f"not in the key.{_X}\n")
-            _prompt("press Enter once you've pasted it into the PSWS portal", "")
-            break
-
-    # The shared key is useless to a recorder that cannot read it, and a
-    # key found rather than created needs this every bit as much: the second
-    # instrument to be configured always FINDS the first one's key.
-    for _note in ensure_key_readable(recorder, key_path):
-        print(f"  {_Y}⚠{_X} {_note}")
+        print(f"  {_Y}⚠{_X} no PSWS upload key at {st.key_path} — run "
+              f"{_B}smd psws enroll{_X}: it creates this machine's key and shows "
+              f"the public key to register on each station it uploads for.")
 
     # 2) station id + device id
     print()
@@ -828,9 +678,6 @@ def cmd_edit(recorder: str) -> int:
     # 3) write
     updates = [(spec["station"][0], spec["station"][-1], station),
                (spec["instrument"][0], spec["instrument"][-1], instrument)]
-    if key_path != st.key_path:
-        ssec = ".".join(spec["ssh_key"][:-1])
-        updates.append((ssec, spec["ssh_key"][-1], key_path))
     try:
         _set_fields(recorder, updates)
     except Exception as exc:                       # noqa: BLE001

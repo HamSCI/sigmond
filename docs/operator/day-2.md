@@ -143,7 +143,7 @@ sudo: a password is required
      querier: v2 <a LAN address> on ens18
 
 ━━━ PSWS upload not finished ━━━
-  ⚠  hf-timestd: SSH key missing: /home/timestd/.ssh/id_rsa_psws
+  ⚠  hf-timestd: SSH key missing: /etc/hs-uploader/keys/id_ed25519_host (this machine's PSWS upload key: `smd psws enroll` creates it and shows the public key to register)
             finish:  smd config hf-timestd edit   (records locally regardless)
   ...  (1 more: the same ⚠ for mag-recorder)
 ```
@@ -344,7 +344,7 @@ contradicts the upload switch:
 
 ```text
   upload readiness — missing items block ONLY uploading; the recorder still records locally:
-    ⚠  PSWS (hf-timestd) — missing station id, instrument id, SFTP key /home/timestd/.ssh/id_rsa_psws
+    ⚠  PSWS (hf-timestd) — missing station id, instrument id, PSWS upload key /etc/hs-uploader/keys/id_ed25519_host
     ⚠  PSWS (mag-recorder) — missing PSWS station id
     ✓  ready: wsprnet.org, wsprdaemon.org, PSKReporter
 ```
@@ -367,9 +367,9 @@ policy switch, which is
 [docs-gap ledger row 29](../contributor/docs-gap-ledger.md).
 
 ⛔ The readiness block's `↳ fix:` lines also hand you commands — `smd config
-edit hf-timestd`, and a `sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh`.
-**Neither is yours** ([do-not-touch.md](do-not-touch.md#the-table)); the
-operator path for PSWS is [registration.md §5](registration.md#5-psws--the-one-portal-step).
+edit hf-timestd` and `smd psws enroll`.  The first is not yours
+([do-not-touch.md](do-not-touch.md#the-table)); the second is the operator path
+for PSWS, [registration.md §5](registration.md#5-psws--the-one-portal-step).
 
 ### 2. Are your spots arriving?
 

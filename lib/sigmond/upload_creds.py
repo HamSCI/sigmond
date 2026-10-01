@@ -58,11 +58,12 @@ _FIX = {
         "force it with `smd admin secrets`",
     "hf-timestd":
         "smd config edit hf-timestd  (set [station] id + instrument_id),  then  "
-        "sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh  "
-        "(prints the public key to register at https://pswsnetwork.eng.ua.edu/)",
+        "smd psws enroll  (creates this machine's upload key and prints the "
+        "public key to register at https://pswsnetwork.eng.ua.edu/)",
     "mag-recorder":
         "smd config edit mag-recorder  (set [station] psws_station_id; "
-        "instrument_id is PSWS-issued, a short number)",
+        "instrument_id is PSWS-issued, a short number),  then  "
+        "smd psws enroll  (this machine's upload key)",
 }
 
 
@@ -181,9 +182,12 @@ def upload_paths_status() -> list[UploadPath]:
             miss.append("station id")
         if _is_placeholder(st.get("instrument_id")):
             miss.append("instrument id")
-        key = ((d.get("uploader", {}) or {}).get("sftp", {}) or {}).get("ssh_key")
-        if key and not _exists(Path(str(key))):
-            miss.append(f"SFTP key {key}")
+        # One PSWS key per uploading machine: hs-uploader's host key, the one
+        # every pipeline uploads with.  [uploader.sftp] ssh_key is retired
+        # (hf-timestd d1af1dd): nothing uploads with it, so it is not asked.
+        key_ok, key_path = _hs_uploader_key_status()
+        if not key_ok:
+            miss.append(f"PSWS upload key {key_path}")
         out.append(UploadPath("PSWS (hf-timestd)", "hf-timestd",
                               needs_creds=True, ready=not miss,
                               missing=", ".join(miss),
@@ -198,6 +202,9 @@ def upload_paths_status() -> list[UploadPath]:
             miss.append("PSWS station id")
         if _is_placeholder(st.get("instrument_id")):
             miss.append("instrument id")
+        key_ok, key_path = _hs_uploader_key_status()
+        if not key_ok:
+            miss.append(f"PSWS upload key {key_path}")
         out.append(UploadPath("PSWS (mag-recorder)", "mag-recorder",
                               needs_creds=True, ready=not miss,
                               missing=", ".join(miss),
