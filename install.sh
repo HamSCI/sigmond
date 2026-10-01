@@ -544,12 +544,28 @@ unset _conv_user _conv_users _conv_home _conv_ent _conv_shell
 # etc/toprc in this repo was written by procps-ng 4.x top itself (fields screen
 # -> W), the only portable way to produce one: the fieldscur encoding is
 # version-specific.
+# ⛔ $SUDO, NOT a bare install.  install.sh does NOT run as root in the golden
+# VM build -- provision.sh line 15 runs `./install.sh` as the unprivileged
+# `build` user -- so a bare `install -D ... /etc/topdefaultrc` fails on
+# permission EVERY time, and `2>/dev/null` plus a soft warn buried the reason
+# in a log inside a build VM that is deleted when the build finishes.  Result:
+# the feature shipped in v3.64 (sigmond 6179fea) and reached no VM at all.  rob
+# found it by looking: "there's no processor in the top ... it's certainly not
+# installed in the VM", 2026-10-01.  The PM was fine throughout because the
+# appliance importer installs it there by a different path, which is exactly
+# why this looked like it worked.
+#
+# ⚠ And report WHY.  The old message could not distinguish "not root" from
+# "read-only /etc" from "no such file", so nobody could act on it even if they
+# had read it.
 if [[ -f "$REPO_DIR/etc/toprc" ]]; then
-    if install -D -m 0644 "$REPO_DIR/etc/toprc" /etc/topdefaultrc 2>/dev/null; then
+    _toprc_err=$($SUDO install -D -m 0644 "$REPO_DIR/etc/toprc" /etc/topdefaultrc 2>&1)
+    if [[ -z "$_toprc_err" ]] && [[ -f /etc/topdefaultrc ]]; then
         ok "top: P column right of %CPU for every user (/etc/topdefaultrc)"
     else
-        warn "top: could not write /etc/topdefaultrc — top keeps its stock columns"
+        warn "top: could not write /etc/topdefaultrc — top keeps its stock columns: ${_toprc_err:-unknown error}"
     fi
+    unset _toprc_err
 fi
 
 # ─── avahi-browse (mDNS discovery) ───────────────────────────────────────────
