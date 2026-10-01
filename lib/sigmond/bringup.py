@@ -300,6 +300,24 @@ def build_plan(profile, *, local_radiod: bool,
                               argv=[smd, 'config', 'upload', client,
                                     reporter, '--on']))
 
+    # Provision the shared hs-uploader watermark dir.  Recorder units list
+    # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it
+    # MUST exist before they start or systemd aborts the sandbox with
+    # 226/NAMESPACE.  It's normally created by hs-uploader/install.sh, which
+    # bring-up doesn't invoke (hs-uploader is a source-only sibling), so create
+    # it here — root:sigmond, setgid + group-writable like /var/lib/sigmond, so
+    # every HamSCI recorder user (in the sigmond group) can write.  `install -d`
+    # is idempotent.
+    #
+    # ⛔ AHEAD OF STAGE 3b, because that stage now STARTS clients as it installs
+    # them.  While every start lived in Stage 4 this sat comfortably above them;
+    # moving the independents earlier moved them above this, and mag-recorder
+    # would have hit 226/NAMESPACE on a directory nothing had created yet.
+    # Cheap enough to be unconditional: it is one idempotent `install -d`.
+    steps.append(Step(STAGE3B, 'provision shared hs-uploader watermark dir', 'tune',
+                      argv=['install', '-d', '-m', '2775', '-o', 'root',
+                            '-g', 'sigmond', '/var/lib/hs-uploader']))
+
     # --- Stage 3b: independent clients (no radiod, no wisdom wait) ---
     for client in profile.clients:
         if client in _INDEPENDENT and client not in skip:
@@ -313,18 +331,29 @@ def build_plan(profile, *, local_radiod: bool,
                 checkpoint(STAGE3B, f'{client} configured',
                            check=f'configured:{client}',
                            hard=client not in dormant)
-
-    # Provision the shared hs-uploader watermark dir.  Recorder units list
-    # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it
-    # MUST exist before they start or systemd aborts the sandbox with
-    # 226/NAMESPACE.  It's normally created by hs-uploader/install.sh, which
-    # bring-up doesn't invoke (hs-uploader is a source-only sibling), so create
-    # it here — root:sigmond, setgid + group-writable like /var/lib/sigmond, so
-    # every HamSCI recorder user (in the sigmond group) can write.  `install -d`
-    # is idempotent.
-    steps.append(Step(STAGE4, 'provision shared hs-uploader watermark dir', 'tune',
-                      argv=['install', '-d', '-m', '2775', '-o', 'root',
-                            '-g', 'sigmond', '/var/lib/hs-uploader']))
+            # ⛔ START IT HERE, NOT IN STAGE 4.  Installed-and-configured is
+            # everything this client needs; it uses no radiod, so there is
+            # nothing left to wait for.  Deferring the start to Stage 4 made it
+            # wait for EVERY remaining component to install first.
+            #
+            # Measured on a v3.64 first install (AI6VN-PM, 2026-10-01):
+            #   station-web installed at log line 929, started at line 1196 --
+            #   267 lines and ~5 minutes apart, idle the whole time.
+            #   VM booted 00:23:43, station-web active 00:31:04 (+7m21).
+            #
+            # That matters because an operator reaching a station through its
+            # RAC channels sees the tunnel come up long before the service
+            # behind it does, so a working station reads as a broken one.
+            # rob, 2026-10-01: "all my access is through the RAC channels ...
+            # we want to optimise for the RAC channels to be available as soon
+            # as possible."
+            #
+            # ⚠ Stage 4 still runs `smd start` over everything enabled, so a
+            # client that fails here is retried there -- this is an EARLY start,
+            # not the only one.
+            steps.append(Step(STAGE3B, f'start {client} (independent — no radiod)',
+                              'start',
+                              argv=[smd, 'start', '--components', client]))
 
     # Re-render the site profile now that stages 1-3 created every client's
     # config: this pushes the PSWS station/instrument ids from
@@ -371,15 +400,9 @@ def build_plan(profile, *, local_radiod: bool,
     independent = [c for c in profile.clients
                    if c not in skip and c in _INDEPENDENT]
 
-    # Independent clients first, and deliberately BEFORE the radiod wait: they
-    # need nothing from radiod, so making them wait for it buys nothing and
-    # costs the operator the whole stagger.  They are also what an operator
-    # looks at first -- the station page and the magnetometer -- so bringing
-    # them up early is the difference between a station that looks alive while
-    # it builds and one that looks broken.
-    for client in independent:
-        steps.append(Step(STAGE4, f'start {client} (independent)', 'start',
-                          argv=[smd, 'start', '--components', client]))
+    # Independent clients already started in Stage 3b, the moment each was
+    # installed and configured -- see the note there.  Stage 4's catch-all
+    # `smd start` below still covers any that did not come up.
 
     if local_radiod:
         steps.append(Step(STAGE4, 'wait for FFT wisdom before starting radiod',

@@ -62,16 +62,24 @@ def test_plan_provisions_hs_uploader_dir_before_start():
     assert first_start is not None and prov < first_start
 
 
-def test_plan_runs_radiod_migrate_after_configs_before_start():
+def test_plan_runs_radiod_migrate_after_configs_before_any_radiod_start():
     # A leftover legacy config that `config init` skipped is healed by a
-    # `radiod migrate` step that runs after all configs and before any start.
+    # `radiod migrate` step that runs after all configs.
+    #
+    # ⚠ The bound is "before the first RADIOD-BOUND start", not "before any
+    # start".  Independent clients (station-web, mag-recorder, gmag-webui) now
+    # start in Stage 3b as each is installed, and they touch no radiod config —
+    # migrating it cannot affect them, and making them wait for it would undo
+    # the point of starting them early.  Anything that DOES use radiod must
+    # still come after.
     p = build_plan(_dasi2(), local_radiod=True)
     mig = next((i for i, s in enumerate(p.steps)
                 if 'migrate' in s.label and 'migrate' in s.argv), None)
-    first_start = next((i for i, s in enumerate(p.steps)
-                        if s.kind == 'start'), None)
+    first_radiod_start = next((i for i, s in enumerate(p.steps)
+                               if s.kind == 'start'
+                               and '(independent' not in s.label), None)
     assert mig is not None, 'no radiod-migrate step in the plan'
-    assert first_start is not None and mig < first_start
+    assert first_radiod_start is not None and mig < first_radiod_start
     assert p.steps[mig].argv[-4:] == ['admin', 'radiod', 'migrate', '--yes']
 
 
@@ -251,27 +259,41 @@ def test_stage4_radiod_bound_clients_are_staggered():
     assert all(s.settle_s == CLIENT_STAGGER_S for s in staggered)
 
 
-def test_stage4_independent_clients_start_before_the_radiod_gate():
-    # ⛔ ORDER IS THE POINT.  A client that does not use radiod must not wait
-    # for it: CLIENT_STAGGER_S exists only to stop simultaneous channel
-    # provisioning starving radiod's control plane, and something that opens
-    # no channel cannot starve anything.  Queued behind the staggered set they
-    # arrive minutes late -- on a dasi2 install, four staggered clients plus a
-    # wait-for-streaming -- and those are exactly the pages an operator looks
-    # at first.  rob watched a healthy station show no station-web and no
-    # magnetometer for ~15 minutes after radiod was up (v3.63, 2026-09-30).
-    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
-    indep = [s for s in s4 if '(independent)' in s.label]
-    assert [s.argv[-1] for s in indep] == ['mag-recorder']
-    assert all(s.settle_s == 0 for s in indep)
+def test_independent_clients_start_as_soon_as_they_are_installed():
+    # ⛔ ORDER IS THE POINT, AND SO IS *WHEN*.  #98 put the independents first
+    # within Stage 4 — but Stage 4 only begins once EVERY component has
+    # installed, so being first inside it bought almost nothing.  Measured on a
+    # v3.64 first install (AI6VN-PM, 2026-10-01): station-web was installed at
+    # bring-up log line 929 and started at line 1196 — 267 lines and ~5 minutes
+    # apart, idle throughout.  VM booted 00:23:43, station-web active 00:31:04.
+    #
+    # An operator reaching a station through its RAC channels sees the tunnel
+    # come up long before the service behind it, so a working station reads as
+    # a broken one.  rob: "all my access is through the RAC channels ... we
+    # want to optimise for the RAC channels to be available as soon as
+    # possible."  So each independent starts in Stage 3b, right after its own
+    # install and config.
+    p = build_plan(_dasi2(), local_radiod=True)
+    steps = p.steps
+    indep = [i for i, s in enumerate(steps) if '(independent' in s.label
+             and s.kind == 'start']
+    assert indep, 'independents must have start steps'
+    assert all(steps[i].stage == STAGE3B for i in indep), \
+        'independents must start in Stage 3b, not deferred to Stage 4'
+    assert all(steps[i].settle_s == 0 for i in indep)
 
-    kinds = [s.kind for s in s4]
-    first_indep = next(i for i, s in enumerate(s4) if '(independent)' in s.label)
-    # before the wisdom wait, the radiod start, and the streaming gate
-    for gate in ('wait-wisdom', 'wait-streaming'):
-        assert kinds.index(gate) > first_indep, f'{gate} must come after the independents'
-    first_staggered = next(i for i, s in enumerate(s4) if s.settle_s)
-    assert first_indep < first_staggered
+    # each one starts after ITS OWN install, and before the radiod gate
+    inst = next(i for i, s in enumerate(steps)
+                if s.kind == 'install' and 'mag-recorder' in s.label)
+    start = next(i for i in indep if 'mag-recorder' in steps[i].label)
+    assert inst < start, 'a client cannot start before it is installed'
+    gate = next(i for i, s in enumerate(steps) if s.kind == 'wait-streaming')
+    assert max(indep) < gate, 'independents must not wait for radiod streaming'
+
+    # ⛔ and the watermark dir must still precede every start, or recorder
+    # units abort with 226/NAMESPACE on a ProtectSystem=strict sandbox.
+    prov = next(i for i, s in enumerate(steps) if '/var/lib/hs-uploader' in s.argv)
+    assert prov < min(indep), 'hs-uploader dir must exist before any start'
 
 
 def test_station_web_and_physics_are_independent_of_radiod():
