@@ -889,15 +889,27 @@ PINCONF
 fi
 ok "sigmond-radiod-thread-pin symlink installed"
 
-# Invoked by sigmond-firstrun-bringup once bring-up has finished.  `smd apply`
-# only STAGES isolcpus in a grub.d drop-in; without this the station runs its
-# whole first session with the guest kernel still on radiod's cores.  Reboots
-# at most once, marker-guarded.
+# `smd apply` only STAGES isolcpus in a grub.d drop-in; without this the guest
+# kernel keeps scheduling on radiod's cores.  Reboots at most once, marker-guarded.
+#
+# ⛔ IT MUST RUN ON EVERY BOOT, NOT ONLY FROM THE FIRST-RUN WRAPPER.  It used to
+# be invoked solely by sigmond-firstrun-bringup, which runs once, ever.  On
+# WB6CXC-7 that wrapper ran at 22:30:25 and correctly found nothing staged (the
+# bring-up had just failed because the RX-888 was not on the bus yet); the
+# operator re-ran `smd bringup` by hand at 23:27:50 — as the tool instructs —
+# and THAT run staged the drop-in.  Nothing ever reloaded the kernel after it.
+# 16 h later radiod's fft thread was at 94.2% instead of 48.1%, with every unit
+# green.  The boot unit makes a hand-recovered station self-heal at its next
+# reboot, which is the only thing the one-shot path could never do.
 info "Installing sigmond-isolation-reboot → /usr/local/sbin/"
 $SUDO chmod a+x "$REPO_DIR/bin/sigmond-isolation-reboot"
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-isolation-reboot" \
         /usr/local/sbin/sigmond-isolation-reboot
-ok "sigmond-isolation-reboot symlink installed"
+$SUDO install -m 644 "$REPO_DIR/systemd/sigmond-isolation-reboot.service" \
+        /etc/systemd/system/sigmond-isolation-reboot.service
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable sigmond-isolation-reboot.service >/dev/null 2>&1 || true
+ok "sigmond-isolation-reboot installed + enabled (runs every boot)"
 
 # ─── SDR recovery: power-cycle a vanished RX-888, restore in order ───────────
 # The RX-888 recurrently leaves the USB bus and only a power cycle of the card

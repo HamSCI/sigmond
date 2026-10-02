@@ -1,0 +1,56 @@
+[Unit]
+# Activate staged guest CPU isolation — on EVERY boot, not just the first.
+#
+# `smd apply` (and therefore `smd bringup`) only STAGES isolcpus/nohz_full/
+# rcu_nocbs in /etc/default/grub.d/sigmond-cpu-isolation.cfg.  A drop-in changes
+# nothing until the kernel is reloaded, and until 2026-10-02 the ONLY thing that
+# reloaded it was sigmond-firstrun-bringup — which runs once, ever.
+#
+# WB6CXC-7 is why this unit exists.  Timeline, from its own firstrun log:
+#   22:30:25  firstrun bring-up FAILED (radiod config: the RX-888 had not
+#             enumerated yet — it appeared at 23:02:18), marker written
+#   22:30:25  sigmond-isolation-reboot ran and CORRECTLY did nothing:
+#             "cpu isolation: nothing staged (...cfg absent) — no reboot"
+#   23:27:50  the operator re-ran `smd bringup dasi2` by hand, exactly as the
+#             tool instructed.  THAT run staged the drop-in and built grub.cfg.
+#   ...and nothing ever reloaded the kernel, because the one-shot wrapper was
+#   already marked done.
+# The station then ran 16 h with the guest kernel scheduling on radiod's cores:
+# 256.9 timer interrupts/s on cpu8 instead of 0.4, radiod's fft thread at 94.2%
+# instead of 48.1%, and proc_rx888 — which does no FFT at all — at 41.6%
+# instead of 22.0%.  Every unit was green.
+#
+# So the bug was never the failed bring-up: it is that the command the tool
+# TELLS the operator to re-run stages isolation and has no way to apply it.
+# Running the activator at every boot closes that, and costs nothing, because
+# sigmond-isolation-reboot is already safe to run repeatedly: it exits 0 when
+# isolation is active, exits 0 when nothing is staged, reboots AT MOST once
+# (its own marker is written before the reboot, never after), and exits 20 —
+# loudly — when staged isolation still is not active after that one attempt.
+#
+# ⛔ Ordering matters.  This must run BEFORE anything starts capturing, or the
+# activation reboot would interrupt a live station.  Before sysinit is too
+# early (no /var yet, where the marker lives).
+Description=Sigmond — activate staged guest CPU isolation (reboots at most once)
+Documentation=file:/usr/local/sbin/sigmond-isolation-reboot
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/etc/default/grub.d/sigmond-cpu-isolation.cfg
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sigmond-isolation-reboot
+# 0  = nothing to do (already active, or nothing staged)
+# 10 = reboot invoked
+# 20 = staged but not active and the one reboot is spent — a real problem, but
+#      NOT a unit failure: failing here would mask it behind a generic red unit
+#      instead of the explicit syslog explanation the script already prints.
+SuccessExitStatus=0 10 20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target

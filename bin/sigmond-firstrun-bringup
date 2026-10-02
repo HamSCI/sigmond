@@ -24,16 +24,33 @@
 # means.
 set -u
 
-MARKER=/var/lib/sigmond/.firstrun-bringup-done
-SENTINEL=/etc/sigmond/.personalized
-PROFILE_FILE=/etc/sigmond/site-profile.toml
-LOG=/var/log/sigmond/firstrun-bringup.log
-SMD=/usr/local/bin/smd
+# Every external is injectable, for the same reason sigmond-isolation-reboot's
+# are: this script decides whether a station retries its own bring-up and
+# whether it reboots, and that logic must be testable without a station.
+MARKER="${SIGMOND_FIRSTRUN_MARKER:-/var/lib/sigmond/.firstrun-bringup-done}"
+SENTINEL="${SIGMOND_FIRSTRUN_SENTINEL:-/etc/sigmond/.personalized}"
+PROFILE_FILE="${SIGMOND_FIRSTRUN_PROFILE_FILE:-/etc/sigmond/site-profile.toml}"
+LOG="${SIGMOND_FIRSTRUN_LOG:-/var/log/sigmond/firstrun-bringup.log}"
+SMD="${SIGMOND_FIRSTRUN_SMD:-/usr/local/bin/smd}"
+ST="${SIGMOND_FIRSTRUN_SITE_TIMING:-/usr/local/sbin/sigmond-site-timing}"
+IR="${SIGMOND_FIRSTRUN_ISOLATION:-/usr/local/sbin/sigmond-isolation-reboot}"
 
 mkdir -p "$(dirname "$LOG")" /var/lib/sigmond 2>/dev/null
 say(){ printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG"; }
 
-[ -e "$MARKER" ] && { say "already ran (marker $MARKER) — nothing to do"; exit 0; }
+# The marker is now a RESULT, not merely a tombstone: `result=retry` means a
+# previous boot failed for a possibly-transient reason and we are allowed to
+# try again.  Anything else (ok, gave-up) is final.  A legacy marker from
+# before this change carries no result= line and is treated as final, so an
+# upgrade never re-runs bring-up on a station that already completed.
+if [ -e "$MARKER" ]; then
+    _res=$(sed -n 's/^result=\(.*\)/\1/p' "$MARKER" 2>/dev/null | head -1)
+    if [ "${_res:-final}" != retry ]; then
+        say "already ran (marker $MARKER, result=${_res:-final}) — nothing to do"
+        exit 0
+    fi
+    say "previous boot left result=retry — attempting bring-up again"
+fi
 if [ ! -e "$SENTINEL" ]; then
     say "host is not personalized yet ($SENTINEL absent) — leaving the station"
     say "alone; the wizard runs first, and this unit fires on the next boot"
@@ -55,55 +72,105 @@ say "this takes many minutes; follow it with: tail -f $LOG"
 # dead one waiting on a prompt nobody will answer.
 if "$SMD" bringup "$PROFILE" --non-interactive >>"$LOG" 2>&1; then
     say "bring-up finished"
-
-    # ⛔ RE-RUN THE SITE WIRING.  The wizard already ran sigmond-site-timing,
-    # but it ran it BEFORE this bring-up existed -- before hf-timestd was
-    # installed and before its config was written.  Its step 3 needs
-    # /etc/hf-timestd/ to be there, so it skipped, silently, and nothing
-    # re-ran it.  The result is a station with NO metrology channels at all:
-    # zero timestd-metrology@ units, /etc/hf-timestd/metrology-channels/
-    # never created, fusion reading "0 entries from 6 channels", no T3 --
-    # and every unit green, so nothing anywhere says it is broken.
-    #
-    # B4 ran that way from its reflash until 2026-09-23; rob's lab station
-    # did the same on v3.53 and needed the command run by hand.  An appliance
-    # that requires a manual step after an unattended install is not
-    # unattended, and this one is invisible.
-    #
-    # Here is the correct moment: bring-up has just finished, so hf-timestd
-    # and its config now exist.  sigmond-site-timing is idempotent -- every
-    # other step of it skips when already satisfied -- so re-running it costs
-    # a few seconds and fixes the one step that could not run earlier.
-    ST=/usr/local/sbin/sigmond-site-timing
-    if [ -x "$ST" ]; then
-        say "re-running site wiring now that hf-timestd exists ($ST)"
-        if "$ST" >>"$LOG" 2>&1; then
-            say "site wiring complete"
-        else
-            say "site wiring exited $? — see $LOG; re-run by hand with: sudo $ST"
-        fi
-        _mc=$(systemctl list-units 'timestd-metrology@*' --no-legend --plain 2>/dev/null | wc -l)
-        # Say the NUMBER.  "site wiring complete" with zero channels is the
-        # exact shape of the failure this block exists to end.
-        if [ "${_mc:-0}" -gt 0 ]; then
-            say "metrology channels running: $_mc"
-        else
-            say "⚠ NO metrology channels are running — this station measures nothing."
-            say "  check: journalctl -t sigmond-site-timing ; ls /etc/hf-timestd/metrology-channels/"
-        fi
-    else
-        say "⚠ $ST not present — metrology channels will NOT exist; timing chain unwired"
-    fi
+    bringup_ok=1
 else
     rc=$?
-    # Do NOT retry on the next boot: a bring-up that failed for a real reason
-    # (no network, a component that will not build) would loop forever and
-    # bury the cause.  Mark it done and leave the operator a log and a verb.
-    say "bring-up exited $rc — see $LOG; re-run by hand with:"
-    say "    smd bringup $PROFILE"
+    bringup_ok=0
+    say "bring-up exited $rc — see $LOG"
 fi
-date -Iseconds > "$MARKER"
-say "marker written ($MARKER); this unit will not run again"
+
+# ⛔ THE SITE WIRING AND THE RETRY DECISION ARE **OUTSIDE** THE SUCCESS BRANCH.
+# They used to live inside it, and WB6CXC-7 is what that cost: its bring-up
+# exited 1 at 22:30:25 because `smd config init radiod` found no RX-888 (the
+# card enumerated 32 min later, at 23:02:18), so the else branch printed
+# "re-run by hand" and skipped everything below, then wrote the never-again
+# marker anyway.  The station came up with ZERO metrology channels and
+# timestd-metrology.target reporting "active" with ConsistsOf= empty — a
+# target that pulls in nothing reaches active instantly and looks like success.
+# That is precisely the "every unit green, measures nothing" failure the
+# comment below has warned about since this file was written.
+
+# ⛔ RE-RUN THE SITE WIRING.  The wizard already ran sigmond-site-timing,
+# but it ran it BEFORE this bring-up existed -- before hf-timestd was
+# installed and before its config was written.  Its step 3 needs
+# /etc/hf-timestd/ to be there, so it skipped, silently, and nothing
+# re-ran it.  The result is a station with NO metrology channels at all:
+# zero timestd-metrology@ units, /etc/hf-timestd/metrology-channels/
+# never created, fusion reading "0 entries from 6 channels", no T3 --
+# and every unit green, so nothing anywhere says it is broken.
+#
+# B4 ran that way from its reflash until 2026-09-23; rob's lab station
+# did the same on v3.53 and needed the command run by hand.  An appliance
+# that requires a manual step after an unattended install is not
+# unattended, and this one is invisible.
+#
+# Here is the correct moment: bring-up has just finished, so hf-timestd
+# and its config now exist.  sigmond-site-timing is idempotent -- every
+# other step of it skips when already satisfied -- so re-running it costs
+# a few seconds and fixes the one step that could not run earlier.
+if [ -x "$ST" ]; then
+    if [ "$bringup_ok" -eq 1 ]; then
+        say "re-running site wiring now that hf-timestd exists ($ST)"
+    else
+        # Run it anyway.  It is idempotent and every step gates itself, so on a
+        # bring-up that died before hf-timestd existed this costs a few seconds
+        # and skips -- while on one that died AFTER, it is the difference
+        # between a station with metrology channels and one without.
+        say "bring-up failed, but running site wiring anyway ($ST) — idempotent,"
+        say "  and a partial bring-up may still have produced what it needs"
+    fi
+    if "$ST" >>"$LOG" 2>&1; then
+        say "site wiring complete"
+    else
+        say "site wiring exited $? — see $LOG; re-run by hand with: sudo $ST"
+    fi
+    _mc=$(systemctl list-units 'timestd-metrology@*' --no-legend --plain 2>/dev/null | wc -l)
+    # Say the NUMBER.  "site wiring complete" with zero channels is the exact
+    # shape of the failure this block exists to end -- and it is what
+    # WB6CXC-7 reported for 16 h while timestd-metrology.target read "active".
+    if [ "${_mc:-0}" -gt 0 ]; then
+        say "metrology channels running: $_mc"
+    else
+        say "⚠ NO metrology channels are running — this station measures nothing."
+        say "  check: journalctl -t sigmond-site-timing ; ls /etc/hf-timestd/metrology-channels/"
+    fi
+else
+    say "⚠ $ST not present — metrology channels will NOT exist; timing chain unwired"
+fi
+
+# ─── retry a FAILED bring-up, a bounded number of times ──────────────────────
+# The original rule was "never retry": a bring-up that failed for a real reason
+# would loop forever and bury the cause.  That is right about an infinite loop
+# and wrong about zero attempts.  WB6CXC-7 failed for a reason that fixed
+# ITSELF — a slow FX3 that had not enumerated at 22:30 and was on the bus by
+# 23:02 — and a single retry on the next boot would have brought the whole
+# station up with nobody present.  Instead it needed a human, and the two steps
+# that human's `smd bringup` does NOT do (site wiring, isolation activation)
+# stayed undone for 16 h.
+#
+# So: bounded.  Retry on later boots up to MAX_ATTEMPTS, then stop and say so.
+# The attempt counter is the marker's content, so an operator can read how many
+# times it tried and `rm` it to start over.
+MAX_ATTEMPTS=3
+attempts=$(sed -n 's/^attempts=\([0-9]*\).*/\1/p' "$MARKER" 2>/dev/null | head -1)
+attempts=$((${attempts:-0} + 1))
+
+if [ "$bringup_ok" -eq 1 ]; then
+    printf 'attempts=%s\nresult=ok\n%s\n' "$attempts" "$(date -Iseconds)" > "$MARKER"
+    say "marker written ($MARKER); bring-up succeeded on attempt $attempts"
+elif [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then
+    printf 'attempts=%s\nresult=gave-up\n%s\n' "$attempts" "$(date -Iseconds)" > "$MARKER"
+    say "⚠ bring-up has now FAILED $attempts times — not trying again."
+    say "  re-run by hand with:  smd bringup $PROFILE"
+    say "  then:                 sudo /usr/local/sbin/sigmond-site-timing"
+    say "  (that second command is NOT part of smd bringup, and without it the"
+    say "   station has no metrology channels while every unit still reads green)"
+else
+    printf 'attempts=%s\nresult=retry\n%s\n' "$attempts" "$(date -Iseconds)" > "$MARKER"
+    say "bring-up failed (attempt $attempts of $MAX_ATTEMPTS) — will retry on the next boot"
+    say "  a transient cause (slow RX-888 enumeration, no network yet) fixes itself;"
+    say "  re-run sooner by hand with:  smd bringup $PROFILE"
+fi
 
 # ─── activate CPU isolation ──────────────────────────────────────────────────
 # `smd apply` (inside bring-up above) STAGES isolcpus/nohz_full/rcu_nocbs in a
@@ -112,11 +179,10 @@ say "marker written ($MARKER); this unit will not run again"
 # a reboot is free -- nothing is decoding yet.  The decision lives in its own
 # script because code that reboots a station must be testable without rebooting
 # one; it reboots AT MOST once and says so loudly if it cannot.
-_IR=/usr/local/sbin/sigmond-isolation-reboot
-if [ -x "$_IR" ]; then
-    "$_IR" 2>&1 | while IFS= read -r _l; do say "$_l"; done
+if [ -x "$IR" ]; then
+    "$IR" 2>&1 | while IFS= read -r _l; do say "$_l"; done
 else
-    say "⚠ $_IR missing — CPU isolation will stay staged but inactive until a reboot"
+    say "⚠ $IR missing — CPU isolation will stay staged but inactive until a reboot"
 fi
 
 exit 0

@@ -3110,6 +3110,51 @@ def _stop_component_units(component: str) -> None:
         _warn(f'{component}: stop units skipped — {exc}')
 
 
+def _dormant_disable_units(name: str) -> None:
+    """systemd-disable a hardware-gated component's units while it is dormant.
+
+    `smd start` already refuses to start these (harmonize.dormant_reason), but
+    that gate guards the VERB, and systemd does not consult it.  The client's
+    unit ships `WantedBy=multi-user.target` with `UnitFilePreset=enabled`, so
+    every boot starts it regardless and, with no device, it crash-loops to
+    start-limit-hit.  WB6CXC-7 burned all 10 of `StartLimitBurst` in 74 seconds
+    on 2026-10-02; W3USR-06 was in the identical state.
+
+    Only units systemd would actually start at boot are touched — 'static',
+    'masked', 'disabled' and 'not-found' are already harmless, and disabling
+    them unconditionally would be noise at best.
+
+    Best-effort: a station must never fail to start because this bookkeeping
+    did not work.
+    """
+    try:
+        from sigmond.lifecycle import resolve_units
+        units = [u for u in resolve_units([name], [name])
+                 if not getattr(u, 'orphaned', False)]
+    except Exception as exc:
+        _warn(f'{name}: dormant, but its units could not be resolved to '
+              f'disable them — {exc}')
+        return
+
+    for u in units:
+        unit = getattr(u, 'unit', None)
+        if not unit:
+            continue
+        try:
+            state = _run(['systemctl', 'is-enabled', unit],
+                         capture=True, timeout=10).stdout.strip()
+        except Exception:
+            continue
+        if state != 'enabled':
+            continue
+        _run(['systemctl', 'disable', '--now', unit], sudo=True)
+        # Clear a start-limit-hit so the unit is not left red forever for a
+        # condition sigmond has now deliberately resolved.
+        _run(['systemctl', 'reset-failed', unit], sudo=True)
+        _info(f'  {unit}: systemd-disabled while dormant '
+              f'(it would crash-loop at every boot)')
+
+
 def cmd_add(args) -> int:
     """Clone a sigmond-managed component into /opt/git/sigmond/<name>/.
 
@@ -10828,6 +10873,24 @@ def cmd_start(args) -> int:
             hw = _dormant_reason(name, enabled=True)
             if hw:
                 _info(f'{name}: dormant — {hw} not present; starts when attached')
+                # ⛔ DORMANT MUST MEAN systemd-DISABLED, NOT MERELY "smd won't
+                # start it".  This gate guards the smd VERB; systemd does not
+                # consult it.  The client's unit ships
+                # WantedBy=multi-user.target with UnitFilePreset=enabled, so
+                # every boot starts it anyway and, with no device, it
+                # crash-loops to start-limit-hit.  WB6CXC-7 2026-10-02 burned
+                # all 10 of StartLimitBurst in 74 s (boot 16:27:21, failed
+                # 16:28:35); W3USR-06 sat in the identical state, so this is a
+                # class defect rather than one station's.
+                #
+                # Reversible by construction: topology still says enabled=true
+                # (the component DOES belong on a dasi2 station — the hardware
+                # is absent, not the intent), `smd validate` still reports it
+                # dormant rather than missing, and when the device appears this
+                # branch stops firing, the component lands in `startable`, and
+                # the start loop below re-enables it — it already enables any
+                # unit whose `systemctl is-enabled` is false.
+                _dormant_disable_units(name)
                 continue
             alias = getattr(entry, 'topology_alias', None) if entry else None
             s = compute_state(name, topo_for_state, alias=alias)
