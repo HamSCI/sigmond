@@ -1,1 +1,18 @@
-AMD Ryzen 7 5825U with Radeon Graphics
+model=AMD Ryzen 7 5825U with Radeon Graphics
+l3_bytes=16777216
+l3_ways=16
+radiod_l3_bytes=10485760
+samprate=129600000
+codelets=206
+bytes=33476
+# Provenance: sigmond-appliance/wisdomf-ryzen5825u — the file the image
+# actually bakes (build-golden-vm.sh:142 -> provision-components.sh:245).
+# It is COMPLETE: B4 and W3USR-06 both run it and report zero misses in
+# /var/lib/ka9q-radio/fft.log, and W3USR-06 walks the full ka9q-web zoom
+# ladder without a single fallback.
+#
+# This replaces a 15124 B / 109-codelet file that had HALF the coverage.
+# That mattered the moment _seed_bundled_wisdom() became reachable: a host
+# with no wisdom would have been seeded worse than the image already seeds
+# it, and the only symptom would have been a slow fft thread.
+# Verified 2026-10-02.
