@@ -15183,7 +15183,15 @@ def cmd_wisdom_plan(args) -> int:
     # is what that radiod CPU will be running."
     # Only boost when we are actually planning on vCPU 0 (the legacy path,
     # where the core really is throttled and nothing else is pinned there).
-    boost = _wisdom_boost_cpu0() if plan_cpus == '0' else None
+    # ⛔ A SENTINEL DICT, NOT None.  The reporting block below is an if/elif
+    # chain that dereferences boost['mode'] in every arm, and the finally-
+    # restore touches it again — returning None meant a TypeError at
+    # smd:15206 that killed the run AFTER `smd stop` had already taken the
+    # station down (measured, 2026-10-02). The chain already has an else arm
+    # for "not boosted", so hand it a dict that lands there.
+    boost = (_wisdom_boost_cpu0() if plan_cpus == '0' else
+             {'mode': 'skipped',
+              'reason': f'planning on CPU {plan_cpus} at its production clock'})
     if plan_cpus != '0':
         _info(f'frequency: left at the production setting for CPU {plan_cpus} '
               f'(not boosted — plans must match the clock radiod runs at)')
