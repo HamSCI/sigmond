@@ -10138,6 +10138,34 @@ def _wisdom_already_running() -> bool:
         return False
 
 
+def _radiod_plan_cpus() -> str:
+    """radiod's AllowedCPUs, so wisdom is planned in production's cache.
+
+    A station that partitions L3 by cpuset gives radiod a different number of
+    cache ways than the default group. Planning anywhere else measures the
+    wrong cache and bakes in algorithms radiod will never benefit from, which
+    is invisible afterwards: the wisdom file looks planned either way.
+    Returns '' when there is no radiod unit or no explicit cpuset, so callers
+    fall back to the historical CPU 0.
+    """
+    try:
+        out = subprocess.run(['systemctl', 'list-units', 'radiod@*',
+                              '--no-legend', '--plain', '--all'],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return ''
+    unit = next((ln.split()[0] for ln in out.splitlines() if ln.strip()), '')
+    if not unit:
+        return ''
+    try:
+        v = subprocess.run(['systemctl', 'show', unit, '-p', 'AllowedCPUs',
+                            '--value'], capture_output=True, text=True,
+                           timeout=10).stdout.strip()
+    except Exception:
+        return ''
+    return v if v and not v.startswith('[') else ''
+
+
 def _install_wisdom() -> None:
     """Atomically install wisdomf.new → wisdomf if it grew (sanity check)."""
     if not _WISDOM_TMP.exists():
@@ -15098,13 +15126,29 @@ def cmd_wisdom_plan(args) -> int:
 
     WISDOM_TMP.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pin to CPU 0 for the entire run.  FFTW's planner picks the
-    # fastest implementation by literally benchmarking each candidate;
-    # if the kernel migrates the process to a different core mid-plan,
-    # cache behaviour shifts and the timings get noisy — leading to
-    # suboptimal plans.  taskset's affinity is inherited by children,
-    # so stdbuf and fftwf-wisdom both stay on CPU 0.
-    cmd = ['taskset', '-c', '0',
+    # Pin for the entire run.  FFTW's planner picks the fastest
+    # implementation by literally benchmarking each candidate; if the kernel
+    # migrates the process to a different core mid-plan, cache behaviour
+    # shifts and the timings get noisy — leading to suboptimal plans.
+    # taskset's affinity is inherited by children, so stdbuf and
+    # fftwf-wisdom both stay put.
+    #
+    # ⛔ PIN TO THE CPUs radiod WILL USE, NOT CPU 0.  This was hardcoded to
+    # CPU 0, and on a cache-partitioned station that measures the WRONG
+    # cache.  Measured on WB6CXC-7 (Ryzen 5 5560U) 2026-10-02 — the host's
+    # resctrl groups are not alike:
+    #     /sys/fs/resctrl/others/  cpus=0-7,10-11  L3:0=fc00   ( 6 ways)
+    #     /sys/fs/resctrl/radiod/  cpus=8-9        L3:0=3ff    (10 ways)
+    # vCPU->pCPU is 1:1, so planning on CPU 0 benchmarks with 6 ways of L3
+    # while radiod runs with 10. FFTW chooses algorithms BY CACHE SIZE, so
+    # every plan would be optimal for a cache radiod never gets.
+    # rob, 2026-10-02: "the plan should happen on the CPU where the FFT will
+    # be running with the L3 allocations as they will be in production."
+    #
+    # Default is radiod's own AllowedCPUs when we can read them, CPU 0
+    # otherwise (unchanged behaviour on a station with no partitioning).
+    plan_cpus = os.environ.get('SIGMOND_WISDOM_CPUS') or _radiod_plan_cpus() or '0'
+    cmd = ['taskset', '-c', plan_cpus,
            'stdbuf', '-oL', fftwf, '-v', '-T', '1',
            '-o', str(WISDOM_TMP), *FFT_WISDOM_PROFILES]
 
@@ -15122,7 +15166,7 @@ def cmd_wisdom_plan(args) -> int:
     _heading(f'wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)')
     _info(f'output:   {WISDOM_TMP}')
     _info(f'log:      {WISDOM_LOG}')
-    _info(f'affinity: CPU 0  (single-core for stable FFTW timing measurements)')
+    _info(f"affinity: CPU {plan_cpus}  (radiod's own cores - same L3 partition as production)")
     if boost['mode'] == 'proxmox':
         if boost.get('boosted_khz') is not None:
             _info(f"CPU freq:  host {boost['host']} pCPU {boost['pcpu']} via SSH: "
