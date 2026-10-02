@@ -7815,6 +7815,36 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     import time
     if wisdom_file.exists():
         return True
+
+    # ⛔ IDENTIFY THE CPU BEFORE WAITING, AND SAY WHAT YOU FOUND.
+    # _seed_bundled_wisdom() has existed since the bundle mechanism landed
+    # and was UNREACHABLE — its only caller, _ensure_fft_wisdom(), is never
+    # invoked — so no station has ever been seeded, and every bring-up on
+    # every CPU planned from scratch.  On a 5560U that is 1 h 46 m for
+    # rof3240000 alone (measured WB6CXC-7, 2026-10-02).
+    #
+    # Seeding first turns a matched CPU's wait into nothing.  On a MISS the
+    # operator must be told immediately, by name — the silent version of
+    # this looks exactly like a hung bring-up.
+    from sigmond.wisdom import identify_cpu
+    verdict = identify_cpu(_WISDOM_BUNDLE_DIRS)
+    _info(f'FFT wisdom: this host is {verdict["model"]}')
+    if verdict['have_wisdom']:
+        _seed_bundled_wisdom()
+        if wisdom_file.exists():
+            _ok(f'FFT wisdom: seeded from bundle {verdict["bundle"].name} — '
+                f'no planning pass needed')
+            return True
+    else:
+        _warn(f'FFT wisdom: NO bundled wisdom for this CPU '
+              f'(wisdomf-{verdict["slug"]} is absent).')
+        _warn('  Planning from scratch takes HOURS — the station is down '
+              'until it finishes.  This is expected, not a hang.')
+        if verdict['known_bundles']:
+            _info(f'  Bundles present: {", ".join(verdict["known_bundles"])}')
+        _info(f'  When it completes, capture it so the next host of this '
+              f'model skips the wait:  smd admin wisdom harvest')
+
     _info(f'waiting for FFT wisdom ({wisdom_file}) — this can take ~30 min...')
     waited = 0
     while waited < timeout_s:
@@ -10104,19 +10134,14 @@ def cmd_apply(args) -> int:
 # fftwf-wisdom reads the existing wisdomf first and skips already-planned
 # transforms, so running with the full list is safe and fast when wisdom
 # is already current.  Source: ka9q-radio docs/FFTW3.md
-_FFT_WISDOM_PROFILES = [
-    # Inverse FFTs for demodulator channels — smallest first (fast to plan)
-    'cob15',   'cob45',   'cob85',
-    'cob160',  'cob200',  'cob205',  'cob300',   'cob320',
-    'cob400',  'cob405',  'cob480',  'cob600',   'cob800',  'cob810',
-    'cob960',  'cob1200', 'cob1600', 'cob1620',  'cob1920',
-    'cob3200', 'cob3240', 'cob4800', 'cob4860',  'cob6930',
-    'cob8100', 'cob9600', 'cob16200', 'cob32400', 'cob40500',
-    'cob81000', 'cob162000',
-    # Forward real FFTs — progressively larger, most expensive last
-    'rof1620000',   # RX888 MkII @  64.8 MHz, 20 ms block, overlap 5
-    'rof3240000',   # RX888 MkII @ 129.6 MHz, 20 ms block, overlap 5  ← hours
-]
+# ⛔ ONE LIST, NOT TWO.  A second hardcoded copy used to live here.  It
+# never received the cif*/cof* families added to the canonical list in
+# 8fe856c, so whichever code path you happened to hit decided whether a
+# whole transform family got planned.  The canonical list is
+# sigmond.wisdom.FFT_WISDOM_PROFILES; read it, never restate it.
+def _fft_wisdom_profiles() -> list:
+    from sigmond.wisdom import profiles_for_planning
+    return profiles_for_planning()
 
 _FFTWF_WISDOM_BIN = Path('/usr/bin/fftwf-wisdom')
 _WISDOM_FILE      = Path('/etc/fftw/wisdomf')
@@ -10281,7 +10306,8 @@ def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
         if r.returncode == 0:
             _run(['systemctl', 'stop', u.unit], sudo=True)
 
-    _info(f'FFT wisdom: checking {len(_FFT_WISDOM_PROFILES)} profiles '
+    _profiles = _fft_wisdom_profiles()
+    _info(f'FFT wisdom: checking {len(_profiles)} profiles '
           f'(skips already-planned transforms — fast if wisdom is current)')
 
     # stdbuf -oL forces line-buffered stdout so each progress line from
@@ -10291,7 +10317,7 @@ def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
     wisdom_cmd = (
         [_stdbuf, '-oL'] if _stdbuf else []
     ) + [str(_FFTWF_WISDOM_BIN), '-v', '-T', '1',
-         '-o', str(_WISDOM_TMP)] + _FFT_WISDOM_PROFILES
+         '-o', str(_WISDOM_TMP)] + _profiles
 
     with open(_WISDOM_LOG, 'w') as log_f:
         proc = subprocess.Popen(
@@ -15087,6 +15113,122 @@ def _wisdom_restore_cpu0(b: dict) -> str | None:
     return None
 
 
+def _wisdom_machine_facts() -> dict:
+    """Everything that makes a measured FFTW plan valid for THIS machine.
+
+    An FFTW plan is chosen by timing candidate algorithms, so it is only
+    optimal on the machine it was timed on.  CPU model alone is not enough:
+    the 5560U and 5825U are both Zen3 at the same 3.2 GHz pin and differ by
+    8 vs 16 MiB of L3 — and the resctrl partition splits that again.  Record
+    what we can see, and mark what we cannot rather than guessing.
+
+    resctrl lives on the Proxmox HOST and is not virtualised into guests,
+    so from inside a station VM the cache partition is simply unknown here.
+    """
+    facts = {}
+    try:
+        facts['model'] = next(
+            (ln.split(':', 1)[1].strip()
+             for ln in Path('/proc/cpuinfo').read_text().splitlines()
+             if ln.startswith('model name')), '')
+    except OSError:
+        facts['model'] = ''
+    for key, path in (('l3_bytes', '/sys/devices/system/cpu/cpu0/cache/index3/size'),
+                      ('l3_ways',  '/sys/devices/system/cpu/cpu0/cache/index3/ways_of_associativity')):
+        try:
+            raw = Path(path).read_text().strip()
+            facts[key] = str(int(raw[:-1]) * 1024) if raw.endswith('K') else raw
+        except (OSError, ValueError):
+            pass
+    try:
+        facts['mem_total_kb'] = next(
+            (ln.split()[1] for ln in Path('/proc/meminfo').read_text().splitlines()
+             if ln.startswith('MemTotal')), '')
+    except OSError:
+        pass
+    try:
+        rc = Path('/sys/fs/resctrl/radiod/size')
+        facts['radiod_l3_bytes'] = next(
+            (ln.split('=', 1)[1].strip() for ln in rc.read_text().splitlines()
+             if ln.strip().startswith('L3')), '')
+    except OSError:
+        facts['radiod_l3_bytes'] = 'unknown-from-guest (resctrl is host-only)'
+    try:
+        for conf in sorted(Path('/etc/radio').glob('radiod@*.conf')):
+            txt = conf.read_text()
+            if '[rx888]' in txt:
+                tail = txt.split('[rx888]', 1)[1]
+                for ln in tail.splitlines():
+                    if ln.strip().startswith('samprate'):
+                        facts['samprate'] = ln.split('=', 1)[1].split('#')[0].strip()
+                        break
+            if 'samprate' in facts:
+                break
+    except OSError:
+        pass
+    return facts
+
+
+def cmd_wisdom_harvest(args) -> int:
+    """Capture this host's planned wisdom as a CPU-matched bundle.
+
+    The whole point of bundling: planning rof3240000 from scratch took
+    1 h 46 m on a 5560U, and the zoom-ladder top-up on top of it.  A second
+    host of the same model should pay none of that.
+
+    rob, 2026-10-02: "after you run the plan for a CPU and memory
+    configuration, commit that so that a small set of similar CPUs during
+    bring up may be able to accelerate bring up by choosing wisdom files
+    appropriate to the CPU and its memory configuration."
+    """
+    from sigmond.wisdom import WISDOM_FILE, cpu_slug, read_sidecar
+
+    if not WISDOM_FILE.exists() or WISDOM_FILE.stat().st_size == 0:
+        _err(f'{WISDOM_FILE} is absent or empty — nothing to harvest.')
+        _info('Run:  smd admin wisdom plan')
+        return 1
+
+    facts = _wisdom_machine_facts()
+    if not facts.get('model'):
+        _err('cannot read the CPU model from /proc/cpuinfo — refusing to '
+             'write a bundle that nothing could ever match')
+        return 1
+
+    dest = Path(args.dest) if getattr(args, 'dest', None) else _WISDOM_BUNDLE_DIRS[0]
+    if not dest.is_dir():
+        _err(f'bundle directory {dest} does not exist')
+        return 1
+
+    slug = cpu_slug(facts['model'])
+    bundle = dest / f'wisdomf-{slug}'
+    sidecar = dest / f'wisdomf-{slug}.cpu'
+
+    if bundle.exists() and not getattr(args, 'force', False):
+        existing = bundle.stat().st_size
+        new = WISDOM_FILE.stat().st_size
+        _warn(f'{bundle.name} already exists ({existing} B); this host has '
+              f'{new} B.')
+        _info('Re-run with --force to replace it.')
+        return 1
+
+    codelets = WISDOM_FILE.read_text().count('fftwf_codelet')
+    shutil.copyfile(WISDOM_FILE, bundle)
+    lines = [f'model={facts["model"]}']
+    lines += [f'{k}={v}' for k, v in facts.items() if k != 'model' and v]
+    lines.append(f'codelets={codelets}')
+    lines.append(f'bytes={WISDOM_FILE.stat().st_size}')
+    sidecar.write_text('\n'.join(lines) + '\n')
+
+    _ok(f'harvested {WISDOM_FILE} → {bundle}')
+    _info(f'  {codelets} codelets, {WISDOM_FILE.stat().st_size} B')
+    for k, v in read_sidecar(sidecar).items():
+        _info(f'  {k:<16} {v}')
+    _warn('COMMIT IT, or it is lost — that is exactly how the ka9q-web '
+          'zoom-level plans built on the AI6VN lab box disappeared.')
+    _info(f'  git -C <sigmond checkout> add {bundle.name} {sidecar.name}')
+    return 0
+
+
 def cmd_wisdom_plan(args) -> int:
     """Run fftwf-wisdom for every transform radiod uses; install /etc/fftw/wisdomf.
 
@@ -15105,7 +15247,7 @@ def cmd_wisdom_plan(args) -> int:
     """
     from sigmond.wisdom import (
         FFT_WISDOM_PROFILES, WISDOM_FILE, WISDOM_TMP, WISDOM_LOG,
-        install_wisdom,
+        install_wisdom, profiles_for_planning,
     )
 
     fftwf = shutil.which('fftwf-wisdom')
@@ -15157,9 +15299,30 @@ def cmd_wisdom_plan(args) -> int:
     # Default is radiod's own AllowedCPUs when we can read them, CPU 0
     # otherwise (unchanged behaviour on a station with no partitioning).
     plan_cpus = os.environ.get('SIGMOND_WISDOM_CPUS') or _radiod_plan_cpus() or '0'
+
+    # ⛔ PLAN WHAT THIS STATION ACTUALLY MISSED, NOT JUST THE STATIC LIST.
+    # radiod plans FFTW_WISDOM_ONLY|FFTW_PATIENT and, on a miss, silently
+    # falls back to FFTW_ESTIMATE (filter.c:107-110) — an unmeasured
+    # heuristic plan that is then used forever.  The ONLY trace is a line
+    # in /var/lib/ka9q-radio/fft.log, so that file is exactly "the list of
+    # transforms running on bad plans right now".
+    #
+    # plans_from_fft_log() has existed since 8fe856c and was wired only to
+    # a status field — it reported the gap and never closed it.  That is
+    # why the ka9q-web zoom-level plans rob built on the AI6VN lab box were
+    # lost: nothing consumed the observation.  Feeding it to the planner
+    # makes every station self-heal for sizes no static list anticipated
+    # (new zoom levels, new channel bandwidths, another operator's client).
+    profiles = profiles_for_planning()
+    extra = profiles[len(FFT_WISDOM_PROFILES):]
+    if extra:
+        _info(f'fft.log reports {len(extra)} transform(s) radiod had to '
+              f'estimate; adding them to this run:')
+        print(f'      {" ".join(extra)}')
+
     cmd = ['taskset', '-c', plan_cpus,
            'stdbuf', '-oL', fftwf, '-v', '-T', '1',
-           '-o', str(WISDOM_TMP), *FFT_WISDOM_PROFILES]
+           '-o', str(WISDOM_TMP), *profiles]
 
     # Stage the pCPU running vCPU 0 at its hardware-max frequency for the
     # duration of the run, then restore.  FFTW's planner is timing-sensitive
@@ -15196,7 +15359,8 @@ def cmd_wisdom_plan(args) -> int:
         _info(f'frequency: left at the production setting for CPU {plan_cpus} '
               f'(not boosted — plans must match the clock radiod runs at)')
 
-    _heading(f'wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)')
+    _heading(f'wisdom plan ({len(profiles)} profiles'
+             f'{f", {len(extra)} from fft.log" if extra else ""})')
     _info(f'output:   {WISDOM_TMP}')
     _info(f'log:      {WISDOM_LOG}')
     _info(f"affinity: CPU {plan_cpus}  (radiod's own cores - same L3 partition as production)")
@@ -23410,6 +23574,14 @@ def main() -> int:
                               help='show whether /etc/fftw/wisdomf exists and how old it is '
                                    '(default for bare `smd admin wisdom`)')
 
+    p = wisdom_sub.add_parser('harvest',
+                              help="capture this host's planned wisdom as a reusable "
+                                   'CPU-matched bundle in the sigmond repo')
+    p.add_argument('--dest', default=None,
+                   help='bundle directory (default: the sigmond checkout\'s wisdom/)')
+    p.add_argument('--force', action='store_true',
+                   help='overwrite an existing bundle for this CPU model')
+
     wisdom_sub.add_parser('help', help='show this help')
 
     # diag  (with its own sub-commands)
@@ -24555,6 +24727,8 @@ def main() -> int:
             if _need_root('wisdom plan'):
                 return 1
             return cmd_wisdom_plan(args)
+        if wis_cmd == 'harvest':
+            return cmd_wisdom_harvest(args)
         if wis_cmd == 'help':
             p_wisdom.print_help()
             return 0

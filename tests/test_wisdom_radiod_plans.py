@@ -67,3 +67,70 @@ def test_garbage_lines_are_ignored(tmp_path):
     log.write_text("cif300\n\n  \nnot-a-plan\ncob512\n")
 
     assert plans_from_fft_log(log) == ['cif300', 'cob512']
+
+
+# ── ka9q-web spectrum zoom ladder ────────────────────────────────────────
+#
+# Every zoom level in the web UI is a different transform size, so a
+# browser walking the zoom control creates each in turn.  None were in
+# the profile list, so each ran on FFTW_ESTIMATE forever, and the cost
+# lands in the `fft` worker thread.  Observed on WB6CXC-7 2026-10-02 with
+# three ka9q-web sessions open — 25 distinct transforms, none covered.
+#
+# rob had already planned these by hand on the AI6VN lab box; that work
+# was lost because nothing wrote the list down.  This test is what makes
+# losing it again a test failure rather than a silent regression.
+CXC_ZOOM_MISSES = (
+    'cof1625', 'cof1638', 'cof1650', 'cof1664',
+    'cif1650', 'cif2080', 'cif3250', 'cif4095', 'cif8125',
+    'cob1650', 'cob2080', 'cob3250', 'cob4095', 'cob8125',
+    'rof3240', 'rof6480', 'rof12960', 'rof16200', 'rof25920',
+    'rof32400', 'rof64800', 'rof129600', 'rof162000', 'rof259200',
+    'rof324000',
+)
+
+
+def test_the_zoom_ladder_is_covered():
+    missing = [p for p in CXC_ZOOM_MISSES if p not in FFT_WISDOM_PROFILES]
+
+    assert not missing, (
+        f"ka9q-web zoom levels left unplanned, will run on FFTW_ESTIMATE: {missing}"
+    )
+
+
+def test_the_expensive_front_end_pair_is_planned_last():
+    """Smallest-first is a usability property: the operator must see
+    progress in seconds, and rof3240000 alone takes ~1 h 46 m (measured
+    on WB6CXC-7, a 5560U).  If it drifts earlier the run looks hung."""
+    assert FFT_WISDOM_PROFILES[-2:] == ('rof1620000', 'rof3240000')
+
+
+def test_planner_plans_the_misses_not_just_the_static_list(tmp_path):
+    """The whole point: fft.log must reach the PLANNER, not just a status
+    field.  plans_from_fft_log() shipped in 8fe856c wired only to
+    `wisdom_misses` in `smd diag` — it reported the gap for seven weeks
+    and never closed it.  Delete the union below and this is the test
+    that fails."""
+    from sigmond.wisdom import profiles_for_planning
+
+    log = tmp_path / "fft.log"
+    log.write_text("rof99999 cob77777 rof99999\ncob15\n")   # 2 new, 1 dup, 1 known
+
+    profiles = profiles_for_planning(log)
+
+    assert 'rof99999' in profiles and 'cob77777' in profiles
+    assert profiles.count('rof99999') == 1, "a repeated miss must not be planned twice"
+    assert profiles.count('cob15') == 1, "a miss already in the static list is not re-added"
+    assert profiles[:len(FFT_WISDOM_PROFILES)] == list(FFT_WISDOM_PROFILES)
+
+
+def test_planner_is_unchanged_when_nothing_missed(tmp_path):
+    """The null: an empty fft.log must add nothing.  Without this, a test
+    that only ever sees misses would pass against a function that
+    unconditionally appended garbage."""
+    from sigmond.wisdom import profiles_for_planning
+
+    log = tmp_path / "fft.log"
+    log.write_text("")
+
+    assert profiles_for_planning(log) == list(FFT_WISDOM_PROFILES)
