@@ -3147,12 +3147,41 @@ def _dormant_disable_units(name: str) -> None:
             continue
         if state != 'enabled':
             continue
+
+        # ⛔ CAPTURE THE UNIT FILE FIRST.  sigmond's client units are LINKED --
+        # /etc/systemd/system/<unit> is a symlink into /opt/git/sigmond/<comp>/
+        # systemd/ -- and `systemctl disable` on a linked unit removes that
+        # symlink as well as the WantedBy ones, leaving the unit `not-found`
+        # instead of `disabled`.  That is worse than the crash-loop it fixes:
+        # `smd start` and `smd validate` would then report the component
+        # MISSING rather than dormant, and attaching the hardware would not
+        # bring it back.  Observed doing exactly this on WB6CXC-7 and
+        # W3USR-06, 2026-10-02 -- both had to be re-linked by hand.
+        try:
+            frag = _run(['systemctl', 'show', unit, '-p', 'FragmentPath',
+                         '--value'], capture=True, timeout=10).stdout.strip()
+        except Exception:
+            frag = ''
+
         _run(['systemctl', 'disable', '--now', unit], sudo=True)
+
+        # Re-link if disable took the unit file with it.  The desired end
+        # state is `linked`: present and startable on demand, absent from
+        # multi-user.target.wants so no boot ever starts it.
+        try:
+            load = _run(['systemctl', 'show', unit, '-p', 'LoadState',
+                         '--value'], capture=True, timeout=10).stdout.strip()
+        except Exception:
+            load = ''
+        if load == 'not-found' and frag and Path(frag).exists():
+            _run(['systemctl', 'link', frag], sudo=True)
+            _run(['systemctl', 'daemon-reload'], sudo=True)
+
         # Clear a start-limit-hit so the unit is not left red forever for a
         # condition sigmond has now deliberately resolved.
         _run(['systemctl', 'reset-failed', unit], sudo=True)
-        _info(f'  {unit}: systemd-disabled while dormant '
-              f'(it would crash-loop at every boot)')
+        _info(f'  {unit}: not started at boot while dormant '
+              f'(it would crash-loop); relights when the device appears')
 
 
 def cmd_add(args) -> int:

@@ -25,6 +25,7 @@ import importlib.util
 import os
 import subprocess
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -51,13 +52,26 @@ class _Unit:
 
 class DormantUnitsAreDisabled(unittest.TestCase):
 
-    def _harness(self, units, is_enabled='enabled'):
-        """Record every systemctl smd runs; report is-enabled as given."""
+    def _harness(self, units, is_enabled='enabled',
+                 fragment='/opt/git/sigmond/mag-recorder/systemd/mag-recorder.service',
+                 load_after_disable='loaded'):
+        """Record every systemctl smd runs; report is-enabled as given.
+
+        `load_after_disable='not-found'` reproduces the linked-unit case:
+        `systemctl disable` removed the unit symlink along with the WantedBy
+        ones, so the unit file itself is gone.
+        """
         calls = []
 
         def fake_run(cmd, *a, **kw):
             calls.append(list(cmd))
-            out = is_enabled if cmd[:2] == ['systemctl', 'is-enabled'] else ''
+            out = ''
+            if cmd[:2] == ['systemctl', 'is-enabled']:
+                out = is_enabled
+            elif cmd[:2] == ['systemctl', 'show'] and 'FragmentPath' in cmd:
+                out = fragment
+            elif cmd[:2] == ['systemctl', 'show'] and 'LoadState' in cmd:
+                out = load_after_disable
             return subprocess.CompletedProcess(cmd, 0, out, '')
 
         self._orig_run = smd._run
@@ -102,6 +116,33 @@ class DormantUnitsAreDisabled(unittest.TestCase):
         smd._dormant_disable_units('mag-recorder')
 
         self.assertFalse([c for c in calls if 'disable' in c])
+
+    def test_a_LINKED_unit_whose_file_disable_removed_is_re_linked(self):
+        """sigmond's client units are symlinks into /opt/git/sigmond/<comp>/.
+        `systemctl disable` removes that symlink too, leaving the unit
+        `not-found` — which is WORSE than the crash-loop, because the
+        component then reads as MISSING rather than dormant and attaching the
+        hardware will not bring it back.  Both WB6CXC-7 and W3USR-06 had to be
+        re-linked by hand after exactly this, 2026-10-02."""
+        frag = '/opt/git/sigmond/mag-recorder/systemd/mag-recorder.service'
+        calls = self._harness([_Unit('mag-recorder.service')],
+                              fragment=frag, load_after_disable='not-found')
+
+        with unittest.mock.patch.object(smd.Path, 'exists', lambda self: True):
+            smd._dormant_disable_units('mag-recorder')
+
+        self.assertIn(['systemctl', 'link', frag], calls,
+                      'a linked unit whose file disable removed was not restored')
+
+    def test_a_normal_unit_is_NOT_re_linked(self):
+        """The null: re-linking an ordinary enabled unit that disable left
+        intact would be meddling."""
+        calls = self._harness([_Unit('mag-recorder.service')],
+                              load_after_disable='loaded')
+
+        smd._dormant_disable_units('mag-recorder')
+
+        self.assertFalse([c for c in calls if 'link' in c])
 
     def test_orphaned_units_are_skipped(self):
         calls = self._harness([_Unit('mag-recorder@stale.service', orphaned=True)])
