@@ -1,0 +1,22 @@
+model=AMD Ryzen 5 5560U with Radeon Graphics
+l3_bytes=8388608
+l3_ways=16
+radiod_l3_bytes=5242880
+samprate=129600000
+codelets=302
+# Planned ON a 5560U, on radiod's own core (CPU 8) at its production
+# 3.2 GHz pin, with the production resctrl partition in force
+# (/sys/fs/resctrl/radiod L3:0=3ff = 5.00 MiB).  FFTW picks algorithms by
+# timing them, so a plan is only optimal on the machine it was measured
+# on -- the 5560U's ten ways are 5 MiB where the 5825U's are 10 MiB, and
+# that changes the answer.
+#
+# Measured worth, same silicon and isolation, 2026-10-02:
+#   WB6CXC-7  this file (302 codelets, local)   fft 48.1%  (2 web clients)
+#   AI6VN     5825U seed (206 codelets)         fft 59.0%  (0 web clients)
+# ~11 points, and CXC carried the heavier client load.
+#
+# Converged: /var/lib/ka9q-radio/fft.log stays EMPTY across a full restart,
+# so radiod asks for nothing this lacks -- including all 23 ka9q-web zoom
+# levels (ka9q-web.c:716) and the demod channel-filter sizes.
+# Harvested from WB6CXC-7 2026-10-02.
