@@ -10163,7 +10163,16 @@ def _radiod_plan_cpus() -> str:
                            timeout=10).stdout.strip()
     except Exception:
         return ''
-    return v if v and not v.startswith('[') else ''
+    if not v or v.startswith('['):
+        return ''
+    # ⛔ ONE CORE, NOT THE WHOLE CPUSET.  fftwf-wisdom runs -T 1 (single
+    # threaded) and FFTW chooses by timing; letting the kernel bounce it
+    # between 8 and 9 mid-plan reintroduces exactly the measurement noise the
+    # original CPU-0 pin existed to prevent. rob watched it migrate live,
+    # 2026-10-02: "I can see it's moving the FFT between CPU 8 and CPU 9 —
+    # pin it to CPU 8 and keep it there." Take the first core of radiod's set.
+    first = v.split(',')[0].split('-')[0].strip()
+    return first if first.isdigit() else ''
 
 
 def _install_wisdom() -> None:
@@ -15161,13 +15170,29 @@ def cmd_wisdom_plan(args) -> int:
     # install-state.env), this SSHes to the host using the same key
     # install.sh used for grub edits and writes the host pCPU's sysfs.
     # Best-effort: failures degrade to "run at whatever the OS picks".
-    boost = _wisdom_boost_cpu0()
+    # ⛔ DO NOT BOOST, AND DO NOT BOOST THE WRONG CORE.  This raises vCPU 0's
+    # host pCPU to cpuinfo_max_freq.  Two problems once planning moved off
+    # CPU 0: it boosts a core nothing is running on, and on this hardware that
+    # core sits in the same package — spending power budget that the planning
+    # core needs to hold its clock.  More fundamentally, production is a PINNED
+    # frequency, not max: the host hookscript sets radiod's cores to exactly
+    # 3.2 GHz (min=max=3200000, governor=performance) and worker cores to
+    # 1.4 GHz.  Planning at 4.06 GHz would bias the plans toward codelets that
+    # win at a clock radiod never sees — the same error as planning in the
+    # wrong cache. rob, 2026-10-02: "it ought to be running at 3.2 GHz, which
+    # is what that radiod CPU will be running."
+    # Only boost when we are actually planning on vCPU 0 (the legacy path,
+    # where the core really is throttled and nothing else is pinned there).
+    boost = _wisdom_boost_cpu0() if plan_cpus == '0' else None
+    if plan_cpus != '0':
+        _info(f'frequency: left at the production setting for CPU {plan_cpus} '
+              f'(not boosted — plans must match the clock radiod runs at)')
 
     _heading(f'wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)')
     _info(f'output:   {WISDOM_TMP}')
     _info(f'log:      {WISDOM_LOG}')
     _info(f"affinity: CPU {plan_cpus}  (radiod's own cores - same L3 partition as production)")
-    if boost['mode'] == 'proxmox':
+    if boost and boost['mode'] == 'proxmox':
         if boost.get('boosted_khz') is not None:
             _info(f"CPU freq:  host {boost['host']} pCPU {boost['pcpu']} via SSH: "
                   f"{boost['saved_khz']/1000:.0f} → {boost['boosted_khz']/1000:.0f} MHz "
@@ -15224,7 +15249,7 @@ def cmd_wisdom_plan(args) -> int:
             _warn('aborted by operator (Ctrl-C)')
             return 130
     finally:
-        if boost.get('boosted_khz') is not None:
+        if boost and boost.get('boosted_khz') is not None:
             saved_mhz = boost['saved_khz'] / 1000
             err = _wisdom_restore_cpu0(boost)
             if err is None:
