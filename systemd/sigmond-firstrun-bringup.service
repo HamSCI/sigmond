@@ -8,7 +8,10 @@ Wants=network-online.target
 # build a station around.  Checked again in the script, because this
 # condition is only re-read at boot and the script is also runnable by hand.
 ConditionPathExists=/etc/sigmond/.personalized
-ConditionPathExists=!/var/lib/sigmond/.firstrun-bringup-done
+# NO ConditionPathExists=!<marker>: sigmond-firstrun-bringup reads the marker
+# and exits at once when nothing is owed.  The condition refused to START the
+# unit once ANY marker existed, which silently killed result=retry and would
+# kill result=awaiting-sdr (no SDR at install; finish when it is plugged in).
 
 [Service]
 Type=oneshot

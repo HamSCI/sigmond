@@ -100,6 +100,9 @@ class Plan:
     local_radiod: bool
     remote_status_dns: Optional[str]
     steps: list = field(default_factory=list)
+    # True when the plan defers the radio half because no SDR was on the bus.
+    # The executor then exits PARTIAL (rc 3), never "done" -- see build_plan.
+    sdr_absent: bool = False
 
 
 def build_plan(profile, *, local_radiod: bool,
@@ -107,7 +110,8 @@ def build_plan(profile, *, local_radiod: bool,
                smd: str = 'smd', with_optional: bool = False,
                non_interactive: bool = False, skip=frozenset(),
                dormant=frozenset(), no_config=frozenset(),
-               reporter: Optional[str] = None) -> Plan:
+               reporter: Optional[str] = None,
+               sdr_absent: bool = False) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
     ``local_radiod`` gates the entire radiod stack (infra, ka9q-radio, tuning,
@@ -129,7 +133,21 @@ def build_plan(profile, *, local_radiod: bool,
     no config for the probe to find.  ``ka9q-web`` has always had this
     treatment implicitly, by sitting in ``local_radiod_infra`` rather than in
     ``clients``; ``gmag-webui`` sits in ``clients`` and needs it named.
+
+    ``sdr_absent`` (local radiod only) means no SDR was on the USB bus when
+    bring-up began.  mjh, 2026-10-04, from Fargo: never write "done" when not
+    done; offer an abort, but by default carry on without the radio.  So the
+    plan still INSTALLS everything, and runs the independent track whole, but
+    defers every step that needs radiod's configuration: radiod's own config
+    and its hard checkpoint, host tuning (``smd apply`` starts radiod), FFT
+    wisdom, the ka9q-web unit, every radiod-bound client's config, instance
+    and upload flag, the streaming waits and the radiod-bound starts.  The
+    radio half is installed WITHOUT enabling it in topology, so Stage 4's
+    catch-all ``smd start`` cannot start a recorder that has no config.  The
+    plan is marked partial; re-running bring-up once the card is present
+    (firstrun does that on its arrival) completes it.
     """
+    deferring = bool(sdr_absent and local_radiod)
     steps: list = []
 
     # Pre-create the shared SQLite sink with group-writable perms BEFORE any
@@ -149,7 +167,7 @@ def build_plan(profile, *, local_radiod: bool,
                             ' && chgrp sigmond /var/lib/sigmond/sink.db'
                             ' && chmod 664 /var/lib/sigmond/sink.db']))
 
-    def install(stage: str, comp: str) -> None:
+    def install(stage: str, comp: str, enable: bool = True) -> None:
         # Enable in topology BEFORE installing.  `smd install --components` builds
         # the component but does NOT flip topology `enabled=true` (only
         # `smd install --profile` does, via set_component_enabled).  Without this
@@ -157,6 +175,14 @@ def build_plan(profile, *, local_radiod: bool,
         # nothing "declared" and the Stage-4 `smd start` steps have nothing to
         # start (radiod is left disabled/inactive).  `smd enable` is idempotent,
         # so re-running bring-up is a no-op here.
+        if not enable:
+            # Deferred radio half (no SDR): build it, leave it disabled, so no
+            # catch-all start can launch it before it is configured.
+            steps.append(Step(stage, f'install {comp} (not enabled — radio deferred)',
+                              'install',
+                              argv=[smd, 'install', '--components', comp, '--yes',
+                                    '--no-enable']))
+            return
         steps.append(Step(stage, f'enable {comp}', 'enable',
                           argv=[smd, 'enable', comp]))
         steps.append(Step(stage, f'install {comp}', 'install',
@@ -190,7 +216,20 @@ def build_plan(profile, *, local_radiod: bool,
                           check=check, hard=hard))
 
     # --- Stage 1: radiod stack (local only) ---
-    if local_radiod:
+    if deferring:
+        steps.append(Step(STAGE1, 'NO SDR on the USB bus — installing the radiod '
+                                  'stack but deferring its configuration, host '
+                                  'tuning, FFT wisdom and every radiod-bound '
+                                  'client until the SDR appears', 'note'))
+        for infra in profile.local_radiod_infra:
+            if infra in skip:
+                continue
+            install(STAGE1, infra, enable=False)
+        install(STAGE1, 'ka9q-radio', enable=False)
+        if with_optional:
+            for opt in profile.optional:
+                install(STAGE1, opt, enable=False)
+    elif local_radiod:
         for infra in profile.local_radiod_infra:
             if infra in skip:           # hardware-gated infra absent (e.g. no GPSDO)
                 continue
@@ -250,8 +289,8 @@ def build_plan(profile, *, local_radiod: bool,
 
     # --- Stage 2: hf-timestd (timing authority; radiod-bound) ---
     if _TIMING_AUTHORITY in profile.clients and _TIMING_AUTHORITY not in skip:
-        install(STAGE2, _TIMING_AUTHORITY)
-        if _TIMING_AUTHORITY not in no_config:
+        install(STAGE2, _TIMING_AUTHORITY, enable=not deferring)
+        if _TIMING_AUTHORITY not in no_config and not deferring:
             configure(STAGE2, _TIMING_AUTHORITY)
             checkpoint(STAGE2, 'hf-timestd configured',
                        check=f'configured:{_TIMING_AUTHORITY}',
@@ -262,7 +301,9 @@ def build_plan(profile, *, local_radiod: bool,
         if (client == _TIMING_AUTHORITY or client in _INDEPENDENT
                 or client in skip):
             continue
-        install(STAGE3A, client)
+        install(STAGE3A, client, enable=not deferring)
+        if deferring:
+            continue    # config, instance and upload flag need radiod's status
         # ⛔ Both of these guards were missing here while the Stage-3b loop
         # below carried them, and the two loops disagreeing IS the defect:
         # gmag-webui rides this track, so a Fargo station with no
@@ -404,7 +445,9 @@ def build_plan(profile, *, local_radiod: bool,
     # installed and configured -- see the note there.  Stage 4's catch-all
     # `smd start` below still covers any that did not come up.
 
-    if local_radiod:
+    if deferring:
+        radiod_bound = []           # installed, not enabled, nothing to start
+    elif local_radiod:
         steps.append(Step(STAGE4, 'wait for FFT wisdom before starting radiod',
                           'wait-wisdom'))
         radiod_stack = ['ka9q-radio'] + [i for i in profile.local_radiod_infra
@@ -453,11 +496,16 @@ def build_plan(profile, *, local_radiod: bool,
     # cascade (cycle gaps, missing bands, out-of-order uploads, low output).
     # `cpu-affinity --apply` daemon-reexecs the exclusion + sets AllowedCPUs on
     # every running service; idempotent.
-    if local_radiod:
+    if local_radiod and not deferring:
         steps.append(Step(STAGE4, 'reserve radiod cores (apply cache-pair CPU exclusion)',
                           'tune',
                           argv=[smd, 'admin', 'diag', 'cpu-affinity', '--apply']))
     checkpoint(STAGE4, 'final validate', check='validate')
+    if deferring:
+        steps.append(Step(STAGE4, 'PARTIAL — the radio half waits for the SDR; '
+                                  'bring-up completes when it is plugged in '
+                                  '(or run `smd bringup` again)', 'note'))
 
     return Plan(profile=profile.name, local_radiod=local_radiod,
-                remote_status_dns=remote_status_dns, steps=steps)
+                remote_status_dns=remote_status_dns, steps=steps,
+                sdr_absent=deferring)

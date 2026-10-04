@@ -8273,12 +8273,14 @@ def cmd_bringup(args) -> int:
         return 1
 
     remote_dns = getattr(args, 'remote_radiod', None)
+    sdr_absent = False      # set below when a local-radiod profile finds no SDR
     if remote_dns is not None:
         local = False                     # explicit remote override
     elif prof.local_radiod_infra:
         # Local-radiod profile: the upfront check is the SDR HARDWARE on the USB
         # bus, NOT whether ka9q-radio is built yet (bringup builds it).
         if not _detect_local_sdr():
+            sdr_absent = True
             # Install lays the groundwork and activates nothing.  Fargo
             # installs with NOTHING attached and gains the RX888 after a
             # reboot; refusing here makes the machine un-buildable at the
@@ -8288,6 +8290,24 @@ def cmd_bringup(args) -> int:
                   'cannot run and NOTHING decodes (WSPR / PSK / GRAPE all '
                   'dark). Installing anyway; the station stays dormant until '
                   'an SDR is attached and adopted with `smd adopt`.')
+            # mjh, 2026-10-04: offer an abort, but by DEFAULT carry on without
+            # the radio.  Only a person at a terminal is asked; an unattended
+            # first boot (--non-interactive, or no tty) always carries on.
+            if (not getattr(args, 'non_interactive', False)
+                    and not getattr(args, 'dry_run', False)
+                    and sys.stdin.isatty()):
+                try:
+                    ans = input('No SDR found.  [C]ontinue without the radio '
+                                '(it completes when the SDR is plugged in), '
+                                'or [a]bort?  [C/a] ').strip().lower()
+                except EOFError:
+                    ans = ''
+                if ans.startswith('a'):
+                    _err('bringup: aborted by the operator — nothing installed')
+                    return 1
+            _info('bringup: continuing WITHOUT the radio — everything installs; '
+                  'radiod and its clients are configured and started when the '
+                  'SDR appears.  This run will report PARTIAL, not complete.')
         local = True
         # Local-radiod means radiod installs dormant on this host; nothing
         # starts on its own just because the hardware later shows up.
@@ -8441,6 +8461,7 @@ def cmd_bringup(args) -> int:
                   '(no hand-entry — the GPS is the station location)')
 
     plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
+                      sdr_absent=sdr_absent,
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
                       non_interactive=getattr(args, 'non_interactive', False),
                       skip=frozenset(skip), dormant=frozenset(dormant),
@@ -8676,9 +8697,31 @@ def cmd_bringup(args) -> int:
               'until this is done)')
 
     print()
-    _ok(f"bringup '{prof.name}' complete")
+    return _bringup_finish(plan, prof.name)
+
+
+def _bringup_finish(plan, name: str) -> int:
+    """The verdict of a bring-up that ran to its end.
+
+    ⛔ NEVER "complete" when the radio half was deferred (mjh, 2026-10-04:
+    do not write done when not done).  rc 3 tells sigmond-firstrun-bringup to
+    record result=awaiting-sdr, which is not final, and the SDR's arrival
+    re-runs bring-up to finish the job."""
+    if plan.sdr_absent:
+        _warn(f"bringup '{name}' PARTIAL — no SDR, so radiod and the "
+              "radiod-bound clients are installed but not configured or started.")
+        _info('plug in the SDR: first-run bring-up completes on its own; '
+              f'by hand, run `smd bringup {name}` again')
+        return BRINGUP_PARTIAL_RC
+    _ok(f"bringup '{name}' complete")
     _info('verify anytime with: smd admin validate')
     return 0
+
+
+# Exit status of a bring-up that ran to the end with the radio half deferred
+# (no SDR).  Neither success (0) nor failure (1): sigmond-firstrun-bringup
+# maps it to result=awaiting-sdr.
+BRINGUP_PARTIAL_RC = 3
 
 
 def _install_profile(args) -> int:

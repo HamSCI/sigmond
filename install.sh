@@ -947,19 +947,25 @@ ok "sigmond-sdr-recover + sigmond-radiod-ready symlinks installed"
 # and NOTHING RUNNING -- no radiod, no ka9q-web, no recorders -- because
 # installing and starting the station was a separate step nobody is told to
 # run (rob 2026-09-17: "it is supposed to start up and run everything after an
-# installation").  The unit fires once, on the first boot after the wizard
-# personalizes the host, and is a no-op on every host that is already up.
+# installation").  The unit runs on every boot and on the SDR's arrival; the
+# script reads its marker and does real work only until bring-up is complete
+# (result=ok), so it is a no-op on every host that is already up.
 info "Installing first-run bring-up -> /usr/local/bin/"
 $SUDO chmod a+x "$REPO_DIR/bin/sigmond-firstrun-bringup"
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-firstrun-bringup" /usr/local/bin/sigmond-firstrun-bringup
 $SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-firstrun-bringup.service" \
      /etc/systemd/system/sigmond-firstrun-bringup.service
+# The SDR's arrival re-runs it, so a bring-up that found no SDR (result=
+# awaiting-sdr) completes when the card is plugged in, with nobody on site.
+$SUDO install -m 0644 "$REPO_DIR/udev/90-sigmond-sdr-arrival.rules" \
+     /etc/udev/rules.d/90-sigmond-sdr-arrival.rules
+$SUDO udevadm control --reload-rules 2>/dev/null || true
 $SUDO systemctl daemon-reload
-# enable, NOT --now: on an already-running station this must wait for a boot
-# (and its ConditionPathExists guards), never start a bring-up under the
-# operator mid-install.
+# enable, NOT --now: on an already-running station this must wait for a boot,
+# never start a bring-up under the operator mid-install.  The script itself
+# reads the marker and exits at once when nothing is owed.
 $SUDO systemctl enable sigmond-firstrun-bringup.service 2>/dev/null \
-    && ok "sigmond-firstrun-bringup.service enabled (fires once after personalization)" \
+    && ok "sigmond-firstrun-bringup.service enabled (runs until bring-up is complete)" \
     || warn "could not enable sigmond-firstrun-bringup.service"
 
 # ts1: operator console on the TS-1 TimeSync injector (rob 2026-09-05) — on

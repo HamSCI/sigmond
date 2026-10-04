@@ -40,16 +40,24 @@ say(){ printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG"; }
 
 # The marker is now a RESULT, not merely a tombstone: `result=retry` means a
 # previous boot failed for a possibly-transient reason and we are allowed to
-# try again.  Anything else (ok, gave-up) is final.  A legacy marker from
-# before this change carries no result= line and is treated as final, so an
-# upgrade never re-runs bring-up on a station that already completed.
+# try again; `result=awaiting-sdr` means bring-up ran to the end WITHOUT the
+# radio (no SDR on the bus) and the radio half is still owed.  Anything else
+# (ok, gave-up) is final.  A legacy marker from before this change carries no
+# result= line and is treated as final, so an upgrade never re-runs bring-up
+# on a station that already completed.
+#
+# ⛔ This script, not systemd, decides.  The unit used to carry
+# ConditionPathExists=!<marker>, which refused to START once any marker
+# existed -- so result=retry never got its retry.  The unit now runs on every
+# boot and on the SDR's arrival (udev), and exits here when nothing is owed.
 if [ -e "$MARKER" ]; then
     _res=$(sed -n 's/^result=\(.*\)/\1/p' "$MARKER" 2>/dev/null | head -1)
-    if [ "${_res:-final}" != retry ]; then
-        say "already ran (marker $MARKER, result=${_res:-final}) — nothing to do"
-        exit 0
-    fi
-    say "previous boot left result=retry — attempting bring-up again"
+    case "${_res:-final}" in
+        retry)        say "previous boot left result=retry — attempting bring-up again" ;;
+        awaiting-sdr) say "previous run deferred the radio (no SDR) — completing bring-up now" ;;
+        *)            say "already ran (marker $MARKER, result=${_res:-final}) — nothing to do"
+                      exit 0 ;;
+    esac
 fi
 if [ ! -e "$SENTINEL" ]; then
     say "host is not personalized yet ($SENTINEL absent) — leaving the station"
@@ -70,13 +78,22 @@ say "this takes many minutes; follow it with: tail -f $LOG"
 # config interview takes its defaults, which the operator refines later with
 # `smd config edit <client>`.  Better a running station with defaults than a
 # dead one waiting on a prompt nobody will answer.
+# Exit 3 = PARTIAL: ran to the end with the radio half deferred (no SDR).
+# Never "done" -- mjh, 2026-10-04: do not write done when not done.
+partial=0
 if "$SMD" bringup "$PROFILE" --non-interactive >>"$LOG" 2>&1; then
     say "bring-up finished"
     bringup_ok=1
 else
     rc=$?
     bringup_ok=0
-    say "bring-up exited $rc — see $LOG"
+    if [ "$rc" -eq 3 ]; then
+        partial=1
+        say "bring-up PARTIAL — no SDR on the USB bus; everything else is up,"
+        say "  and the radio half completes when the SDR is plugged in"
+    else
+        say "bring-up exited $rc — see $LOG"
+    fi
 fi
 
 # ⛔ THE SITE WIRING AND THE RETRY DECISION ARE **OUTSIDE** THE SUCCESS BRANCH.
@@ -153,9 +170,16 @@ fi
 # times it tried and `rm` it to start over.
 MAX_ATTEMPTS=3
 attempts=$(sed -n 's/^attempts=\([0-9]*\).*/\1/p' "$MARKER" 2>/dev/null | head -1)
-attempts=$((${attempts:-0} + 1))
+attempts=${attempts:-0}
+# A missing SDR is not a failed attempt: it costs no retry budget, and it waits
+# as long as it takes, because the thing it waits for is a person with a cable.
+[ "$partial" -eq 1 ] || attempts=$((attempts + 1))
 
-if [ "$bringup_ok" -eq 1 ]; then
+if [ "$partial" -eq 1 ]; then
+    printf 'attempts=%s\nresult=awaiting-sdr\n%s\n' "$attempts" "$(date -Iseconds)" > "$MARKER"
+    say "marker: result=awaiting-sdr — NOT done.  Plugging in the SDR re-runs this;"
+    say "  so does any reboot.  By hand:  smd bringup $PROFILE"
+elif [ "$bringup_ok" -eq 1 ]; then
     printf 'attempts=%s\nresult=ok\n%s\n' "$attempts" "$(date -Iseconds)" > "$MARKER"
     say "marker written ($MARKER); bring-up succeeded on attempt $attempts"
 elif [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then

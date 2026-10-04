@@ -131,7 +131,7 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
 | After | Verifies | Policy |
 |---|---|---|
 | Stage 0 | substrate importable (`ka9q_python`, callhash, hs-uploader) | **hard-stop** |
-| Stage 1 | radiod configured; tuning applied; wisdom launched | **hard-stop** |
+| Stage 1 | radiod configured; tuning applied; wisdom launched | **hard-stop** — but only with an SDR on the bus. With none, the plan defers the whole radio half (radiod config, tuning, wisdom, radiod-bound clients installed but not enabled), runs everything else, and ends **PARTIAL** (rc 3, firstrun marker `result=awaiting-sdr`); the SDR's arrival (udev, `90-sigmond-sdr-arrival.rules`) re-runs bring-up to finish it. A person at a terminal is offered an abort; the default carries on (mjh, 2026-10-04). |
 | Stage 2 | hf-timestd recording GRAPE; timing endpoint advertised | advisory |
 | Stage 3a/b | each client passes its own `validate` / self-describe | advisory |
 | Stage 4 | `smd admin validate` board all green | advisory (report) |
