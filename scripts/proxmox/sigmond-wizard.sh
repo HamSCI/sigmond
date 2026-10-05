@@ -1442,6 +1442,21 @@ if [ -f /root/sigmond-appliance/sigmond-site-timing ]; then
 else
     say "WARN: sigmond-site-timing not staged — timing chain will need manual wiring"
 fi
+# ⛔ Tell the VM which network the SITE is on.  site-timing discovers a LAN
+# stratum-1 (T4) and a GNSS VTEC stream (:9000) by scanning the VM's own
+# kernel route -- but since v3.50 the VM sits on the host-only 10.99.0.0/30
+# behind this host, so it scanned four addresses holding nothing but us.
+# AC0G-ND (v3.67, 2026-10-05) came up with NEITHER its LAN stratum-1 nor its
+# VTEC box although both answered on 192.168.8.0/24.  Only this host sees
+# the site LAN; write it where site-timing (and every rerun of it) can read it.
+SITE_LAN=$(ip -4 route show dev vmbr0 proto kernel scope link 2>/dev/null | awk '{print $1; exit}')
+if [ -n "$SITE_LAN" ]; then
+    gexec 15 "mkdir -p /etc/sigmond && echo '$SITE_LAN' > /etc/sigmond/site-lan" \
+        && say "site LAN for discovery: $SITE_LAN" \
+        || say "WARN: could not record the site LAN in the VM — T4/VTEC discovery will not find LAN servers"
+else
+    say "WARN: no vmbr0 route — T4/VTEC discovery will not find LAN servers"
+fi
 # location authority: GPSDO position is definitive over operator entry
 # (rob 2026-08-04) — ticked by the sentinel; staged from the stick
 if [ -f /root/sigmond-appliance/sigmond-location-check ]; then
