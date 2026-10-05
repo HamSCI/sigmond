@@ -92,6 +92,9 @@ class Step:
     background: bool = False         # fire-and-don't-wait
     check: str = ''                 # checkpoint probe id (see executor._probe)
     settle_s: int = 0               # executor sleeps this long after the step
+    may_fail: bool = False          # non-fatal BY DESIGN: a non-zero exit is not
+                                    # a failed bring-up (e.g. sdr-recover on a
+                                    # hub that cannot switch power)
 
 
 @dataclass
@@ -261,7 +264,7 @@ def build_plan(profile, *, local_radiod: bool,
         steps.append(Step(STAGE1, 'ensure the RX-888 is on the bus (wait for a '
                                   'slow FX3, recover a latched card)', 'tune',
                           argv=['/usr/local/sbin/sigmond-sdr-recover',
-                                '--ensure-present']))
+                                '--ensure-present'], may_fail=True))
         configure(STAGE1, 'radiod')
         # Tune AFTER `configure radiod`, never before: `smd apply` writes
         # per-INSTANCE affinity drop-ins and enables + starts any radiod

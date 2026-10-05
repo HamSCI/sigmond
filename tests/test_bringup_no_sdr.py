@@ -186,6 +186,25 @@ class Verdict(unittest.TestCase):
         self.assertEqual(smd._bringup_finish(
             build_plan(_dasi2(), local_radiod=True), 'dasi2'), 0)
 
+    def test_a_failed_step_is_never_complete(self):
+        # AC0G-ND v3.67: three steps exited 1 and the run still said complete.
+        import io, contextlib
+        smd = _load_smd()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = smd._bringup_finish(build_plan(_dasi2(), local_radiod=True), 'dasi2',
+                                     ['start psk-recorder@AC0G/ND (exit 1)'])
+        self.assertEqual(rc, smd.BRINGUP_INCOMPLETE_RC)
+        self.assertNotEqual(rc, 0)
+        self.assertIn('INCOMPLETE', out.getvalue())
+        self.assertIn('psk-recorder', out.getvalue())
+        self.assertNotIn("'dasi2' complete", out.getvalue())
+
+    def test_sdr_recover_is_the_only_may_fail_step(self):
+        p = build_plan(_dasi2(), local_radiod=True)
+        tolerant = [s.argv[0] for s in p.steps if s.may_fail]
+        self.assertEqual(tolerant, ['/usr/local/sbin/sigmond-sdr-recover'])
+
 
 class FirstrunAwaitingSdr(unittest.TestCase):
 

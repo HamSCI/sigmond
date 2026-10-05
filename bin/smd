@@ -8576,6 +8576,7 @@ def cmd_bringup(args) -> int:
             _warn('site-profile render failed — client wizards will fall '
                   'back to prompts/placeholders')
 
+    failed_steps: list = []     # every step that exited non-zero (not may_fail)
     for st in plan.steps:
         if st.kind == 'note':
             _info(st.label)
@@ -8650,6 +8651,8 @@ def cmd_bringup(args) -> int:
                      interactive=(st.kind == 'config'))
         if getattr(r, 'returncode', 0) != 0 and not st.background:
             _warn(f'step exited {r.returncode}: {" ".join(st.argv)}')
+            if not getattr(st, 'may_fail', False):
+                failed_steps.append(f'{st.label} (exit {r.returncode})')
         if st.settle_s:
             import time
             _info(f'  settling {st.settle_s}s before the next client...')
@@ -8697,22 +8700,38 @@ def cmd_bringup(args) -> int:
               'until this is done)')
 
     print()
-    return _bringup_finish(plan, prof.name)
+    return _bringup_finish(plan, prof.name, failed_steps)
 
 
-def _bringup_finish(plan, name: str) -> int:
+def _bringup_finish(plan, name: str, failed_steps=()) -> int:
     """The verdict of a bring-up that ran to its end.
 
     ⛔ NEVER "complete" when the radio half was deferred (mjh, 2026-10-04:
     do not write done when not done).  rc 3 tells sigmond-firstrun-bringup to
     record result=awaiting-sdr, which is not final, and the SDR's arrival
-    re-runs bring-up to finish the job."""
+    re-runs bring-up to finish the job.
+
+    ⛔ NOR when a step failed.  AC0G-ND (v3.67, 2026-10-05) printed "bringup
+    'dasi2' complete" after three steps exited 1 (psk and meteor instance
+    enables, the catch-all start) because radiod had no samples -- and
+    firstrun then wrote result=ok, so nothing would ever retry.  A failed
+    step makes the run INCOMPLETE: rc 1, which firstrun records as a failed
+    attempt and retries on the next boot, a bounded number of times."""
+    if failed_steps:
+        _warn(f"{len(failed_steps)} bring-up step(s) FAILED:")
+        for f in failed_steps:
+            _warn(f'  ✗ {f}')
     if plan.sdr_absent:
         _warn(f"bringup '{name}' PARTIAL — no SDR, so radiod and the "
               "radiod-bound clients are installed but not configured or started.")
         _info('plug in the SDR: first-run bring-up completes on its own; '
               f'by hand, run `smd bringup {name}` again')
         return BRINGUP_PARTIAL_RC
+    if failed_steps:
+        _err(f"bringup '{name}' INCOMPLETE — {len(failed_steps)} step(s) failed "
+             "(listed above).  Fix the cause, then: "
+             f"smd bringup {name}")
+        return BRINGUP_INCOMPLETE_RC
     _ok(f"bringup '{name}' complete")
     _info('verify anytime with: smd admin validate')
     return 0
@@ -8722,6 +8741,9 @@ def _bringup_finish(plan, name: str) -> int:
 # (no SDR).  Neither success (0) nor failure (1): sigmond-firstrun-bringup
 # maps it to result=awaiting-sdr.
 BRINGUP_PARTIAL_RC = 3
+# A run that reached its end with one or more failed steps.  Plain failure,
+# so firstrun retries it (bounded) rather than recording result=ok.
+BRINGUP_INCOMPLETE_RC = 1
 
 
 def _install_profile(args) -> int:
