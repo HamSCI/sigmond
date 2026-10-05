@@ -1473,7 +1473,7 @@ fi
 # wired PM can still hold beside its real lease, and our own host-only /30.
 SITE_LAN=""
 _updev=$(ip -4 route show default 2>/dev/null \
-         | awk '!/linkdown/{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')
+         | awk '!/linkdown/ && !/via 192\.168\.100\./{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')
 for _d in $_updev vmbr0; do
     SITE_LAN=$(ip -4 route show dev "$_d" proto kernel scope link 2>/dev/null \
                | awk '!/linkdown/ && $1 !~ /^192\.168\.100\./ && $1 !~ /^10\.99\.0\./ {print $1; exit}')

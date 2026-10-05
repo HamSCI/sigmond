@@ -119,8 +119,12 @@ say "this takes many minutes; follow it with: tail -f $LOG"
 # The passes share the unit's TimeoutStartSec (90 min), and one full plan can
 # wait up to an hour for FFT wisdom; past PASS_BUDGET_S a further pass is left
 # to a fresh run scheduled after this one exits (below), with its own timeout.
-PASS_BUDGET_S="${SIGMOND_FIRSTRUN_PASS_BUDGET_S:-1800}"
-_t0=$(date +%s)
+# 900 s, not more: a full pass on a CPU without bundled wisdom waits up to an
+# hour (_bringup_wait_wisdom), so a second pass must START early enough to
+# finish inside the 90-minute unit timeout (review round 2).  SECONDS, not the
+# wall clock: chrony may step the clock during first boot.
+PASS_BUDGET_S="${SIGMOND_FIRSTRUN_PASS_BUDGET_S:-900}"
+SECONDS=0
 partial=0
 for _pass in 1 2 3; do
     partial=0
@@ -139,9 +143,9 @@ for _pass in 1 2 3; do
         fi
     fi
     [ "$partial" -eq 1 ] && sdr_on_bus || break
-    [ "$_pass" -lt 3 ] || { say "SDR on the bus but 3 passes done — leaving it to a scheduled run"; break; }
-    if [ $(( $(date +%s) - _t0 )) -gt "$PASS_BUDGET_S" ]; then
-        say "SDR arrived, but this run has used its time budget — leaving the radio half to a scheduled run"
+    [ "$_pass" -lt 3 ] || { say "SDR on the bus but 3 passes done — no further pass in this run (see below)"; break; }
+    if [ "$SECONDS" -gt "$PASS_BUDGET_S" ]; then
+        say "SDR arrived, but this run has used its time budget — no further pass in this run (see below)"
         break
     fi
     say "the SDR arrived while bring-up ran (its arrival event was absorbed by"
@@ -236,17 +240,26 @@ if [ "$partial" -eq 1 ]; then
     # about cannot loop the station.
     reruns=$(sed -n 's/^sdr_reruns=\([0-9]*\).*/\1/p' "$MARKER" 2>/dev/null | head -1)
     reruns=${reruns:-0}
-    _resched=0
-    if sdr_on_bus && [ "$reruns" -lt 3 ]; then reruns=$((reruns + 1)); _resched=1; fi
+    if sdr_on_bus; then
+        if [ "$reruns" -lt 3 ]; then
+            # --collect: a FAILED transient stays loaded and would block the
+            # name; the timestamp keeps names unique across marker resets.
+            if "$SYSTEMD_RUN" --collect --on-active=60 \
+                   --unit="sigmond-firstrun-rerun-$(date +%s)" \
+                   "$SYSTEMCTL" --no-block start sigmond-firstrun-bringup.service >/dev/null 2>&1; then
+                reruns=$((reruns + 1))
+                say "the SDR is on the bus now — bring-up scheduled again in 60 s (re-run $reruns of 3)"
+            else
+                say "the SDR is on the bus now, but scheduling a re-run FAILED — a reboot or the next arrival will"
+            fi
+        else
+            say "the SDR is on the bus, but 3 scheduled re-runs are used up — NOT scheduling another."
+            say "  Finish by hand:  smd bringup $PROFILE   (or reboot)"
+        fi
+    fi
     printf 'attempts=%s\nresult=awaiting-sdr\nsdr_reruns=%s\n%s\n' "$attempts" "$reruns" "$(date -Iseconds)" > "$MARKER"
     say "marker: result=awaiting-sdr — NOT done.  Plugging in the SDR re-runs this;"
     say "  so does any reboot.  By hand:  smd bringup $PROFILE"
-    if [ "$_resched" = 1 ]; then
-        say "the SDR is on the bus now — scheduling bring-up again in 60 s (re-run $reruns of 3)"
-        "$SYSTEMD_RUN" --on-active=60 --unit="sigmond-firstrun-rerun-$reruns" \
-            "$SYSTEMCTL" --no-block start sigmond-firstrun-bringup.service >/dev/null 2>&1 \
-            || say "  could not schedule it — a reboot or the next arrival will"
-    fi
 elif [ "$bringup_ok" -eq 1 ]; then
     printf 'attempts=%s\nresult=ok\n%s\n' "$attempts" "$(date -Iseconds)" > "$MARKER"
     say "marker written ($MARKER); bring-up succeeded on attempt $attempts"

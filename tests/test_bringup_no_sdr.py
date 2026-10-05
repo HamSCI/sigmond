@@ -222,10 +222,10 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         p.chmod(0o755)
         return p
 
-    def _argstub(self, name):
+    def _argstub(self, name, rc=0):
         """A stub that records its full argv, one call per line, in <name>.argv."""
         p = self.d / f'{name}-stub'
-        p.write_text(f'#!/bin/bash\necho "$*" >> {self.d}/{name}.argv\nexit 0\n')
+        p.write_text(f'#!/bin/bash\necho "$*" >> {self.d}/{name}.argv\nexit {rc}\n')
         p.chmod(0o755)
         return p
 
@@ -256,7 +256,8 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         (b / 'lsusb').write_text(f'#!/bin/bash\necho "{line}"\n')
         (b / 'lsusb').chmod(0o755)
 
-    def run_script(self, smd_rc, marker=None, smd_rcs=None, rx888=False, args=()):
+    def run_script(self, smd_rc, marker=None, smd_rcs=None, rx888=False, args=(),
+                   systemd_run_rc=0):
         m = self.d / 'marker'
         if marker is not None:
             m.write_text(marker)
@@ -265,7 +266,7 @@ class FirstrunAwaitingSdr(unittest.TestCase):
                    PATH=f"{self.d / 'bin'}:{os.environ.get('PATH', '')}",
                    SIGMOND_FIRSTRUN_SETTLE_S='0',
                    SIGMOND_FIRSTRUN_SYSTEMCTL=str(self._argstub('systemctl')),
-                   SIGMOND_FIRSTRUN_SYSTEMD_RUN=str(self._argstub('systemd-run')),
+                   SIGMOND_FIRSTRUN_SYSTEMD_RUN=str(self._argstub('systemd-run', systemd_run_rc)),
                    SIGMOND_FIRSTRUN_MARKER=str(m),
                    SIGMOND_FIRSTRUN_SENTINEL=str(self.d / 'personalized'),
                    SIGMOND_FIRSTRUN_PROFILE_FILE=str(self.d / 'profile.toml'),
@@ -324,6 +325,25 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         sched = self.argv_of('systemd-run')
         self.assertEqual(len(sched), 1, sched)
         self.assertIn('start sigmond-firstrun-bringup.service', sched[0])
+
+    def test_the_rerun_unit_is_collected_and_uniquely_named(self):
+        # A failed transient stays loaded without --collect and blocks a
+        # reused name (systemd 257, review round 2).
+        self.run_script(None, smd_rcs=[3], rx888=True)
+        sched = self.argv_of('systemd-run')[0]
+        self.assertIn('--collect', sched)
+        self.assertRegex(sched, r'--unit=sigmond-firstrun-rerun-\d{9,}')
+
+    def test_a_failed_schedule_spends_no_rerun(self):
+        r, calls, marker = self.run_script(None, smd_rcs=[3], rx888=True, systemd_run_rc=1)
+        self.assertIn('sdr_reruns=0', marker)
+        self.assertIn('scheduling a re-run FAILED', (self.d / 'log').read_text())
+
+    def test_the_cap_says_it_scheduled_nothing(self):
+        r, calls, marker = self.run_script(
+            None, smd_rcs=[3], rx888=True,
+            marker='attempts=0\nresult=awaiting-sdr\nsdr_reruns=3\nx\n')
+        self.assertIn('NOT scheduling another', (self.d / 'log').read_text())
 
     def test_the_scheduled_reruns_are_bounded(self):
         r, calls, marker = self.run_script(
