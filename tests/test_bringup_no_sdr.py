@@ -202,16 +202,41 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         p.chmod(0o755)
         return p
 
-    def run_script(self, smd_rc, marker=None):
+    def _smd_sequence(self, rcs):
+        """An smd stub whose Nth call exits rcs[N] (the last one repeats)."""
+        p = self.d / 'smd'
+        p.write_text('#!/bin/bash\n'
+                     f'echo smd >> {self.d}/calls\n'
+                     f'n=$(grep -c smd {self.d}/calls)\n'
+                     f'rcs=({" ".join(str(r) for r in rcs)})\n'
+                     'i=$(( n - 1 )); [ $i -ge ${#rcs[@]} ] && i=$(( ${#rcs[@]} - 1 ))\n'
+                     'exit ${rcs[$i]}\n')
+        p.chmod(0o755)
+        return p
+
+    def _lsusb(self, rx888: bool):
+        """Put an lsusb on PATH that does or does not show an RX888."""
+        b = self.d / 'bin'
+        b.mkdir(exist_ok=True)
+        line = 'Bus 008 Device 003: ID 04b4:00f1 Cypress Semiconductor Corp. RX888mk2' if rx888 \
+            else 'Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub'
+        (b / 'lsusb').write_text(f'#!/bin/bash\necho "{line}"\n')
+        (b / 'lsusb').chmod(0o755)
+
+    def run_script(self, smd_rc, marker=None, smd_rcs=None, rx888=False):
         m = self.d / 'marker'
         if marker is not None:
             m.write_text(marker)
+        self._lsusb(rx888)
         env = dict(os.environ,
+                   PATH=f"{self.d / 'bin'}:{os.environ.get('PATH', '')}",
+                   SIGMOND_FIRSTRUN_SETTLE_S='0',
                    SIGMOND_FIRSTRUN_MARKER=str(m),
                    SIGMOND_FIRSTRUN_SENTINEL=str(self.d / 'personalized'),
                    SIGMOND_FIRSTRUN_PROFILE_FILE=str(self.d / 'profile.toml'),
                    SIGMOND_FIRSTRUN_LOG=str(self.d / 'log'),
-                   SIGMOND_FIRSTRUN_SMD=str(self._stub('smd', smd_rc)),
+                   SIGMOND_FIRSTRUN_SMD=str(self._smd_sequence(smd_rcs) if smd_rcs
+                                            else self._stub('smd', smd_rc)),
                    SIGMOND_FIRSTRUN_SITE_TIMING=str(self._stub('site-timing', 0)),
                    SIGMOND_FIRSTRUN_ISOLATION=str(self._stub('isolation', 0)))
         r = subprocess.run(['bash', str(FIRSTRUN)], env=env,
@@ -236,6 +261,24 @@ class FirstrunAwaitingSdr(unittest.TestCase):
             _, _, marker = self.run_script(3, marker=marker)
         self.assertIn('result=awaiting-sdr', marker)
         self.assertNotIn('gave-up', marker)
+
+    def test_an_sdr_that_arrives_during_the_run_is_not_lost(self):
+        # AC0G-ND v3.67, 2026-10-05: the RX888 enumerated 80 s into a run that
+        # had already deferred the radio; its arrival event hit a unit that was
+        # already active, so the run ended awaiting-sdr with the card present.
+        r, calls, marker = self.run_script(None, smd_rcs=[3, 0], rx888=True)
+        self.assertEqual(calls.count('smd'), 2, 'card on the bus after a partial -> run again')
+        self.assertIn('result=ok', marker)
+
+    def test_no_card_after_a_partial_means_no_second_run(self):
+        r, calls, marker = self.run_script(None, smd_rcs=[3, 0], rx888=False)
+        self.assertEqual(calls.count('smd'), 1)
+        self.assertIn('result=awaiting-sdr', marker)
+
+    def test_the_rerun_is_bounded(self):
+        r, calls, marker = self.run_script(None, smd_rcs=[3], rx888=True)
+        self.assertEqual(calls.count('smd'), 3)
+        self.assertIn('result=awaiting-sdr', marker)
 
     def test_a_completed_station_exits_without_running(self):
         r, calls, _ = self.run_script(0, marker='attempts=1\nresult=ok\nx\n')

@@ -80,21 +80,39 @@ say "this takes many minutes; follow it with: tail -f $LOG"
 # dead one waiting on a prompt nobody will answer.
 # Exit 3 = PARTIAL: ran to the end with the radio half deferred (no SDR).
 # Never "done" -- mjh, 2026-10-04: do not write done when not done.
+#
+# ⛔ AN SDR THAT ARRIVES *DURING* THE RUN IS LOST WITHOUT THE RE-CHECK BELOW.
+# AC0G-ND, v3.67, 2026-10-05: bring-up started 01:47:37 with no RX888 on the
+# bus, so it deferred the radio half; the card enumerated at 01:48:57, and
+# its arrival rule asked systemd to start THIS unit -- which was already
+# running, so the request did nothing.  The run then ended PARTIAL at
+# 01:49:45 with the card present and nothing left to re-trigger it.  So
+# after a partial run, look at the bus again: if the SDR is there now, run
+# bring-up again (it is idempotent) instead of waiting for an event that
+# has already fired.  Bounded, so a card that flaps cannot loop us.
+sdr_on_bus() { lsusb 2>/dev/null | grep -qiE 'ID 04b4:00f[013]'; }
 partial=0
-if "$SMD" bringup "$PROFILE" --non-interactive >>"$LOG" 2>&1; then
-    say "bring-up finished"
-    bringup_ok=1
-else
-    rc=$?
-    bringup_ok=0
-    if [ "$rc" -eq 3 ]; then
-        partial=1
-        say "bring-up PARTIAL — no SDR on the USB bus; everything else is up,"
-        say "  and the radio half completes when the SDR is plugged in"
+for _pass in 1 2 3; do
+    partial=0
+    if "$SMD" bringup "$PROFILE" --non-interactive >>"$LOG" 2>&1; then
+        say "bring-up finished"
+        bringup_ok=1
     else
-        say "bring-up exited $rc — see $LOG"
+        rc=$?
+        bringup_ok=0
+        if [ "$rc" -eq 3 ]; then
+            partial=1
+            say "bring-up PARTIAL — no SDR on the USB bus; everything else is up,"
+            say "  and the radio half completes when the SDR is plugged in"
+        else
+            say "bring-up exited $rc — see $LOG"
+        fi
     fi
-fi
+    [ "$partial" -eq 1 ] && sdr_on_bus || break
+    say "the SDR arrived while bring-up ran (its arrival event was absorbed by"
+    say "  this run) — running bring-up again to finish the radio half (pass $((_pass + 1)))"
+    sleep "${SIGMOND_FIRSTRUN_SETTLE_S:-5}"   # FX3 settle: 00f3 (bootloader) -> 00f1 within ~1 s
+done
 
 # ⛔ THE SITE WIRING AND THE RETRY DECISION ARE **OUTSIDE** THE SUCCESS BRANCH.
 # They used to live inside it, and WB6CXC-7 is what that cost: its bring-up
