@@ -1341,6 +1341,24 @@ gexec 30 "echo $B64 | base64 -d > /etc/sigmond/site-profile.toml" \
 say "personalizing VM (new machine-id, SSH host keys, hostname)..."
 gexec 600 "smd admin personalize --reset-identity --yes" \
     || { say "ERROR: personalize failed — see $LOG"; exit 1; }
+# ⛔ Pin the VM's NEW host key on this host, read over the guest-agent channel
+# (authoritative; no network scan to trust).  Nothing pinned it before, so
+# every PM -> VM ssh (fleet-ssh's nested hop, pm-align, site-restore) failed
+# BatchMode with "Host key verification failed" -- AC0G-ND, v3.67,
+# 2026-10-05, fixed there by hand.  Both names the PM uses: the /30 address
+# and the vm-ssh relay.  Replaces any stale pin from an earlier install.
+VMKEY=$(qm guest exec "$VMID" --timeout 15 -- cat /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null </dev/null \
+        | grep -o '"out-data" *: *"[^"]*"' | sed 's/.*: *"//;s/\\n"$//;s/"$//' | awk '{print $1" "$2}')
+if [[ "$VMKEY" == ssh-ed25519\ * ]]; then
+    install -d -m 700 /root/.ssh; touch /root/.ssh/known_hosts; chmod 600 /root/.ssh/known_hosts
+    for h in 10.99.0.2 '[127.0.0.1]:12222'; do
+        ssh-keygen -R "$h" -f /root/.ssh/known_hosts >/dev/null 2>&1
+        echo "$h $VMKEY" >> /root/.ssh/known_hosts
+    done
+    say "pinned the decoder VM's host key on this host"
+else
+    say "WARN: could not read the VM's host key — PM -> VM ssh will refuse until pinned"
+fi
 say "rendering site config in VM..."
 gexec 600 "smd config render" \
     || say "WARN: smd config render reported issues (continuing; rerun inside VM)"
