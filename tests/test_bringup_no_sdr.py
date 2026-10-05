@@ -90,8 +90,23 @@ class DeferredPlan(unittest.TestCase):
 
     def test_the_station_level_steps_still_run(self):
         self.assertIn('smd admin uploader manifest --write --enable', self.argv)
-        self.assertIn('smd start', self.argv)
         self.assertTrue(any(s.check == 'validate' for s in self.p.steps))
+
+    def test_the_catch_all_start_names_only_what_the_plan_activated(self):
+        # A bare `smd start` starts everything topology calls enabled, and the
+        # golden VM enables the radio half before bring-up ever runs (v3.67
+        # nested test: igmp-querier started, ka9q-web "unit not found", rc 1).
+        self.assertNotIn('smd start', self.argv)
+        catch_all = [' '.join(s.argv) for s in self.p.steps
+                     if s.label.startswith('start the components this plan activated')]
+        self.assertEqual(len(catch_all), 1, catch_all)
+        named = catch_all[0].split()[-1].split(',')
+        self.assertIn('mag-recorder', named)
+        for c in ('ka9q-radio', 'ka9q-web', 'igmp-querier', 'gpsdo-monitor') + RADIOD_BOUND:
+            self.assertNotIn(c, named, f'{c} is deferred; the catch-all must not start it')
+
+    def test_a_full_plan_keeps_the_bare_catch_all(self):
+        self.assertIn('smd start', _argvs(build_plan(_dasi2(), local_radiod=True)))
 
     def test_a_remote_radiod_host_is_never_deferred(self):
         p = build_plan(_dasi2(), local_radiod=False,

@@ -167,6 +167,9 @@ def build_plan(profile, *, local_radiod: bool,
                             ' && chgrp sigmond /var/lib/sigmond/sink.db'
                             ' && chmod 664 /var/lib/sigmond/sink.db']))
 
+    activated: list = []    # components this plan enables (start-eligible)
+    deferred: list = []     # radio half installed --no-enable (no SDR)
+
     def install(stage: str, comp: str, enable: bool = True) -> None:
         # Enable in topology BEFORE installing.  `smd install --components` builds
         # the component but does NOT flip topology `enabled=true` (only
@@ -178,11 +181,13 @@ def build_plan(profile, *, local_radiod: bool,
         if not enable:
             # Deferred radio half (no SDR): build it, leave it disabled, so no
             # catch-all start can launch it before it is configured.
+            deferred.append(comp)
             steps.append(Step(stage, f'install {comp} (not enabled — radio deferred)',
                               'install',
                               argv=[smd, 'install', '--components', comp, '--yes',
                                     '--no-enable']))
             return
+        activated.append(comp)
         steps.append(Step(stage, f'enable {comp}', 'enable',
                           argv=[smd, 'enable', comp]))
         steps.append(Step(stage, f'install {comp}', 'install',
@@ -469,8 +474,23 @@ def build_plan(profile, *, local_radiod: bool,
             steps.append(Step(STAGE4, f'start {client} (staggered)', 'start',
                               argv=[smd, 'start', '--components', client],
                               settle_s=CLIENT_STAGGER_S))
-    steps.append(Step(STAGE4, 'start any remaining enabled components', 'start',
-                      argv=[smd, 'start']))
+    if deferring:
+        # ⛔ NOT a bare `smd start`.  --no-enable only declines to ENABLE the
+        # radio half; it cannot disable what the image's topology already
+        # enables, and the DASI golden VM ships hf-timestd, psk, meteor,
+        # igmp-querier and ka9q-web enabled=true.  A bare catch-all then
+        # started igmp-querier and failed on "Unit ka9q-web.service not found"
+        # (v3.67 nested test, 2026-10-05 01:07Z) -- a red step in a partial
+        # bring-up that had done exactly what it should.  So name what this
+        # plan activated, and nothing it deferred.
+        startable = [c for c in activated if c not in deferred]
+        if startable:
+            steps.append(Step(STAGE4, 'start the components this plan activated '
+                                      '(radio half deferred)', 'start',
+                              argv=[smd, 'start', '--components', ','.join(startable)]))
+    else:
+        steps.append(Step(STAGE4, 'start any remaining enabled components', 'start',
+                          argv=[smd, 'start']))
 
     # hs-uploader burns its systemd start-limit during Stages 1-3: the
     # component install bootstraps the daemon before any client pipelines
