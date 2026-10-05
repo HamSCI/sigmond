@@ -507,9 +507,15 @@ def build_plan(profile, *, local_radiod: bool,
     steps.append(Step(STAGE4, 'clear hs-uploader start-limit (pre-manifest '
                               'crash-loop)', 'start',
                       argv=['systemctl', 'reset-failed', 'hs-uploader.service']))
+    # may_fail: a manifest with ZERO pipelines (uploads held and heartbeat
+    # declined -- K3LR's state on 10-01) makes hs-uploader exit "nothing to
+    # do" before READY, so the restart exits 1 on a station that is fine.
+    # With failed steps now making a run INCOMPLETE (retry, retry, gave-up),
+    # that would have condemned such a station on every boot.
     steps.append(Step(STAGE4, 'restart hs-uploader on the final manifest',
                       'start',
-                      argv=['systemctl', 'restart', 'hs-uploader.service']))
+                      argv=['systemctl', 'restart', 'hs-uploader.service'],
+                      may_fail=True))
 
     # Now that every client is running, pin them OFF radiod's cache-pair (cores
     # 0-1).  Stage 1's `smd apply` writes the exclusion files but runs before the

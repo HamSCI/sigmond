@@ -1467,13 +1467,26 @@ fi
 # AC0G-ND (v3.67, 2026-10-05) came up with NEITHER its LAN stratum-1 nor its
 # VTEC box although both answered on 192.168.8.0/24.  Only this host sees
 # the site LAN; write it where site-timing (and every rerun of it) can read it.
-SITE_LAN=$(ip -4 route show dev vmbr0 proto kernel scope link 2>/dev/null | awk '{print $1; exit}')
+# The uplink is whatever device carries the IPv4 default route -- vmbr0 on a
+# wired station, the wlan on a Wi-Fi-only one (sigmond-wifi never bridges it).
+# Skip linkdown routes and the installer's 192.168.100.x fallback, which a
+# wired PM can still hold beside its real lease, and our own host-only /30.
+SITE_LAN=""
+_updev=$(ip -4 route show default 2>/dev/null \
+         | awk '!/linkdown/{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')
+for _d in $_updev vmbr0; do
+    SITE_LAN=$(ip -4 route show dev "$_d" proto kernel scope link 2>/dev/null \
+               | awk '!/linkdown/ && $1 !~ /^192\.168\.100\./ && $1 !~ /^10\.99\.0\./ {print $1; exit}')
+    [ -n "$SITE_LAN" ] && break
+done
 if [ -n "$SITE_LAN" ]; then
     gexec 15 "mkdir -p /etc/sigmond && echo '$SITE_LAN' > /etc/sigmond/site-lan" \
         && say "site LAN for discovery: $SITE_LAN" \
         || say "WARN: could not record the site LAN in the VM — T4/VTEC discovery will not find LAN servers"
 else
-    say "WARN: no vmbr0 route — T4/VTEC discovery will not find LAN servers"
+    # a re-run at a new site must not leave the old site's subnet behind
+    gexec 15 "rm -f /etc/sigmond/site-lan" || true
+    say "WARN: no usable IPv4 site LAN — T4/VTEC discovery will not find LAN servers"
 fi
 # location authority: GPSDO position is definitive over operator entry
 # (rob 2026-08-04) — ticked by the sentinel; staged from the stick

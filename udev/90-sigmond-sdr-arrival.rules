@@ -3,8 +3,10 @@
 # mjh, 2026-10-04: never write "done" when not done.  A bring-up that found no
 # SDR installs everything, defers the radio half, and leaves the first-run
 # marker at result=awaiting-sdr.  When an RX-888 with firmware loaded (Cypress
-# FX3, 04b4:00f1) appears, ask systemd for sigmond-firstrun-bringup.service;
-# the script reads the marker and finishes the radio half, or exits at once
-# when nothing is owed (an ordinary re-enumeration of a working card).
+# FX3, 04b4:00f1) appears, ask systemd for sigmond-sdr-arrival.service, which
+# starts first-run bring-up ONLY when the radio half is owed (awaiting-sdr, or
+# no marker yet).  It must not start bring-up directly: a working card
+# re-enumerates many times, and a result=retry station would then get a full
+# unattended bring-up under it (pre-build review of v3.68, 2026-10-05).
 # Fargo is the case: nobody on site, and no reboot coming.
-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04b4", ATTR{idProduct}=="00f1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sigmond-firstrun-bringup.service"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04b4", ATTR{idProduct}=="00f1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sigmond-sdr-arrival.service"

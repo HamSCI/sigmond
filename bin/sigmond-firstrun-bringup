@@ -35,8 +35,34 @@ SMD="${SIGMOND_FIRSTRUN_SMD:-/usr/local/bin/smd}"
 ST="${SIGMOND_FIRSTRUN_SITE_TIMING:-/usr/local/sbin/sigmond-site-timing}"
 IR="${SIGMOND_FIRSTRUN_ISOLATION:-/usr/local/sbin/sigmond-isolation-reboot}"
 
+SYSTEMCTL="${SIGMOND_FIRSTRUN_SYSTEMCTL:-systemctl}"
+SYSTEMD_RUN="${SIGMOND_FIRSTRUN_SYSTEMD_RUN:-systemd-run}"
+
 mkdir -p "$(dirname "$LOG")" /var/lib/sigmond 2>/dev/null
 say(){ printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG"; }
+
+# The same SDR set as lib/sigmond/hardware.py's detector: FX3 bootloader 00f3,
+# firmware-loaded 00f1, 00f0, and 00bc.
+sdr_on_bus() { lsusb 2>/dev/null | grep -qiE 'ID 04b4:(00bc|00f[013])'; }
+
+# ─── --on-sdr-arrival: the udev path (sigmond-sdr-arrival.service) ──────────
+# ⛔ An RX-888 ENUMERATES MANY TIMES IN A STATION'S LIFE (ND re-enumerated five
+# times on 2026-09-09), and the arrival rule fires on every one.  It used to
+# start THIS unit directly, which was harmless while a failed bring-up wrote
+# result=ok -- but since a failed step yields result=retry (sigmond 613fdb9),
+# any re-enumeration of a WORKING station's card would have launched a full
+# unattended bring-up under it.  So the arrival owes work only when the radio
+# half is owed: result=awaiting-sdr, or no marker yet.  retry stays a BOOT
+# decision; ok and gave-up stay final.
+if [ "${1:-}" = "--on-sdr-arrival" ]; then
+    _res=""
+    [ -e "$MARKER" ] && _res=$(sed -n 's/^result=\(.*\)/\1/p' "$MARKER" 2>/dev/null | head -1)
+    if [ ! -e "$MARKER" ] || [ "$_res" = awaiting-sdr ]; then
+        say "SDR arrived and bring-up is owed (${_res:-no marker yet}) — starting first-run bring-up"
+        exec "$SYSTEMCTL" --no-block start sigmond-firstrun-bringup.service
+    fi
+    exit 0      # silent: an ordinary re-enumeration of a working card
+fi
 
 # The marker is now a RESULT, not merely a tombstone: `result=retry` means a
 # previous boot failed for a possibly-transient reason and we are allowed to
@@ -90,7 +116,11 @@ say "this takes many minutes; follow it with: tail -f $LOG"
 # after a partial run, look at the bus again: if the SDR is there now, run
 # bring-up again (it is idempotent) instead of waiting for an event that
 # has already fired.  Bounded, so a card that flaps cannot loop us.
-sdr_on_bus() { lsusb 2>/dev/null | grep -qiE 'ID 04b4:00f[013]'; }
+# The passes share the unit's TimeoutStartSec (90 min), and one full plan can
+# wait up to an hour for FFT wisdom; past PASS_BUDGET_S a further pass is left
+# to a fresh run scheduled after this one exits (below), with its own timeout.
+PASS_BUDGET_S="${SIGMOND_FIRSTRUN_PASS_BUDGET_S:-1800}"
+_t0=$(date +%s)
 partial=0
 for _pass in 1 2 3; do
     partial=0
@@ -109,6 +139,11 @@ for _pass in 1 2 3; do
         fi
     fi
     [ "$partial" -eq 1 ] && sdr_on_bus || break
+    [ "$_pass" -lt 3 ] || { say "SDR on the bus but 3 passes done — leaving it to a scheduled run"; break; }
+    if [ $(( $(date +%s) - _t0 )) -gt "$PASS_BUDGET_S" ]; then
+        say "SDR arrived, but this run has used its time budget — leaving the radio half to a scheduled run"
+        break
+    fi
     say "the SDR arrived while bring-up ran (its arrival event was absorbed by"
     say "  this run) — running bring-up again to finish the radio half (pass $((_pass + 1)))"
     sleep "${SIGMOND_FIRSTRUN_SETTLE_S:-5}"   # FX3 settle: 00f3 (bootloader) -> 00f1 within ~1 s
@@ -194,9 +229,24 @@ attempts=${attempts:-0}
 [ "$partial" -eq 1 ] || attempts=$((attempts + 1))
 
 if [ "$partial" -eq 1 ]; then
-    printf 'attempts=%s\nresult=awaiting-sdr\n%s\n' "$attempts" "$(date -Iseconds)" > "$MARKER"
+    # An SDR that enumerated AFTER the last pass (during site wiring or the
+    # isolation step) hit an active unit too, and was absorbed the same way.
+    # Look once more; if it is here, schedule a fresh run for after this one
+    # exits.  Bounded by sdr_reruns, so a card the detector and lsusb disagree
+    # about cannot loop the station.
+    reruns=$(sed -n 's/^sdr_reruns=\([0-9]*\).*/\1/p' "$MARKER" 2>/dev/null | head -1)
+    reruns=${reruns:-0}
+    _resched=0
+    if sdr_on_bus && [ "$reruns" -lt 3 ]; then reruns=$((reruns + 1)); _resched=1; fi
+    printf 'attempts=%s\nresult=awaiting-sdr\nsdr_reruns=%s\n%s\n' "$attempts" "$reruns" "$(date -Iseconds)" > "$MARKER"
     say "marker: result=awaiting-sdr — NOT done.  Plugging in the SDR re-runs this;"
     say "  so does any reboot.  By hand:  smd bringup $PROFILE"
+    if [ "$_resched" = 1 ]; then
+        say "the SDR is on the bus now — scheduling bring-up again in 60 s (re-run $reruns of 3)"
+        "$SYSTEMD_RUN" --on-active=60 --unit="sigmond-firstrun-rerun-$reruns" \
+            "$SYSTEMCTL" --no-block start sigmond-firstrun-bringup.service >/dev/null 2>&1 \
+            || say "  could not schedule it — a reboot or the next arrival will"
+    fi
 elif [ "$bringup_ok" -eq 1 ]; then
     printf 'attempts=%s\nresult=ok\n%s\n' "$attempts" "$(date -Iseconds)" > "$MARKER"
     say "marker written ($MARKER); bring-up succeeded on attempt $attempts"

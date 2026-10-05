@@ -1,0 +1,12 @@
+[Unit]
+Description=Sigmond: an RX-888 arrived — finish a bring-up that is waiting for it
+# Started by udev (90-sigmond-sdr-arrival.rules) on every RX-888 enumeration.
+# The script starts sigmond-firstrun-bringup.service only when the marker says
+# the radio half is owed; an ordinary re-enumeration of a working card is a
+# silent no-op.  Starting the main unit BY NAME keeps systemd's own dedup: an
+# arrival during a running bring-up joins it instead of running a second one.
+ConditionPathExists=/etc/sigmond/.personalized
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sigmond-firstrun-bringup --on-sdr-arrival

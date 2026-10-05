@@ -200,10 +200,11 @@ class Verdict(unittest.TestCase):
         self.assertIn('psk-recorder', out.getvalue())
         self.assertNotIn("'dasi2' complete", out.getvalue())
 
-    def test_sdr_recover_is_the_only_may_fail_step(self):
+    def test_the_may_fail_steps_are_exactly_the_two_by_design(self):
         p = build_plan(_dasi2(), local_radiod=True)
-        tolerant = [s.argv[0] for s in p.steps if s.may_fail]
-        self.assertEqual(tolerant, ['/usr/local/sbin/sigmond-sdr-recover'])
+        tolerant = sorted(' '.join(s.argv) for s in p.steps if s.may_fail)
+        self.assertEqual(tolerant, ['/usr/local/sbin/sigmond-sdr-recover --ensure-present',
+                                    'systemctl restart hs-uploader.service'])
 
 
 class FirstrunAwaitingSdr(unittest.TestCase):
@@ -221,6 +222,17 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         p.chmod(0o755)
         return p
 
+    def _argstub(self, name):
+        """A stub that records its full argv, one call per line, in <name>.argv."""
+        p = self.d / f'{name}-stub'
+        p.write_text(f'#!/bin/bash\necho "$*" >> {self.d}/{name}.argv\nexit 0\n')
+        p.chmod(0o755)
+        return p
+
+    def argv_of(self, name):
+        f = self.d / f'{name}.argv'
+        return f.read_text().splitlines() if f.exists() else []
+
     def _smd_sequence(self, rcs):
         """An smd stub whose Nth call exits rcs[N] (the last one repeats)."""
         p = self.d / 'smd'
@@ -233,16 +245,18 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         p.chmod(0o755)
         return p
 
-    def _lsusb(self, rx888: bool):
-        """Put an lsusb on PATH that does or does not show an RX888."""
+    def _lsusb(self, rx888):
+        """Put an lsusb on PATH that does or does not show an RX888
+        (rx888 may be True, False, or a product id such as '00bc')."""
         b = self.d / 'bin'
         b.mkdir(exist_ok=True)
-        line = 'Bus 008 Device 003: ID 04b4:00f1 Cypress Semiconductor Corp. RX888mk2' if rx888 \
+        pid = rx888 if isinstance(rx888, str) else '00f1'
+        line = f'Bus 008 Device 003: ID 04b4:{pid} Cypress Semiconductor Corp. RX888mk2' if rx888 \
             else 'Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub'
         (b / 'lsusb').write_text(f'#!/bin/bash\necho "{line}"\n')
         (b / 'lsusb').chmod(0o755)
 
-    def run_script(self, smd_rc, marker=None, smd_rcs=None, rx888=False):
+    def run_script(self, smd_rc, marker=None, smd_rcs=None, rx888=False, args=()):
         m = self.d / 'marker'
         if marker is not None:
             m.write_text(marker)
@@ -250,6 +264,8 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         env = dict(os.environ,
                    PATH=f"{self.d / 'bin'}:{os.environ.get('PATH', '')}",
                    SIGMOND_FIRSTRUN_SETTLE_S='0',
+                   SIGMOND_FIRSTRUN_SYSTEMCTL=str(self._argstub('systemctl')),
+                   SIGMOND_FIRSTRUN_SYSTEMD_RUN=str(self._argstub('systemd-run')),
                    SIGMOND_FIRSTRUN_MARKER=str(m),
                    SIGMOND_FIRSTRUN_SENTINEL=str(self.d / 'personalized'),
                    SIGMOND_FIRSTRUN_PROFILE_FILE=str(self.d / 'profile.toml'),
@@ -258,7 +274,7 @@ class FirstrunAwaitingSdr(unittest.TestCase):
                                             else self._stub('smd', smd_rc)),
                    SIGMOND_FIRSTRUN_SITE_TIMING=str(self._stub('site-timing', 0)),
                    SIGMOND_FIRSTRUN_ISOLATION=str(self._stub('isolation', 0)))
-        r = subprocess.run(['bash', str(FIRSTRUN)], env=env,
+        r = subprocess.run(['bash', str(FIRSTRUN), *args], env=env,
                            capture_output=True, text=True, timeout=120)
         calls = (self.d / 'calls').read_text().split() if (self.d / 'calls').exists() else []
         return r, calls, m.read_text() if m.exists() else ''
@@ -299,9 +315,64 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         self.assertEqual(calls.count('smd'), 3)
         self.assertIn('result=awaiting-sdr', marker)
 
+    def test_an_sdr_after_the_last_pass_schedules_a_fresh_run(self):
+        # Card enumerates during site wiring / isolation, after the loop: the
+        # marker says awaiting-sdr, and a run is scheduled for after exit.
+        r, calls, marker = self.run_script(None, smd_rcs=[3], rx888=True)
+        self.assertIn('result=awaiting-sdr', marker)
+        self.assertIn('sdr_reruns=1', marker)
+        sched = self.argv_of('systemd-run')
+        self.assertEqual(len(sched), 1, sched)
+        self.assertIn('start sigmond-firstrun-bringup.service', sched[0])
+
+    def test_the_scheduled_reruns_are_bounded(self):
+        r, calls, marker = self.run_script(
+            None, smd_rcs=[3], rx888=True,
+            marker='attempts=0\nresult=awaiting-sdr\nsdr_reruns=3\nx\n')
+        self.assertEqual(self.argv_of('systemd-run'), [])
+        self.assertIn('sdr_reruns=3', marker)
+
+    def test_no_card_schedules_nothing(self):
+        r, calls, marker = self.run_script(3)
+        self.assertEqual(self.argv_of('systemd-run'), [])
+
+    def test_a_00bc_card_counts_as_present(self):
+        # Same set as hardware._sdr_present; 00bc used to be missed.
+        r, calls, marker = self.run_script(None, smd_rcs=[3, 0], rx888='00bc')
+        self.assertEqual(calls.count('smd'), 2)
+
     def test_a_completed_station_exits_without_running(self):
         r, calls, _ = self.run_script(0, marker='attempts=1\nresult=ok\nx\n')
         self.assertNotIn('smd', calls)
+
+
+class OnSdrArrival(FirstrunAwaitingSdr):
+    """--on-sdr-arrival: starts bring-up only when the radio half is owed."""
+
+    def arrive(self, marker):
+        r, calls, _ = self.run_script(0, marker=marker, rx888=True,
+                                      args=('--on-sdr-arrival',))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('smd', calls, 'arrival must never run bring-up itself')
+        return self.argv_of('systemctl')
+
+    def test_awaiting_sdr_starts_bringup(self):
+        self.assertEqual(self.arrive('attempts=0\nresult=awaiting-sdr\nx\n'),
+                         ['--no-block start sigmond-firstrun-bringup.service'])
+
+    def test_no_marker_yet_starts_bringup(self):
+        self.assertEqual(self.arrive(None),
+                         ['--no-block start sigmond-firstrun-bringup.service'])
+
+    def test_a_retry_station_is_left_to_the_next_boot(self):
+        # ⛔ the review's case: a working station's card re-enumerates.
+        self.assertEqual(self.arrive('attempts=1\nresult=retry\nx\n'), [])
+
+    def test_ok_and_gave_up_are_final(self):
+        self.assertEqual(self.arrive('attempts=1\nresult=ok\nx\n'), [])
+        self.assertEqual(self.arrive('attempts=3\nresult=gave-up\nx\n'), [])
+
+    # the inherited FirstrunAwaitingSdr tests also run here; harmless
 
 
 class ArrivalTrigger(unittest.TestCase):
@@ -318,12 +389,19 @@ class ArrivalTrigger(unittest.TestCase):
         self.assertEqual(len(live), 1)
         for frag in ('ACTION=="add"', 'ATTR{idVendor}=="04b4"',
                      'ATTR{idProduct}=="00f1"',
-                     'SYSTEMD_WANTS}+="sigmond-firstrun-bringup.service"'):
+                     'SYSTEMD_WANTS}+="sigmond-sdr-arrival.service"'):
             self.assertIn(frag, live[0])
+        self.assertNotIn('sigmond-firstrun-bringup.service', live[0],
+                         'udev must not start bring-up directly (retry stations)')
 
-    def test_install_sh_installs_the_rule(self):
-        self.assertIn('udev/90-sigmond-sdr-arrival.rules',
-                      (REPO / 'install.sh').read_text())
+    def test_the_arrival_unit_runs_the_gated_mode(self):
+        unit = (REPO / 'systemd' / 'sigmond-sdr-arrival.service').read_text()
+        self.assertIn('ExecStart=/usr/local/bin/sigmond-firstrun-bringup --on-sdr-arrival', unit)
+
+    def test_install_sh_installs_the_rule_and_the_unit(self):
+        sh = (REPO / 'install.sh').read_text()
+        self.assertIn('udev/90-sigmond-sdr-arrival.rules', sh)
+        self.assertIn('systemd/sigmond-sdr-arrival.service', sh)
 
 
 if __name__ == '__main__':

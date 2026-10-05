@@ -957,6 +957,8 @@ $SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-firstrun-bringup.service" \
      /etc/systemd/system/sigmond-firstrun-bringup.service
 # The SDR's arrival re-runs it, so a bring-up that found no SDR (result=
 # awaiting-sdr) completes when the card is plugged in, with nobody on site.
+$SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-sdr-arrival.service" \
+     /etc/systemd/system/sigmond-sdr-arrival.service
 $SUDO install -m 0644 "$REPO_DIR/udev/90-sigmond-sdr-arrival.rules" \
      /etc/udev/rules.d/90-sigmond-sdr-arrival.rules
 $SUDO udevadm control --reload-rules 2>/dev/null || true
