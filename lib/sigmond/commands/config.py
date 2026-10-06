@@ -1001,6 +1001,13 @@ def _regenerate_uploader_manifest() -> int:
     return cmd_uploader_manifest(types.SimpleNamespace(write=True, enable=True))
 
 
+def _say_set_aside(moved) -> None:
+    """One line per (source, destination) pair moved, on success and on a
+    DoorError alike, so the two paths cannot word it differently."""
+    for src, dst in moved:
+        info(f'set aside {src} -> {dst}')
+
+
 def _close_doors() -> int:
     """Before the written mode leaves discard (the site sink switch's `off`),
     whatever the new setting: refuse while GRAPE or the magnetometer packages
@@ -1022,13 +1029,11 @@ def _close_doors() -> int:
         report = sink_doors.close_doors(datetime.now(timezone.utc))
     except sink_doors.DoorError as exc:
         # The message names one held directory; the pairs name every move.
-        for src, dst in exc.moved:
-            info(f'set aside {src} -> {dst}')
+        _say_set_aside(exc.moved)
         err('could not set aside data stored while the site sink switch read off: '
             f'{exc}')
         return 1
-    for src, dst in report.moved:
-        info(f'set aside {src} -> {dst}')
+    _say_set_aside(report.moved)
     if report.marked:
         info(f'marked {len(report.marked)} earlier GRAPE days packaged, so the '
              'catch-up sweep never rebuilds them')
@@ -1037,7 +1042,9 @@ def _close_doors() -> int:
 
 # The two vocabularies one handler speaks: the legacy `smd upload` words, and
 # the sink words of tasks/plan-sink-control.md §2.1 for `smd sink`.  Every
-# line `smd sink off|upload` prints comes from the 'sink' half.
+# message cmd_config_uploads itself prints for `smd sink` comes from the 'sink'
+# half.  Lines printed elsewhere (_close_doors, the manifest regeneration in
+# commands/uploader.py) keep their own words.
 _SINK_SETTING = {'upload': 'upload', 'discard': 'off', 'hold': 'hold (legacy)'}
 
 _WORDS = {
@@ -1071,8 +1078,8 @@ _WORDS = {
         'cannot_discard': "this host's hs-uploader ({python}) cannot discard and "
                           'would send everything; update hs-uploader first.  The '
                           'site sink switch is unchanged.',
-        'confirm': 'Site sink switch to off: data recorded from now on will never ship. '
-                   'Type "off" to confirm: ',
+        'confirm': 'Site sink switch to off: the station stops sending data until '
+                   'someone runs `smd sink upload`.  Type "off" to confirm: ',
         'confirm_word': 'off',
         'unconfirmed': 'not confirmed; the site sink switch is unchanged',
         'written': '{path}: site sink switch set to {setting}',

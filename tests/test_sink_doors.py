@@ -407,3 +407,18 @@ def test_the_config_hook_prints_what_moved_before_a_door_error(capsys):
     out = "".join(capsys.readouterr())
     assert str(a) in out and str(b) in out
     assert "could not mark 20261006" in out
+    # What moved comes first, so the error is the last thing the operator reads.
+    assert out.index(str(a)) < out.index("could not mark 20261006")
+
+
+def test_the_config_hook_prints_what_moved_and_what_it_marked(capsys):
+    import sigmond.commands.config as cfg
+    a, b = Path("/spool/20261005/OBS2026-10-05T00-00"), Path("/held/20261007T153000Z/OBS")
+    marked = [Path("/spool/20261006/.complete"), Path("/spool/20261004/.complete")]
+    report = sd.DoorReport(moved=[(a, b)], marked=marked)
+    with mock.patch.object(sd, "packaging_running", return_value=[]), \
+            mock.patch.object(sd, "close_doors", return_value=report):
+        assert cfg._close_doors() == 0
+    out = "".join(capsys.readouterr())
+    assert str(a) in out and str(b) in out
+    assert "marked 2 earlier GRAPE days packaged" in out

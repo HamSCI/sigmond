@@ -577,3 +577,29 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertNotIn("nothing recorded during discard will ship", out)
         self.assertIn("ships now", out)
         self.doors_mock.assert_called_once()     # the WRITTEN mode left discard
+
+    def test_the_sink_confirm_prompt_promises_no_permanent_loss(self):
+        # The GRAPE and magnetometer packages of the day of `smd sink upload`
+        # still ship, so the prompt must not say recorded data "will never
+        # ship".  The legacy prompt keeps its words.
+        self._supports(True)
+        prompts = []
+
+        def answer(prompt):
+            prompts.append(prompt)
+            return "off"
+
+        for sink_words in (True, False):
+            with mock.patch("sys.stdin.isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=answer):
+                rc, _ = self._run(uploads_command="discard", reason="bench",
+                                  yes=False, sink_words=sink_words)
+            # "off" confirms the sink prompt; the legacy prompt wants "discard".
+            self.assertEqual(rc, 0 if sink_words else 1)
+        sink_prompt, legacy_prompt = prompts
+        self.assertEqual(
+            sink_prompt,
+            'Site sink switch to off: the station stops sending data until someone '
+            'runs `smd sink upload`.  Type "off" to confirm: ')
+        self.assertNotIn("never", sink_prompt)
+        self.assertIn("will never ship", legacy_prompt)
