@@ -387,6 +387,19 @@ class UploadsBlockWriterTests(unittest.TestCase):
         self.assertEqual(prof.uploads_reason, "no HF antenna")
         self.assertEqual(prof.call, "DASI002")
 
+    def test_a_header_with_a_trailing_comment_is_replaced_not_duplicated(self):
+        # Uncommenting TEMPLATE's example yields this header.  The patcher used
+        # to miss it, append a second [uploads] table, and leave a file that
+        # tomllib rejects: "Cannot declare ('uploads',) twice".
+        from sigmond.commands.config import _patch_uploads_block
+        from sigmond.coordination import Uploads, load_coordination
+        p = self._tmp(text='[host]\ncall = "AC0G"\n\n'
+                           '[uploads]                        # outbound-uploads POLICY\n'
+                           'enabled = false\nreason = "pause"\n')
+        _patch_uploads_block(p, Uploads(enabled=True))
+        self.assertEqual(p.read_text().count("[uploads]"), 1)
+        self.assertTrue(load_coordination(p).uploads.enabled)
+
 
 class ConfigUploadsVerbTests(unittest.TestCase):
     """`smd config uploads status|disable|enable` (sigmond#53)."""
@@ -603,3 +616,94 @@ class ConfigUploadsVerbTests(unittest.TestCase):
             'runs `smd sink upload`.  Type "off" to confirm: ')
         self.assertNotIn("never", sink_prompt)
         self.assertIn("will never ship", legacy_prompt)
+
+
+class CarryUploadsTests(unittest.TestCase):
+    """A wizard rewrite never resets the site sink switch
+    (tasks/plan-sink-control.md §10.3 item 2)."""
+
+    NEW = '[station]\ncallsign = "AC0G"\ngrid_square = "EM38ww"\n\n[reporters]\nreporter_id = "AC0G/B4"\n'
+    OFF = '\n[uploads]\nenabled = false\nmode    = "discard"\nreason  = "new station"\n'
+    UPLOAD = '[station]\ncallsign = "OLD"\n\n[uploads]\nenabled = true\nreason = ""\n\n[psws]\nenabled = false\n'
+
+    def _parse(self, text):
+        import tomllib
+        return tomllib.loads(text)
+
+    def test_reconfigure_keeps_an_upload_block(self):
+        from sigmond.site_profile import carry_uploads_block
+        out = self._parse(carry_uploads_block(self.NEW, self.UPLOAD))
+        self.assertEqual(out["uploads"]["enabled"], True)
+        self.assertEqual(out["station"]["callsign"], "AC0G")      # the new profile wins elsewhere
+        self.assertNotIn("psws", out)                              # old blocks do not ride along
+
+    def test_a_first_install_keeps_its_off_block(self):
+        from sigmond.site_profile import carry_uploads_block
+        new = self.NEW + self.OFF
+        self.assertEqual(carry_uploads_block(new, None), new)
+        self.assertEqual(carry_uploads_block(new, '[station]\ncallsign = "x"\n'), new)
+
+    def test_an_old_block_wins_over_a_new_one(self):
+        from sigmond.site_profile import carry_uploads_block
+        out = self._parse(carry_uploads_block(self.NEW + self.OFF, self.UPLOAD))
+        self.assertEqual(out["uploads"].get("mode", "upload"), "upload")
+        self.assertTrue(out["uploads"]["enabled"])
+
+    def test_a_commented_example_is_not_a_block(self):
+        from sigmond.site_profile import TEMPLATE, carry_uploads_block
+        self.assertEqual(carry_uploads_block(self.NEW, TEMPLATE), self.NEW)
+        # TEMPLATE's own example header carries a trailing comment, so it alone
+        # cannot tell a commented header from a live one; this one can.
+        commented = '[station]\ncallsign = "OLD"\n\n# [uploads]\n# enabled = false\n'
+        self.assertEqual(carry_uploads_block(self.NEW, commented), self.NEW)
+
+    def test_a_header_with_a_trailing_comment_is_carried(self):
+        # Uncommenting TEMPLATE's example yields exactly this header line.
+        from sigmond.site_profile import carry_uploads_block
+        old = ('[station]\ncallsign = "OLD"\n\n'
+               '[uploads]                        # outbound-uploads POLICY\n'
+               'enabled = false\nreason = "pause"\n')
+        out = self._parse(carry_uploads_block(self.NEW, old))
+        self.assertEqual(out["uploads"], {"enabled": False, "reason": "pause"})
+        self.assertEqual(out["station"]["callsign"], "AC0G")
+
+    def test_an_absent_block_stays_absent(self):
+        from sigmond.site_profile import carry_uploads_block
+        out = self._parse(carry_uploads_block(self.NEW, '[station]\ncallsign = "OLD"\n'))
+        self.assertNotIn("uploads", out)
+
+
+class ProfileInstallTests(unittest.TestCase):
+    def setUp(self):
+        import sigmond.commands.config as cfg
+        self.cfg = cfg
+        d = TemporaryDirectory(); self.addCleanup(d.cleanup)
+        self.dir = Path(d.name)
+        self.profile = self.dir / "site-profile.toml"
+        p = mock.patch.object(cfg, "SITE_PROFILE_PATH", self.profile)
+        p.start(); self.addCleanup(p.stop)
+
+    def _run(self, path):
+        import io, contextlib, types
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = self.cfg.cmd_config_profile_install(types.SimpleNamespace(path=str(path)))
+        return rc, out.getvalue()
+
+    def test_installs_carries_the_block_and_removes_the_new_file(self):
+        self.profile.write_text(CarryUploadsTests.UPLOAD)
+        new = self.dir / "site-profile.toml.new"
+        new.write_text(CarryUploadsTests.NEW)
+        rc, out = self._run(new)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(new.exists())
+        self.assertIn("[uploads]", self.profile.read_text())
+        self.assertIn("kept the site sink switch", out)
+
+    def test_refuses_invalid_toml_and_leaves_the_old_profile(self):
+        self.profile.write_text(CarryUploadsTests.UPLOAD)
+        new = self.dir / "site-profile.toml.new"
+        new.write_text("[station\nbroken")
+        rc, _ = self._run(new)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.profile.read_text(), CarryUploadsTests.UPLOAD)

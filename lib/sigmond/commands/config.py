@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -971,7 +972,10 @@ def _patch_uploads_block(path: Path, up: Uploads) -> None:
     found = False
     for line in lines:
         s = line.strip()
-        if s == '[uploads]':
+        # A header may carry a trailing comment ("[uploads]   # policy ...").
+        # Only the [uploads] table itself starts the block; a [uploads.x]
+        # subtable (none exists today) ends it and stays, as before.
+        if re.match(r'\[\s*uploads\s*\]', s):
             in_block = True
             found = True
             out.extend(body)
@@ -1226,6 +1230,38 @@ def cmd_config_uploads(args) -> int:
     else:
         ok(words['hold'] + (f' ({reason})' if reason else ''))
     return rc
+
+
+def cmd_config_profile_install(args) -> int:
+    """`smd config profile-install <path>`: install a new site-profile.toml
+    (the wizard writes it beside the old one) and keep any [uploads] block the
+    old profile declared (tasks/plan-sink-control.md §10.3 item 2)."""
+    import shutil
+    import tomllib
+    from ..site_profile import carry_uploads_block
+    new_path = Path(args.path)
+    try:
+        new_text = new_path.read_text()
+    except OSError as exc:
+        err(f'cannot read {new_path}: {exc}')
+        return 1
+    old_text = SITE_PROFILE_PATH.read_text() if SITE_PROFILE_PATH.exists() else None
+    text = carry_uploads_block(new_text, old_text)
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        err(f'{new_path} is not valid TOML: {exc}; site-profile.toml unchanged')
+        return 1
+    tmp = SITE_PROFILE_PATH.with_name(SITE_PROFILE_PATH.name + '.tmp')
+    tmp.write_text(text)
+    if SITE_PROFILE_PATH.exists():
+        shutil.copymode(SITE_PROFILE_PATH, tmp)
+    os.replace(tmp, SITE_PROFILE_PATH)
+    new_path.unlink(missing_ok=True)
+    if text != new_text:
+        info('kept the site sink switch already set in site-profile.toml')
+    ok(f'installed {SITE_PROFILE_PATH}')
+    return 0
 
 
 # ---------------------------------------------------------------------------

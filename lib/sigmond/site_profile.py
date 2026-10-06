@@ -12,6 +12,7 @@ delivered via ``smd admin secrets``). See docs/PROVISIONING-INPUTS.md §8.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -273,3 +274,33 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
         uploads_mode=_clean(up.get("mode")).lower(),
         source_path=path,
     )
+
+
+def _split_block(text: str, name: str) -> tuple:
+    """(text without the [name] table and its [name.*] subtables, that block).
+    Only a header at line start counts; a commented example does not.  A
+    header may carry a trailing comment, as TEMPLATE's example does once
+    uncommented: `[uploads]   # outbound-uploads POLICY`."""
+    header = re.compile(r'\[\s*' + re.escape(name) + r'\s*(\]|\.)')
+    keep, block, inside = [], [], False
+    for line in text.splitlines(keepends=True):
+        s = line.strip()
+        if s.startswith('['):
+            inside = bool(header.match(s))
+        (block if inside else keep).append(line)
+    return ''.join(keep), ''.join(block)
+
+
+def carry_uploads_block(new_text: str, old_text) -> str:
+    """The profile a wizard run should install: ``new_text``, except that an
+    [uploads] block the old profile declares survives unchanged.  The wizard
+    rewrites site-profile whole on every run, and `smd align` installs new
+    wizards on stations whose operator already set the site sink switch;
+    a rewrite must never reset it (tasks/plan-sink-control.md §10.3 item 2)."""
+    if not old_text:
+        return new_text
+    _, old_block = _split_block(old_text, 'uploads')
+    if not old_block.strip():
+        return new_text
+    rest, _ = _split_block(new_text, 'uploads')
+    return rest.rstrip('\n') + '\n\n' + old_block.strip('\n') + '\n'
