@@ -1,6 +1,7 @@
 """Tests for sigmond.site_profile + the PSWS push planner (Phase 2:
 one-file identity for the golden-image model)."""
 
+import os
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -680,30 +681,132 @@ class ProfileInstallTests(unittest.TestCase):
         d = TemporaryDirectory(); self.addCleanup(d.cleanup)
         self.dir = Path(d.name)
         self.profile = self.dir / "site-profile.toml"
+        self.new = self.dir / "site-profile.toml.new"
         p = mock.patch.object(cfg, "SITE_PROFILE_PATH", self.profile)
         p.start(); self.addCleanup(p.stop)
+        self.chowned = []   # (path, uid, gid): the suite never calls the real chown
 
-    def _run(self, path):
+    def _chown(self, path, uid, gid):
+        self.chowned.append((Path(path), uid, gid))
+
+    def _run(self, path, chown=None):
         import io, contextlib, types
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            rc = self.cfg.cmd_config_profile_install(types.SimpleNamespace(path=str(path)))
+            rc = self.cfg.cmd_config_profile_install(
+                types.SimpleNamespace(path=str(path)), chown=chown or self._chown)
         return rc, out.getvalue()
 
     def test_installs_carries_the_block_and_removes_the_new_file(self):
         self.profile.write_text(CarryUploadsTests.UPLOAD)
-        new = self.dir / "site-profile.toml.new"
-        new.write_text(CarryUploadsTests.NEW)
-        rc, out = self._run(new)
+        self.new.write_text(CarryUploadsTests.NEW)
+        rc, out = self._run(self.new)
         self.assertEqual(rc, 0, out)
-        self.assertFalse(new.exists())
-        self.assertIn("[uploads]", self.profile.read_text())
+        self.assertFalse(self.new.exists())
+        installed = self.profile.read_text()
+        self.assertIn("[uploads]", installed)
+        self.assertIn('callsign = "AC0G"', installed)      # the new profile's own content
+        self.assertNotIn('callsign = "OLD"', installed)
         self.assertIn("kept the site sink switch", out)
 
     def test_refuses_invalid_toml_and_leaves_the_old_profile(self):
         self.profile.write_text(CarryUploadsTests.UPLOAD)
-        new = self.dir / "site-profile.toml.new"
-        new.write_text("[station\nbroken")
-        rc, _ = self._run(new)
+        self.new.write_text("[station\nbroken")
+        rc, out = self._run(self.new)
         self.assertEqual(rc, 1)
         self.assertEqual(self.profile.read_text(), CarryUploadsTests.UPLOAD)
+        self.assertTrue(self.new.exists())
+        self.assertIn(f"{self.new} is not valid TOML", out)
+
+    def test_a_bad_old_block_blames_the_live_profile_not_the_new_file(self):
+        bad_old = '[station]\ncallsign = "OLD"\n\n[uploads]\nenabled = tru\n'
+        self.profile.write_text(bad_old)
+        self.new.write_text(CarryUploadsTests.NEW)
+        rc, out = self._run(self.new)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.profile.read_text(), bad_old)         # both files untouched
+        self.assertEqual(self.new.read_text(), CarryUploadsTests.NEW)
+        self.assertIn(f"the [uploads] block in the live {self.profile} does not parse", out)
+        self.assertNotIn("is not valid TOML", out)
+
+    def test_refuses_the_live_profile_given_as_the_new_file(self):
+        # Installing the live file over itself and then deleting "the new file"
+        # used to delete the live profile and still return 0.
+        self.profile.write_text(CarryUploadsTests.UPLOAD)
+        before = self.profile.read_bytes()
+        link = self.dir / "hard.new"
+        os.link(self.profile, link)
+        sym = self.dir / "sym.new"
+        sym.symlink_to(self.profile)
+        for given in (self.profile, link, sym):
+            with self.subTest(given=given.name):
+                rc, out = self._run(given)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("is the live site profile itself", out)
+                self.assertIn("Nothing changed", out)
+                self.assertTrue(given.exists())
+                self.assertEqual(self.profile.read_bytes(), before)
+        self.assertEqual(self.chowned, [])
+
+    def test_a_relative_path_to_the_live_profile_is_refused_too(self):
+        self.profile.write_text(CarryUploadsTests.UPLOAD)
+        before = self.profile.read_bytes()
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        os.chdir(self.dir)
+        rc, out = self._run("site-profile.toml")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self.profile.read_bytes(), before)
+
+    def test_a_missing_new_file_takes_the_read_refusal(self):
+        self.profile.write_text(CarryUploadsTests.UPLOAD)
+        rc, out = self._run(self.dir / "nowhere.new")
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot read", out)
+        self.assertEqual(self.profile.read_text(), CarryUploadsTests.UPLOAD)
+
+    def test_the_installed_profile_keeps_the_old_mode(self):
+        self.profile.write_text(CarryUploadsTests.UPLOAD)
+        self.profile.chmod(0o640)
+        self.new.write_text(CarryUploadsTests.NEW)
+        self.new.chmod(0o600)
+        rc, out = self._run(self.new)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.profile.stat().st_mode & 0o777, 0o640)
+
+    def test_the_installed_profile_keeps_the_old_owner_and_group(self):
+        self.profile.write_text(CarryUploadsTests.UPLOAD)
+        st = self.profile.stat()
+        self.new.write_text(CarryUploadsTests.NEW)
+        rc, out = self._run(self.new)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.chowned), 1)
+        path, uid, gid = self.chowned[0]
+        self.assertEqual((uid, gid), (st.st_uid, st.st_gid))
+        self.assertEqual(path.parent, self.dir)     # the temp beside the profile, before the replace
+
+    def test_a_first_install_keeps_the_new_files_mode(self):
+        self.new.write_text(CarryUploadsTests.NEW)
+        self.new.chmod(0o644)
+        old_umask = os.umask(0o077)
+        try:
+            rc, out = self._run(self.new)
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.profile.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.chowned, [])          # no old profile, nothing to copy an owner from
+
+    def test_a_failure_before_the_replace_leaves_no_temp_file(self):
+        self.profile.write_text(CarryUploadsTests.UPLOAD)
+        self.new.write_text(CarryUploadsTests.NEW)
+
+        def refuse(path, uid, gid):
+            raise PermissionError("chown refused")
+
+        with self.assertRaises(PermissionError):
+            self._run(self.new, chown=refuse)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()),
+                         ["site-profile.toml", "site-profile.toml.new"])
+        self.assertEqual(self.profile.read_text(), CarryUploadsTests.UPLOAD)
+        self.assertTrue(self.new.exists())

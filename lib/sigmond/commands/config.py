@@ -1232,31 +1232,59 @@ def cmd_config_uploads(args) -> int:
     return rc
 
 
-def cmd_config_profile_install(args) -> int:
+def cmd_config_profile_install(args, chown=os.chown) -> int:
     """`smd config profile-install <path>`: install a new site-profile.toml
     (the wizard writes it beside the old one) and keep any [uploads] block the
-    old profile declared (tasks/plan-sink-control.md §10.3 item 2)."""
+    old profile declared (tasks/plan-sink-control.md §10.3 item 2).  The
+    installed file keeps the old profile's mode, owner and group; a first
+    install keeps the new file's mode.  ``chown`` is injectable so tests need
+    no root."""
     import shutil
     import tomllib
     from ..site_profile import carry_uploads_block
     new_path = Path(args.path)
+    live = SITE_PROFILE_PATH.exists()
+    # The command deletes `new_path` after the install.  Given the live profile
+    # (by its path, a relative path, a symlink or a hardlink), it would delete
+    # what it just installed.  Refuse before reading anything.
+    if live:
+        try:
+            same = os.path.samefile(new_path, SITE_PROFILE_PATH)
+        except OSError:
+            same = False        # a missing new_path takes the read refusal below
+        if same:
+            err(f'{new_path} is the live site profile itself; give the wizard\'s '
+                'new file (site-profile.toml.new).  Nothing changed.')
+            return 1
     try:
         new_text = new_path.read_text()
     except OSError as exc:
         err(f'cannot read {new_path}: {exc}')
         return 1
-    old_text = SITE_PROFILE_PATH.read_text() if SITE_PROFILE_PATH.exists() else None
+    try:
+        tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as exc:
+        err(f'{new_path} is not valid TOML: {exc}; site-profile.toml unchanged')
+        return 1
+    old_text = SITE_PROFILE_PATH.read_text() if live else None
     text = carry_uploads_block(new_text, old_text)
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        err(f'{new_path} is not valid TOML: {exc}; site-profile.toml unchanged')
+        err(f'the [uploads] block in the live {SITE_PROFILE_PATH} does not parse '
+            f'({exc}); {SITE_PROFILE_PATH.name} and {new_path.name} unchanged')
         return 1
+    old_st = SITE_PROFILE_PATH.stat() if live else None
     tmp = SITE_PROFILE_PATH.with_name(SITE_PROFILE_PATH.name + '.tmp')
-    tmp.write_text(text)
-    if SITE_PROFILE_PATH.exists():
-        shutil.copymode(SITE_PROFILE_PATH, tmp)
-    os.replace(tmp, SITE_PROFILE_PATH)
+    try:
+        tmp.write_text(text)
+        shutil.copymode(SITE_PROFILE_PATH if live else new_path, tmp)
+        if old_st is not None:
+            chown(tmp, old_st.st_uid, old_st.st_gid)
+        os.replace(tmp, SITE_PROFILE_PATH)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     new_path.unlink(missing_ok=True)
     if text != new_text:
         info('kept the site sink switch already set in site-profile.toml')

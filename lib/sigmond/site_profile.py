@@ -280,7 +280,9 @@ def _split_block(text: str, name: str) -> tuple:
     """(text without the [name] table and its [name.*] subtables, that block).
     Only a header at line start counts; a commented example does not.  A
     header may carry a trailing comment, as TEMPLATE's example does once
-    uncommented: `[uploads]   # outbound-uploads POLICY`."""
+    uncommented: `[uploads]   # outbound-uploads POLICY`.  The split assumes the
+    block holds only scalar values: a multi-line array whose line starts with
+    `[` would end the block early.  [uploads] holds only scalars today."""
     header = re.compile(r'\[\s*' + re.escape(name) + r'\s*(\]|\.)')
     keep, block, inside = [], [], False
     for line in text.splitlines(keepends=True):
