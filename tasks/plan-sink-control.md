@@ -200,7 +200,8 @@ it works, tolerates an existing user or group, creates `/etc/hs-uploader/pipelin
 
 ```
  <client> process ──writes──► sink (sink.db rows or a spool dir) ──read by──► hs-uploader daemon ──► destination
-        │ effective_state(): may it store?                                         │ effective_state(): may it send?
+   │ effective_state(): may it store?                                         │
+   effective_state(): may it send?
         └──────────── /etc/hs-uploader/sinks/<client>.toml  +  sinks/site.toml ────────┘
                                  ▲ changed only through write_switch() (§3.4)
 ```
@@ -944,7 +945,8 @@ Each step ships on its own and leaves stations working.
 2. **hs-uploader foundation.**  The sink writer moves in, with a compatibility import left in
    sigmond, and rows gain `producer` and `local`.  Each sender gets its own send-record key, with
    the one-time migration and the forward-only rule of §6.2.  The daemon reads `pipelines.d/`
-   alongside the legacy list (§3.5).  The switch files, `effective_state()`, the carry-over and enforcement arrive
+   alongside the legacy list (§3.5).  The switch files, `effective_state()`, the carry-over and
+   enforcement arrive
    together.  Cleanup moves into the daemon and spares unsent data, except rows of clients whose
    in-process senders still run (§6.3), and `sink drop` arrives.  The
    send log gains `pipeline` and `client` columns and the `last_send` table (§8.2).  Until grants
@@ -1031,8 +1033,11 @@ sending a day more than once (D7).  The earlier v3.69 list moves to v3.70.
      by the spool's owner, so GRAPE's catch-up sweep never re-packages a day from before it
      (`hamsci-physics/src/hamsci_physics/cli.py:576-591`).
 
-   sigmond decides this from the mode the manifest actually renders, not from the mode written,
-   because a host whose hs-uploader cannot discard renders `hold` instead.  One gap stays open
+   sigmond takes these steps whenever the written mode leaves `discard`, whatever the new setting,
+   and it refuses while GRAPE's or the magnetometer's packaging runs, so it never moves a package
+   that is still being written.  It reads the mode the manifest actually rendered only to say
+   truthfully what ships: a host whose hs-uploader cannot discard renders `hold`, and the backlog it
+   stored then ships.  One gap stays open
    until §4.1 lands.  The packages that GRAPE and the magnetometer build after the command still
    cover whole days.  That includes the day of the command.  It also includes the day before, when
    the command runs before that night's packaging, which starts at about 01:00 UTC for GRAPE and
@@ -1053,11 +1058,13 @@ sending a day more than once (D7).  The earlier v3.69 list moves to v3.70.
    a day, and the sweep retries only the days that truly failed.  On a station,
    `journalctl -u grape-daily` lines reading `sweep: retrying incomplete day` show the fault; one
    station's journal confirms it before release.
-6. **INSTALL.md, verified against v3.69.**  Section 9, "check it's alive", points at the decodes on
-   the station pages instead of wsprnet and pskreporter.info, since nothing ships yet.  It closes
-   by raising the site sink switch: the operator confirms callsign and grid on the station pages,
-   runs `smd sink upload`, and reads the result with `smd sink status`.  The step lives inside §9,
-   so no later section renumbers and the links from sigmond's operator docs keep working.  The
+6. **INSTALL.md, verified against v3.69.**  Section 9, "check it's alive", points at the decodes in
+   `smd watch wspr` and `smd watch psk`, and at callsign and grid on the station pages, instead of
+   wsprnet and pskreporter.info, since no data ships yet.  The heartbeat still goes out.  It closes
+   by raising the site sink switch: the operator confirms reporter ID, callsign and grid in
+   `site-profile.toml` (the station pages show callsign and grid too), runs `smd sink upload`,
+   and reads the result with `smd sink status`.  The step lives inside §9, so no later section
+   renumbers and the links from sigmond's operator docs keep working.  The
    guide never teaches `smd upload on`.  It says plainly that nothing recorded before
    `smd sink upload` leaves the station, apart from the GRAPE and magnetometer packages of item
    3's gap.  Section 11's row for "no spots after 30 minutes" changes to match.  Section 12, on
