@@ -493,3 +493,13 @@ def test_shipped_dasi2_profile_excludes_its_contract_less_client():
     p = build_plan(prof, local_radiod=True, no_config=frozenset(no_config))
     assert 'configure gmag-webui' not in _labels(p, 'config')
     assert 'configure wspr-recorder' in _labels(p, 'config')
+
+
+def test_bringup_leaves_the_daemon_as_the_only_pskreporter_sender():
+    # tasks/plan-sink-control.md §10.2 step 1: server-raw starts no in-process
+    # sender, so the daemon's psk-pskreporter posts these rows alone.
+    p = build_plan(_dasi2(), local_radiod=True, reporter='AC0G/S')
+    ups = {s.argv[3]: s.argv for s in p.steps
+           if s.argv and s.argv[:3] == ['smd', 'config', 'upload']}
+    assert ups['psk-recorder'][-2:] == ['--via', 'server-raw']
+    assert '--via' not in ups['wspr-recorder']

@@ -336,18 +336,20 @@ def build_plan(profile, *, local_radiod: bool,
                               'enable',
                               argv=[smd, 'admin', 'instance', 'add', '--force',
                                     client, reporter]))
-            # Enable the instance's upstream upload — the flag itself
-            # (WSPR/PSK_USE_HS_UPLOADER) plus, via DELIVERY_ON_ENABLE, the
-            # standalone-correct PSK_DELIVERY_PIPELINES=direct.  This was a
-            # manual image-builder step; when skipped, psk-recorder falls to
-            # the server-merge runtime default and PSKReporter silently gets
-            # nothing while every local health check stays green (B4
-            # appliance bring-up, 2026-07-27).  Idempotent.
+            # Enable the instance's upstream upload.  For psk-recorder, pass
+            # --via server-raw: it starts no in-process sender and leaves
+            # forward_to_pskreporter false, so the daemon's psk-pskreporter
+            # pipeline is the one sender for these rows, under the site sink
+            # switch (tasks/plan-sink-control.md §10.2 step 1).  Without --via,
+            # `--on` writes direct, and the in-process sender would post beside
+            # the daemon.  Idempotent.
+            argv = [smd, 'config', 'upload', client, reporter, '--on']
+            if client == 'psk-recorder':
+                argv += ['--via', 'server-raw']
             steps.append(Step(STAGE3A,
                               f'enable upload {client}@{reporter}',
                               'config',
-                              argv=[smd, 'config', 'upload', client,
-                                    reporter, '--on']))
+                              argv=argv))
 
     # Provision the shared hs-uploader watermark dir.  Recorder units list
     # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it
