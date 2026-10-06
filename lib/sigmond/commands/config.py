@@ -1001,6 +1001,97 @@ def _regenerate_uploader_manifest() -> int:
     return cmd_uploader_manifest(types.SimpleNamespace(write=True, enable=True))
 
 
+def _close_doors() -> int:
+    """Before the written mode leaves discard (the site sink switch's `off`),
+    whatever the new setting: refuse while GRAPE or the magnetometer packages
+    a day; otherwise set aside the GRAPE packages and magnetometer zips stored
+    while it read off, and mark earlier GRAPE days packaged
+    (tasks/plan-sink-control.md §10.3 item 3).  Isolated so tests can stub
+    it.  Returns 0 on success, 1 on refusal; on 1 the caller writes nothing."""
+    from datetime import datetime, timezone
+    from .. import sink_doors
+    busy = sink_doors.packaging_running()
+    if busy:
+        err(f'refusing while packaging runs ({", ".join(busy)}): setting its '
+            'spool aside now could split a package.  Run the command again '
+            'when it finishes; GRAPE packs from about 01:00 UTC for up to '
+            'three hours, the magnetometer at about 03:00 UTC.  The site sink '
+            'switch stays off.')
+        return 1
+    try:
+        report = sink_doors.close_doors(datetime.now(timezone.utc))
+    except sink_doors.DoorError as exc:
+        # The message names one held directory; the pairs name every move.
+        for src, dst in exc.moved:
+            info(f'set aside {src} -> {dst}')
+        err('could not set aside data stored while the site sink switch read off: '
+            f'{exc}')
+        return 1
+    for src, dst in report.moved:
+        info(f'set aside {src} -> {dst}')
+    if report.marked:
+        info(f'marked {len(report.marked)} earlier GRAPE days packaged, so the '
+             'catch-up sweep never rebuilds them')
+    return 0
+
+
+# The two vocabularies one handler speaks: the legacy `smd upload` words, and
+# the sink words of tasks/plan-sink-control.md §2.1 for `smd sink`.  Every
+# line `smd sink off|upload` prints comes from the 'sink' half.
+_SINK_SETTING = {'upload': 'upload', 'discard': 'off', 'hold': 'hold (legacy)'}
+
+_WORDS = {
+    'legacy': {
+        'need_reason': 'discard needs --reason, e.g. --reason "bench provisioning '
+                       'for DASI-021"; the fleetboard shows it',
+        'need_yes': 'discard needs --yes when not run at a terminal',
+        'cannot_discard': '{python} cannot import hs_uploader.transports.discard: '
+                          'this hs-uploader would ignore discard and SHIP.  Update '
+                          'hs-uploader first; policy unchanged.',
+        'confirm': 'Discard: data recorded from now on will never ship. '
+                   'Type "discard" to confirm: ',
+        'confirm_word': 'discard',
+        'unconfirmed': 'discard not confirmed; policy unchanged',
+        'written': '{path}: [uploads] mode = {mode}',
+        'denied': 'permission denied writing the policy; re-run smd as root',
+        'on': 'uploads on — outbound data pipelines restored in the manifest',
+        'nothing_ships': 'nothing recorded during discard will ship, except the '
+                         'GRAPE and magnetometer packages for this UTC day, and for '
+                         'the day before if its packaging has not yet run',
+        'rendered_hold': 'this host rendered hold, not discard: the backlog stored '
+                         'since then ships now, oldest first',
+        'hold_backlog': 'the backlog stored during hold ships now, oldest first',
+        'off': 'discard mode — data pipelines ack without shipping',
+        'hold': 'uploads held — manifest is heartbeat-only',
+    },
+    'sink': {
+        'need_reason': 'smd sink off needs --reason, e.g. --reason "bench checkout"; '
+                       'the fleetboard shows it',
+        'need_yes': 'smd sink off needs --yes when not run at a terminal',
+        'cannot_discard': "this host's hs-uploader ({python}) cannot discard and "
+                          'would send everything; update hs-uploader first.  The '
+                          'site sink switch is unchanged.',
+        'confirm': 'Site sink switch to off: data recorded from now on will never ship. '
+                   'Type "off" to confirm: ',
+        'confirm_word': 'off',
+        'unconfirmed': 'not confirmed; the site sink switch is unchanged',
+        'written': '{path}: site sink switch set to {setting}',
+        'denied': 'permission denied writing the site sink switch; re-run smd as root',
+        'on': 'site sink: upload — every data pipeline is back in the manifest',
+        'nothing_ships': 'nothing recorded while the site sink switch read off will '
+                         'ship, except the GRAPE and magnetometer packages for this '
+                         'UTC day, and for the day before if its packaging (01:00 '
+                         'to about 04:00 UTC) has not yet run',
+        'rendered_hold': 'this host could not discard, so it stored data while the '
+                         'site sink switch read off; that backlog ships now, oldest '
+                         'first',
+        'hold_backlog': 'the backlog stored under the legacy hold ships now, oldest first',
+        'off': 'site sink: off — no data ships and no backlog builds',
+        'hold': 'site sink: hold (legacy) — the manifest is heartbeat-only',
+    },
+}
+
+
 # Operator verbs → modes.  `off` means hold, because losing data should take
 # a deliberate word; `enable`/`disable` keep `smd config uploads` working.
 UPLOAD_VERBS = {
@@ -1010,21 +1101,21 @@ UPLOAD_VERBS = {
 }
 
 
-def _confirm_discard(args) -> bool:
+def _confirm_discard(args, words=None) -> bool:
     """Discard throws data away, so a person at a terminal confirms it.
     Scripts pass --yes; a non-interactive caller without it is refused."""
     import sys
+    words = words or _WORDS['legacy']
     if getattr(args, 'yes', False):
         return True
     if not sys.stdin.isatty():
-        err('discard needs --yes when not run at a terminal')
+        err(words['need_yes'])
         return False
     try:
-        answer = input('Discard: data recorded from now on will never ship. '
-                       'Type "discard" to confirm: ')
+        answer = input(words['confirm'])
     except EOFError:
         return False
-    return answer.strip().lower() == 'discard'
+    return answer.strip().lower() == words['confirm_word']
 
 
 def cmd_config_uploads(args) -> int:
@@ -1042,6 +1133,7 @@ def cmd_config_uploads(args) -> int:
 
     verb = getattr(args, 'uploads_command', None) or 'status'
     coord = load_coordination(COORDINATION_PATH)
+    words = _WORDS['sink' if getattr(args, 'sink_words', False) else 'legacy']
 
     if verb == 'status':
         up = coord.uploads
@@ -1079,20 +1171,25 @@ def cmd_config_uploads(args) -> int:
     reason = (getattr(args, 'reason', None) or '').strip()
     if mode == 'discard':
         if not reason:
-            err('discard needs --reason, e.g. --reason "bench provisioning '
-                'for DASI-021"; the fleetboard shows it')
+            err(words['need_reason'])
             return 2
         if not um.hs_uploader_supports_discard():
-            err(f'{um.HS_UPLOADER_PYTHON} cannot import '
-                'hs_uploader.transports.discard: this hs-uploader would ignore '
-                'discard and SHIP.  Update hs-uploader first; policy unchanged.')
+            err(words['cannot_discard'].format(python=um.HS_UPLOADER_PYTHON))
             return 1
-        if not _confirm_discard(args):
-            info('discard not confirmed; policy unchanged')
+        if not _confirm_discard(args, words):
+            info(words['unconfirmed'])
             return 1
     elif mode == 'hold' and not reason:
         warn('no --reason given; the board will say "held by policy" '
              'with no why — consider re-running with --reason')
+
+    # Leaving the written discard -- the site sink switch's `off` -- for ANY
+    # setting closes the doors first, so discard -> hold -> on cannot slip
+    # past them (tasks/plan-sink-control.md §10.3 item 3).  _close_doors
+    # prints its own refusal, which says the switch stays off.
+    if mode != 'discard' and coord.uploads.mode == 'discard':
+        if _close_doors():
+            return 1
 
     up = Uploads(mode=mode, reason='' if mode == 'upload' else reason)
 
@@ -1100,25 +1197,27 @@ def cmd_config_uploads(args) -> int:
         for path in (SITE_PROFILE_PATH, COORDINATION_PATH):
             if path is COORDINATION_PATH or path.exists():
                 _patch_uploads_block(path, up)
-                ok(f'{path}: [uploads] mode = {mode}')
+                ok(words['written'].format(path=path, mode=mode,
+                                           setting=_SINK_SETTING[mode]))
     except PermissionError:
-        err('permission denied writing the policy; re-run smd as root')
+        err(words['denied'])
         return 1
 
     rc = _regenerate_uploader_manifest()
     if mode == 'upload':
-        ok('uploads on — outbound data pipelines restored in the manifest')
+        ok(words['on'])
         if coord.uploads.mode == 'discard':
-            info('nothing recorded during discard will ship: hs-uploader '
-                 'acknowledged it as it arrived')
+            # The mode the manifest rendered decides what truly ships.
+            if um.effective_mode(coord) == 'discard':
+                info(words['nothing_ships'])
+            else:
+                warn(words['rendered_hold'])
         elif coord.uploads.mode == 'hold':
-            info('the backlog stored during hold ships now, oldest first')
+            info(words['hold_backlog'])
     elif mode == 'discard':
-        ok('discard mode — data pipelines ack without shipping'
-           + (f' ({reason})' if reason else ''))
+        ok(words['off'] + (f' ({reason})' if reason else ''))
     else:
-        ok('uploads held — manifest is heartbeat-only'
-           + (f' ({reason})' if reason else ''))
+        ok(words['hold'] + (f' ({reason})' if reason else ''))
     return rc
 
 

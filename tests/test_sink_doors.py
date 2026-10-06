@@ -361,3 +361,49 @@ def test_close_doors_hands_chown_and_chmod_to_the_day_directories(tmp_path):
                                     "20261002", "20261001", "20260930")}
     assert {c.args[1] for c in chmod.call_args_list} == {stat.S_IMODE(g.stat().st_mode)}
     assert g / "20261006" in {c.args[0] for c in chown.call_args_list}
+
+
+# -- the config hook around close_doors (Task 5) ----------------------------
+
+def test_the_config_hook_refuses_on_a_door_error_and_stamps_utc():
+    import sigmond.commands.config as cfg
+    seen = {}
+
+    def fake(now, **kw):
+        seen["now"] = now
+        return sd.DoorReport()
+
+    with mock.patch.object(sd, "packaging_running", return_value=[]):
+        with mock.patch.object(sd, "close_doors", side_effect=sd.DoorError("cross-fs")):
+            assert cfg._close_doors() == 1
+        with mock.patch.object(sd, "close_doors", side_effect=fake):
+            assert cfg._close_doors() == 0
+    assert seen["now"].utcoffset() is not None
+    assert seen["now"].utcoffset().total_seconds() == 0
+
+
+def test_the_config_hook_refuses_while_packaging_runs(capsys):
+    # §10.3 item 3: never move a package that a unit still writes.
+    import sigmond.commands.config as cfg
+    with mock.patch.object(sd, "packaging_running",
+                           return_value=["grape-daily.service"]), \
+            mock.patch.object(sd, "close_doors") as close:
+        assert cfg._close_doors() == 1
+    close.assert_not_called()
+    out = "".join(capsys.readouterr())
+    assert "grape-daily.service" in out
+    assert "again" in out and "stays off" in out
+
+
+def test_the_config_hook_prints_what_moved_before_a_door_error(capsys):
+    # A rename or marking step can fail after some moves.  The message names
+    # one held directory; the pairs say where everything went.
+    import sigmond.commands.config as cfg
+    a, b = Path("/spool/20261005/OBS2026-10-05T00-00"), Path("/held/20261007T153000Z/OBS")
+    err = sd.DoorError("could not mark 20261006", moved=[(a, b)])
+    with mock.patch.object(sd, "packaging_running", return_value=[]), \
+            mock.patch.object(sd, "close_doors", side_effect=err):
+        assert cfg._close_doors() == 1
+    out = "".join(capsys.readouterr())
+    assert str(a) in out and str(b) in out
+    assert "could not mark 20261006" in out

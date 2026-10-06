@@ -407,6 +407,8 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.regen = mock.patch.object(cfg, "_regenerate_uploader_manifest",
                                        return_value=0)
         self.regen_mock = self.regen.start(); self.addCleanup(self.regen.stop)
+        self.doors = mock.patch.object(cfg, "_close_doors", return_value=0)
+        self.doors_mock = self.doors.start(); self.addCleanup(self.doors.stop)
 
     def _run(self, **kw):
         import io, contextlib, types
@@ -522,3 +524,56 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertEqual(load_coordination(self.coord).uploads.mode, "upload")
         self.assertNotIn("mode", self.coord.read_text())
         self.assertIn("nothing recorded during discard will ship", out)
+
+    # -- leaving the site sink switch's `off` (tasks/plan-sink-control.md §10.3) --
+
+    def test_leaving_discard_closes_the_doors_before_the_manifest(self):
+        self._supports(True)
+        self._run(uploads_command="discard", reason="bench", yes=True)
+        order = []
+        self.doors_mock.side_effect = lambda: order.append("doors") or 0
+        self.regen_mock.side_effect = lambda: order.append("regen") or 0
+        rc, _ = self._run(uploads_command="on")
+        self.assertEqual(rc, 0)
+        self.assertEqual(order, ["doors", "regen"])
+
+    def test_a_door_failure_leaves_the_site_sink_off(self):
+        from sigmond.coordination import load_coordination
+        self._supports(True)
+        self._run(uploads_command="discard", reason="bench", yes=True)
+        self.regen_mock.reset_mock()
+        self.doors_mock.return_value = 1
+        rc, _ = self._run(uploads_command="on")
+        self.assertEqual(rc, 1)
+        self.assertEqual(load_coordination(self.coord).uploads.mode, "discard")
+        self.regen_mock.assert_not_called()
+
+    def test_on_from_upload_or_hold_leaves_the_doors_alone(self):
+        self._run(uploads_command="on")
+        self._run(uploads_command="hold", reason="x")
+        self._run(uploads_command="on")
+        self.doors_mock.assert_not_called()
+
+    def test_leaving_off_through_hold_closes_the_doors(self):
+        # discard -> hold -> on: the hook keys on the WRITTEN mode leaving
+        # discard, whatever the new setting, so the doors close at the first
+        # step and never again.
+        self._supports(True)
+        self._run(uploads_command="discard", reason="bench", yes=True)
+        self._run(uploads_command="hold", reason="pause")
+        self.doors_mock.assert_called_once()
+        self._run(uploads_command="on")
+        self.doors_mock.assert_called_once()
+
+    def test_leaving_a_discard_rendered_as_hold_says_the_backlog_ships(self):
+        # The policy reads discard, but this host's hs-uploader cannot discard,
+        # so the manifest rendered hold and a backlog built up.
+        from sigmond.commands.config import _patch_uploads_block
+        from sigmond.coordination import Uploads
+        _patch_uploads_block(self.coord, Uploads(mode="discard", reason="wizard"))
+        self._supports(False)
+        rc, out = self._run(uploads_command="on")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("nothing recorded during discard will ship", out)
+        self.assertIn("ships now", out)
+        self.doors_mock.assert_called_once()     # the WRITTEN mode left discard
