@@ -30,7 +30,7 @@ class SuppressedPipelinesLineTests(unittest.TestCase):
     def test_names_suppressed_pipelines(self):
         rc, out = self._check(["wspr-wsprdaemon", "psk-pskreporter"])
         self.assertEqual(rc, 0)
-        self.assertIn("HELD BY POLICY", out)
+        self.assertIn("SITE SINK HOLD (LEGACY)", out)
         self.assertIn("wspr-wsprdaemon, psk-pskreporter", out)
 
     def test_discard_is_not_reported_as_held(self):
@@ -38,10 +38,10 @@ class SuppressedPipelinesLineTests(unittest.TestCase):
         # line said "DISABLED BY POLICY ... suppressed", the hold wording.
         rc, out = self._check(["wspr-wsprdaemon"], mode="discard")
         self.assertEqual(rc, 0)
-        self.assertIn("DISCARD MODE", out)
-        self.assertNotIn("HELD", out)
+        self.assertIn("SITE SINK OFF", out)
+        self.assertNotIn("HOLD", out)
 
     def test_silent_when_policy_enabled(self):
         rc, out = self._check([])
         self.assertEqual(rc, 0)
-        self.assertNotIn("POLICY", out)
+        self.assertNotIn("SITE SINK", out)

@@ -398,7 +398,8 @@ class UploadsPolicyRenderTests(unittest.TestCase):
         text = self._generate(self._coord(enabled=False, reason="no HF antenna"))
         parsed = tomllib.loads(text)
         self.assertEqual([p["name"] for p in parsed["pipeline"]], ["heartbeat"])
-        self.assertIn("DISABLED BY POLICY", text)
+        self.assertIn("SITE SINK HOLD (LEGACY)", text)
+        self.assertNotIn("smd upload on", text)
         self.assertIn("no HF antenna", text)
         self.assertIn("[uploads] enabled = false", text)
 
@@ -407,7 +408,7 @@ class UploadsPolicyRenderTests(unittest.TestCase):
         parsed = tomllib.loads(text)
         self.assertEqual([p["name"] for p in parsed["pipeline"]],
                          ["grape-psws", "heartbeat"])
-        self.assertNotIn("DISABLED BY POLICY", text)
+        self.assertNotIn("SITE SINK", text)
 
     def test_suppressed_pipelines_are_reported(self):
         """The command layer needs the names it suppressed, to print them."""
@@ -450,14 +451,16 @@ class DiscardRenderTests(UploadsPolicyRenderTests):
         self.assertEqual(sorted(pipes), ["grape-psws", "heartbeat"])
         self.assertIs(pipes["grape-psws"].get("discard"), True)
         self.assertNotIn("discard", pipes["heartbeat"])
-        self.assertIn("DISCARD MODE", text)
+        self.assertIn("SITE SINK OFF", text)
+        self.assertIn("smd sink upload", text)
+        self.assertNotIn("smd upload on", text)
         self.assertIn("bench provisioning", text)
 
     def test_an_hs_uploader_without_discard_gets_hold_not_ship(self):
         text = self._gen(self._discard(), False)
         pipes = [p["name"] for p in tomllib.loads(text)["pipeline"]]
         self.assertEqual(pipes, ["heartbeat"])
-        self.assertIn("predates discard", text)
+        self.assertIn("cannot discard", text)
 
     def test_discarded_pipelines_are_reported_by_name(self):
         coord = self._discard()

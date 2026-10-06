@@ -33,7 +33,8 @@ Operate (run things now, may need sudo):
     smd restart     [<component> [<instance>]]
     smd reload      [--via=auto|systemd|socket]  [<component>]
     smd timing            [--json]                               timing authority + accuracy
-    smd upload      status | on | hold | off | discard [--reason R]  what the station ships (sudo)
+    smd sink        status | off --reason R | upload                 the site sink switch (sudo)
+    smd upload      status | on | hold | off | discard [--reason R]  legacy words for the same switch (sudo)
     smd tui                                                      launch interactive TUI
 
 Topology file (default: /etc/sigmond/topology.toml) controls which
@@ -676,22 +677,30 @@ def _autoenable_named_on_start(args, topology_path) -> bool:
 
 
 def _add_upload_verbs(p) -> None:
-    """The upload-mode verbs, shared by `smd upload` and the older
-    `smd config uploads` (tasks/plan-upload-control.md)."""
+    """The legacy upload-mode verbs, shared by `smd upload` and the older
+    `smd config uploads` (tasks/plan-upload-control.md).  `smd sink` sets the
+    same switch in the sink words (tasks/plan-sink-control.md §2.1)."""
     vs = p.add_subparsers(dest='uploads_command')
-    vs.add_parser('status', help='show the mode and the pipelines it affects')
-    for verb, text in (('on', 'store and ship (normal operation)'),
+    vs.add_parser('status', help='show the mode and the pipelines it affects; '
+                                 '`smd sink status` says it in the sink words')
+    for verb, text in (('on', 'store and send (normal operation); same as '
+                              '`smd sink upload`'),
                        ('enable', 'same as on'),
-                       ('hold', 'store everything, ship nothing; `on` ships the backlog'),
-                       ('off', 'same as hold — keeps the data'),
+                       ('hold', 'send no data; clients keep FT8 spots about 1 h '
+                                'and WSPR spots about 24 h, then drop them; '
+                                '`on` sends what is still stored'),
+                       ('off', 'same as hold'),
                        ('disable', 'same as hold')):
         v = vs.add_parser(verb, help=text)
         if verb not in ('on', 'enable'):
             v.add_argument('--reason', help='why (on the fleetboard and in the '
                                             'manifest), e.g. "no HF antenna"')
     d = vs.add_parser('discard',
-                      help='ship nothing and keep no backlog (bench provisioning, '
-                           'diagnostics); ending it ships nothing from before')
+                      help='send no data and keep no backlog; same as '
+                           '`smd sink off`.  Ending it sends nothing recorded '
+                           'before, except the GRAPE and magnetometer packages '
+                           'for that UTC day, and for the day before until its '
+                           'packaging runs')
     d.add_argument('--reason', required=True,
                    help='why, e.g. "bench provisioning for DASI-021"')
     d.add_argument('--yes', action='store_true',
@@ -24647,9 +24656,26 @@ def main() -> int:
     # key handshake happens later from a real terminal: enroll prints the
     # station pubkey to paste into the portal, verify proves the login live.
     p_upload = sub.add_parser('upload',
-        help='what this station ships: status | on (store + ship) | hold / off '
-             '(store, ship nothing) | discard (ship nothing, keep no backlog)')
+        help='legacy words for the site sink switch (`smd sink`): status | on | '
+             'hold / off | discard')
     _add_upload_verbs(p_upload)
+
+    p_sink = sub.add_parser('sink',
+        help='the site sink switch: status | off (send no data, keep no backlog) | '
+             'upload (store and send)')
+    sink_sub = p_sink.add_subparsers(dest='sink_command')
+    sink_sub.add_parser('status', help='show the site sink switch and what it holds back')
+    s_off = sink_sub.add_parser('off',
+        help='send no data and keep no backlog (a new or staged station)')
+    s_off.add_argument('--reason', required=True,
+                       help='why (on the fleetboard), e.g. "bench checkout"')
+    s_off.add_argument('--yes', action='store_true',
+                       help='skip the typed confirmation (for scripts)')
+    sink_sub.add_parser('upload',
+        help='store and send.  Leaving off first sets aside the GRAPE packages '
+             'and magnetometer zips stored while off, and refuses while their '
+             'packaging runs')
+    sink_sub.add_parser('fill', help='not available yet (a later release)')
 
     p_psws = sub.add_parser('psws',
         help='PSWS enrollment: status | enroll (print key + portal steps) | '
@@ -24784,6 +24810,13 @@ def main() -> int:
             return cmd_secrets_bundle(args)
         p_secrets.print_help()
         return 0
+
+    if args.command == 'sink':
+        verb = getattr(args, 'sink_command', None) or 'status'
+        if verb not in ('status', 'fill') and _need_root(f'sink {verb}'):
+            return 1
+        from sigmond.commands.sink import cmd_sink
+        return cmd_sink(args)
 
     if args.command == 'upload':
         verb = getattr(args, 'uploads_command', None) or 'status'

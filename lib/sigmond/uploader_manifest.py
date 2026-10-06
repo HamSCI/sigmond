@@ -410,22 +410,26 @@ def policy_banner(coord: Coordination, mode: Optional[str] = None) -> list:
     if mode == "discard":
         return [
             "#",
-            "# *** DISCARD MODE: DATA PIPELINES ACK WITHOUT SHIPPING ***",
-            f"# coordination.toml [uploads] mode = \"discard\"{why}",
-            "# Nothing leaves this host except the heartbeat, and no backlog",
-            "# accrues: ending discard ships nothing recorded before it.",
-            "#   smd upload on      (then the manifest regenerates)",
+            "# *** SITE SINK OFF: DATA PIPELINES ACK WITHOUT SENDING ***",
+            f"# coordination.toml [uploads] mode = \"discard\" sets the site sink switch to off{why}",
+            "# Nothing leaves this host except the heartbeat, and no backlog builds.",
+            "# `smd sink upload` sends nothing recorded before it, except the GRAPE and",
+            "# magnetometer packages for that UTC day, and for the day before if its",
+            "# packaging (01:00 to about 04:00 UTC) has not yet run.",
+            "#   smd sink upload    (then the manifest regenerates)",
         ]
     lines = [
         "#",
-        "# *** OUTBOUND DATA PIPELINES DISABLED BY POLICY ***",
+        "# *** SITE SINK HOLD (LEGACY): DATA PIPELINES NOT RENDERED ***",
         f"# coordination.toml [uploads] enabled = false{why}",
-        "# Only the station heartbeat is shipped. Re-enable with:",
-        "#   smd upload on      (then the manifest regenerates)",
+        "# Only the station heartbeat leaves this host.  Clients keep FT8 spots",
+        "# for one hour and WSPR spots for 24 hours.",
+        "#   smd sink upload    (then the manifest regenerates; what is still stored ships)",
     ]
     if up.mode == "discard":
-        lines[2:2] = ["# [uploads] mode = \"discard\", but the hs-uploader this host",
-                      "# runs predates discard, so sigmond renders HOLD instead."]
+        lines[2:2] = ["# The site sink switch reads off ([uploads] mode = \"discard\"), but",
+                      "# the hs-uploader this host runs cannot discard, so sigmond renders",
+                      "# the legacy hold instead."]
     return lines
 
 
@@ -461,19 +465,20 @@ def generate(topology: Optional[Topology] = None,
     elif mode == "discard":
         pipelines = [dict(p, discard=True)
                      for p in collect_pipelines(topology, coord)]
-        logger.warning("uploader-manifest: DISCARD MODE%s — data pipelines "
-                       "ack without shipping", reason)
+        logger.warning("uploader-manifest: SITE SINK OFF%s — data pipelines "
+                       "ack without sending", reason)
     else:
         pipelines = []
         if coord.uploads.mode == "discard":
             logger.error(
-                "uploader-manifest: [uploads] mode = discard, but %s cannot "
-                "import hs_uploader.transports.discard — rendering HOLD "
-                "(heartbeat only) instead; update hs-uploader", HS_UPLOADER_PYTHON)
+                "uploader-manifest: the site sink switch reads off ([uploads] mode = "
+                "discard), but %s cannot import hs_uploader.transports.discard — "
+                "rendering the legacy hold (heartbeat only) instead; update "
+                "hs-uploader", HS_UPLOADER_PYTHON)
         else:
             logger.warning(
-                "uploader-manifest: OUTBOUND DATA PIPELINES DISABLED BY POLICY "
-                "([uploads] enabled = false%s) — rendering heartbeat only", reason)
+                "uploader-manifest: SITE SINK HOLD (LEGACY) ([uploads] enabled = "
+                "false%s) — rendering heartbeat only", reason)
     hb_pipeline = heartbeat_pipeline(coord)
     if hb_pipeline is not None:
         pipelines.append(hb_pipeline)

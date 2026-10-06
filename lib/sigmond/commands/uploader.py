@@ -112,12 +112,11 @@ def cmd_uploader_manifest(args) -> int:
         except Exception:  # pragma: no cover - defensive
             mode = "hold"
         if mode == "discard":
-            print("uploader: DISCARD MODE — these pipelines ack without "
-                  "shipping: " + ", ".join(suppressed))
+            print("uploader: SITE SINK OFF — these pipelines ack without "
+                  "sending: " + ", ".join(suppressed))
         else:
-            print("uploader: OUTBOUND DATA PIPELINES HELD BY POLICY "
-                  "([uploads] enabled = false) — not rendered: "
-                  + ", ".join(suppressed))
+            print("uploader: SITE SINK HOLD (LEGACY) ([uploads] enabled = false) "
+                  "— not rendered: " + ", ".join(suppressed))
 
     path = um.MANIFEST_PATH
     installed = path.read_text() if path.exists() else ""
