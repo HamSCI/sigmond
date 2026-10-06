@@ -1,21 +1,22 @@
 # plan: per-client sink control — who stores, who ships, and how much disk each may hold
 
 **Status — 2026-10-06.**  Michael agreed this design in conversation.  An adversarial review on
-2026-10-06 then checked it against the code.  This revision carries the review's corrections, three
+2026-10-06 then checked it against the code, and this revision carries the review's corrections, the
 decisions Michael made after it, and one question that Claude settled during the review (§2, rows
-D1-D4).  The
-spec awaits his review, and nobody has built any of it yet.  On 2026-10-06 Michael confirmed that
-wd30, which he runs, takes separate per-client uploads as it stands (§12).  It supersedes §1 of
-[plan-upload-control.md](plan-upload-control.md), the three site-wide modes, and leaves that plan's
-§2, adaptive shipping, standing.  The evidence comes from read-only code traces across every client
-repo on 2026-10-06 (§13).  Nobody touched a station.
+D1-D7).  A later pass made the vocabulary consistent (§2.1), at Michael's request, and live reads of
+ND and K3LR reshaped the first step (§10.2 step 1, §10.3).  On 2026-10-06 Michael confirmed that
+wd30, which he runs, takes separate per-client uploads as it stands (§12).  Nobody has built any of
+this yet.  It supersedes §1 of [plan-upload-control.md](plan-upload-control.md), the three site-wide
+modes, and leaves that plan's §2, adaptive shipping, standing.  The evidence comes from read-only
+code traces across every client repo and read-only checks of wd30, ND and K3LR on 2026-10-06 (§13).
+Nothing on any station changed.
 
 ## 1. Why
 
 On 2026-10-01 an operator put K3LR on hold with `smd config uploads disable --reason "station under
 test"`. `smd upload status` reported the hold for four days.  During those four days psk-recorder's
 own uploader, running inside the psk-recorder process, posted roughly 35,000 spots a day to
-pskreporter.info.  The site switch never reached it.  The per-client lever, `smd config upload
+pskreporter.info.  The site-wide hold never reached it.  The per-client lever, `smd config upload
 psk-recorder K3LR --off`, wrote a flag that psk-recorder does not read.
 
 On 2026-10-06 a second operator, running sigmond with meteor-scatter alone, asked why none of his
@@ -28,51 +29,69 @@ comes from the code alone; nobody examined his host.
 
 Both failures share a cause.  A client's data can leave a station by more than one route, and no
 single party knows or controls all of them.  Three code traces, run on 2026-10-06, mapped the
-routes, the switches and the storage behaviour (§13).  They found:
+routes, the levers and the storage behaviour (§13).  They found:
 
-- 14 outbound data paths across 7 clients.  The site switch governs only the paths that run
-  inside the hs-uploader daemon.
-- Six senders that never read the site switch: psk-recorder's and meteor-scatter's direct
+- 14 outbound data paths across 7 clients.  The site-wide setting, `[uploads] mode`, governs only
+  the paths that run inside the hs-uploader daemon.
+- Six senders that never read that setting: psk-recorder's and meteor-scatter's direct
   uploaders, wspr-recorder's in-process uploader and `wspr-uploader.service`, mag-recorder's
   fallback uploader, and hfdl-recorder's live feed.
 - Senders that share one record of what they have sent.  Each selects different rows, so whichever
   runs first moves the record past rows the others have not sent.  By the code, those rows never
   ship.  Nobody has yet observed the loss on a station.
-- A hold that does not hold.  The cleanup timer deletes psk spots after 60 minutes and WSPR spots
+- A `hold` that does not hold.  The cleanup timer deletes psk spots after 60 minutes and WSPR spots
   after 24 hours, sent or not.
-- A discard that leaks.  GRAPE packages each day a day late and re-packages up to a week back; the
-  magnetometer packages whole days at 03:00 UTC.  Bench days become uploadable after discard ends.
-- Switches that do nothing, and status views that report the setting rather than the behaviour.
+- A `discard` that leaks.  GRAPE packages each day a day late and re-packages up to a week back;
+  the magnetometer packages whole days at 03:00 UTC.  Bench days become uploadable after `discard`
+  ends.
+- Levers that do nothing, and status views that report the setting rather than the behaviour.
 - No coordination of disk among clients.  The contract carries storage figures one way only,
   from client to sigmond, and sigmond reads none of them.
 
 ## 2. What the operator gets
 
-An operator can turn every outbound data flow off for the whole station, or for one client, with
-one command, and can trust what the status says.  A newly installed client that can send data
-stores nothing for a repository and sends nothing until someone turns it on.  Turning a client off
-stops only what could reach a repository.  The client keeps the local data it needs, such as
-hf-timestd's timing and raw IQ.  The design aims to keep every byte bound for a repository at the
-site until someone has confirmed that the station receives well and that its data carry the right
-callsign and location.
+An operator can turn every outbound data flow off with one command, for the whole station through
+the site sink switch, or for one client through that client's sink switch.  The operator can trust
+what the status says.  A newly installed client that can send data starts with its sink switch at
+`off`.  It stores nothing for a repository and sends nothing until someone turns it on.  Turning a
+client off stops only what could reach a repository.  The client keeps the local data it needs,
+such as hf-timestd's timing and raw IQ.  The design aims to keep every byte bound for a repository
+at the site until someone has confirmed that the station receives well and that its data carry the
+right callsign and location.
 
 | Decision | Made by | Date |
 |---|---|---|
-| Each client with a route to a repository owns two switches: store the data bound for a repository, and, if storing, upload it on its own schedule (scoped by D2) | Michael | 2026-10-06 |
-| Three states follow: `off` (store nothing for a repository, send nothing), `fill` (store, send nothing), `upload` (store and send) | Michael | 2026-10-06 |
+| Each client with a route to a repository decides two things: whether to store the data bound for a repository, and, if it stores, whether to upload that data on its own schedule.  One sink switch with three settings carries both answers (§2.1; scoped by D2) | Michael | 2026-10-06 |
+| The sink switch takes three settings: `off` (store nothing for a repository, send nothing), `fill` (store, send nothing), `upload` (store and send) | Michael | 2026-10-06 |
 | The client answers for every route its data takes, whatever the path | Michael | 2026-10-06 |
-| Sigmond directs one client, or all of them at once through one site switch — the site spigot | Michael | 2026-10-06 |
-| The stricter of the site switch and the client switch wins | proposed by Claude, accepted by Michael | 2026-10-06 |
-| One switch covers a whole client, all its instances; the file shape leaves room for per-instance control later | Michael | 2026-10-06 |
+| Sigmond directs one client, or all of them at once through one site sink switch — the site spigot | Michael | 2026-10-06 |
+| The stricter of the site sink switch and the client's sink switch wins | proposed by Claude, accepted by Michael | 2026-10-06 |
+| One sink switch covers a whole client, all its instances; the file shape leaves room for per-instance control later | Michael | 2026-10-06 |
 | A new client with a route to a repository starts `off` | Michael | 2026-10-06 |
-| The heartbeat reports each client as `sink off`, `sink filling` or `sink uploading` | Michael | 2026-10-06 |
+| The heartbeat reports each client's sink state as `sink off`, `sink filling` or `sink uploading` | Michael | 2026-10-06 |
 | One upload pathway: the hs-uploader daemon, packaged with every client; in-process senders retire | Michael | 2026-10-06 |
 | Storage: declare, grant, report; backlog divided by equal days of holdover | Michael | 2026-10-06 |
 | wsprdaemon.org: each client sends its own per-cycle upload; the merged WSPR+FT8 upload ends | Michael | 2026-10-06 |
-| D1.  The site switch acts as a ceiling over every client.  Opening the site lifts the limit but turns on no client that someone set `off` by name.  Before the site opens, sigmond runs the identity check for every client the opening would raise to `upload`, and refuses if any check fails (§3.2) | Michael | 2026-10-06 |
-| D2.  `off` stops only data bound for a repository, meaning sink rows and upload packages.  Local data a client needs or keeps for itself continues.  A client with no outbound route carries no switch; it offers `sink status` and `sink limit`, and the heartbeat shows it as `local-only` (§4) | Michael | 2026-10-06 |
-| D3.  In a WSPR merge fleet every instance feeds one sink, and the client's one switch governs them all.  The decode-only role disappears.  The carry-over reads what actually shipped, and the switch file records identity per instance (§6.4, §10.1) | resolved by Claude during the review; open to Michael's correction | 2026-10-06 |
-| D4.  If wd30 cannot take separate per-client FT8, FT4 and MSK144 uploads, one merged upload per cycle stays.  It carries a client's rows only while that client's effective state reads `upload` (§6.6) | Michael | 2026-10-06 |
+| D1.  The site sink switch acts as a ceiling over every client.  Raising it lifts the limit but turns on no client that someone set `off` by name.  Before raising it, sigmond runs the identity check for every client the change would lift to `upload`, and refuses if any check fails (§3.2) | Michael | 2026-10-06 |
+| D2.  `off` stops only data bound for a repository, meaning sink rows and upload packages.  Local data a client needs or keeps for itself continues.  A client with no outbound route carries no sink switch; it offers `sink status` and `sink limit`, and the heartbeat shows it as `local-only` (§4) | Michael | 2026-10-06 |
+| D3.  In a WSPR merge fleet every instance feeds the client's one sink, and the client's one sink switch governs them all.  The decode-only role disappears.  The carry-over reads what actually shipped, and the switch file records identity per instance (§6.4, §10.1) | resolved by Claude during the review; open to Michael's correction | 2026-10-06 |
+| D4.  If wd30 cannot take separate per-client FT8, FT4 and MSK144 uploads, one merged upload per cycle stays.  It carries a client's rows only while that client's sink state reads `upload` (§6.6) | Michael | 2026-10-06 |
+| D5.  One vocabulary for the sink everywhere: spec, plan, code, CLI help, INSTALL.md and heartbeat (§2.1) | Michael | 2026-10-06 |
+| D6.  Ship a small v3.69 first, carrying only §10.3; the earlier v3.69 list moves to v3.70.  In v3.69 the first step means one pskreporter sender per set of rows; separate keys, their migration and the forward-only rule move to step 2 (§10.2) | Michael | 2026-10-06 |
+| D7.  v3.69 also stops GRAPE's catch-up sweep from sending a day more than once (§10.3 item 5) | Michael | 2026-10-06 |
+
+### 2.1 Terms
+
+The rest of this spec uses these words in one sense each.
+
+| Term | Meaning |
+|---|---|
+| sink | A client's store of data bound for a repository, made of its rows in `sink.db` that carry no local mark (§6.1) and any upload spool.  "Its sink" and "the client's sink" always mean this store.  `sink.db` names only the database file, which all clients share.  The sink writer, `sigmond.hamsci_sink.Writer` today, writes the rows. |
+| sink switch | One per client with a route to a repository, with three settings: `off`, `fill` and `upload`.  `fill` and `upload` store; only `upload` sends. |
+| site sink switch | The same three settings for the whole station.  It sets a ceiling over every client's sink switch. |
+| sink state | The setting that actually applies to a client, the stricter of its sink switch and the site sink switch.  Status and the heartbeat report it as `sink off`, `sink filling` or `sink uploading`.  The code calls it the effective state, after `effective_state()`. |
+| commands | `<client> sink off\|fill\|upload\|status\|check\|limit` sets and reports one client.  `smd sink [<client>] off\|fill\|upload\|status` does the same from sigmond, and with no client named it acts on the site sink switch. |
+| legacy words | `smd upload on\|hold\|off\|discard`, `smd config uploads` and `[uploads] mode` survive only as aliases and as names of existing code.  Their modes always map the same way: `upload` → `upload`, `hold` → `fill`, `discard` → `off`.  Of the legacy verbs, `on` and `enable` set `upload`; `off` and `disable` mean `hold` and so set `fill`. |
 
 ## 3. Ownership and the single pathway
 
@@ -111,19 +130,19 @@ it works, tolerates an existing user or group, creates `/etc/hs-uploader/pipelin
 - The daemon reads one pipeline file per client from `/etc/hs-uploader/pipelines.d/<client>.toml`
   instead of one list that sigmond renders (§3.5).
 - The sink writer moves here from `sigmond.hamsci_sink`.  It uses only the Python standard library
-  (`sigmond/lib/sigmond/hamsci_sink/writer.py:37-46`).  The sink stays at
+  (`sigmond/lib/sigmond/hamsci_sink/writer.py:37-46`).  `sink.db` keeps its path,
   `/var/lib/sigmond/sink.db`, so row ids continue and no send record needs resetting.  A fresh file
   would restart the ids, and every stored send record would then skip all new rows.
   hs-uploader's `tmpfiles.d` entry creates `/var/lib/sigmond` (02775, root:sigmond) on every host,
   with or without sigmond.
-- When a client's effective state allows storing and the sink cannot open, the writer logs once,
+- When a client's effective state allows storing and `sink.db` cannot open, the writer logs once,
   reports `sink unavailable` in `sink status`, and alarms.  It never falls silently to a no-op, as
   it does today.
 - Six clients declare hs-uploader as a dependency today.  codar-sounder, hf-tec and
   superdarn-sounder import the writer but declare neither sigmond nor hs-uploader.  Each adds
   hs-uploader to its `pyproject.toml` and `[tool.uv.sources]` and refreshes `uv.lock` when it
   converts (§10.2).
-- Cleanup of the sink moves here from sigmond's storage-trim units (§6.3).
+- Cleanup of `sink.db` moves here from sigmond's storage-trim units (§6.3).
 - The switch files live here: `/etc/hs-uploader/sinks/<client>.toml` and
   `/etc/hs-uploader/sinks/site.toml` (§3.4).
 - Three library functions serve every reader and writer.  `effective_state(client)` reads both
@@ -139,37 +158,40 @@ it works, tolerates an existing user or group, creates `/etc/hs-uploader/pipelin
 - A client with an outbound route writes its own pipeline file at install and at every
   configuration change (§3.5), taking callsign, grid, reporter id and PSWS ids from its own
   configuration.
-- A client with an outbound route owns its switch through its own command:
-  `<client> sink status | off | fill | upload | check | limit`.  A client with none offers
-  `sink status` and `sink limit` only (§4).
-- It writes repository-bound data into the sink, or packages it for upload, only when its effective
-  state allows storing.  The daemon carries that data out only when the effective state allows
-  uploading.
+- A client with an outbound route owns its sink switch through its own command,
+  `<client> sink off|fill|upload|status|check|limit`.  A client with none offers `sink status` and
+  `sink limit` only (§4).
+- It stores repository-bound data in its sink, as rows in `sink.db` or as packages in a spool, only
+  when its effective state allows storing.  The daemon carries that data out only when the
+  effective state allows uploading.
 
 **Sigmond, the orchestrator.**
 
 - `smd sink <client> off|fill|upload` directs one client by calling that client's own command.  It
   passes every option through: `--drop-backlog`, `--accept-identity-change`, `--accept-position`
   and `--yes`.  If the client has no `sink` command, sigmond refuses (§3.6).
-- `smd sink off|fill|upload`, naming no client, sets the site switch, which acts as a ceiling over
-  every client (D1).  Lowering it holds every client at or below the new state.  Raising it lifts
-  the limit but turns on no client that someone set `off` by name.  That client stays off until
-  someone turns it on by name.
-- Before sigmond raises the site switch, it finds every client whose effective state would become
-  `upload` and runs that client's identity check, `<client> sink check --yes` (§4.2).  If any check
-  fails, sigmond refuses to open the site and names each client that failed.  The operator then
-  fixes the configuration or passes an override.  `smd sink upload` and `smd upload on` accept
-  `--accept-identity-change <client>`, `--accept-position <client>` and
-  `--drop-backlog <client>`, and each option reaches only the client it names.  Once the site
-  opens, sigmond prints every client whose effective state stays below `upload`, and the switch
-  that holds it there.
+- `smd sink off|fill|upload`, naming no client, sets the site sink switch, which acts as a ceiling
+  over every client (D1).  Lowering it limits every client to the new setting or below.  Raising
+  it lifts the limit but turns on no client that someone set `off` by name.  That client stays off
+  until someone turns it on by name.
+- Before sigmond raises the site sink switch, it finds every client whose sink state would
+  become `upload` and runs that client's identity check, `<client> sink check --yes` (§4.2).  If
+  any check fails, sigmond refuses to raise the site sink switch and names each client that failed.
+  The operator then fixes the configuration or passes an override.  `smd sink upload` and its alias
+  `smd upload on` accept `--accept-identity-change <client>`, `--accept-position <client>` and
+  `--drop-backlog <client>`, and each option reaches only the client it names.  After raising the
+  switch to `upload`, sigmond lists every client whose sink state stays below `upload`, and the
+  sink switch that keeps it there.
 - `smd sink status` shows each client's report beside what the daemon actually sent (§8).
-- `smd upload on|hold|off|discard` stays as an alias for the site command.  `on` sets the site to
-  `upload`; `hold` and `off` set it to `fill`; `discard` sets it to `off`.  Because the alias sets
-  only the site switch, `smd upload on` cannot turn on a client that someone set `off` by name.  The
-  old command could, since it re-rendered every pipeline.  The alias's help text says so plainly,
-  and its output names each client that stays off.
-- `smd config uploads enable|disable` aliases `smd upload` until step 5 of §10.2, and then retires.
+- The legacy `smd upload on|hold|off|discard` stays as an alias for `smd sink` at site level, and
+  its verbs follow the fixed mapping of §2.1.  `on` sets the site sink switch to `upload`, `hold`
+  sets it to `fill`, and `discard` sets it to `off`.  In the legacy command `off` means `hold` and
+  keeps the data, so `smd upload off` sets `fill`, not `off`.  Because the alias sets only the site
+  sink switch, `smd upload on` cannot turn on a client that someone set `off` by name.  The old
+  command could, since it re-rendered every pipeline.  The alias's help text says so plainly, and
+  its output names each client that stays off.
+- `smd config uploads enable|disable` aliases `smd upload on|hold`, setting `upload` or `fill`,
+  until step 5 of §10.2, and then retires.
 - Sigmond stops rendering `/etc/hs-uploader/pipelines.toml`.  It drops in a pipeline file for its
   own heartbeat, declared ungoverned (§3.4).
 - Sigmond computes and delivers storage grants (§5).
@@ -188,10 +210,10 @@ The client's own `sink` command writes the client file, and sigmond may call tha
 
 ### 3.4 The switch files
 
-Only `write_switch()` changes `/etc/hs-uploader/sinks/<client>.toml`.  The installer of a client
-with an outbound route calls it to create the file at `off` when none exists.  The client's own
-`sink` command calls it for every later change, and the carry-over calls it once (§10.1).  Every
-service account can read the file.
+Each client's sink switch lives in `/etc/hs-uploader/sinks/<client>.toml`, and only
+`write_switch()` changes that file.  The installer of a client with an outbound route calls it to
+create the file at `off` when none exists.  The client's own `sink` command calls it for every
+later change, and the carry-over calls it once (§10.1).  Every service account can read the file.
 
 ```toml
 client  = "wspr-recorder"
@@ -233,10 +255,11 @@ lon         = -92.33
 wspr-recorder ships nothing to PSWS, so its identity tables carry no PSWS ids.  hamsci-physics and
 mag-recorder add `psws = { station = "…", instrument = "…" }` to theirs.
 
-`/etc/hs-uploader/sinks/site.toml` carries `state`, `reason`, `set_by`, `set_at` and the same
-`[[history]]` list, without identity tables.  A site change can start storing for a client.  When
-it does, sigmond calls that client's command, which appends its own history entry with
-`by = "site"`.  The client file then records the identity in force when storing began.
+`/etc/hs-uploader/sinks/site.toml` records the site sink switch.  It carries `state`, `reason`,
+`set_by`, `set_at` and the same `[[history]]` list, without identity tables.  A change to the site
+sink switch can start storing for a client.  When it does, sigmond calls that client's command,
+which appends its own history entry with `by = "site"`.  The client file then records the identity
+in force when storing began.
 
 `/etc/hs-uploader/sinks/` belongs to root:sigmond with mode 0755, and each file carries mode 0644.
 Every write goes through one library function, `write_switch(path, change)`.  The client's installer
@@ -248,9 +271,9 @@ to root as `smd` does; `sink status` needs no root.
 
 Rules for reading them:
 
-- The effective state equals the stricter of the client state and the site state, in the order
-  `off` < `fill` < `upload`.  Site `fill` with client `upload` yields `fill`; a client set to `off`
-  stays off when the site opens.
+- The effective state equals the stricter of the client's sink switch and the site sink switch, in
+  the order `off` < `fill` < `upload`.  Site `fill` with client `upload` yields `fill`; a client set
+  to `off` stays off whatever the site sink switch reads.
 - `effective_state()` and `stored_intervals()` read both files.  No reader uses one file's history
   alone.
 - A missing client file means `off`.  The check fails closed.  §10.1 explains how existing
@@ -266,14 +289,14 @@ Rules for reading them:
 - Readers check the file's modification time before each write batch and before each send, so a
   change takes effect within one cycle, about 30 seconds, and nobody restarts a recorder.
 - Per-instance control, if it ever arrives, adds an optional `[instances.<name>]` table.  Nothing
-  in this design depends on it.  Identity already sits per instance, in the history (D3); the state
-  stays per client.
+  in this design depends on it.  Identity already sits per instance, in the history (D3); the sink
+  switch stays per client.
 
-Station telemetry stands outside the switches.  Sigmond's heartbeat pipeline file,
+Station telemetry stands outside the sink switches.  Sigmond's heartbeat pipeline file,
 `pipelines.d/sigmond-heartbeat.toml`, declares `governed = false`.  The daemon never calls
-`effective_state()` for an ungoverned pipeline, so neither the site switch nor a missing switch
-file stops it.  The heartbeat carries station status, never received data.  Today's renderer
-exempts it in the same way (`sigmond/lib/sigmond/uploader_manifest.py:453`).
+`effective_state()` for an ungoverned pipeline, so neither the site sink switch nor a missing
+switch file stops it.  The heartbeat carries station status, never received data.  Today's
+renderer exempts it in the same way (`sigmond/lib/sigmond/uploader_manifest.py:453`).
 
 ### 3.5 Pipeline files
 
@@ -309,9 +332,9 @@ third-party clients, and older pinned versions.  For such a client `smd sink <cl
 names the client's version, and `smd sink status` shows it as UNMANAGED.
 
 `smd remove <client>` first asks whether to ship or drop the client's unsent backlog.  It accepts
-ship only while the client's effective state reads `upload`; otherwise it refuses and names the
-switch that holds the client.  When the operator chooses to ship, the removal waits until the
-daemon has sent the backlog.  The removal then deletes `pipelines.d/<client>.toml`, calls
+ship only while the client's sink state reads `upload`; otherwise it refuses and names the sink
+switch that keeps the client below `upload`.  When the operator chooses to ship, the removal waits
+until the daemon has sent the backlog.  The removal then deletes `pipelines.d/<client>.toml`, calls
 `hs-uploader sink drop <client>`, and moves `sinks/<client>.toml` to
 `sinks/removed/<client>.<UTC time>.toml`.  The history survives, and a reinstall starts `off`.
 
@@ -321,37 +344,38 @@ its installer then creates the file at `off`.  A client with no outbound route k
 
 ## 4. What each change does to the data
 
-One rule lies underneath every transition.  Data recorded while a client's effective state reads
-`off` never enters the sink and never enters a later package, so it can never reach a repository.
-`off` stops only that repository-bound data.  The client keeps receiving and decoding throughout,
-and it keeps the local data it needs or keeps for itself.  That covers hf-timestd's timing and raw
-IQ, the local JSONL archives of codar-sounder, hf-tec and superdarn-sounder, decoder logs, and
-hfdl-recorder's local archive rows (§6.4).  `sink status` shows reception live, as decodes or
-samples per minute and the time of the last data, so an operator can judge reception without
-storing anything for upload.
+One rule lies underneath every transition.  Data recorded while a client's sink state reads `off`
+never enters its sink, neither as a row in `sink.db` nor in a later package, so it can never reach
+a repository.  `off` stops only that repository-bound data.  The client keeps receiving and
+decoding throughout, and it keeps the local data it needs or keeps for itself.  That covers
+hf-timestd's timing and raw IQ, the local JSONL archives of codar-sounder, hf-tec and
+superdarn-sounder, decoder logs, and hfdl-recorder's local archive rows (§6.4).  `sink status`
+shows reception live, as decodes or samples per minute and the time of the last data, so an
+operator can judge reception without storing anything for upload.
 
-A client with no outbound route carries no switch.  hf-timestd, gpsdo-monitor, station-web and
+A client with no outbound route carries no sink switch.  hf-timestd, gpsdo-monitor, station-web and
 phase-engine send nothing off the station, so nothing they write can reach a repository.  They
 implement `sink status` and `sink limit` only, and the heartbeat shows them as `local-only`.
-GRAPE's switch belongs to hamsci-physics, which packages and sends GRAPE.  It does not belong to
-hf-timestd, which records the samples GRAPE draws on.
+GRAPE's sink switch belongs to hamsci-physics, which packages and sends GRAPE.  It does not belong
+to hf-timestd, which records the samples GRAPE draws on.
 
 | Change | What happens |
 |---|---|
-| `off` → `fill` | The client starts storing from that moment.  The history of whichever switch changed records the moment.  The client's own history records the identity in force for each instance (§3.4). |
-| `fill` → `upload` | The identity check runs (§4.2).  The daemon then ships everything stored during `fill`, oldest first, and keeps up with new data.  `--drop-backlog` discards the stored data and ships only new data. |
+| `off` → `fill` | The client starts storing from that moment.  The history of whichever sink switch changed records the moment.  The client's own history records the identity in force for each instance (§3.4). |
+| `fill` → `upload` | The identity check runs (§4.2).  The daemon then ships everything stored during `fill`, oldest first, and keeps up with new data.  `--drop-backlog` drops the stored data and ships only new data. |
 | `upload` → `fill` | Sending stops before the next batch.  Storing continues.  Nothing gets lost. |
 | `fill` or `upload` → `off` | Storing for upload stops.  Data stored but not yet sent stays on disk, and `sink status` reports its size and age range.  Only `--drop-backlog`, given deliberately, deletes it. |
 | `off` → `upload`, with an old backlog | `sink status` shows the backlog's age and the identities recorded with it.  It ships unless the operator passes `--drop-backlog`.  The identity check applies. |
-| site raised | Sigmond runs the identity check for each client the change raises to `upload`, and refuses the change if any check fails (§3.2).  A client set `off` by name stays off. |
+| site sink switch raised | Sigmond runs the identity check for each client the change raises to `upload`, and refuses the change if any check fails (§3.2).  A client set `off` by name stays off. |
 
 ### 4.1 Products packaged after the fact
 
 GRAPE (hamsci-physics) and the magnetometer (mag-recorder) package their data some hours after
 recording it.  Their packagers call the library function `stored_intervals(client, start, end)`.
-It merges the client's and the site's histories into the intervals when the effective state
-allowed storing.  A packager builds a product only from samples inside those intervals.  GRAPE's
-packager reads the switch of hamsci-physics, `sinks/hamsci-physics.toml`.
+It merges the histories of the client's sink switch and the site sink switch into the intervals
+when the effective state allowed storing.  A packager builds a product only from samples inside
+those intervals.  GRAPE's packager reads the sink switch of hamsci-physics,
+`sinks/hamsci-physics.toml`.
 
 The GRAPE packager masks rather than skips.  It zeroes the minutes outside stored intervals and
 marks them invalid in the day's metadata and in `gap_summary.json`, the way an outage appears
@@ -361,22 +385,22 @@ UTC, and a packager treats the minute on either side of a transition as off.
 
 ### 4.2 The identity check
 
-A switch to `upload` first prints what the data will carry for each instance: callsign, reporter
-id, grid, lat/lon and PSWS ids.  Two findings stop the switch.
+A change to `upload` first prints what the data will carry for each instance: callsign, reporter
+id, grid, lat/lon and PSWS ids.  Two findings stop the change.
 
 1. An instance's configured identity differs from any identity recorded across the periods that
    the unsent backlog spans.  Someone edited the configuration, or moved the station, after storing
-   began, so part of the backlog carries an old identity.  The switch refuses to ship that backlog
-   unless the operator chooses `--drop-backlog` or passes `--accept-identity-change`.
+   began, so part of the backlog carries an old identity.  The command refuses to ship that
+   backlog unless the operator chooses `--drop-backlog` or passes `--accept-identity-change`.
 2. The host publishes a measured position, today through gpsdo-monitor's files under `/run/gpsdo/`,
    and that position falls outside the configured grid square.  The check compares against the
-   grid at the precision the configuration gives it.  The switch refuses until the configuration
-   matches or the operator passes `--accept-position`.
+   grid at the precision the configuration gives it.  The command refuses until the
+   configuration matches or the operator passes `--accept-position`.
 
 At a terminal the check asks for confirmation.  Called by sigmond or a script, it needs `--yes`,
 and it logs exactly what it accepted.  `--yes` replaces only the prompt.  Each blocking finding
 still needs its own `--accept-*` option.  The check runs at `<client> sink upload`, as
-`<client> sink check` when sigmond raises the site switch, and at bring-up.
+`<client> sink check` when sigmond raises the site sink switch, and at bring-up.
 
 The check has a blind spot.  A bench station may carry its permanent identity and lack a GNSS
 receiver, and the check then sees nothing wrong.  So a bench uses `off`, never `fill`, and the
@@ -396,12 +420,13 @@ client's backlog ceiling stands at 5 GB, an initial default set in
 ### 5.1 Today
 
 Sigmond does not divide the disk among clients, and the contract holds no allotment.  §17 of
-CLIENT-CONTRACT.md asks each client to describe its sinks with `retention_days` and `mb_per_day`.
-Sigmond never reads `data_sinks`.  It parses `mb_per_day` only from the legacy `disk_writes` key,
-for display, and sums nothing (`sigmond/lib/sigmond/clients/contract.py:215-220`).  Nobody built
-the per-filesystem sum that §17.6 promised.  The declared figures also mislead.  hf-timestd declares
-0 MB/day, while its own guardian budgets about 16.6 GB of raw IQ and 4 GB of phase2 per channel per
-day (`hf-timestd/src/hf_timestd/core/resource_guardian.py:91-97`).
+CLIENT-CONTRACT.md asks each client to list where it writes data, in `data_sinks`, with
+`retention_days` and `mb_per_day`.  Sigmond never reads `data_sinks`.  It parses `mb_per_day` only
+from the legacy `disk_writes` key, for display, and sums nothing
+(`sigmond/lib/sigmond/clients/contract.py:215-220`).  Nobody built the per-filesystem sum that
+§17.6 promised.  The declared figures also mislead.  hf-timestd declares 0 MB/day, while its own
+guardian budgets about 16.6 GB of raw IQ and 4 GB of phase2 per channel per day
+(`hf-timestd/src/hf_timestd/core/resource_guardian.py:91-97`).
 
 All clients share one filesystem in the appliance.  Each polices itself by age or file count.  Only
 hf-timestd watches free space, and it watches the whole filesystem, so a neighbour's growth makes
@@ -460,8 +485,8 @@ holdover; as the disk tightens, everyone's holdover shrinks together.
 Sigmond delivers each grant through the client's own command, `<client> sink limit`, which writes
 the `[grant]` table of the switch file.  A client with no outbound route has no switch file, so its
 `sink limit` writes the same table, through the same function, to `sinks/<client>.grant.toml`.  The
-client enforces the grant, counting only its own directories and its own rows in the sink, never
-the whole filesystem.  The daemon's cleanup enforces the backlog and archive grants for rows in
+client enforces the grant, counting only its own directories and its own rows in `sink.db`,
+never the whole filesystem.  The daemon's cleanup enforces the backlog and archive grants for rows in
 `sink.db` (§6.3).  In the `[grant]` table an absent key means no grant, and the client then uses a
 limit from its own configuration, as on a standalone host.  A value of 0 means zero.
 
@@ -483,35 +508,36 @@ ledger (§6.4).  They replace its direct read of the send records table.
 - Each limiter keeps a whole-filesystem floor as a last resort, the 95 % pause and the 100 MB
   headroom.  At that floor it pauses hf-timestd's own writes and alarms, but it deletes nothing
   outside its subtree.
-- The sink cleanup must spare unsent rows (§6.3).
+- Cleanup of `sink.db` must spare unsent rows (§6.3).
 - psk-recorder's and meteor-scatter's rows need separate accounting in the shared table (§6.1).
 - hs-uploader must count bytes per producer in `sink.db` (§6.3).
 
 ## 6. Enforcement on each path
 
-### 6.1 The sink
+### 6.1 `sink.db` and the sink writer
 
-The sink writer, now part of hs-uploader, enforces the store switch.  `pending_uploads` gains a
-real column, `producer TEXT NOT NULL DEFAULT ''`.  When the column does not exist yet, the writer's
-schema setup adds it with ALTER TABLE, along with an index on (target_db, target_table, producer,
-id).  `Writer.from_env` gains a required `producer=` argument naming the client.
+The sink writer, now part of hs-uploader, enforces the sink switch where data gets stored.  `fill`
+and `upload` store; `off` stores nothing.  `pending_uploads` gains a real column,
+`producer TEXT NOT NULL DEFAULT ''`.  When the column does not exist yet, the writer's schema setup
+adds it with ALTER TABLE, along with an index on (target_db, target_table, producer, id).
+`Writer.from_env` gains a required `producer=` argument naming the client.
 
 The writer checks `effective_state(producer)` at `insert()`, against each row's own time.  It splits
 a batch that straddles a switch change and judges each row on its own.  In `off` the writer drops
-rows inside `insert()` and otherwise stays live and healthy.  No client disables its sink object or
-skips decoding because the state reads `off`.
+rows inside `insert()` and otherwise stays live and healthy.  No client disables its sink writer or
+skips decoding because its sink state reads `off`.
 
 Until a caller passes `producer=` (step 4 of §10.2), the compatibility writer infers the producer
 from each row's table and its `mode` field.  psk.spots rows with mode msk144 go to meteor-scatter,
 and other psk.spots rows to psk-recorder.  The compatibility writer enforces only when that
 producer's switch file exists.
 
-Some clients keep a local archive inside the sink.  hfdl-recorder's rows in `hfdl.spots` and
+Some clients keep a local archive inside `sink.db`.  hfdl-recorder's rows in `hfdl.spots` and
 hf-timestd's rows in `timestd.events` serve that purpose, and no pipeline reads either table
 (`sigmond/lib/sigmond/storage_trim.py:5-7, 91-93`).  Such a client opens its writer with
 `local=True`.  The writer then skips the switch check and marks each row local in a second new
 column, `local INTEGER NOT NULL DEFAULT 0`.  No source ever selects a row marked local, so a local
-row can never reach a repository, and the store switch has nothing to guard there.
+row can never reach a repository, and the sink switch has nothing to guard there.
 
 psk-recorder and meteor-scatter keep sharing the `psk.spots` table, as the wsprdaemon server
 expects, but each row names its writer, which gives each client its own pipelines, its own byte
@@ -540,30 +566,33 @@ fetch and the ceiling.
   acknowledgement.  `advance_cursor` reads and writes under one lock.  It stores the new send
   record only when the source says it lies after the stored one, and otherwise logs a WARNING.
   `reset_cursor` and `sink drop` stay the only deliberate rewinds.  The forward-only rule guards
-  against regressions; the separate keys of the first bullet fix the shared record.  GRAPE's send record
-  becomes a set of names (§6.4), and the forward-only rule applies only to send records that hold
-  one position.
+  against regressions; the separate keys of the first bullet fix the shared record.  GRAPE's send
+  record becomes a set of names (§6.4), and the forward-only rule applies only to send records that
+  hold one position.
 - Each pipeline knows its client.  `Pipeline` gains `client: str`.  The daemon sets it from the
   `pipelines.d` file name, and for legacy entries during steps 2 to 5 from the `client` key that
   sigmond renders.  The daemon asks `may_send(pipe)` at the top of `_pump_one`, before each queued
   delivery it replays (the code calls them deliverables), and before each batch in the
   `_drain_source` loop.  In `fill` or `off` a refused pipeline returns without work.  It touches
   neither its send record nor its queued deliveries; they wait, and nothing gets dropped.  The
-  `discard` flag and DiscardTransport retire when the gate goes live, and site `off` replaces them.
-  A pipeline declared `governed = false` skips the check (§3.4).
+  legacy `discard` flag and DiscardTransport retire when the gate goes live, and the site sink
+  switch at `off` replaces them.  A pipeline declared `governed = false` skips the check (§3.4).
 - A new pipeline starts from its client's first stored row, not from "now".  Because `off` stores
-  nothing bound for a repository, the sink holds only data from `fill` or `upload` periods, so the
-  whole backlog ships.  Pipeline files never set `start_at = "now"`.  The factory default for
-  `wspr_cycle` becomes `"beginning"`, and the daemon refuses `"now"` in `pipelines.d`.  With no
-  send record and no predecessor key, a source starts at its producer's first stored row.
+  nothing bound for a repository, the client's sink holds only data from `fill` or `upload`
+  periods, so the whole backlog ships.  Pipeline files never set `start_at = "now"`.  The factory
+  default for `wspr_cycle` becomes `"beginning"`, and the daemon refuses `"now"` in `pipelines.d`.
+  With no send record and no predecessor key, a source starts at its producer's first stored row.
   SqliteSource starts above id 0 within its producer filter.  WsprCycleSource starts from an empty
   record.  A FileTree spool kept after sending starts above modification time 0.
 - When a new key replaces an older one, a one-time migration copies the old send record to each new
-  key before the first pump.  It prints the old key, the new key and the record, and then deletes
-  the old row.
-- `hs-uploader sink drop <client>` discards a client's backlog.  It sets each of the client's send
+  key before the first pump.  It also re-homes the queued retries, which store their key and their
+  pipeline's name at the moment they queue (`hs-uploader/src/hs_uploader/core.py:494-506, 544-551`);
+  a retry left on the old key would recreate the old row when it acknowledges, and a retry left
+  under a retired pipeline name would never ship.  The migration prints the old key, the new key
+  and the record, and then deletes the old row.
+- `hs-uploader sink drop <client>` drops a client's backlog.  It sets each of the client's send
   records to the producer's newest row, deletes the client's queued deliveries, and deletes only
-  rows that match its producer.  It runs while the daemon holds that client's pipelines idle.  The
+  rows that match its producer.  It runs while the daemon keeps that client's pipelines idle.  The
   client's `--drop-backlog` option calls it.
 
 ### 6.3 Cleanup
@@ -608,7 +637,7 @@ its rows.  Deleting rows alone never shrinks the file, so the writer sets
 
 ### 6.4 Per client
 
-| Client | The store switch acts on | The upload switch acts on | Retires |
+| Client | `fill` and `upload` store | Only `upload` sends | Retires |
 |---|---|---|---|
 | wspr-recorder | rows written to `wspr.spots` and `wspr.noise` | its wsprnet and wsprdaemon pipelines | its in-process uploader (`wspr_recorder/hs_uploader_shim.py`), `wspr-uploader.service`, `WSPR_USE_HS_UPLOADER` and the decode-only merge role, once the shim's other duties move (below) |
 | psk-recorder | its rows in `psk.spots` | its pskreporter pipeline and its own wsprdaemon pipeline | the `direct` in-process uploader, the per-slot `.spots.txt` fallback, `PSK_DELIVERY_PIPELINES`, `PSK_USE_HS_UPLOADER` |
@@ -617,8 +646,8 @@ its rows.  Deleting rows alone never shrinks the file, so the writer sets
 | mag-recorder | packaging, per §4.1; its JSONL samples stay local | its PSWS pipeline | the fallback uploader in `mag-recorder-upload.service` |
 | hfdl-recorder | nothing; its `hfdl.spots` rows form a local archive, written with `local=True` (§6.1) | its live feed to airframes.io, which runs only while the effective state reads `upload` | `sigmond-storage-trim-hfdl` (§6.3) |
 | codar-sounder, hf-tec, superdarn-sounder | their sink rows; their JSONL archives stay local | nothing today; no pipeline reads their rows | — |
-| hf-timestd | no switch (§4); its raw IQ, phase2, `timestd.db` and local `timestd.events` rows count as working and archive storage | nothing; GRAPE belongs to hamsci-physics | — |
-| gpsdo-monitor, station-web, phase-engine | no switch (§4) | nothing | — |
+| hf-timestd | no sink switch (§4); its raw IQ, phase2, `timestd.db` and local `timestd.events` rows count as working and archive storage | nothing; GRAPE belongs to hamsci-physics | — |
+| gpsdo-monitor, station-web, phase-engine | no sink switch (§4) | nothing | — |
 
 hfdl-recorder runs its decoder with the feed output only while the effective state reads
 `upload`.  A change to either switch file makes the client restart its own subprocess, so `off` and
@@ -644,12 +673,12 @@ wsprnet verifier and the wsprdaemon verifier.  The daemon builds its uploader wi
 silently.  They move first.  Either the pipeline file names per-pipeline outcome hooks that the
 daemon imports from wspr-recorder, or a wspr-recorder observer reads the daemon's send log.
 
-A WSPR merge fleet runs several wspr-recorder instances on one host, each writing into one sink
-(D3).  Today only the merge instance uploads, and the others carry
+A WSPR merge fleet runs several wspr-recorder instances on one host, each writing into the client's
+one sink (D3).  Today only the merge instance uploads, and the others carry
 `WSPR_USE_HS_UPLOADER=0`.  With the daemon as the only sender, that decode-only role disappears.
 Every instance feeds the one sink, and the daemon's wspr pipeline waits for every expected reporter
-as the merge instance does today.  The client's one switch governs all the instances.  Identity
-stays per instance, inside the switch file's history (§3.4).
+as the merge instance does today.  The client's one sink switch governs all the instances.
+Identity stays per instance, inside the switch file's history (§3.4).
 
 ### 6.5 Destinations as client configuration
 
@@ -664,8 +693,8 @@ spot still asked it to, the mark of meteor-scatter's `deposit` mode.  This desig
 closed, because as it runs today it loses spots in two ways.  It reads 500 rows at a time past a
 watermark kept in whole seconds.  The server stamps each insert, often more than 1,000 rows, with a
 single second, so the forwarder never reads the rest of that second.  And the ftlib library beneath
-it drops any spot older than 50 minutes, so nothing held in `fill` survives that path.  The path
-reopens only after Michael fixes both (§12).
+it drops any spot older than 50 minutes, so nothing stored during `fill` survives that path.  The
+path reopens only after Michael fixes both (§12).
 
 ### 6.6 wsprdaemon.org
 
@@ -736,8 +765,8 @@ A new section, §20 "Data sink control", in CLIENT-CONTRACT.md raises the contra
 conforming client with an outbound route meets all nine items below.  A client with none meets
 items 1, 6, 7, 8 and 9, and offers only `sink status` and `sink limit`.
 
-1. Implements `<client> sink status [--json] | off | fill | upload | check | limit`, writing only
-   its own switch file, through hs-uploader's library.
+1. Implements `<client> sink off|fill|upload|status|check|limit`, with `status --json`, writing
+   only its own switch file, through hs-uploader's library.
 2. Writes `/etc/hs-uploader/pipelines.d/<client>.toml` at install and at every configuration change
    (§3.5).
 3. Calls `effective_state()` before storing anything bound for a repository, and stores none of it
@@ -769,12 +798,12 @@ observed behaviour beside the setting.
 
 `<client> sink status --json`:
 
-- switches: the client state, the site state and the effective state, with who set each one, when
-  and why, or `local-only` for a client with no outbound route;
+- sink switches: the client's sink switch, the site sink switch and the resulting sink state, with
+  who set each switch, when and why, or `local-only` for a client with no outbound route;
 - identity in force for each instance, and the identities recorded across the unsent backlog,
   where they differ;
 - reception, live even in `off`: decodes or samples per minute, the time of the last data;
-- storage by kind: bytes held, the grant, the age of the oldest unsent item, days of headroom at
+- storage by kind: bytes stored, the grant, the age of the oldest unsent item, days of headroom at
   the current rate;
 - sending: the last send per pipeline, and the count sent since the last switch change.
 
@@ -807,26 +836,26 @@ Step 2 of §10.2 adds `pipeline` and `client` columns, filled by `record_attempt
 
 ### 8.3 Heartbeat and fleetboard
 
-One line per client.  The line shows the effective state, as `sink off`, `sink filling` or
-`sink uploading`, and names the switch that sets it, client or site.  A client with no outbound
-route shows `local-only`.  Each line also carries backlog size, the age of the oldest unsent item,
-days of headroom, the last send and the leak flag.  The fleetboard shows the per-client line, not
-only the site state.
+One line per client.  The line shows the client's sink state, as `sink off`, `sink filling` or
+`sink uploading`, and names the sink switch that sets it, the client's or the site's.  A client
+with no outbound route shows `local-only`.  Each line also carries backlog size, the age of the
+oldest unsent item, days of headroom, the last send and the leak flag.  The fleetboard shows the
+per-client line, not only the site sink switch.
 
 ### 8.4 Logging and alarms
 
 Each client and the daemon log a switch change once, at the change.  A pipeline skipped because of
-its state stays quiet in the journal and shows in status; a condition repeated at every send attempt
-would bury the alarms that matter.
+its client's sink state stays quiet in the journal and shows in status.  A condition repeated at
+every send attempt would bury the alarms that matter.
 
 | Event | Journal | Heartbeat and fleetboard | `smd sink status` |
 |---|---|---|---|
 | leak | ERROR | flag | red |
-| switch file unreadable, or holding an unknown state | ERROR, once, naming the file | flag | red |
+| switch file unreadable, or carrying an unknown `state` | ERROR, once, naming the file | flag | red |
 | declared pipeline failed to build | ERROR, once, naming the pipeline | flag | red |
 | oldest unsent data deleted at the grant | WARNING, naming the bytes and time span lost | counter | amber |
 | headroom below one day | WARNING, once | value | amber |
-| identity check blocked a switch to `upload` or a site opening | INFO, naming what differed | — | shown |
+| identity check blocked a change to `upload` or a raise of the site sink switch | INFO, naming what differed | — | shown |
 
 The five-minute limit for STALE and the one-day headroom warning serve as initial defaults until
 measurements on B4 replace them.
@@ -836,11 +865,11 @@ measurements on B4 replace them.
 A client cloned and installed on a host without sigmond brings ka9q-python, to reach radiod, and
 hs-uploader's library, daemon and sink writer, to store and send.  Its installer runs hs-uploader's
 installer.  That creates the `hsupload` user, the `sigmond` group, `/var/lib/hs-uploader`,
-`/var/lib/sigmond` for the sink, `/etc/hs-uploader/keys`, `pipelines.d` and `sinks`, and it installs
+`/var/lib/sigmond` for `sink.db`, `/etc/hs-uploader/keys`, `pipelines.d` and `sinks`, and it installs
 and enables the unit.  A client with an outbound route drops in its own pipeline file, and its
 installer creates its switch file at `off`.  Its operator runs `<client> sink fill`, checks
 reception and identity with `<client> sink status`, and then runs `<client> sink upload`.  No site
-file exists, so the client's own switch governs alone, and its own configuration supplies its
+file exists, so the client's own sink switch governs alone, and its own configuration supplies its
 storage limits.
 
 The 2026-10-06 trace found that this principle holds today for reaching radiod and fails for
@@ -862,8 +891,9 @@ hamsci-physics gains an `install.sh`; it has none today.  The client work in §1
 
 ### 10.1 Carrying existing stations over
 
-One rule governs the carry-over.  What the operator allowed keeps shipping, and what the operator
-held stays held, even where code ignored the hold until now.
+One rule governs the carry-over.  What the operator allowed keeps shipping.  What the operator
+kept from sending still does not send, even where code ignored the operator's setting until now.
+Such a client carries over as `fill`, so it keeps storing.
 
 - Carry-over runs wherever `topology.toml` lists an enabled client with an outbound route, or
   `sink.db` or `watermarks.db` exists.  Only a host with none of these counts as fresh, gets no
@@ -871,22 +901,24 @@ held stays held, even where code ignored the hold until now.
   senders, with no legacy `pipelines.toml`, therefore still carries over.
 - Sigmond runs it, from `smd align` and `smd update`, under hs-uploader's install lock,
   `/run/lock/hs-uploader-install.lock`.  It takes the client list from the enabled components in
-  `topology.toml`, plus any producer with rows in `sink.db`.  It
-  never takes the list from `pipelines.toml`, which names pipelines rather than clients and, under
-  a hold, lists only the heartbeat.
+  `topology.toml`, plus any producer with rows in `sink.db`.  It never takes the list from
+  `pipelines.toml`, which names pipelines rather than clients and, while the legacy
+  `[uploads] mode` reads `hold`, lists only the heartbeat.
 - A client gets `upload` when either source shows it shipping: its send records or the send log
-  show its data leaving, or the legacy list, rendered as if the site stood open, includes its
-  pipelines.  The site file then carries any site-wide hold (below).  A client whose data shows no
-  sign of shipping gets `fill`, so whatever it holds stays held.  A client with no outbound route
-  gets no switch file.
+  show its data leaving, or the legacy list, rendered as if `[uploads] mode` read `upload`, includes
+  its pipelines.  The site sink switch then carries any site-wide limit (below).  A client whose
+  data shows no sign of shipping gets `fill`, so nothing it has stored ships.  A client with no
+  outbound route gets no switch file.
 - The carry-over ignores `WSPR_USE_HS_UPLOADER`, which in a merge fleet marks a decode-only role
-  rather than a hold (§6.4).  It reads `PSK_USE_HS_UPLOADER=0` and `METEOR_SCATTER_USE_HS_UPLOADER=0`
-  as operator holds, even though the code ignored them, and gives that client `fill`.  K3LR's
-  `smd config upload psk-recorder K3LR --off` (§1) carries over this way.
+  rather than an order to stop sending (§6.4).  It reads `PSK_USE_HS_UPLOADER=0` and
+  `METEOR_SCATTER_USE_HS_UPLOADER=0` as such an order, even though the code ignored them, and gives
+  that client `fill`.  K3LR's `smd config upload psk-recorder K3LR --off` (§1) carries over this
+  way.
 - The carry-over records each instance's configured identity in a history entry with
   `by = "carry-over"`.
-- It writes the site file from sigmond's `[uploads]` mode, when one exists.  `upload` becomes
-  `upload`, `hold` becomes `fill` (K3LR today), and `discard` becomes `off`.
+- It sets the site sink switch from sigmond's legacy `[uploads] mode`, when one exists, by the
+  fixed mapping of §2.1.  `upload` becomes `upload`, `hold` becomes `fill` (K3LR today), and
+  `discard` becomes `off`.
 - Rows already in `sink.db` gain a producer inferred from their table and mode, and the
   carry-over marks the rows in `hfdl.spots` and `timestd.events` local (§6.1).
 - Completion writes the marker `/var/lib/hs-uploader/carry-over-v1.done`, and the daemon enforces
@@ -898,26 +930,32 @@ held stays held, even where code ignored the hold until now.
 
 Each step ships on its own and leaves stations working.
 
-1. **The shared send record, as a bug fix now.**  Give each sender its own key.  Put the producer
-   in the source id, or the mode until §6.1 lands.  Where neither fits, give the sender a distinct
-   transport `name`.  In the same release, migrate each existing send record to every key that replaces it
-   (§6.2).  Leave one sender per set of rows.  Where the daemon's `psk-pskreporter` runs,
-   psk-recorder's and meteor-scatter's in-process pskreporter senders stop.  Make send records move
-   forward only.  By the code, this ends the spot loss wherever psk-recorder, meteor-scatter and
-   the daemon run together.
+1. **One sender per set of rows.**  Live reads on 2026-10-06 showed that the shared send record
+   hides duplicates rather than losing spots.  On ND the daemon's `psk-pskreporter` and
+   psk-recorder's in-process sender select the same FT8 and FT4 rows, and the shared record splits
+   the work between them, with about 1 % posted twice.  Separate keys alone would therefore double
+   ND's pskreporter posts.  The loss case needs a meteor-scatter in-process sender beside an FT8
+   sender, and neither readable station runs one.  So the first step leaves the daemon as the only
+   pskreporter sender wherever it runs `psk-pskreporter`: psk-recorder moves to `server-raw` and
+   meteor-scatter to `off`.  v3.69 does this for fresh installs through bring-up (§10.3); an
+   existing station changes by a one-line edit and a restart of that recorder alone.  Separate
+   keys, the migration of send records and queued retries, and the forward-only rule move into
+   step 2, where per-client pipelines need them (§6.2).
 2. **hs-uploader foundation.**  The sink writer moves in, with a compatibility import left in
-   sigmond, and rows gain `producer` and `local`.  The daemon reads `pipelines.d/` alongside the
-   legacy list (§3.5).  The switch files, `effective_state()`, the carry-over and enforcement arrive
+   sigmond, and rows gain `producer` and `local`.  Each sender gets its own send-record key, with
+   the one-time migration and the forward-only rule of §6.2.  The daemon reads `pipelines.d/`
+   alongside the legacy list (§3.5).  The switch files, `effective_state()`, the carry-over and enforcement arrive
    together.  Cleanup moves into the daemon and spares unsent data, except rows of clients whose
    in-process senders still run (§6.3), and `sink drop` arrives.  The
    send log gains `pipeline` and `client` columns and the `last_send` table (§8.2).  Until grants
    arrive in step 6, each client's backlog ceiling stands at the 5 GB default of §4.3.  From this
-   step `smd upload` and `smd config uploads` write `site.toml` through `write_switch()`, and
-   coordination.toml's `[uploads]` becomes read-only legacy.  In-process senders keep running until
-   step 4 reaches their client.  On a held station sigmond stops them now:
+   step the site form of `smd sink`, and its aliases `smd upload` and `smd config uploads`, write
+   `site.toml` through `write_switch()`, and coordination.toml's `[uploads]` becomes read-only
+   legacy.  In-process senders keep running until step 4 reaches their client.  On a station whose
+   site sink switch reads `off` or `fill`, sigmond stops them now:
    - it sets `PSK_DELIVERY_PIPELINES=server-raw` and `METEOR_SCATTER_DELIVERY_MODE=off`, so their
-     rows wait in the sink behind the site gate with `forward_to_pskreporter` false.
-     `server-merge` and `deposit` would mark every held row for wd30's forwarder
+     rows wait in each client's sink, behind the site sink switch, with `forward_to_pskreporter`
+     false.  `server-merge` and `deposit` would mark every waiting row for wd30's forwarder
      (`psk-recorder/src/psk_recorder/core/recorder.py:553-555`,
      `meteor-scatter/src/meteor_scatter/core/recorder.py:427`).  That forwarder drops spots older
      than 50 minutes, and it would post fresh ones a second time beside the daemon's pskreporter
@@ -926,67 +964,113 @@ Each step ships on its own and leaves stations working.
      in-process wspr shim runs;
    - it sets mag-recorder's `[uploader] enabled = false`, which governs only the fallback sender.
 
-   Each env change takes effect when sigmond restarts that recorder alone, never radiod. `smd sink
-   status` lists each remaining in-process sender as UNMANAGED. 3. **Per-client wsprdaemon
-   uploads.**  One release ships the psk cycle source, psk-recorder's and meteor-scatter's own
-   wsprdaemon pipelines, and `include_psk = false` together.  Michael confirmed on 2026-10-06 that
-   wd30 takes separate uploads as it runs (§12).  This step waits only on the wd30 test of §11.
-   Step 4 may not move psk-recorder or meteor-scatter to `fill` before this step ships.  Until then,
-   the gate on wspr-recorder's wsprdaemon pipeline drops psk rows whose producer's effective state
-   does not read `upload`. 4. **Clients, one at a time.**  Each gains its `sink` command, its
-   pipeline file, the store check, an installer that meets §9, and optional sigmond paths in its
-   units, and each retires its in-process sender.  They convert in this order: psk-recorder and
-   meteor-scatter first; then wspr-recorder, mag-recorder and GRAPE; then hfdl-recorder; then
-   codar-sounder, hf-tec and superdarn-sounder.  wspr-recorder first moves its wsprnet audit, its
-   negative call cache and both verifiers (§6.4).  hf-tec fixes its writer call, passing
-   `mode="hf_tec"` and `producer="hf-tec"` and handing `insert()` a list of records.  codar-sounder,
-   hf-tec and superdarn-sounder add hs-uploader to their dependencies (§3.2).  The GRAPE ledger and
-   hamsci-physics' spool trim ship together (§5.4). 5. **Sigmond.**  `smd sink` arrives, with the
+   Each env change takes effect when sigmond restarts that recorder alone, never radiod.
+   `smd sink status` lists each remaining in-process sender as UNMANAGED.
+3. **Per-client wsprdaemon uploads.**  One release ships the psk cycle source, psk-recorder's and
+   meteor-scatter's own wsprdaemon pipelines, and `include_psk = false` together.  Michael confirmed
+   on 2026-10-06 that wd30 takes separate uploads as it runs (§12).  This step waits only on the
+   wd30 test of §11.  Step 4 may not move psk-recorder or meteor-scatter to `fill` before this step
+   ships.  Until then, the gate on wspr-recorder's wsprdaemon pipeline drops psk rows whose
+   producer's effective state does not read `upload`.
+4. **Clients, one at a time.**  Each gains its `sink` command, its pipeline file, the check before
+   storing, an installer that meets §9, and optional sigmond paths in its units, and each retires
+   its in-process sender.  They convert in this order: psk-recorder and meteor-scatter first; then
+   wspr-recorder, mag-recorder and GRAPE; then hfdl-recorder; then codar-sounder, hf-tec and
+   superdarn-sounder.  wspr-recorder first moves its wsprnet audit, its negative call cache and both
+   verifiers (§6.4).  hf-tec fixes its writer call, passing `mode="hf_tec"` and `producer="hf-tec"`
+   and handing `insert()` a list of records.  codar-sounder, hf-tec and superdarn-sounder add
+   hs-uploader to their dependencies (§3.2).  The GRAPE ledger and hamsci-physics' spool trim ship
+   together (§5.4).
+5. **Sigmond.**  `smd sink <client>` arrives beside the site form that v3.69 ships (§10.3), with the
    status check for LEAK, UNMANAGED and STALE, per-client heartbeat lines, masking of ka9q-radio's
    feeder units, and `off` with the identity check at bring-up.  Sigmond stops rendering the
-   pipeline list.  coordination.toml's `[uploads]` and `smd config uploads` retire. 6. **Storage
-   grants.**  §20's declare-grant-report fields, per-producer byte accounting, measured growth,
-   grants by equal holdover, and hf-timestd confined to its own subtree.  Until this step lands,
-   each client keeps the fixed 5 GB backlog ceiling of step 2, and cleanup already spares unsent
-   data, except rows of clients whose in-process senders still run. 7. **The contract.**
-   CLIENT-CONTRACT.md gains §20.  This step marks §1 of `tasks/plan-upload-control.md` superseded
-   and leaves its unbuilt §2 standing.
+   pipeline list.  coordination.toml's `[uploads]` and `smd config uploads` retire.
+6. **Storage grants.**  §20's declare-grant-report fields, per-producer byte accounting, measured
+   growth, grants by equal holdover, and hf-timestd confined to its own subtree.  Until this step
+   lands, each client keeps the fixed 5 GB backlog ceiling of step 2, and cleanup already spares
+   unsent data, except rows of clients whose in-process senders still run.
+7. **The contract.**  CLIENT-CONTRACT.md gains §20.  This step marks §1 of
+   `tasks/plan-upload-control.md` superseded and leaves its unbuilt §2 standing.
 
 ### 10.3 The first image: v3.69
 
-Michael chose on 2026-10-06 to ship a small v3.69 ahead of the rest.  It carries only what stops a
-new station from sending unverified data, and it moves the earlier v3.69 list to v3.70.
+Michael chose on 2026-10-06 to ship a small v3.69 ahead of the rest (D6).  It stops a new station
+from sending unverified data, gives operators the sink vocabulary at site level, and stops GRAPE from
+sending a day more than once (D7).  The earlier v3.69 list moves to v3.70.
 
-1. **Every fresh install starts with the site in `discard`.**  That mode comes nearest, in today's
-   code, to the `off` that row 64 asks of a new client: nothing ships and no backlog builds.  The
-   wizard writes `[uploads] mode = "discard"` into site-profile, which already parses the mode
-   (`sigmond/lib/sigmond/site_profile.py:137, 273`); until now the wizard wrote none.  It tells the
-   operator that the station records but sends nothing until someone runs `smd upload on`.
-2. **The first `smd upload on` closes the doors that `discard` leaves open.**  `discard` acts when
-   the daemon ships, so data packaged after the fact can still leak once it ends (§1).  Before it
-   opens the site, sigmond moves aside every GRAPE package and magnetometer zip built before that
-   moment, and prints what it moved.  It writes `upload/<day>/.upload_complete` for each earlier day
-   that still has raw data, so GRAPE's catch-up sweep never re-packages a bench day
-   (`hamsci-physics/src/hamsci_physics/cli.py:576-591`).  That also covers a station whose PSWS
-   ids arrive later, since nothing from before the switch remains to ship.  One gap stays open
-   until §4.1 lands: the GRAPE and magnetometer packages of the day of the switch itself still
-   cover the whole day.
-3. **Bring-up stops arming in-process senders.**  It sets `PSK_DELIVERY_PIPELINES=server-raw` and
-   `METEOR_SCATTER_DELIVERY_MODE=off`, so their rows carry `forward_to_pskreporter` false and the
-   daemon's pskreporter pipeline posts them under the site switch.  `smd upload on` then needs to
-   re-arm nothing.  The daemon posts every row under the station's single identity, so this fits a
-   station with one receiver per client; a host that runs several psk-recorder instances, as B4
-   does, keeps its present settings until step 4.
-4. **Step 1 of §10.2**, the separate send-record keys with their migration, and the forward-only
-   rule.
-5. **INSTALL.md, verified against v3.69.**  A new step after "check it's alive" turns uploads on:
-   check the waterfall and the decodes, confirm callsign and grid on the station pages, then run
-   `smd upload on`.  It says plainly that nothing recorded before that command leaves the station,
-   apart from the GRAPE and magnetometer packages of that same day.  §12, on moving a station, keeps uploads off through staging, reconfigures the grid at
-   the destination, and only then turns uploads on.
+1. **`smd sink off|upload|status` arrives at site level.**  It wraps the existing `[uploads] mode`:
+   `off` writes `discard` and `upload` writes `upload`.  `smd sink off` keeps the safeguards of
+   `smd upload discard`.  It needs `--reason`, asks for confirmation at a terminal, and refuses when
+   the installed hs-uploader cannot discard.  v3.69 offers no `smd sink fill`.  The legacy `hold`
+   it would ride on keeps WSPR spots for 24 hours and FT8 spots for one hour, and the first
+   `smd sink upload` sets aside packages built before it (item 3).  So `fill` would not keep what
+   §2.1 promises, and it arrives with step 2 of §10.2 instead.  `smd sink status` reports a legacy
+   `hold`, such as K3LR's, as `hold (legacy)`, never as `fill`.  `smd upload` stays as an alias.
+   The per-client form, `smd sink <client>`, waits for step 5 of §10.2.
+2. **Every fresh install starts with the site sink switch at `off`.**  The wizard writes `[uploads]`
+   into site-profile with `enabled = false`, `mode = "discard"` and a reason, the same form that
+   `smd upload discard` writes.  An older sigmond that ignores `mode` still reads `enabled = false`.
+   The wizard writes the block only on a first install, when the host carries no `.configured`
+   mark (`sigmond/scripts/proxmox/sigmond-wizard.sh:219, 286`).  The wizard rewrites site-profile
+   whole on every run (`:1338`), and `smd align` installs the new wizard on every station.  So on
+   any later run, `--reconfigure` included, the wizard carries an existing `[uploads]` block through
+   unchanged and writes none where none existed, because a missing block means `upload`.  It tells
+   the operator that the station records but sends nothing until someone runs `smd sink upload`.
+3. **The first `smd sink upload` after `off`, or its alias `smd upload on`, closes the doors that
+   `off` leaves open.**  Under v3.69 `off` rides on the legacy `discard`, which acts when the daemon
+   ships.  Data packaged after the fact can therefore still leak once the site sink switch leaves
+   `off` (§1).  The leak matters most where GRAPE's or the magnetometer's pipeline dropped out of
+   the manifest for missing PSWS ids, since then nothing discarded their packages.  Before sigmond
+   raises the switch, it takes two steps.
+   - It moves every GRAPE package and magnetometer zip built before that moment into a sibling
+     directory outside each spool root, `/var/lib/timestd/upload-held/<UTC time>/` and
+     `/var/lib/mag-recorder/upload-held/<UTC time>/`, and prints what it moved.  A directory
+     inside a root would still ship, because the file source searches the whole tree.  It refuses
+     rather than copy when the two directories sit on different filesystems.
+   - It writes `upload/<day>/.upload_complete` for each of the seven days before the command, owned
+     by the spool's owner, so GRAPE's catch-up sweep never re-packages a day from before it
+     (`hamsci-physics/src/hamsci_physics/cli.py:576-591`).
 
-Existing stations keep shipping as they do.  v3.69 changes only what a fresh install starts with,
-and the send-record fix.
+   sigmond decides this from the mode the manifest actually renders, not from the mode written,
+   because a host whose hs-uploader cannot discard renders `hold` instead.  One gap stays open
+   until §4.1 lands.  The packages that GRAPE and the magnetometer build after the command still
+   cover whole days.  That includes the day of the command.  It also includes the day before, when
+   the command runs before that night's packaging, which starts at about 01:00 UTC for GRAPE and
+   03:00 UTC for the magnetometer.
+4. **Bring-up leaves the daemon as the only pskreporter sender** (step 1 of §10.2).  It passes
+   `--via server-raw` to `smd config upload psk-recorder`, which would otherwise write `direct`.
+   meteor-scatter's `deploy.toml` seeds `METEOR_SCATTER_DELIVERY_MODE = "off"` in place of
+   `deposit`.  Their rows then carry `forward_to_pskreporter` false, and the daemon's pskreporter
+   pipeline posts them under the site sink switch, so `smd sink upload` needs to re-arm nothing.
+   The daemon posts every row under the station's single identity, which fits a station with one
+   receiver per client.  A host that runs several psk-recorder instances, as B4 does, keeps its
+   present settings until step 4 of §10.2, and nobody re-runs bring-up there until then.
+5. **GRAPE stops sending a day more than once.**  Nothing has written `.upload_complete` since
+   hf-timestd `af45a6a` (2026-06-30) retired its writer, so every night the catch-up sweep
+   re-packages the previous two to seven days.  Each re-package rewrites the day's files, which
+   moves their modification time past GRAPE's send record, so hs-uploader may send each day up to
+   six more times.  hamsci-physics now writes `upload/<day>/.upload_complete` once it has packaged
+   a day, and the sweep retries only the days that truly failed.  On a station,
+   `journalctl -u grape-daily` lines reading `sweep: retrying incomplete day` show the fault; one
+   station's journal confirms it before release.
+6. **INSTALL.md, verified against v3.69.**  Section 9, "check it's alive", points at the decodes on
+   the station pages instead of wsprnet and pskreporter.info, since nothing ships yet.  It closes
+   by raising the site sink switch: the operator confirms callsign and grid on the station pages,
+   runs `smd sink upload`, and reads the result with `smd sink status`.  The step lives inside §9,
+   so no later section renumbers and the links from sigmond's operator docs keep working.  The
+   guide never teaches `smd upload on`.  It says plainly that nothing recorded before
+   `smd sink upload` leaves the station, apart from the GRAPE and magnetometer packages of item
+   3's gap.  Section 11's row for "no spots after 30 minutes" changes to match.  Section 12, on
+   moving a station, keeps the site sink switch at `off` through staging, reconfigures the grid at
+   the destination, and only then runs `smd sink upload`.  It notes that a GPSDO may already have
+   moved the grid, and it corrects the claim that `--reconfigure` keeps every earlier answer,
+   since the wizard pre-fills only some of them.
+
+Existing stations keep shipping as they do.  On an existing station v3.69 adds `smd sink` beside
+`smd upload`, which keeps working, and GRAPE's marker.  ND and K3LR each still carry one
+pskreporter setting that step 1 asks to change.  ND's psk-recorder runs `direct` beside the daemon.
+K3LR's stop-gap reads `server-merge`, which marks its rows for wd30's lossy forwarder.  Each moves
+to `server-raw` by a one-line edit and a restart of psk-recorder alone, when Michael chooses.
 
 ## 11. Testing
 
@@ -995,21 +1079,28 @@ and the send-record fix.
   - Nothing leaves in `off` or `fill`.
   - `fill` → `upload` ships the backlog exactly once, under the right identity.
   - Nothing from an `off` period ever ships, re-packaging included.
-  - With the client in `upload` and the site in `off` for a day, then the site in `fill`, nothing
-    from the site-off day ships.
+  - With the client's sink switch at `upload`, and the site sink switch at `off` for a day and then
+    at `fill`, nothing from the day at `off` ships.
   - `--drop-backlog` drops what it should.
-  - An identity mismatch blocks the switch, and blocks the site from opening.
+  - An identity mismatch blocks a change to `upload`, and blocks a raise of the site sink switch.
   - Decoding continues in `off`, and local data keeps growing.
-  - The send-record migration of step 1 neither re-sends nor skips a row.
+  - The send-record migration of step 2 neither re-sends nor skips a row, and carries the
+    queued retries with it.
+  - `sigmond-setup --reconfigure` keeps an existing `[uploads]` block exactly, and writes none
+    where none existed; only a first install writes `off`.
+  - The first `smd sink upload` after `off` sets aside every GRAPE package and magnetometer zip
+    built before it, outside the spool roots, and nothing it set aside ever ships.
+  - After hamsci-physics packages a day, the catch-up sweep never packages that day again.
 - **Proof that the harness catches leaks.**  Remove the state check from the daemon, from the sink
   writer and from each packager, one at a time; the harness must fail each time.  A test nobody
   has watched fail proves nothing.
 - **Storage.**  Cleanup never deletes unsent data; a grant drops the oldest data first and raises
   its alarm; grants sum to the budget; hf-timestd's limiters ignore a neighbour's growth.
-- **Carry-over.**  Upgrade a host in each site mode and confirm that what ships stays the same.
+- **Carry-over.**  Upgrade a host in each legacy `[uploads] mode`, `upload`, `hold` and `discard`
+  (carried over as `upload`, `fill` and `off`), and confirm that what ships stays the same.
 - **On B4, the test bench**, after announcing on the claude-bus: watch the wire for each
   destination (pskreporter TCP 4739; SFTP to gw1, gw2 and PSWS; HTTPS to wsprnet) through every
-  state; then a day in `fill` and a switch to `upload`, checked at wd30 and on pskreporter.info.
+  state; then a day in `fill` and a change to `upload`, checked at wd30 and on pskreporter.info.
 - **wd30, before step 3 ships.**  After announcing on the claude-bus, ship one cycle from B4 under
   `AC0G_B4_psk` and one under `AC0G_B4_msk`.  At wd30, confirm three things.  The server log shows a
   flush of psk rows with no spots and no noise.  The rows land in `psk.spots` under `AC0G=B4_EM38ww`
@@ -1055,19 +1146,19 @@ and the send-record fix.
 All paths start at the repos root.  Every item comes from reading code on 2026-10-06, during the
 first traces and the review.  Nothing ran on a station.
 
-### 13.1 Egress and switches
+### 13.1 Egress and levers
 
-- psk-recorder's direct uploader never reads the site policy: `psk-recorder/src/psk_recorder/core/recorder.py:714-748`; `coordination.env` carries no uploads key: `sigmond/lib/sigmond/coordination.py:557` (`render_env`).
-- Bring-up writes `PSK_DELIVERY_PIPELINES=direct` whatever the site mode: `sigmond/lib/sigmond/bringup.py:339-350`, `sigmond/lib/sigmond/upload.py:35-38`.
+- psk-recorder's direct uploader never reads the site's `[uploads] mode`: `psk-recorder/src/psk_recorder/core/recorder.py:714-748`; `coordination.env` carries no uploads key: `sigmond/lib/sigmond/coordination.py:557` (`render_env`).
+- Bring-up writes `PSK_DELIVERY_PIPELINES=direct` whatever `[uploads] mode` says: `sigmond/lib/sigmond/bringup.py:339-350`, `sigmond/lib/sigmond/upload.py:35-38`.
 - `smd config upload psk-recorder … --off` writes `PSK_USE_HS_UPLOADER`, which psk-recorder ignores; `smd config upload meteor-scatter` writes `METEOR_SCATTER_USE_HS_UPLOADER`, which no runtime code reads: `sigmond/lib/sigmond/upload.py:18-23`.
 - `smd config upload` refuses mag-recorder, hamsci-physics, hf-timestd and hfdl-recorder with "has no upstream upload path", though all but hf-timestd upload: `sigmond/lib/sigmond/commands/config.py:1139-1142`.  hf-timestd uploads nothing since the 2026-08-24 split: `hf-timestd/deploy.toml:219-227`, `hf-timestd/src/hf_timestd/cli.py:336-344`.
 - Shared send records: hs-uploader keys a send record on source, destination and table (`hs-uploader/src/hs_uploader/watermark/sqlite.py:34-40`; `hs-uploader/src/hs_uploader/core.py:407-410, 465-467`), and the pipeline name keys only the queued deliveries (`hs-uploader/src/hs_uploader/core.py:334`).  `SqliteSource.source_id()` ignores `extra_where` (`hs-uploader/src/hs_uploader/sources/sqlite.py:331-332`); `PskReporterTcp` has a fixed default name (`hs-uploader/src/hs_uploader/transports/pskreporter.py:127`).  So psk-recorder's in-process sender, though named `psk-recorder-<rid>`, shares its key with the daemon's `psk-pskreporter` (`psk-recorder/src/psk_recorder/core/hs_uploader_shim.py:186, 193`).  `advance_cursor` overwrites blindly (`hs-uploader/src/hs_uploader/watermark/sqlite.py:164-180`).
 - meteor-scatter's `deposit` seed and the daemon pipeline that refuses deposit rows: `meteor-scatter/deploy.toml:21-22, 146`.
 - mag-recorder's fallback ships whenever hs-uploader is inactive at 03:00 UTC: `mag-recorder/systemd/mag-recorder-upload.service:38`.
-- An unresolved PSWS id skips a pipeline in every mode, discard included: `sigmond/lib/sigmond/uploader_manifest.py:226-234`.
+- An unresolved PSWS id skips a pipeline in every `[uploads] mode`, `discard` included: `sigmond/lib/sigmond/uploader_manifest.py:226-234`.
 - GRAPE's sweep re-packages days 2-7 back and bumps modification times past the send record: `hamsci-physics/src/hamsci_physics/cli.py:576-591`, `hs-uploader/src/hs_uploader/sources/files.py:113-120`.
 - hamsci-physics hands its spool to the daemon and keeps `--no-upload` only as a no-op: `hamsci-physics/src/hamsci_physics/cli.py:479-497`.
-- The heartbeat never obeys the upload policy, and a hold renders it alone: `sigmond/lib/sigmond/uploader_manifest.py:453, 466-480`.
+- The heartbeat never obeys `[uploads] mode`, and `hold` renders it alone: `sigmond/lib/sigmond/uploader_manifest.py:453, 466-480`.
 - ka9q-radio installs acars, aprsfeed, hfdl and horusdemod units (`ka9q-radio/service/Makefile:10-14`); acars posts to feed.acars.io (`ka9q-radio/service/acars.service.in:17`); the ft8 decode unit "only needs the file system, not the network" (`ka9q-radio/service/ft8-decode.service.in:3`); `pskreporter@` appears only in the docs (`ka9q-radio/docs/ft8.md:84-85`).
 
 ### 13.2 Standalone
@@ -1076,13 +1167,13 @@ first traces and the review.  Nothing ran on a station.
 - hs-uploader's installer installs the unit but never enables it, and adds `hsupload` only to the timestd, wsprrec and pskrec groups: `hs-uploader/install.sh:183-185, 192-200`.  Its `tmpfiles.d` entry creates only `/var/lib/hs-uploader`: `hs-uploader/tmpfiles.d/hs-uploader.conf`.
 - The writer falls silently to a no-op when it cannot write to `/var/lib/sigmond` (`sigmond/lib/sigmond/hamsci_sink/writer.py:10-16, 234-235`), and SqliteSource does the same when the file does not exist (`hs-uploader/src/hs_uploader/sources/sqlite.py:120-138`).
 - No client declares `sigmond`, yet six import `sigmond.hamsci_sink`: e.g. `psk-recorder/src/psk_recorder/core/ch_tailer.py:563`, `wspr-recorder/wspr_recorder/spot_sink.py:161`.  codar-sounder, hf-tec and superdarn-sounder declare neither sigmond nor hs-uploader in their `pyproject.toml`.
-- wspr-recorder skips decoding when the sink is unavailable: `wspr-recorder/wspr_recorder/__main__.py:467-468`.  It decodes only with `WD_DECODE_VIA_DB=1`, which sigmond seeds: `wspr-recorder/deploy.toml:18-23`.
+- wspr-recorder skips decoding when it cannot write to `sink.db`: `wspr-recorder/wspr_recorder/__main__.py:467-468`.  It decodes only with `WD_DECODE_VIA_DB=1`, which sigmond seeds: `wspr-recorder/deploy.toml:18-23`.
 - psk-recorder's and meteor-scatter's installers never fetch `hamsci-dsp`: `psk-recorder/scripts/install.sh:144-146`, `meteor-scatter/scripts/install.sh:149-151`.  Only `smd` builds jt9 and wsprd: `sigmond/bin/smd:1445`.  hamsci-physics has no installer: `sigmond/etc/catalog.toml:79`.
 - Units require sigmond-owned paths without the optional prefix: e.g. `meteor-scatter/systemd/meteor-scatter@.service:95`, `hs-uploader/systemd/hs-uploader.service:77-78`.
 
 ### 13.3 Storage
 
-- Age-only trim: `sigmond/lib/sigmond/storage_trim.py:94-106, 263-277`.  No pipeline reads `hfdl.spots` or `timestd.events`; the sink holds them as an archive: `sigmond/lib/sigmond/storage_trim.py:5-7, 91-93`.  sigmond's installer copies the per-target trim units onto every host and enables only `-all`: `sigmond/install.sh:822-826, 1171`.
+- Age-only trim: `sigmond/lib/sigmond/storage_trim.py:94-106, 263-277`.  No pipeline reads `hfdl.spots` or `timestd.events`; `sink.db` holds them as an archive: `sigmond/lib/sigmond/storage_trim.py:5-7, 91-93`.  sigmond's installer copies the per-target trim units onto every host and enables only `-all`: `sigmond/install.sh:822-826, 1171`.
 - Sigmond reads no `data_sinks`; it parses `mb_per_day` from the legacy `disk_writes` key for display: `sigmond/lib/sigmond/clients/contract.py:215-220`.  `data_sinks` already uses `kind` for `file` and `service`: `sigmond/docs/CLIENT-CONTRACT.md:2060, 2067, 2082, 2170-2172`.
 - hf-timestd's budget per channel per day: `hf-timestd/src/hf_timestd/core/resource_guardian.py:91-97`.
 - hf-timestd's whole-filesystem limiters: `hf-timestd/src/hf_timestd/quota_manager.py:91-95` (also run by `hf-timestd/systemd/timestd-prune.service:19`), `hf-timestd/src/hf_timestd/core/resource_guardian.py:211-262, 445-490`, `hf-timestd/src/hf_timestd/core/binary_archive_writer.py:1016-1020` and its 100 MB floor at `:1038`.
