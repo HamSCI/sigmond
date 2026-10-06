@@ -404,6 +404,16 @@ gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
     return 1
 }
 
+# uploads_toml — the [uploads] block a FRESH install writes: the site sink
+# switch starts `off` (stored as the legacy discard) until the operator checks
+# the station and runs `smd sink upload` (tasks/plan-sink-control.md §10.3
+# item 2).  A configured host prints nothing; `smd config profile-install`
+# then keeps whatever block the station already carries.
+uploads_toml(){
+    [ -e "$CONF_MARK" ] && return 0
+    printf '\n[uploads]\nenabled = false\nmode    = "discard"\nreason  = "new station: the site sink switch stays off until someone runs smd sink upload"\n'
+}
+
 # ── prompts ─────────────────────────────────────────────────────────────────
 # Each question is a function so the final review screen can re-run any
 # single one: the operator sees everything they typed and picks a number
@@ -1319,6 +1329,7 @@ host     = \"$HB_HOST\"
 port     = $HB_PORT
 "
 fi
+UPLOADS_TOML=$(uploads_toml)
 PROFILE=$(cat <<PEOF
 # Written by the Sigmond appliance first-boot wizard $(date -u +%Y-%m-%dT%H:%MZ)
 [station]
@@ -1329,14 +1340,30 @@ $PSWS_TOML
 [reporters]
 reporter_id = "$REPORTER"
 $HB_TOML
+$UPLOADS_TOML
 
 [host]
 hostname = "$VMNAME"
 PEOF
 )
 B64=$(echo "$PROFILE" | base64 -w0)
-gexec 30 "echo $B64 | base64 -d > /etc/sigmond/site-profile.toml" \
+gexec 30 "echo $B64 | base64 -d > /etc/sigmond/site-profile.toml.new" \
     || { say "ERROR: could not write site-profile.toml in guest"; exit 1; }
+# profile-install keeps a site sink switch the station already set; a plain
+# overwrite would reset it on every --reconfigure (§10.3 item 2).  Ask first
+# whether this VM's smd knows the verb, so that a refusal of the new file
+# (invalid TOML, say, from a double quote in an answer) never falls through
+# to installing it whole.
+if gexec 30 "smd config profile-install --help >/dev/null 2>&1"; then
+    gexec 30 "smd config profile-install /etc/sigmond/site-profile.toml.new" \
+        || { say "ERROR: smd config profile-install refused the new site-profile.toml — see $LOG"; exit 1; }
+else
+    say "WARN: this VM's sigmond predates 'smd config profile-install', so the wizard"
+    say "      installs the profile whole, as earlier wizards did.  An [uploads] block"
+    say "      the old profile carried is gone: check 'smd upload status' and set it again."
+    gexec 30 "mv -f /etc/sigmond/site-profile.toml.new /etc/sigmond/site-profile.toml" \
+        || { say "ERROR: could not install site-profile.toml in guest"; exit 1; }
+fi
 
 say "personalizing VM (new machine-id, SSH host keys, hostname)..."
 gexec 600 "smd admin personalize --reset-identity --yes" \
@@ -2402,6 +2429,10 @@ HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 |
 # station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
 # need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
 [ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.)' | head -1)
+SINK_NOTE=""
+[ -n "${UPLOADS_TOML:-}" ] && SINK_NOTE=" Site sink switch: off — the station records and decodes but sends
+            no data; only its heartbeat goes out.  Check reception and
+            identity, then run in the VM: smd sink upload"
 SUMMARY=$(cat <<SEOF
 ──────────────────────────────────────────────────────
  Sigmond station configured: $REPORTER @ $GRID
@@ -2422,6 +2453,7 @@ SUMMARY=$(cat <<SEOF
  SDR/radiod: $RADIOD_STATE
  RAC:       $RAC_STATE
  PSWS:      $PSWS_STATE
+$SINK_NOTE
  Rerun wizard:  sigmond-setup --reconfigure
  This summary is saved in /root/sigmond-setup-summary.txt
 ──────────────────────────────────────────────────────
