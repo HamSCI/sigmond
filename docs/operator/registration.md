@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond b8f26c7 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -112,6 +112,8 @@ answer to go and correct. A real station's reporter ID is `CALL` or
 **Database** tab, and search for your reporter ID in the *Reporter* field. Rows
 should appear about fifteen minutes after you run `smd sink upload`
 ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)).
+That command refuses while GRAPE or the magnetometer packages a day (about
+01:00 to 04:00 UTC); run it again when that finishes.
 
 You can also watch it happen from the station, which is faster than reloading a
 web page and tells you *why* if nothing is shipping — `[VM]`:
@@ -396,7 +398,9 @@ admin and quote this paragraph; it is a known failure shape, not a mystery.
 
 Registration is done when all of these show data. The waits are typical, not
 guarantees — propagation may simply be poor, and a band with nothing on it
-produces no spots no matter how healthy your station is.
+produces no spots no matter how healthy your station is. Each wait starts when
+the site sink switch reads `upload`: a new station sends no data until someone
+runs `smd sink upload`, and the end of this section explains the switch.
 
 | Product | Where to look | Typically appears |
 |---|---|---|
@@ -437,8 +441,10 @@ broken". If you *do* have an RM3100 and only one row appears, that is worth
 reporting — start at
 [troubleshooting.md → *Magnetometer flat line, or mag-recorder says failed*](troubleshooting.md#magnetometer-flat-line-or-mag-recorder-says-failed).
 
-So a station finished on Tuesday afternoon shows spots the same afternoon and
-its first PSWS products on Wednesday. Don't judge PSWS on day one.
+Once its site sink switch reads `upload`, a station finished on Tuesday
+afternoon shows spots the same afternoon and its first PSWS products on
+Wednesday. A new station starts at `off` until someone runs `smd sink upload`.
+Don't judge PSWS on day one.
 
 > **One switch that stops every upload at once.** The site sink switch decides what
 > leaves the station, and someone may have set it to send no data on purpose. Check it
@@ -451,7 +457,7 @@ its first PSWS products on Wednesday. Don't judge PSWS on day one.
 > | It says | Meaning |
 > |---|---|
 > | `✓ site sink: upload (store and send)` | normal |
-> | `⚠ site sink: off — no data ships and no backlog builds` | no data leaves; only the heartbeat goes out. A new station starts here, with the reason `new station: …`, until someone checks it and runs `smd sink upload`; a bench machine being provisioned sits here too. `smd sink upload` sends nothing recorded before it, except the GRAPE and magnetometer packages for that UTC day, and for the day before if that night's packing has not finished. On a station built before v3.69, psk-recorder may still post FT8 spots itself (its setting `PSK_DELIVERY_PIPELINES` reads `direct`), and the site sink switch does not stop that sender; ask your fleet admin |
+> | `⚠ site sink: off — no data ships and no backlog builds` | no data leaves; only the heartbeat goes out. A new station starts here, with the reason `new station: …`, until someone checks it and runs `smd sink upload`; a bench machine being provisioned sits here too. `smd sink upload` sends nothing recorded before it, except the GRAPE and magnetometer packages for that UTC day, and for the day before if its packaging, which runs from about 01:00 to 04:00 UTC, has not finished. On a station built before v3.69, psk-recorder may still post FT8 spots itself (its setting `PSK_DELIVERY_PIPELINES` reads `direct`), and the site sink switch does not stop that sender; ask your fleet admin |
 > | `⚠ site sink: hold (legacy) — stores for a while and sends no data; …` | an older pause, set with `smd upload hold`. The station keeps FT8 spots for one hour and WSPR spots for 24 hours, then drops them. `smd sink upload` sends what remains; `smd sink off` drops it. DASI002 reads `no HF antenna; no PSWS station/instrument ids` |
 >
 > `smd upload hold` and `smd upload discard` still work; they set the legacy modes
@@ -496,10 +502,12 @@ sigmond-setup --reconfigure
 Type the new grid square. The wizard asks for your reporter ID and PSWS ids
 afresh, and pressing Enter at the PSWS station ID skips PSWS, so have them at
 hand. It keeps your remote-access number, your PSWS key registration and the
-site sink switch. Then check the identity in the `[VM]` with
+site sink switch. The wizard restarts the recorders itself, so you restart
+nothing. Then check the identity in the `[VM]` with
 `grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml`. If
-`smd sink status` still says `site sink: off`, run `smd sink upload`. Check
-wsprnet about fifteen minutes later
+`smd sink status` says `site sink: off` with the reason `new station: …`, run
+`smd sink upload`. For any other reason, ask your fleet admin. Check wsprnet
+about fifteen minutes later
 ([INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
 
 ---

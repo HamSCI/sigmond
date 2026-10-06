@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond b8f26c7 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -401,7 +401,9 @@ smd sink status
 If it answers `⚠ site sink: off` and the reason reads `new station: …`, nobody has
 raised the switch since the install: finish
 [INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)
-and run `smd sink upload`. Any other `⚠ site sink: off` or `⚠ site sink: hold (legacy)`
+and run `smd sink upload`. It refuses while GRAPE or the magnetometer packages a
+day (about 01:00 to 04:00 UTC); run it again when that finishes. Any other
+`⚠ site sink: off` or `⚠ site sink: hold (legacy)`
 means somebody set it on purpose: **expect zero spots and report nothing**, and do not
 change it yourself. `smd upload hold` and `smd upload discard` still work; they set the
 legacy modes that `smd sink status` reports as `hold (legacy)` and `off`. The full
@@ -650,7 +652,9 @@ for a documented procedure, not a reinstall: log into the `[host]`, run
 `sigmond-setup --reconfigure`, and type the new grid square. The wizard asks
 for your reporter ID and PSWS ids afresh, and pressing Enter at the PSWS
 station ID skips PSWS, so have them at hand. It keeps your remote-access
-number and the site sink switch as they were. Full steps:
+number and the site sink switch as they were. The wizard carries the new
+location to the recorders, the timing station and the magnetometer, and
+restarts the recorders itself. Full steps:
 [INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another).
 
 ---

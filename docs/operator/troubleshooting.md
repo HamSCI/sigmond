@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond b8f26c7 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -234,7 +234,8 @@ someone checks it and runs `smd sink upload`.
 - `site sink: off` with the reason `new station: …` → nobody has raised the switch
   since the install. Check the station
   ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
-  then run `smd sink upload`.
+  then run `smd sink upload`. It refuses while GRAPE or the magnetometer
+  packages a day (about 01:00 to 04:00 UTC); run it again when that finishes.
 - `site sink: off` or `site sink: hold (legacy)` with any other reason →
   **do not change it yourself.** Somebody set it for a reason
   ([registration.md §6](registration.md#6-confirming-everything-flows)).
@@ -439,7 +440,8 @@ smd watch uploads
 
 *Good:* `✓ site sink: upload`, then counters moving each cycle. *Bad:*
 `⚠ site sink: hold (legacy) — … <reason>` or `⚠ site sink: off — … <reason>` (deliberate unless the reason reads `new station: …`; ask before changing), or
-counters flat while cycles keep printing.
+counters flat while cycles keep printing. An `off` switch keeps no backlog, so
+it does not explain a growing pending count.
 
 Then check the outside world:
 [registration.md §6](registration.md#6-confirming-everything-flows) says where
