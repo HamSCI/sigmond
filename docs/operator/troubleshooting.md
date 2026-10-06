@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -157,13 +157,15 @@ for about three minutes.
 **Likely causes, most common first**
 
 1. **Not enough time, or the wrong search.** Rows appear about fifteen minutes
-   after the station is up, and you must search the **Reporter** field with your
+   after the station is up and its site sink switch reads `upload`, and you
+   must search the **Reporter** field with your
    [reporter ID](glossary.md) (`AC0G/B4`), not your bare callsign
    ([registration.md §6](registration.md#6-confirming-everything-flows)).
 2. **You are searching the wrong identity.** The reporter ID is whatever the
    wizard recorded, which may not be what you remember typing.
-3. **Uploads are switched off by policy.** A station with no antenna, or one
-   still being built, is deliberately kept out of the public databases.
+3. **The site sink switch holds uploads back.** A new station starts at `off`
+   until someone runs `smd sink upload`. A station with no antenna, or one still
+   under construction, stays out of the public databases on purpose.
 4. **Nothing is being decoded at all** — which is a different problem, and a
    bigger one.
 5. **Propagation.** An hour with no spots is weather. A week with zero is a
@@ -188,13 +190,13 @@ It follows the uploader until you press Ctrl-C; it changes nothing. There are
 | It **returns immediately** with `✗ uploads-watch: no active uploader on this host (wspr-uploader.service, wspr-recorder@*, psk-recorder@*, wd-upload-hs@* all inactive).` | The spot recorders and uploaders are **not running on this station** — usually because they were deliberately switched off (no antenna, or a station still being built). This is DASI002's answer, and it is correct there. Nothing has failed and there is nothing to Ctrl-C. |
 
 That fourth answer is the one most likely to be mistaken for a crash. Confirm it
-with the next two commands: if `smd upload status` says
-`HOLD` or `DISCARD`, or `smd component list` shows `wspr-recorder` and
+with the next two commands: if `smd sink status` says
+`site sink: off` or `site sink: hold (legacy)`, or `smd component list` shows `wspr-recorder` and
 `psk-recorder` at LIFECYCLE `binary, on PATH` rather than `enabled, running`,
 then this station is not meant to be uploading spots
 ([registration.md → *when it says "no active uploader"*](registration.md#when-it-says-no-active-uploader);
 [day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
-If uploads are **enabled** and you still get it, that is a real finding for your
+If `smd sink status` says `site sink: upload` and you still get it, that is a real finding for your
 fleet admin. The four unit names it lists are internal plumbing and appear
 nowhere else in these pages — [docs-gap ledger row 27](../contributor/docs-gap-ledger.md).
 
@@ -208,16 +210,17 @@ The **REPORTER ID** column is the answer (b4 prints `AC0G/B4` for
 `wspr-recorder`, `psk-recorder` and `meteor-scatter`, live 2026-08-23). The same
 value is in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id`.
 
-Then check the upload switch — `[VM]`:
+Then check the site sink switch — `[VM]`:
 
 ```bash
-smd upload status
+smd sink status
 ```
 
-*Good:* `✓ uploads: enabled (outbound data pipelines render normally)` — b4's
-answer. *Bad, but deliberate:*
-`⚠ uploads: HOLD — stored, not shipped — no HF antenna; no PSWS station/instrument ids`
-— DASI002's answer, and correct for that station.
+*Good:* `✓ site sink: upload (store and send)`, b4's answer. *Silent on purpose:*
+`⚠ site sink: hold (legacy) — stores for a while and sends no data; … — no HF antenna; no PSWS station/instrument ids`,
+DASI002's answer and correct for that station. A new station answers
+`⚠ site sink: off — no data ships and no backlog builds — new station: …` until
+someone checks it and runs `smd sink upload`.
 
 **What to do**
 
@@ -228,13 +231,18 @@ answer. *Bad, but deliberate:*
   [Spots stopped](#spots-stopped-were-fine-before). (Only if it **sat there**
   silently. An *immediate* `✗ … no active uploader on this host` is the fourth
   row of the table above, and does not belong on that path.)
-- `HOLD` or `DISCARD` → **do not turn it back on yourself.** Somebody set that
-  for a reason ([registration.md §6](registration.md#6-confirming-everything-flows)).
+- `site sink: off` with the reason `new station: …` → nobody has raised the switch
+  since the install. Check the station
+  ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
+  then run `smd sink upload`.
+- `site sink: off` or `site sink: hold (legacy)` with any other reason →
+  **do not change it yourself.** Somebody set it for a reason
+  ([registration.md §6](registration.md#6-confirming-everything-flows)).
   Ask your [fleet admin](glossary.md).
 
 **When to stop and ask**
 
-Uploads enabled, `radiod` active, signals visible on the waterfall, cycles
+`site sink: upload`, `radiod` active, signals visible on the waterfall, cycles
 printing with real counts — and still nothing on wsprnet an hour later. That
 combination is not something you can fix from the station.
 
@@ -256,8 +264,8 @@ combination is not something you can fix from the station.
    shows **no `psk-recorder:` block**, the client is installed but switched off
    — the same case as the wsprnet section's fourth outcome. Confirm with
    `smd component list` (LIFECYCLE `binary, on PATH` or `configured` rather than
-   `enabled, running`) and `smd upload status`; if uploads are
-   `HOLD` or `DISCARD` this station is not meant to be reporting FT8/FT4 and
+   `enabled, running`) and `smd sink status`; if it says `site sink: off` or
+   `site sink: hold (legacy)`, this station does not report FT8/FT4 on purpose and
    there is nothing to fix
    ([day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
 4. **`psk-recorder` is enabled but not running.**
@@ -325,7 +333,7 @@ mechanism and the station usually repairs it without you.
 2. **The band died.** Propagation, not you.
 3. **`radiod` itself stopped** — then nothing works, not just spots.
 4. **The antenna or its coax.**
-5. **Uploads switched off** — see [No spots on wsprnet](#no-spots-on-wsprnet).
+5. **The site sink switch holds uploads back** — see [No spots on wsprnet](#no-spots-on-wsprnet).
 
 **What to check**
 
@@ -397,7 +405,7 @@ or spots stop again within the hour.
 
 **Read this before you act, because the usual answer is "nothing is wrong."**
 
-The station keeps a queue of things to upload in its [sink](glossary.md), and
+Each client keeps what it will upload in its [sink](glossary.md), and
 you can see its depth in the TUI's Resources screen (`smd tui`) or on the fleet
 board your admin watches. A growing number there, with the **oldest** entry
 frozen at a fixed age, is the *normal, healthy* shape for the wsprdaemon path —
@@ -417,7 +425,7 @@ all four destinations — that gap is row 8 of the
 **Likely causes, most common first**
 
 1. **Nothing** — the shape above.
-2. **Uploads disabled by policy** (a testbed, a station with no antenna).
+2. **The site sink switch holds uploads back** (`hold (legacy)` on a testbed or a station with no antenna).
 3. **A real network outage.** Then *every* counter stops, not one queue.
 
 **What to check**
@@ -425,12 +433,12 @@ all four destinations — that gap is row 8 of the
 `[VM]`, in this order:
 
 ```bash
-smd upload status
+smd sink status
 smd watch uploads
 ```
 
-*Good:* `✓ uploads: enabled`, then counters moving each cycle. *Bad:*
-`⚠ uploads: HOLD — … <reason>` or `⚠ uploads: DISCARD — … <reason>` (deliberate; ask before changing), or
+*Good:* `✓ site sink: upload`, then counters moving each cycle. *Bad:*
+`⚠ site sink: hold (legacy) — … <reason>` or `⚠ site sink: off — … <reason>` (deliberate unless the reason reads `new station: …`; ask before changing), or
 counters flat while cycles keep printing.
 
 Then check the outside world:
@@ -495,7 +503,7 @@ what each means.
   prompt: `enroll` and `verify` write root-owned files, so `smd` re-runs itself
   under `sudo` ([registration.md §5b](registration.md#5b-register-the-key)).
 - PSWS disabled and you now have IDs → run `sigmond-setup --reconfigure` from
-  the `[host]` and press Enter through everything else
+  the `[host]` and type your reporter ID and the PSWS IDs at their questions
   ([registration.md §1](registration.md#1-what-the-wizard-already-did)).
 
 ⚠ **`smd status` will keep printing `━━━ PSWS upload not finished ━━━` even
@@ -952,8 +960,10 @@ carries no science data at all
 sigmond-setup --reconfigure
 ```
 
-Press Enter through everything; only the remote-access step needs to re-run.
-Your reporter ID, grid square, RAC number and PSWS registration all stick.
+Only the remote-access step needs to change, but the wizard asks every question
+again: type your reporter ID and PSWS ids afresh (pressing Enter at the PSWS
+station ID skips PSWS) and check the grid square on its review screen. It keeps
+your RAC number and the site sink switch.
 
 **Two traps worth knowing before you chase this:**
 
@@ -1158,7 +1168,7 @@ which image you *started from*, not what you are running now —
 
 | If your symptom was | Also send |
 |---|---|
-| Anything about spots or uploads | `smd upload status`, and a minute of `smd watch uploads` |
+| Anything about spots or uploads | `smd sink status`, and a minute of `smd watch uploads` |
 | PSWS | `smd psws status` |
 | GPS or timing | `smd watch gpsdo --once` |
 | A failed unit | `systemctl --failed --no-pager`, then `systemctl status <unit> --no-pager` and `smd admin log <client> --files` (that last one follows the log until you press Ctrl-C; it changes nothing) |

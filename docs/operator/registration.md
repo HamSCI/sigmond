@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -82,9 +82,10 @@ PSWS enrollment — site
 ```
 
 > **If you skipped the PSWS questions and now have IDs**, don't re-run the whole
-> wizard from scratch: from the **host**, `sigmond-setup --reconfigure` re-asks
-> everything with your old answers pre-filled — press Enter through the ones
-> that are already right ([INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
+> wizard from scratch: from the **host**, run `sigmond-setup --reconfigure`. It
+> asks the questions again but pre-fills only some answers: type your reporter
+> ID again, and type the PSWS IDs at their questions
+> ([INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
 
 ---
 
@@ -109,7 +110,7 @@ answer to go and correct. A real station's reporter ID is `CALL` or
 
 **How to confirm:** go to [wsprnet.org](https://wsprnet.org), open the
 **Database** tab, and search for your reporter ID in the *Reporter* field. Rows
-should appear within about fifteen minutes of the station being up
+should appear about fifteen minutes after you run `smd sink upload`
 ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)).
 
 You can also watch it happen from the station, which is faster than reloading a
@@ -137,20 +138,20 @@ Ctrl-C, and the command has not failed:
 It means exactly what it says: none of the units that could be shipping spots
 are running on this station, so there is nothing for the watcher to watch. On a
 station like DASI002 that is **correct and deliberate** — no HF antenna, so the
-spot recorders are not [enabled](glossary.md) and uploads are off by policy
-(§6). Confirm which it is — `[VM]`:
+spot recorders are not [enabled](glossary.md) and its site sink switch holds
+uploads back (§6). Confirm which it is — `[VM]`:
 
 ```bash
-smd upload status
+smd sink status
 smd component list
 ```
 
-`⚠ uploads: HOLD` or `⚠ uploads: DISCARD` in the first, or a LIFECYCLE of
+`⚠ site sink: off` or `⚠ site sink: hold (legacy)` in the first, or a LIFECYCLE of
 `binary, on PATH` / `configured` rather than `enabled, running` for
 `wspr-recorder` and `psk-recorder` in the second, and you have your answer:
 nothing is wrong, this station is not meant to be uploading spots
 ([day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
-If instead uploads are **enabled** and you still get this line, that is a real
+If instead `smd sink status` says `site sink: upload` and you still get this line, that is a real
 finding — send it to your fleet admin.
 
 The four unit names in the message are internal plumbing and appear nowhere else
@@ -360,7 +361,7 @@ smd psws status
 > configuration file, which is your fleet admin's job, not yours
 > ([do-not-touch.md](do-not-touch.md#the-table)). The operator path for putting
 > PSWS ids in is the one in §5a — `sigmond-setup --reconfigure` from the
-> `[host]`, pressing Enter through the answers that are already right. The
+> `[host]`, typing your reporter ID and the PSWS ids at their questions. The
 > parenthesis is the useful half: *records locally regardless* means nothing is
 > being lost while the ids are missing. That `smd status` hands the operator a
 > command the operator guide forbids is
@@ -439,23 +440,25 @@ reporting — start at
 So a station finished on Tuesday afternoon shows spots the same afternoon and
 its first PSWS products on Wednesday. Don't judge PSWS on day one.
 
-> **One switch that stops everything at once.** A station runs in one of three
-> upload modes, and it can stop shipping on purpose. Check which with
-> `smd upload status` — `[VM]`:
+> **One switch that stops every upload at once.** The site sink switch decides what
+> leaves the station, and someone may have set it to send no data on purpose. Check it
+> with `smd sink status` — `[VM]`:
 >
 > ```bash
-> smd upload status
+> smd sink status
 > ```
 >
 > | It says | Meaning |
 > |---|---|
-> | `✓ uploads: on (store and ship)` | normal |
-> | `⚠ uploads: HOLD — stored, not shipped` | deliberately paused; the station keeps everything, and `smd upload on` ships the backlog. DASI002 reads `no HF antenna; no PSWS station/instrument ids` |
-> | `⚠ uploads: DISCARD — data pipelines ack without shipping` | a machine on the bench, being provisioned or tested before it goes to its site. Nothing it records ever ships, even after `smd upload on` |
+> | `✓ site sink: upload (store and send)` | normal |
+> | `⚠ site sink: off — no data ships and no backlog builds` | no data leaves; only the heartbeat goes out. A new station starts here, with the reason `new station: …`, until someone checks it and runs `smd sink upload`; a bench machine being provisioned sits here too. `smd sink upload` sends nothing recorded before it, except the GRAPE and magnetometer packages for that UTC day, and for the day before if that night's packing has not finished. On a station built before v3.69, psk-recorder may still post FT8 spots itself (its setting `PSK_DELIVERY_PIPELINES` reads `direct`), and the site sink switch does not stop that sender; ask your fleet admin |
+> | `⚠ site sink: hold (legacy) — stores for a while and sends no data; …` | an older pause, set with `smd upload hold`. The station keeps FT8 spots for one hour and WSPR spots for 24 hours, then drops them. `smd sink upload` sends what remains; `smd sink off` drops it. DASI002 reads `no HF antenna; no PSWS station/instrument ids` |
 >
-> Ask your fleet admin before changing it. The station's 5-minute
-> [heartbeat](glossary.md) obeys none of these modes, so a station that ships
-> nothing still shows up on the fleet board.
+> `smd upload hold` and `smd upload discard` still work; they set the legacy modes
+> that `smd sink status` reports as `hold (legacy)` and `off`. Ask your fleet admin
+> before changing the switch, unless the reason reads `new station: …` and you have
+> just finished INSTALL.md §9. The station's 5-minute [heartbeat](glossary.md) ignores
+> the switch, so a station that sends no data still shows up on the fleet board.
 >
 > On a station that has not enrolled in PSWS the command also prints one or more
 > lines like `uploader-manifest: skipping pipeline grape-psws (hf-timestd) —
@@ -490,10 +493,13 @@ square is wrong. After it is physically installed, from the **host**:
 sigmond-setup --reconfigure
 ```
 
-Type the new grid square; press Enter through everything else. Your reporter
-ID, remote-access number and **PSWS registration all stick**, the recorders
-restart themselves, and the next spots upload with the new grid — check
-wsprnet after about fifteen minutes
+Type the new grid square. The wizard asks for your reporter ID and PSWS ids
+afresh, and pressing Enter at the PSWS station ID skips PSWS, so have them at
+hand. It keeps your remote-access number, your PSWS key registration and the
+site sink switch. Then check the identity in the `[VM]` with
+`grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml`. If
+`smd sink status` still says `site sink: off`, run `smd sink upload`. Check
+wsprnet about fifteen minutes later
 ([INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
 
 ---
@@ -508,7 +514,7 @@ yourself; the full diagnosis for each lives in
 |---|---|---|
 | **No spots on wsprnet** after 30 minutes | `smd watch uploads` — three answers to tell apart. If it **returns at once** with `✗ uploads-watch: no active uploader on this host`, this station's recorders are switched off and zero spots is expected ([above](#when-it-says-no-active-uploader)). If it sits there printing **nothing at all**, the problem is decoding, not registration. If it prints `wsprnet=posted:0`, check that you are searching the right identity with `smd admin instance list` (its REPORTER ID column, e.g. `AC0G/B4`) or in `/etc/sigmond/site-profile.toml` under `[reporters] reporter_id` | [troubleshooting.md → *No spots on wsprnet*](troubleshooting.md#no-spots-on-wsprnet) |
 | **Nothing on pskreporter** | Search your callsign **as receiver**, not sender (§3) — that is the answer more often than not | [troubleshooting.md → *Nothing on pskreporter*](troubleshooting.md#nothing-on-pskreporter) |
-| **Uploads pending, and the number keeps growing** | `smd upload status` first (§6) — uploads may be off by policy | [troubleshooting.md → *Uploads pending and growing*](troubleshooting.md#uploads-pending-and-growing) |
+| **Uploads pending, and the number keeps growing** | `smd sink status` first (§6); the site sink switch may hold uploads back | [troubleshooting.md → *Uploads pending and growing*](troubleshooting.md#uploads-pending-and-growing) |
 | **PSWS not verified** | `smd psws verify` and read which of the two failures it reports (§5c) | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |
 | **PSWS has GRAPE data but no magnetometer data** | Nothing to fix locally — tell your fleet admin, and quote §5d | [troubleshooting.md → *PSWS not verified*](troubleshooting.md#psws-not-verified) |
 

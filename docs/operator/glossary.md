@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;
@@ -53,7 +53,8 @@ plus the handful below that its pages use without defining.
 | **RM3100** | The PNI magnetometer sensor, optional. It produces the station's daily geomagnetic product for PSWS. |
 | **RTP** | The real-time streaming format `radiod` uses on the local network. You will meet the word in log messages about "RTP gaps", which mean lost samples. |
 | **RX888** | The wideband SDR receiver (Mk II) that digitises 10 kHz–64 MHz all at once and streams it over USB 3. One per station. |
-| **sink** | The shared database `/var/lib/sigmond/sink.db` that every recorder writes into and the uploader reads from. It is the station's source of truth for what was heard. |
+| **sink** | A client's store of data bound for a repository: its rows in `sink.db` and any upload spool waiting to ship. `sink.db` names only the database file, `/var/lib/sigmond/sink.db`, which every recorder writes into and the uploader reads from. |
+| **site sink switch** (`smd sink`) | The station-wide setting for what leaves the site: `off` sends no data and keeps no backlog; `upload` stores and sends. A new station starts at `off`; `smd sink upload` raises it once you have checked reception and identity. A station set with the older `smd upload hold` reports `hold (legacy)`. `fill` arrives in a later release. The heartbeat ignores the switch. |
 | **smd** | The single command that runs the station ("SigMonD") — `smd status`, `smd doctor`, `smd version`. Run it as yourself inside the VM; it refuses to run under `sudo`. |
 | **spot** | One report that you heard one station, at one time, on one frequency. The unit of WSPR and FT8/FT4 data. |
 | **SSRC** | The 32-bit stream id `radiod` assigns to each channel; it shows up in status output and logs. `radiod` assigns it, so don't try to work it out from the frequency. |
@@ -115,7 +116,7 @@ is something you act on; it is here so you can read your own output.
 | Term | What it means |
 |---|---|
 | **`CONFIG` / `ENV` / `SOURCES`** (`smd admin instance list`) | Three ✓/✗ checks on one recorder instance: does it have a config file, has its environment file been rendered, and are its radio sources resolved. Three ✓ means fully wired. Anything else goes to your fleet admin. |
-| **`uploader-manifest`, pipeline, unresolved identity** (`smd upload status`) | See [registration.md §6](registration.md#6-confirming-everything-flows) — a *pipeline* is one product-to-destination route, and *unresolved identity* names the ids it has not been given. |
+| **`uploader-manifest`, pipeline, unresolved identity** (`smd sink status`) | See [registration.md §6](registration.md#6-confirming-everything-flows) — a *pipeline* is one product-to-destination route, and *unresolved identity* names the ids it has not been given. |
 | **`PLL`, `A-level` / `A0`, `no_fix`, `ANT`, `OUT1/OUT2 MHz`** (`smd watch gpsdo`) | The GPSDO's own report. **PLL** is its phase-locked loop — `yes` means the oscillator is locked to its reference. `A0`/`A1` is a coarse health grade with the reason spelled out beneath. `no_fix` means zero satellites. `ANT` is whether the antenna reads as connected. OUT1/OUT2 are the frequencies on its two outputs. |
 | **`FX3`** | The USB controller chip inside the *RX888*. It is the part that latches up and needs a full power-off rather than a reboot. |
 

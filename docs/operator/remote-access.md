@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, on/off, how the admin connects
 
 The setup wizard asked you for one decision about this — it ends
@@ -217,8 +217,9 @@ sigmond-setup --rac-on
 sigmond-setup --reconfigure
 ```
 
-Press Enter through every question you want to keep; your reporter ID, grid
-square, RAC number and PSWS registration all stick
+The wizard keeps your RAC number and the site sink switch. It asks for your
+reporter ID and PSWS ids afresh, and pressing Enter at the PSWS station ID
+skips PSWS, so have them at hand; check the grid square on its review screen
 ([INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another)).
 
 (Sources: `sigmond-wizard.sh` subcommand handlers — `--rac-off` disables and
@@ -333,7 +334,10 @@ upload path are unaffected.
 sigmond-setup --reconfigure
 ```
 
-Press Enter through everything; only the remote-access step needs to re-run.
+Only the remote-access step needs to change, but the wizard asks every question
+again: type your reporter ID and PSWS ids afresh (pressing Enter at the PSWS
+station ID skips PSWS) and check the grid square on its review screen. It keeps
+your RAC number and the site sink switch.
 
 **Where to look for the reason.** A tunnel that was never configured leaves *no
 journal entries at all* — the service is written to stay inert until its config

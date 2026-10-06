@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through pass 2 fixes (live dasi002 + b4)
+> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -340,7 +340,7 @@ one-line answer, and it is tracked as
 #### "Ready" and "disabled" in the same weekly check
 
 `smd component list` finishes with a block like this — and it will look like it
-contradicts the upload switch:
+contradicts the site sink switch:
 
 ```text
   upload readiness — missing items block ONLY uploading; the recorder still records locally:
@@ -349,22 +349,22 @@ contradicts the upload switch:
     ✓  ready: wsprnet.org, wsprdaemon.org, PSKReporter
 ```
 
-while `smd upload status` on the very same station says
-`⚠ uploads: HOLD` or `⚠ uploads: DISCARD`.
+while `smd sink status` on the very same station says
+`⚠ site sink: off` or `⚠ site sink: hold (legacy)`.
 
-**Both are true, and the policy line wins.** They answer different questions:
+**Both hold true, and the site sink line wins.** They answer different questions:
 
 | Line | The question it answers |
 |---|---|
 | `✓ ready: wsprnet.org, …` in `smd component list` | *"Does this path have the credentials and identity it would need?"* — `lib/sigmond/upload_creds.py`, whose `ready` field is documented as "are the required credentials/identity present?". wsprnet, wsprdaemon and PSKReporter need no registration at all ([registration.md §2–§4](registration.md#2-wsprnetorg--nothing-to-register)), so they are *always* "ready" on every station. |
-| `⚠ uploads: HOLD` or `⚠ uploads: DISCARD` in `smd upload status` | *"Is this station allowed to upload right now?"* — the site-wide switch. |
+| `⚠ site sink: off` or `⚠ site sink: hold (legacy)` in `smd sink status` | *"May this station send data right now?"* The site sink switch answers that for the whole station. |
 
-So read the readiness block as **"nothing is missing that would stop these paths
-if they were switched on"**, and `smd upload status` as **whether they
-are switched on**. On a policy-disabled station the honest summary is: fully
-equipped, deliberately silent. The readiness block knows nothing about the
-policy switch, which is
-[docs-gap ledger row 29](../contributor/docs-gap-ledger.md).
+So read the readiness block as **"nothing missing would stop these paths once
+the site sink switch lets them send"**, and `smd sink status` as **whether it
+lets them**. A station whose site sink switch reads `off` stands fully equipped
+and deliberately silent. The readiness block knows nothing about the site sink
+switch, a gap that
+[docs-gap ledger row 29](../contributor/docs-gap-ledger.md) records.
 
 ⛔ The readiness block's `↳ fix:` lines also hand you commands — `smd config
 edit hf-timestd` and `smd psws enroll`.  The first is not yours
@@ -388,18 +388,24 @@ Propagation dies, bands go empty, and a quiet afternoon produces nothing from a
 flawless station. A week with *zero* spots is a fault. An hour with none is
 weather.
 
-**Except on a station whose uploads are switched off** — then a week with zero
-spots is guaranteed and is not a fault at all. A testbed with no antenna, or a
-station still being built, is deliberately kept out of the public databases.
-Check once, and you never have to wonder again — `[VM]`:
+**Except on a station whose site sink switch holds uploads back.** Then a
+week with zero spots means nothing went wrong. A new station starts that way,
+and a testbed with no antenna, or a station still under construction, stays
+out of the public databases on purpose. Check once, and you never have to
+wonder again — `[VM]`:
 
 ```bash
-smd upload status
+smd sink status
 ```
 
-If it answers `⚠ uploads: HOLD` or `⚠ uploads: DISCARD` with a reason, **zero spots is the
-expected result and there is nothing to report**; do not turn it back on
-yourself. The full explanation is the closing blockquote of
+If it answers `⚠ site sink: off` and the reason reads `new station: …`, nobody has
+raised the switch since the install: finish
+[INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)
+and run `smd sink upload`. Any other `⚠ site sink: off` or `⚠ site sink: hold (legacy)`
+means somebody set it on purpose: **expect zero spots and report nothing**, and do not
+change it yourself. `smd upload hold` and `smd upload discard` still work; they set the
+legacy modes that `smd sink status` reports as `hold (legacy)` and `off`. The full
+explanation sits in the closing blockquote of
 [registration.md §6 — Confirming everything flows](registration.md#6-confirming-everything-flows).
 
 ### 3. Disk — `df -h /`
@@ -639,11 +645,12 @@ station from another computer over the network from then on
 ([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on)).
 You can unplug the monitor and keyboard whenever you like.
 
-**Moving the station to a new location** — a different [grid square](glossary.md) — is a
-documented procedure, not a reinstall: log into the `[host]`, run
-`sigmond-setup --reconfigure`, type the new grid square, and press Enter
-through everything else. The new location flows everywhere automatically and
-the recorders restart themselves. Full steps:
+**Moving the station to a new location** — a different [grid square](glossary.md) — calls
+for a documented procedure, not a reinstall: log into the `[host]`, run
+`sigmond-setup --reconfigure`, and type the new grid square. The wizard asks
+for your reporter ID and PSWS ids afresh, and pressing Enter at the PSWS
+station ID skips PSWS, so have them at hand. It keeps your remote-access
+number and the site sink switch as they were. Full steps:
 [INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another).
 
 ---
@@ -661,9 +668,9 @@ Three things worth knowing:
   goes silent past three intervals turns red on the board no matter how healthy
   its last message claimed to be. Silence *is* the signal — that is the whole
   design.
-- **It is never switched off by the upload policy.** A station whose outbound
-  uploads are disabled (dasi002, deliberately) still heartbeats, so it still
-  appears on the board.
+- **The site sink switch never stops it.** A station that sends no data
+  (dasi002, deliberately, and every new station until `smd sink upload`)
+  still heartbeats, so it still appears on the board.
 - **Nothing pages anybody.** The board is the entire interface. No emails, no
   alerts. If your station goes dark on a Friday night, it is seen when someone
   looks.
@@ -701,7 +708,8 @@ Full detail, including the factory default and the Proxmox GUI login:
 
 If you typed a wrong answer to the setup wizard — reporter ID, grid square,
 PSWS ids — you do not reinstall: run `sigmond-setup --reconfigure` from the
-`[host]` and press Enter through everything you want to keep.
+`[host]`. It asks for your reporter ID and PSWS ids afresh, so have them at
+hand; pressing Enter at the PSWS station ID skips PSWS.
 
 ---
 
