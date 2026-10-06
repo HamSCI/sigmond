@@ -1354,15 +1354,28 @@ gexec 30 "echo $B64 | base64 -d > /etc/sigmond/site-profile.toml.new" \
 # whether this VM's smd knows the verb, so that a refusal of the new file
 # (invalid TOML, say, from a double quote in an answer) never falls through
 # to installing it whole.
+# An older smd has no profile-install.  Installing the profile whole is safe
+# only when the guest affirmatively answers that the live profile has no
+# [uploads] header (a missing live file passes too: nothing to lose).  gexec
+# returns 0 only when the agent answered with exit 0, so a block, a dead agent
+# and a transient failure all refuse, and the live profile stays as it is.
 if gexec 30 "smd config profile-install --help >/dev/null 2>&1"; then
     gexec 30 "smd config profile-install /etc/sigmond/site-profile.toml.new" \
-        || { say "ERROR: smd config profile-install refused the new site-profile.toml — see $LOG"; exit 1; }
-else
+        || { say "ERROR: smd config profile-install refused the new site-profile.toml — most often a double quote or backslash in an answer; see $LOG"; exit 1; }
+elif gexec 30 "! grep -qsE '^[[:space:]]*\\[uploads\\]' /etc/sigmond/site-profile.toml"; then
     say "WARN: this VM's sigmond predates 'smd config profile-install', so the wizard"
-    say "      installs the profile whole, as earlier wizards did.  An [uploads] block"
-    say "      the old profile carried is gone: check 'smd upload status' and set it again."
+    say "      installs the profile whole, as earlier wizards did.  The live profile sets"
+    say "      no [uploads] block, so none is lost.  Check 'smd upload status'; change it"
+    say "      with 'smd upload on', 'smd upload hold' or 'smd upload discard'."
     gexec 30 "mv -f /etc/sigmond/site-profile.toml.new /etc/sigmond/site-profile.toml" \
         || { say "ERROR: could not install site-profile.toml in guest"; exit 1; }
+else
+    gexec 30 "rm -f /etc/sigmond/site-profile.toml.new" || true
+    say "ERROR: this VM's sigmond predates 'smd config profile-install', and its site-profile.toml"
+    say "       sets the site sink switch ([uploads]).  Installing the new profile whole would reset it."
+    say "       Ask your fleet admin to update this VM's sigmond, then run the wizard again."
+    say "       The live site profile is unchanged."
+    exit 1
 fi
 
 say "personalizing VM (new machine-id, SSH host keys, hostname)..."
