@@ -225,13 +225,21 @@ class _FakeGit:
     should fail (default: every SHA resolves). ``changed_files`` maps
     component name -> list of paths `git diff --name-only <from> <to>`
     should report changed (default: none, so install.sh is skipped).
+    ``rerender`` answers the restored smd's `admin uploader manifest
+    --write --enable`: a (returncode, stdout, stderr) tuple, or an
+    exception to raise (default: success).  ``rerender_kwargs`` keeps the
+    keyword arguments that call received.
     """
 
-    def __init__(self, dirty=None, unresolvable=None, changed_files=None):
+    def __init__(self, dirty=None, unresolvable=None, changed_files=None,
+                 rerender=(0, 'uploader: /etc/hs-uploader/pipelines.toml '
+                              'already current (3 pipeline(s))\n', '')):
         self.calls = []
         self.dirty = dirty or {}
         self.unresolvable = unresolvable or set()
         self.changed_files = changed_files or {}
+        self.rerender = rerender
+        self.rerender_kwargs = None
 
     def _component_of(self, cmd):
         # component checkouts live at .../<base>/<name>; find the -C arg.
@@ -242,6 +250,12 @@ class _FakeGit:
     def __call__(self, cmd, **kwargs):
         self.calls.append(list(cmd))
         out = types.SimpleNamespace(returncode=0, stdout='', stderr='')
+        if 'uploader' in cmd and 'manifest' in cmd:
+            self.rerender_kwargs = kwargs
+            if isinstance(self.rerender, BaseException):
+                raise self.rerender
+            out.returncode, out.stdout, out.stderr = self.rerender
+            return out
         name = self._component_of(cmd)
         if 'fetch' in cmd:
             return out
@@ -348,6 +362,15 @@ class ManifestRestoreCliDryRunTests(unittest.TestCase):
         live = {'hf-timestd': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
         rc, out, fake = self._run(manifest, live=live)
         self.assertFalse(any('fetch' in c for c in fake.calls))
+
+    def test_dry_run_never_rerenders_the_uploader_manifest(self):
+        # D11's re-render belongs to --apply alone, even when the plan
+        # would move a checkout.
+        manifest = self._manifest()
+        live = {'hf-timestd': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        rc, out, fake = self._run(manifest, live=live)
+        self.assertEqual(rc, 0)
+        self.assertFalse(any('uploader' in c for c in fake.calls))
 
 
 class ManifestRestoreDirtyTreeTests(unittest.TestCase):
@@ -633,6 +656,79 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         self.assertIn('wspr-recorder', out)
         self.assertIn('not resolvable', out)
         self.assertNotIn('re-plan verifies all-keep', out)
+
+    # -- D11: re-render pipelines.toml with the restored sigmond --------
+
+    LIVE = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+    AFTER = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+
+    @staticmethod
+    def _rerenders(fake):
+        return [c for c in fake.calls if 'uploader' in c and 'manifest' in c]
+
+    def test_apply_rerenders_with_the_restored_smd_after_the_checkouts(self):
+        restored = self.base / 'sigmond' / 'bin' / 'smd'
+        restored.parent.mkdir(parents=True)
+        restored.write_text('#!/usr/bin/env python3\n')
+        fake = _FakeGit(rerender=(0, 'uploader: manifest changed — restarting '
+                                     'hs-uploader.service\n', ''))
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 0, out)
+        rerenders = self._rerenders(fake)
+        self.assertEqual(len(rerenders), 1)
+        self.assertEqual(rerenders[0][1:], [str(restored), 'admin', 'uploader',
+                                            'manifest', '--write', '--enable'])
+        checkout = next(i for i, c in enumerate(fake.calls)
+                        if 'checkout' in c and '--detach' in c)
+        self.assertGreater(fake.calls.index(rerenders[0]), checkout)
+        self.assertIn('timeout', fake.rerender_kwargs)
+        self.assertIn('restored to manifest — 1 component(s) moved', out)
+        self.assertIn('| uploader: manifest changed — restarting '
+                      'hs-uploader.service', out)
+        self.assertIn('pipelines.toml re-rendered by the restored sigmond', out)
+
+    def test_without_a_sigmond_checkout_the_running_smd_rerenders(self):
+        fake = _FakeGit()
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._rerenders(fake)[0][1], str(smd._SCRIPT))
+
+    def test_apply_rerenders_even_when_nothing_moved(self):
+        # A re-run after a failed re-render repairs the manifest.
+        fake = _FakeGit()
+        rc, out, fake = self._run(self._manifest(), self.AFTER, fake,
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(any('checkout' in c for c in fake.calls))
+        self.assertEqual(len(self._rerenders(fake)), 1)
+
+    def test_a_failed_rerender_exits_1_and_names_the_fix(self):
+        fake = _FakeGit(rerender=(1, '', 'smd: hs-uploader migrate failed\n'))
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 1)
+        self.assertIn('restored to manifest', out)   # the checkouts did move
+        self.assertIn('| smd: hs-uploader migrate failed', out)
+        self.assertIn('re-render by the restored sigmond FAILED (exit 1)', out)
+        self.assertIn('smd admin uploader manifest --write --enable', out)
+
+    def test_a_hung_rerender_exits_1(self):
+        fake = _FakeGit(rerender=subprocess.TimeoutExpired(['smd'], 600))
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 1)
+        self.assertIn('timed out after 600 s', out)
+        self.assertIn('FAILED', out)
+
+    def test_a_restore_that_fails_verification_never_rerenders(self):
+        fake = _FakeGit()
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.LIVE)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self._rerenders(fake), [])
+        self.assertIn('pipelines.toml not re-rendered', out)
 
 
 if __name__ == '__main__':

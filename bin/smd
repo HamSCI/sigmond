@@ -4304,6 +4304,54 @@ def cmd_manifest_adopt(args) -> int:
     return 0
 
 
+# Room for the child's own work: an hs-uploader install when its venv is
+# missing, a migrate that may wait 120 s, and a daemon restart.
+_RESTORE_RERENDER_TIMEOUT_S = 600
+
+
+def _restore_rerender_uploader(base) -> int:
+    """Re-render pipelines.toml with the sigmond a restore just put back
+    (tasks/plan-sink-control.md D11).
+
+    A restore moves checkouts and nothing else.  Without this step the
+    manifest a newer sigmond rendered stays on disk, and a rolled-back
+    hs-uploader reads pipelines it cannot honour at its next start.  This
+    runs the restored checkout's own smd, `admin uploader manifest --write
+    --enable`, so the restored code renders, writes, and restarts hs-uploader
+    when the manifest changed.  It runs as a child: this process already
+    holds the newer sigmond's modules in memory.
+
+    The restored smd lives at `<base>/sigmond/bin/smd`; without a sigmond
+    checkout under `base`, the running smd stands in.  It relays every line
+    the child prints.  Returns 0 on success, 1 when the child failed, hung
+    or could not start.
+    """
+    smd_path = Path(base) / 'sigmond' / 'bin' / 'smd'
+    if not smd_path.is_file():
+        smd_path = _SCRIPT
+    argv = [sys.executable, str(smd_path), 'admin', 'uploader', 'manifest',
+            '--write', '--enable']
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL,
+                           timeout=_RESTORE_RERENDER_TIMEOUT_S)
+        rc, text = r.returncode, (r.stdout or '') + (r.stderr or '')
+    except subprocess.TimeoutExpired:
+        rc, text = -1, f'timed out after {_RESTORE_RERENDER_TIMEOUT_S} s'
+    except OSError as exc:
+        rc, text = -1, f'could not run {smd_path}: {exc}'
+    for line in text.splitlines():
+        if line.strip():
+            _info(f'| {line}')
+    if rc == 0:
+        _ok(f'pipelines.toml re-rendered by the restored sigmond ({smd_path})')
+        return 0
+    _err(f'pipelines.toml re-render by the restored sigmond FAILED (exit {rc}). '
+         f'hs-uploader may still read pipelines a newer sigmond wrote.  Fix the '
+         f'cause, then run `smd admin uploader manifest --write --enable`.')
+    return 1
+
+
 def cmd_manifest_restore(args) -> int:
     """`smd admin manifest restore <path> [--apply] [--no-fetch]` — the
     remote-rollback half of the blessed-manifest mechanism; `admin
@@ -4370,8 +4418,9 @@ def cmd_manifest_restore(args) -> int:
        auto-track everything else, the same rationale `smd update`
        uses for its own install step. Finally, the SAME restart
        guidance `smd update` prints (`cmd_update`'s "restart not
-       automated here" line) — restarts stay manual and stated, never
-       silently triggered.
+       automated here" line) — radiod and the recorders restart by
+       hand, never silently.  hs-uploader alone restarts in step 8,
+       and only when its manifest changed.
     7. Post-apply verification: recompute live components and re-run
        `plan_restore` ITSELF against `<path>` (`resolvable` stubbed to
        always return `False` — nothing should need a NEW checkout move
@@ -4392,9 +4441,17 @@ def cmd_manifest_restore(args) -> int:
        listed by name) and exits 1 — a restore that still shows drift
        immediately afterward is not a success just because the
        mechanical steps ran.
+    8. Re-render (D11, only after step 7 verifies): the restored smd, as a
+       child process, runs `admin uploader manifest --write --enable`
+       (`_restore_rerender_uploader`).  A rolled-back hs-uploader then
+       never reads pipelines a newer sigmond rendered.  It runs even when
+       nothing moved, so a re-run repairs a re-render that failed.  A
+       failed re-render exits 1; a dry run or a refused or unverified
+       restore never re-renders.
 
-    Exit codes: 0 plan/restore ok, 1 refusal or post-apply verification
-    failure, 2 usage (argparse's own doing, not this function's).
+    Exit codes: 0 plan/restore ok, 1 refusal, post-apply verification
+    failure or a failed re-render, 2 usage (argparse's own doing, not
+    this function's).
     """
     if not _HAS_SIGMOND_LIB:
         _err('admin manifest restore: sigmond library not importable')
@@ -4604,7 +4661,7 @@ def cmd_manifest_restore(args) -> int:
               f'{len(moved)} component(s) moved, re-plan verifies '
               f'all-keep ({len(reverify.strays)} stray component(s) '
               f'untouched)')
-        return 0
+        return _restore_rerender_uploader(base)
 
     _err(f'admin manifest restore: restored {len(moved)} component(s) but '
          f're-plan verification STILL finds a divergence — treat this '
@@ -4613,6 +4670,8 @@ def cmd_manifest_restore(args) -> int:
         _err(r)
     for n, a, f, t in non_keep:
         _err(f'{n}: still {a} ({f} -> {t}) after --apply')
+    _info('pipelines.toml not re-rendered: a restore re-renders only once '
+          'it verifies')
     return 1
 
 
@@ -24040,7 +24099,9 @@ def main() -> int:
     p_m_restore.add_argument('path', help='local path to a candidate (blessed) manifest file')
     p_m_restore.add_argument('--apply', action='store_true',
         help='move checkouts onto the manifest SHAs (root; only if the plan '
-             'is ok). Default is dry-run: plan only, never touches a checkout.')
+             'is ok), then re-render the hs-uploader manifest with the '
+             'restored sigmond. Default is dry-run: plan only, never touches '
+             'a checkout.')
     p_m_restore.add_argument('--no-fetch', action='store_true',
         help='skip `git fetch` before planning (faster, but a manifest SHA '
              'not yet fetched will read as unresolvable and refuse)')
