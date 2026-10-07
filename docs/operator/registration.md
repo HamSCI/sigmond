@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 9fe399d on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond 58fb909 on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -113,7 +113,7 @@ answer to go and correct. A real station's reporter ID is `CALL` or
 should appear about fifteen minutes after you run `smd sink upload`
 ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)).
 That command refuses while GRAPE or the magnetometer packages a day (about
-01:00 to 04:00 UTC); run it again when that finishes.
+01:00 to 05:00 UTC); run it again when that finishes.
 
 You can also watch it happen from the station, which is faster than reloading a
 web page and tells you *why* if nothing is shipping — `[VM]`:
@@ -459,7 +459,7 @@ Don't judge PSWS on day one.
 > | It says | Meaning |
 > |---|---|
 > | `✓ site sink: upload (store and send)` | normal |
-> | `⚠ site sink: off — no data ships and no backlog builds` | no data leaves; only the heartbeat goes out. A new station starts here, with the reason `new station: …`, until someone checks it and runs `smd sink upload`; a bench machine being provisioned sits here too. `smd sink upload` sends nothing recorded before it, except the GRAPE and magnetometer packages for that UTC day, and for the day before if its packaging, which runs from about 01:00 to 04:00 UTC, has not finished. Some stations built before v3.69 run senders of their own, and the site sink switch does not stop them: psk-recorder or meteor-scatter set to `direct`, B4's wspr-uploader, an optional hfdl-recorder feed. Ask your fleet admin |
+> | `⚠ site sink: off — no data ships and no backlog builds` | no data leaves; only the heartbeat goes out. A new station starts here, with the reason `new station: …`, until someone checks it and runs `smd sink upload`; a bench machine being provisioned sits here too. `smd sink upload` sends nothing recorded before it, except the GRAPE and magnetometer packages for that UTC day, and for the day before if its packaging, which runs from about 01:00 to 05:00 UTC, has not finished. Some stations built before v3.69 run senders of their own, and the site sink switch does not stop them: psk-recorder or meteor-scatter set to `direct`, B4's wspr-uploader, an optional hfdl-recorder feed. Ask your fleet admin |
 > | `⚠ site sink: hold (legacy) — stores for a while and sends no data; …` | an older pause, set with `smd upload hold`. The station keeps FT8 spots for one hour and WSPR spots for 24 hours, then drops them. `smd sink upload` sends what remains; `smd sink off` drops it. DASI002 reads `no HF antenna; no PSWS station/instrument ids` |
 >
 > When the switch leaves `off`, `smd sink upload` moves every GRAPE package and

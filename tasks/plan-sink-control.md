@@ -1161,8 +1161,9 @@ to `server-raw` by a one-line edit and a restart of psk-recorder alone, when Mic
 
 ## 13. Evidence
 
-All paths start at the repos root.  Every item comes from reading code on 2026-10-06, during the
-first traces and the review.  Nothing ran on a station.
+All paths start at the repos root.  Every item in §13.1-§13.5 comes from reading code on
+2026-10-06, during the first traces and the review.  Nothing ran on a station.  §13.6 records
+read-only journal reads on two stations.
 
 ### 13.1 Egress and levers
 
@@ -1228,3 +1229,11 @@ commands, and took the ClickHouse figures from queries bounded by time.
 - The forwarder's batch boundary: `wd30:~/wsprdaemon-server/pskreporter_forwarder.py:216-224, 434-437` and `wsprdaemon_server.py:489`.  In the hour to 18:22Z, 42 of 51 ingest seconds held more than 500 rows.
 - ftlib's age cutoff: `pskreporter_forwarder.py:324`, `wd30:/opt/wsprdaemon-server/venv/lib/python3.13/site-packages/pskreporter.py:139-146`.
 - The delivery modes that set the row flag: `psk-recorder/src/psk_recorder/core/recorder.py:553-555`, `meteor-scatter/src/meteor_scatter/core/recorder.py:427`.
+
+### 13.6 Task 12 Step 1, 2026-10-07
+
+Read-only reads of the `grape-daily` journal, at about 03:15Z on 2026-10-07, gave these figures.
+
+- AC0G-B4 (`journalctl -u grape-daily --since -3d`): four days packaged and two sweep retries, `sweep: retrying incomplete day 20261003` on 10-05 and `… 20261004` on 10-06.  They confirm §10.3 item 5 on B4.  The 10-05 run ended at 07:07:19.  The 10-06 run started at 01:02:03, reached WWV 25000 of day 20261005 at 04:00:40 and finished that day at about 04:40; the sweep then re-packaged 20261004 until 08:25:20.  The 10-07 run started at 01:01:41 and still ran at 03:12, having begun SHARED 15000 at 02:45.
+- AC0G-ND: the 10-06 run lasted from 01:00:58 to 03:22:41, six of six channels, with no sweep retry.  The 10-07 run started at 01:00:09 and began WWV 20000 at 03:08:11; at about 32 minutes a channel, it ends near 04:15.
+- The main day's packaging therefore ends between about 03:20 and 04:40 UTC.  Under v3.69 the sweep no longer re-packages a finished day.  The refusal, the `nothing_ships` message, the manifest banner, the operator pages, INSTALL.md and QUICKSTART.txt now give the window as about 01:00 to 05:00 UTC, GRAPE packing for up to four hours.  The magnetometer stays at about 03:00 UTC.

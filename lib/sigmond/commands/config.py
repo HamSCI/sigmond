@@ -1027,7 +1027,7 @@ def _close_doors() -> int:
         err(f'refusing while packaging runs ({", ".join(busy)}): setting its '
             'spool aside now could split a package.  Run the command again '
             'when it finishes; GRAPE packs from about 01:00 UTC for up to '
-            'three hours, the magnetometer at about 03:00 UTC.  The site sink '
+            'four hours, the magnetometer at about 03:00 UTC.  The site sink '
             'switch stays off.')
         return 1
     try:
@@ -1101,7 +1101,7 @@ _WORDS = {
         'nothing_ships': 'nothing recorded while the site sink switch read off will '
                          'ship, except the GRAPE and magnetometer packages for this '
                          'UTC day, and for the day before if its packaging (01:00 '
-                         'to about 04:00 UTC) has not yet run',
+                         'to about 05:00 UTC) has not yet run',
         'rendered_hold': 'this host could not discard, so it stored data while the '
                          'site sink switch read off; that backlog ships now, oldest '
                          'first',

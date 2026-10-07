@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 7ddd32d on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond 58fb909 on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -402,7 +402,7 @@ If it answers `⚠ site sink: off` and the reason reads `new station: …`, nobo
 raised the switch since the install: finish
 [INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)
 and run `smd sink upload`. It refuses while GRAPE or the magnetometer packages a
-day (about 01:00 to 04:00 UTC); run it again when that finishes. Any other
+day (about 01:00 to 05:00 UTC); run it again when that finishes. Any other
 `⚠ site sink: off` or `⚠ site sink: hold (legacy)`
 means somebody set it on purpose: **expect zero spots and report nothing**, and do not
 change it yourself. `smd upload hold` and `smd upload discard` still work; they set the

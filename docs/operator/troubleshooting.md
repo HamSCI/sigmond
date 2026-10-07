@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 9fe399d on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 58fb909 on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -235,7 +235,7 @@ someone checks it and runs `smd sink upload`.
   since the install. Check the station
   ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
   then run `smd sink upload`. It refuses while GRAPE or the magnetometer
-  packages a day (about 01:00 to 04:00 UTC); run it again when that finishes.
+  packages a day (about 01:00 to 05:00 UTC); run it again when that finishes.
 - `site sink: off` or `site sink: hold (legacy)` with any other reason →
   **do not change it yourself.** Somebody set it for a reason
   ([registration.md §6](registration.md#6-confirming-everything-flows)).

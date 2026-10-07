@@ -415,7 +415,7 @@ def policy_banner(coord: Coordination, mode: Optional[str] = None) -> list:
             "# Nothing leaves this host except the heartbeat, and no backlog builds.",
             "# `smd sink upload` sends nothing recorded before it, except the GRAPE and",
             "# magnetometer packages for that UTC day, and for the day before if its",
-            "# packaging (01:00 to about 04:00 UTC) has not yet run.",
+            "# packaging (01:00 to about 05:00 UTC) has not yet run.",
             "#   smd sink upload    (then the manifest regenerates)",
         ]
     lines = [
