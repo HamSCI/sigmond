@@ -11,6 +11,11 @@ modes, and leaves that plan's §2, adaptive shipping, standing.  The evidence co
 code traces across every client repo and read-only checks of wd30, ND and K3LR on 2026-10-06 (§13).
 Nothing on any station changed.
 
+**2026-10-07.**  v3.69 shipped, blessed after a hardware run on AC0G-ND (§10.3).  A code reading of
+step 2 then found that the store cannot migrate, that a rollback would lose position, and that
+separate keys would double B4's posts.  Michael split step 2a in two and took the decisions D8-D15
+(§2, §10.2, §10.4).
+
 ## 1. Why
 
 On 2026-10-01 an operator put K3LR on hold with `smd config uploads disable --reason "station under
@@ -79,6 +84,14 @@ right callsign and location.
 | D5.  One vocabulary for the sink everywhere: spec, plan, code, CLI help, INSTALL.md and heartbeat (§2.1) | Michael | 2026-10-06 |
 | D6.  Ship a small v3.69 first, carrying only §10.3; the earlier v3.69 list moves to v3.70.  In v3.69 the first step means one pskreporter sender per set of rows; separate keys, their migration and the forward-only rule move to step 2 (§10.2) | Michael | 2026-10-06 |
 | D7.  v3.69 also stops GRAPE's catch-up sweep from sending a day more than once (§10.3 item 5) | Michael | 2026-10-06 |
+| D8.  Step 2a ships in two images.  v3.70 lays a foundation that changes nothing the station sends; v3.71 splits the send-record keys.  Step 2b moves to v3.72 (§10.2, §10.4) | Michael | 2026-10-07 |
+| D9.  A key migration copies each old send record to its new keys and never deletes the old row.  The old row stays frozen, so a station rolled back resumes from it: a rollback can re-send, never skip (§6.2) | Michael | 2026-10-07 |
+| D10.  The migration runs as its own step, `hs-uploader migrate`.  Update, align and bring-up call it once every component's code is in place and before the daemon restarts.  The daemon never migrates while it starts; a store still on an older version keeps its older keys (§10.4) | Michael | 2026-10-07 |
+| D11.  `smd admin manifest restore` re-renders `pipelines.toml` with the sigmond it restored, so a rolled-back daemon never reads pipelines a newer renderer wrote (§10.4) | Michael | 2026-10-07 |
+| D12.  A row stored before its writer knew `producer` carries `producer = ''`, and readers infer its producer from table and mode: MSK144 belongs to meteor-scatter, the other psk modes to psk-recorder, the wspr tables to wspr-recorder.  No bulk update rewrites `sink.db` (§6.1) | Michael | 2026-10-07 |
+| D13.  While a client's in-process sender still runs, the daemon's pipelines skip that producer's rows, so exactly one sender covers each row (§6.2, §10.2 step 1) | Michael | 2026-10-07 |
+| D14.  sigmond keeps a bundled copy of the sink writer for venvs that carry no hs-uploader (codar-sounder, hf-tec, superdarn-sounder); its compatibility import prefers hs-uploader's writer (§6.1) | Michael | 2026-10-07 |
+| D15.  v3.70 fixes the retry requeue that drops a queued retry's key, send record and commit token after its first failed replay (`hs-uploader/src/hs_uploader/core.py:585-594`), because the key migration depends on queued retries keeping their keys (§10.4) | Michael | 2026-10-07 |
 
 ### 2.1 Terms
 
@@ -590,7 +603,8 @@ fetch and the ceiling.
   pipeline's name at the moment they queue (`hs-uploader/src/hs_uploader/core.py:494-506, 544-551`);
   a retry left on the old key would recreate the old row when it acknowledges, and a retry left
   under a retired pipeline name would never ship.  The migration prints the old key, the new key
-  and the record, and then deletes the old row.
+  and the record.  It keeps the old row, frozen, so a station rolled back to an older release resumes
+  from it (D9).
 - `hs-uploader sink drop <client>` drops a client's backlog.  It sets each of the client's send
   records to the producer's newest row, deletes the client's queued deliveries, and deletes only
   rows that match its producer.  It runs while the daemon keeps that client's pipelines idle.  The
@@ -942,7 +956,14 @@ Each step ships on its own and leaves stations working.
    existing station changes by a one-line edit and a restart of that recorder alone.  Separate
    keys, the migration of send records and queued retries, and the forward-only rule move into
    step 2, where per-client pipelines need them (§6.2).
-2. **hs-uploader foundation.**  The sink writer moves in, with a compatibility import left in
+2. **hs-uploader foundation.**  It ships in three images (D8):
+   - **2a-i, v3.70:** the foundation, changing nothing the station sends (§10.4).
+   - **2a-ii, v3.71:** each sender gets its own send-record key, with the one-time migration of
+     §6.2 (D9, D10), the daemon skipping producers whose own sender still runs (D13), and the
+     forward-only rule enforced.
+   - **2b, v3.72:** everything below from `pipelines.d/` on.
+
+   The sink writer moves in, with a compatibility import left in
    sigmond, and rows gain `producer` and `local`.  Each sender gets its own send-record key, with
    the one-time migration and the forward-only rule of §6.2.  The daemon reads `pipelines.d/`
    alongside the legacy list (§3.5).  The switch files, `effective_state()`, the carry-over and
@@ -1089,6 +1110,44 @@ Existing stations keep shipping as they do.  On an existing station v3.69 adds `
 pskreporter setting that step 1 asks to change.  ND's psk-recorder runs `direct` beside the daemon.
 K3LR's stop-gap reads `server-merge`, which marks its rows for wd30's lossy forwarder.  Each moves
 to `server-raw` by a one-line edit and a restart of psk-recorder alone, when Michael chooses.
+
+### 10.4 The second image: v3.70
+
+v3.70 lays the foundation of step 2a and changes nothing the station sends (D8).  Every send-record
+key stays as it is, and every pipeline selects the rows it selects today.  The one deliberate change
+in behaviour fixes a defect (item 6).
+
+1. **The sink writer moves into hs-uploader** as `hs_uploader.sink`.  sigmond's `hamsci_sink`
+   becomes a compatibility import that prefers it and falls back to a bundled copy where a client's
+   venv carries no hs-uploader (D14).
+2. **`sink.db` rows gain `producer` and `local`.**  The writer adds both columns when it opens a
+   file that lacks them; SQLite adds a column without rewriting the table.  A caller that names its
+   producer stores it; otherwise the writer infers it by the rule of D12, and readers apply the same
+   rule to rows that carry `''`.  v3.70 adds no index and filters nothing on `producer`.
+3. **`watermarks.db` gains a schema version and `hs-uploader migrate`.**  The version lives in
+   `PRAGMA user_version`.  Each migration runs once, in order, inside `BEGIN IMMEDIATE`, and does
+   nothing when its version already stands.  `migrate --check` reports what would run.  v3.70's
+   only migration records version 1 and changes no row.  `smd update`, `smd align` and bring-up run
+   `hs-uploader migrate` once every component's code is in place and before they restart the daemon
+   (D10).
+4. **Each source gains `cursor_is_after(new, stored)`** with the orderings of §6.2.  In v3.70
+   `advance_cursor` asks it under the store's lock and logs a WARNING with both values when a write
+   would move a send record backward, but still writes as it does today.  v3.71 enforces the rule
+   once each sender owns its key; v3.70's warnings measure how often a shared key runs backward
+   before then.  (Resolved by Claude while writing this section, so that v3.70 stays neutral; open
+   to Michael's correction.)
+5. **`smd admin manifest restore` re-renders `pipelines.toml`** with the sigmond it restored, then
+   restarts the daemon when the manifest changed (D11).
+6. **The requeue keeps a retry's key** (D15).  Today a queued retry that fails again loses its key,
+   send record and commit token (`hs-uploader/src/hs_uploader/core.py:585-594`), so its eventual
+   acknowledgement advances nothing and the rows behind it go out again.
+
+**The proof that nothing changes.**  Before release, read-only snapshots of `watermarks.db` and
+`sink.db` from ND and B4, taken with `sqlite3 -readonly .backup` as the operator account, run through
+the v3.69 and v3.70 code side by side.  Both must form the same keys and select the same rows, and
+`migrate --check` must report version 1 alone.  The update rig (test-update-v3.sh) must show
+`hs-uploader migrate` running before the daemon restarts, and a rollback whose re-rendered manifest
+matches the restored release.
 
 ## 11. Testing
 
