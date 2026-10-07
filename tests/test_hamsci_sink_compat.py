@@ -63,6 +63,16 @@ def _child(script: str, extra_path=()) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+def _fake_hs_uploader(root: str, sink_init: str = "", writer_py: str = "") -> None:
+    """Write a stand-in hs_uploader package under `root`, with a sink package
+    whose __init__ and writer hold the given source."""
+    sink = Path(root) / "hs_uploader" / "sink"
+    sink.mkdir(parents=True)
+    (sink.parent / "__init__.py").write_text('__version__ = "0.1.0"\n')
+    (sink / "__init__.py").write_text(sink_init)
+    (sink / "writer.py").write_text(writer_py)
+
+
 class BundledCopyTests(unittest.TestCase):
     """The bundled copy holds a marked header, then hs-uploader's file unchanged."""
 
@@ -152,6 +162,54 @@ class SelectionTests(unittest.TestCase):
             """, extra_path=[tmp])
             self.assertEqual(Path(got["found"]).parent, old)
         self.assertEqual(got["impl"], "bundled")
+
+    def test_other_errors_from_the_sink_package_propagate(self):
+        """The fallback catches ImportError only.  A sink package that fails
+        some other way surfaces as that failure, and the half-built
+        sigmond.hamsci_sink leaves nothing in sys.modules to import later."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _fake_hs_uploader(tmp, sink_init='raise RuntimeError("sink broke")\n')
+            got = _child("""
+                try:
+                    import sigmond.hamsci_sink
+                except RuntimeError as exc:
+                    raised = str(exc)
+                else:
+                    raised = None
+                print(json.dumps({
+                    "raised": raised,
+                    "left": sorted(k for k in sys.modules
+                                   if k.startswith("sigmond.hamsci_sink")),
+                }))
+            """, extra_path=[tmp])
+        self.assertEqual(got["raised"], "sink broke")
+        self.assertEqual(got["left"], [])
+
+    def test_import_error_inside_the_sink_writer_falls_back(self):
+        """An ImportError raised from inside hs_uploader.sink.writer falls
+        back too, whether it names a missing module (a ModuleNotFoundError
+        about some other package) or a missing name."""
+        for label, body in (
+            ("missing module", "import no_such_module_xyz\n"),
+            ("missing name", "from os import no_such_name_xyz\n"),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                _fake_hs_uploader(tmp, writer_py=body)
+                got = _child("""
+                    import sigmond.hamsci_sink as hs
+                    from sigmond.hamsci_sink import _bundled
+                    chosen = sys.modules["sigmond.hamsci_sink.writer"]
+                    print(json.dumps({
+                        "impl": hs.SINK_IMPL,
+                        "is_bundled": chosen is _bundled and hs.Writer is _bundled.Writer,
+                        "module": hs.Writer.__module__,
+                        "file": chosen.__file__,
+                    }))
+                """, extra_path=[tmp])
+                self.assertEqual(got["impl"], "bundled")
+                self.assertTrue(got["is_bundled"])
+                self.assertEqual(got["module"], "sigmond.hamsci_sink._bundled")
+                self.assertEqual(Path(got["file"]).resolve(), _BUNDLED.resolve())
 
     def test_hs_uploader_writer_preferred_when_importable(self):
         if not _UPSTREAM.is_file():
