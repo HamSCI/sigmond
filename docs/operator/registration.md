@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond b8f26c7 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 7ddd32d on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -318,8 +318,10 @@ banner never ask.
 > `/etc/hs-uploader/keys/id_ed25519_host`, serves every PSWS product, and
 > `smd psws enroll` / `smd psws verify` are the whole flow.  Follow this page.
 
-Nothing is lost while you wait to do this. The recorders keep recording and the
-day's files queue up locally; they upload once the key is accepted.
+While the site sink switch reads `upload`, waiting costs nothing. The recorders
+keep recording and the day's files queue up locally; they upload once the key is
+accepted. Files built while the switch read `off` stay on the station and never
+ship ([§6](#6-confirming-everything-flows) explains the switch).
 
 ### 5c. Prove it works
 
