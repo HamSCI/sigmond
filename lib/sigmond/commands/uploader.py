@@ -8,10 +8,17 @@ Modes (default is the read-only check):
 
 * ``--check`` / (no flag) — render and diff against the installed manifest;
   exit non-zero on drift.  Read-only, no root.
-* ``--write`` — write the manifest (root); back up any existing file to ``.bak``.
+* ``--write`` — write the manifest (root); back up any existing file to
+  ``.bak``; then run ``hs-uploader migrate`` as ``hsupload``.
 * ``--enable`` — install the daemon first when it is missing (the render
-  probes its venv), write, then ensure ``hs-uploader.service`` is enabled +
-  running (restart it when the manifest actually changed).
+  probes its venv), write, migrate, then ensure ``hs-uploader.service`` is
+  enabled + running (restart it when the manifest actually changed).
+
+``hs-uploader migrate`` brings ``watermarks.db`` to the schema the
+installed daemon expects.  It runs after the write and before anything
+starts or restarts the daemon, because the daemon never migrates while it
+starts (tasks/plan-sink-control.md D10).  A failed migrate leaves the
+daemon as it stands and exits 1.
 """
 from __future__ import annotations
 
@@ -30,6 +37,9 @@ _UNIT_SRC = Path("/opt/git/sigmond/hs-uploader/systemd/hs-uploader.service")
 _UNIT_DST = Path("/etc/systemd/system/hs-uploader.service")
 _INSTALL_SH = Path("/opt/git/sigmond/hs-uploader/install.sh")
 _VENV = Path("/opt/hs-uploader/venv")
+# Longer than hs-uploader migrate's own 30 s wait for another writer's lock,
+# with room for the interpreter to start on a busy station.
+_MIGRATE_TIMEOUT_S = 120
 
 
 def _err(msg: str) -> None:
@@ -89,6 +99,53 @@ def _ensure_daemon_installed() -> bool:
              "install hs-uploader first")
         return False
     return True
+
+
+def _run_migrate() -> int:
+    """Run the daemon's own ``hs-uploader migrate`` as ``hsupload``.
+
+    The daemon never migrates while it starts (tasks/plan-sink-control.md
+    D10), so this runs after the manifest write and before any start or
+    restart.  It runs as ``hsupload``, the daemon's account, in the unit's
+    working directory.  So no file SQLite creates beside ``watermarks.db``,
+    such as its rollback journal, ever belongs to root (bee1, 2026-05-12:
+    "attempt to write a readonly database").
+
+    Returns 0 when migrate finished or found nothing to do.  Also returns 0,
+    with a line saying so, when no daemon venv exists or the installed
+    hs-uploader predates ``migrate`` (argparse exits 2 with ``invalid
+    choice: 'migrate'``).  Returns 1 on any other failure, after saying
+    why."""
+    exe = _VENV / "bin" / "hs-uploader"
+    if not exe.exists():
+        print(f"uploader: no {exe}; send-record migrate skipped")
+        return 0
+    runuser = shutil.which("runuser") or "/usr/sbin/runuser"
+    cmd = [runuser, "-u", "hsupload", "--", str(exe), "migrate"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, cwd=str(_VENV.parent),
+                           timeout=_MIGRATE_TIMEOUT_S, check=False)
+    except subprocess.TimeoutExpired:
+        _err(f"hs-uploader migrate did not finish within "
+             f"{_MIGRATE_TIMEOUT_S} s")
+        return 1
+    except OSError as exc:
+        _err(f"hs-uploader migrate could not run: {exc}")
+        return 1
+    stderr = (r.stderr or "").strip()
+    if r.returncode == 2 and "invalid choice: 'migrate'" in stderr:
+        print("uploader: this hs-uploader predates `migrate`; send-record "
+              "migrate skipped")
+        return 0
+    for line in (r.stdout or "").splitlines():
+        if line.strip():
+            print(f"uploader: {line}")
+    if r.returncode != 0:
+        _err(f"hs-uploader migrate failed (exit {r.returncode}): "
+             f"{stderr or 'no message'}")
+        return 1
+    return 0
 
 
 def cmd_uploader_manifest(args) -> int:
@@ -179,15 +236,26 @@ def cmd_uploader_manifest(args) -> int:
             print(f"uploader: refreshed {path} "
                   f"({n} pipeline(s); no functional change)")
 
+    # A failed install still leaves the manifest written above; the call
+    # then reports failure here, and never migrates.
+    if enable:
+        if daemon_ready is None:
+            daemon_ready = _ensure_daemon_installed()
+        if not daemon_ready:
+            return 1
+
+    # D10: migrate the send-record store after the write and before anything
+    # starts or restarts the daemon.  `--write` alone migrates too: smd align
+    # runs it, then restarts hs-uploader itself only when this exits 0.
+    if _run_migrate() != 0:
+        _err(f"hs-uploader migrate failed; {SERVICE} left as it stands, "
+             "neither started nor restarted.  Fix the cause above, then run "
+             "this command again.")
+        return 1
+
     if not enable:
         return 0
 
-    # A failed install still leaves the manifest written above; the call
-    # then reports failure here.
-    if daemon_ready is None:
-        daemon_ready = _ensure_daemon_installed()
-    if not daemon_ready:
-        return 1
     was_active = _service_active()
     _run(["systemctl", "enable", "--now", SERVICE])
     if was_active and changed:
