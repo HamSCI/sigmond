@@ -5953,7 +5953,12 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
     from sigmond import uploader_manifest as um
 
     def _tail(r) -> str:
-        for stream in (r.stdout, r.stderr):
+        # A child that failed says why on stderr, after any progress lines
+        # on stdout; a child that succeeded keeps stdout first.
+        streams = (r.stdout, r.stderr)
+        if r.returncode != 0:
+            streams = (r.stderr, r.stdout)
+        for stream in streams:
             lines = [ln for ln in (stream or '').strip().splitlines() if ln.strip()]
             if lines:
                 return lines[-1]
@@ -6000,8 +6005,11 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
         before = um.MANIFEST_PATH.read_bytes()
     except OSError:
         before = None
+    # 240 s: the child writes, then waits up to 120 s for `hs-uploader migrate`
+    # (sigmond.commands.uploader._MIGRATE_TIMEOUT_S).  A shorter limit here
+    # would kill smd before its own timeout could report a hung migrate.
     r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'uploader', 'manifest', '--write'],
-                   run=run, timeout=120, action='admin uploader manifest --write',
+                   run=run, timeout=240, action='admin uploader manifest --write',
                    stdin=subprocess.DEVNULL)
     detail = _tail(r)
     if r.returncode != 0:

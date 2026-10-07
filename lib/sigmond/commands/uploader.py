@@ -19,6 +19,12 @@ installed daemon expects.  It runs after the write and before anything
 starts or restarts the daemon, because the daemon never migrates while it
 starts (tasks/plan-sink-control.md D10).  A failed migrate leaves the
 daemon as it stands and exits 1.
+
+The daemon reads its manifest once, when it starts.  ``--enable`` therefore
+restarts an active daemon when the manifest changed, and also when the
+daemon started before the manifest file's last write.  The second case
+covers a rerun after a failed migrate: the first run wrote the manifest and
+restarted nothing, so the rerun finds the file current and the daemon stale.
 """
 from __future__ import annotations
 
@@ -82,6 +88,39 @@ def _service_active() -> bool:
                           check=False).returncode == 0
 
 
+def _service_started_at() -> "float | None":
+    """When the daemon's current run began, in Unix seconds, or None when
+    systemd does not say.  ``--timestamp=unix`` prints ``@<seconds>``."""
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "-p", "ActiveEnterTimestamp",
+             "--timestamp=unix", "--value", SERVICE],
+            capture_output=True, text=True, errors="replace",
+            stdin=subprocess.DEVNULL, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return float((r.stdout or "").strip().lstrip("@"))
+    except ValueError:
+        return None
+
+
+def _started_before_manifest(path: Path) -> bool:
+    """True when the running daemon started before the manifest file's last
+    write, so it still follows an older manifest.  Also True when either
+    time cannot be read: the operator's setting (``smd sink off``) must take
+    effect, and one extra restart costs little."""
+    started = _service_started_at()
+    if started is None:
+        return True
+    try:
+        return started < path.stat().st_mtime
+    except OSError:
+        return True
+
+
 def _ensure_daemon_installed() -> bool:
     """Make sure the unit + hsupload user + venv exist.  Runs the sibling
     install.sh (idempotent) when the venv or user is missing.  Returns True
@@ -124,8 +163,9 @@ def _run_migrate() -> int:
     cmd = [runuser, "-u", "hsupload", "--", str(exe), "migrate"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           stdin=subprocess.DEVNULL, cwd=str(_VENV.parent),
-                           timeout=_MIGRATE_TIMEOUT_S, check=False)
+                           errors="replace", stdin=subprocess.DEVNULL,
+                           cwd=str(_VENV.parent), timeout=_MIGRATE_TIMEOUT_S,
+                           check=False)
     except subprocess.TimeoutExpired:
         _err(f"hs-uploader migrate did not finish within "
              f"{_MIGRATE_TIMEOUT_S} s")
@@ -249,16 +289,23 @@ def cmd_uploader_manifest(args) -> int:
     # runs it, then restarts hs-uploader itself only when this exits 0.
     if _run_migrate() != 0:
         _err(f"hs-uploader migrate failed; {SERVICE} left as it stands, "
-             "neither started nor restarted.  Fix the cause above, then run "
-             "this command again.")
+             "neither started nor restarted.  Run this command again once "
+             "migrate passes.")
         return 1
 
     if not enable:
         return 0
 
     was_active = _service_active()
+    why = None
+    if was_active:
+        if changed:
+            why = "manifest changed"
+        elif _started_before_manifest(path):
+            why = (f"{SERVICE} started before the manifest on disk "
+                   "was written")
     _run(["systemctl", "enable", "--now", SERVICE])
-    if was_active and changed:
-        print(f"uploader: manifest changed — restarting {SERVICE}")
+    if why:
+        print(f"uploader: {why} — restarting {SERVICE}")
         _run(["systemctl", "restart", SERVICE])
     return 0

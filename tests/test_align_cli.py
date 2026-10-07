@@ -1419,6 +1419,50 @@ class AlignBringupTests(unittest.TestCase):
         self.assertEqual([s.component for s in steps],
                          ["config render", "admin uploader manifest --write", "doctor --fix"])
 
+    # --- v3.70 / D10: `admin uploader manifest --write` now runs
+    # `hs-uploader migrate`.  When that fails the child prints its progress
+    # on stdout ("wrote ...") and the reason on stderr, and align must show
+    # the reason. ---
+
+    def test_a_failed_manifest_step_shows_its_stderr_reason_not_its_progress(self):
+        steps, fake = self._run([
+            (0, "", ""),
+            (1, "uploader: wrote /etc/hs-uploader/pipelines.toml (3 pipeline(s))\n",
+             "smd: hs-uploader migrate failed (exit 1): database is locked\n"
+             "smd: hs-uploader migrate failed; hs-uploader.service left as it "
+             "stands, neither started nor restarted.\n")])
+        self.assertEqual([s.component for s in steps],
+                         ["sigmond-site-timing", "config render",
+                          "admin uploader manifest --write"])
+        self.assertEqual(steps[-1].outcome, "failed")
+        self.assertIn("migrate failed", steps[-1].detail)
+        self.assertNotIn("wrote", steps[-1].detail)
+
+    def test_a_failed_child_with_only_stdout_still_shows_it(self):
+        steps, fake = self._run([(0, "", ""), (1, "only stdout\n", "")])
+        self.assertEqual(steps[-1].outcome, "failed")
+        self.assertEqual(steps[-1].detail, "only stdout")
+
+    def test_a_successful_child_still_shows_its_last_stdout_line(self):
+        steps, fake = self._run([(0, "", ""),
+                                 (0, "uploader: already current\n", "a warning\n"),
+                                 (0, "", "")])
+        manifest_step = next(s for s in steps
+                             if s.component == "admin uploader manifest --write")
+        self.assertEqual(manifest_step.outcome, "ran")
+        self.assertEqual(manifest_step.detail, "uploader: already current")
+
+    def test_the_manifest_step_outlasts_the_migrate_timeout(self):
+        # The child writes, then waits up to _MIGRATE_TIMEOUT_S for migrate.
+        # An outer limit at or below it would kill smd before it could say
+        # that migrate hung.
+        from sigmond.commands import uploader as up_cmd
+        steps, fake = self._run([(0, "", "")] * 4)
+        i = next(n for n, argv in enumerate(fake.calls)
+                 if argv[-4:] == ["admin", "uploader", "manifest", "--write"])
+        self.assertEqual(fake.kwargs[i]["timeout"], 240)
+        self.assertGreater(fake.kwargs[i]["timeout"], up_cmd._MIGRATE_TIMEOUT_S)
+
 
 class AlignChownTests(unittest.TestCase):
     def test_uses_checkout_dir_uid_and_gid_not_swapped(self):
