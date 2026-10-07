@@ -17,6 +17,8 @@ import importlib.util
 import io
 import os
 import subprocess
+import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -228,7 +230,8 @@ class _FakeGit:
     ``rerender`` answers the restored smd's `admin uploader manifest
     --write --enable`: a (returncode, stdout, stderr) tuple, or an
     exception to raise (default: success).  ``rerender_kwargs`` keeps the
-    keyword arguments that call received.
+    keyword arguments that call received, and ``rerender_environ`` the
+    process environment at that moment.
     """
 
     def __init__(self, dirty=None, unresolvable=None, changed_files=None,
@@ -240,6 +243,7 @@ class _FakeGit:
         self.changed_files = changed_files or {}
         self.rerender = rerender
         self.rerender_kwargs = None
+        self.rerender_environ = None
 
     def _component_of(self, cmd):
         # component checkouts live at .../<base>/<name>; find the -C arg.
@@ -252,6 +256,7 @@ class _FakeGit:
         out = types.SimpleNamespace(returncode=0, stdout='', stderr='')
         if 'uploader' in cmd and 'manifest' in cmd:
             self.rerender_kwargs = kwargs
+            self.rerender_environ = dict(os.environ)
             if isinstance(self.rerender, BaseException):
                 raise self.rerender
             out.returncode, out.stdout, out.stderr = self.rerender
@@ -677,16 +682,27 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         rerenders = self._rerenders(fake)
         self.assertEqual(len(rerenders), 1)
-        self.assertEqual(rerenders[0][1:], [str(restored), 'admin', 'uploader',
-                                            'manifest', '--write', '--enable'])
+        self.assertEqual(rerenders[0], [sys.executable, str(restored), 'admin',
+                                        'uploader', 'manifest', '--write',
+                                        '--enable'])
         checkout = next(i for i, c in enumerate(fake.calls)
                         if 'checkout' in c and '--detach' in c)
         self.assertGreater(fake.calls.index(rerenders[0]), checkout)
-        self.assertIn('timeout', fake.rerender_kwargs)
+        self.assertEqual(smd._RESTORE_RERENDER_TIMEOUT_S, 600)
+        self.assertEqual(fake.rerender_kwargs['timeout'],
+                         smd._RESTORE_RERENDER_TIMEOUT_S)
         self.assertIn('restored to manifest — 1 component(s) moved', out)
         self.assertIn('| uploader: manifest changed — restarting '
                       'hs-uploader.service', out)
-        self.assertIn('pipelines.toml re-rendered by the restored sigmond', out)
+        # Task 9's rig greps the words after the mark; the line names the smd
+        # that rendered, and it follows the restore line and the relay.
+        success = ('\x1b[32m✓\x1b[0m  pipelines.toml re-rendered by the '
+                   f'restored sigmond ({restored})')
+        self.assertIn(success, out)
+        self.assertLess(out.index('restored to manifest'),
+                        out.index('| uploader: manifest changed'))
+        self.assertLess(out.index('| uploader: manifest changed'),
+                        out.index(success))
 
     def test_without_a_sigmond_checkout_the_running_smd_rerenders(self):
         fake = _FakeGit()
@@ -694,6 +710,7 @@ class ManifestRestoreApplyTests(unittest.TestCase):
                                   after_live=self.AFTER)
         self.assertEqual(rc, 0, out)
         self.assertEqual(self._rerenders(fake)[0][1], str(smd._SCRIPT))
+        self.assertIn(f're-rendered by the restored sigmond ({smd._SCRIPT})', out)
 
     def test_apply_rerenders_even_when_nothing_moved(self):
         # A re-run after a failed re-render repairs the manifest.
@@ -720,7 +737,7 @@ class ManifestRestoreApplyTests(unittest.TestCase):
                                   after_live=self.AFTER)
         self.assertEqual(rc, 1)
         self.assertIn('timed out after 600 s', out)
-        self.assertIn('FAILED', out)
+        self.assertIn('FAILED (exit -1)', out)
 
     def test_a_restore_that_fails_verification_never_rerenders(self):
         fake = _FakeGit()
@@ -729,6 +746,159 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(self._rerenders(fake), [])
         self.assertIn('pipelines.toml not re-rendered', out)
+
+    def test_the_child_runs_as_a_captured_text_child_under_a_timeout(self):
+        # How the child runs matters as much as what it prints: a missing
+        # timeout hangs the restore, a missing capture loses the relay, and
+        # an inherited stdin could block it on a terminal.
+        rc, out, fake = self._run(self._manifest(), self.LIVE, _FakeGit(),
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 0, out)
+        kw = fake.rerender_kwargs
+        self.assertTrue(kw['capture_output'])
+        self.assertTrue(kw['text'])
+        self.assertEqual(kw['errors'], 'replace')   # a stray byte cannot raise
+        self.assertEqual(kw['stdin'], subprocess.DEVNULL)
+        self.assertEqual(kw['timeout'], 600)
+
+    def test_the_child_inherits_the_environment_unchanged(self):
+        # Decision 6: `_need_root` sets SIGMOND_ALLOW_SUDO before this process
+        # re-executes under sudo, and the child must see it.  A PYTHONPATH
+        # naming the running (newer) checkout would make the restored smd
+        # import the newer lib it exists to replace.
+        with mock.patch.dict(os.environ, {'SIGMOND_ALLOW_SUDO': '1'}):
+            os.environ.pop('PYTHONPATH', None)
+            rc, out, fake = self._run(self._manifest(), self.LIVE, _FakeGit(),
+                                      after_live=self.AFTER)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('env', fake.rerender_kwargs)
+        self.assertEqual(fake.rerender_environ.get('SIGMOND_ALLOW_SUDO'), '1')
+        self.assertNotIn('PYTHONPATH', fake.rerender_environ)
+
+    def test_a_child_that_cannot_start_exits_1_with_exit_minus_1(self):
+        fake = _FakeGit(rerender=FileNotFoundError(2, 'No such file or '
+                                                      'directory'))
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 1)
+        self.assertIn('restored to manifest', out)
+        self.assertIn('could not run', out)
+        self.assertIn('FAILED (exit -1)', out)
+
+    def _hung_after_printing(self, partial):
+        fake = _FakeGit(rerender=subprocess.TimeoutExpired(
+            ['smd'], 600, output=partial, stderr=b'warn \xff\n'))
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 1)
+        self.assertIn('| uploader: installing hs-uploader', out)
+        self.assertIn('| warn \ufffd', out)
+        self.assertLess(out.index('| uploader: installing'),
+                        out.index('| warn'))
+        self.assertLess(out.index('| warn'), out.index('| timed out after 600 s'))
+        self.assertIn('FAILED (exit -1)', out)
+
+    def test_a_hung_rerender_relays_what_the_child_already_printed(self):
+        # subprocess keeps the output as bytes (None when the child printed
+        # nothing); that output says where the child hung.
+        self._hung_after_printing(b'uploader: installing hs-uploader\n')
+
+    def test_a_hung_rerender_relays_partial_output_given_as_text(self):
+        self._hung_after_printing('uploader: installing hs-uploader\n')
+
+    def test_the_relay_is_stdout_then_stderr_without_blank_lines(self):
+        # Task 9's rig reads these lines.  The unterminated last stdout line
+        # must not fuse with the first stderr line.
+        fake = _FakeGit(rerender=(0, 'out-1\n\nout-2', 'err-1\n\n'))
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.AFTER)
+        self.assertEqual(rc, 0, out)
+        lines = [ln.strip() for ln in out.splitlines()
+                 if ln.strip().startswith('|')]
+        self.assertEqual(lines, ['| out-1', '| out-2', '| err-1'])
+
+    def _refused_apply_never_rerenders(self, fake):
+        rc, out, fake = self._run(self._manifest(), self.LIVE, fake,
+                                  after_live=self.LIVE)
+        self.assertEqual(rc, 1)
+        self.assertIn('REFUSED', out)
+        self.assertFalse(any('checkout' in c and '--detach' in c
+                             for c in fake.calls))
+        self.assertEqual(self._rerenders(fake), [])
+
+    def test_a_refused_plan_with_apply_never_rerenders(self):
+        self._refused_apply_never_rerenders(
+            _FakeGit(unresolvable={'wspr-recorder'}))
+
+    def test_a_dirty_tree_refusal_with_apply_never_rerenders(self):
+        self._refused_apply_never_rerenders(
+            _FakeGit(dirty={'wspr-recorder': ['lib/x.py']}))
+
+
+class RestoreRerenderRealChildTests(unittest.TestCase):
+    """`_restore_rerender_uploader` against a REAL child process: a stub
+    `<base>/sigmond/bin/smd` that only prints, run by `sys.executable` the way
+    the restore runs the restored smd.  The fakes above cannot show that the
+    child is a separate process whose bytes survive the pipe.  Nothing here
+    touches a station or runs sigmond."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        (self.base / 'sigmond' / 'bin').mkdir(parents=True)
+
+    def _call(self, stub):
+        (self.base / 'sigmond' / 'bin' / 'smd').write_text(stub)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = smd._restore_rerender_uploader(self.base)
+        return rc, buf.getvalue()
+
+    def test_stdout_then_stderr_and_a_failed_exit(self):
+        rc, out = self._call(
+            "import sys\n"
+            "print('out-1'); print(); print('out-2')\n"
+            "print('err-1', file=sys.stderr)\n"
+            "sys.exit(3)\n")
+        self.assertEqual(rc, 1)
+        lines = [ln.strip() for ln in out.splitlines()
+                 if ln.strip().startswith('|')]
+        self.assertEqual(lines, ['| out-1', '| out-2', '| err-1'])
+        self.assertIn('FAILED (exit 3)', out)
+
+    def test_the_child_gets_the_subcommand_and_the_inherited_environment(self):
+        stub = ("import os, sys\n"
+                "print('argv', sys.argv[1:])\n"
+                "print('allow', os.environ.get('SIGMOND_ALLOW_SUDO'))\n"
+                "print('pythonpath', os.environ.get('PYTHONPATH'))\n")
+        with mock.patch.dict(os.environ, {'SIGMOND_ALLOW_SUDO': '1'}):
+            os.environ.pop('PYTHONPATH', None)
+            rc, out = self._call(stub)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("| argv ['admin', 'uploader', 'manifest', '--write', "
+                      "'--enable']", out)
+        self.assertIn('| allow 1', out)
+        self.assertIn('| pythonpath None', out)
+        self.assertIn('re-rendered by the restored sigmond', out)
+
+    def test_output_that_is_not_utf8_does_not_raise(self):
+        rc, out = self._call("import sys\n"
+                             "sys.stdout.buffer.write(b'ok \\xff bad\\n')\n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn('| ok \ufffd bad', out)
+
+    def test_a_hung_child_is_killed_and_its_output_relayed(self):
+        stub = ("import time\n"
+                "print('uploader: installing hs-uploader', flush=True)\n"
+                "time.sleep(60)\n")
+        with mock.patch.object(smd, '_RESTORE_RERENDER_TIMEOUT_S', 2):
+            rc, out = self._call(stub)
+        self.assertEqual(rc, 1)
+        self.assertIn('| uploader: installing hs-uploader', out)
+        self.assertLess(out.index('| uploader: installing'),
+                        out.index('| timed out after 2 s'))
+        self.assertIn('FAILED (exit -1)', out)
 
 
 if __name__ == '__main__':

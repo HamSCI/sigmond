@@ -4317,30 +4317,49 @@ def _restore_rerender_uploader(base) -> int:
     manifest a newer sigmond rendered stays on disk, and a rolled-back
     hs-uploader reads pipelines it cannot honour at its next start.  This
     runs the restored checkout's own smd, `admin uploader manifest --write
-    --enable`, so the restored code renders, writes, and restarts hs-uploader
-    when the manifest changed.  It runs as a child: this process already
-    holds the newer sigmond's modules in memory.
+    --enable`, so the restored code renders and writes the manifest.  That
+    smd also starts hs-uploader, or restarts it, by its own rule: a v3.69
+    smd restarts when the manifest changed, a v3.70 or later smd also when
+    the daemon started before the manifest on disk.  It runs as a child:
+    this process already holds the newer sigmond's modules in memory.
 
     The restored smd lives at `<base>/sigmond/bin/smd`; without a sigmond
-    checkout under `base`, the running smd stands in.  It relays every line
-    the child prints.  Returns 0 on success, 1 when the child failed, hung
-    or could not start.
+    checkout under `base`, the running smd stands in.  It relays every
+    non-empty line the child printed, stdout then stderr.  After a hang it
+    relays what the child printed before the kill.  Returns 0 on success, 1
+    when the child failed, hung or could not start.
     """
     smd_path = Path(base) / 'sigmond' / 'bin' / 'smd'
     if not smd_path.is_file():
         smd_path = _SCRIPT
     argv = [sys.executable, str(smd_path), 'admin', 'uploader', 'manifest',
             '--write', '--enable']
+    # errors='replace': the checkouts have moved by now, so a stray byte in
+    # the child's output must not end this restore in a traceback.
+    note = None
     try:
         r = subprocess.run(argv, capture_output=True, text=True,
-                           stdin=subprocess.DEVNULL,
+                           errors='replace', stdin=subprocess.DEVNULL,
                            timeout=_RESTORE_RERENDER_TIMEOUT_S)
-        rc, text = r.returncode, (r.stdout or '') + (r.stderr or '')
-    except subprocess.TimeoutExpired:
-        rc, text = -1, f'timed out after {_RESTORE_RERENDER_TIMEOUT_S} s'
+        rc, out, err = r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired as exc:
+        # run() kills the child and keeps what it printed first, as bytes
+        # (None when it printed nothing).  That output says where it hung.
+        rc, out, err = -1, exc.stdout, exc.stderr
+        note = f'timed out after {_RESTORE_RERENDER_TIMEOUT_S} s'
     except OSError as exc:
-        rc, text = -1, f'could not run {smd_path}: {exc}'
-    for line in text.splitlines():
+        rc, out, err = -1, None, None
+        note = f'could not run {smd_path}: {exc}'
+    # Split each stream on its own: an unterminated last stdout line must
+    # not fuse with the first stderr line.
+    lines = []
+    for chunk in (out, err):
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode('utf-8', errors='replace')
+        lines.extend((chunk or '').splitlines())
+    if note:
+        lines.append(note)
+    for line in lines:
         if line.strip():
             _info(f'| {line}')
     if rc == 0:
@@ -4419,8 +4438,9 @@ def cmd_manifest_restore(args) -> int:
        uses for its own install step. Finally, the SAME restart
        guidance `smd update` prints (`cmd_update`'s "restart not
        automated here" line) — radiod and the recorders restart by
-       hand, never silently.  hs-uploader alone restarts in step 8,
-       and only when its manifest changed.
+       hand, never silently.  Only hs-uploader can start or restart
+       on its own, in step 8, by the restored smd's own rule (see
+       `_restore_rerender_uploader`).
     7. Post-apply verification: recompute live components and re-run
        `plan_restore` ITSELF against `<path>` (`resolvable` stubbed to
        always return `False` — nothing should need a NEW checkout move
