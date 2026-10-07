@@ -1,3 +1,17 @@
+# ---- BEGIN sigmond bundled-copy header -------------------------------------
+# Below this header sits a verbatim copy of hs-uploader's
+# src/hs_uploader/sink/writer.py.  sigmond.hamsci_sink imports it only where
+# a client's venv cannot import hs_uploader.sink: codar-sounder, hf-tec and
+# superdarn-sounder carry no hs-uploader, and an hs-uploader older than v3.70
+# has no sink package (tasks/plan-sink-control.md D14).
+#
+# Never edit below this header.  Change hs-uploader's file, then refresh this
+# copy from the sigmond checkout:
+#   { sed '/^# ---- END sigmond bundled-copy header/q' lib/sigmond/hamsci_sink/_bundled.py
+#     cat ../hs-uploader/src/hs_uploader/sink/writer.py; } > lib/sigmond/hamsci_sink/_bundled.py.new
+#   mv lib/sigmond/hamsci_sink/_bundled.py.new lib/sigmond/hamsci_sink/_bundled.py
+# tests/test_hamsci_sink_compat.py fails while the two copies differ.
+# ---- END sigmond bundled-copy header ---------------------------------------
 """Local sink writer for HamSCI clients (CONTRACT §17).
 
 Why this exists:
@@ -6,6 +20,16 @@ Why this exists:
     durable promise (rows survive a crash; the uploader reads at its
     own pace) at tens of MB of RAM and no daemon — the right shape for
     a host whose real job is running an SDR pipeline.
+
+Where it lives:
+    This module moved here from sigmond (`sigmond/lib/sigmond/
+    hamsci_sink/writer.py`) in v3.70.  Clients still import it as
+    `sigmond.hamsci_sink`, which prefers this module.  sigmond also
+    carries a copy for venvs that hold no hs-uploader (D14), and a drift
+    test holds the two together.  Keep this file stdlib-only and free of
+    imports from the rest of `hs_uploader`, so that copy can stay a
+    plain file copy.  The logger name and the `hamsci_sink:` message
+    prefix stay as they were: operators grep them.
 
 Selection (`Writer.from_env`):
     `SIGMOND_SQLITE_PATH` set → writer at that path (explicit override;
@@ -24,13 +48,23 @@ Storage shape:
         schema_version  INTEGER
         payload_json    TEXT     -- the row, JSON-serialized
         queued_at       TEXT     -- ISO8601 UTC (writer wall-clock)
+        producer        TEXT     -- the client that stored the row
+        local           INTEGER  -- 1 = a local archive row (no caller sets it yet)
 
     `hs-uploader` reads rows in FIFO order, ships them upstream, and
     deletes on success.  JSON-on-disk means the uploader owns schema
     translation, not the producer — so producers stay decoupled from
     the upstream's column shape.
 
-Not threadsafe: instantiate one per producer thread, or serialize calls.
+    `producer` and `local` arrived in v3.70 (tasks/plan-sink-control.md
+    §10.4 item 2).  A writer that opens an older file adds both with
+    ALTER TABLE ADD COLUMN, which changes only the schema: SQLite
+    rewrites no row.  Rows stored before v3.70 keep `producer = ''`, and
+    readers name their producer with `infer_producer` (D12).  The writer
+    stores `local = 0` on every row; a caller that keeps a local archive
+    gains a way to say so in a later release.
+
+Thread-safe: see `Writer`.
 """
 from __future__ import annotations
 
@@ -60,6 +94,7 @@ DEFAULT_SQLITE_BATCH_ROWS = 1000
 # in memory until the next active period.
 DEFAULT_SQLITE_AUTO_FLUSH_SECONDS = 30.0
 
+# The name operators grep for; it predates the move into hs-uploader.
 logger = logging.getLogger("sigmond.hamsci_sink")
 
 
@@ -127,6 +162,8 @@ class SqliteConfig:
         return cls(path=path)
 
 
+# `producer` and `local` sit LAST, so a fresh table and an older table
+# that `ensure_columns` extended list their columns in the same order.
 _QUEUE_DDL = """
 CREATE TABLE IF NOT EXISTS pending_uploads (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,7 +171,9 @@ CREATE TABLE IF NOT EXISTS pending_uploads (
     target_table    TEXT NOT NULL,
     schema_version  INTEGER NOT NULL DEFAULT 0,
     payload_json    TEXT NOT NULL,
-    queued_at       TEXT NOT NULL
+    queued_at       TEXT NOT NULL,
+    producer        TEXT NOT NULL DEFAULT '',
+    local           INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -155,12 +194,108 @@ CREATE INDEX IF NOT EXISTS idx_pending_uploads_cycle_time
                         json_extract(payload_json, '$.time'))
 """
 
+# The whole queue schema as one script, for `conn.executescript()`:
+# tests, fixtures and tools that build a sink.db the way the writer does.
+PENDING_UPLOADS_DDL = ";\n".join(
+    s.strip() for s in (_QUEUE_DDL, _QUEUE_INDEX_DDL, _QUEUE_CYCLE_INDEX_DDL)
+) + ";\n"
+
+# The columns v3.70 added, in the order `ensure_columns` adds them.
+_ADDED_COLUMNS = (
+    ("producer", "TEXT NOT NULL DEFAULT ''"),
+    ("local", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def ensure_columns(conn: sqlite3.Connection) -> list[str]:
+    """Add `producer` and `local` to an older `pending_uploads`.
+
+    Returns the names of the columns this call added, in order; an
+    empty list when both already exist or the table does not exist yet
+    (the CREATE TABLE in `PENDING_UPLOADS_DDL` carries both).
+
+    ALTER TABLE ADD COLUMN with a constant default changes only the
+    schema, so it runs in milliseconds on a file of millions of rows
+    and rewrites none of them.  This function adds no index, runs no
+    VACUUM, and updates no row: a row stored before the column existed
+    reads `producer = ''` and `local = 0` (D12).
+
+    Several clients open the same sink.db and may restart together.  Two
+    can both see a column missing; the slower one's ALTER then fails
+    with "duplicate column name", which means the column now exists, so
+    that error counts as success.  Any other error propagates.  Each
+    ALTER commits on its own unless the caller holds a transaction open.
+    """
+    have = {row[1] for row in conn.execute("PRAGMA table_info(pending_uploads)")}
+    if not have:
+        return []
+    added: list[str] = []
+    for name, decl in _ADDED_COLUMNS:
+        if name in have:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE pending_uploads ADD COLUMN {name} {decl}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
+            continue
+        added.append(name)
+    return added
+
+
+# D12 (tasks/plan-sink-control.md §2): the one client that writes each
+# target_db, read from the clients' own writer calls on 2026-10-07.
+#   wspr       wspr-recorder      (wspr.spots, wspr.noise)
+#   codar      codar-sounder      (codar.spots)
+#   superdarn  superdarn-sounder  (superdarn.detections)
+#   hfdl       hfdl-recorder      (hfdl.spots)
+#   timestd    hf-timestd         (timestd.events, none written since 2026-05)
+# psk-recorder and meteor-scatter both write psk.spots; each row's own
+# `mode` tells them apart (see `infer_producer`).  hf-tec writes no row
+# today, and the fix that makes it write will name its producer, so it
+# needs no entry.
+_PRODUCER_BY_DB = {
+    "wspr": "wspr-recorder",
+    "codar": "codar-sounder",
+    "superdarn": "superdarn-sounder",
+    "hfdl": "hfdl-recorder",
+    "timestd": "hf-timestd",
+}
+_PSK_DB = "psk"
+_METEOR_SCATTER_MODE = "msk144"
+
+
+def infer_producer(target_db: str, target_table: str, payload: dict) -> str:
+    """Name the client that stored a row whose writer named none (D12).
+
+    MSK144 rows in `psk` belong to meteor-scatter and every other `psk`
+    row to psk-recorder; each other target_db maps to the one client
+    that writes it.  An unknown target_db, including one renamed by
+    `SIGMOND_SQLITE_DB_<MODE>`, gives `''`, the column's default.
+
+    The writer applies this to each new row whose caller named no
+    producer, and readers apply it to rows stored with `''`, so both
+    reach the same answer from the stored columns alone.
+    `target_table` rides along for that shared signature; no rule needs
+    it today.  Never raises: a flush must not fail over a payload's
+    shape.
+    """
+    if target_db == _PSK_DB:
+        mode = payload.get("mode") if isinstance(payload, dict) else None
+        if isinstance(mode, str) and mode.strip().lower() == _METEOR_SCATTER_MODE:
+            return "meteor-scatter"
+        return "psk-recorder"
+    return _PRODUCER_BY_DB.get(target_db, "")
+
 
 class Writer:
     """Writer that buffers rows into a local SQLite queue.
 
     Use `Writer.from_env(...)` to construct from coordination.env.
     Pass `connect_factory` in tests to inject a fake connection.
+
+    `producer` names the client that stores the rows.  When the caller
+    leaves it out, each row's producer comes from `infer_producer`.
 
     Thread-safe: `insert`, `flush` and `close` hold one re-entrant lock,
     and the default connection is opened with ``check_same_thread=False``
@@ -177,6 +312,7 @@ class Writer:
         table: str,
         *,
         schema_version: int = 0,
+        producer: Optional[str] = None,
         batch_rows: int = DEFAULT_SQLITE_BATCH_ROWS,
         auto_flush_seconds: float = DEFAULT_SQLITE_AUTO_FLUSH_SECONDS,
         config: Optional[SqliteConfig] = None,
@@ -185,6 +321,7 @@ class Writer:
         self.database = database
         self.table = table
         self.schema_version = schema_version
+        self.producer = producer or ""
         self.batch_rows = batch_rows
         self.auto_flush_seconds = auto_flush_seconds
         self._buffer_max = batch_rows * 2
@@ -208,6 +345,7 @@ class Writer:
         mode: str,
         database: Optional[str] = None,
         schema_version: int = 0,
+        producer: Optional[str] = None,
         batch_rows: int = DEFAULT_SQLITE_BATCH_ROWS,
         auto_flush_seconds: float = DEFAULT_SQLITE_AUTO_FLUSH_SECONDS,
         env: Optional[dict] = None,
@@ -224,7 +362,8 @@ class Writer:
         `mode` is the per-mode key (`wspr`, `psk`, `hfdl`, `codar`,
         `timestd`).  `database` defaults to the mode name — operators
         can override per host via `SIGMOND_SQLITE_DB_<MODE>`.  Pass
-        `database=` to bypass the alias.
+        `database=` to bypass the alias.  `producer` names the client;
+        leave it out and the writer infers it per row (`infer_producer`).
         """
         e = env if env is not None else os.environ
         sqlite_path = (e.get("SIGMOND_SQLITE_PATH") or "").strip()
@@ -242,6 +381,7 @@ class Writer:
             database=actual_db,
             table=table,
             schema_version=schema_version,
+            producer=producer,
             batch_rows=batch_rows,
             auto_flush_seconds=auto_flush_seconds,
             config=cfg,
@@ -312,13 +452,17 @@ class Writer:
                         self.schema_version,
                         json.dumps(row, default=_json_default),
                         now_iso,
+                        self.producer
+                        or infer_producer(self.database, self.table, row),
+                        0,
                     )
                     for row in self._buffer
                 ]
                 conn.executemany(
                     "INSERT INTO pending_uploads "
-                    "(target_db, target_table, schema_version, payload_json, queued_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "(target_db, target_table, schema_version, payload_json, "
+                    "queued_at, producer, local) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     params,
                 )
                 conn.commit()
@@ -370,7 +514,15 @@ class Writer:
         conn.execute(_QUEUE_DDL)
         conn.execute(_QUEUE_INDEX_DDL)
         conn.execute(_QUEUE_CYCLE_INDEX_DDL)
+        # An older sink.db gains producer and local here (v3.70).
+        added = ensure_columns(conn)
         conn.commit()
+        if added:
+            logger.info(
+                "hamsci_sink: added column(s) %s to pending_uploads in %s",
+                ", ".join(added),
+                self._config.path if self._config else "?",
+            )
         # Ensure the main db + WAL/SHM sidecars are group-writable so
         # OTHER producers in the same supplementary group can write to
         # the same sink.  Multiple HamSCI clients (psk-recorder,

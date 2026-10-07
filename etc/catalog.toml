@@ -143,12 +143,16 @@ hardware_gated  = "magnetometer (RM3100 / Pololu USB-I2C)"  # dormant when absen
 
 [client.hs-uploader]
 kind            = "library"                           # source-only dep from the catalog's perspective
-description     = "HamSCI PSWS uploader (sibling Python pkg used by mag-recorder via uv editable install)"
+description     = "HamSCI uploader: the sink writer (hs_uploader.sink), the upload library and the hs-uploader daemon"
 repo            = "https://github.com/HamSCI/hs-uploader"
-# No install_script: mag-recorder's pyproject.toml [tool.uv.sources] points at
-# ../hs-uploader as an editable install — only the source tree needs to exist.
-# `smd install hs-uploader` still works thanks to find_install_script's post-clone
-# discovery (the cloned repo carries its own install.sh).
+# No install_script: six clients (psk-recorder, meteor-scatter, wspr-recorder,
+# mag-recorder, hamsci-physics, hf-timestd) declare hs-uploader and point
+# [tool.uv.sources] at ../hs-uploader as an editable install — only the source
+# tree needs to exist.
+# sigmond.hamsci_sink imports hs_uploader.sink where a venv carries it, and its
+# bundled copy elsewhere.  `smd install hs-uploader` still works thanks to
+# find_install_script's post-clone discovery (the cloned repo carries its own
+# install.sh, which installs the daemon's venv and hs-uploader.service).
 
 [client.hamsci-dsp]
 kind            = "library"                           # source-only dep: sibling Python pkg

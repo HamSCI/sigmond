@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 55b9e68 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 3008453 on 2026-10-07 — sink writer links checked against lib/sigmond/hamsci_sink/
 > **Canonical for:** graduating a capture to a sigmond client (Tier 1)
 
 [Tier 0](capture-quickstart.md) ends with bytes on a disk and a person who
@@ -199,7 +199,7 @@ If your client produces **rows** — spots, detections, per-cycle measurements �
 write them to the station's shared local sink rather than inventing a file
 format. The sink is a store-and-forward queue that `hs-uploader` drains
 ([§17](../CLIENT-CONTRACT.md#17-output-sinks-v06)); the writer is
-[`sigmond.hamsci_sink.Writer`](../../lib/sigmond/hamsci_sink/writer.py).
+[`sigmond.hamsci_sink.Writer`](../../lib/sigmond/hamsci_sink/__init__.py).
 
 ```python
 from sigmond.hamsci_sink import Writer
@@ -218,8 +218,9 @@ writer.insert([                      # a LIST of dicts, never a bare dict
 writer.flush()                       # or let it auto-flush; close() on shutdown
 ```
 
-What the code above is really doing, from
-[`writer.py`](../../lib/sigmond/hamsci_sink/writer.py)'s own docstring:
+What the code above is really doing, from the writer's own docstring
+([`_bundled.py`](../../lib/sigmond/hamsci_sink/_bundled.py), sigmond's copy of
+hs-uploader's `sink/writer.py`):
 
 - **One queue table for everybody.** Rows go into `pending_uploads` in
   `/var/lib/sigmond/sink.db` as `(target_db, target_table, schema_version,

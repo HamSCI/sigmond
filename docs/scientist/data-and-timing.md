@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live DASI002 + code/docs)
+> **Verified against:** sigmond 3008453 on 2026-10-07 — sink writer links checked against lib/sigmond/hamsci_sink/
 > **Canonical for:** where station data lands and what its timing labels mean
 
 Two questions arrive the moment a capture works: *where did it go*, and *what
@@ -225,9 +225,11 @@ CREATE INDEX idx_pending_uploads_cycle_time
 ```
 
 (source: `sqlite3 /var/lib/sigmond/sink.db ".schema pending_uploads"` on b4,
-2026-08-23; the same DDL is in
-[`lib/sigmond/hamsci_sink/writer.py`](../../lib/sigmond/hamsci_sink/writer.py),
-`_QUEUE_DDL` / `_QUEUE_INDEX_DDL`.)
+2026-08-23.)  Since v3.70 the writer's DDL lives in hs-uploader's
+`src/hs_uploader/sink/writer.py`, and sigmond carries a copy in
+[`lib/sigmond/hamsci_sink/_bundled.py`](../../lib/sigmond/hamsci_sink/_bundled.py).
+The table there gains two columns, `producer` and `local`, and the writer adds
+both to an older `sink.db` when it opens one.
 
 Live b4, 2026-08-23, the queue held:
 

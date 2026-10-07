@@ -178,12 +178,44 @@ only required for tests and the TUI extras.
 
 ## Sink backend selection
 
-`sigmond.hamsci_sink.Writer.from_env()` picks the producer-side sink at
-construction time:
+Since v3.70 the sink writer lives in hs-uploader as `hs_uploader.sink`
+(`tasks/plan-sink-control.md` D14).  Clients still import
+`sigmond.hamsci_sink`, a compatibility import that hands each one a copy of
+the same writer:
+
+- `hs_uploader.sink.writer` when the client's venv can import it, as the
+  venvs of the six clients that declare hs-uploader can (psk-recorder,
+  meteor-scatter, wspr-recorder, mag-recorder, hamsci-physics, hf-timestd).
+- `lib/sigmond/hamsci_sink/_bundled.py` otherwise.  codar-sounder, hf-tec and
+  superdarn-sounder carry no hs-uploader, and an hs-uploader older than v3.70
+  has no `sink` package.
+
+`sigmond.hamsci_sink.SINK_IMPL` names the copy in use, `"hs_uploader"` or
+`"bundled"`.  `sigmond.hamsci_sink.writer` names the chosen module itself, so
+a global set through it reaches `Writer.from_env`.
+
+**Never edit `_bundled.py` by hand.**  Change hs-uploader's
+`src/hs_uploader/sink/writer.py`, commit it there, then refresh the copy below
+its marked header from this checkout:
+
+```bash
+{ sed '/^# ---- END sigmond bundled-copy header/q' lib/sigmond/hamsci_sink/_bundled.py
+  cat ../hs-uploader/src/hs_uploader/sink/writer.py; } > lib/sigmond/hamsci_sink/_bundled.py.new
+mv lib/sigmond/hamsci_sink/_bundled.py.new lib/sigmond/hamsci_sink/_bundled.py
+```
+
+`tests/test_hamsci_sink_compat.py` fails while the two copies differ, and skips
+that comparison when no `../hs-uploader` checkout sits beside this one.
+
+Either copy picks the sink at construction time:
 
 - `SIGMOND_SQLITE_PATH` set → `Writer` at that path (override).
 - Unset                    → `Writer` at `/var/lib/sigmond/sink.db`
   if writable, else no-op (preserves standalone-safety).
+
+Each row also carries `producer` and `local` (spec §6.1).  The writer adds
+both columns, by `ALTER TABLE ADD COLUMN` alone, to an older `sink.db` it
+opens.
 
 SQLite is the sole local sink. On a host carrying a leftover legacy
 ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.

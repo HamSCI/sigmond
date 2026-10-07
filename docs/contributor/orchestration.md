@@ -64,8 +64,9 @@ The FHS anchors — `/etc/sigmond`, `/var/lib/sigmond`, `/var/log/sigmond`,
 [`../../lib/sigmond/paths.py`](../../lib/sigmond/paths.py); the rest are named at
 their point of use: `GIT_BASE` in `discover.py` / `installer.py`, the operator
 catalog layer in `catalog.py` (`DEFAULT_CATALOG_PATHS`), `site-profile.toml` in
-`capture_prep.py`, the sink default in `hamsci_sink/writer.py`, and
-`upload-wake.sock` in ka9q-python's wspr_recorder.
+`capture_prep.py`, the sink default in hs-uploader's `sink/writer.py` (copied
+into `hamsci_sink/_bundled.py`), and `upload-wake.sock` in ka9q-python's
+wspr_recorder.
 
 | Path | What it is |
 |---|---|
