@@ -615,8 +615,69 @@ class ConfigUploadsVerbTests(unittest.TestCase):
             sink_prompt,
             'Site sink switch to off: the station stops sending data until someone '
             'runs `smd sink upload`.  Type "off" to confirm: ')
-        self.assertNotIn("never", sink_prompt)
-        self.assertIn("will never ship", legacy_prompt)
+        # The legacy prompt keeps the legacy words, and the same truth.
+        self.assertEqual(
+            legacy_prompt,
+            'Discard: the station stops sending data until `smd upload on`.  '
+            'Type "discard" to confirm: ')
+        for prompt in prompts:
+            self.assertNotIn("never", prompt)
+
+    # -- what `smd upload status` says about the legacy hold (final review S1) --
+
+    def test_legacy_hold_status_says_hold_sends_nothing_and_keeps_little(self):
+        # Hold keeps FT8 spots about an hour and WSPR spots about a day, then
+        # drops them; "stored, not shipped" promised a backlog it does not keep.
+        self._run(uploads_command="hold", reason="no HF antenna")
+        with mock.patch("sigmond.uploader_manifest.suppressed_pipelines",
+                        return_value=["wspr-wsprnet", "psk-pskreporter"]):
+            rc, out = self._run(uploads_command="status")
+        self.assertEqual(rc, 0)
+        self.assertIn("uploads: HOLD — sends no data; FT8 spots kept about 1 h, "
+                      "WSPR about 24 h — no HF antenna", out)
+        self.assertIn("not sending: wspr-wsprnet, psk-pskreporter", out)
+        self.assertNotIn("stored, not shipped", out)
+        self.assertNotIn("holding:", out)
+
+    # -- the success line follows the manifest (final review S2) -------------
+
+    def test_on_says_the_pipelines_are_back_only_when_the_manifest_regenerated(self):
+        rc, out = self._run(uploads_command="on")
+        self.assertEqual(rc, 0)
+        self.assertIn("uploads on — outbound data pipelines restored in the manifest", out)
+        self.assertNotIn("manifest --write", out)
+
+    def test_on_with_a_failed_manifest_says_so_and_how_to_retry(self):
+        self._run(uploads_command="hold", reason="x")
+        self.regen_mock.return_value = 1
+        rc, out = self._run(uploads_command="on")
+        self.assertEqual(rc, 1)
+        self.assertNotIn("restored in the manifest", out)
+        self.assertNotIn("ships now", out)      # the backlog does not ship yet
+        self.assertIn("manifest step failed", out)
+        self.assertIn("`smd admin uploader manifest --write`", out)
+
+    def test_sink_upload_with_a_failed_manifest_says_so_in_sink_words(self):
+        self._supports(True)
+        self._run(uploads_command="discard", reason="bench", yes=True)
+        self.regen_mock.return_value = 1
+        rc, out = self._run(uploads_command="on", sink_words=True)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("every data pipeline is back in the manifest", out)
+        self.assertIn("site sink switch set to upload, but the uploader manifest "
+                      "step failed", out)
+        self.assertIn("`smd admin uploader manifest --write`", out)
+
+    def test_off_with_a_failed_manifest_never_claims_nothing_ships(self):
+        # The old manifest may still ship every pipeline.
+        self._supports(True)
+        self.regen_mock.return_value = 1
+        rc, out = self._run(uploads_command="discard", reason="bench", yes=True,
+                            sink_words=True)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("no data ships", out)
+        self.assertIn("site sink switch set to off, but the uploader manifest "
+                      "step failed", out)
 
 
 class CarryUploadsTests(unittest.TestCase):
@@ -770,7 +831,13 @@ class ProfileInstallTests(unittest.TestCase):
         self.profile.chmod(0o640)
         self.new.write_text(CarryUploadsTests.NEW)
         self.new.chmod(0o600)
-        rc, out = self._run(self.new)
+        # Under umask 027 a fresh file already comes out 0640, and this test
+        # would pass without the mode copy.  022 makes it 0644.
+        old_umask = os.umask(0o022)
+        try:
+            rc, out = self._run(self.new)
+        finally:
+            os.umask(old_umask)
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.profile.stat().st_mode & 0o777, 0o640)
 

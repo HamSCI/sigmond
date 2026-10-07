@@ -24678,8 +24678,9 @@ def main() -> int:
     s_off.add_argument('--yes', action='store_true',
                        help='skip the typed confirmation (for scripts)')
     sink_sub.add_parser('upload',
-        help='store and send.  Leaving off first sets aside the GRAPE packages '
-             'and magnetometer zips stored while off, and refuses while their '
+        help='store and send.  Leaving off first moves every GRAPE package and '
+             'magnetometer zip still in the spools aside, unsent ones built before '
+             'off included, and none of them ships.  It refuses while their '
              'packaging runs')
     sink_sub.add_parser('fill', help='not available yet (a later release)')
 

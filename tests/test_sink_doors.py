@@ -212,6 +212,37 @@ def test_set_aside_failing_midway_reports_what_it_moved(tmp_path):
     assert "stays off" in str(caught.value)
 
 
+def test_set_aside_skips_a_zip_the_daemon_deleted_after_the_scan(tmp_path):
+    # In discard, mag-recorder's delete_on_ack can remove a zip between the
+    # rglob and the rename.  That zip needs no setting aside; the rest move.
+    spool, (first, second) = _two_zips(tmp_path)
+    real_rename = os.rename
+
+    def rename(src, dst):
+        if Path(src) == first:
+            os.unlink(src)                      # the daemon got there first
+        return real_rename(src, dst)
+
+    with mock.patch("sigmond.sink_doors.os.rename", side_effect=rename):
+        moved = sd.set_aside(spool, "*.zip", match_dirs=False, stamp="S")
+    held = tmp_path / "mag-recorder" / "upload-held" / "S"
+    assert moved == [(second, held / second.name)]
+    assert not first.exists() and not (held / first.name).exists()
+
+
+def test_set_aside_still_refuses_a_missing_destination(tmp_path):
+    # FileNotFoundError while the source still exists names a fault in the
+    # held directory, not a vanished package: refuse as before.
+    spool, (first, second) = _two_zips(tmp_path)
+    with mock.patch("sigmond.sink_doors.os.rename",
+                    side_effect=FileNotFoundError(2, "No such file or directory")):
+        with pytest.raises(sd.DoorError) as caught:
+            sd.set_aside(spool, "*.zip", match_dirs=False, stamp="S")
+    assert caught.value.moved == []
+    assert first.exists() and second.exists()
+    assert "stays off" in str(caught.value)
+
+
 def test_close_doors_failing_in_mag_carries_the_grape_pairs_too(tmp_path):
     g, obs = _grape(tmp_path)
     m, (first, second) = _two_zips(tmp_path)

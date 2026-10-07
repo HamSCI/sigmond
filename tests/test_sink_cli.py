@@ -183,6 +183,24 @@ class SinkCommandRegistrationTests(unittest.TestCase):
         for verb in ("status", "off", "upload", "fill"):
             self.assertIn(verb, out)
 
+    def test_sink_help_says_leaving_off_sets_aside_every_spooled_package(self):
+        # close_doors moves EVERY GRAPE package and magnetometer zip still in
+        # the spools, unsent ones built before off included (final review S4).
+        rc, out = self._smd("sink", "--help")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("every GRAPE package and magnetometer zip still in the spools", out)
+        self.assertIn("unsent ones built before off", out)
+        self.assertNotIn("stored while off", out)
+
+    def test_the_contributor_table_says_the_same(self):
+        page = Path(__file__).resolve().parents[1] / "docs" / "contributor" / "orchestration.md"
+        rows = {line.split("|")[1].strip(): line for line in page.read_text().splitlines()
+                if line.startswith("| `sink` |") or line.startswith("| `upload` |")}
+        for verb in ("`sink`", "`upload`"):
+            row = " ".join(rows[verb].split())
+            self.assertIn("every GRAPE package and magnetometer zip still in the spools", row, verb)
+        self.assertNotIn("stored while off", rows["`sink`"])
+
     def test_sink_fill_refuses_without_root(self):
         # `fill` is refused before any root check, with exit code 2.
         rc, out = self._smd("sink", "fill")

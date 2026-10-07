@@ -840,6 +840,9 @@ ask_grid() {
 
 ask_antenna() {
     rd -r -p "Antenna description (optional, Enter to skip): " ANTENNA
+    # The profile pastes this inside a TOML "…" string: a quote, a backslash or
+    # a raw control byte (an arrow key) there aborts first boot.
+    ANTENNA=$(printf '%s' "$ANTENNA" | tr -d '"\\[:cntrl:]')
 }
 
 # ── Wi-Fi ───────────────────────────────────────────────────────────────────

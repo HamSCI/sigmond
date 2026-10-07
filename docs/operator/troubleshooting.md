@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond b8f26c7 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 9fe399d on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -216,7 +216,7 @@ Then check the site sink switch — `[VM]`:
 smd sink status
 ```
 
-*Good:* `✓ site sink: upload (store and send)`, b4's answer. *Silent on purpose:*
+*Good:* `✓ site sink: upload (store and send)`. *Silent on purpose:*
 `⚠ site sink: hold (legacy) — stores for a while and sends no data; … — no HF antenna; no PSWS station/instrument ids`,
 DASI002's answer and correct for that station. A new station answers
 `⚠ site sink: off — no data ships and no backlog builds — new station: …` until

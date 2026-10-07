@@ -1015,8 +1015,9 @@ def _say_set_aside(moved) -> None:
 def _close_doors() -> int:
     """Before the written mode leaves discard (the site sink switch's `off`),
     whatever the new setting: refuse while GRAPE or the magnetometer packages
-    a day; otherwise set aside the GRAPE packages and magnetometer zips stored
-    while it read off, and mark earlier GRAPE days packaged
+    a day; otherwise set aside every GRAPE package and magnetometer zip still
+    in the spools, unsent ones built before off included, and mark earlier
+    GRAPE days packaged
     (tasks/plan-sink-control.md §10.3 item 3).  Isolated so tests can stub
     it.  Returns 0 on success, 1 on refusal; on 1 the caller writes nothing."""
     from datetime import datetime, timezone
@@ -1059,13 +1060,17 @@ _WORDS = {
         'cannot_discard': '{python} cannot import hs_uploader.transports.discard: '
                           'this hs-uploader would ignore discard and SHIP.  Update '
                           'hs-uploader first; policy unchanged.',
-        'confirm': 'Discard: data recorded from now on will never ship. '
+        'confirm': 'Discard: the station stops sending data until `smd upload on`.  '
                    'Type "discard" to confirm: ',
         'confirm_word': 'discard',
         'unconfirmed': 'discard not confirmed; policy unchanged',
         'written': '{path}: [uploads] mode = {mode}',
         'denied': 'permission denied writing the policy; re-run smd as root',
         'on': 'uploads on — outbound data pipelines restored in the manifest',
+        'regen_failed': '[uploads] mode = {mode} written, but the uploader manifest '
+                        'step failed (see above), so the uploader may still follow '
+                        'the old mode.  Fix that, then run `smd admin uploader '
+                        'manifest --write` as root',
         'nothing_ships': 'nothing recorded during discard will ship, except the '
                          'GRAPE and magnetometer packages for this UTC day, and for '
                          'the day before if its packaging has not yet run',
@@ -1089,6 +1094,10 @@ _WORDS = {
         'written': '{path}: site sink switch set to {setting}',
         'denied': 'permission denied writing the site sink switch; re-run smd as root',
         'on': 'site sink: upload — every data pipeline is back in the manifest',
+        'regen_failed': 'site sink switch set to {setting}, but the uploader manifest '
+                        'step failed (see above), so the uploader may still follow '
+                        'the old setting.  Fix that, then run `smd admin uploader '
+                        'manifest --write` as root',
         'nothing_ships': 'nothing recorded while the site sink switch read off will '
                          'ship, except the GRAPE and magnetometer packages for this '
                          'UTC day, and for the day before if its packaging (01:00 '
@@ -1157,7 +1166,8 @@ def cmd_config_uploads(args) -> int:
                 err('hs-uploader on this host predates discard, so the manifest '
                     'renders HOLD instead; update hs-uploader')
         else:
-            warn(f'uploads: HOLD — stored, not shipped{why}')
+            warn('uploads: HOLD — sends no data; FT8 spots kept about 1 h, '
+                 f'WSPR about 24 h{why}')
         if up.mode != 'upload':
             try:
                 sup = um.suppressed_pipelines(coord=coord)
@@ -1165,7 +1175,7 @@ def cmd_config_uploads(args) -> int:
                 sup = []
                 warn(f'could not enumerate affected pipelines: {exc}')
             if sup:
-                info(('discarding: ' if up.mode == 'discard' else 'holding: ')
+                info(('discarding: ' if up.mode == 'discard' else 'not sending: ')
                      + ', '.join(sup))
             info('heartbeat is never subject to this policy')
         prof = load_site_profile(SITE_PROFILE_PATH) if SITE_PROFILE_PATH.exists() else None
@@ -1215,7 +1225,13 @@ def cmd_config_uploads(args) -> int:
         return 1
 
     rc = _regenerate_uploader_manifest()
-    if mode == 'upload':
+    if rc:
+        # The old manifest may still rule: no success line, no "ships now".
+        warn(words['regen_failed'].format(mode=mode, setting=_SINK_SETTING[mode]))
+        if (mode == 'upload' and coord.uploads.mode == 'discard'
+                and um.effective_mode(coord) == 'discard'):
+            info(words['nothing_ships'])
+    elif mode == 'upload':
         ok(words['on'])
         if coord.uploads.mode == 'discard':
             # The mode the manifest rendered decides what truly ships.

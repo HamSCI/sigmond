@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond b8f26c7 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 9fe399d on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;
@@ -54,7 +54,7 @@ plus the handful below that its pages use without defining.
 | **RTP** | The real-time streaming format `radiod` uses on the local network. You will meet the word in log messages about "RTP gaps", which mean lost samples. |
 | **RX888** | The wideband SDR receiver (Mk II) that digitises 10 kHz–64 MHz all at once and streams it over USB 3. One per station. |
 | **sink** | A client's store of data bound for a repository: its rows in `sink.db` and any upload spool waiting to ship. `sink.db` names only the database file, `/var/lib/sigmond/sink.db`, which every recorder writes into and the uploader reads from. |
-| **site sink switch** (`smd sink`) | The station-wide setting for what leaves the site: `off` sends no data and keeps no backlog; `upload` stores and sends. A new station starts at `off`; `smd sink upload` raises it once you have checked reception and identity. A station set with the older `smd upload hold` reports `hold (legacy)`. `fill` arrives in a later release. The heartbeat ignores the switch. Some stations built before v3.69 still post FT8 spots themselves, and this switch does not stop that sender ([registration.md §6](registration.md#6-confirming-everything-flows)). |
+| **site sink switch** (`smd sink`) | The station-wide setting for what leaves the site: `off` sends no data and keeps no backlog; `upload` stores and sends. A new station starts at `off`; `smd sink upload` raises it once you have checked reception and identity. A station set with the older `smd upload hold` reports `hold (legacy)`. `fill` arrives in a later release. The heartbeat ignores the switch. Some stations built before v3.69 run senders of their own (psk-recorder or meteor-scatter set to `direct`, B4's wspr-uploader, an optional hfdl-recorder feed), and this switch does not stop them; ask your fleet admin ([registration.md §6](registration.md#6-confirming-everything-flows)). |
 | **smd** | The single command that runs the station ("SigMonD") — `smd status`, `smd doctor`, `smd version`. Run it as yourself inside the VM; it refuses to run under `sudo`. |
 | **spot** | One report that you heard one station, at one time, on one frequency. The unit of WSPR and FT8/FT4 data. |
 | **SSRC** | The 32-bit stream id `radiod` assigns to each channel; it shows up in status output and logs. `radiod` assigns it, so don't try to work it out from the frequency. |

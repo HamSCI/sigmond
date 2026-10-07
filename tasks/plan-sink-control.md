@@ -1050,6 +1050,17 @@ sending a day more than once (D7).  The earlier v3.69 list moves to v3.70.
    The daemon posts every row under the station's single identity, which fits a station with one
    receiver per client.  A host that runs several psk-recorder instances, as B4 does, keeps its
    present settings until step 4 of §10.2, and nobody re-runs bring-up there until then.
+   `sigmond-setup --reconfigure` counts as a re-run: on a station whose VM sees its RX888, the
+   wizard clears the first-run marker and starts bring-up again, which re-runs
+   `smd config upload psk-recorder … --via server-raw` and so moves an existing station's
+   psk-recorder to `server-raw`.  That is the intended end state, but it arrives at reconfigure
+   time, so nobody reconfigures B4 before step 4.
+   wspr-recorder's in-process sender stays off on a fresh station for one reason only: nothing
+   writes `WD_RECEIVER_GRID` into its environment, and its shim refuses to start without it.
+   Anything that later sets that variable, or gives the shim a `STATION_GRID` fallback, arms a
+   sender the site sink switch does not govern, until step 2 of §10.2 retires the shim.  The
+   nested test guards it: Phase D fails when any wspr-recorder instance env, or coordination.env,
+   carries the variable.
 5. **GRAPE stops sending a day more than once.**  Nothing has written `.upload_complete` since
    hf-timestd `af45a6a` (2026-06-30) retired its writer, so every night the catch-up sweep
    re-packages the previous two to seven days.  Each re-package rewrites the day's files, which

@@ -5,7 +5,8 @@ In v3.69 the site sink switch's `off` rides on the legacy `[uploads] mode =
 magnetometer zips built while it read `off` can therefore still ship once it
 leaves `off` -- above all where their pipelines dropped out of the manifest
 for missing PSWS ids, so nothing discarded them.  Before the written mode
-leaves discard, sigmond moves them into a sibling directory OUTSIDE each
+leaves discard, sigmond moves every package still in each spool (those, and
+any unsent ones built before discard) into a sibling directory OUTSIDE each
 spool root (hs-uploader's file source searches the whole tree, hidden
 directories included) and marks earlier GRAPE days packaged so the catch-up
 sweep never rebuilds them.  The caller first asks `packaging_running()` and
@@ -96,8 +97,10 @@ def set_aside(spool: Path, pattern: str, *, match_dirs: bool,
     Files always match.  Directories match too when `match_dirs` is true
     (GRAPE OBS*), the rule of hs-uploader's file source.  Refuses before
     moving anything when the spool and its parent sit on different
-    filesystems.  A rename that fails stops the move; the error lists the
-    pairs moved so far."""
+    filesystems.  A source that vanished after the scan, such as a
+    magnetometer zip the daemon deleted on ack, needs no setting aside and
+    is skipped.  Any other rename failure stops the move; the error lists
+    the pairs moved so far."""
     if not spool.is_dir():
         return []
     _check_same_fs(spool)
@@ -116,6 +119,8 @@ def set_aside(spool: Path, pattern: str, *, match_dirs: bool,
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.rename(src, dst)
         except OSError as exc:
+            if isinstance(exc, FileNotFoundError) and not os.path.lexists(src):
+                continue
             raise DoorError(
                 f"could not move {src} to {dst}: {exc}.  The site sink switch "
                 f"stays off; whatever moved before this sits in {dest_root}.",
