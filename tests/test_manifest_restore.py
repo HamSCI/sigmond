@@ -16,6 +16,7 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import subprocess
 import types
 import unittest
 from pathlib import Path
@@ -414,6 +415,98 @@ class ManifestRestoreDirtyTreeTests(unittest.TestCase):
         self.assertIn('uv.lock', combined)
         self.assertIn('install.sh', combined)
         self.assertIn('git checkout -- uv.lock', combined)
+
+
+# Captured at import, before any test patches `subprocess.run`.
+_REAL_RUN = subprocess.run
+
+
+class _RealStatusGit(_FakeGit):
+    """_FakeGit, except `git status` runs for real against the checkout.
+
+    The dirty-tree check's whole meaning lives in which flags it hands
+    git — a fake that answers `status` from a script cannot tell
+    tracked from untracked, so these tests ask git itself."""
+
+    def __call__(self, cmd, **kwargs):
+        if 'status' in cmd and '--porcelain' in cmd:
+            self.calls.append(list(cmd))
+            return _REAL_RUN(cmd, **kwargs)
+        return super().__call__(cmd, **kwargs)
+
+
+class ManifestRestoreUntrackedIsNotDirtTests(unittest.TestCase):
+    """Untracked files are not dirt — the definition align_apply.dirty_files
+    and doctor.git_state already use.
+
+    The v3.69 rig test (PHASE G) refused to restore ka9q-web over
+    `config_paths.h`, an untracked file its Makefile generates. Restore
+    must refuse a modified TRACKED file and let an untracked one be: a
+    checkout that would collide with one fails loudly as a git error."""
+
+    def setUp(self):
+        import tempfile
+        self.tdir = Path(tempfile.mkdtemp())
+        self.base = self.tdir / 'base'
+        self.base.mkdir()
+        self.repo = self.base / 'ka9q-web'
+        self.repo.mkdir()
+        for args in (('init', '-q', '-b', 'main'),
+                     ('config', 'user.name', 'T'),
+                     ('config', 'user.email', 't@example.com')):
+            self._git(*args)
+        (self.repo / 'Makefile').write_text('all:\n')
+        self._git('add', 'Makefile')
+        self._git('commit', '-q', '-m', 'A')
+        # The build output that tripped PHASE G: untracked, never committed.
+        (self.repo / 'config_paths.h').write_text('#define X 1\n')
+        for name in _filler_live(MIN_COMPONENT_ROWS - 1):
+            (self.base / name / '.git').mkdir(parents=True)
+
+    def _git(self, *args):
+        _REAL_RUN(['git', '-C', str(self.repo), *args], check=True,
+                  capture_output=True, text=True)
+
+    def _run(self):
+        manifest = self.tdir / 'blessed.txt'
+        manifest.write_text(
+            "components (live):\n"
+            "    ka9q-web         aaaaaaa\n"
+            + _filler_rows(MIN_COMPONENT_ROWS - 1))
+        # Live sits elsewhere, so the plan wants to check ka9q-web out.
+        live = {'ka9q-web': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        args = types.SimpleNamespace(path=str(manifest), apply=False,
+                                     no_fetch=True, base=str(self.base))
+        fake = _RealStatusGit()
+        buf, errbuf = io.StringIO(), io.StringIO()
+        with mock.patch('sigmond.provenance.component_versions',
+                         return_value=live), \
+             mock.patch('subprocess.run', side_effect=fake):
+            with contextlib.redirect_stdout(buf), \
+                 contextlib.redirect_stderr(errbuf):
+                rc = smd.cmd_manifest_restore(args)
+        self.assertTrue(any('status' in c for c in fake.calls),
+                        'the dirty-tree check never ran')
+        return rc, buf.getvalue() + errbuf.getvalue()
+
+    def test_untracked_build_output_alone_does_not_refuse(self):
+        rc, out = self._run()
+        self.assertNotIn('dirty working tree', out)
+        self.assertNotIn('config_paths.h', out)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('ka9q-web: checkout', out)
+
+    def test_modified_tracked_file_still_refuses_naming_only_it(self):
+        (self.repo / 'Makefile').write_text('all:\n\techo local fix\n')
+        rc, out = self._run()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('ka9q-web: dirty working tree (Makefile)', out)
+        self.assertIn('never stashed or discarded', out)
+        # The untracked neighbour is not named as dirt.
+        self.assertNotIn('config_paths.h', out)
+        # NEVER stash or discard: the local fix survives the refusal.
+        self.assertIn('echo local fix', (self.repo / 'Makefile').read_text())
+        self.assertTrue((self.repo / 'config_paths.h').exists())
 
 
 class ManifestRestoreApplyTests(unittest.TestCase):

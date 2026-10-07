@@ -4345,7 +4345,9 @@ def cmd_manifest_restore(args) -> int:
        (read-only; run un-elevated, never via runuser). Any subprocess
        error there is treated as unresolvable — fail closed.
     4. DIRTY TREE CHECK, per component the plan wants to move
-       (`git status --porcelain`): a dirty tree is always a refusal,
+       (`git status --porcelain --untracked-files=no`: tracked changes
+       only — an untracked build output such as ka9q-web's
+       `config_paths.h` is not dirt): a dirty tree is always a refusal,
        naming the files and pointing at CONTRIBUTING.md §8 — restore
        NEVER stashes and NEVER discards, because a local modification
        may be a real fix nobody committed yet. The `uv.lock` case (that
@@ -4479,11 +4481,16 @@ def cmd_manifest_restore(args) -> int:
     # dirty tree on a 'keep' needs no working-tree change here and is
     # `smd doctor`'s concern, not restore's. NEVER stash, NEVER discard
     # — a local modification may be a real fix nobody committed yet.
+    # Untracked files are not dirt — the definition align_apply.dirty_files,
+    # doctor.git_state and _repo_is_dirty already use. ka9q-web's Makefile
+    # generates an untracked config_paths.h, and counting it refused the
+    # v3.69 rig test's rollback. A checkout that would collide with an
+    # untracked file fails loudly as a git error at --apply.
     dirty_refusals = []
     for name, _from, _to in checkout_actions:
         d = checkout_by_name[name]
         r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
-                            'status', '--porcelain'],
+                            'status', '--porcelain', '--untracked-files=no'],
                            capture_output=True, text=True)
         files = [line[3:].strip() for line in r.stdout.splitlines()
                 if line.strip()]
