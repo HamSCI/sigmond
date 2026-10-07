@@ -9,8 +9,9 @@ Modes (default is the read-only check):
 * ``--check`` / (no flag) — render and diff against the installed manifest;
   exit non-zero on drift.  Read-only, no root.
 * ``--write`` — write the manifest (root); back up any existing file to ``.bak``.
-* ``--enable`` — write, then ensure ``hs-uploader.service`` is installed +
-  enabled + running (restart it when the manifest actually changed).
+* ``--enable`` — install the daemon first when it is missing (the render
+  probes its venv), write, then ensure ``hs-uploader.service`` is enabled +
+  running (restart it when the manifest actually changed).
 """
 from __future__ import annotations
 
@@ -94,6 +95,22 @@ def cmd_uploader_manifest(args) -> int:
     write = bool(getattr(args, "write", False) or getattr(args, "enable", False))
     enable = bool(getattr(args, "enable", False))
 
+    # Install the daemon BEFORE rendering.  um.generate() asks the daemon's
+    # own venv whether it can discard.  A fresh host has no venv yet, so
+    # the probe answers no.  The site sink switch `off` then renders as the
+    # legacy hold, and a backlog builds that a later `smd sink upload`
+    # would ship (tasks/plan-sink-control.md §10.3).  Only root installs;
+    # a non-root call reaches the refusal below.  The enable branch reuses
+    # this result, so install.sh runs once.  An install error still lets
+    # the write go ahead, as it did before.
+    daemon_ready = None
+    if enable and os.geteuid() == 0:
+        try:
+            daemon_ready = _ensure_daemon_installed()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _err(f"hs-uploader daemon install failed: {exc}")
+            daemon_ready = False
+
     try:
         text = um.generate()
     except Exception as exc:  # pragma: no cover - defensive
@@ -165,7 +182,11 @@ def cmd_uploader_manifest(args) -> int:
     if not enable:
         return 0
 
-    if not _ensure_daemon_installed():
+    # A failed install still leaves the manifest written above; the call
+    # then reports failure here.
+    if daemon_ready is None:
+        daemon_ready = _ensure_daemon_installed()
+    if not daemon_ready:
         return 1
     was_active = _service_active()
     _run(["systemctl", "enable", "--now", SERVICE])
