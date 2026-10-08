@@ -86,7 +86,7 @@ right callsign and location.
 | D7.  v3.69 also stops GRAPE's catch-up sweep from sending a day more than once (§10.3 item 5) | Michael | 2026-10-06 |
 | D8.  Step 2a ships in two images.  v3.70 lays a foundation that changes nothing the station sends; v3.71 splits the send-record keys.  Step 2b moves to v3.72 (§10.2, §10.4) | Michael | 2026-10-07 |
 | D9.  A key migration copies each old send record to its new keys and never deletes the old row.  The old row stays frozen, so a station rolled back resumes from it: a rollback can re-send, never skip (§6.2) | Michael | 2026-10-07 |
-| D10.  The migration runs as its own step, `hs-uploader migrate`.  Update, align and bring-up call it once every component's code is in place and before the daemon restarts.  The daemon never migrates while it starts; a store still on an older version keeps its older keys (§10.4) | Michael | 2026-10-07 |
+| D10.  The migration runs as its own step, `hs-uploader migrate`.  In v3.70 only the manifest step (`smd admin uploader manifest`, which `smd sink …`, align, apply, bring-up and restore run) calls it, after the write and before the daemon starts or restarts; `smd update` alone does not.  The daemon never migrates while it starts; a store still on an older version keeps its older keys (§10.4) | Michael | 2026-10-07 |
 | D11.  `smd admin manifest restore` re-renders `pipelines.toml` with the sigmond it restored, so a rolled-back daemon never reads pipelines a newer renderer wrote (§10.4) | Michael | 2026-10-07 |
 | D12.  A row stored before its writer knew `producer` carries `producer = ''`, and readers infer its producer from table and mode: MSK144 belongs to meteor-scatter, the other psk modes to psk-recorder, the wspr tables to wspr-recorder.  No bulk update rewrites `sink.db` (§6.1) | Michael | 2026-10-07 |
 | D13.  While a client's in-process sender still runs, the daemon's pipelines skip that producer's rows, so exactly one sender covers each row (§6.2, §10.2 step 1) | Michael | 2026-10-07 |
@@ -1127,9 +1127,10 @@ in behaviour fixes a defect (item 6).
 3. **`watermarks.db` gains a schema version and `hs-uploader migrate`.**  The version lives in
    `PRAGMA user_version`.  Each migration runs once, in order, inside `BEGIN IMMEDIATE`, and does
    nothing when its version already stands.  `migrate --check` reports what would run.  v3.70's
-   only migration records version 1 and changes no row.  `smd update`, `smd align` and bring-up run
-   `hs-uploader migrate` once every component's code is in place and before they restart the daemon
-   (D10).
+   only migration records version 1 and changes no row.  The manifest step (`smd admin uploader
+   manifest`) runs `hs-uploader migrate` after it writes the manifest and before it starts or
+   restarts the daemon.  `smd apply`, `smd align`, bring-up, `smd sink …` and restore reach that
+   step; `smd update` alone does not (D10).
 4. **Each source gains `cursor_is_after(new, stored)`** with the orderings of §6.2.  In v3.70
    `advance_cursor` asks it under the store's lock and logs a WARNING with both values when a write
    would move a send record backward, but still writes as it does today.  v3.71 enforces the rule
@@ -1140,7 +1141,10 @@ in behaviour fixes a defect (item 6).
    restarts the daemon when the manifest changed (D11).
 6. **The requeue keeps a retry's key** (D15).  Today a queued retry that fails again loses its key,
    send record and commit token (`hs-uploader/src/hs_uploader/core.py:585-594`), so its eventual
-   acknowledgement advances nothing and the rows behind it go out again.
+   acknowledgement advances nothing and the rows behind it go out again.  After D15, a retry that
+   failed twice can write its own, older cursor to a send-record key that another sender shares.
+   After an outage an operator should expect backward-write WARNINGs (`does not move forward`) and
+   some re-sent rows; v3.71's key split removes the sharing.
 
 **The proof that nothing changes.**  Before release, read-only snapshots of `watermarks.db` and
 `sink.db` from ND and B4, taken with `sqlite3 -readonly .backup` as the operator account, run through

@@ -24120,8 +24120,9 @@ def main() -> int:
     p_m_restore.add_argument('--apply', action='store_true',
         help='move checkouts onto the manifest SHAs (root; only if the plan '
              'is ok), then re-render the hs-uploader manifest with the '
-             'restored sigmond. Default is dry-run: plan only, never touches '
-             'a checkout.')
+             'restored sigmond. That re-render passes --enable, so it also '
+             'starts an hs-uploader you stopped by hand. Default is dry-run: '
+             'plan only, never touches a checkout.')
     p_m_restore.add_argument('--no-fetch', action='store_true',
         help='skip `git fetch` before planning (faster, but a manifest SHA '
              'not yet fetched will read as unresolvable and refuse)')

@@ -1070,7 +1070,7 @@ _WORDS = {
         'regen_failed': '[uploads] mode = {mode} written, but the uploader manifest '
                         'step failed (see above), so the uploader may still follow '
                         'the old mode.  Fix that, then run `smd admin uploader '
-                        'manifest --write` as root',
+                        'manifest --write --enable` as root',
         'nothing_ships': 'nothing recorded during discard will ship, except the '
                          'GRAPE and magnetometer packages for this UTC day, and for '
                          'the day before if its packaging has not yet run',
@@ -1097,7 +1097,7 @@ _WORDS = {
         'regen_failed': 'site sink switch set to {setting}, but the uploader manifest '
                         'step failed (see above), so the uploader may still follow '
                         'the old setting.  Fix that, then run `smd admin uploader '
-                        'manifest --write` as root',
+                        'manifest --write --enable` as root',
         'nothing_ships': 'nothing recorded while the site sink switch read off will '
                          'ship, except the GRAPE and magnetometer packages for this '
                          'UTC day, and for the day before if its packaging (01:00 '

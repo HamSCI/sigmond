@@ -655,7 +655,7 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertNotIn("restored in the manifest", out)
         self.assertNotIn("ships now", out)      # the backlog does not ship yet
         self.assertIn("manifest step failed", out)
-        self.assertIn("`smd admin uploader manifest --write`", out)
+        self.assertIn("`smd admin uploader manifest --write --enable`", out)
 
     def test_sink_upload_with_a_failed_manifest_says_so_in_sink_words(self):
         self._supports(True)
@@ -666,7 +666,7 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertNotIn("every data pipeline is back in the manifest", out)
         self.assertIn("site sink switch set to upload, but the uploader manifest "
                       "step failed", out)
-        self.assertIn("`smd admin uploader manifest --write`", out)
+        self.assertIn("`smd admin uploader manifest --write --enable`", out)
 
     def test_off_with_a_failed_manifest_never_claims_nothing_ships(self):
         # The old manifest may still ship every pipeline.
@@ -678,6 +678,26 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertNotIn("no data ships", out)
         self.assertIn("site sink switch set to off, but the uploader manifest "
                       "step failed", out)
+
+    def test_the_retry_hint_names_enable_at_both_sites(self):
+        # A failed manifest step can leave the manifest written and the daemon
+        # on the old one.  The bare `--write` finds that manifest current, runs
+        # migrate and restarts nothing (exit 0).  Only `--write --enable`
+        # restarts a daemon that started before the manifest on disk.  The
+        # hint has two sites, one per vocabulary in config._WORDS; the sink
+        # words carry `smd sink off`.
+        self._supports(True)
+        for sink_words, verb in ((False, "on"), (True, "on"), (True, "discard")):
+            with self.subTest(sink_words=sink_words, verb=verb):
+                self._run(uploads_command="hold", reason="x")
+                self.regen_mock.return_value = 1
+                kwargs = {"reason": "bench", "yes": True} if verb == "discard" else {}
+                rc, out = self._run(uploads_command=verb, sink_words=sink_words,
+                                    **kwargs)
+                self.assertEqual(rc, 1)
+                self.assertIn("run `smd admin uploader manifest --write --enable` "
+                              "as root", out)
+                self.assertNotIn("manifest --write` as root", out)
 
 
 class CarryUploadsTests(unittest.TestCase):
