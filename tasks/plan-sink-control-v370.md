@@ -84,6 +84,15 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
   and nothing reads `/var/lib/sigmond/sdr-recover.json`. The heartbeat must carry the card's state (present, absent
   since when, whether its port can switch power), and the fleetboard must show "needs a person to replug" as an
   alarm. A schema change on both the station and wd30.
+- **`smd align` must reinstall a client's udev rules when it moves the client** (Michael, 2026-10-08: v3.71). On
+  K3LR an align moved mag-recorder to ec95cc0, whose unit carries `ConditionPathExists=/dev/ttyMAG0`, and left the
+  older `/etc/udev/rules.d/99-PololuI2C.rules` in place, without the `SYSTEMD_WANTS` line that commit 4b243b4
+  pairs with the condition. A boot without the adapter then left the recorder down for good. Check B4 and ND
+  (`grep -c SYSTEMD_WANTS /etc/udev/rules.d/99-PololuI2C.rules`). The wider question: which other installed files
+  (udev rules, unit files, sudoers, tmpfiles) does align leave behind when a checkout moves?
+- **A recorder must restart when its USB adapter enumerates again**, and must never write a repeated reading as
+  fresh (HamSCI/mag-recorder#6, with the K3LR evidence of 2026-10-07). K3LR carries a site-local udev guard
+  (`99-k3lr-mag-replug.rules`) until the product does it.
 
 ### Task 1: `hs_uploader.sink` — the sink writer moves into hs-uploader, and each row names its producer
 
