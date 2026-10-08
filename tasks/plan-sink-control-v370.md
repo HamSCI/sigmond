@@ -93,6 +93,26 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
 - **A recorder must restart when its USB adapter enumerates again**, and must never write a repeated reading as
   fresh (HamSCI/mag-recorder#6, with the K3LR evidence of 2026-10-07). K3LR carries a site-local udev guard
   (`99-k3lr-mag-replug.rules`) until the product does it.
+- **No guest-agent request may carry a non-ASCII character** (found 2026-10-08, while the v3.70 update test kept
+  failing in its v3.69 base install). Proxmox sends such a `qm guest exec` request short: as many bytes as the
+  request has characters, so the closing bytes never arrive (PVE 9.1.1, qemu-server 9.0.30). About one time in six
+  the guest agent's parser then waits for the rest forever. The agent keeps its PID, reads every later ping, and
+  answers none. The console panel sends such a request every five minutes on every station: sigmond-appliance
+  `firstboot-v3.sh`, the bring-up status line, `grep -E "^───|» "`. That command has never run once. Four pieces
+  of work follow.
+  1. The panel builds those bytes inside the guest (`printf '\342\224\200'`), so the request stays ASCII.
+  2. The status command then runs for the first time, and wakes code nobody has watched: its `inactive` branch
+     can print "BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING" without checking the bring-up marker its own
+     comment names. Before the wizard, when bring-up has not started, that would raise a false alarm. Correct and
+     test that branch in the same change.
+  3. A host that finds the agent silent sends one 0xFF byte down `/var/run/qemu-server/<vmid>.qga` before it
+     concludes anything. That byte resets the agent's parser; the QGA protocol defines it and Proxmox never sends
+     it. The panel, `pm-heartbeat.py` and the wizard's `gexec` all need it. It also cures a station that sits
+     deaf today, without a restart inside the VM.
+  4. A test fails when any guest-agent argument in `firstboot-v3.sh` or `scripts/proxmox/sigmond-wizard.sh`
+     holds a byte above 0x7F. An operator's typed answer can hold one too, so `gexec` must encode what it sends.
+  The panel script lives on the Proxmox host, so stations receive this through `smd align`, never through
+  `smd update`. The image rig carries a logging watcher (`ga-watch.sh`) until an image holds the fix.
 
 ### Task 1: `hs_uploader.sink` — the sink writer moves into hs-uploader, and each row names its producer
 
