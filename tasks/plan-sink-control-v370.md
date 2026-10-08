@@ -113,6 +113,41 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
      holds a byte above 0x7F. An operator's typed answer can hold one too, so `gexec` must encode what it sends.
   The panel script lives on the Proxmox host, so stations receive this through `smd align`, never through
   `smd update`. The image rig carries a logging watcher (`ga-watch.sh`) until an image holds the fix.
+- **The remote-access switch exists; three gaps around it** (Michael, 2026-10-08: some site owners will not grant
+  standing access, yet will open the door when trouble comes). On the Proxmox host, `sigmond-setup --rac-off`
+  stops and disables the tunnel and keeps its configuration, and `sigmond-setup --rac-on` brings it back with no
+  new registration. Nothing else turns it on; the wizard asks "Enable remote access? [Y/n]" at install.
+  `docs/operator/remote-access.md` section 4 says all this. Build no second switch. `smd admin rac` in the VM
+  manages a different tunnel, for stations without a Proxmox host.
+  1. The console panel prints "OFFLINE — check: journalctl -u sigmond-rac-host" whenever the unit does not run,
+     so an owner's deliberate off reads as a fault. It should say "off, by the owner's choice" for a disabled
+     unit and print the one command that turns it on, because that owner stands at the box.
+  2. Nobody has run `--rac-off` or `--rac-on` on a live station or on the rig; the operator page says so itself.
+     The nested test should turn the tunnel off, reboot, confirm it stayed off, and turn it on.
+  3. The switch works only on the host, and the host has no keyboard after install. The owner needs the host's
+     address and its root password at the moment of trouble. The panel shows both; say so on the operator page.
+- **After a restore, `smd update` reports a station as current while it sits releases behind** (pre-tag hunt B, M1).
+  `smd admin manifest restore --apply` leaves each moved checkout on a detached HEAD with no `.pin`. `cmd_update`
+  finds no upstream for it, counts zero commits behind, and prints the all-clear. Report such a checkout as HELD
+  (exit 3). Until then: put each restored checkout back on `main` as its owner, then update. The same cause stops
+  `test-update-v3.sh --resume` after the restore. Restore's closing hint must also name hs-uploader, which keeps
+  running the newer code until someone restarts it.
+- **A zero-length `watermarks.db` stops every manifest step** (hunt A, m1). `migrate` refuses a file without a
+  `watermarks` table and exits 1, and sigmond then leaves the daemon alone. No shipped code leaves such a file.
+  Treat a zero-length file as a missing one.
+- **Bring-up restarts hs-uploader even after a failed migrate** (hunt A, m2; `bringup.py`, the unconditional
+  restart after the manifest step). D10 says "left as it stands". Harmless while migration 1 changes nothing.
+- **A migrate that times out can finish after sigmond reported the failure** (final review, M-7).
+  `subprocess.run` kills `runuser`; the `hs-uploader migrate` under it can run on and commit. Kill the process
+  group.
+- **The compatibility import falls back only on `ImportError`** (final review M-5, hunt A m8). A `sink/writer.py`
+  that exists but that the recorder's user cannot read raises `PermissionError` and stops the recorder.
+- **The manifest step can restart hs-uploader on an unchanged manifest** (hunt C, m3). systemd answers the start
+  time in whole seconds, and sigmond compares it with a fractional file time. One extra restart, no harm.
+- Small corrections: the CONTRACT STRINGS header in sigmond-appliance `test-update-v3.sh` still reads "Checked
+  against sigmond ac01bb7"; `hamsci_sink/__init__.py` says update pulls sigmond before hs-uploader, and the plan
+  sorts by name; comments in `update.py` and `bin/smd` say an image build pins checkouts, and only `smd align`
+  writes a `.pin`.
 
 ### Task 1: `hs_uploader.sink` — the sink writer moves into hs-uploader, and each row names its producer
 
