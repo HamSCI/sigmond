@@ -487,5 +487,57 @@ class CollectFindingsTests(unittest.TestCase):
         self.assertTrue(findings[0].fixable)
 
 
+    # -- native build pins (2026-10-08) --------------------------------------
+    #
+    # wsjtx sits on a detached HEAD at the commit sigmond's build pins; it
+    # has no `.pin` file.  `smd update` now says "HELD — pinned by sigmond's
+    # native build", so doctor must not call the same state "detached with
+    # no .pin".
+
+    SHA = 'ccdfaf3c1c109010d15399674ce278167cfde848'
+
+    def _detached_wsjtx(self, head):
+        comp = self._make_component('wsjtx')
+        self._doctor_mod.git_state = lambda d: {
+            'error': None, 'dirty': [], 'untracked': [], 'ahead': 0,
+            'detached': True, 'pin': '', 'head': head, 'at_pin': False}
+        return comp
+
+    def _detached_kinds(self):
+        _clean, findings = smd.collect_findings(base=str(self.base))
+        return [f for f in findings if f.kind == 'detached']
+
+    def test_detached_at_a_native_build_pin_is_not_drift(self):
+        self._force_manifest_clean()
+        self._detached_wsjtx(self.SHA)
+        orig, smd._WSJTX_COMMIT = smd._WSJTX_COMMIT, self.SHA
+        try:
+            self.assertEqual(self._detached_kinds(), [])
+        finally:
+            smd._WSJTX_COMMIT = orig
+
+    def test_detached_off_a_native_build_pin_is_drift(self):
+        self._force_manifest_clean()
+        self._detached_wsjtx('0' * 40)
+        orig, smd._WSJTX_COMMIT = smd._WSJTX_COMMIT, self.SHA
+        try:
+            found = self._detached_kinds()
+        finally:
+            smd._WSJTX_COMMIT = orig
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].component, 'wsjtx')
+        self.assertIn(f'drifted off its pin {self.SHA[:12]}', found[0].detail)
+
+    def test_detached_with_no_pin_of_any_kind_is_still_drift(self):
+        self._force_manifest_clean()
+        comp = self._make_component('some-client')
+        self._doctor_mod.git_state = lambda d: {
+            'error': None, 'dirty': [], 'untracked': [], 'ahead': 0,
+            'detached': True, 'pin': '', 'head': self.SHA, 'at_pin': False}
+        found = self._detached_kinds()
+        self.assertEqual(len(found), 1)
+        self.assertIn('no .pin records', found[0].detail)
+
+
 if __name__ == '__main__':
     unittest.main()

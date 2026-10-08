@@ -321,3 +321,45 @@ def test_a_skewed_venv_that_cannot_be_repaired_refuses_rather_than_pretending():
     assert refusals[0].target == 'ka9q-python'
     assert 'install' in refusals[0].reason
     assert not [a for a in plan if getattr(a, 'kind', '') == 'install']
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-08: a source sigmond's own native build pins is held, not pulled
+# ---------------------------------------------------------------------------
+#
+# onion and wsjtx are not catalog components and not editable libraries.
+# sigmond clones them under /opt/git/sigmond and checks out the commit its
+# build was validated against.  cmd_update marks such a checkout with
+# `pin_source: 'native-build'`; the planner holds it with its own message,
+# because `smd update --unpin` does not release it.
+
+_NATIVE = {'behind': 0, 'dirty': [], 'owner': 'sigmond', 'installer': False,
+           'pinned': 'de8ea938342b36c28024fd8393ebc27b8442a161',
+           'at_pin': True, 'pin_source': 'native-build'}
+
+
+def test_a_native_build_pin_is_held_with_its_own_message():
+    plan = plan_update(_state(repos={'onion': dict(_NATIVE)}))
+
+    assert plan == [Refusal(
+        'onion',
+        "pinned by sigmond's native build to de8ea938 "
+        "(docs/native-binaries.md)",
+        kind='pin')]
+
+
+def test_a_native_build_pin_plans_no_pull_and_no_restart():
+    plan = plan_update(_state(repos={'onion': dict(_NATIVE, behind=1)}))
+
+    assert not [a for a in plan if isinstance(a, Action)]
+
+
+def test_an_align_pin_keeps_its_unpin_hint():
+    """The `.pin` hold says `--unpin` releases it; the native one must not."""
+    plan = plan_update(_state(repos={'hf-timestd': {
+        'behind': 3, 'dirty': [], 'owner': 'timestd',
+        'pinned': 'abcdef1234567890', 'at_pin': True}}))
+
+    assert '--unpin` releases it' in plan[0].reason
+    assert '--unpin' not in plan_update(
+        _state(repos={'onion': dict(_NATIVE)}))[0].reason

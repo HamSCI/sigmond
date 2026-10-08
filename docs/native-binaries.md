@@ -96,6 +96,16 @@ pin + manifest + diag treatment to any future upstream-built dep. The
 principles are identical to mag-usb; only the storage location differs
 because we don't own the source repo.
 
+`smd update` holds these pinned sources at their pin. `onion` and `wsjtx`
+carry no `.pin` file, because sigmond's build checks the commit out. So
+`smd update` reads their pins from the same constants the builds use
+(`_native_build_pins` in `bin/smd`). A checkout at its pin shows as
+`HELD — pinned by sigmond's native build`; the plan pulls nothing and
+restarts nothing for it. `smd update --unpin` does not release it, because
+a pull would move the source off the commit the installed library was built
+from. A checkout off its pin draws a warning, and the next build returns it.
+Move a pin by bumping the constant.
+
 ## The `.provenance` sidecar
 
 Every committed binary under `<repo>/bin/` MUST have a matching

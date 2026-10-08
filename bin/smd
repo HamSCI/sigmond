@@ -1099,6 +1099,36 @@ def _git_head(repo: Path) -> str:
     return r.stdout.strip() if r.returncode == 0 else ''
 
 
+def _native_build_pins() -> dict:
+    """Upstream sources sigmond's own native builds pin: checkout directory
+    name -> the commit the build checks out.
+
+    One table, built from the constants above, so `smd update` and
+    `smd doctor` cannot drift from what the builds do.  It reads the
+    constants at call time: bump `_ONION_COMMIT` and the table follows.
+
+    Why it exists (2026-10-07 20:02Z): upstream onion gained its first
+    commit in four years.  Every station holds onion on branch master at the
+    pin, with no `.pin` file, so `smd update` counted that commit as
+    "behind" and planned a pull — and a service restart — for a library
+    sigmond pinned on purpose.  A pull moves the source off the commit the
+    installed libonion was built from.
+
+    Add a source here when a `_build_*` helper clones it under
+    /opt/git/sigmond and checks a commit out.  jt9-decode does not belong:
+    it lives vendored inside psk-recorder's checkout, which has its own state.
+    """
+    return {
+        _ONION_SRC.name: _ONION_COMMIT,
+        _WSJTX_SRC.name: _WSJTX_COMMIT,
+    }
+
+
+# The build that returns each pinned source to its pin, for the off-pin
+# warning.  Keyed like _native_build_pins(); a name missing here prints as is.
+_NATIVE_BUILD_OF = {'onion': 'ka9q-web', 'wsjtx': 'wsjtx-decoders'}
+
+
 def _git_remote_url(repo: Path) -> str:
     r = _run(['git', '-c', f'safe.directory={repo}', '-C', str(repo),
               'remote', 'get-url', 'origin'])
@@ -3748,6 +3778,17 @@ def cmd_update(args) -> int:
         if st['error']:
             continue
         pin, at_pin, detached = st['pin'], st['at_pin'], st['detached']
+        # A source sigmond's own native build pins (onion, wsjtx).  The build
+        # checks the commit out and writes no `.pin`, so the pin checks below
+        # cannot see it; the build table can.  At the pin, the planner holds
+        # it and `--unpin` does not release it: a pull would move the source
+        # off the commit libonion was built from.  Off the pin, it plans
+        # nothing and warns; the next build restores the pin.  Neither case
+        # compares against upstream.  Upstream onion gained a commit on
+        # 2026-10-07 20:02Z, and the old count turned it into `[pull] onion`.
+        native_pin = _native_build_pins().get(d.name) or ''
+        native_hold = (bool(native_pin) and bool(st['head'])
+                       and st['head'].startswith(native_pin))
         # bring-up's image build and `smd align` both detach onto `.pin`
         # deliberately — a held component's checkout legitimately has no
         # usable @{u}, so comparing against it is noise on top of the
@@ -3760,7 +3801,16 @@ def cmd_update(args) -> int:
         pin_hold = bool(pin) and at_pin
         held = pin_hold and not unpin
         behind = 0
-        if held:
+        if native_pin:
+            if native_hold and unpin:
+                _info(f"{d.name}: stays held under --unpin — sigmond's "
+                      f"native build pins it")
+            elif not native_hold:
+                _warn(f"{d.name}: at {st['head'][:8]}, off sigmond's build "
+                      f"pin {native_pin[:8]} — the next "
+                      f"{_NATIVE_BUILD_OF.get(d.name, d.name)} build "
+                      f"returns it")
+        elif held:
             pass
         elif unpin and pin_hold and detached:
             # `--unpin` releases a detached, PINNED checkout: `HEAD..@{u}`
@@ -3795,10 +3845,15 @@ def cmd_update(args) -> int:
             owner = d.owner()
         except Exception:
             owner = None
-        inc = subprocess.run(
-            ['git', '--no-optional-locks', '-C', str(d), 'diff',
-             '--name-only', 'HEAD..@{u}'], capture_output=True, text=True)
-        incoming = (inc.stdout.split() if inc.returncode == 0 else None)
+        if native_pin:
+            # Nothing is pulled, so no incoming file can collide with a
+            # local edit; `None` here would hold a dirty tree for nothing.
+            incoming = []
+        else:
+            inc = subprocess.run(
+                ['git', '--no-optional-locks', '-C', str(d), 'diff',
+                 '--name-only', 'HEAD..@{u}'], capture_output=True, text=True)
+            incoming = (inc.stdout.split() if inc.returncode == 0 else None)
         # Whether there is an install script to run at all. ka9q-python
         # has none (library, consumed editably), and planning an install
         # for it made the executor run a nonexistent path — exit 127.
@@ -3808,7 +3863,11 @@ def cmd_update(args) -> int:
         repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
                          'incoming': incoming, 'owner': owner,
                          'installer': installer}
-        if held:
+        if native_hold:
+            repos[d.name]['pinned'] = native_pin
+            repos[d.name]['at_pin'] = True
+            repos[d.name]['pin_source'] = 'native-build'
+        elif held:
             repos[d.name]['pinned'] = pin
             repos[d.name]['at_pin'] = True
 
@@ -7354,10 +7413,18 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
             # Detached AT the recorded pin is a correctly pinned component,
             # not a fault.  Only drift off the pin, or a detached HEAD with
             # no pin to justify it, is worth an operator's attention.
-            if st['detached'] and not st.get('at_pin'):
-                if st.get('pin'):
+            # A source sigmond's native build pins (wsjtx) carries no `.pin`;
+            # the build table is its pin, and `smd update` holds it there
+            # (2026-10-08).  Doctor must agree with that hold.
+            pin, at_pin = st.get('pin'), st.get('at_pin')
+            native_pin = _native_build_pins().get(name)
+            if native_pin:
+                pin = native_pin
+                at_pin = (st.get('head') or '').startswith(native_pin)
+            if st['detached'] and not at_pin:
+                if pin:
                     detail = (f'HEAD {st.get("head", "?")[:12]} has drifted off '
-                              f'its pin {st["pin"][:12]}')
+                              f'its pin {pin[:12]}')
                 else:
                     detail = ('HEAD is detached and no .pin records which '
                               'commit it should be at')

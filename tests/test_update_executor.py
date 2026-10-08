@@ -101,6 +101,28 @@ class _Rig(unittest.TestCase):
             rc = smd.cmd_update(args)
         return rc, out.getvalue() + err.getvalue()
 
+    def _add_plain_component(self, name):
+        """A second, ordinary checkout under base: not pinned, genuinely
+        one commit behind, clean, and with no install script to
+        complicate the plan — "no installer issue" per the fix request."""
+        root = Path(self._tmp.name)
+        origin = root / f"{name}-origin.git"
+        _git("init", "--bare", "-b", "main", str(origin), cwd=root)
+        seed = root / f"{name}-seed"
+        _git("clone", str(origin), str(seed), cwd=root)
+        (seed / "a.txt").write_text("a\n")
+        _git("add", "-A", cwd=seed)
+        _git("commit", "-m", "first", cwd=seed)
+        _git("push", "-u", "origin", "main", cwd=seed)
+        host = self.base / name
+        _git("clone", str(origin), str(host), cwd=root)
+        (seed / "b.txt").write_text("b\n")
+        _git("add", "-A", cwd=seed)
+        _git("commit", "-m", "second", cwd=seed)
+        _git("push", "origin", "main", cwd=seed)
+        expected_sha = _git("rev-parse", "HEAD", cwd=seed).stdout.strip()
+        return host, expected_sha
+
 
 class ExecutorTests(_Rig):
     def test_success_path_pulls_then_installs(self):
@@ -201,28 +223,6 @@ class PinnedComponentTests(_Rig):
         _git("checkout", "--detach", head, cwd=self.host)
         (self.host / ".pin").write_text(head + "\n")
         return head
-
-    def _add_plain_component(self, name):
-        """A second, ordinary checkout under base: not pinned, genuinely
-        one commit behind, clean, and with no install script to
-        complicate the plan — "no installer issue" per the fix request."""
-        root = Path(self._tmp.name)
-        origin = root / f"{name}-origin.git"
-        _git("init", "--bare", "-b", "main", str(origin), cwd=root)
-        seed = root / f"{name}-seed"
-        _git("clone", str(origin), str(seed), cwd=root)
-        (seed / "a.txt").write_text("a\n")
-        _git("add", "-A", cwd=seed)
-        _git("commit", "-m", "first", cwd=seed)
-        _git("push", "-u", "origin", "main", cwd=seed)
-        host = self.base / name
-        _git("clone", str(origin), str(host), cwd=root)
-        (seed / "b.txt").write_text("b\n")
-        _git("add", "-A", cwd=seed)
-        _git("commit", "-m", "second", cwd=seed)
-        _git("push", "origin", "main", cwd=seed)
-        expected_sha = _git("rev-parse", "HEAD", cwd=seed).stdout.strip()
-        return host, expected_sha
 
     def test_a_pinned_component_is_held_not_pulled(self):
         self._pin_at_head()
@@ -326,3 +326,213 @@ class PinnedComponentTests(_Rig):
         self.assertIn("install skipped — checkout failed above", text)
         self.assertNotIn("install skipped — pull failed above", text)
         self.assertTrue((self.host / ".pin").exists())
+
+
+class _NativePinRig(_Rig):
+    """A checkout sigmond's own native build pins (onion, wsjtx).
+
+    On 2026-10-07 20:02Z upstream onion gained its first commit in four
+    years.  Every station holds onion on branch master AT the pinned
+    commit with no `.pin` file, so `smd update` counted that commit as
+    "behind" and planned `[pull] onion` plus a service restart.  The
+    pull would move the source off the commit libonion was built from.
+    """
+
+    def _head(self, repo=None):
+        return _git("rev-parse", "HEAD", cwd=repo or self.host).stdout.strip()
+
+    def _origin_head(self):
+        return _git("rev-parse", "main", cwd=self.origin).stdout.strip()
+
+    def _pin_constant(self, name, sha):
+        """Point one of smd's native pin constants at a scratch commit."""
+        p = mock.patch.object(smd, name, sha)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _add_pin_file_component(self, name):
+        """An ordinary checkout `smd align` has pinned: detached at its HEAD
+        with a `.pin` naming it, one commit behind upstream."""
+        host, _sha = self._add_plain_component(name)
+        head = self._head(host)
+        _git("checkout", "--detach", head, cwd=host)
+        (host / ".pin").write_text(head + "\n")
+        return host
+
+    def _run_update(self, apply=False, unpin=False):
+        args = types.SimpleNamespace(base=self.base, apply=apply,
+                                     no_fetch=False, unpin=unpin)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = smd.cmd_update(args)
+        return rc, out.getvalue() + err.getvalue()
+
+
+class NativeBuildPinOnionTests(_NativePinRig):
+    COMP = "onion"
+    CONST = "_ONION_COMMIT"
+
+    def _at_pin(self):
+        """HEAD is the pin; upstream sits one commit ahead (setUp)."""
+        pin = self._head()
+        self._pin_constant(self.CONST, pin)
+        return pin
+
+    def test_onion_at_its_pin_is_not_pulled(self):
+        """The defect: the one commit upstream gained planned a pull."""
+        pin = self._at_pin()
+        rc, text = self._run_update()
+        self.assertNotIn("[pull] onion", text)
+        self.assertNotIn("commit(s) behind", text)
+        self.assertNotIn("[restart]", text)
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(self._head(), pin)
+
+    def test_onion_at_its_pin_is_held_as_a_pin_refusal(self):
+        pin = self._at_pin()
+        rc, text = self._run_update()
+        self.assertIn(f"onion: HELD — pinned by sigmond's native build to "
+                      f"{pin[:8]} (docs/native-binaries.md)", text)
+        # A pin hold is the steady state: exit 0, and the sentinel the
+        # fleet post-check reads (Controller ruling 4).
+        self.assertEqual(rc, 0, text)
+        self.assertIn("nothing to do", text)
+
+    def test_no_comparison_against_upstream_for_a_native_pin(self):
+        self._at_pin()
+        _rc, text = self._run_update()
+        self.assertNotIn("cannot compare against upstream", text)
+
+    def test_apply_leaves_a_native_pin_where_it_is(self):
+        pin = self._at_pin()
+        rc, text = self._run_update(apply=True)
+        self.assertEqual(self._head(), pin, text)
+        self.assertEqual(rc, 0, text)
+        self.assertFalse((self.host / ".installed").exists(), text)
+
+    def test_unpin_does_not_release_a_native_pin(self):
+        pin = self._at_pin()
+        rc, text = self._run_update(apply=True, unpin=True)
+        self.assertEqual(self._head(), pin, text)
+        self.assertNotIn("[pull] onion", text)
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(
+            sum("onion: stays held under --unpin" in l
+                for l in text.splitlines()), 1, text)
+        self.assertIn("sigmond's native build pins it", text)
+
+    def test_without_unpin_the_unpin_line_stays_quiet(self):
+        self._at_pin()
+        _rc, text = self._run_update()
+        self.assertNotIn("--unpin", text)
+
+    def test_a_local_edit_does_not_turn_a_native_hold_into_a_failure(self):
+        """Nothing is pulled, so nothing can collide with the edit."""
+        self._at_pin()
+        (self.host / "a.txt").write_text("edited\n")
+        rc, text = self._run_update()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("onion: HELD — pinned by sigmond's native build", text)
+        self.assertNotIn("modified file", text)
+
+    def test_a_shorter_pin_constant_matches_the_full_head(self):
+        pin = self._head()
+        self._pin_constant(self.CONST, pin[:12])
+        rc, text = self._run_update()
+        self.assertIn("onion: HELD — pinned by sigmond's native build to "
+                      f"{pin[:8]}", text)
+        self.assertNotIn("[pull] onion", text)
+
+    def test_off_its_pin_onion_plans_nothing_and_warns_once(self):
+        """HEAD differs from the pin: the next ka9q-web build returns it,
+        so the planner must not pull it somewhere else."""
+        head = self._head()
+        pin = self._origin_head()            # a commit HEAD is not at
+        self._pin_constant(self.CONST, pin)
+        rc, text = self._run_update(apply=True)
+        self.assertNotIn("[pull] onion", text)
+        self.assertNotIn("[restart]", text)
+        warning = (f"onion: at {head[:8]}, off sigmond's build pin "
+                   f"{pin[:8]} — the next ka9q-web build returns it")
+        self.assertEqual(sum(warning in l for l in text.splitlines()), 1, text)
+        self.assertNotIn("cannot compare against upstream", text)
+        self.assertEqual(self._head(), head, text)
+        self.assertEqual(rc, 0, text)
+
+    def test_a_pin_file_hold_and_a_behind_library_behave_as_before(self):
+        """Native pins must not disturb the other two kinds of neighbour."""
+        self._at_pin()
+        self._add_pin_file_component("pinclient")
+        self._add_plain_component("otherclient")
+
+        rc, text = self._run_update()
+
+        self.assertEqual(rc, 0, text)
+        self.assertIn("pinclient: HELD — pinned by smd align to", text)
+        self.assertIn("onion: HELD — pinned by sigmond's native build to", text)
+        self.assertIn("[pull] otherclient", text)
+        self.assertNotIn("[pull] onion", text)
+        self.assertNotIn("[pull] pinclient", text)
+
+    def test_unpin_still_releases_a_pin_file_beside_a_native_pin(self):
+        pin = self._at_pin()
+        pinned = self._add_pin_file_component("pinclient")
+
+        rc, text = self._run_update(apply=True, unpin=True)
+
+        self.assertEqual(rc, 0, text)
+        self.assertFalse((pinned / ".pin").exists(), text)      # released
+        self.assertIn("[pull] pinclient", text)
+        self.assertEqual(self._head(), pin, text)               # onion held
+        self.assertIn("onion: stays held under --unpin", text)
+
+
+class NativeBuildPinWsjtxTests(_NativePinRig):
+    """wsjtx sits on a DETACHED HEAD at its pin (the build checks the commit
+    out by hash).  Detached, it had no upstream to count against, so the
+    planner only said "cannot compare against upstream"."""
+
+    COMP = "wsjtx"
+    CONST = "_WSJTX_COMMIT"
+
+    def test_detached_wsjtx_at_its_pin_is_held(self):
+        pin = self._head()
+        _git("checkout", "--detach", pin, cwd=self.host)
+        self._pin_constant(self.CONST, pin)
+        rc, text = self._run_update()
+        self.assertIn(f"wsjtx: HELD — pinned by sigmond's native build to "
+                      f"{pin[:8]} (docs/native-binaries.md)", text)
+        self.assertNotIn("cannot compare against upstream", text)
+        self.assertEqual(rc, 0, text)
+
+    def test_detached_wsjtx_off_its_pin_warns_with_its_own_builder(self):
+        head = self._head()
+        _git("checkout", "--detach", head, cwd=self.host)
+        pin = self._origin_head()
+        self._pin_constant(self.CONST, pin)
+        rc, text = self._run_update()
+        self.assertIn(f"wsjtx: at {head[:8]}, off sigmond's build pin "
+                      f"{pin[:8]} — the next wsjtx-decoders build returns it",
+                      text)
+        self.assertNotIn("cannot compare against upstream", text)
+        self.assertEqual(rc, 0, text)
+
+
+class NativeBuildPinTableTests(unittest.TestCase):
+    """One table, derived from the build constants — never copied."""
+
+    def test_the_table_covers_onion_and_wsjtx(self):
+        self.assertEqual(smd._native_build_pins(),
+                         {"onion": smd._ONION_COMMIT,
+                          "wsjtx": smd._WSJTX_COMMIT})
+
+    def test_the_table_follows_the_constants(self):
+        with mock.patch.object(smd, "_ONION_COMMIT", "a" * 40), \
+             mock.patch.object(smd, "_WSJTX_COMMIT", "b" * 40):
+            self.assertEqual(smd._native_build_pins(),
+                             {"onion": "a" * 40, "wsjtx": "b" * 40})
+
+    def test_every_key_names_a_checkout_the_build_clones(self):
+        for name in smd._native_build_pins():
+            self.assertIn(Path("/opt/git/sigmond") / name,
+                          (smd._ONION_SRC, smd._WSJTX_SRC))

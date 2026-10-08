@@ -40,6 +40,11 @@ The traps, and how each is encoded:
   point: a fresh station runs the exact combination the nested test has
   seen.  The plan REFUSES a component that is still at its pin, and
   `smd update --unpin` is the only way off it.
+* **a natively pinned source stays pinned** — onion and wsjtx carry no
+  `.pin`: sigmond's own build checks their commit out.  The caller marks
+  them `pin_source: 'native-build'`, the plan holds them like any pin, and
+  `--unpin` does not release them.  A pull would move the source off the
+  commit the installed library was built from (onion, 2026-10-07).
 
 Every action carries a `verify`, because today's failures were uniformly
 of the form "looked fine, wasn't done" — a deploy that restarted
@@ -144,11 +149,15 @@ def plan_update(state: dict) -> list:
             # tells this apart from a pin the operator already left
             # behind by moving HEAD by hand; that case falls through to
             # a normal pull below.
-            refusals.append(Refusal(
-                name,
-                f'pinned by smd align to {pinned[:8]} — '
-                f'`smd update --unpin` releases it',
-                kind='pin'))
+            if info.get('pin_source') == 'native-build':
+                # sigmond's own build pinned this source (onion, wsjtx):
+                # `--unpin` does not release it, so the hint stays out.
+                reason = (f"pinned by sigmond's native build to "
+                          f"{pinned[:8]} (docs/native-binaries.md)")
+            else:
+                reason = (f'pinned by smd align to {pinned[:8]} — '
+                          f'`smd update --unpin` releases it')
+            refusals.append(Refusal(name, reason, kind='pin'))
             continue
         if info.get('behind'):
             detail = f'{info["behind"]} commit(s) behind upstream'
