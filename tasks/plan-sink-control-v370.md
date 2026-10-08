@@ -112,7 +112,21 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
   4. A test fails when any guest-agent argument in `firstboot-v3.sh` or `scripts/proxmox/sigmond-wizard.sh`
      holds a byte above 0x7F. An operator's typed answer can hold one too, so `gexec` must encode what it sends.
   The panel script lives on the Proxmox host, so stations receive this through `smd align`, never through
-  `smd update`. The image rig carries a logging watcher (`ga-watch.sh`) until an image holds the fix.
+  `smd update`. Until an image holds the fix, `test-update-v3.sh` holds a defective panel off during its update
+  phases and says so, and a logging watcher (`ga-watch.sh`) stands beside the base install.
+- **The guest agent's 128 MB cap covers every command run through it** (found 2026-10-08 on the rig).
+  `systemd/qemu-guest-agent-selfheal.conf` sets `MemoryMax=128M` on `qemu-guest-agent.service`, so that a runaway
+  exec buffer kills the agent instead of wedging it. Every process a `qm guest exec` starts lives under that cap.
+  One smd process needs about 55 MB. Peak anonymous memory measured in the nest under v3.70: `smd version` 56 MB,
+  `smd config render` 55, `smd admin uploader manifest --write --enable` with its migrate 80, `smd doctor` 82.
+  From v3.70 `smd admin manifest restore --apply` starts a second smd to re-render the manifest (D11), and the two
+  together pass 128 MB. The kernel kills the child, systemd then stops the whole unit, and the agent restarts
+  under its caller. No shipped tool runs a restore through the agent, and the wizard's own commands fit. The
+  margin stands near 45 MB, and nothing measures it. For v3.71:
+  1. The wizard's `gexec` starts anything heavy in a unit of its own (`systemd-run --wait --pipe`), as the update
+     test now does for the restore.
+  2. A test records the peak of each command the wizard sends through the agent.
+  3. Decide whether a killed child should take the agent with it. The cap exists for the agent's own buffer.
 - **Remote access: every install registers, and the operator holds the switch** (Michael, 2026-10-08).
   *Decided.* Registration with the gateway belongs to every install; the wizard offers no way to skip it. It is
   the price of the software and of any support, because a tunnel gives the only effective means of supporting a
