@@ -1300,3 +1300,35 @@ Read-only reads of the `grape-daily` journal, at about 03:15Z on 2026-10-07, gav
 - AC0G-B4 (`journalctl -u grape-daily --since -3d`): four days packaged and two sweep retries, `sweep: retrying incomplete day 20261003` on 10-05 and `… 20261004` on 10-06.  They confirm §10.3 item 5 on B4.  The 10-05 run ended at 07:07:19.  The 10-06 run started at 01:02:03, reached WWV 25000 of day 20261005 at 04:00:40 and finished that day at about 04:40; the sweep then re-packaged 20261004 until 08:25:20.  The 10-07 run started at 01:01:41 and still ran at 03:12, having begun SHARED 15000 at 02:45.
 - AC0G-ND: the 10-06 run lasted from 01:00:58 to 03:22:41, six of six channels, with no sweep retry.  The 10-07 run started at 01:00:09 and began WWV 20000 at 03:08:11; at about 32 minutes a channel, it ends near 04:15.
 - The main day's packaging therefore ends between about 03:20 and 04:40 UTC.  Under v3.69 the sweep no longer re-packages a finished day.  The refusal, the `nothing_ships` message, the manifest banner, the operator pages, INSTALL.md and QUICKSTART.txt now give the window as about 01:00 to 05:00 UTC, GRAPE packing for up to four hours.  The magnetometer stays at about 03:00 UTC.
+
+### 13.7 Task 10 Step 1, 2026-10-08: the neutrality proof on AC0G-B4 and AC0G-ND
+
+At 06:55Z on 2026-10-08 I took read-only `sqlite3 .backup` copies of `/var/lib/sigmond/sink.db` and
+`/var/lib/hs-uploader/watermarks.db`, plus `/etc/hs-uploader/pipelines.toml`, from AC0G-B4 (image v3.66, 67,795
+stored rows) and AC0G-ND (image v3.69, 34,675 stored rows).  The checksums matched on the devbox, and I deleted
+the station copies.  `tools/neutrality_check.py` then compared OLD (hs-uploader 3e97223, the v3.69 code) with NEW
+(8376fd8, the v3.70 head) on those copies, with the clock held at 06:55:20Z.  Nothing touched a station after the copy.
+
+- **As copied.**  Both stations: six of six pipelines agree, exit 0.  Both sat almost idle, as Task 5's carry note
+  warned: only B4's `psk-pskreporter` held a batch (39 records, rows 3094698 to 3094736, digest `307cf4d8f2ba`).
+- **With the send records moved back, in copies only.**  Two rewinds per station put `psk.spots`, `wspr.spots` and
+  `wspr.cycle` behind the stored rows: one by about half an hour, one to the oldest rows held.  Every run agreed.
+  The batches compared: ND `psk-pskreporter` 500 and 500 records, `wspr-wsprnet` 231 and 900, `wspr-wsprdaemon`
+  245 and 49; B4 `psk-pskreporter` 500 and 500, `wspr-wsprnet` 303 and 900, `wspr-wsprdaemon` 410 and 74.  OLD and
+  NEW chose the same rows, the same next send record and the same digest each time.
+- **A sink that carries the new columns.**  `hs_uploader.sink.ensure_columns` added `producer` and `local` to a copy
+  of each `sink.db` in under 10 ms.  OLD and NEW agreed again on both rewinds, and each pipeline's batch matched the
+  plain-sink run line for line.  The v3.69 readers therefore select the same rows from a widened `sink.db`.
+- **The store's version.**  `hs-uploader migrate --check` reported `version 0` with migration 1 pending on both
+  stations and left each file byte-identical.  A real `migrate` on a copy recorded version 1; a digest over every
+  row of `watermarks`, `attempts`, `deliverables` and `dead_letter` came out the same before and after.  OLD and NEW
+  then agreed on the migrated store with the widened sink, which stands for a station rolled back to v3.69.
+
+What this proof does not cover.  The tool compares what each tree would READ and hand to a transport.  The write
+side rests on unit tests: the checked send-record write, the D15 requeue and the queued-retry gate
+(`test_advance_cursor_checked.py`, `test_requeue_keeps_key.py`, `test_core_orchestration.py`).  The three
+file-tree pipelines (`grape-psws`, `mag-psws`, `heartbeat`) showed "no batch" in every run, because their source
+directories live on the station and not in a copy of two databases; both trees formed the same key and read the
+same send record for them, and no more.  Neither station held a queued retry (`deliverables` empty on both).
+
+The copies and every run's output sit in `~/v370-t10/` on the devbox.

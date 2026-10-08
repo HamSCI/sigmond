@@ -78,6 +78,12 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
   Neither has been run against this plan.
 - A daemon restart between about 02:55 and 03:10 UTC lets `mag-recorder-upload.service` ship that day's zip itself,
   outside the site sink switch. Time v3.71's restarts around it.
+- **An alarm for an RX888 that software cannot bring back** (Michael, 2026-10-08: v3.71 carries it). Where a hub
+  switches power per port, `sigmond-sdr-recover` cycles it. Where none does, a vanished card gets one journal line
+  (`bin/sigmond-sdr-recover`, "a manual replug is the only recovery") and no more: the heartbeat has no block for it
+  and nothing reads `/var/lib/sigmond/sdr-recover.json`. The heartbeat must carry the card's state (present, absent
+  since when, whether its port can switch power), and the fleetboard must show "needs a person to replug" as an
+  alarm. A schema change on both the station and wd30.
 
 ### Task 1: `hs_uploader.sink` — the sink writer moves into hs-uploader, and each row names its producer
 
@@ -8789,7 +8795,7 @@ code by `smd update --apply`, which pulls and runs each `install.sh` but never r
 bring-up would move its several psk-recorder instances to `server-raw`, and the spec keeps B4 on its present
 settings until step 4.
 
-- [ ] **Step 1: The neutrality proof on real data** (read-only; bus post first).
+- [x] **Step 1: The neutrality proof on real data** (read-only; bus post first).
   Take read-only snapshots of `/var/lib/sigmond/sink.db`, `/var/lib/hs-uploader/watermarks.db` and
   `/etc/hs-uploader/pipelines.toml` from ND and B4. Size each file first, and copy nothing over 2 GB without
   Michael's say-so. On each station, as the operator account through its Proxmox host:
@@ -8802,7 +8808,7 @@ settings until step 4.
   -C $SCR/old`) and NEW (the v3.70 head, the same way), and run Task 5's tool against each station's copies:
   ```bash
   .venv/bin/python tools/neutrality_check.py --old $SCR/old/src --new $SCR/new/src \
-      --pipelines $SCR/nd-pipelines.toml --sink $SCR/nd-sink.db --watermarks $SCR/nd-wm.db
+      --manifest $SCR/nd-pipelines.toml --sink $SCR/nd-sink.db --watermarks $SCR/nd-wm.db
   ```
   Expected: every pipeline prints `agree`, and the tool exits 0. Then make a second copy of each station's
   `sink.db`, let NEW's writer add its columns to it (`.venv/bin/python -c "import sqlite3, hs_uploader.sink as
@@ -8811,7 +8817,7 @@ settings until step 4.
   carries `producer` and `local`, as a station rolled back to v3.69 would. Also run `hs-uploader migrate --check --db
   $SCR/nd-wm.db` with NEW: it reports version 0 with migration 1 pending, and the file stays byte-identical
   (`sha256sum` before and after). Record both stations' results in spec §13 as "Task 10 Step 1".
-- [ ] **Step 2: Full suites green** in hs-uploader, sigmond and sigmond-appliance (the runners and baselines in
+- [x] **Step 2: Full suites green** in hs-uploader, sigmond and sigmond-appliance (the runners and baselines in
   Global Constraints, plus each task's additions).
 - [ ] **Step 3: Push** hs-uploader, sigmond and sigmond-appliance `main` (Michael's go). The golden VM clones each
   repo's latest `main` and fails when one sits behind its remote.
