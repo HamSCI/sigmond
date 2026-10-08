@@ -113,19 +113,37 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
      holds a byte above 0x7F. An operator's typed answer can hold one too, so `gexec` must encode what it sends.
   The panel script lives on the Proxmox host, so stations receive this through `smd align`, never through
   `smd update`. The image rig carries a logging watcher (`ga-watch.sh`) until an image holds the fix.
-- **The remote-access switch exists; three gaps around it** (Michael, 2026-10-08: some site owners will not grant
-  standing access, yet will open the door when trouble comes). On the Proxmox host, `sigmond-setup --rac-off`
-  stops and disables the tunnel and keeps its configuration, and `sigmond-setup --rac-on` brings it back with no
-  new registration. Nothing else turns it on; the wizard asks "Enable remote access? [Y/n]" at install.
-  `docs/operator/remote-access.md` section 4 says all this. Build no second switch. `smd admin rac` in the VM
-  manages a different tunnel, for stations without a Proxmox host.
-  1. The console panel prints "OFFLINE — check: journalctl -u sigmond-rac-host" whenever the unit does not run,
-     so an owner's deliberate off reads as a fault. It should say "off, by the owner's choice" for a disabled
-     unit and print the one command that turns it on, because that owner stands at the box.
-  2. Nobody has run `--rac-off` or `--rac-on` on a live station or on the rig; the operator page says so itself.
+- **Remote access: every install registers, and the operator holds the switch** (Michael, 2026-10-08).
+  *Decided.* Registration with the gateway belongs to every install; the wizard offers no way to skip it. It is
+  the price of the software and of any support, because a tunnel gives the only effective means of supporting a
+  site. The operator then controls on and off. Some owners will not grant standing access, yet will open the door
+  when trouble comes.
+  *What exists.* On the Proxmox host, `sigmond-setup --rac-off` stops and disables the tunnel and keeps its
+  configuration; `--rac-on` brings it back with no new registration. Nothing else turns it on.
+  `docs/operator/remote-access.md` section 4 says so. `smd admin rac` in the VM manages a different tunnel, for
+  stations without a Proxmox host. Today a No at the wizard skips registration, and enabling later reruns the
+  whole wizard on the host.
+  *Work that follows from the decision.*
+  1. The wizard registers first, then asks whether the tunnel stays on. Its text says what registration sends:
+     the station's name and the host's public key.
+  2. Registration becomes a step that runs alone on the host, and retries by itself until it succeeds. An install
+     with no internet, or with the gateway down, must still finish and must still end up registered.
+  3. The console panel prints "OFFLINE — check: journalctl -u sigmond-rac-host" whenever the unit does not run,
+     so a deliberate off reads as a fault. It should say "off, by the owner's choice" and print the one command
+     that turns it on.
+  4. Nobody has run `--rac-off` or `--rac-on` on a live station or on the rig; the operator page says so itself.
      The nested test should turn the tunnel off, reboot, confirm it stayed off, and turn it on.
-  3. The switch works only on the host, and the host has no keyboard after install. The owner needs the host's
-     address and its root password at the moment of trouble. The panel shows both; say so on the operator page.
+  5. The registrar answers over plain HTTP, and its reply carries the station's token. Move it to HTTPS against
+     the certificate authority the image already pins. Not yet checked: what the token alone allows.
+  *Proposed, not yet decided.* The operator asks from the VM (`smd rac on`), since the host has no keyboard and
+  the operator knows the VM. The host alone decides. For that the wizard pairs the two at every install: one SSH
+  key in the VM that can run exactly one script on the host, accepting `on <hours>`, `off` and `status`. The VM
+  must never be able to create that pairing itself. A grant made this way expires, on the host, and a reboot
+  never extends it. No party outside the station can ask. The panel, the login banner and the heartbeat show
+  "on until <time>".
+  *Open for Michael.* Which state each station class starts in (the wizard already asks "Is this a DASI
+  station?"). The default length of a grant. Whether install opens the tunnel for about a minute to prove it,
+  even for an owner who then chooses off.
 - **After a restore, `smd update` reports a station as current while it sits releases behind** (pre-tag hunt B, M1).
   `smd admin manifest restore --apply` leaves each moved checkout on a detached HEAD with no `.pin`. `cmd_update`
   finds no upstream for it, counts zero commits behind, and prints the all-clear. Report such a checkout as HELD
