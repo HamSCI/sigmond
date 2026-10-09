@@ -107,6 +107,11 @@ BLOCK_NAMES = ("versions", "doctor", "resources", "rac")
 RAC_SWITCH = "/usr/local/sbin/sigmond-rac-switch"
 RAC_STATE_FILE = "/run/sigmond/rac-state"
 
+# `status` stamps `checked_at` into the file at every run.  A stamp further
+# than this from now, on either side, means the switch did not write the
+# file it just answered about.
+RAC_STATE_MAX_AGE_SEC = 300
+
 DEFAULT_INTERVAL_SEC = 300
 
 CONFIG_PATH = "/etc/pm-heartbeat/config.toml"
@@ -217,12 +222,13 @@ def _rank(verdict) -> int:
     return PRECEDENCE.get(verdict, PRECEDENCE["INDETERMINATE"])
 
 
-def _assemble_block(name: str, checks: dict) -> dict:
+def _assemble_block(name: str, checks: dict) -> dict | None:
     """Call the block's check, wrapped: exception -> INDETERMINATE.
 
     Mirrors ``sigmond.heartbeat._assemble_block`` — a check that raises
     or was never wired must never make its block silently disappear or
-    read as healthy.
+    read as healthy.  A mapper may answer ``None`` for a block this host
+    cannot claim; ``assemble`` then leaves the block out.
     """
     fn = checks.get(name)
     if not callable(fn):
@@ -514,13 +520,19 @@ def _map_resources(raw) -> dict:
 # rac block — the operator's switch for remote access
 # ---------------------------------------------------------------------------
 
-def build_rac_raw(switch_present, run_switch_status, read_state):
+def build_rac_raw(switch_present, run_switch_status, read_state, now=None):
     """Ask the switch script for the state, then read the file it leaves.
 
     ``None`` when this host carries no switch script: the block is then not
     claimed.  The script exits 0 for on or off and 3 for "wanted on, not
     up"; all three are answers.  Any other exit raises, and so does a
     state file that names no state, so that neither can read as healthy.
+
+    The switch swallows a failed write of its state file, so `status` can
+    exit 0 and leave an OLD file in place.  The file's ``checked_at`` must
+    therefore parse and lie within ``RAC_STATE_MAX_AGE_SEC`` of ``now``
+    (default: the clock, read at call time); otherwise this raises, and the
+    block reads INDETERMINATE instead of an old answer reading as current.
     """
     if not switch_present():
         return None
@@ -536,14 +548,42 @@ def build_rac_raw(switch_present, run_switch_status, read_state):
             raw[key.strip()] = value.strip()
     if "state" not in raw:
         raise RuntimeError(f"{RAC_STATE_FILE} names no state")
+    _require_fresh(raw.get("checked_at"),
+                   _as_utc(datetime.now(timezone.utc) if now is None else now))
     return raw
 
 
-def _as_count(value) -> int:
+def _require_fresh(checked_at, now) -> None:
     try:
-        return max(int(value), 0)
+        stamped = datetime.strptime(checked_at, _EMITTED_AT_FORMAT).replace(
+            tzinfo=timezone.utc)
     except (TypeError, ValueError):
-        return 0
+        shown = "missing" if checked_at is None else repr(str(checked_at)[:40])
+        raise RuntimeError(
+            f"{RAC_STATE_FILE} carries no usable checked_at time ({shown}): "
+            f"the switch's state file may be stale") from None
+    skew = (now - stamped).total_seconds()
+    if abs(skew) > RAC_STATE_MAX_AGE_SEC:
+        raise RuntimeError(
+            f"{RAC_STATE_FILE} is stale: checked_at {checked_at} lies "
+            f"{abs(skew):.0f} s {'before' if skew > 0 else 'after'} now "
+            f"(more than {RAC_STATE_MAX_AGE_SEC} s); the switch did not "
+            f"rewrite its state file")
+
+
+def _as_count(raw, key) -> int:
+    """A count the switch wrote.  One that does not parse is UNKNOWN, and
+    raises: a zero would state a measurement the switch never made."""
+    value = raw.get(key)
+    if value is None:
+        raise ValueError(f"{key} is missing from the switch's answer")
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = -1
+    if count < 0:
+        raise ValueError(f"{key}={str(value)[:40]!r} is not a count")
+    return count
 
 
 def _map_rac(raw):
@@ -553,8 +593,8 @@ def _map_rac(raw):
     if raw is None:
         return None
     state = raw.get("state")
-    up = _as_count(raw.get("channels_up"))
-    declared = _as_count(raw.get("channels_declared"))
+    up = _as_count(raw, "channels_up")
+    declared = _as_count(raw, "channels_declared")
     registered = raw.get("registered") == "yes"
     running = raw.get("tunnel") == "running"
     data = {
@@ -704,7 +744,8 @@ def _rac_switch_present() -> bool:
 
 def _run_rac_switch_status() -> RunResult:
     proc = subprocess.run([RAC_SWITCH, "status"], capture_output=True,
-                          text=True, timeout=30, check=False)
+                          stdin=subprocess.DEVNULL, text=True, timeout=30,
+                          check=False)
     return RunResult(proc.returncode, proc.stdout, proc.stderr)
 
 

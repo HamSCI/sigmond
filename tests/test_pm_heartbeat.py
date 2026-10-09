@@ -21,7 +21,7 @@ import importlib.util
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -64,6 +64,20 @@ RAC_ON = {
 
 def rac(**changes):
     return dict(RAC_ON, **changes)
+
+
+#: The clock the rac tests read: 58 seconds after RAC_ON's `checked_at`, so a
+#: file the switch has just written reads fresh.
+RAC_NOW = datetime(2026, 10, 9, 19, 1, 0, tzinfo=timezone.utc)
+
+
+def rac_text(drop=(), **changes):
+    """RAC_ON (with changes) as the switch writes it: one key=value per line."""
+    return "".join(f"{k}={v}\n" for k, v in rac(**changes).items() if k not in drop)
+
+
+def stamp(moment):
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def rich_checks(**overrides):
@@ -396,7 +410,6 @@ RAC_CASES = [
     (rac(state="down", channels_up="0"),
      "INVALID", "wanted on, not up: the gateway accepted none of 6 channels"),
     (rac(state="sideways"), "INDETERMINATE", "the switch reported no usable state ('sideways')"),
-    (rac(channels_up="lots", channels_declared=""), "INCONCLUSIVE", "on, short of channels: 0 of 0"),
 ]
 
 
@@ -407,6 +420,42 @@ def test_rac_block_verdicts(raw, verdict, reason):
     assert (block["verdict"], block["reason"]) == (verdict, reason)
     assert set(block["data"]) == {"wish", "wish_source", "registered", "tunnel", "channels_up",
                                   "channels_declared", "since", "by"}
+
+
+def test_the_blocks_data_carries_typed_values_not_the_files_text():
+    data = pm_heartbeat._map_rac(RAC_CASES[0][0])["data"]       # the VALID, all-up case
+    assert data["registered"] is True                            # "yes" in the file
+    assert type(data["channels_up"]) is int
+    assert type(data["channels_declared"]) is int
+    assert (data["channels_up"], data["channels_declared"]) == (6, 6)
+
+
+# A count that does not parse is unknown, never a measured zero: a zero would
+# read "the gateway accepted none" (INVALID) or "short of channels", and
+# either states a measurement the switch never made.
+GARBLED = [
+    (rac(channels_up="lots", channels_declared=""), "channels_up='lots' is not a count"),
+    (rac(channels_up=""), "channels_up='' is not a count"),
+    (rac(channels_up="-2"), "channels_up='-2' is not a count"),
+    ({k: v for k, v in RAC_ON.items() if k != "channels_up"}, "channels_up is missing"),
+    (rac(channels_declared=""), "channels_declared='' is not a count"),
+    (rac(channels_declared="six"), "channels_declared='six' is not a count"),
+    (rac(state="off", wish="off", tunnel="stopped", channels_up="0", channels_declared="?"),
+     "channels_declared='?' is not a count"),                    # an operator's off included
+    (rac(channels_declared="9" * 59 + "x"),
+     "channels_declared='" + "9" * 40 + "' is not a count"),
+]
+
+
+@pytest.mark.parametrize("raw,reason_has", GARBLED,
+                         ids=[f"{c[1].split()[0].split('=')[0]}-{i}" for i, c in enumerate(GARBLED)])
+def test_a_garbled_channel_count_reads_indeterminate_never_zero(raw, reason_has):
+    envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=lambda: raw))
+    block = envelope["blocks"]["rac"]
+    assert block["verdict"] == "INDETERMINATE"
+    assert reason_has in block["reason"]
+    assert "9" * 41 not in block["reason"]                       # the value is cut at 40
+    assert envelope["rollup"]["verdict"] != "VALID"
 
 
 def test_an_operators_off_never_worsens_the_hosts_rollup():
@@ -437,9 +486,9 @@ def test_a_host_without_the_switch_script_claims_no_rac_block():
 
 
 def test_build_rac_raw_reads_the_file_the_switch_leaves():
-    text = "".join(f"{k}={v}\n" for k, v in RAC_ON.items())
+    text = rac_text()
     for rc in (0, 3):                              # 3: wanted on, not up; still an answer
-        raw = pm_heartbeat.build_rac_raw(lambda: True, lambda: rr(rc), lambda: text)
+        raw = pm_heartbeat.build_rac_raw(lambda: True, lambda: rr(rc), lambda: text, now=RAC_NOW)
         assert raw == RAC_ON
     assert raw["tier"] == "wsprdaemon (secure)"     # a value with a space and brackets
 
@@ -451,7 +500,8 @@ def test_build_rac_raw_reads_the_file_the_switch_leaves():
     (rr(0), "nonsense without an equals sign\n", "names no state"),
 ], ids=["refused", "not-runnable", "empty-file", "no-state-line"])
 def test_a_switch_that_gives_no_answer_reads_indeterminate_never_valid(status, state_text, needle):
-    check = lambda: pm_heartbeat.build_rac_raw(lambda: True, lambda: status, lambda: state_text)
+    check = lambda: pm_heartbeat.build_rac_raw(lambda: True, lambda: status, lambda: state_text,
+                                               now=RAC_NOW)
     envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=check))
     block = envelope["blocks"]["rac"]
     assert block["verdict"] == "INDETERMINATE" and needle in block["reason"]
@@ -461,9 +511,124 @@ def test_a_switch_that_gives_no_answer_reads_indeterminate_never_valid(status, s
 def test_a_state_file_that_cannot_be_read_reads_indeterminate():
     def unreadable():
         raise FileNotFoundError("/run/sigmond/rac-state")
-    check = lambda: pm_heartbeat.build_rac_raw(lambda: True, lambda: rr(0), unreadable)
+    check = lambda: pm_heartbeat.build_rac_raw(lambda: True, lambda: rr(0), unreadable, now=RAC_NOW)
     envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=check))
     assert envelope["blocks"]["rac"]["verdict"] == "INDETERMINATE"
+
+
+# --- an old state file must not read as the present -----------------------
+# The switch's write_state() swallows its own failure, so `status` can exit 0
+# with /run/sigmond unwritable and leave an OLD file in place.  The file's
+# `checked_at` is the only witness that the answer is current.
+
+def _check_on(text, now=RAC_NOW):
+    return lambda: pm_heartbeat.build_rac_raw(
+        lambda: True, lambda: rr(0), lambda: text, now=now)
+
+
+@pytest.mark.parametrize("text,needle", [
+    (rac_text(checked_at=stamp(RAC_NOW - timedelta(minutes=10))), "is stale"),
+    (rac_text(checked_at=stamp(RAC_NOW + timedelta(minutes=10))), "is stale"),
+    (rac_text(checked_at=stamp(RAC_NOW - timedelta(seconds=301))), "is stale"),
+    (rac_text(drop=("checked_at",)), "carries no usable checked_at"),
+    (rac_text(checked_at=""), "carries no usable checked_at"),
+    (rac_text(checked_at="last tuesday"), "carries no usable checked_at"),
+], ids=["ten-minutes-back", "ten-minutes-ahead", "301-seconds-back",
+        "no-checked_at", "empty-checked_at", "unparsable-checked_at"])
+def test_an_old_state_file_reads_indeterminate_though_its_state_says_on(text, needle):
+    assert "state=on" in text
+    envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=_check_on(text)))
+    block = envelope["blocks"]["rac"]
+    assert block["verdict"] == "INDETERMINATE"
+    assert needle in block["reason"]
+    assert pm_heartbeat.RAC_STATE_FILE in block["reason"]
+    assert "stale" in block["reason"]
+    assert envelope["rollup"]["verdict"] != "VALID"
+
+
+@pytest.mark.parametrize("age", [timedelta(0), timedelta(minutes=1), timedelta(seconds=299),
+                                 -timedelta(minutes=1)],
+                         ids=["now", "one-minute-old", "299-seconds-old", "one-minute-ahead"])
+def test_a_state_file_within_five_minutes_reads_as_its_state_says(age):
+    text = rac_text(state="down", tunnel="stopped", channels_up="0",
+                    checked_at=stamp(RAC_NOW - age))
+    block = pm_heartbeat.assemble(CONFIG, rich_checks(rac=_check_on(text)))["blocks"]["rac"]
+    assert block["verdict"] == "INVALID"
+    assert block["reason"] == "wanted on, not up: the tunnel service does not run"
+
+
+# --- the production wrappers and their wiring ------------------------------
+# A fake switch in tmp_path stands in for /usr/local/sbin/sigmond-rac-switch:
+# it records its argv and leaves a state file, as the real one does.
+
+def _fake_switch(tmp_path, monkeypatch, rc=0, leaves=None, executable=True):
+    argv_file, state_file = tmp_path / "argv", tmp_path / "rac-state"
+    script = tmp_path / "sigmond-rac-switch"
+    lines = ["#!/bin/sh", f"printf '%s\\n' \"$@\" >> '{argv_file}'"]
+    if leaves is not None:
+        lines.append(f"cat > '{state_file}' <<'EOF'\n{leaves}EOF")
+    lines.append(f"exit {rc}")
+    script.write_text("\n".join(lines) + "\n")
+    script.chmod(0o755 if executable else 0o644)
+    monkeypatch.setattr(pm_heartbeat, "RAC_SWITCH", str(script))
+    monkeypatch.setattr(pm_heartbeat, "RAC_STATE_FILE", str(state_file))
+    return argv_file, state_file
+
+
+def _production_rac_block(check=None):
+    """The `rac` check exactly as main() wires it, run through assemble()."""
+    check = check or pm_heartbeat.build_production_checks(
+        {"vmid": 100, "expect_cat": False})["rac"]
+    return pm_heartbeat.assemble(CONFIG, rich_checks(rac=check))
+
+
+def _now_text(**changes):
+    return rac_text(checked_at=stamp(datetime.now(timezone.utc)), **changes)
+
+
+def test_the_production_check_asks_the_switch_for_status_and_reads_its_file(tmp_path, monkeypatch):
+    argv_file, _ = _fake_switch(tmp_path, monkeypatch, rc=0, leaves=_now_text())
+    envelope = _production_rac_block()
+    block = envelope["blocks"]["rac"]
+    assert (block["verdict"], block["reason"]) == ("VALID", "on: 6 of 6 channels")
+    assert argv_file.read_text().splitlines() == ["status"]      # nothing else, ever
+
+
+def test_a_switch_that_exits_3_still_gives_its_state_through_the_production_check(
+        tmp_path, monkeypatch):
+    argv_file, _ = _fake_switch(
+        tmp_path, monkeypatch, rc=3,
+        leaves=_now_text(state="down", tunnel="stopped", channels_up="0"))
+    block = _production_rac_block()["blocks"]["rac"]
+    assert (block["verdict"], block["reason"]) == (
+        "INVALID", "wanted on, not up: the tunnel service does not run")
+    assert argv_file.read_text().splitlines() == ["status"]
+
+
+def test_a_switch_that_exits_1_reads_indeterminate_and_its_file_is_never_read(
+        tmp_path, monkeypatch):
+    argv_file, state_file = _fake_switch(tmp_path, monkeypatch, rc=1, leaves=None)
+    state_file.write_text(_now_text())                  # state=on: would read VALID if trusted
+    reads = []
+    real_read = pm_heartbeat._read_rac_state
+    monkeypatch.setattr(pm_heartbeat, "_read_rac_state",
+                        lambda: (reads.append(1), real_read())[1])
+    envelope = _production_rac_block()
+    block = envelope["blocks"]["rac"]
+    assert block["verdict"] == "INDETERMINATE" and "exited 1" in block["reason"]
+    assert reads == []
+    assert argv_file.read_text().splitlines() == ["status"]
+    assert envelope["rollup"]["verdict"] != "VALID"
+
+
+def test_a_switch_without_the_executable_bit_claims_no_block_and_never_runs(
+        tmp_path, monkeypatch):
+    argv_file, _ = _fake_switch(tmp_path, monkeypatch, rc=0, leaves=_now_text(),
+                                executable=False)
+    envelope = _production_rac_block()
+    assert "rac" not in envelope["blocks"]
+    assert not argv_file.exists()
+    assert heartbeat_schema.validate(envelope) == []
 
 
 def test_the_emitter_reads_the_keys_the_switch_writes():
@@ -475,6 +640,10 @@ def test_the_emitter_reads_the_keys_the_switch_writes():
         assert f"printf '{key}=%s\\n'" in wizard, key
     assert f"RUN_DIR=\"${{SIGMOND_RAC_RUN_DIR:-{pm_heartbeat.RAC_STATE_FILE.rsplit('/', 1)[0]}}}\"" in wizard
     assert pm_heartbeat.RAC_SWITCH == "/usr/local/sbin/sigmond-rac-switch"
+    # The wizard spells both paths on lines of their own; the emitter must name
+    # the same two.  One moved path would make every host claim no block at all.
+    assert f"RAC_STATE_FILE={pm_heartbeat.RAC_STATE_FILE}" in wizard
+    assert f"RAC_SWITCH={pm_heartbeat.RAC_SWITCH}" in wizard
 
 
 # ---------------------------------------------------------------------------

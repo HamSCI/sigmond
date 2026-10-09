@@ -1163,8 +1163,9 @@ def test_validate_accepts_a_strict_subset_of_block_names():
     apply to it without being rejected as malformed.
 
     scripts/proxmox/pm-heartbeat.py (sigmond fleet-awareness task PM-1)
-    is the first real producer that relies on this: it emits exactly
-    ``{versions, doctor, resources}`` and nothing else. This test turns
+    is the first real producer that relies on this: it emits
+    ``{versions, doctor, resources}``, plus ``rac`` on a host that carries
+    the switch script, and nothing else. This test turns
     an earlier code review's "missing block names are not flagged"
     observation into documented, tested behavior, so nobody "fixes"
     validate() into requiring the full set and silently breaks every
