@@ -1160,7 +1160,7 @@ rac_pair_verify_script(){
 main(){
     D=/etc/sigmond
     C=/var/lib/sigmond/remote-access.json
-    out=\$(ssh -n -T -i "\$D/rac-switch.key" -o BatchMode=yes -o IdentitiesOnly=yes \\
+    out=\$(ssh -n -T -F /dev/null -i "\$D/rac-switch.key" -o BatchMode=yes -o IdentitiesOnly=yes \\
               -o StrictHostKeyChecking=yes -o UserKnownHostsFile="\$D/rac-switch.known_hosts" \\
               -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=8 -o LogLevel=ERROR \\
               $RAC_PAIR_USER@$1 status 2>&1)

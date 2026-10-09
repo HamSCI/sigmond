@@ -12,7 +12,7 @@ import subprocess
 import sys
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -31,6 +31,7 @@ OFF = ("Remote access: off\n"
 DOWN = ("Remote access: wanted on, not up\n"
         "  The station has not registered yet: no gateway has answered.\n")
 HOSTKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostHostHostHostHostHostHostHostHostHostHost"
+NOW = datetime(2026, 10, 9, 20, 0, 0, tzinfo=timezone.utc)      # the banner tests' clock
 
 
 class RemoteCliTests(unittest.TestCase):
@@ -71,12 +72,28 @@ class RemoteCliTests(unittest.TestCase):
         self.assertEqual(out, OFF)
         argv, kw = self.calls[0]
         self.assertEqual(argv[-2:], ["sigmond-remote@10.99.0.1", "status"])
-        self.assertEqual(argv[:4], ["ssh", "-T", "-i", str(self.key)])
+        self.assertEqual(argv[argv.index("-i") + 1], str(self.key))
         for opt in ("BatchMode=yes", "IdentitiesOnly=yes", "StrictHostKeyChecking=yes",
                     f"UserKnownHostsFile={self.known}", "GlobalKnownHostsFile=/dev/null"):
             self.assertIn(opt, argv)
         self.assertEqual(kw["stdin"], subprocess.DEVNULL)
         self.assertEqual(kw["timeout"], 60)
+
+    def test_ssh_reads_no_config_file_and_keeps_its_timeout_and_quiet(self):
+        # A `Host *` block in an ssh config would add an identity file, SendEnv and GSSAPI
+        # to this call.  -F /dev/null stops every config file, user and system.
+        self._pair()
+        self._run("status", stdout=OFF)
+        argv = self.calls[0][0]
+        self.assertEqual(argv[:4], ["ssh", "-T", "-F", "/dev/null"])
+        self.assertIn("ConnectTimeout=8", argv)
+        self.assertIn("LogLevel=ERROR", argv)
+
+    def test_the_hosts_answer_is_decoded_leniently(self):
+        # A non-UTF-8 byte in the answer must not raise inside subprocess.run.
+        self._pair()
+        self._run("status", stdout=OFF)
+        self.assertEqual(self.calls[0][1]["errors"], "replace")
 
     def test_a_bare_smd_remote_means_status(self):
         self._pair()
@@ -119,7 +136,20 @@ class RemoteCliTests(unittest.TestCase):
         self.assertIn("holds no pairing with its Proxmox host", errs)
         self.assertIn("sigmond-setup --pair-vm", errs)
         self.assertIn("sigmond-setup --rac-off", errs)   # the switch that works meanwhile
+        self.assertIn("sigmond-setup --rac-on", errs)
         self.assertNotIn("sudo smd", errs)
+
+    def test_the_not_paired_message_leads_with_the_switch_that_works_on_any_host(self):
+        # The reader took `smd update` before the host reached v3.71.  That host knows no
+        # --pair-vm: it answers "already configured" and pairs nothing.
+        self.mark.write_text("v3.70\n")
+        _, _, errs = self._run("on")
+        self.assertIn("v3.71", errs)
+        self.assertIn("already configured", errs)
+        self.assertLess(errs.index("sigmond-setup --rac-off"), errs.index("sigmond-setup --pair-vm"))
+        self.assertLess(errs.index("sigmond-setup --rac-on"), errs.index("sigmond-setup --pair-vm"))
+        self.assertLess(errs.index("sigmond-setup --pair-vm"), errs.index("already configured"))
+        self.assertNotIn("within", errs)                 # no promise about when a host pairs
 
     def test_a_station_without_a_proxmox_host_is_pointed_at_its_own_tunnel(self):
         code, _, errs = self._run("status")
@@ -130,10 +160,29 @@ class RemoteCliTests(unittest.TestCase):
     def test_a_key_without_a_usable_known_hosts_line_counts_as_not_paired(self):
         self._pair()
         for bad in ("", "# comment only\n", "$(reboot) ssh-ed25519 AAAA\n",
-                    "host.example.org ssh-ed25519 AAAA\n", "10.99.0.1\n"):
+                    "host.example.org ssh-ed25519 AAAA\n", "10.99.0.1\n",
+                    "cafe.de ssh-ed25519 AAAA\n", "beef ssh-ed25519 AAAA\n",
+                    "... ssh-ed25519 AAAA\n", "10.99.0.1 foo bar\n",
+                    "-oProxyCommand=x ssh-ed25519 AAAA\n",
+                    "# a comment first\n10.99.0.1 ssh-ed25519 AAAA\n"):
             self.known.write_text(bad)
             self.assertEqual(self._run("status")[0], remote.EXIT_NOT_PAIRED, bad)
         self.assertEqual(self.calls, [])
+
+    def test_a_known_hosts_file_that_cannot_be_decoded_counts_as_not_paired(self):
+        self._pair()
+        self.known.write_bytes(b"10.99.0.1 ssh-ed25519 AAAA\xff\xfe\n")
+        self.assertIsNone(remote.paired_host())
+        self.assertEqual(self._run("status")[0], remote.EXIT_NOT_PAIRED)
+        self.assertEqual(self.calls, [])
+
+    def test_an_address_and_a_key_type_make_a_pairing_ipv4_or_ipv6(self):
+        for line, host in (("10.99.0.1 ssh-ed25519 AAAA\n", "10.99.0.1"),
+                           ("10.99.0.1 ssh-ed25519 AAAA host-comment\n", "10.99.0.1"),
+                           ("fd99::1 ssh-ed25519 AAAA\n", "fd99::1"),
+                           ("10.99.0.1 ecdsa-sha2-nistp256 AAAA\n", "10.99.0.1")):
+            self.known.write_text(line)
+            self.assertEqual(remote.paired_host(), host, line)
 
     # -- the host does not answer -------------------------------------------
 
@@ -143,8 +192,10 @@ class RemoteCliTests(unittest.TestCase):
             "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n"
             "Host key verification failed.\n"))
         self.assertEqual(code, remote.EXIT_UNREACHABLE)
-        self.assertIn("an sshd key this VM was not paired with", errs)
-        self.assertIn("pairs again by itself within minutes", errs)
+        self.assertIn("shows an sshd key this VM was not paired with", errs)
+        self.assertNotIn("within minutes", errs)          # true only for a host at v3.71 whose agent answers
+        self.assertIn("v3.71", errs)
+        self.assertIn("sshd key file changes", errs)
         self.assertIn("sigmond-setup --pair-vm", errs)
 
     def test_a_refused_key_names_the_repair(self):
@@ -159,8 +210,10 @@ class RemoteCliTests(unittest.TestCase):
         code, _, errs = self._run("status", rc=255,
                                   stderr="ssh: connect to host 10.99.0.1 port 22: No route to host\n")
         self.assertEqual(code, remote.EXIT_UNREACHABLE)
+        self.assertIn("could not reach the Proxmox host at 10.99.0.1", errs)
         self.assertIn("No route to host", errs)
         self.assertIn("private link", errs)
+        self.assertIn("smd remote status", errs)          # the way to ask again
 
     def test_a_host_that_never_answers_times_out_with_a_next_step(self):
         self._pair()
@@ -176,6 +229,54 @@ class RemoteCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("gave no state (exit 2)", errs)
         self.assertFalse(self.cache.exists())
+
+    def test_a_zero_status_without_a_state_is_still_a_failure(self):
+        self._pair()
+        code, out, errs = self._run("status", rc=0, stdout="something else entirely\n")
+        self.assertEqual(code, 1)
+        self.assertIn("gave no state (exit 0)", errs)
+        self.assertFalse(self.cache.exists())
+
+    def test_a_sudo_failure_on_the_host_names_the_pairing_as_the_cure(self):
+        self._pair()
+        for last in ("sudo: a password is required", "sudo: not found",
+                     "sh: 1: sudo: not found"):
+            code, _, errs = self._run("status", rc=1, stderr=f"noise first\n{last}\n")
+            self.assertEqual(code, 1, last)
+            self.assertIn("pairing account could not run the switch", errs, last)
+            self.assertIn("sigmond-setup --pair-vm", errs, last)
+            self.assertNotIn("gave no state", errs, last)
+        self.assertFalse(self.cache.exists())
+
+    def test_a_line_that_merely_mentions_sudo_is_no_sudo_failure(self):
+        self._pair()
+        code, _, errs = self._run("status", rc=1, stderr="the switch uses sudo to act\n")
+        self.assertEqual(code, 1)
+        self.assertIn("gave no state (exit 1)", errs)
+        self.assertNotIn("pairing account", errs)
+
+    def test_a_connection_that_ends_after_the_state_line_is_unreachable_but_kept(self):
+        self._pair()
+        code, out, errs = self._run("on", rc=255, stdout=ON,
+                                    stderr="Connection to 10.99.0.1 closed by remote host.\n")
+        self.assertEqual(code, remote.EXIT_UNREACHABLE)
+        self.assertEqual(out, ON)                        # the state it did print stands
+        self.assertIn("ended before its switch finished", errs)
+        self.assertEqual(json.loads(self.cache.read_text())["state"], "on")
+
+    # -- a cache write that fails ------------------------------------------------
+
+    def test_a_cache_write_that_fails_leaves_no_temp_file_and_says_so(self):
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        with mock.patch("os.replace", side_effect=OSError("disk full")):
+            code, out, errs = self._run("status", rc=0, stdout=OFF)
+        self.assertEqual(code, 0)                        # the host's status, not the cache's
+        self.assertEqual(out, OFF)
+        self.assertEqual(list(self.cache.parent.glob(".remote-access.*")), [])
+        self.assertFalse(self.cache.exists())
+        self.assertIn("banner keeps its older answer", errs)
+        self.assertIn("disk full", errs)
 
     # -- what the login banner reads -------------------------------------------
 
@@ -195,9 +296,14 @@ class RemoteCliTests(unittest.TestCase):
         self.assertEqual(remote.state_of("Remote access: online\n"), None)
         self.assertEqual(remote.state_of(""), None)
 
-    def _motd(self):
+    def _motd(self, now=NOW):
+        # The clock stands still at `now`, so an answer on file keeps the age the test gives it.
+        class Frozen(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with mock.patch.object(remote, "datetime", Frozen), contextlib.redirect_stdout(out):
             code = remote.cmd_remote(types.SimpleNamespace(remote_command="motd"),
                                      run=lambda *a, **k: self.fail("the banner must never ask the host"))
         self.assertEqual(code, 0)
@@ -218,6 +324,62 @@ class RemoteCliTests(unittest.TestCase):
         ):
             self.cache.write_text(json.dumps({"state": state, "checked_at": "2026-10-09T18:22:05Z"}))
             self.assertEqual(self._motd(), want)
+
+    def test_the_banner_takes_only_a_state_and_a_time_it_can_read(self):
+        # Any member of group `sigmond` can write the cache file.
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        for doc in ({"state": "unknown", "checked_at": "2026-10-09T18:22:05Z"},
+                    {"state": None, "checked_at": "2026-10-09T18:22:05Z"},
+                    {"state": "on", "checked_at": "yesterday"},
+                    {"state": "on", "checked_at": "2026-10-09 18:22:05"},
+                    {"state": "on", "checked_at": 20261009},
+                    {"state": "on", "checked_at": None},
+                    {"state": ["on"], "checked_at": "2026-10-09T18:22:05Z"}):
+            self.cache.write_text(json.dumps(doc))
+            self.assertIn("state not read yet", self._motd(), doc)
+
+    def test_an_answer_up_to_seven_hours_old_prints_as_a_fresh_one(self):
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text(json.dumps({"state": "on", "checked_at": "2026-10-09T18:22:05Z"}))
+        want = "Remote access: on (as the host reported 2026-10-09 18:22 UTC).  Turn it off:  smd remote off\n"
+        then = datetime(2026, 10, 9, 18, 22, 5, tzinfo=timezone.utc)
+        for hours in (0, 6, 7):                           # seven hours exactly still counts
+            self.assertEqual(self._motd(then + timedelta(hours=hours)), want, hours)
+
+    def test_an_answer_over_seven_hours_old_says_how_old_and_how_to_ask_again(self):
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        for state, word in (("on", "on"), ("off", "OFF"), ("down", "wanted on, NOT UP")):
+            self.cache.write_text(json.dumps({"state": state, "checked_at": "2026-10-09T18:22:05Z"}))
+            line = self._motd(datetime(2026, 10, 10, 2, 22, 5, tzinfo=timezone.utc))     # 8 h on
+            self.assertIn("8 hours old", line)
+            self.assertIn(word, line)
+            self.assertIn("2026-10-09 18:22 UTC", line)
+            self.assertTrue(line.endswith("Ask again:  smd remote status\n"), line)
+            self.assertEqual(line.count("\n"), 1)                                        # one line
+        # whole hours: seven hours and a second is "7", twenty-six hours and a half is "26"
+        self.assertIn("7 hours old", self._motd(datetime(2026, 10, 10, 1, 22, 6, tzinfo=timezone.utc)))
+        self.assertIn("26 hours old", self._motd(datetime(2026, 10, 10, 20, 52, 5, tzinfo=timezone.utc)))
+
+    def test_an_answer_dated_ahead_of_the_clock_is_marked(self):
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text(json.dumps({"state": "on", "checked_at": "2026-10-09T18:22:05Z"}))
+        line = self._motd(datetime(2026, 10, 9, 10, 0, 0, tzinfo=timezone.utc))
+        self.assertIn("future", line)
+        self.assertIn("2026-10-09 18:22 UTC", line)
+        self.assertTrue(line.endswith("Ask again:  smd remote status\n"), line)
+
+    def test_cmd_motd_takes_the_time_it_is_given(self):
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text(json.dumps({"state": "off", "checked_at": "2026-10-09T18:22:05Z"}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(remote.cmd_motd(now=datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)), 0)
+        self.assertIn("53 hours old", out.getvalue())
 
     def test_the_banner_survives_a_cache_it_cannot_read(self):
         self._pair()

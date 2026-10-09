@@ -260,6 +260,14 @@ def test_the_verify_script_passes_only_on_an_answer_from_the_switch(tmp_path, ss
                  "GlobalKnownHostsFile=/dev/null", "sigmond-remote@10.99.0.1 status"):
         assert must in args, must
     assert re.search(r"(^| )-n( |$)", args), "ssh must take -n"
+    assert "-F /dev/null" in args, "ssh must read no config file"
+
+
+def test_the_proof_travels_the_path_smd_remote_travels():
+    # smd remote runs `ssh -T -F /dev/null -i ...` (sigmond.commands.remote.ssh_argv).  A `Host *`
+    # block in an ssh config would add an identity file, SendEnv and GSSAPI to one call and
+    # not the other, so the pairing's proof ignores every config file too.
+    assert "ssh -n -T -F /dev/null -i " in verify_script()
 
 
 def test_a_refused_request_shows_why_in_the_failure_output(tmp_path):
