@@ -948,7 +948,7 @@ RACSWEOF
     # LogLevelMax and SyslogLevel keep systemd's own "Starting", "Started" and
     # "Deactivated" lines out of the journal: at one try in ten minutes they
     # would bury the one line the script writes when its reason changes.
-    cat > /etc/systemd/system/sigmond-rac-register.service <<'RACREGSVCEOF' || return 1
+    cat > /etc/systemd/system/sigmond-rac-register.service <<'RACREGSVCEOF'
 [Unit]
 Description=Sigmond remote access: register with the gateway, then bring the tunnel up if wanted
 [Service]
@@ -958,7 +958,8 @@ LogLevelMax=notice
 SyslogLevel=notice
 ExecStart=/usr/local/sbin/sigmond-setup --rac-retry
 RACREGSVCEOF
-    cat > /etc/systemd/system/sigmond-rac-register.timer <<'RACREGTMREOF' || return 1
+    [ $? -eq 0 ] || return 1
+    cat > /etc/systemd/system/sigmond-rac-register.timer <<'RACREGTMREOF'
 [Unit]
 Description=Sigmond remote access: retry the gateway registration until it succeeds
 [Timer]
@@ -968,9 +969,10 @@ RandomizedDelaySec=60
 [Install]
 WantedBy=timers.target
 RACREGTMREOF
+    [ $? -eq 0 ] || return 1
     # The pairing's re-assertion: after every boot, four times a day, and
     # whenever this host's sshd key changes (an identity restore does that).
-    cat > /etc/systemd/system/sigmond-rac-pair.service <<'RACPAIRSVCEOF' || return 1
+    cat > /etc/systemd/system/sigmond-rac-pair.service <<'RACPAIRSVCEOF'
 [Unit]
 Description=Sigmond remote access: re-assert the pairing between this host and its decoder VM
 After=pve-guests.service
@@ -979,7 +981,8 @@ Type=oneshot
 TimeoutStartSec=600
 ExecStart=/usr/local/sbin/sigmond-setup --pair-vm
 RACPAIRSVCEOF
-    cat > /etc/systemd/system/sigmond-rac-pair.timer <<'RACPAIRTMREOF' || return 1
+    [ $? -eq 0 ] || return 1
+    cat > /etc/systemd/system/sigmond-rac-pair.timer <<'RACPAIRTMREOF'
 [Unit]
 Description=Sigmond remote access: re-assert the VM pairing after boot and four times a day
 [Timer]
@@ -988,7 +991,8 @@ OnUnitInactiveSec=6h
 [Install]
 WantedBy=timers.target
 RACPAIRTMREOF
-    cat > /etc/systemd/system/sigmond-rac-pair.path <<'RACPAIRPATHEOF' || return 1
+    [ $? -eq 0 ] || return 1
+    cat > /etc/systemd/system/sigmond-rac-pair.path <<'RACPAIRPATHEOF'
 [Unit]
 Description=Sigmond remote access: re-assert the VM pairing when this host's sshd key changes
 [Path]
@@ -997,6 +1001,7 @@ Unit=sigmond-rac-pair.service
 [Install]
 WantedBy=paths.target
 RACPAIRPATHEOF
+    [ $? -eq 0 ] || return 1
     # A reload that fails costs nothing: `systemctl enable` reloads by itself.
     # The switch stands, so say so and return 0.  Plain echo: `say` belongs to
     # the wizard, and rac_retry replaces it.
