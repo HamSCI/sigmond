@@ -134,3 +134,33 @@ def test_planner_is_unchanged_when_nothing_missed(tmp_path):
     log.write_text("")
 
     assert profiles_for_planning(log) == list(FFT_WISDOM_PROFILES)
+
+
+# ── input-destroying channel outputs ─────────────────────────────────────
+#
+# ka9q-radio bc224260 (2026-10-07) plans each channel's output transform
+# with FFTW_DESTROY_INPUT and logs it as cdb<N>.  Wisdom for cob<N> does
+# not satisfy that request, so every cob size needs a cdb twin, and the
+# fft.log reader must accept the `d` placement letter or the miss never
+# reaches the planner.  Observed on DP0GVN 2026-10-08: 26 cdb misses.
+
+def test_every_channel_output_size_has_an_input_destroying_twin():
+    cob = [p for p in FFT_WISDOM_PROFILES if p.startswith('cob')]
+    missing = ['cdb' + p[3:] for p in cob if 'cdb' + p[3:] not in FFT_WISDOM_PROFILES]
+
+    assert not missing, f"current radiod will miss these and run on FFTW_ESTIMATE: {missing}"
+
+
+def test_input_destroying_misses_are_read_back(tmp_path):
+    log = tmp_path / "fft.log"
+    log.write_text("cdb1200\ncob1200\ncdb1200\nrdb640\n")
+
+    assert plans_from_fft_log(log) == ['cdb1200', 'cob1200', 'rdb640']
+
+
+def test_the_placement_letter_is_still_checked(tmp_path):
+    """Accepting `d` must not mean accepting any letter."""
+    log = tmp_path / "fft.log"
+    log.write_text("cqb1200\ncdb1200\n")
+
+    assert plans_from_fft_log(log) == ['cdb1200']
