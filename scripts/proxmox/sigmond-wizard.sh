@@ -590,6 +590,9 @@ RAC_SWITCH=/usr/local/sbin/sigmond-rac-switch
 RAC_STATE_FILE=/run/sigmond/rac-state
 rac_install_host_files(){
     # Unlink before writing: a copy that runs at this moment keeps its file.
+    # The working copy waits under a second name, a hard link to the same file,
+    # until the new one proves whole (rac_switch_settle, below).
+    ln -f /usr/local/sbin/sigmond-rac-switch /usr/local/sbin/sigmond-rac-switch.old 2>/dev/null
     rm -f /usr/local/sbin/sigmond-rac-switch
     cat > /usr/local/sbin/sigmond-rac-switch <<'RACSWEOF'
 #!/bin/bash
@@ -862,8 +865,24 @@ print_state
 [ "$STATE" = down ] && exit 3
 exit 0
 RACSWEOF
+    rac_switch_settle $? || return 1
     chmod 755 /usr/local/sbin/sigmond-rac-switch || return 1
     bash -n /usr/local/sbin/sigmond-rac-switch
+}
+
+# rac_install_host_files hands this the status of its write.  The new switch
+# stands when that status reads 0, the file takes mode 755, it parses, and its
+# last line reads `exit 0`: a copy cut short parses too, and only the last line
+# shows the cut.  Otherwise the working copy comes back, or, on a first
+# install, the broken file goes.  Either way this returns 1.
+rac_switch_settle(){
+    if [ "$1" = 0 ] && chmod 755 "$RAC_SWITCH" \
+            && [ "$(tail -n 1 "$RAC_SWITCH")" = "exit 0" ] && bash -n "$RAC_SWITCH"; then
+        rm -f "$RAC_SWITCH.old"
+        return 0
+    fi
+    if [ -e "$RAC_SWITCH.old" ]; then mv -f "$RAC_SWITCH.old" "$RAC_SWITCH"; else rm -f "$RAC_SWITCH"; fi
+    return 1
 }
 
 # ── RAC on/off switches (no wizard rerun needed) ────────────────────────────

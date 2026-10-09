@@ -9,6 +9,7 @@ directory stands in for the Proxmox host: stub `systemctl`, `curl` and
 import fcntl
 import os
 import re
+import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -459,3 +460,154 @@ def test_the_switch_installs_from_the_wizard_as_an_ascii_script():
     assert "rm -f /usr/local/sbin/sigmond-rac-switch\n" in fn
     assert "chmod 755 /usr/local/sbin/sigmond-rac-switch" in fn
     assert WIZARD.index("rac_install_host_files(){") < WIZARD.index('case "${1:-}" in')
+
+
+# -- the installer keeps the working switch until the new one proves whole -----------
+#
+# A failed write must not cost the station the switch it had.  The tests cut
+# rac_install_host_files and its helper out of the wizard, point every path in
+# them at a scratch directory, and put a `cat` first on PATH that goes wrong
+# in the way CAT_MODE says.
+
+CAT = r"""#!/bin/bash
+# stub: a cat whose write goes wrong.  $CAT_MODE says how; no mode, a real cat.
+case "$CAT_MODE" in
+    fail)    "$REAL_CAT" > /dev/null; exit 1 ;;            # disk full: nothing written
+    refused) "$REAL_CAT"; exit 1 ;;                        # the whole body, and a bad status
+    short)   head -c "$CAT_BYTES"; exit 0 ;;               # cut short, and a good status
+    garbled) "$REAL_CAT" > /dev/null; printf 'if [\nexit 0\n'; exit 0 ;;   # ends right, does not parse
+esac
+exec "$REAL_CAT" "$@"
+"""
+CHMOD = '#!/bin/bash\n# stub: a chmod that refuses when CHMOD_FAILS is set\n[ -n "$CHMOD_FAILS" ] && exit 1\nexec "$REAL_CHMOD" "$@"\n'
+WORKING = "#!/bin/bash\necho the switch that works\nexit 0\n"
+
+
+def installer_text(target: Path) -> str:
+    """rac_install_host_files and the helper after it, with every path moved to `target`."""
+    i = WIZARD.index("RAC_SWITCH=/usr/local/sbin/sigmond-rac-switch\n")
+    j = WIZARD.index("# ── RAC on/off switches", i)
+    return WIZARD[i:j].replace("/usr/local/sbin/sigmond-rac-switch", str(target))
+
+
+def run_installer(tmp_path, *, old=True, mode=None, nbytes=None, chmod_fails=False):
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    for name, body in (("cat", CAT), ("chmod", CHMOD)):
+        (stub / name).write_text(body)
+        (stub / name).chmod(0o755)
+    target = tmp_path / "sigmond-rac-switch"
+    if old:
+        target.write_text(WORKING)
+        target.chmod(0o755)
+    (tmp_path / "installer.sh").write_text(installer_text(target))
+    env = {"PATH": f"{stub}:{os.environ['PATH']}", "REAL_CAT": shutil.which("cat"),
+           "REAL_CHMOD": shutil.which("chmod")}
+    if chmod_fails:
+        env["CHMOD_FAILS"] = "1"
+    if mode:
+        env["CAT_MODE"] = mode
+    if nbytes is not None:
+        env["CAT_BYTES"] = str(nbytes)
+    r = subprocess.run(["bash", "-c", f"set -u; source {tmp_path}/installer.sh; rac_install_host_files"],
+                       capture_output=True, text=True, env=env, timeout=60)
+    return r, target, target.with_name(target.name + ".old")
+
+
+CUTS = {                                         # where a short write stops, from the end
+    "half": lambda n: n // 2,
+    "a-screen-short": lambda n: n - 1000,
+    "before-the-last-line": lambda n: n - len("exit 0\n"),
+    "inside-the-last-line": lambda n: n - 3,
+}
+
+
+def test_the_switch_ends_on_the_line_the_installer_looks_for():
+    assert switch_text().splitlines()[-1] == "exit 0"
+
+
+def test_a_good_write_replaces_the_switch_and_leaves_nothing_beside_it(tmp_path):
+    r, target, aside = run_installer(tmp_path)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert target.read_text() == switch_text()
+    assert oct(target.stat().st_mode & 0o777) == "0o755"
+    assert not aside.exists()
+
+
+@pytest.mark.parametrize("mode,cut", [("fail", None), ("refused", None), ("garbled", None)]
+                         + [("short", c) for c in CUTS],
+                         ids=["cat-fails", "cat-reports-failure-after-a-whole-write",
+                              "does-not-parse"] + [f"short-{c}" for c in CUTS])
+def test_a_write_that_goes_wrong_puts_the_working_switch_back_and_fails(tmp_path, mode, cut):
+    n = len(switch_text().encode())
+    r, target, aside = run_installer(tmp_path, mode=mode, nbytes=CUTS[cut](n) if cut else None)
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert target.read_text() == WORKING
+    assert os.access(target, os.X_OK)
+    assert not aside.exists()
+
+
+def test_a_switch_that_cannot_be_made_executable_puts_the_working_one_back(tmp_path):
+    r, target, aside = run_installer(tmp_path, chmod_fails=True)
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert target.read_text() == WORKING
+    assert os.access(target, os.X_OK)
+    assert not aside.exists()
+
+
+@pytest.mark.parametrize("mode", ["fail", "refused", "garbled"])
+def test_a_first_install_that_goes_wrong_leaves_no_broken_switch_behind(tmp_path, mode):
+    r, target, aside = run_installer(tmp_path, old=False, mode=mode)
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert not target.exists() and not aside.exists()
+
+
+# -- on waits for the channels, step by step -----------------------------------------
+
+CURL_SEQ = r"""#!/bin/bash
+# stub: frpc's admin API, answering from a sequence.  Every call takes the next
+# number in $HOSTDIR/channels.seq as the count of running proxies; the last repeats.
+read -r -a all < "$HOSTDIR/channels.seq"
+i=$(cat "$HOSTDIR/channels.pos" 2>/dev/null || echo 0)
+echo $((i + 1)) > "$HOSTDIR/channels.pos"
+n=${all[$i]:-${all[-1]}}
+printf '{"tcp":['
+for k in $(seq 1 "$n"); do printf '{"name":"p%s","status":"running"},' "$k"; done
+printf '{"name":"x","status":"new"}]}\n'
+"""
+SLEEP_LOG = '#!/bin/sh\necho "$*" >> "$HOSTDIR/sleep.calls"\n'
+
+
+def host_that_climbs(tmp_path, answers, **kw):
+    """A host whose gateway accepts channels as the sequence says, one answer per look."""
+    h = Host(tmp_path, wish="off", **kw)
+    (tmp_path / "channels.seq").write_text(" ".join(str(a) for a in answers))
+    for name, body in (("curl", CURL_SEQ), ("sleep", SLEEP_LOG)):
+        (tmp_path / "bin" / name).write_text(body)
+        (tmp_path / "bin" / name).chmod(0o755)
+    return h
+
+
+def test_on_waits_until_the_gateway_has_accepted_every_channel(tmp_path):
+    h = host_that_climbs(tmp_path, [0, 0, 6])
+    r = h.run("on")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "The gateway accepted 6 of 6 channels" in r.stdout
+    assert len(h.calls("sleep")) >= 2
+
+
+def test_on_does_not_settle_for_the_channels_up_at_the_first_look(tmp_path):
+    h = host_that_climbs(tmp_path, [4, 4, 6])
+    r = h.run("on")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "The gateway accepted 6 of 6 channels" in r.stdout
+    assert "4 of 6" not in r.stdout
+    assert h.state()["channels_up"] == "6"
+
+
+def test_on_waits_the_whole_time_it_is_given_and_no_longer(tmp_path):
+    h = host_that_climbs(tmp_path, [0])
+    r = h.run("on", env={"SIGMOND_RAC_WAIT_S": "20", "SIGMOND_RAC_WAIT_STEP": "5"})
+    assert r.returncode == 3
+    assert DOWN in r.stdout.splitlines()
+    assert h.calls("sleep") == ["5"] * 4           # WAIT_S / WAIT_STEP steps of WAIT_STEP
