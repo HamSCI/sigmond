@@ -505,6 +505,9 @@ exec "$REAL_CAT" "$@"
 CHMOD = '#!/bin/bash\n# stub: a chmod that refuses when CHMOD_FAILS is set\n[ -n "$CHMOD_FAILS" ] && exit 1\nexec "$REAL_CHMOD" "$@"\n'
 INSTALLER_SYSTEMCTL = "#!/bin/sh\n# stub: the installer reloads systemd; the test touches none\nexit ${SYSTEMCTL_RC:-0}\n"
 WORKING = "#!/bin/bash\necho the switch that works\nexit 0\n"
+# every unit the installer writes: the retry pair and the pairing's three
+HOST_UNITS = ["sigmond-rac-pair.path", "sigmond-rac-pair.service", "sigmond-rac-pair.timer",
+              "sigmond-rac-register.service", "sigmond-rac-register.timer"]
 
 
 def installer_text(target: Path) -> str:
@@ -568,8 +571,7 @@ def test_a_good_write_replaces_the_switch_and_leaves_nothing_beside_it(tmp_path)
     assert target.read_text() == switch_text()
     assert oct(target.stat().st_mode & 0o777) == "0o755"
     assert not aside.exists()
-    assert sorted(f.name for f in (tmp_path / "units").iterdir()) == [
-        "sigmond-rac-register.service", "sigmond-rac-register.timer"]
+    assert sorted(f.name for f in (tmp_path / "units").iterdir()) == HOST_UNITS
 
 
 def test_the_retry_service_keeps_systemds_own_lines_out_of_the_journal(tmp_path):
@@ -585,8 +587,10 @@ def test_the_retry_service_keeps_systemds_own_lines_out_of_the_journal(tmp_path)
 
 @pytest.mark.parametrize("fault", [
     {"units": "file"}, {"blocked": "sigmond-rac-register.service"},
-    {"blocked": "sigmond-rac-register.timer"}],
-    ids=["no-units-directory", "service-unit-unwritable", "timer-unit-unwritable"])
+    {"blocked": "sigmond-rac-register.timer"}, {"blocked": "sigmond-rac-pair.service"},
+    {"blocked": "sigmond-rac-pair.timer"}, {"blocked": "sigmond-rac-pair.path"}],
+    ids=["no-units-directory", "service-unit-unwritable", "timer-unit-unwritable",
+         "pair-service-unwritable", "pair-timer-unwritable", "pair-path-unwritable"])
 def test_a_unit_that_cannot_be_written_fails_the_installer(tmp_path, fault):
     r, target, aside = run_installer(tmp_path, **fault)
     assert r.returncode == 1, (r.stdout, r.stderr)
@@ -600,8 +604,7 @@ def test_a_systemd_that_will_not_reload_does_not_fail_the_installer(tmp_path):
     assert "daemon-reload" in r.stderr and r.stderr.count("\n") == 1
     assert target.read_text() == switch_text()
     assert oct(target.stat().st_mode & 0o777) == "0o755"
-    assert sorted(f.name for f in (tmp_path / "units").iterdir()) == [
-        "sigmond-rac-register.service", "sigmond-rac-register.timer"]
+    assert sorted(f.name for f in (tmp_path / "units").iterdir()) == HOST_UNITS
 
 
 @pytest.mark.parametrize("mode,cut", [("fail", None), ("refused", None), ("garbled", None)]

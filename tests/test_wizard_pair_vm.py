@@ -1,0 +1,404 @@
+"""The pairing: the decoder VM asks, the Proxmox host alone acts
+(tasks/plan-remote-access.md section 2).
+
+`sigmond-setup --pair-vm` gives the VM one ssh key, and gives that key one
+thing it can run on the host: sigmond-rac-switch, with one of its three words.
+These tests run the wizard's own functions, cut out of the shipped script by
+name.  The two scripts the host sends into the guest run here for real, in a
+scratch directory.  The rig proves the rest against a real sshd and a real
+sudo (sigmond-appliance test-nested-v3.sh).
+"""
+import base64
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import textwrap
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+WIZARD = REPO / "scripts" / "proxmox" / "sigmond-wizard.sh"
+TEXT = WIZARD.read_text()
+
+HOSTKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostHostHostHostHostHostHostHostHostHostHost"
+VMKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVm"
+PAIR_FUNCS = ("rac_pair_key_ok", "rac_have_sudo", "rac_pair_sudoers", "rac_pair_authorized_line",
+              "rac_pair_guest_script", "rac_pair_verify_script", "rac_pair_vm")
+VISUDO = shutil.which("visudo") or ("/usr/sbin/visudo" if os.path.exists("/usr/sbin/visudo") else None)
+
+
+def shell_func(name: str) -> str:
+    out, keep = [], False
+    for ln in TEXT.splitlines(True):
+        if ln.startswith(f"{name}(){{") or ln.startswith(f"{name}() {{"):
+            keep = True
+        if keep:
+            out.append(ln)
+            if ln.rstrip() == "}" or (len(out) == 1 and ln.rstrip().endswith("}")):
+                break
+    assert out, f"{name} not found in the wizard"
+    return "".join(out)
+
+
+def heredoc(path: str) -> str:
+    m = re.search(r"cat > %s <<'([A-Z]+)'[^\n]*\n(.*?)\n\1\n" % re.escape(path), TEXT, re.S)
+    assert m, f"the wizard writes no {path}"
+    return m.group(2) + "\n"
+
+
+PRELUDE = textwrap.dedent("""
+    set -u
+    RAC_SWITCH=/usr/local/sbin/sigmond-rac-switch
+    RAC_PAIR_USER=sigmond-remote
+    RAC_PAIR_FAIL=""
+""")
+
+
+def bash(script, env=None, **kw):
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                          env=dict(os.environ, **(env or {})), **kw)
+
+
+def funcs(*names):
+    return PRELUDE + "".join(shell_func(n) for n in names)
+
+
+# -- the key line: one key, one script ----------------------------------------------
+
+def test_the_key_line_restricts_the_key_to_the_switch_and_to_the_vms_address():
+    r = bash(funcs("rac_pair_key_ok", "rac_pair_authorized_line")
+             + f"rac_pair_authorized_line 10.99.0.2 '{VMKEY}'\n")
+    assert r.stdout == ('restrict,from="10.99.0.2",command="sudo -n /usr/local/sbin/sigmond-rac-switch" '
+                        f"{VMKEY} sigmond-rac-switch\n")
+
+
+BAD_KEYS = [
+    "", "ssh-ed25519", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7" + "A" * 60,
+    VMKEY + ' x" command="/bin/sh', VMKEY + "\n" + VMKEY, "no-pty " + VMKEY,
+    "ssh-ed25519 AAAA\u00c3\u00a2\u00c2\u0080\u00c2\u0094" + "A" * 60,     # mojibake from the agent
+    "ssh-ed25519 " + "A" * 300,
+]
+
+
+@pytest.mark.parametrize("key", BAD_KEYS, ids=range(len(BAD_KEYS)))
+def test_anything_but_one_ed25519_public_key_writes_no_key_line(key):
+    r = bash(funcs("rac_pair_key_ok", "rac_pair_authorized_line")
+             + 'rac_pair_authorized_line 10.99.0.2 "$KEY"; echo "rc=$?"\n', env={"KEY": key})
+    assert r.stdout == "rc=1\n"
+
+
+# -- the sudoers lines: one account, one script, no argument ---------------------------
+
+def test_the_sudoers_lines_allow_the_switch_with_no_argument_and_keep_one_variable():
+    out = bash(funcs("rac_pair_sudoers") + "rac_pair_sudoers\n").stdout
+    rules = [ln for ln in out.splitlines() if ln and not ln.startswith("#")]
+    assert rules == [
+        "Defaults:sigmond-remote env_reset",
+        'Defaults:sigmond-remote env_keep = "SSH_ORIGINAL_COMMAND"',
+        "Defaults:sigmond-remote !requiretty",
+        'sigmond-remote ALL=(root) NOPASSWD: /usr/local/sbin/sigmond-rac-switch ""',
+    ]
+
+
+@pytest.mark.skipif(VISUDO is None, reason="needs visudo")
+def test_visudo_accepts_the_sudoers_lines(tmp_path):
+    f = tmp_path / "sigmond-remote"
+    f.write_text(bash(funcs("rac_pair_sudoers") + "rac_pair_sudoers\n").stdout)
+    f.chmod(0o440)
+    r = subprocess.run([VISUDO, "-c", "-q", "-f", str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+# -- what the host sends into the guest ----------------------------------------------------
+
+def guest_script(host="10.99.0.1", key=HOSTKEY):
+    return bash(funcs("rac_pair_guest_script") + f"rac_pair_guest_script '{host}' '{key}'\n").stdout
+
+
+def sandbox(tmp_path, script):
+    """Run a guest script against a scratch /etc/sigmond; chown needs root, so stub it."""
+    d, m, b = tmp_path / "etc-sigmond", tmp_path / "motd.d", tmp_path / "bin"
+    for p in (m, b):
+        p.mkdir(exist_ok=True)
+    (b / "chown").write_text("#!/bin/sh\nexit 0\n")
+    (b / "chown").chmod(0o755)
+    script = script.replace("D=/etc/sigmond\n", f"D={d}\n").replace("M=/etc/update-motd.d\n", f"M={m}\n")
+    script = script.replace("C=/var/lib/sigmond/remote-access.json\n", f"C={tmp_path}/cache/remote-access.json\n")
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
+    return r, d, m
+
+
+def test_every_byte_sent_into_the_guest_is_ascii():
+    # Proxmox sends a guest-agent request that holds a non-ASCII character
+    # short, and about one time in six the agent then answers nothing more.
+    for script in (guest_script(),
+                   bash(funcs("rac_pair_verify_script") + "rac_pair_verify_script 10.99.0.1\n").stdout):
+        assert script and all(ord(c) < 128 for c in script)
+    body = "".join(shell_func(n) for n in PAIR_FUNCS)
+    assert all(ord(c) < 128 for c in body), "a pairing function holds a non-ASCII byte"
+    assert body.count("| base64 -w0) | base64 -d | bash") == 2      # both scripts travel encoded
+
+
+def test_the_guest_script_makes_a_root_only_key_and_pins_the_host(tmp_path):
+    r, d, m = sandbox(tmp_path, guest_script())
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert stat.S_IMODE((d / "rac-switch.key").stat().st_mode) == 0o600
+    assert (d / "rac-switch.key.pub").read_text().startswith("ssh-ed25519 ")
+    assert (d / "rac-switch.known_hosts").read_text() == f"10.99.0.1 {HOSTKEY}\n"
+    hook = (m / "72-sigmond-remote").read_text()
+    assert "smd remote motd" in hook and os.access(m / "72-sigmond-remote", os.X_OK)
+
+
+def test_a_second_run_keeps_the_key_and_takes_up_a_new_host_key(tmp_path):
+    sandbox(tmp_path, guest_script())
+    first = (tmp_path / "etc-sigmond" / "rac-switch.key.pub").read_text()
+    restored = HOSTKEY.replace("Host", "Rest")              # an identity restore changed it
+    r, d, _ = sandbox(tmp_path, guest_script(key=restored))
+    assert r.returncode == 0
+    assert (d / "rac-switch.key.pub").read_text() == first
+    assert (d / "rac-switch.known_hosts").read_text() == f"10.99.0.1 {restored}\n"
+
+
+def test_half_a_key_pair_gets_replaced_by_a_whole_one(tmp_path):
+    sandbox(tmp_path, guest_script())
+    d = tmp_path / "etc-sigmond"
+    (d / "rac-switch.key.pub").unlink()
+    r, d, _ = sandbox(tmp_path, guest_script())
+    assert r.returncode == 0
+    pub = subprocess.run(["ssh-keygen", "-y", "-f", str(d / "rac-switch.key")],
+                         capture_output=True, text=True).stdout.split()[:2]
+    assert (d / "rac-switch.key.pub").read_text().split()[:2] == pub
+
+
+VERIFY_CASES = [
+    (0, "Remote access: on\n  ...\n", 0, "on"),
+    (0, "Remote access: off\n  ...\n", 0, "off"),
+    (3, "Remote access: wanted on, not up\n  ...\n", 0, "down"),
+    (255, "Host key verification failed.\n", 1, None),
+    (255, "sigmond-remote@10.99.0.1: Permission denied (publickey).\n", 1, None),
+    (2, "sigmond-rac-switch: refused.\n", 1, None),
+    (1, "Remote access: on\n", 1, None),              # the right words, the wrong exit
+    (0, "something else entirely\n", 1, None),
+]
+
+
+@pytest.mark.parametrize("ssh_rc,ssh_out,want_rc,want_state", VERIFY_CASES,
+                         ids=[c[3] or f"rc{c[0]}-{i}" for i, c in enumerate(VERIFY_CASES)])
+def test_the_verify_script_passes_only_on_an_answer_from_the_switch(tmp_path, ssh_rc, ssh_out,
+                                                                    want_rc, want_state):
+    script = bash(funcs("rac_pair_verify_script") + "rac_pair_verify_script 10.99.0.1\n").stdout
+    (tmp_path / "bin").mkdir()
+    ssh = tmp_path / "bin" / "ssh"
+    (tmp_path / "ssh.out").write_text(ssh_out)
+    ssh.write_text(f"#!/bin/bash\necho \"$*\" > {tmp_path}/ssh.args\ncat {tmp_path}/ssh.out\nexit {ssh_rc}\n")
+    ssh.chmod(0o755)
+    r, _, _ = sandbox(tmp_path, script)
+    assert r.returncode == want_rc, r.stdout + r.stderr
+    cache = tmp_path / "cache" / "remote-access.json"
+    if want_state is None:
+        assert not cache.exists()
+    else:
+        doc = json.loads(cache.read_text())
+        assert doc["state"] == want_state
+        assert re.fullmatch(r"20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ", doc["checked_at"])
+    args = (tmp_path / "ssh.args").read_text()
+    for must in ("BatchMode=yes", "IdentitiesOnly=yes", "StrictHostKeyChecking=yes",
+                 "GlobalKnownHostsFile=/dev/null", "sigmond-remote@10.99.0.1 status"):
+        assert must in args, must
+
+
+# -- the whole pairing, with the host's commands stubbed ---------------------------------------
+
+def pair(tmp_path, *, slash30="10.99.0.1/30", agent=0, sudo="yes", apt_installs=False,
+         vmkey=VMKEY, gexec_rcs="0 0", install_rc=0, hostpub=HOSTKEY + " root@pm\n", user_exists=False):
+    (tmp_path / "home").mkdir(exist_ok=True)
+    for stale in ("calls", "gexec.args"):
+        (tmp_path / stale).unlink(missing_ok=True)
+    if hostpub is not None:
+        (tmp_path / "host.pub").write_text(hostpub)
+    script = funcs(*PAIR_FUNCS) + textwrap.dedent(f"""
+        VMID=100
+        LOG={tmp_path}/wizard.log
+        RAC_PAIR_HOME={tmp_path}/home
+        RAC_PAIR_SUDOERS={tmp_path}/sudoers.d-sigmond-remote
+        RAC_PAIR_HOSTPUB={tmp_path}/host.pub
+        C={tmp_path}/calls
+        say(){{ echo "[wizard] $*"; }}
+        sleep(){{ :; }}
+        timeout(){{ shift; "$@"; }}
+        mgmt_vm_ip(){{ echo 10.99.0.2; }}
+        ip(){{ [ -n "{slash30}" ] && echo "7: vmbr1    inet {slash30} brd 10.99.0.3 scope global vmbr1"; }}
+        qm(){{ echo "qm $*" >> $C; return {agent}; }}
+        rac_have_sudo(){{ [ -e {tmp_path}/sudo-present ]; }}
+        apt-get(){{ echo "apt-get $*" >> $C; case "$*" in *install*) [ {int(apt_installs)} = 1 ] && touch {tmp_path}/sudo-present;; esac; }}
+        rac_install_host_files(){{ echo install-host-files >> $C; return {install_rc}; }}
+        id(){{ [ {int(user_exists)} = 1 ]; }}
+        useradd(){{ echo "useradd $*" >> $C; }}
+        usermod(){{ echo "usermod $*" >> $C; }}
+        chown(){{ echo "chown $*" >> $C; }}
+        visudo(){{ echo "visudo $*" >> $C; {VISUDO or 'true'} "$@"; }}
+        systemctl(){{ echo "systemctl $*" >> $C; }}
+        N=0
+        gexec(){{
+            N=$((N+1)); shift
+            printf '%s\\n' "$*" >> {tmp_path}/gexec.args
+            echo "gexec $N" >> $C
+            set -- {gexec_rcs}
+            eval "return \\${{$N}}"
+        }}
+        guest_out(){{ echo "guest_out $2" >> $C; printf '%s\\n' "$VMKEY_LINE"; }}
+    """)
+    if sudo == "yes":
+        (tmp_path / "sudo-present").touch()
+    r = bash(script + 'rac_pair_vm; echo "rc=$? fail=$RAC_PAIR_FAIL"\n',
+             env={"VMKEY_LINE": vmkey})
+    calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
+    return r, calls
+
+
+def test_pairing_writes_both_halves_and_then_proves_them(tmp_path):
+    r, calls = pair(tmp_path)
+    assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "home" / ".ssh" / "authorized_keys").read_text() == (
+        'restrict,from="10.99.0.2",command="sudo -n /usr/local/sbin/sigmond-rac-switch" '
+        f"{VMKEY} sigmond-rac-switch\n")
+    assert 'NOPASSWD: /usr/local/sbin/sigmond-rac-switch ""' in (tmp_path / "sudoers.d-sigmond-remote").read_text()
+    assert not (tmp_path / "sudoers.d-sigmond-remote.new").exists()
+    order = [c.split()[0] + (" " + c.split()[1] if c.startswith(("gexec", "systemctl")) else "")
+             for c in calls]
+    assert order == ["qm", "install-host-files", "useradd", "usermod", "chown", "visudo",
+                     "gexec 1", "guest_out", "chown", "gexec 2", "systemctl enable"]
+    assert calls[-1] == "systemctl enable --now sigmond-rac-pair.timer sigmond-rac-pair.path"
+    assert "useradd --system --home-dir" in calls[2] and "--shell /bin/sh sigmond-remote" in calls[2]
+    assert calls[3] == "usermod -p * -s /bin/sh sigmond-remote"
+
+
+def test_what_travels_through_the_guest_agent_is_ascii_and_carries_the_hosts_key(tmp_path):
+    pair(tmp_path, hostpub=HOSTKEY + " root@caf\u00e9-PM \u2014 the host\n")
+    args = (tmp_path / "gexec.args").read_text().splitlines()
+    assert len(args) == 2
+    for a in args:
+        assert all(ord(c) < 128 for c in a)
+        assert re.fullmatch(r"echo [A-Za-z0-9+/=]+ \| base64 -d \| bash", a), a[:60]
+    sent = base64.b64decode(args[0].split()[1]).decode()
+    assert f"printf '%s %s\\n' '10.99.0.1' '{HOSTKEY}'" in sent
+
+
+def test_pairing_again_changes_nothing_but_the_keys_it_reads(tmp_path):
+    pair(tmp_path)
+    newkey = VMKEY.replace("Vm", "Nw")
+    r, calls = pair(tmp_path, vmkey=newkey, user_exists=True)
+    assert "rc=0" in r.stdout
+    assert not any(c.startswith("useradd") for c in calls)
+    ak = (tmp_path / "home" / ".ssh" / "authorized_keys").read_text()
+    assert ak.count("\n") == 1 and newkey in ak and VMKEY not in ak      # one key, never two
+
+
+@pytest.mark.parametrize("kw,reason,touched", [
+    (dict(slash30=""), "no private link to its decoder VM", []),
+    (dict(hostpub=None), "cannot read this host's sshd key", []),
+    (dict(hostpub="ssh-ed25519 AAAA\u00e9\u00e9 x\n"), "cannot read this host's sshd key", []),
+    (dict(agent=1), "the guest agent in VM 100 does not answer", ["qm"]),
+    (dict(sudo="no"), "this host has no sudo and could not install it", ["qm", "apt-get", "apt-get"]),
+    (dict(install_rc=1), "could not install /usr/local/sbin/sigmond-rac-switch", ["qm", "install-host-files"]),
+], ids=["no-slash-30", "no-host-key", "host-key-not-ascii", "agent-silent", "no-sudo", "no-switch"])
+def test_pairing_refuses_early_and_says_why(tmp_path, kw, reason, touched):
+    r, calls = pair(tmp_path, **kw)
+    assert "rc=1" in r.stdout and reason in r.stdout, r.stdout
+    assert sorted(set(c.split()[0] for c in calls)) == sorted(set(touched))
+    assert not (tmp_path / "home" / ".ssh" / "authorized_keys").exists()
+    assert not (tmp_path / "gexec.args").exists()
+
+
+def test_a_host_without_sudo_installs_it_once_and_pairs(tmp_path):
+    r, calls = pair(tmp_path, sudo="no", apt_installs=True)
+    assert "rc=0" in r.stdout, r.stdout
+    assert [c for c in calls if c.startswith("apt-get")] == ["apt-get -qq update", "apt-get -y -qq install sudo"]
+    assert "this host has no sudo; installing it" in r.stdout
+
+
+def test_only_the_keys_two_fields_reach_the_key_line(tmp_path):
+    # Whatever follows the key in the VM's answer never reaches the file.
+    r, _ = pair(tmp_path, vmkey=VMKEY + ' x",command="/bin/sh')
+    assert "rc=0" in r.stdout
+    ak = (tmp_path / "home" / ".ssh" / "authorized_keys").read_text()
+    assert ak.endswith(f"{VMKEY} sigmond-rac-switch\n") and "/bin/sh" not in ak
+
+
+@pytest.mark.parametrize("vmkey", ["", "ssh-rsa AAAA" + "B" * 80, "ssh-ed25519 short"],
+                         ids=["nothing", "rsa", "too-short"])
+def test_a_bad_answer_from_the_vm_leaves_the_earlier_key_line_in_place(tmp_path, vmkey):
+    pair(tmp_path)
+    before = (tmp_path / "home" / ".ssh" / "authorized_keys").read_text()
+    r, calls = pair(tmp_path, vmkey=vmkey, user_exists=True)
+    assert "rc=1 fail=VM 100 returned no usable public key" in r.stdout
+    assert (tmp_path / "home" / ".ssh" / "authorized_keys").read_text() == before
+    assert "gexec 2" not in calls and not any(c.startswith("systemctl") for c in calls)
+
+
+def test_a_pairing_that_does_not_answer_is_reported_as_not_paired(tmp_path):
+    r, calls = pair(tmp_path, gexec_rcs="0 1")
+    assert "rc=1" in r.stdout
+    assert "a request from the VM did not reach the switch" in r.stdout
+    assert not any(c.startswith("systemctl") for c in calls)
+
+
+def test_a_vm_that_will_not_take_its_half_stops_the_pairing(tmp_path):
+    r, calls = pair(tmp_path, gexec_rcs="1 0")
+    assert "rc=1 fail=could not write the pairing into VM 100" in r.stdout
+    assert "guest_out" not in " ".join(calls)
+
+
+# -- where it sits, and what re-asserts it ------------------------------------------------------
+
+def test_pair_vm_runs_before_the_wizard_waits_or_asks():
+    i = TEXT.index("    --pair-vm)")
+    branch = TEXT[i:TEXT.index("    --rac-off|--rac-on)", i)]
+    assert "rac_pair_vm" in branch and "exit 0" in branch and "exit 1;;" in branch
+    assert i < TEXT.index("waiting for decoder VM") and i < TEXT.index("ask_reporter() {")
+    for name in PAIR_FUNCS + ("gexec", "guest_out", "mgmt_vm_ip", "rac_install_host_files"):
+        j = TEXT.find(f"\n{name}(){{")
+        j = j if j >= 0 else TEXT.index(f"\n{name}() {{")
+        assert j < i, f"{name} must be defined above the dispatch"
+
+
+def test_the_wizard_run_pairs_after_it_has_brought_remote_access_up():
+    i = TEXT.index("\nrac_activate\n")
+    j = TEXT.index("if ! rac_pair_vm; then", i)
+    assert j < TEXT.index('> "$CONF_MARK"')
+    assert " Switch:    $PAIR_STATE\n" in TEXT
+    assert "sigmond-setup --pair-vm" in TEXT[j:j + 400]
+
+
+def test_the_pairing_is_re_asserted_at_boot_and_when_the_hosts_sshd_key_changes():
+    service = heredoc("/etc/systemd/system/sigmond-rac-pair.service")
+    timer = heredoc("/etc/systemd/system/sigmond-rac-pair.timer")
+    path = heredoc("/etc/systemd/system/sigmond-rac-pair.path")
+    assert "ExecStart=/usr/local/sbin/sigmond-setup --pair-vm\n" in service
+    assert "OnBootSec=4min\n" in timer
+    assert "PathChanged=/etc/ssh/ssh_host_ed25519_key.pub\n" in path
+    assert "Unit=sigmond-rac-pair.service\n" in path
+
+
+@pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="needs systemd-analyze")
+def test_the_pairing_units_parse(tmp_path):
+    for name in ("sigmond-rac-pair.service", "sigmond-rac-pair.timer", "sigmond-rac-pair.path"):
+        (tmp_path / name).write_text(heredoc(f"/etc/systemd/system/{name}"))
+    for name in ("sigmond-rac-pair.timer", "sigmond-rac-pair.path"):
+        r = subprocess.run(["systemd-analyze", "verify", str(tmp_path / name)],
+                           capture_output=True, text=True, timeout=60)
+        noise = [ln for ln in (r.stdout + r.stderr).splitlines()
+                 if "sigmond-rac-pair" in ln and "sigmond-setup" not in ln]
+        assert noise == [], noise
+
+
+def test_the_pairing_key_stays_out_of_the_station_identity():
+    # A reflash mints a new pairing key and the wizard pairs again.  The key
+    # records whom the VM may ask, not who the station is.
+    identity = (REPO / "lib" / "sigmond" / "identity.py").read_text()
+    assert "rac-switch" not in identity and "sigmond-remote" not in identity

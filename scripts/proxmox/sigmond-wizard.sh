@@ -33,6 +33,9 @@
 #              --rac-retry     what sigmond-rac-register.timer runs: register a
 #                              station that could not at install, then bring
 #                              the tunnel up if its operator still wants it up
+#              --pair-vm       pair the decoder VM with this host, so that
+#                              `smd remote on|off|status` works there; also
+#                              re-asserts a pairing that stands
 #              --rac-upgrade   climb to a more secure gateway tier if one
 #                              has since come up (see the RAC ladder below)
 set -u
@@ -586,6 +589,67 @@ rac_register(){
     return $rc
 }
 
+# ── reaching the decoder VM ─────────────────────────────────────────────────
+# These three stood further down, among the wizard's questions.  They sit
+# here so that `sigmond-setup --pair-vm` can use them: that subcommand runs
+# before the wizard waits for anything or asks anything.
+# The VM's address on the host-only /30 (PM .1, VM .2).  Needed because the
+# repair below must NOT go through the guest agent — that is the thing that is
+# broken.  ssh over the private link is the independent path.
+mgmt_vm_ip() {
+    [ -n "${SIGMOND_MGMT_VM:-}" ] && { printf '%s\n' "${SIGMOND_MGMT_VM}"; return; }
+    local a
+    a=$(ip -4 -o addr show 2>/dev/null \
+        | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
+    if [ -n "$a" ]; then
+        awk -v ip="$a" 'BEGIN{n=split(ip,o,"."); printf "%s.%s.%s.%d\n",o[1],o[2],o[3],o[4]+1}'
+        return
+    fi
+    printf '10.99.0.2\n'
+}
+
+gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
+    # A guest agent that dies mid-wizard used to poison every LATER step:
+    # each one returned "QEMU guest agent is not running", each printed its
+    # own WARN, and the wizard walked on to declare success.  That is how
+    # v3.39/v3.40 shipped a VM with no password and no ssh policy — the two
+    # steps that happen to sit right after the one that killed the agent
+    # (2026-09-16).  A dead agent is now a transient to wait out, not a
+    # silent skip: wait for it to answer again and retry the step ONCE.
+    # A command that merely exits non-zero is NOT retried — that is a real
+    # answer from a live agent.
+    local t="$1"; shift
+    local out rc try i
+    for try in 1 2; do
+        out=$(qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>&1 </dev/null)
+        rc=$(echo "$out" | grep -o '"exitcode" *: *[0-9-]*' | grep -o '[0-9-]*$' | head -1)
+        echo "$out" >> "$LOG"
+        [ "${rc:-1}" = "0" ] && return 0
+        case "$out" in
+            *"guest agent is not running"*|*"got timeout"*|*"QGA"*)
+                [ "$try" = 2 ] && return 1
+                say "guest agent stopped answering — waiting for it before retrying"
+                for i in $(seq 1 24); do
+                    qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
+                    sleep 5
+                done
+                ;;
+            *) return 1 ;;
+        esac
+    done
+    return 1
+}
+
+# Run a command in the guest and hand back its STDOUT.  gexec returns only an
+# exit code; preflight_devices already needed the output and open-coded this.
+guest_out() {
+    local t="$1"; shift
+    qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>/dev/null </dev/null \
+      | python3 -c 'import json,sys
+try:  print(json.load(sys.stdin).get("out-data",""))
+except Exception: pass' 2>/dev/null || true
+}
+
 # ── the one switch, and the host files that go with it ─────────────────────
 # tasks/plan-remote-access.md section 1.  /usr/local/sbin/sigmond-rac-switch
 # holds the only code on the station that turns the tunnel on or off.  The
@@ -904,10 +968,39 @@ RandomizedDelaySec=60
 [Install]
 WantedBy=timers.target
 RACREGTMREOF
+    # The pairing's re-assertion: after every boot, four times a day, and
+    # whenever this host's sshd key changes (an identity restore does that).
+    cat > /etc/systemd/system/sigmond-rac-pair.service <<'RACPAIRSVCEOF' || return 1
+[Unit]
+Description=Sigmond remote access: re-assert the pairing between this host and its decoder VM
+After=pve-guests.service
+[Service]
+Type=oneshot
+TimeoutStartSec=600
+ExecStart=/usr/local/sbin/sigmond-setup --pair-vm
+RACPAIRSVCEOF
+    cat > /etc/systemd/system/sigmond-rac-pair.timer <<'RACPAIRTMREOF' || return 1
+[Unit]
+Description=Sigmond remote access: re-assert the VM pairing after boot and four times a day
+[Timer]
+OnBootSec=4min
+OnUnitInactiveSec=6h
+[Install]
+WantedBy=timers.target
+RACPAIRTMREOF
+    cat > /etc/systemd/system/sigmond-rac-pair.path <<'RACPAIRPATHEOF' || return 1
+[Unit]
+Description=Sigmond remote access: re-assert the VM pairing when this host's sshd key changes
+[Path]
+PathChanged=/etc/ssh/ssh_host_ed25519_key.pub
+Unit=sigmond-rac-pair.service
+[Install]
+WantedBy=paths.target
+RACPAIRPATHEOF
     # A reload that fails costs nothing: `systemctl enable` reloads by itself.
     # The switch stands, so say so and return 0.  Plain echo: `say` belongs to
     # the wizard, and rac_retry replaces it.
-    systemctl daemon-reload || echo "sigmond-wizard: systemctl daemon-reload failed; the retry units are written, and enabling the timer reloads systemd by itself." >&2
+    systemctl daemon-reload || echo "sigmond-wizard: systemctl daemon-reload failed; the units are written, and enabling the timer reloads systemd by itself." >&2
     return 0
 }
 
@@ -960,6 +1053,211 @@ rac_retry(){
     return 0
 }
 
+# ── the pairing: the decoder VM asks, this host alone acts ─────────────────
+# tasks/plan-remote-access.md section 2.  The operator knows the VM, and this
+# host has no keyboard once the install ends.  So the VM holds one ssh key,
+# and that key buys one thing: sigmond-rac-switch, with one of its three
+# words.  No shell, no forwarding, no other command.
+#
+# The VM can never create this pairing: the host's half lives in files that
+# only root on this host writes.  And the host re-asserts both halves, at
+# every boot and whenever its own sshd key changes.  On AC0G-B4 an identity
+# restore replaced a host key eight minutes after the wizard had authorized
+# the old one, and the fleet's login stayed broken for a week.
+RAC_PAIR_USER=sigmond-remote
+RAC_PAIR_HOME=/var/lib/sigmond-remote
+RAC_PAIR_SUDOERS=/etc/sudoers.d/sigmond-remote
+RAC_PAIR_HOSTPUB=/etc/ssh/ssh_host_ed25519_key.pub
+RAC_PAIR_FAIL=""
+
+rac_pair_key_ok(){
+    # One ed25519 public key, as "type base64", and not a byte more.  What
+    # comes back through the guest agent is data from another machine.  The
+    # match covers the whole string, so a second line cannot ride along: in
+    # an authorized_keys file a second line would stand as a key of its own,
+    # with no restriction on it.
+    local LC_ALL=C
+    [[ "$1" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{60,100}={0,2}$ ]]
+}
+
+rac_have_sudo(){ command -v sudo >/dev/null 2>&1 && command -v visudo >/dev/null 2>&1; }
+
+rac_pair_sudoers(){
+    cat <<SUDOEOF
+# Written by sigmond-setup --pair-vm (sigmond tasks/plan-remote-access.md).
+# The decoder VM holds one ssh key.  That key reaches this account, and this
+# account may run one script as root, with no argument.  The script reads the
+# requested word (on, off or status) from SSH_ORIGINAL_COMMAND.
+Defaults:$RAC_PAIR_USER env_reset
+Defaults:$RAC_PAIR_USER env_keep = "SSH_ORIGINAL_COMMAND"
+Defaults:$RAC_PAIR_USER !requiretty
+$RAC_PAIR_USER ALL=(root) NOPASSWD: $RAC_SWITCH ""
+SUDOEOF
+}
+
+rac_pair_authorized_line(){
+    # rac_pair_authorized_line <VM address> <VM public key>
+    rac_pair_key_ok "$2" || return 1
+    printf 'restrict,from="%s",command="sudo -n %s" %s sigmond-rac-switch\n' "$1" "$RAC_SWITCH" "$2"
+}
+
+rac_pair_guest_script(){
+    # rac_pair_guest_script <host address> <host sshd public key>
+    # The script the guest runs.  It travels base64-encoded, and it holds
+    # ASCII only: Proxmox sends a guest-agent request with a non-ASCII
+    # character short, and the agent can then go deaf.
+    cat <<GUESTEOF
+set -e
+umask 077
+D=/etc/sigmond
+M=/etc/update-motd.d
+K=\$D/rac-switch.key
+install -d -m 755 "\$D"
+if [ ! -s "\$K" ] || [ ! -s "\$K.pub" ]; then
+    rm -f "\$K" "\$K.pub"
+    ssh-keygen -q -t ed25519 -N '' -C sigmond-rac-switch -f "\$K"
+fi
+chown root:root "\$K" "\$K.pub"
+chmod 600 "\$K"
+chmod 644 "\$K.pub"
+printf '%s %s\n' '$1' '$2' > "\$D/rac-switch.known_hosts.new"
+chown root:root "\$D/rac-switch.known_hosts.new"
+chmod 644 "\$D/rac-switch.known_hosts.new"
+mv -f "\$D/rac-switch.known_hosts.new" "\$D/rac-switch.known_hosts"
+if [ -d "\$M" ]; then
+    printf '%s\n' '#!/bin/sh' \\
+        '# One line on the state of remote access.  Written from the Proxmox host' \\
+        '# by sigmond-setup --pair-vm.  Prints nothing where smd lacks the verb.' \\
+        'command -v smd >/dev/null 2>&1 && smd remote motd 2>/dev/null' \\
+        'exit 0' > "\$M/72-sigmond-remote"
+    chmod 755 "\$M/72-sigmond-remote"
+fi
+GUESTEOF
+}
+
+rac_pair_verify_script(){
+    # rac_pair_verify_script <host address>
+    # One request from the VM, through sshd and sudo, to the switch.  It also
+    # leaves the answer where the VM's login banner reads it.
+    cat <<VERIFYEOF
+D=/etc/sigmond
+C=/var/lib/sigmond/remote-access.json
+out=\$(ssh -T -i "\$D/rac-switch.key" -o BatchMode=yes -o IdentitiesOnly=yes \\
+          -o StrictHostKeyChecking=yes -o UserKnownHostsFile="\$D/rac-switch.known_hosts" \\
+          -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=8 -o LogLevel=ERROR \\
+          $RAC_PAIR_USER@$1 status 2>&1)
+rc=\$?
+case "\$rc" in 0|3) ;; *) printf '%s\n' "\$out" | tail -3; exit 1 ;; esac
+case "\$(printf '%s\n' "\$out" | head -1)" in
+    "Remote access: on") s=on ;;
+    "Remote access: off") s=off ;;
+    "Remote access: wanted on, not up") s=down ;;
+    *) printf '%s\n' "\$out" | head -3; exit 1 ;;
+esac
+mkdir -p "\$(dirname "\$C")"
+printf '{"state": "%s", "checked_at": "%s"}\n' "\$s" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "\$C"
+chmod 644 "\$C"
+exit 0
+VERIFYEOF
+}
+
+rac_pair_vm(){
+    # Pair the decoder VM with this host, or re-assert a pairing that stands.
+    # Safe at any time: it writes both halves again from what holds now.
+    #   this host's half   the account, its sudoers lines, the VM's public key
+    #   the VM's half      its key pair (made in the VM; the private half
+    #                      never leaves it), and this host's sshd key as the
+    #                      only host that key talks to
+    # Returns 0 once a request from the VM has reached the switch script.
+    # Otherwise it returns 1 with the reason in RAC_PAIR_FAIL.
+    local pm vm hostkey vmkey line tmp i
+    RAC_PAIR_FAIL=""
+    vm=$(mgmt_vm_ip)
+    pm=$(ip -4 -o addr show 2>/dev/null | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
+    if [ -z "$pm" ]; then
+        RAC_PAIR_FAIL="this host has no private link to its decoder VM (no /30 address)"
+        return 1
+    fi
+    hostkey=$(awk '{print $1" "$2; exit}' "$RAC_PAIR_HOSTPUB" 2>/dev/null)
+    if ! rac_pair_key_ok "$hostkey"; then
+        RAC_PAIR_FAIL="cannot read this host's sshd key ($RAC_PAIR_HOSTPUB)"
+        return 1
+    fi
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
+        if [ "$i" = 12 ]; then
+            RAC_PAIR_FAIL="the guest agent in VM $VMID does not answer"
+            return 1
+        fi
+        sleep 5
+    done
+    # Stock Proxmox carries no sudo.  A v3.71 install brings it on the stick;
+    # a station installed earlier fetches it here, once.
+    if ! rac_have_sudo; then
+        say "this host has no sudo; installing it (the pairing account needs its one sudoers line)"
+        apt-get -qq update >>"$LOG" 2>&1
+        DEBIAN_FRONTEND=noninteractive timeout 300 apt-get -y -qq install sudo >>"$LOG" 2>&1
+        if ! rac_have_sudo; then
+            RAC_PAIR_FAIL="this host has no sudo and could not install it; run: apt-get install sudo, then: sigmond-setup --pair-vm"
+            return 1
+        fi
+    fi
+    if ! rac_install_host_files; then
+        RAC_PAIR_FAIL="could not install $RAC_SWITCH"
+        return 1
+    fi
+
+    # This host's half, part one: an account that can do one thing.
+    if ! id "$RAC_PAIR_USER" >/dev/null 2>&1 \
+       && ! useradd --system --home-dir "$RAC_PAIR_HOME" --shell /bin/sh "$RAC_PAIR_USER"; then
+        RAC_PAIR_FAIL="could not create the account $RAC_PAIR_USER"
+        return 1
+    fi
+    # No password that could ever match, and a shell sshd can run the forced
+    # command with.
+    usermod -p '*' -s /bin/sh "$RAC_PAIR_USER" >/dev/null 2>&1
+    install -d -m 755 "$RAC_PAIR_HOME" "$RAC_PAIR_HOME/.ssh"
+    chown root:root "$RAC_PAIR_HOME" "$RAC_PAIR_HOME/.ssh"
+    # sudo skips a file whose name holds a dot, so the candidate cannot take
+    # effect before visudo has passed it.
+    tmp="$RAC_PAIR_SUDOERS.new"
+    if ! { rac_pair_sudoers > "$tmp" && chmod 440 "$tmp" \
+           && visudo -c -q -f "$tmp" >/dev/null 2>&1 && mv -f "$tmp" "$RAC_PAIR_SUDOERS"; }; then
+        rm -f "$tmp"
+        RAC_PAIR_FAIL="could not install the sudoers lines ($RAC_PAIR_SUDOERS)"
+        return 1
+    fi
+
+    # The VM's half.
+    if ! gexec 60 "echo $(rac_pair_guest_script "$pm" "$hostkey" | base64 -w0) | base64 -d | bash"; then
+        RAC_PAIR_FAIL="could not write the pairing into VM $VMID (see $LOG)"
+        return 1
+    fi
+    vmkey=$(guest_out 20 "cat /etc/sigmond/rac-switch.key.pub" | awk 'NF>=2{print $1" "$2; exit}')
+    if ! line=$(rac_pair_authorized_line "$vm" "$vmkey"); then
+        RAC_PAIR_FAIL="VM $VMID returned no usable public key"
+        return 1
+    fi
+
+    # This host's half, part two: that one key, in a file the account cannot
+    # write.
+    tmp="$RAC_PAIR_HOME/.ssh/authorized_keys.new"
+    if ! { printf '%s\n' "$line" > "$tmp" && chown root:root "$tmp" && chmod 644 "$tmp" \
+           && mv -f "$tmp" "$RAC_PAIR_HOME/.ssh/authorized_keys"; }; then
+        rm -f "$tmp"
+        RAC_PAIR_FAIL="could not write $RAC_PAIR_HOME/.ssh/authorized_keys"
+        return 1
+    fi
+
+    # Prove it.
+    if ! gexec 60 "echo $(rac_pair_verify_script "$pm" | base64 -w0) | base64 -d | bash"; then
+        RAC_PAIR_FAIL="both halves stand on disk, but a request from the VM did not reach the switch (see $LOG)"
+        return 1
+    fi
+    systemctl enable --now sigmond-rac-pair.timer sigmond-rac-pair.path >/dev/null 2>&1
+    return 0
+}
+
 # ── RAC on/off switches (no wizard rerun needed) ────────────────────────────
 case "${1:-}" in
     --rac-register)
@@ -974,6 +1272,17 @@ case "${1:-}" in
     --rac-retry)
         rac_retry
         exit 0;;
+    --pair-vm)
+        # Pair the decoder VM with this host, or re-assert the pairing.  A
+        # station installed before v3.71 runs this once, by hand or through
+        # pm-align.  sigmond-rac-pair runs it after every boot and whenever
+        # this host's sshd key changes.
+        if rac_pair_vm; then
+            say "paired: the decoder VM can run smd remote on, smd remote off and smd remote status"
+            exit 0
+        fi
+        say "NOT paired: $RAC_PAIR_FAIL"
+        exit 1;;
     --rac-off|--rac-on)
         # One switch.  These two spellings from before v3.71 run the script
         # that `smd remote` reaches from the decoder VM.
@@ -1047,20 +1356,6 @@ if ! qm status "$VMID" >/dev/null 2>&1 </dev/null; then
     say "      SIGMOND_VMID=<id> sigmond-setup --reconfigure"
     exit 1
 fi
-# The VM's address on the host-only /30 (PM .1, VM .2).  Needed because the
-# repair below must NOT go through the guest agent — that is the thing that is
-# broken.  ssh over the private link is the independent path.
-mgmt_vm_ip() {
-    [ -n "${SIGMOND_MGMT_VM:-}" ] && { printf '%s\n' "${SIGMOND_MGMT_VM}"; return; }
-    local a
-    a=$(ip -4 -o addr show 2>/dev/null \
-        | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
-    if [ -n "$a" ]; then
-        awk -v ip="$a" 'BEGIN{n=split(ip,o,"."); printf "%s.%s.%s.%d\n",o[1],o[2],o[3],o[4]+1}'
-        return
-    fi
-    printf '10.99.0.2\n'
-}
 _vmip=$(mgmt_vm_ip)
 _healed=0
 for i in $(seq 1 60); do
@@ -1110,37 +1405,6 @@ fi
 # live tty read only fails on EOF (Ctrl-D), where aborting is also right.
 rd(){ read "$@" || { echo; say "stdin closed (EOF) — aborting wizard; nothing applied. Rerun: sigmond-setup"; exit 1; }; }
 
-gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
-    # A guest agent that dies mid-wizard used to poison every LATER step:
-    # each one returned "QEMU guest agent is not running", each printed its
-    # own WARN, and the wizard walked on to declare success.  That is how
-    # v3.39/v3.40 shipped a VM with no password and no ssh policy — the two
-    # steps that happen to sit right after the one that killed the agent
-    # (2026-09-16).  A dead agent is now a transient to wait out, not a
-    # silent skip: wait for it to answer again and retry the step ONCE.
-    # A command that merely exits non-zero is NOT retried — that is a real
-    # answer from a live agent.
-    local t="$1"; shift
-    local out rc try i
-    for try in 1 2; do
-        out=$(qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>&1 </dev/null)
-        rc=$(echo "$out" | grep -o '"exitcode" *: *[0-9-]*' | grep -o '[0-9-]*$' | head -1)
-        echo "$out" >> "$LOG"
-        [ "${rc:-1}" = "0" ] && return 0
-        case "$out" in
-            *"guest agent is not running"*|*"got timeout"*|*"QGA"*)
-                [ "$try" = 2 ] && return 1
-                say "guest agent stopped answering — waiting for it before retrying"
-                for i in $(seq 1 24); do
-                    qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
-                    sleep 5
-                done
-                ;;
-            *) return 1 ;;
-        esac
-    done
-    return 1
-}
 
 # uploads_toml — the [uploads] block a FRESH install writes: the site sink
 # switch starts `off` (stored as the legacy discard) until the operator checks
@@ -1329,15 +1593,6 @@ except Exception: pass' 2>/dev/null || true)
 # device here.  This value is only the PROMPT DEFAULT; the authoritative
 # position is re-asserted from the GPSDO after bring-up by
 # sigmond-location-check ("location authority first (GPSDO definitive)").
-# Run a command in the guest and hand back its STDOUT.  gexec returns only an
-# exit code; preflight_devices already needed the output and open-coded this.
-guest_out() {
-    local t="$1"; shift
-    qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>/dev/null </dev/null \
-      | python3 -c 'import json,sys
-try:  print(json.load(sys.stdin).get("out-data",""))
-except Exception: pass' 2>/dev/null || true
-}
 
 # ── is the GPSDO actually locked? ───────────────────────────────────────────
 # ⚡ The wizard is the ONLY place this surfaces during an install, and it was
@@ -2953,6 +3208,14 @@ rac_activate(){
 }
 rac_activate
 
+# The switch works from the decoder VM only once the two machines pair.
+PAIR_STATE="paired: in the decoder VM, smd remote on / off / status"
+if ! rac_pair_vm; then
+    PAIR_STATE="NOT PAIRED ($RAC_PAIR_FAIL).
+            Until it pairs, smd remote cannot reach this host. Later, on this host: sigmond-setup --pair-vm"
+    say "WARN: remote-access switch: $PAIR_STATE"
+fi
+
 PSWS_STATE="skipped — add later: sigmond-setup --reconfigure"
 if [ -n "$PSWS_ID" ] && [ -n "$KEYS_RESTORED" ]; then
     if gexec 90 "smd psws verify"; then
@@ -3021,6 +3284,7 @@ SUMMARY=$(cat <<SEOF
    console: qm terminal $VMID  (Ctrl+O exits; sigmond or root)
  SDR/radiod: $RADIOD_STATE
  RAC:       $RAC_STATE
+ Switch:    $PAIR_STATE
  PSWS:      $PSWS_STATE
 $SINK_NOTE
  Rerun wizard:  sigmond-setup --reconfigure
