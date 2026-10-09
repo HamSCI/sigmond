@@ -115,8 +115,10 @@ def _blocks_from_payload(payload):
     A block may carry no ``data`` key at all (the unknown paths never
     produce one), so nothing here may assume it exists.  The board shows
     verdicts and reasons; the full payload stays in the database for
-    anyone who needs the numbers.  The one exception is the `rac` block's
-    wish, read by ``_wish_of`` to mark an operator's off.
+    anyone who needs the numbers.  The one exception is the `rac` block of
+    a host (role "pm"): ``_wish_of`` and ``_never_registered`` read its wish
+    and its registration to mark an operator's off, and hand back words of
+    the board's own, never a value out of ``data``.
     """
     blocks = payload.get("blocks")
     if not isinstance(blocks, dict):
@@ -140,8 +142,13 @@ def _blocks_from_payload(payload):
                 .strip())
             continue
         out[name] = _verdict(verdict, block.get("reason") or "")
-        if name == "rac" and verdict == "VALID" and _wish_of(block) == "off":
+        # Only a host may wear the label: a station's own heartbeat never
+        # carries `rac`, and the host's heartbeat sets role = "pm".
+        if (name == "rac" and verdict == "VALID"
+                and payload.get("role") == "pm" and _wish_of(block) == "off"):
             out[name]["label"] = OPERATOR_OFF
+            if _never_registered(block):
+                out[name]["never_registered"] = True
     return out
 
 
@@ -152,6 +159,17 @@ def _wish_of(block):
     data = block.get("data")
     wish = data.get("wish") if isinstance(data, dict) else None
     return wish if isinstance(wish, str) else None
+
+
+def _never_registered(block):
+    """True when a `rac` block's data says the station never registered:
+    `wish_source` is "units" and `registered` is exactly False.  As strict as
+    ``_wish_of``: it compares against constants, so any other type or value
+    reads False, and it hands no value out of ``data``."""
+    data = block.get("data")
+    return (isinstance(data, dict)
+            and data.get("wish_source") == "units"
+            and data.get("registered") is False)
 
 
 def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
@@ -193,10 +211,13 @@ def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
             # instead of comparing two fields.
             "reports_as": (heartbeat_station
                           if heartbeat_station != station else None),
-            # True when the newest heartbeat says the operator turned
-            # remote access off.  A decision: it tags the row and never
-            # changes a verdict.
+            # True when the newest heartbeat, from a host, says remote
+            # access is off by decision: the operator's, or a station that
+            # never registered.  It tags the row and never changes a verdict.
             "remote_access_off": False,
+            # True when that off is the "never registered" case, not an
+            # operator's choice: the tag words the two differently.
+            "remote_access_never_registered": False,
         }
         row = _latest(conn, heartbeat_station)
         if row is None:
@@ -225,8 +246,11 @@ def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
             interval = interval_default
         else:
             status["blocks"] = _blocks_from_payload(payload)
-            status["remote_access_off"] = (
-                status["blocks"]["rac"].get("label") == OPERATOR_OFF)
+            rac = status["blocks"].get("rac") or {}
+            status["remote_access_off"] = rac.get("label") == OPERATOR_OFF
+            status["remote_access_never_registered"] = (
+                status["remote_access_off"]
+                and rac.get("never_registered") is True)
             envelope_top = _envelope_rollup(payload, rollup_verdict)
             interval = _interval_of(payload, interval_default)
             role = payload.get("role")
@@ -452,7 +476,19 @@ def render_html(statuses, unexpected, rejects, generated_at):
         if status.get("frozen"):
             tags.append(f"frozen: {status['frozen']}")
         if status.get("remote_access_off"):
-            tags.append("remote access off by the operator")
+            # The tag states a decision.  On a row the board has declared
+            # silent it can only report what the host last said: absence
+            # beats self-report, and a present-tense "off by the operator"
+            # would read as the reason for the silence.
+            live = (status.get("availability") or {}).get("verdict") == "VALID"
+            if status.get("remote_access_never_registered"):
+                tags.append("remote access off: never registered" if live else
+                            "remote access was off (never registered) "
+                            "at its last heartbeat")
+            else:
+                tags.append("remote access off by the operator" if live else
+                            "remote access was off by the operator "
+                            "at its last heartbeat")
         reports_as = status.get("reports_as")
         if reports_as and reports_as != status.get("station"):
             tags.append(f"reports as: {reports_as}")

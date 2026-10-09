@@ -759,6 +759,10 @@ def test_silent_pm_row_flips_invalid_same_as_a_station(db_path):
 RAC_OFF = {"verdict": "VALID", "reason": "off by the operator since 2026-10-09T18:22:05Z",
            "data": {"wish": "off", "tunnel": "stopped", "channels_up": 0,
                     "channels_declared": 6, "since": "2026-10-09T18:22:05Z", "by": "vm"}}
+RAC_NEVER = {"verdict": "VALID", "reason": "off: this station never registered for remote access",
+             "data": {"wish": "off", "wish_source": "units", "registered": False,
+                      "tunnel": "stopped", "channels_up": 0, "channels_declared": 6,
+                      "since": None, "by": None}}
 RAC_ON = {"verdict": "VALID", "reason": "on: 6 of 6 channels",
           "data": {"wish": "on", "tunnel": "running", "channels_up": 6, "channels_declared": 6}}
 RAC_DOWN = {"verdict": "INVALID", "reason": "wanted on, not up: the tunnel service does not run",
@@ -799,6 +803,7 @@ def test_remote_access_off_by_the_operator_shows_as_a_decision(db_path):
     assert ('<td class="verdict v-OFF" title="off by the operator since '
             '2026-10-09T18:22:05Z">off</td>') in html
     assert "remote access off by the operator" in html   # the row's tag: no hover needed
+    assert "at its last heartbeat" not in html           # a live row states a present decision
     assert html.count('class="verdict v-INVALID"') == 0
 
 
@@ -833,22 +838,118 @@ def test_wanted_on_and_not_up_stays_a_fault(db_path):
 @pytest.mark.parametrize("rac", [
     dict(RAC_OFF, verdict="INVALID"),                    # a fault never wears the label
     dict(RAC_OFF, verdict="INCONCLUSIVE"),               # "off, yet the tunnel service runs"
+    dict(RAC_OFF, verdict="INDETERMINATE"),              # a stale state file: nobody can tell
     {"verdict": "VALID", "reason": "x"},                 # no data at all
     {"verdict": "VALID", "reason": "x", "data": "off"},
     {"verdict": "VALID", "reason": "x", "data": {"wish": ["off"]}},
     {"verdict": "VALID", "reason": "x", "data": {"wish": "OFF"}},
-], ids=["invalid", "inconclusive", "no-data", "data-not-a-dict", "wish-not-a-string", "wish-misspelt"])
+], ids=["invalid", "inconclusive", "indeterminate", "no-data", "data-not-a-dict",
+         "wish-not-a-string", "wish-misspelt"])
 def test_only_a_valid_block_whose_wish_reads_off_wears_the_label(db_path, rac):
     row, html = _row(db_path, pm_with_rac(rac))
     assert "label" not in row["blocks"]["rac"]
     assert row["remote_access_off"] is False
     assert 'class="verdict v-OFF"' not in html
+    assert "remote access" not in html
 
 
 def test_a_silent_host_stays_invalid_whatever_its_last_rac_block_said(db_path):
     row, html = _row(db_path, pm_with_rac(RAC_OFF), age=3 * 3600)
     assert row["availability"]["verdict"] == "INVALID"
     assert row["top"]["verdict"] == "INVALID" and "silent" in row["top"]["reason"]
+    # The cell keeps the last-known state, but the tag may not state it in the
+    # present tense on a row the board has just declared silent: absence beats
+    # self-report, and "off by the operator" would read as the reason for it.
+    assert row["blocks"]["rac"]["label"] == fleetboard.OPERATOR_OFF
+    assert "remote access was off by the operator at its last heartbeat" in html
+    assert "remote access off by the operator" not in html
+
+
+def test_a_never_registered_station_has_a_tag_that_does_not_say_operator(db_path):
+    row, html = _row(db_path, pm_with_rac(RAC_NEVER))
+    assert row["top"]["verdict"] == "VALID"
+    assert row["blocks"]["rac"]["label"] == fleetboard.OPERATOR_OFF   # same label, same cell
+    assert row["remote_access_off"] is True
+    assert ('<td class="verdict v-OFF" title="off: this station never registered '
+            'for remote access">off</td>') in html
+    assert "remote access off: never registered" in html
+    assert "by the operator" not in html
+    assert "at its last heartbeat" not in html
+
+
+def test_a_silent_never_registered_station_speaks_in_the_past_tense(db_path):
+    row, html = _row(db_path, pm_with_rac(RAC_NEVER), age=3 * 3600)
+    assert row["availability"]["verdict"] == "INVALID"
+    assert row["blocks"]["rac"]["label"] == fleetboard.OPERATOR_OFF
+    assert "remote access was off (never registered) at its last heartbeat" in html
+    assert "remote access off" not in html
+    assert "by the operator" not in html
+
+
+@pytest.mark.parametrize("wish_source, registered", [
+    ("<b>HOSTILE</b>", False),                # markup where a source word belongs
+    (["units", "HOSTILE"], False),            # a list
+    ({"x": "HOSTILE"}, False),                # a mapping
+    (None, False),
+    (5, False),
+    ("UNITS", False),                         # the word, misspelt
+    ("units", None),                          # registered not stated
+    ("units", 0),                             # falsy, but not False
+    ("units", "HOSTILE"),                     # a string
+    ("units", [False]),
+    ("units", True),                          # it did register
+    ("state", False),                         # registered or not, the source says an operator chose
+], ids=["markup", "list", "mapping", "none", "int", "misspelt", "registered-none",
+        "registered-zero", "registered-string", "registered-list", "registered-true",
+        "source-state"])
+def test_any_other_wish_source_or_registered_reads_as_the_operators_off(db_path, wish_source, registered):
+    rac = dict(RAC_NEVER, reason="off by the operator since 2026-10-09T18:22:05Z",
+               data=dict(RAC_NEVER["data"], wish_source=wish_source, registered=registered))
+    row, html = _row(db_path, pm_with_rac(rac))
+    assert row["blocks"]["rac"]["label"] == fleetboard.OPERATOR_OFF
+    assert "remote access off by the operator" in html
+    assert "never registered" not in html
+    assert "HOSTILE" not in html                         # nothing out of `data` reaches the page
+    assert "<b>" not in html
+
+
+def test_a_silent_row_with_a_hostile_wish_source_reads_as_the_operators_off(db_path):
+    rac = dict(RAC_OFF, data=dict(RAC_OFF["data"], wish_source="<b>HOSTILE</b>", registered=False))
+    row, html = _row(db_path, pm_with_rac(rac), age=3 * 3600)
+    assert "remote access was off by the operator at its last heartbeat" in html
+    assert "HOSTILE" not in html
+
+
+@pytest.mark.parametrize("role", [None, "station", "PM"], ids=["absent", "station", "wrong-case"])
+def test_only_a_host_may_wear_the_label(db_path, role):
+    """A station's own heartbeat never carries `rac`, and validate() does not
+    forbid it: a station that sends one is not a host and is read as any block."""
+    blocks = {name: {"verdict": "VALID", "reason": f"{name} ok"}
+              for name in heartbeat_schema.BLOCK_NAMES}
+    blocks["rac"] = RAC_OFF
+    env = make_envelope(blocks=blocks)
+    if role is not None:
+        env["role"] = role
+    assert heartbeat_schema.validate(env) == []
+    row, html = _row(db_path, env)
+    assert "label" not in row["blocks"]["rac"]
+    assert row["remote_access_off"] is False
+    assert row["blocks"]["rac"]["verdict"] == "VALID"
+    assert '<td class="verdict v-VALID" title="off by the operator since 2026-10-09T18:22:05Z">ok</td>' in html
+    assert 'class="verdict v-OFF"' not in html
+    assert "remote access" not in html
+    assert "<th>rac</th>" in html                        # the page still renders, columns aligned
+
+
+def test_a_schema_copy_without_rac_does_not_take_the_page_down(db_path, monkeypatch):
+    """The board reads the `rac` block through .get: whatever a future schema
+    edit does to ALL_BLOCK_NAMES, the page still renders."""
+    monkeypatch.setattr(heartbeat_schema, "ALL_BLOCK_NAMES", heartbeat_schema.BLOCK_NAMES)
+    row, html = _row(db_path, pm_with_rac_unchecked(RAC_OFF))
+    assert "rac" not in row["blocks"]
+    assert row["remote_access_off"] is False
+    assert "<th>rac</th>" not in html
+    assert "remote access" not in html
 
 
 def test_ingest_takes_a_host_envelope_that_carries_rac(drop_dir, db_path, monkeypatch):
