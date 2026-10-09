@@ -41,7 +41,7 @@ Do these in order. Only steps 1 and 2 need you physically at the machine.
 | 2. Install from the USB stick | [install.md](install.md) | ~45 min |
 | 3. Register your station's uploads | [registration.md](registration.md) | 30 min + portal waits |
 | 4. Learn what "healthy" looks like | [day-2.md](day-2.md) | 15 min |
-| 5. (optional) Let the fleet admin reach it | [remote-access.md](remote-access.md) | 10 min |
+| 5. Know who can reach your station, and how to switch that off | [remote-access.md](remote-access.md) | 10 min |
 | When it breaks | [troubleshooting.md](troubleshooting.md) | — |
 | Before you touch anything | [do-not-touch.md](do-not-touch.md) | — |
 | Words used in these pages | [glossary.md](glossary.md) | — |
@@ -64,9 +64,10 @@ with `passwd` in each ([INSTALL.md §10](https://github.com/HamSCI/sigmond-appli
 ⚠ **Write down BOTH addresses while the install is showing them — the host one
 especially.** After the first reboot the station's keyboard stops working on
 purpose (the USB ports go to the radio), so that screen is the last easy chance
-to read the host address. Several later steps — the Proxmox window, every
-remote-access check in [remote-access.md §4](remote-access.md#4-turning-it-on-off-and-checking-it--all-on-the-host) —
-run on the `[host]` and are simply unreachable without it. If you have already
+to read the host address. Several later steps — the Proxmox window, a rerun
+of the setup wizard — run on the `[host]` and are simply unreachable without
+it. (The switch for remote access needs only the VM:
+[remote-access.md §4](remote-access.md#4-the-switch-off-on-status).) If you have already
 lost it, your fleet admin or your router's DHCP list can recover it — it is a
 nuisance, not a dead end.
 

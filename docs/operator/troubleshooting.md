@@ -948,41 +948,44 @@ machine is clearly powered.
 
 ---
 
-### Remote access says FAILED
+### Remote access says wanted on, not up
 
-**A failed tunnel costs you nothing but support access.** The radio, the
-recorders and every upload path are completely unaffected — remote access
-carries no science data at all
-([remote-access.md §7](remote-access.md#7-if-it-says-failed)).
+**This costs you nothing but support access.** The radio, the recorders and
+every upload path are completely unaffected — remote access carries no science
+data at all
+([remote-access.md §7](remote-access.md#7-if-remote-access-does-not-come-up)).
 
-**What to do** — one command, from the `[host]`, whenever you like:
+**What to do** — look at the state, in the `[VM]`:
 
 ```bash
-# [host] — on the Proxmox host, not the VM
-sigmond-setup --reconfigure
+# [VM] — in the decoder VM
+smd remote status
 ```
 
-Only the remote-access step needs to change, but the wizard asks every question
-again: type your reporter ID and PSWS ids afresh (pressing Enter at the PSWS
-station ID skips PSWS) and check the grid square on its review screen. It keeps
-your RAC number and the site sink switch.
+The second line of its answer names the case. A station that has not registered
+yet needs nothing from you: the host tries again every 10 minutes and brings
+the tunnel up when a gateway answers. A tunnel service that does not run starts
+again with `smd remote on`.
 
-**Two traps worth knowing before you chase this:**
+**Three things worth knowing before you chase this:**
 
+- **`Remote access: off` is not a fault.** The operator turned it off. `smd
+  remote on` turns it on again
+  ([remote-access.md §4](remote-access.md#4-the-switch-off-on-status)).
 - ⛔ **If your admin says "I can reach the port but cannot log in", that is
   almost certainly the dashboard's `root@` command**, which can never work
   against the decoder VM. Send them to
   [remote-access.md §5](remote-access.md#5-how-the-admin-actually-connects--and-the-one-instruction-that-is-wrong).
 - **Inside the VM, `smd admin rac status` will say "not configured".** That is
   correct output on an appliance station, not a fault, and you must **not** run
-  `smd admin rac install` to "fix" it
-  ([remote-access.md §4](remote-access.md#ignore-smd-admin-rac-on-an-appliance-station)).
+  `smd admin rac install` to "fix" it. The verb for your station is `smd remote`
+  ([remote-access.md §4](remote-access.md#4-the-switch-off-on-status)).
 
 **When to stop and ask**
 
-`sigmond-setup --reconfigure` still reports FAILED. On an older image this step
-used to fail for everybody; the answer is a newer image, not more retries
-([remote-access.md §7](remote-access.md#7-if-it-says-failed)).
+`smd remote status` still says `wanted on, not up` a day later, or `smd remote`
+says it holds no pairing with its Proxmox host
+([remote-access.md §8](remote-access.md#8-a-station-installed-before-v371)).
 
 ---
 
@@ -1142,8 +1145,8 @@ touching one program and bouncing the whole station.
 Two commands that are **not** on this table because they are decisions, not
 repairs: `smd update --apply` (only when your admin says a release is
 blessed — [day-2.md](day-2.md#updates--who-decides-and-what-you-run)) and
-`sigmond-setup --reconfigure` on the `[host]` (for wrong answers, a new grid
-square, or remote access).
+`sigmond-setup --reconfigure` on the `[host]` (for wrong answers or a new grid
+square).
 
 ---
 

@@ -21,8 +21,9 @@ by printing the `[host]` (Proxmox) address and the `[VM]` (decoder) address on
 the station's monitor. Copy both somewhere you will still have them in a year:
 after the next reboot the station's keyboard stops working by design — the USB
 ports belong to the radio — and the host address is needed for the Proxmox
-window and for every remote-access check in
-[remote-access.md](remote-access.md). The VM address alone is not enough.
+window and for a rerun of the setup wizard. The VM address alone is not enough
+for those. (It is enough for the remote-access switch:
+[remote-access.md](remote-access.md).)
 
 When INSTALL.md §9 says "check it's alive", come back here and continue with
 [day-2.md](day-2.md).

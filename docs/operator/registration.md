@@ -41,7 +41,7 @@ do not edit that file by hand and you do not repeat yourself per program.
 | **Grid square** (e.g. `EM38ww`) | `[station] grid_square` | all four; also the station's own coordinates |
 | **Station designator** | `site-profile.toml` `[host].hostname` | names the VM and the radio's channels |
 | **PSWS station + instrument IDs** *(optional, skippable)* | `[psws]` and `[psws.instruments]` | PSWS only |
-| **Remote access** *(optional)* | the RAC tunnel | your fleet admin, not a data path |
+| **Remote access** *(no question; every install registers)* | the RAC tunnel | your fleet admin, not a data path |
 
 Note what is **not** on that list: the wizard never asks for your callsign. It
 takes the part of the reporter ID before the `/` — `AC0G/B4` gives `AC0G`
