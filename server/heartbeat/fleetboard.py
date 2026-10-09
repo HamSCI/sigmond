@@ -76,18 +76,29 @@ def _verdict(verdict, reason):
 def _unknown_blocks(reason):
     """A full block set that says, honestly, that nothing was measured."""
     return {name: _verdict("INDETERMINATE", reason)
-            for name in heartbeat_schema.BLOCK_NAMES}
+            for name in heartbeat_schema.ALL_BLOCK_NAMES}
 
 
 #: Board-only sentinel, deliberately NOT one of heartbeat_schema.VERDICTS.
 #: A block missing from an envelope that DID arrive and parse is a
 #: producer's honest declaration that it has no view of that block (a PM
-#: heartbeat carries only versions/doctor/resources — it has no way to
-#: see timing/gaps/uploads/manifest at all).  That is a different fact
-#: from INDETERMINATE ("I looked and could not tell"), and painting both
-#: the same grey would make an honest partial producer read as several
-#: failed measurements instead of the blocks it never claimed.
+#: heartbeat carries versions/doctor/resources, plus rac when its host has
+#: the remote-access switch — it has no way to see timing/gaps/uploads/
+#: manifest at all; a station's own heartbeat never carries rac, which only
+#: a Proxmox host can claim).  That is a different fact from INDETERMINATE
+#: ("I looked and could not tell"), and painting both the same grey would
+#: make an honest partial producer read as several failed measurements
+#: instead of the blocks it never claimed.
 NOT_CLAIMED = "N/A"
+
+#: Board-only label for the one block state that is a decision and neither
+#: health nor a fault: the station's operator turned remote access off
+#: (sigmond tasks/plan-remote-access.md section 4).  The host reports it as a
+#: VALID `rac` block whose data says wish = off.  Painted "ok" it would hide
+#: that nobody can reach the station; painted "FAIL" it would send someone to
+#: chase a station whose owner chose this.  So it gets a label and a colour
+#: of its own, and a tag on the row.
+OPERATOR_OFF = "off"
 
 
 def _latest(conn, station):
@@ -104,13 +115,14 @@ def _blocks_from_payload(payload):
     A block may carry no ``data`` key at all (the unknown paths never
     produce one), so nothing here may assume it exists.  The board shows
     verdicts and reasons; the full payload stays in the database for
-    anyone who needs the numbers.
+    anyone who needs the numbers.  The one exception is the `rac` block's
+    wish, read by ``_wish_of`` to mark an operator's off.
     """
     blocks = payload.get("blocks")
     if not isinstance(blocks, dict):
         return _unknown_blocks("heartbeat carried no blocks")
     out = {}
-    for name in heartbeat_schema.BLOCK_NAMES:
+    for name in heartbeat_schema.ALL_BLOCK_NAMES:
         block = blocks.get(name)
         if not isinstance(block, dict):
             # The envelope arrived and parsed; this block simply was never
@@ -128,7 +140,18 @@ def _blocks_from_payload(payload):
                 .strip())
             continue
         out[name] = _verdict(verdict, block.get("reason") or "")
+        if name == "rac" and verdict == "VALID" and _wish_of(block) == "off":
+            out[name]["label"] = OPERATOR_OFF
     return out
+
+
+def _wish_of(block):
+    """The operator's wish from a `rac` block's data, or None.  The one
+    place the board reads a block's data: the verdict alone cannot tell a
+    tunnel that runs from one its operator turned off."""
+    data = block.get("data")
+    wish = data.get("wish") if isinstance(data, dict) else None
+    return wish if isinstance(wish, str) else None
 
 
 def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
@@ -170,6 +193,10 @@ def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
             # instead of comparing two fields.
             "reports_as": (heartbeat_station
                           if heartbeat_station != station else None),
+            # True when the newest heartbeat says the operator turned
+            # remote access off.  A decision: it tags the row and never
+            # changes a verdict.
+            "remote_access_off": False,
         }
         row = _latest(conn, heartbeat_station)
         if row is None:
@@ -198,6 +225,8 @@ def derive_status(conn, roster, now, interval_default=DEFAULT_INTERVAL_SEC,
             interval = interval_default
         else:
             status["blocks"] = _blocks_from_payload(payload)
+            status["remote_access_off"] = (
+                status["blocks"]["rac"].get("label") == OPERATOR_OFF)
             envelope_top = _envelope_rollup(payload, rollup_verdict)
             interval = _interval_of(payload, interval_default)
             role = payload.get("role")
@@ -320,6 +349,7 @@ td.verdict small { display: block; font-weight: normal; color: #333;
 .v-INCONCLUSIVE  { background: #fbe8c0; }
 .v-INDETERMINATE { background: #dedede; }
 .v-NA            { background: #fafafa; color: #888; font-style: italic; }
+.v-OFF           { background: #dbe7f5; }
 footer { color: #555; font-size: .85rem; border-top: 1px solid #ccc;
          padding-top: .5rem; }
 """
@@ -375,6 +405,9 @@ def _verdict_cell(block, full=False):
         verdict = "INDETERMINATE"
     reason = (block.get("reason") if isinstance(block, dict) else "") or ""
     css = _CSS_SUFFIX.get(verdict, verdict)
+    if not full and isinstance(block, dict) and block.get("label") == OPERATOR_OFF:
+        return (f'<td class="verdict v-OFF" title="{_e(reason)}">'
+                f'{_e(OPERATOR_OFF)}</td>')
     if full:
         return (f'<td class="verdict v-{css}">{_e(verdict)}'
                 f'<small>{_e(reason)}</small></td>')
@@ -406,7 +439,7 @@ def render_html(statuses, unexpected, rejects, generated_at):
     out.append("<table><thead><tr>")
     out.append("<th>station</th><th>status</th><th>availability</th>"
                "<th>silent for</th><th>last arrival</th><th>emitted at</th>")
-    for name in heartbeat_schema.BLOCK_NAMES:
+    for name in heartbeat_schema.ALL_BLOCK_NAMES:
         out.append(f"<th>{_e(name)}</th>")
     out.append("</tr></thead><tbody>")
 
@@ -418,6 +451,8 @@ def render_html(statuses, unexpected, rejects, generated_at):
             tags.append("canary")
         if status.get("frozen"):
             tags.append(f"frozen: {status['frozen']}")
+        if status.get("remote_access_off"):
+            tags.append("remote access off by the operator")
         reports_as = status.get("reports_as")
         if reports_as and reports_as != status.get("station"):
             tags.append(f"reports as: {reports_as}")
@@ -435,14 +470,14 @@ def render_html(statuses, unexpected, rejects, generated_at):
         out.append(f'<td class="num">{_e(status.get("emitted_at") or "—")}'
                    f'</td>')
         blocks = status.get("blocks") or {}
-        for name in heartbeat_schema.BLOCK_NAMES:
+        for name in heartbeat_schema.ALL_BLOCK_NAMES:
             out.append(_verdict_cell(blocks.get(name) or {}))
         out.append("</tr>")
     if not statuses:
         # 6 fixed columns (station, status, availability, silent for,
         # last arrival, emitted at) + one per block name — kept in sync
         # with the <thead> above rather than hand-counted.
-        colspan = 6 + len(heartbeat_schema.BLOCK_NAMES)
+        colspan = 6 + len(heartbeat_schema.ALL_BLOCK_NAMES)
         out.append(f'<tr><td colspan="{colspan}">roster is empty — nothing '
                    'is being watched</td></tr>')
     out.append("</tbody></table>")

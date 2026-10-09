@@ -83,8 +83,10 @@ def make_envelope(station="AC0G-B4", rollup="VALID",
     return env
 
 
-#: The 3-block subset scripts/proxmox/pm-heartbeat.py's assemble() emits
-#: (see its BLOCK_NAMES) — a PM has no view of manifest/timing/gaps/
+#: The 3 blocks every PM heartbeat carries — scripts/proxmox/pm-heartbeat.py's
+#: assemble() emits these and, when its host has the remote-access switch,
+#: a fourth, `rac` (see its BLOCK_NAMES).  The `rac` tests add that one
+#: per case with pm_with_rac().  A PM has no view of manifest/timing/gaps/
 #: uploads at all.
 PM_BLOCK_NAMES = ("versions", "doctor", "resources")
 
@@ -484,7 +486,7 @@ def test_never_heard_roster_station_is_indeterminate(db_path):
     assert d2["silent_for_s"] is None
     # Every block reads "could not measure" — never a blank that could be
     # mistaken for health.
-    assert set(d2["blocks"]) == set(heartbeat_schema.BLOCK_NAMES)
+    assert set(d2["blocks"]) == set(heartbeat_schema.ALL_BLOCK_NAMES)
     assert all(b["verdict"] == "INDETERMINATE" for b in d2["blocks"].values())
 
 
@@ -647,9 +649,9 @@ def test_never_heard_station_still_shows_unknown_not_na(db_path):
 
 
 def test_full_blocks_station_row_is_unchanged(db_path):
-    """Regression pin: an ordinary station's full 7-block envelope must
-    never pick up the n/a class — n/a is only for a genuinely absent
-    block."""
+    """Regression pin: none of an ordinary station's seven blocks may pick
+    up the n/a class — n/a is only for a genuinely absent block.  `rac`
+    is such a block on a station row: only a Proxmox host can claim it."""
     seed(db_path, "AC0G-B4", NOW - 10, make_envelope())
 
     conn = ingest.open_db(str(db_path))
@@ -659,9 +661,11 @@ def test_full_blocks_station_row_is_unchanged(db_path):
         conn.close()
 
     b4 = {s["station"]: s for s in statuses}["AC0G-B4"]
-    assert set(b4["blocks"]) == set(heartbeat_schema.BLOCK_NAMES)
-    assert all(b["verdict"] != fleetboard.NOT_CLAIMED
-              for b in b4["blocks"].values())
+    assert set(b4["blocks"]) == set(heartbeat_schema.ALL_BLOCK_NAMES)
+    assert all(b4["blocks"][n]["verdict"] != fleetboard.NOT_CLAIMED
+              for n in heartbeat_schema.BLOCK_NAMES)
+    assert b4["blocks"]["rac"]["verdict"] == fleetboard.NOT_CLAIMED
+    assert b4["remote_access_off"] is False
     assert b4["envelope_role"] is None
 
 
@@ -747,12 +751,134 @@ def test_silent_pm_row_flips_invalid_same_as_a_station(db_path):
     assert "fine" not in pm["top"]["reason"]
 
 
+# ---------------------------------------------------------------------------
+# 2c. remote access — "off by the operator" is a decision, never a fault
+#     (sigmond tasks/plan-remote-access.md section 4)
+# ---------------------------------------------------------------------------
+
+RAC_OFF = {"verdict": "VALID", "reason": "off by the operator since 2026-10-09T18:22:05Z",
+           "data": {"wish": "off", "tunnel": "stopped", "channels_up": 0,
+                    "channels_declared": 6, "since": "2026-10-09T18:22:05Z", "by": "vm"}}
+RAC_ON = {"verdict": "VALID", "reason": "on: 6 of 6 channels",
+          "data": {"wish": "on", "tunnel": "running", "channels_up": 6, "channels_declared": 6}}
+RAC_DOWN = {"verdict": "INVALID", "reason": "wanted on, not up: the tunnel service does not run",
+            "data": {"wish": "on", "tunnel": "stopped", "channels_up": 0, "channels_declared": 6}}
+
+
+def pm_with_rac(rac, station="AC0G-B4", rollup="VALID", reason="versions: host versions read"):
+    env = make_pm_envelope(station=station, rollup=rollup, reason=reason)
+    env["blocks"]["rac"] = rac
+    assert heartbeat_schema.validate(env) == []
+    return env
+
+
+def pm_with_rac_unchecked(rac):
+    """The same envelope with no validate() call: for a schema that predates `rac`."""
+    env = make_pm_envelope(station="AC0G-B4-PM")
+    env["blocks"]["rac"] = rac
+    return env
+
+
+def _row(db_path, envelope, age=10):
+    seed(db_path, "AC0G-B4", NOW - age, envelope)
+    conn = ingest.open_db(str(db_path))
+    try:
+        statuses = fleetboard.derive_status(conn, ROSTER, NOW)
+    finally:
+        conn.close()
+    row = {s["station"]: s for s in statuses}["AC0G-B4"]
+    html = fleetboard.render_html([row], [], {"count": 0, "window_s": 86400, "recent": []}, NOW)
+    return row, html
+
+
+def test_remote_access_off_by_the_operator_shows_as_a_decision(db_path):
+    row, html = _row(db_path, pm_with_rac(RAC_OFF))
+    assert row["top"]["verdict"] == "VALID"              # nothing to chase
+    assert row["blocks"]["rac"]["label"] == fleetboard.OPERATOR_OFF
+    assert row["remote_access_off"] is True
+    assert ('<td class="verdict v-OFF" title="off by the operator since '
+            '2026-10-09T18:22:05Z">off</td>') in html
+    assert "remote access off by the operator" in html   # the row's tag: no hover needed
+    assert html.count('class="verdict v-INVALID"') == 0
+
+
+def test_the_off_cell_escapes_the_reason_it_took_off_the_wire(db_path):
+    hostile = 'off by the operator <script>alert(1)</script> "x"'
+    row, html = _row(db_path, pm_with_rac(dict(RAC_OFF, reason=hostile)))
+    assert row["blocks"]["rac"]["label"] == fleetboard.OPERATOR_OFF
+    assert ('<td class="verdict v-OFF" title="off by the operator '
+            '&lt;script&gt;alert(1)&lt;/script&gt; &quot;x&quot;">off</td>') in html
+    assert "<script" not in html
+
+
+def test_a_tunnel_that_runs_reads_ok_and_carries_no_off_label(db_path):
+    row, html = _row(db_path, pm_with_rac(RAC_ON))
+    assert "label" not in row["blocks"]["rac"]
+    assert row["remote_access_off"] is False
+    assert '<td class="verdict v-VALID" title="on: 6 of 6 channels">ok</td>' in html
+    assert "remote access off" not in html
+    assert 'class="verdict v-OFF"' not in html           # the CSS defines it; no cell uses it
+
+
+def test_wanted_on_and_not_up_stays_a_fault(db_path):
+    env = pm_with_rac(RAC_DOWN, rollup="INVALID",
+                      reason="rac: wanted on, not up: the tunnel service does not run")
+    row, html = _row(db_path, env)
+    assert row["top"]["verdict"] == "INVALID"
+    assert row["remote_access_off"] is False
+    assert ('<td class="verdict v-INVALID" title="wanted on, not up: the tunnel '
+            'service does not run">FAIL</td>') in html
+
+
+@pytest.mark.parametrize("rac", [
+    dict(RAC_OFF, verdict="INVALID"),                    # a fault never wears the label
+    dict(RAC_OFF, verdict="INCONCLUSIVE"),               # "off, yet the tunnel service runs"
+    {"verdict": "VALID", "reason": "x"},                 # no data at all
+    {"verdict": "VALID", "reason": "x", "data": "off"},
+    {"verdict": "VALID", "reason": "x", "data": {"wish": ["off"]}},
+    {"verdict": "VALID", "reason": "x", "data": {"wish": "OFF"}},
+], ids=["invalid", "inconclusive", "no-data", "data-not-a-dict", "wish-not-a-string", "wish-misspelt"])
+def test_only_a_valid_block_whose_wish_reads_off_wears_the_label(db_path, rac):
+    row, html = _row(db_path, pm_with_rac(rac))
+    assert "label" not in row["blocks"]["rac"]
+    assert row["remote_access_off"] is False
+    assert 'class="verdict v-OFF"' not in html
+
+
+def test_a_silent_host_stays_invalid_whatever_its_last_rac_block_said(db_path):
+    row, html = _row(db_path, pm_with_rac(RAC_OFF), age=3 * 3600)
+    assert row["availability"]["verdict"] == "INVALID"
+    assert row["top"]["verdict"] == "INVALID" and "silent" in row["top"]["reason"]
+
+
+def test_ingest_takes_a_host_envelope_that_carries_rac(drop_dir, db_path, monkeypatch):
+    drop(drop_dir, "AC0G-B4-PM_20261009T190002Z.json", pm_with_rac(RAC_OFF, station="AC0G-B4-PM"))
+    result = ingest.ingest_once(str(drop_dir), str(db_path))
+    assert (result["ingested"], result["quarantined"]) == (1, 0)
+    # Control: a server whose schema copy predates `rac` quarantines the very
+    # same file, and a quarantined host looks silent.  So the server learns
+    # the block before any host sends it (the release order says the same).
+    monkeypatch.setattr(heartbeat_schema, "ALL_BLOCK_NAMES", heartbeat_schema.BLOCK_NAMES)
+    drop(drop_dir, "AC0G-B4-PM_20261009T190502Z.json",
+         dict(pm_with_rac_unchecked(RAC_OFF), emitted_at="2026-10-09T19:05:02Z"))
+    result = ingest.ingest_once(str(drop_dir), str(db_path))
+    assert (result["ingested"], result["quarantined"]) == (0, 1)
+
+
+def test_the_board_draws_one_column_for_every_block_the_wire_knows():
+    html = fleetboard.render_html(
+        [], [], {"count": 0, "window_s": 86400, "recent": []}, 1.0)
+    for name in heartbeat_schema.ALL_BLOCK_NAMES:
+        assert f"<th>{name}</th>" in html
+    assert html.index("<th>resources</th>") < html.index("<th>rac</th>")
+
+
 def test_colspan_is_computed_not_hardcoded():
     html = fleetboard.render_html(
         [], [], {"count": 0, "window_s": 86400, "recent": []}, 1.0)
     match = re.search(r'colspan="(\d+)"', html)
     assert match, "the empty-roster row must declare a colspan"
-    assert int(match.group(1)) == 6 + len(heartbeat_schema.BLOCK_NAMES)
+    assert int(match.group(1)) == 6 + len(heartbeat_schema.ALL_BLOCK_NAMES)
 
 
 # ---------------------------------------------------------------------------
