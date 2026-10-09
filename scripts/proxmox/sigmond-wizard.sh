@@ -1229,9 +1229,6 @@ rac_pair_locked(){
         RAC_PAIR_FAIL="could not install $RAC_SWITCH"
         return 1
     fi
-    if ! systemctl enable --now sigmond-rac-pair.timer sigmond-rac-pair.path >/dev/null 2>&1; then
-        RAC_PAIR_WARN="the pairing's re-assertion units did not start (systemctl enable --now failed)"
-    fi
     pm=$(ip -4 -o addr show 2>/dev/null | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
     if [ -z "$pm" ]; then
         RAC_PAIR_FAIL="this host has no private link to its decoder VM (no /30 address)"
@@ -1241,6 +1238,13 @@ rac_pair_locked(){
     if ! rac_pair_key_ok "$hostkey"; then
         RAC_PAIR_FAIL="cannot read this host's sshd key ($RAC_PAIR_HOSTPUB)"
         return 1
+    fi
+    # Armed before every step that can fail by chance (the guest agent, sudo, the
+    # account, the guest script, the proof), and after the two checks above, which
+    # fail by structure: a host with no /30 link or no sshd key can never pair, and
+    # would run a unit that fails at every boot and every six hours.
+    if ! systemctl enable --now sigmond-rac-pair.timer sigmond-rac-pair.path >/dev/null 2>&1; then
+        RAC_PAIR_WARN="the pairing's re-assertion units did not start (systemctl enable --now failed)"
     fi
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break

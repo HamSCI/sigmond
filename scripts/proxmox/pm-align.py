@@ -7,9 +7,14 @@ default: it says what differs from the release and changes nothing.
 
 What it never touches, whatever the flags: the host's network (interfaces,
 vmbr1, NAT, netfix/setnet), CPU/IRQ/cache tuning (host-apply, the fence,
-irq-affinity, resctrl, grub, vfio), Proxmox packages, the hostname, the
+irq-affinity, resctrl, grub, vfio), Proxmox packages (one exception: the
+pairing step installs sudo on a host that has none), the hostname, the
 VM's configuration, and the host's ssh key.  Those take a station off the
 air; they stay with a reinstall or an explicit, separate act.
+
+After the files land, --apply runs the installed wizard's --pair-vm, which
+pairs the decoder VM with this host so that `smd remote` works in the VM.  A
+failed pairing warns and sets exit 1; the heartbeat and tunnel steps still run.
 
 Design: sigmond docs/superpowers/specs/2026-09-24-smd-align-design.md §4.
 """
@@ -239,6 +244,8 @@ WIZARD_HEREDOCS_SINCE_V371 = {
 }
 SETUP = "/usr/local/sbin/sigmond-setup"
 PAIR_FLAG = "--pair-vm"
+NO_PRIVATE_LINK = ("this host has no private link to its decoder VM (the pre-v3.4x layout); "
+                   "smd remote needs that link")
 RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
           ("station", 12224, 8000), ("gmag", 12225, 8082))
 NOT_TOUCHED = (
@@ -273,9 +280,11 @@ def relay_units(wizard: str, vmid: int) -> list:
     return out
 
 
-def desired_files(src: Sources, vmid: int) -> list:
+def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list:
     """The refresh set (plan Decision 2): what the release says these host
-    files hold.  Nothing outside it is ever written."""
+    files hold.  Nothing outside it is ever written.  When `notes` is a list,
+    a wizard that carries some but not all of the six v3.71 remote-access
+    files adds one line that names the missing ones."""
     fb = extract_heredocs(src.firstboot)
     wz = extract_heredocs(src.wizard)
     out = []
@@ -289,9 +298,14 @@ def desired_files(src: Sources, vmid: int) -> list:
         if path not in wz:
             raise PmAlignError(f"the release's wizard no longer writes {path}")
         out.append(HostFile(path, wz[path].encode(), mode, "sigmond-wizard.sh"))
-    for path, mode in WIZARD_HEREDOCS_SINCE_V371.items():
-        if path in wz:
-            out.append(HostFile(path, wz[path].encode(), mode, "sigmond-wizard.sh"))
+    carried = [path for path in WIZARD_HEREDOCS_SINCE_V371 if path in wz]
+    for path in carried:
+        out.append(HostFile(path, wz[path].encode(), WIZARD_HEREDOCS_SINCE_V371[path],
+                            "sigmond-wizard.sh"))
+    if notes is not None and 0 < len(carried) < len(WIZARD_HEREDOCS_SINCE_V371):
+        missing = [Path(path).name for path in WIZARD_HEREDOCS_SINCE_V371 if path not in wz]
+        notes.append(f"this release's wizard carries {len(carried)} of the "
+                     f"{len(WIZARD_HEREDOCS_SINCE_V371)} remote-access files ({', '.join(missing)})")
     out.extend(relay_units(src.wizard, vmid))
     if "pm-align.py" in src.proxmox:
         out.append(HostFile("/usr/local/sbin/pm-align", src.proxmox["pm-align.py"], 0o755,
@@ -780,35 +794,63 @@ def heartbeat_step(root: Path, src: Sources, argv_tail: list, *, run, tmpdir: Pa
     return "re-run" if existed else "set up"
 
 
+def _can_pair(wizard: str) -> bool:
+    """True when this wizard text carries the `--pair-vm` branch (v3.71 on);
+    a comment that merely mentions the flag does not count."""
+    return f"    {PAIR_FLAG})" in wizard
+
+
+def _no_private_link(root: Path) -> bool:
+    """True on a host whose decoder VM sits on the LAN (the pre-v3.4x layout):
+    the pairing needs the host's private /30 link to the VM, so it can never
+    pair there."""
+    return topology_note(root) is not None
+
+
 def pairing_step(root: Path, *, run, warn=None) -> str:
     """Pair the decoder VM with this host, or re-assert the pairing, by
     running the installed wizard's own `--pair-vm` (sigmond
     tasks/plan-remote-access.md section 2).  The VM then holds one key that
     can run one script here, and its operator can type `smd remote off`.
 
-    "paired"; "skipped: <why>" when the installed wizard predates v3.71, or
-    when another run holds the pairing's lock and does the work; or
-    "failed: <the wizard's last line>".  The wizard may print `WARN: <text>`
-    before any of those (its re-assertion units did not start): `warn(text)`
+    "paired", only when the wizard's last line says `paired: `;
+    "skipped: <why>" when the installed wizard predates v3.71, when this host
+    has no private link to its VM, or when another run holds the pairing's
+    lock and does the work; or "failed: <why>": the wizard's last line
+    (and, when that line is not its `NOT paired:` answer, the last line of its
+    stderr), or `unexpected answer: ...` for an exit 0 that never said paired.
+    Before it starts the wizard, which can run some minutes with its output
+    captured, it prints one line saying so.  The wizard may print `WARN: <text>`
+    before its answer (its re-assertion units did not start): `warn(text)`
     receives each one.  Never raises for a wizard that ran."""
     try:
         text = _under(root, SETUP).read_text()
     except OSError:
         return "skipped: no sigmond-setup on this host"
-    if f"    {PAIR_FLAG})" not in text:
+    if not _can_pair(text):
         return "skipped: this release's wizard cannot pair (it predates v3.71)"
+    if _no_private_link(root):
+        return f"skipped: {NO_PRIVATE_LINK}"
+    _say(f"  pairing: running {SETUP} {PAIR_FLAG} (it can take some minutes)")
     r = run([SETUP, PAIR_FLAG], capture_output=True, text=True, timeout=900)
-    lines = (r.stdout or r.stderr or "").strip().splitlines()
+    out = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+    err = [ln for ln in (r.stderr or "").splitlines() if ln.strip()]
+    last = out[-1] if out else ""
     if warn is not None:
-        for line in lines:
+        for line in out:
             _, found, why = line.partition("WARN: ")
             if found:
                 warn(why.strip())
     if r.returncode == 0:
-        if lines and "another pairing is running" in lines[-1]:
+        if "another pairing is running" in last:
             return "skipped: another pairing is running on this host; it does the work"
-        return "paired"
-    return f"failed: {lines[-1] if lines else 'exit ' + str(r.returncode)}"
+        if "paired: " in last and "NOT paired" not in last:
+            return "paired"
+        return f"failed: unexpected answer: {last.strip() or 'no output'}"
+    why = last.strip()
+    if err and "NOT paired:" not in last:
+        why = f"{why} | {err[-1].strip()}" if why else err[-1].strip()
+    return f"failed: {why or 'exit ' + str(r.returncode)}"
 
 
 def _apply_pairing(root: Path, run) -> int:
@@ -1007,13 +1049,16 @@ def _print_status(root: Path) -> None:
 def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.request.urlopen,
          run=None, now=None) -> int:
     """Exit 0 aligned (or --apply/--tunnel-step succeeded), 1 alignment
-    available (or --tunnel-step did not fully come up), 2 target could not
-    be established, or --apply refused (not root)."""
+    available (or --apply's pairing step failed, or --tunnel-step did not
+    fully come up), 2 target could not be established, or --apply refused
+    (not root)."""
     run = run or subprocess.run
     now = now or datetime.now(timezone.utc)
     ap = argparse.ArgumentParser(prog="pm-align", description=__doc__.splitlines()[0])
     ap.add_argument("--release", help="a blessed tag (default: the latest)")
-    ap.add_argument("--apply", action="store_true", help="write the refresh set, as root")
+    ap.add_argument("--apply", action="store_true",
+                    help="write the refresh set, as root, then pair the decoder VM with this "
+                         "host (on a host with no sudo that installs sudo)")
     ap.add_argument("--tunnel-step", action="store_true", dest="tunnel_step",
                     help=argparse.SUPPRESS)
     ap.add_argument("--status", action="store_true",
@@ -1054,7 +1099,8 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
     try:
         rel = fetch_release(args.release, urlopen=urlopen)
         src = fetch_sources(rel, vmid=vmid, urlopen=urlopen)
-        changes = plan_files(desired_files(src, vmid), root)
+        notes = []
+        changes = plan_files(desired_files(src, vmid, notes), root)
     except PmAlignError as exc:
         _say(f"pm-align: cannot establish the target — {exc}")
         return 2
@@ -1064,6 +1110,8 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
     note = topology_note(root)
     if note:
         _say(f"  topology: {note}")
+    for line in notes:
+        _say(f"  note: {line}")
     _say("  not touched, by design:")
     for line in NOT_TOUCHED:
         _say(f"    - {line}")
@@ -1077,8 +1125,11 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
     tunnel_msg, tunnel_pending = _dry_run_tunnel_note(root)
     _say(f"  {tunnel_msg}")
     _say(f"  {_dry_run_heartbeat_note(root)}")
-    if f"    {PAIR_FLAG})" in src.wizard:
-        _say(f"  pairing: --apply pairs the decoder VM with this host, or re-asserts it ({SETUP} {PAIR_FLAG})")
+    if _can_pair(src.wizard):
+        if _no_private_link(root):
+            _say(f"  pairing: skipped: {NO_PRIVATE_LINK}")
+        else:
+            _say(f"  pairing: --apply pairs the decoder VM with this host, or re-asserts it ({SETUP} {PAIR_FLAG})")
     _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
     return 1 if (pending or tunnel_pending) else 0
 

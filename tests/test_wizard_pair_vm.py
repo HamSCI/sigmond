@@ -380,12 +380,15 @@ def test_pairing_again_changes_nothing_but_the_keys_it_reads(tmp_path):
 
 
 ARMING = ["install-host-files", "systemctl"]
+# A host that fails by its structure (no /30 link, no readable sshd key) never pairs, so it
+# arms nothing: the units would fail at every boot and every six hours for ever.
+STRUCTURAL = ["install-host-files"]
 
 
 @pytest.mark.parametrize("kw,reason,touched", [
-    (dict(slash30=""), "no private link to its decoder VM", ARMING),
-    (dict(hostpub=None), "cannot read this host's sshd key", ARMING),
-    (dict(hostpub="ssh-ed25519 AAAA\u00e9\u00e9 x\n"), "cannot read this host's sshd key", ARMING),
+    (dict(slash30=""), "no private link to its decoder VM", STRUCTURAL),
+    (dict(hostpub=None), "cannot read this host's sshd key", STRUCTURAL),
+    (dict(hostpub="ssh-ed25519 AAAA\u00e9\u00e9 x\n"), "cannot read this host's sshd key", STRUCTURAL),
     (dict(agent=1), "the guest agent in VM 100 does not answer", ARMING + ["qm"]),
     (dict(sudo="no"), "this host has no sudo and could not install it", ARMING + ["qm", "apt-get"]),
     (dict(install_rc=1), "could not install /usr/local/sbin/sigmond-rac-switch", ["install-host-files"]),
@@ -396,6 +399,21 @@ def test_pairing_refuses_early_and_says_why(tmp_path, kw, reason, touched):
     assert sorted(set(c.split()[0] for c in calls)) == sorted(set(touched))
     assert not (tmp_path / "home" / ".ssh" / "authorized_keys").exists()
     assert not (tmp_path / "gexec.args").exists()
+
+
+@pytest.mark.parametrize("kw,reason", [
+    (dict(slash30=""), "this host has no private link to its decoder VM (no /30 address)"),
+    (dict(hostpub=None), "cannot read this host's sshd key"),
+    (dict(hostpub="ssh-ed25519 AAAA\u00e9\u00e9 x\n"), "cannot read this host's sshd key"),
+], ids=["no-slash-30", "no-host-key", "host-key-not-ascii"])
+def test_a_host_that_fails_by_structure_arms_no_unit(tmp_path, kw, reason):
+    # The re-assertion units are armed before every step that can fail by chance and after the
+    # two that fail by structure.  Such a host can never pair, so it gets no unit that would
+    # fail at every boot.
+    r, calls = pair(tmp_path, **kw)
+    assert f"rc=1 fail={reason}" in r.stdout, r.stdout
+    assert not [c for c in calls if c.startswith("systemctl")], calls
+    assert "install-host-files" in calls              # the files still land first
 
 
 def test_a_host_without_sudo_installs_it_once_and_pairs(tmp_path):
@@ -494,6 +512,10 @@ def branch_tail():
     branch = TEXT[i:TEXT.index("    --rac-off|--rac-on)", i)]
     return 'set -- --pair-vm\ncase "${1:-}" in\n' + branch + "esac\necho NOT-REACHED\n"
 
+
+# Every pm-align in the field from v3.71 on reads these three lines of `--pair-vm` (the
+# `paired:` line, the `another pairing is running` line and the `NOT paired:` line), so their
+# text is a contract.  Change a word here and a fielded pm-align reads the answer wrong.
 
 def test_pair_vm_says_paired_and_exits_0(tmp_path):
     r, _ = pair(tmp_path, tail=branch_tail())

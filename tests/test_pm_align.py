@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -255,7 +256,7 @@ def test_not_touched_lists_every_global_constraint_area():
         assert phrase in text
 
 
-def _fake_run(calls, rc=0, stdout=""):
+def _fake_run(calls, rc=0, stdout="", stderr=""):
     def run(argv, **kw):
         calls.append(list(argv))
         # tunnel_apply's active check comes first and needs "active" to
@@ -263,7 +264,7 @@ def _fake_run(calls, rc=0, stdout=""):
         # is a no-op for every other caller of _fake_run.
         if argv[:2] == ["systemctl", "is-active"]:
             return subprocess.CompletedProcess(argv, 0, "active\n", "")
-        return subprocess.CompletedProcess(argv, rc, stdout, "")
+        return subprocess.CompletedProcess(argv, rc, stdout, stderr)
     return run
 
 
@@ -1547,6 +1548,10 @@ esac
 '''
 
 
+# The line `sigmond-setup --pair-vm` prints when it has paired, through the wizard's `say`.
+PAIRED_LINE = "[wizard] paired: the decoder VM can run smd remote on, smd remote off and smd remote status\n"
+
+
 def _src_v371():
     return pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ_V371, 100),
                             {"pm-heartbeat.py": b"hb"})
@@ -1591,28 +1596,73 @@ def test_the_real_wizard_carries_every_file_pm_align_delivers_from_it():
 # What every pm-align already in the field demands of a release's wizard.  A
 # station runs the pm-align its last alignment installed, and that copy reads
 # the NEW release's wizard.  It refuses the whole release, with "the release's
-# wizard no longer writes ...", when one of these has gone.  Frozen here as
-# literals on purpose: this test must not move when pm-align.py does.
+# wizard no longer writes ...", when one of these has gone.
+#
+# The test reads the wizard with ITS OWN copy of the reader a fielded pm-align
+# uses: the regex and the line scan below stand as literals, so the test does
+# not move when pm-align.py does.  (A test that read through
+# `pm_align.extract_heredocs` would pass a change that loosened the reader and
+# the wizard together, while every pm-align in the field refused the release.)
 FIELDED_QUOTED = ("/usr/local/bin/sigmond-vm", "/usr/local/lib/sigmond/vm-port-relay.py")
 FIELDED_TEMPLATES = ("/etc/systemd/system/sigmond-vm-$RNAME-relay.socket",
                      "/etc/systemd/system/sigmond-vm-$RNAME-relay@.service")
+FIELDED_RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
+                  ("station", 12224, 8000), ("gmag", 12225, 8082))
+FIELDED_HEREDOC_START = re.compile(
+    r"""^\s*cat\s+>\s*"?(/[^"\s]+)"?\s+<<\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2\s*$""")
+
+
+def _fielded_heredocs(text, quoted_only=True):
+    """{path: body} the way a fielded pm-align reads a wizard: a top-level
+    ``cat > PATH <<'DELIM'`` whose opener ends right after the delimiter, up to
+    the delimiter alone on a line."""
+    out, lines, i = {}, text.splitlines(keepends=True), 0
+    while i < len(lines):
+        m = FIELDED_HEREDOC_START.match(lines[i].rstrip("\n"))
+        if not m:
+            i += 1
+            continue
+        path, quote, delim = m.groups()
+        j = i + 1
+        while j < len(lines) and lines[j].rstrip("\n") != delim:
+            j += 1
+        assert j < len(lines), f"the heredoc for {path} (<<{delim}) never closes"
+        if quote or not quoted_only:
+            out[path] = "".join(lines[i + 1:j])
+        i = j + 1
+    return out
 
 
 def test_the_real_wizard_still_satisfies_every_pm_align_in_the_field():
-    quoted = pm_align.extract_heredocs(WIZARD)
+    quoted = _fielded_heredocs(WIZARD)
     for path in FIELDED_QUOTED:
-        assert quoted.get(path, "").strip(), path
-    templates = pm_align.extract_heredocs(WIZARD, quoted_only=False)
+        assert quoted.get(path, "").strip(), f"a fielded pm-align cannot read {path} from the wizard"
+    templates = _fielded_heredocs(WIZARD, quoted_only=False)
     for path in FIELDED_TEMPLATES:
-        assert path in templates, path
-    units = {f.path: f.content.decode() for f in pm_align.relay_units(WIZARD, 100)}
+        assert path in templates, f"a fielded pm-align cannot read {path} from the wizard"
+    sock = templates["/etc/systemd/system/sigmond-vm-$RNAME-relay.socket"]
+    svc = templates["/etc/systemd/system/sigmond-vm-$RNAME-relay@.service"]
+    units = {}
+    for name, lport, vport in FIELDED_RELAYS:
+        for kind, tmpl in (("socket", sock), ("service", svc)):
+            units[(name, kind)] = (tmpl.replace("$RNAME", name).replace("$RLPORT", str(lport))
+                                   .replace("$RVPORT", str(vport)).replace("$VMID", "100"))
     assert len(units) == 8
-    for name, lport, vport in (("ssh", 12222, 22), ("web", 12223, 8081),
-                               ("station", 12224, 8000), ("gmag", 12225, 8082)):
-        assert f"ListenStream=127.0.0.1:{lport}\n" in units[f"/etc/systemd/system/sigmond-vm-{name}-relay.socket"]
-        svc = units[f"/etc/systemd/system/sigmond-vm-{name}-relay@.service"]
-        assert f"ExecStart=/usr/local/lib/sigmond/vm-port-relay.py {vport}\n" in svc
-        assert "Environment=SIGMOND_VMID=100\n" in svc
+    for name, lport, vport in FIELDED_RELAYS:
+        assert f"ListenStream=127.0.0.1:{lport}\n" in units[(name, "socket")]
+        assert f"ExecStart=/usr/local/lib/sigmond/vm-port-relay.py {vport}\n" in units[(name, "service")]
+        assert "Environment=SIGMOND_VMID=100\n" in units[(name, "service")]
+
+
+def test_the_frozen_reader_is_still_the_reader_pm_align_has_today():
+    # If this fails, someone changed pm-align's reader.  Do NOT edit the frozen
+    # copy above to match: every pm-align already in the field keeps the OLD
+    # reader, and the frozen test above must keep reading the wizard through it.
+    # A change to the reader needs a migration plan for the release that ships
+    # it (the wizard must still parse under the old reader, or the release must
+    # reach the fleet some other way), and only then does this expected pattern
+    # move.
+    assert FIELDED_HEREDOC_START.pattern == pm_align._HEREDOC_START.pattern
 
 
 def _setup(tmp_path, text):
@@ -1624,7 +1674,7 @@ def _setup(tmp_path, text):
 def test_pairing_step_runs_the_installed_wizards_pair_vm(tmp_path):
     _setup(tmp_path, WIZ_V371)
     calls = []
-    assert pm_align.pairing_step(tmp_path, run=_fake_run(calls)) == "paired"
+    assert pm_align.pairing_step(tmp_path, run=_fake_run(calls, stdout=PAIRED_LINE)) == "paired"
     assert calls == [["/usr/local/sbin/sigmond-setup", "--pair-vm"]]
 
 
@@ -1656,6 +1706,7 @@ def test_main_apply_pairs_after_the_files_and_before_heartbeat_and_tunnel(tmp_pa
             # the new wizard and the switch script stand on disk by now
             assert (tmp_path / "usr/local/sbin/sigmond-rac-switch").exists()
             order.append("pair")
+            return subprocess.CompletedProcess(argv, 0, PAIRED_LINE, "")
         elif argv[:3] == ["qm", "guest", "exec"]:
             order.append("push")
         elif argv and argv[0].endswith("pm-heartbeat-setup.sh"):
@@ -1789,3 +1840,204 @@ def test_pm_align_reads_the_switch_and_all_five_units_out_of_the_real_wizard():
     found = pm_align.extract_heredocs(WIZARD)
     missing = [p for p in V371_HEREDOC_PATHS if not found.get(p, "").strip()]
     assert not missing, f"extract_heredocs cannot read {missing} from the real wizard"
+
+
+# ── fix round 1: an answer must say paired; a host with no private link stays
+#    quiet; the step says what it runs; a partial wizard gets a note ─────────
+
+SETUP_ARGV = ["/usr/local/sbin/sigmond-setup", "--pair-vm"]
+LAN_INTERFACES = "auto vmbr0\niface vmbr0 inet dhcp\n"       # no vmbr1: the decoder VM sits on the LAN
+NO_LINK = ("skipped: this host has no private link to its decoder VM (the pre-v3.4x layout); "
+           "smd remote needs that link")
+RUNNING = "pairing: running /usr/local/sbin/sigmond-setup --pair-vm (it can take some minutes)"
+
+
+def _lan_host(tmp_path):
+    (tmp_path / "etc/network").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "etc/network/interfaces").write_text(LAN_INTERFACES)
+
+
+def _patch_release(monkeypatch, src):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.71", "a" * 40, "d" * 40, "f" * 64, ""))
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
+
+
+# -- "paired" means the wizard said so ---------------------------------------------------------
+
+@pytest.mark.parametrize("stdout,want", [
+    ("", "failed: unexpected answer: no output"),
+    ("[wizard] already configured (/etc/sigmond/rac-switch.key.pub)\n",
+     "failed: unexpected answer: [wizard] already configured (/etc/sigmond/rac-switch.key.pub)"),
+    ("\n[wizard] already configured\n\n", "failed: unexpected answer: [wizard] already configured"),
+    ("[wizard] NOT paired: the guest agent in VM 100 does not answer\n",
+     "failed: unexpected answer: [wizard] NOT paired: the guest agent in VM 100 does not answer"),
+    (PAIRED_LINE + "[wizard] done\n", "failed: unexpected answer: [wizard] done"),
+], ids=["no-output", "old-wizard-says-configured", "blank-lines-do-not-count",
+        "exit-0-with-a-not-paired-line", "paired-is-not-the-last-line"])
+def test_pairing_step_fails_an_exit_0_that_does_not_end_on_the_paired_line(tmp_path, stdout, want):
+    _setup(tmp_path, WIZ_V371)
+    assert pm_align.pairing_step(tmp_path, run=_fake_run([], stdout=stdout)) == want
+
+
+def test_pairing_step_accepts_the_paired_line_after_a_warn_line(tmp_path):
+    _setup(tmp_path, WIZ_V371)
+    out = pm_align.pairing_step(tmp_path, run=_fake_run(
+        [], stdout="[wizard] WARN: the units did not start\n" + PAIRED_LINE))
+    assert out == "paired"
+
+
+@pytest.mark.parametrize("stdout,want", [
+    ("", "failed: unexpected answer: no output"),
+    ("[wizard] already configured (/etc/sigmond/rac-switch.key.pub)\n",
+     "failed: unexpected answer: [wizard] already configured (/etc/sigmond/rac-switch.key.pub)"),
+], ids=["no-output", "old-wizard-says-configured"])
+def test_main_apply_exits_1_for_an_exit_0_that_does_not_say_paired(tmp_path, monkeypatch, capsys,
+                                                                   stdout, want):
+    def run(argv, **kw):
+        if list(argv)[:2] == SETUP_ARGV:
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    assert _apply_v371(tmp_path, monkeypatch, run) == 1
+    out = capsys.readouterr().out
+    assert f"pairing: WARN — {want}" in out
+    assert "retry: /usr/local/sbin/sigmond-setup --pair-vm" in out
+    assert "the decoder VM can run" not in out
+    assert "tunnel: no host tunnel configured" in out                      # the later steps ran
+
+
+# -- a host with no private link stays quiet -----------------------------------------------------
+
+def test_pairing_step_skips_a_host_with_no_private_link_and_never_runs_the_wizard(tmp_path):
+    _setup(tmp_path, WIZ_V371)
+    _lan_host(tmp_path)
+    calls = []
+    assert pm_align.pairing_step(tmp_path, run=_fake_run(calls, stdout=PAIRED_LINE)) == NO_LINK
+    assert calls == []
+
+
+def test_pairing_step_pairs_a_host_whose_interfaces_declare_vmbr1(tmp_path):
+    _setup(tmp_path, WIZ_V371)
+    (tmp_path / "etc/network").mkdir(parents=True)
+    (tmp_path / "etc/network/interfaces").write_text("auto vmbr0\nauto vmbr1\n")
+    assert pm_align.pairing_step(tmp_path, run=_fake_run([], stdout=PAIRED_LINE)) == "paired"
+
+
+def test_main_apply_on_a_host_with_no_private_link_exits_0_and_runs_the_later_steps(
+        tmp_path, monkeypatch, capsys):
+    _tunnel_root(tmp_path)
+    _lan_host(tmp_path)
+    (tmp_path / "etc/pm-heartbeat").mkdir(parents=True)
+    (tmp_path / "etc/pm-heartbeat/config.toml").write_text(
+        'station = "b4-pm"\nvmid = 100\ndest_host = "wd30"\n')
+    order = []
+
+    def run(argv, **kw):
+        argv = list(argv)
+        if argv[:2] == SETUP_ARGV:
+            order.append("pair")
+        elif argv[:3] == ["qm", "guest", "exec"]:
+            order.append("push")
+        elif argv and argv[0].endswith("pm-heartbeat-setup.sh"):
+            order.append("heartbeat")
+        elif argv[0] == "systemd-run":
+            order.append("tunnel")
+        return subprocess.CompletedProcess(argv, 0, '{"exitcode": 0}', "")
+
+    src = _src_v371()
+    for name in pm_align.HB_FILES:
+        src.proxmox[name] = b"#!/bin/sh\n"
+    _patch_release(monkeypatch, src)
+    assert pm_align.main(["--apply"], root=tmp_path, run=run) == 0
+    assert order == ["push", "heartbeat", "tunnel"]                       # the wizard never ran
+    out = capsys.readouterr().out
+    assert f"  pairing: {NO_LINK}" in out
+    assert RUNNING not in out and "WARN" not in out
+
+
+def test_main_dry_run_on_a_host_with_no_private_link_prints_the_skip_instead_of_the_offer(
+        tmp_path, monkeypatch, capsys):
+    _lan_host(tmp_path)
+    _patch_release(monkeypatch, _src_v371())
+    pm_align.main([], root=tmp_path, run=_fake_run([]))
+    out = capsys.readouterr().out
+    assert f"  pairing: {NO_LINK}" in out
+    assert "--apply pairs" not in out
+
+
+# -- the step says what it runs, and keeps the wizard's own complaint --------------------------
+
+def test_the_pairing_step_says_what_it_runs_before_it_starts_the_wizard(tmp_path, monkeypatch, capsys):
+    seen = []
+
+    def run(argv, **kw):
+        if list(argv)[:2] == SETUP_ARGV:
+            seen.append(capsys.readouterr().out)          # everything printed up to this call
+            return subprocess.CompletedProcess(argv, 0, PAIRED_LINE, "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    assert _apply_v371(tmp_path, monkeypatch, run) == 0
+    assert len(seen) == 1 and f"  {RUNNING}\n" in seen[0]
+    after = capsys.readouterr().out
+    assert RUNNING not in after and "pairing: the decoder VM can run" in after
+
+
+@pytest.mark.parametrize("stdout,stderr,want", [
+    ("[wizard] starting\n", "/usr/local/sbin/sigmond-setup: line 1236: pm: unbound variable\n",
+     "failed: [wizard] starting | /usr/local/sbin/sigmond-setup: line 1236: pm: unbound variable"),
+    ("[wizard] starting\n", "first\n\nthe last one\n\n", "failed: [wizard] starting | the last one"),
+    ("[wizard] NOT paired: this host has no sudo\n", "noise\n",
+     "failed: [wizard] NOT paired: this host has no sudo"),
+    ("", "bash: boom\n", "failed: bash: boom"),
+    ("", "", "failed: exit 1"),
+], ids=["stderr-follows", "last-nonempty-stderr-line", "not-paired-line-stands-alone",
+        "stderr-only", "nothing-at-all"])
+def test_a_failed_pairing_keeps_the_wizards_stderr_line_unless_it_said_why(tmp_path, stdout, stderr, want):
+    _setup(tmp_path, WIZ_V371)
+    assert pm_align.pairing_step(tmp_path, run=_fake_run([], rc=1, stdout=stdout, stderr=stderr)) == want
+
+
+# -- a wizard that carries some, but not all, of the six remote-access files -------------------
+
+def test_desired_files_notes_a_wizard_that_carries_some_of_the_six():
+    notes = []
+    pm_align.desired_files(_src_v371(), 100, notes)             # the switch and pair.path: 2 of 6
+    assert notes == ["this release's wizard carries 2 of the 6 remote-access files "
+                     "(sigmond-rac-register.service, sigmond-rac-register.timer, "
+                     "sigmond-rac-pair.service, sigmond-rac-pair.timer)"]
+
+
+def test_desired_files_notes_nothing_for_none_or_all_of_the_six():
+    for src in (_src(), pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZARD, 100), {})):
+        notes = []
+        pm_align.desired_files(src, 100, notes)
+        assert notes == []
+
+
+def test_the_dry_run_and_apply_print_the_note_for_a_partial_wizard(tmp_path, monkeypatch, capsys):
+    _patch_release(monkeypatch, _src_v371())
+    pm_align.main([], root=tmp_path, run=_fake_run([]))
+    dry = capsys.readouterr().out
+    assert "  note: this release's wizard carries 2 of the 6 remote-access files (sigmond-rac-register.service," in dry
+    _apply_v371(tmp_path / "applied", monkeypatch, _fake_run([], stdout=PAIRED_LINE))
+    assert "  note: this release's wizard carries 2 of the 6 remote-access files" in capsys.readouterr().out
+
+
+def test_the_dry_run_prints_no_note_for_a_wizard_with_none_or_all_of_the_six(tmp_path, monkeypatch, capsys):
+    for src in (_src(), pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZARD, 100), {})):
+        _patch_release(monkeypatch, src)
+        pm_align.main([], root=tmp_path, run=_fake_run([]))
+        assert "remote-access files" not in capsys.readouterr().out
+
+
+# -- the words an operator reads ------------------------------------------------------------------
+
+def test_the_texts_an_operator_reads_name_the_pairing_step(capsys):
+    assert "pairing step" in pm_align.__doc__ and "sudo" in pm_align.__doc__
+    assert "pairing" in pm_align.main.__doc__
+    with pytest.raises(SystemExit):
+        pm_align.main(["--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "pair the decoder VM" in help_text and "sudo" in help_text
