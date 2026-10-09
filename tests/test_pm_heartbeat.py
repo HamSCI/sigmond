@@ -51,8 +51,23 @@ def rr(rc, stdout="", stderr=""):
     return pm_heartbeat.RunResult(rc, stdout, stderr)
 
 
+#: What sigmond-rac-switch leaves in /run/sigmond/rac-state for a tunnel that
+#: runs with every channel accepted, already split into key and value.
+RAC_ON = {
+    "state": "on", "wish": "on", "wish_source": "file", "registered": "yes",
+    "tunnel": "running", "channels_up": "6", "channels_declared": "6",
+    "rac": "507", "gateway": "gw2.wsprdaemon.org", "tier": "wsprdaemon (secure)",
+    "changed_at": "2026-10-09T18:22:05Z", "changed_by": "install",
+    "checked_at": "2026-10-09T19:00:02Z",
+}
+
+
+def rac(**changes):
+    return dict(RAC_ON, **changes)
+
+
 def rich_checks(**overrides):
-    """The five top-level check runners a fully-healthy PM would wire.
+    """The six top-level check runners a fully-healthy PM would wire.
 
     Keys mirror pm_heartbeat.assemble()'s expectations exactly: "now",
     "uptime_s" and one raw-returning callable per BLOCK_NAMES entry.
@@ -75,6 +90,7 @@ def rich_checks(**overrides):
             "uptime_s": 123456.7,
             "temperature": 47.5,
         },
+        "rac": lambda: rac(),
     }
     checks.update(overrides)
     return checks
@@ -88,7 +104,7 @@ def test_contract_envelope_validates_against_schema():
     envelope = pm_heartbeat.assemble(CONFIG, rich_checks())
     errors = heartbeat_schema.validate(envelope)
     assert errors == []
-    assert set(envelope["blocks"]) == {"versions", "doctor", "resources"}
+    assert set(envelope["blocks"]) == {"versions", "doctor", "resources", "rac"}
     assert envelope["role"] == "pm"
     assert envelope["kind"] == heartbeat_schema.KIND
     assert envelope["schema_version"] == heartbeat_schema.SCHEMA_VERSION
@@ -101,8 +117,11 @@ def test_envelope_is_json_serializable():
 
 
 def test_block_names_constant_is_a_strict_subset_in_report_order():
-    assert pm_heartbeat.BLOCK_NAMES == ("versions", "doctor", "resources")
-    assert set(pm_heartbeat.BLOCK_NAMES) <= set(heartbeat_schema.BLOCK_NAMES)
+    assert pm_heartbeat.BLOCK_NAMES == ("versions", "doctor", "resources", "rac")
+    assert set(pm_heartbeat.BLOCK_NAMES) <= set(heartbeat_schema.ALL_BLOCK_NAMES)
+    # `rac` belongs to the host alone: the station's own block set lacks it.
+    assert "rac" in heartbeat_schema.HOST_BLOCK_NAMES
+    assert "rac" not in heartbeat_schema.BLOCK_NAMES
 
 
 def test_inlined_verdicts_and_precedence_match_the_real_schema():
@@ -353,6 +372,109 @@ def test_resources_missing_disk_path_is_null_not_a_crash():
     block = pm_heartbeat._map_resources(raw)
     assert block["verdict"] == "VALID"
     assert block["data"]["temperature_c"] is None
+
+
+# ---------------------------------------------------------------------------
+# rac block — the operator's switch for remote access
+# (sigmond tasks/plan-remote-access.md section 4)
+# ---------------------------------------------------------------------------
+
+RAC_CASES = [
+    (rac(), "VALID", "on: 6 of 6 channels"),
+    (rac(channels_up="4"), "INCONCLUSIVE", "on, short of channels: 4 of 6"),
+    (rac(state="off", wish="off", tunnel="stopped", channels_up="0", changed_by="vm"),
+     "VALID", "off by the operator since 2026-10-09T18:22:05Z"),
+    (rac(state="off", wish="off", wish_source="units", registered="no", tunnel="stopped",
+         channels_up="0", channels_declared="0", changed_at="", changed_by=""),
+     "VALID", "off: this station never registered for remote access"),
+    (rac(state="off", wish="off"), "INCONCLUSIVE",
+     "off by the operator since 2026-10-09T18:22:05Z, yet the tunnel service runs"),
+    (rac(state="down", registered="no", tunnel="stopped", channels_up="0", channels_declared="0"),
+     "INVALID", "wanted on, not up: not registered yet (the host retries)"),
+    (rac(state="down", tunnel="stopped", channels_up="0"),
+     "INVALID", "wanted on, not up: the tunnel service does not run"),
+    (rac(state="down", channels_up="0"),
+     "INVALID", "wanted on, not up: the gateway accepted none of 6 channels"),
+    (rac(state="sideways"), "INDETERMINATE", "the switch reported no usable state ('sideways')"),
+    (rac(channels_up="lots", channels_declared=""), "INCONCLUSIVE", "on, short of channels: 0 of 0"),
+]
+
+
+@pytest.mark.parametrize("raw,verdict,reason", RAC_CASES,
+                         ids=[f"{c[1]}-{i}" for i, c in enumerate(RAC_CASES)])
+def test_rac_block_verdicts(raw, verdict, reason):
+    block = pm_heartbeat._map_rac(raw)
+    assert (block["verdict"], block["reason"]) == (verdict, reason)
+    assert set(block["data"]) == {"wish", "wish_source", "registered", "tunnel", "channels_up",
+                                  "channels_declared", "since", "by"}
+
+
+def test_an_operators_off_never_worsens_the_hosts_rollup():
+    off = rac(state="off", wish="off", tunnel="stopped", channels_up="0", changed_by="vm")
+    envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=lambda: off))
+    assert envelope["blocks"]["rac"]["verdict"] == "VALID"
+    assert envelope["blocks"]["rac"]["data"]["wish"] == "off"
+    assert envelope["blocks"]["rac"]["data"]["by"] == "vm"
+    assert envelope["rollup"]["verdict"] == "VALID"
+    assert heartbeat_schema.validate(envelope) == []
+
+
+def test_wanted_on_and_not_up_turns_the_hosts_rollup_invalid():
+    down = rac(state="down", tunnel="stopped", channels_up="0")
+    envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=lambda: down))
+    assert envelope["rollup"]["verdict"] == "INVALID"
+    assert envelope["rollup"]["reason"].startswith("rac: wanted on, not up")
+
+
+def test_a_host_without_the_switch_script_claims_no_rac_block():
+    # A host installed before v3.71, or one pm-align has only half brought up.
+    raw = pm_heartbeat.build_rac_raw(lambda: False, lambda: 1 / 0, lambda: 1 / 0)
+    assert raw is None
+    envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=lambda: None))
+    assert set(envelope["blocks"]) == {"versions", "doctor", "resources"}
+    assert envelope["rollup"]["verdict"] == "VALID"
+    assert heartbeat_schema.validate(envelope) == []
+
+
+def test_build_rac_raw_reads_the_file_the_switch_leaves():
+    text = "".join(f"{k}={v}\n" for k, v in RAC_ON.items())
+    for rc in (0, 3):                              # 3: wanted on, not up; still an answer
+        raw = pm_heartbeat.build_rac_raw(lambda: True, lambda: rr(rc), lambda: text)
+        assert raw == RAC_ON
+    assert raw["tier"] == "wsprdaemon (secure)"     # a value with a space and brackets
+
+
+@pytest.mark.parametrize("status,state_text,needle", [
+    (rr(2, "", "sigmond-rac-switch: refused."), "state=on\n", "exited 2"),
+    (rr(127, "", "not found"), "state=on\n", "exited 127"),
+    (rr(0), "", "names no state"),
+    (rr(0), "nonsense without an equals sign\n", "names no state"),
+], ids=["refused", "not-runnable", "empty-file", "no-state-line"])
+def test_a_switch_that_gives_no_answer_reads_indeterminate_never_valid(status, state_text, needle):
+    check = lambda: pm_heartbeat.build_rac_raw(lambda: True, lambda: status, lambda: state_text)
+    envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=check))
+    block = envelope["blocks"]["rac"]
+    assert block["verdict"] == "INDETERMINATE" and needle in block["reason"]
+    assert envelope["rollup"]["verdict"] != "VALID"
+
+
+def test_a_state_file_that_cannot_be_read_reads_indeterminate():
+    def unreadable():
+        raise FileNotFoundError("/run/sigmond/rac-state")
+    check = lambda: pm_heartbeat.build_rac_raw(lambda: True, lambda: rr(0), unreadable)
+    envelope = pm_heartbeat.assemble(CONFIG, rich_checks(rac=check))
+    assert envelope["blocks"]["rac"]["verdict"] == "INDETERMINATE"
+
+
+def test_the_emitter_reads_the_keys_the_switch_writes():
+    # The switch script ships inside the wizard; its write_state() names the
+    # keys.  A renamed key there would turn this block INDETERMINATE fleet-wide.
+    wizard = (PROXMOX / "sigmond-wizard.sh").read_text()
+    for key in ("state", "wish", "wish_source", "registered", "tunnel", "channels_up",
+                "channels_declared", "changed_at", "changed_by"):
+        assert f"printf '{key}=%s\\n'" in wizard, key
+    assert f"RUN_DIR=\"${{SIGMOND_RAC_RUN_DIR:-{pm_heartbeat.RAC_STATE_FILE.rsplit('/', 1)[0]}}}\"" in wizard
+    assert pm_heartbeat.RAC_SWITCH == "/usr/local/sbin/sigmond-rac-switch"
 
 
 # ---------------------------------------------------------------------------

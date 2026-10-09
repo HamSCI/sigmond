@@ -31,18 +31,24 @@ and ``test_inlined_verdicts_and_precedence_match_the_real_schema`` are the
 DRIFT GUARD for this duplication: if the real schema ever changes shape,
 those tests go red here and force this file to catch up.
 
-``BLOCK_NAMES`` here is NOT the schema's full 7-name set — it is the
-THREE blocks a PM can honestly speak to (``versions``, ``doctor``,
-``resources``).  ``heartbeat_schema.validate()`` deliberately accepts any
-SUBSET of its block names (see its docstring: additive/partial producers
-must not be rejected), which is what makes a heartbeat with only these
-three blocks a valid ``station_heartbeat`` envelope.  Emitting
-``timing``/``gaps``/``uploads``/``manifest`` from a PM would be a lie —
-a Proxmox host has no view of any of those.
+``BLOCK_NAMES`` here is NOT the schema's full name set — it is the FOUR
+blocks a PM can honestly speak to (``versions``, ``doctor``,
+``resources``, and ``rac``, which only a host can see).
+``heartbeat_schema.validate()`` deliberately accepts any SUBSET of its
+block names (see its docstring: additive/partial producers must not be
+rejected), which is what makes a heartbeat with only these blocks a
+valid ``station_heartbeat`` envelope.  Emitting ``timing``/``gaps``/
+``uploads``/``manifest`` from a PM would be a lie — a Proxmox host has
+no view of any of those.
+
+``rac`` reports the operator's switch for remote access and the tunnel
+behind it (sigmond tasks/plan-remote-access.md section 4).  A host that
+carries no switch script, one installed before v3.71, leaves the block
+out: the board then draws "n/a", never "measured nothing".
 
 Architecture (mirrors lib/sigmond/heartbeat.py's shape on purpose)
 -------------------------------------------------------------------
-* ``assemble(config, checks)`` — pure.  ``checks`` is a bundle of five
+* ``assemble(config, checks)`` — pure.  ``checks`` is a bundle of six
   zero-arg callables keyed "now", "uptime_s", and one per ``BLOCK_NAMES``
   entry.  Every block callable is wrapped: an exception becomes
   ``INDETERMINATE`` with the exception attached, exactly like
@@ -92,9 +98,14 @@ PRECEDENCE = {
     "INVALID": 3,
 }
 
-# The subset of the schema's 7 block names a PM can honestly speak to, in
+# The subset of the schema's block names a PM can honestly speak to, in
 # report order.  See module docstring: validate() accepts any subset.
-BLOCK_NAMES = ("versions", "doctor", "resources")
+BLOCK_NAMES = ("versions", "doctor", "resources", "rac")
+
+# The one switch for the remote-access tunnel, and the file its `status`
+# leaves behind: one "key=value" line per fact.
+RAC_SWITCH = "/usr/local/sbin/sigmond-rac-switch"
+RAC_STATE_FILE = "/run/sigmond/rac-state"
 
 DEFAULT_INTERVAL_SEC = 300
 
@@ -129,7 +140,7 @@ def assemble(config: dict, checks: dict) -> dict:
                 is REQUIRED; a missing one raises ``ValueError`` — an
                 unattributable heartbeat is worse than none (mirrors
                 ``sigmond.heartbeat.assemble``).
-    ``checks``  five zero-arg callables: "now" (-> datetime, required),
+    ``checks``  six zero-arg callables: "now" (-> datetime, required),
                 "uptime_s" (-> float | None), and one per ``BLOCK_NAMES``
                 entry (-> that block's RAW dict, or raises).  Bundled as
                 callables — not read here — is what keeps this function
@@ -151,6 +162,12 @@ def assemble(config: dict, checks: dict) -> dict:
     uptime_s = _safe_call(checks.get("uptime_s"))
 
     blocks = {name: _assemble_block(name, checks) for name in BLOCK_NAMES}
+    # A mapper answers None for a block this host cannot claim (`rac` on a
+    # host without the switch script).  Leaving the block out says "not
+    # claimed".  An INDETERMINATE would say "looked and could not tell",
+    # and would grey every host that has not yet been brought up to v3.71.
+    blocks = {name: block for name, block in blocks.items()
+              if block is not None}
 
     interval_sec = config.get("interval_sec") or DEFAULT_INTERVAL_SEC
 
@@ -493,10 +510,98 @@ def _map_resources(raw) -> dict:
     return _block("VALID", "host resource counters read", data)
 
 
+# ---------------------------------------------------------------------------
+# rac block — the operator's switch for remote access
+# ---------------------------------------------------------------------------
+
+def build_rac_raw(switch_present, run_switch_status, read_state):
+    """Ask the switch script for the state, then read the file it leaves.
+
+    ``None`` when this host carries no switch script: the block is then not
+    claimed.  The script exits 0 for on or off and 3 for "wanted on, not
+    up"; all three are answers.  Any other exit raises, and so does a
+    state file that names no state, so that neither can read as healthy.
+    """
+    if not switch_present():
+        return None
+    res = run_switch_status()
+    if res.rc not in (0, 3):
+        raise RuntimeError(
+            f"sigmond-rac-switch status exited {res.rc}: "
+            f"{(res.stderr or '').strip()[:200]}")
+    raw = {}
+    for line in (read_state() or "").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            raw[key.strip()] = value.strip()
+    if "state" not in raw:
+        raise RuntimeError(f"{RAC_STATE_FILE} names no state")
+    return raw
+
+
+def _as_count(value) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _map_rac(raw):
+    """off by the operator is a decision, and reads VALID.  Wanted on and
+    not up is the fault, and reads INVALID.  ``None`` passes through: not
+    claimed (see assemble)."""
+    if raw is None:
+        return None
+    state = raw.get("state")
+    up = _as_count(raw.get("channels_up"))
+    declared = _as_count(raw.get("channels_declared"))
+    registered = raw.get("registered") == "yes"
+    running = raw.get("tunnel") == "running"
+    data = {
+        "wish": raw.get("wish"),
+        "wish_source": raw.get("wish_source"),
+        "registered": registered,
+        "tunnel": raw.get("tunnel"),
+        "channels_up": up,
+        "channels_declared": declared,
+        "since": raw.get("changed_at") or None,
+        "by": raw.get("changed_by") or None,
+    }
+    since = f" since {data['since']}" if data["since"] else ""
+    if state == "off":
+        if running:
+            return _block(
+                "INCONCLUSIVE",
+                f"off by the operator{since}, yet the tunnel service runs",
+                data)
+        if not registered and raw.get("wish_source") == "units":
+            return _block(
+                "VALID", "off: this station never registered for remote access",
+                data)
+        return _block("VALID", f"off by the operator{since}", data)
+    if state == "on":
+        if declared and up >= declared:
+            return _block("VALID", f"on: {up} of {declared} channels", data)
+        return _block(
+            "INCONCLUSIVE", f"on, short of channels: {up} of {declared}", data)
+    if state == "down":
+        if not registered:
+            why = "not registered yet (the host retries)"
+        elif not running:
+            why = "the tunnel service does not run"
+        else:
+            why = f"the gateway accepted none of {declared} channels"
+        return _block("INVALID", f"wanted on, not up: {why}", data)
+    return _block(
+        "INDETERMINATE", f"the switch reported no usable state ({state!r})",
+        data)
+
+
 _MAPPERS = {
     "versions": _map_versions,
     "doctor": _map_doctor,
     "resources": _map_resources,
+    "rac": _map_rac,
 }
 
 
@@ -593,6 +698,21 @@ def _read_temperature():
     return None
 
 
+def _rac_switch_present() -> bool:
+    return os.access(RAC_SWITCH, os.X_OK)
+
+
+def _run_rac_switch_status() -> RunResult:
+    proc = subprocess.run([RAC_SWITCH, "status"], capture_output=True,
+                          text=True, timeout=30, check=False)
+    return RunResult(proc.returncode, proc.stdout, proc.stderr)
+
+
+def _read_rac_state() -> str:
+    with open(RAC_STATE_FILE, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
 def build_production_checks(config: dict) -> dict:
     vmid = config["vmid"]
     expect_cat = config["expect_cat"]
@@ -606,6 +726,8 @@ def build_production_checks(config: dict) -> dict:
         "resources": lambda: build_resources_raw(
             _read_loadavg, _read_disk_used_pct, read_uptime,
             _read_temperature),
+        "rac": lambda: build_rac_raw(
+            _rac_switch_present, _run_rac_switch_status, _read_rac_state),
     }
 
 

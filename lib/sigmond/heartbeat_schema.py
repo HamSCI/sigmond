@@ -66,6 +66,17 @@ BLOCK_NAMES = (
     "resources",
 )
 
+# Blocks only a Proxmox HOST can speak to.  A station's own heartbeat
+# (sigmond.heartbeat) assembles BLOCK_NAMES and never these: the decoder VM
+# has no view of what runs on the host under it.
+#   rac   remote access: the operator's switch and the tunnel behind it
+#         (tasks/plan-remote-access.md section 4)
+HOST_BLOCK_NAMES = ("rac",)
+
+# Every block name the wire knows, in report order.  validate() accepts any
+# subset of these; the board draws one column for each.
+ALL_BLOCK_NAMES = BLOCK_NAMES + HOST_BLOCK_NAMES
+
 
 def validate(envelope: dict) -> list:
     """Structural errors in ``envelope``; empty list means valid.
@@ -126,9 +137,9 @@ def validate(envelope: dict) -> list:
         errors.append(f"blocks is {type(blocks).__name__}, not a dict")
     else:
         for name in sorted(blocks):
-            if name not in BLOCK_NAMES:
+            if name not in ALL_BLOCK_NAMES:
                 errors.append(
-                    f"unknown block {name!r}, expected one of {BLOCK_NAMES}")
+                    f"unknown block {name!r}, expected one of {ALL_BLOCK_NAMES}")
                 continue
             block = blocks[name]
             if not isinstance(block, dict):

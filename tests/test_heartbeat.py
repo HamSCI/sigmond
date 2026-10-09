@@ -1189,6 +1189,40 @@ def test_validate_accepts_a_strict_subset_of_block_names():
     assert heartbeat_schema.validate(envelope) == []
 
 
+def test_validate_accepts_the_hosts_rac_block():
+    """A Proxmox host reports the operator's switch for remote access in a
+    block of its own (tasks/plan-remote-access.md section 4).  The server's
+    copy of validate() must know the name before any host sends it: an
+    unknown block name quarantines the whole envelope, and a quarantined
+    host looks silent on the board."""
+    envelope = {
+        "kind": heartbeat_schema.KIND,
+        "schema_version": heartbeat_schema.SCHEMA_VERSION,
+        "station": "b4-pm",
+        "emitted_at": "2026-10-09T19:00:02Z",
+        "interval_sec": 300,
+        "rollup": {"verdict": "VALID", "reason": "versions: 2 read"},
+        "blocks": {
+            "versions": {"verdict": "VALID", "reason": "2 read"},
+            "rac": {"verdict": "VALID", "reason": "off by the operator since 2026-10-09T18:22:05Z",
+                    "data": {"wish": "off"}},
+        },
+    }
+    assert heartbeat_schema.validate(envelope) == []
+    envelope["blocks"]["tunnel"] = {"verdict": "VALID", "reason": "x"}
+    assert any("unknown block 'tunnel'" in e for e in heartbeat_schema.validate(envelope))
+
+
+def test_the_stations_own_block_set_holds_no_host_block():
+    """sigmond.heartbeat assembles BLOCK_NAMES.  A host block there would
+    make every decoder VM report a block it has no view of."""
+    assert heartbeat_schema.HOST_BLOCK_NAMES == ("rac",)
+    assert not set(heartbeat_schema.HOST_BLOCK_NAMES) & set(heartbeat_schema.BLOCK_NAMES)
+    assert heartbeat_schema.ALL_BLOCK_NAMES == (
+        heartbeat_schema.BLOCK_NAMES + heartbeat_schema.HOST_BLOCK_NAMES)
+    assert len(heartbeat_schema.BLOCK_NAMES) == 7
+
+
 # --- sigmond#53: uploads policy -------------------------------------------
 
 def test_uploads_disabled_by_policy_reads_valid_with_reason():
