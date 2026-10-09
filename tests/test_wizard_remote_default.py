@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from .test_rac_switch import Host
+
 REPO = Path(__file__).resolve().parent.parent
 WIZARD = REPO / "scripts" / "proxmox" / "sigmond-wizard.sh"
 TEXT = WIZARD.read_text()
@@ -41,7 +43,7 @@ def shell_func(name: str) -> str:
 
 
 def heredoc(path: str) -> str:
-    m = re.search(r"cat > %s <<'([A-Z]+)'\n(.*?)\n\1\n" % re.escape(path), TEXT, re.S)
+    m = re.search(r"cat > %s <<'([A-Z]+)'[^\n]*\n(.*?)\n\1\n" % re.escape(path), TEXT, re.S)
     assert m, f"the wizard writes no {path}"
     return m.group(2) + "\n"
 
@@ -108,14 +110,20 @@ def test_no_trace_of_the_question_or_its_answer_remains():
     review = TEXT[TEXT.index("── Review — nothing is applied yet"):TEXT.index('rd -r -p "Apply?')]
     assert "smd remote off / on" in review
     assert "4) ask_rac;;" in TEXT                  # entry 4 still re-asks the station class
+    assert "and (optionally)" not in TEXT          # the header no longer calls the tunnel optional
 
 
 # -- what a wizard run does about the tunnel ---------------------------------------
 
 def activate(tmp_path, *, configured=False, wish=None, registered=False, switch_wish="on",
              on_rc=0, on_out=ON_LINES, install_rc=0, register_rc=0, tier=None, env=None):
+    """Run rac_activate against stubs.  `switch_wish=None` makes the switch's
+    `status` leave no state file.  Called twice on one tmp_path, the second run
+    meets what the first left in the mark directory."""
     mark = tmp_path / "marks"
-    mark.mkdir()
+    mark.mkdir(exist_ok=True)
+    if (tmp_path / "calls").exists():
+        (tmp_path / "calls").unlink()
     if configured:
         (mark / ".configured").write_text("N0CALL/T1 EM00aa 2026-10-01\n")
     if wish:
@@ -126,11 +134,13 @@ def activate(tmp_path, *, configured=False, wish=None, registered=False, switch_
         (mark / "rac-tier").write_text(tier + "\n")
     (tmp_path / "on.out").write_text(on_out)
     switch = tmp_path / "switch"
+    status = ("" if switch_wish is None
+              else f'echo "wish={switch_wish}" > {tmp_path}/rac-state; ')
     switch.write_text(textwrap.dedent(f"""\
         #!/bin/bash
         echo "switch[${{SIGMOND_RAC_BY:-}}] $* site=$(cat {mark}/rac-site 2>/dev/null)" >> {tmp_path}/calls
         case "$1" in
-            status) echo "wish={switch_wish}" > {tmp_path}/rac-state; exit 0 ;;
+            status) {status}exit 0 ;;
             on) cat {tmp_path}/on.out; exit {on_rc} ;;
         esac
         """))
@@ -159,14 +169,21 @@ def activate(tmp_path, *, configured=False, wish=None, registered=False, switch_
     return r, calls, state
 
 
+WISH_LINE = re.compile(r"^on \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ install$")
+
+
 def test_a_first_install_turns_remote_access_on_and_asks_the_switch_once(tmp_path):
     r, calls, state = activate(tmp_path)
     assert "rc=0" in r.stdout, r.stdout + r.stderr
-    assert calls == ["install-host-files", "install-relays",
+    assert calls == ["install-relays", "install-host-files",
                      "switch[install] on site=N0CALL_T1"]
     assert state.splitlines()[0] == "on"
     assert "The gateway accepted 6 of 6 channels" in state
     assert "smd remote off" in state
+    # The wizard records the wish itself, before anything that can fail.
+    marks = tmp_path / "marks"
+    assert (marks / "rac-desired").read_text() == "on\n"
+    assert WISH_LINE.match((marks / "rac-changed").read_text().rstrip("\n"))
 
 
 def test_the_inputs_a_lone_registration_needs_are_on_disk_before_the_switch_runs(tmp_path):
@@ -186,12 +203,16 @@ def test_a_first_install_with_no_gateway_still_finishes(tmp_path):
 
 
 def test_a_later_run_keeps_a_switch_its_operator_turned_off(tmp_path):
+    # The wish on file decides.  The switch hears nothing: no `on`, no
+    # registration, no question.
     r, calls, state = activate(tmp_path, configured=True, wish="off", registered=True,
-                               switch_wish="off")
+                               switch_wish="on")           # the stub would say on, were it asked
     assert "rc=0" in r.stdout
-    assert [c for c in calls if c.startswith("switch")] == ["switch[] status site=N0CALL_T1"]
-    assert "register fresh" not in calls
+    assert [c for c in calls if c.startswith("switch")] == []
+    assert not any(c.startswith("register") for c in calls)
     assert state == "off, as its operator left it. Turn it on from the decoder VM: smd remote on"
+    assert (tmp_path / "marks" / "rac-desired").read_text() == "off\n"
+    assert not (tmp_path / "marks" / "rac-changed").exists()   # the wizard records no change
 
 
 def test_a_station_from_before_v371_whose_owner_declined_stays_as_it_stands(tmp_path):
@@ -199,12 +220,14 @@ def test_a_station_from_before_v371_whose_owner_declined_stays_as_it_stands(tmp_
     r, calls, state = activate(tmp_path, configured=True, switch_wish="off")
     assert not any(" on " in c for c in calls)
     assert state.startswith("off, as its operator left it")
+    assert not (tmp_path / "marks" / "rac-desired").exists()   # no wish recorded for it
+    assert not any(c.startswith("register") for c in calls)
 
 
 def test_a_later_run_registers_afresh_before_it_asks_the_switch(tmp_path):
     r, calls, state = activate(tmp_path, configured=True, wish="on", registered=True)
-    assert calls == ["install-host-files", "install-relays", "switch[] status site=N0CALL_T1",
-                     "register fresh", "switch[install] on site=N0CALL_T1"]
+    assert calls == ["install-relays", "install-host-files", "register fresh",
+                     "switch[install] on site=N0CALL_T1"]
     assert state.splitlines()[0] == "on"
 
 
@@ -217,10 +240,62 @@ def test_a_failed_fresh_registration_warns_and_keeps_the_tunnel(tmp_path):
 
 
 def test_a_host_that_cannot_take_the_switch_script_says_so_and_carries_on(tmp_path):
+    # A first install whose host files fail still leaves the wish reading on,
+    # the relays and the recorded inputs in place, and a way to try again.
     r, calls, state = activate(tmp_path, install_rc=1)
     assert "rc=0" in r.stdout
-    assert calls == ["install-host-files"]
+    assert calls == ["install-relays", "install-host-files"]
     assert state.startswith("FAILED: could not install")
+    assert "sigmond-setup --reconfigure" in state
+    marks = tmp_path / "marks"
+    assert (marks / "rac-desired").read_text() == "on\n"
+    assert WISH_LINE.match((marks / "rac-changed").read_text().rstrip("\n"))
+    assert (marks / "rac-profile").read_text() == "standard\n"
+    assert (marks / "rac-site").read_text().strip() == "N0CALL_T1"
+
+
+def test_the_run_after_a_failed_first_install_brings_remote_access_up(tmp_path):
+    activate(tmp_path, install_rc=1)                        # the first install fails
+    # The wizard marked the host configured.  Were the wish not on file, the
+    # real switch would read this unregistered station as off.
+    r, calls, state = activate(tmp_path, configured=True, switch_wish="off")
+    assert "switch[install] on site=N0CALL_T1" in calls
+    assert state.splitlines()[0] == "on"
+    assert "as its operator left it" not in state
+
+
+def test_a_first_install_whose_switch_fails_outright_still_leaves_the_wish_on(tmp_path):
+    r, calls, state = activate(tmp_path, on_rc=1, on_out="")
+    assert "rc=0" in r.stdout
+    assert state.startswith("FAILED: ")
+    assert (tmp_path / "marks" / "rac-desired").read_text() == "on\n"
+
+
+def test_a_switch_that_leaves_no_answer_is_not_a_decision(tmp_path):
+    # Configured, no wish on file, and `status` writes no state file.
+    r, calls, state = activate(tmp_path, configured=True, switch_wish=None)
+    assert "rc=0" in r.stdout
+    assert state.startswith("FAILED: could not read the remote-access switch's state")
+    assert "as its operator left it" not in state
+    assert not any(" on " in c for c in calls)
+    assert not (tmp_path / "marks" / "rac-desired").exists()
+
+
+def test_the_switch_reads_the_wish_lines_the_wizard_writes_as_its_own(tmp_path):
+    # Put the files the wizard wrote in front of the real switch.
+    (tmp_path / "wiz").mkdir()
+    (tmp_path / "host").mkdir()
+    activate(tmp_path / "wiz", install_rc=1)
+    h = Host(tmp_path / "host")
+    for name in ("rac-desired", "rac-changed"):
+        shutil.copy(tmp_path / "wiz" / "marks" / name, h.d / "marks" / name)
+    before = (h.d / "marks" / "rac-changed").read_text()
+    h.run("status")
+    st = h.state()
+    assert (st["wish"], st["wish_source"], st["changed_by"]) == ("on", "file", "install")
+    r = h.run("on")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert (h.d / "marks" / "rac-changed").read_text() == before   # `on` rewrites nothing
 
 
 def test_an_unsecured_tier_keeps_its_warning(tmp_path):
@@ -240,7 +315,7 @@ def test_the_wizard_calls_the_activation_once_and_before_it_marks_the_host_confi
 # -- the retry timer ------------------------------------------------------------------
 
 def retry(tmp_path, *, register_rc, fail="no gateway tier answered (tried: wsprdaemon (secure))",
-          wish=None, note=None):
+          wish=None, note=None, switch_rc=0):
     mark = tmp_path / "marks"
     mark.mkdir(exist_ok=True)
     (mark / "rac-number").write_text("507\n")
@@ -253,7 +328,7 @@ def retry(tmp_path, *, register_rc, fail="no gateway tier answered (tried: wsprd
         calls.unlink()
     switch = tmp_path / "switch"
     switch.write_text(f'#!/bin/bash\necho "switch[${{SIGMOND_RAC_BY:-}}] $*" >> {calls}\n'
-                      'echo "Remote access: on"\n')
+                      f'echo "Remote access: on"\nexit {switch_rc}\n')
     switch.chmod(0o755)
     script = textwrap.dedent(f"""
         set -u
@@ -282,11 +357,20 @@ def test_a_try_that_finds_no_gateway_says_so_once_and_leaves_the_timer_armed(tmp
     assert "not registered yet: sigmond-rac payload missing" in r3.stdout
 
 
-def test_a_try_that_registers_disarms_the_timer_and_brings_a_wanted_tunnel_up(tmp_path):
+def test_a_try_that_registers_brings_a_wanted_tunnel_up_and_leaves_the_disarming_to_the_switch(tmp_path):
     r, calls = retry(tmp_path, register_rc=0, wish="on", note="no gateway tier answered")
-    assert calls == ["systemctl disable --now sigmond-rac-register.timer", "switch[timer] on"]
+    assert calls == ["switch[timer] on"]           # the switch disarms the timer on its `on` path
     assert "registered as RAC #507" in r.stdout
     assert not (tmp_path / "reason").exists()
+
+
+def test_a_try_whose_switch_fails_leaves_the_timer_armed(tmp_path):
+    # The switch exits 1 (its lock is busy).  The station sits registered and
+    # wanted on, and only the timer is left to try again.
+    r, calls = retry(tmp_path, register_rc=0, wish="on", switch_rc=1)
+    assert calls == ["switch[timer] on"]
+    assert not any("systemctl" in c for c in calls)
+    assert "rc=0" in r.stdout                      # a failed try is not a failed unit
 
 
 @pytest.mark.parametrize("wish", ["off", None], ids=["turned-off-meanwhile", "no-wish-on-file"])

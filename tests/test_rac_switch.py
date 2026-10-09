@@ -503,7 +503,7 @@ esac
 exec "$REAL_CAT" "$@"
 """
 CHMOD = '#!/bin/bash\n# stub: a chmod that refuses when CHMOD_FAILS is set\n[ -n "$CHMOD_FAILS" ] && exit 1\nexec "$REAL_CHMOD" "$@"\n'
-INSTALLER_SYSTEMCTL = "#!/bin/sh\n# stub: the installer reloads systemd; the test touches none\nexit 0\n"
+INSTALLER_SYSTEMCTL = "#!/bin/sh\n# stub: the installer reloads systemd; the test touches none\nexit ${SYSTEMCTL_RC:-0}\n"
 WORKING = "#!/bin/bash\necho the switch that works\nexit 0\n"
 
 
@@ -515,13 +515,22 @@ def installer_text(target: Path) -> str:
             .replace("/etc/systemd/system", str(target.parent / "units")))
 
 
-def run_installer(tmp_path, *, old=True, mode=None, nbytes=None, chmod_fails=False):
+def run_installer(tmp_path, *, old=True, mode=None, nbytes=None, chmod_fails=False,
+                  units="dir", blocked=None, systemctl_rc=0):
+    """`units`: "dir" is a units directory that takes writes, "file" puts a regular file where
+    the directory belongs.  `blocked` names a unit file to occupy with a directory.  Both fail
+    a write for root as well.  `systemctl_rc` is the status the stub systemctl exits with."""
     stub = tmp_path / "stub"
     stub.mkdir()
     for name, body in (("cat", CAT), ("chmod", CHMOD), ("systemctl", INSTALLER_SYSTEMCTL)):
         (stub / name).write_text(body)
         (stub / name).chmod(0o755)
-    (tmp_path / "units").mkdir()
+    if units == "file":
+        (tmp_path / "units").write_text("not a directory\n")
+    else:
+        (tmp_path / "units").mkdir()
+    if blocked:
+        (tmp_path / "units" / blocked).mkdir()
     target = tmp_path / "sigmond-rac-switch"
     if old:
         target.write_text(WORKING)
@@ -531,6 +540,7 @@ def run_installer(tmp_path, *, old=True, mode=None, nbytes=None, chmod_fails=Fal
            "REAL_CHMOD": shutil.which("chmod")}
     if chmod_fails:
         env["CHMOD_FAILS"] = "1"
+    env["SYSTEMCTL_RC"] = str(systemctl_rc)
     if mode:
         env["CAT_MODE"] = mode
     if nbytes is not None:
@@ -558,6 +568,40 @@ def test_a_good_write_replaces_the_switch_and_leaves_nothing_beside_it(tmp_path)
     assert target.read_text() == switch_text()
     assert oct(target.stat().st_mode & 0o777) == "0o755"
     assert not aside.exists()
+    assert sorted(f.name for f in (tmp_path / "units").iterdir()) == [
+        "sigmond-rac-register.service", "sigmond-rac-register.timer"]
+
+
+def test_the_retry_service_keeps_systemds_own_lines_out_of_the_journal(tmp_path):
+    # systemd logs "Starting", "Started" and "Deactivated" for every run of a
+    # oneshot, which at one try in ten minutes floods the journal.  The two
+    # settings leave the script's own line, the only one worth keeping.
+    run_installer(tmp_path)
+    text = (tmp_path / "units" / "sigmond-rac-register.service").read_text()
+    service = text.split("[Service]", 1)[1].split("\n[", 1)[0].splitlines()
+    assert "LogLevelMax=notice" in service
+    assert "SyslogLevel=notice" in service
+
+
+@pytest.mark.parametrize("fault", [
+    {"units": "file"}, {"blocked": "sigmond-rac-register.service"},
+    {"blocked": "sigmond-rac-register.timer"}],
+    ids=["no-units-directory", "service-unit-unwritable", "timer-unit-unwritable"])
+def test_a_unit_that_cannot_be_written_fails_the_installer(tmp_path, fault):
+    r, target, aside = run_installer(tmp_path, **fault)
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert target.read_text() == switch_text()       # the switch itself stands
+
+
+def test_a_systemd_that_will_not_reload_does_not_fail_the_installer(tmp_path):
+    # `systemctl enable` reloads by itself, so a failed daemon-reload costs nothing.
+    r, target, aside = run_installer(tmp_path, systemctl_rc=1)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "daemon-reload" in r.stderr and r.stderr.count("\n") == 1
+    assert target.read_text() == switch_text()
+    assert oct(target.stat().st_mode & 0o777) == "0o755"
+    assert sorted(f.name for f in (tmp_path / "units").iterdir()) == [
+        "sigmond-rac-register.service", "sigmond-rac-register.timer"]
 
 
 @pytest.mark.parametrize("mode,cut", [("fail", None), ("refused", None), ("garbled", None)]

@@ -2,7 +2,7 @@
 # sigmond-wizard — first-boot site-identity wizard for the Sigmond appliance.
 # Runs on the Proxmox HOST console (tty1 via sigmond-wizard.service, or
 # rerun any time as `sigmond-setup`).  Prompts for the few per-site facts,
-# pushes them into the decoder VM via the qemu guest agent, and (optionally)
+# pushes them into the decoder VM via the qemu guest agent, and
 # activates the host-side RAC tunnel.
 #
 # Prompts: reporter ID (required)   e.g. AC0G/B4 — drives ALL upload paths
@@ -881,15 +881,20 @@ RACSWEOF
     bash -n /usr/local/sbin/sigmond-rac-switch || return 1
     # The retry timer.  The switch arms it when a station wants remote access
     # and no gateway answers, and the run that registers disarms it.
-    cat > /etc/systemd/system/sigmond-rac-register.service <<'RACREGSVCEOF'
+    # LogLevelMax and SyslogLevel keep systemd's own "Starting", "Started" and
+    # "Deactivated" lines out of the journal: at one try in ten minutes they
+    # would bury the one line the script writes when its reason changes.
+    cat > /etc/systemd/system/sigmond-rac-register.service <<'RACREGSVCEOF' || return 1
 [Unit]
 Description=Sigmond remote access: register with the gateway, then bring the tunnel up if wanted
 [Service]
 Type=oneshot
 TimeoutStartSec=900
+LogLevelMax=notice
+SyslogLevel=notice
 ExecStart=/usr/local/sbin/sigmond-setup --rac-retry
 RACREGSVCEOF
-    cat > /etc/systemd/system/sigmond-rac-register.timer <<'RACREGTMREOF'
+    cat > /etc/systemd/system/sigmond-rac-register.timer <<'RACREGTMREOF' || return 1
 [Unit]
 Description=Sigmond remote access: retry the gateway registration until it succeeds
 [Timer]
@@ -899,7 +904,11 @@ RandomizedDelaySec=60
 [Install]
 WantedBy=timers.target
 RACREGTMREOF
-    systemctl daemon-reload
+    # A reload that fails costs nothing: `systemctl enable` reloads by itself.
+    # The switch stands, so say so and return 0.  Plain echo: `say` belongs to
+    # the wizard, and rac_retry replaces it.
+    systemctl daemon-reload || echo "sigmond-wizard: systemctl daemon-reload failed; the retry units are written, and enabling the timer reloads systemd by itself." >&2
+    return 0
 }
 
 # rac_install_host_files hands this the status of its write.  The new switch
@@ -936,12 +945,17 @@ rac_retry(){
         return 0
     fi
     rm -f "$RAC_RETRY_NOTE"
-    systemctl disable --now sigmond-rac-register.timer >/dev/null 2>&1
     echo "remote access: registered as RAC #$(cat "$MARK_DIR/rac-number" 2>/dev/null)"
     if [ "$(head -1 "$MARK_DIR/rac-desired" 2>/dev/null)" = on ]; then
+        # The switch disarms the timer once it holds a registration.  Until it
+        # has run, the timer stays armed: a switch that fails (its lock is
+        # busy) leaves the next try something to do.
         SIGMOND_RAC_BY=timer "$RAC_SWITCH" on
         return 0
     fi
+    # The operator holds the tunnel off and the station holds a registration:
+    # nothing is left to retry.
+    systemctl disable --now sigmond-rac-register.timer >/dev/null 2>&1
     echo "remote access: the operator holds it off, so the tunnel stays down"
     return 0
 }
@@ -2870,20 +2884,48 @@ rac_activate(){
     # no gateway in reach still finishes its install, and the host keeps
     # trying.
     local want out rc
-    if ! rac_install_host_files; then
-        RAC_STATE="FAILED: could not install $RAC_SWITCH on this host"
-        say "WARN: $RAC_STATE"
-        return 0
+    # The wish comes first, before anything that can fail.  A wish on file
+    # decides.  With none on file, a first install wants it on, and the wizard
+    # records that itself, in the format the switch writes: a run that dies
+    # below must not leave a station that the next run reads as one that
+    # declined.  A configured station with no wish on file predates v3.71; the
+    # switch reads the wish from what stands, once the switch exists.
+    want=$(head -1 "$MARK_DIR/rac-desired" 2>/dev/null)
+    case "$want" in on|off) ;; *) want="" ;; esac
+    if [ -z "$want" ] && [ ! -e "$CONF_MARK" ]; then
+        want=on
+        mkdir -p "$MARK_DIR" \
+            && printf '%s\n' on > "$MARK_DIR/rac-desired.new" \
+            && mv -f "$MARK_DIR/rac-desired.new" "$MARK_DIR/rac-desired" \
+            && printf '%s %s %s\n' on "$(date -u +%Y-%m-%dT%H:%M:%SZ)" install > "$MARK_DIR/rac-changed" \
+            || say "WARN: could not record the remote-access wish in $MARK_DIR; carrying on with it on"
     fi
     rac_install_relays
     install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py /usr/local/sbin/pm-align 2>/dev/null \
         || say "WARN: pm-align not installed (sigmond tree lacks it)"
     rac_record_inputs
-    if [ ! -e "$CONF_MARK" ] && [ ! -e "$MARK_DIR/rac-desired" ]; then
-        want=on
-    else
+    if ! rac_install_host_files; then
+        RAC_STATE="FAILED: could not install $RAC_SWITCH on this host"
+        [ -n "$want" ] && RAC_STATE="$RAC_STATE
+          The wish stands on file (remote access $want)."
+        RAC_STATE="$RAC_STATE
+          To try again, run on this host: sigmond-setup --reconfigure"
+        say "WARN: $RAC_STATE"
+        return 0
+    fi
+    if [ -z "$want" ]; then
+        # A silent switch is no decision.  Clear the old answer first, so that
+        # only this run's answer can stand.
+        rm -f "$RAC_STATE_FILE"
         "$RAC_SWITCH" status >/dev/null 2>&1
         want=$(sed -n 's/^wish=//p' "$RAC_STATE_FILE" 2>/dev/null | head -1)
+        case "$want" in
+            on|off) ;;
+            *)
+                RAC_STATE="FAILED: could not read the remote-access switch's state on this host; look at it with: $RAC_SWITCH status"
+                say "WARN: $RAC_STATE"
+                return 0 ;;
+        esac
     fi
     if [ "$want" != on ]; then
         RAC_STATE="off, as its operator left it. Turn it on from the decoder VM: smd remote on"
