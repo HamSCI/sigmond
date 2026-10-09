@@ -138,8 +138,8 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
   stations without a Proxmox host. Today a No at the wizard skips registration, and enabling later reruns the
   whole wizard on the host.
   *Work that follows from the decision.*
-  1. The wizard registers first, then asks whether the tunnel stays on. Its text says what registration sends:
-     the station's name and the host's public key.
+  1. The wizard registers and brings the tunnel up without asking. Its text says what registration sends (the
+     station's name and the host's public key) and names the command that turns the tunnel off.
   2. Registration becomes a step that runs alone on the host, and retries by itself until it succeeds. An install
      with no internet, or with the gateway down, must still finish and must still end up registered.
   3. The console panel prints "OFFLINE — check: journalctl -u sigmond-rac-host" whenever the unit does not run,
@@ -149,15 +149,17 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
      The nested test should turn the tunnel off, reboot, confirm it stayed off, and turn it on.
   5. The registrar answers over plain HTTP, and its reply carries the station's token. Move it to HTTPS against
      the certificate authority the image already pins. Not yet checked: what the token alone allows.
-  *Proposed, not yet decided.* The operator asks from the VM (`smd rac on`), since the host has no keyboard and
-  the operator knows the VM. The host alone decides. For that the wizard pairs the two at every install: one SSH
-  key in the VM that can run exactly one script on the host, accepting `on <hours>`, `off` and `status`. The VM
-  must never be able to create that pairing itself. A grant made this way expires, on the host, and a reboot
-  never extends it. No party outside the station can ask. The panel, the login banner and the heartbeat show
-  "on until <time>".
-  *Open for Michael.* Which state each station class starts in (the wizard already asks "Is this a DASI
-  station?"). The default length of a grant. Whether install opens the tunnel for about a minute to prove it,
-  even for an owner who then chooses off.
+  *Decided 2026-10-09 (Michael).* Remote access comes up at install and stays on by default, for every station
+  class. An operator can later turn it off, and on again, from the VM. The basic instructions gain a short
+  section that says how.
+  *How the VM asks.* The host has no keyboard and the operator knows the VM, so the VM asks and the host alone
+  acts. The wizard pairs the two at every install: one SSH key in the VM that can run exactly one script on the
+  host, accepting `on`, `off` and `status`. The VM must never be able to create that pairing itself; a station
+  installed before this needs one command at the host console. No party outside the station can ask. The
+  console panel, the login banner and the heartbeat show the state.
+  *Still open.* Whether `on` from the VM may carry a time limit (`on 24h`) for the owner who opens the door only
+  for one consultation. The verb's name and home (`smd rac`, or a word that does not collide with
+  `smd admin rac`, which manages the other tunnel).
 - **After a restore, `smd update` reports a station as current while it sits releases behind** (pre-tag hunt B, M1).
   `smd admin manifest restore --apply` leaves each moved checkout on a detached HEAD with no `.pin`. `cmd_update`
   finds no upstream for it, counts zero commits behind, and prints the all-clear. Report such a checkout as HELD
