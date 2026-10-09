@@ -113,6 +113,11 @@ its "Design", "Decided on review", and phases 1 to 5. Research map behind the fi
 The spec says what the software must do. Each line below records a choice this plan made where the spec left room,
 with the reason and what it costs if wrong. Michael reviews these before execution starts.
 
+**Reviewed by Michael on 2026-10-09.** The rulings stand. On the three he had to settle: ruling 9 keeps the
+dedicated account and sudo; v3.71 ships while the registrar still answers over plain HTTP (ruling 8), and the
+gateway's side goes to Rob; and Michael, who stands at AC0G-ND, types the off, the power cycle and the on of
+Task 12 Step 8 himself. Execution runs subagent-driven.
+
 1. **The switch script, its units and the pairing live inside the wizard file, as heredocs**, the way `sigmond-vm`
    and `vm-port-relay.py` already do (Task 2). Reason: the wizard is the one host file that every delivery path
    already carries, so any host that holds the v3.71 wizard can install the rest, and `sigmond-setup --rac-off`
@@ -139,7 +144,7 @@ with the reason and what it costs if wrong. Michael reviews these before executi
 9. **sudo.** Stock Proxmox carries none, and nothing in `firstboot-v3.sh` or `offline-debs/` installs it. The
    image gains it as an offline package (Task 10). On a station installed earlier, `sigmond-setup --pair-vm`
    installs it with apt (Task 4), and pm-align's "never touches a package" gains that one exception (Task 6).
-   Cost if wrong: see the first question for Michael, below.
+   Cost if wrong: one more package on the hypervisor, and apt on a station in the field.
 10. **The key line also carries `from="<the VM's address on the private link>"`** (Task 4). A copy of the key then
     works from nowhere but the VM. Cost: a station whose VM sits on another address must pair again.
 11. **The pairing re-asserts itself 4 minutes after every boot, every 6 hours, and whenever the host's sshd key
