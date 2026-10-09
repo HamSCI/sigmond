@@ -21,6 +21,7 @@ WIZARD = (REPO / "scripts" / "proxmox" / "sigmond-wizard.sh").read_text()
 
 SOCKETS = [f"sigmond-vm-{n}-relay.socket" for n in ("ssh", "web", "station", "gmag")]
 UNIT = "sigmond-rac-host.service"
+RETRY_TIMER = "sigmond-rac-register.timer"
 ON, OFF, DOWN = "Remote access: on", "Remote access: off", "Remote access: wanted on, not up"
 
 TOML = ('serverAddr = "gw2.wsprdaemon.org"\nuser = "0123456789abcdef"\n'
@@ -284,7 +285,8 @@ def test_on_enables_relays_and_tunnel_and_waits_for_every_declared_channel(tmp_p
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert r.stdout.splitlines()[-4] == ON or ON in r.stdout.splitlines()
     assert h.wish() == "on"
-    assert h.changes() == ["enable --now " + " ".join(SOCKETS),
+    assert h.changes() == [f"disable --now {RETRY_TIMER}",       # nothing left to retry
+                           "enable --now " + " ".join(SOCKETS),
                            f"enable --now {UNIT}",
                            "start --no-block sigmond-issue.service"]
     assert h.calls("setup") == []                # registered already: nothing asked of the gateway
@@ -311,9 +313,30 @@ def test_on_with_no_gateway_keeps_the_wish_and_reports_not_up(tmp_path):
     assert r.returncode == 3
     assert h.wish() == "on"
     assert DOWN in r.stdout.splitlines()
-    assert "has not registered with a gateway yet" in r.stdout
-    assert not any(c.startswith("enable") for c in h.changes())
+    assert "has not registered yet: no gateway has answered" in r.stdout
+    assert "tries again every 10 minutes and brings the tunnel up when one does" in r.stdout
+    # The wish stands and the timer keeps trying; nothing else gets enabled.
+    assert h.changes() == [f"enable --now {RETRY_TIMER}",
+                           "start --no-block sigmond-issue.service"]
     assert h.state()["state"] == "down" and h.state()["registered"] == "no"
+
+
+def test_on_that_registers_disarms_the_retry_timer(tmp_path):
+    h = Host(tmp_path, registered=False, wish="on")
+    (tmp_path / "gateway-answers").touch()
+    r = h.run("on")
+    assert r.returncode == 0
+    assert h.changes()[0] == f"disable --now {RETRY_TIMER}"
+    assert not any(c.startswith("enable") and RETRY_TIMER in c for c in h.changes())
+
+
+def test_off_leaves_the_retry_timer_alone(tmp_path):
+    # A station that turned the switch off before it could register still
+    # registers when a gateway answers, and stops there.  So `off` never
+    # disarms the timer.
+    h = Host(tmp_path, registered=False, wish="on")
+    h.run("off")
+    assert not any(RETRY_TIMER in c for c in h.changes())
 
 
 def test_on_whose_channels_never_come_up_exits_3_after_the_wait(tmp_path):
@@ -480,6 +503,7 @@ esac
 exec "$REAL_CAT" "$@"
 """
 CHMOD = '#!/bin/bash\n# stub: a chmod that refuses when CHMOD_FAILS is set\n[ -n "$CHMOD_FAILS" ] && exit 1\nexec "$REAL_CHMOD" "$@"\n'
+INSTALLER_SYSTEMCTL = "#!/bin/sh\n# stub: the installer reloads systemd; the test touches none\nexit 0\n"
 WORKING = "#!/bin/bash\necho the switch that works\nexit 0\n"
 
 
@@ -487,15 +511,17 @@ def installer_text(target: Path) -> str:
     """rac_install_host_files and the helper after it, with every path moved to `target`."""
     i = WIZARD.index("RAC_SWITCH=/usr/local/sbin/sigmond-rac-switch\n")
     j = WIZARD.index("# ── RAC on/off switches", i)
-    return WIZARD[i:j].replace("/usr/local/sbin/sigmond-rac-switch", str(target))
+    return (WIZARD[i:j].replace("/usr/local/sbin/sigmond-rac-switch", str(target))
+            .replace("/etc/systemd/system", str(target.parent / "units")))
 
 
 def run_installer(tmp_path, *, old=True, mode=None, nbytes=None, chmod_fails=False):
     stub = tmp_path / "stub"
     stub.mkdir()
-    for name, body in (("cat", CAT), ("chmod", CHMOD)):
+    for name, body in (("cat", CAT), ("chmod", CHMOD), ("systemctl", INSTALLER_SYSTEMCTL)):
         (stub / name).write_text(body)
         (stub / name).chmod(0o755)
+    (tmp_path / "units").mkdir()
     target = tmp_path / "sigmond-rac-switch"
     if old:
         target.write_text(WORKING)

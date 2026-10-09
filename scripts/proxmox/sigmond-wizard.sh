@@ -8,16 +8,19 @@
 # Prompts: reporter ID (required)   e.g. AC0G/B4 — drives ALL upload paths
 #          grid square (required)   e.g. EM38ww
 #          antenna     (optional)   free text
-#          remote access (RAC) — just Y/n. The RAC registrar ($RAC_SERVER,
-#              configurable via SIGMOND_RAC_SERVER/_REGISTRAR) auto-assigns
-#              a free RAC number (sites are identified by reporter ID;
-#              the number is plumbing) and the wizard brings up ONE
-#              host-side frpc carrying FOUR channels: VM ssh (35800+n),
-#              VM ka9q-web (45800+n), host ssh (50800+n), Proxmox UI
-#              (55800+n). The vm-* channels go through local relays that
-#              ask the guest agent for the VM's CURRENT IP per connection,
-#              so they survive DHCP changes AND the host stays reachable
-#              even when the VM is down.
+#          station class — DASI or not, and the DASI unit number.  It picks
+#              the gateway ladder for remote access.
+#
+# Remote access (RAC) carries no question.  Every install registers with the
+#          gateway and brings the tunnel up (tasks/plan-remote-access.md).
+#          The registrar ($RAC_SERVER, configurable via SIGMOND_RAC_SERVER/
+#          _REGISTRAR) assigns a free RAC number, and ONE host-side frpc
+#          carries six channels: VM ssh (35800+n), VM ka9q-web (45800+n),
+#          station-web (48800+n), magnetometer (49800+n), host ssh (50800+n)
+#          and the Proxmox UI (55800+n).  The vm-* channels go through local
+#          relays, so the host stays reachable even when the VM is down.
+#          The operator holds the switch, in the decoder VM: smd remote off,
+#          smd remote on, smd remote status.
 #
 # Subcommands: --reconfigure   rerun the wizard (RAC number is sticky)
 #              --rac-off       turn the remote-access tunnel off (config kept)
@@ -27,6 +30,9 @@
 #                              same script with `smd remote`)
 #              --rac-register  register with the gateway and write the tunnel
 #                              configuration; asks nothing, starts nothing
+#              --rac-retry     what sigmond-rac-register.timer runs: register a
+#                              station that could not at install, then bring
+#                              the tunnel up if its operator still wants it up
 #              --rac-upgrade   climb to a more secure gateway tier if one
 #                              has since come up (see the RAC ladder below)
 set -u
@@ -658,6 +664,7 @@ WAIT_STEP="${SIGMOND_RAC_WAIT_STEP:-5}"
 LOCK_WAIT_S="${SIGMOND_RAC_LOCK_WAIT_S:-120}"
 UNIT=sigmond-rac-host.service
 SOCKETS="sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket"
+RETRY_TIMER=sigmond-rac-register.timer
 PAIR_USER=sigmond-remote
 
 # Who asks: the decoder VM (through the pairing account), or root on this
@@ -779,8 +786,8 @@ print_state(){
         *)
             echo "Remote access: wanted on, not up"
             if [ "$REGD" = no ]; then
-                echo "  The station has not registered with a gateway yet."
-                echo "  Try again:  smd remote on   (in the decoder VM)"
+                echo "  The station has not registered yet: no gateway has answered."
+                echo "  This host tries again every 10 minutes and brings the tunnel up when one does."
             elif [ "$RUNS" = running ]; then
                 echo "  The tunnel service runs, and the gateway has accepted none of its $DECL channels ($where)."
                 echo "  It keeps trying every 30 seconds. Look at:  journalctl -u $UNIT -n 50   (on the Proxmox host)"
@@ -852,11 +859,15 @@ if ! registered; then
     "$SETUP" --rac-register
 fi
 if registered; then
+    systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
     # shellcheck disable=SC2086
     systemctl enable --now $SOCKETS >/dev/null 2>&1
     systemctl enable --now "$UNIT" >/dev/null 2>&1
     echo "Waiting up to ${WAIT_S}s for the gateway to accept the channels."
     wait_for_channels
+else
+    # No gateway answered.  The wish stands, and the timer keeps trying.
+    systemctl enable --now "$RETRY_TIMER" >/dev/null 2>&1
 fi
 repaint_panel
 read_state
@@ -867,7 +878,28 @@ exit 0
 RACSWEOF
     rac_switch_settle $? || return 1
     chmod 755 /usr/local/sbin/sigmond-rac-switch || return 1
-    bash -n /usr/local/sbin/sigmond-rac-switch
+    bash -n /usr/local/sbin/sigmond-rac-switch || return 1
+    # The retry timer.  The switch arms it when a station wants remote access
+    # and no gateway answers, and the run that registers disarms it.
+    cat > /etc/systemd/system/sigmond-rac-register.service <<'RACREGSVCEOF'
+[Unit]
+Description=Sigmond remote access: register with the gateway, then bring the tunnel up if wanted
+[Service]
+Type=oneshot
+TimeoutStartSec=900
+ExecStart=/usr/local/sbin/sigmond-setup --rac-retry
+RACREGSVCEOF
+    cat > /etc/systemd/system/sigmond-rac-register.timer <<'RACREGTMREOF'
+[Unit]
+Description=Sigmond remote access: retry the gateway registration until it succeeds
+[Timer]
+OnActiveSec=10min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=60
+[Install]
+WantedBy=timers.target
+RACREGTMREOF
+    systemctl daemon-reload
 }
 
 # rac_install_host_files hands this the status of its write.  The new switch
@@ -885,6 +917,35 @@ rac_switch_settle(){
     return 1
 }
 
+RAC_RETRY_NOTE=/run/sigmond/rac-retry.reason
+rac_retry(){
+    # What sigmond-rac-register.timer runs.  Register a station that could
+    # not at install.  Then bring the tunnel up, but only if its operator
+    # still wants it up.  A try that fails ends quietly: the timer tries
+    # again, and the journal gets one line per reason, never one per try.
+    local last
+    say(){ :; }
+    LOG=/dev/null
+    if ! rac_register ensure; then
+        last=$(cat "$RAC_RETRY_NOTE" 2>/dev/null)
+        if [ "$RAC_FAIL" != "$last" ]; then
+            mkdir -p "$(dirname "$RAC_RETRY_NOTE")" 2>/dev/null
+            printf '%s\n' "$RAC_FAIL" > "$RAC_RETRY_NOTE" 2>/dev/null
+            echo "remote access: not registered yet: $RAC_FAIL. This host tries again every 10 minutes; this line returns only when the reason changes."
+        fi
+        return 0
+    fi
+    rm -f "$RAC_RETRY_NOTE"
+    systemctl disable --now sigmond-rac-register.timer >/dev/null 2>&1
+    echo "remote access: registered as RAC #$(cat "$MARK_DIR/rac-number" 2>/dev/null)"
+    if [ "$(head -1 "$MARK_DIR/rac-desired" 2>/dev/null)" = on ]; then
+        SIGMOND_RAC_BY=timer "$RAC_SWITCH" on
+        return 0
+    fi
+    echo "remote access: the operator holds it off, so the tunnel stays down"
+    return 0
+}
+
 # ── RAC on/off switches (no wizard rerun needed) ────────────────────────────
 case "${1:-}" in
     --rac-register)
@@ -896,6 +957,9 @@ case "${1:-}" in
         fi
         say "not registered: $RAC_FAIL"
         exit 1;;
+    --rac-retry)
+        rac_retry
+        exit 0;;
     --rac-off|--rac-on)
         # One switch.  These two spellings from before v3.71 run the script
         # that `smd remote` reaches from the decoder VM.
@@ -1705,10 +1769,16 @@ ask_rac() {
     fi
     build_rac_tiers
     echo ""
-    echo "Remote access (RAC) is a reverse tunnel to the fleet gateway so the"
-    echo "admin can reach this station for support.  Keys, credentials and"
-    echo "channel numbers are all handled automatically, and you can turn it"
-    echo "off any time with:  sigmond-setup --rac-off"
+    echo "Remote access comes up by itself; this wizard asks nothing about it."
+    echo "It gives your fleet admin the only effective way to support this"
+    echo "station: a tunnel the station dials out, with nothing opened on your"
+    echo "router."
+    echo "  Registering sends two things to the gateway: this station's name"
+    echo "  and this host's public key."
+    echo "  You hold the switch. In the decoder VM, at any time:"
+    echo "      smd remote off      turn it off (it stays off across reboots)"
+    echo "      smd remote on       turn it on again"
+    echo "      smd remote status   show the state"
     echo ""
     if [ "$RAC_PROFILE" = "standard" ]; then
         echo "  Gateway: $RAC_SERVER, secure only."
@@ -1719,18 +1789,14 @@ ask_rac() {
         done
         echo "  The tier that answers is reported at the end of the install."
     fi
-    # When equipment is missing this is the single most valuable thing the
-    # install can still achieve: it is how someone remote reaches the station
-    # to help finish it.  Say so at the moment of the decision.
+    # When equipment is missing, the tunnel is the most valuable thing the
+    # install can still achieve: it lets someone remote help finish the build.
     if [ "$HAVE_RX888" = 0 ] || [ "$HAVE_GPSDO" = 0 ] || [ "$HAVE_TS1" = 0 ] || [ "$HAVE_MAG" = 0 ]; then
         echo ""
-        echo "  ** Some equipment was not detected (see above).  Enabling remote"
-        echo "     access is strongly recommended: it lets the fleet admin connect"
-        echo "     and help finish the install once the missing parts are fitted. **"
+        echo "  ** Some equipment was not detected (see above).  Remote access lets"
+        echo "     the fleet admin connect and help finish the install once the"
+        echo "     missing parts are fitted. **"
     fi
-    rd -r -p "Enable remote access? [Y/n] " RAC_EN
-    RAC_NUM=""
-    case "${RAC_EN:-Y}" in [Nn]*) ;; *) RAC_NUM="auto";; esac
 }
 
 ask_psws() {
@@ -1867,17 +1933,14 @@ while :; do
     echo "  1) Reporter:  $REPORTER"
     echo "  2) Grid:      $GRID"
     echo "  3) Antenna:   ${ANTENNA:-(none)}"
-    if [ -n "$RAC_NUM" ]; then
-        _rgw="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
-        if [ -n "$DASI_NUM" ]; then
-            _rwhich="DASI-$(printf '%03d' "$DASI_NUM") → RAC $((220 + DASI_NUM))"
-        else
-            _rwhich="number auto-assigned by the gateway"
-        fi
-        echo "  4) Remote:    enabled via ${_rgw} ($_rwhich)"
+    _rgw="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
+    if [ -n "$DASI_NUM" ] && [ "$RAC_PROFILE" != "standard" ]; then
+        _rwhich="DASI-$(printf '%03d' "$DASI_NUM") → RAC $((220 + DASI_NUM))"
     else
-        echo "  4) Remote:    disabled"
+        _rwhich="number auto-assigned by the gateway"
     fi
+    echo "  4) Remote:    via ${_rgw} ($_rwhich)"
+    echo "                (comes up by itself; switch it in the decoder VM: smd remote off / on)"
     if [ -n "$PSWS_ID" ]; then
         echo "  5) PSWS:      station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}  (key registered after install)"
     else
@@ -2598,7 +2661,7 @@ if [ -n "$VMIP" ]; then
     fi
 fi
 
-RAC_STATE="skipped"
+RAC_STATE=""
 # The relays that carry the VM's channels.  A function, so that the lines
 # below keep their bytes: pm-align reads these very templates out of the
 # release's wizard to refresh a station's relay units.
@@ -2791,44 +2854,62 @@ SVCEOF
             done
             systemctl daemon-reload
 }
-if [ -n "$RAC_NUM" ]; then
-    say "activating remote access"
-    if ! rac_payload_ready; then
-        RAC_STATE="FAILED — sigmond-rac payload missing (frpc/CA); run install-host.sh, then sigmond-setup --reconfigure"
+rac_record_inputs(){
+    # What a registration that runs alone must know.  Written before the
+    # switch runs, because the switch registers in a process of its own.
+    printf '%s\n' "$RAC_PROFILE" > "$MARK_DIR/rac-profile"
+    [ -n "$DASI_NUM" ] && printf '%s\n' "$DASI_NUM" > "$MARK_DIR/dasi-number"
+    rac_site_name > "$MARK_DIR/rac-site"
+    rac_save_pin
+}
+rac_activate(){
+    # Remote access at the end of a wizard run (tasks/plan-remote-access.md).
+    # A first install turns it on, for every station class, and asks nothing.
+    # A later run leaves the switch where its operator put it.  Sets
+    # RAC_STATE for the summary.  It never fails the wizard: a station with
+    # no gateway in reach still finishes its install, and the host keeps
+    # trying.
+    local want out rc
+    if ! rac_install_host_files; then
+        RAC_STATE="FAILED: could not install $RAC_SWITCH on this host"
         say "WARN: $RAC_STATE"
-    else
-        rac_install_relays
-
-        install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py /usr/local/sbin/pm-align 2>/dev/null \
-            || say "WARN: pm-align not installed (sigmond tree lacks it)"
-
-        rac_save_pin
-        if ! rac_register fresh; then
-            RAC_STATE="FAILED — $RAC_FAIL (see $LOG), rerun: sigmond-setup --reconfigure"
-            say "WARN: $RAC_STATE"
-        else
-            # The switch turns the tunnel on, waits for every channel the
-            # configuration declares, and reports what stands.
-            rac_install_host_files
-            _sw=$(SIGMOND_RAC_BY=install "$RAC_SWITCH" on 2>&1); _swrc=$?
-            printf '%s\n' "$_sw" | sed 's/^/  /' | tee -a "$LOG"
-            _up=$(sed -n 's/^channels_up=//p' "$RAC_STATE_FILE" 2>/dev/null)
-            _decl=$(sed -n 's/^channels_declared=//p' "$RAC_STATE_FILE" 2>/dev/null)
-            if [ "$_swrc" = 0 ] && [ -n "$_decl" ] && [ "${_up:-0}" -ge "$_decl" ]; then
-                RAC_STATE="#$RACN live on $SRV via $RAC_TIER_LABEL — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI
-            (turn it off or on from the decoder VM: smd remote off / smd remote on)"
-                if [ "$RAC_TLS" = "off" ]; then
-                    RAC_STATE="$RAC_STATE
-              ** this tunnel is UNSECURED (no TLS) — the secure gateways did
-                 not answer.  Once one is available run: sigmond-setup --rac-upgrade **"
-                fi
-            else
-                RAC_STATE="FAILED — registered as RAC #$RACN, but only ${_up:-0}/${_decl:-?} channels came up; journalctl -u sigmond-rac-host"
-                say "WARN: $RAC_STATE"
-            fi
-        fi
+        return 0
     fi
-fi
+    rac_install_relays
+    install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py /usr/local/sbin/pm-align 2>/dev/null \
+        || say "WARN: pm-align not installed (sigmond tree lacks it)"
+    rac_record_inputs
+    if [ ! -e "$CONF_MARK" ] && [ ! -e "$MARK_DIR/rac-desired" ]; then
+        want=on
+    else
+        "$RAC_SWITCH" status >/dev/null 2>&1
+        want=$(sed -n 's/^wish=//p' "$RAC_STATE_FILE" 2>/dev/null | head -1)
+    fi
+    if [ "$want" != on ]; then
+        RAC_STATE="off, as its operator left it. Turn it on from the decoder VM: smd remote on"
+        say "remote access stays off, as its operator left it"
+        return 0
+    fi
+    say "remote access: bringing it up (turn it off later from the decoder VM: smd remote off)"
+    # A station that registered before registers again: its reporter id may
+    # have changed.  A station that never did registers inside the switch.
+    if [ -s "$RAC_TOML" ] && ! rac_register fresh; then
+        say "WARN: could not register afresh ($RAC_FAIL); the earlier registration stays"
+    fi
+    out=$(SIGMOND_RAC_BY=install "$RAC_SWITCH" on 2>&1); rc=$?
+    printf '%s\n' "$out" | sed 's/^/  /' | tee -a "$LOG"
+    RAC_STATE=$(printf '%s\n' "$out" | sed -n '/^Remote access: /,$p' \
+                | sed -e '1s/^Remote access: //' -e '2,$s/^/          /')
+    [ -n "$RAC_STATE" ] || RAC_STATE="FAILED: $RAC_SWITCH gave no answer (exit $rc); try: sigmond-setup --rac-on"
+    case "$(head -1 "$MARK_DIR/rac-tier" 2>/dev/null)" in
+        *UNSECURED*|*unsecured*)
+            RAC_STATE="$RAC_STATE
+              ** this tunnel is UNSECURED (no TLS): the secure gateways did
+                 not answer.  Once one is available run: sigmond-setup --rac-upgrade **" ;;
+    esac
+    return 0
+}
+rac_activate
 
 PSWS_STATE="skipped — add later: sigmond-setup --reconfigure"
 if [ -n "$PSWS_ID" ] && [ -n "$KEYS_RESTORED" ]; then
