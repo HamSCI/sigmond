@@ -157,9 +157,9 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
   host, accepting `on`, `off` and `status`. The VM must never be able to create that pairing itself; a station
   installed before this needs one command at the host console. No party outside the station can ask. The
   console panel, the login banner and the heartbeat show the state.
-  *Still open.* Whether `on` from the VM may carry a time limit (`on 24h`) for the owner who opens the door only
-  for one consultation. The verb's name and home (`smd rac`, or a word that does not collide with
-  `smd admin rac`, which manages the other tunnel).
+  *Settled 2026-10-09.* No time limit for now. The command reads `smd remote`. The wizard loses its question and
+  option altogether; the installation documentation says how to turn remote access off and on. The design
+  lives in `tasks/plan-remote-access.md`.
 - **After a restore, `smd update` reports a station as current while it sits releases behind** (pre-tag hunt B, M1).
   `smd admin manifest restore --apply` leaves each moved checkout on a detached HEAD with no `.pin`. `cmd_update`
   finds no upstream for it, counts zero commits behind, and prints the all-clear. Report such a checkout as HELD

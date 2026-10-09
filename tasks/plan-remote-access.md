@@ -2,7 +2,7 @@
 
 **Authors:** Michael Hauan (AC0G) + Claude
 **Date:** 2026-10-09
-**Status:** design, for review. No code yet. Target release: v3.71.
+**Status:** design agreed with Michael on 2026-10-09. No code yet. Target release: v3.71.
 **Verified against:** sigmond 1057d73 on 2026-10-09 — `scripts/proxmox/sigmond-wizard.sh`, `docs/operator/remote-access.md`, `scripts/proxmox/pm-heartbeat.py`; sigmond-appliance a0d7268 `firstboot-v3.sh`; the host unit read on AC0G-B4's Proxmox host
 
 ## Goal
@@ -142,13 +142,19 @@ Today registration sits inside the wizard. It moves into a step the host can run
   three sentences: remote access comes up by itself, what it sends, and how to switch it from the VM.
 - The quick-start card that rides the stick: one line.
 
-## Open questions for Michael
+## Decided on review (Michael, 2026-10-09)
 
-1. **A time limit on `on`.** `smd remote on 24h` would let an owner open the door for one consultation and
-   have it close by itself. The default `on` would carry no limit. Worth building now, or later?
-2. **The name.** `smd remote`, as argued above, or another word.
-3. **Stations already in the field** whose owner said No at install: do they register at their next
-   `pm-align`, like a new install, or only when the owner asks?
+- **No time limit.** The tunnel starts on, and the operator turns it off and on as desired. `on` carries no
+  timer for now.
+- **The command reads `smd remote`.**
+- **The wizard loses its remote-access question and option altogether.** The installation documentation tells
+  the operator, plainly, how to turn remote access off and on.
+
+## One question still open
+
+Stations already in the field whose owner said No at install. This plan leaves them as they stand: such a
+station registers and comes up the first time its owner types `smd remote on`, and not before. A new install
+never reaches that state, because its wizard no longer asks.
 
 ## Phases
 
@@ -164,7 +170,8 @@ Each phase ships alone and leaves the station working.
    refused.
 4. **The heartbeat block and the fleet board.**
 5. **The instructions**, checked against a real install.
-6. **The time limit**, if question 1 says yes.
+
+No phase builds a time limit; add one later if owners ask for it.
 
 A reflash of AC0G-ND with the v3.71 image proves phases 1 to 3 and 5 on hardware. AC0G-B4 and AI6VN receive
 the host's half through `pm-align` and pair with `sigmond-setup --pair-vm`.
