@@ -1068,7 +1068,9 @@ RAC_PAIR_USER=sigmond-remote
 RAC_PAIR_HOME=/var/lib/sigmond-remote
 RAC_PAIR_SUDOERS=/etc/sudoers.d/sigmond-remote
 RAC_PAIR_HOSTPUB=/etc/ssh/ssh_host_ed25519_key.pub
+RAC_PAIR_LOCK=/run/sigmond/rac-pair.lock
 RAC_PAIR_FAIL=""
+RAC_PAIR_WARN=""
 
 rac_pair_key_ok(){
     # One ed25519 public key, as "type base64", and not a byte more.  What
@@ -1106,32 +1108,41 @@ rac_pair_guest_script(){
     # The script the guest runs.  It travels base64-encoded, and it holds
     # ASCII only: Proxmox sends a guest-agent request with a non-ASCII
     # character short, and the agent can then go deaf.
+    #
+    # The guest's bash reads this script from a pipe (echo ... | base64 -d |
+    # bash), so any command inside that reads stdin takes the rest of the
+    # script with it.  Bash reads a whole function before it runs any of it,
+    # and main runs with stdin from /dev/null.  `set -e` and `umask 077` stand
+    # first inside main: both bind the whole shell either way.
     cat <<GUESTEOF
-set -e
-umask 077
-D=/etc/sigmond
-M=/etc/update-motd.d
-K=\$D/rac-switch.key
-install -d -m 755 "\$D"
-if [ ! -s "\$K" ] || [ ! -s "\$K.pub" ]; then
-    rm -f "\$K" "\$K.pub"
-    ssh-keygen -q -t ed25519 -N '' -C sigmond-rac-switch -f "\$K"
-fi
-chown root:root "\$K" "\$K.pub"
-chmod 600 "\$K"
-chmod 644 "\$K.pub"
-printf '%s %s\n' '$1' '$2' > "\$D/rac-switch.known_hosts.new"
-chown root:root "\$D/rac-switch.known_hosts.new"
-chmod 644 "\$D/rac-switch.known_hosts.new"
-mv -f "\$D/rac-switch.known_hosts.new" "\$D/rac-switch.known_hosts"
-if [ -d "\$M" ]; then
-    printf '%s\n' '#!/bin/sh' \\
-        '# One line on the state of remote access.  Written from the Proxmox host' \\
-        '# by sigmond-setup --pair-vm.  Prints nothing where smd lacks the verb.' \\
-        'command -v smd >/dev/null 2>&1 && smd remote motd 2>/dev/null' \\
-        'exit 0' > "\$M/72-sigmond-remote"
-    chmod 755 "\$M/72-sigmond-remote"
-fi
+main(){
+    set -e
+    umask 077
+    D=/etc/sigmond
+    M=/etc/update-motd.d
+    K=\$D/rac-switch.key
+    install -d -m 755 "\$D"
+    if [ ! -s "\$K" ] || [ ! -s "\$K.pub" ]; then
+        rm -f "\$K" "\$K.pub"
+        ssh-keygen -q -t ed25519 -N '' -C sigmond-rac-switch -f "\$K"
+    fi
+    chown root:root "\$K" "\$K.pub"
+    chmod 600 "\$K"
+    chmod 644 "\$K.pub"
+    printf '%s %s\n' '$1' '$2' > "\$D/rac-switch.known_hosts.new"
+    chown root:root "\$D/rac-switch.known_hosts.new"
+    chmod 644 "\$D/rac-switch.known_hosts.new"
+    mv -f "\$D/rac-switch.known_hosts.new" "\$D/rac-switch.known_hosts"
+    if [ -d "\$M" ]; then
+        printf '%s\n' '#!/bin/sh' \\
+            '# One line on the state of remote access.  Written from the Proxmox host' \\
+            '# by sigmond-setup --pair-vm.  Prints nothing where smd lacks the verb.' \\
+            'command -v smd >/dev/null 2>&1 && smd remote motd 2>/dev/null' \\
+            'exit 0' > "\$M/72-sigmond-remote"
+        chmod 755 "\$M/72-sigmond-remote"
+    fi
+}
+main </dev/null
 GUESTEOF
 }
 
@@ -1139,25 +1150,35 @@ rac_pair_verify_script(){
     # rac_pair_verify_script <host address>
     # One request from the VM, through sshd and sudo, to the switch.  It also
     # leaves the answer where the VM's login banner reads it.
+    # Same shape as the guest script, for the same reason: this one runs ssh,
+    # and a real ssh client reads stdin to the end unless it gets -n.  Both
+    # protections stand, the function and the -n.
+    # The state comes from the first line that begins "Remote access: ", so a
+    # warning that ssh prints ahead of the switch's answer costs nothing.  The
+    # whole output stays for the failure print.
     cat <<VERIFYEOF
-D=/etc/sigmond
-C=/var/lib/sigmond/remote-access.json
-out=\$(ssh -T -i "\$D/rac-switch.key" -o BatchMode=yes -o IdentitiesOnly=yes \\
-          -o StrictHostKeyChecking=yes -o UserKnownHostsFile="\$D/rac-switch.known_hosts" \\
-          -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=8 -o LogLevel=ERROR \\
-          $RAC_PAIR_USER@$1 status 2>&1)
-rc=\$?
-case "\$rc" in 0|3) ;; *) printf '%s\n' "\$out" | tail -3; exit 1 ;; esac
-case "\$(printf '%s\n' "\$out" | head -1)" in
-    "Remote access: on") s=on ;;
-    "Remote access: off") s=off ;;
-    "Remote access: wanted on, not up") s=down ;;
-    *) printf '%s\n' "\$out" | head -3; exit 1 ;;
-esac
-mkdir -p "\$(dirname "\$C")"
-printf '{"state": "%s", "checked_at": "%s"}\n' "\$s" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "\$C"
-chmod 644 "\$C"
-exit 0
+main(){
+    D=/etc/sigmond
+    C=/var/lib/sigmond/remote-access.json
+    out=\$(ssh -n -T -i "\$D/rac-switch.key" -o BatchMode=yes -o IdentitiesOnly=yes \\
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="\$D/rac-switch.known_hosts" \\
+              -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=8 -o LogLevel=ERROR \\
+              $RAC_PAIR_USER@$1 status 2>&1)
+    rc=\$?
+    case "\$rc" in 0|3) ;; *) printf '%s\n' "\$out" | tail -3; exit 1 ;; esac
+    answer=\$(printf '%s\n' "\$out" | sed -n '/^Remote access: /{p;q;}')
+    case "\$answer" in
+        "Remote access: on") s=on ;;
+        "Remote access: off") s=off ;;
+        "Remote access: wanted on, not up") s=down ;;
+        *) printf '%s\n' "\$out" | head -3; exit 1 ;;
+    esac
+    mkdir -p "\$(dirname "\$C")"
+    printf '{"state": "%s", "checked_at": "%s"}\n' "\$s" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "\$C"
+    chmod 644 "\$C"
+    exit 0
+}
+main </dev/null
 VERIFYEOF
 }
 
@@ -1169,10 +1190,43 @@ rac_pair_vm(){
     #                      never leaves it), and this host's sshd key as the
     #                      only host that key talks to
     # Returns 0 once a request from the VM has reached the switch script.
-    # Otherwise it returns 1 with the reason in RAC_PAIR_FAIL.
-    local pm vm hostkey vmkey line tmp i
+    # Returns 2 when another pairing runs at this moment, and does nothing:
+    # the timer carries OnBootSec, so arming it long after boot starts the
+    # service at once, beside the wizard's own pairing.
+    # Otherwise it returns 1 with the reason in RAC_PAIR_FAIL.  RAC_PAIR_WARN
+    # holds a warning when the re-assertion units could not start.
+    local rc
     RAC_PAIR_FAIL=""
+    RAC_PAIR_WARN=""
+    mkdir -p "$(dirname "$RAC_PAIR_LOCK")" 2>/dev/null
+    if ! { exec 7>"$RAC_PAIR_LOCK"; } 2>/dev/null; then
+        RAC_PAIR_FAIL="cannot open the pairing lock ($RAC_PAIR_LOCK)"
+        return 1
+    fi
+    if ! flock -n 7; then
+        exec 7>&-
+        RAC_PAIR_FAIL="another pairing is running"
+        return 2
+    fi
+    rac_pair_locked; rc=$?
+    exec 7>&-
+    return $rc
+}
+
+rac_pair_locked(){
+    local pm vm hostkey vmkey line tmp i
     vm=$(mgmt_vm_ip)
+    # The units first.  A pairing that fails here must try again by itself:
+    # a host with no keyboard cannot wait for an operator.  A station whose
+    # guest agent stood deaf at install pairs at the next boot, or in six
+    # hours, without anyone.
+    if ! rac_install_host_files; then
+        RAC_PAIR_FAIL="could not install $RAC_SWITCH"
+        return 1
+    fi
+    if ! systemctl enable --now sigmond-rac-pair.timer sigmond-rac-pair.path >/dev/null 2>&1; then
+        RAC_PAIR_WARN="the pairing's re-assertion units did not start (systemctl enable --now failed)"
+    fi
     pm=$(ip -4 -o addr show 2>/dev/null | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
     if [ -z "$pm" ]; then
         RAC_PAIR_FAIL="this host has no private link to its decoder VM (no /30 address)"
@@ -1195,16 +1249,12 @@ rac_pair_vm(){
     # a station installed earlier fetches it here, once.
     if ! rac_have_sudo; then
         say "this host has no sudo; installing it (the pairing account needs its one sudoers line)"
-        apt-get -qq update >>"$LOG" 2>&1
+        timeout 120 apt-get -qq update >>"$LOG" 2>&1
         DEBIAN_FRONTEND=noninteractive timeout 300 apt-get -y -qq install sudo >>"$LOG" 2>&1
         if ! rac_have_sudo; then
             RAC_PAIR_FAIL="this host has no sudo and could not install it; run: apt-get install sudo, then: sigmond-setup --pair-vm"
             return 1
         fi
-    fi
-    if ! rac_install_host_files; then
-        RAC_PAIR_FAIL="could not install $RAC_SWITCH"
-        return 1
     fi
 
     # This host's half, part one: an account that can do one thing.
@@ -1214,10 +1264,14 @@ rac_pair_vm(){
         return 1
     fi
     # No password that could ever match, and a shell sshd can run the forced
-    # command with.
-    usermod -p '*' -s /bin/sh "$RAC_PAIR_USER" >/dev/null 2>&1
-    install -d -m 755 "$RAC_PAIR_HOME" "$RAC_PAIR_HOME/.ssh"
-    chown root:root "$RAC_PAIR_HOME" "$RAC_PAIR_HOME/.ssh"
+    # command with.  Root owns the home and its .ssh: an account that owns the
+    # file with its key could change its own key.
+    if ! { usermod -p '*' -s /bin/sh "$RAC_PAIR_USER" >/dev/null 2>&1 \
+           && install -d -m 755 "$RAC_PAIR_HOME" "$RAC_PAIR_HOME/.ssh" \
+           && chown root:root "$RAC_PAIR_HOME" "$RAC_PAIR_HOME/.ssh"; }; then
+        RAC_PAIR_FAIL="could not prepare $RAC_PAIR_HOME for the account (root must own it)"
+        return 1
+    fi
     # sudo skips a file whose name holds a dot, so the candidate cannot take
     # effect before visudo has passed it.
     tmp="$RAC_PAIR_SUDOERS.new"
@@ -1233,7 +1287,9 @@ rac_pair_vm(){
         RAC_PAIR_FAIL="could not write the pairing into VM $VMID (see $LOG)"
         return 1
     fi
-    vmkey=$(guest_out 20 "cat /etc/sigmond/rac-switch.key.pub" | awk 'NF>=2{print $1" "$2; exit}')
+    # The line that starts with the key type: a guest profile script may print
+    # a line of its own ahead of the key.
+    vmkey=$(guest_out 20 "cat /etc/sigmond/rac-switch.key.pub" | awk '$1=="ssh-ed25519"{print $1" "$2; exit}')
     if ! line=$(rac_pair_authorized_line "$vm" "$vmkey"); then
         RAC_PAIR_FAIL="VM $VMID returned no usable public key"
         return 1
@@ -1254,7 +1310,6 @@ rac_pair_vm(){
         RAC_PAIR_FAIL="both halves stand on disk, but a request from the VM did not reach the switch (see $LOG)"
         return 1
     fi
-    systemctl enable --now sigmond-rac-pair.timer sigmond-rac-pair.path >/dev/null 2>&1
     return 0
 }
 
@@ -1277,8 +1332,15 @@ case "${1:-}" in
         # station installed before v3.71 runs this once, by hand or through
         # pm-align.  sigmond-rac-pair runs it after every boot and whenever
         # this host's sshd key changes.
-        if rac_pair_vm; then
+        rac_pair_vm; _prc=$?
+        [ -n "$RAC_PAIR_WARN" ] && say "WARN: $RAC_PAIR_WARN"
+        if [ "$_prc" = 0 ]; then
             say "paired: the decoder VM can run smd remote on, smd remote off and smd remote status"
+            exit 0
+        fi
+        if [ "$_prc" = 2 ]; then
+            # The pairing that holds the lock does the work.
+            say "another pairing is running; nothing done"
             exit 0
         fi
         say "NOT paired: $RAC_PAIR_FAIL"
@@ -3214,6 +3276,11 @@ if ! rac_pair_vm; then
     PAIR_STATE="NOT PAIRED ($RAC_PAIR_FAIL).
             Until it pairs, smd remote cannot reach this host. Later, on this host: sigmond-setup --pair-vm"
     say "WARN: remote-access switch: $PAIR_STATE"
+fi
+if [ -n "$RAC_PAIR_WARN" ]; then
+    PAIR_STATE="$PAIR_STATE
+            WARN: $RAC_PAIR_WARN"
+    say "WARN: remote-access switch: $RAC_PAIR_WARN"
 fi
 
 PSWS_STATE="skipped — add later: sigmond-setup --reconfigure"
