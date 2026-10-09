@@ -34,6 +34,7 @@ Operate (run things now, may need sudo):
     smd reload      [--via=auto|systemd|socket]  [<component>]
     smd timing            [--json]                               timing authority + accuracy
     smd sink        status | off --reason R | upload                 the site sink switch (sudo)
+    smd remote      status | off | on                                remote access for the fleet admin (sudo)
     smd upload      status | on | hold | off | discard [--reason R]  legacy words for the same switch (sudo)
     smd tui                                                      launch interactive TUI
 
@@ -23413,6 +23414,7 @@ def main() -> int:
                            (start <name> also enables an installed component)
                 disable    take a component offline (reversible; stops + un-enables)
                 apply      reconcile running services with current config
+                remote     remote access for the fleet admin: status | off | on
 
               Installer / maintenance:
                 install    install + configure + enable a component
@@ -24849,6 +24851,18 @@ def main() -> int:
              'packaging runs')
     sink_sub.add_parser('fill', help='not available yet (a later release)')
 
+    p_remote = sub.add_parser('remote',
+        help='remote access for the fleet admin: status | off | on.  It asks '
+             'the Proxmox host, which alone switches the tunnel')
+    remote_sub = p_remote.add_subparsers(dest='remote_command')
+    remote_sub.add_parser('status',
+        help='show whether remote access stands on, off, or wanted on and not up')
+    remote_sub.add_parser('off',
+        help='turn remote access off; it stays off across reboots')
+    remote_sub.add_parser('on', help='turn remote access on again')
+    remote_sub.add_parser('motd',
+        help='login-banner hook (invoked from /etc/update-motd.d)')
+
     p_psws = sub.add_parser('psws',
         help='PSWS enrollment: status | enroll (print key + portal steps) | '
              'verify (live SFTP login test)')
@@ -24989,6 +25003,15 @@ def main() -> int:
             return 1
         from sigmond.commands.sink import cmd_sink
         return cmd_sink(args)
+
+    if args.command == 'remote':
+        verb = getattr(args, 'remote_command', None) or 'status'
+        # The pairing key belongs to root alone, so every word elevates but
+        # the login banner's, which reads no key.
+        if verb != 'motd' and _need_root(f'remote {verb}'):
+            return 1
+        from sigmond.commands.remote import cmd_remote
+        return cmd_remote(args)
 
     if args.command == 'upload':
         verb = getattr(args, 'uploads_command', None) or 'status'
