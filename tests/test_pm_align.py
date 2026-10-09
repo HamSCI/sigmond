@@ -1524,16 +1524,13 @@ def test_wizard_verify_counts_every_declared_proxy_not_four():
     assert "grep -c '^name *=' /etc/sigmond/frpc-host.toml" in block
 
 
-def test_wizard_rac_number_gated_on_the_same_dynamic_threshold():
-    # The success branch that records rac-number must be gated by the SAME
-    # "$_want" threshold the loop waits on -- not a bare "$RUNNING" check
-    # that would still record success on a partial (e.g. 4-of-6) tunnel.
-    i = WIZARD.index("PROVE the tunnel")
-    block = WIZARD[i:i + 2500]
-    want_i = block.index('_want=$(grep')
-    gate_i = block.index('if [ "$RUNNING" -ge "$_want" ]')
-    rac_number_i = block.index('rac-number')
-    assert want_i < gate_i < rac_number_i
+def test_wizard_records_the_rac_number_only_once_the_configuration_stands():
+    # rac_write_config writes its marks after it has renamed the tunnel
+    # configuration into place.  A host with a RAC number and no configuration
+    # reads on the console panel as "assigned, but frpc-host.toml is missing".
+    i = WIZARD.index("rac_write_config(){")
+    body = WIZARD[i:WIZARD.index("\n}\n", i)]
+    assert body.index('mv -f "$RAC_TOML.new" "$RAC_TOML"') < body.index("rac-number")
 
 
 def test_wizard_installs_pm_align_on_the_host():

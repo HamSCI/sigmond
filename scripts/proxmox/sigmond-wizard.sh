@@ -22,6 +22,8 @@
 # Subcommands: --reconfigure   rerun the wizard (RAC number is sticky)
 #              --rac-off       drop the remote-access tunnel (config kept)
 #              --rac-on        bring it back up
+#              --rac-register  register with the gateway and write the tunnel
+#                              configuration; asks nothing, starts nothing
 #              --rac-upgrade   climb to a more secure gateway tier if one
 #                              has since come up (see the RAC ladder below)
 set -u
@@ -211,6 +213,30 @@ derive_dasi_num() {
     return 0
 }
 
+# A pinned gateway persists.  A registration that runs alone (the switch
+# script, the retry timer) carries no environment from the wizard run that
+# pinned it, so it reads the pin from this file.  The image rig writes one,
+# so that a nested install never registers with a real gateway.
+RAC_PIN_FILE=/etc/sigmond-appliance/rac-endpoint.env
+rac_load_pin(){
+    local k v
+    [ -r "$RAC_PIN_FILE" ] || return 0
+    while IFS='=' read -r k v; do
+        case "$k" in
+            SIGMOND_RAC_SERVER|SIGMOND_RAC_REGISTRAR|SIGMOND_RAC_TLS|SIGMOND_RAC_FRPS_PORT)
+                # the environment of this run wins over the file
+                [ -n "${!k:-}" ] || printf -v "$k" '%s' "$v" ;;
+        esac
+    done < "$RAC_PIN_FILE"
+}
+rac_save_pin(){
+    local k
+    [ -n "${SIGMOND_RAC_SERVER:-}" ] || [ -n "${SIGMOND_RAC_REGISTRAR:-}" ] || return 0
+    for k in SIGMOND_RAC_SERVER SIGMOND_RAC_REGISTRAR SIGMOND_RAC_TLS SIGMOND_RAC_FRPS_PORT; do
+        if [ -n "${!k:-}" ]; then printf '%s=%s\n' "$k" "${!k}"; fi
+    done > "$RAC_PIN_FILE.new" && mv -f "$RAC_PIN_FILE.new" "$RAC_PIN_FILE"
+}
+rac_load_pin
 build_rac_tiers
 RAC_SERVER="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
 RAC_TLS="on"
@@ -222,8 +248,346 @@ say(){ echo "[wizard] $*" | tee -a "$LOG"; }
 
 mkdir -p "$MARK_DIR"
 
+# ── registration, as a step that runs alone ────────────────────────────────
+# tasks/plan-remote-access.md section 3.  Before v3.71 these lines sat inside
+# the interactive flow and read its shell variables, so only a person
+# answering the wizard could register a station.  They now read what a wizard
+# run recorded under $MARK_DIR, and `sigmond-setup --rac-register` runs them
+# with no question and no decoder VM.
+#
+# Nothing here starts or stops the tunnel.
+RAC_FRPC=/usr/local/sbin/frpc
+RAC_CA=/etc/sigmond/frps-ca.crt
+RAC_TOML=/etc/sigmond/frpc-host.toml
+RAC_HOSTKEY=/root/.ssh/id_ed25519
+RAC_LOCK=/run/sigmond-rac-register.lock
+RAC_RELAY_UNIT=/etc/systemd/system/sigmond-vm-ssh-relay.socket
+RAC_FAIL=""
+
+rac_site_name(){
+    # The name the gateway files this station under: the reporter id in upper
+    # case, with / as _.  A running wizard knows $REPORTER.  A run without it
+    # reads the name the last registration recorded, then the reporter id the
+    # last wizard run left in the configured mark.
+    local r="${REPORTER:-}"
+    [ -n "$r" ] || r=$(cat "$MARK_DIR/rac-site" 2>/dev/null)
+    [ -n "$r" ] || r=$(awk 'NR==1{print $1}' "$CONF_MARK" 2>/dev/null)
+    printf '%s' "$r" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-'
+}
+
+rac_payload_ready(){
+    # frpc, the pinned CA and the host unit come from the sigmond-rac payload.
+    if [ ! -x "$RAC_FRPC" ] && [ -x /root/sigmond-appliance/sigmond-rac/install-host.sh ]; then
+        (cd /root/sigmond-appliance/sigmond-rac && ./install-host.sh) >>"$LOG" 2>&1
+    fi
+    [ -x "$RAC_FRPC" ] && [ -f "$RAC_CA" ]
+}
+
+rac_ladder(){
+    # Walk $RAC_TIERS, best first, and stop at the first tier that registers
+    # this station.  Sets REG (empty when none did), RAC_TRIED, and for the
+    # tier that answered RAC_SERVER, RAC_REGISTRAR, RAC_TLS, RAC_PORT and
+    # RAC_TIER_LABEL.  Reads SITE, DASI_NUM, HAMSCI_TOKEN and $RAC_HOSTKEY.pub.
+    local _lbl _cand _cand_reg _tls _fport
+    local _racn _pvs _pvw _phs _phu _pst _pgm _duser _tf _dtls _spec _n _lp _rp
+    local _tpid _drun _derr _api _i
+    REG=""
+    RAC_TRIED=""
+    while IFS='|' read -r _lbl _cand _cand_reg _tls _fport; do
+        [ -n "$_cand" ] || continue
+        RAC_TRIED="${RAC_TRIED:+$RAC_TRIED, }$_lbl"
+        say "trying $_lbl — $_cand:$_fport (registrar $_cand_reg)"
+        case "$_tls" in
+            off) say "  NOTE: this tier is UNSECURED (no TLS, legacy frps)." ;;
+            opp) say "  NOTE: encrypted (TLS) but the server is unauthenticated" ;;
+        esac
+        # The tier IS its tunnel port: if no frps listens there, the tier is
+        # down no matter what the (shared) registrar would say — probe it
+        # first so a dead secure stack can't register and then fail late.
+        if ! timeout 5 bash -c "exec 3<>/dev/tcp/$_cand/$_fport" 2>/dev/null; then
+            say "  $_lbl did not answer (no frps on $_cand:$_fport)"
+            continue
+        fi
+        if [ "$_cand_reg" = "DIRECT" ]; then
+            # Registrar-less DASI rung: deterministic RAC + ports, verified
+            # by ATTEMPT — a throwaway frpc claims all 4 proxies and the
+            # frps itself refuses a taken name/port.  The live tunnel (if
+            # any) is untouched: separate config, separate admin port.
+            _racn=$((220 + DASI_NUM))
+            _pvs=$((RAC_BASE_VMSSH+_racn)); _pvw=$((RAC_BASE_VMWEB+_racn))
+            _phs=$((RAC_BASE_HSSH+_racn)); _phu=$((RAC_BASE_HUI+_racn))
+            _pst=$((RAC_BASE_VMSTN+_racn)); _pgm=$((RAC_BASE_VMGMAG+_racn))
+            _duser="DASI-$(printf '%03d' "$DASI_NUM")"
+            say "  deterministic mapping: $_duser -> RAC #$_racn (attempting, not probing)"
+            _tf=$(mktemp /tmp/frpc-dasi-XXXXXX.toml)
+            _dtls=true; [ "$_tls" = "off" ] && _dtls=false
+            {
+                printf 'serverAddr = "%s"\nserverPort = %s\nuser = "%s"\nloginFailExit = true\n' "$_cand" "$_fport" "$_duser"
+                # the pubkey rides EVERY login as metadata — today the server
+                # ignores it; a future Login plugin on the VPN turns it into
+                # per-unit admission (TOFU) with no Linux accounts (rob).
+                printf '[metadatas]\npubkey = "%s"\nsite = "%s"\ndasi = "%s"\n' "$(cat "$RAC_HOSTKEY.pub")" "$SITE" "$_duser"
+                # TOFU: the pubkey (above) is the credential; the server's
+                # auth.token is empty, so the client sends an empty token too.
+                printf '[auth]\nmethod = "token"\ntoken = ""\n'
+                printf '[transport.tls]\nenable = %s\n' "$_dtls"
+                printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
+                for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu" \
+                             "vm-station:12224:$_pst" "vm-gmag:12225:$_pgm"; do
+                    IFS=: read -r _n _lp _rp <<<"$_spec"
+                    printf '[[proxies]]\nname = "%s-%s"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = %s\nremotePort = %s\n' "$SITE" "$_n" "$_lp" "$_rp"
+                done
+            } > "$_tf"
+            "$RAC_FRPC" -c "$_tf" >>"$LOG" 2>&1 &
+            _tpid=$!
+            _drun=0; _derr=""
+            for _i in 1 2 3 4 5 6 7 8; do
+                sleep 3
+                kill -0 "$_tpid" 2>/dev/null || break
+                _api=$(curl -s http://127.0.0.1:7502/api/status 2>/dev/null)
+                _drun=$(echo "$_api" | grep -o '"status":"running"' | wc -l)
+                _derr=$(echo "$_api" | grep -o '"err":"[^"]\{1,\}"' | head -3)
+                [ "$_drun" -ge 4 ] && break
+            done
+            kill "$_tpid" 2>/dev/null; wait "$_tpid" 2>/dev/null; rm -f "$_tf"
+            if [ "$_drun" -ge 4 ]; then
+                say "  RAC #$_racn is free on $_cand — claiming it"
+                REG="RACN=$_racn RUSER=$_duser RTOKEN=$HAMSCI_TOKEN P_VMSSH=$_pvs P_VMWEB=$_pvw P_HSSH=$_phs P_HUI=$_phu SRV=$_cand SPORT=$_fport"
+            elif echo "$_derr" | grep -qi "port already"; then
+                say "  ** RAC #$_racn ports are TAKEN on $_cand — is another unit already"
+                say "  ** using DASI number $DASI_NUM?  Choose a different number via"
+                say "  ** sigmond-setup --reconfigure, or let the ladder continue below."
+            else
+                say "  HamSCI direct attempt failed (${_derr:-login refused — check the token}); see $LOG"
+            fi
+        else
+            REG=$(python3 - "$SITE" "$(cat "$RAC_HOSTKEY.pub")" "$_cand_reg" "$RAC_CA" <<'PYEOF' 2>>"$LOG"
+import json, re, ssl, sys, urllib.error, urllib.request
+site, pub, registrar, cafile = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# The reply carries this station's token.  Over https, accept it only from a
+# registrar that proves itself against the CA the image pins.  Both gateways
+# serve their registrar over plain http today (see the ladder comment above),
+# so an http address still goes out in the clear.
+ctx = ssl.create_default_context(cafile=cafile) if registrar.startswith("https://") else None
+req = urllib.request.Request(
+    registrar,
+    data=json.dumps({"site": site, "pubkey": pub}).encode(),
+    headers={"Content-Type": "application/json"})
+try:
+    r = json.load(urllib.request.urlopen(req, timeout=30, context=ctx))
+except urllib.error.HTTPError as e:
+    try: msg = json.load(e)["error"]
+    except Exception: msg = str(e)
+    sys.exit("gateway refused registration: %s" % msg)
+except Exception as e:
+    sys.exit("cannot reach the gateway registrar: %s" % e)
+ok = (re.fullmatch(r"[0-9a-f]{16}", str(r.get("user", "")))
+      and re.fullmatch(r"[0-9a-zA-Z]{8,64}", str(r.get("token", "")))
+      and re.fullmatch(r"[a-z0-9.-]+", str(r.get("server_addr", "")))
+      and isinstance(r.get("rac"), int)
+      and all(isinstance(r.get("ports", {}).get(k), int)
+              for k in ("vm_ssh", "vm_web", "host_ssh", "host_ui")))
+if not ok:
+    sys.exit("gateway returned a malformed registration")
+print("RACN=%d RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%s SPORT=%d" % (
+    r["rac"], r["user"], r["token"], r["ports"]["vm_ssh"], r["ports"]["vm_web"],
+    r["ports"]["host_ssh"], r["ports"]["host_ui"],
+    r["server_addr"], int(r["server_port"])))
+PYEOF
+)
+        fi
+        if [ -n "$REG" ]; then
+            RAC_SERVER="$_cand"
+            RAC_REGISTRAR="$_cand_reg"
+            RAC_TLS="$_tls"
+            RAC_PORT="$_fport"
+            RAC_TIER_LABEL="$_lbl"
+            break
+        fi
+        say "  $_lbl frps answered on :$_fport but its registrar did not"
+    done <<TIEREOF
+$RAC_TIERS
+TIEREOF
+}
+
+rac_write_config(){
+    # Turn one registration ($REG, from rac_ladder) into this host's tunnel
+    # configuration and its marks.  It leaves RACN, SRV and the four gateway
+    # ports set for the caller's summary line.
+    local RAC_TLS_BLOCK
+    RACN=""; P_VMSTN=""; P_VMGMAG=""
+    eval "$REG"
+    [ -n "$RACN" ] || { RAC_FAIL="the registration carried no RAC number"; return 1; }
+    # The two newest channels are DERIVED, never supplied.  The deterministic
+    # path computes them; the registrar path cannot, because the gateway's
+    # JSON only carries the four original ports.  Every band is base+rac by
+    # construction, so deriving is the same rule, applied here.
+    P_VMSTN=$((RAC_BASE_VMSTN+RACN))
+    P_VMGMAG=$((RAC_BASE_VMGMAG+RACN))
+    # transport follows the tier that actually answered: a secure tier pins
+    # the fleet CA, opportunistic (opp) encrypts without pinning (server cert
+    # is self-signed — vpn.hamsci.org today), and an unsecured one has no TLS.
+    case "$RAC_TLS" in
+        off) RAC_TLS_BLOCK="[transport.tls]
+enable = false" ;;
+        opp) RAC_TLS_BLOCK="[transport.tls]
+enable = true" ;;
+        *)   RAC_TLS_BLOCK="[transport.tls]
+enable = true
+trustedCaFile = \"$RAC_CA\"" ;;
+    esac
+    say "writing $RAC_TOML (6 channels, one tunnel)"
+    # Write beside the live file under a closed umask, then rename: the file
+    # holds the station's token, and frpc must never read half of it.
+    if ! ( umask 077; cat > "$RAC_TOML.new" <<TOMLEOF
+# Written by sigmond-setup $(date -u +%F) — RAC #$RACN, site $SITE.
+# ONE frpc on the Proxmox host carries every channel; the vm-* channels
+# ride the local relays (12222-12225), so this file never needs the VM's
+# address.
+# serverPort comes from the TIER that answered (35736 TLS / 35735 legacy),
+# not from the registrar's reply — the registrar only knows the legacy stack.
+serverAddr = "$SRV"
+serverPort = ${RAC_PORT:-$SPORT}
+user = "$RUSER"
+
+# The station's pubkey rides every login as metadata (any tier): servers
+# ignore it today; a Login plugin can enforce per-unit admission (TOFU)
+# from it later — no per-client accounts needed (rob 2026-08-09).
+[metadatas]
+pubkey = "$(cat "$RAC_HOSTKEY.pub")"
+site = "$SITE"
+dasi = "${DASI_NUM:+DASI-$(printf '%03d' "$DASI_NUM")}"
+
+[auth]
+method = "token"
+token = "$RTOKEN"
+
+$RAC_TLS_BLOCK
+
+[webServer]
+addr = "127.0.0.1"
+port = 7500
+
+[[proxies]]
+name = "$SITE-vm-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12222
+remotePort = $P_VMSSH
+
+[[proxies]]
+name = "$SITE-vm-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12223
+remotePort = $P_VMWEB
+
+[[proxies]]
+name = "$SITE-vm-station"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12224
+remotePort = $P_VMSTN
+
+[[proxies]]
+name = "$SITE-vm-gmag"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12225
+remotePort = $P_VMGMAG
+
+[[proxies]]
+name = "$SITE-host-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = $P_HSSH
+
+[[proxies]]
+name = "$SITE-host-ui"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8006
+remotePort = $P_HUI
+TOMLEOF
+    ) || ! mv -f "$RAC_TOML.new" "$RAC_TOML"; then
+        rm -f "$RAC_TOML.new"
+        RAC_FAIL="could not write $RAC_TOML"
+        return 1
+    fi
+    # The marks come last: a station counts as registered once the tunnel
+    # configuration stands, and never before.
+    printf '%s\n' "$RAC_TIER_LABEL" > "$MARK_DIR/rac-tier"
+    printf '%s\n' "$RAC_REGISTRAR" > "$MARK_DIR/rac-registrar"
+    printf '%s\n' "$RACN" > "$MARK_DIR/rac-number"
+    printf '%s\n' "$SITE" > "$MARK_DIR/rac-site"
+}
+
+rac_register_locked(){
+    local mode="$1"
+    if [ "$mode" = ensure ] && [ -s "$RAC_TOML" ]; then
+        return 0
+    fi
+    SITE=$(rac_site_name)
+    if [ -z "$SITE" ]; then
+        RAC_FAIL="this host records no station name yet; run: sigmond-setup --reconfigure"
+        return 1
+    fi
+    if ! rac_payload_ready; then
+        RAC_FAIL="sigmond-rac payload missing (frpc/CA); run install-host.sh, then sigmond-setup --reconfigure"
+        return 1
+    fi
+    if [ ! -f "$RAC_RELAY_UNIT" ]; then
+        RAC_FAIL="the VM relays are not installed on this host; run: pm-align --apply (or sigmond-setup --reconfigure)"
+        return 1
+    fi
+    [ -f "$RAC_HOSTKEY" ] || ssh-keygen -q -t ed25519 -N "" -f "$RAC_HOSTKEY"
+    say "registering with the gateway: this sends the station's name ($SITE) and this host's public key"
+    rac_ladder
+    if [ -z "$REG" ]; then
+        RAC_FAIL="no gateway tier answered (tried: $RAC_TRIED)"
+        return 1
+    fi
+    rac_write_config || return 1
+    # A tunnel that runs takes up the new configuration.  One that stands
+    # stopped stays stopped.
+    systemctl try-restart sigmond-rac-host.service >>"$LOG" 2>&1
+    return 0
+}
+
+rac_register(){
+    # rac_register ensure|fresh
+    #   ensure  register only a host that holds no tunnel configuration yet
+    #   fresh   register again even so.  A wizard run does, because the
+    #           reporter id may have changed.  A failed fresh run leaves the
+    #           old configuration as it stands.
+    # Returns 0 once $RAC_TOML holds a registration.  Returns 1 otherwise, with
+    # the reason in $RAC_FAIL.  One registration at a time: the lock covers a
+    # wizard run, the switch script and the retry timer.
+    local rc
+    RAC_FAIL=""
+    exec 8>"$RAC_LOCK"
+    if ! flock -w 300 8; then
+        exec 8>&-
+        RAC_FAIL="another registration is still running"
+        return 1
+    fi
+    rac_register_locked "${1:-ensure}"; rc=$?
+    exec 8>&-
+    return $rc
+}
+
 # ── RAC on/off switches (no wizard rerun needed) ────────────────────────────
 case "${1:-}" in
+    --rac-register)
+        # Registration alone.  No question, no decoder VM, and no start:
+        # this branch exits before the wizard waits for anything.
+        if rac_register ensure; then
+            say "registered: RAC #$(cat "$MARK_DIR/rac-number" 2>/dev/null) via $(cat "$MARK_DIR/rac-tier" 2>/dev/null)"
+            exit 0
+        fi
+        say "not registered: $RAC_FAIL"
+        exit 1;;
     --rac-off)
         systemctl disable --now sigmond-rac-host.service \
             sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket \
@@ -1939,149 +2303,10 @@ if [ -n "$VMIP" ]; then
 fi
 
 RAC_STATE="skipped"
-if [ -n "$RAC_NUM" ]; then
-    say "activating remote access — registering with the gateway"
-    # frpc binary, TLS CA and the host unit come from the sigmond-rac payload
-    if [ ! -x /usr/local/sbin/frpc ] && [ -x /root/sigmond-appliance/sigmond-rac/install-host.sh ]; then
-        (cd /root/sigmond-appliance/sigmond-rac && ./install-host.sh) >>"$LOG" 2>&1
-    fi
-    if [ ! -x /usr/local/sbin/frpc ] || [ ! -f /etc/sigmond/frps-ca.crt ]; then
-        RAC_STATE="FAILED — sigmond-rac payload missing (frpc/CA); run install-host.sh, then sigmond-setup --reconfigure"
-        say "WARN: $RAC_STATE"
-    else
-        # One POST does what used to be a copy-paste ritual: gw2's registrar
-        # creates the station account, files our pubkey (that IS the auth —
-        # the frps plugin only admits registered keys), auto-assigns a free
-        # RAC number (sticky per site, so reconfigure keeps it), and
-        # returns user/token/ports for the frpc config.
-        SITE=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
-        REG=""
-        RAC_TRIED=""
-        while IFS='|' read -r _lbl _cand _cand_reg _tls _fport; do
-        [ -n "$_cand" ] || continue
-        RAC_TRIED="${RAC_TRIED:+$RAC_TRIED, }$_lbl"
-        say "trying $_lbl — $_cand:$_fport (registrar $_cand_reg)"
-        case "$_tls" in
-            off) say "  NOTE: this tier is UNSECURED (no TLS, legacy frps)." ;;
-            opp) say "  NOTE: encrypted (TLS) but the server is unauthenticated" ;;
-        esac
-        # The tier IS its tunnel port: if no frps listens there, the tier is
-        # down no matter what the (shared) registrar would say — probe it
-        # first so a dead secure stack can't register and then fail late.
-        if ! timeout 5 bash -c "exec 3<>/dev/tcp/$_cand/$_fport" 2>/dev/null; then
-            say "  $_lbl did not answer (no frps on $_cand:$_fport)"
-            continue
-        fi
-        if [ "$_cand_reg" = "DIRECT" ]; then
-            # Registrar-less DASI rung: deterministic RAC + ports, verified
-            # by ATTEMPT — a throwaway frpc claims all 4 proxies and the
-            # frps itself refuses a taken name/port.  The live tunnel (if
-            # any) is untouched: separate config, separate admin port.
-            _racn=$((220 + DASI_NUM))
-            _pvs=$((RAC_BASE_VMSSH+_racn)); _pvw=$((RAC_BASE_VMWEB+_racn))
-            _phs=$((RAC_BASE_HSSH+_racn)); _phu=$((RAC_BASE_HUI+_racn))
-            _pst=$((RAC_BASE_VMSTN+_racn)); _pgm=$((RAC_BASE_VMGMAG+_racn))
-            _duser="DASI-$(printf '%03d' "$DASI_NUM")"
-            say "  deterministic mapping: $_duser -> RAC #$_racn (attempting, not probing)"
-            _tf=$(mktemp /tmp/frpc-dasi-XXXXXX.toml)
-            _dtls=true; [ "$_tls" = "off" ] && _dtls=false
-            {
-                printf 'serverAddr = "%s"\nserverPort = %s\nuser = "%s"\nloginFailExit = true\n' "$_cand" "$_fport" "$_duser"
-                # the pubkey rides EVERY login as metadata — today the server
-                # ignores it; a future Login plugin on the VPN turns it into
-                # per-unit admission (TOFU) with no Linux accounts (rob).
-                printf '[metadatas]\npubkey = "%s"\nsite = "%s"\ndasi = "%s"\n' "$(cat /root/.ssh/id_ed25519.pub)" "$SITE" "$_duser"
-                # TOFU: the pubkey (above) is the credential; the server's
-                # auth.token is empty, so the client sends an empty token too.
-                printf '[auth]\nmethod = "token"\ntoken = ""\n'
-                printf '[transport.tls]\nenable = %s\n' "$_dtls"
-                printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
-                for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu" \
-                             "vm-station:12224:$_pst" "vm-gmag:12225:$_pgm"; do
-                    IFS=: read -r _n _lp _rp <<<"$_spec"
-                    printf '[[proxies]]\nname = "%s-%s"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = %s\nremotePort = %s\n' "$SITE" "$_n" "$_lp" "$_rp"
-                done
-            } > "$_tf"
-            /usr/local/sbin/frpc -c "$_tf" >>"$LOG" 2>&1 &
-            _tpid=$!
-            _drun=0; _derr=""
-            for _i in 1 2 3 4 5 6 7 8; do
-                sleep 3
-                kill -0 "$_tpid" 2>/dev/null || break
-                _api=$(curl -s http://127.0.0.1:7502/api/status 2>/dev/null)
-                _drun=$(echo "$_api" | grep -o '"status":"running"' | wc -l)
-                _derr=$(echo "$_api" | grep -o '"err":"[^"]\{1,\}"' | head -3)
-                [ "$_drun" -ge 4 ] && break
-            done
-            kill "$_tpid" 2>/dev/null; wait "$_tpid" 2>/dev/null; rm -f "$_tf"
-            if [ "$_drun" -ge 4 ]; then
-                say "  RAC #$_racn is free on $_cand — claiming it"
-                REG="RACN=$_racn RUSER=$_duser RTOKEN=$HAMSCI_TOKEN P_VMSSH=$_pvs P_VMWEB=$_pvw P_HSSH=$_phs P_HUI=$_phu SRV=$_cand SPORT=$_fport"
-            elif echo "$_derr" | grep -qi "port already"; then
-                say "  ** RAC #$_racn ports are TAKEN on $_cand — is another unit already"
-                say "  ** using DASI number $DASI_NUM?  Choose a different number via"
-                say "  ** sigmond-setup --reconfigure, or let the ladder continue below."
-            else
-                say "  HamSCI direct attempt failed (${_derr:-login refused — check the token}); see $LOG"
-            fi
-        else
-        REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" "$_cand_reg" <<'PYEOF' 2>>"$LOG"
-import json, re, sys, urllib.error, urllib.request
-site, pub, registrar = sys.argv[1], sys.argv[2], sys.argv[3]
-req = urllib.request.Request(
-    registrar,
-    data=json.dumps({"site": site, "pubkey": pub}).encode(),
-    headers={"Content-Type": "application/json"})
-try:
-    r = json.load(urllib.request.urlopen(req, timeout=30))
-except urllib.error.HTTPError as e:
-    try: msg = json.load(e)["error"]
-    except Exception: msg = str(e)
-    sys.exit("gateway refused registration: %s" % msg)
-except Exception as e:
-    sys.exit("cannot reach the gateway registrar: %s" % e)
-ok = (re.fullmatch(r"[0-9a-f]{16}", str(r.get("user", "")))
-      and re.fullmatch(r"[0-9a-zA-Z]{8,64}", str(r.get("token", "")))
-      and re.fullmatch(r"[a-z0-9.-]+", str(r.get("server_addr", "")))
-      and isinstance(r.get("rac"), int)
-      and all(isinstance(r.get("ports", {}).get(k), int)
-              for k in ("vm_ssh", "vm_web", "host_ssh", "host_ui")))
-if not ok:
-    sys.exit("gateway returned a malformed registration")
-print("RACN=%d RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%s SPORT=%d" % (
-    r["rac"], r["user"], r["token"], r["ports"]["vm_ssh"], r["ports"]["vm_web"],
-    r["ports"]["host_ssh"], r["ports"]["host_ui"],
-    r["server_addr"], int(r["server_port"])))
-PYEOF
-)
-        fi
-        if [ -n "$REG" ]; then
-            RAC_SERVER="$_cand"
-            RAC_REGISTRAR="$_cand_reg"
-            RAC_TLS="$_tls"
-            RAC_PORT="$_fport"
-            RAC_TIER_LABEL="$_lbl"
-            break
-        fi
-        say "  $_lbl frps answered on :$_fport but its registrar did not"
-        done <<TIEREOF
-$RAC_TIERS
-TIEREOF
-        if [ -z "$REG" ]; then
-            RAC_STATE="FAILED — no gateway tier answered (tried: $RAC_TRIED; see $LOG), rerun: sigmond-setup --reconfigure"
-            say "WARN: $RAC_STATE"
-        else
-            eval "$REG"
-            # The two newest channels are DERIVED, never supplied.  The
-            # deterministic path computes them above; the registrar path
-            # cannot, because the gateway's JSON only carries the four
-            # original ports and it has no idea these services exist.  Every
-            # band is base+rac by construction, so deriving is not a
-            # fallback -- it is the same rule, applied here.
-            [ -n "${RACN:-}" ] && {
-                : "${P_VMSTN:=$((RAC_BASE_VMSTN+RACN))}"
-                : "${P_VMGMAG:=$((RAC_BASE_VMGMAG+RACN))}"
-            }
+# The relays that carry the VM's channels.  A function, so that the lines
+# below keep their bytes: pm-align reads these very templates out of the
+# release's wizard to refresh a station's relay units.
+rac_install_relays(){
             # DHCP-proof relays: frpc needs a fixed local target, but the
             # VM's address can change — so the vm-* channels point at local
             # sockets whose per-connection handler asks the guest agent for
@@ -2269,108 +2494,31 @@ ExecStart=/usr/local/lib/sigmond/vm-port-relay.py $RVPORT
 SVCEOF
             done
             systemctl daemon-reload
-            systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket \
-                sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket >>"$LOG" 2>&1
+}
+if [ -n "$RAC_NUM" ]; then
+    say "activating remote access"
+    if ! rac_payload_ready; then
+        RAC_STATE="FAILED — sigmond-rac payload missing (frpc/CA); run install-host.sh, then sigmond-setup --reconfigure"
+        say "WARN: $RAC_STATE"
+    else
+        rac_install_relays
+        systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket \
+            sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket >>"$LOG" 2>&1
 
-            install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py /usr/local/sbin/pm-align 2>/dev/null \
-                || say "WARN: pm-align not installed (sigmond tree lacks it)"
+        install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py /usr/local/sbin/pm-align 2>/dev/null \
+            || say "WARN: pm-align not installed (sigmond tree lacks it)"
 
-            # transport follows the tier that actually answered: a secure
-            # tier pins the fleet CA, opportunistic (opp) encrypts without
-            # pinning (server cert is self-signed — vpn.hamsci.org today),
-            # and an unsecured one has no TLS at all.
-            case "$RAC_TLS" in
-                off) RAC_TLS_BLOCK="[transport.tls]
-enable = false" ;;
-                opp) RAC_TLS_BLOCK="[transport.tls]
-enable = true" ;;
-                *)   RAC_TLS_BLOCK="[transport.tls]
-enable = true
-trustedCaFile = \"/etc/sigmond/frps-ca.crt\"" ;;
-            esac
-            # record the tier so 'sigmond-setup --rac-upgrade' can tell whether
-            # a better one has since come up
-            printf '%s\n' "$RAC_TIER_LABEL" > "$MARK_DIR/rac-tier"
-            printf '%s\n' "$RAC_REGISTRAR" > "$MARK_DIR/rac-registrar"
-            say "writing /etc/sigmond/frpc-host.toml (4 channels, one tunnel)"
-            cat > /etc/sigmond/frpc-host.toml <<TOMLEOF
-# Written by sigmond-setup $(date -u +%F) — RAC #$RACN (auto-assigned), site $SITE.
-# ONE frpc on the Proxmox host carries all four channels; the vm-*
-# channels ride the local relays (12222/12223) that resolve the VM's
-# current IP per connection, so this file never needs the VM's address.
-# serverPort comes from the TIER that answered (35736 TLS / 35735 legacy),
-# not from the registrar's reply — the registrar only knows the legacy stack.
-serverAddr = "$SRV"
-serverPort = ${RAC_PORT:-$SPORT}
-user = "$RUSER"
-
-# The station's pubkey rides every login as metadata (any tier): servers
-# ignore it today; a Login plugin can enforce per-unit admission (TOFU)
-# from it later — no per-client accounts needed (rob 2026-08-09).
-[metadatas]
-pubkey = "$(cat /root/.ssh/id_ed25519.pub)"
-site = "$SITE"
-dasi = "${DASI_NUM:+DASI-$(printf '%03d' "$DASI_NUM")}"
-
-[auth]
-method = "token"
-token = "$RTOKEN"
-
-$RAC_TLS_BLOCK
-
-[webServer]
-addr = "127.0.0.1"
-port = 7500
-
-[[proxies]]
-name = "$SITE-vm-ssh"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 12222
-remotePort = $P_VMSSH
-
-[[proxies]]
-name = "$SITE-vm-web"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 12223
-remotePort = $P_VMWEB
-
-[[proxies]]
-name = "$SITE-vm-station"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 12224
-remotePort = $P_VMSTN
-
-[[proxies]]
-name = "$SITE-vm-gmag"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 12225
-remotePort = $P_VMGMAG
-
-[[proxies]]
-name = "$SITE-host-ssh"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 22
-remotePort = $P_HSSH
-
-[[proxies]]
-name = "$SITE-host-ui"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 8006
-remotePort = $P_HUI
-TOMLEOF
-            chmod 600 /etc/sigmond/frpc-host.toml
+        rac_save_pin
+        if ! rac_register fresh; then
+            RAC_STATE="FAILED — $RAC_FAIL (see $LOG), rerun: sigmond-setup --reconfigure"
+            say "WARN: $RAC_STATE"
+        else
             systemctl enable sigmond-rac-host.service >>"$LOG" 2>&1
             systemctl restart sigmond-rac-host.service >>"$LOG" 2>&1
 
             # PROVE the tunnel (don't just claim it): frpc's local admin API
             # reports per-proxy status once the server has accepted them.
-            # _want is however many proxies the writer above actually put in
+            # _want is however many proxies rac_write_config actually put in
             # frpc-host.toml (6 today: vm-ssh/vm-web/vm-station/vm-gmag/
             # host-ssh/host-ui) — NOT a hardcoded count that silently accepts
             # a partial tunnel once a proxy is added or removed.
@@ -2391,9 +2539,8 @@ TOMLEOF
               ** this tunnel is UNSECURED (no TLS) — the secure gateways did
                  not answer.  Once one is available run: sigmond-setup --rac-upgrade **"
                 fi
-                echo "$RACN" > "$MARK_DIR/rac-number"
             else
-                RAC_STATE="FAILED — registered, but only $RUNNING/$_want channels came up; journalctl -u sigmond-rac-host"
+                RAC_STATE="FAILED — registered as RAC #$RACN, but only $RUNNING/$_want channels came up; journalctl -u sigmond-rac-host"
                 say "WARN: $RAC_STATE"
             fi
         fi
