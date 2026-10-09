@@ -1503,26 +1503,11 @@ def test_tunnel_step_merge_local_write_failure_never_crashes_out_from_under_the_
 
 # ── wizard static-text checks: sigmond-wizard.sh, not pm-align.py ──────────
 #
-# These read the real wizard shell script as text (no execution) and check
-# for the three defects Task 7 fixes: the --rac-off/--rac-on toggles only
-# touching 2 of 4 relay sockets, the tunnel-verify loop hardcoding "4" when
-# frpc-host.toml actually carries 6 proxies, and the wizard never installing
-# pm-align onto the host.
-
-def test_wizard_rac_toggles_name_all_four_relay_sockets():
-    for flag in ("--rac-off", "--rac-on"):
-        i = WIZARD.index(f"{flag})") if f"{flag})" in WIZARD else WIZARD.index(flag)
-        block = WIZARD[i:i + 1500]
-        for name in ("ssh", "web", "station", "gmag"):
-            assert f"sigmond-vm-{name}-relay.socket" in block, (flag, name)
-
-
-def test_wizard_verify_counts_every_declared_proxy_not_four():
-    i = WIZARD.index("PROVE the tunnel")
-    block = WIZARD[i:i + 2500]
-    assert "-ge 4" not in block
-    assert "grep -c '^name *=' /etc/sigmond/frpc-host.toml" in block
-
+# These read the real wizard shell script as text (no execution).  Two checks
+# that once lived here moved with their code into the switch script, and
+# tests/test_rac_switch.py now runs them: both spellings of the switch name
+# all four relay sockets, and the wait counts every proxy frpc-host.toml
+# declares, never a fixed four.
 
 def test_wizard_records_the_rac_number_only_once_the_configuration_stands():
     # rac_write_config writes its marks after it has renamed the tunnel
