@@ -8915,20 +8915,39 @@ settings until step 4.
   (`sha256sum` before and after). Record both stations' results in spec §13 as "Task 10 Step 1".
 - [x] **Step 2: Full suites green** in hs-uploader, sigmond and sigmond-appliance (the runners and baselines in
   Global Constraints, plus each task's additions).
-- [ ] **Step 3: Push** hs-uploader, sigmond and sigmond-appliance `main` (Michael's go). The golden VM clones each
+- [x] **Step 3: Push** hs-uploader, sigmond and sigmond-appliance `main` (Michael's go). The golden VM clones each
   repo's latest `main` and fails when one sits behind its remote.
-- [ ] **Step 4: Before tagging, run the pre-tag adversarial hunt** that caught v3.69's blocker. Look for anything
+- [x] **Step 4: Before tagging, run the pre-tag adversarial hunt** that caught v3.69's blocker. Look for anything
   that breaks the image build, a first boot, the rigs, or an existing station on `smd update`. Then tag `v3.70`
   in sigmond-appliance (`git tag -a v3.70`, push the tag) and build on the rig (root@192.168.1.182): pull both
   checkouts, `./sync-rig.sh`, `./build-golden-vm.sh`, `./build-usb-v3.sh --release`.
-- [ ] **Step 5: Nested test** — `./test-nested-v3.sh` on the rig. Phase D must print
+- [x] **Step 5: Nested test** — `./test-nested-v3.sh` on the rig. Phase D must print
   `PHASE D PASS — NESTED TEST COMPLETE` and Task 9's new lines: `hs-uploader migrate` at version 1, the psk-recorder
   venv's `SINK_IMPL` reading `hs_uploader`. The nest has no RX888, so no writer creates `pending_uploads`; expect
   the columns check inside the closing `⚠ SITE SINK CHECKS NOT EVALUATED` line, as
   `sink.db's producer and local columns (no writer has created pending_uploads in this nest)`.
-- [ ] **Step 5b: Update test** — `./test-update-v3.sh --image sigmond-appliance-v3.69-20261007-release.img`. It rolls
+- [x] **Step 5b: Update test** — `./test-update-v3.sh --image sigmond-appliance-v3.69-20261007-release.img`. It rolls
   blessed v3.69 forward to `main` and back. PHASE E, E-bis, F, G and G-bis must each print their PASS line.
-- [ ] **Step 6: B4 overnight** (bus first, coordination doc first). Run `smd update --apply` on B4. Then run
+  *Done 2026-10-09 00:22Z.* Steps 3 to 5b as they ran: the hunt found no blocker (three reports, kept with the
+  ledger). Tag `v3.70` sits on sigmond-appliance `169dcc5`; the image holds sigmond `1f7d5ad` and hs-uploader
+  `8376fd8`; image sha256 `d7b927eedaf1ab4b07a0533e868e0c82132253631341c0b5350d22d8d539efa2`. The first build
+  (sha256 `1915ade1…`) gave way to this one after upstream onion gained a commit and `smd update` had to learn
+  to hold sigmond's native-build pins. Nested test PASS 2026-10-08 21:42Z. Update test PASS in one clean run,
+  23:54Z to 00:22Z: E at `1f7d5ad`, E-bis (store 0 to 1 by the manifest step's migrate, daemon up 45 s later),
+  F, G (2 components moved) and G-bis. Four earlier attempts failed on faults outside v3.70: the console panel's
+  truncated guest-agent request (three times, in two forms), my own reader of smd's HELD lines, and the guest
+  agent's 128 MB cap under the restore. The carry list above holds each. The test code that got the run through
+  sits in sigmond-appliance past the tag (`46d2383` and two later commits); the image did not change.
+- [ ] **Step 6: B4 overnight** (bus first, coordination doc first). *Before it, from the pre-tag hunt:* B4 sits
+  at v3.66, so `smd update --apply` lands v3.67 to v3.70 at once; Michael decides whether B4 first aligns to
+  blessed v3.69 and takes a baseline night. Save a restore point (`smd version > ~/b4-pre-v370.txt`). Confirm
+  `/var/lib/sigmond/.firstrun-bringup-done` exists, or the next RX888 arrival starts an unattended bring-up.
+  sigmond `main` now stands a few plan-only commits past the image's `1f7d5ad`: compare `smd version` with the
+  image manifest afterwards and say so. After the update, read `SINK_IMPL` in each client venv. The manifest
+  command below may restart the daemon by itself; then the explicit restart makes two, harmlessly. A rollback
+  rehearsal needs `git checkout main` in each restored checkout before `smd update` can move it again. And
+  B4's guest agent probably sits deaf (carry list): one 0xFF from its Proxmox host clears it, until its panel
+  fires again. Run `smd update --apply` on B4. Then run
   `smd admin uploader manifest --write --enable`, which runs `hs-uploader migrate`. v3.70 changes no manifest, so
   that command does not restart the daemon: run `sudo systemctl restart hs-uploader` yourself. Then restart each
   recorder alone with `sudo systemctl restart '<unit>'` (never `smd restart`, which also restarts radiod). Record `hs-uploader migrate --check` and `systemctl show hs-uploader -p ActiveEnterTimestamp -p NRestarts`.
