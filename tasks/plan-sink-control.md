@@ -16,6 +16,14 @@ step 2 then found that the store cannot migrate, that a rollback would lose posi
 separate keys would double B4's posts.  Michael split step 2a in two and took the decisions D8-D15
 (§2, §10.2, §10.4).
 
+**2026-10-10.**  v3.70 (step 2a-i) runs on AC0G-B4 since 00:37Z and on AC0G-ND since 11:45Z, by an
+update in place; its bless waits for ND's night and for the install pages.  B4's first night showed
+no loss against ND as the control, and no send record ran backward.  The release numbers of the
+later steps move by one: v3.71 became the remote-access release and carries no hs-uploader work, and
+Michael decided on 2026-10-10 to keep it so.  Step 2a-ii therefore ships in v3.72 and step 2b in
+v3.73 (§10.2).  Where §10.4 and the v3.70 plan's carry list say "v3.71" for the key split, read
+v3.72.
+
 ## 1. Why
 
 On 2026-10-01 an operator put K3LR on hold with `smd config uploads disable --reason "station under
@@ -958,10 +966,10 @@ Each step ships on its own and leaves stations working.
    step 2, where per-client pipelines need them (§6.2).
 2. **hs-uploader foundation.**  It ships in three images (D8):
    - **2a-i, v3.70:** the foundation, changing nothing the station sends (§10.4).
-   - **2a-ii, v3.71:** each sender gets its own send-record key, with the one-time migration of
-     §6.2 (D9, D10), the daemon skipping producers whose own sender still runs (D13), and the
-     forward-only rule enforced.
-   - **2b, v3.72:** everything below from `pipelines.d/` on.
+   - **2a-ii, v3.72** (v3.71 until 2026-10-10; that release went to remote access): each sender
+     gets its own send-record key, with the one-time migration of §6.2 (D9, D10), the daemon
+     skipping producers whose own sender still runs (D13), and the forward-only rule enforced.
+   - **2b, v3.73** (v3.72 until 2026-10-10): everything below from `pipelines.d/` on.
 
    The sink writer moves in, with a compatibility import left in
    sigmond, and rows gain `producer` and `local`.  Each sender gets its own send-record key, with
