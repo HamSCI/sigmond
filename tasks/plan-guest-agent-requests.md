@@ -126,12 +126,13 @@ and that function base64-encodes the command. The VM decodes and runs it. The re
 the command holds.
 
 - **The wizard:** `gexec` and `guest_out` encode. Their 48 callers do not change. A trial of the encoded form
-  against the direct form gave the same output and the same exit code on twelve commands; only the prefix of
-  a syntax error's message differs.
+  against the direct form gave the same output and the same exit code on thirteen commands; only the prefix
+  of a syntax error's message differs.
 - **`pm-align`** encodes already.
 - **The panel, and the direct calls elsewhere,** send fixed ASCII text and stay as they stand. A guard test
-  reads the shipped files, finds every `qm guest exec`, and fails when one outside a sender holds a byte above
-  0x7F or any variable beyond the VM's number.
+  reads the shipped files, follows every `qm guest exec` to the end of its command, and fails on a byte above
+  0x7F. It also pins how many such requests each file holds, so that a new one stops the test until someone
+  has looked at it.
 
 The decoded command arrives as an argument, never on the shell's standard input. The remote-access work
 showed why: a command that reads its input swallows the rest of a script piped to the shell.
@@ -144,22 +145,24 @@ counts as silence.
 
 The wizard keeps its restart over ssh as the second resort, after the reset byte has failed.
 
-The panel runs every five minutes on every station. So a station whose agent stands deaf today heals within
-five minutes of its host's alignment, with nobody at the keyboard, and stays healed because the cause has gone.
+The panel runs every five minutes on every host that runs its timer. So a station whose agent stands deaf
+today heals within five minutes of its host's alignment, with nobody at the keyboard, and stays healed because
+the cause has gone.
 
 No new program carries this. Each of the four holds the same few lines: two in bash with a `python3`
 one-liner, two in Python. A test pins the bytes they send as equal. A trial against a stand-in socket showed
 the bash form answer in under a second when the agent replies, and give up after four seconds when it does
-not. The reason for four copies: `pm-align`
-delivers no new host file out of firstboot, and `pm-heartbeat` must run with nothing beside it.
+not. The reason for four copies: `pm-align` delivers no new host file out of firstboot, and `pm-heartbeat`
+must run with nothing beside it.
 
 A reset must leave a trace, or the fleet learns nothing. The panel and the heartbeat both run every five
 minutes, so the panel will often reset the agent before the heartbeat looks. The heartbeat would then report
 a healthy agent, beat after beat, over a fault that returns each time.
 
 - **Whoever resets the agent and gets its answer writes one line** to `/run/sigmond/qga-reset`: the time and
-  its own name. The line replaces the one before, so the file never grows.
-- **The heartbeat reads that line** and reports a reset since its last beat as a finding of its own. After
+  its own name (`panel`, `wizard`, `pairing`, `pm-align` or `heartbeat`). The line replaces the one before, so
+  the file never grows.
+- **The heartbeat reads that line, reports it once** as a finding of its own, and moves the file aside. After
   this fix no station should show one. A station that does then names a new cause.
 - **The panel** says in one line when the agent stays silent after a reset.
 - **Nothing writes a log line per refresh.** A condition that persists gets one line per reason.
@@ -168,15 +171,22 @@ One risk: a reset that lands in the middle of another caller's request loses tha
 once and tries again. A reset follows a failed ping only, so the case stays rare. Both proven resets ran while
 nothing else held the agent's socket; the rig must show what a reset does while another request holds it.
 
+A second risk: a ping can fail because the agent has not started yet, and the agent can start within the four
+seconds the reset waits. The record then names a reset that healed nothing. One such beat right after a boot
+proves little; one at any other time names a cause.
+
 ### 5. The rigs prove it on real Proxmox
 
 The nested rig gains three checks:
 
 1. After a dozen forced panel refreshes, every ping answers. On 2026-10-08 the fault hit four of five base
    installs on the rig, in one form or the other.
-2. The rig sends a non-ASCII request of its own until the agent stands deaf, within a bounded number of tries.
-   It then runs the panel once and requires the agent to answer. That proves the reset where it counts.
-3. During bring-up the panel says "still building"; after it, the panel says nothing.
+2. The rig sends a non-ASCII request of its own until the agent stands deaf, within thirty tries. It then runs
+   the panel once and requires the agent to answer. That proves the reset where it counts. When thirty tries
+   leave the agent hearing, the rig says that the heal went unproven; it does not fail.
+3. During bring-up the panel says "still building". After it, the panel's line follows the marker's result. The
+   nest holds no RX888, so there the panel must say that bring-up ran without the radio, and must raise no
+   ka9q-web alarm.
 
 The update rig keeps its hold on a v3.70 base's panel. It already tests a panel's text for the defect, so it
 lets a clean panel run.
@@ -196,8 +206,9 @@ file until Michael sends it.
 
 1. **Does the host reset a silent agent by itself, or only report it?** I recommend that it resets and
    reports. The reset costs nothing when the agent merely boots, and a station nobody can reach needs it most.
-2. **Which colour does one reset earn on the fleet board?** I recommend amber for that beat (INCONCLUSIVE):
-   the station works again, and someone should know it happened. A silence that survives the reset stays red.
+2. **What does one reset earn on the fleet board?** I recommend INCONCLUSIVE for that beat, between green and
+   red: the station works again, and someone should know it happened. A silence that survives the reset stays
+   INVALID.
 3. **The panel reads the bring-up marker's result** and prints one short notice for each unfinished state
    (`retry`, `awaiting-sdr`, `gave-up`, and a unit that systemd ended). Today all of them share the one alarm.
 4. **Before bring-up has run, the panel prints nothing** about it. The wizard's own prompt already holds the
@@ -209,7 +220,7 @@ file until Michael sends it.
 Each phase ships alone and leaves a station working.
 
 1. **The panel's request and its bring-up line** (sigmond-appliance), with the hermetic test.
-2. **The senders encode** (the wizard, the panel), with the guard test over both repositories' files.
+2. **The wizard's senders encode**, with the guard test over both repositories' files.
 3. **The reset** in the four programs, and the heartbeat's finding.
 4. **The rigs.**
 5. **The words:** the operator's troubleshooting page, the release notes, and the draft for Proxmox.
