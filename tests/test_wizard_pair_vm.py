@@ -28,7 +28,10 @@ TEXT = WIZARD.read_text()
 HOSTKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostHostHostHostHostHostHostHostHostHostHost"
 VMKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVmVm"
 PAIR_FUNCS = ("rac_pair_key_ok", "rac_have_sudo", "rac_pair_sudoers", "rac_pair_authorized_line",
-              "rac_pair_guest_script", "rac_pair_verify_script", "rac_pair_locked", "rac_pair_vm")
+              "rac_pair_guest_script", "rac_pair_verify_script", "rac_pair_record", "rac_pair_locked",
+              "rac_pair_vm")
+COULD_NOT_INSTALL = "could not install the remote-access files on this host (the switch or its units)"
+STAMP = r"20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ"
 ARMED = "systemctl enable --now sigmond-rac-pair.timer sigmond-rac-pair.path"
 NOT_STARTED = "the pairing's re-assertion units did not start (systemctl enable --now failed)"
 VISUDO = shutil.which("visudo") or ("/usr/sbin/visudo" if os.path.exists("/usr/sbin/visudo") else None)
@@ -281,19 +284,28 @@ def test_a_refused_request_shows_why_in_the_failure_output(tmp_path):
 
 # -- the whole pairing, with the host's commands stubbed ---------------------------------------
 
-def pair(tmp_path, *, slash30="10.99.0.1/30", agent=0, sudo="yes", apt_installs=False,
+def pair(tmp_path, *, slash30="10.99.0.1/30", other30="", agent=0, sudo="yes", apt_installs=False,
          vmkey=VMKEY, gexec_rcs="0 0", install_rc=0, hostpub=HOSTKEY + " root@pm\n", user_exists=False,
-         chown_rc=0, enable_rc=0, lock_held=False, tail=None):
+         chown_rc=0, enable_rc=0, lock_held=False, tail=None, real_mgmt_vm_ip=False, marks="dir"):
     """`tail` is the last thing the script runs; by default one pairing, then its result.
-    `lock_held` holds the pairing lock from this process, as another pairing would."""
+    `lock_held` holds the pairing lock from this process, as another pairing would.
+    `slash30` is the /30 address vmbr1 carries; `other30` is one on another interface, which
+    `ip` lists first.  `real_mgmt_vm_ip` runs the wizard's own mgmt_vm_ip against the same `ip`.
+    `marks="file"` puts a regular file where the mark directory belongs, so nothing can be
+    written under it (root included)."""
     (tmp_path / "home").mkdir(exist_ok=True)
-    for stale in ("calls", "gexec.args", "timeouts"):
+    if marks == "dir":
+        (tmp_path / "marks").mkdir(exist_ok=True)
+    elif not (tmp_path / "marks").exists():
+        (tmp_path / "marks").write_text("not a directory\n")
+    for stale in ("calls", "gexec.args", "timeouts", "body.fds", "body.lock"):
         (tmp_path / stale).unlink(missing_ok=True)
     if hostpub is not None:
         (tmp_path / "host.pub").write_text(hostpub)
     script = funcs(*PAIR_FUNCS) + textwrap.dedent(f"""
         VMID=100
         LOG={tmp_path}/wizard.log
+        MARK_DIR={tmp_path}/marks
         RAC_PAIR_HOME={tmp_path}/home
         RAC_PAIR_SUDOERS={tmp_path}/sudoers.d-sigmond-remote
         RAC_PAIR_HOSTPUB={tmp_path}/host.pub
@@ -303,11 +315,25 @@ def pair(tmp_path, *, slash30="10.99.0.1/30", agent=0, sudo="yes", apt_installs=
         sleep(){{ :; }}
         timeout(){{ echo "$1 $2" >> {tmp_path}/timeouts; shift; "$@"; }}
         mgmt_vm_ip(){{ echo 10.99.0.2; }}
-        ip(){{ [ -n "{slash30}" ] && echo "7: vmbr1    inet {slash30} brd 10.99.0.3 scope global vmbr1"; }}
+        ip(){{
+            echo "ip $*" >> {tmp_path}/ip.calls
+            case " $* " in
+                *" dev vmbr1 "*) ;;
+                *) [ -n "{other30}" ] && echo "5: wg0    inet {other30} scope global wg0" ;;
+            esac
+            [ -n "{slash30}" ] && echo "7: vmbr1    inet {slash30} brd 10.99.0.3 scope global vmbr1"
+            return 0
+        }}
         qm(){{ echo "qm $*" >> $C; return {agent}; }}
         rac_have_sudo(){{ [ -e {tmp_path}/sudo-present ]; }}
         apt-get(){{ echo "apt-get $*" >> $C; case "$*" in *install*) [ {int(apt_installs)} = 1 ] && touch {tmp_path}/sudo-present;; esac; }}
-        rac_install_host_files(){{ echo install-host-files >> $C; return {install_rc}; }}
+        rac_install_host_files(){{
+            echo install-host-files >> $C
+            # What a program started inside the locked body inherits, and whether the lock holds.
+            ls -l /proc/self/fd > {tmp_path}/body.fds 2>/dev/null
+            flock -n "$RAC_PAIR_LOCK" true && echo free > {tmp_path}/body.lock || echo held > {tmp_path}/body.lock
+            return {install_rc}
+        }}
         id(){{ [ {int(user_exists)} = 1 ]; }}
         useradd(){{ echo "useradd $*" >> $C; }}
         usermod(){{ echo "usermod $*" >> $C; }}
@@ -324,6 +350,8 @@ def pair(tmp_path, *, slash30="10.99.0.1/30", agent=0, sudo="yes", apt_installs=
         }}
         guest_out(){{ echo "guest_out $2" >> $C; printf '%s\\n' "$VMKEY_LINE"; }}
     """)
+    if real_mgmt_vm_ip:
+        script += shell_func("mgmt_vm_ip")
     if sudo == "yes":
         (tmp_path / "sudo-present").touch()
     held = None
@@ -391,7 +419,7 @@ STRUCTURAL = ["install-host-files"]
     (dict(hostpub="ssh-ed25519 AAAA\u00e9\u00e9 x\n"), "cannot read this host's sshd key", STRUCTURAL),
     (dict(agent=1), "the guest agent in VM 100 does not answer", ARMING + ["qm"]),
     (dict(sudo="no"), "this host has no sudo and could not install it", ARMING + ["qm", "apt-get"]),
-    (dict(install_rc=1), "could not install /usr/local/sbin/sigmond-rac-switch", ["install-host-files"]),
+    (dict(install_rc=1), COULD_NOT_INSTALL, ["install-host-files"]),
 ], ids=["no-slash-30", "no-host-key", "host-key-not-ascii", "agent-silent", "no-sudo", "no-switch"])
 def test_pairing_refuses_early_and_says_why(tmp_path, kw, reason, touched):
     r, calls = pair(tmp_path, **kw)
@@ -426,7 +454,18 @@ def test_a_host_without_sudo_installs_it_once_and_pairs(tmp_path):
 def test_the_apt_calls_of_a_host_without_sudo_run_under_a_timeout(tmp_path):
     # The re-assertion reaches these lines on every run of such a host.
     pair(tmp_path, sudo="no", apt_installs=True)
-    assert (tmp_path / "timeouts").read_text().splitlines() == ["120 apt-get", "300 apt-get"]
+    assert (tmp_path / "timeouts").read_text().splitlines() == ["10 qm", "120 apt-get", "300 apt-get"]
+
+
+def test_every_ping_of_the_guest_agent_runs_under_a_timeout_of_ten_seconds(tmp_path):
+    # `qm agent ping` can hang on a channel that has gone stale, and the pairing's
+    # service would then sit on its lock until systemd killed it.
+    _, calls = pair(tmp_path)
+    assert (tmp_path / "timeouts").read_text().splitlines() == ["10 qm"]
+    assert "qm agent 100 ping" in calls
+    r, _ = pair(tmp_path, agent=1)
+    assert "does not answer" in r.stdout
+    assert (tmp_path / "timeouts").read_text().splitlines() == ["10 qm"] * 12
 
 
 def test_only_the_keys_two_fields_reach_the_key_line(tmp_path):
@@ -543,6 +582,7 @@ def test_pair_vm_prints_the_warning_whatever_the_outcome(tmp_path, kw, rc):
 
 def wizard_run(rc, fail="", warn=""):
     """The lines the wizard run holds between rac_activate and PSWS_STATE, with the pairing stubbed."""
+    fail = fail or ("another pairing is running" if rc == 2 else "")
     start = TEXT.index("\nrac_activate\n") + len("\nrac_activate\n")
     block = TEXT[start:TEXT.index("\nPSWS_STATE=", start)]
     script = ('set -u\nsay(){ echo "[wizard] $*"; }\n'
@@ -567,9 +607,17 @@ def test_the_wizard_run_stays_quiet_when_nothing_is_wrong():
     assert "WARN" not in out and out.endswith("<<paired: in the decoder VM, smd remote on / off / status>>\n")
 
 
-def test_the_wizard_run_reports_a_busy_lock_as_not_paired():
-    out = wizard_run(2, fail="another pairing is running")
-    assert "NOT PAIRED (another pairing is running)" in out
+def test_the_wizard_run_says_that_a_pairing_runs_already_and_how_to_see_it_finish():
+    # The pairing's timer starts a run of its own the moment the wizard arms it.
+    # That run holds the lock and does the work, so "NOT PAIRED" would mislead.
+    out = wizard_run(2)
+    assert "NOT PAIRED" not in out and "STATE=<<paired:" not in out
+    state = out.split("STATE=<<", 1)[1]
+    assert "a pairing runs already on this host" in state
+    assert "smd remote status" in state and "decoder VM" in state
+    assert "sigmond-setup --pair-vm" not in state            # nothing for the reader to run
+    assert "[wizard] remote-access switch: a pairing runs already on this host" in out
+    assert "WARN" not in out
 
 
 def test_an_account_directory_root_cannot_own_stops_the_pairing(tmp_path):
@@ -617,10 +665,10 @@ def test_pair_vm_runs_before_the_wizard_waits_or_asks():
 
 def test_the_wizard_run_pairs_after_it_has_brought_remote_access_up():
     i = TEXT.index("\nrac_activate\n")
-    j = TEXT.index("if ! rac_pair_vm; then", i)
+    j = TEXT.index("rac_pair_vm; _prc=$?\n", i)
     assert j < TEXT.index('> "$CONF_MARK"')
     assert " Switch:    $PAIR_STATE\n" in TEXT
-    assert "sigmond-setup --pair-vm" in TEXT[j:j + 400]
+    assert "sigmond-setup --pair-vm" in TEXT[j:j + 900]
 
 
 def test_the_pairing_is_re_asserted_at_boot_and_when_the_hosts_sshd_key_changes():
@@ -650,3 +698,172 @@ def test_the_pairing_key_stays_out_of_the_station_identity():
     # records whom the VM may ask, not who the station is.
     identity = (REPO / "lib" / "sigmond" / "identity.py").read_text()
     assert "rac-switch" not in identity and "sigmond-remote" not in identity
+
+
+# -- which link, when the host carries more than one /30 ---------------------------------------
+
+def test_the_pairing_takes_the_hosts_address_from_vmbr1_when_another_slash_30_comes_first(tmp_path):
+    # A WireGuard or point-to-point link can carry a /30 too, and `ip` may list it first.
+    # The private link to the decoder VM is vmbr1's.  The VM's address follows from it:
+    # mgmt_vm_ip reads "the first /30 on this host" and would name the wrong machine.
+    r, _ = pair(tmp_path, slash30="10.99.0.1/30", other30="172.16.5.1/30", real_mgmt_vm_ip=True)
+    assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
+    sent = base64.b64decode((tmp_path / "gexec.args").read_text().splitlines()[0].split()[1]).decode()
+    assert f"printf '%s %s\\n' '10.99.0.1' '{HOSTKEY}'" in sent
+    ak = (tmp_path / "home" / ".ssh" / "authorized_keys").read_text()
+    assert ak.startswith('restrict,from="10.99.0.2",'), ak
+    assert "ip -4 -o addr show dev vmbr1" in (tmp_path / "ip.calls").read_text().splitlines()[0]
+
+
+def test_the_pairing_falls_back_to_the_first_slash_30_when_vmbr1_carries_none(tmp_path):
+    r, _ = pair(tmp_path, slash30="", other30="10.99.0.1/30", real_mgmt_vm_ip=True)
+    assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
+    sent = base64.b64decode((tmp_path / "gexec.args").read_text().splitlines()[0].split()[1]).decode()
+    assert f"printf '%s %s\\n' '10.99.0.1' '{HOSTKEY}'" in sent
+    assert (tmp_path / "home" / ".ssh" / "authorized_keys").read_text().startswith('restrict,from="10.99.0.2",')
+
+
+def test_an_address_set_by_hand_for_the_vm_still_wins(tmp_path):
+    r, _ = pair(tmp_path, slash30="10.99.0.1/30", other30="172.16.5.1/30", real_mgmt_vm_ip=True,
+                tail='SIGMOND_MGMT_VM=10.99.0.6 rac_pair_vm; echo "rc=$?"\n')
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "home" / ".ssh" / "authorized_keys").read_text().startswith('restrict,from="10.99.0.6",')
+
+
+# -- the lock stays in the shell that took it ---------------------------------------------------
+
+def test_a_program_started_inside_the_pairing_holds_no_copy_of_its_lock(tmp_path):
+    # An orphaned child (a guest-agent call that hangs, an apt that never returns) that
+    # inherited descriptor 7 kept the lock after its shell had died, and every later
+    # pairing then answered "another pairing is running".
+    r, _ = pair(tmp_path)
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "body.lock").read_text() == "held\n"          # the pairing itself holds it
+    fds = (tmp_path / "body.fds").read_text()
+    assert "pair.lock" not in fds, fds                                # and no child carries it
+
+
+# -- the outcome on file: what the console panel and pm-align read ------------------------------
+
+def record(tmp_path):
+    p = tmp_path / "marks" / "rac-pairing"
+    return p.read_text() if p.exists() else None
+
+
+def test_a_pairing_that_proves_itself_records_paired_and_when(tmp_path):
+    r, _ = pair(tmp_path)
+    assert "rc=0" in r.stdout
+    assert re.fullmatch(rf"paired {STAMP}\n", record(tmp_path)), record(tmp_path)
+    assert stat.S_IMODE((tmp_path / "marks" / "rac-pairing").stat().st_mode) == 0o644
+    assert sorted(f.name for f in (tmp_path / "marks").iterdir()) == ["rac-pairing"]     # no .new left
+
+
+@pytest.mark.parametrize("kw,reason", [
+    (dict(agent=1), "the guest agent in VM 100 does not answer"),
+    (dict(gexec_rcs="0 1"), "both halves stand on disk, but a request from the VM did not reach the switch"),
+    (dict(slash30=""), "this host has no private link to its decoder VM (no /30 address)"),
+    (dict(install_rc=1), COULD_NOT_INSTALL),
+], ids=["agent-silent", "proof-failed", "no-private-link", "no-host-files"])
+def test_a_pairing_that_fails_records_not_paired_and_why(tmp_path, kw, reason):
+    r, _ = pair(tmp_path, **kw)
+    assert "rc=1" in r.stdout
+    m = re.fullmatch(rf"not-paired {STAMP} (.*)\n", record(tmp_path))
+    assert m and m.group(1).startswith(reason), record(tmp_path)
+
+
+def test_a_failure_replaces_an_earlier_paired_and_a_success_replaces_it_again(tmp_path):
+    pair(tmp_path)
+    pair(tmp_path, agent=1, user_exists=True)
+    assert record(tmp_path).startswith("not-paired ")
+    pair(tmp_path, user_exists=True)
+    assert record(tmp_path).startswith("paired ")
+
+
+def test_a_pairing_that_finds_another_one_running_records_nothing(tmp_path):
+    r, _ = pair(tmp_path, lock_held=True)
+    assert "rc=2" in r.stdout
+    assert record(tmp_path) is None
+    pair(tmp_path)                                                    # and it leaves a record alone
+    before = record(tmp_path)
+    pair(tmp_path, lock_held=True)
+    assert record(tmp_path) == before
+
+
+def test_a_lock_that_cannot_be_opened_records_not_paired(tmp_path):
+    (tmp_path / "run").write_text("a file where the lock's directory belongs\n")
+    r, calls = pair(tmp_path)
+    assert "rc=1 fail=cannot open the pairing lock" in r.stdout, r.stdout
+    assert re.fullmatch(rf"not-paired {STAMP} cannot open the pairing lock \(.*\)\n", record(tmp_path))
+    assert calls == []
+
+
+def test_the_reason_on_file_is_one_line_of_printable_text_no_longer_than_200(tmp_path):
+    script = funcs("rac_pair_record") + (
+        f'MARK_DIR={tmp_path}\n'
+        "rac_pair_record not-paired \"$(printf 'first\\nsecond\\ttab\\033[2Jesc\\001%0300d' 7)\"; echo rc=$?\n")
+    r = bash(script)
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    raw = (tmp_path / "rac-pairing").read_bytes()
+    assert raw.count(b"\n") == 1 and raw.endswith(b"\n")
+    word, when, why = raw.decode().rstrip("\n").split(" ", 2)
+    assert word == "not-paired" and re.fullmatch(STAMP, when)
+    assert why.startswith("first second tab[2Jesc0000") and len(why) == 200
+    assert all(32 <= b < 127 for b in raw[:-1])
+
+
+def test_an_outcome_that_cannot_be_recorded_warns_and_keeps_the_pairings_result(tmp_path):
+    r, _ = pair(tmp_path, marks="file")
+    assert "rc=0 fail= warn=" in r.stdout, r.stdout
+    assert "could not record the pairing's outcome" in r.stdout
+    assert "the console panel" in r.stdout
+
+
+def test_pair_vm_the_command_records_its_outcome_too(tmp_path):
+    # `sigmond-setup --pair-vm` and the wizard's own pairing run one function.
+    r, _ = pair(tmp_path, tail=branch_tail())
+    assert r.returncode == 0 and record(tmp_path).startswith("paired ")
+    r, _ = pair(tmp_path, gexec_rcs="0 1", user_exists=True, tail=branch_tail())
+    assert r.returncode == 1 and record(tmp_path).startswith("not-paired ")
+    before = record(tmp_path)
+    r, _ = pair(tmp_path, lock_held=True, tail=branch_tail())
+    assert r.returncode == 0 and record(tmp_path) == before
+    assert "$MARK_DIR/rac-pairing" in shell_func("rac_pair_record")
+    assert "rac_pair_record" in shell_func("rac_pair_vm")
+
+
+# -- the banner's cache carries a tunnel that still runs while the wish reads off ----------------
+
+SWITCH_NOTE = "  NOTE: the tunnel service runs all the same. Someone started it outside this switch; 'off' again stops it."
+
+
+def verify_cache(tmp_path, ssh_out, ssh_rc=0):
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    ssh = tmp_path / "bin" / "ssh"
+    (tmp_path / "ssh.out").write_text(ssh_out)
+    ssh.write_text(f"#!/bin/bash\ncat >/dev/null\ncat {tmp_path}/ssh.out\nexit {ssh_rc}\n")
+    ssh.chmod(0o755)
+    r, _, _ = sandbox(tmp_path, verify_script(), "DC")
+    assert r.returncode == 0, r.stdout + r.stderr
+    return json.loads((tmp_path / "cache" / "remote-access.json").read_text())
+
+
+def test_the_note_the_verify_script_looks_for_is_the_switchs_own_line():
+    assert f'echo "{SWITCH_NOTE}"' in TEXT
+    assert "NOTE: the tunnel service runs all the same\\." in verify_script()
+
+
+def test_the_proof_records_a_tunnel_that_runs_while_the_wish_reads_off(tmp_path):
+    doc = verify_cache(tmp_path, "Remote access: off\n  The operator holds it off.\n" + SWITCH_NOTE + "\n")
+    assert doc["state"] == "off" and doc["tunnel_runs"] is True
+    assert sorted(doc) == ["checked_at", "state", "tunnel_runs"]
+
+
+@pytest.mark.parametrize("answer", [
+    "Remote access: off\n  The operator holds it off.\n",
+    "Remote access: on\n  The gateway accepted 6 of 6 channels.\n",
+    "Remote access: on\n" + SWITCH_NOTE + "\n",                      # the note belongs to off alone
+    "Remote access: off\n  a line that says NOTE: the tunnel service runs all the same. inside it\n",
+], ids=["off", "on", "on-with-the-words", "words-inside-another-line"])
+def test_the_proof_leaves_the_key_out_of_every_other_answer(tmp_path, answer):
+    doc = verify_cache(tmp_path, answer)
+    assert sorted(doc) == ["checked_at", "state"]

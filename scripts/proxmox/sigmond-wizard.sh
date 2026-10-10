@@ -584,7 +584,11 @@ rac_register(){
         RAC_FAIL="another registration is still running"
         return 1
     fi
-    rac_register_locked "${1:-ensure}"; rc=$?
+    # `8>&-` on the call keeps the lock with this shell and out of every
+    # program the registration starts (the trial frpc, python3, systemctl):
+    # bash holds the lock in a copy no child inherits, so a child left behind
+    # holds no lock once this shell has gone.
+    rac_register_locked "${1:-ensure}" 8>&-; rc=$?
     exec 8>&-
     return $rc
 }
@@ -673,7 +677,10 @@ rac_install_host_files(){
 #                               wait for the channels; print the state
 #   sigmond-rac-switch off      record the wish; stop and disable the tunnel and
 #                               the relays.  The registration stays, so a later
-#                               `on` needs nothing from the gateway
+#                               `on` needs nothing from the gateway.  It stops
+#                               and disables them even when it can write
+#                               nothing: neither the wish, nor its lock, nor
+#                               its state file
 #   sigmond-rac-switch status   print the state and change nothing
 #
 # It takes exactly one of those three words and nothing after it.  The decoder
@@ -691,6 +698,8 @@ rac_install_host_files(){
 # Exit codes: 0 done (for status: on, or off)   2 refused, nothing changed
 #             3 wanted on, not up               4 off, yet the tunnel still runs
 #             1 the switch could not start its work, and changed nothing
+#               (for off: the tunnel stands stopped and disabled, and the wish
+#               could not be recorded; its answer says so)
 #
 # Written to the host by sigmond-wizard.sh (rac_install_host_files).
 # Design: sigmond tasks/plan-remote-access.md.
@@ -700,10 +709,13 @@ LC_ALL=C; export LC_ALL
 # -- the word ----------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
     # The pairing's way in: the forced command passes no argument.  In this
-    # mode the script reads one variable from its environment and no other.
-    unset SIGMOND_RAC_MARK_DIR SIGMOND_RAC_TOML SIGMOND_RAC_RUN_DIR SIGMOND_RAC_SETUP \
-          SIGMOND_RAC_API SIGMOND_RAC_WAIT_S SIGMOND_RAC_WAIT_STEP SIGMOND_RAC_LOCK_WAIT_S \
-          SIGMOND_RAC_BY
+    # mode the script takes one thing from its caller, the word, and nothing
+    # else: no stdin, and no variable whose name begins SIGMOND_.  That covers
+    # the overrides this script reads and the ones a program it starts reads
+    # (sigmond-setup, which registers, takes a gateway and a port that way).
+    exec </dev/null
+    for _v in "${!SIGMOND_@}"; do unset "$_v"; done
+    unset _v
     WORD="${SSH_ORIGINAL_COMMAND-}"
 elif [ "$#" -eq 1 ]; then
     WORD="$1"
@@ -741,7 +753,12 @@ fi
 
 # -- reading what stands -----------------------------------------------------
 registered(){ [ -s "$TOML" ]; }
-tunnel_running(){ systemctl is-active --quiet "$UNIT" 2>/dev/null; }
+tunnel_running(){
+    # `activating` is the unit inside its restart delay: the service keeps
+    # trying, so "does not run" would come and go between two tries.
+    case "$(systemctl is-active "$UNIT" 2>/dev/null)" in active|activating) return 0 ;; esac
+    return 1
+}
 declared(){ local n; n=$(grep -c '^name *=' "$TOML" 2>/dev/null); echo "${n:-0}"; }
 channels_up(){
     # grep -o | wc -l, not grep -c: the API answers with one line of JSON.
@@ -769,7 +786,8 @@ set_wish(){
     [ "$(wish_on_file)" = "$new" ] && return 0
     mkdir -p "$MARK_DIR" || return 1
     printf '%s\n' "$new" > "$MARK_DIR/rac-desired.new" \
-        && mv -f "$MARK_DIR/rac-desired.new" "$MARK_DIR/rac-desired" || return 1
+        && mv -f "$MARK_DIR/rac-desired.new" "$MARK_DIR/rac-desired" \
+        || { rm -f "$MARK_DIR/rac-desired.new" 2>/dev/null; return 1; }
     printf '%s %s %s\n' "$new" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BY" > "$MARK_DIR/rac-changed"
     logger -t sigmond-rac-switch "remote access wish set to $new by $BY" 2>/dev/null
     return 0
@@ -795,9 +813,13 @@ read_state(){
 }
 write_state(){
     # One line per fact, key=value, for the console panel and the host
-    # heartbeat.  They read this file; they never run it.
+    # heartbeat.  They read this file; they never run it.  `status` takes no
+    # lock, and the panel, the heartbeat and an operator can each run one at
+    # the same moment, so every run writes a file of its own name and renames
+    # it into place.  Returns 1 when the file could not be written.
+    local tmp="$RUN_DIR/rac-state.new.$$"
     mkdir -p "$RUN_DIR" 2>/dev/null
-    {
+    if {
         printf 'state=%s\n' "$STATE"
         printf 'wish=%s\n' "$W"
         printf 'wish_source=%s\n' "$WSRC"
@@ -811,9 +833,13 @@ write_state(){
         printf 'changed_at=%s\n' "$CHANGED_AT"
         printf 'changed_by=%s\n' "$CHANGED_BY"
         printf 'checked_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$RUN_DIR/rac-state.new" 2>/dev/null \
-        && chmod 644 "$RUN_DIR/rac-state.new" 2>/dev/null \
-        && mv -f "$RUN_DIR/rac-state.new" "$RUN_DIR/rac-state" 2>/dev/null
+    } 2>/dev/null > "$tmp" \
+        && chmod 644 "$tmp" 2>/dev/null \
+        && mv -f "$tmp" "$RUN_DIR/rac-state" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+    return 1
 }
 who_when(){
     [ -n "$CHANGED_AT" ] || return 0
@@ -891,53 +917,119 @@ fi
 # its terminal then goes away mid-run.  Finish regardless.
 trap '' HUP PIPE
 mkdir -p "$RUN_DIR" 2>/dev/null
-if ! exec 9>"$RUN_DIR/rac-switch.lock"; then
-    echo "sigmond-rac-switch: cannot write under $RUN_DIR; nothing changed." >&2
-    exit 1
+LOCKED=yes
+if ! { exec 9>"$RUN_DIR/rac-switch.lock"; } 2>/dev/null; then
+    # No lock file can be opened: a full disk, or one mounted read-only.  `on`
+    # stops here.  `off` goes on without the lock, because an owner must be
+    # able to close the station whatever the disk does.  (A lock that another
+    # change HOLDS is a different thing: `off` waits for that one, below.)
+    LOCKED=no
+    if [ "$WORD" != off ]; then
+        echo "sigmond-rac-switch: cannot write under $RUN_DIR; nothing changed." >&2
+        exit 1
+    fi
 fi
-if ! flock -w "$LOCK_WAIT_S" 9; then
+if [ "$LOCKED" = yes ] && ! flock -w "$LOCK_WAIT_S" 9; then
     echo "sigmond-rac-switch: another change is still running; nothing changed." >&2
     exit 1
 fi
 
-if [ "$WORD" = off ]; then
+switch_off(){
+    # Stop and disable first, whatever else fails.  Then say what stands, and
+    # what could not be put on file.
+    local recorded=yes wrote=yes did
     trap '' INT TERM
-    set_wish off || { echo "sigmond-rac-switch: could not record the wish; nothing changed." >&2; exit 1; }
+    set_wish off 2>/dev/null || recorded=no
     # The relays first and the tunnel last: stopping the tunnel may end the
     # caller's own session.
     # shellcheck disable=SC2086
     systemctl disable --now $SOCKETS >/dev/null 2>&1
     systemctl disable --now "$UNIT" >/dev/null 2>&1
+    # With no `off` on file, nothing tells a later run of the retry timer that
+    # the operator said off.  So the timer goes too.
+    [ "$recorded" = yes ] || systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
+    repaint_panel
+    read_state
+    write_state || wrote=no
+    case "$STATE" in
+        on|off|down) print_state 2>/dev/null ;;
+        *)  # No state to print.  Say the one thing this run did.
+            if [ "$RUNS" = running ]; then
+                echo "sigmond-rac-switch: off asked systemd to stop and disable the tunnel, and the tunnel service still runs."
+            else
+                echo "sigmond-rac-switch: the tunnel and its relays are stopped and disabled."
+            fi ;;
+    esac
+    # These lines go to stdout, below the state: `smd remote` in the VM prints
+    # the switch's stdout, and its operator must read them.
+    if [ "$recorded" = no ]; then
+        if [ "$RUNS" = running ]; then
+            did="off asked systemd to stop and disable the tunnel, its relays and the retry timer, and the tunnel service STILL RUNS."
+        else
+            did="off stopped and disabled the tunnel, its relays and the retry timer. They stay so across a reboot."
+        fi
+        echo "sigmond-rac-switch: $did"
+        echo "sigmond-rac-switch: it could not record the wish 'off' under $MARK_DIR (is the disk full, or read-only?)."
+        echo "sigmond-rac-switch: this host therefore still reads the wish as it stood before. Make room on the disk, then turn remote access off once more."
+    fi
+    [ "$wrote" = yes ] || echo "sigmond-rac-switch: could not write under $RUN_DIR, so this run left no state file; the console panel and the host heartbeat read that file."
+    [ "$RUNS" = running ] && return 4
+    [ "$recorded" = yes ] || return 1
+    return 0
+}
+
+switch_on(){
+    # A timer run and a wizard run read the wish before they ask for `on`: the
+    # timer a moment before, a wizard that registers afresh some minutes
+    # before.  An operator who said off in between has the last word.  With
+    # `off` on file, a request from either of the two changes nothing and
+    # answers as `status` does.  An operator's own `on` acts.
+    if [ "$(wish_on_file)" = off ]; then
+        case "$BY" in
+            timer|install)
+                read_state
+                write_state
+                print_state
+                [ "$STATE" = down ] && return 3
+                return 0 ;;
+        esac
+    fi
+    set_wish on || { echo "sigmond-rac-switch: could not record the wish; nothing changed." >&2; return 1; }
+    if ! registered; then
+        echo "This station has not registered for remote access yet. Registering now."
+        "$SETUP" --rac-register
+    fi
+    if registered; then
+        systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
+        # shellcheck disable=SC2086
+        systemctl enable --now $SOCKETS >/dev/null 2>&1
+        systemctl enable --now "$UNIT" >/dev/null 2>&1
+        echo "Waiting up to ${WAIT_S}s for the gateway to accept the channels."
+        wait_for_channels
+    else
+        # No gateway answered.  The wish stands, and the timer keeps trying.
+        systemctl enable --now "$RETRY_TIMER" >/dev/null 2>&1
+    fi
     repaint_panel
     read_state
     write_state
-    print_state 2>/dev/null
-    [ "$RUNS" = running ] && exit 4
-    exit 0
-fi
+    print_state
+    [ "$STATE" = down ] && return 3
+    return 0
+}
 
-# on
-set_wish on || { echo "sigmond-rac-switch: could not record the wish; nothing changed." >&2; exit 1; }
-if ! registered; then
-    echo "This station has not registered for remote access yet. Registering now."
-    "$SETUP" --rac-register
+# The lock stays with this shell and reaches no program it starts: `9>&-` on
+# the call closes descriptor 9 for everything the function runs, while bash
+# keeps the lock itself in a copy that no child inherits.  A child left behind
+# (a registration cut short, a systemctl that hangs) then holds no lock after
+# this shell has gone.
+if [ "$WORD" = off ]; then
+    switch_off 9>&-
+    exit $?
 fi
-if registered; then
-    systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
-    # shellcheck disable=SC2086
-    systemctl enable --now $SOCKETS >/dev/null 2>&1
-    systemctl enable --now "$UNIT" >/dev/null 2>&1
-    echo "Waiting up to ${WAIT_S}s for the gateway to accept the channels."
-    wait_for_channels
-else
-    # No gateway answered.  The wish stands, and the timer keeps trying.
-    systemctl enable --now "$RETRY_TIMER" >/dev/null 2>&1
-fi
-repaint_panel
-read_state
-write_state
-print_state
-[ "$STATE" = down ] && exit 3
+switch_on 9>&-
+RC=$?
+[ "$RC" = 0 ] || exit "$RC"
 exit 0
 RACSWEOF
     rac_switch_settle $? || return 1
@@ -1030,9 +1122,21 @@ rac_retry(){
     # not at install.  Then bring the tunnel up, but only if its operator
     # still wants it up.  A try that fails ends quietly: the timer tries
     # again, and the journal gets one line per reason, never one per try.
-    local last
+    local last want
     say(){ :; }
     LOG=/dev/null
+    # No wish on file: nothing on this station has asked for remote access (a
+    # station from before v3.71 whose owner declined reads so).  Nothing
+    # registers it, by this timer or by hand.  The timer has nothing left to
+    # try, so it goes too: one line now, and none every ten minutes.
+    want=$(head -1 "$MARK_DIR/rac-desired" 2>/dev/null)
+    case "$want" in
+        on|off) ;;
+        *)
+            systemctl disable --now sigmond-rac-register.timer >/dev/null 2>&1
+            echo "remote access: this station has recorded no wish for remote access, so nothing registers it. To turn it on, in the decoder VM: smd remote on"
+            return 0 ;;
+    esac
     if ! rac_register ensure; then
         last=$(cat "$RAC_RETRY_NOTE" 2>/dev/null)
         if [ "$RAC_FAIL" != "$last" ]; then
@@ -1179,7 +1283,13 @@ main(){
         *) printf '%s\n' "\$out" | head -3; exit 1 ;;
     esac
     mkdir -p "\$(dirname "\$C")"
-    printf '{"state": "%s", "checked_at": "%s"}\n' "\$s" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "\$C"
+    # Off, and the tunnel service runs all the same: the switch says so in its
+    # NOTE line, and the login banner must carry it.
+    if [ "\$s" = off ] && printf '%s\n' "\$out" | grep -q '^  NOTE: the tunnel service runs all the same\.'; then
+        printf '{"state": "%s", "checked_at": "%s", "tunnel_runs": true}\n' "\$s" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "\$C"
+    else
+        printf '{"state": "%s", "checked_at": "%s"}\n' "\$s" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "\$C"
+    fi
     chmod 644 "\$C"
     exit 0
 }
@@ -1199,37 +1309,82 @@ rac_pair_vm(){
     # the timer carries OnBootSec, so arming it long after boot starts the
     # service at once, beside the wizard's own pairing.
     # Otherwise it returns 1 with the reason in RAC_PAIR_FAIL.  RAC_PAIR_WARN
-    # holds a warning when the re-assertion units could not start.
-    local rc
+    # holds a warning when the re-assertion units could not start, or when the
+    # outcome could not be put on file.
+    # Every run that did the work records its outcome (rac_pair_record).  The
+    # run that found another one at work records nothing: that one does.
+    local rc word=not-paired
     RAC_PAIR_FAIL=""
     RAC_PAIR_WARN=""
     mkdir -p "$(dirname "$RAC_PAIR_LOCK")" 2>/dev/null
     if ! { exec 7>"$RAC_PAIR_LOCK"; } 2>/dev/null; then
         RAC_PAIR_FAIL="cannot open the pairing lock ($RAC_PAIR_LOCK)"
-        return 1
-    fi
-    if ! flock -n 7; then
+        rc=1
+    elif ! flock -n 7; then
         exec 7>&-
         RAC_PAIR_FAIL="another pairing is running"
         return 2
+    else
+        # `7>&-` on the call keeps the lock with this shell and out of every
+        # program the pairing starts (qm, apt-get, systemctl): bash holds the
+        # lock in a copy no child inherits.  A child left behind then holds no
+        # lock after this shell has gone, and the next pairing can run.
+        rac_pair_locked 7>&-; rc=$?
     fi
-    rac_pair_locked; rc=$?
+    [ "$rc" = 0 ] && word=paired
+    if ! rac_pair_record "$word" "$RAC_PAIR_FAIL"; then
+        RAC_PAIR_WARN="${RAC_PAIR_WARN:+$RAC_PAIR_WARN; }could not record the pairing's outcome in $MARK_DIR/rac-pairing; the console panel reads that file to choose the instruction it prints"
+    fi
     exec 7>&-
     return $rc
 }
 
+rac_pair_record(){
+    # rac_pair_record paired | not-paired <reason>
+    # One line in $MARK_DIR/rac-pairing, the outcome of the last pairing:
+    #     paired <UTC>          or          not-paired <UTC> <reason>
+    # The console panel reads the first word: it names the decoder VM's
+    # command (smd remote ...) only where a pairing stands, and the host's own
+    # switch everywhere else.  pm-align --status prints the line.  The reason
+    # stays on one line of printable ASCII, 200 characters at most.
+    local f="$MARK_DIR/rac-pairing" line why
+    line="$1 $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ "$1" != paired ]; then
+        why=$(printf '%s' "${2:-}" | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C tr -cd '\040-\176' | cut -c1-200)
+        line="$line $why"
+    fi
+    if { mkdir -p "$MARK_DIR" && printf '%s\n' "$line" > "$f.new" && chmod 644 "$f.new" \
+         && mv -f "$f.new" "$f"; } 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$f.new" 2>/dev/null
+    return 1
+}
+
 rac_pair_locked(){
     local pm vm hostkey vmkey line tmp i
-    vm=$(mgmt_vm_ip)
     # The units first.  A pairing that fails here must try again by itself:
     # a host with no keyboard cannot wait for an operator.  A station whose
     # guest agent stood deaf at install pairs at the next boot, or in six
     # hours, without anyone.
     if ! rac_install_host_files; then
-        RAC_PAIR_FAIL="could not install $RAC_SWITCH"
+        RAC_PAIR_FAIL="could not install the remote-access files on this host (the switch or its units)"
         return 1
     fi
-    pm=$(ip -4 -o addr show 2>/dev/null | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
+    # The private link is vmbr1's /30: this host holds its first address and
+    # the decoder VM the next one.  Read that bridge first.  A host can carry
+    # another /30 (a WireGuard link, a point-to-point uplink) and `ip` may list
+    # it first; mgmt_vm_ip reads "the first /30 on this host" and would then
+    # name a machine that is not the VM.  So the VM's address follows from the
+    # bridge's here, unless SIGMOND_MGMT_VM names it.  Only a host whose vmbr1
+    # carries no /30 falls back to the first /30 it has, and to mgmt_vm_ip.
+    pm=$(ip -4 -o addr show dev vmbr1 2>/dev/null | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
+    if [ -n "$pm" ] && [ -z "${SIGMOND_MGMT_VM:-}" ]; then
+        vm=$(awk -v ip="$pm" 'BEGIN{n=split(ip,o,"."); printf "%s.%s.%s.%d\n",o[1],o[2],o[3],o[4]+1}')
+    else
+        vm=$(mgmt_vm_ip)
+        [ -n "$pm" ] || pm=$(ip -4 -o addr show 2>/dev/null | awk '$4 ~ /\/30$/ {split($4,p,"/"); print p[1]; exit}')
+    fi
     if [ -z "$pm" ]; then
         RAC_PAIR_FAIL="this host has no private link to its decoder VM (no /30 address)"
         return 1
@@ -1246,8 +1401,10 @@ rac_pair_locked(){
     if ! systemctl enable --now sigmond-rac-pair.timer sigmond-rac-pair.path >/dev/null 2>&1; then
         RAC_PAIR_WARN="the pairing's re-assertion units did not start (systemctl enable --now failed)"
     fi
+    # Each ping under a timeout: on a channel gone stale `qm agent ping` can
+    # hang, and this run would then sit on the pairing's lock.
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-        qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
+        timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
         if [ "$i" = 12 ]; then
             RAC_PAIR_FAIL="the guest agent in VM $VMID does not answer"
             return 1
@@ -1356,8 +1513,17 @@ case "${1:-}" in
         exit 1;;
     --rac-off|--rac-on)
         # One switch.  These two spellings from before v3.71 run the script
-        # that `smd remote` reaches from the decoder VM.
-        rac_install_host_files || { say "could not install $RAC_SWITCH"; exit 1; }
+        # that `smd remote` reaches from the decoder VM.  The host files are
+        # written afresh first.  Where that fails (a full disk) and a switch
+        # stands at its path, that switch runs all the same: an owner must be
+        # able to close the station, as `--rac-off` could before v3.71.
+        if ! rac_install_host_files; then
+            if [ ! -x "$RAC_SWITCH" ]; then
+                say "could not install the remote-access files on this host (the switch or its units)"
+                exit 1
+            fi
+            say "WARN: could not refresh the remote-access files on this host (the switch or its units); running the switch that stands"
+        fi
         exec "$RAC_SWITCH" "${1#--rac-}";;
     --rac-upgrade)
         # rob 2026-08-09: a station that had to settle for a lower tier should
@@ -3209,7 +3375,7 @@ rac_activate(){
     # RAC_STATE for the summary.  It never fails the wizard: a station with
     # no gateway in reach still finishes its install, and the host keeps
     # trying.
-    local want out rc
+    local want out rc line asked=no
     # The wish comes first, before anything that can fail.  A wish on file
     # decides.  With none on file, a first install wants it on, and the wizard
     # records that itself, in the format the switch writes: a run that dies
@@ -3231,7 +3397,7 @@ rac_activate(){
         || say "WARN: pm-align not installed (sigmond tree lacks it)"
     rac_record_inputs
     if ! rac_install_host_files; then
-        RAC_STATE="FAILED: could not install $RAC_SWITCH on this host"
+        RAC_STATE="FAILED: could not install the remote-access files on this host (the switch or its units)"
         [ -n "$want" ] && RAC_STATE="$RAC_STATE
           The wish stands on file (remote access $want)."
         RAC_STATE="$RAC_STATE
@@ -3244,6 +3410,7 @@ rac_activate(){
         # only this run's answer can stand.
         rm -f "$RAC_STATE_FILE"
         "$RAC_SWITCH" status >/dev/null 2>&1
+        asked=yes
         want=$(sed -n 's/^wish=//p' "$RAC_STATE_FILE" 2>/dev/null | head -1)
         case "$want" in
             on|off) ;;
@@ -3256,6 +3423,19 @@ rac_activate(){
     if [ "$want" != on ]; then
         RAC_STATE="off, as its operator left it. Turn it on from the decoder VM: smd remote on"
         say "remote access stays off, as its operator left it"
+        # The wish reads off, and the tunnel service can run all the same:
+        # someone started it outside the switch.  The summary must not read a
+        # plain "off" over an open door.  `status` changes nothing; the old
+        # state file goes first, so that only this run's answer can stand.
+        if [ "$asked" = no ]; then
+            rm -f "$RAC_STATE_FILE"
+            "$RAC_SWITCH" status >/dev/null 2>&1
+        fi
+        if [ "$(sed -n 's/^tunnel=//p' "$RAC_STATE_FILE" 2>/dev/null | head -1)" = running ]; then
+            RAC_STATE="off, as its operator left it, BUT THE TUNNEL SERVICE STILL RUNS:
+          this station can still be reached. Close it from the decoder VM: smd remote off"
+            say "WARN: remote access reads off, but the tunnel service still runs; close it from the decoder VM: smd remote off"
+        fi
         return 0
     fi
     say "remote access: bringing it up (turn it off later from the decoder VM: smd remote off)"
@@ -3264,9 +3444,19 @@ rac_activate(){
     if [ -s "$RAC_TOML" ] && ! rac_register fresh; then
         say "WARN: could not register afresh ($RAC_FAIL); the earlier registration stays"
     fi
-    out=$(SIGMOND_RAC_BY=install "$RAC_SWITCH" on 2>&1); rc=$?
-    printf '%s\n' "$out" | sed 's/^/  /' | tee -a "$LOG"
-    RAC_STATE=$(printf '%s\n' "$out" | sed -n '/^Remote access: /,$p' \
+    # The switch's lines reach the console and the log as they come.  A
+    # registration and the wait for the channels can take minutes, and a
+    # console that prints nothing for minutes reads as a hang.  The summary
+    # still comes from the same lines.  (`wait` on the process substitution
+    # hands back the switch's exit status.)
+    out=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        printf '  %s\n' "$line" | tee -a "$LOG"
+        out="$out$line
+"
+    done < <(SIGMOND_RAC_BY=install "$RAC_SWITCH" on 2>&1)
+    wait "$!"; rc=$?
+    RAC_STATE=$(printf '%s' "$out" | sed -n '/^Remote access: /,$p' \
                 | sed -e '1s/^Remote access: //' -e '2,$s/^/          /')
     [ -n "$RAC_STATE" ] || RAC_STATE="FAILED: $RAC_SWITCH gave no answer (exit $rc); try: sigmond-setup --rac-on"
     case "$(head -1 "$MARK_DIR/rac-tier" 2>/dev/null)" in
@@ -3281,7 +3471,15 @@ rac_activate
 
 # The switch works from the decoder VM only once the two machines pair.
 PAIR_STATE="paired: in the decoder VM, smd remote on / off / status"
-if ! rac_pair_vm; then
+rac_pair_vm; _prc=$?
+if [ "$_prc" = 2 ]; then
+    # Another pairing holds the lock (the pairing's own timer started one) and
+    # does the work.  That is no failure, and nothing is left for the reader
+    # to run.
+    PAIR_STATE="a pairing runs already on this host, and it does the work.
+            To see when it has finished, in the decoder VM: smd remote status"
+    say "remote-access switch: $PAIR_STATE"
+elif [ "$_prc" != 0 ]; then
     PAIR_STATE="NOT PAIRED ($RAC_PAIR_FAIL).
             Until it pairs, smd remote cannot reach this host. Later, on this host: sigmond-setup --pair-vm"
     say "WARN: remote-access switch: $PAIR_STATE"

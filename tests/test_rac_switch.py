@@ -38,11 +38,16 @@ def switch_text() -> str:
 
 
 SYSTEMCTL = r"""#!/bin/bash
-# stub: write down every call; keep `active` and `enabled` as files
+# stub: write down every call; keep `active` and `enabled` as files.  `is-active`
+# prints the unit's state and exits 0 for `active` alone, as systemctl does; the
+# file `activating` stands for a unit inside its restart delay.
 echo "$*" >> "$HOSTDIR/systemctl.calls"
 verb="$1"; shift
 case "$verb" in
-    is-active)  [ -e "$HOSTDIR/active" ] ;;
+    is-active)  say=echo; case " $* " in *" --quiet "*) say=: ;; esac
+                if [ -e "$HOSTDIR/activating" ]; then $say activating; exit 3; fi
+                if [ -e "$HOSTDIR/active" ]; then $say active; exit 0; fi
+                $say inactive; exit 3 ;;
     is-enabled) [ -e "$HOSTDIR/enabled" ] ;;
     enable)  case " $* " in *" sigmond-rac-host.service "*)
                  touch "$HOSTDIR/enabled"
@@ -263,20 +268,201 @@ def test_a_change_that_cannot_get_the_lock_gives_up_and_changes_nothing(tmp_path
     assert r.returncode == 0 and h.wish() == "off", (r.stdout, r.stderr)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through a read-only directory")
-@pytest.mark.parametrize("word,stood", [("off", "on"), ("on", "off")])
-def test_a_wish_that_cannot_be_recorded_changes_nothing(tmp_path, word, stood):
-    h = Host(tmp_path, enabled=(stood == "on"), active=(stood == "on"), wish=stood)
-    marks = tmp_path / "marks"
-    marks.chmod(0o555)
+NOT_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason="root writes through a read-only directory")
+
+
+def run_with(h, word, *, closed=(), env=None):
+    """Run the switch while the directories named in `closed` take no write."""
+    for d in closed:
+        (h.d / d).chmod(0o555)
     try:
-        r = h.run(word)
+        return h.run(word, env=env)
     finally:
-        marks.chmod(0o755)
+        for d in closed:
+            (h.d / d).chmod(0o755)
+
+
+@NOT_ROOT
+def test_an_on_whose_wish_cannot_be_recorded_changes_nothing(tmp_path):
+    h = Host(tmp_path, wish="off")
+    r = run_with(h, "on", closed=["marks"])
     assert r.returncode == 1, (r.stdout, r.stderr)
     assert "could not record the wish; nothing changed" in r.stderr
-    assert h.changes() == []                     # nothing enabled, nothing stopped
-    assert h.wish() == stood
+    assert h.changes() == []                     # nothing enabled, nothing started
+    assert h.wish() == "off"
+
+
+@NOT_ROOT
+def test_an_on_that_cannot_open_its_lock_changes_nothing(tmp_path):
+    h = Host(tmp_path, wish="off")
+    r = run_with(h, "on", closed=["run"])
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "cannot write under" in r.stderr and "nothing changed" in r.stderr
+    assert h.changes() == [] and h.wish() == "off"
+
+
+# -- off closes the station whatever it cannot write ---------------------------------
+#
+# A full root disk must not keep an owner from closing the station.  `off` stops
+# and disables the relays and the tunnel first, and says afterwards what it could
+# not put on file.
+
+CLOSED = ["disable --now " + " ".join(SOCKETS), f"disable --now {UNIT}"]
+
+
+@NOT_ROOT
+def test_off_closes_the_tunnel_when_the_wish_cannot_be_recorded(tmp_path):
+    h = Host(tmp_path, enabled=True, active=True, wish="on")
+    r = run_with(h, "off", closed=["marks"])
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert h.changes()[:2] == CLOSED
+    # No `off` stands on file to stop a later run of the retry timer, so the timer goes too.
+    assert f"disable --now {RETRY_TIMER}" in h.changes()
+    assert not (tmp_path / "active").exists() and not (tmp_path / "enabled").exists()
+    assert h.wish() == "on"                                  # the file could not change
+    assert r.stdout.splitlines()[0] == DOWN                  # what this host now reads
+    said = [ln for ln in r.stdout.splitlines() if ln.startswith("sigmond-rac-switch: ")]
+    assert any("stopped and disabled the tunnel, its relays and the retry timer" in ln for ln in said), r.stdout
+    assert any("could not record the wish 'off'" in ln and str(tmp_path / "marks") in ln for ln in said), r.stdout
+    assert "nothing changed" not in r.stdout + r.stderr
+
+
+@NOT_ROOT
+def test_off_closes_the_tunnel_when_the_run_directory_takes_no_write(tmp_path):
+    # No lock file can be opened and no state file written.
+    h = Host(tmp_path, enabled=True, active=True, wish="on")
+    r = run_with(h, "off", closed=["run"])
+    assert h.changes()[:2] == CLOSED, (r.stdout, r.stderr)
+    assert not (tmp_path / "active").exists()
+    assert h.wish() == "off"                                 # the wish did reach its file
+    assert not any(RETRY_TIMER in c for c in h.changes())    # so the timer stays as it stood
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert r.stdout.splitlines()[0] == OFF
+    assert f"sigmond-rac-switch: could not write under {tmp_path}/run" in r.stdout
+    assert not (tmp_path / "run" / "rac-state").exists()
+    assert "nothing changed" not in r.stdout + r.stderr
+
+
+def test_off_closes_the_tunnel_when_no_run_directory_can_exist(tmp_path):
+    # A regular file where the directory belongs: this fails for root too.
+    h = Host(tmp_path, enabled=True, active=True, wish="on")
+    (tmp_path / "run").rmdir()
+    (tmp_path / "run").write_text("not a directory\n")
+    r = h.run("off")
+    assert h.changes()[:2] == CLOSED, (r.stdout, r.stderr)
+    assert h.wish() == "off" and r.returncode == 0
+    assert r.stdout.splitlines()[0] == OFF
+
+
+@NOT_ROOT
+def test_off_closes_the_tunnel_when_neither_directory_takes_a_write(tmp_path):
+    h = Host(tmp_path, enabled=True, active=True, wish="on")
+    r = run_with(h, "off", closed=["marks", "run"])
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert h.changes()[:3] == CLOSED + [f"disable --now {RETRY_TIMER}"]
+    assert not (tmp_path / "active").exists()
+
+
+@NOT_ROOT
+def test_off_that_cannot_record_and_cannot_stop_the_tunnel_says_both_and_exits_4(tmp_path):
+    h = Host(tmp_path, enabled=True, active=True, wish="on")
+    (tmp_path / "unit-refuses-to-stop").touch()
+    r = run_with(h, "off", closed=["marks"])
+    assert r.returncode == 4, (r.stdout, r.stderr)
+    assert "the tunnel service STILL RUNS" in r.stdout
+    assert "could not record the wish 'off'" in r.stdout
+
+
+@NOT_ROOT
+def test_off_on_a_station_with_no_wish_on_file_reads_off_and_still_says_what_it_could_not_record(tmp_path):
+    # A station from before v3.71: the wish reads from the units, so once they
+    # stand disabled the state reads off.
+    h = Host(tmp_path, enabled=True, active=True)
+    r = run_with(h, "off", closed=["marks"])
+    assert r.returncode == 1
+    assert r.stdout.splitlines()[0] == OFF
+    assert "could not record the wish 'off'" in r.stdout
+    assert h.wish() is None
+
+
+def test_an_off_that_records_its_wish_prints_no_line_of_complaint(tmp_path):
+    h = Host(tmp_path, enabled=True, active=True, wish="on")
+    r = h.run("off")
+    assert r.returncode == 0
+    assert "sigmond-rac-switch:" not in r.stdout and r.stderr == ""
+
+
+def rac_branch(word):
+    """The `--rac-off|--rac-on` branch of the wizard's dispatch, run for `word`."""
+    i = WIZARD.index("    --rac-off|--rac-on)")
+    branch = WIZARD[i:WIZARD.index("    --rac-upgrade)", i)]
+    return f'set -- --rac-{word}\ncase "${{1:-}}" in\n' + branch + "esac\necho NOT-REACHED\n"
+
+
+@pytest.mark.parametrize("word", ["off", "on"])
+def test_the_hosts_own_spelling_reaches_a_standing_switch_when_its_files_cannot_be_refreshed(tmp_path, word):
+    # A full disk fails the reinstall of the host files.  v3.70's --rac-off closed
+    # the station all the same, and so must this one.
+    switch = tmp_path / "switch"
+    switch.write_text(f'#!/bin/bash\necho "switch $*" >> {tmp_path}/calls\necho "Remote access: off"\nexit 0\n')
+    switch.chmod(0o755)
+    script = (f'set -u\nRAC_SWITCH={switch}\nsay(){{ echo "[wizard] $*"; }}\n'
+              'rac_install_host_files(){ return 1; }\n' + rac_branch(word))
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+    assert (tmp_path / "calls").read_text() == f"switch {word}\n", (r.stdout, r.stderr)
+    assert r.returncode == 0 and "NOT-REACHED" not in r.stdout
+    assert "could not refresh the remote-access files on this host" in r.stdout
+    assert "Remote access: off" in r.stdout
+
+
+def test_the_hosts_own_spelling_stops_when_no_switch_stands_at_all(tmp_path):
+    script = (f'set -u\nRAC_SWITCH={tmp_path}/no-switch\nsay(){{ echo "[wizard] $*"; }}\n'
+              'rac_install_host_files(){ return 1; }\n' + rac_branch("off"))
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and "NOT-REACHED" not in r.stdout
+    assert "could not install the remote-access files on this host (the switch or its units)" in r.stdout
+
+
+# -- a timer run or a wizard run never reverses an operator's off ---------------------
+#
+# Each reads the wish, then asks for `on`: the timer milliseconds later, a wizard
+# rerun minutes later, after a fresh registration.  An `off` typed in between
+# stands on file by the time the switch holds its lock, and it wins.
+
+@pytest.mark.parametrize("by", ["timer", "install"])
+def test_an_on_from_the_timer_or_the_installer_leaves_an_off_on_file_alone(tmp_path, by):
+    h = Host(tmp_path, wish="off")
+    before = "off 2026-10-09T18:22:05Z vm\n"
+    (tmp_path / "marks" / "rac-changed").write_text(before)
+    r = h.run("on", env={"SIGMOND_RAC_BY": by})
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert r.stdout.splitlines()[0] == OFF
+    assert h.wish() == "off"
+    assert h.changes() == []                                 # no enable, no timer, no repaint
+    assert h.calls("setup") == []
+    assert (tmp_path / "marks" / "rac-changed").read_text() == before
+    assert h.state()["state"] == "off"                       # it writes the state, as status does
+
+
+def test_an_operators_own_on_turns_an_off_on_as_before(tmp_path):
+    for by in ("host", "anything else"):
+        h = Host(tmp_path / by.replace(" ", "-"), wish="off") if (tmp_path / by.replace(" ", "-")).mkdir() is None else None
+        r = h.run("on", env={"SIGMOND_RAC_BY": by})
+        assert r.returncode == 0 and h.wish() == "on", (by, r.stdout, r.stderr)
+        assert f"enable --now {UNIT}" in h.changes()
+    h = Host(tmp_path / "vm", wish="off") if (tmp_path / "vm").mkdir() is None else None
+    r = h.run("on", env={"SUDO_USER": "sigmond-remote", "SIGMOND_RAC_BY": "timer"})
+    assert h.wish() == "on" and f"enable --now {UNIT}" in h.changes()      # the VM's request is the operator's
+
+
+@pytest.mark.parametrize("by", ["timer", "install"])
+def test_an_on_from_the_timer_or_the_installer_acts_when_no_off_stands_on_file(tmp_path, by):
+    for name, wish in (("none", None), ("on", "on")):
+        (tmp_path / name).mkdir()
+        h = Host(tmp_path / name, wish=wish)
+        r = h.run("on", env={"SIGMOND_RAC_BY": by})
+        assert r.returncode == 0 and h.wish() == "on", (name, r.stdout, r.stderr)
+        assert f"enable --now {UNIT}" in h.changes()
 
 
 def test_on_enables_relays_and_tunnel_and_waits_for_every_declared_channel(tmp_path):
@@ -363,7 +549,7 @@ def test_on_counts_what_the_configuration_declares_not_a_fixed_number(tmp_path):
     r = h.run("on")
     assert r.returncode == 0
     assert "The gateway accepted 4 of 6 channels" in r.stdout
-    assert h.calls().count("is-active --quiet " + UNIT) >= 1
+    assert [c for c in h.calls() if c.startswith("is-active") and c.endswith(UNIT)]
     body = switch_text()
     assert "-ge 4" not in body and "-ge 6" not in body
     assert "grep -c '^name *=' \"$TOML\"" in body
@@ -684,3 +870,150 @@ def test_on_waits_the_whole_time_it_is_given_and_no_longer(tmp_path):
     assert r.returncode == 3
     assert DOWN in r.stdout.splitlines()
     assert h.calls("sleep") == ["5"] * 4           # WAIT_S / WAIT_STEP steps of WAIT_STEP
+
+
+# -- a unit inside its restart delay still counts as running --------------------------
+
+def test_a_tunnel_unit_that_systemd_calls_activating_counts_as_running(tmp_path):
+    # Between two tries systemd reports the unit as `activating`.  "The tunnel
+    # service does not run" would then flip in and out of the answer every 30 seconds.
+    h = Host(tmp_path, wish="on", enabled=True, channels=0)
+    (tmp_path / "activating").touch()
+    r = h.run("status")
+    assert r.returncode == 3
+    assert "The tunnel service runs, and the gateway has accepted none of its 6 channels" in r.stdout
+    assert "does not run" not in r.stdout
+    assert h.state()["tunnel"] == "running"
+
+
+def test_a_unit_that_is_neither_active_nor_activating_does_not_run(tmp_path):
+    h = Host(tmp_path, wish="on", enabled=True, channels=6)
+    r = h.run("status")
+    assert "The tunnel service does not run" in r.stdout
+    assert h.state()["tunnel"] == "stopped"
+
+
+# -- the state file never shows two writers at once -----------------------------------
+
+STATE_KEYS = ["state", "wish", "wish_source", "registered", "tunnel", "channels_up",
+              "channels_declared", "rac", "gateway", "tier", "changed_at", "changed_by", "checked_at"]
+DATE_GATE = r"""#!/bin/bash
+# stub: a date that waits.  It says it was reached, then holds until the test lets it go.
+touch "$HOSTDIR/at-date.$WRITER"
+while [ ! -e "$HOSTDIR/go.$WRITER" ]; do "$REAL_SLEEP" 0.02; done
+exec "$REAL_DATE" "$@"
+"""
+
+
+def test_the_state_file_is_written_through_a_name_of_the_writers_own():
+    body = switch_text()
+    assert '"$RUN_DIR/rac-state.new.$$"' in body
+    assert '"$RUN_DIR/rac-state.new"' not in body
+
+
+def test_two_writers_at_once_leave_a_state_file_that_parses(tmp_path):
+    # `status` runs from the panel, the heartbeat and an operator with no lock
+    # between them.  Writer A has written twelve lines and stands at its last
+    # one when writer B starts and writes twelve shorter ones; then A finishes,
+    # then B.  Through one shared temporary name that leaves B's lines, a run of
+    # NUL bytes and two last lines in the file.
+    h = Host(tmp_path, wish="on", enabled=True, active=True, channels=6)
+    (tmp_path / "marks" / "rac-tier").write_text("a tier whose name runs long enough to move the last line\n")
+    short = tmp_path / "marks-b"
+    short.mkdir()
+    (short / "rac-desired").write_text("on\n")
+    (tmp_path / "bin" / "date").write_text(DATE_GATE)
+    (tmp_path / "bin" / "date").chmod(0o755)
+    env = {"PATH": f"{tmp_path}/bin:{os.environ['PATH']}", "HOSTDIR": str(tmp_path),
+           "SIGMOND_RAC_MARK_DIR": f"{tmp_path}/marks", "SIGMOND_RAC_TOML": f"{tmp_path}/frpc-host.toml",
+           "SIGMOND_RAC_RUN_DIR": f"{tmp_path}/run",
+           "REAL_DATE": shutil.which("date"), "REAL_SLEEP": shutil.which("sleep")}
+
+    def start(writer, **more):
+        p = subprocess.Popen([str(h.script), "status"], env=dict(env, WRITER=writer, **more),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(500):
+            if (tmp_path / f"at-date.{writer}").exists():
+                return p
+            subprocess.run([env["REAL_SLEEP"], "0.02"])
+        p.kill()
+        raise AssertionError(f"writer {writer} never reached its last line")
+
+    a = start("A")
+    b = start("B", SIGMOND_RAC_MARK_DIR=str(short))
+    (tmp_path / "go.A").touch()
+    a.wait(timeout=30)
+    (tmp_path / "go.B").touch()
+    b.wait(timeout=30)
+    raw = (tmp_path / "run" / "rac-state").read_bytes()
+    assert b"\x00" not in raw
+    lines = raw.decode().splitlines()
+    assert [ln.split("=", 1)[0] for ln in lines] == STATE_KEYS, lines
+    assert sorted(f.name for f in (tmp_path / "run").iterdir()) == ["rac-state"]      # no temp file left
+
+
+# -- the forced command takes nothing from its caller but the word --------------------
+
+SYSTEMCTL_WITNESS = r"""#!/bin/bash
+# stub: what a program started by the switch inherits
+{ echo "CALL $*"
+  env | grep '^SIGMOND_' | sed 's/^/ENV /'
+  echo "STDIN $(head -c 64 | tr -d '\n')"
+  echo "FD9 $(readlink /proc/$$/fd/9 2>/dev/null)"
+  [ -e "$HOSTDIR/run/rac-switch.lock" ] && { flock -n "$HOSTDIR/run/rac-switch.lock" true && echo "LOCK free" || echo "LOCK held"; }
+} >> "$HOSTDIR/witness"
+exit 3
+"""
+
+
+def witness(tmp_path, *args, env=None, stdin="left over on stdin\n"):
+    h = Host(tmp_path, registered=True, wish="on")
+    (tmp_path / "bin" / "systemctl").write_text(SYSTEMCTL_WITNESS)
+    r = h.run(*args, env=env, input=stdin)
+    w = tmp_path / "witness"
+    return r, (w.read_text().splitlines() if w.exists() else [])
+
+
+def test_in_forced_mode_no_sigmond_variable_reaches_the_switch_or_a_program_it_starts(tmp_path):
+    # sigmond-setup, which the switch starts to register, reads a dozen SIGMOND_
+    # variables the switch itself never names: a gateway, a VM id, a port.
+    sent = {"SSH_ORIGINAL_COMMAND": "status", "SIGMOND_RAC_SERVER": "gateway.example.invalid",
+            "SIGMOND_VMID": "999", "SIGMOND_SOMETHING_NEW": "x"}
+    r, seen = witness(tmp_path, env=sent)
+    assert r.returncode in (0, 3), (r.stdout, r.stderr)
+    assert r.stdout.splitlines()[0] in (ON, OFF, DOWN)
+    assert [ln for ln in seen if ln.startswith("CALL")], "the switch started no program to witness"
+    assert [ln for ln in seen if ln.startswith("ENV")] == []
+    assert not (tmp_path / "run" / "rac-state").exists()     # SIGMOND_RAC_RUN_DIR went with the rest
+
+
+def test_in_forced_mode_stdin_reads_as_empty_inside_a_child(tmp_path):
+    r, seen = witness(tmp_path, env={"SSH_ORIGINAL_COMMAND": "status"})
+    stdins = [ln for ln in seen if ln.startswith("STDIN")]
+    assert stdins and set(stdins) == {"STDIN "}, seen
+
+
+def test_the_witness_can_see_a_variable_and_stdin_when_the_switch_takes_an_argument(tmp_path):
+    # The control: with one argument the same stub sees both, so the two tests
+    # above can fail.
+    r, seen = witness(tmp_path, "status", env={"SIGMOND_SOMETHING_NEW": "x"})
+    assert "ENV SIGMOND_SOMETHING_NEW=x" in seen
+    assert "STDIN left over on stdin" in seen
+
+
+def test_forced_mode_names_no_list_of_variables_to_forget():
+    body = switch_text()
+    forced = body[body.index('if [ "$#" -eq 0 ]; then'):body.index('elif [ "$#" -eq 1 ]; then')]
+    assert 'for _v in "${!SIGMOND_@}"; do unset "$_v"; done' in forced
+    assert forced.index("exec </dev/null") < forced.index("${!SIGMOND_@}") < forced.index("SSH_ORIGINAL_COMMAND")
+
+
+# -- the lock stays in the switch, out of every program it starts ---------------------
+
+@pytest.mark.parametrize("word", ["on", "off"])
+def test_a_program_the_switch_starts_holds_no_copy_of_its_lock(tmp_path, word):
+    # An orphaned child that held fd 9 kept the lock after the switch had died.
+    r, seen = witness(tmp_path, word, stdin="")
+    assert [ln for ln in seen if ln.startswith("CALL")], (r.stdout, r.stderr)
+    assert {ln for ln in seen if ln.startswith("FD9")} == {"FD9 "}, seen
+    assert {ln for ln in seen if ln.startswith("LOCK")} == {"LOCK held"}, seen      # and the switch still holds it

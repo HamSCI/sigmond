@@ -282,6 +282,24 @@ def test_the_lock_is_free_again_after_a_run(tmp_path, registrar):
     assert "FREE" in r.stdout, r.stdout + r.stderr
 
 
+def test_a_program_started_inside_a_registration_holds_no_copy_of_its_lock(tmp_path, registrar):
+    # The trial frpc of a DASI rung runs for up to 24 s, and python3 waits on a
+    # registrar for 30.  A child that inherited descriptor 8 kept the lock after
+    # its shell had died, and every later registration waited five minutes on it.
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    witness = textwrap.dedent(f"""
+        rac_payload_ready(){{
+            ls -l /proc/self/fd > {tmp_path}/body.fds 2>/dev/null
+            flock -n {tmp_path}/register.lock true && echo free > {tmp_path}/body.lock || echo held > {tmp_path}/body.lock
+            [ -x "$RAC_FRPC" ] && [ -f "$RAC_CA" ]
+        }}
+    """)
+    r = run(pre + witness + 'rac_register ensure; echo "rc=$?"\n', tmp_path)
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "body.lock").read_text() == "held\n"      # the registration itself holds it
+    assert "register.lock" not in (tmp_path / "body.fds").read_text()
+
+
 def test_a_second_registration_waits_for_the_first(tmp_path, registrar):
     pre = host(tmp_path, tiers=tier(registrar.port))
     script = pre + textwrap.dedent(f"""
