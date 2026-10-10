@@ -36,6 +36,9 @@ STATE_LINES = {
     'Remote access: off': 'off',
     'Remote access: wanted on, not up': 'down',
 }
+# With the wish off and the tunnel service running all the same, the switch
+# adds a line that begins so (after two spaces).  The login banner carries it.
+TUNNEL_RUNS_NOTE = 'NOTE: the tunnel service runs all the same.'
 # `on` may register with a gateway first and then waits for the channels.
 TIMEOUT_S = {'on': 600, 'off': 120, 'status': 60}
 
@@ -94,11 +97,24 @@ def state_of(answer: str) -> str | None:
     return None
 
 
-def _remember(state: str, now: datetime | None = None) -> None:
+def tunnel_still_runs(state: str, answer: str) -> bool:
+    """True when the host answered off and added its NOTE that the tunnel
+    service runs all the same.  The NOTE counts only as a line of its own."""
+    return state == 'off' and any(
+        line.startswith('  ' + TUNNEL_RUNS_NOTE) for line in answer.splitlines())
+
+
+def _remember(state: str, answer: str = '', now: datetime | None = None) -> None:
     """Keep the answer for the login banner.  A failure here costs a banner
-    line and one warning, and the verb's exit status stays the host's."""
+    line and one warning, and the verb's exit status stays the host's.
+
+    The file holds the state and its time.  `tunnel_runs` joins them, as
+    true, only when the wish reads off and the tunnel service still runs;
+    a file without the key reads as false."""
     now = now or datetime.now(timezone.utc)
     doc = {'state': state, 'checked_at': now.strftime(STAMP_FORMAT)}
+    if tunnel_still_runs(state, answer):
+        doc['tunnel_runs'] = True
     tmp = None
     try:
         CACHE.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +158,13 @@ def _unreachable(host: str, stderr: str) -> int:
         err(f'the Proxmox host at {host} shows an sshd key this VM was not paired with')
         info('A host at v3.71 pairs this VM again when its sshd key file changes.')
         info('If this message stays, on the Proxmox host:  sigmond-setup --pair-vm')
+        # The pairing pins the key in the host's key file.  A running sshd
+        # serves the key it loaded when it started, so the two can differ
+        # until sshd restarts, and then pairing again changes nothing.
+        info('If it stays after that, the host\'s sshd still serves its earlier key.  '
+             'Restart it, then pair again, on the Proxmox host:')
+        info('    systemctl restart ssh')
+        info('    sigmond-setup --pair-vm')
     elif 'permission denied' in low:
         err(f'the Proxmox host at {host} did not accept this VM\'s pairing key')
         info('On the Proxmox host:  sigmond-setup --pair-vm')
@@ -167,16 +190,19 @@ def cmd_motd(now: datetime | None = None) -> int:
     """One line for the login banner; nothing on a VM that holds no pairing.
 
     The file it reads can be written by any member of group `sigmond`, so the
-    line carries only a state and a time it can read.  An answer more than
-    FRESH_FOR old, or dated ahead of the clock, says so.
+    line carries only a state and a time it can read, and one flag that must
+    read as a JSON true: off, with the tunnel service still running.  An
+    answer more than FRESH_FOR old, or dated ahead of the clock, says so.
     """
     if not KEY.exists():
         return 0
     try:
         doc = json.loads(CACHE.read_text(encoding='utf-8'))
         state, stamp = doc['state'], _stamp(doc['checked_at'])
-    except (OSError, ValueError, KeyError, TypeError):
-        state, stamp = None, None
+        # Only a JSON true counts; a file without the key reads as false.
+        runs = doc.get('tunnel_runs') is True
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        state, stamp, runs = None, None, False
     if state not in ('on', 'off', 'down') or stamp is None:
         print('Remote access: state not read yet.  Check it:  smd remote status')
         return 0
@@ -196,6 +222,9 @@ def cmd_motd(now: datetime | None = None) -> int:
     as_of = f' (as the host reported {when} UTC)'
     if state == 'on':
         print(f'Remote access: on{as_of}.  Turn it off:  smd remote off')
+    elif state == 'off' and runs:
+        print(f'Remote access: OFF, but the tunnel service still runs{as_of}.  '
+              f'Close it:  smd remote off')
     elif state == 'off':
         print(f'Remote access: OFF{as_of}.  Turn it on:  smd remote on')
     else:
@@ -241,7 +270,7 @@ def cmd_remote(args, *, run=subprocess.run) -> int:
             err(f'the host\'s switch gave no state (exit {r.returncode})'
                 + (f': {tail[0]}' if tail else ''))
         return r.returncode or 1
-    _remember(state)
+    _remember(state, answer)
     if r.returncode == 255:
         err('the connection to the Proxmox host ended before its switch finished')
         return EXIT_UNREACHABLE

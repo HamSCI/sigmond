@@ -30,6 +30,9 @@ OFF = ("Remote access: off\n"
        "  Turn it on:   smd remote on    (in the decoder VM)\n")
 DOWN = ("Remote access: wanted on, not up\n"
         "  The station has not registered yet: no gateway has answered.\n")
+# The switch's own NOTE line, as sigmond-wizard.sh prints it for off with the tunnel service running.
+NOTE = "  NOTE: the tunnel service runs all the same. Someone started it outside this switch; 'off' again stops it.\n"
+OFF_OPEN = OFF.replace("  Turn it on:", NOTE + "  Turn it on:")
 HOSTKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostHostHostHostHostHostHostHostHostHostHost"
 NOW = datetime(2026, 10, 9, 20, 0, 0, tzinfo=timezone.utc)      # the banner tests' clock
 
@@ -198,6 +201,29 @@ class RemoteCliTests(unittest.TestCase):
         self.assertIn("sshd key file changes", errs)
         self.assertIn("sigmond-setup --pair-vm", errs)
 
+    def test_a_changed_host_key_that_outlasts_a_pairing_names_the_sshd_restart(self):
+        # The pairing pins the key in the host's key FILE.  A running sshd keeps
+        # serving the key it loaded at its start, so after the file changed the
+        # two differ until sshd restarts, and pairing again cannot help.
+        self._pair()
+        _, _, errs = self._run("status", rc=255, stderr="Host key verification failed.\n")
+        self.assertIn("shows an sshd key this VM was not paired with", errs)
+        self.assertEqual(errs.count("sigmond-setup --pair-vm"), 2)
+        first = errs.index("sigmond-setup --pair-vm")
+        restart = errs.index("systemctl restart ssh")
+        self.assertLess(first, restart)
+        self.assertLess(restart, errs.index("sigmond-setup --pair-vm", first + 1))
+        self.assertIn("on the Proxmox host", errs[first - 60:restart + 60])
+        self.assertNotIn("systemctl restart sshd", errs)     # Debian names the unit ssh.service
+        self.assertNotIn("sudo ", errs)
+
+    def test_only_the_changed_key_message_names_the_sshd_restart(self):
+        self._pair()
+        for stderr in ("sigmond-remote@10.99.0.1: Permission denied (publickey).\n",
+                       "ssh: connect to host 10.99.0.1 port 22: No route to host\n"):
+            _, _, errs = self._run("status", rc=255, stderr=stderr)
+            self.assertNotIn("systemctl restart ssh", errs)
+
     def test_a_refused_key_names_the_repair(self):
         self._pair()
         code, _, errs = self._run("on", rc=255,
@@ -288,6 +314,71 @@ class RemoteCliTests(unittest.TestCase):
             self.assertEqual(doc["state"], state)
             self.assertRegex(doc["checked_at"], r"^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertEqual(oct(self.cache.stat().st_mode & 0o777), "0o644")
+
+    # -- off, and the tunnel service still runs ----------------------------------
+
+    def test_the_note_this_verb_looks_for_is_the_switchs_own_line(self):
+        wizard = (REPO / "scripts" / "proxmox" / "sigmond-wizard.sh").read_text()
+        self.assertTrue(NOTE.startswith("  " + remote.TUNNEL_RUNS_NOTE))
+        self.assertIn('echo "' + NOTE.rstrip("\n") + '"', wizard)
+
+    def test_an_off_with_the_switchs_note_is_kept_as_a_tunnel_that_still_runs(self):
+        self._pair()
+        code, out, _ = self._run("off", rc=4, stdout=OFF_OPEN)
+        self.assertEqual((code, out), (4, OFF_OPEN))
+        doc = json.loads(self.cache.read_text())
+        self.assertEqual(doc["state"], "off")
+        self.assertIs(doc["tunnel_runs"], True)
+
+    def test_every_other_answer_leaves_the_key_out(self):
+        self._pair()
+        for answer in (OFF, ON, DOWN,
+                       ON + NOTE,                                        # the note belongs to off alone
+                       OFF + "  it says NOTE: the tunnel service runs all the same. inside a line\n"):
+            self._run("status", stdout=answer)
+            self.assertEqual(sorted(json.loads(self.cache.read_text())), ["checked_at", "state"], answer)
+
+    def test_the_banner_says_so_when_off_stands_over_a_tunnel_that_still_runs(self):
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text(json.dumps({"state": "off", "checked_at": "2026-10-09T18:22:05Z",
+                                          "tunnel_runs": True}))
+        self.assertEqual(self._motd(),
+                         "Remote access: OFF, but the tunnel service still runs "
+                         "(as the host reported 2026-10-09 18:22 UTC).  Close it:  smd remote off\n")
+
+    def test_the_banner_reads_a_missing_or_odd_flag_as_false(self):
+        # Any member of group `sigmond` can write the cache file: only a JSON true counts.
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        plain = "Remote access: OFF (as the host reported 2026-10-09 18:22 UTC).  Turn it on:  smd remote on\n"
+        for flag in ({}, {"tunnel_runs": False}, {"tunnel_runs": "true"}, {"tunnel_runs": 1},
+                     {"tunnel_runs": None}, {"tunnel_runs": ["x"]}):
+            self.cache.write_text(json.dumps({"state": "off", "checked_at": "2026-10-09T18:22:05Z", **flag}))
+            self.assertEqual(self._motd(), plain, flag)
+
+    def test_the_flag_changes_no_other_banner_line(self):
+        self._pair()
+        self.cache.parent.mkdir(parents=True)
+        for state, begins in (("on", "Remote access: on (as"), ("down", "Remote access: wanted on, NOT UP (as")):
+            self.cache.write_text(json.dumps({"state": state, "checked_at": "2026-10-09T18:22:05Z",
+                                              "tunnel_runs": True}))
+            line = self._motd()
+            self.assertTrue(line.startswith(begins), line)
+            self.assertNotIn("still runs", line)
+        # An answer too old to trust says how old it is, and claims nothing about the tunnel.
+        self.cache.write_text(json.dumps({"state": "off", "checked_at": "2026-10-09T18:22:05Z",
+                                          "tunnel_runs": True}))
+        line = self._motd(datetime(2026, 10, 10, 2, 22, 5, tzinfo=timezone.utc))
+        self.assertIn("8 hours old", line)
+        self.assertNotIn("still runs", line)
+
+    def test_the_two_writers_of_the_cache_spell_the_key_alike(self):
+        wizard = (REPO / "scripts" / "proxmox" / "sigmond-wizard.sh").read_text()
+        self.assertIn('"tunnel_runs": true}', wizard)
+        self._pair()
+        self._run("off", rc=4, stdout=OFF_OPEN)
+        self.assertIn('"tunnel_runs": true', self.cache.read_text())
 
     def test_the_state_reads_from_the_exact_line_wherever_it_stands(self):
         self.assertEqual(remote.state_of(ON), "on")                  # after the waiting line
