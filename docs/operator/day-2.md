@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 6406025 on 2026-10-10 — remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -640,13 +640,15 @@ antenna is still connected, then run `smd status` and send the output to your
 fleet admin ([troubleshooting.md](troubleshooting.md);
 [INSTALL.md §11](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#11-if-something-goes-wrong)).
 
-**A dead keyboard on the station itself is normal.** After the first reboot
-following installation, the USB ports belong to the decoder VM — the radio
-needs them. The physical keyboard stops working and the monitor shows a login
-panel with both addresses. That is correct and deliberate; you drive the
+**The station's own keyboard no longer types into the host, and that is
+normal.** After the first reboot following installation, the USB ports belong
+to the decoder VM — the radio needs them. The monitor shows a panel with the
+station's addresses and logins. That is correct and deliberate; you drive the
 station from another computer over the network from then on
 ([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on)).
-You can unplug the monitor and keyboard whenever you like.
+A keyboard at the station can still reach a login on the host;
+[remote-access.md §4](remote-access.md#4-the-switch-off-on-status) says how, and
+on which stations. You can unplug the monitor and keyboard whenever you like.
 
 **Moving the station to a new location** — a different [grid square](glossary.md) — calls
 for a documented procedure, not a reinstall: log into the `[host]`, run

@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 74f8543 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 007bf72 on 2026-10-10 — remote-access words and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's split console; sink words checked at 74f8543 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > replugged RX888 is brought back with `smd status` + `smd adopt`.
 > **Canonical for:** what an operator must not do on a station, and why
@@ -178,8 +178,8 @@ No permission needed, any time, as often as you like. All `[VM]` unless noted.
 - **Reboot, or power off and on, the whole box** — with your fleet admin's
   agreement when you are chasing a fault, and freely when you need to move
   furniture. It comes back by itself; allow ten minutes.
-- **Unplug the monitor and keyboard.** After the first reboot they do nothing
-  anyway — the USB ports belong to the radio.
+- **Unplug the monitor and keyboard.** After the first reboot the station needs
+  neither: you drive it from another computer.
 
 ---
 

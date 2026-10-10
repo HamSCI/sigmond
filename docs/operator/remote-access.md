@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 6406025 on 2026-10-10 — the switch script, registration and pairing in `scripts/proxmox/sigmond-wizard.sh`, `pm-align.py`, `lib/sigmond/commands/remote.py`, the console panel in sigmond-appliance `firstboot-v3.sh`, and their tests. A hardware install has not yet confirmed it.
+> **Verified against:** sigmond 007bf72 on 2026-10-10 — the switch script, registration and pairing in `scripts/proxmox/sigmond-wizard.sh`, `pm-align.py`, `lib/sigmond/commands/remote.py`, the console panel and the split console in sigmond-appliance `firstboot-v3.sh`, and their tests. A hardware install has not yet confirmed it.
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, how the operator switches it, how the admin connects
 
 Every Sigmond station registers for remote access when it installs, and its
@@ -227,6 +227,13 @@ and across a rerun of the wizard. Nothing on the station turns it back on, and
 nobody outside the station can. Only a reinstall from the stick starts over,
 with remote access on.
 
+Off closes the tunnel even on a host that can write nothing, such as one whose
+disk has filled. The host still stops and disables the tunnel and its relays.
+Its answer then ends with lines that begin `sigmond-rac-switch:`, and one of
+them says that it `could not record the wish 'off'`. Send those lines to your
+fleet admin. Until the host can record the wish, a rerun of the setup wizard
+could turn remote access on again.
+
 One thing to know before you type it from far away: if you reached the VM
 *through* the tunnel, `smd remote off` cuts the connection you type on. The host
 still finishes the job. You then need a way in that does not use the tunnel,
@@ -260,8 +267,23 @@ time limit: it stays on until you turn it off.
   - `ON` lists the channels below it. The two host channels stand under the
     heading `ADMINISTRATORS ONLY`. The VM channels stand under `HamSCI users`.
   - `OFF` says since when, and says "not a fault". Below it, the panel gives
-    the whole way to turn it on: the ssh command that logs in to the VM, then
-    `smd remote on`.
+    the whole way to turn it on. On a station whose two machines have paired
+    (§8), that line names the VM's command:
+
+    ```text
+    ==> to turn it on, log in to the decoder VM (ssh -p 2222 sigmond@<host address>) and type:  smd remote on
+    ```
+
+  - On a station that has not paired, the panel names the host's own switch
+    in place of `smd remote`, as a whole command for another computer:
+
+    ```text
+    ==> to turn it on, type on another computer:  ssh root@<host address> 'sigmond-setup --rac-on'
+    to turn it off, type on another computer:  ssh root@<host address> 'sigmond-setup --rac-off'
+    ```
+
+    The host records the outcome of each pairing, and the panel reads that
+    record at every refresh. Only a recorded success earns the VM's command.
   - If the tunnel service still runs while the switch says off, the first line
     drops "not a fault". A further line reads "NOTE: the tunnel service still
     runs, so this station can still be reached." Below it, the panel names the
@@ -270,7 +292,10 @@ time limit: it stays on until you turn it off.
     declined remote access before v3.71, or that the station never reached a
     gateway. §8 explains. `smd remote on` tries to register the station; if no
     gateway answers, the host tries again every 10 minutes (§3).
-  - Each of the three `WANTED ON` lines gives its next step below it.
+  - Each of the three `WANTED ON` lines gives its next step below it. Under
+    `NOT REGISTERED YET` the panel says that the host tries again every 10
+    minutes. Its last line begins "To keep the tunnel down once the station
+    registers," and gives the command that turns remote access off.
   - `STATE NOT READ` means the switch gave no fresh answer. The line below it
     gives the command that asks the switch directly. In the VM,
     `smd remote status` asks the same question. If the panel still says
@@ -281,7 +306,9 @@ time limit: it stays on until you turn it off.
   with the time of that report in UTC. It never asks the host, so a login stays
   fast. When the report is more than 7 hours old, the banner says how old it is
   and tells you to ask again with `smd remote status`. Until the VM holds any
-  report, it says `state not read yet`.
+  report, it says `state not read yet`. If the host reported off while its
+  tunnel service still ran, the banner reads `OFF, but the tunnel service still
+  runs` and names `smd remote off` as the way to close it.
 - The **fleet board** tags a station whose host reports remote access off with
   "remote access off by the operator". A station that never registered carries
   "remote access off: never registered" instead. When a station has gone silent,
@@ -291,8 +318,10 @@ time limit: it stays on until you turn it off.
   Your admin sees a decision, not a station to chase. The board hears from your
   station only when it sends status heartbeats; the wizard asks about them.
 
-**How the VM asks.** The host has no keyboard once the install ends, and you
-know the VM, so the VM asks and the host alone acts. At install the wizard
+**How the VM asks.** The host has no keyboard of its own once the install
+ends: the USB ports belong to the decoder VM, so a keyboard plugged into the
+station types into the decoder VM. You know the VM as well. So the VM asks and
+the host alone acts. At install the wizard
 *pairs* the two machines: the VM gets one ssh key, kept in a file only `root`
 can read, and the host gets an account for it. On the host that key can run
 exactly one program, with one of three words: `on`, `off` or `status`. It opens
@@ -307,10 +336,21 @@ its own ssh key.
 `root`. Type it as shown, with no `sudo` in front.
 
 **From the host.** `sigmond-setup --rac-off` and `sigmond-setup --rac-on` on the
-`[host]` run the same switch and do the same thing. Reach the `[host]` from
-another computer with `ssh root@<host address>`. The console panel prints that
-command and, beside the login `root`, says which password to use: `the password
-you set at install`, or the image default with a warning to change it.
+`[host]` run the same switch and do the same thing. Two ways lead to a `root`
+login on the `[host]`:
+
+- **From another computer:** `ssh root@<host address>`. The console panel
+  prints that command. Beside the login `root` it says which password to use:
+  `the password you set at install`, or
+  `hamsci-sigmond   <-- image default, CHANGE IT`.
+- **At the station, with a keyboard and the monitor.** On a station with the
+  private link, installed at v3.66 or later, the panel's first line reads
+  `KEYBOARD WORKS HERE — press Enter for a login to THIS host`. Press Enter.
+  The screen asks for the host's `root` password; type it and press Enter.
+  Nothing shows while you type the password. The decoder VM carries your typing
+  to the host over the private link, and the host shows the login on its
+  monitor. There you can type `sigmond-setup --rac-off`,
+  `sigmond-setup --rac-on` and `sigmond-setup --pair-vm`.
 
 **`smd admin rac` is a different thing.** Those verbs manage a tunnel inside
 the VM, for a station that has no Proxmox host. On your station they report
@@ -417,7 +457,9 @@ cover most cases:
   host at v3.71 or later.
 - *"shows an sshd key this VM was not paired with"* — the host's ssh key
   changed. A host at v3.71 pairs this VM again when its sshd key file changes.
-  If the message stays, run `sigmond-setup --pair-vm` on the `[host]`.
+  If the message stays, run `sigmond-setup --pair-vm` on the `[host]`. If it
+  stays after that, the host's ssh service still serves its earlier key. On the
+  `[host]`, run `systemctl restart ssh`, then `sigmond-setup --pair-vm` again.
 - *"did not accept this VM's pairing key"* — the host refuses the key this VM
   offers. Run `sigmond-setup --pair-vm` on the `[host]`.
 - *"could not reach the Proxmox host"* — the host does not answer on the
@@ -473,8 +515,8 @@ message. That is expected:
 ```
 
 The message says the host works the switch itself, whatever its version. That
-holds for turning an existing registration off and on. A station that never
-registered needs a host at v3.71 to register.
+holds for turning an existing registration off and on. On an older host,
+`sigmond-setup --rac-on` does nothing for a station that never registered.
 
 Once the host runs v3.71, this command pairs the two machines by hand. You need
 it when `pm-align` could not pair them, or when a message in §7 asks for it:
@@ -494,8 +536,9 @@ A failed pairing answers `[wizard] NOT paired:` and names the reason. Send that
 line to your fleet admin. On a station with the old layout, the reason reads
 `this host has no private link to its decoder VM (no /30 address)`. A /30 is the
 size of the small private network that joins the host and its VM. The answer
-`[wizard] another pairing is running; nothing done` means the host pairs right
-now. Wait a few minutes, then run the command again.
+`[wizard] another pairing is running; nothing done` means the host already runs
+a pairing. Wait a few minutes, then run the command again. If the same answer
+returns after ten minutes, tell your fleet admin.
 
 ⚠ **On a host that has not reached v3.71, this command answers "already
 configured" and pairs nothing.** Do not take that answer for success. The host
@@ -506,15 +549,29 @@ hours, and when its sshd key file (the file that holds its ssh host key)
 changes. Those checks begin with the host's first attempt to pair.
 
 Until the station pairs, the host's own `sigmond-setup --rac-off` and
-`sigmond-setup --rac-on`, typed on the `[host]`, work the switch.
+`sigmond-setup --rac-on`, typed on the `[host]`, turn an existing registration
+off and on. On a host at v3.71, `sigmond-setup --rac-on` also registers a
+station that never registered. The console panel of such a host names those two
+commands in place of `smd remote` (§4). Its line for turning remote access on
+reads:
+
+```text
+==> to turn it on, type on another computer:  ssh root@<host address> 'sigmond-setup --rac-on'
+```
+
+The host records the outcome of each pairing, and the panel names the VM's
+command once that record says the two machines have paired. Your fleet admin
+can read the same record on the `[host]` with `pm-align --status`.
 
 **A station with the old layout cannot pair.** The pairing needs the private
 link between the host and its decoder VM. A station installed with the old
 layout has its VM on the LAN, and no private link exists. There `smd remote`
 does not work. The host's own `sigmond-setup --rac-off` and
-`sigmond-setup --rac-on` remain its switch, and a reinstall brings the private
-link. For such a host `pm-align` says "skipped: this host has no private link to
-its decoder VM", and adds that `smd remote` needs that link.
+`sigmond-setup --rac-on` remain its switch for an existing registration; type
+them on the `[host]`, which you reach from another computer with
+`ssh root@<host address>`. A reinstall brings the private link. For such a host
+`pm-align` says "skipped: this host has no private link to its decoder VM", and
+adds that `smd remote` needs that link.
 
 ---
 

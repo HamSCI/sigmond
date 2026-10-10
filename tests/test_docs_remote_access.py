@@ -224,9 +224,9 @@ def test_the_panel_figures_the_page_names_are_the_panels():
 
 
 def _address_contexts(text: str):
-    """(sentence or table row, place) for every http:// URL or ssh command
-    that targets `<VM address>`."""
-    pattern = re.compile(r"(?:http://|\bssh\b[^`\n]*@)<VM address>")
+    """(sentence or table row, place) for every http:// or https:// URL or ssh
+    command that targets `<VM address>`."""
+    pattern = re.compile(r"(?:https?://|\bssh\b[^`\n]*@)<VM address>")
     paragraph: list = []
     found = []
 
@@ -261,6 +261,16 @@ def test_no_operator_page_sends_the_reader_to_an_address_that_reaches_nothing():
             if "old layout" not in context:
                 bad.append(f"{md.name}: {context[:110]}")
     assert not bad, "\n".join(bad)
+
+
+def test_the_address_guard_reads_http_https_and_ssh():
+    # The guard above must be able to fail on each of the three forms.
+    for line in ("Open http://<VM address>:8081 in a browser.",
+                 "Open https://<VM address>:8006 in a browser.",
+                 "Log in with `ssh sigmond@<VM address>` from another computer.",
+                 "| web | https://<VM address>:8006 |"):
+        assert len(_address_contexts(line + "\n")) == 1, line
+    assert _address_contexts("Open https://<host address>:8006 in a browser.\n") == []
 
 
 def test_the_relays_the_pages_name_are_relays_the_host_runs():
@@ -349,3 +359,140 @@ def test_the_console_panel_lines_on_the_page_are_the_panels():
     assert "`Decoder VM`" in PAGE and "Decoder VM" in panel
     assert "10.99.0.*)" in FIRSTBOOT_TEXT and "MGMT_VM=10.99.0.2" in FIRSTBOOT_TEXT
     assert "`10.99.0.2`" in PAGE
+
+
+# -- what the final fixes changed in what an operator reads -----------------------------
+
+def test_no_page_promises_that_off_stops_the_retries():
+    # `off` never touches the retry timer: the host registers when a gateway
+    # answers, and then leaves the tunnel down.
+    for md in sorted(DOCS.glob("*.md")):
+        low = md.read_text().lower()
+        for phrase in ("stop it trying", "stops trying", "stop the retr", "stops the retr"):
+            assert phrase not in low, (md.name, phrase)
+    assert "the host still registers when it can, and stops there" in flat(PAGE)
+    assert 'systemctl disable --now "$RETRY_TIMER"' in WIZARD            # only where no off stands on file
+    off = WIZARD[WIZARD.index("switch_off(){"):WIZARD.index("switch_on(){")]
+    assert off.count("RETRY_TIMER") == 1 and '[ "$recorded" = yes ] || systemctl disable --now "$RETRY_TIMER"' in off
+
+
+@pytest.mark.skipif(not FIRSTBOOT.exists(), reason="no sigmond-appliance checkout beside this one")
+def test_the_panels_sentence_about_the_retry_is_on_the_page():
+    quoted = "To keep the tunnel down once the station registers"
+    assert quoted in flat(PAGE) and quoted in FIRSTBOOT_TEXT
+    assert "stop it trying" not in FIRSTBOOT_TEXT
+
+
+@pytest.mark.skipif(not FIRSTBOOT.exists(), reason="no sigmond-appliance checkout beside this one")
+def test_the_instruction_the_page_gives_for_an_unpaired_station_is_the_panels():
+    # The panel names the decoder VM's command only where the wizard's pairing
+    # recorded `paired`; everywhere else it prints the host's own switch as a
+    # whole command.  The page quotes that line for both words.
+    m = re.search(r"""printf "(type on another computer:  ssh root@%s 'sigmond-setup --rac-%s')" """, FIRSTBOOT_TEXT)
+    assert m, "the panel no longer prints the host's own switch in this form"
+    for word in ("on", "off"):
+        line = m.group(1).replace("%s", "<host address>", 1).replace("%s", word, 1)
+        assert line in PAGE, line
+    # The paired form, which the page already gives.
+    assert "log in to the decoder VM (ssh -p 2222 sigmond@" in FIRSTBOOT_TEXT
+    assert "log in to the decoder VM (ssh -p 2222 sigmond@<host address>) and type:  smd remote on" in PAGE
+    # One file decides, and the page says which outcome earns which line.
+    assert '"${RAC_PAIRING:-$RAC_MARKS/rac-pairing}"' in FIRSTBOOT_TEXT
+    assert '"$MARK_DIR/rac-pairing"' in WIZARD
+    page = flat(PAGE)
+    assert "has not paired" in page and "names the host's own switch" in page
+    # Section 8 says it too, where the reader of an older station looks.
+    eight = PAGE[PAGE.index("## 8. A station installed before v3.71"):PAGE.index("## When to mention it")]
+    assert "sigmond-setup --rac-on'" in eight and "console panel" in eight
+
+
+def test_the_banners_line_for_off_over_a_running_tunnel_is_on_the_page():
+    quoted = "OFF, but the tunnel service still runs"
+    assert quoted in flat(PAGE) and quoted in REMOTE_PY
+    assert "Close it:  smd remote off" in REMOTE_PY
+    assert remote.TUNNEL_RUNS_NOTE in WIZARD
+
+
+def test_the_changed_key_message_on_the_page_names_the_sshd_restart():
+    code = joined(REMOTE_PY)
+    page = flat(PAGE)
+    assert "systemctl restart ssh" in code and "`systemctl restart ssh`" in page
+    seven = PAGE[PAGE.index("## 7. If remote access does not come up"):PAGE.index("## 8. A station installed")]
+    i = seven.index("shows an sshd key this VM was not paired with")
+    bullet = flat(seven[i:seven.index("did not accept this VM's pairing key", i)])
+    assert bullet.index("sigmond-setup --pair-vm") < bullet.index("systemctl restart ssh")
+    assert bullet.count("sigmond-setup --pair-vm") == 2          # pair, restart sshd, pair again
+    assert "still serves its earlier key" in code and "earlier key" in bullet
+
+
+def test_the_page_says_what_off_does_when_the_host_can_write_nothing():
+    page = flat(PAGE)
+    for quoted in ("sigmond-rac-switch:", "could not record the wish 'off'"):
+        assert quoted in page, quoted
+        assert quoted in WIZARD, quoted
+    assert "stops and disables the tunnel" in page
+
+
+@pytest.mark.skipif(not FIRSTBOOT.exists(), reason="no sigmond-appliance checkout beside this one")
+def test_what_the_page_says_about_the_keyboard_is_what_the_station_does():
+    # The host has no keyboard of its own.  A keyboard plugged into the station
+    # types into the decoder VM, and the split console carries that to a root
+    # login on the host (firstboot-v3.sh: sigmond-console-bridge, -paint, -relay).
+    first_line = "KEYBOARD WORKS HERE \u2014 press Enter for a login to THIS host"
+    assert first_line in PAGE and first_line in FIRSTBOOT_TEXT
+    assert "TYPE THE PROXMOX HOST ROOT PASSWORD" in FIRSTBOOT_TEXT       # what the screen then asks
+    assert "Nothing appears while you type" in FIRSTBOOT_TEXT
+    assert "TCP4-LISTEN:7790,bind=10.99.0.1" in FIRSTBOOT_TEXT           # it rides the private link
+    page = flat(PAGE)
+    assert "The host has no keyboard of its own" in page
+    assert "types into the decoder VM" in page
+    assert "nothing shows while you type" in page.lower()
+    i = page.index("KEYBOARD WORKS HERE")
+    after = page[i:i + 900]
+    for cmd in ("sigmond-setup --rac-off", "sigmond-setup --rac-on", "sigmond-setup --pair-vm"):
+        assert cmd in after, cmd
+    assert "The host has no keyboard once the install ends" not in PAGE
+    # No neighbouring page still calls the keyboard dead or the console read-only.
+    for md in sorted(DOCS.glob("*.md")):
+        low = md.read_text().lower()
+        # (troubleshooting.md keeps "The host console keyboard is dead" as a
+        # heading: it names what the operator sees, and its body says what holds.)
+        for stale in ("keyboard stops working", "dead keyboard", "they do nothing",
+                      "console is read-only"):
+            assert stale not in low, (md.name, stale)
+
+
+@pytest.mark.skipif(not FIRSTBOOT.exists(), reason="no sigmond-appliance checkout beside this one")
+def test_the_two_password_notes_the_page_quotes_are_the_panels():
+    for quoted in ("the password you set at install", "hamsci-sigmond <-- image default, CHANGE IT"):
+        assert quoted in flat(PAGE), quoted
+        assert quoted in flat(FIRSTBOOT_TEXT), quoted
+    assert "with a warning to change it" not in PAGE             # a paraphrase the panel never prints
+
+
+def test_the_page_claims_no_more_about_an_older_host_than_the_code_shows():
+    page = flat(PAGE)
+    assert ("On an older host, `sigmond-setup --rac-on` does nothing for a station that never "
+            "registered.") in page
+    assert "needs a host at v3.71 to register" not in page
+    assert "means the host already runs a pairing" in page
+    assert "pairs right now" not in page
+    assert "If the same answer returns after ten minutes, tell your fleet admin." in page
+    # Wherever section 8 says the host's own two commands work the switch, it
+    # says for what: an existing registration.
+    eight = flat(PAGE[PAGE.index("## 8. A station installed before v3.71"):PAGE.index("## When to mention it")])
+    for m in re.finditer(r"`sigmond-setup --rac-off` and `sigmond-setup --rac-on`", eight):
+        assert "existing registration" in eight[m.start():m.start() + 260], eight[m.start():m.start() + 200]
+
+
+def test_the_contents_page_and_the_install_page_ask_for_the_host_address_alone():
+    readme = (DOCS / "README.md").read_text()
+    install = (DOCS / "install.md").read_text()
+    for name, text in (("README.md", readme), ("install.md", install)):
+        low = flat(text).lower()
+        assert "both addresses" not in low, name
+        assert "write down the host address when the install shows it" in low, name
+        assert "works only from the host" in low, name
+    assert "The VM address alone is not enough" not in install
+    assert "ports confirmed live" not in readme
+    assert "a small private network that only the two machines share" in flat(readme)

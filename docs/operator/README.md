@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 6406025 on 2026-10-10 — remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; walk-through fixes (live dasi002 + b4) as of 4aec0c2
+> **Verified against:** sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; walk-through fixes (live dasi002 + b4) as of 4aec0c2
 > **Canonical for:** the operator's table of contents
 
 You are hosting a *station*: one small computer that listens to the whole
@@ -55,28 +55,28 @@ One physical computer runs **two** systems. This trips everybody up once:
 | `[host]` | The **Proxmox host** — the bare machine, the thing with the power button and the USB ports | `<designator>-PM`, e.g. `AC0G-B4-PM` | `ssh root@<host address>`, or a browser at `https://<host address>:8006` |
 | `[VM]` | The **decoder VM** — a virtual machine running inside the host; the radio and every recorder live here | `<designator>`, e.g. `AC0G-B4` | `ssh -p 2222 sigmond@<host address>` (the host relays port 2222 to the VM; `hamsci@` works too); on a station with the old layout: `ssh sigmond@<VM address>` |
 
-The old layout puts the VM on your own network, with no private link to its host.
-On a station with the old layout, you use the VM's own address directly, and the
-host forwards nothing on ports 2222, 8081, 8000 and 8082.
+The old layout puts the VM on your own network. The new layout puts it behind
+the host, on a small private network that only the two machines share. With the
+old layout, you log in to the VM and open its web pages at the VM's own address,
+and the host's install set up no forwards on ports 2222, 8081, 8000 and 8082.
 [remote-access.md §8](remote-access.md#8-a-station-installed-before-v371) shows
 how to tell which layout your station has.
 
 The *designator* is the station name you give the setup wizard, which names the
 VM after it and adds `-PM` for the host (source:
-`sigmond/scripts/proxmox/sigmond-wizard.sh`, `ask_names()`). Both addresses
-print on the station's monitor; one password unlocks both at first — change it
-with `passwd` in each ([INSTALL.md §10](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#10-logins--and-change-the-password)).
+`sigmond/scripts/proxmox/sigmond-wizard.sh`, `ask_names()`). The station's
+monitor prints the addresses; one password unlocks both machines at first —
+change it with `passwd` in each ([INSTALL.md §10](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#10-logins--and-change-the-password)).
 
-⚠ **Write down BOTH addresses while the install is showing them — the host one
-especially.** After the first reboot the station's keyboard stops working on
-purpose (the USB ports go to the radio), so that screen is the last easy chance
-to read the host address. Several later steps — the Proxmox window, a rerun
-of the setup wizard — run on the `[host]` and are simply unreachable without
-it. (The switch for remote access runs in the VM, and you reach the VM through
-the host's address:
-[remote-access.md §4](remote-access.md#4-the-switch-off-on-status).) If you have already
-lost it, your fleet admin or your router's DHCP list can recover it — it is a
-nuisance, not a dead end.
+⚠ **Write down the host address when the install shows it.** The VM address
+beside it (`10.99.0.2` on a station with the private link) works only from the
+host; you need not keep it. Everything goes through the host's address: the
+Proxmox window, a rerun of the setup wizard, and the login to the VM, where the
+switch for remote access runs
+([remote-access.md §4](remote-access.md#4-the-switch-off-on-status)). The
+console panel on the station's monitor shows the host address as well. If you
+have lost it and cannot read the monitor, your fleet admin or your router's
+DHCP list can recover it — it is a nuisance, not a dead end.
 
 **Every command here is tagged `[host]` or `[VM]`** — the tag sits on the line
 above the command, never inside it, so a whole block is safe to copy. Nearly
@@ -100,9 +100,8 @@ nothing and that is correct — `smd component list` is the command that shows
 both, see [day-2.md §1](day-2.md#installed-enabled-shown).)
 Then the web pages, from any computer on your network: `http://<host address>:8081` (live
 receiver), `http://<host address>:8000` (timing dashboard) and
-`http://<host address>:8082` (magnetometer dashboard, if you have one) — ports
-confirmed live on AC0G/B4, 2026-08-23. The console panel prints these addresses for your
-station.
+`http://<host address>:8082` (magnetometer dashboard, if you have one). The
+console panel prints these addresses for your station.
 
 ## Getting help — what to send
 

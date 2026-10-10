@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 6406025 on 2026-10-10 — remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; sink words checked at 58fb909 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -879,13 +879,16 @@ At 80 %. Not at 94 %.
 
 **Nothing is wrong.** After the first reboot following installation, the
 machine's USB ports belong to the [decoder VM](glossary.md) — the radio needs
-them — so the physical keyboard stops working and the monitor shows a login
-panel with both addresses instead. That is correct and deliberate
+them — so the keyboard no longer types into the host. The monitor shows a panel
+with the station's addresses and logins. That is correct and deliberate
 ([INSTALL.md §8](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#8-remove-the-stick--it-powers-off--switch-it-back-on);
 [day-2.md](day-2.md#power-loss-reboots-and-moving-the-box)).
 
 **What to do:** drive the station from another computer over the network. You
-can unplug the monitor and keyboard whenever you like.
+can unplug the monitor and keyboard whenever you like. A keyboard at the station
+can still reach a login on the host;
+[remote-access.md §4](remote-access.md#4-the-switch-off-on-status) says how, and
+on which stations.
 
 ⚠ **On a laptop this is a real problem**, because the built-in keyboard is the
 one that dies. That is why the parts list says not to use one
