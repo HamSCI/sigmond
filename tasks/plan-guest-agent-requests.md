@@ -2,10 +2,14 @@
 
 **Authors:** Michael Hauan (AC0G) + Claude
 **Date:** 2026-10-10
-**Status:** design, for Michael's review. No code yet. Target release: v3.71.
-**Verified against:** sigmond bfd3add on 2026-10-10 — `scripts/proxmox/sigmond-wizard.sh`,
-`scripts/proxmox/pm-align.py`, `scripts/proxmox/pm-heartbeat.py`; sigmond-appliance 5e8e23a `firstboot-v3.sh`;
-the rig measurements of 2026-10-08 (Proxmox VE 9.1.1, qemu-server 9.0.30)
+**Status:** design, for Michael's review. Nothing committed as code. Target release: v3.71. A prototype of the
+whole change ran in a scratch copy of both repositories on 2026-10-10 (sigmond's suite: 4080 tests, none
+failing; 48 mutations, each caught). The implementation plan built from it, on the answers this design
+recommends: `tasks/plan-guest-agent-requests-v371.md`.
+**Verified against:** sigmond 28a5aac on 2026-10-10 — `scripts/proxmox/sigmond-wizard.sh`,
+`scripts/proxmox/pm-align.py`, `scripts/proxmox/pm-heartbeat.py`, `bin/sigmond-firstrun-bringup`;
+sigmond-appliance c348e21 `firstboot-v3.sh`, `test-nested-v3.sh`; the rig measurements of 2026-10-08
+(Proxmox VE 9.1.1, qemu-server 9.0.30)
 
 ## Goal
 
