@@ -458,8 +458,10 @@ cover most cases:
 - *"shows an sshd key this VM was not paired with"* — the host's ssh key
   changed. A host at v3.71 pairs this VM again when its sshd key file changes.
   If the message stays, run `sigmond-setup --pair-vm` on the `[host]`. If it
-  stays after that, the host's ssh service still serves its earlier key. On the
-  `[host]`, run `systemctl restart ssh`, then `sigmond-setup --pair-vm` again.
+  stays after that, restart the host's ssh service and pair again: on the
+  `[host]`, run `systemctl restart ssh`, then `sigmond-setup --pair-vm`. The
+  pairing reads the host's key file, and a running ssh service serves the key it
+  loaded at its start.
 - *"did not accept this VM's pairing key"* — the host refuses the key this VM
   offers. Run `sigmond-setup --pair-vm` on the `[host]`.
 - *"could not reach the Proxmox host"* — the host does not answer on the

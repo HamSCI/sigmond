@@ -158,13 +158,14 @@ def _unreachable(host: str, stderr: str) -> int:
         err(f'the Proxmox host at {host} shows an sshd key this VM was not paired with')
         info('A host at v3.71 pairs this VM again when its sshd key file changes.')
         info('If this message stays, on the Proxmox host:  sigmond-setup --pair-vm')
-        # The pairing pins the key in the host's key file.  A running sshd
-        # serves the key it loaded when it started, so the two can differ
-        # until sshd restarts, and then pairing again changes nothing.
-        info('If it stays after that, the host\'s sshd still serves its earlier key.  '
-             'Restart it, then pair again, on the Proxmox host:')
+        # The pairing pins the key in the host's key file.  After that file
+        # changed, the two differ until sshd restarts, and pairing again
+        # cannot help: its own proof meets the earlier key and fails.
+        info('If it stays after that, restart sshd on the Proxmox host, then pair again:')
         info('    systemctl restart ssh')
         info('    sigmond-setup --pair-vm')
+        info('(The pairing reads the host\'s key file; a running sshd serves the key it '
+             'loaded at its start.)')
     elif 'permission denied' in low:
         err(f'the Proxmox host at {host} did not accept this VM\'s pairing key')
         info('On the Proxmox host:  sigmond-setup --pair-vm')

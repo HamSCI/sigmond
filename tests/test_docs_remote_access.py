@@ -422,7 +422,8 @@ def test_the_changed_key_message_on_the_page_names_the_sshd_restart():
     bullet = flat(seven[i:seven.index("did not accept this VM's pairing key", i)])
     assert bullet.index("sigmond-setup --pair-vm") < bullet.index("systemctl restart ssh")
     assert bullet.count("sigmond-setup --pair-vm") == 2          # pair, restart sshd, pair again
-    assert "still serves its earlier key" in code and "earlier key" in bullet
+    assert "a running sshd serves the key it loaded at its start" in code
+    assert "serves the key it loaded at its start" in bullet
 
 
 def test_the_page_says_what_off_does_when_the_host_can_write_nothing():

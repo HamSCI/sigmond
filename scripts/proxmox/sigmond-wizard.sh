@@ -963,10 +963,14 @@ switch_off(){
     # These lines go to stdout, below the state: `smd remote` in the VM prints
     # the switch's stdout, and its operator must read them.
     if [ "$recorded" = no ]; then
+        # Say only what holds.  On a root filesystem mounted read-only, systemd
+        # stops a unit and cannot remove the link that enables it.
         if [ "$RUNS" = running ]; then
             did="off asked systemd to stop and disable the tunnel, its relays and the retry timer, and the tunnel service STILL RUNS."
+        elif systemctl is-enabled --quiet "$UNIT" 2>/dev/null; then
+            did="off stopped the tunnel and its relays, and the tunnel service STAYS ENABLED: systemd could not disable it, so it starts again at the next boot."
         else
-            did="off stopped and disabled the tunnel, its relays and the retry timer. They stay so across a reboot."
+            did="off stopped and disabled the tunnel, its relays and the retry timer."
         fi
         echo "sigmond-rac-switch: $did"
         echo "sigmond-rac-switch: it could not record the wish 'off' under $MARK_DIR (is the disk full, or read-only?)."

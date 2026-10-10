@@ -53,7 +53,7 @@ case "$verb" in
                  touch "$HOSTDIR/enabled"
                  [ -e "$HOSTDIR/unit-refuses-to-start" ] || touch "$HOSTDIR/active" ;; esac ;;
     disable) case " $* " in *" sigmond-rac-host.service "*)
-                 rm -f "$HOSTDIR/enabled"
+                 [ -e "$HOSTDIR/unit-stays-enabled" ] || rm -f "$HOSTDIR/enabled"
                  [ -e "$HOSTDIR/unit-refuses-to-stop" ] || rm -f "$HOSTDIR/active" ;; esac ;;
 esac
 """
@@ -165,6 +165,13 @@ def test_a_request_through_the_forced_command_is_read_as_strictly(tmp_path, aske
     assert r.stderr == REFUSAL                   # never a byte of what was asked
 
 
+# The forced command honours no override, so these tests meet this machine's
+# real paths.  As an ordinary user the switch can write none of them; as root it
+# could, so they do not run as root.
+FORCED = pytest.mark.skipif(os.geteuid() == 0, reason="as root the forced command would write this machine's /run/sigmond")
+
+
+@FORCED
 def test_the_forced_command_passes_the_word_in_ssh_original_command(tmp_path):
     # No argument: the word arrives in SSH_ORIGINAL_COMMAND, and in that mode
     # the script honours no override.  It therefore reads this machine's real
@@ -374,6 +381,21 @@ def test_off_that_cannot_record_and_cannot_stop_the_tunnel_says_both_and_exits_4
 
 
 @NOT_ROOT
+def test_off_that_cannot_record_says_so_when_systemd_could_not_disable_the_unit_either(tmp_path):
+    # A root filesystem mounted read-only: systemd stops the unit and cannot
+    # remove its link, so the tunnel would start again at the next boot.  The
+    # answer must not say "disabled".
+    h = Host(tmp_path, enabled=True, active=True, wish="on")
+    (tmp_path / "unit-stays-enabled").touch()
+    r = run_with(h, "off", closed=["marks"])
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert not (tmp_path / "active").exists()                # stopped all the same
+    assert "the tunnel service STAYS ENABLED" in r.stdout and "starts again at the next boot" in r.stdout
+    assert "stopped and disabled the tunnel" not in r.stdout
+    assert "could not record the wish 'off'" in r.stdout
+
+
+@NOT_ROOT
 def test_off_on_a_station_with_no_wish_on_file_reads_off_and_still_says_what_it_could_not_record(tmp_path):
     # A station from before v3.71: the wish reads from the units, so once they
     # stand disabled the state reads off.
@@ -445,14 +467,19 @@ def test_an_on_from_the_timer_or_the_installer_leaves_an_off_on_file_alone(tmp_p
 
 
 def test_an_operators_own_on_turns_an_off_on_as_before(tmp_path):
-    for by in ("host", "anything else"):
-        h = Host(tmp_path / by.replace(" ", "-"), wish="off") if (tmp_path / by.replace(" ", "-")).mkdir() is None else None
+    def host(name):
+        (tmp_path / name).mkdir()
+        return Host(tmp_path / name, wish="off")
+
+    for name, by in (("host", "host"), ("other", "anything else")):
+        h = host(name)
         r = h.run("on", env={"SIGMOND_RAC_BY": by})
         assert r.returncode == 0 and h.wish() == "on", (by, r.stdout, r.stderr)
         assert f"enable --now {UNIT}" in h.changes()
-    h = Host(tmp_path / "vm", wish="off") if (tmp_path / "vm").mkdir() is None else None
+    # A request through the pairing account is the operator's, whatever name it carries.
+    h = host("vm")
     r = h.run("on", env={"SUDO_USER": "sigmond-remote", "SIGMOND_RAC_BY": "timer"})
-    assert h.wish() == "on" and f"enable --now {UNIT}" in h.changes()      # the VM's request is the operator's
+    assert h.wish() == "on" and f"enable --now {UNIT}" in h.changes()
 
 
 @pytest.mark.parametrize("by", ["timer", "install"])
@@ -974,6 +1001,7 @@ def witness(tmp_path, *args, env=None, stdin="left over on stdin\n"):
     return r, (w.read_text().splitlines() if w.exists() else [])
 
 
+@FORCED
 def test_in_forced_mode_no_sigmond_variable_reaches_the_switch_or_a_program_it_starts(tmp_path):
     # sigmond-setup, which the switch starts to register, reads a dozen SIGMOND_
     # variables the switch itself never names: a gateway, a VM id, a port.
@@ -987,6 +1015,7 @@ def test_in_forced_mode_no_sigmond_variable_reaches_the_switch_or_a_program_it_s
     assert not (tmp_path / "run" / "rac-state").exists()     # SIGMOND_RAC_RUN_DIR went with the rest
 
 
+@FORCED
 def test_in_forced_mode_stdin_reads_as_empty_inside_a_child(tmp_path):
     r, seen = witness(tmp_path, env={"SSH_ORIGINAL_COMMAND": "status"})
     stdins = [ln for ln in seen if ln.startswith("STDIN")]
