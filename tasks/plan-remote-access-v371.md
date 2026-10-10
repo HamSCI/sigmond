@@ -9387,30 +9387,43 @@ sigmond tasks/plan-remote-access.md section 5.
 $(cat .git/ATTRIBUTION)"
 ```
 
-### Task 12: build, test, prove on AC0G-ND and bless v3.71 (each external step waits for Michael's go)
+### Task 12: build, test, prove on AC0G-B4 and bless v3.71 (each external step waits for Michael's go)
 
 Nothing here is code. Each step reaches outside the devbox, so each one waits for Michael's explicit go. Every
 station step starts with a claude-bus read and post, and for B4 also a read of `/etc/sigmond/CLAUDE-COORDINATION.md`
 on the VM (with the hyphen).
 
-Three orders bind this task, and each has a reason.
+**Rewritten 2026-10-10, after the final review.** The hardware proof moves from AC0G-ND to AC0G-B4: Michael leaves
+ND early on 2026-10-12 and reflashes B4 at home. ND then takes v3.71 in place (Step 10). The whole-branch review
+and its one fix round also changed what the rigs print and what the proof must show; this text follows the code
+at sigmond 28a5aac and sigmond-appliance c348e21.
+
+Five orders bind this task, and each has a reason.
 
 - **v3.70 first.** `smd update` on a station follows `origin/main`. So nothing of v3.71 reaches `origin/main` of
-  sigmond or sigmond-appliance until AC0G-B4 and AC0G-ND have taken v3.70 (Step 1).
+  sigmond or sigmond-appliance until AC0G-B4 and AC0G-ND have taken v3.70 and v3.70 stands blessed (Step 1).
+  B4's sigmond and hs-uploader follow `origin/main` with no pin since 2026-10-10.
 - **wd30 before any host.** A host that sends a `rac` block to a server that does not know the name gets its whole
   heartbeat quarantined, and looks silent. `deploy-wd30.sh` carries the board, the ingest and the schema from the
   devbox's checkout by rsync, so it needs no push (Step 3).
-- **The bless before the stations in the field.** `pm-align` reads only a blessed release, so B4 and AI6VN
-  receive the host's half after Step 9.
+- **The bless before the stations in the field.** `pm-align` reads only a blessed release, so ND receives the
+  host's half after Step 9.
+- **On a station in the field, the VM before the host.** The new panel names `smd remote on`. A VM that has not
+  yet taken v3.71 lacks that verb.
+- **No host installed before v3.66 aligns to v3.71 without a look.** The panel prints "KEYBOARD WORKS HERE" on
+  every host, and the split console that makes it true arrived in v3.66; `pm-align` does not deliver it. B4 (a
+  reflash), ND and K3LR (v3.69 images) all hold it.
 
-- [ ] **Step 1: Confirm that v3.70 has reached AC0G-B4 and AC0G-ND** (read-only; bus read first).
-  Read the bus and `sigmond/tasks/plan-sink-control-v370.md` Task 10: its Steps 6 and 7 must stand checked. If
-  either station still runs an older release, stop here. Tasks 1 to 11 may sit committed and unpushed for as long
-  as that takes.
+- [ ] **Step 1: Confirm that v3.70 has reached AC0G-B4 and AC0G-ND, and stands blessed** (read-only; bus read
+  first). Read the bus and `sigmond/tasks/plan-sink-control-v370.md` Task 10: its Steps 6 and 7 must stand
+  checked, and the release must show on GitHub. B4 took v3.70 at 00:37Z on 2026-10-10. If ND still runs an older
+  release, stop here. Tasks 1 to 11 may sit committed and unpushed for as long as that takes.
 - [ ] **Step 2: Full suites green** in both repos.
-  `cd /home/mjh/hamsci/repos/sigmond && .venv/bin/pytest -q` must print
-  `3728 passed, 1 warning, 65 subtests passed`. In sigmond-appliance, the loop of Task 10 Step 7 plus
-  `bash test-instructions-remote.sh | tail -1` must print each test's PASS line.
+  `cd /home/mjh/hamsci/repos/sigmond && .venv/bin/pytest -q` must print the count that the ledger's last entry
+  names: `3975 passed, 1 warning, 65 subtests passed` at the close of the final review, and more once the
+  guest-agent plan has landed. In sigmond-appliance, each of these must print its PASS line:
+  `test-panel-remote.sh` (129 passed), `test-remote-rig-lines.sh`, `test-offline-debs.sh`,
+  `test-instructions-remote.sh`, `test-wifi-boot.sh` (108 passed), `test-bless-instructions.sh` (195 passed).
 - [ ] **Step 3: Teach wd30 the `rac` block** (bus post first; wd30 belongs to Michael).
   From the devbox: `cd /home/mjh/hamsci/repos/sigmond && server/heartbeat/deploy-wd30.sh`. It builds the roster
   from `ops/fleet.toml`, rsyncs `ingest.py`, `fleetboard.py`, `roster_check.py` and `heartbeat_schema.py` to
@@ -9420,85 +9433,122 @@ Three orders bind this task, and each has a reason.
 - [ ] **Step 4: Push** sigmond and sigmond-appliance `main` (Michael's go; only after Step 1). The golden VM clones
   each repo's latest `main` and fails when one sits behind its remote.
 - [ ] **Step 5: Run the pre-tag adversarial hunt**, as before v3.69 and v3.70. Look for anything that breaks the
-  image build, a first boot, the rigs, or an existing station on `smd update`. Three questions this release adds:
+  image build, a first boot, the rigs, or an existing station on `smd update`. Four questions this release adds:
   does a v3.70 host that takes `smd update` in its VM keep everything it had (the VM gains `smd remote`, which
-  says it holds no pairing; nothing else may change)? Does the pm-align that B4 and AI6VN hold accept the v3.71
-  wizard and firstboot (Task 6's frozen list says yes; read the pm-align each host actually holds, to be sure)?
-  And does any path register a station whose owner said No? Then tag `v3.71` in sigmond-appliance
-  (`git tag -a v3.71`, push the tag) and build on the rig (root@192.168.1.182): pull both checkouts,
-  `./sync-rig.sh`, `./build-golden-vm.sh`, `./build-usb-v3.sh --release`. `sync-rig.sh` must print
-  `NEW    offline-debs/sudo_…_amd64.deb`, and the build's `offline-debs:` line must count one package more than
-  v3.70's build did.
+  says it holds no pairing; nothing else may change)? Does the pm-align that B4 and ND hold accept the v3.71
+  wizard and firstboot (Task 6's frozen list says yes, and the re-review extracted all ten heredocs with a copy
+  of the reader; read the pm-align each host actually holds, to be sure)? Does any path register a station
+  whose owner said No? And does the release carry the guest-agent plan
+  (`tasks/plan-guest-agent-requests.md`)? Tag only once Michael has said whether v3.71 waits for it.
+  Then tag `v3.71` in sigmond-appliance (`git tag -a v3.71`, push the tag) and build on the rig
+  (root@192.168.1.182): pull both checkouts, `./sync-rig.sh`, `./build-golden-vm.sh`,
+  `./build-usb-v3.sh --release`. `sync-rig.sh` must print `NEW    offline-debs/sudo_…_amd64.deb`, and the build's
+  `offline-debs:` line must count one package more than v3.70's build did.
 - [ ] **Step 6: Nested test** — `./test-nested-v3.sh` on the rig. Phase D must print
-  `wizard answers: 12 (remote-access question: not asked)`, then these six lines, each ending in `✓`
+  `wizard answers: 12 (remote-access question: not asked)`, then these seven lines, each ending in `✓`
   (the last one names in brackets how many tries it took):
   `wish on, not registered, retry timer armed, sudo and the pairing in place`;
   `status answered; a fourth word, extra words, no word and a second key all refused`;
-  `registered through the stand-in: RAC 599, six channels declared, name and key sent and nothing else`;
+  `registered through the stand-in: RAC 599, six channels declared, name N0CALL_T1 and the host's key sent and nothing else`;
   `off held across the reboot, and the panel calls it the operator's choice`;
+  `the pairing stands recorded as paired, and the panel names the decoder VM and smd remote on`;
   `on enabled the tunnel and the relays again`;
   `the host re-asserted the pairing after its sshd key changed`. It must then print
   `PHASE D PASS — NESTED TEST COMPLETE`, and must not print `REMOTE ACCESS CHECKS NOT EVALUATED`.
-  The remote-access checks have never met a nest before this run (Task 10). When one of them fails, decide first
-  whether the product or the rig holds the fault. Fix a rig fault in sigmond-appliance past the tag, as v3.70's
-  run did; a product fault means a new build. This step also settles three things the plan could not verify:
-  that sshd on a Proxmox host honours the pairing's key line, that sudo's dependencies all sit on stock Proxmox,
-  and that the path unit fires when a key file gets replaced.
+  The remote-access checks have never met a nest before this run. When one of them fails, decide first whether
+  the product or the rig holds the fault. Fix a rig fault in sigmond-appliance past the tag, as v3.70's run did;
+  a product fault means a new build. **Watch these first, in this order**, because no test on the devbox could
+  settle them:
+  1. Check 2a. It expects ssh with `-tt` to end without the switch's answer when sshd refuses the terminal. That
+     reading of OpenSSH has never run.
+  2. That sudo installs from the stick, and that `sudo -l` prints the form check 1b reads.
+  3. Check 4's three new tokens (`PAIRREC`, `VMCMD`, `HOSTCMD`) and check 5's key reader. A pairing re-check that
+     fails by chance records `not-paired` until its next run; the rig then stops at check 4. Read the pairing's
+     journal before calling that a product fault.
+  4. Check 1a's count of journal lines from the retry service (`LogLevelMax=notice` on Proxmox).
+  5. That the decoder VM starts by itself after the nested host reboots, and that the run fits its fuse
+     (3600 s nested, 2400 s for the update rig).
+  6. That `sigmond-rac-host.service` may read `failed` while no gateway answers, and no check mistakes that.
+  This step also settles three things the plan could not verify: that sshd on a Proxmox host honours the
+  pairing's key line, that sudo's dependencies all sit on stock Proxmox, and that the path unit fires when a key
+  file gets replaced.
 - [ ] **Step 7: Update test** — `./test-update-v3.sh --image sigmond-appliance-v3.70-<date>-release.img`, with the
   blessed v3.70 image's own file name. It rolls blessed v3.70 forward to `main` and back. PHASE E, E-bis, E-ter,
   F, G and G-bis must each print their PASS line. E-ter's line reads
   `PHASE E-ter PASS — a host from <image> pairs with one command, and its owner's No still stands`. Read one more
   line of E-ter: `the base host carries no sudo: the pairing must fetch it`. It confirms what ruling 9 assumed. If
   it reads `already carries sudo` instead, say so to Michael: the offline package and the apt step then guard
-  against nothing.
-- [ ] **Step 8: Reflash AC0G-ND with the v3.71 image** — the hardware proof of spec phases 1 to 3 and 5 (bus
-  first). Michael flashes and installs; follow `INSTALL.md` word for word and mark every place where the text and
-  the machine disagree. Check, in this order:
+  against nothing. Watch two things here: E-ter's `scp` needs the VM's host key pinned on the nested host, and
+  Phase G's doctor check runs after E-ter has paired.
+- [ ] **Step 8: Reflash AC0G-B4 with the v3.71 image** — the hardware proof of spec phases 1 to 3 and 5 (bus
+  first, and B4's coordination doc). Michael flashes and installs at home, on or after 2026-10-12; follow
+  `INSTALL.md` word for word and mark every place where the text and the machine disagree. B4 serves as the test
+  bench: a fault found here gets filed for the next build, never patched in place. Check, in this order:
   1. The wizard asks whether this is a DASI station and asks nothing about remote access. It prints the three
      `smd remote` commands and says what registering sends.
   2. The closing summary's `RAC:` line reads `on`, with `6 of 6 channels`, and its `Switch:` line reads
-     `paired: in the decoder VM, smd remote on / off / status`.
-  3. After the power cycle the console panel reads `Remote access   ON — RAC <n> on <gateway>`.
+     `paired: in the decoder VM, smd remote on / off / status`. On the host, `pm-align --status` prints a
+     `pairing (/etc/sigmond-appliance/rac-pairing): paired <UTC>` line.
+  3. After the power cycle the console panel reads `Remote access   ON — RAC <n> on <gateway>`, and its
+     instruction names the decoder VM and `smd remote off`.
   4. A login to the VM prints the banner's line, `Remote access: on (as the host reported …)`.
   5. `smd remote status` in the VM answers `Remote access: on`.
-  6. **From ND's own network, never through the tunnel**, type `smd remote off`. It must answer
-     `Remote access: off` and exit 0. The gateway must then show none of ND's six channels, and the fleet's reach
-     to ND through the gateway must fail. The panel must read `OFF, by the operator's choice … — not a fault`.
-     Within ten minutes the fleet board's row for ND's host must show `off` in its `rac` column and the tag
+  6. **From B4's own network, never through the tunnel**, type `smd remote off`. It must answer
+     `Remote access: off` and exit 0. The gateway must then show none of B4's six channels, and the fleet's reach
+     to B4 through the gateway must fail. The panel must read `OFF, by the operator's choice … — not a fault`.
+     Within ten minutes the fleet board's row for B4's host must show `off` in its `rac` column and the tag
      `remote access off by the operator`, with the row still green.
   7. Power-cycle the station. Remote access must still read off: panel, banner and `smd remote status`.
   8. `smd remote on`. It must answer `Remote access: on` with `6 of 6 channels`, and the fleet's reach must work
      again.
-  9. Run the identity restore for ND, if this reflash calls for one. It replaces the host's sshd key. Once
-     the host's sshd presents the new key (the restore's own restart, or a reboot), `smd remote status` must
-     answer within two minutes, and nobody types a pairing command: the pairing re-asserted itself. Note
-     whether `smd remote status` failed in between, and for how long (see "What this plan could not verify").
-     This is the AC0G-B4 fault of 2026-10-01, met on hardware.
-  Record each of the nine in spec `tasks/plan-remote-access.md`, under a new heading "v3.71 hardware proof".
+  9. **Once, through the tunnel**, with Michael at the station: from another network, log in through the gateway
+     and type `smd remote off`. The session may end before the answer arrives, because the tunnel closes under
+     it. The station must end closed all the same: the panel reads `OFF, by the operator's choice`, and the
+     gateway shows none of the six channels. Then type `smd remote on` at the station. The final review asked
+     for this: no test proves what an `off` does to the very connection that carries it.
+  10. Run the identity restore for B4, if this reflash calls for one. It replaces the host's sshd key. Once the
+     host's sshd presents the new key (the restore's own restart, or a reboot), `smd remote status` must answer
+     within two minutes, and nobody types a pairing command: the pairing re-asserted itself. Note whether
+     `smd remote status` failed in between, and for how long (see "What this plan could not verify"). If the
+     changed-key message stays, `systemctl restart ssh` on the host and `sigmond-setup --pair-vm` clear it; note
+     whether B4 needed that. This is the AC0G-B4 fault of 2026-10-01, met on hardware.
+  11. Read the journals of `sigmond-rac-register` and `sigmond-rac-host` over one hour with the gateway
+     reachable, and over ten minutes with the uplink pulled. The retry service must write one line for the
+     condition, never one per try (rig check 1a proved that in the nest). Record what the tunnel's own program
+     writes while the gateway stays away; nobody has read that on hardware.
+  Record each of the eleven in spec `tasks/plan-remote-access.md`, under a new heading "v3.71 hardware proof".
 - [ ] **Step 9: The instructions, then the bless.** Edit `INSTALL.md` in sigmond-appliance: keep
   `**Status:** current`, and make the `**Verified against:**` line name `sigmond-appliance v3.71`, the image's
-  commit and sha256, the nested run and the AC0G-ND install of Step 8. Bring `docs/install-page.html` level with
+  commit and sha256, the nested run and the AC0G-B4 install of Step 8. Bring `docs/install-page.html` level with
   it: the image's exact file name wherever a file name stands, and the footer's version and date. Correct every
   place Step 8 marked. In sigmond, set the `Verified against` line of `docs/operator/remote-access.md` to the
   hardware run and drop its sentence "A hardware install has not yet confirmed it." Commit both, push both
   (Michael's go). Then `./bless-release.sh v3.71` on the rig: read its gates, gate 7 above all, and Michael
-  runs `--apply` at a terminal there.
-- [ ] **Step 10: Bring AC0G-B4's host and AI6VN's host to v3.71** (after the bless; bus first; for B4 the
-  coordination doc first; AI6VN needs Rob's go as well). On each station:
-  1. In the VM, bring sigmond to v3.71 the way Michael chooses for that station (`smd align` to the blessed
-     release, or `smd update --apply`). `smd remote status` then exits 5 and names `sigmond-setup --pair-vm`:
-     the VM holds no pairing yet.
+  runs `--apply` at a terminal there. The release note names, for stations in the field: the new account
+  `sigmond-remote` on the host, the `sudo` package it installs, and the keyboard line on hosts older than v3.66.
+- [ ] **Step 10: Bring AC0G-ND to v3.71 in place** (after the bless; bus first). K3LR follows the same steps
+  when Michael says so. AI6VN waits for Rob: it serves no production, and he will likely reflash it. On the
+  station:
+  1. In the VM, bring sigmond to v3.71. ND and B4 carry a pin on every component from `smd align`, and
+     `smd update` there says "host is current". Either `smd align` to the blessed release, or release the pins
+     of the components that v3.71 moves and run `smd update --apply`, as B4 took v3.70. Never `--unpin`: it
+     releases every component. `smd remote status` then exits 5 and names `sigmond-setup --pair-vm`: the VM
+     holds no pairing yet.
   2. On the Proxmox host, read the plan first: `pm-align`. Then `pm-align --apply`. The copy that runs is the one
      the host already held, so it prints no `pairing:` line. It installs the v3.71 wizard, panel and heartbeat,
      and a new copy of itself.
-  3. On the host: `sigmond-setup --pair-vm`. Expected: `paired: the decoder VM can run smd remote on, smd remote
-     off and smd remote status`. A host whose guest agent stands deaf cannot pair; clear the agent first (one
-     0xFF byte down its socket, as the v3.70 plan's carry list describes). A host without sudo fetches it here.
-  4. In the VM: `smd remote status`. On B4 and AI6VN, whose owners said Yes, it must read `Remote access: on`,
-     and nothing about the tunnel may have changed: same RAC number, same channels, no restart of
-     `sigmond-rac-host` (`systemctl show sigmond-rac-host -p ActiveEnterTimestamp` before and after).
-  5. Within ten minutes the fleet board's row for that host shows `ok` in its `rac` column.
-  Do not type `smd remote off` on either station as a test. ND proved it; these two carry other work.
+  3. Wait for the guest agent. ND's panel (v3.69) deafens the agent again within about half an hour of every
+     reset, so expect it deaf: check with `qm agent 100 ping` before the alignment, and note the answer. When
+     v3.71 carries the guest-agent plan, the new panel resets the agent at its next refresh, within five
+     minutes; watch the ping come back with nobody touching it, and record the time. That is the field proof of that plan. When v3.71 does not carry it, send the reset by hand (one 0xFF
+     byte down the agent's socket, as the v3.70 plan's carry list describes).
+  4. On the host: `sigmond-setup --pair-vm`. Expected: `paired: the decoder VM can run smd remote on, smd remote
+     off and smd remote status`. A host without sudo fetches it here.
+  5. In the VM: `smd remote status`. On ND, whose owner said Yes, it must read `Remote access: on`, and nothing
+     about the tunnel may have changed: same RAC number, same channels, no restart of `sigmond-rac-host`
+     (`systemctl show sigmond-rac-host -p ActiveEnterTimestamp` before and after).
+  6. Within ten minutes the fleet board's row for that host shows `ok` in its `rac` column.
+  Do not type `smd remote off` on ND as a test. B4 proved it, and nobody stands at ND to turn it on again.
 - [ ] **Step 11: Republish and record.** Rebuild the shared page "Installing a Sigmond Station"
   (https://claude.ai/artifact/WvLUettP4ViRFYu6sftctf) from the blessed `INSTALL.md` and
   `docs/install-page.html`. Set the Status line of `sigmond/tasks/plan-remote-access.md` to what shipped and
@@ -9528,7 +9578,13 @@ Three orders bind this task, and each has a reason.
   again, split the host files out and teach both delivery paths about them in one release.
 - **`sigmond-setup --rac-upgrade`** still reruns the whole wizard to climb to a better gateway tier. With
   registration alone in hand, it could register afresh and ask nothing.
-- **The other v3.71 items of the v3.70 plan's carry list** stay their own work: the guest agent's reset byte and
-  the test that no guest-agent argument holds a non-ASCII byte, the agent's 128 MB cap, the RX888 alarm, the udev
-  rules that `smd align` leaves behind. This plan obeys the first two for its own code and fixes none of them
-  for the rest.
+- **The other v3.71 items of the v3.70 plan's carry list** stay their own work. The guest agent's reset byte
+  and the test that no guest-agent argument holds a non-ASCII byte have their own design since 2026-10-10:
+  `tasks/plan-guest-agent-requests.md`. The agent's 128 MB cap, the RX888 alarm and the udev rules that
+  `smd align` leaves behind have none yet. This plan obeys the first two for its own code and fixes none of
+  them for the rest.
+- **Found by the final review, and carried** (the ledger holds each ruling): the wizard's closing summary still
+  prints `ssh sigmond@<VM's own address>` as the way in "from other machines", which reaches nothing on a
+  station with the private link; the panel's keyboard line on a host installed before v3.66; a pairing re-check
+  that fails by chance records `not-paired` until its next run, and three sentences of the appliance documents
+  then name the wrong cause; a unit file that a full disk cut short stays cut until a later run rewrites it.
