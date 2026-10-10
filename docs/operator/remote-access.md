@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 007bf72 on 2026-10-10 — the switch script, registration and pairing in `scripts/proxmox/sigmond-wizard.sh`, `pm-align.py`, `lib/sigmond/commands/remote.py`, the console panel and the split console in sigmond-appliance `firstboot-v3.sh`, and their tests. A hardware install has not yet confirmed it.
+> **Verified against:** sigmond ddaefd6 on 2026-10-10 — the switch script, registration and pairing in `scripts/proxmox/sigmond-wizard.sh`, `pm-align.py`, `lib/sigmond/commands/remote.py`, the console panel and the split console in sigmond-appliance `firstboot-v3.sh`, and their tests. A hardware install has not yet confirmed it.
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, how the operator switches it, how the admin connects
 
 Every Sigmond station registers for remote access when it installs, and its

@@ -35,7 +35,9 @@
 #                              the tunnel up if its operator still wants it up
 #              --pair-vm       pair the decoder VM with this host, so that
 #                              `smd remote on|off|status` works there; also
-#                              re-asserts a pairing that stands
+#                              re-asserts a pairing that stands.  It records
+#                              its outcome in /etc/sigmond-appliance/rac-pairing,
+#                              which the console panel reads
 #              --rac-upgrade   climb to a more secure gateway tier if one
 #                              has since come up (see the RAC ladder below)
 set -u
