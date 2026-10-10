@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond 6406025 on 2026-10-10 — remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -21,13 +21,14 @@ This page is that five minutes. Words you don't recognise are in the
 Four web pages, from any computer on the same network as the station. None
 need a login except Proxmox. You do not have to look at all four every week —
 step 1 of [the weekly check](#the-weekly-five-minute-check) covers most of it —
-but these are where "is it actually working?" is answered with your own eyes.
+but these are where "is it actually working?" is answered with your own eyes. The
+console panel prints these addresses for your station.
 
 | Window | Address | What "good" looks like |
 |---|---|---|
-| **Live receiver** (ka9q-web) | `http://<VM address>:8081` | A waterfall with **signals in it** — bright horizontal traces, not a flat empty wash. This is the one page that proves the antenna, the [RX888](glossary.md) and [radiod](glossary.md) are all doing their jobs ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)). |
-| **Timing dashboard** (hf-timestd) | `http://<VM address>:8000` | The page loads and its health/metrology panels show **recent** timestamps and a current timing tier — the same tier `smd status` prints. (`hf-timestd/docs/REQUIREMENTS.md` `HFT-F-050`: a FastAPI dashboard on port 8000 serving station/health/metrology/stability/propagation routes.) |
-| **Magnetometer dashboard** (gmag-webui) — only if you have an RM3100 | `http://<VM address>:8082` | A trace that **moves**. Geomagnetic field readings always wiggle; a dead-flat unchanging line is a stuck sensor, not a quiet day. Report it. (Port: `lib/sigmond/gmag_webui.py`, `PORT = 8082`.) |
+| **Live receiver** (ka9q-web) | `http://<host address>:8081` | A waterfall with **signals in it** — bright horizontal traces, not a flat empty wash. This is the one page that proves the antenna, the [RX888](glossary.md) and [radiod](glossary.md) are all doing their jobs ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)). |
+| **Timing dashboard** (hf-timestd) | `http://<host address>:8000` | The page loads and its health/metrology panels show **recent** timestamps and a current timing tier — the same tier `smd status` prints. (`hf-timestd/docs/REQUIREMENTS.md` `HFT-F-050`: a FastAPI dashboard on port 8000 serving station/health/metrology/stability/propagation routes.) |
+| **Magnetometer dashboard** (gmag-webui) — only if you have an RM3100 | `http://<host address>:8082` | A trace that **moves**. Geomagnetic field readings always wiggle; a dead-flat unchanging line is a stuck sensor, not a quiet day. Report it. (Port: `lib/sigmond/gmag_webui.py`, `PORT = 8082`.) |
 | **Proxmox** (the `[host]`) | `https://<host address>:8006` | Your one [decoder VM](glossary.md) — the one named after your [designator](glossary.md) — shows **running**. That is all you ever need Proxmox for. |
 
 Ports 8081, 8000 and 8082 were confirmed listening on AC0G/B4 on 2026-08-23
@@ -49,7 +50,7 @@ yourself up on wsprnet and pskreporter, there is nothing to type on the station
 — and **step 4 is `smd doctor`**, which you run only when one of the first three
 looked wrong. So the block below is steps 1 and 3, which is the whole of a
 normal week. Run it on the **decoder VM** — `[VM]`, i.e. after
-`ssh hamsci@<VM address>`:
+`ssh -p 2222 hamsci@<host address>`:
 
 ```bash
 smd status
@@ -701,7 +702,7 @@ changing one does not change the other:
 passwd
 ```
 
-`[VM]` — on the decoder VM, after `ssh hamsci@<VM address>`:
+`[VM]` — on the decoder VM, after `ssh -p 2222 hamsci@<host address>`:
 
 ```bash
 passwd

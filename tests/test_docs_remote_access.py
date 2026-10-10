@@ -180,9 +180,100 @@ def test_the_fleet_boards_tags_on_the_page_are_the_boards():
     page = flat(PAGE)
     for tag in ("remote access off by the operator",
                 "remote access off: never registered",
-                "remote access was off by the operator at its last heartbeat"):
+                "remote access was off by the operator at its last heartbeat",
+                "remote access was off (never registered) at its last heartbeat"):
         assert tag in page, tag
         assert tag in code, tag
+
+
+def test_each_gateway_base_belongs_to_its_channel():
+    # The wizard's RAC_BASE_<NAME>=<base> assignments, read out and set beside
+    # the row the page gives for that channel.
+    row_of = {"VMSSH": "**VM ssh**", "VMWEB": "**VM web**", "VMSTN": "**station pages**",
+              "VMGMAG": "**magnetometer**", "HSSH": "**host ssh**", "HUI": "**host UI**"}
+    bases = dict(re.findall(r"\bRAC_BASE_(\w+)=(\d+)", WIZARD))
+    assert set(row_of) <= set(bases), sorted(bases)
+    rows = {line.split("|")[1].strip(): line for line in PAGE.splitlines() if line.startswith("| **")}
+    for name, label in row_of.items():
+        assert f"{bases[name]} + your RAC number" in rows[label], (name, bases[name], rows[label])
+
+
+def test_the_tiers_the_page_names_are_the_wizards_labels():
+    page = flat(PAGE)
+    for label in ("HamSCI secure (TOFU)", "wsprdaemon (secure)",
+                  "HamSCI unsecured (direct)", "wsprdaemon (UNSECURED)"):
+        assert label in page, label
+        assert f"{label}|" in WIZARD, label
+
+
+def test_the_panel_figures_the_page_names_are_the_panels():
+    if not FIRSTBOOT.exists():
+        pytest.skip("no sigmond-appliance checkout beside this one")
+    # "five minutes later": the panel's refresh timer.
+    m = re.search(r"sigmond-issue\.timer <<'ITEOF'.*?OnUnitActiveSec=(\d+)min", FIRSTBOOT_TEXT, re.S)
+    assert m, "the panel's refresh timer is gone"
+    word = {1: "one", 2: "two", 3: "three", 5: "five", 10: "ten", 15: "fifteen"}[int(m.group(1))]
+    assert f"`STATE NOT READ` {word} minutes later" in flat(PAGE)
+    # The ssh command the panel prints for the VM is the one the page gives.
+    panel_ports = set(re.findall(r"ssh -p (\d+) sigmond@\$\{HOSTIP", FIRSTBOOT_TEXT))
+    assert panel_ports == set(re.findall(r"ssh -p (\d+) sigmond@<host address>", PAGE)) != set()
+    # Beside the host login the panel says which password to use.
+    assert "Logins   host  root / $PWLINE" in FIRSTBOOT_TEXT
+    assert 'PWLINE="the password you set at install"' in FIRSTBOOT_TEXT
+    assert "the password you set at install" in flat(PAGE)
+
+
+def _address_contexts(text: str):
+    """(sentence or table row, place) for every http:// URL or ssh command
+    that targets `<VM address>`."""
+    pattern = re.compile(r"(?:http://|\bssh\b[^`\n]*@)<VM address>")
+    paragraph: list = []
+    found = []
+
+    def close():
+        if paragraph:
+            for sentence in re.split(r"(?<=[.!?])\s+", " ".join(paragraph)):
+                if pattern.search(sentence):
+                    found.append(sentence)
+            paragraph.clear()
+
+    for line in text.splitlines():
+        if line.startswith("|"):
+            close()
+            if pattern.search(line):
+                found.append(line)
+        elif line.strip():
+            paragraph.append(line.strip())
+        else:
+            close()
+    close()
+    return found
+
+
+def test_no_operator_page_sends_the_reader_to_an_address_that_reaches_nothing():
+    # On a station with the private link the VM holds 10.99.0.2, which nothing
+    # on the operator's network reaches; the host relays the VM's ports at its
+    # own address.  A page may name `<VM address>` as the target of a URL or an
+    # ssh command only where the same sentence or table row names the old layout.
+    bad = []
+    for md in sorted(DOCS.glob("*.md")):
+        for context in _address_contexts(md.read_text()):
+            if "old layout" not in context:
+                bad.append(f"{md.name}: {context[:110]}")
+    assert not bad, "\n".join(bad)
+
+
+def test_the_relays_the_pages_name_are_relays_the_host_runs():
+    # The pages send web visitors to the host's ports 8081, 8000 and 8082 and
+    # ssh to port 2222; each is a DNAT to the same port on the VM (ssh to 22).
+    if not FIRSTBOOT.exists():
+        pytest.skip("no sigmond-appliance checkout beside this one")
+    for port, target in (("8081", "8081"), ("8000", "8000"), ("8082", "8082"), ("2222", "22")):
+        assert (f"--dport {port} -j DNAT --to-destination ${{MGMT_VM}}:{target}") in FIRSTBOOT_TEXT, port
+    for page in ("README.md", "day-2.md", "troubleshooting.md"):
+        text = (DOCS / page).read_text()
+        for port in re.findall(r"http://<host address>:(\d+)", text):
+            assert port in ("8081", "8000", "8082"), (page, port)
 
 
 def test_the_page_promises_no_speed_the_code_does_not_keep():

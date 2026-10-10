@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; walk-through fixes (live dasi002 + b4) as of 4aec0c2
+> **Verified against:** sigmond 6406025 on 2026-10-10 — remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; walk-through fixes (live dasi002 + b4) as of 4aec0c2
 > **Canonical for:** the operator's table of contents
 
 You are hosting a *station*: one small computer that listens to the whole
@@ -53,7 +53,13 @@ One physical computer runs **two** systems. This trips everybody up once:
 | Tag | What it is | Its name | You reach it by |
 |---|---|---|---|
 | `[host]` | The **Proxmox host** — the bare machine, the thing with the power button and the USB ports | `<designator>-PM`, e.g. `AC0G-B4-PM` | `ssh root@<host address>`, or a browser at `https://<host address>:8006` |
-| `[VM]` | The **decoder VM** — a virtual machine running inside the host; the radio and every recorder live here | `<designator>`, e.g. `AC0G-B4` | `ssh -p 2222 sigmond@<host address>` (the host relays port 2222 to the VM; `hamsci@` works too) |
+| `[VM]` | The **decoder VM** — a virtual machine running inside the host; the radio and every recorder live here | `<designator>`, e.g. `AC0G-B4` | `ssh -p 2222 sigmond@<host address>` (the host relays port 2222 to the VM; `hamsci@` works too); on a station with the old layout: `ssh sigmond@<VM address>` |
+
+The old layout puts the VM on your own network, with no private link to its host.
+On a station with the old layout, you use the VM's own address directly, and the
+host forwards nothing on ports 2222, 8081, 8000 and 8082.
+[remote-access.md §8](remote-access.md#8-a-station-installed-before-v371) shows
+how to tell which layout your station has.
 
 The *designator* is the station name you give the setup wizard, which names the
 VM after it and adds `-PM` for the host (source:
@@ -92,10 +98,11 @@ active, ask. (`smd status` lists only *[enabled](glossary.md)* clients, so a
 client that is *[installed](glossary.md)* and deliberately switched off shows
 nothing and that is correct — `smd component list` is the command that shows
 both, see [day-2.md §1](day-2.md#installed-enabled-shown).)
-Then the web pages, from any computer on your network: `http://<VM address>:8081` (live
-receiver), `http://<VM address>:8000` (timing dashboard) and
-`http://<VM address>:8082` (magnetometer dashboard, if you have one) — ports
-confirmed live on AC0G/B4, 2026-08-23.
+Then the web pages, from any computer on your network: `http://<host address>:8081` (live
+receiver), `http://<host address>:8000` (timing dashboard) and
+`http://<host address>:8082` (magnetometer dashboard, if you have one) — ports
+confirmed live on AC0G/B4, 2026-08-23. The console panel prints these addresses for your
+station.
 
 ## Getting help — what to send
 

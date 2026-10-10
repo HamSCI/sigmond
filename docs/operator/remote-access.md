@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 0340629 on 2026-10-10 — the switch script, registration and pairing in `scripts/proxmox/sigmond-wizard.sh`, `pm-align.py`, `lib/sigmond/commands/remote.py`, the console panel in sigmond-appliance `firstboot-v3.sh`, and their tests. A hardware install has not yet confirmed it.
+> **Verified against:** sigmond 6406025 on 2026-10-10 — the switch script, registration and pairing in `scripts/proxmox/sigmond-wizard.sh`, `pm-align.py`, `lib/sigmond/commands/remote.py`, the console panel in sigmond-appliance `firstboot-v3.sh`, and their tests. A hardware install has not yet confirmed it.
 > **Canonical for:** remote access (RAC) — what it is, what it exposes, how the operator switches it, how the admin connects
 
 Every Sigmond station registers for remote access when it installs, and its
@@ -51,12 +51,14 @@ That direction is the whole point:
 
 Concretely: a small program called `frpc` runs on the **Proxmox host** and keeps
 one connection open to the gateway (source: `/etc/sigmond/frpc-host.toml` on the
-`[host]`). On the wsprdaemon gateway's secure tier, TLS protects that connection,
-and the host checks the gateway against a certificate authority pinned into the
-image at `/etc/sigmond/frps-ca.crt`. The other tiers weaken that. A DASI
-station's secure HamSCI tier encrypts without that check. The two unsecured
-tiers carry no TLS at all. `smd remote status`, the console panel and the
-install summary name the tier your station got.
+`[host]`). Your station tries gateways in order, best first. Each stop is a
+tier, and `smd remote status` names the one you got. The console panel and the
+install summary show it as well while the tunnel is up. On the wsprdaemon gateway's secure tier,
+`wsprdaemon (secure)`, TLS protects the connection, and the host checks the
+gateway against a certificate authority pinned into the image at
+`/etc/sigmond/frps-ca.crt`. A DASI station's `HamSCI secure (TOFU)` tier
+encrypts without that check. The unsecured tiers (`HamSCI unsecured (direct)`
+and `wsprdaemon (UNSECURED)`) carry no TLS.
 
 ### It runs on the host, not on the VM
 
@@ -172,8 +174,9 @@ at `/root/sigmond-setup-summary.txt` on the `[host]`.
 ## 4. The switch: off, on, status
 
 Everything in this section runs in the decoder `[VM]`. From another computer on
-your network, log in with `ssh -p 2222 sigmond@<host address>`. The console panel
-prints that command with your station's address, and lists the logins below it.
+your network, log in with `ssh -p 2222 sigmond@<host address>` (on a station with
+the old layout: `ssh sigmond@<VM address>`). The console panel prints that command
+with your station's address, and lists the logins below it.
 
 **See the state** — `[VM]`:
 
@@ -265,7 +268,8 @@ time limit: it stays on until you turn it off.
     way to close it: `smd remote off` once more.
   - `off — this station has not registered for it` means that its owner
     declined remote access before v3.71, or that the station never reached a
-    gateway. §8 explains. `smd remote on` registers the station.
+    gateway. §8 explains. `smd remote on` tries to register the station; if no
+    gateway answers, the host tries again every 10 minutes (§3).
   - Each of the three `WANTED ON` lines gives its next step below it.
   - `STATE NOT READ` means the switch gave no fresh answer. The line below it
     gives the command that asks the switch directly. In the VM,
@@ -282,6 +286,8 @@ time limit: it stays on until you turn it off.
   "remote access off by the operator". A station that never registered carries
   "remote access off: never registered" instead. When a station has gone silent,
   its tag reads "remote access was off by the operator at its last heartbeat".
+  A silent station that never registered reads "remote access was off (never
+  registered) at its last heartbeat".
   Your admin sees a decision, not a station to chase. The board hears from your
   station only when it sends status heartbeats; the wizard asks about them.
 
@@ -303,7 +309,8 @@ its own ssh key.
 **From the host.** `sigmond-setup --rac-off` and `sigmond-setup --rac-on` on the
 `[host]` run the same switch and do the same thing. Reach the `[host]` from
 another computer with `ssh root@<host address>`. The console panel prints that
-command and the login.
+command and, beside the login `root`, says which password to use: `the password
+you set at install`, or the image default with a warning to change it.
 
 **`smd admin rac` is a different thing.** Those verbs manage a tunnel inside
 the VM, for a station that has no Proxmox host. On your station they report
@@ -353,10 +360,10 @@ Plainly:
   *through the tunnel*. (An admin who logs in is then on your LAN like any
   other machine in the house — that follows from the shell in the bullet above,
   not from the tunnel.)
-- **Nothing about it is public.** The gateway keeps the channel ports private.
-  Only an administrator of the gateway can publish a VM channel, and a host
-  channel stays private (§2). The station is not listed anywhere a stranger can
-  browse.
+- **Nothing about it is public unless a gateway administrator publishes it.**
+  The gateway keeps the channel ports private. An administrator can publish a VM
+  channel on purpose; a host channel stays private (§2). The station is not
+  listed anywhere a stranger can browse.
 - **It is not needed to produce or upload data.** Every upload path works with
   it off.
 - **It is yours to end.** `smd remote off` stops it now, and it stays off until
@@ -403,10 +410,11 @@ Read the second line of the answer; it begins one of three ways.
 cover most cases:
 
 - *"this VM holds no pairing with its Proxmox host"* — the two machines have not
-  paired; §8 gives the steps. Until then the host's own switch works, whatever
-  the host's version: type `sigmond-setup --rac-off` or `sigmond-setup --rac-on`
-  on the `[host]`. The message also names `sigmond-setup --pair-vm`, and says
-  that command needs the host at v3.71 or later.
+  paired; §8 gives the steps. Until then the host's own switch turns an existing
+  registration off and on, whatever the host's version: type
+  `sigmond-setup --rac-off` or `sigmond-setup --rac-on` on the `[host]`. The
+  message also names `sigmond-setup --pair-vm`, and says that command needs the
+  host at v3.71 or later.
 - *"shows an sshd key this VM was not paired with"* — the host's ssh key
   changed. A host at v3.71 pairs this VM again when its sshd key file changes.
   If the message stays, run `sigmond-setup --pair-vm` on the `[host]`.
@@ -430,8 +438,8 @@ Two more cases:
 Such a station keeps the answer its owner gave the old wizard. If the owner said
 Yes and the station registered, remote access stays on. If the owner said No, or
 the registration failed, it stays off, and the station registers only when its
-owner types `smd remote on` (or `sigmond-setup --rac-on` on the `[host]` at
-v3.71).
+owner types `smd remote on` (or, on a `[host]` that runs v3.71,
+`sigmond-setup --rac-on`).
 
 First find out which layout your station has. Look at the `Decoder VM` line of
 the console panel. A station with the private link shows `10.99.0.2` and
@@ -446,8 +454,8 @@ On a station with the private link, the two machines must pair once before
    once your fleet admin says a release is out
    ([day-2.md](day-2.md#updates--who-decides-and-what-you-run)).
 2. Your fleet admin updates the host to v3.71 with the admin's own tool,
-   `pm-align`, which brings a Proxmox host forward to the latest blessed release
-   in place. That step pairs the two machines.
+   `pm-align`, which updates a Proxmox host to the newest released image without
+   a reinstall. That step pairs the two machines.
 3. `smd remote status` in the `[VM]` now answers.
 
 Between steps 1 and 2, `smd remote` in the VM answers with the not-paired
@@ -464,6 +472,10 @@ message. That is expected:
      Such a host needs its alignment to v3.71 first.
 ```
 
+The message says the host works the switch itself, whatever its version. That
+holds for turning an existing registration off and on. A station that never
+registered needs a host at v3.71 to register.
+
 Once the host runs v3.71, this command pairs the two machines by hand. You need
 it when `pm-align` could not pair them, or when a message in §7 asks for it:
 
@@ -478,12 +490,12 @@ It answers:
 [wizard] paired: the decoder VM can run smd remote on, smd remote off and smd remote status
 ```
 
-Any other answer starts `[wizard] NOT paired:` and names the reason. Send that
+A failed pairing answers `[wizard] NOT paired:` and names the reason. Send that
 line to your fleet admin. On a station with the old layout, the reason reads
-`this host has no private link to its decoder VM (no /30 address)`. The `/30`
-names the small private network that joins the host and its VM. If the host
-answers `[wizard] another pairing is running; nothing done`, the pairing that
-holds the lock does the work.
+`this host has no private link to its decoder VM (no /30 address)`. A /30 is the
+size of the small private network that joins the host and its VM. The answer
+`[wizard] another pairing is running; nothing done` means the host pairs right
+now. Wait a few minutes, then run the command again.
 
 ⚠ **On a host that has not reached v3.71, this command answers "already
 configured" and pairs nothing.** Do not take that answer for success. The host

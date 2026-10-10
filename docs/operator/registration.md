@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond 6406025 on 2026-10-10 — remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -22,8 +22,9 @@ budget your real effort for PSWS.
 
 Every command below is tagged `[VM]` or `[host]` on the line above it, so a
 whole block is safe to copy. Nearly all of them are `[VM]` — the decoder VM,
-which you reach with `ssh hamsci@<VM address>` (see
-[the operator front page](README.md#two-machines-in-one-box)).
+which you reach with `ssh -p 2222 hamsci@<host address>` (see
+[the operator front page](README.md#two-machines-in-one-box)). The console panel
+prints that address for your station.
 
 ---
 

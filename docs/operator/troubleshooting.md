@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 58fb909 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 6406025 on 2026-10-10 — remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -22,8 +22,9 @@ looks wrong.
 
 Every command is tagged `[VM]` or `[host]` on the line above it, so a whole
 block is safe to copy. Nearly all are `[VM]` — the [decoder VM](glossary.md),
-which you reach with `ssh hamsci@<VM address>`
-([two machines in one box](README.md#two-machines-in-one-box)).
+which you reach with `ssh -p 2222 hamsci@<host address>`
+([two machines in one box](README.md#two-machines-in-one-box)). The console panel
+prints that address for your station.
 
 ---
 
@@ -41,7 +42,7 @@ df -h /
 ```
 
 Then, from any computer on your network, open the live receiver page:
-`http://<VM address>:8081`.
+`http://<host address>:8081`.
 
 Read them in this order:
 
@@ -348,7 +349,7 @@ smd status
 `radiod` is not active, everything else on this page is downstream of that —
 go to [RX888 not found](#rx888-not-found-or-the-waterfall-is-blank).
 
-Then look at the live receiver page (`http://<VM address>:8081`). A waterfall
+Then look at the live receiver page (`http://<host address>:8081`). A waterfall
 with bright horizontal traces means the antenna and the radio are fine and the
 problem is in a decoder ([day-2.md, the four windows](day-2.md#the-four-windows)).
 
