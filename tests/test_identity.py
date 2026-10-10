@@ -47,6 +47,17 @@ class ManifestTests(unittest.TestCase):
             "/etc/hs-uploader/keys/id_ed25519_host.pub",
         })
 
+    def test_restore_backups_stay_out(self):
+        # A restore sets the freshly minted keys aside under this suffix; they
+        # name the install that got replaced, not the station.
+        root = _vm_root(self.tmp)
+        for rel in ("etc/ssh/ssh_host_ed25519_key",
+                    "etc/hs-uploader/keys/id_ed25519_host.pub"):
+            (root / f"{rel}.pre-identity-restore-20261001T204643Z").write_text("old\n")
+        paths = {e["path"] for e in identity.manifest("vm", str(root))["files"]}
+        self.assertFalse([p for p in paths if "pre-identity-restore" in p])
+        self.assertEqual(len(paths), 4)
+
     def test_pub_fingerprint_matches_ssh_keygen(self):
         root = _vm_root(self.tmp)
         pub = root / "etc/ssh/ssh_host_ed25519_key.pub"

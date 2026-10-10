@@ -76,6 +76,11 @@ FILE_PATTERNS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# A restore renames each key it replaces to <path><RESTORE_BACKUP><UTC>.  Those
+# copies name the install that got replaced, not the station, and the globs
+# above would otherwise sweep them in.
+RESTORE_BACKUP = ".pre-identity-restore-"
+
 RAC_CONFIG = "etc/sigmond/frpc-host.toml"            # pm only
 RAC_FIELDS = (("user",), ("auth", "method"), ("auth", "token"))
 RAC_MEMBER = "identity/rac-credential.json"
@@ -93,6 +98,8 @@ def matched_files(plane: str, root: str) -> list[str]:
     found = set()
     for pattern in FILE_PATTERNS[plane]:
         for path in glob.glob(os.path.join(root, pattern)):
+            if RESTORE_BACKUP in os.path.basename(path):
+                continue
             if os.path.isfile(path) and not os.path.islink(path):
                 found.add(os.path.relpath(path, root))
     return sorted(found)
