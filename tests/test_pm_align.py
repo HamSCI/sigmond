@@ -8,6 +8,7 @@ import base64
 import hashlib
 import http.client
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -2041,3 +2042,70 @@ def test_the_texts_an_operator_reads_name_the_pairing_step(capsys):
         pm_align.main(["--help"])
     help_text = " ".join(capsys.readouterr().out.split())
     assert "pair the decoder VM" in help_text and "sudo" in help_text
+
+
+# --- a Ctrl-C during the pairing ends --apply ---
+
+def test_main_apply_ends_at_a_keyboard_interrupt_during_the_pairing(tmp_path, monkeypatch, capsys):
+    # The pairing can run some minutes with its output captured, and an admin
+    # who presses Ctrl-C there means "stop".  --apply must not walk on to the
+    # heartbeat and to the tunnel step, which restarts the tunnel.
+    _tunnel_root(tmp_path)                 # a tunnel short of two channels: the step would launch
+    later = []
+
+    def run(argv, **kw):
+        argv = list(argv)
+        if argv[:2] == ["/usr/local/sbin/sigmond-setup", "--pair-vm"]:
+            raise KeyboardInterrupt
+        if argv[0] == "systemd-run" or argv[0].endswith("pm-heartbeat-setup.sh"):
+            later.append(argv[0])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(KeyboardInterrupt):
+        _apply_v371(tmp_path, monkeypatch, run)
+    assert later == []
+    out = capsys.readouterr().out
+    assert "tunnel:" not in out and "heartbeat:" not in out
+    assert "pairing: running /usr/local/sbin/sigmond-setup --pair-vm" in out      # it had begun
+
+
+def test_the_pairing_step_still_turns_an_ordinary_failure_into_a_warning():
+    src = inspect.getsource(pm_align._apply_pairing)
+    assert "except Exception as exc:" in src and "BaseException" not in src
+
+
+# --- --status shows the pairing's recorded outcome ---
+
+def _pairing_line(tmp_path, capsys, content=None):
+    if content is not None:
+        p = tmp_path / "etc/sigmond-appliance/rac-pairing"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(content)
+    assert pm_align.main(["--status"], root=tmp_path) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("pairing")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+def test_status_says_no_pairing_recorded_on_a_host_that_never_ran_one(tmp_path, capsys):
+    assert _pairing_line(tmp_path, capsys) == "pairing: no pairing recorded (/etc/sigmond-appliance/rac-pairing)"
+    assert _pairing_line(tmp_path, capsys, b"") == "pairing: no pairing recorded (/etc/sigmond-appliance/rac-pairing)"
+
+
+def test_status_prints_the_recorded_outcome_of_the_last_pairing(tmp_path, capsys):
+    assert _pairing_line(tmp_path, capsys, b"paired 2026-10-10T01:02:03Z\n") == \
+        "pairing (/etc/sigmond-appliance/rac-pairing): paired 2026-10-10T01:02:03Z"
+    line = _pairing_line(tmp_path, capsys,
+                         b"not-paired 2026-10-10T07:02:03Z the guest agent in VM 100 does not answer\n")
+    assert line.endswith(": not-paired 2026-10-10T07:02:03Z the guest agent in VM 100 does not answer")
+
+
+def test_status_prints_one_printable_line_whatever_the_file_holds(tmp_path, capsys):
+    line = _pairing_line(tmp_path, capsys, b"not-paired \x1b[2J\x00 x\xff" + b"y" * 600 + b"\nsecond line\n")
+    assert "\x1b" not in line and "\x00" not in line and "second line" not in line
+    assert len(line) < 400
+
+
+def test_the_file_status_reads_is_the_file_the_wizard_writes():
+    assert pm_align.PAIRING_RECORD == "/etc/sigmond-appliance/rac-pairing"
+    assert '"$MARK_DIR/rac-pairing"' in WIZARD and "\nMARK_DIR=/etc/sigmond-appliance\n" in WIZARD

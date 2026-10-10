@@ -15,6 +15,8 @@ air; they stay with a reinstall or an explicit, separate act.
 After the files land, --apply runs the installed wizard's --pair-vm, which
 pairs the decoder VM with this host so that `smd remote` works in the VM.  A
 failed pairing warns and sets exit 1; the heartbeat and tunnel steps still run.
+A Ctrl-C during the pairing ends --apply there.  --status prints the outcome
+the last pairing recorded on this host.
 
 Design: sigmond docs/superpowers/specs/2026-09-24-smd-align-design.md §4.
 """
@@ -244,6 +246,9 @@ WIZARD_HEREDOCS_SINCE_V371 = {
 }
 SETUP = "/usr/local/sbin/sigmond-setup"
 PAIR_FLAG = "--pair-vm"
+# Where the wizard's pairing records its outcome, one line: `paired <UTC>` or
+# `not-paired <UTC> <reason>` (sigmond-wizard.sh, rac_pair_record).
+PAIRING_RECORD = "/etc/sigmond-appliance/rac-pairing"
 NO_PRIVATE_LINK = ("this host has no private link to its decoder VM (the pre-v3.4x layout); "
                    "smd remote needs that link")
 RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
@@ -856,13 +861,15 @@ def pairing_step(root: Path, *, run, warn=None) -> str:
 def _apply_pairing(root: Path, run) -> int:
     """The pairing step of --apply.  A failure is a WARN and makes --apply's
     exit code 1; it never stops the heartbeat and tunnel steps that follow.
-    A WARN the wizard printed shows beside the outcome and changes nothing."""
+    A WARN the wizard printed shows beside the outcome and changes nothing.
+    A KeyboardInterrupt passes through: the admin who presses Ctrl-C here
+    stops --apply, and neither the heartbeat step nor the tunnel step runs."""
     def warn(text):
         _say(f"  pairing: WARN — {text}")
 
     try:
         out = pairing_step(root, run=run, warn=warn)
-    except BaseException as exc:
+    except Exception as exc:
         out = f"failed: raised {exc!r}"
     if out.startswith("failed"):
         warn(out)
@@ -1036,7 +1043,21 @@ def _dry_run_heartbeat_note(root: Path) -> str:
     return "heartbeat: not set up — add --heartbeat to set it up"
 
 
+def _pairing_note(root: Path) -> str:
+    """One line: what the last pairing on this host recorded, or that none
+    did.  The file's first line, printable characters only."""
+    try:
+        first = _under(root, PAIRING_RECORD).read_text(errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        first = ""
+    shown = "".join(ch for ch in first if ch.isprintable() and ch != "\ufffd")[:300].strip()
+    if not shown:
+        return f"pairing: no pairing recorded ({PAIRING_RECORD})"
+    return f"pairing ({PAIRING_RECORD}): {shown}"
+
+
 def _print_status(root: Path) -> None:
+    _say(_pairing_note(root))
     tpath = _under(root, TUNNEL_RESULT)
     _say(f"tunnel result ({tpath}):")
     _say(tpath.read_text().rstrip("\n") if tpath.exists() else "  none yet")
