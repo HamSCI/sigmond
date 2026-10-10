@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 58fb909 on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -891,7 +891,7 @@ one that dies. That is why the parts list says not to use one
 ([shopping-list.md](../hardware/shopping-list.md#things-that-look-right-but-arent)).
 
 **When to stop and ask:** never for this. If you need console access to the VM,
-your fleet admin has it through remote access
+your fleet admin has it through remote access, when remote access is on
 ([remote-access.md](remote-access.md#1-what-it-is)).
 
 ---
@@ -942,8 +942,9 @@ qm list
 The VM starts and then stops again; or the Proxmox page will not load while the
 machine is clearly powered.
 
-> Your fleet admin can still reach the station **while the VM is down** — remote
-> access runs on the host, not in the VM, precisely for this
+> When remote access is on, your fleet admin can still reach the station **while
+> the VM is down** — remote access runs on the host, not in the VM, precisely
+> for this
 > ([remote-access.md §1](remote-access.md#it-runs-on-the-host-not-on-the-vm)).
 
 ---

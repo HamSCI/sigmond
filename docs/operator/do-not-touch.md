@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 74f8543 on 2026-10-06 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 74f8543 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > replugged RX888 is brought back with `smd status` + `smd adopt`.
 > **Canonical for:** what an operator must not do on a station, and why

@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 58fb909 on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -652,7 +652,7 @@ for a documented procedure, not a reinstall: log into the `[host]`, run
 `sigmond-setup --reconfigure`, and type the new grid square. The wizard asks
 for your reporter ID and PSWS ids afresh, and pressing Enter at the PSWS
 station ID skips PSWS, so have them at hand. It keeps your remote-access
-number and the site sink switch as they were. The wizard carries the new
+number, the remote-access switch and the site sink switch as they were. The wizard carries the new
 location to the recorders, the timing station and the magnetometer, and
 restarts the recorders itself. Full steps:
 [INSTALL.md §12](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#12-moving-a-station-staged-in-one-place-deployed-in-another).

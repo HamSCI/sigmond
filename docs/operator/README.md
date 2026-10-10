@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; walk-through fixes (live dasi002 + b4) as of 4aec0c2
 > **Canonical for:** the operator's table of contents
 
 You are hosting a *station*: one small computer that listens to the whole
@@ -53,7 +53,7 @@ One physical computer runs **two** systems. This trips everybody up once:
 | Tag | What it is | Its name | You reach it by |
 |---|---|---|---|
 | `[host]` | The **Proxmox host** — the bare machine, the thing with the power button and the USB ports | `<designator>-PM`, e.g. `AC0G-B4-PM` | `ssh root@<host address>`, or a browser at `https://<host address>:8006` |
-| `[VM]` | The **decoder VM** — a virtual machine running inside the host; the radio and every recorder live here | `<designator>`, e.g. `AC0G-B4` | `ssh hamsci@<VM address>` (or `sigmond@`) |
+| `[VM]` | The **decoder VM** — a virtual machine running inside the host; the radio and every recorder live here | `<designator>`, e.g. `AC0G-B4` | `ssh -p 2222 sigmond@<host address>` (the host relays port 2222 to the VM; `hamsci@` works too) |
 
 The *designator* is the station name you give the setup wizard, which names the
 VM after it and adds `-PM` for the host (source:
@@ -66,7 +66,8 @@ especially.** After the first reboot the station's keyboard stops working on
 purpose (the USB ports go to the radio), so that screen is the last easy chance
 to read the host address. Several later steps — the Proxmox window, a rerun
 of the setup wizard — run on the `[host]` and are simply unreachable without
-it. (The switch for remote access needs only the VM:
+it. (The switch for remote access runs in the VM, and you reach the VM through
+the host's address:
 [remote-access.md §4](remote-access.md#4-the-switch-off-on-status).) If you have already
 lost it, your fleet admin or your router's DHCP list can recover it — it is a
 nuisance, not a dead end.

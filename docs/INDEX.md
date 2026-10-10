@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond 978c80a on 2026-08-23 — docs
+> **Verified against:** sigmond 0340629 on 2026-10-10 — the remote-access entry checked against operator/remote-access.md; the other entries as of 978c80a
 > **Canonical for:** the map of sigmond/docs
 
 Reading-order map. ★ = canonical — when two docs disagree, the ★ one wins.

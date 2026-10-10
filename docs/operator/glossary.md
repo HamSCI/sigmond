@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 9fe399d on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 9fe399d against commands/sink.py and commands/config.py
 > **Canonical for:** plain-English definitions of station vocabulary
 
 Alphabetical. If a word in any operator page is not obvious, it should be here;

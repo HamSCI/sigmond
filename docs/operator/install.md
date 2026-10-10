@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** pointer
-> **Verified against:** sigmond 4aec0c2 on 2026-08-23 — walk-through fixes (live dasi002 + b4)
+> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; walk-through fixes (live dasi002 + b4) as of 4aec0c2
 > **See instead:** [sigmond-appliance/INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md)
 
 The install walkthrough belongs to the repository that builds the USB image, so
@@ -22,8 +22,9 @@ the station's monitor. Copy both somewhere you will still have them in a year:
 after the next reboot the station's keyboard stops working by design — the USB
 ports belong to the radio — and the host address is needed for the Proxmox
 window and for a rerun of the setup wizard. The VM address alone is not enough
-for those. (It is enough for the remote-access switch:
-[remote-access.md](remote-access.md).)
+for those. The remote-access switch runs in the VM, and you log in to the VM
+through the host's address too: `ssh -p 2222 sigmond@<host address>`
+([remote-access.md](remote-access.md)).
 
 When INSTALL.md §9 says "check it's alive", come back here and continue with
 [day-2.md](day-2.md).

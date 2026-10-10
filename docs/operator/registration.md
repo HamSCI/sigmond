@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 58fb909 on 2026-10-07 — sink words checked against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond 0340629 on 2026-10-10 — remote-access words checked against commands/remote.py and the wizard's switch; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
