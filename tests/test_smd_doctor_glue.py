@@ -161,6 +161,12 @@ class ManifestUsableWiringTests(unittest.TestCase):
         # its "no topology file" default path deterministically, rather
         # than picking up whatever the host running the tests has.
         smd.TOPOLOGY_PATH = self.tdir / 'no-such-topology.toml'
+        # Drop-in families would ask the host's `systemctl cat`;
+        # tests/conftest.py fails that loudly.
+        for _fam in ('_qga_dropin_findings', '_radiod_dropins_findings'):
+            _p = mock.patch.object(smd, _fam, return_value=[])
+            _p.start()
+            self.addCleanup(_p.stop)
 
     def tearDown(self):
         smd.MANIFEST_PATH = self._orig_manifest_path
@@ -390,9 +396,12 @@ class CollectFindingsTests(unittest.TestCase):
         smd.TOPOLOGY_PATH = self.tdir / 'no-such-topology.toml'
         # The guest-agent family asks the host's systemd whether the agent
         # unit exists; keep these tests independent of the machine they run on.
-        _qga = mock.patch.object(smd, '_qga_dropin_findings', return_value=[])
-        _qga.start()
-        self.addCleanup(_qga.stop)
+        # So does radiod's drop-in family; tests/conftest.py fails a real
+        # `systemctl cat` loudly.
+        for _fam in ('_qga_dropin_findings', '_radiod_dropins_findings'):
+            _p = mock.patch.object(smd, _fam, return_value=[])
+            _p.start()
+            self.addCleanup(_p.stop)
 
     def tearDown(self):
         smd.MANIFEST_PATH = self._orig_manifest_path

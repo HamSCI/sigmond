@@ -10821,6 +10821,10 @@ def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
 
     ``systemd_dir``/``src_dir``/``run`` are injectable so tests run against
     a tmp tree instead of the real `/etc/systemd/system`.
+
+    ``pairs``, ``gate`` and ``label`` let other families reuse this: the
+    guest agent's drop-in does now (_ensure_qga_dropin), and Task 5's pair
+    follows.  Left out, they mean radiod's set, gate and label.
     """
     run = run or _run
     src_dir = Path(src_dir) if src_dir is not None else _RADIOD_DROPIN_SRC_DIR

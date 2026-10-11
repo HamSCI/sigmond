@@ -54,3 +54,38 @@ def _tui_skip_banner():
 
 
 _tui_skip_banner()
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_host_systemctl(monkeypatch):
+    """Keep a test from asking the host's real `systemctl cat` by accident.
+
+    `smd doctor`'s check families (radiod's drop-ins, the guest agent's
+    drop-in) ask the host's systemd whether a unit exists.  A test that calls
+    `collect_findings` or `cmd_doctor` without stubbing them would then
+    report whatever the machine running the suite happens to have installed.
+    This wrapper fails a `systemctl cat` loudly (the existence gate of both
+    drop-in families).  Other systemctl reads stay allowed: older families
+    already make them in unstubbed tests, harmlessly.  A test that patches
+    `subprocess.run` (or `smd._run`) itself replaces the wrapper and keeps
+    working.
+    """
+    import subprocess
+    real_run = subprocess.run
+
+    def guarded(cmd, *a, **kw):
+        argv = list(cmd) if isinstance(cmd, (list, tuple)) else []
+        if argv[:1] == ['sudo']:
+            argv = argv[1:]
+        if argv[:2] == ['systemctl', 'cat']:
+            raise AssertionError(
+                f"a test ran the host's real {' '.join(map(str, argv))!r}. "
+                "Stub the doctor family that asked "
+                "(smd._qga_dropin_findings, smd._radiod_dropins_findings, "
+                "or the _ensure_* twin), or pass run= / patch smd._run.")
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(subprocess, 'run', guarded)
