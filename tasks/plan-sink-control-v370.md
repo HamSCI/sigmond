@@ -8940,7 +8940,7 @@ settings until step 4.
   truncated guest-agent request (three times, in two forms), my own reader of smd's HELD lines, and the guest
   agent's 128 MB cap under the restore. The carry list above holds each. The test code that got the run through
   sits in sigmond-appliance past the tag (`46d2383` and two later commits); the image did not change.
-- [ ] **Step 6: B4 overnight** (bus first, coordination doc first). *Before it, from the pre-tag hunt:* B4 sits
+- [x] **Step 6: B4 overnight** (bus first, coordination doc first). *Before it, from the pre-tag hunt:* B4 sits
   at v3.66, so `smd update --apply` lands v3.67 to v3.70 at once; Michael decides whether B4 first aligns to
   blessed v3.69 and takes a baseline night. Save a restore point (`smd version > ~/b4-pre-v370.txt`). Confirm
   `/var/lib/sigmond/.firstrun-bringup-done` exists, or the next RX888 arrival starts an unattended bring-up.
@@ -8959,14 +8959,28 @@ settings until step 4.
   key warns once, then once an hour with a count, so add up the counts. The total measures how often a shared key
   ran backward, and it feeds v3.71. Treat it as a lower bound: each process keeps its windows in memory, so
   a restart drops its uncounted repeats. Confirm GRAPE and the magnetometer shipped their day.
-- [ ] **Step 7: ND** — the same as Step 6 on ND, after B4's night passes, including the explicit
+- [x] **Step 7: ND** — the same as Step 6 on ND, after B4's night passes, including the explicit
   `sudo systemctl restart hs-uploader`. ND runs no in-process sender, so only hs-uploader's journal can warn there.
-- [ ] **Step 8: Bless** — `./bless-release.sh v3.70`, read its gates, then Michael runs `--apply` at a terminal on
+- [x] **Step 8: Bless** — `./bless-release.sh v3.70`, read its gates, then Michael runs `--apply` at a terminal on
   the rig.
-- [ ] **Step 9: Update the operator install pages** (standing policy, `sigmond-appliance/docs/RELEASE.md` §3).
+- [x] **Step 9: Update the operator install pages** (standing policy, `sigmond-appliance/docs/RELEASE.md` §3).
   `INSTALL.md` already reads `Status: current` from Step 7's hardware run; check its "Verified against" line names
   the v3.70 image commit, sha256 and the B4/ND runs. Then rebuild the shared page "Installing a Sigmond Station"
   (https://claude.ai/artifact/WvLUettP4ViRFYu6sftctf) from that `INSTALL.md`: version, file names, and every step
   v3.70 changed. v3.70 changes no operator step, so expect only the version, file names and footer to move.
+  *Done 2026-10-11 12:30Z.* Steps 6 to 9 as they ran (the ledger holds the detail). B4 updated in place
+  2026-10-10 00:32-00:37Z. smd align had pinned all 25 checkouts, so only hs-uploader (`3e97223` to `8376fd8`) and
+  sigmond (`f01e86f` to `7fe58c7`) were released and moved; 23 stayed held and radiod was untouched. B4's night lost
+  nothing v3.70 explains: WSPR fell 31 % against the night before, and ND, still on v3.69 as the control, fell
+  27 %. ND updated in place 11:40-11:45Z on 10-10; it carried no align pins, and exactly the same two components
+  moved. ND's night of 10-11: wd30 holds every spot ND sent (927/636/345/208 against 926/629/341/203, hours 01-04Z);
+  both PSWS datasets shipped. Forward-check and backward-write WARNINGs: ZERO on both stations, in every journal
+  that writes send records. ND decoded fewer spots than B4 that night (ratio 0.40 against about 0.8), a gap that
+  predates the update and sits on 40 m and 630 m; and ND's RX888 dropped off USB once, recovered, with HPPS dark
+  12.6 h until its watchdog acted. Neither belongs to v3.70; both go on the carry list. Bless: gates 0-7 PASS, and
+  Michael ran `--apply` at a TTY (GitHub Release v3.70, 2026-10-11 12:30:43Z); the bless published
+  `<stem>.INSTALL.md` and `.INSTALL.html` beside the image on wd30 and both Drives. Install pages: sigmond-appliance
+  `fcacb13` (INSTALL.md Verified-against v3.70 with the B4 and ND in-place runs; image names; page footer), and the
+  shared page republished from that commit's `docs/install-page.html`.
 
 
