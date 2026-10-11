@@ -604,8 +604,8 @@ The record starts only after `smd update` has run on the station.
 | `sdr-lost` | The card sits off the bus right now. | 1 |
 | `sdr-record-unreadable` | The record file is not an ordinary file (a link or a pipe, for example), so the station cannot read it. | 1 |
 
-The heartbeat shows the exit-1 findings as red. It shows `sdr-recovered` as
-amber, marked "unsure". `smd fleet doctor` lists a host that has only
+The heartbeat and the fleet board show the exit-1 findings as red, marked FAIL.
+They show `sdr-recovered` as amber, marked "unsure". `smd fleet doctor` lists a host that has only
 `sdr-recovered` under "clean, with reports:".
 
 To read the record itself, `[VM]`:
@@ -619,6 +619,9 @@ which kinds of event it held (`usb-remove`, `power-cycle`, `radiod-exit`,
 `radiod-wedge`), how many, and when the card came back. Events that follow one
 another closely join the same episode. An episode with `radiod-exit` and no
 `usb-remove` means the stream stalled while the card stayed on the bus.
+A `radiod-exit` can also come from a fault in `radiod` itself, for example a
+configuration error after a render, and not from the RX888. To tell them apart,
+read `journalctl -u radiod@<name>` on the decoder VM.
 `radiod-wedge` means the watchdog found `radiod` alive but stuck, and restarted
 it. The watchdog logs the time it acted, not the time `radiod` stalled, so a
 wedge can look shorter than it was.
@@ -630,7 +633,8 @@ wedge can look shorter than it was.
   same things as for `sdr-flapping`.
 - `sdr-flapping` → check the hub's own power supply, the USB cable and how it
   sits in the port. Then send the record with your request for help.
-- `sdr-lost` → follow the steps under "What to do" above.
+- `sdr-lost` → follow the steps under "What to do" in the section "RX888 not found, or the
+  waterfall is blank" above.
 - `sdr-record-unreadable` → send the output of `ls -l /var/lib/sigmond/` with
   your request for help. Do not delete the file yourself.
 
