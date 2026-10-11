@@ -35,6 +35,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -121,11 +122,31 @@ def _dump(ep: Episode) -> str:
                       sort_keys=True)
 
 
+_NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_regular(path: Path, flags: int, mode: int = 0o644) -> int:
+    """Open `path` without following a symlink, and refuse anything but a
+    regular file.  /var/lib/sigmond admits every sigmond-group member while
+    the writer runs as root, so a planted link must not steer a root write.
+    Raises OSError on a link (ELOOP) or on a device, FIFO or directory."""
+    fd = os.open(str(path), flags | _NOFOLLOW, mode)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _load(path: Path) -> List[Episode]:
     try:
-        text = Path(path).read_text(errors="replace")
+        fd = _open_regular(path, os.O_RDONLY)
     except FileNotFoundError:
         return []
+    with os.fdopen(fd, "r", errors="replace") as fh:
+        text = fh.read()
     return [ep for ep in map(_parse, text.splitlines()) if ep is not None]
 
 
@@ -136,7 +157,7 @@ def _write(path: Path, episodes: Sequence[Episode]) -> None:
             fh.write("".join(_dump(ep) + "\n" for ep in episodes))
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp, 0o644)
+            os.fchmod(fh.fileno(), 0o644)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -156,7 +177,9 @@ def record(kind: str, detail: str = "", *, now: float,
         raise ValueError(f"unknown kind {kind!r}; expected one of {', '.join(KINDS)}")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.parent / (path.name + ".lock"), "a") as lock:
+    lock_fd = _open_regular(path.parent / (path.name + ".lock"),
+                            os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    with os.fdopen(lock_fd, "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         episodes = [ep for ep in _load(path) if ep.last >= now - KEEP_S]
         cur = episodes[-1] if episodes else None

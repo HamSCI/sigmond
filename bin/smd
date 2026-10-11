@@ -10755,6 +10755,27 @@ def _radiod_template_installed(run) -> bool:
     return r.returncode == 0
 
 
+# The sdr-event drop-in runs /usr/local/sbin/sigmond-sdr-event after every radiod
+# exit.  Only install.sh creates that symlink, so doctor and the native install
+# hold the drop-in back until the writer exists; a drop-in ahead of its writer
+# would leave a station recording nothing, with no sign.
+_SDR_EVENT_WRITER = Path('/usr/local/sbin/sigmond-sdr-event')
+_SDR_EVENT_DROPIN_SRC = 'radiod-sdr-event.conf'
+
+
+def _sdr_event_writer_ready() -> bool:
+    """True when the writer path resolves to an executable file."""
+    p = Path(_SDR_EVENT_WRITER)
+    return p.is_file() and os.access(p, os.X_OK)
+
+
+def _ready_pairs(pairs) -> tuple:
+    """`pairs` without the sdr-event drop-in while its writer is absent."""
+    if _sdr_event_writer_ready():
+        return tuple(pairs)
+    return tuple(p for p in pairs if p[0] != _SDR_EVENT_DROPIN_SRC)
+
+
 def _radiod_dropins_missing(*, systemd_dir: Path = Path('/etc/systemd/system'),
                             src_dir: Path = None, run=None,
                             pairs=None, gate=None) -> list:
@@ -10779,6 +10800,7 @@ def _radiod_dropins_missing(*, systemd_dir: Path = Path('/etc/systemd/system'),
     gate = gate or _radiod_template_installed
     if not gate(run):
         return []
+    pairs = _ready_pairs(pairs)
 
     missing = []
     for src_name, rel_dest in pairs:
@@ -10838,6 +10860,7 @@ def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
     gate = gate or _radiod_template_installed
     if not gate(run):
         return []
+    pairs = _ready_pairs(pairs)
 
     written = []
     for src_name, rel_dest in pairs:

@@ -106,6 +106,13 @@ class RadiodDropinsWriterTests(unittest.TestCase):
         self.systemd_dir = self.tdir / 'etc-systemd'
         self.src_dir.mkdir()
         self.systemd_dir.mkdir()
+        # The sdr-event drop-in installs only once its writer exists.
+        writer = self.tdir / 'sigmond-sdr-event'
+        writer.write_text('#!/bin/sh\n')
+        writer.chmod(0o755)
+        patcher = mock.patch.object(smd, '_SDR_EVENT_WRITER', writer)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.src_names = [
             'radiod-restart-forever.conf',
             'radiod-park.conf',
@@ -229,6 +236,13 @@ class RadiodDropinsMissingTests(unittest.TestCase):
         self.systemd_dir = self.tdir / 'etc-systemd'
         self.src_dir.mkdir()
         self.systemd_dir.mkdir()
+        # The sdr-event drop-in installs only once its writer exists.
+        writer = self.tdir / 'sigmond-sdr-event'
+        writer.write_text('#!/bin/sh\n')
+        writer.chmod(0o755)
+        patcher = mock.patch.object(smd, '_SDR_EVENT_WRITER', writer)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.src_names = [
             'radiod-restart-forever.conf',
             'radiod-park.conf',

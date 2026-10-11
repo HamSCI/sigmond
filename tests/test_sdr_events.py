@@ -342,3 +342,35 @@ def test_the_nd_restart_loop_reads_down_long(tmp_path):
     ("exit-code", True), ("signal", True), ("core-dump", True), ("watchdog", True)])
 def test_which_radiod_exits_count_as_a_loss(result, loss):
     assert ev.radiod_exit_is_loss(result) is loss
+
+
+# -- a planted symlink cannot steer a root write (v3.71 security fix) --------------------
+
+def test_a_symlink_at_the_lock_path_makes_record_raise_and_spares_its_target(tmp_path):
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    evp = tmp_path / "sdr-events.jsonl"
+    (tmp_path / "sdr-events.jsonl.lock").symlink_to(victim)
+    with pytest.raises(OSError):
+        ev.record("usb-remove", "x", now=T0, path=evp)
+    assert victim.read_text() == "keep"
+    assert not evp.exists()
+
+
+def test_a_symlink_at_the_data_path_is_not_followed_for_reading(tmp_path):
+    other = tmp_path / "other"
+    other.write_text(json.dumps({"opened": "2026-10-11T08:00:00Z", "last": "2026-10-11T08:00:00Z",
+                                 "kinds": ["usb-remove"], "count": 1, "detail": "", "back": None}) + "\n")
+    evp = tmp_path / "sdr-events.jsonl"
+    evp.symlink_to(other)
+    with pytest.raises(OSError):
+        ev._load(evp)
+
+
+def test_the_written_file_is_0644_and_nothing_chmods_by_path(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("path-based chmod")
+    monkeypatch.setattr(os, "chmod", boom)
+    evp = tmp_path / "sdr-events.jsonl"
+    ev.record("usb-remove", "x", now=T0, path=evp)
+    assert (evp.stat().st_mode & 0o777) == 0o644

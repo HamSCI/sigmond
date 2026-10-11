@@ -161,3 +161,66 @@ def test_install_sh_lays_down_the_writer_the_rule_and_the_dropin():
     assert "/etc/udev/rules.d/91-sigmond-sdr-event.rules" in sh
     assert "systemd/radiod-sdr-event.conf" in sh
     assert "radiod@.service.d/50-sigmond-sdr-event.conf" in sh
+
+
+# -- the drop-in waits for its writer ---------------------------------------------------
+
+def _gate_setup(tmp_path):
+    import types
+    smd = _load_smd()
+    src, sysd = tmp_path / "src", tmp_path / "sys"
+    src.mkdir()
+    sysd.mkdir()
+    for name, _ in smd._RADIOD_DROPINS:
+        (src / name).write_text("x\n")
+    run = lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    return smd, src, sysd, run
+
+
+def test_doctor_reports_nothing_for_the_dropin_until_the_writer_exists(tmp_path):
+    from unittest import mock
+    smd, src, sysd, run = _gate_setup(tmp_path)
+    dest = str(sysd / "radiod@.service.d/50-sigmond-sdr-event.conf")
+    with mock.patch.object(smd, "_SDR_EVENT_WRITER", tmp_path / "absent"):
+        assert dest not in smd._radiod_dropins_missing(systemd_dir=sysd, src_dir=src, run=run)
+    writer = tmp_path / "writer"
+    writer.write_text("#!/bin/sh\n")
+    writer.chmod(0o755)
+    with mock.patch.object(smd, "_SDR_EVENT_WRITER", writer):
+        assert dest in smd._radiod_dropins_missing(systemd_dir=sysd, src_dir=src, run=run)
+
+
+def test_a_writer_that_is_not_executable_holds_the_dropin_back(tmp_path):
+    from unittest import mock
+    smd, src, sysd, run = _gate_setup(tmp_path)
+    writer = tmp_path / "writer"
+    writer.write_text("#!/bin/sh\n")
+    writer.chmod(0o644)
+    dest = str(sysd / "radiod@.service.d/50-sigmond-sdr-event.conf")
+    with mock.patch.object(smd, "_SDR_EVENT_WRITER", writer):
+        assert dest not in smd._radiod_dropins_missing(systemd_dir=sysd, src_dir=src, run=run)
+
+
+def test_the_fix_installs_the_dropin_only_after_the_writer_exists(tmp_path):
+    import types
+    from unittest import mock
+    smd, src, sysd, _ = _gate_setup(tmp_path)
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["install", "-m"]:
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_bytes(Path(cmd[-2]).read_bytes())
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with mock.patch.object(smd, "_SDR_EVENT_WRITER", tmp_path / "absent"):
+        written = smd._ensure_radiod_dropins(systemd_dir=sysd, src_dir=src, run=run)
+    assert not any("50-sigmond-sdr-event.conf" in w for w in written)
+    assert written
+    writer = tmp_path / "writer"
+    writer.write_text("#!/bin/sh\n")
+    writer.chmod(0o755)
+    with mock.patch.object(smd, "_SDR_EVENT_WRITER", writer):
+        written = smd._ensure_radiod_dropins(systemd_dir=sysd, src_dir=src, run=run)
+    assert [w for w in written if "50-sigmond-sdr-event.conf" in w]
