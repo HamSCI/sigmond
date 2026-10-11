@@ -2,10 +2,16 @@
 
 **Authors:** Michael Hauan (AC0G) + Claude
 **Date:** 2026-10-10
-**Status:** design, for Michael's review. Nothing committed as code. Target release: v3.71. A prototype of the
-whole change ran in a scratch copy of both repositories on 2026-10-10 (sigmond's suite: 4080 tests, none
-failing; 48 mutations, each caught). The implementation plan built from it, on the answers this design
-recommends: `tasks/plan-guest-agent-requests-v371.md`.
+**Status:** committed 2026-10-11, unpushed, on Michael's five decisions of that day. The code stands in four
+commits: sigmond-appliance 68e966a (the panel) and 957096d (the nested rig), sigmond beeb5fa (the wizard's
+senders) and 16f47bc (`pm-heartbeat`, `pm-align`). The words stand in Task 5: the operator's troubleshooting
+page, the installation documents, the rule in `CLAUDE.md` and the draft report for Proxmox
+(`tasks/upstream-proxmox-qga-truncation.md`). Still waiting: the nested rig's run on a real Proxmox host (the
+deafening step has never run); the hardware proof, the reflash of AC0G-B4 at home on or after 2026-10-12 and the
+alignment of AC0G-ND; and Michael's reading of the report, which goes nowhere until he sends it. Target release:
+v3.71. The implementation plan: `tasks/plan-guest-agent-requests-v371.md`. A prototype of the whole change ran in a
+scratch copy of both repositories on 2026-10-10 (sigmond's suite: 4080 tests, none failing; 48 mutations, each
+caught).
 **Verified against:** sigmond 28a5aac on 2026-10-10 — `scripts/proxmox/sigmond-wizard.sh`,
 `scripts/proxmox/pm-align.py`, `scripts/proxmox/pm-heartbeat.py`, `bin/sigmond-firstrun-bringup`;
 sigmond-appliance c348e21 `firstboot-v3.sh`, `test-nested-v3.sh`; the rig measurements of 2026-10-08

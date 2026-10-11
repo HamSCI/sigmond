@@ -114,6 +114,9 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
   The panel script lives on the Proxmox host, so stations receive this through `smd align`, never through
   `smd update`. Until an image holds the fix, `test-update-v3.sh` holds a defective panel off during its update
   phases and says so, and a logging watcher (`ga-watch.sh`) stands beside the base install.
+  Landed in `tasks/plan-guest-agent-requests.md` (the design) and `tasks/plan-guest-agent-requests-v371.md`
+  (the plan), as four commits, unpushed on 2026-10-11: sigmond-appliance 68e966a (the panel), sigmond beeb5fa
+  (the wizard's senders) and 16f47bc (`pm-heartbeat`, `pm-align`), sigmond-appliance 957096d (the nested rig).
 - **The guest agent's 128 MB cap covers every command run through it** (found 2026-10-08 on the rig).
   `systemd/qemu-guest-agent-selfheal.conf` sets `MemoryMax=128M` on `qemu-guest-agent.service`, so that a runaway
   exec buffer kills the agent instead of wedging it. Every process a `qm guest exec` starts lives under that cap.

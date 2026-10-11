@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 16f47bc on 2026-10-11 — the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -950,6 +950,71 @@ machine is clearly powered.
 > the VM is down** — remote access runs on the host, not in the VM, precisely
 > for this
 > ([remote-access.md §1](remote-access.md#it-runs-on-the-host-not-on-the-vm)).
+
+---
+
+### The console panel shows a line about bring-up or the guest agent
+
+The console panel is the text on the screen of the station's host. Every five
+minutes it asks the decoder VM where the first-run build stands, and it prints
+a notice when the build has not finished. Six of those lines come up in the
+field. Each one starts with the words quoted below.
+
+**Likely causes, most common first**
+
+1. **`STATION IS STILL BUILDING`.** The first-run build is running. It clones and
+   builds about 25 components, and on a cold machine that takes tens of minutes.
+   Nothing has failed.
+2. **`bring-up ran WITHOUT the radio`.** The build ran to its end while no SDR
+   stood on the USB bus.
+3. **`BRING-UP FAILED -- it tries again`.** The build failed once or twice, often
+   for a reason that passes by itself (a slow SDR start, no network yet).
+4. **`BRING-UP FAILED THREE TIMES`.** The build failed three times and has
+   stopped trying.
+5. **`BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING`.** The build ended well,
+   and the service behind the web page does not run.
+6. **`guest agent does not answer`.** The panel asks the VM its questions through
+   a channel called the guest agent. The agent did not answer, even after the
+   panel reset it once. The panel then says nothing about the build, because it
+   cannot read it.
+
+**What to check**
+
+Read the first line of the panel's notice, and compare it with the six above.
+The panel prints nothing about bring-up before the first build starts, and
+nothing once the build has ended well and ka9q-web runs.
+
+**What to do**
+
+1. `STATION IS STILL BUILDING`: wait. The web links in the panel answer when the
+   build ends, not before. Do not power-cycle the machine.
+2. `bring-up ran WITHOUT the radio`: plug the SDR into a **blue** USB 3 port,
+   straight into the machine. Bring-up finishes by itself when the SDR appears,
+   and the notice goes away.
+3. `BRING-UP FAILED -- it tries again`: it tries again when the decoder VM next
+   boots. To run it sooner, log in to the VM (`sigmond-vm` on the host, or
+   `ssh -p 2222 sigmond@<host address>`). The last lines of
+   `/var/log/sigmond/firstrun-bringup.log` name the command that runs bring-up
+   by hand.
+4. `BRING-UP FAILED THREE TIMES`: bring-up has stopped trying. Log in to the VM
+   as above, read the last 30 lines of `/var/log/sigmond/firstrun-bringup.log`
+   and send them to your fleet admin. The log names two commands. The second,
+   `sudo /usr/local/sbin/sigmond-site-timing`, matters: it does not belong to
+   `smd bringup`, and without it the station has no timing channels while every
+   service reads green.
+5. `BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING`: log in to the VM and run
+   `smd status`. Send its output to your fleet admin.
+6. `guest agent does not answer`: the host cannot ask the VM anything for the
+   moment. The radio and the uploads do not depend on the guest agent, and they
+   go on. The panel tries one reset at each refresh, every five minutes. Wait
+   ten minutes. Never run `smd` through `qm guest exec` on the host: the
+   agent's memory cap kills a command as large as a bring-up.
+
+**When to stop and ask**
+
+The line `guest agent does not answer` stays for more than ten minutes while the
+VM runs. Or `BRING-UP FAILED THREE TIMES` or
+`BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING` shows on the panel at all.
 
 ---
 

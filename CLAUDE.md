@@ -575,6 +575,12 @@ contextual; cross-operator upgrades are out of scope for `smd`.
   - Binaries: `/usr/local/bin/smd` (symlink to the repo's `bin/smd`)
   - Logs: `/var/log/sigmond/`
   - State: `/var/lib/sigmond/`
+- **No byte above 0x7F in a guest-agent request.** Proxmox writes a `qm guest exec` request that holds
+  non-ASCII characters short, and about one time in six the guest agent then stands deaf: it keeps its
+  process, reads every request and answers none. In `sigmond-wizard.sh`, send through `gexec` or `guest_out`
+  (both base64-encode). Anywhere else, keep the request's text fixed and ASCII, or encode it. A host that
+  finds the agent silent sends one 0xFF byte down `/var/run/qemu-server/<vmid>.qga` before it concludes
+  anything. Design: `tasks/plan-guest-agent-requests.md`.
 
 ## Planning docs (`tasks/`)
 
