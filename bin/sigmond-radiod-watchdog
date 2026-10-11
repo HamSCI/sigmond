@@ -30,6 +30,11 @@ broken device can't cause a restart storm; warm-up grace after every
 (re)start.  Runs from a 2-minute systemd timer as root.  RWD_DRY_RUN=1
 reports without acting.
 
+Each restart either detector makes also leaves one event, radiod-wedge, in
+/var/lib/sigmond/sdr-events.jsonl, which `smd doctor` reads (v3.71).  A
+restart that hf-timestd requested leaves none: it marks a timing fault,
+not a lost RX888.
+
 Additionally (opt-in site policy): honor hf-timestd's radiod restart
 REQUEST artifact (/run/hf-timestd/radiod-restart-request.json,
 offset-judge spec §9 step 3).  hf-timestd never restarts radiod itself —
@@ -57,6 +62,11 @@ COOLDOWN_SEC = int(os.environ.get('RWD_COOLDOWN_SEC', '600'))
 DRY_RUN = os.environ.get('RWD_DRY_RUN', '') not in ('', '0')
 
 STATE_DIR = Path('/run/sigmond-radiod-watchdog')
+
+# The station's record of losing its RX888 (v3.71, lib/sigmond/sdr_events.py),
+# which `smd doctor` reads.  None means the library's own path,
+# /var/lib/sigmond/sdr-events.jsonl; the tests point it at a scratch file.
+SDR_EVENTS_PATH = None
 
 QUIT_RE = re.compile(r'No rx888 data for .* quitting')
 
@@ -121,6 +131,28 @@ def _mark_restarted(unit: str, now: float) -> None:
     (STATE_DIR / f'{unit}.last-restart').write_text(f'{now}\n')
 
 
+def _note_event(unit: str, reason: str, now: float) -> None:
+    """Note this restart in the station's record of RX888 losses (v3.71).
+
+    A wedged radiod has lost its RX888 as surely as one that died.  But
+    systemd reads the stop in _restart as one someone asked for, so radiod's
+    own ExecStopPost= hook writes nothing.  The event merges into any open
+    episode, as the other writers' events do.
+
+    Bookkeeping never blocks the restart.  It adds no line of its own, since
+    _restart already prints one; only a failed record speaks."""
+    lib = Path(__file__).resolve().parent.parent / 'lib'
+    if str(lib) not in sys.path:
+        sys.path.insert(0, str(lib))
+    try:
+        from sigmond import sdr_events
+        kw = {} if SDR_EVENTS_PATH is None else {'path': Path(SDR_EVENTS_PATH)}
+        sdr_events.record('radiod-wedge', f'{unit} {reason}', now=now, **kw)
+    except Exception as exc:        # noqa: BLE001 -- never block the restart
+        print(f'  {unit}: could not record the restart for smd doctor: {exc}',
+              file=sys.stderr)
+
+
 # USB ids to hard-reset between stop and start.  A plain restart leaves
 # the RX888's FX3 in a stale streaming state and the next radiod start
 # trips the driver's 5 s no-data timeout ("No rx888 data ... quitting"),
@@ -163,6 +195,9 @@ def _restart(unit: str, reason: str, now: float) -> None:
     if DRY_RUN:
         return
     _mark_restarted(unit, now)
+    # Note the loss before the stop: the episode opens with its cause, and
+    # the exits of a radiod that fails its next starts join it.
+    _note_event(unit, reason, now)
     # stop → USB reset → settle → start: see RESET_USB_IDS above.
     #
     # Every step before the start is best-effort, and the start is issued

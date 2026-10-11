@@ -15,14 +15,21 @@ to consume the start.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
+import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "lib"))
+
+from sigmond import sdr_events as ev  # noqa: E402
 
 
 def _load():
@@ -48,8 +55,10 @@ class RestartAlwaysStarts(unittest.TestCase):
         self._reset = wd._reset_usb_devices
         self._mark = wd._mark_restarted
         self._sleep = wd.time.sleep
+        self._note = wd._note_event
         wd._reset_usb_devices = lambda: None
         wd._mark_restarted = lambda unit, now: None
+        wd._note_event = lambda unit, reason, now: None
         wd.time.sleep = lambda s: None
         wd.DRY_RUN = False
 
@@ -57,6 +66,7 @@ class RestartAlwaysStarts(unittest.TestCase):
         wd._run = self._run
         wd._reset_usb_devices = self._reset
         wd._mark_restarted = self._mark
+        wd._note_event = self._note
         wd.time.sleep = self._sleep
 
     def _verbs(self):
@@ -115,6 +125,118 @@ class RestartAlwaysStarts(unittest.TestCase):
         finally:
             wd.DRY_RUN = False
         self.assertEqual(self._verbs(), [])
+
+
+T0 = 1_760_000_000.0
+UNIT = "radiod@ac0g.service"
+
+
+class RestartNotesTheLoss(unittest.TestCase):
+    """v3.71.  Each restart the watchdog makes leaves one event for `smd
+    doctor`.  systemd reads the watchdog's stop as asked for, so radiod's own
+    ExecStopPost= hook writes nothing; without this, a wedge that the
+    watchdog cleared would leave no trace."""
+
+    SAVED = ("_run", "_reset_usb_devices", "_mark_restarted", "_cooldown_ok",
+             "_unit_prop", "_epoch", "_journal_since_invocation",
+             "SDR_EVENTS_PATH", "DRY_RUN")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.events = self.tmp / "sdr-events.jsonl"
+        self.calls = []
+        self._saved = {n: getattr(wd, n) for n in self.SAVED}
+        self._sleep = wd.time.sleep
+
+        def fake(cmd, timeout=60):
+            self.calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        wd._run = fake
+        wd._reset_usb_devices = lambda: None
+        wd._mark_restarted = lambda unit, now: None
+        wd.time.sleep = lambda s: None
+        wd.SDR_EVENTS_PATH = self.events
+        wd.DRY_RUN = False
+
+    def tearDown(self):
+        for n, v in self._saved.items():
+            setattr(wd, n, v)
+        wd.time.sleep = self._sleep
+
+    def lines(self):
+        return [json.loads(l) for l in self.events.read_text().splitlines()]
+
+    def verbs(self):
+        return [c[1] for c in self.calls if c and c[0] == "systemctl"]
+
+    def a_unit_an_hour_old(self, journal):
+        wd._unit_prop = lambda unit, prop: {"InvocationID": "abc",
+                                            "ActiveEnterTimestamp": "x"}[prop]
+        wd._epoch = lambda ts: T0 - 3600
+        wd._journal_since_invocation = lambda unit, inv: journal
+
+    def test_a_restart_leaves_one_event_naming_the_unit_and_the_reason(self):
+        wd._restart(UNIT, "no journal output for 700s (heartbeat lost)", T0)
+        (d,) = self.lines()
+        self.assertEqual(d["kinds"], ["radiod-wedge"])
+        self.assertIn(UNIT, d["detail"])
+        self.assertIn("heartbeat lost", d["detail"])
+
+    def test_the_quitting_detector_records_through_restart(self):
+        self.a_unit_an_hour_old([
+            f"{T0 - 300:.6f} host radiod[1]: No rx888 data for 5 seconds, quitting",
+            f"{T0 - 10:.6f} host radiod[1]: measured sample rate 64800000"])
+        wd._cooldown_ok = lambda unit, now: True
+        wd.check_unit(UNIT, T0)
+        (d,) = self.lines()
+        self.assertIn("quitting", d["detail"])
+        self.assertEqual(self.verbs(), ["stop", "start"])
+
+    def test_a_unit_in_cooldown_records_nothing(self):
+        self.a_unit_an_hour_old([f"{T0 - 900:.6f} host radiod[1]: last words"])
+        wd._cooldown_ok = lambda unit, now: False
+        with contextlib.redirect_stdout(io.StringIO()):
+            wd.check_unit(UNIT, T0)
+        self.assertFalse(self.events.exists())
+        self.assertEqual(self.verbs(), [])
+
+    def test_the_event_lands_before_the_stop(self):
+        seen = []
+
+        def fake(cmd, timeout=60):
+            seen.append((cmd[1], self.events.exists()))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        wd._run = fake
+        wd._restart(UNIT, "wedged", T0)
+        self.assertEqual(seen[0], ("stop", True))
+
+    def test_a_dry_run_records_nothing(self):
+        wd.DRY_RUN = True
+        with contextlib.redirect_stdout(io.StringIO()):
+            wd._restart(UNIT, "wedged", T0)
+        self.assertFalse(self.events.exists())
+
+    def test_a_restart_and_radiods_failing_starts_make_one_episode(self):
+        wd._restart(UNIT, 'declared "no rx888 data, quitting" 300s ago', T0)
+        ev.record("radiod-exit", "ac0g core-dump dumped/ABRT", now=T0 + 20, path=self.events)
+        (d,) = self.lines()
+        self.assertEqual(d["kinds"], ["radiod-exit", "radiod-wedge"])
+        self.assertEqual(d["count"], 2)
+
+    def test_a_record_that_fails_still_restarts(self):
+        (self.tmp / "file").write_text("")
+        wd.SDR_EVENTS_PATH = self.tmp / "file" / "sdr-events.jsonl"
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            wd._restart(UNIT, "wedged", T0)
+        self.assertEqual(self.verbs(), ["stop", "start"])
+        self.assertIn("could not record", err.getvalue())
+
+    def test_a_restart_adds_no_line_of_its_own(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            wd._restart(UNIT, "wedged", T0)
+        self.assertEqual(len(out.getvalue().splitlines()), 1, out.getvalue())
 
 
 if __name__ == "__main__":
