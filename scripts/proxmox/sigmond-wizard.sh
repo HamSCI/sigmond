@@ -2169,6 +2169,94 @@ ask_antenna() {
     ANTENNA=$(printf '%s' "$ANTENNA" | tr -d '"\\[:cntrl:]')
 }
 
+# ── uplink gate ─────────────────────────────────────────────────────────────
+# ⛔ AN INSTALL WITH NO INTERNET CANNOT SUCCEED, AND IT FAILS LATE.
+# Bring-up clones from github.com (install.sh and bin/smd name it ten times)
+# and fetches uv from astral.sh.  With no egress the wizard still "finishes":
+# every question is answered, the VM is created, and the failure surfaces
+# minutes later inside bring-up as a clone error nobody is standing by to see.
+# rob, 2026-10-11: a working uplink is "a condition for proceeding through the
+# wizard ... if that isn't possible the installation should abort".
+#
+# ⛔ THREE STAGES, EACH NAMING ITS OWN FAILURE.  "No internet" is useless to an
+# operator at a console.  A link with no address, a lease whose resolver never
+# answers, and a captive portal are three different repairs, and the whole
+# point of stopping here is to tell them which one they have.
+#
+# ⛔ NEVER FORCE AN ADDRESS FAMILY.  curl resolves through getaddrinfo and uses
+# whichever family works, so an IPv6-only NAT64 site passes on its own terms.
+# Forcing -4 would reject a perfectly good station: this fleet runs IPv6-only
+# stations behind NAT64/CLAT, and they are not a hypothetical.
+UPLINK_HOST="${SIGMOND_NET_PROBE_HOST:-github.com}"
+
+# Echoes "ok", or "<stage>: <reason>", and returns non-zero on failure.
+# No prompting and no side effects, so the retry loop and the tests can both
+# call it as often as they like.
+uplink_probe() {
+    local out
+    if [ -z "$(ip -o addr show scope global 2>/dev/null | grep -v ' lo ' | head -1)" ]; then
+        echo "link: no interface has a global address"; return 1
+    fi
+    # ⚡ AN ADDRESS IS NOT A ROUTE.  vmbr1 is the host-only /30 to the decoder
+    # VM and always carries a global address, so an address check alone passes
+    # on a station with no uplink at all.  The default route is what separates
+    # "has an address" from "can leave the building".
+    if [ -z "$(ip -4 route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)" ]; then
+        echo "link: an address, but no default route"; return 1
+    fi
+    if ! timeout 5 getent ahosts "$UPLINK_HOST" >/dev/null 2>&1; then
+        echo "DNS: cannot resolve $UPLINK_HOST (the link is up; the resolver is not answering)"; return 1
+    fi
+    if [ -n "${SIGMOND_NET_PROBE_CMD:-}" ]; then
+        out=$(eval "$SIGMOND_NET_PROBE_CMD" 2>&1) || { echo "egress: ${out:-probe command failed}"; return 1; }
+        echo ok; return 0
+    fi
+    # ⚡ EXIT CODE, NOT STATUS CODE.  Any HTTP answer proves the path is open;
+    # github may reply 200 or 301 and both mean egress works.  curl's stderr
+    # rides along in the message so the operator sees TLS vs timeout vs refused
+    # rather than a bare "failed".
+    out=$(curl -sS --max-time 8 -o /dev/null --head "https://$UPLINK_HOST" 2>&1) \
+        || { echo "egress: cannot reach https://$UPLINK_HOST — ${out:-timed out}"; return 1; }
+    echo ok
+}
+
+require_uplink() {
+    local st
+    while :; do
+        st=$(uplink_probe)
+        if [ "$st" = ok ]; then
+            say "uplink OK — $UPLINK_HOST is reachable"
+            return 0
+        fi
+
+        echo ""
+        echo "  ── No working Internet connection ───────────────────"
+        echo "  $st"
+        echo ""
+        echo "  The install must reach $UPLINK_HOST (and astral.sh) to fetch the"
+        echo "  station software.  Without that, bring-up fails minutes from now,"
+        echo "  after the VM has already been created."
+        echo ""
+
+        # ⛔ NEVER PROMPT ON PIPED STDIN.  bash suppresses `read -p` prompts on a
+        # non-tty, so a prompt here would silently eat the answer meant for the
+        # NEXT question and desync every prompt after it — the 2026-08-11
+        # nested-test hunt.  An unattended run gets one probe and an abort.
+        if [ ! -t 0 ]; then
+            say "no uplink, and no operator to fix it (unattended) — aborting; nothing was applied"
+            exit 1
+        fi
+
+        echo "  Plug in an Ethernet cable, or set up Wi-Fi, then re-check."
+        rd -r -p "  [r] re-check · [w] set up Wi-Fi · [q] abort install: " _uq
+        case "${_uq:-r}" in
+            [Ww]*) ask_wifi ;;
+            [Qq]*) say "aborted: no Internet connection — nothing was applied. Rerun: sigmond-setup"; exit 1 ;;
+            *)     ;;   # r (or anything else): probe again
+        esac
+    done
+}
+
 # ── Wi-Fi ───────────────────────────────────────────────────────────────────
 # ⚡ On a DASI station Wi-Fi is PREFERRED over wired, and the reason is
 # physical, not convenience (rob, 2026-09-28): "the wired interface introduces
@@ -2521,6 +2609,10 @@ ask_antenna
 # Before ask_rac on purpose: remote access is only meaningful over a link that
 # works, and on a cable-free DASI box this is the step that creates one.
 ask_wifi
+# After ask_wifi on purpose: on a cable-free DASI box that step is what creates
+# the link, so judging connectivity before it would abort installs that were
+# about to be fine.
+require_uplink
 ask_rac
 ask_psws
 ask_heartbeat
@@ -2575,6 +2667,12 @@ while :; do
         *) echo "  ✗ Y, n, or an entry number 1-8";;
     esac
 done
+
+# ⛔ RE-CHECK THE UPLINK AT APPLY.  Review entry 8 re-runs ask_wifi, and joining
+# a different AP can take down the very link the earlier gate passed on — so
+# the last thing checked before anything is applied must be the link itself.
+# Cheap (one DNS lookup and one HEAD) and it reuses the same retry loop.
+require_uplink
 
 # ── station names: VM = designator, Proxmox host = designator-PM ────────────
 # Applied FIRST: everything after this uses qm, and a Proxmox single-node
