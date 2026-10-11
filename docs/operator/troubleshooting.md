@@ -957,7 +957,7 @@ machine is clearly powered.
 
 The console panel is the text on the screen of the station's host. Every five
 minutes it asks the decoder VM where the first-run build stands, and it prints
-a notice when the build has not finished. Six of those lines come up in the
+a notice when the build has not finished. Seven of those lines come up in the
 field. Each one starts with the words quoted below.
 
 **Likely causes, most common first**
@@ -973,14 +973,16 @@ field. Each one starts with the words quoted below.
    stopped trying.
 5. **`BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING`.** The build ended well,
    and the service behind the web page does not run.
-6. **`guest agent does not answer`.** The panel asks the VM its questions through
+6. **`the decoder VM's guest agent does not answer`.** The panel asks the VM its questions through
    a channel called the guest agent. The agent did not answer, even after the
    panel reset it once. The panel then says nothing about the build, because it
    cannot read it.
+7. **`BRING-UP WAS STOPPED BEFORE IT FINISHED (its 90-minute limit, or a kill)`.**
+   Systemd ended the build before it reached its end.
 
 **What to check**
 
-Read the first line of the panel's notice, and compare it with the six above.
+Read the first line of the panel's notice, and compare it with the seven above.
 The panel prints nothing about bring-up before the first build starts, and
 nothing once the build has ended well and ka9q-web runs.
 
@@ -1004,17 +1006,20 @@ nothing once the build has ended well and ka9q-web runs.
    service reads green.
 5. `BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING`: log in to the VM and run
    `smd status`. Send its output to your fleet admin.
-6. `guest agent does not answer`: the host cannot ask the VM anything for the
+6. `the decoder VM's guest agent does not answer`: the host cannot ask the VM anything for the
    moment. The radio and the uploads do not depend on the guest agent, and they
    go on. The panel tries one reset at each refresh, every five minutes. Wait
    ten minutes. Never run `smd` through `qm guest exec` on the host: the
    agent's memory cap kills a command as large as a bring-up.
+7. `BRING-UP WAS STOPPED BEFORE IT FINISHED`: log in to the VM as above, read the
+   last 30 lines of `/var/log/sigmond/firstrun-bringup.log` and send them to
+   your fleet admin.
 
 **When to stop and ask**
 
-The line `guest agent does not answer` stays for more than ten minutes while the
-VM runs. Or `BRING-UP FAILED THREE TIMES` or
-`BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING` shows on the panel at all.
+The line `the decoder VM's guest agent does not answer` stays for more than ten minutes while the
+VM runs. Or `BRING-UP FAILED THREE TIMES`, `BRING-UP WAS STOPPED BEFORE IT FINISHED`
+or `BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING` shows on the panel at all.
 
 ---
 

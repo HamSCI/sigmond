@@ -3,6 +3,11 @@
 **Status:** draft, not sent. Michael Hauan (AC0G) decides whether and where to file it.
 **Observed on:** Proxmox VE 9.1.1, qemu-server 9.0.30, perl 5.40.1; guest Debian 13 with qemu-guest-agent.
 **Measured:** 2026-10-08, on a nested install; seen in the field on three stations from 2026-09-27.
+**Before sending:** one figure rests on a written record in this repository: "about one time in six", in
+`tasks/plan-guest-agent-requests.md` (section "Why"). The versions above, the 2026-10-08 date and the cure
+(0xFF) come from the same design. No file here records any other count: how many bytes the request lost, and
+how many requests a reproduction needs. A reproduction on a Proxmox host must establish those before Michael
+sends this, and must replace the wording below that avoids a count.
 
 ## What happens
 
@@ -10,8 +15,8 @@ A `qm guest exec` whose arguments hold non-ASCII characters reaches the guest ag
 that arrives holds as many BYTES as the request has CHARACTERS, so its last bytes never arrive: one byte for
 each extra byte that UTF-8 needs.
 
-Read back from the guest's memory, one such request ended at `"capture-output":`. The seven bytes `true}}`
-and the newline never arrived, and the command's argument held seven extra UTF-8 bytes.
+Read back from the guest's memory, one such request ended at `"capture-output":`. The closing bytes of the
+request never arrived.
 
 ## What follows
 
@@ -29,12 +34,11 @@ The order of JSON keys varies from one `qm` process to the next, which decides w
 
 ```
 qm guest exec <vmid> -- /bin/echo ok                # answers
-qm guest exec <vmid> -- /bin/echo '───'             # repeat up to about ten times
+qm guest exec <vmid> -- /bin/echo '───'             # repeat a dozen times or more
 qm agent <vmid> ping                                # "QEMU guest agent is not running"
 ```
 
-In one trial, fourteen such requests in a row ran zero times: twelve cost the next request, and two left the
-agent deaf. Six requests with ASCII arguments, sent the same way, all ran.
+Requests with ASCII arguments, sent the same way, ran every time.
 
 ## What ends it without touching the guest
 
