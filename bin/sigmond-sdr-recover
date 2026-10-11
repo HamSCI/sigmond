@@ -58,6 +58,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                 "..", "lib"))
 from sigmond.paths import LIFECYCLE_LOCK  # noqa: E402
+from sigmond import sdr_events  # noqa: E402
 
 # The card blips off the bus for a second or two whenever it re-enumerates —
 # including during its own recovery.  Cycling inside that window would
@@ -353,6 +354,27 @@ def save_state(state: dict) -> None:
         STATE_PATH.write_text(json.dumps(state))
     except Exception as exc:            # never fail the run over bookkeeping
         _log(f"could not persist state: {exc}")
+
+
+def note_event(kind: str, detail: str) -> None:
+    """One line per episode in /var/lib/sigmond/sdr-events.jsonl, which
+    `smd doctor` reads.  Bookkeeping never fails a recovery."""
+    try:
+        sdr_events.record(kind, detail, now=time.time())
+    except Exception as exc:            # noqa: BLE001
+        _log(f"could not record the {kind}: {exc}")
+
+
+def log_on_change(state: dict, msg: str) -> None:
+    """Log `msg` only when it says something new.  The timer runs this helper
+    every 30 s, and a card that stays away used to log "holding: ..." on
+    every tick.  Numbers carry no news ("absent 45s" and "absent 75s" say the
+    same thing), so the comparison blanks them.  The key lives in the state
+    file; the card's return and each power cut clear it."""
+    key = re.sub(r"\d+", "#", msg)
+    if state.get("said") != key:
+        _log(msg)
+        state["said"] = key
 
 
 def read_config() -> dict:
@@ -702,11 +724,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                  "with a working device on it is never a candidate): "
                  + ", ".join(f"{h} p{p}" for h, p, _ in boot))
     if not (hub and port):
+        log_on_change(state, "no hub/port to cycle: nothing in [radiod] and the "
+                      "card was never seen on a bus this helper could inspect — "
+                      + ("it is absent right now; cannot recover" if not present
+                         else "unexpected while present"))
         save_state(state)
-        _log("no hub/port to cycle: nothing in [radiod] and the card was never "
-             "seen on a bus this helper could inspect — "
-             + ("it is absent right now; cannot recover" if not present
-                else "unexpected while present"))
         return 0
     if not radiod_unit and not bootstrapped:
         save_state(state)
@@ -718,16 +740,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _log("no radiod unit yet — cycling anyway to bring the card back, "
              "then bring-up can configure radiod against real hardware")
     if state.get("switchable") is False and not cfg.get("recover_hub"):
-        save_state(state)
         if not present:
-            _log(f"card absent but hub {hub} port {port} cannot switch power — "
-                 f"a manual replug is the only recovery")
+            log_on_change(state, f"card absent but hub {hub} port {port} cannot "
+                                 f"switch power — a manual replug is the only recovery")
+        else:
+            state.pop("said", None)
+        save_state(state)
         return 0
 
     if present:
         if state.get("absent_since"):
             _log("device returned to the bus")
         state["absent_since"] = None
+        state.pop("said", None)
     elif not state.get("absent_since"):
         state["absent_since"] = now
         _log("device absent from the bus — starting the grace window")
@@ -749,12 +774,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                 (now - last_cycle) if last_cycle else None)
 
     if not decision.cycle:
-        save_state(state)
         # Report when the card is missing, and always under --dry-run: someone
         # who asks what this would do deserves an answer even when the answer
-        # is "nothing".  Silence reads as a broken tool.
-        if not present or args.dry_run:
+        # is "nothing".  Silence reads as a broken tool.  The timer's own runs
+        # say it once per change, never once per 30 s tick.
+        if args.dry_run:
             _log(f"holding: {decision.reason}")
+        elif not present:
+            log_on_change(state, f"holding: {decision.reason}")
+        save_state(state)
         return 0
 
     _log(decision.reason)
@@ -763,6 +791,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     state["last_cycle_at"] = now
+    state.pop("said", None)     # after a cut, the next "holding" carries news
     save_state(state)
 
     # ⛔ LEARNED LOCATIONS ARE BUS PATHS, AND BUS PATHS MOVE ACROSS A REBOOT.
@@ -792,6 +821,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             targets += extra
     if not targets:
         targets = [(hub, str(port), False)]
+    note_event("power-cycle", " ".join(f"{h}p{p}" for h, p, _ in targets))
     if not cycle_port(targets, args.off_seconds):
         return 1
     if not wait_for_device():

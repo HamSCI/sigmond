@@ -20,11 +20,15 @@ Two failure modes shape every test here, and both were observed on AC0G-B4:
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -677,3 +681,107 @@ class PeerHalfIsNotAnEmptyPortTests(unittest.TestCase):
         got = {(h, p) for h, p, _ in self._bootstrap()}
         self.assertTrue(("5-1", "4") in got or ("3-1", "4") in got,
                         "the vanished card's port must still be cycled")
+
+
+class EpisodeAndQuietTests(unittest.TestCase):
+    """v3.71.  A power cut leaves one event for `smd doctor` to read, and a
+    card that stays away says "holding" once per change.  This helper runs
+    every 30 s, and the old line on every tick made two lines a minute for
+    hours."""
+
+    CFG = {"recover_hub": "1-1", "recover_port": "2",
+           "unit": "radiod@ac0g.service", "consumers": []}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.log, self.events = [], []
+        self.present, self.returns = False, True
+        self.t = 1_760_000_000.0
+        self._saved = {}
+        stand_ins = {
+            "STATE_PATH": self.tmp / "sdr-recover.json",
+            "read_config": lambda: dict(self.CFG),
+            "device_present": lambda: self.present,
+            "bootstrap_locations": lambda: [],
+            "cycle_port": lambda targets, off: True,
+            "wait_for_device": lambda timeout_s=90: self.returns,
+            "installed_units": lambda: [],
+            "restart_station": lambda unit, consumers, **kw: True,
+            "_with_lifecycle_lock": contextlib.nullcontext,
+            "_log": self.log.append,
+            "note_event": lambda kind, detail: self.events.append((kind, detail)),
+        }
+        for name, value in stand_ins.items():
+            self._saved[name] = getattr(sdr, name)
+            setattr(sdr, name, value)
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            setattr(sdr, name, value)
+
+    def tick(self, *argv, dt=30):
+        with mock.patch.object(sdr.time, "time", return_value=self.t):
+            rc = sdr.main(list(argv))
+        self.t += dt
+        return rc
+
+    def holding(self):
+        return [m for m in self.log if m.startswith("holding:")]
+
+    def test_a_power_cut_leaves_one_event_naming_the_port(self):
+        self.tick()            # absent: the grace window opens
+        self.tick()            # 30 s later: cut
+        self.assertEqual(self.events, [("power-cycle", "1-1p2")])
+
+    def test_a_dry_run_records_nothing(self):
+        for _ in range(3):
+            self.tick("--dry-run")
+        self.assertEqual(self.events, [])
+
+    def test_a_present_card_records_nothing_and_says_nothing(self):
+        self.present = True
+        for _ in range(5):
+            self.tick()
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.holding(), [])
+
+    def test_a_card_that_stays_away_says_holding_once_per_change(self):
+        self.returns = False
+        for _ in range(22):    # 11 minutes: the grace window, one cut, then cooldown
+            self.tick()
+        self.assertEqual(len(self.events), 1)
+        h = self.holding()
+        self.assertEqual(len(h), 2, h)
+        self.assertIn("grace", h[0])
+        self.assertIn("cooldown", h[1])
+
+    def test_holding_speaks_again_after_the_card_came_back_and_left(self):
+        self.tick()            # absent, grace: holding
+        self.present = True
+        self.tick()            # back
+        self.present = False
+        self.tick()            # absent again: holding again
+        self.assertEqual(len(self.holding()), 2)
+
+    def test_a_dry_run_still_answers_every_time(self):
+        for _ in range(3):
+            self.tick("--dry-run", dt=5)
+        self.assertEqual(len(self.holding()), 3)
+
+    def test_an_unswitchable_hub_says_so_once(self):
+        sdr.read_config = lambda: {"unit": "radiod@ac0g.service", "consumers": []}
+        (self.tmp / "sdr-recover.json").write_text(json.dumps(
+            {"hub": "1-1", "port": "2", "switchable": False,
+             "locations": [["1-1", "2", False]]}))
+        for _ in range(5):
+            self.tick()
+        said = [m for m in self.log if "cannot switch power" in m]
+        self.assertEqual(len(said), 1, self.log)
+
+    def test_a_record_that_fails_never_fails_the_run(self):
+        sdr.note_event = self._saved["note_event"]     # the real one
+        with mock.patch.object(sdr.sdr_events, "record", side_effect=OSError("read-only")):
+            self.tick()
+            rc = self.tick()
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("could not record the power-cycle" in m for m in self.log), self.log)
