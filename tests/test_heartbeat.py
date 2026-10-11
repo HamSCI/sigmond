@@ -1347,3 +1347,57 @@ def test_uploads_discard_mode_reads_valid_and_says_discard():
     assert block["verdict"] == "VALID"
     assert block["reason"] == (
         "discard mode (bench) — data acked locally, nothing shipped")
+
+
+# ---------------------------------------------------------------------------
+# v3.71: a lost RX888 on the doctor block
+# ---------------------------------------------------------------------------
+
+def test_doctor_with_only_sdr_recovered_is_inconclusive_and_says_how_often():
+    env = assemble(NOW, CONFIG, rich_readers(doctor=lambda: (False, [
+        FakeFinding("ka9q-radio", "sdr-recovered",
+                    "RX888 lost 2 time(s) in 24 h, last at 2026-10-10 14:48Z "
+                    "(radiod-exit, 1 event(s)); recovered")])))
+    block = env["blocks"]["doctor"]
+    assert block["verdict"] == "INCONCLUSIVE"
+    assert "sdr-recovered" in block["reason"]
+    assert "lost 2 time(s) in 24 h" in block["reason"]
+    assert heartbeat_schema.validate(env) == []
+
+
+def test_sdr_recovered_beside_any_other_finding_is_invalid():
+    env = assemble(NOW, CONFIG, rich_readers(doctor=lambda: (False, [
+        FakeFinding("ka9q-radio", "sdr-recovered", "lost 1 time(s)"),
+        FakeFinding("sigmond", "dirty", "1 modified file"),
+    ])))
+    assert env["blocks"]["doctor"]["verdict"] == "INVALID"
+
+
+@pytest.mark.parametrize("kind", ["sdr-lost", "sdr-flapping", "sdr-down-long", "sdr-record-unreadable"])
+def test_a_lost_flapping_or_long_down_rx888_is_invalid(kind):
+    env = assemble(NOW, CONFIG, rich_readers(doctor=lambda: (False, [
+        FakeFinding("ka9q-radio", kind, "RX888 off the bus now")])))
+    block = env["blocks"]["doctor"]
+    assert block["verdict"] == "INVALID"
+    assert kind in block["reason"] and "RX888 off the bus now" in block["reason"]
+
+
+def test_an_sdr_detail_reaches_the_reason_printable_and_bounded():
+    env = assemble(NOW, CONFIG, rich_readers(doctor=lambda: (False, [
+        FakeFinding("ka9q-radio", "sdr-recovered", "\x1b[31m" + "é" * 1000)])))
+    reason = env["blocks"]["doctor"]["reason"]
+    assert reason.isascii() and reason.isprintable()
+    assert len(reason) < 300
+
+
+def test_the_wire_contract_stands():
+    assert heartbeat_schema.KIND == "station_heartbeat"
+    assert heartbeat_schema.SCHEMA_VERSION == 1
+    assert heartbeat_schema.VERDICTS == ("VALID", "INVALID", "INCONCLUSIVE", "INDETERMINATE")
+    assert heartbeat_schema.PRECEDENCE == {"VALID": 0, "INCONCLUSIVE": 1,
+                                           "INDETERMINATE": 2, "INVALID": 3}
+
+
+def test_only_sdr_recovered_counts_as_soft():
+    from sigmond.doctor import SOFT_FINDING_KINDS
+    assert SOFT_FINDING_KINDS == frozenset({"sdr-recovered"})

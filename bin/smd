@@ -7294,11 +7294,11 @@ def _retired_unit_findings(is_enabled=None) -> list:
 
 
 def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
-    """Read-only composition of the eleven `smd doctor` check families:
+    """Read-only composition of the twelve `smd doctor` check families:
     ownership, git state, venv skew, manifest drift, exec mismatch,
     retired-but-still-armed units, rx888 IRQ placement, rx888 queue
-    depth, chrony refclock capture, radiod's systemd drop-ins, and the guest
-    agent's drop-in.
+    depth, chrony refclock capture, radiod's systemd drop-ins, the guest
+    agent's drop-in, and whether the RX888 went away in the last 24 h.
 
     Extracted from `cmd_doctor` so the fleet heartbeat assembler can get
     the same findings in-process, without shelling out to `smd doctor`
@@ -7648,6 +7648,13 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
         # OOMPolicy.  See _qga_dropin_findings / _ensure_qga_dropin.
         findings.extend(_qga_dropin_findings())
 
+    def _sdr() -> None:
+        # Did this station lose its RX888 in the last 24 h?  A stall, a
+        # vanish, a power cut: each recovers by itself, and nothing else
+        # says so.  sdr-recovered reports without failing doctor
+        # (sigmond.doctor.SOFT_FINDING_KINDS).  See _sdr_findings.
+        findings.extend(_sdr_findings())
+
     _guarded('ownership', _ownership)
     _guarded('git', _git)
     _guarded('venv-skew', _venv)
@@ -7659,6 +7666,7 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
     _guarded('chrony-refclock-captured', _chrony_captured)
     _guarded('radiod-dropins', _radiod_dropins)
     _guarded('qga-dropin', _qga_dropin)
+    _guarded('sdr-events', _sdr)
 
     if unassessed:
         clean = None
@@ -7682,7 +7690,7 @@ def cmd_doctor(args) -> int:
     left to a human.  Manifest drift and a running/installed binary
     mismatch are likewise judgement calls, never auto-repaired.
 
-    The eleven check families themselves are composed in `collect_findings`
+    The twelve check families themselves are composed in `collect_findings`
     (module level, above) — read-only, and reusable by the fleet
     heartbeat assembler without shelling out to `smd doctor`. `--fix`'s
     repair pass stays here: `collect_findings` never mutates anything.
@@ -7692,7 +7700,7 @@ def cmd_doctor(args) -> int:
         return 1
 
     from pathlib import Path
-    from sigmond.doctor import component_checkouts, foreign_owned, summarise
+    from sigmond.doctor import component_checkouts, foreign_owned, hard_findings, summarise
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     if not base.is_dir():
@@ -7743,6 +7751,12 @@ def cmd_doctor(args) -> int:
     fixable = sum(1 for f in findings if f.fixable)
     if fixable and not getattr(args, 'fix', False):
         _info(f'{fixable} finding(s) repairable with: smd doctor --fix')
+    if not hard_findings(findings):
+        # An RX888 that came back (sdr-recovered) reports for 24 h and fails
+        # nothing: the station works, and a script that runs doctor must not
+        # read a recovered stall as a broken host.
+        _info('nothing above fails doctor: it reports what the station recovered from')
+        return 0
     return 1
 
 
@@ -10973,6 +10987,35 @@ def _qga_dropin_findings(*, systemd_dir: Path = Path('/etc/systemd/system'),
         f'{missing[0]} missing or stale: a request that outgrows the guest '
         f'agent\'s 128 MB cap may still stop the whole agent (smd doctor --fix)',
         fixable=True)]
+
+
+def _sdr_findings(*, path=None, sysfs=None, now=None) -> list:
+    """Did this station lose its RX888 in the last 24 h?  Read-only: it
+    never consumes the record, since `smd doctor` and the heartbeat both
+    read it.  No file, no finding: a host with no RX888, or one that never
+    lost it, has nothing to say.  A record that cannot be read (a planted
+    symlink or FIFO, a permission fault) reads sdr-record-unreadable, a hard
+    kind: an admin must see a tampered record.  See lib/sigmond/sdr_events.py."""
+    from sigmond import sdr_events
+    from sigmond.doctor import Finding
+    path = Path(path) if path is not None else sdr_events.EVENTS_PATH
+    now = time.time() if now is None else now
+    try:
+        # read_episodes returns [] for a missing file and raises OSError for
+        # a symlink, a FIFO or anything else that is not a regular file.
+        episodes = sdr_events.read_episodes(path, now=now)
+    except OSError as e:
+        return [Finding('ka9q-radio', 'sdr-record-unreadable',
+                        f'cannot read the RX888 event record: {e}')]
+    if not episodes:
+        return []
+    present = sdr_events.card_present(
+        Path(sysfs) if sysfs is not None else sdr_events.SYSFS_USB)
+    verdict = sdr_events.assess(episodes, present)
+    if verdict is None:
+        return []
+    kind, detail = verdict
+    return [Finding('ka9q-radio', kind, detail)]
 
 
 def _ensure_radiod_affinity_drop_ins(radiod_units: list,

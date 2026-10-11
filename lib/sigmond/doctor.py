@@ -46,6 +46,18 @@ class Finding:
     fixable: bool = False
 
 
+#: Findings of these kinds report, but they fail nothing: `smd doctor` still
+#: exits 0, and the heartbeat's doctor block reads INCONCLUSIVE when they
+#: stand alone.  The station works again, and someone should know what it
+#: took.  sdr-recovered: the RX888 went away and came back (sdr_events.py).
+SOFT_FINDING_KINDS = frozenset({"sdr-recovered"})
+
+
+def hard_findings(findings) -> list:
+    """The findings that fail `smd doctor`: every one whose kind is not soft."""
+    return [f for f in findings if getattr(f, "kind", None) not in SOFT_FINDING_KINDS]
+
+
 # A venv legitimately belongs to its SERVICE user rather than the
 # checkout owner, and editor/build caches belong to whoever last built.
 # Neither blocks a git operation or an install, and both bury the real

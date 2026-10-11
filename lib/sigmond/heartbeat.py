@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from .heartbeat_schema import BLOCK_NAMES, KIND, PRECEDENCE, SCHEMA_VERSION
+from .doctor import SOFT_FINDING_KINDS
 
 log = logging.getLogger(__name__)
 
@@ -463,6 +464,15 @@ def _policy_suffix(reason: str, disabled: bool) -> str:
             if disabled else reason)
 
 
+# The board prints a block's reason and drops its data, so an RX888 finding
+# carries its detail into the reason: how often, and when, in UTC.
+_SDR_REASON_MAX = 200
+
+
+def _printable(text, limit: int) -> str:
+    return "".join(c if " " <= c <= "~" else "?" for c in str(text or ""))[:limit]
+
+
 def _map_doctor(raw) -> dict:
     clean, findings = raw
     findings = list(findings or [])
@@ -489,9 +499,16 @@ def _map_doctor(raw) -> dict:
                       f"doctor could not assess every check family{detail}",
                       data)
     if findings:
-        return _block("INVALID",
-                      f"{len(findings)} doctor finding(s): {', '.join(kinds)}",
-                      data)
+        # A block whose findings are all soft (an RX888 that came back) reads
+        # INCONCLUSIVE: the station works, and someone should know what it
+        # took.  Any other finding beside it keeps INVALID.
+        verdict = ("INCONCLUSIVE" if all(k in SOFT_FINDING_KINDS for k in kinds)
+                   else "INVALID")
+        reason = f"{len(findings)} doctor finding(s): {', '.join(kinds)}"
+        sdr = [f for f in findings if str(getattr(f, "kind", "")).startswith("sdr-")]
+        if sdr:
+            reason += f" ({_printable(getattr(sdr[0], 'detail', ''), _SDR_REASON_MAX)})"
+        return _block(verdict, reason, data)
     if clean is False:
         # Contradictory input: not-clean is only ever set alongside at
         # least one finding.  Fail toward caution rather than pick the
