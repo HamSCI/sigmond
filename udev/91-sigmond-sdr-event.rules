@@ -1,0 +1,16 @@
+# The RX888 left the USB bus, or came back.  sigmond-sdr-event keeps one line
+# per episode in /var/lib/sigmond/sdr-events.jsonl, and `smd doctor` reads it
+# (sdr-lost, sdr-down-long, sdr-flapping, sdr-recovered).
+#
+# Only 04b4:00f1, the card with its firmware loaded.  The FX3 bootloader
+# (00f3) leaves the bus at every firmware load, at every boot; counting it
+# would raise an alarm per boot.  A radiod restart does not re-enumerate the
+# card, so a healthy station stays quiet here.
+#
+# On remove, udev holds no ATTR{} any more.  The kernel's PRODUCT (vendor,
+# product and bcd in hex, no leading zeros) still names the card.  Both
+# rules match it, so they cannot disagree about which device they mean.
+# udev trusts no PATH and discards the program's output: full paths, and the
+# writer speaks to syslog.
+ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{PRODUCT}=="4b4/f1/*", RUN+="/usr/bin/python3 /usr/local/sbin/sigmond-sdr-event usb-remove %k"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{PRODUCT}=="4b4/f1/*", RUN+="/usr/bin/python3 /usr/local/sbin/sigmond-sdr-event usb-add %k"

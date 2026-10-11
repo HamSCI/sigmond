@@ -10734,6 +10734,10 @@ _RADIOD_DROPINS = (
     # radiod starts, and the demod threads are created up to ~70 s later.
     ('sigmond-radiod-park@.timer', 'sigmond-radiod-park@.timer'),
     ('sigmond-radiod-consumers@.service', 'sigmond-radiod-consumers@.service'),
+    # A radiod exit nobody asked for leaves one line per episode in
+    # sdr-events.jsonl (sigmond-sdr-event; smd doctor's sdr family).
+    ('radiod-sdr-event.conf',
+     'radiod@.service.d/50-sigmond-sdr-event.conf'),
 )
 
 

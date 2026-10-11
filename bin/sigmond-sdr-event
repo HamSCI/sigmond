@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""sigmond-sdr-event -- note that this station lost its RX888, once per episode.
+
+    sigmond-sdr-event usb-remove|usb-add <devpath>   (udev: 91-sigmond-sdr-event.rules)
+    sigmond-sdr-event radiod-exit <instance>         (radiod's 50-sigmond-sdr-event.conf)
+
+sigmond-sdr-recover notes its power cuts, and sigmond-radiod-watchdog its
+restarts, in-process, through the same library.
+The record: /var/lib/sigmond/sdr-events.jsonl, one line per episode
+(lib/sigmond/sdr_events.py).  `smd doctor` reads it.
+
+This program never fails its caller.  udev waits for it, and radiod's drop-in
+runs it after every exit, so it exits 0 whatever happens and says what went
+wrong in one line.  Only an unknown kind exits 2, since only a person types
+one.  A radiod exit counts only when systemd's $SERVICE_RESULT says radiod
+died on its own; a stop someone asked for writes nothing.
+
+SIGMOND_SDR_EVENTS, when set, names another file and sends the one line to
+stderr instead of syslog; the tests use it.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
+from sigmond import sdr_events  # noqa: E402
+
+
+def _say(msg: str, to_syslog: bool) -> None:
+    if not to_syslog:
+        print(f"sigmond-sdr-event: {msg}", file=sys.stderr, flush=True)
+        return
+    try:
+        import syslog
+        syslog.openlog("sigmond-sdr-event")
+        syslog.syslog(syslog.LOG_WARNING, msg)
+    except Exception:  # noqa: BLE001 -- the record matters, the line does not
+        pass
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] not in sdr_events.KINDS:
+        print(f"usage: sigmond-sdr-event {{{'|'.join(sdr_events.KINDS)}}} [detail]",
+              file=sys.stderr)
+        return 2
+    kind, detail = argv[0], " ".join(argv[1:])
+    override = os.environ.get("SIGMOND_SDR_EVENTS")
+    path = Path(override) if override else sdr_events.EVENTS_PATH
+    to_syslog = not override
+    if kind == "radiod-exit":
+        result = os.environ.get("SERVICE_RESULT", "")
+        if not sdr_events.radiod_exit_is_loss(result):
+            return 0
+        detail = (f"{detail} {result} {os.environ.get('EXIT_CODE', '?')}/"
+                  f"{os.environ.get('EXIT_STATUS', '?')}").strip()
+    try:
+        what = sdr_events.record(kind, detail, now=time.time(), path=path)
+    except Exception as exc:  # noqa: BLE001 -- never fail udev or radiod
+        _say(f"could not record {kind}: {exc}", to_syslog)
+        return 0
+    if what == "opened":
+        _say(f"RX888 lost ({kind}: {detail}); one new episode in {path}", to_syslog)
+    elif what == "back":
+        _say(f"RX888 back on the bus ({detail})", to_syslog)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

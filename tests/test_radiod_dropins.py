@@ -46,6 +46,7 @@ _DROPIN_RELPATHS = [
     # the demod threads do not exist for another ~70 s (AI6VN 2026-09-29).
     'sigmond-radiod-park@.timer',
     'sigmond-radiod-consumers@.service',
+    'radiod@.service.d/50-sigmond-sdr-event.conf',
 ]
 
 
@@ -112,6 +113,7 @@ class RadiodDropinsWriterTests(unittest.TestCase):
             'sigmond-radiod-park@.service',
             'sigmond-radiod-park@.timer',
             'sigmond-radiod-consumers@.service',
+            'radiod-sdr-event.conf',
         ]
         for i, name in enumerate(self.src_names):
             (self.src_dir / name).write_bytes(f'content-{i}\n'.encode())
@@ -234,6 +236,7 @@ class RadiodDropinsMissingTests(unittest.TestCase):
             'sigmond-radiod-park@.service',
             'sigmond-radiod-park@.timer',
             'sigmond-radiod-consumers@.service',
+            'radiod-sdr-event.conf',
         ]
         for i, name in enumerate(self.src_names):
             (self.src_dir / name).write_bytes(f'content-{i}\n'.encode())

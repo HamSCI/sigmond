@@ -929,8 +929,11 @@ ok "sigmond-isolation-reboot installed + enabled (runs every boot)"
 #                               topology.toml and a pattern matching nothing is
 #                               reported rather than skipped.
 info "Installing SDR recovery helpers → /usr/local/sbin/"
-$SUDO chmod a+x "$REPO_DIR/bin/sigmond-sdr-recover" "$REPO_DIR/bin/sigmond-radiod-ready"
+$SUDO chmod a+x "$REPO_DIR/bin/sigmond-sdr-recover" "$REPO_DIR/bin/sigmond-radiod-ready" \
+    "$REPO_DIR/bin/sigmond-sdr-event"
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-sdr-recover"  /usr/local/sbin/sigmond-sdr-recover
+# One line per RX888-loss episode, for udev and radiod's drop-in to call.
+$SUDO ln -sf "$REPO_DIR/bin/sigmond-sdr-event"    /usr/local/sbin/sigmond-sdr-event
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-radiod-ready" /usr/local/sbin/sigmond-radiod-ready
 $SUDO chmod a+x "$REPO_DIR/bin/sigmond-t6-stuck-watchdog"
 $SUDO ln -sf "$REPO_DIR/bin/sigmond-t6-stuck-watchdog" /usr/local/sbin/sigmond-t6-stuck-watchdog
@@ -961,6 +964,10 @@ $SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-sdr-arrival.service" \
      /etc/systemd/system/sigmond-sdr-arrival.service
 $SUDO install -m 0644 "$REPO_DIR/udev/90-sigmond-sdr-arrival.rules" \
      /etc/udev/rules.d/90-sigmond-sdr-arrival.rules
+# The RX888 leaving or rejoining the bus: one line per episode in
+# /var/lib/sigmond/sdr-events.jsonl, which smd doctor reads.
+$SUDO install -m 0644 "$REPO_DIR/udev/91-sigmond-sdr-event.rules" \
+     /etc/udev/rules.d/91-sigmond-sdr-event.rules
 $SUDO udevadm control --reload-rules 2>/dev/null || true
 $SUDO systemctl daemon-reload
 # enable, NOT --now: on an already-running station this must wait for a boot,
@@ -1014,6 +1021,9 @@ if compgen -G "/etc/systemd/system/radiod@*.service" >/dev/null 2>&1 || \
         /etc/systemd/system/sigmond-radiod-consumers@.service
     $SUDO install -m 0644 "$REPO_DIR/systemd/radiod-consumers.conf" \
         /etc/systemd/system/radiod@.service.d/45-sigmond-consumers.conf
+    # Note a radiod exit nobody asked for (a stream stall, a card gone).
+    $SUDO install -m 0644 "$REPO_DIR/systemd/radiod-sdr-event.conf" \
+        /etc/systemd/system/radiod@.service.d/50-sigmond-sdr-event.conf
     $SUDO systemctl daemon-reload
     ok "radiod drop-in installed (thread-parker + consumer-restart companions wired)"
 fi
