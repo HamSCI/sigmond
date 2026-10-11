@@ -130,6 +130,9 @@ map behind every file and line cited here: `sigmond/.superpowers/research/v370-s
      test now does for the restore.
   2. A test records the peak of each command the wizard sends through the agent.
   3. Decide whether a killed child should take the agent with it. The cap exists for the agent's own buffer.
+  Items 1 and 3 landed in `tasks/plan-sdr-alarm-memcap-v371.md` (2026-10-11): the drop-in sets
+  `OOMPolicy=continue`, so a killed child fails its own request and the agent keeps serving, and the wizard's five
+  `smd` requests and the update rig's `smd update --apply` run in transient units. Item 2 stays open.
 - **Remote access: every install registers, and the operator holds the switch** (Michael, 2026-10-08).
   *Decided.* Registration with the gateway belongs to every install; the wizard offers no way to skip it. It is
   the price of the software and of any support, because a tunnel gives the only effective means of supporting a

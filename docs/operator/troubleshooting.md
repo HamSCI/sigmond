@@ -53,6 +53,7 @@ Read them in this order:
 | Any **other** unit says `failed` | [After a power cut everything is back except one client](#after-a-power-cut-everything-is-back-except-one-client) — that is the general "one unit is down" tree, whether or not you lost power |
 | `df -h /` is 80 % or more | [Disk filling up](#disk-filling-up) |
 | The waterfall is blank or empty | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
+| `smd doctor` names `sdr-lost`, `sdr-down-long`, `sdr-flapping`, `sdr-recovered` or `sdr-record-unreadable` | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
 | No page loads at all | [Web pages don't load but ssh works](#web-pages-dont-load-but-ssh-works) |
 | It all looks fine but no data is arriving upstream | [No spots on wsprnet](#no-spots-on-wsprnet) |
 
@@ -583,6 +584,55 @@ smd status
   > armed — the finding names the command that stops it.
 - Radio present, `radiod` active, waterfall still blank → check the coax, the
   connector and the antenna itself. Nothing on the computer will fix that.
+
+**When `smd doctor` names the RX888**
+
+From v3.71 the station keeps a record each time it loses the RX888. Four things
+write to it. The card leaves the USB bus. `sigmond-sdr-recover` cuts the card's
+power. `radiod` exits on its own, for example on a stalled stream with the card
+still on the bus. The radiod watchdog restarts a `radiod` that hung. When the
+operator stops or restarts `radiod`, nothing gets recorded. `smd doctor` reads
+the last 24 h of the record, and the fleet board shows the same finding.
+
+The record starts only after `smd update` has run on the station.
+
+| Finding | What happened | `smd doctor` exits |
+|---|---|---|
+| `sdr-recovered` | The RX888 went away once or twice, each time for 30 minutes or less, and came back by itself. | 0 |
+| `sdr-down-long` | An episode stayed open longer than 30 minutes. The card may sit back on the bus now. | 1 |
+| `sdr-flapping` | The RX888 went away three or more times in 24 h. It came back each time, but something keeps taking it. | 1 |
+| `sdr-lost` | The card sits off the bus right now. | 1 |
+| `sdr-record-unreadable` | The record file is not an ordinary file (a link or a pipe, for example), so the station cannot read it. | 1 |
+
+The heartbeat shows the exit-1 findings as red. It shows `sdr-recovered` as
+amber, marked "unsure". `smd fleet doctor` lists a host that has only
+`sdr-recovered` under "clean, with reports:".
+
+To read the record itself, `[VM]`:
+
+```bash
+cat /var/lib/sigmond/sdr-events.jsonl
+```
+
+Each line holds one episode: when it opened and when its last event came (UTC),
+which kinds of event it held (`usb-remove`, `power-cycle`, `radiod-exit`,
+`radiod-wedge`), how many, and when the card came back. Events that follow one
+another closely join the same episode. An episode with `radiod-exit` and no
+`usb-remove` means the stream stalled while the card stayed on the bus.
+`radiod-wedge` means the watchdog found `radiod` alive but stuck, and restarted
+it. The watchdog logs the time it acted, not the time `radiod` stalled, so a
+wedge can look shorter than it was.
+
+- `sdr-recovered` → nothing to do now. If it comes back day after day, treat it
+  as `sdr-flapping`.
+- `sdr-down-long` → the station went without its receiver for more than half an
+  hour. Read the record to see which kind of event kept it down, then check the
+  same things as for `sdr-flapping`.
+- `sdr-flapping` → check the hub's own power supply, the USB cable and how it
+  sits in the port. Then send the record with your request for help.
+- `sdr-lost` → follow the steps under "What to do" above.
+- `sdr-record-unreadable` → send the output of `ls -l /var/lib/sigmond/` with
+  your request for help. Do not delete the file yourself.
 
 **When to stop and ask**
 
