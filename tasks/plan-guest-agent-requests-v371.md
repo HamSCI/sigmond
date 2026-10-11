@@ -16,8 +16,8 @@ socket; whoever gets an answer leaves one line in `/run/sigmond/qga-reset`, and 
 **Spec:** `tasks/plan-guest-agent-requests.md` (design of 2026-10-10). Read it before Task 1. Where this plan and
 the spec disagree, the spec wins.
 
-**Status:** written 2026-10-10 against sigmond 28a5aac and sigmond-appliance c348e21. ⚠ **The design still waits
-for Michael's review.** This plan follows the answers the design recommends to its five decisions: the host
+**Status:** written 2026-10-10 against sigmond 28a5aac and sigmond-appliance c348e21. ✅ **Michael decided the design's five
+questions on 2026-10-11, as recommended.** This plan follows the answers the design recommends to its five decisions: the host
 resets by itself and reports; one reset reads INCONCLUSIVE on the fleet board; the panel reads the marker's
 result; before bring-up the panel prints nothing; the report to Proxmox stays a draft. A different answer changes
 Task 3 (decisions 1 and 2) or Task 1 (decisions 3 and 4), and nothing else.

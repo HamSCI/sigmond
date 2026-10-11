@@ -204,6 +204,10 @@ file until Michael sends it.
 
 ## Decisions for Michael
 
+**Decided 2026-10-11 (Michael):** 1 reset and report; 2 INCONCLUSIVE; 3 yes; 4 yes; 5 yes, on the assumption that
+the report can bring back useful information (Task 5 drafts it; Michael sees the draft before anything goes to
+Proxmox); and v3.71 waits for this fix.
+
 1. **Does the host reset a silent agent by itself, or only report it?** I recommend that it resets and
    reports. The reset costs nothing when the agent merely boots, and a station nobody can reach needs it most.
 2. **What does one reset earn on the fleet board?** I recommend INCONCLUSIVE for that beat, between green and
