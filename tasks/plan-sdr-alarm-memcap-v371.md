@@ -10,9 +10,10 @@ removal, a power cut) says so on `smd doctor` and on the fleet board for 24 h.
 **Architecture:** Change A adds `OOMPolicy=continue` to the agent's drop-in, lets `smd doctor --fix` keep that
 drop-in current the way it keeps radiod's, and moves the wizard's five `smd` requests and the rig's
 `smd update --apply` into transient units (`systemd-run --wait --pipe`). Change B adds one small library,
-`lib/sigmond/sdr_events.py`, that keeps one line per loss episode in `/var/lib/sigmond/sdr-events.jsonl`; three
-callers feed it (a udev rule, `sigmond-sdr-recover`, a radiod `ExecStopPost=`), and one new doctor family reads
-the last 24 h. A recovered loss reports, reads INCONCLUSIVE on the heartbeat, and leaves doctor's exit code at 0.
+`lib/sigmond/sdr_events.py`, that keeps one line per loss episode in `/var/lib/sigmond/sdr-events.jsonl`; four
+callers feed it (a udev rule, `sigmond-sdr-recover`, a radiod `ExecStopPost=`, `sigmond-radiod-watchdog`), and
+one new doctor family reads the last 24 h. A loss that recovered within 30 minutes reports, reads INCONCLUSIVE on
+the heartbeat, and leaves doctor's exit code at 0. A loss that stayed open longer reads INVALID.
 
 **Tech Stack:** Python 3.11, standard library only; bash; systemd and udev unit files; pytest (sigmond); hermetic
 bash tests (sigmond-appliance).
@@ -23,12 +24,18 @@ decisions disagree, the decisions win. Where this plan departs from the research
 
 **Status:** written 2026-10-11 against sigmond `16f47bc` and sigmond-appliance `957096d`. Every file:line the
 research cites was checked against that tree; the ones that moved are named in "Verified anchors" below.
+Amended the same day, after Michael answered the plan's four open questions (see "Decided by Michael"): the
+30-minute rule entered Task 4 and Task 8, and a new Task 7 makes the radiod watchdog a fourth writer. The old
+Task 7 (doctor) became Task 8, and the old Task 8 (words) became Task 9. The amendment re-checked its anchors
+against sigmond `2a24e4d` and sigmond-appliance `f134582`.
 
 ## How this plan carries its code
 
 Unlike its sibling `tasks/plan-guest-agent-requests-v371.md`, **no line of code in this plan has run.** The
 planner read every file it edits and wrote each hunk against the text it read, but built no scratch copy and ran
-no test. So treat each test's first red run as a real check: if a test fails for a reason the step does not name,
+no test. One exception came with the amendment of 2026-10-11: Task 4's module and tests, and Task 7's watchdog
+hunks and tests, ran in a scratch copy (54 passed), and mutations 13, 14 and 16 of Task 4 and 2 and 6 of Task 7
+turned the named tests red. Nothing else ran. So treat each test's first red run as a real check: if a test fails for a reason the step does not name,
 stop and read before you change anything. If an anchor quoted in a step no longer matches the tree, find where it
 went, make the same edit by hand, and say so in your report.
 
@@ -41,8 +48,8 @@ re-read the anchors in the files below, since that plan edits them too:
 |---|---|---|---|
 | `scripts/proxmox/sigmond-wizard.sh` | sigmond | Task 2 (committed `beeb5fa`): `qga_b64`, `QGA_RUN`, `qga_reset`, base64 senders | Task 2 adds `gexec_unit` beside `gexec` and edits five call sites |
 | `tests/test_wizard_guest_senders.py` | sigmond | Task 2 created it | Task 2 imports its harness and must keep its count of `qm guest exec` at 8 |
-| `docs/operator/troubleshooting.md` | sigmond | Task 5 (words) | Task 8 adds a block to the RX888 section and one triage row |
-| `tasks/plan-sink-control-v370.md` | sigmond | Task 5 edits the carry list | Task 8 marks carry items 1 and 3 done |
+| `docs/operator/troubleshooting.md` | sigmond | Task 5 (words) | Task 9 adds a block to the RX888 section and one triage row |
+| `tasks/plan-sink-control-v370.md` | sigmond | Task 5 edits the carry list | Task 9 marks carry items 1 and 3 done |
 | `test-update-v3.sh` | sigmond-appliance | none named; its Task 4 edits `test-nested-v3.sh` | Task 3 edits line ~876 and the comment above ~1453 |
 
 This plan never edits `test-nested-v3.sh`, `firstboot-v3.sh`, `pm-heartbeat.py` or `pm-align.py`.
@@ -56,8 +63,20 @@ This plan never edits `test-nested-v3.sh`, `firstboot-v3.sh`, `pm-heartbeat.py` 
 - `lib/sigmond/heartbeat.py:466-501` (`_map_doctor`); `lib/sigmond/heartbeat_schema.py:26-78`: as cited.
 - `bin/sigmond-sdr-recover`: grace 65, cooldown 70, state path 73, `device_present` 332-334, the two absence lines
   729 and 733, "holding" 756-757, `last_cycle_at` 765: as cited.
-- `scripts/proxmox/sigmond-wizard.sh`: the five `smd` requests sit at 2666, 2667, 2686, 2707, 3567, as cited;
-  `gexec` at 660, `guest_out` at 700.
+- `scripts/proxmox/sigmond-wizard.sh`: at `16f47bc` the five `smd` requests sat at 2666, 2667, 2686, 2707, 3567,
+  as cited. Commit `7580f49` moved them down seven lines: at `2a24e4d` they sit at 2673, 2674, 2693, 2714, 3574,
+  with `gexec` at 667 and `guest_out` at 707. Task 2 quotes the text of each line, so the edits still match.
+- `bin/sigmond-radiod-watchdog` (at `2a24e4d`): `DRY_RUN` 57, `STATE_DIR` 59, `_mark_restarted` 119-121,
+  `_restart` 160-191 (its dry-run return 163-164, `_mark_restarted(unit, now)` 165, the stop 177-185, the start
+  191), `check_unit` 194-231 (warm-up return 200-201, the cooldown line 202-204, detector 1 at 222-226,
+  detector 2 at 229-231), `_honor_restart_request` 237-274 (its own `lib` path at 249-251), `main` 277-291. The
+  service runs as root (`systemd/sigmond-radiod-watchdog.service` sets no `User=`); its timer fires every 2 min
+  (`systemd/sigmond-radiod-watchdog.timer:6`). `smd`'s `_install_radiod_watchdog` (`bin/smd:2805`) links
+  `/usr/local/bin/sigmond-radiod-watchdog` into the repo, so a `git` update reaches it.
+- `tests/test_radiod_watchdog.py` (at `2a24e4d`): one class, `RestartAlwaysStarts`, `setUp` 45-54, `tearDown`
+  56-60.
+- `systemd/radiod-restart-forever.conf` sets `StartLimitIntervalSec=0` and `RestartSec=10`: radiod keeps
+  restarting every 10 s for as long as its card stays away, so an episode keeps growing while the loss lasts.
 - `test-update-v3.sh`: `e3-update-apply` at 876, `g3-restore-apply` at 1453 with its comment at 1436-1452.
 - **Research gap:** radiod runs as `User=radio` (`ka9q-radio/service/radiod@.service.in`), which cannot write
   `/var/lib/sigmond`. Task 5 therefore gives the `ExecStopPost=` line the `+` prefix (full privileges).
@@ -76,17 +95,22 @@ This plan never edits `test-nested-v3.sh`, `firstboot-v3.sh`, `pm-heartbeat.py` 
   radiod's drop-ins already use. pm-align never touches the VM's configuration and cannot carry it.
 - **A stream stall with the card still on the bus counts as losing the RX888**, as do a USB removal and a power
   cut by `sigmond-sdr-recover`.
-- **One writer, one line per episode**, in `/var/lib/sigmond/sdr-events.jsonl`. Three callers: a udev
-  remove/add rule, `sigmond-sdr-recover`, radiod's `ExecStopPost=` on an exit nobody asked for.
-- **The finding family reads the last 24 h:** `sdr-lost` (card off the bus now) INVALID; `sdr-recovered`
-  INCONCLUSIVE; three or more episodes in 24 h INVALID, under the kind `sdr-flapping`.
+- **One writer, one line per episode**, in `/var/lib/sigmond/sdr-events.jsonl`. Four callers: a udev
+  remove/add rule, `sigmond-sdr-recover`, radiod's `ExecStopPost=` on an exit nobody asked for, and
+  `sigmond-radiod-watchdog` when it restarts a wedged radiod (a USB-stall zombie, or a silent one). Each event
+  merges into the open episode, whoever wrote it.
+- **The finding family reads the last 24 h:** `sdr-lost` (card off the bus now) INVALID; `sdr-down-long` (an
+  episode that stayed open longer than 30 minutes) INVALID; three or more episodes in 24 h INVALID, under the kind
+  `sdr-flapping`; otherwise `sdr-recovered`, INCONCLUSIVE.
 - **`sdr-recovered` reports but does not change `smd doctor`'s exit code.** Every other finding still exits 1.
   The update rig parses doctor's kinds from lines of the form `"    <kind>: <detail>"`; that shape stays.
 - **The heartbeat's wire contract stays as it stands**: `KIND`, `SCHEMA_VERSION`, `VERDICTS`, `PRECEDENCE`, the
   block names. A finding's kind travels as free text inside the doctor block's reason.
-- **No log line per tick for a condition that persists.** `sigmond-sdr-recover` says "holding" once per change.
+- **No log line per tick for a condition that persists.** `sigmond-sdr-recover` says each of its three
+  absent-card lines once per change. The watchdog's hook adds no line when it records; it speaks once, and only
+  when the record fails.
 - **No byte above 0x7F may cross to the guest agent**, in any request these tasks add or touch.
-- **Two repositories, both on `main`.** Tasks 1, 2 and 4-8 commit in `/home/mjh/hamsci/repos/sigmond`; Task 3
+- **Two repositories, both on `main`.** Tasks 1, 2 and 4-9 commit in `/home/mjh/hamsci/repos/sigmond`; Task 3
   in `/home/mjh/hamsci/repos/sigmond-appliance`. Commit by path. Never `git add -A`. Never push. End each commit
   message with the attribution lines your own session's instructions give.
 - **Tests:** in sigmond, `.venv/bin/pytest` (never a bare `pytest`). The appliance's tests take the file under
@@ -112,19 +136,30 @@ that pins it.
    `test_one_vanish_is_one_episode_whatever_its_kinds`.
 2. **A stop someone asked for.** `smd apply`, sdr-recover and the radiod watchdog all restart radiod; radiod
    answers SIGTERM with `EX_OK` (`ka9q-radio/src/main.c:200`), and systemd then sets `SERVICE_RESULT=success`. A
-   slow stop that systemd ends by SIGKILL sets `timeout`. Neither may count as a loss. Task 5:
-   `test_an_exit_someone_asked_for_writes_nothing`, `test_a_slow_stop_writes_nothing`.
+   slow stop that systemd ends by SIGKILL sets `timeout`. Neither may count as a loss through radiod's own hook.
+   Task 5: `test_an_exit_someone_asked_for_writes_nothing`, `test_a_slow_stop_writes_nothing`. The watchdog's
+   restart still marks a stall, so the watchdog writes its own event (Task 7), and radiod's failing starts after
+   it join the same episode: `test_a_restart_and_radiods_failing_starts_make_one_episode`.
 3. **A host with no RX888 at all** (the nested rig, any VM without a card). No file means no finding, so the
-   update rig's "no new doctor kinds" check stays quiet. Task 7: `test_no_file_no_finding`. The rig itself must
+   update rig's "no new doctor kinds" check stays quiet. Task 8: `test_no_file_no_finding`. The rig itself must
    still confirm that no radiod instance runs and dies in the nest (rig check R5).
 4. **A record that some other program damaged, or a hostile detail.** The reader must skip bad lines, and the
    text that reaches the fleet board must stay printable ASCII of bounded length. Task 4:
-   `test_damaged_and_hostile_lines_are_skipped`, `test_detail_is_printable_ascii_and_bounded`; Task 7:
+   `test_damaged_and_hostile_lines_are_skipped`, `test_detail_is_printable_ascii_and_bounded`; Task 8:
    `test_an_sdr_detail_reaches_the_reason_printable_and_bounded`.
 5. **A wizard step whose request times out while its unit keeps running.** `gexec` retries once after an agent
    failure; the retry then meets a unit of the same name still running, and `systemd-run` refuses it. The step
    fails loudly instead of running a second `smd` beside the first. No hermetic test can stage that; rig check
    R6 covers it. Task 2 pins the fixed unit name: `test_the_command_runs_in_a_transient_unit_that_waits_and_pipes`.
+6. **The 30-minute edge, and where an episode ends.** An episode closes at the card's return when one came, and
+   at its last event otherwise. Exactly 30 minutes stays `sdr-recovered`; one second more reads `sdr-down-long`.
+   A return long after the last radiod exit still counts, and a long episode early in the day keeps the verdict
+   for 24 h even when a short one followed it. Task 4: `test_exactly_30_minutes_stays_recovered`,
+   `test_a_return_after_30_minutes_counts_as_long`, `test_a_long_episode_earlier_in_the_day_still_reads_down_long`.
+7. **A watchdog restart that records in the wrong place.** The hook belongs after the dry-run return and before
+   the stop, inside `_restart`, which only the two wedge detectors call. Placed in `check_unit` before the
+   cooldown, it would write every 2 min; placed before the dry-run return, a dry run would write. Task 7:
+   `test_a_unit_in_cooldown_records_nothing`, `test_a_dry_run_records_nothing`, `test_the_event_lands_before_the_stop`.
 
 ---
 
@@ -133,15 +168,15 @@ that pins it.
 | File | Repository | Task | What changes |
 |---|---|---|---|
 | `systemd/qemu-guest-agent-selfheal.conf` | sigmond | 1 | Adds `OOMPolicy=continue`; header rewritten |
-| `bin/smd` | sigmond | 1, 5, 7 | 1: `pairs`/`gate`/`label` on the radiod drop-in helpers; `_QGA_DROPIN` and its ensure/finding pair; the `qga-dropin` family; `--fix` calls it. 5: one pair in `_RADIOD_DROPINS`. 7: `_sdr_findings`, the `sdr-events` family, the exit code |
+| `bin/smd` | sigmond | 1, 5, 8 | 1: `pairs`/`gate`/`label` on the radiod drop-in helpers; `_QGA_DROPIN` and its ensure/finding pair; the `qga-dropin` family; `--fix` calls it. 5: one pair in `_RADIOD_DROPINS`. 8: `_sdr_findings`, the `sdr-events` family, the exit code |
 | `install.sh` | sigmond | 1, 5 | 1: the agent block's message. 5: the writer's symlink, the udev rule, the radiod drop-in |
 | `tests/test_qga_dropin.py` (new) | sigmond | 1 | The shipped drop-in, ensure, finding, `--fix`, the family |
 | `scripts/proxmox/sigmond-wizard.sh` | sigmond | 2 | `QGA_SDRUN`, `gexec_unit`; five call sites |
 | `tests/test_wizard_smd_units.py` (new) | sigmond | 2 | `gexec_unit` against a stub `qm` and a stand-in `systemd-run`; the scan |
 | `test-update-v3.sh` | sigmond-appliance | 3 | `e3-update-apply` runs in `rig-update-apply`; two comments |
 | `test-update-agent-cap.sh` (new) | sigmond-appliance | 3 | Scans the rig's heavy requests |
-| `lib/sigmond/sdr_events.py` (new) | sigmond | 4 | The episode record: `record`, `read_episodes`, `card_present`, `assess`, `radiod_exit_is_loss` |
-| `tests/test_sdr_events.py` (new) | sigmond | 4 | The record's rules |
+| `lib/sigmond/sdr_events.py` (new) | sigmond | 4 | The episode record: `record`, `read_episodes`, `card_present`, `episode_span`, `assess`, `radiod_exit_is_loss`; the loss kind `radiod-wedge`; `LONG_EPISODE_S` |
+| `tests/test_sdr_events.py` (new) | sigmond | 4 | The record's rules, the 30-minute rule |
 | `bin/sigmond-sdr-event` (new) | sigmond | 5 | The command-line writer for udev and radiod |
 | `udev/91-sigmond-sdr-event.rules` (new) | sigmond | 5 | Remove and add of 04b4:00f1 |
 | `systemd/radiod-sdr-event.conf` (new) | sigmond | 5 | `ExecStopPost=-+/usr/local/sbin/sigmond-sdr-event radiod-exit %i` |
@@ -149,12 +184,14 @@ that pins it.
 | `tests/test_radiod_dropins.py` | sigmond | 5 | The fixture lists gain the new pair |
 | `bin/sigmond-sdr-recover` | sigmond | 6 | `note_event`, `log_on_change`; one call before the cut; three log lines quieted |
 | `tests/test_sdr_recover.py` | sigmond | 6 | One class driving `main()` |
-| `lib/sigmond/doctor.py` | sigmond | 7 | `SOFT_FINDING_KINDS`, `hard_findings` |
-| `lib/sigmond/heartbeat.py` | sigmond | 7 | `_map_doctor`: INCONCLUSIVE for soft kinds alone; the sdr detail in the reason |
-| `tests/test_sdr_doctor.py` (new) | sigmond | 7 | The family and the exit code |
-| `tests/test_heartbeat.py` | sigmond | 7 | Six tests appended |
-| `docs/operator/troubleshooting.md` | sigmond | 8 | One triage row; one block in the RX888 section |
-| `tasks/plan-sink-control-v370.md` | sigmond | 8 | Carry items 1 and 3 marked done |
+| `bin/sigmond-radiod-watchdog` | sigmond | 7 | `SDR_EVENTS_PATH`, `_note_event`; one call in `_restart` |
+| `tests/test_radiod_watchdog.py` | sigmond | 7 | The old class stubs `_note_event`; one class appended |
+| `lib/sigmond/doctor.py` | sigmond | 8 | `SOFT_FINDING_KINDS`, `hard_findings` |
+| `lib/sigmond/heartbeat.py` | sigmond | 8 | `_map_doctor`: INCONCLUSIVE for soft kinds alone; the sdr detail in the reason |
+| `tests/test_sdr_doctor.py` (new) | sigmond | 8 | The family and the exit code |
+| `tests/test_heartbeat.py` | sigmond | 8 | Six tests appended |
+| `docs/operator/troubleshooting.md` | sigmond | 9 | One triage row; one block in the RX888 section |
+| `tasks/plan-sink-control-v370.md` | sigmond | 9 | Carry items 1 and 3 marked done |
 
 ---
 
@@ -630,8 +667,8 @@ git commit -m "agent: keep the 128 MB cap, let a killed child fail alone, and le
 ### Task 2: the wizard runs each smd in a transient unit of its own
 
 **Files:**
-- Modify: `/home/mjh/hamsci/repos/sigmond/scripts/proxmox/sigmond-wizard.sh` (after `gexec`, ~line 696; call
-  sites ~2666, ~2667, ~2686, ~2707, ~3567)
+- Modify: `/home/mjh/hamsci/repos/sigmond/scripts/proxmox/sigmond-wizard.sh` (after `gexec`, ~line 703 at `2a24e4d`;
+  call sites ~2673, ~2674, ~2693, ~2714, ~3574)
 - Create: `/home/mjh/hamsci/repos/sigmond/tests/test_wizard_smd_units.py`
 
 **Interfaces:**
@@ -990,7 +1027,8 @@ git commit -m "rigs: the update rig runs smd update --apply in a transient unit,
 - Produces, in `sigmond.sdr_events`:
   - constants `EVENTS_PATH = Path("/var/lib/sigmond/sdr-events.jsonl")`, `SYSFS_USB`, `EPISODE_GAP_S = 600`,
     `SETTLE_S = 120`, `KEEP_S = 604800`, `MAX_LINES = 200`, `WINDOW_S = 86400`, `FLAP_EPISODES = 3`,
-    `DETAIL_MAX = 120`, `LOSS_KINDS = ("usb-remove", "power-cycle", "radiod-exit")`, `ARRIVAL_KIND = "usb-add"`,
+    `LONG_EPISODE_S = 1800`, `DETAIL_MAX = 120`,
+    `LOSS_KINDS = ("usb-remove", "power-cycle", "radiod-exit", "radiod-wedge")`, `ARRIVAL_KIND = "usb-add"`,
     `KINDS`, `RADIOD_LOSS_RESULTS`, `RX888_IDS`;
   - `@dataclass Episode(opened: float, last: float, kinds: list[str], count: int, detail: str = "", back:
     Optional[float] = None)`;
@@ -998,8 +1036,9 @@ git commit -m "rigs: the update rig runs smd update --apply in a transient unit,
     `"opened"`, `"grown"`, `"back"` or `None`; raises `ValueError` on an unknown kind;
   - `read_episodes(path: Path = EVENTS_PATH, *, now: float, window_s: float = WINDOW_S) -> list[Episode]`;
   - `card_present(root: Path = SYSFS_USB) -> bool`;
+  - `episode_span(ep: Episode) -> float`, the seconds an episode stayed open;
   - `assess(episodes: Sequence[Episode], present: bool) -> Optional[tuple[str, str]]` returning
-    `("sdr-lost"|"sdr-flapping"|"sdr-recovered", detail)`;
+    `("sdr-lost"|"sdr-down-long"|"sdr-flapping"|"sdr-recovered", detail)`;
   - `radiod_exit_is_loss(service_result: str) -> bool`;
   - `clean_text(s, limit: int = DETAIL_MAX) -> str`.
 
@@ -1012,6 +1051,18 @@ git commit -m "rigs: the update rig runs smd update --apply in a transient unit,
   opens nothing. A `usb-remove` that joins an episode clears its `back`; other kinds leave it.
 - So ND's loop of 2026-10-05 (1,708 radiod restarts about 20 s apart over 9.5 h) makes one line with count 1708,
   and a card that drops, returns and drops again five minutes later makes two episodes.
+- **The 30-minute rule (Michael, 2026-10-11).** An episode that stayed open longer than `LONG_EPISODE_S` (1800 s)
+  reads INVALID under the kind `sdr-down-long`, for as long as it sits in the 24 h window. `episode_span`
+  measures it: from the first event to the card's return when one came, else to the last event. A stall with the
+  card on the bus never brings a return, but radiod restarts every 10 s while it lasts
+  (`systemd/radiod-restart-forever.conf`), so its last event tracks the outage. ND's loop reads `sdr-down-long`.
+  Exactly 1800 s stays `sdr-recovered`.
+- **Why a new kind, not `sdr-lost`.** `sdr-lost` means one thing an operator can check by hand: the card sits off
+  the bus right now. A 40-minute stall that ended an hour ago leaves the card on the bus. Folding it into
+  `sdr-lost` would send the operator to look for a card that sits in plain view. So `assess` tries `sdr-lost`
+  first (the present tense wins), then `sdr-down-long`, then `sdr-flapping`, then `sdr-recovered`.
+- **`radiod-wedge`** joins the loss kinds for Task 7: the radiod watchdog restarts a radiod that said
+  "quitting" yet stayed active, or went silent. It merges like any other loss.
 - Every boot brings a `usb-add` of the running card. With no open episode it writes nothing.
 - The file lives in `/var/lib`: a lost card clusters around reboots and cold starts, and `/run` forgets across
   them. Writers run as root (udev, sdr-recover, radiod's drop-in with `+`); `smd doctor` may run as a user, so
@@ -1099,6 +1150,15 @@ def test_one_vanish_is_one_episode_whatever_its_kinds(tmp_path):
     assert d["kinds"] == ["power-cycle", "radiod-exit", "usb-remove"]
     assert d["count"] == 4
     assert d["back"] is not None
+
+
+def test_a_watchdog_restart_joins_the_episode_like_any_loss(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("radiod-wedge", "radiod@ac0g.service no journal output for 700s", now=T0, path=p)
+    assert ev.record("radiod-exit", now=T0 + 20, path=p) == "grown"
+    (d,) = lines(p)
+    assert d["kinds"] == ["radiod-exit", "radiod-wedge"] and d["count"] == 2
+    assert ev.read_episodes(p, now=T0 + 30)[0].kinds == ["radiod-exit", "radiod-wedge"]
 
 
 def test_a_card_that_drops_again_after_it_settled_opens_a_new_episode(tmp_path):
@@ -1221,8 +1281,9 @@ def test_no_usb_tree_means_no_card(tmp_path):
 
 # -- the verdict -----------------------------------------------------------------------
 
-def ep(opened, kinds=("radiod-exit",), count=1, detail=""):
-    return ev.Episode(opened=opened, last=opened, kinds=list(kinds), count=count, detail=detail)
+def ep(opened, kinds=("radiod-exit",), count=1, detail="", span=0, back=None):
+    return ev.Episode(opened=opened, last=opened + span, kinds=list(kinds), count=count,
+                      detail=detail, back=back)
 
 
 def test_nothing_to_assess_without_episodes():
@@ -1247,6 +1308,47 @@ def test_the_detail_names_how_often_and_when_in_utc():
     kind, detail = ev.assess([ep(T0), ep(T0 + 3600, detail="ac0g core-dump dumped/ABRT")], True)
     assert "2 time(s) in 24 h" in detail
     assert "Z" in detail and "ABRT" in detail
+
+
+# -- the 30-minute rule (Michael, 2026-10-11) -------------------------------------------
+
+def test_an_episode_open_longer_than_30_minutes_reads_down_long():
+    kind, detail = ev.assess([ep(T0, span=1801)], True)
+    assert kind == "sdr-down-long"
+    assert "30 min" in detail
+
+
+def test_exactly_30_minutes_stays_recovered():
+    assert ev.assess([ep(T0, span=1800)], True)[0] == "sdr-recovered"
+
+
+def test_a_return_after_30_minutes_counts_as_long():
+    # The card left, radiod failed a few starts, then nothing came until the
+    # card returned 31 minutes after the loss.
+    long = ep(T0, kinds=("usb-remove",), span=60, back=T0 + 1860)
+    assert ev.episode_span(long) == 1860
+    assert ev.assess([long], True)[0] == "sdr-down-long"
+
+
+def test_a_long_episode_earlier_in_the_day_still_reads_down_long():
+    assert ev.assess([ep(T0, span=3600), ep(T0 + 7200)], True)[0] == "sdr-down-long"
+
+
+def test_a_long_episode_names_itself_before_flapping():
+    eps = [ep(T0), ep(T0 + 3600, span=2400), ep(T0 + 7200)]
+    assert ev.assess(eps, True)[0] == "sdr-down-long"
+
+
+def test_the_card_off_the_bus_reads_lost_even_when_the_episode_ran_long():
+    assert ev.assess([ep(T0, kinds=("usb-remove",), span=3600)], False)[0] == "sdr-lost"
+
+
+def test_the_nd_restart_loop_reads_down_long(tmp_path):
+    p = tmp_path / "e.jsonl"
+    for i in range(1708):
+        ev.record("radiod-exit", now=T0 + 20 * i, path=p)
+    eps = ev.read_episodes(p, now=T0 + 20 * 1708)
+    assert ev.assess(eps, True)[0] == "sdr-down-long"
 
 
 @pytest.mark.parametrize("result,loss", [
@@ -1276,6 +1378,10 @@ heard about it.
   data for 5 seconds, quitting" and dies on a libusb assertion
   (radiod-exit).  AC0G-ND did this three times between 2026-10-10 10:13Z and
   2026-10-11 08:49Z, and its card never left the bus.
+* radiod says "quitting" yet hangs, or falls silent, and
+  sigmond-radiod-watchdog restarts it (radiod-wedge).  systemd reads that
+  restart as asked for, so radiod's own hook writes nothing; the watchdog
+  writes the event itself.
 
 Writers call record(); `smd doctor` calls read_episodes() and assess().  The
 file lives in /var/lib, not /run: a lost card clusters around reboots and
@@ -1287,6 +1393,10 @@ came back more than SETTLE_S before.  ND's loop of 2026-10-05 (1,708 radiod
 restarts in 9.5 h) makes one line with count 1708; one vanish -- removal,
 radiod's failing restarts, the power cut -- makes one episode; a card that
 drops, returns and drops again minutes later makes two.
+
+An episode that stayed open longer than LONG_EPISODE_S reads INVALID
+(sdr-down-long), even after the card came back (Michael's rule,
+2026-10-11).  Shorter, a lone episode reads sdr-recovered.
 """
 from __future__ import annotations
 
@@ -1308,9 +1418,10 @@ KEEP_S = 7 * 86400           # episodes older than this drop on the next write
 MAX_LINES = 200              # the file never holds more
 WINDOW_S = 86400             # what `smd doctor` reads
 FLAP_EPISODES = 3            # this many episodes in WINDOW_S read INVALID
+LONG_EPISODE_S = 1800        # an episode open longer than this reads INVALID
 DETAIL_MAX = 120
 
-LOSS_KINDS = ("usb-remove", "power-cycle", "radiod-exit")
+LOSS_KINDS = ("usb-remove", "power-cycle", "radiod-exit", "radiod-wedge")
 ARRIVAL_KIND = "usb-add"
 KINDS = LOSS_KINDS + (ARRIVAL_KIND,)
 
@@ -1466,19 +1577,43 @@ def _hm(t: float) -> str:
     return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d %H:%MZ")
 
 
+def episode_span(ep: Episode) -> float:
+    """How long the episode stayed open, in seconds: from its first event to
+    the card's return when one came, else to its last event.  A stall with
+    the card on the bus brings no return, but radiod restarts every 10 s while
+    it lasts, so the last event tracks the outage."""
+    end = ep.last if ep.back is None else max(ep.last, ep.back)
+    return end - ep.opened
+
+
+def _tail(ep: Episode) -> str:
+    tail = f"{'+'.join(ep.kinds)}, {ep.count} event(s)"
+    if ep.detail:
+        tail += f", {ep.detail}"
+    return tail
+
+
 def assess(episodes: Sequence[Episode], present: bool) -> Optional[Tuple[str, str]]:
-    """`smd doctor`'s verdict on the window: (kind, detail), or None."""
+    """`smd doctor`'s verdict on the window: (kind, detail), or None.
+
+    The present tense wins: a card off the bus now reads sdr-lost.  Then an
+    episode open longer than LONG_EPISODE_S reads sdr-down-long, then three
+    episodes read sdr-flapping.  Only what remains reads sdr-recovered."""
     if not episodes:
         return None
     n = len(episodes)
     last = episodes[-1]
-    tail = f"{'+'.join(last.kinds)}, {last.count} event(s)"
-    if last.detail:
-        tail += f", {last.detail}"
+    tail = _tail(last)
     if not present:
         return ("sdr-lost",
                 f"RX888 off the bus now; lost at {_hm(last.opened)} ({tail}); "
                 f"{n} loss episode(s) in 24 h")
+    long = [ep for ep in episodes if episode_span(ep) > LONG_EPISODE_S]
+    if long:
+        worst = max(long, key=episode_span)
+        return ("sdr-down-long",
+                f"RX888 lost for {int(episode_span(worst) // 60)} min from "
+                f"{_hm(worst.opened)} ({_tail(worst)}); {n} loss episode(s) in 24 h")
     if n >= FLAP_EPISODES:
         return ("sdr-flapping",
                 f"RX888 lost {n} times in 24 h, last at {_hm(last.opened)} ({tail}); "
@@ -1512,12 +1647,24 @@ Expected: PASS.
   10. Remove `os.chmod(tmp, 0o644)` → `test_the_file_stays_world_readable` turns red (mkstemp makes 0600).
   11. Add `"timeout"` to `RADIOD_LOSS_RESULTS` → `test_which_radiod_exits_count_as_a_loss[timeout-False]` turns
       red.
+  12. Set `LONG_EPISODE_S = 3600` → `test_an_episode_open_longer_than_30_minutes_reads_down_long` and
+      `test_a_return_after_30_minutes_counts_as_long` turn red.
+  13. Change `episode_span(ep) > LONG_EPISODE_S` to `>=` → `test_exactly_30_minutes_stays_recovered` turns red.
+  14. In `episode_span`, ignore `back` (`end = ep.last`) → `test_a_return_after_30_minutes_counts_as_long` turns
+      red.
+  15. Test only the newest episode (`long = [last] if episode_span(last) > LONG_EPISODE_S else []`) →
+      `test_a_long_episode_earlier_in_the_day_still_reads_down_long` and
+      `test_a_long_episode_names_itself_before_flapping` turn red.
+  16. Move the `sdr-down-long` check above the `if not present:` block →
+      `test_the_card_off_the_bus_reads_lost_even_when_the_episode_ran_long` turns red.
+  17. Drop `"radiod-wedge"` from `LOSS_KINDS` → `test_a_watchdog_restart_joins_the_episode_like_any_loss` turns
+      red (`record` refuses the kind).
 
 - [ ] **Step 6: Commit.**
 
 ```bash
 git add lib/sigmond/sdr_events.py tests/test_sdr_events.py
-git commit -m "sdr: one line per episode when the station loses its RX888, read back over 24 h"
+git commit -m "sdr: one line per episode when the station loses its RX888, read back over 24 h; past 30 minutes it reads INVALID"
 ```
 
 ---
@@ -1560,11 +1707,13 @@ git commit -m "sdr: one line per episode when the station loses its RX888, read 
 - [ ] **Step 1: Write the failing tests.** Create `tests/test_sdr_event_hooks.py`:
 
 ```python
-"""The writer and the three hooks that feed it (v3.71).
+"""The writer and the hooks that feed it (v3.71).
 
-udev notes the RX888 leaving and rejoining the bus, radiod's drop-in notes
-an exit nobody asked for, and sigmond-sdr-recover notes its power cuts
-(tests/test_sdr_recover.py).  The writer must never fail its caller.
+udev notes the RX888 leaving and rejoining the bus, and radiod's drop-in
+notes an exit nobody asked for.  sigmond-sdr-recover notes its power cuts
+(tests/test_sdr_recover.py), and sigmond-radiod-watchdog its restarts
+(tests/test_radiod_watchdog.py), both in-process.  The writer must never
+fail its caller.
 """
 import importlib.machinery
 import importlib.util
@@ -1738,7 +1887,8 @@ tests with `FileNotFoundError`; the `smd` and install.sh tests on missing text.
     sigmond-sdr-event usb-remove|usb-add <devpath>   (udev: 91-sigmond-sdr-event.rules)
     sigmond-sdr-event radiod-exit <instance>         (radiod's 50-sigmond-sdr-event.conf)
 
-sigmond-sdr-recover notes its power cuts in-process, through the same library.
+sigmond-sdr-recover notes its power cuts, and sigmond-radiod-watchdog its
+restarts, in-process, through the same library.
 The record: /var/lib/sigmond/sdr-events.jsonl, one line per episode
 (lib/sigmond/sdr_events.py).  `smd doctor` reads it.
 
@@ -1811,7 +1961,7 @@ if __name__ == "__main__":
 ```
 # The RX888 left the USB bus, or came back.  sigmond-sdr-event keeps one line
 # per episode in /var/lib/sigmond/sdr-events.jsonl, and `smd doctor` reads it
-# (sdr-lost, sdr-recovered, sdr-flapping).
+# (sdr-lost, sdr-down-long, sdr-flapping, sdr-recovered).
 #
 # Only 04b4:00f1, the card with its firmware loaded.  The FX3 bootloader
 # (00f3) leaves the bus at every firmware load, at every boot; counting it
@@ -1961,7 +2111,8 @@ git commit -m "sdr: udev and radiod's unasked exits note each RX888 loss, once p
 - The timer runs this helper every 30 s. While the card stays away it logged `holding: <reason>` on every tick:
   two lines a minute for hours, the flood that buries the line that mattered. Two other lines for an absent card
   ran per tick too: "no hub/port to cycle ... cannot recover" and "card absent but hub ... cannot switch power".
-  This task quiets all three. A dry run still answers every time, since a person asked.
+  This task quiets all three; Michael confirmed all three on 2026-10-11. A dry run still answers every time,
+  since a person asked.
 - The reasons carry changing numbers ("absent 45s", "cycled 300s ago"), so `log_on_change` compares them with
   the digits blanked. The key lives in the state file, which persists between ticks. The card's return and each
   power cut clear it, so the next "holding" counts as news.
@@ -2279,7 +2430,333 @@ git commit -m "sdr-recover: note each power cut for doctor, and say holding once
 
 ---
 
-### Task 7: smd doctor's sdr family, its exit code, and the heartbeat
+### Task 7: the radiod watchdog notes each restart it makes
+
+**Files:**
+- Modify: `/home/mjh/hamsci/repos/sigmond/bin/sigmond-radiod-watchdog` (after `STATE_DIR` at 59; after
+  `_mark_restarted` at 119-121; in `_restart` at 163-165)
+- Modify: `/home/mjh/hamsci/repos/sigmond/tests/test_radiod_watchdog.py` (imports 16-23; `setUp` 45-54 and
+  `tearDown` 56-60 of `RestartAlwaysStarts`; one class appended)
+
+**Interfaces:**
+- Consumes: `sigmond.sdr_events.record` and the loss kind `radiod-wedge` (Task 4).
+- Produces: in `sigmond-radiod-watchdog`, the module setting `SDR_EVENTS_PATH = None` and
+  `_note_event(unit: str, reason: str, now: float) -> None`.
+
+**What you need to know:**
+- Michael decided on 2026-10-11 that the watchdog becomes the fourth writer. It restarts a radiod that said
+  "No rx888 data ... quitting" yet stayed active (detector 1), or that logged nothing for `RWD_SILENCE_SEC`
+  (detector 2). Each such restart marks a stall of the RX888. systemd reads the watchdog's `systemctl stop` as a
+  stop someone asked for: radiod exits `EX_OK` and `SERVICE_RESULT` reads `success`, or `timeout` when a wedged
+  radiod dies slowly. So radiod's own hook (Task 5) writes nothing for it, and the watchdog must write the event
+  itself.
+- The hook sits in `_restart`, after the dry-run return and `_mark_restarted`, before the stop. Only the two
+  detectors in `check_unit` call `_restart`. `_honor_restart_request` restarts radiod through
+  `sigmond.timing_judge.process_restart_request` and never calls `_restart`, so a restart that hf-timestd asked
+  for records nothing: it marks a timing fault, not a lost RX888.
+- The event lands before the stop. The episode then opens with its cause, and the `radiod-exit` events of a
+  radiod that fails its next starts join it.
+- The existing rules stay. The cooldown (`RWD_COOLDOWN_SEC`, 600 s) and the warm-up (`RWD_WARMUP_SEC`, 300 s)
+  already gate `_restart`, so the watchdog records at most one event per restart, never one per 2-minute tick.
+  `_restart` already prints one line per restart; the hook adds none. It speaks once, on stderr, only when the
+  record fails.
+- The watchdog runs as root (its service sets no `User=`), so it can write `/var/lib/sigmond`. It reaches its
+  library the way `_honor_restart_request` does: `/usr/local/bin/sigmond-radiod-watchdog` links into the repo,
+  and `lib/` sits beside `bin/` once the link resolves. The import stays lazy, inside `_note_event`, so a tick
+  that restarts nothing pays no import.
+- The episode opens when the watchdog acts, not when the stall began. A quitting radiod waits out
+  `RWD_GRACE_SEC` (120 s) plus up to one tick; a silent one waits at least `RWD_SILENCE_SEC` (600 s). So
+  `episode_span` (Task 4) undercounts a wedge by that much. "What this plan could not verify" names the cost.
+- `SDR_EVENTS_PATH` exists only so the tests can point the record at a scratch file, the way
+  `SIGMOND_SDR_EVENTS` serves the writer's tests.
+
+- [ ] **Step 1: Write the failing tests.** In `tests/test_radiod_watchdog.py`, replace the imports:
+
+```python
+import importlib.machinery
+import importlib.util
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+```
+
+  with:
+
+```python
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "lib"))
+
+from sigmond import sdr_events as ev  # noqa: E402
+```
+
+  In `RestartAlwaysStarts`, so its tests never write the station's real record, replace:
+
+```python
+        self._sleep = wd.time.sleep
+        wd._reset_usb_devices = lambda: None
+        wd._mark_restarted = lambda unit, now: None
+        wd.time.sleep = lambda s: None
+        wd.DRY_RUN = False
+
+    def tearDown(self):
+        wd._run = self._run
+        wd._reset_usb_devices = self._reset
+        wd._mark_restarted = self._mark
+        wd.time.sleep = self._sleep
+```
+
+  with:
+
+```python
+        self._sleep = wd.time.sleep
+        self._note = wd._note_event
+        wd._reset_usb_devices = lambda: None
+        wd._mark_restarted = lambda unit, now: None
+        wd._note_event = lambda unit, reason, now: None
+        wd.time.sleep = lambda s: None
+        wd.DRY_RUN = False
+
+    def tearDown(self):
+        wd._run = self._run
+        wd._reset_usb_devices = self._reset
+        wd._mark_restarted = self._mark
+        wd._note_event = self._note
+        wd.time.sleep = self._sleep
+```
+
+  Then insert this class directly above the closing `if __name__ == "__main__":`:
+
+```python
+T0 = 1_760_000_000.0
+UNIT = "radiod@ac0g.service"
+
+
+class RestartNotesTheLoss(unittest.TestCase):
+    """v3.71.  Each restart the watchdog makes leaves one event for `smd
+    doctor`.  systemd reads the watchdog's stop as asked for, so radiod's own
+    ExecStopPost= hook writes nothing; without this, a wedge that the
+    watchdog cleared would leave no trace."""
+
+    SAVED = ("_run", "_reset_usb_devices", "_mark_restarted", "_cooldown_ok",
+             "_unit_prop", "_epoch", "_journal_since_invocation",
+             "SDR_EVENTS_PATH", "DRY_RUN")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.events = self.tmp / "sdr-events.jsonl"
+        self.calls = []
+        self._saved = {n: getattr(wd, n) for n in self.SAVED}
+        self._sleep = wd.time.sleep
+
+        def fake(cmd, timeout=60):
+            self.calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        wd._run = fake
+        wd._reset_usb_devices = lambda: None
+        wd._mark_restarted = lambda unit, now: None
+        wd.time.sleep = lambda s: None
+        wd.SDR_EVENTS_PATH = self.events
+        wd.DRY_RUN = False
+
+    def tearDown(self):
+        for n, v in self._saved.items():
+            setattr(wd, n, v)
+        wd.time.sleep = self._sleep
+
+    def lines(self):
+        return [json.loads(l) for l in self.events.read_text().splitlines()]
+
+    def verbs(self):
+        return [c[1] for c in self.calls if c and c[0] == "systemctl"]
+
+    def a_unit_an_hour_old(self, journal):
+        wd._unit_prop = lambda unit, prop: {"InvocationID": "abc",
+                                            "ActiveEnterTimestamp": "x"}[prop]
+        wd._epoch = lambda ts: T0 - 3600
+        wd._journal_since_invocation = lambda unit, inv: journal
+
+    def test_a_restart_leaves_one_event_naming_the_unit_and_the_reason(self):
+        wd._restart(UNIT, "no journal output for 700s (heartbeat lost)", T0)
+        (d,) = self.lines()
+        self.assertEqual(d["kinds"], ["radiod-wedge"])
+        self.assertIn(UNIT, d["detail"])
+        self.assertIn("heartbeat lost", d["detail"])
+
+    def test_the_quitting_detector_records_through_restart(self):
+        self.a_unit_an_hour_old([
+            f"{T0 - 300:.6f} host radiod[1]: No rx888 data for 5 seconds, quitting",
+            f"{T0 - 10:.6f} host radiod[1]: measured sample rate 64800000"])
+        wd._cooldown_ok = lambda unit, now: True
+        wd.check_unit(UNIT, T0)
+        (d,) = self.lines()
+        self.assertIn("quitting", d["detail"])
+        self.assertEqual(self.verbs(), ["stop", "start"])
+
+    def test_a_unit_in_cooldown_records_nothing(self):
+        self.a_unit_an_hour_old([f"{T0 - 900:.6f} host radiod[1]: last words"])
+        wd._cooldown_ok = lambda unit, now: False
+        with contextlib.redirect_stdout(io.StringIO()):
+            wd.check_unit(UNIT, T0)
+        self.assertFalse(self.events.exists())
+        self.assertEqual(self.verbs(), [])
+
+    def test_the_event_lands_before_the_stop(self):
+        seen = []
+
+        def fake(cmd, timeout=60):
+            seen.append((cmd[1], self.events.exists()))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        wd._run = fake
+        wd._restart(UNIT, "wedged", T0)
+        self.assertEqual(seen[0], ("stop", True))
+
+    def test_a_dry_run_records_nothing(self):
+        wd.DRY_RUN = True
+        with contextlib.redirect_stdout(io.StringIO()):
+            wd._restart(UNIT, "wedged", T0)
+        self.assertFalse(self.events.exists())
+
+    def test_a_restart_and_radiods_failing_starts_make_one_episode(self):
+        wd._restart(UNIT, 'declared "no rx888 data, quitting" 300s ago', T0)
+        ev.record("radiod-exit", "ac0g core-dump dumped/ABRT", now=T0 + 20, path=self.events)
+        (d,) = self.lines()
+        self.assertEqual(d["kinds"], ["radiod-exit", "radiod-wedge"])
+        self.assertEqual(d["count"], 2)
+
+    def test_a_record_that_fails_still_restarts(self):
+        (self.tmp / "file").write_text("")
+        wd.SDR_EVENTS_PATH = self.tmp / "file" / "sdr-events.jsonl"
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            wd._restart(UNIT, "wedged", T0)
+        self.assertEqual(self.verbs(), ["stop", "start"])
+        self.assertIn("could not record", err.getvalue())
+
+    def test_a_restart_adds_no_line_of_its_own(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            wd._restart(UNIT, "wedged", T0)
+        self.assertEqual(len(out.getvalue().splitlines()), 1, out.getvalue())
+```
+
+- [ ] **Step 2: Run the tests; watch them fail.**
+
+Run: `.venv/bin/pytest tests/test_radiod_watchdog.py -q --override-ini addopts=`
+Expected: FAIL, every test. The five older tests fail in `setUp` with `AttributeError: module
+'radiod_watchdog_under_test' has no attribute '_note_event'`; the new class fails in `setUp` on
+`'SDR_EVENTS_PATH'`. Both pass again after Step 4.
+
+- [ ] **Step 3: Name the record's path.** In `bin/sigmond-radiod-watchdog`, directly after
+  `STATE_DIR = Path('/run/sigmond-radiod-watchdog')`, insert:
+
+```python
+
+# The station's record of losing its RX888 (v3.71, lib/sigmond/sdr_events.py),
+# which `smd doctor` reads.  None means the library's own path,
+# /var/lib/sigmond/sdr-events.jsonl; the tests point it at a scratch file.
+SDR_EVENTS_PATH = None
+```
+
+- [ ] **Step 4: Add the hook, and call it once per restart.** Directly after the end of `_mark_restarted` (the
+  line `    (STATE_DIR / f'{unit}.last-restart').write_text(f'{now}\n')`), insert:
+
+```python
+
+
+def _note_event(unit: str, reason: str, now: float) -> None:
+    """Note this restart in the station's record of RX888 losses (v3.71).
+
+    A wedged radiod has lost its RX888 as surely as one that died.  But
+    systemd reads the stop in _restart as one someone asked for, so radiod's
+    own ExecStopPost= hook writes nothing.  The event merges into any open
+    episode, as the other writers' events do.
+
+    Bookkeeping never blocks the restart.  It adds no line of its own, since
+    _restart already prints one; only a failed record speaks."""
+    lib = Path(__file__).resolve().parent.parent / 'lib'
+    if str(lib) not in sys.path:
+        sys.path.insert(0, str(lib))
+    try:
+        from sigmond import sdr_events
+        kw = {} if SDR_EVENTS_PATH is None else {'path': Path(SDR_EVENTS_PATH)}
+        sdr_events.record('radiod-wedge', f'{unit} {reason}', now=now, **kw)
+    except Exception as exc:        # noqa: BLE001 -- never block the restart
+        print(f'  {unit}: could not record the restart for smd doctor: {exc}',
+              file=sys.stderr)
+```
+
+  In `_restart`, replace:
+
+```python
+    if DRY_RUN:
+        return
+    _mark_restarted(unit, now)
+```
+
+  with:
+
+```python
+    if DRY_RUN:
+        return
+    _mark_restarted(unit, now)
+    # Note the loss before the stop: the episode opens with its cause, and
+    # the exits of a radiod that fails its next starts join it.
+    _note_event(unit, reason, now)
+```
+
+  In the module docstring, after the paragraph that ends `reports without acting.`, add:
+
+```
+Each restart either detector makes also leaves one event, radiod-wedge, in
+/var/lib/sigmond/sdr-events.jsonl, which `smd doctor` reads (v3.71).  A
+restart that hf-timestd requested leaves none: it marks a timing fault,
+not a lost RX888.
+```
+
+- [ ] **Step 5: Run the tests; watch them pass.**
+
+Run: `.venv/bin/pytest tests/test_radiod_watchdog.py tests/test_sdr_events.py tests/test_timing_judge.py -q --override-ini addopts=`
+Expected: PASS.
+
+- [ ] **Step 6: Watch each guard fail (mutations, on a copy).**
+  1. Delete the `_note_event(unit, reason, now)` call →
+     `test_a_restart_leaves_one_event_naming_the_unit_and_the_reason`,
+     `test_the_quitting_detector_records_through_restart`, `test_the_event_lands_before_the_stop` and
+     `test_a_restart_and_radiods_failing_starts_make_one_episode` turn red.
+  2. Move the call above `if DRY_RUN:` → `test_a_dry_run_records_nothing` turns red.
+  3. Move the call after `_run(['systemctl', 'start', unit])` → `test_the_event_lands_before_the_stop` turns red.
+  4. Move the call to the top of `check_unit`, before the cooldown check, and out of `_restart` →
+     `test_a_unit_in_cooldown_records_nothing` turns red.
+  5. Remove the `try`/`except` in `_note_event` → `test_a_record_that_fails_still_restarts` turns red.
+  6. Print `recorded radiod-wedge` after a successful `record` → `test_a_restart_adds_no_line_of_its_own` turns
+     red.
+  7. Write the kind `radiod-exit` instead of `radiod-wedge` →
+     `test_a_restart_leaves_one_event_naming_the_unit_and_the_reason` turns red.
+
+- [ ] **Step 7: Commit.**
+
+```bash
+git add bin/sigmond-radiod-watchdog tests/test_radiod_watchdog.py
+git commit -m "radiod-watchdog: each restart of a wedged radiod notes the RX888 loss for doctor, once per restart"
+```
+
+---
+
+### Task 8: smd doctor's sdr family, its exit code, and the heartbeat
 
 **Files:**
 - Modify: `/home/mjh/hamsci/repos/sigmond/lib/sigmond/doctor.py` (after `class Finding`, ~46)
@@ -2294,8 +2771,8 @@ git commit -m "sdr-recover: note each power cut for doctor, and say holding once
   `qga-dropin` family (Task 1).
 - Produces: `sigmond.doctor.SOFT_FINDING_KINDS = frozenset({"sdr-recovered"})` and
   `sigmond.doctor.hard_findings(findings) -> list`; in `bin/smd`, `_sdr_findings(*, path=None, sysfs=None,
-  now=None) -> list[Finding]` (component `ka9q-radio`; kinds `sdr-lost`, `sdr-flapping`, `sdr-recovered`; never
-  fixable).
+  now=None) -> list[Finding]` (component `ka9q-radio`; kinds `sdr-lost`, `sdr-down-long`, `sdr-flapping`,
+  `sdr-recovered`; never fixable).
 
 **What you need to know:**
 - `collect_findings` serves both `smd doctor` and the heartbeat (`smd admin heartbeat emit`, with
@@ -2310,6 +2787,9 @@ git commit -m "sdr-recover: note each power cut for doctor, and say holding once
   INCONCLUSIVE, the twin of pm-heartbeat's `SOFT_FINDING_KINDS`. The board prints the block's reason and drops
   `data`, so the reason carries the sdr finding's detail ("lost 2 time(s) in 24 h, last at ...").
 - The wire contract stays: no new block, verdict or field.
+- Only `sdr-recovered` counts as soft. `sdr-down-long` (Task 4's 30-minute rule) fails doctor and reads INVALID on
+  the heartbeat, like `sdr-lost` and `sdr-flapping`. So a single loss that recovered inside 30 minutes leaves the
+  exit code at 0, and a longer one sets it to 1 for the 24 h the episode stays in the window.
 
 - [ ] **Step 1: Write the failing tests.** Create `tests/test_sdr_doctor.py`:
 
@@ -2317,9 +2797,10 @@ git commit -m "sdr-recover: note each power cut for doctor, and say holding once
 """smd doctor's sdr family (v3.71): did this station lose its RX888 in the
 last 24 h, and does that fail doctor?
 
-A loss that recovered reports for 24 h and leaves the exit code at 0: the
-station works, and a script that runs doctor must not read a recovered stall
-as a broken host.  A card off the bus now, or three losses in a day, fail it.
+A loss that recovered within 30 minutes reports for 24 h and leaves the exit
+code at 0: the station works, and a script that runs doctor must not read a
+recovered stall as a broken host.  A card off the bus now, a loss that stayed
+open longer than 30 minutes, or three losses in a day, fail it.
 """
 import contextlib
 import importlib.machinery
@@ -2393,6 +2874,20 @@ class SdrFamilyTests(unittest.TestCase):
         (f,) = self.find(card=False)
         self.assertEqual(f.kind, "sdr-lost")
 
+    def test_a_restart_loop_past_30_minutes_reads_sdr_down_long(self):
+        for i in range(100):     # 100 radiod exits 20 s apart: one episode, 33 min
+            ev.record("radiod-exit", now=NOW - 3600 + 20 * i, path=self.p)
+        (f,) = self.find()
+        self.assertEqual(f.kind, "sdr-down-long")
+        self.assertIn("33 min", f.detail)
+
+    def test_a_watchdog_restart_reads_like_any_other_loss(self):
+        ev.record("radiod-wedge", "radiod@ac0g.service no journal output for 700s (heartbeat lost)",
+                  now=NOW - 600, path=self.p)
+        (f,) = self.find()
+        self.assertEqual(f.kind, "sdr-recovered")
+        self.assertIn("radiod-wedge", f.detail)
+
     def test_an_episode_older_than_24_h_makes_no_finding(self):
         ev.record("radiod-exit", now=NOW - 90_000, path=self.p)
         self.assertEqual(self.find(), [])
@@ -2425,8 +2920,8 @@ class ExitCodeTests(unittest.TestCase):
         rc, _ = self.doctor([self.SOFT, Finding("sigmond", "dirty", "1 modified file(s)")])
         self.assertEqual(rc, 1)
 
-    def test_lost_and_flapping_exit_1(self):
-        for kind in ("sdr-lost", "sdr-flapping"):
+    def test_lost_flapping_and_down_long_exit_1(self):
+        for kind in ("sdr-lost", "sdr-flapping", "sdr-down-long"):
             rc, _ = self.doctor([Finding("ka9q-radio", kind, "x")])
             self.assertEqual(rc, 1, kind)
 
@@ -2467,8 +2962,8 @@ def test_sdr_recovered_beside_any_other_finding_is_invalid():
     assert env["blocks"]["doctor"]["verdict"] == "INVALID"
 
 
-@pytest.mark.parametrize("kind", ["sdr-lost", "sdr-flapping"])
-def test_a_lost_or_flapping_rx888_is_invalid(kind):
+@pytest.mark.parametrize("kind", ["sdr-lost", "sdr-flapping", "sdr-down-long"])
+def test_a_lost_flapping_or_long_down_rx888_is_invalid(kind):
     env = assemble(NOW, CONFIG, rich_readers(doctor=lambda: (False, [
         FakeFinding("ka9q-radio", kind, "RX888 off the bus now")])))
     block = env["blocks"]["doctor"]
@@ -2662,8 +3157,14 @@ tests this plan added.
   1. In `cmd_doctor`, drop the `if not hard_findings(findings):` block → `test_a_recovered_rx888_reports_and_exits_0`
      turns red.
   2. Change `hard_findings` to return `list(findings)` → the same test turns red.
-  3. Add `"sdr-flapping"` to `SOFT_FINDING_KINDS` → `test_lost_and_flapping_exit_1`,
-     `test_a_lost_or_flapping_rx888_is_invalid[sdr-flapping]` and `test_only_sdr_recovered_counts_as_soft` turn red.
+  3. Add `"sdr-flapping"` to `SOFT_FINDING_KINDS` → `test_lost_flapping_and_down_long_exit_1`,
+     `test_a_lost_flapping_or_long_down_rx888_is_invalid[sdr-flapping]` and
+     `test_only_sdr_recovered_counts_as_soft` turn red.
+  3a. Add `"sdr-down-long"` to `SOFT_FINDING_KINDS` → `test_lost_flapping_and_down_long_exit_1`,
+     `test_a_lost_flapping_or_long_down_rx888_is_invalid[sdr-down-long]` and
+     `test_only_sdr_recovered_counts_as_soft` turn red.
+  3b. In `sdr_events.py` (a copy), set `LONG_EPISODE_S = 7200` →
+     `test_a_restart_loop_past_30_minutes_reads_sdr_down_long` turns red. It reads `sdr-recovered`.
   4. In `_map_doctor`, change `all(` to `any(` → `test_sdr_recovered_beside_any_other_finding_is_invalid` turns red.
   5. Drop `_printable(...)` and append the raw detail → `test_an_sdr_detail_reaches_the_reason_printable_and_bounded`
      turns red.
@@ -2677,20 +3178,20 @@ tests this plan added.
 
 ```bash
 git add lib/sigmond/doctor.py lib/sigmond/heartbeat.py bin/smd tests/test_sdr_doctor.py tests/test_heartbeat.py
-git commit -m "doctor: a lost RX888 reports for 24 h; a recovered one reads INCONCLUSIVE and fails nothing"
+git commit -m "doctor: a lost RX888 reports for 24 h; one back within 30 minutes reads INCONCLUSIVE and fails nothing"
 ```
 
 ---
 
-### Task 8: the words
+### Task 9: the words
 
 **Files:**
-- Modify: `/home/mjh/hamsci/repos/sigmond/docs/operator/troubleshooting.md` (triage table ~49-57; RX888 section,
-  before `**When to stop and ask**` ~587)
-- Modify: `/home/mjh/hamsci/repos/sigmond/tasks/plan-sink-control-v370.md` (the carry list ~118-130)
+- Modify: `/home/mjh/hamsci/repos/sigmond/docs/operator/troubleshooting.md` (triage table ~49-57, the
+  waterfall row at 55; RX888 section 526, before its `**When to stop and ask**` at 587)
+- Modify: `/home/mjh/hamsci/repos/sigmond/tasks/plan-sink-control-v370.md` (the carry list, item 3 at 132)
 
 **Interfaces:**
-- Consumes: the kinds and the file path from Tasks 4-7.
+- Consumes: the kinds and the file path from Tasks 4-8.
 - Produces: nothing code reads.
 
 **What you need to know:**
@@ -2701,7 +3202,7 @@ git commit -m "doctor: a lost RX888 reports for 24 h; a recovered one reads INCO
   after the row that begins `| The waterfall is blank or empty |`, add:
 
 ```markdown
-| `smd doctor` names `sdr-lost`, `sdr-recovered` or `sdr-flapping` | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
+| `smd doctor` names `sdr-lost`, `sdr-down-long`, `sdr-flapping` or `sdr-recovered` | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
 ```
 
 - [ ] **Step 2: Add the block.** In the section `### RX888 not found, or the waterfall is blank`, directly before
@@ -2710,14 +3211,16 @@ git commit -m "doctor: a lost RX888 reports for 24 h; a recovered one reads INCO
 ````markdown
 **When `smd doctor` names the RX888**
 
-From v3.71 the station keeps a record each time it loses the RX888: the card
-leaves the USB bus, `sigmond-sdr-recover` cuts its power, or `radiod` dies on a
-stalled stream with the card still on the bus. `smd doctor` reads the last
-24 h of that record, and the fleet board shows the same finding.
+From v3.71 the station keeps a record each time it loses the RX888. The card
+leaves the USB bus, `sigmond-sdr-recover` cuts its power, `radiod` dies on a
+stalled stream with the card still on the bus, or the radiod watchdog restarts
+a `radiod` that hung. `smd doctor` reads the last 24 h of that record, and the
+fleet board shows the same finding.
 
 | Finding | What happened | `smd doctor` exits |
 |---|---|---|
-| `sdr-recovered` | The RX888 went away once or twice and came back by itself. | 0 |
+| `sdr-recovered` | The RX888 went away once or twice, each time for 30 minutes or less, and came back by itself. | 0 |
+| `sdr-down-long` | It went away for more than 30 minutes at a stretch. It may sit back on the bus now. | 1 |
 | `sdr-flapping` | It went away three or more times in 24 h. It came back each time, but something keeps taking it. | 1 |
 | `sdr-lost` | It sits off the bus right now. | 1 |
 
@@ -2728,12 +3231,18 @@ cat /var/lib/sigmond/sdr-events.jsonl
 ```
 
 Each line holds one episode: when it opened and when its last event came (UTC),
-which kinds of event it held (`usb-remove`, `power-cycle`, `radiod-exit`), how
-many, and when the card came back. An episode with `radiod-exit` and no
-`usb-remove` means the stream stalled while the card stayed on the bus.
+which kinds of event it held (`usb-remove`, `power-cycle`, `radiod-exit`,
+`radiod-wedge`), how many, and when the card came back. An episode with
+`radiod-exit` and no `usb-remove` means the stream stalled while the card
+stayed on the bus. `radiod-wedge` means the watchdog found `radiod` alive but
+stuck, and restarted it.
 
 - `sdr-recovered` → nothing to do now. If it comes back day after day, treat it
   as `sdr-flapping`.
+- `sdr-down-long` → the station went without its receiver for more than half an
+  hour. Read the
+  record to see which kind of event kept it down, then check the same things
+  as for `sdr-flapping`.
 - `sdr-flapping` → check the hub's own power supply, the USB cable and how it
   sits in the port. Then send the record with your request for help.
 - `sdr-lost` → follow **What to do** above.
@@ -2771,6 +3280,7 @@ git commit -m "docs: what smd doctor's sdr findings mean at the station, and the
 | The wizard's `gexec_unit` | pm-align, from the release, on the Proxmox host |
 | The update rig | the appliance repository; no station runs it |
 | `lib/sigmond/sdr_events.py`, `bin/smd`, `bin/sigmond-sdr-recover`, `bin/sigmond-sdr-event`, `lib/sigmond/heartbeat.py` | `smd update` (git) |
+| `bin/sigmond-radiod-watchdog`'s hook | `smd update` (git): `/usr/local/bin/sigmond-radiod-watchdog` links into the repo, and the timer runs the new code at its next tick |
 | The agent's drop-in | `install.sh` (which `smd update` re-runs, since this release changes `install.sh`), and `smd doctor --fix` afterwards |
 | radiod's `50-sigmond-sdr-event.conf` | `install.sh`'s radiod block, `smd doctor --fix`, and the native radiod install |
 | The udev rule, the writer's symlink | `install.sh` only |
@@ -2800,17 +3310,45 @@ Run these on the nested rig, and the hardware ones on AC0G-B4 (announce on the c
 - **R6.** A fresh wizard run in the nest: each `sigmond-wizard-*` unit appears and goes, `personalize` finishes
   under its unit despite the new machine-id, and the agent's `MemoryPeak` stays under 64 MB.
 - **R7.** qemu-ga 10.0's per-stream bound (research A1): read `GUEST_EXEC_MAX_OUTPUT` in the 10.0 source.
+- **R8. The watchdog's hook, on AC0G-B4 only** (the nest runs no radiod, R5). This takes B4's receiver down for
+  about 15 minutes, so announce it on the claude-bus and in `/etc/sigmond/CLAUDE-COORDINATION.md` first.
+  `systemctl kill -s STOP radiod@<name>` freezes radiod, so its journal falls silent. After
+  `RWD_SILENCE_SEC` (600 s) the watchdog's next tick restarts it. Expect: the watchdog's journal shows one
+  "restarting" line and no other new line; `/var/lib/sigmond/sdr-events.jsonl` gains exactly one episode with
+  kinds `["radiod-wedge"]` and a detail naming `heartbeat lost`; radiod's own hook adds nothing (systemd sends
+  SIGCONT with the stop's SIGTERM, radiod exits `EX_OK`, and `SERVICE_RESULT` reads `success`; INFERRED, which
+  this check confirms); `smd doctor` names `sdr-recovered` and exits 0. Through the next 10 minutes of cooldown,
+  the record stays at one episode.
+- **R9. The 30-minute rule, end to end, on any station with its RX888 on the bus** (B4: announce first). No rig
+  can stage a real half-hour loss cheaply, so this check plants one line. Save the record if one exists, then
+  write one episode with `opened` 40 minutes ago, `last` 5 minutes ago, `kinds` `["radiod-exit"]`, `count` 100,
+  `back` null. `smd doctor` names `sdr-down-long` with `lost for 35 min` and exits 1; the next heartbeat shows
+  the doctor block INVALID with `sdr-down-long` in its reason. Change `last` to 25 minutes after `opened`:
+  doctor names `sdr-recovered` and exits 0. Restore the saved record. ND's history serves as the real case:
+  rebuild its 2026-10-05 loop from its journal into a scratch file, and `assess` must read `sdr-down-long`.
+- **A wedge's span starts late.** The watchdog records when it acts, not when radiod stalled: a quitting radiod
+  waits out `RWD_GRACE_SEC` (120 s) plus up to one 2-minute tick, and a silent one at least `RWD_SILENCE_SEC`
+  (600 s). So a wedge that kept the station dark for 35 minutes may record as a 20-minute episode and read
+  `sdr-recovered`. This plan accepts that; a later release could pass the stall's own time to `record`.
+- **Repeated silent wedges.** When a restart does not cure a silent wedge and radiod logs no exit in between,
+  the watchdog restarts again only after its cooldown (600 s) and another `RWD_SILENCE_SEC` of silence after
+  radiod's last line, so 10 minutes or more later. A gap past `EPISODE_GAP_S` (600 s) opens a new episode each
+  time, and the third reads `sdr-flapping` (INVALID) rather than `sdr-down-long`. Both fail doctor. No test pins
+  this; R8 run twice would show it.
 
-## Open questions only Michael can answer
+## Decided by Michael (2026-10-11)
 
-1. **One long episode.** ND's loop of 2026-10-05 (1,708 restarts over 9.5 h, card on the bus) makes **one**
-   episode and reads `sdr-recovered`, INCONCLUSIVE, for as long as it lasts. The research proposed "or one
-   episode with count ≥ 3" as INVALID; that rule would fire on every vanish, since radiod fails a start every 10 s
-   while the card stays away. Should an episode still growing after some span (say 30 min) read INVALID?
-2. **The radiod watchdog.** `sigmond-radiod-watchdog` restarts a radiod that said "quitting" yet stays active, or
-   went silent. That restart reads as asked-for (`success`), so it records nothing, though it marks a stall. Add
-   the watchdog as a fourth caller of the writer?
-3. **Two more quieted lines.** Task 6 applies "once per change" to two lines besides "holding" ("no hub/port to
-   cycle" and "cannot switch power"), since both repeat every 30 s for an absent card. Keep that?
-4. **Research A1** stays open: did the 2026-08-24 wedge on B4 take memory at all? The drop-in's header now says
-   the question stands open; R7 answers half of it.
+1. **An episode that stays open longer than 30 minutes reads INVALID.** It takes a new kind, `sdr-down-long`,
+   rather than folding into `sdr-lost`: `sdr-lost` keeps its present-tense meaning (the card sits off the bus
+   now), which an operator can check by hand, while a long stall leaves the card on the bus. At 30 minutes or
+   less, a single recovered episode stays `sdr-recovered`, INCONCLUSIVE, and leaves doctor's exit code alone.
+   Landed in: Task 4 (`LONG_EPISODE_S`, `episode_span`, `assess` and seven tests), Task 8 (the exit code, the
+   heartbeat, two tests and two widened ones), Task 9 (the table and the advice), Global Constraints, Review
+   Focus 6, rig check R9.
+2. **`sigmond-radiod-watchdog` becomes the fourth writer.** When it restarts a wedged radiod (a USB-stall zombie,
+   or a silent one) it records a `radiod-wedge` event through the same library, merged into the open episode.
+   It keeps its cooldown and warm-up, and adds no log line of its own. Landed in: new Task 7; Task 4
+   (`radiod-wedge` in `LOSS_KINDS`); Task 9 (the words); Global Constraints, Review Focus 2 and 7; rig check R8.
+3. **sdr-recover's three per-tick lines become once-per-change**, as planned. Landed in: Task 6, unchanged.
+4. **Research A1 stays open**: did the 2026-08-24 wedge on B4 take memory at all? It changes nothing in this
+   plan. The drop-in's header (Task 1) says the question stands open; R7 answers half of it.
