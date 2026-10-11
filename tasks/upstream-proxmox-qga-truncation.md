@@ -3,11 +3,12 @@
 **Status:** draft, not sent. Michael Hauan (AC0G) decides whether and where to file it.
 **Observed on:** Proxmox VE 9.1.1, qemu-server 9.0.30, perl 5.40.1; guest Debian 13 with qemu-guest-agent.
 **Measured:** 2026-10-08, on a nested install; seen in the field on three stations from 2026-09-27.
-**Before sending:** one figure rests on a written record in this repository: "about one time in six", in
-`tasks/plan-guest-agent-requests.md` (section "Why"). The versions above, the 2026-10-08 date and the cure
-(0xFF) come from the same design. No file here records any other count: how many bytes the request lost, and
-how many requests a reproduction needs. A reproduction on a Proxmox host must establish those before Michael
-sends this, and must replace the wording below that avoids a count.
+**Source of the figures:** the hamsci-ops repository, `memory/reference_qemu_ga_alive_but_deaf.md`. It records
+one session on the sigmond image-build rig, 2026-10-08 22:10-22:36Z, on a v3.69 nested install. "About one time in
+six" also stands in `tasks/plan-guest-agent-requests.md` (section "Why").
+**Before sending:** every count below comes from that one session. A fresh reproduction, on a current Proxmox
+release as well as 9.1.1, should confirm them before Michael sends this, and should replace the trial's counts
+with its own.
 
 ## What happens
 
@@ -15,8 +16,8 @@ A `qm guest exec` whose arguments hold non-ASCII characters reaches the guest ag
 that arrives holds as many BYTES as the request has CHARACTERS, so its last bytes never arrive: one byte for
 each extra byte that UTF-8 needs.
 
-Read back from the guest's memory, one such request ended at `"capture-output":`. The closing bytes of the
-request never arrived.
+Read back from the guest's memory, one such request ended at `"capture-output":`. The seven bytes `true}}`
+and the newline never arrived, and the command's argument held seven extra UTF-8 bytes.
 
 ## What follows
 
@@ -38,13 +39,15 @@ qm guest exec <vmid> -- /bin/echo '───'             # repeat a dozen times
 qm agent <vmid> ping                                # "QEMU guest agent is not running"
 ```
 
-Requests with ASCII arguments, sent the same way, ran every time.
+In one trial on a guest that had healed, a non-ASCII argument sent fourteen times ran zero times: twelve
+requests cost the next one, and two left the agent deaf. The ASCII-only form, sent six times, ran six times and
+left the agent well.
 
 ## What ends it without touching the guest
 
 The QGA protocol defines the byte 0xFF as a reset of the agent's parser. Proxmox does not send it. One such
 byte, followed by a `guest-sync-delimited` request, written to `/var/run/qemu-server/<vmid>.qga`, brought a
-deaf agent back at once, with the same PID:
+deaf agent back at once: `qm agent <vmid> ping` failed before and returned 0 after, and `qemu-ga` kept the same PID:
 
 ```python
 import socket
