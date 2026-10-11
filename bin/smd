@@ -11005,8 +11005,16 @@ def _sdr_findings(*, path=None, sysfs=None, now=None) -> list:
         # a symlink, a FIFO or anything else that is not a regular file.
         episodes = sdr_events.read_episodes(path, now=now)
     except OSError as e:
-        return [Finding('ka9q-radio', 'sdr-record-unreadable',
-                        f'cannot read the RX888 event record: {e}')]
+        found = [Finding('ka9q-radio', 'sdr-record-unreadable',
+                         f'cannot read the RX888 event record: {e}')]
+        # The record cannot speak, but the bus can: a card gone now still
+        # reads sdr-lost beside the unreadable record.
+        if not sdr_events.card_present(
+                Path(sysfs) if sysfs is not None else sdr_events.SYSFS_USB):
+            found.append(Finding(
+                'ka9q-radio', 'sdr-lost',
+                'RX888 off the bus now (the event record cannot say since when)'))
+        return found
     if not episodes:
         return []
     present = sdr_events.card_present(

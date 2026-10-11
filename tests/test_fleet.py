@@ -751,6 +751,57 @@ class TestFormatDoctor:
         assert 'no hosts' in format_doctor([]).lower()
 
 
+SOFT_REPORT = """ka9q-radio:
+    sdr-recovered: RX888 lost 1 time(s) in 24 h, last at 2026-10-10 14:48Z (radiod-exit); recovered
+     nothing above fails doctor: it reports what the station recovered from
+"""
+
+
+class TestFleetDoctorSoftReports:
+    """v3.71: sdr-recovered exits 0.  The fleet view must still show it."""
+
+    def _results(self):
+        from sigmond.fleet import doctor_to_dict  # noqa: F401
+        fleet = {n: Host(name=n, reach='r') for n in ('soft', 'pure', 'sick')}
+        run = runner({
+            ('soft', 'true'): _ok(),
+            ('soft', 'smd doctor'): RunResult(rc=0, out=SOFT_REPORT),
+            ('pure', 'true'): _ok(),
+            ('pure', 'smd doctor'): _ok('deploy trees clean'),
+            ('sick', 'true'): _ok(),
+            ('sick', 'smd doctor'): RunResult(rc=1, out=DOCTOR_FINDINGS),
+        })
+        return {r.host.name: r for r in fleet_doctor(fleet, run)}
+
+    def test_a_soft_only_host_shows_its_kind_line_in_the_text(self):
+        res = self._results()
+        text = format_doctor(list(res.values()))
+        assert 'sdr-recovered: RX888 lost 1 time(s)' in text
+        assert 'clean, with reports' in text
+        assert res['soft'].clean is True
+
+    def test_a_truly_clean_host_prints_only_on_the_clean_line(self):
+        res = self._results()
+        text = format_doctor([res['pure']])
+        assert 'clean: pure' in text
+        assert 'with reports' not in text
+        assert 'deploy trees clean' not in text
+
+    def test_a_dirty_host_is_unchanged(self):
+        res = self._results()
+        text = format_doctor([res['sick']])
+        assert 'sick: findings' in text and 'venv-skew' in text
+
+    def test_json_carries_the_kinds_and_report_beside_clean_true(self):
+        from sigmond.fleet import doctor_to_dict
+        res = self._results()
+        d = doctor_to_dict('soft', res['soft'])
+        assert d['clean'] is True
+        assert d['kinds'] == ['sdr-recovered']
+        assert 'sdr-recovered' in d['report']
+        assert doctor_to_dict('pure', res['pure'])['kinds'] == []
+
+
 # ---------------------------------------------------------------------------
 # Task 4 — smd fleet update
 # ---------------------------------------------------------------------------

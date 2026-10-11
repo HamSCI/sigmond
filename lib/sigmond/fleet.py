@@ -644,6 +644,21 @@ def _doctor_for(host, run):
                              f'smd doctor exit {result.rc}').strip())
 
 
+_KIND_LINE = re.compile(r'^    ([A-Za-z][A-Za-z0-9_-]*):', re.M)
+
+
+def report_kinds(report: str) -> list:
+    """The finding kinds in a doctor report, read the way the update rig
+    reads them: lines of the form "    <kind>: <detail>".  A clean host's
+    one-line report holds none.  A soft finding (sdr-recovered) leaves
+    doctor's exit code at 0, so its kind shows here and nowhere else."""
+    seen = []
+    for k in _KIND_LINE.findall(report or ''):
+        if k not in seen:
+            seen.append(k)
+    return seen
+
+
 def format_doctor(results: list) -> str:
     """Aggregate without hiding.
 
@@ -659,7 +674,8 @@ def format_doctor(results: list) -> str:
 
     lines = []
     dirty = [r for r in results if r.clean is False]
-    clean = [r for r in results if r.clean is True]
+    clean = [r for r in results if r.clean is True and not report_kinds(r.report)]
+    reporting = [r for r in results if r.clean is True and report_kinds(r.report)]
     skipped = [r for r in results if r.clean is None]
 
     for r in dirty:
@@ -672,6 +688,14 @@ def format_doctor(results: list) -> str:
 
     if clean:
         lines.append('clean: ' + ', '.join(r.host.name for r in clean))
+    if reporting:
+        # Exit 0, but doctor printed finding lines: a soft kind such as
+        # sdr-recovered.  Show them; the report is not noise.
+        lines.append('clean, with reports:')
+        for r in reporting:
+            lines.append(f'  {r.host.name}:')
+            for line in r.report.splitlines():
+                lines.append(f'    {line}')
     for r in skipped:
         if r.reachable and not r.has_sigmond:
             lines.append(f'{r.host.name}: no sigmond install '
@@ -694,8 +718,11 @@ def doctor_to_dict(name: str, doctor: HostDoctor) -> dict:
     is deliberately tri-state (True/False/None); collapsing the
     not-examined case to ``false`` here would libel a host nobody looked
     at, so ``None`` must serialize as JSON ``null``, never ``false``.
+    ``kinds`` lists the finding kinds in the report; a host can read
+    ``clean: true`` and still carry a soft one (sdr-recovered).
     """
-    return {'name': name, **asdict(doctor)}
+    return {'name': name, **asdict(doctor),
+            'kinds': report_kinds(doctor.report)}
 
 
 # ---------------------------------------------------------------------------

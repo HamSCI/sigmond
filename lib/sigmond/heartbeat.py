@@ -40,8 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from .heartbeat_schema import BLOCK_NAMES, KIND, PRECEDENCE, SCHEMA_VERSION
 from .doctor import SOFT_FINDING_KINDS
+from .heartbeat_schema import BLOCK_NAMES, KIND, PRECEDENCE, SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
 

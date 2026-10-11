@@ -101,6 +101,13 @@ class SdrFamilyTests(unittest.TestCase):
         self.assertIn("cannot read the RX888 event record", f.detail)
         self.assertNotIn(f.kind, SOFT_FINDING_KINDS)
 
+    def test_an_unreadable_record_beside_an_absent_card_also_reads_sdr_lost(self):
+        target = self.tmp / "elsewhere"
+        target.write_text("")
+        self.p.symlink_to(target)
+        kinds = [f.kind for f in self.find(card=False)]
+        self.assertEqual(kinds, ["sdr-record-unreadable", "sdr-lost"])
+
     def test_a_dangling_symlink_is_not_silence(self):
         self.p.symlink_to(self.tmp / "nowhere")
         (f,) = self.find()
