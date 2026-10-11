@@ -297,6 +297,7 @@ class RadiodDropinsDoctorTests(unittest.TestCase):
         with mock.patch.object(
                 smd, '_ensure_radiod_dropins',
                 side_effect=lambda **kw: calls.append(True) or []), \
+             mock.patch.object(smd, '_ensure_qga_dropin', return_value=[]), \
              mock.patch.object(smd, 'collect_findings', return_value=(True, [])):
             smd.cmd_doctor(args)
         self.assertEqual(calls, [True])

@@ -7294,10 +7294,11 @@ def _retired_unit_findings(is_enabled=None) -> list:
 
 
 def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
-    """Read-only composition of the ten `smd doctor` check families:
+    """Read-only composition of the eleven `smd doctor` check families:
     ownership, git state, venv skew, manifest drift, exec mismatch,
     retired-but-still-armed units, rx888 IRQ placement, rx888 queue
-    depth, chrony refclock capture, and radiod's systemd drop-ins.
+    depth, chrony refclock capture, radiod's systemd drop-ins, and the guest
+    agent's drop-in.
 
     Extracted from `cmd_doctor` so the fleet heartbeat assembler can get
     the same findings in-process, without shelling out to `smd doctor`
@@ -7642,6 +7643,11 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
         # See _radiod_dropins_findings / _ensure_radiod_dropins.
         findings.extend(_radiod_dropins_findings())
 
+    def _qga_dropin() -> None:
+        # The guest agent's drop-in (VM guests only): its cap and its
+        # OOMPolicy.  See _qga_dropin_findings / _ensure_qga_dropin.
+        findings.extend(_qga_dropin_findings())
+
     _guarded('ownership', _ownership)
     _guarded('git', _git)
     _guarded('venv-skew', _venv)
@@ -7652,6 +7658,7 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
     _guarded('rx888-queuedepth', _rx888_queuedepth)
     _guarded('chrony-refclock-captured', _chrony_captured)
     _guarded('radiod-dropins', _radiod_dropins)
+    _guarded('qga-dropin', _qga_dropin)
 
     if unassessed:
         clean = None
@@ -7667,15 +7674,15 @@ def cmd_doctor(args) -> int:
     drift, and running-vs-installed binary mismatches.
 
     Each check corresponds to something that blocked the DASI002 update
-    on 2026-08-15, discovered one failed command at a time.  Ownership
-    and radiod's systemd drop-ins are the only classes --fix repairs:
+    on 2026-08-15, discovered one failed command at a time.  Ownership,
+    radiod's systemd drop-ins and the guest agent's drop-in are the only classes --fix repairs:
     each has an unambiguous correct state (the checkout's own owner; this
     checkout's systemd/ bytes) and an idempotent repair.  A dirty tree may
     be a real uncommitted fix — it was on DASI002 — so it is reported and
     left to a human.  Manifest drift and a running/installed binary
     mismatch are likewise judgement calls, never auto-repaired.
 
-    The ten check families themselves are composed in `collect_findings`
+    The eleven check families themselves are composed in `collect_findings`
     (module level, above) — read-only, and reusable by the fleet
     heartbeat assembler without shelling out to `smd doctor`. `--fix`'s
     repair pass stays here: `collect_findings` never mutates anything.
@@ -7721,6 +7728,10 @@ def cmd_doctor(args) -> int:
         # radiod@.service template unit exists yet.
         for p in _ensure_radiod_dropins():
             _ok(f'radiod drop-in: wrote {p}')
+
+        # The guest agent's drop-in: idempotent, never restarts the agent.
+        for p in _ensure_qga_dropin():
+            _ok(f'guest-agent drop-in: wrote {p}')
 
     _, findings = collect_findings(base)
 
@@ -10741,7 +10752,8 @@ def _radiod_template_installed(run) -> bool:
 
 
 def _radiod_dropins_missing(*, systemd_dir: Path = Path('/etc/systemd/system'),
-                            src_dir: Path = None, run=None) -> list:
+                            src_dir: Path = None, run=None,
+                            pairs=None, gate=None) -> list:
     """Installed radiod drop-in / companion-unit paths (str) that are
     missing, or whose bytes differ from this checkout's systemd/ copy.
 
@@ -10757,11 +10769,15 @@ def _radiod_dropins_missing(*, systemd_dir: Path = Path('/etc/systemd/system'),
     src_dir = Path(src_dir) if src_dir is not None else _RADIOD_DROPIN_SRC_DIR
     systemd_dir = Path(systemd_dir)
 
-    if not _radiod_template_installed(run):
+    # pairs/gate default to radiod's set; the guest agent's drop-in passes
+    # its own (_qga_dropin_findings).
+    pairs = _RADIOD_DROPINS if pairs is None else pairs
+    gate = gate or _radiod_template_installed
+    if not gate(run):
         return []
 
     missing = []
-    for src_name, rel_dest in _RADIOD_DROPINS:
+    for src_name, rel_dest in pairs:
         dest = systemd_dir / rel_dest
         try:
             src_bytes = (src_dir / src_name).read_bytes()
@@ -10781,7 +10797,9 @@ def _radiod_dropins_missing(*, systemd_dir: Path = Path('/etc/systemd/system'),
 
 
 def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
-                           src_dir: Path = None, run=None) -> list:
+                           src_dir: Path = None, run=None,
+                           pairs=None, gate=None,
+                           label: str = 'radiod drop-ins') -> list:
     """Idempotently install radiod's template drop-ins + companion units.
 
     Writes a file only when its bytes differ from this checkout's systemd/
@@ -10808,16 +10826,18 @@ def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
     src_dir = Path(src_dir) if src_dir is not None else _RADIOD_DROPIN_SRC_DIR
     systemd_dir = Path(systemd_dir)
 
-    if not _radiod_template_installed(run):
+    pairs = _RADIOD_DROPINS if pairs is None else pairs
+    gate = gate or _radiod_template_installed
+    if not gate(run):
         return []
 
     written = []
-    for src_name, rel_dest in _RADIOD_DROPINS:
+    for src_name, rel_dest in pairs:
         dest = systemd_dir / rel_dest
         try:
             content = (src_dir / src_name).read_bytes()
         except OSError as e:
-            _err(f'radiod drop-ins: cannot read source {src_dir / src_name}: {e}')
+            _err(f'{label}: cannot read source {src_dir / src_name}: {e}')
             continue
         try:
             if dest.read_bytes() == content:
@@ -10828,7 +10848,7 @@ def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
         r = run(['install', '-d', '-m', '0755', '-o', 'root', '-g', 'root',
                  str(dest.parent)], sudo=True)
         if getattr(r, 'returncode', 0) != 0:
-            _err(f'radiod drop-ins: cannot create {dest.parent}')
+            _err(f'{label}: cannot create {dest.parent}')
             continue
         tmp = None
         try:
@@ -10837,7 +10857,7 @@ def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
                     f.write(content)
                     tmp = f.name
             except OSError as e:
-                _err(f'radiod drop-ins: cannot stage {dest}: {e}')
+                _err(f'{label}: cannot stage {dest}: {e}')
                 continue
             # root:root, 0644 — these are root-run units' config; a bare
             # `mv` would instead keep the temp file's owner (whoever ran
@@ -10846,7 +10866,7 @@ def _ensure_radiod_dropins(*, systemd_dir: Path = Path('/etc/systemd/system'),
             r = run(['install', '-m', '0644', '-o', 'root', '-g', 'root',
                      tmp, str(dest)], sudo=True)
             if getattr(r, 'returncode', 0) != 0:
-                _err(f'radiod drop-ins: install failed for {dest}')
+                _err(f'{label}: install failed for {dest}')
                 continue
             written.append(str(dest))
         finally:
@@ -10876,6 +10896,51 @@ def _radiod_dropins_findings(*, systemd_dir: Path = Path('/etc/systemd/system'),
         'ka9q-radio', 'radiod-dropins-missing',
         f'{len(missing)} radiod drop-in/companion-unit path(s) missing or '
         f'stale: {head} (smd doctor --fix)',
+        fixable=True)]
+
+
+# The guest agent's drop-in, by the same machinery as radiod's.  install.sh
+# writes it only when install.sh runs, and `smd update` re-runs install.sh
+# only when install.sh, pyproject.toml or uv.lock changed
+# (lib/sigmond/align_apply.py), so a change to the .conf alone would never
+# reach a station.  pm-align cannot carry it either: it never touches the
+# VM's configuration.  The gate: the agent's unit exists, which holds on VM
+# guests only.
+_QGA_DROPIN = ('qemu-guest-agent-selfheal.conf',
+               'qemu-guest-agent.service.d/50-sigmond-selfheal.conf')
+
+
+def _qga_unit_installed(run) -> bool:
+    """True when qemu-guest-agent.service exists on this host."""
+    return run(['systemctl', 'cat', 'qemu-guest-agent.service'],
+               capture=True).returncode == 0
+
+
+def _ensure_qga_dropin(*, systemd_dir: Path = Path('/etc/systemd/system'),
+                       src_dir: Path = None, run=None) -> list:
+    """Write the guest agent's drop-in when missing or stale, then
+    daemon-reload once.  Never restarts the agent: a restart kills whatever
+    request it serves, and daemon-reload applies the new settings to the
+    running unit."""
+    return _ensure_radiod_dropins(systemd_dir=systemd_dir, src_dir=src_dir,
+                                  run=run, pairs=(_QGA_DROPIN,),
+                                  gate=_qga_unit_installed,
+                                  label='guest-agent drop-in')
+
+
+def _qga_dropin_findings(*, systemd_dir: Path = Path('/etc/systemd/system'),
+                         src_dir: Path = None, run=None) -> list:
+    """`smd doctor` finding: the guest agent's drop-in missing or stale."""
+    from sigmond.doctor import Finding
+    missing = _radiod_dropins_missing(systemd_dir=systemd_dir, src_dir=src_dir,
+                                      run=run, pairs=(_QGA_DROPIN,),
+                                      gate=_qga_unit_installed)
+    if not missing:
+        return []
+    return [Finding(
+        'sigmond', 'qga-dropin-stale',
+        f'{missing[0]} missing or stale: a request that outgrows the guest '
+        f'agent\'s 128 MB cap may still stop the whole agent (smd doctor --fix)',
         fixable=True)]
 
 

@@ -1146,7 +1146,9 @@ ok "sigmond-radiod-pin-threads symlink installed"
 # `qm guest exec` output in memory; a large exec balloons it to GB and
 # a client timeout then leaves the agent wedged — alive, channel dead,
 # invisible to Restart=always (nothing died).  MemoryMax converts that
-# wedge into an OOM-kill + clean restart.  See the drop-in's header and
+# wedge into an OOM-kill + clean restart; OOMPolicy=continue keeps a killed
+# child from taking the agent with it.  `smd doctor --fix` rewrites a stale
+# copy on stations this script no longer reaches.  See the drop-in's header and
 # scripts/proxmox/pm-heartbeat.py::_check_guest_exec (the alarm side).
 if systemctl list-unit-files qemu-guest-agent.service >/dev/null 2>&1 \
         && systemctl list-unit-files qemu-guest-agent.service 2>/dev/null | grep -q qemu-guest-agent; then
@@ -1154,7 +1156,7 @@ if systemctl list-unit-files qemu-guest-agent.service >/dev/null 2>&1 \
     $SUDO install -d -m 0755 /etc/systemd/system/qemu-guest-agent.service.d
     $SUDO install -m 0644 "$REPO_DIR/systemd/qemu-guest-agent-selfheal.conf" \
         /etc/systemd/system/qemu-guest-agent.service.d/50-sigmond-selfheal.conf
-    ok "qemu-guest-agent drop-in installed (MemoryMax self-heal)"
+    ok "qemu-guest-agent drop-in installed (MemoryMax=128M, OOMPolicy=continue)"
 fi
 
 $SUDO systemctl daemon-reload
