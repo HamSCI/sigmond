@@ -641,12 +641,19 @@ QGA_RUN='eval "$(printf %s "$1" | base64 -d)"'
 QGA_DIR="${SIGMOND_QGA_DIR:-/var/run/qemu-server}"
 QGA_NOTE="${SIGMOND_QGA_NOTE:-/run/sigmond/qga-reset}"
 qga_reset(){
-    timeout 10 python3 -c 'import socket,sys
+    timeout 10 python3 -c 'import socket,sys,time
 s=socket.socket(socket.AF_UNIX); s.settimeout(4)
+end=time.monotonic()+4; got=b""
 try:
     s.connect(sys.argv[2]+"/"+sys.argv[1]+".qga")
     s.sendall(b"\xff"+b"{\"execute\":\"guest-sync-delimited\",\"arguments\":{\"id\":4242}}\n")
-    sys.exit(0 if b"4242" in s.recv(4096) else 1)
+    while b"4242" not in got:
+        left=end-time.monotonic()
+        if left<=0: sys.exit(1)
+        s.settimeout(left); d=s.recv(4096)
+        if not d: sys.exit(1)
+        got+=d
+    sys.exit(0)
 except Exception:
     sys.exit(1)' "$1" "$QGA_DIR" >/dev/null 2>&1 </dev/null
 }
@@ -654,7 +661,7 @@ except Exception:
 # and who sent it.  pm-heartbeat.py reports from it.
 qga_note_reset(){
     mkdir -p "$(dirname "$QGA_NOTE")" 2>/dev/null
-    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$QGA_NOTE" 2>/dev/null
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" 2>/dev/null >"$QGA_NOTE"
 }
 
 gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
@@ -1666,7 +1673,7 @@ for i in $(seq 1 60); do
     # Nothing inside the VM restarts, and the private link plays no part.
     if [ "$i" = 2 ] && qga_reset "$VMID"; then
         qga_note_reset wizard
-        say "  the guest agent stood deaf; one parser reset brought it back"
+        say "  the guest agent answered after one parser reset"
         continue
     fi
     # ⚡ SELF-HEAL A STALE CHANNEL, the second resort.  Observed repeatedly on AI6VN 2026-09-29:

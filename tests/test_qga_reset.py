@@ -13,7 +13,9 @@ import os
 import re
 import socket
 import sys
+import subprocess
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -119,6 +121,16 @@ class Agent:
                 c.sendall(b"\xff" + b'{"return": 17}\n')
             elif self.mode == "silent":
                 self.release.wait(20)
+            elif self.mode == "pieces":
+                # The protocol lets the agent answer in pieces: an error object
+                # for the stray 0xFF, then the 0xFF, then the sync's answer.
+                for piece in (b'{"error": {"class": "JSONParsingError"}}\n',
+                              b"\xff", b'{"return": 4242}\n'):
+                    c.sendall(piece)
+                    time.sleep(0.3)
+            elif self.mode == "error_only":
+                c.sendall(b'{"error": {"class": "JSONParsingError"}}\n')
+                self.release.wait(20)
         except OSError:
             pass
         c.close()
@@ -152,6 +164,60 @@ def test_a_reset_that_gets_no_word_gives_up_within_seconds(tmp_path, monkeypatch
     took = time.monotonic() - t0
     agent.release.set()
     assert 3.0 < took < 8.0, took
+
+
+@pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])
+def test_an_answer_that_comes_in_pieces_reads_true(tmp_path, monkeypatch, mod):
+    monkeypatch.setattr(mod, "QGA_DIR", str(tmp_path))
+    Agent(tmp_path, "pieces")
+    assert mod._qga_reset(100) is True
+
+
+@pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])
+def test_an_error_object_alone_fails_within_the_one_deadline(tmp_path, monkeypatch, mod):
+    monkeypatch.setattr(mod, "QGA_DIR", str(tmp_path))
+    agent = Agent(tmp_path, "error_only")
+    t0 = time.monotonic()
+    assert mod._qga_reset(100) is False
+    took = time.monotonic() - t0
+    agent.release.set()
+    assert took < 6.0, took
+
+
+def bash_reset(tmp_path, text, note=False):
+    """Run a script's own `qga_reset` (and, with note, `qga_note_reset`)."""
+    body = ""
+    for name in ("qga_reset", "qga_note_reset"):
+        m = re.search(rf"^{name}\(\)\{{\n.*?^\}}\n", text, re.S | re.M)
+        assert m, name
+        body += m.group(0)
+    script = (f'QGA_DIR={tmp_path}\nQGA_NOTE={tmp_path}/run/qga-reset\n{body}\n'
+              f'qga_reset 100 && {"qga_note_reset test" if note else "true"}\n')
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+
+
+@pytest.mark.parametrize("src", [WIZARD, FIRSTBOOT], ids=["wizard", "panel"])
+def test_the_bash_reset_reads_an_answer_in_pieces_and_leaves_the_record(tmp_path, src):
+    if not src.exists():
+        pytest.skip(f"no {src}")
+    Agent(tmp_path, "pieces")
+    r = bash_reset(tmp_path, src.read_text(), note=True)
+    assert r.returncode == 0, r.stderr
+    assert re.fullmatch(rf"{STAMP} test\n", (tmp_path / "run" / "qga-reset").read_text())
+
+
+@pytest.mark.parametrize("src", [WIZARD, FIRSTBOOT], ids=["wizard", "panel"])
+def test_the_bash_reset_fails_within_the_deadline_on_an_error_alone(tmp_path, src):
+    if not src.exists():
+        pytest.skip(f"no {src}")
+    agent = Agent(tmp_path, "error_only")
+    t0 = time.monotonic()
+    r = bash_reset(tmp_path, src.read_text(), note=True)
+    took = time.monotonic() - t0
+    agent.release.set()
+    assert r.returncode != 0
+    assert not (tmp_path / "run" / "qga-reset").exists()
+    assert took < 6.5, took
 
 
 @pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])

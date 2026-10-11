@@ -22,7 +22,7 @@ One cause is known (sigmond tasks/plan-guest-agent-requests.md): Proxmox
 writes a request that holds non-ASCII characters short, and the agent's
 parser then waits for the missing bytes for good.  One 0xFF byte from the
 host resets that parser.  So this emitter sends one reset before it calls
-the agent wedged, and it reports every reset that brought the agent back,
+the agent wedged, and it reports every reset the agent answered,
 its own or another program's, as a finding of its own.
 
 Wire-contract compatibility (READ BEFORE EDITING)
@@ -453,8 +453,8 @@ def _check_guest_exec(vmid, run_guest_exec, run_qm_status,
         return _finding(
             "guest-exec", "guest-agent-reset",
             f"VM {vmid}: a parser reset of the guest agent got its answer "
-            f"since the last beat ({note}); the agent may have stood deaf, or "
-            f"merely booting")
+            f"since the last beat ({note}); the agent stood deaf, or "
+            f"was still booting")
     return None
 
 
@@ -730,7 +730,20 @@ def _qga_reset(vmid) -> bool:
             s.settimeout(4)
             s.connect(f"{QGA_DIR}/{vmid}.qga")
             s.sendall(QGA_RESET)
-            return b"4242" in s.recv(4096)
+            # The agent may answer in pieces (an error for the stray byte, the
+            # byte, then the sync's answer): read until 4242 arrives or the
+            # one overall deadline passes.
+            end, got = time.monotonic() + 4, b""
+            while b"4242" not in got:
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                s.settimeout(left)
+                data = s.recv(4096)
+                if not data:
+                    return False
+                got += data
+            return True
     except OSError:
         return False
 

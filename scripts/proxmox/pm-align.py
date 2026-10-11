@@ -495,7 +495,20 @@ def _qga_reset(vmid) -> bool:
             s.settimeout(4)
             s.connect(f"{QGA_DIR}/{vmid}.qga")
             s.sendall(QGA_RESET)
-            return b"4242" in s.recv(4096)
+            # The agent may answer in pieces (an error for the stray byte, the
+            # byte, then the sync's answer): read until 4242 arrives or the
+            # one overall deadline passes.
+            end, got = time.monotonic() + 4, b""
+            while b"4242" not in got:
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                s.settimeout(left)
+                data = s.recv(4096)
+                if not data:
+                    return False
+                got += data
+            return True
     except OSError:
         return False
 

@@ -3,9 +3,9 @@
 **Status:** draft, not sent. Michael Hauan (AC0G) decides whether and where to file it.
 **Observed on:** Proxmox VE 9.1.1, qemu-server 9.0.30, perl 5.40.1; guest Debian 13 with qemu-guest-agent.
 **Measured:** 2026-10-08, on a nested install; seen in the field on three stations from 2026-09-27.
-**Source of the figures:** the hamsci-ops repository, `memory/reference_qemu_ga_alive_but_deaf.md`. It records
-one session on the sigmond image-build rig, 2026-10-08 22:10-22:36Z, on a v3.69 nested install. "About one time in
-six" also stands in `tasks/plan-guest-agent-requests.md` (section "Why").
+**Source of the figures:** Internal, remove before sending: the hamsci-ops repository,
+`memory/reference_qemu_ga_alive_but_deaf.md`, and "About one time in six" in `tasks/plan-guest-agent-requests.md`
+(section "Why"). For Proxmox: measured on the project's image-build rig, 2026-10-08 22:10-22:36Z, on a v3.69 nested install.
 **Before sending:** every count below comes from that one session. A fresh reproduction, on a current Proxmox
 release as well as 9.1.1, should confirm them before Michael sends this, and should replace the trial's counts
 with its own.

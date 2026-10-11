@@ -293,7 +293,7 @@ def test_the_wizard_resets_a_deaf_agent_before_it_restarts_anything(tmp_path):
     r = bash(agent_wait(tmp_path))
     agent.t.join(5)
     assert agent.got == RESET
-    assert "one parser reset brought it back" in r.stdout
+    assert "answered after one parser reset" in r.stdout
     assert r.stdout.splitlines()[-2:] == ["went on", "rc=0"]
     calls = wait_calls(tmp_path)
     assert "ssh" not in calls
