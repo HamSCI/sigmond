@@ -22,7 +22,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-WIZARD = REPO / "scripts" / "proxmox" / "sigmond-wizard.sh"
+# A mutation gets tried on a copy of the wizard, never in the checkout: name the copy here.
+WIZARD = Path(os.environ.get("SIGMOND_TEST_WIZARD") or REPO / "scripts" / "proxmox" / "sigmond-wizard.sh")
 TEXT = WIZARD.read_text()
 
 HOSTKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostHostHostHostHostHostHostHostHostHostHost"
@@ -286,19 +287,21 @@ def test_a_refused_request_shows_why_in_the_failure_output(tmp_path):
 
 def pair(tmp_path, *, slash30="10.99.0.1/30", other30="", agent=0, sudo="yes", apt_installs=False,
          vmkey=VMKEY, gexec_rcs="0 0", install_rc=0, hostpub=HOSTKEY + " root@pm\n", user_exists=False,
-         chown_rc=0, enable_rc=0, lock_held=False, tail=None, real_mgmt_vm_ip=False, marks="dir"):
+         chown_rc=0, enable_rc=0, lock_held=False, tail=None, real_mgmt_vm_ip=False, marks="dir",
+         reset_heals=False):
     """`tail` is the last thing the script runs; by default one pairing, then its result.
     `lock_held` holds the pairing lock from this process, as another pairing would.
     `slash30` is the /30 address vmbr1 carries; `other30` is one on another interface, which
     `ip` lists first.  `real_mgmt_vm_ip` runs the wizard's own mgmt_vm_ip against the same `ip`.
     `marks="file"` puts a regular file where the mark directory belongs, so nothing can be
-    written under it (root included)."""
+    written under it (root included).  `reset_heals`: one parser reset brings a silent
+    agent back (`agent` then gives only the answer before that reset)."""
     (tmp_path / "home").mkdir(exist_ok=True)
     if marks == "dir":
         (tmp_path / "marks").mkdir(exist_ok=True)
     elif not (tmp_path / "marks").exists():
         (tmp_path / "marks").write_text("not a directory\n")
-    for stale in ("calls", "gexec.args", "timeouts", "body.fds", "body.lock"):
+    for stale in ("calls", "gexec.args", "timeouts", "body.fds", "body.lock", "resets"):
         (tmp_path / stale).unlink(missing_ok=True)
     if hostpub is not None:
         (tmp_path / "host.pub").write_text(hostpub)
@@ -324,7 +327,10 @@ def pair(tmp_path, *, slash30="10.99.0.1/30", other30="", agent=0, sudo="yes", a
             [ -n "{slash30}" ] && echo "7: vmbr1    inet {slash30} brd 10.99.0.3 scope global vmbr1"
             return 0
         }}
-        qm(){{ echo "qm $*" >> $C; return {agent}; }}
+        AGENT_RC={agent}
+        qm(){{ echo "qm $*" >> $C; return $AGENT_RC; }}
+        qga_reset(){{ echo "reset $1" >> {tmp_path}/resets; [ {int(reset_heals)} = 1 ] || return 1; AGENT_RC=0; }}
+        qga_note_reset(){{ echo "note $1" >> {tmp_path}/resets; }}
         rac_have_sudo(){{ [ -e {tmp_path}/sudo-present ]; }}
         apt-get(){{ echo "apt-get $*" >> $C; case "$*" in *install*) [ {int(apt_installs)} = 1 ] && touch {tmp_path}/sudo-present;; esac; }}
         rac_install_host_files(){{
@@ -367,6 +373,27 @@ def pair(tmp_path, *, slash30="10.99.0.1/30", other30="", agent=0, sudo="yes", a
             os.close(held)
     calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
     return r, calls
+
+
+def test_a_deaf_agent_gets_one_reset_and_the_pairing_goes_on(tmp_path):
+    """tasks/plan-guest-agent-requests.md section 4: one reset before any verdict."""
+    r, calls = pair(tmp_path, agent=1, reset_heals=True)
+    assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "resets").read_text() == "reset 100\nnote pairing\n"
+    assert [c for c in calls if c.startswith("qm agent")] == ["qm agent 100 ping"] * 2
+    assert (tmp_path / "marks" / "rac-pairing").read_text().startswith("paired ")
+
+
+def test_an_agent_that_stays_silent_gets_one_reset_and_no_more(tmp_path):
+    r, calls = pair(tmp_path, agent=1)
+    assert "fail=the guest agent in VM 100 does not answer" in r.stdout
+    assert (tmp_path / "resets").read_text() == "reset 100\n"
+    assert len([c for c in calls if c.startswith("qm agent")]) == 12
+
+
+def test_an_agent_that_answers_gets_no_reset_from_the_pairing(tmp_path):
+    pair(tmp_path)
+    assert not (tmp_path / "resets").exists()
 
 
 def test_pairing_writes_both_halves_and_then_proves_them(tmp_path):

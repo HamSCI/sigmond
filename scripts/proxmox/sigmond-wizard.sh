@@ -614,6 +614,49 @@ mgmt_vm_ip() {
     printf '10.99.0.2\n'
 }
 
+# ── what crosses to the guest agent ─────────────────────────────────────────
+# ⛔ NO BYTE ABOVE 0x7F MAY CROSS TO THE GUEST AGENT.  Proxmox (PVE 9.1.1,
+# qemu-server 9.0.30) writes a request that holds non-ASCII characters SHORT:
+# as many bytes as the request has characters, so the closing bytes never
+# arrive.  About one time in six the agent's parser then waits for them for
+# good: it keeps its PID, reads every later request and answers none
+# (tasks/plan-guest-agent-requests.md).  An operator's own answer can hold
+# such a character -- a name with an accent, a password -- so gexec and
+# guest_out send every command base64-encoded: the request holds ASCII
+# whatever the command holds.  tests/test_wizard_guest_senders.py fails on
+# any byte above 0x7F in a request.
+#
+# The guest decodes the word and runs it in the login shell it stands in, as
+# `bash -lc "<command>"` did.  The command arrives as an ARGUMENT, never on
+# the shell's standard input: a command that reads its input would swallow
+# whatever followed it there.
+qga_b64(){ printf '%s' "$1" | base64 -w0; }
+QGA_RUN='eval "$(printf %s "$1" | base64 -d)"'
+
+# qga_reset <vmid> : one 0xFF byte and a sync request down the agent's socket.
+# The byte resets the agent's parser; the QGA protocol defines it and Proxmox
+# never sends it.  Returns 0 when the agent answered the sync.  The same bytes
+# stand in the console panel (sigmond-appliance firstboot-v3.sh), pm-align.py
+# and pm-heartbeat.py; tests/test_qga_reset.py holds them equal.
+QGA_DIR="${SIGMOND_QGA_DIR:-/var/run/qemu-server}"
+QGA_NOTE="${SIGMOND_QGA_NOTE:-/run/sigmond/qga-reset}"
+qga_reset(){
+    timeout 10 python3 -c 'import socket,sys
+s=socket.socket(socket.AF_UNIX); s.settimeout(4)
+try:
+    s.connect(sys.argv[2]+"/"+sys.argv[1]+".qga")
+    s.sendall(b"\xff"+b"{\"execute\":\"guest-sync-delimited\",\"arguments\":{\"id\":4242}}\n")
+    sys.exit(0 if b"4242" in s.recv(4096) else 1)
+except Exception:
+    sys.exit(1)' "$1" "$QGA_DIR" >/dev/null 2>&1 </dev/null
+}
+# One line, replaced each time: when the last reset brought the agent back,
+# and who sent it.  pm-heartbeat.py reports from it.
+qga_note_reset(){
+    mkdir -p "$(dirname "$QGA_NOTE")" 2>/dev/null
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$QGA_NOTE" 2>/dev/null
+}
+
 gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
     # A guest agent that dies mid-wizard used to poison every LATER step:
     # each one returned "QEMU guest agent is not running", each printed its
@@ -625,9 +668,10 @@ gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
     # A command that merely exits non-zero is NOT retried — that is a real
     # answer from a live agent.
     local t="$1"; shift
-    local out rc try i
+    local out rc try i b
+    b=$(qga_b64 "$*")
     for try in 1 2; do
-        out=$(qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>&1 </dev/null)
+        out=$(qm guest exec "$VMID" --timeout "$t" -- bash -lc "$QGA_RUN" bash "$b" 2>&1 </dev/null)
         rc=$(echo "$out" | grep -o '"exitcode" *: *[0-9-]*' | grep -o '[0-9-]*$' | head -1)
         echo "$out" >> "$LOG"
         [ "${rc:-1}" = "0" ] && return 0
@@ -635,8 +679,13 @@ gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
             *"guest agent is not running"*|*"got timeout"*|*"QGA"*)
                 [ "$try" = 2 ] && return 1
                 say "guest agent stopped answering — waiting for it before retrying"
+                # One reset before the wait: an agent that stands deaf hears
+                # again at once, and nothing inside the VM restarts.
+                if ! timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 </dev/null; then
+                    qga_reset "$VMID" && qga_note_reset wizard
+                fi
                 for i in $(seq 1 24); do
-                    qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
+                    timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
                     sleep 5
                 done
                 ;;
@@ -650,7 +699,7 @@ gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
 # exit code; preflight_devices already needed the output and open-coded this.
 guest_out() {
     local t="$1"; shift
-    qm guest exec "$VMID" --timeout "$t" -- bash -lc "$*" 2>/dev/null </dev/null \
+    qm guest exec "$VMID" --timeout "$t" -- bash -lc "$QGA_RUN" bash "$(qga_b64 "$*")" 2>/dev/null </dev/null \
       | python3 -c 'import json,sys
 try:  print(json.load(sys.stdin).get("out-data",""))
 except Exception: pass' 2>/dev/null || true
@@ -1411,6 +1460,12 @@ rac_pair_locked(){
     # hang, and this run would then sit on the pairing's lock.
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
+        # One reset after the first silent ping: an agent that stands deaf
+        # hears again at once, and this run need not fail over it.
+        if [ "$i" = 1 ] && qga_reset "$VMID"; then
+            qga_note_reset pairing
+            continue
+        fi
         if [ "$i" = 12 ]; then
             RAC_PAIR_FAIL="the guest agent in VM $VMID does not answer"
             return 1
@@ -1599,12 +1654,22 @@ if ! qm status "$VMID" >/dev/null 2>&1 </dev/null; then
     say "      SIGMOND_VMID=<id> sigmond-setup --reconfigure"
     exit 1
 fi
+# >>> agent_wait (tests/test_wizard_guest_senders.py loads exactly this block)
 _vmip=$(mgmt_vm_ip)
 _healed=0
 for i in $(seq 1 60); do
-    qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
+    timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 </dev/null && break
     [ "$i" = 1 ] && qm start "$VMID" >/dev/null 2>&1 </dev/null
-    # ⚡ SELF-HEAL A STALE CHANNEL.  Observed repeatedly on AI6VN 2026-09-29:
+    # ONE RESET FIRST.  At the second silent ping the VM has had its start, so
+    # the agent may stand deaf: it reads every request and answers none
+    # (tasks/plan-guest-agent-requests.md).  One 0xFF byte resets its parser.
+    # Nothing inside the VM restarts, and the private link plays no part.
+    if [ "$i" = 2 ] && qga_reset "$VMID"; then
+        qga_note_reset wizard
+        say "  the guest agent stood deaf; one parser reset brought it back"
+        continue
+    fi
+    # ⚡ SELF-HEAL A STALE CHANNEL, the second resort.  Observed repeatedly on AI6VN 2026-09-29:
     # the agent is `active` inside the guest with NRestarts=0, having served
     # requests moments earlier, while the host insists "QEMU guest agent is
     # not running".  It is the host<->guest channel that has desynced, not the
@@ -1632,7 +1697,7 @@ for i in $(seq 1 60); do
     [ $((i % 3)) = 0 ] && say "  still waiting for the guest agent ($((i * 5))s of 300s)..."
     sleep 5
 done
-if ! qm agent "$VMID" ping >/dev/null 2>&1 </dev/null; then
+if ! timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 </dev/null; then
     say "ERROR: guest agent in VM $VMID not answering after 300s."
     say "  The VM can be up and reachable over ssh while the agent channel is"
     say "  stale — the service inside the guest shows active, but the host still"
@@ -1642,6 +1707,7 @@ if ! qm agent "$VMID" ping >/dev/null 2>&1 </dev/null; then
     say "  If the VM was never imported, plug in the Sigmond USB to trigger it."
     exit 1
 fi
+# <<< agent_wait
 
 # rd — read that ABORTS on EOF instead of letting a validation loop spin
 # forever when piped stdin runs dry (nested-test hang, 2026-08-11).  On a
