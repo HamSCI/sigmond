@@ -12,12 +12,18 @@ Why this exists
 ----------------
 The fleetboard watches VMs; the PM underneath them — the deployment
 fulcrum and the project's named critical dependency — was invisible.
-Worse, its ``qm guest exec`` channel to the VM can wedge SILENTLY: the
-host-side QEMU guest agent connection resets while the guest agent
-inside the VM looks perfectly healthy from the VM's own seat.  Only the
-PM can see that from the outside, which is the entire reason this is a
-separate emitter rather than one more block on the station's own
-heartbeat.
+Worse, its ``qm guest exec`` channel to the VM can go deaf SILENTLY: the
+guest agent keeps its process, reads every request and answers none, and
+looks perfectly healthy from the VM's own seat.  Only the PM can see that
+from the outside, which is the entire reason this is a separate emitter
+rather than one more block on the station's own heartbeat.
+
+One cause is known (sigmond tasks/plan-guest-agent-requests.md): Proxmox
+writes a request that holds non-ASCII characters short, and the agent's
+parser then waits for the missing bytes for good.  One 0xFF byte from the
+host resets that parser.  So this emitter sends one reset before it calls
+the agent wedged, and it reports every reset that brought the agent back,
+its own or another program's, as a finding of its own.
 
 Wire-contract compatibility (READ BEFORE EDITING)
 --------------------------------------------------
@@ -73,6 +79,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -113,6 +120,20 @@ RAC_STATE_FILE = "/run/sigmond/rac-state"
 RAC_STATE_MAX_AGE_SEC = 300
 
 DEFAULT_INTERVAL_SEC = 300
+
+# One parser reset for the guest agent: the byte 0xFF, then one sync request.
+# The QGA protocol defines the byte; Proxmox never sends it.  The console
+# panel (sigmond-appliance firstboot-v3.sh), sigmond-wizard.sh and pm-align.py
+# send the same bytes; tests/test_qga_reset.py holds the copies equal.
+QGA_DIR = "/var/run/qemu-server"
+QGA_RESET = b"\xff" + b'{"execute":"guest-sync-delimited","arguments":{"id":4242}}\n'
+# Whoever resets the agent and gets its answer leaves one line here,
+# "<UTC> <who>", replacing the line before.  This emitter reports the line
+# once and moves the file aside, so that one reset costs one beat.
+QGA_NOTE = "/run/sigmond/qga-reset"
+# A finding of these kinds alone reads INCONCLUSIVE, not INVALID: the station
+# works again, and someone should know what it took.
+SOFT_FINDING_KINDS = frozenset({"guest-agent-reset"})
 
 CONFIG_PATH = "/etc/pm-heartbeat/config.toml"
 SPOOL_DIR = "/var/lib/pm-heartbeat/spool"
@@ -328,7 +349,8 @@ def _map_versions(raw) -> dict:
 # ---------------------------------------------------------------------------
 
 def build_doctor_raw(vmid, expect_cat, run_guest_exec, run_qm_status,
-                     run_qm_config, probe_cat) -> dict:
+                     run_qm_config, probe_cat, reset_agent=None,
+                     note_reset=None, take_reset_note=None) -> dict:
     """Run the three doctor sub-checks, each independently wrapped.
 
     A sub-check that raises contributes a ``"<name>-unassessed"`` finding
@@ -342,7 +364,8 @@ def build_doctor_raw(vmid, expect_cat, run_guest_exec, run_qm_status,
     checks_run = 0
 
     try:
-        f = _check_guest_exec(vmid, run_guest_exec, run_qm_status)
+        f = _check_guest_exec(vmid, run_guest_exec, run_qm_status,
+                              reset_agent, note_reset, take_reset_note)
         checks_run += 1
         if f is not None:
             findings.append(f)
@@ -379,31 +402,60 @@ def build_doctor_raw(vmid, expect_cat, run_guest_exec, run_qm_status,
     }
 
 
-def _check_guest_exec(vmid, run_guest_exec, run_qm_status):
+def _check_guest_exec(vmid, run_guest_exec, run_qm_status,
+                      reset_agent=None, note_reset=None, take_reset_note=None):
     """``qm guest exec <vmid> --timeout 15 -- /usr/bin/true``.
 
-    rc 0 -> no finding.  A failure distinguishes THE WEDGE DETECTOR
-    ("QEMU guest agent is not running" while the VM IS running ->
-    ``guest-agent-wedged``) from an unremarkable ``vm-stopped`` (checked
-    via ``qm status``) from anything else (``guest-exec-error``, verbatim
-    stderr).
+    A failure distinguishes THE WEDGE DETECTOR ("QEMU guest agent is not
+    running" while the VM IS running -> ``guest-agent-wedged``) from an
+    unremarkable ``vm-stopped`` (checked via ``qm status``) from anything
+    else (``guest-exec-error``, verbatim stderr).
+
+    One reset before the verdict: with ``reset_agent`` given, a silent agent
+    in a running VM gets one parser reset and one more request.  Only a
+    second failure reads ``guest-agent-wedged``.
+
+    An agent that answers may still have needed a reset since the last
+    beat, from this emitter or from the panel, the wizard or pm-align.
+    ``take_reset_note`` hands over the line such a reset left, and that
+    reads ``guest-agent-reset``.
     """
     res = run_guest_exec(vmid)
-    if res.rc == 0:
-        return None
     stderr = (res.stderr or "").strip()
-    if "QEMU guest agent is not running" in stderr:
+    if res.rc != 0 and "QEMU guest agent is not running" in stderr:
         status = run_qm_status(vmid)
         status_text = (status.stdout or "").strip().lower()
         if "stopped" in status_text:
             return _finding("guest-exec", "vm-stopped",
                             f"VM {vmid} is stopped")
+        if reset_agent is None or not reset_agent(vmid):
+            tried = "" if reset_agent is None else \
+                "; one parser reset brought no answer"
+            return _finding(
+                "guest-exec", "guest-agent-wedged",
+                f"VM {vmid} is running but the QEMU guest agent is not: "
+                f"{stderr}{tried}")
+        if note_reset is not None:
+            note_reset("heartbeat")
+        res = run_guest_exec(vmid)
+        stderr = (res.stderr or "").strip()
+        if res.rc != 0:
+            return _finding(
+                "guest-exec", "guest-agent-wedged",
+                f"VM {vmid}: the guest agent answered a parser reset and "
+                f"failed the next request: "
+                f"{stderr or f'qm guest exec exited {res.rc}'}")
+    elif res.rc != 0:
+        return _finding("guest-exec", "guest-exec-error",
+                        stderr or f"qm guest exec exited {res.rc}")
+    note = take_reset_note() if take_reset_note is not None else None
+    if note:
         return _finding(
-            "guest-exec", "guest-agent-wedged",
-            f"VM {vmid} is running but the QEMU guest agent is not: "
-            f"{stderr}")
-    return _finding("guest-exec", "guest-exec-error",
-                    stderr or f"qm guest exec exited {res.rc}")
+            "guest-exec", "guest-agent-reset",
+            f"VM {vmid}: a parser reset of the guest agent got its answer "
+            f"since the last beat ({note}); the agent may have stood deaf, or "
+            f"merely booting")
+    return None
 
 
 def _check_hookscript(vmid, run_qm_config):
@@ -460,8 +512,11 @@ def _map_doctor(raw) -> dict:
             data)
     if findings:
         kinds = _unique(f.get("kind") for f in findings)
+        verdict = "INVALID"
+        if all(k in SOFT_FINDING_KINDS for k in kinds):
+            verdict = "INCONCLUSIVE"
         return _block(
-            "INVALID",
+            verdict,
             f"{len(findings)} doctor finding(s): {', '.join(kinds)}",
             data)
     return _block("VALID", f"{checks_run} checks passed", data)
@@ -668,6 +723,44 @@ def _run_qm_guest_exec(vmid) -> RunResult:
     return RunResult(proc.returncode, proc.stdout, proc.stderr)
 
 
+def _qga_reset(vmid) -> bool:
+    """One parser reset for the VM's guest agent; True when it answered."""
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(4)
+            s.connect(f"{QGA_DIR}/{vmid}.qga")
+            s.sendall(QGA_RESET)
+            return b"4242" in s.recv(4096)
+    except OSError:
+        return False
+
+
+def _note_reset(who: str) -> None:
+    """Leave the one line a reset that worked leaves.  Never raises."""
+    try:
+        os.makedirs(os.path.dirname(QGA_NOTE), exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime(_EMITTED_AT_FORMAT)
+        with open(QGA_NOTE, "w", encoding="ascii") as fh:
+            fh.write(f"{stamp} {who}\n")
+    except OSError:
+        pass
+
+
+def _take_reset_note():
+    """The line the last reset left, or None; the file moves aside.
+
+    Printable ASCII only and 80 characters at most: the line travels in a
+    heartbeat, and another program wrote it."""
+    try:
+        with open(QGA_NOTE, "r", encoding="ascii", errors="replace") as fh:
+            line = fh.readline()
+        os.replace(QGA_NOTE, QGA_NOTE + ".seen")
+    except OSError:
+        return None
+    line = "".join(c for c in line if " " <= c <= "~").strip()[:80]
+    return line or None
+
+
 def _run_qm_status(vmid) -> RunResult:
     proc = subprocess.run(["qm", "status", str(vmid)], capture_output=True,
                           text=True, timeout=15, check=False)
@@ -763,7 +856,8 @@ def build_production_checks(config: dict) -> dict:
         "versions": lambda: build_versions_raw(_run_pveversion, _run_uname),
         "doctor": lambda: build_doctor_raw(
             vmid, expect_cat, _run_qm_guest_exec, _run_qm_status,
-            _run_qm_config, _probe_cat),
+            _run_qm_config, _probe_cat, reset_agent=_qga_reset,
+            note_reset=_note_reset, take_reset_note=_take_reset_note),
         "resources": lambda: build_resources_raw(
             _read_loadavg, _read_disk_used_pct, read_uptime,
             _read_temperature),

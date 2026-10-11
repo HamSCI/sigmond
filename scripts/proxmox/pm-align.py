@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,18 @@ RAW = "https://raw.githubusercontent.com/HamSCI"
 PROXMOX_FILES = ("pm-heartbeat.py", "pm-heartbeat.service", "pm-heartbeat.timer",
                  "pm-heartbeat-setup.sh", "pm-align.py")
 RECORD = "/etc/sigmond-appliance/host-aligned.json"
+
+# One parser reset for the guest agent: the byte 0xFF, then one sync request
+# (sigmond tasks/plan-guest-agent-requests.md).  Proxmox writes a request
+# that holds non-ASCII characters short, and the agent's parser can then wait
+# for the missing bytes for good; this byte resets it.  The console panel,
+# sigmond-wizard.sh and pm-heartbeat.py send the same bytes;
+# tests/test_qga_reset.py holds the copies equal.
+QGA_DIR = "/var/run/qemu-server"
+QGA_RESET = b"\xff" + b'{"execute":"guest-sync-delimited","arguments":{"id":4242}}\n'
+# Whoever resets the agent and gets its answer leaves one line here,
+# "<UTC> <who>"; pm-heartbeat.py reports it.
+QGA_NOTE = "/run/sigmond/qga-reset"
 BACKUP_BASE = "/var/lib/pm-align/backup"
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 _TIMEOUT = 30
@@ -464,9 +477,38 @@ def push_record(record_path: Path, vmid: int, *, run) -> bool:
     b64 = base64.b64encode(record_path.read_bytes()).decode()
     cmd = (f"mkdir -p /etc/sigmond-appliance && echo {b64} | base64 -d "
            f"> {RECORD}.tmp && mv {RECORD}.tmp {RECORD}")
-    r = run(["qm", "guest", "exec", str(vmid), "--timeout", "30", "--", "bash", "-lc", cmd],
-            capture_output=True, text=True, timeout=60)
+    argv = ["qm", "guest", "exec", str(vmid), "--timeout", "30", "--", "bash", "-lc", cmd]
+    r = run(argv, capture_output=True, text=True, timeout=60)
+    # One reset before the verdict: a deaf agent hears again at once, and
+    # nothing inside the VM restarts.
+    if r.returncode != 0 and "guest agent is not running" in (r.stderr or "") \
+            and _qga_reset(vmid):
+        _note_reset("pm-align")
+        r = run(argv, capture_output=True, text=True, timeout=60)
     return r.returncode == 0 and re.search(r'"exitcode"\s*:\s*0\b', r.stdout or "") is not None
+
+
+def _qga_reset(vmid) -> bool:
+    """One parser reset for the VM's guest agent; True when it answered."""
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(4)
+            s.connect(f"{QGA_DIR}/{vmid}.qga")
+            s.sendall(QGA_RESET)
+            return b"4242" in s.recv(4096)
+    except OSError:
+        return False
+
+
+def _note_reset(who: str) -> None:
+    """Leave the one line a reset that worked leaves.  Never raises."""
+    try:
+        os.makedirs(os.path.dirname(QGA_NOTE), exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(QGA_NOTE, "w", encoding="ascii") as fh:
+            fh.write(f"{stamp} {who}\n")
+    except OSError:
+        pass
 
 
 def _apply_record_push(record: Path, vmid: int, *, run) -> str:
