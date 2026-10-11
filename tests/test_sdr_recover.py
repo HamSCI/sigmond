@@ -785,3 +785,28 @@ class EpisodeAndQuietTests(unittest.TestCase):
             rc = self.tick()
         self.assertEqual(rc, 0)
         self.assertTrue(any("could not record the power-cycle" in m for m in self.log), self.log)
+
+    def _no_hub(self):
+        sdr.read_config = lambda: {"unit": "radiod@ac0g.service", "consumers": []}
+
+    def _unswitchable(self):
+        self._no_hub()
+        (self.tmp / "sdr-recover.json").write_text(json.dumps(
+            {"hub": "1-1", "port": "2", "switchable": False,
+             "locations": [["1-1", "2", False]]}))
+
+    def _two_dry_runs_then_a_real_one(self, needle):
+        for _ in range(2):
+            self.tick("--dry-run")
+        self.assertEqual(len([m for m in self.log if needle in m]), 2, self.log)
+        self.tick()
+        self.tick()
+        self.assertEqual(len([m for m in self.log if needle in m]), 3, self.log)
+
+    def test_a_dry_run_answers_every_time_for_an_unswitchable_hub(self):
+        self._unswitchable()
+        self._two_dry_runs_then_a_real_one("cannot switch power")
+
+    def test_a_dry_run_answers_every_time_with_no_hub_to_cycle(self):
+        self._no_hub()
+        self._two_dry_runs_then_a_real_one("no hub/port to cycle")

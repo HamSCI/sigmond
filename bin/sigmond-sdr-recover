@@ -724,10 +724,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                  "with a working device on it is never a candidate): "
                  + ", ".join(f"{h} p{p}" for h, p, _ in boot))
     if not (hub and port):
-        log_on_change(state, "no hub/port to cycle: nothing in [radiod] and the "
-                      "card was never seen on a bus this helper could inspect — "
-                      + ("it is absent right now; cannot recover" if not present
-                         else "unexpected while present"))
+        msg = ("no hub/port to cycle: nothing in [radiod] and the "
+               "card was never seen on a bus this helper could inspect — "
+               + ("it is absent right now; cannot recover" if not present
+                  else "unexpected while present"))
+        if args.dry_run:        # a person asked: answer, and leave "said" alone
+            _log(msg)
+        else:
+            log_on_change(state, msg)
         save_state(state)
         return 0
     if not radiod_unit and not bootstrapped:
@@ -741,9 +745,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "then bring-up can configure radiod against real hardware")
     if state.get("switchable") is False and not cfg.get("recover_hub"):
         if not present:
-            log_on_change(state, f"card absent but hub {hub} port {port} cannot "
-                                 f"switch power — a manual replug is the only recovery")
-        else:
+            msg = (f"card absent but hub {hub} port {port} cannot "
+                   f"switch power — a manual replug is the only recovery")
+            if args.dry_run:    # a person asked: answer, and leave "said" alone
+                _log(msg)
+            else:
+                log_on_change(state, msg)
+        elif not args.dry_run:
             state.pop("said", None)
         save_state(state)
         return 0
@@ -821,6 +829,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             targets += extra
     if not targets:
         targets = [(hub, str(port), False)]
+    # Record before the cut: a failed cut still counts as an attempt, and the
+    # record survives a helper that dies mid-cycle.
     note_event("power-cycle", " ".join(f"{h}p{p}" for h, p, _ in targets))
     if not cycle_port(targets, args.off_seconds):
         return 1
