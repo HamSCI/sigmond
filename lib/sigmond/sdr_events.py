@@ -134,6 +134,8 @@ def _write(path: Path, episodes: Sequence[Episode]) -> None:
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write("".join(_dump(ep) + "\n" for ep in episodes))
+            fh.flush()
+            os.fsync(fh.fileno())
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:
@@ -160,12 +162,13 @@ def record(kind: str, detail: str = "", *, now: float,
         cur = episodes[-1] if episodes else None
         what = None
         if kind == ARRIVAL_KIND:
-            if cur is not None and cur.back is None and now - cur.last <= WINDOW_S:
+            if (cur is not None and cur.back is None
+                    and abs(now - cur.last) <= EPISODE_GAP_S):
                 cur.back = now
                 what = "back"
-        elif (cur is not None and now - cur.last <= EPISODE_GAP_S
+        elif (cur is not None and abs(now - cur.last) <= EPISODE_GAP_S
               and (cur.back is None or now - cur.back <= SETTLE_S)):
-            cur.last = now
+            cur.last = max(cur.last, now)
             cur.count += 1
             cur.kinds = sorted(set(cur.kinds) | {kind})
             if kind == "usb-remove":

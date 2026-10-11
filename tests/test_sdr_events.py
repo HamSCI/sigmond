@@ -152,6 +152,59 @@ def test_the_file_stays_world_readable(tmp_path):
     assert os.stat(p).st_mode & 0o777 == 0o644
 
 
+# -- fix round 1: a return closes only an open episode; the clock may step back ---------
+
+def test_a_stall_is_not_closed_by_a_boot_hours_later(tmp_path):
+    p = tmp_path / "e.jsonl"
+    for dt in (0, 10, 20):
+        ev.record("radiod-exit", now=T0 + dt, path=p)
+    assert ev.record("usb-add", "8-1.2", now=T0 + 8 * 3600, path=p) is None
+    assert lines(p)[0]["back"] is None
+    eps = ev.read_episodes(p, now=T0 + 8 * 3600)
+    assert ev.assess(eps, True)[0] == "sdr-recovered"
+
+
+def test_a_return_inside_the_gap_still_closes_the_episode(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("radiod-exit", now=T0, path=p)
+    assert ev.record("usb-add", now=T0 + ev.EPISODE_GAP_S, path=p) == "back"
+    assert lines(p)[0]["back"] is not None
+
+
+def test_a_forty_minute_stall_then_a_return_reads_down_long(tmp_path):
+    p = tmp_path / "e.jsonl"
+    for i in range(241):
+        ev.record("radiod-exit", now=T0 + 10 * i, path=p)
+    assert ev.record("usb-add", now=T0 + 2400 + 5, path=p) == "back"
+    eps = ev.read_episodes(p, now=T0 + 2500)
+    assert ev.assess(eps, True)[0] == "sdr-down-long"
+
+
+def test_an_event_stamped_a_day_ahead_then_the_true_time_opens_another(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("radiod-exit", now=T0 + 86400, path=p)
+    assert ev.record("radiod-exit", now=T0, path=p) == "opened"
+    eps = ev.read_episodes(p, now=T0 + 100)
+    assert len(eps) == 2
+    assert all(ev.episode_span(e) >= 0 for e in eps)
+
+
+def test_a_small_step_back_joins_and_leaves_last_alone(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("radiod-exit", now=T0 + 100, path=p)
+    assert ev.record("radiod-exit", now=T0 + 90, path=p) == "grown"
+    (d,) = lines(p)
+    assert d["count"] == 2 and d["last"] == ev._iso(T0 + 100)
+
+
+def test_the_file_is_synced_before_it_replaces_the_old_one(tmp_path, monkeypatch):
+    synced = []
+    real = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    ev.record("usb-remove", now=T0, path=tmp_path / "e.jsonl")
+    assert synced
+
+
 # -- the read side ---------------------------------------------------------------------
 
 def test_damaged_and_hostile_lines_are_skipped(tmp_path):
