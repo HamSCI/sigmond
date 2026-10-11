@@ -63,6 +63,32 @@ def test_a_stall_writes_one_episode_naming_how_radiod_died(tmp_path):
     assert d["detail"] == "ac0g core-dump dumped/ABRT"
 
 
+def test_radiod_finding_no_card_just_after_boot_writes_nothing(tmp_path):
+    # K3LR, every boot on record: rx888_boot loads the firmware, radiod starts
+    # 0.1 s later, finds no card yet (the RX888 takes about a second to come
+    # back as 00f1), exits 66, and runs 10 s later.  That is no loss.
+    r = run_cli(tmp_path, "radiod-exit", "k3lr", SERVICE_RESULT="exit-code",
+                EXIT_CODE="exited", EXIT_STATUS="66", SIGMOND_UPTIME_S="12.5")
+    assert r.returncode == 0
+    assert not (tmp_path / "sdr-events.jsonl").exists()
+    assert "just after boot" in r.stderr
+
+
+def test_radiod_finding_no_card_past_the_boot_grace_is_a_loss(tmp_path):
+    r = run_cli(tmp_path, "radiod-exit", "k3lr", SERVICE_RESULT="exit-code",
+                EXIT_CODE="exited", EXIT_STATUS="66", SIGMOND_UPTIME_S="181")
+    assert r.returncode == 0
+    (d,) = lines(tmp_path / "sdr-events.jsonl")
+    assert d["detail"] == "k3lr exit-code exited/66"
+
+
+def test_any_other_exit_just_after_boot_is_still_a_loss(tmp_path):
+    r = run_cli(tmp_path, "radiod-exit", "k3lr", SERVICE_RESULT="core-dump",
+                EXIT_CODE="dumped", EXIT_STATUS="ABRT", SIGMOND_UPTIME_S="12.5")
+    assert r.returncode == 0
+    assert len(lines(tmp_path / "sdr-events.jsonl")) == 1
+
+
 def test_the_opening_line_speaks_once_per_episode(tmp_path):
     env = dict(SERVICE_RESULT="signal", EXIT_CODE="killed", EXIT_STATUS="ABRT")
     first = run_cli(tmp_path, "radiod-exit", "ac0g", **env)

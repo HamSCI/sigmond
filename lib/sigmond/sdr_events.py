@@ -66,6 +66,16 @@ KINDS = LOSS_KINDS + (ARRIVAL_KIND,)
 # ran long and ended in SIGKILL; it loses nothing.
 RADIOD_LOSS_RESULTS = frozenset({"exit-code", "signal", "core-dump", "watchdog"})
 
+# At power-up rx888_boot loads the firmware and the card leaves the bus as
+# 00f3 and returns as 00f1 about a second later.  radiod can start inside that
+# second: it finds no card, exits 66 (EX_NOINPUT, "device could not be
+# found"), and systemd starts it again 10 s later.  K3LR did this on every
+# boot on record.  An exit 66 this soon after boot is that race, not a loss; a
+# card that stays missing keeps radiod failing past the grace and counts then.
+NO_CARD_STATUS = "66"
+BOOT_GRACE_S = 180
+UPTIME_PATH = Path("/proc/uptime")
+
 # The running card (00f1) and its FX3 bootloader (00f3): either one sits on the
 # bus.  The same pair sigmond-sdr-recover looks for.
 RX888_IDS = (("04b4", "00f1"), ("04b4", "00f3"))
@@ -90,6 +100,19 @@ def clean_text(s, limit: int = DETAIL_MAX) -> str:
 
 def radiod_exit_is_loss(service_result: str) -> bool:
     return service_result in RADIOD_LOSS_RESULTS
+
+
+def radiod_exit_is_boot_race(exit_status: str, uptime: Optional[float]) -> bool:
+    return (exit_status == NO_CARD_STATUS and uptime is not None
+            and uptime < BOOT_GRACE_S)
+
+
+def uptime_s(path: Path = UPTIME_PATH) -> Optional[float]:
+    """Seconds since boot, or None when the kernel's answer cannot be read."""
+    try:
+        return float(path.read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _iso(t: float) -> str:

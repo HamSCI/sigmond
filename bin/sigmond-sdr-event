@@ -13,10 +13,12 @@ This program never fails its caller.  udev waits for it, and radiod's drop-in
 runs it after every exit, so it exits 0 whatever happens and says what went
 wrong in one line.  Only an unknown kind exits 2, since only a person types
 one.  A radiod exit counts only when systemd's $SERVICE_RESULT says radiod
-died on its own; a stop someone asked for writes nothing.
+died on its own; a stop someone asked for writes nothing, and neither does
+radiod finding no card in the first minutes after boot (the firmware-load
+race, sdr_events.BOOT_GRACE_S).
 
 SIGMOND_SDR_EVENTS, when set, names another file and sends the one line to
-stderr instead of syslog; the tests use it.
+stderr instead of syslog; the tests use it, and SIGMOND_UPTIME_S with it.
 """
 from __future__ import annotations
 
@@ -54,6 +56,14 @@ def main(argv=None) -> int:
     if kind == "radiod-exit":
         result = os.environ.get("SERVICE_RESULT", "")
         if not sdr_events.radiod_exit_is_loss(result):
+            return 0
+        status = os.environ.get("EXIT_STATUS", "")
+        up = (float(os.environ["SIGMOND_UPTIME_S"])
+              if override and "SIGMOND_UPTIME_S" in os.environ
+              else sdr_events.uptime_s())
+        if sdr_events.radiod_exit_is_boot_race(status, up):
+            _say(f"radiod {detail} found no RX888 just after boot (exit {status}, "
+                 f"{up:.0f} s up): firmware still loading, not a loss", to_syslog)
             return 0
         detail = (f"{detail} {result} {os.environ.get('EXIT_CODE', '?')}/"
                   f"{os.environ.get('EXIT_STATUS', '?')}").strip()

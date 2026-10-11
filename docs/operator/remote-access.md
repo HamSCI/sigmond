@@ -499,7 +499,9 @@ On a station with the private link, the two machines must pair once before
    ([day-2.md](day-2.md#updates--who-decides-and-what-you-run)).
 2. Your fleet admin updates the host to v3.71 with the admin's own tool,
    `pm-align`, which updates a Proxmox host to the newest released image without
-   a reinstall. That step pairs the two machines.
+   a reinstall. Its first run brings the host the new `pm-align` and the
+   switch. A second `pm-align --apply`, or `sigmond-setup --pair-vm` on the
+   host, then pairs the two machines.
 3. `smd remote status` in the `[VM]` now answers.
 
 Between steps 1 and 2, `smd remote` in the VM answers with the not-paired

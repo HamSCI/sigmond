@@ -344,6 +344,20 @@ def test_which_radiod_exits_count_as_a_loss(result, loss):
     assert ev.radiod_exit_is_loss(result) is loss
 
 
+@pytest.mark.parametrize("status,uptime,race", [
+    ("66", 5.0, True), ("66", ev.BOOT_GRACE_S - 1, True), ("66", ev.BOOT_GRACE_S, False),
+    ("66", None, False), ("1", 5.0, False), ("ABRT", 5.0, False), ("", 5.0, False)])
+def test_only_no_card_just_after_boot_is_the_boot_race(status, uptime, race):
+    assert ev.radiod_exit_is_boot_race(status, uptime) is race
+
+
+def test_uptime_reads_proc_and_answers_none_when_it_cannot(tmp_path):
+    good, bad = tmp_path / "u", tmp_path / "missing"
+    good.write_text("123.45 678.90\n")
+    assert ev.uptime_s(good) == pytest.approx(123.45)
+    assert ev.uptime_s(bad) is None
+
+
 # -- a planted symlink cannot steer a root write (v3.71 security fix) --------------------
 
 def test_a_symlink_at_the_lock_path_makes_record_raise_and_spares_its_target(tmp_path):

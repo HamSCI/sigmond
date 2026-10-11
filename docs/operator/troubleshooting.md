@@ -621,7 +621,10 @@ another closely join the same episode. An episode with `radiod-exit` and no
 `usb-remove` means the stream stalled while the card stayed on the bus.
 A `radiod-exit` can also come from a fault in `radiod` itself, for example a
 configuration error after a render, and not from the RX888. To tell them apart,
-read `journalctl -u radiod@<name>` on the decoder VM.
+read `journalctl -u radiod@<name>` on the decoder VM. A `radiod` that finds no
+card in the first three minutes after boot writes nothing: at power-up the RX888
+takes about a second to come back with its firmware loaded, and `radiod` can
+start inside that second.
 `radiod-wedge` means the watchdog found `radiod` alive but stuck, and restarted
 it. The watchdog logs the time it acted, not the time `radiod` stalled, so a
 wedge can look shorter than it was.
