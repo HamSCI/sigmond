@@ -37,6 +37,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,7 @@ WINDOW_S = 86400             # what `smd doctor` reads
 FLAP_EPISODES = 3            # this many episodes in WINDOW_S read INVALID
 LONG_EPISODE_S = 1800        # an episode open longer than this reads INVALID
 DETAIL_MAX = 120
+LOCK_WAIT_S = 5.0            # the writer waits this long for the lock, then raises OSError
 
 LOSS_KINDS = ("usb-remove", "power-cycle", "radiod-exit", "radiod-wedge")
 ARRIVAL_KIND = "usb-add"
@@ -122,7 +124,9 @@ def _dump(ep: Episode) -> str:
                       sort_keys=True)
 
 
-_NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC
+# O_NONBLOCK: opening a FIFO planted at the path must not block.  A regular
+# file ignores the flag, so its reads and writes behave as before.
+_NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
 
 def _open_regular(path: Path, flags: int, mode: int = 0o644) -> int:
@@ -167,6 +171,21 @@ def _write(path: Path, episodes: Sequence[Episode]) -> None:
         raise
 
 
+def _lock_or_raise(lock) -> None:
+    """flock(LOCK_EX), waiting at most LOCK_WAIT_S.  Any reader of the 0644
+    lock file can hold the lock, so a plain blocking flock could hang the
+    writer, and radiod's stop with it."""
+    deadline = time.monotonic() + LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise OSError(f"could not take the events lock within {LOCK_WAIT_S:g} s")
+            time.sleep(0.05)
+
+
 def record(kind: str, detail: str = "", *, now: float,
            path: Path = EVENTS_PATH) -> Optional[str]:
     """Note one event.  Returns "opened" when it began an episode, "grown"
@@ -180,7 +199,7 @@ def record(kind: str, detail: str = "", *, now: float,
     lock_fd = _open_regular(path.parent / (path.name + ".lock"),
                             os.O_WRONLY | os.O_CREAT | os.O_APPEND)
     with os.fdopen(lock_fd, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _lock_or_raise(lock)
         episodes = [ep for ep in _load(path) if ep.last >= now - KEEP_S]
         cur = episodes[-1] if episodes else None
         what = None

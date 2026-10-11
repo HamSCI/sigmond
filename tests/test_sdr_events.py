@@ -374,3 +374,72 @@ def test_the_written_file_is_0644_and_nothing_chmods_by_path(tmp_path, monkeypat
     evp = tmp_path / "sdr-events.jsonl"
     ev.record("usb-remove", "x", now=T0, path=evp)
     assert (evp.stat().st_mode & 0o777) == 0o644
+
+
+# -- nothing a group member plants can hang the writer (v3.71 fix round 2) ----------------
+
+import fcntl  # noqa: E402
+import subprocess  # noqa: E402
+import time  # noqa: E402
+
+_LIB = str(Path(__file__).resolve().parent.parent / "lib")
+
+
+def _record_in_subprocess(path, limit, wait_s=None):
+    """Run record() in a child so a hang cannot hang the suite.  Returns
+    (outcome, seconds): 'ok', 'OSError', or 'HUNG'."""
+    code = (f"import sys; sys.path.insert(0, {_LIB!r})\n"
+            "from sigmond import sdr_events as e\n"
+            + (f"e.LOCK_WAIT_S = {wait_s}\n" if wait_s is not None else "")
+            + f"try:\n    e.record('usb-remove', 'x', now=1_760_000_000.0, path={str(path)!r})\n"
+              "    print('ok')\nexcept OSError:\n    print('OSError')\n")
+    t = time.monotonic()
+    try:
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           timeout=limit)
+        return r.stdout.strip(), time.monotonic() - t
+    except subprocess.TimeoutExpired:
+        return "HUNG", time.monotonic() - t
+
+
+def test_a_fifo_at_the_data_path_fails_fast(tmp_path):
+    p = tmp_path / "e.jsonl"
+    os.mkfifo(p)
+    out, secs = _record_in_subprocess(p, 3)
+    assert out == "OSError" and secs < 3
+
+
+def test_a_fifo_at_the_lock_path_fails_fast(tmp_path):
+    p = tmp_path / "e.jsonl"
+    os.mkfifo(tmp_path / "e.jsonl.lock")
+    out, secs = _record_in_subprocess(p, 3)
+    assert out == "OSError" and secs < 3
+
+
+def test_a_lock_held_by_someone_else_raises_after_the_deadline(tmp_path):
+    p = tmp_path / "e.jsonl"
+    lock = tmp_path / "e.jsonl.lock"
+    lock.write_text("")
+    fd = os.open(lock, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        out, secs = _record_in_subprocess(p, 8, wait_s=0.5)
+    finally:
+        os.close(fd)
+    assert out == "OSError" and 0.4 <= secs < 5
+    assert not p.exists()
+
+
+def test_the_lock_deadline_is_about_five_seconds():
+    assert 1 <= ev.LOCK_WAIT_S <= 10
+
+
+def test_a_lock_released_during_the_wait_lets_the_write_through(tmp_path):
+    p = tmp_path / "e.jsonl"
+    lock = tmp_path / "e.jsonl.lock"
+    lock.write_text("")
+    fd = os.open(lock, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    import threading
+    threading.Timer(0.3, lambda: os.close(fd)).start()
+    assert ev.record("usb-remove", "x", now=T0, path=p) == "opened"
