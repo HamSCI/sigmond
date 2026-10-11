@@ -702,6 +702,21 @@ gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
     return 1
 }
 
+# gexec_unit <timeout-s> <name> <command...> : gexec, but the command runs in
+# a transient unit of its own, sigmond-wizard-<name>, outside the guest
+# agent's cgroup.  sigmond's drop-in caps the agent at MemoryMax=128M, and the
+# cap covers every process a request starts: one smd needs about 55 MB, two
+# pass it.  So every smd the wizard runs goes through here.  `systemd-run
+# --wait` hands back the command's own exit, and --pipe passes its output
+# through to the request.  The command travels base64-encoded a second time,
+# so no quote inside it can break the line.  A retry after a dead agent meets
+# the unit's name still in use and fails, rather than start a second smd.
+QGA_SDRUN="${SIGMOND_QGA_SDRUN:-systemd-run}"
+gexec_unit(){
+    local t="$1" name="$2"; shift 2
+    gexec "$t" "$QGA_SDRUN --quiet --wait --pipe --collect --unit=sigmond-wizard-$name /bin/bash -lc '$QGA_RUN' bash $(qga_b64 "$*")"
+}
+
 # Run a command in the guest and hand back its STDOUT.  gexec returns only an
 # exit code; preflight_devices already needed the output and open-coded this.
 guest_out() {
@@ -2670,8 +2685,8 @@ gexec 30 "echo $B64 | base64 -d > /etc/sigmond/site-profile.toml.new" \
 # [uploads] header (a missing live file passes too: nothing to lose).  gexec
 # returns 0 only when the agent answered with exit 0, so a block, a dead agent
 # and a transient failure all refuse, and the live profile stays as it is.
-if gexec 30 "smd config profile-install --help >/dev/null 2>&1"; then
-    gexec 30 "smd config profile-install /etc/sigmond/site-profile.toml.new" \
+if gexec_unit 30 profile-probe "smd config profile-install --help >/dev/null 2>&1"; then
+    gexec_unit 30 profile-install "smd config profile-install /etc/sigmond/site-profile.toml.new" \
         || { say "ERROR: smd config profile-install refused the new site-profile.toml — most often a double quote or backslash in an answer; see $LOG"; exit 1; }
 elif gexec 30 "! grep -qsE '^[[:space:]]*\\[uploads\\]' /etc/sigmond/site-profile.toml"; then
     say "WARN: this VM's sigmond predates 'smd config profile-install', so the wizard"
@@ -2690,7 +2705,7 @@ else
 fi
 
 say "personalizing VM (new machine-id, SSH host keys, hostname)..."
-gexec 600 "smd admin personalize --reset-identity --yes" \
+gexec_unit 600 personalize "smd admin personalize --reset-identity --yes" \
     || { say "ERROR: personalize failed — see $LOG"; exit 1; }
 # ⛔ Pin the VM's NEW host key on this host, read over the guest-agent channel
 # (authoritative; no network scan to trust).  Nothing pinned it before, so
@@ -2711,7 +2726,7 @@ else
     say "WARN: could not read the VM's host key — PM -> VM ssh will refuse until pinned"
 fi
 say "rendering site config in VM..."
-gexec 600 "smd config render" \
+gexec_unit 600 render "smd config render" \
     || say "WARN: smd config render reported issues (continuing; rerun inside VM)"
 
 # sigmond-heartbeat.timer ships installed everywhere but never auto-enabled
@@ -3571,7 +3586,7 @@ fi
 
 PSWS_STATE="skipped — add later: sigmond-setup --reconfigure"
 if [ -n "$PSWS_ID" ] && [ -n "$KEYS_RESTORED" ]; then
-    if gexec 90 "smd psws verify"; then
+    if gexec_unit 90 psws-verify "smd psws verify"; then
         PSWS_STATE="station $PSWS_ID — registered key RESTORED from the stick, verify PASSED ✓"
     else
         PSWS_STATE="station $PSWS_ID — key restored from the stick; verify pending
