@@ -114,6 +114,7 @@ set -u
 B64=QUJD
 LOG=/dev/null
 say(){ echo "[wizard] $*"; }
+gexec_unit(){ local t="$1"; shift 2; gexec "$t" "$@"; }   # the unit's name is not what these tests judge
 gexec(){
     shift
     printf '%s\n' "$*" >> "$CALLS"
