@@ -171,7 +171,7 @@ def cmd_check(args, env: Optional[Env] = None, checks=None) -> int:
 @dataclass(frozen=True)
 class Service:
     state: str                  # active | activating | failed | inactive | absent
-    age_s: Optional[float]      # since the oldest active unit started; None if unknown
+    age_s: Optional[float]      # since the youngest active unit started; None if unknown
     enabled: bool = False
     restarting: bool = False    # state is failed because systemd keeps restarting it
 
@@ -347,10 +347,9 @@ def service_problem(label: str, svc: Service, unit: str) -> Optional[Line]:
 
 
 def is_young(svc: Service, window_s: float) -> bool:
-    """True while a service has run for less than `window_s`.  A start
-    of unknown age counts as young; an unknown age otherwise does not, so it can never hide a fault."""
-    if svc.state == 'activating' and svc.age_s is None:
-        return True
+    """True while a service has run, or has been starting, for less than
+    `window_s`.  An unknown age never counts as young, so it can never hide
+    a fault."""
     return svc.age_s is not None and svc.age_s < window_s
 
 

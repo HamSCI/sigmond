@@ -99,8 +99,9 @@ class YoungTests(unittest.TestCase):
         self.assertTrue(check.is_young(check.Service('active', 59.0), 60))
         self.assertFalse(check.is_young(check.Service('active', 60.0), 60))
 
-    def test_starting_counts_as_young_and_unknown_age_does_not(self):
-        self.assertTrue(check.is_young(check.Service('activating', None), 60))
+    def test_unknown_age_is_never_young_and_a_recent_start_is(self):
+        self.assertFalse(check.is_young(check.Service('activating', None), 60))
+        self.assertTrue(check.is_young(check.Service('activating', 5.0), 60))
         self.assertFalse(check.is_young(check.Service('active', None), 60))
 
     def test_activating_past_its_window_is_not_young(self):
