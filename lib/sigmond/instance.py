@@ -748,6 +748,21 @@ class MigrationCandidate:
     def unit_name(self) -> str:
         return f"{self.client}@{systemd_escape(self.old_instance)}.service"
 
+    @property
+    def display_name(self) -> str:
+        """`old_instance` as a person should read it.
+
+        A legacy radiod-keyed name (``my-rx888``) comes back as it is.  A
+        name that still carries an escape after the one unescape detection
+        applied (``AC0G\\x3dB4``, from the double-escaped orphan
+        ``AC0G\\x5cx3dB4``) is a stray copy of a reporter-keyed instance:
+        it reads ``AC0G/B4 (double-escaped copy)``, never the raw escape.
+        """
+        name = self.old_instance
+        if unescape_systemd_instance(name) != name:
+            return f"{display_reporter_id(name)} (double-escaped copy)"
+        return name
+
 
 def detect_migration_candidates() -> list[MigrationCandidate]:
     """Walk env files + systemctl-listed units; surface candidates.
@@ -971,27 +986,38 @@ def migrate_one_instance(
             _do(f"create {new_paths.config} from {legacy_shared} + [instance] block",
                 _write_config)
 
+    # Steps 3-6 never overwrite.  A double-escaped orphan (AC0G\x5cx3dB4)
+    # arrives as old_instance AC0G\x3dB4; its stray env file and dirs sit
+    # beside the live instance's own, and moving one onto the other would
+    # replace the live env file or nest one data dir inside the other.
+    # The operator resolves those by hand; smd counts the WARN as a failure.
+    def _mv(src: Path, dst: Path, make_parent: bool = False) -> None:
+        if not src.exists():
+            return
+        if dst.exists():
+            steps.append(f"WARN: {dst} already exists; not moving {src} "
+                         f"onto it — resolve by hand")
+            return
+
+        def _move():
+            if dst.exists():        # appeared since the check above
+                raise FileExistsError(f"{dst} already exists; {src} not moved")
+            if make_parent:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+        _do(f"mv {src} → {dst}", _move)
+
     # 3. mv env file
-    if old_env.exists():
-        def _mv_env():
-            new_paths.env.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(old_env), str(new_paths.env))
-        _do(f"mv {old_env} → {new_paths.env}", _mv_env)
+    _mv(old_env, new_paths.env, make_parent=True)
 
     # 4. mv data dir
-    if old_state.exists():
-        _do(f"mv {old_state} → {new_paths.state_dir}",
-            lambda: shutil.move(str(old_state), str(new_paths.state_dir)))
+    _mv(old_state, new_paths.state_dir)
 
     # 5. mv log dir
-    if old_log.exists():
-        _do(f"mv {old_log} → {new_paths.log_dir}",
-            lambda: shutil.move(str(old_log), str(new_paths.log_dir)))
+    _mv(old_log, new_paths.log_dir)
 
     # 6. mv systemd drop-in dir
-    if old_dropin.exists():
-        _do(f"mv {old_dropin} → {new_dropin}",
-            lambda: shutil.move(str(old_dropin), str(new_dropin)))
+    _mv(old_dropin, new_dropin)
 
     # 7. systemctl daemon-reload
     _do("systemctl daemon-reload",

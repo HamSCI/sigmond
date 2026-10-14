@@ -21793,7 +21793,7 @@ def cmd_instance_migrate(args) -> int:
         e = ' ✓ ' if c.has_env_file else ' - '
         u = ' ✓ ' if c.has_systemd_unit else ' - '
         a = ' ✓ ' if c.unit_active else ' - '
-        print(f'  {c.client:<18} {c.old_instance:<32}{e}{u}{a}')
+        print(f'  {c.client:<18} {c.display_name:<32}{e}{u}{a}')
     print()
     if dry_run:
         _info('Dry-run mode.  Re-run with `--yes` to actually migrate '
@@ -21810,7 +21810,7 @@ def cmd_instance_migrate(args) -> int:
     failed = 0
     for c in candidates:
         print()
-        _heading(f'{c.client}@{c.old_instance}')
+        _heading(f'{c.client}@{c.display_name}')
         prompt = (f'  new reporter ID (e.g. AC0G/B1 or W1ABC-5) '
                   f'[blank to skip]: ')
         try:
@@ -21820,7 +21820,7 @@ def cmd_instance_migrate(args) -> int:
             _info('aborted')
             return 1
         if not raw_input_str:
-            _info(f'  skipped {c.client}@{c.old_instance}')
+            _info(f'  skipped {c.client}@{c.display_name}')
             skipped += 1
             continue
         try:
@@ -21831,7 +21831,7 @@ def cmd_instance_migrate(args) -> int:
             continue
         display_rid = inst.display_reporter_id(reporter_id)
         confirm = input(
-            f'  migrate {c.client}@{c.old_instance} → '
+            f'  migrate {c.client}@{c.display_name} → '
             f'{c.client}@{display_rid}? [y/N] '
         ).strip().lower()
         if confirm not in ('y', 'yes'):
@@ -21852,7 +21852,7 @@ def cmd_instance_migrate(args) -> int:
             failed += 1
         else:
             migrated += 1
-            _ok(f'migrated {c.client}@{c.old_instance} → '
+            _ok(f'migrated {c.client}@{c.display_name} → '
                 f'{c.client}@{display_rid}')
 
     print()

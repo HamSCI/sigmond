@@ -87,6 +87,107 @@ class MigrationCandidateTests(unittest.TestCase):
         self.assertEqual(self._detect("", env_names=["AC0G\\x3dB4"]), [])
 
 
+class DoubleEscapedMigrationTests(unittest.TestCase):
+    """Final review 2: a double-escaped orphan (psk-recorder@AC0G\\x5cx3dB4)
+    reaches migrate as old_instance AC0G\\x3dB4.  An operator who types
+    AC0G/B4 for it must never have the shadow files moved onto the live
+    instance's own."""
+
+    OLD = "AC0G\\x3dB4"
+
+    def test_the_candidate_keeps_its_own_unit_name(self):
+        c = I.MigrationCandidate("psk-recorder", self.OLD, True, True, False)
+        self.assertEqual(c.unit_name, "psk-recorder@AC0G\\x5cx3dB4.service")
+
+    def test_the_candidate_reads_as_a_double_escaped_copy(self):
+        c = I.MigrationCandidate("psk-recorder", self.OLD, True, True, False)
+        self.assertEqual(c.display_name, "AC0G/B4 (double-escaped copy)")
+        legacy = I.MigrationCandidate("psk-recorder", "my-rx888", True, True, False)
+        self.assertEqual(legacy.display_name, "my-rx888")
+
+    def test_smd_lists_the_display_form_not_the_escape(self):
+        c = I.MigrationCandidate("psk-recorder", self.OLD, True, True, False)
+        args = mock.Mock(yes=False)
+        with mock.patch.object(I, "detect_migration_candidates", lambda: [c]), \
+             mock.patch.object(smd, "_instance_module", lambda: I), \
+             mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+            self.assertEqual(smd.cmd_instance_migrate(args), 0)
+        text = out.getvalue()
+        self.assertIn("AC0G/B4 (double-escaped copy)", text)
+        self.assertNotIn("\\x3d", text)
+
+    def _tree(self, tmp):
+        """Shadow and live copies of every path migrate moves."""
+        root = Path(tmp)
+        pairs = {
+            "env": (root / "etc/psk-recorder/env" / f"{self.OLD}.env",
+                    root / "etc/psk-recorder/env/AC0G=B4.env"),
+            "state": (root / "var/lib/psk-recorder" / self.OLD,
+                      root / "var/lib/psk-recorder/AC0G=B4"),
+            "log": (root / "var/log/psk-recorder" / self.OLD,
+                    root / "var/log/psk-recorder/AC0G=B4"),
+            "dropin": (root / "etc/systemd/system/psk-recorder@AC0G\\x5cx3dB4.service.d",
+                       root / "etc/systemd/system/psk-recorder@AC0G\\x3dB4.service.d"),
+        }
+        for kind, (src, dst) in pairs.items():
+            if kind == "env":
+                src.parent.mkdir(parents=True, exist_ok=True)
+                src.write_text("shadow\n")
+                dst.write_text("live\n")
+            else:
+                for d, body in ((src, "shadow\n"), (dst, "live\n")):
+                    d.mkdir(parents=True)
+                    (d / "f").write_text(body)
+        cfg = root / "etc/psk-recorder/AC0G=B4.toml"
+        cfg.write_text("live\n")
+        return pairs
+
+    def _rooted_var(self, tmp):
+        real = Path
+
+        def P(*parts):
+            p = real(*parts)
+            s = str(p)
+            if s in ("/etc", "/var/lib", "/var/log") or \
+                    s.startswith(("/etc/", "/var/lib/", "/var/log/")):
+                return real(tmp + s)
+            return p
+        return P
+
+    def _migrate(self, dry_run):
+        with tempfile.TemporaryDirectory() as tmp:
+            pairs = self._tree(tmp)
+            with mock.patch.object(I, "Path", self._rooted_var(tmp)), \
+                 mock.patch("subprocess.run", _completed("")):
+                steps = I.migrate_one_instance("psk-recorder", self.OLD, "AC0G=B4",
+                                               dry_run=dry_run)
+            for kind, (src, dst) in pairs.items():
+                with self.subTest(kind=kind):
+                    self.assertTrue(src.exists(), f"{src} was moved")
+                    if kind == "env":
+                        self.assertEqual(src.read_text(), "shadow\n")
+                        self.assertEqual(dst.read_text(), "live\n")
+                    else:
+                        self.assertEqual((src / "f").read_text(), "shadow\n")
+                        self.assertEqual((dst / "f").read_text(), "live\n")
+                        self.assertEqual(sorted(p.name for p in dst.iterdir()), ["f"])
+            return steps
+
+    def test_a_move_onto_an_existing_target_is_refused(self):
+        steps = self._migrate(dry_run=False)
+        warns = [s for s in steps if s.startswith("WARN")]
+        self.assertEqual(len(warns), 4, steps)
+        for w in warns:
+            self.assertIn(self.OLD, w)
+            self.assertIn("AC0G", w)
+        self.assertFalse([s for s in steps if s.startswith("mv ")], steps)
+
+    def test_a_dry_run_shows_the_refusal_too(self):
+        steps = self._migrate(dry_run=True)
+        self.assertEqual(len([s for s in steps if s.startswith("WARN")]), 4, steps)
+        self.assertFalse([s for s in steps if s.startswith("would mv ")], steps)
+
+
 class HarmonizeInboundTests(unittest.TestCase):
     """S13, S15, S16: harmonize reads unit names and finds env files."""
 
