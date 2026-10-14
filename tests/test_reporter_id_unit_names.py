@@ -60,7 +60,7 @@ class MigrateUnitNamesTests(unittest.TestCase):
 class ExpandTemplateTests(unittest.TestCase):
     """S12: lifecycle's UnitRef.unit is what smd start/stop/restart pass on."""
 
-    def _expand(self, listed, env_names=()):
+    def _expand(self, listed, env_names=(), toml_names=(), conf_names=()):
         units_json = json.dumps([{"unit": u} for u in listed])
 
         def run(argv, **kw):
@@ -71,10 +71,17 @@ class ExpandTemplateTests(unittest.TestCase):
             env.mkdir(parents=True)
             for name in env_names:
                 (env / f"{name}.env").write_text("")
+            for name in toml_names:
+                (env.parent / f"{name}.toml").write_text("")
+            conf = Path(tmp) / "etc" / "radio"
+            conf.mkdir(parents=True)
+            for name in conf_names:
+                (conf / f"psk-recorder@{name}.conf").write_text("")
             with mock.patch.object(lifecycle, "Path", _rooted(tmp)), \
                  mock.patch.object(lifecycle.subprocess, "run", run):
                 return lifecycle._expand_template(
-                    "psk-recorder", "psk-recorder@.service", "test", "service")
+                    "psk-recorder", "psk-recorder@.service", "test", "service",
+                    conf_dir="/etc/radio")
 
     def test_unit_carries_systemd_spelling_instance_carries_storage(self):
         refs = self._expand(["psk-recorder@AC0G\\x3dB4.service",
@@ -93,6 +100,28 @@ class ExpandTemplateTests(unittest.TestCase):
         got = {r.unit: r.orphaned for r in refs}
         self.assertEqual(got, {"psk-recorder@AC0G\\x3dB4.service": False,
                                "psk-recorder@AC0G\\x5cx3dB4.service": True})
+
+    def _assert_one_live_unit(self, refs):
+        live = [(r.unit, r.instance) for r in refs if not r.orphaned]
+        self.assertEqual(live, [("psk-recorder@AC0G\\x3dB4.service", "AC0G=B4")])
+
+    def test_a_shadow_env_file_does_not_mint_a_second_daemon(self):
+        # Final review 1: a stray env/AC0G\x3dB4.env (literal backslash) once
+        # became its own instance, escaped AGAIN to AC0G\x5cx3dB4, and smd
+        # start launched a second daemon for the same reporter.
+        refs = self._expand(["psk-recorder@AC0G\\x3dB4.service"],
+                            env_names=["AC0G=B4", "AC0G\\x3dB4"])
+        self._assert_one_live_unit(refs)
+
+    def test_a_shadow_toml_file_does_not_mint_a_second_daemon(self):
+        refs = self._expand(["psk-recorder@AC0G\\x3dB4.service"],
+                            toml_names=["AC0G=B4", "AC0G\\x3dB4"])
+        self._assert_one_live_unit(refs)
+
+    def test_a_shadow_conf_file_does_not_mint_a_second_daemon(self):
+        refs = self._expand(["psk-recorder@AC0G\\x3dB4.service"],
+                            conf_names=["AC0G=B4", "AC0G\\x3dB4"])
+        self._assert_one_live_unit(refs)
 
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")

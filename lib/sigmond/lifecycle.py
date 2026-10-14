@@ -197,6 +197,13 @@ def _expand_template(
     # a locked-down config dir.  Treat PermissionError the same as
     # "directory not present" — instance discovery falls back to the
     # systemctl-based query below, which works without /etc read.
+    # Every stem passes through unescape_systemd_instance: a shadow file
+    # spelled the way systemd spells the unit (env/AC0G\x3dB4.env, literal
+    # backslash) names the SAME instance as env/AC0G=B4.env.  Taken raw, it
+    # became a second instance, escaped again to AC0G\x5cx3dB4, and smd
+    # start launched a second daemon for the same reporter.
+    from .instance import systemd_escape, unescape_systemd_instance
+
     env_dir = Path(f"/etc/{component}/env")
     configured = set()
     try:
@@ -206,7 +213,7 @@ def _expand_template(
     if env_exists:
         try:
             for env_file in env_dir.glob("*.env"):
-                instance_name = env_file.stem
+                instance_name = unescape_systemd_instance(env_file.stem)
                 configured.add(instance_name)
         except PermissionError:
             pass
@@ -225,7 +232,8 @@ def _expand_template(
                 for cf in conf_path.glob(f"{base}@*.conf"):
                     if cf.is_file() and not cf.is_symlink():
                         # "radiod@kfs-rx888-omni.conf" -> "kfs-rx888-omni"
-                        instance_name = cf.stem[len(base) + 1:]
+                        instance_name = unescape_systemd_instance(
+                            cf.stem[len(base) + 1:])
                         if instance_name:
                             configured.add(instance_name)
             except PermissionError:
@@ -263,7 +271,7 @@ def _expand_template(
                     # systemd-discovered instances (CHU_*/WWV_*/SHARED_*).
                     # Instance names never end in ``-config``.
                     if stem and stem != "config" and not stem.endswith("-config"):
-                        configured.add(stem)
+                        configured.add(unescape_systemd_instance(stem))
         except PermissionError:
             pass
 
@@ -276,7 +284,6 @@ def _expand_template(
     # new bogus unit.  A truly double-escaped orphan still decodes to a name
     # (\x5cx3d -> \x3d) that is NOT among the configured instances, so real
     # orphans stay flagged.
-    from .instance import systemd_escape, unescape_systemd_instance
 
     # Discover known instances from systemctl.  Use `list-units`
     # (without --all) + `list-unit-files` together:
