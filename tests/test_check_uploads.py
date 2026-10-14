@@ -75,6 +75,20 @@ class UploadsTests(unittest.TestCase):
         self.assertEqual(out, check.Line(WAIT, 'uploads', 'on since 5 min ago; the first delivery '
                                                           'comes within 30 min'))
 
+    def test_discard_era_acks_do_not_count_as_deliveries(self):
+        # hs-uploader's DiscardTransport acks against the real cursor while the
+        # switch is off, so an ack from before the switch turned on proves nothing.
+        out = line(b=backlog(ack_age_s=2 * 60), age=60)
+        self.assertEqual(out, check.Line(WAIT, 'uploads', 'on since 1 min ago; the first delivery '
+                                                          'comes within 30 min'))
+
+    def test_an_ack_after_the_switch_turned_on_passes(self):
+        out = line(b=backlog(ack_age_s=60), age=2 * 60)
+        self.assertEqual(out, check.Line(OK, 'uploads', 'on; last delivery 1 min ago, no failure in 24 h'))
+
+    def test_discard_era_acks_alone_fail_once_the_wait_is_over(self):
+        self.assertEqual(line(b=backlog(ack_age_s=40 * 60), age=31 * 60).mark, FAIL)
+
     def test_an_unreadable_backlog_fails_with_its_reason(self):
         out = line(b={'readable': False, 'reason': 'OperationalError: unable to open database file'})
         self.assertEqual(out.text, 'cannot read the upload backlog: OperationalError: unable to open '

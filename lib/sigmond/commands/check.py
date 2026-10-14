@@ -781,11 +781,16 @@ def uploads_line(env: Env) -> Line:
     acks = [_parse_ts(c.get('last_ack')) for c in backlog.get('cursors', [])
             if c.get('table_name') != HEARTBEAT_TABLE]
     acks = [a for a in acks if a is not None]
+    switched = env.coordination_age_s()
+    if switched is not None:
+        # While the switch stands off, hs-uploader's DiscardTransport acks every
+        # batch against the real destination's cursor and ships nothing.  An ack
+        # stamped before the switch last changed proves no delivery.
+        acks = [a for a in acks if a > env.now - switched]
     newest = max(acks) if acks else None
     if newest is not None and env.now - newest <= UPLOAD_ACK_S:
         return Line(OK, label, f'on; last delivery {minutes(env.now - newest)} min ago, '
                                f'no failure in 24 h')
-    switched = env.coordination_age_s()
     if switched is not None and switched < UPLOAD_ACK_S:
         return Line(WAIT, label, f'on since {minutes(switched)} min ago; the first delivery '
                                  f'comes within 30 min')
