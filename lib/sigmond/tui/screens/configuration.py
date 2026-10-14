@@ -80,14 +80,19 @@ def _coordination_summary() -> str:
         coord = load_coordination()
     except Exception as exc:
         return f"[dim]coordination: unavailable ({exc})[/]"
+    from ...instance import display_reporter_id
     bits: list[str] = []
-    station = getattr(coord, "station", None) or {}
-    call = station.get("callsign") or station.get("call") or ""
-    grid = station.get("grid_square") or station.get("grid") or ""
-    if call:
-        bits.append(f"Station: [bold]{call}[/]" + (f"/{grid}" if grid else ""))
-    timing = getattr(coord, "timing", None) or {}
-    authority = timing.get("authority", "rtp")
+    # Call and grid live in [host]; [station] carries the reporter id.  Both
+    # load as dataclasses, never dicts (reading them as dicts crashed the TUI
+    # on every station with a [station] block, AC0G-B4 2026-10-14).
+    host = coord.host
+    if host.call:
+        bits.append(f"Station: [bold]{host.call}[/]"
+                    + (f"/{host.grid}" if host.grid else ""))
+    if coord.station.reporter_id:
+        bits.append("Reporter: [bold]"
+                    f"{display_reporter_id(coord.station.reporter_id)}[/]")
+    authority = coord.timing_authority.source or "rtp"
     bits.append(f"Timing: [bold]{authority}[/]")
     radiods = getattr(coord, "radiods", None) or {}
     if radiods:
