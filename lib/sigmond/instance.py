@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import string
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -135,13 +136,89 @@ def parse_user_reporter_id(user_input: str) -> str:
 
 
 def display_reporter_id(reporter_id: str) -> str:
-    """Render a stored reporter ID for user-facing display.
+    """Render a reporter ID, in any of its three spellings, for a person.
 
-    The `=` sentinels in the stored form mark where the user
-    originally typed `/`; revert them.  Hyphens are user-intentional
-    and stay.  Inverse of `parse_user_reporter_id`.
+    Takes the storage form (``AC0G=B4``), systemd's form
+    (``AC0G\\x3dB4``) or the display form itself, and returns the
+    display form (``AC0G/B4``).  It unescapes until nothing changes,
+    so even a double-escaped name (``AC0G\\x5cx3dB4``) never puts a
+    ``\\x3d`` on a screen.  Hyphens are user-intentional and stay.
+    Inverse of `parse_user_reporter_id`.
     """
-    return reporter_id.replace("=", "/")
+    prev = None
+    name = reporter_id
+    while name != prev:
+        prev, name = name, unescape_systemd_instance(name)
+    return name.replace("=", "/")
+
+
+def legacy_instance_hint(name: str) -> str:
+    """The one line smd prints when it falls back to a unit or an env file
+    named exactly as the operator typed it: a legacy radiod-keyed
+    instance (my-rx888, bee1-status.local) that predates reporter ids."""
+    return f"legacy instance name {name}; run: smd admin instance migrate"
+
+
+# Characters systemd keeps as they are in a unit's instance name: letters,
+# digits, ':', '-', '_' and '.'.  systemctl escapes anything else as \xHH
+# when it is handed an unescaped name, which is how every reporter-keyed
+# unit on the stations got its name (psk-recorder@AC0G\x3dB4.service).
+# A backslash is escaped too (\x5c), so systemd_escape() is the exact
+# inverse of one unescape_systemd_instance() and a double-escaped orphan
+# keeps its own name.  systemd-escape(1) is NOT this: it also turns '-'
+# into \x2d (W1ABC-5 -> W1ABC\x2d5), a unit nobody enabled.
+_UNIT_NAME_CHARS = frozenset(string.ascii_letters + string.digits + ":-_.")
+_UNIT_SUFFIXES = (".service", ".timer", ".target", ".socket", ".path")
+
+
+def systemd_escape(name: str) -> str:
+    """Escape any instance name the way a unit name carries it.
+
+    Takes a name already in storage form, or a legacy radiod-keyed
+    name, and does not validate it.  ``AC0G=B4`` -> ``AC0G\\x3dB4``;
+    ``W1ABC-5`` and ``bee1-status.local`` come back unchanged.  Pure
+    Python; never calls systemd-escape(1).
+    """
+    out = []
+    for ch in name:
+        if ch in _UNIT_NAME_CHARS:
+            out.append(ch)
+        else:
+            out.extend(f"\\x{b:02x}" for b in ch.encode("utf-8"))
+    return "".join(out)
+
+
+def systemd_instance(reporter_id: str) -> str:
+    """The instance part of a unit name, for a storage-form reporter ID.
+
+    Validates first, so the display form, systemd's own spelling or
+    lower case raise InvalidReporterId instead of being escaped into
+    a unit nobody enabled.  ``AC0G=B4`` -> ``AC0G\\x3dB4``.
+    """
+    validate_reporter_id(reporter_id)
+    return systemd_escape(reporter_id)
+
+
+def unit_name(client: str, reporter_id: str, suffix: str = ".service") -> str:
+    """``unit_name('psk-recorder', 'AC0G=B4')`` -> ``psk-recorder@AC0G\\x3dB4.service``."""
+    return f"{client}@{systemd_instance(reporter_id)}{suffix}"
+
+
+def display_unit_name(unit: str) -> str:
+    """A unit name as a person should read it.
+
+    ``psk-recorder@AC0G\\x3dB4.service`` -> ``psk-recorder@AC0G/B4.service``.
+    A unit without an instance, a radiod-keyed instance, and a glob
+    such as ``wspr-recorder@*`` come back unchanged.  For screens and
+    messages only: what it returns is not a unit name systemctl knows.
+    """
+    if "@" not in unit:
+        return unit
+    head, _, rest = unit.partition("@")
+    for suffix in _UNIT_SUFFIXES:
+        if rest.endswith(suffix):
+            return f"{head}@{display_reporter_id(rest[:-len(suffix)])}{suffix}"
+    return f"{head}@{display_reporter_id(rest)}"
 
 
 # Back-compat alias.  `to_wsprnet_form` previously did a mechanical
