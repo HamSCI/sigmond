@@ -102,6 +102,42 @@ class ReadBacklogTests(unittest.TestCase):
         with mock.patch('sigmond.heartbeat._read_backlog', side_effect=ReaderUnavailable('timed out')):
             self.assertEqual(check.read_backlog(), {'readable': False, 'reason': 'timed out'})
 
+    def _sudo_call(self):
+        refused = {'readable': False, 'reason': 'OperationalError: unable to open database file'}
+        seen = []
+
+        def run(argv, **kw):
+            seen.append((argv, kw))
+            return subprocess.CompletedProcess(argv, 0, stdout='{"readable": true}')
+        with mock.patch('sigmond.heartbeat._read_backlog', return_value=refused), \
+                mock.patch('os.path.exists', return_value=True), \
+                mock.patch('os.access', return_value=False):
+            check.read_backlog(run=run, euid=lambda: 1000)
+        return seen[0]
+
+    def test_the_root_reader_ignores_the_current_directory(self):
+        argv, kw = self._sudo_call()
+        self.assertLess(argv.index('-P'), argv.index('-m'))
+        self.assertEqual(kw.get('cwd'), '/')
+
+    def test_a_decoy_module_in_the_current_directory_does_not_run(self):
+        import os
+        import sys
+        import tempfile
+        argv, _ = self._sudo_call()
+        argv = argv[argv.index(sys.executable):]          # drop sudo -n env PYTHONPATH=...
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'hs_uploader'))
+            for name, body in (('__init__.py', ''), ('backlog.py', 'print("DECOY RAN")\n')):
+                with open(os.path.join(d, 'hs_uploader', name), 'w') as f:
+                    f.write(body)
+            r = subprocess.run(argv[:-1] + ['/nonexistent'], cwd='/', capture_output=True,
+                               text=True, env={'PYTHONPATH': d + '/empty'})
+            self.assertNotIn('DECOY RAN', r.stdout)
+            r = subprocess.run(argv[:-1] + ['/nonexistent'], cwd=d, capture_output=True,
+                               text=True, env={'PYTHONPATH': d + '/empty'})
+            self.assertNotIn('DECOY RAN', r.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

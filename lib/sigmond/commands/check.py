@@ -734,8 +734,9 @@ def read_backlog(run=subprocess.run, euid=os.geteuid) -> dict:
         return out
     try:
         r = run(['sudo', '-n', 'env', f'PYTHONPATH={paths.hs_uploader_src}', sys.executable,
-                 '-m', 'hs_uploader.backlog', db],
-                capture_output=True, text=True, errors='replace', timeout=20, check=False)
+                 '-P', '-m', 'hs_uploader.backlog', db],
+                capture_output=True, text=True, errors='replace', timeout=20, check=False,
+                cwd='/')   # root must not import from a directory another user can write
         return json.loads(r.stdout) if r.returncode == 0 else out
     except (OSError, subprocess.SubprocessError, ValueError):
         return out
