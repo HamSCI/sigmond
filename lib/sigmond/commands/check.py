@@ -129,7 +129,9 @@ def default_env() -> Env:
     reader = Reader()
     return Env(installed=_installed, service=service_state, reader=reader,
                journal=read_journal, disk=_disk,
-               timestd_config=lambda: read_timestd_config(reader))
+               timestd_config=lambda: read_timestd_config(reader),
+               coordination=_coordination, coordination_age_s=_coordination_age_s,
+               backlog=read_backlog)
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -707,6 +709,103 @@ def _disk(path: str) -> Tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# Uploads
+# ---------------------------------------------------------------------------
+
+UPLOAD_ACK_S = 30 * 60
+NEW_STATION = 'new station'
+# The heartbeat ships through hs-uploader too, every five minutes, whatever
+# the site sink switch says.  Its cursor proves nothing about spots or data.
+HEARTBEAT_TABLE = 'station.heartbeat'
+
+
+def read_backlog(run=subprocess.run, euid=os.geteuid) -> dict:
+    """hs_uploader.backlog's summary of watermarks.db, read out of process by
+    heartbeat._read_backlog.  When the store refuses this user, ask once
+    more through `sudo -n`."""
+    from ..heartbeat import HeartbeatPaths, ReaderUnavailable, _read_backlog
+    paths = HeartbeatPaths()
+    try:
+        out = _read_backlog(paths)
+    except ReaderUnavailable as exc:
+        return {'readable': False, 'reason': str(exc)}
+    db = paths.watermarks_db
+    if out.get('readable') or euid() == 0 or not os.path.exists(db) or os.access(db, os.R_OK):
+        return out
+    try:
+        r = run(['sudo', '-n', 'env', f'PYTHONPATH={paths.hs_uploader_src}', sys.executable,
+                 '-m', 'hs_uploader.backlog', db],
+                capture_output=True, text=True, errors='replace', timeout=20, check=False)
+        return json.loads(r.stdout) if r.returncode == 0 else out
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return out
+
+
+def _parse_ts(ts) -> Optional[float]:
+    try:
+        t = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t.timestamp()
+
+
+def uploads_line(env: Env) -> Line:
+    label = 'uploads'
+    up = env.coordination().uploads
+    reason = (up.reason or '').strip()
+    if up.mode == 'discard':
+        if reason.startswith(NEW_STATION):
+            return Line(WAIT, label, f'off, new station: check the lines above, then '
+                                     f'{RUN}smd sink upload')
+        return Line(FAIL, label, f'off ({reason or "no reason given"}).  '
+                                 f'Ask the fleet admin.')
+    if up.mode == 'hold':
+        return Line(FAIL, label, f'hold ({reason or "no reason given"}).  Ask the fleet admin.')
+    backlog = env.backlog()
+    if not backlog.get('readable'):
+        return Line(FAIL, label, f'cannot read the upload backlog: '
+                                 f'{backlog.get("reason", "no reason given")}')
+    dead = [(p.get('name', '?'), int(p.get('dead_letter_recent_count') or 0))
+            for p in backlog.get('pipelines', [])]
+    dead = [(n, c) for n, c in dead if c]
+    if dead:
+        total = sum(c for _, c in dead)
+        names = ', '.join(n for n, _ in dead)
+        return Line(FAIL, label, f'{total} upload{"s" if total != 1 else ""} failed for good '
+                                 f'in the last 24 h ({names}).  Tell the fleet admin.')
+    acks = [_parse_ts(c.get('last_ack')) for c in backlog.get('cursors', [])
+            if c.get('table_name') != HEARTBEAT_TABLE]
+    acks = [a for a in acks if a is not None]
+    newest = max(acks) if acks else None
+    if newest is not None and env.now - newest <= UPLOAD_ACK_S:
+        return Line(OK, label, f'on; last delivery {minutes(env.now - newest)} min ago, '
+                               f'no failure in 24 h')
+    switched = env.coordination_age_s()
+    if switched is not None and switched < UPLOAD_ACK_S:
+        return Line(WAIT, label, f'on since {minutes(switched)} min ago; the first delivery '
+                                 f'comes within 30 min')
+    return Line(FAIL, label, 'on, but nothing delivered in 30 min.  Tell the fleet admin.')
+
+
+def _coordination():
+    from ..coordination import load_coordination
+    from ..paths import COORDINATION_PATH
+    return load_coordination(COORDINATION_PATH)
+
+
+def _coordination_age_s() -> Optional[float]:
+    """Seconds since coordination.toml last changed: how long the site sink
+    switch has stood where it stands."""
+    from ..paths import COORDINATION_PATH
+    try:
+        return time.time() - COORDINATION_PATH.stat().st_mtime
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
 # not apply here at all.  Later tasks add their entries in place.
@@ -718,5 +817,6 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('magnetometer', mag_line),
     ('GRAPE', grape_line),
     ('storage', storage_line),
+    ('uploads', uploads_line),
     ('meteor scatter', meteor_line),
 ]
