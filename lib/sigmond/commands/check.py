@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -121,7 +122,8 @@ def _installed(name: str) -> bool:
 
 
 def default_env() -> Env:
-    return Env(installed=_installed)
+    return Env(installed=_installed, service=service_state, reader=Reader(),
+               journal=read_journal)
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -160,6 +162,191 @@ def cmd_check(args, env: Optional[Env] = None, checks=None) -> int:
         if not getattr(args, 'no_verdict', False):
             print(summary(lines))
     return EXIT_CODES[word]
+
+
+# ---------------------------------------------------------------------------
+# Probes: files with a sudo fallback, systemd, the journal
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Service:
+    state: str                  # active | activating | failed | inactive | absent
+    age_s: Optional[float]      # since the oldest active unit started; None if unknown
+    enabled: bool = False
+
+
+def service_state(pattern: str, run=subprocess.run, monotonic=time.monotonic) -> Service:
+    """The state of the units matching `pattern` (a glob such as
+    `psk-recorder@*.service`, or one unit name).  The age comes from
+    ActiveEnterTimestampMonotonic, so a host clock step cannot fake it."""
+    r = run(['systemctl', 'list-units', '--all', '--plain', '--no-legend', '--no-pager',
+             '--type=service', pattern],
+            capture_output=True, text=True, errors='replace', timeout=15, check=False)
+    units = {}
+    for ln in (r.stdout or '').splitlines():
+        parts = ln.split()
+        if len(parts) >= 3 and parts[0].endswith('.service'):
+            units[parts[0]] = parts[2]
+    if not units and '*' not in pattern:
+        units = {pattern: None}
+    if not units:
+        return Service('absent', None, False)
+    show = run(['systemctl', 'show', '-p', 'Id', '-p', 'ActiveState', '-p', 'LoadState',
+                '-p', 'UnitFileState', '-p', 'ActiveEnterTimestampMonotonic', *sorted(units)],
+               capture_output=True, text=True, errors='replace', timeout=15, check=False)
+    blocks, cur = [], {}
+    for ln in (show.stdout or '').splitlines() + ['']:
+        if not ln.strip():
+            if cur:
+                blocks.append(cur)
+            cur = {}
+            continue
+        key, _, val = ln.partition('=')
+        cur[key] = val.strip()
+    blocks = [b for b in blocks if b.get('LoadState') not in ('not-found', None)]
+    if not blocks:
+        return Service('absent', None, False)
+    states = [b.get('ActiveState', '') for b in blocks]
+    enabled = any(b.get('UnitFileState') in ('enabled', 'enabled-runtime', 'static', 'indirect')
+                  for b in blocks)
+    starts = []
+    for b in blocks:
+        if b.get('ActiveState') == 'active':
+            try:
+                us = int(b.get('ActiveEnterTimestampMonotonic') or 0)
+            except ValueError:
+                us = 0
+            if us > 0:
+                starts.append(us / 1e6)
+    for state in ('active', 'activating', 'failed'):
+        if state in states:
+            age = (monotonic() - min(starts)) if (state == 'active' and starts) else None
+            return Service(state, age, enabled)
+    return Service('inactive', None, enabled)
+
+
+class Reader:
+    """Reads files as the user who runs smd, and through `sudo -n` once when
+    the file refuses that user (as `_file_size` in bin/smd does)."""
+
+    def __init__(self, run=subprocess.run, euid=os.geteuid):
+        self._run = run
+        self._euid = euid
+
+    def _sudo(self, argv) -> Optional[str]:
+        if self._euid() == 0:
+            return None
+        try:
+            r = self._run(['sudo', '-n', *argv], capture_output=True, text=True,
+                          errors='replace', timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return r.stdout if r.returncode == 0 else None
+
+    def tail(self, path, nbytes: int) -> Optional[str]:
+        """The last `nbytes` of `path` as text, or None when it does not exist."""
+        try:
+            with open(path, 'rb') as fh:
+                size = os.fstat(fh.fileno()).st_size
+                fh.seek(max(0, size - nbytes))
+                return fh.read().decode('utf-8', 'replace')
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            out = self._sudo(['tail', '-c', str(nbytes), str(path)])
+            if out is None:
+                raise Unreadable(path)
+            return out
+
+    def listdir(self, path) -> Optional[List[str]]:
+        try:
+            return sorted(os.listdir(path))
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            out = self._sudo(['find', str(path), '-mindepth', '1', '-maxdepth', '1',
+                              '-printf', '%f\\n'])
+            if out is None:
+                raise Unreadable(path)
+            return sorted(x for x in out.splitlines() if x)
+
+    def newest_mtime(self, path) -> Optional[float]:
+        """The newest modification time of a plain file directly in `path`,
+        or None when `path` is absent or holds no file."""
+        try:
+            best = None
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.is_file(follow_symlinks=False):
+                        m = entry.stat(follow_symlinks=False).st_mtime
+                        best = m if best is None else max(best, m)
+            return best
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            out = self._sudo(['find', str(path), '-maxdepth', '1', '-type', 'f',
+                              '-printf', '%T@\\n'])
+            if out is None:
+                raise Unreadable(path)
+            times = [float(x) for x in out.split()]
+            return max(times) if times else None
+
+
+JOURNAL_GROUPS = ('systemd-journal', 'adm', 'wheel')
+
+
+def _my_groups() -> set:
+    import grp
+    names = set()
+    for gid in os.getgroups():
+        try:
+            names.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            pass
+    return names
+
+
+def read_journal(units: Sequence[str], minutes: int, *, run=subprocess.run,
+                 euid=os.geteuid, groups=_my_groups) -> List[str]:
+    """The last `minutes` of the journal of `units`, message text only.  A
+    user outside the journal's groups sees only their own messages and no
+    error, so such a user asks `sudo -n` from the start."""
+    argv = ['journalctl', '--no-pager', '-q', '-o', 'cat', '--since', f'{minutes} min ago']
+    for unit in units:
+        argv += ['-u', unit]
+    if euid() != 0 and not (set(JOURNAL_GROUPS) & groups()):
+        argv = ['sudo', '-n', *argv]
+    try:
+        r = run(argv, capture_output=True, text=True, errors='replace', timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise Unreadable('the journal')
+    if r.returncode != 0:
+        # journalctl refuses a -u glob that matches no unit that ever logged.
+        if 'No data available' in (r.stderr or ''):
+            return []
+        raise Unreadable('the journal')
+    return (r.stdout or '').splitlines()
+
+
+def service_problem(label: str, svc: Service, unit: str) -> Optional[Line]:
+    """A FAIL line when the service runs not at all, else None."""
+    if svc.state in ('active', 'activating'):
+        return None
+    if svc.state == 'absent':
+        return Line(FAIL, label, f'{unit} is installed but has no service.  Tell the fleet admin.')
+    return Line(FAIL, label, f'{unit} is {svc.state}.  {FIX}smd start {unit}')
+
+
+def is_young(svc: Service, window_s: float) -> bool:
+    """True while a service has run for less than `window_s`.  Starting
+    counts as young; an unknown age does not, so it can never hide a fault."""
+    if svc.state == 'activating':
+        return True
+    return svc.age_s is not None and svc.age_s < window_s
+
+
+def minutes(seconds: float) -> int:
+    return max(1, int(round(seconds / 60.0)))
 
 
 # ---------------------------------------------------------------------------
