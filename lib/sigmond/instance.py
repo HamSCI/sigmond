@@ -100,7 +100,9 @@ def validate_reporter_id(reporter_id: str) -> None:
         raise InvalidReporterId(
             "reporter ID must be a non-empty string"
         )
-    if not REPORTER_ID_REGEX.match(reporter_id):
+    # fullmatch: `$` alone also matches before a trailing newline, so
+    # AC0G\x0a (unescaped to "AC0G\n") would pass as AC0G.
+    if not REPORTER_ID_REGEX.fullmatch(reporter_id):
         raise InvalidReporterId(
             f"reporter ID {reporter_id!r} is not path-safe; "
             f"must match {REPORTER_ID_REGEX.pattern} "
