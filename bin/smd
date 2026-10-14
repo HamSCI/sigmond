@@ -8939,8 +8939,80 @@ def _bringup_finish(plan, name: str, failed_steps=()) -> int:
              f"smd bringup {name}")
         return BRINGUP_INCOMPLETE_RC
     _ok(f"bringup '{name}' complete")
+    _settle_firstrun_marker()
     _info('verify anytime with: smd admin validate')
     return 0
+
+
+FIRSTRUN_MARKER_DEFAULT = '/var/lib/sigmond/.firstrun-bringup-done'
+
+
+def _settle_firstrun_marker(marker=None) -> None:
+    """After a bring-up that succeeded, mark a failed first run as done.
+
+    bin/sigmond-firstrun-bringup records a failed run as result=retry or
+    result=gave-up, and `smd check` reads either as `FAIL  bring-up`.  An
+    operator who then finishes the job by hand left that marker behind, so
+    the station read FAIL for ever (v3.72 #14, R1).  This rewrites such a
+    marker to result=ok in firstrun's own format (attempts, result, a
+    `date -Iseconds` stamp) and keeps its attempt count.
+
+    It creates no marker where none exists.  It leaves every other marker
+    alone: result=ok is already done, a stamp with no result= predates the
+    result line and firstrun reads it as final, and result=awaiting-sdr
+    still owes firstrun's own radio pass (site wiring, isolation)."""
+    from datetime import datetime
+    path = Path(marker or os.environ.get('SIGMOND_FIRSTRUN_MARKER') or FIRSTRUN_MARKER_DEFAULT)
+    try:
+        text = path.read_text(errors='replace')
+    except FileNotFoundError:
+        return
+    except PermissionError:
+        r = subprocess.run(_as_root(['cat', '--', str(path)]), capture_output=True,
+                           text=True, errors='replace', check=False)
+        if r.returncode != 0:
+            _warn(f'cannot read {path}; smd check may still report the first-run bring-up')
+            return
+        text = r.stdout
+    except OSError as exc:
+        _warn(f'cannot read {path}: {exc}')
+        return
+    # Whitespace, not lines: a marker printed on one line still parses.
+    fields = dict(tok.split('=', 1) for tok in text.split() if '=' in tok)
+    old = fields.get('result')
+    if old not in ('retry', 'gave-up'):
+        return
+    attempts = fields.get('attempts', '')
+    attempts = attempts if attempts.isdigit() else '0'
+    stamp = datetime.now().astimezone().isoformat(timespec='seconds')
+    content = f'attempts={attempts}\nresult=ok\n{stamp}\n'
+    try:
+        if os.geteuid() == 0 or os.access(path.parent, os.W_OK):
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix='.firstrun-bringup-')
+            try:
+                with os.fdopen(fd, 'w') as fh:
+                    fh.write(content)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
+        else:
+            # Temp file beside the marker, then a rename: the same atomic
+            # write, as root.
+            script = ('umask 022; t=$(mktemp "$1.XXXXXX") && cat > "$t" '
+                      '&& chmod 0644 "$t" && mv -f -- "$t" "$1" || { rm -f -- "$t"; exit 1; }')
+            r = subprocess.run(_as_root(['sh', '-c', script, 'sh', str(path)]),
+                               input=content, capture_output=True, text=True, check=False)
+            if r.returncode != 0:
+                raise OSError((r.stderr or '').strip() or f'sudo exited {r.returncode}')
+    except OSError as exc:
+        _warn(f'could not mark the first-run bring-up done ({path}): {exc}')
+        return
+    _info(f'first-run marker: result={old} -> ok ({path})')
 
 
 # Exit status of a bring-up that ran to the end with the radio half deferred

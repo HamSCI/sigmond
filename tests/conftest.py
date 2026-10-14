@@ -16,6 +16,10 @@ from pathlib import Path
 # setting it here once makes it true for any file added later, and setdefault
 # leaves a caller's own override alone.
 os.environ.setdefault("SIGMOND_NO_VENV_REEXEC", "1")
+# A bring-up that ends with rc 0 rewrites the first-run marker it finds
+# (bin/smd _settle_firstrun_marker).  Point it at a path that never exists,
+# so a test of `smd bringup` cannot touch the marker of the host running it.
+os.environ.setdefault("SIGMOND_FIRSTRUN_MARKER", "/nonexistent/sigmond-test/.firstrun-bringup-done")
 
 _LIB = Path(__file__).resolve().parent.parent / 'lib'
 if str(_LIB) not in sys.path:
