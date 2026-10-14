@@ -763,6 +763,14 @@ class MigrationCandidate:
             return f"{display_reporter_id(name)} (double-escaped copy)"
         return name
 
+    @property
+    def dropdown_label(self) -> str:
+        """The TUI's label for this candidate: ``my-rx888 (legacy)``, or
+        ``AC0G/B4 (double-escaped copy)`` (see `display_name`)."""
+        if self.display_name != self.old_instance:
+            return self.display_name
+        return f"{self.old_instance} (legacy)"
+
 
 def detect_migration_candidates() -> list[MigrationCandidate]:
     """Walk env files + systemctl-listed units; surface candidates.

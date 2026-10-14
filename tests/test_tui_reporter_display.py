@@ -66,6 +66,45 @@ class DropdownTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
+class LegacyDropdownTests(unittest.TestCase):
+    """Final review 6: a double-escaped copy reads AC0G/B4, never AC0G\\x3dB4;
+    the value the dropdown passes on stays the candidate's own name."""
+
+    WANT = [("AC0G/B4 (double-escaped copy)", "AC0G\\x3dB4"),
+            ("my-rx888 (legacy)", "my-rx888")]
+
+    def _patched(self, client):
+        from sigmond.instance import MigrationCandidate
+        cands = [MigrationCandidate(client, "AC0G\\x3dB4", True, True, False),
+                 MigrationCandidate(client, "my-rx888", True, True, False)]
+        return (mock.patch("sigmond.instance.list_instances",
+                           lambda catalog_clients=None: []),
+                mock.patch("sigmond.instance.detect_migration_candidates",
+                           lambda: cands))
+
+    def test_activity(self):
+        from sigmond.tui.screens import activity
+        a, b = self._patched("psk-recorder")
+        with a, b, mock.patch.dict(activity._TARGET_TO_CLIENT, {"psk": "psk-recorder"}):
+            opts = activity.ActivityScreen._instance_options_for("psk")
+        self.assertEqual(opts[1:], self.WANT)
+
+    def test_logs(self):
+        from sigmond.tui.screens import logs
+        a, b = self._patched("psk-recorder")
+        with a, b:
+            opts = logs._instance_options_for_component("psk-recorder")
+        self.assertEqual(opts[1:], self.WANT)
+
+    def test_verifier(self):
+        from sigmond.tui.screens import verifier
+        a, b = self._patched("wspr-recorder")
+        with a, b, mock.patch.dict(verifier._TARGET_TO_CLIENT, {"wspr": "wspr-recorder"}):
+            opts = verifier.VerifierScreen._instance_options_for("wspr")
+        self.assertEqual(opts[1:], self.WANT)
+
+
+@unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
 class ConfigurationScreenTests(unittest.TestCase):
     """S34: the confirmation text and the command it runs."""
 

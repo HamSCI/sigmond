@@ -212,7 +212,7 @@ class VerifierScreen(Vertical):
         try:
             for c in detect_migration_candidates():
                 if c.client == client:
-                    label = f"{c.old_instance} (legacy)"
+                    label = c.dropdown_label
                     options.append((label, c.old_instance))
         except Exception:
             pass
