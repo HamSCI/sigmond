@@ -276,7 +276,7 @@ class Reader:
         except FileNotFoundError:
             return None
         except PermissionError:
-            out = self._sudo(['tail', '-c', str(nbytes), str(path)])
+            out = self._sudo(['tail', '-c', str(nbytes), '--', str(path)])
             if out is None:
                 raise Unreadable(path)
             return out
@@ -287,7 +287,7 @@ class Reader:
         except FileNotFoundError:
             return None
         except PermissionError:
-            out = self._sudo(['find', str(path), '-mindepth', '1', '-maxdepth', '1',
+            out = self._sudo(['find', '--', str(path), '-mindepth', '1', '-maxdepth', '1',
                               '-printf', '%f\\n'])
             if out is None:
                 raise Unreadable(path)
@@ -300,14 +300,20 @@ class Reader:
             best = None
             with os.scandir(path) as it:
                 for entry in it:
-                    if entry.is_file(follow_symlinks=False):
+                    # hf-timestd moves files from the hot tier to disk while
+                    # we scan; one that vanished must not hide the rest.
+                    try:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
                         m = entry.stat(follow_symlinks=False).st_mtime
-                        best = m if best is None else max(best, m)
+                    except FileNotFoundError:
+                        continue
+                    best = m if best is None else max(best, m)
             return best
         except FileNotFoundError:
             return None
         except PermissionError:
-            out = self._sudo(['find', str(path), '-maxdepth', '1', '-type', 'f',
+            out = self._sudo(['find', '--', str(path), '-maxdepth', '1', '-type', 'f',
                               '-printf', '%T@\\n'])
             if out is None:
                 raise Unreadable(path)

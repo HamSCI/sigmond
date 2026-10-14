@@ -137,7 +137,7 @@ class ReaderTests(unittest.TestCase):
         self.addCleanup(p.chmod, 0o600)
         run = FakeRun([(['sudo', '-n', 'tail'], _cp('via sudo\n'))])
         self.assertEqual(check.Reader(run=run).tail(p, 100), 'via sudo\n')
-        self.assertEqual(run.calls, [['sudo', '-n', 'tail', '-c', '100', str(p)]])
+        self.assertEqual(run.calls, [['sudo', '-n', 'tail', '-c', '100', '--', str(p)]])
 
     def test_a_refusal_sudo_also_refuses_raises_unreadable(self):
         p = self.dir / 'secret.log'
@@ -159,6 +159,54 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(r.newest_mtime(self.dir), 2000)
         self.assertIsNone(r.newest_mtime(self.dir / 'absent'))
         self.assertEqual(r.listdir(self.dir), ['new.bin', 'old.bin', 'sub'])
+
+
+class NewestMtimeRaceTests(unittest.TestCase):
+    """Final review m2: hf-timestd moves a file from the hot tier to disk
+    while the check scans; the vanished entry must not hide the directory."""
+
+    def test_a_file_that_vanishes_mid_scan_is_skipped(self):
+        from unittest import mock
+
+        class Entry:
+            def __init__(self, mtime):
+                self.mtime = mtime
+
+            def is_file(self, follow_symlinks=True):
+                return True
+
+            def stat(self, follow_symlinks=True):
+                if self.mtime is None:
+                    raise FileNotFoundError(2, 'No such file or directory')
+                return mock.Mock(st_mtime=self.mtime)
+
+        class Scan:
+            def __enter__(self):
+                return iter([Entry(None), Entry(2000.0), Entry(None)])
+
+            def __exit__(self, *a):
+                return False
+        with mock.patch.object(check.os, 'scandir', return_value=Scan()):
+            self.assertEqual(check.Reader(euid=lambda: 0).newest_mtime('/x'), 2000.0)
+
+
+class SudoArgvTests(unittest.TestCase):
+    """Final review m3: a path argument follows `--`."""
+
+    def _refused(self, method, *args):
+        from unittest import mock
+        run = FakeRun([(['sudo'], _cp(''))])
+        with mock.patch('builtins.open', side_effect=PermissionError), \
+                mock.patch.object(check.os, 'listdir', side_effect=PermissionError), \
+                mock.patch.object(check.os, 'scandir', side_effect=PermissionError):
+            getattr(check.Reader(run=run, euid=lambda: 1000), method)(*args)
+        return run.calls[0]
+
+    def test_every_sudo_call_ends_its_options_before_the_path(self):
+        for method, args in (('tail', ('/p', 9)), ('listdir', ('/p',)), ('newest_mtime', ('/p',))):
+            argv = self._refused(method, *args)
+            self.assertIn('--', argv, method)
+            self.assertEqual(argv[argv.index('--') + 1], '/p', method)
 
 
 class JournalTests(unittest.TestCase):
