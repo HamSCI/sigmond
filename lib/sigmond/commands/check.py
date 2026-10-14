@@ -15,6 +15,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -125,8 +126,10 @@ def _installed(name: str) -> bool:
 
 
 def default_env() -> Env:
-    return Env(installed=_installed, service=service_state, reader=Reader(),
-               journal=read_journal)
+    reader = Reader()
+    return Env(installed=_installed, service=service_state, reader=reader,
+               journal=read_journal, disk=_disk,
+               timestd_config=lambda: read_timestd_config(reader))
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -585,6 +588,125 @@ def mag_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -> Lin
 
 
 # ---------------------------------------------------------------------------
+# GRAPE and storage
+# ---------------------------------------------------------------------------
+
+
+TIMESTD_CONFIG = Path('/etc/hf-timestd/timestd-config.toml')
+GRAPE_FRESH_S = 11 * 60
+GRAPE_YOUNG_S = 12 * 60
+STORAGE_PATH = '/var/lib'
+STORAGE_MIN_FREE_PCT = 10.0
+_PHASE_ENGINE_SHARED_HZ = (2500000, 5000000, 10000000, 15000000)
+
+
+def read_timestd_config(reader=None, path: Path = TIMESTD_CONFIG) -> Optional[dict]:
+    """hf-timestd's config, or None when absent.  The file is 0640
+    timestd:timestd (clients/hftimestd.py), so this reads it through the
+    Reader's sudo fallback."""
+    import tomllib
+    text = (reader or Reader()).tail(path, 4 * 1024 * 1024)
+    return None if text is None else tomllib.loads(text)
+
+
+def _channel_dir(description: str) -> str:
+    """hf_timestd.paths.channel_name_to_dir: canonical SHARED_/WWV_<kHz> names
+    pass through; anything else has its spaces turned into underscores."""
+    return description.replace(' ', '_')
+
+
+def grape_channels(cfg: dict) -> List[str]:
+    """The raw_buffer directory names hf-timestd archives, from its config:
+    every [[recorder.channel_group.*.channels]] entry whose archive flag
+    (channel, then group, then [recorder]) is true.  In phase-engine mode a
+    SHARED channel on 2.5, 5, 10 or 15 MHz becomes WWV_, WWVH_ and BPM_
+    (core_recorder_v2.py _expand_channel_groups and the expansion before it)."""
+    rec = cfg.get('recorder', {}) or {}
+    engine = (cfg.get('ka9q', {}) or {}).get('source') or rec.get('engine', 'radiod')
+    out = []
+    for group in (rec.get('channel_group', {}) or {}).values():
+        defaults = {k: v for k, v in group.items() if k != 'channels'}
+        for ch in group.get('channels', []) or []:
+            spec = {**defaults, **ch}
+            if not spec.get('archive', rec.get('archive', True)):
+                continue
+            freq = int(spec.get('frequency_hz') or 0)
+            desc = spec.get('description') or f'{freq / 1e6:.3f} MHz'
+            if (engine == 'phase-engine' and freq in _PHASE_ENGINE_SHARED_HZ
+                    and desc.startswith('SHARED')):
+                out += [f'{t}_{freq // 1000}' for t in ('WWV', 'WWVH', 'BPM')]
+            else:
+                out.append(_channel_dir(desc))
+    return out
+
+
+def grape_roots(cfg: dict) -> List[Path]:
+    """Where hf-timestd writes raw IQ.  With tiered storage (the shipped
+    default) a file lands first in <hot_buffer_root>/raw_buffer and moves to
+    <data_root>/raw_buffer minutes later; without it the writer uses
+    <data_root>/<channel> (binary_archive_writer.py archive_dir)."""
+    rec = cfg.get('recorder', {}) or {}
+    data_root = Path(rec.get('production_data_root', '/var/lib/timestd'))
+    roots = [data_root / 'raw_buffer']
+    if rec.get('tiered_storage', False):
+        roots.insert(0, Path(rec.get('hot_buffer_root', '/dev/shm/timestd')) / 'raw_buffer')
+    else:
+        roots.append(data_root)
+    return roots
+
+
+def grape_line(env: Env) -> Line:
+    label = 'GRAPE'
+    if not env.installed('hf-timestd'):
+        return Line(ABSENT, label, 'not on this station')
+    cfg = env.timestd_config()
+    if cfg is None:
+        return Line(FAIL, label, f'hf-timestd has no config at {TIMESTD_CONFIG}.  '
+                                 f'Tell the fleet admin.')
+    channels = grape_channels(cfg)
+    if not channels:
+        return Line(ABSENT, label, 'hf-timestd archives no channel on this station')
+    svc = env.service('timestd-core-recorder.service')
+    bad = service_problem(label, svc, 'hf-timestd')
+    if bad:
+        return bad
+    days = [datetime.fromtimestamp(env.now - back * 86400, tz=timezone.utc).strftime('%Y%m%d')
+            for back in (0, 1)]
+    stale = []
+    for ch in channels:
+        newest = None
+        for root in grape_roots(cfg):
+            for day in days:
+                m = env.reader.newest_mtime(root / ch / day)
+                if m is not None:
+                    newest = m if newest is None else max(newest, m)
+        if newest is None or env.now - newest > GRAPE_FRESH_S:
+            stale.append(ch)
+    if not stale:
+        return Line(OK, label, f'all {len(channels)} channels wrote a file in the last 11 min')
+    if is_young(svc, GRAPE_YOUNG_S):
+        due = minutes(GRAPE_YOUNG_S - (svc.age_s or 0))
+        return Line(WAIT, label, f'first files due in about {due} min (hf-timestd started '
+                                 f'{minutes(svc.age_s or 0)} min ago)')
+    return Line(FAIL, label, f'no file in 11 min from {", ".join(stale)}.  '
+                             f'Tell the fleet admin.')
+
+
+def storage_line(env: Env, path: str = STORAGE_PATH) -> Line:
+    label = 'storage'
+    total, free = env.disk(path)
+    pct = 100.0 * free / total if total else 0.0
+    if pct >= STORAGE_MIN_FREE_PCT:
+        return Line(OK, label, f'{path} has {int(pct)} % free')
+    return Line(FAIL, label, f'{path} has only {int(pct)} % free.  Tell the fleet admin.')
+
+
+def _disk(path: str) -> Tuple[int, int]:
+    usage = shutil.disk_usage(path)
+    return usage.total, usage.free
+
+
+# ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
 # not apply here at all.  Later tasks add their entries in place.
@@ -594,5 +716,7 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('PSK', psk_line),
     ('WSPR', wspr_line),
     ('magnetometer', mag_line),
+    ('GRAPE', grape_line),
+    ('storage', storage_line),
     ('meteor scatter', meteor_line),
 ]
