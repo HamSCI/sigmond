@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,7 +133,7 @@ def default_env() -> Env:
                journal=read_journal, disk=_disk,
                timestd_config=lambda: read_timestd_config(reader),
                coordination=_coordination, coordination_age_s=_coordination_age_s,
-               backlog=read_backlog)
+               backlog=read_backlog, http=http_status)
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -807,6 +809,43 @@ def _coordination_age_s() -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# The VM's own pages
+# ---------------------------------------------------------------------------
+
+
+HTTP_TIMEOUT_S = 3.0
+PAGES = (('receiver page', 8081, None),
+         ('station pages', 8000, None),
+         ('magnetometer page', 8082, 'mag-recorder'))
+
+
+def http_status(url: str, timeout: float = HTTP_TIMEOUT_S,
+                urlopen=urllib.request.urlopen) -> Tuple[Optional[int], str]:
+    """(status, '') when the server answers, (None, why) when it does not."""
+    try:
+        with urlopen(url, timeout=timeout) as resp:
+            return resp.status, ''
+    except urllib.error.HTTPError as exc:
+        return exc.code, ''
+    except Exception as exc:  # noqa: BLE001 -- refused, timed out, reset, ...
+        reason = getattr(exc, 'reason', None) or exc
+        return None, str(reason)
+
+
+def page_check(label: str, port: int, needs: Optional[str]):
+    def check(env: Env) -> Optional[Line]:
+        if needs and not env.installed(needs):
+            return None
+        url = f'http://127.0.0.1:{port}'
+        status, why = env.http(url + '/')
+        if status == 200:
+            return Line(OK, label, f'{url} answers')
+        return Line(FAIL, label, f'{url} does not answer: '
+                                 f'{why or f"status {status}"}')
+    return check
+
+
+# ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
 # not apply here at all.  Later tasks add their entries in place.
@@ -820,4 +859,5 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('storage', storage_line),
     ('uploads', uploads_line),
     ('meteor scatter', meteor_line),
+    *[(label, page_check(label, port, needs)) for label, port, needs in PAGES],
 ]
