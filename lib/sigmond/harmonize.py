@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .instance import unescape_systemd_instance
 from .sysview import SystemView
 
 # Path to the gpsdo-monitor daemon's per-device JSON drop.  Exposed as a
@@ -906,22 +907,9 @@ def rule_wspr_decode_enabled(view: SystemView) -> RuleResult:
                           "skipped (no active wspr-recorder instance)", [])
 
     def _decode_on(unit: str) -> bool:
-        inst = unit[len("wspr-recorder@"):-len(".service")]
-        forms = {inst}
-        if "\\x" in inst:
-            try:
-                forms.add(inst.encode().decode("unicode_escape"))
-            except Exception:                          # noqa: BLE001
-                pass
-        for name in forms:
-            envf = env_dir / f"{name}.env"
-            if not envf.exists():
-                continue
-            for line in envf.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("WD_DECODE_VIA_DB") and "=" in line:
-                    return line.split("=", 1)[1].strip() not in ("", "0")
-        return False
+        env = _resolve_instance_env(
+            "wspr-recorder", unit[len("wspr-recorder@"):-len(".service")])
+        return env.get("WD_DECODE_VIA_DB", "").strip() not in ("", "0")
 
     recorder_only = [u[len("wspr-recorder@"):-len(".service")]
                      for u in active if not _decode_on(u)]
@@ -1178,20 +1166,11 @@ def _read_env_file(path: Path) -> dict:
 
 
 def _resolve_instance_env(client: str, inst: str) -> dict:
-    """Per-instance env for `<client>@<inst>`.  Handles systemd's escaped
-    instance form (e.g. AC0G\\x3dS) vs the env-file name (AC0G=S.env)."""
-    env_dir = Path(f"/etc/{client}/env")
-    forms = {inst}
-    if "\\x" in inst:
-        try:
-            forms.add(inst.encode().decode("unicode_escape"))
-        except Exception:                                  # noqa: BLE001
-            pass
-    for name in forms:
-        f = env_dir / f"{name}.env"
-        if f.exists():
-            return _read_env_file(f)
-    return {}
+    """Per-instance env for `<client>@<inst>`.  `inst` may come straight
+    from a unit name (AC0G\\x3dS); the env file carries the storage form
+    (AC0G=S.env)."""
+    f = Path(f"/etc/{client}/env") / f"{unescape_systemd_instance(inst)}.env"
+    return _read_env_file(f) if f.exists() else {}
 
 
 def _active_instances(client: str) -> list:
@@ -1210,7 +1189,8 @@ def _active_instances(client: str) -> list:
             continue
         u = ln.split()[0]
         if u.startswith(f"{client}@") and u.endswith(".service"):
-            names.append(u[len(f"{client}@"):-len(".service")])
+            names.append(unescape_systemd_instance(
+                u[len(f"{client}@"):-len(".service")]))
     return names
 
 

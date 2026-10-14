@@ -10,8 +10,14 @@ from __future__ import annotations
 
 import os
 import pwd
+import sys
 from pathlib import Path
 from typing import List, Tuple
+
+from .instance import (
+    InvalidReporterId, legacy_instance_hint, parse_user_reporter_id,
+    unescape_systemd_instance,
+)
 
 # client -> (enable-flag env var, [destination labels]).  Adding a row here
 # wires the client into `smd config upload` AND rule_upload_enabled.
@@ -38,29 +44,34 @@ DELIVERY_ON_ENABLE: dict[str, Tuple[str, str, List[str]]] = {
 }
 
 
-def storage_instance(instance: str) -> str:
-    """The per-instance env filename stem for a reporter/instance id.
-
-    Reporter ids are stored path-safe with '/'->'=' (e.g. AC0G/S -> AC0G=S);
-    legacy radiod-keyed instances (my-rx888) have no slash and pass through.
-    Case is preserved — the env file is named with the id as provisioned.
-    """
-    return instance.replace("/", "=")
-
-
 def env_path_for(client: str, instance: str, base: str = "/etc") -> Path:
-    """Resolve the per-instance env file, preferring the canonical
-    storage form and falling back to any already-present spelling."""
+    """The per-instance env file for a reporter id typed in any spelling.
+
+    AC0G/S, AC0G=S, AC0G\\x3dS and ac0g/s all name
+    <base>/<client>/env/AC0G=S.env.  One fallback, for a host that still
+    carries an instance under a legacy radiod-keyed name: when that file
+    is absent (or the text is no reporter id, like bee1-status.local) and
+    a file named exactly as typed exists (unescaped, case kept), use it
+    and print one line saying so.  Never invents a second spelling: a
+    missing file is created under the storage form.  Raises
+    InvalidReporterId (a ValueError) when the text is no reporter id and
+    no such legacy file exists.
+    """
     env_dir = Path(base) / client / "env"
-    canonical = env_dir / f"{storage_instance(instance)}.env"
-    if canonical.exists():
-        return canonical
-    # Fall back to an existing file under a different spelling (e.g. the
-    # raw reporter id, or a systemd-escaped name) so we edit, not shadow.
-    for cand in {instance, storage_instance(instance.upper())}:
-        p = env_dir / f"{cand}.env"
-        if p.exists():
-            return p
+    exact = unescape_systemd_instance(instance.strip())
+    legacy = env_dir / f"{exact}.env" if exact and "/" not in exact else None
+    try:
+        storage = parse_user_reporter_id(instance)
+    except InvalidReporterId:
+        if legacy is not None and legacy.exists():
+            print(legacy_instance_hint(exact), file=sys.stderr)
+            return legacy
+        raise
+    canonical = env_dir / f"{storage}.env"
+    if (not canonical.exists() and exact != storage
+            and legacy is not None and legacy.exists()):
+        print(legacy_instance_hint(exact), file=sys.stderr)
+        return legacy
     return canonical
 
 

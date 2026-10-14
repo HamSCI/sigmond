@@ -158,6 +158,16 @@ try:
         render      as _diag_drop_in_render,
         has_failure as _diag_drop_in_has_failure,
     )
+    # Reporter-id spellings (tasks/spec-reporter-id-v372.md): a person sees
+    # AC0G/B4, files hold AC0G=B4, unit names carry AC0G\x3dB4.
+    from sigmond.instance import (
+        display_reporter_id       as _display_rid,
+        display_unit_name         as _display_unit,
+        legacy_instance_hint      as _legacy_hint,
+        parse_user_reporter_id    as _parse_reporter_id,
+        systemd_escape            as _systemd_escape,
+        unescape_systemd_instance as _unescape_instance,
+    )
     _HAS_SIGMOND_LIB = True
 except ImportError:
     _HAS_SIGMOND_LIB = False
@@ -17061,6 +17071,9 @@ def _radiod_status_from_per_instance_config(client: str, instance: str) -> Optio
     ``[[radiod]] status`` value found, which is what
     contract/inventory uses as the spool key.
     """
+    # A watch that found its instance in a unit name holds systemd's
+    # spelling (AC0G\x3dB4); the config file carries AC0G=B4.toml.
+    instance = _unescape_instance(instance)
     cfg_path = Path(f'/etc/{client}/{instance}.toml')
     if not cfg_path.exists():
         return None

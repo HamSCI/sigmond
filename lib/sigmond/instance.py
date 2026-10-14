@@ -345,6 +345,9 @@ def _list_units_for_client(client: str) -> list[str]:
             cli, _, rid = base.partition("@")
             if cli != client or not rid:
                 continue
+            # systemd lists the instance in its own spelling (AC0G\x3dB4);
+            # validate and return the storage form (AC0G=B4).
+            rid = unescape_systemd_instance(rid)
             try:
                 validate_reporter_id(rid)
             except InvalidReporterId:
@@ -766,7 +769,9 @@ def detect_migration_candidates() -> list[MigrationCandidate]:
         if not env_dir.is_dir():
             continue
         for env_file in sorted(env_dir.glob("*.env")):
-            name = env_file.stem
+            # An env file named in systemd's spelling (a shadow some older
+            # smd wrote: AC0G\x3dB4.env) is the same reporter-keyed instance.
+            name = unescape_systemd_instance(env_file.stem)
             try:
                 validate_reporter_id(name)
                 continue                # already reporter-keyed; skip
@@ -806,6 +811,9 @@ def detect_migration_candidates() -> list[MigrationCandidate]:
                 continue
             if not name:
                 continue
+            # systemd lists the live reporter-keyed unit as AC0G\x3dB4;
+            # unescaped it validates, so it is not a legacy candidate.
+            name = unescape_systemd_instance(name)
             try:
                 validate_reporter_id(name)
                 continue                # already reporter-keyed

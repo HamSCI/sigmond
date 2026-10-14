@@ -1,5 +1,7 @@
 """Tests for sigmond.upload — the per-instance upload-enable helper that
 backs `smd config upload` and rule_upload_enabled."""
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -18,8 +20,58 @@ class TestUploadEnable(unittest.TestCase):
         return self.base / client / "env" / f"{inst}.env"
 
     def test_storage_form_slash_to_equals(self):
-        self.assertEqual(upload.storage_instance("AC0G/S"), "AC0G=S")
-        self.assertEqual(upload.storage_instance("my-rx888"), "my-rx888")
+        base = str(self.base)
+        for typed in ("AC0G/S", "ac0g/s", "AC0G=S"):
+            with self.subTest(typed=typed):
+                self.assertEqual(upload.env_path_for("x", typed, base=base).name, "AC0G=S.env")
+
+    def test_escaped_instance_finds_the_storage_env_file(self):
+        # S19: systemd's spelling must reach AC0G=B4.env, not AC0G\x3dB4.env.
+        env = self._env("psk-recorder", "AC0G=B4")
+        env.parent.mkdir(parents=True)
+        env.write_text("X=1\n")
+        self.assertEqual(
+            upload.env_path_for("psk-recorder", "AC0G\\x3dB4", base=str(self.base)), env)
+
+    def test_escaped_instance_writes_no_shadow_file(self):
+        path, *_ = upload.apply_enable(
+            "wspr-recorder", "AC0G\\x3dB4", True, base=str(self.base))
+        self.assertEqual(path.name, "AC0G=B4.env")
+        self.assertEqual([p.name for p in path.parent.iterdir()], ["AC0G=B4.env"])
+
+    def test_lower_case_reaches_the_upper_case_file(self):
+        # Review Focus 1: reporter ids are upper case only.
+        env = self._env("psk-recorder", "W1ABC-5")
+        env.parent.mkdir(parents=True)
+        env.write_text("")
+        self.assertEqual(
+            upload.env_path_for("psk-recorder", "w1abc-5", base=str(self.base)), env)
+
+    def _legacy(self, name, typed):
+        env = self._env("psk-recorder", name)
+        env.parent.mkdir(parents=True)
+        env.write_text("")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = upload.env_path_for("psk-recorder", typed, base=str(self.base))
+        return env, got, err.getvalue()
+
+    def test_a_legacy_file_named_exactly_as_typed_is_used_with_a_hint(self):
+        env, got, err = self._legacy("my-rx888", "my-rx888")
+        self.assertEqual(got, env)
+        self.assertIn("legacy instance name my-rx888; run: smd admin instance migrate", err)
+
+    def test_a_legacy_name_that_is_no_reporter_id_is_used_with_a_hint(self):
+        env, got, err = self._legacy("bee1-status.local", "bee1-status.local")
+        self.assertEqual(got, env)
+        self.assertIn("legacy instance name bee1-status.local", err)
+
+    def test_without_a_legacy_file_the_storage_form_wins(self):
+        self.assertEqual(
+            upload.env_path_for("psk-recorder", "my-rx888", base=str(self.base)).name,
+            "MY-RX888.env")
+        with self.assertRaises(ValueError):
+            upload.env_path_for("psk-recorder", "bee1-status.local", base=str(self.base))
 
     def test_apply_enable_creates_and_sets_flag(self):
         path, flag, dests, delivery = upload.apply_enable(
