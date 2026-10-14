@@ -276,7 +276,7 @@ def _expand_template(
     # new bogus unit.  A truly double-escaped orphan still decodes to a name
     # (\x5cx3d -> \x3d) that is NOT among the configured instances, so real
     # orphans stay flagged.
-    from .instance import unescape_systemd_instance
+    from .instance import systemd_escape, unescape_systemd_instance
 
     # Discover known instances from systemctl.  Use `list-units`
     # (without --all) + `list-unit-files` together:
@@ -330,7 +330,10 @@ def _expand_template(
 
     # Create UnitRef for each known instance
     for instance in sorted(known):
-        unit_name = template.replace('@.', f"@{instance}.")
+        # `instance` holds the storage form (AC0G=B4); the unit carries
+        # systemd's spelling (AC0G\x3dB4), so systemctl gets the name it
+        # created and never warns "Invalid unit name".
+        unit_name = template.replace('@.', f"@{systemd_escape(instance)}.")
         # Only orphan if sigmond owns instance config (env files exist) but
         # this instance isn't among them. If no env files exist the client
         # manages its own instances and nothing is orphaned.

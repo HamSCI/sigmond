@@ -229,7 +229,7 @@ class TestSweepOrphanUnits(unittest.TestCase):
             wants.mkdir(parents=True)
             (sysd / "keepme.service").write_text("[Unit]\n")
             (wants / "keepme.service").symlink_to(sysd / "keepme.service")     # valid
-            (wants / "wspr-recorder@AC0G=S.service").symlink_to(
+            (wants / "wspr-recorder@AC0G\\x3dS.service").symlink_to(
                 sysd / "gone.service")                                          # dangling
             saved = (uninstall.SYSTEMD_SYSTEM, uninstall.subprocess.run)
             try:

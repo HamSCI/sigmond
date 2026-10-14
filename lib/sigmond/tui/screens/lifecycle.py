@@ -185,6 +185,7 @@ def _gather() -> _LifecycleData:
         from ...topology import load_topology
         from ...lifecycle import resolve_units
         from ...catalog import load_catalog
+        from ...instance import display_unit_name
 
         topology = load_topology()
         enabled = topology.enabled_components()
@@ -220,7 +221,7 @@ def _gather() -> _LifecycleData:
                     state = props.get(u.unit, {}).get("ActiveState", "unknown")
                     rows.append(_Row(
                         key=u.unit,
-                        display=u.unit.removesuffix(".service"),
+                        display=display_unit_name(u.unit).removesuffix(".service"),
                         kind="instance",
                         active=state,
                         unit=u.unit,

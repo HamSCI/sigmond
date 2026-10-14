@@ -104,6 +104,14 @@ def _instance_options_for_component(component: str) -> list:
     return options
 
 
+def _instance_unit(component: str, instance: str) -> str:
+    """The unit for one dropdown choice: a storage-form reporter id
+    (AC0G=B4) or a legacy radiod-keyed name, spelled as systemd spells it
+    (psk-recorder@AC0G\\x3dB4.service)."""
+    from ...instance import systemd_escape
+    return f"{component}@{systemd_escape(instance)}.service"
+
+
 def _resolve_unit_names(component: str) -> list:
     """Resolve systemd units for a component.
 
@@ -302,7 +310,7 @@ class LogsScreen(Vertical):
             # narrow the unit list to the chosen instance only.
             instance = self.query_one("#lg-instance", Select).value
             if instance not in (None, Select.NULL, Select.BLANK, _INSTANCE_ALL):
-                target_unit = f"{comp}@{instance}.service"
+                target_unit = _instance_unit(comp, instance)
                 if target_unit in units:
                     units = [target_unit]
                 else:
@@ -315,7 +323,9 @@ class LogsScreen(Vertical):
             cmd = ['journalctl', '--follow', '--no-hostname', '-n', '50']
             for u in units:
                 cmd.extend(['-u', u])
-            status = f"following journal for: {', '.join(units)}"
+            from ...instance import display_unit_name
+            status = ("following journal for: "
+                      + ", ".join(display_unit_name(u) for u in units))
         elif mode == 'files':
             from pathlib import Path
             paths = _resolve_log_paths(comp)

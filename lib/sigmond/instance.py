@@ -245,7 +245,7 @@ class InstancePaths:
     state_dir: Path     # /var/lib/<client>/<reporter_id>/  (systemd-managed)
     log_dir: Path       # /var/log/<client>/<reporter_id>/  (systemd-managed)
     run_dir: Path       # /run/<client>/<reporter_id>/      (systemd-managed)
-    unit_name: str      # <client>@<reporter_id>.service
+    unit_name: str      # <client>@<systemd form>.service, e.g. psk-recorder@AC0G\x3dB4.service
     unit_template: str  # <client>@.service (in client repo's systemd/ dir)
 
 
@@ -268,7 +268,7 @@ def instance_paths(client: str, reporter_id: str) -> InstancePaths:
         state_dir=Path("/var/lib") / client / reporter_id,
         log_dir=Path("/var/log") / client / reporter_id,
         run_dir=Path("/run") / client / reporter_id,
-        unit_name=f"{client}@{reporter_id}.service",
+        unit_name=unit_name(client, reporter_id),
         unit_template=f"{client}@.service",
     )
 
@@ -745,7 +745,7 @@ class MigrationCandidate:
 
     @property
     def unit_name(self) -> str:
-        return f"{self.client}@{self.old_instance}.service"
+        return f"{self.client}@{systemd_escape(self.old_instance)}.service"
 
 
 def detect_migration_candidates() -> list[MigrationCandidate]:
@@ -914,7 +914,7 @@ def migrate_one_instance(
 
     validate_reporter_id(reporter_id)
     new_paths = instance_paths(client, reporter_id)
-    old_unit = f"{client}@{old_instance}.service"
+    old_unit = f"{client}@{systemd_escape(old_instance)}.service"
     new_unit = new_paths.unit_name
 
     old_env = Path("/etc") / client / "env" / f"{old_instance}.env"
