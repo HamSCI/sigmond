@@ -334,3 +334,26 @@ def test_lines_smd_check_renders_parse_on_the_host(tmp_path):
 def test_the_sigmond_check_heredoc_is_pure_ascii():
     # sigmond CLAUDE.md: no byte above 0x7F where a guest-agent request may carry it.
     assert all(ord(c) < 0x80 for c in SCRIPT)
+
+
+# -- R4: the host prints a magnetometer page line exactly when the VM did -----
+@pytest.mark.parametrize("has_mag", [True, False])
+def test_the_host_follows_the_vms_magnetometer_page_decision(tmp_path, has_mag):
+    from sigmond.commands import check
+    from tests.check_fakes import make_env
+    env = make_env(http=lambda url: (200, ''), exists=lambda p: has_mag,
+                   mag_psws_id=lambda: '', reader=check.Reader(euid=lambda: 0))
+    mag_dir = tmp_path / "mag"
+    mag_dir.mkdir()
+    checks = [("magnetometer", lambda e: check.mag_line(e, mag_dir=mag_dir)),
+              ("magnetometer page", lambda e: check.mag_page_line(e, mag_dir=mag_dir)),
+              *[c for c in check.CHECKS if c[0] in ("receiver page", "station pages")]]
+    vm = "".join(check.render_line(ln) + "\n" for ln in check.run_checks(env, checks))
+    assert ("magnetometer page" in vm) is has_mag
+    rc, out = run(tmp_path, vm=vm, vm_rc=0, curl=VM_200)
+    mag_page = [ln for ln in out if "magnetometer page" in ln]
+    if has_mag:
+        assert mag_page == [" ok    magnetometer page  IPv4 http://192.168.1.50:8082   no IPv6 here"]
+    else:
+        assert mag_page == []
+        assert " --    magnetometer   no magnetometer on this station" in out

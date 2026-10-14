@@ -130,7 +130,7 @@ own global IPv6 address goes through the relay a browser would use.
 | IPv6 and the relay | both links, each checked |
 | IPv6 and no relay | `FAIL IPv6 http://[...]:8081 does not answer: the IPv6 relay is not installed` (v3.72 #15 cures this on dual-stack sites) |
 
-The magnetometer page line appears only when the VM reports mag-recorder installed.
+The magnetometer page line appears only when the VM printed one: mag-recorder is installed and the magnetometer line is not `--` (residual R4).
 
 ## 6. Where the code lives
 

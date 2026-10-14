@@ -1,6 +1,8 @@
 """`smd check` magnetometer line, with the freeze rule of spec §4.1 and the
 missing adapter of v3.72 #17 (tasks/spec-smd-check-v372.md §4)."""
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -98,11 +100,31 @@ class MagTests(unittest.TestCase):
 
     def test_a_station_that_never_had_a_magnetometer_reads_absent(self):
         # Every dasi2 image installs and enables mag-recorder; with no device
-        # its unit never starts (ConditionPathExists=/dev/ttyMAG0) and no
-        # samples file is ever written.
+        # it writes no samples file, and the site profile names no PSWS
+        # magnetometer instrument.  (mag-recorder.service carries Restart=always
+        # and no condition, so the unit itself may read failed or restarting.)
         self.device.unlink()
-        line = self.line(service=lambda p: svc(state='inactive', age_s=None, enabled=True))
-        self.assertEqual(line, check.Line(ABSENT, 'magnetometer', 'no magnetometer on this station'))
+        for state in ('inactive', 'failed'):
+            line = self.line(service=lambda p: svc(state=state, age_s=None, enabled=True),
+                             mag_psws_id=lambda: '')
+            self.assertEqual(line, check.Line(ABSENT, 'magnetometer', 'no magnetometer on this station'))
+
+    def test_a_declared_magnetometer_without_its_adapter_fails_before_any_sample(self):
+        # R2: a reflashed station starts with an empty /var/lib/mag-recorder.
+        # Its site profile still names the PSWS magnetometer instrument.
+        self.device.unlink()
+        line = self.line(service=lambda p: svc(state='inactive', age_s=None, enabled=True),
+                         mag_psws_id=lambda: '84')
+        self.assertEqual(line.mark, FAIL)
+        self.assertEqual(line.text, f'no magnetometer adapter at {self.device}.  '
+                                    f'Check its USB cable.  {FIX}')
+
+    def test_history_without_a_declared_id_still_fails(self):
+        self.device.unlink()
+        self.write(self.live(), day_t=NOW - 2 * 86400)
+        line = self.line(service=lambda p: svc(state='inactive', age_s=None, enabled=True),
+                         mag_psws_id=lambda: '')
+        self.assertEqual(line.mark, FAIL)
 
     def test_an_adapter_gone_after_samples_were_written_still_fails(self):
         # The B4 hub swap (v3.72 #17): samples once came, the adapter is gone now.
@@ -129,6 +151,47 @@ class MagTests(unittest.TestCase):
 
     def test_not_installed_is_absent(self):
         self.assertEqual(self.line(installed=lambda n: False).mark, ABSENT)
+
+
+class MagPswsIdTests(unittest.TestCase):
+    """read_mag_psws_id: the default Env hook, read-only and never fatal."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.path = Path(d.name) / 'site-profile.toml'
+
+    def read(self, reader=None):
+        return check.read_mag_psws_id(reader or check.Reader(euid=lambda: 0), self.path)
+
+    def test_the_magnetometer_instrument_id_is_read(self):
+        self.path.write_text('[psws]\nstation_id = "S000170"\ninstrument_id = "172"\n'
+                             '[psws.instruments]\n"mag-recorder" = "84"\n')
+        self.assertEqual(self.read(), '84')
+
+    def test_the_legacy_single_id_is_the_grape_id_not_the_magnetometer(self):
+        self.path.write_text('[psws]\nstation_id = "S000170"\ninstrument_id = "172"\n')
+        self.assertEqual(self.read(), '')
+
+    def test_a_placeholder_counts_as_no_id(self):
+        self.path.write_text('[psws.instruments]\n"mag-recorder" = "<from the portal>"\n')
+        self.assertEqual(self.read(), '')
+
+    def test_a_missing_broken_or_unreadable_profile_means_no_id(self):
+        self.assertEqual(self.read(), '')
+        self.path.write_text('[psws\nnot toml')
+        self.assertEqual(self.read(), '')
+        self.path.write_text('[psws.instruments]\n"mag-recorder" = "84"\n')
+        self.path.chmod(0)
+        self.addCleanup(self.path.chmod, 0o644)
+        if os.access(self.path, os.R_OK):
+            self.skipTest('running as root: every file is readable')
+        refuses = check.Reader(run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', ''),
+                               euid=lambda: 1000)
+        self.assertEqual(self.read(refuses), '')
+        allows = check.Reader(run=lambda *a, **k: subprocess.CompletedProcess(
+            a, 0, '[psws.instruments]\n"mag-recorder" = "84"\n', ''), euid=lambda: 1000)
+        self.assertEqual(self.read(allows), '84')
 
 
 if __name__ == '__main__':

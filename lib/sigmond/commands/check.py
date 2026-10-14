@@ -121,6 +121,8 @@ class Env:
     backlog: Callable[[], dict] = None                                 # Task 6
     http: Callable[[str], Tuple[Optional[int], str]] = None            # Task 7
     bringup: Callable[[], Any] = None                                  # final review I3
+    bringup_marker: Path = Path('/var/lib/sigmond/.firstrun-bringup-done')  # residual R3
+    mag_psws_id: Callable[[], str] = None                              # residual R2
 
 
 def _installed(name: str) -> bool:
@@ -140,7 +142,8 @@ def default_env() -> Env:
                journal=read_journal, disk=_disk,
                timestd_config=lambda: read_timestd_config(reader),
                coordination=_coordination, coordination_age_s=_coordination_age_s,
-               backlog=read_backlog, http=http_status, bringup=bringup_state)
+               backlog=read_backlog, http=http_status, bringup=bringup_state,
+               mag_psws_id=lambda: read_mag_psws_id(reader))
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -359,14 +362,14 @@ def read_journal(units: Sequence[str], minutes: int, *, run=subprocess.run,
 
 
 def service_problem(label: str, svc: Service, unit: str,
-                    bringup_running: bool = False) -> Optional[Line]:
-    """A FAIL line when the service runs not at all, else None.  While the
-    first-run bring-up still runs, a service it has not started yet is no
-    fault: the line waits and offers no Fix (final review I3)."""
+                    hold: Optional[str] = None) -> Optional[Line]:
+    """A FAIL line when the service runs not at all, else None.  `hold` says
+    why bring-up has not started it yet (bringup_hold): then it is no fault
+    of its own, and the line waits and offers no Fix (final review I3, R3)."""
     if svc.state in ('active', 'activating'):
         return None
-    if bringup_running:
-        return Line(WAIT, label, f'{unit} is {svc.state}; bring-up has not started it yet')
+    if hold:
+        return Line(WAIT, label, f'{unit} is {svc.state}; {hold}')
     if svc.state == 'absent':
         return Line(FAIL, label, f'{unit} is installed but has no service.  Tell the fleet admin.')
     if svc.restarting:
@@ -385,31 +388,60 @@ BRINGUP_LOG = '/var/log/sigmond/firstrun-bringup.log'
 BRINGUP_MAX_ATTEMPTS = 3      # MAX_ATTEMPTS in bin/sigmond-firstrun-bringup
 
 
+NO_SDR = ('ran without the radio: no SDR on the USB bus.  Plug the SDR in; '
+          'bring-up finishes by itself.')
+
+
 def bringup_running(env: Env) -> bool:
     return env.bringup is not None and env.bringup().state in ('active', 'activating')
 
 
 def _marker_fields(reader, marker: Path) -> dict:
+    """The key=value fields of firstrun's marker.  Split on whitespace, not
+    lines, so a marker printed on one line parses too; a marker that holds a
+    bare timestamp only (the format before result= existed, as on K3LR)
+    yields no result and so reads as done, as firstrun reads it."""
     try:
         text = reader.tail(marker, 4096) or ''
     except Unreadable:
         return {}
     out = {}
-    for ln in text.splitlines():
-        key, sep, val = ln.partition('=')
-        if sep:
-            out[key.strip()] = val.strip()
+    for tok in text.split():
+        key, sep, val = tok.partition('=')
+        if sep and key not in out:
+            out[key] = val
     return out
 
 
-def bringup_line(env: Env, marker: Path = BRINGUP_MARKER) -> Optional[Line]:
+def bringup_awaiting_sdr(env: Env) -> bool:
+    """True when the first-run bring-up has ended and its marker says it ran
+    without the radio (result=awaiting-sdr): the radiod-bound clients wait,
+    disabled and unstarted, for the SDR."""
+    if env.bringup is None or env.bringup().state in ('absent', 'active', 'activating'):
+        return False
+    return _marker_fields(env.reader, env.bringup_marker).get('result') == 'awaiting-sdr'
+
+
+def bringup_hold(env: Env, radio: bool = True) -> Optional[str]:
+    """Why bring-up has not started a client yet, or None.  `radio` names a
+    radiod-bound client, which also waits for an SDR that was missing."""
+    if bringup_running(env):
+        return 'bring-up has not started it yet'
+    if radio and bringup_awaiting_sdr(env):
+        return 'it starts once the SDR is plugged in'
+    return None
+
+
+def bringup_line(env: Env, marker: Optional[Path] = None) -> Optional[Line]:
     """A first line while bring-up runs or after it failed; None once it
     finished, and None on an older image that has no such unit.  The unit
     exits 0 and counts 1 as success, so after a reboot only its marker
-    remembers a failure (result=retry or result=gave-up)."""
+    remembers a failure (result=retry or result=gave-up) or a run without
+    the radio (result=awaiting-sdr)."""
     label = 'bring-up'
     if env.bringup is None:
         return None
+    marker = env.bringup_marker if marker is None else marker
     unit = env.bringup()
     if unit.state == 'absent':
         return None
@@ -426,6 +458,8 @@ def bringup_line(env: Env, marker: Path = BRINGUP_MARKER) -> Optional[Line]:
                                  f'again at the next boot); {tell}')
     if fields.get('result') == 'gave-up':
         return Line(FAIL, label, f'failed {attempts} times and stopped trying; {tell}')
+    if fields.get('result') == 'awaiting-sdr':
+        return Line(FAIL, label, NO_SDR)
     return None
 
 
@@ -527,7 +561,7 @@ def psk_line(env: Env, log_dir: Path = PSK_LOG_DIR) -> Line:
     if not env.installed('psk-recorder'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('psk-recorder@*.service')
-    bad = service_problem(label, svc, 'psk-recorder', bringup_running(env))
+    bad = service_problem(label, svc, 'psk-recorder', bringup_hold(env))
     if bad:
         return bad
     counts = count_psk_spots(env.reader, log_dir, env.now)
@@ -545,7 +579,7 @@ def wspr_line(env: Env) -> Line:
     if not env.installed('wspr-recorder'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('wspr-recorder@*.service')
-    bad = service_problem(label, svc, 'wspr-recorder', bringup_running(env))
+    bad = service_problem(label, svc, 'wspr-recorder', bringup_hold(env))
     if bad:
         return bad
     spots, bands, band_count = 0, set(), 0
@@ -573,7 +607,7 @@ def meteor_line(env: Env) -> Line:
     if not env.installed('meteor-scatter'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('meteor-scatter@*.service')
-    bad = service_problem(label, svc, 'meteor-scatter', bringup_running(env))
+    bad = service_problem(label, svc, 'meteor-scatter', bringup_hold(env))
     if bad:
         return bad
     stats = [m for m in (_METEOR_STATS.search(x)
@@ -658,21 +692,65 @@ def has_mag_history(reader, mag_dir: Path) -> bool:
                for n in (reader.listdir(mag_dir) or []))
 
 
+def read_mag_psws_id(reader=None, path: Optional[Path] = None) -> str:
+    """The PSWS magnetometer instrument id the site profile declares, or ''.
+    SiteProfile.instrument_for('mag-recorder') reads [psws.instruments] only:
+    the legacy single [psws].instrument_id names the GRAPE instrument.  A
+    missing, broken or unreadable profile means no id; this never raises."""
+    import contextlib
+    import io
+    import tomllib
+    from ..site_profile import SITE_PROFILE_PATH, load_site_profile
+    path = SITE_PROFILE_PATH if path is None else path
+    try:
+        # load_site_profile warns on stderr about a retired section; smd
+        # check's output stays its own.
+        with contextlib.redirect_stderr(io.StringIO()):
+            prof = load_site_profile(path)
+        return prof.instrument_for('mag-recorder') if prof else ''
+    except PermissionError:
+        pass
+    except Exception:  # noqa: BLE001 -- a broken profile is no magnetometer id
+        return ''
+    try:
+        text = (reader or Reader()).tail(path, 1024 * 1024)
+        inst = ((tomllib.loads(text or '').get('psws') or {}).get('instruments') or {})
+        v = str(inst.get('mag-recorder', '') or '').strip()
+        return '' if (v.startswith('<') and v.endswith('>')) else v
+    except Exception:  # noqa: BLE001 -- Unreadable, bad TOML: no id
+        return ''
+
+
+def no_magnetometer(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -> bool:
+    """True when this station has no magnetometer: mag-recorder is enabled
+    but finds no adapter, never wrote a sample here, and the site profile
+    names no PSWS magnetometer instrument.  The magnetometer line then reads
+    `--` and the magnetometer page line does not appear (R2, R4).
+
+    Every dasi2 image installs and enables mag-recorder.  Its unit carries
+    Restart=always and no start condition, so without the adapter it keeps
+    trying and writes nothing.  A station whose adapter once delivered
+    samples (the B4 hub swap, v3.72 #17), or whose profile declares one (a
+    reflashed station starts with an empty /var/lib/mag-recorder), has a
+    magnetometer that is missing: a fault."""
+    if not env.service('mag-recorder.service').enabled or env.exists(device):
+        return False
+    if has_mag_history(env.reader, mag_dir):
+        return False
+    return not (env.mag_psws_id() if env.mag_psws_id else '')
+
+
 def mag_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -> Line:
     label = 'magnetometer'
     if not env.installed('mag-recorder'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('mag-recorder.service')
     if svc.enabled and not env.exists(device):
-        # Every dasi2 image installs and enables mag-recorder; on a station
-        # with no magnetometer it stays dormant (ConditionPathExists=/dev/ttyMAG0)
-        # and writes nothing.  Only an adapter that once delivered samples and
-        # has gone (the B4 hub swap, v3.72 #17) is a fault.
-        if not has_mag_history(env.reader, mag_dir):
+        if no_magnetometer(env, mag_dir, device):
             return Line(ABSENT, label, 'no magnetometer on this station')
         return Line(FAIL, label, f'no magnetometer adapter at {device}.  Check its USB cable.  '
                                  f'{MAG_FIX}')
-    bad = service_problem(label, svc, 'mag-recorder', bringup_running(env))
+    bad = service_problem(label, svc, 'mag-recorder', bringup_hold(env, radio=False))
     if bad:
         return bad
     samples = last_mag_samples(env.reader, mag_dir, env.now)
@@ -769,7 +847,7 @@ def grape_line(env: Env) -> Line:
     if not channels:
         return Line(ABSENT, label, 'hf-timestd archives no channel on this station')
     svc = env.service('timestd-core-recorder.service')
-    bad = service_problem(label, svc, 'hf-timestd', bringup_running(env))
+    bad = service_problem(label, svc, 'hf-timestd', bringup_hold(env))
     if bad:
         return bad
     days = [datetime.fromtimestamp(env.now - back * 86400, tz=timezone.utc).strftime('%Y%m%d')
@@ -920,6 +998,7 @@ HTTP_TIMEOUT_S = 3.0
 PAGES = (('receiver page', 8081, None),
          ('station pages', 8000, None),
          ('magnetometer page', 8082, 'mag-recorder'))
+MAG_PAGE = 'magnetometer page'
 
 
 def http_status(url: str, timeout: float = HTTP_TIMEOUT_S,
@@ -948,6 +1027,16 @@ def page_check(label: str, port: int, needs: Optional[str]):
     return check
 
 
+def mag_page_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -> Optional[Line]:
+    """The magnetometer page line, present exactly when the magnetometer
+    line is not `--` (R4): a station with no magnetometer owes no gmag-webui
+    answer.  sigmond-check on the host prints its own magnetometer page line
+    only when this one appears."""
+    if not env.installed('mag-recorder') or no_magnetometer(env, mag_dir, device):
+        return None
+    return page_check(MAG_PAGE, 8082, None)(env)
+
+
 # ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
@@ -963,5 +1052,6 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('storage', storage_line),
     ('uploads', uploads_line),
     ('meteor scatter', meteor_line),
-    *[(label, page_check(label, port, needs)) for label, port, needs in PAGES],
+    *[(label, mag_page_line if label == MAG_PAGE else page_check(label, port, needs))
+      for label, port, needs in PAGES],
 ]

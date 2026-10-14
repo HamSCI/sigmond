@@ -55,6 +55,31 @@ class BringupLineTests(unittest.TestCase):
         self.assertIsNone(self.line(svc(state='absent', age_s=None)))
         self.assertIsNone(check.bringup_line(make_env(), marker=self.marker))
 
+    def test_a_stamp_only_marker_reads_as_done(self):
+        # K3LR, 2026-09-30: a marker from before result= existed.  firstrun
+        # reads it as final, so smd check must too.
+        self.marker.write_text('2026-09-30T01:00:32+00:00\n')
+        self.assertIsNone(self.line(svc(state='inactive', age_s=None)))
+
+    def test_a_marker_on_one_line_still_parses(self):
+        self.marker.write_text('attempts=1 result=retry 2026-10-14T20:25:15+00:00\n')
+        self.assertEqual(self.line(svc(state='inactive', age_s=None)).text,
+                         f'failed (attempt 1 of 3; it tries again at the next boot); '
+                         f'its log is {LOG}.  Tell the fleet admin.')
+        self.marker.write_text('attempts=1 result=ok 2026-10-13T16:30:27+00:00\n')
+        self.assertIsNone(self.line(svc(state='inactive', age_s=None)))
+
+    def test_a_run_without_the_radio_fails_and_says_what_to_plug_in(self):
+        # R3: result=awaiting-sdr.  No command fixes it; a cable does.
+        self.marker.write_text('attempts=0\nresult=awaiting-sdr\nsdr_reruns=0\n'
+                               '2026-10-14T12:00:00+00:00\n')
+        out = self.line(svc(state='inactive', age_s=None))
+        self.assertEqual(out, Line(FAIL, 'bring-up', 'ran without the radio: no SDR on the USB '
+                                                     'bus.  Plug the SDR in; bring-up finishes '
+                                                     'by itself.'))
+        self.assertNotIn('Fix:', out.text)
+        self.assertTrue(all(ord(c) < 0x80 for c in out.text))
+
     def test_bringup_is_the_first_line(self):
         self.assertEqual(check.CHECKS[0][0], 'bring-up')
 
@@ -75,6 +100,31 @@ class ClientsDuringBringupTests(unittest.TestCase):
             for fn in (lambda e: check.psk_line(e, log_dir=Path(d)), check.wspr_line,
                        check.meteor_line):
                 self.assertEqual(fn(env).mark, WAIT)
+
+    def test_radio_clients_offer_no_fix_while_the_sdr_is_missing(self):
+        # R3: firstrun left the radiod-bound clients disabled and unstarted.
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / '.firstrun-bringup-done'
+            marker.write_text('attempts=0\nresult=awaiting-sdr\nsdr_reruns=0\n')
+            env = make_env(bringup=lambda: svc(state='inactive', age_s=None),
+                           bringup_marker=marker,
+                           service=lambda p: svc(state='inactive', age_s=None, enabled=False),
+                           timestd_config=lambda: {'recorder': {'channel_group': {'g': {
+                               'channels': [{'frequency_hz': 10000000,
+                                             'description': 'WWV_10000'}]}}}})
+            lines = [check.psk_line(env, log_dir=Path(d)), check.wspr_line(env),
+                     check.meteor_line(env), check.grape_line(env)]
+            for ln in lines:
+                self.assertEqual(ln.mark, WAIT, ln)
+                self.assertNotIn('Fix:', ln.text)
+            self.assertEqual(lines[1], Line(WAIT, 'WSPR', 'wspr-recorder is inactive; it starts '
+                                                          'once the SDR is plugged in'))
+            # The magnetometer needs no radio: its own Fix stays.
+            dev = Path(d) / 'ttyMAG0'
+            dev.write_text('')
+            mag = check.mag_line(env, mag_dir=Path(d), device=str(dev))
+            self.assertEqual(mag, Line(FAIL, 'magnetometer',
+                                       'mag-recorder is inactive.  Fix: smd start mag-recorder'))
 
     def test_the_same_client_fails_with_a_fix_once_bringup_is_done(self):
         env = make_env(bringup=lambda: svc(state='inactive', age_s=None),

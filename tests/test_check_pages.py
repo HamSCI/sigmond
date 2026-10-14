@@ -1,11 +1,13 @@
 """`smd check` VM page lines and the full list of lines
 (tasks/spec-smd-check-v372.md §2, §4)."""
 import io
+import tempfile
 import unittest
 import urllib.error
+from pathlib import Path
 
 from sigmond.commands import check
-from sigmond.commands.check import FAIL, OK
+from sigmond.commands.check import ABSENT, FAIL, OK
 
 from tests.check_fakes import make_env
 
@@ -17,7 +19,7 @@ def pages(env):
 class PageTests(unittest.TestCase):
     def test_answering_pages_pass_on_127_0_0_1(self):
         asked = []
-        env = make_env(http=lambda url: asked.append(url) or (200, ''))
+        env = make_env(http=lambda url: asked.append(url) or (200, ''), exists=lambda p: True)
         self.assertEqual(pages(env), [
             check.Line(OK, 'receiver page', 'http://127.0.0.1:8081 answers'),
             check.Line(OK, 'station pages', 'http://127.0.0.1:8000 answers'),
@@ -28,6 +30,32 @@ class PageTests(unittest.TestCase):
     def test_no_magnetometer_page_line_without_mag_recorder(self):
         env = make_env(installed=lambda n: n != 'mag-recorder', http=lambda url: (200, ''))
         self.assertEqual([ln.label for ln in pages(env)], ['receiver page', 'station pages'])
+
+    def test_no_magnetometer_page_line_on_a_station_without_a_magnetometer(self):
+        # R4: the magnetometer line reads `--` (no device, no samples ever, no
+        # PSWS magnetometer id), so gmag-webui owes no answer either.
+        with tempfile.TemporaryDirectory() as d:
+            env = make_env(http=lambda url: (None, 'refused'), exists=lambda p: False,
+                           mag_psws_id=lambda: '')
+            self.assertEqual(check.mag_line(env, mag_dir=Path(d)).mark, ABSENT)
+            self.assertIsNone(check.mag_page_line(env, mag_dir=Path(d)))
+
+    def test_the_magnetometer_page_line_follows_the_magnetometer_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            refused = lambda url: (None, 'refused')
+            cases = {
+                'device present': make_env(http=refused, exists=lambda p: True),
+                'PSWS id declared': make_env(http=refused, exists=lambda p: False,
+                                             mag_psws_id=lambda: '84'),
+            }
+            for why, env in cases.items():
+                self.assertNotEqual(check.mag_line(env, mag_dir=Path(d)).mark, ABSENT, why)
+                self.assertEqual(check.mag_page_line(env, mag_dir=Path(d)),
+                                 check.Line(FAIL, 'magnetometer page',
+                                            'http://127.0.0.1:8082 does not answer: refused'), why)
+            (Path(d) / 'samples-2025-10-10.jsonl').write_text('')
+            env = make_env(http=lambda url: (200, ''), exists=lambda p: False)
+            self.assertEqual(check.mag_page_line(env, mag_dir=Path(d)).mark, OK)
 
     def test_a_refused_or_wrong_status_fails(self):
         env = make_env(http=lambda url: (None, '[Errno 111] Connection refused') if '8081' in url
