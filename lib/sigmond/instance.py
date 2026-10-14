@@ -468,7 +468,7 @@ def get_instance(client: str, reporter_id: str) -> Optional[Instance]:
 def _stub_header(client: str, reporter_id: str, kind: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return (
-        f"# {kind} for {client}@{reporter_id}\n"
+        f"# {kind} for {client}@{display_reporter_id(reporter_id)}\n"
         f"# Created by `smd admin instance add` on {ts}.\n"
         f"# See docs/MULTI-INSTANCE-ARCHITECTURE.md for the canonical "
         f"layout.\n"
@@ -486,7 +486,8 @@ def _config_stub(client: str, reporter_id: str) -> str:
         f'reporter_id = "{display_reporter_id(reporter_id)}"\n'
         "\n"
         "# Source-keys this instance consumes from.  Use\n"
-        '#   smd admin sources add ' + client + '@' + reporter_id + ' <kind>:<id>\n'
+        '#   smd admin sources add ' + client + '@'
+        + display_reporter_id(reporter_id) + ' <kind>:<id>\n'
         "# to populate.  See `smd admin sources list` for what's discoverable.\n"
         "sources = []\n"
         "\n"
@@ -495,7 +496,7 @@ def _config_stub(client: str, reporter_id: str) -> str:
         '# sdr      = "rx888-mk2"       # SDR model / serial / friendly name\n'
         "\n"
         "# Client-specific sections follow.  Run `smd admin instance edit\n"
-        f"# {client} {reporter_id}` to invoke the client's config flow.\n"
+        f"# {client} {display_reporter_id(reporter_id)}` to invoke the client's config flow.\n"
     )
 
 
@@ -570,7 +571,7 @@ def _env_stub(client: str, reporter_id: str) -> str:
     body = (
         _stub_header(client, reporter_id, "Per-instance env")
         + "\n"
-        f"# Loaded by {client}@{reporter_id}.service via\n"
+        f"# Loaded by the {client} unit for {display_reporter_id(reporter_id)} via\n"
         f"#   EnvironmentFile=-/etc/{client}/env/{reporter_id}.env\n"
     )
     defaults = _instance_env_defaults(client, reporter_id)
@@ -592,8 +593,8 @@ def _sources_stub(client: str, reporter_id: str) -> str:
         + "\n"
         "# Rendered by `smd admin sources apply` from the instance config's\n"
         "# `sources = [...]` list.  Don't hand-edit; use\n"
-        f"#   smd admin sources add {client}@{reporter_id} <kind>:<id>\n"
-        f"#   smd admin sources remove {client}@{reporter_id} <kind>:<id>\n"
+        f"#   smd admin sources add {client}@{display_reporter_id(reporter_id)} <kind>:<id>\n"
+        f"#   smd admin sources remove {client}@{display_reporter_id(reporter_id)} <kind>:<id>\n"
         "selections = []\n"
     )
 
@@ -860,7 +861,7 @@ def _migration_config_header(client: str, old: str, reporter_id: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     legacy = _LEGACY_SHARED_CONFIG.get(client, Path("(unknown legacy path)"))
     return (
-        f"# Per-instance config for {client}@{reporter_id}\n"
+        f"# Per-instance config for {client}@{display_reporter_id(reporter_id)}\n"
         f"# Created by `smd admin instance migrate` on {ts}\n"
         f"# (migrated from legacy unit {client}@{old}.service).\n"
         f"#\n"

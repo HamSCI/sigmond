@@ -195,6 +195,16 @@ class EnumerateTimingConsumerUnitsTests(unittest.TestCase):
                          "timestd-metrology@WWV_20000.service")
         self.assertEqual(units[1].instance, "CHU_3330")
 
+    def test_reporter_keyed_instance_comes_back_in_storage_form(self):
+        # S23: systemctl lists wspr-recorder@AC0G\x3dB4.service.
+        runner = self._make_runner({
+            "wspr-recorder@*.service": (
+                0, "wspr-recorder@AC0G\\x3dB4.service loaded active running\n", ""),
+        })
+        units = enumerate_timing_consumer_units(runner=runner)
+        self.assertEqual([(u.instance, u.unit) for u in units],
+                         [("AC0G=B4", "wspr-recorder@AC0G\\x3dB4.service")])
+
     def test_non_templated_unit_has_empty_instance(self):
         runner = self._make_runner({
             "mag-recorder.service": (
@@ -288,6 +298,16 @@ class RenderAnnotationQualityBodyTests(unittest.TestCase):
         self.assertIn("local_minus_source", out)
         self.assertIn("sustained_breach = [red]yes[/]", out)
         self.assertIn("disagreement flags", out)
+
+    def test_reporter_keyed_row_shows_the_display_form(self):
+        # S23: the row label a person reads is AC0G/B4.
+        auth, recorder, units = self._full_inputs()
+        units.append(TimingConsumerUnit("wspr-recorder", "AC0G=B4",
+                                        "wspr-recorder@AC0G\\x3dB4.service"))
+        out = render_annotation_quality_body(auth, None, 5.0, recorder, None, units)
+        self.assertIn("AC0G/B4", out)
+        self.assertNotIn("AC0G=B4", out)
+        self.assertNotIn("\\x3d", out)
 
     def test_green_verdict_when_sigma_tight(self):
         auth, recorder, units = self._full_inputs(sigma_ns=50_000, breach=False)

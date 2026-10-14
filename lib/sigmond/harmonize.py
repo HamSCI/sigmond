@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .instance import unescape_systemd_instance
+from .instance import display_reporter_id, unescape_systemd_instance
 from .sysview import SystemView
 
 # Path to the gpsdo-monitor daemon's per-device JSON drop.  Exposed as a
@@ -911,7 +911,7 @@ def rule_wspr_decode_enabled(view: SystemView) -> RuleResult:
             "wspr-recorder", unit[len("wspr-recorder@"):-len(".service")])
         return env.get("WD_DECODE_VIA_DB", "").strip() not in ("", "0")
 
-    recorder_only = [u[len("wspr-recorder@"):-len(".service")]
+    recorder_only = [display_reporter_id(u[len("wspr-recorder@"):-len(".service")])
                      for u in active if not _decode_on(u)]
     if recorder_only:
         return RuleResult(
@@ -1222,7 +1222,7 @@ def rule_upload_enabled(view: SystemView) -> RuleResult:
             env = dict(coord)
             env.update(_resolve_instance_env(client, inst))
             if not _upload_truthy(env.get(flag)):
-                off.append(f"{client}@{inst} -> {' / '.join(dest)}")
+                off.append(f"{client}@{display_reporter_id(inst)} -> {' / '.join(dest)}")
     if not off:
         return RuleResult("upload_enabled", "pass",
                           "active recorder instances have upload enabled "

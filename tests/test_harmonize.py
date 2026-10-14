@@ -926,7 +926,8 @@ class TestUploadEnabled(unittest.TestCase):
             instances={"wspr-recorder": ["AC0G\\x3dS"]},
             envs={("wspr-recorder", "AC0G\\x3dS"): {}})  # flag unset
         self.assertEqual(r.severity, "warn")
-        self.assertIn("wspr-recorder@AC0G\\x3dS", r.message)
+        self.assertIn("wspr-recorder@AC0G/S", r.message)
+        self.assertNotIn("\\x3d", r.message)
         self.assertIn("smd config render", r.message)      # identity deferral
         self.assertIn("smd admin secrets", r.message)       # credential deferral
         self.assertEqual(r.affected, ["wspr-recorder"])

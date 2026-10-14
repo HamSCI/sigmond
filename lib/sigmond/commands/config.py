@@ -459,7 +459,8 @@ def _restart_location_consumers() -> int:
     if not units:
         warn('no active location-consuming units found to restart.')
         return 0
-    info('restarting: ' + ' '.join(units))
+    from ..instance import display_unit_name
+    info('restarting: ' + ' '.join(display_unit_name(u) for u in units))
     rc = subprocess.run(['systemctl', 'restart', *units], check=False).returncode
     if rc == 0:
         ok('restarted; clients now report the GPS-derived grid.')
@@ -1321,6 +1322,7 @@ def cmd_config_upload(args) -> int:
     — they are not touched here.  Pairs with harmonize's rule_upload_enabled.
     """
     from .. import upload
+    from ..instance import display_reporter_id, systemd_escape
     client = args.client
     if client not in upload.UPLOAD_ENABLE:
         err(f"{client} has no upstream upload path.")
@@ -1351,7 +1353,7 @@ def cmd_config_upload(args) -> int:
                 dkey = delivery_knob[0]
                 dval = upload.read_flag(e, dkey)
                 extra = f"  [{dkey}={dval if dval is not None else 'unset (default server-merge)'}]"
-            print(f"    {state}  {e.stem}    "
+            print(f"    {state}  {display_reporter_id(e.stem)}    "
                   f"({flag}={val if val is not None else 'unset'}){extra}")
         info(f"enable:  smd config upload {client} <instance> --on")
         return 0
@@ -1368,7 +1370,8 @@ def cmd_config_upload(args) -> int:
         if delivery_knob:
             info(f"valid --via choices: {', '.join(delivery_knob[2])}")
         return 1
-    ok(f"{'enabled' if on else 'disabled'} upload for {client}@{instance}  "
+    rid = path.stem     # what apply_enable resolved: the storage form, or a legacy name
+    ok(f"{'enabled' if on else 'disabled'} upload for {client}@{display_reporter_id(rid)}  "
        f"({flag}={'1' if on else '0'})  ->  {', '.join(dests)}")
     if delivery_set:
         dkey, dval = delivery_set
@@ -1379,5 +1382,8 @@ def cmd_config_upload(args) -> int:
     if on:
         info("identity: `smd config render` (site-profile)  ·  "
              "credentials: `smd admin secrets`")
-    info(f"restart to apply:  sudo systemctl restart '{client}@{instance}'")
+    # A printed command in the form systemctl accepts: the slash form would
+    # name a different unit (AC0G/S -> AC0G-S).
+    info(f"restart to apply:  sudo systemctl restart "
+         f"'{client}@{systemd_escape(rid)}.service'")
     return 0

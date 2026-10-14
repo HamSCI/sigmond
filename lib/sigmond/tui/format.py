@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+from ..instance import display_reporter_id, unescape_systemd_instance
+
 
 # --- chronyc sources/tracking parsers + formatters (timing.py) -----------
 #
@@ -875,7 +877,8 @@ def enumerate_timing_consumer_units(
             # between '@' and '.service'.  Non-templated → empty.
             instance = ""
             if '@' in unit_name:
-                instance = unit_name.split('@', 1)[1].rsplit('.', 1)[0]
+                instance = unescape_systemd_instance(
+                    unit_name.split('@', 1)[1].rsplit('.', 1)[0])
             units.append(TimingConsumerUnit(
                 client=client, instance=instance, unit=unit_name,
             ))
@@ -984,7 +987,7 @@ def render_annotation_quality_body(
             if u.client != last_client:
                 lines.append(f"  [cyan]{u.client}[/]")
                 last_client = u.client
-            label = u.instance or "(default)"
+            label = display_reporter_id(u.instance) if u.instance else "(default)"
             lines.append(
                 f"    {label:<20s}  [{tcol}]{tier}[/]"
                 f"   σ={sigma_str}   [{verdict_colour}]{verdict_label}[/]"
