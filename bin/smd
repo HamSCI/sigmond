@@ -20011,6 +20011,34 @@ def _format_superdarn_record(rec: dict) -> str:
             f'n={n:<3} beam={beam_str:<3} SNR={snr:+5.1f} dB')
 
 
+def _superdarn_instance_dir(raw, root=None):
+    """A typed ``--instance`` -> (instance, data dir) under the spool root.
+
+    The spool directory is named for the systemd instance, the reporter id
+    in storage form (AC0G=B4), so any spelling the operator types
+    (AC0G/B4, lower case) goes through parse_user_reporter_id first.  One
+    fallback, as in _watch_instance: when the text is no reporter id, or
+    no directory exists for the reporter id, and a directory named exactly
+    as typed (unescaped) exists, use that and print the migrate hint.
+    Raises InvalidReporterId (a ValueError) when the text names neither.
+    """
+    root = Path(root or '/var/lib/superdarn-sounder')
+    exact = _unescape_instance(raw.strip())
+    can_be_legacy = bool(exact) and '/' not in exact
+    try:
+        rid = _parse_reporter_id(raw)
+    except ValueError:
+        if can_be_legacy and (root / exact).is_dir():
+            _warn(_legacy_hint(exact))
+            return exact, root / exact
+        raise
+    if (can_be_legacy and exact != rid and not (root / rid).is_dir()
+            and (root / exact).is_dir()):
+        _warn(_legacy_hint(exact))
+        return exact, root / exact
+    return rid, root / rid
+
+
 def cmd_superdarn_watch(args) -> int:
     """Live tail of superdarn-sounder's passive SuperDARN detections.
 
@@ -20033,6 +20061,13 @@ def cmd_superdarn_watch(args) -> int:
     resets the cursor against the new day's file (codar-watch pattern).
     """
     instance = getattr(args, 'instance', None)
+    data_dir = None
+    if instance is not None:
+        try:
+            instance, data_dir = _superdarn_instance_dir(instance)
+        except ValueError as exc:
+            _err(f'superdarn-watch: --instance: {exc}')
+            return 1
     if instance is None:
         try:
             r = subprocess.run(
@@ -20063,13 +20098,14 @@ def cmd_superdarn_watch(args) -> int:
                      'recorded yet?')
                 return 1
             instance = candidates[0].name
-            _warn(f'superdarn-sounder@{instance} not active — tailing '
+            _warn(f'superdarn-sounder@{_display_rid(instance)} not active — tailing '
                   f'data dir anyway (records will only update once '
                   f'the service starts)')
         else:
             unit = lines[0].split()[0]
             try:
-                instance = unit.split('@', 1)[1].rsplit('.', 1)[0]
+                instance = _unescape_instance(
+                    unit.split('@', 1)[1].rsplit('.', 1)[0])
             except IndexError:
                 _err(f'unexpected unit name: {unit}')
                 return 1
@@ -20079,7 +20115,8 @@ def cmd_superdarn_watch(args) -> int:
     # (the hf-tec scheme).  So the instance name IS the data-dir key; a legacy
     # single-instance host names the service after its radiod status, which is
     # both the instance and the spool key, so this is correct there too.
-    data_dir = Path(f'/var/lib/superdarn-sounder/{instance}')
+    if data_dir is None:
+        data_dir = Path(f'/var/lib/superdarn-sounder/{instance}')
     if not data_dir.is_dir():
         _err(f'no data directory at {data_dir} — wrong instance?')
         return 1
@@ -20094,7 +20131,7 @@ def cmd_superdarn_watch(args) -> int:
 
     WIN_SEC = 15.0  # a quarter of the ~60 s UT-locked scan period
 
-    _heading(f'SuperDARN passive detections ({instance})')
+    _heading(f'SuperDARN passive detections ({_display_rid(instance)})')
     _info('   stage: decoder (superdarn-sounder) → JSONL spool (pre-SQLite)')
     _info(f'   ▸ data: {data_dir}')
     _info(f'   ▸ every {int(WIN_SEC)} s — per-window rollup by radar')

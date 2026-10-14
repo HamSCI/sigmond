@@ -78,7 +78,14 @@ class WatchInstanceArgTests(unittest.TestCase):
         self.assertEqual(got, ("bee1-status.local", "psk-recorder@bee1-status.local.service"))
         self.assertIn("legacy instance name bee1-status.local", said)
 
-    def test_without_a_legacy_unit_the_reporter_unit_wins(self):
+    def test_the_reporter_unit_wins_over_a_legacy_unit_when_both_exist(self):
+        self.known = {"wspr-recorder@MY-RX888.service",
+                      "wspr-recorder@my-rx888.service"}
+        got, said = self._watch("my-rx888", "wspr-recorder")
+        self.assertEqual(got, ("MY-RX888", "wspr-recorder@MY-RX888.service"))
+        self.assertEqual(said, "")
+
+    def test_when_no_unit_exists_the_reporter_unit_is_named(self):
         got, said = self._watch("my-rx888", "wspr-recorder")
         self.assertEqual(got, ("MY-RX888", "wspr-recorder@MY-RX888.service"))
         self.assertEqual(said, "")
@@ -95,6 +102,47 @@ class WatchInstanceArgTests(unittest.TestCase):
         self.assertFalse(hasattr(smd, "_systemd_escape_reporter"))
         self.assertFalse(hasattr(smd, "_display_reporter"))
         self.assertFalse(hasattr(smd, "_parse_instance_arg"))
+
+
+class SuperdarnInstanceDirTests(unittest.TestCase):
+    """superdarn-watch's spool directory is named for the storage form."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def _dir(self, text):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(err):
+            got = smd._superdarn_instance_dir(text, self.root)
+        return got, err.getvalue()
+
+    def test_every_spelling_reaches_the_storage_form_directory(self):
+        (self.root / "AC0G=B4").mkdir()
+        for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4", "ac0g/b4"):
+            with self.subTest(text=text):
+                got, said = self._dir(text)
+                self.assertEqual(got, ("AC0G=B4", self.root / "AC0G=B4"))
+                self.assertNotIn("legacy", said)
+
+    def test_a_legacy_directory_named_as_typed_is_reached_with_a_hint(self):
+        (self.root / "my-rx888").mkdir()
+        got, said = self._dir("my-rx888")
+        self.assertEqual(got, ("my-rx888", self.root / "my-rx888"))
+        self.assertIn("legacy instance name my-rx888", said)
+
+    def test_the_reporter_directory_wins_when_both_exist(self):
+        (self.root / "my-rx888").mkdir()
+        (self.root / "MY-RX888").mkdir()
+        got, said = self._dir("my-rx888")
+        self.assertEqual(got, ("MY-RX888", self.root / "MY-RX888"))
+        self.assertNotIn("legacy", said)
+
+    def test_junk_is_refused(self):
+        with self.assertRaises(ValueError):
+            smd._superdarn_instance_dir("AC0G/", self.root)
 
 
 class WatchCommandUnitTests(unittest.TestCase):
