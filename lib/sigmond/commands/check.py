@@ -499,6 +499,92 @@ def meteor_line(env: Env) -> Line:
 
 
 # ---------------------------------------------------------------------------
+# Magnetometer
+# ---------------------------------------------------------------------------
+
+MAG_DIR = Path('/var/lib/mag-recorder')
+MAG_DEVICE = '/dev/ttyMAG0'
+MAG_SAMPLES = 60
+MAG_FRESH_S = 10
+MAG_YOUNG_S = 60
+MAG_TAIL_BYTES = 64 * 1024
+MAG_FIX = f'{FIX}sudo systemctl restart mag-recorder'
+
+
+def _utc_day(t: float, days_back: int = 0) -> str:
+    return datetime.fromtimestamp(t - days_back * 86400, tz=timezone.utc).strftime('%Y-%m-%d')
+
+
+def _sample_time(sample: dict) -> Optional[float]:
+    try:
+        return datetime.fromisoformat(str(sample['ts']).replace('Z', '+00:00')).timestamp()
+    except (KeyError, ValueError):
+        return None
+
+
+def last_mag_samples(reader, mag_dir: Path, now: float, n: int = MAG_SAMPLES) -> List[dict]:
+    """The newest `n` samples, oldest first.  Reads yesterday's file too when
+    today's holds fewer (just after 00:00 UTC).  A line that does not parse
+    (the half-written last line) is skipped."""
+    samples: List[dict] = []
+    for back in (0, 1):
+        text = reader.tail(mag_dir / f'samples-{_utc_day(now, back)}.jsonl', MAG_TAIL_BYTES)
+        got = []
+        for line in (text or '').splitlines():
+            try:
+                s = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(s, dict) and _sample_time(s) is not None:
+                got.append(s)
+        samples = got + samples
+        if len(samples) >= n:
+            break
+    return samples[-n:]
+
+
+def mag_frozen(samples: Sequence[dict]) -> Optional[str]:
+    """Why the last 60 samples look frozen (spec §4.1), or None."""
+    if len(samples) < MAG_SAMPLES:
+        return None
+    try:
+        rts = [float(s['rt']) for s in samples]
+        axes = {k: {float(s[k]) for s in samples} for k in ('x', 'y', 'z')}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if all(rt == 0.0 for rt in rts):
+        return f'frozen: 0.00 C, no change in {MAG_SAMPLES} s'
+    if all(len(v) == 1 for v in axes.values()):
+        return f'frozen: x, y and z did not change in {MAG_SAMPLES} s'
+    return None
+
+
+def mag_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -> Line:
+    label = 'magnetometer'
+    if not env.installed('mag-recorder'):
+        return Line(ABSENT, label, 'not on this station')
+    svc = env.service('mag-recorder.service')
+    if svc.enabled and not env.exists(device):
+        return Line(FAIL, label, f'no magnetometer adapter at {device}.  Check its USB cable.  '
+                                 f'{MAG_FIX}')
+    bad = service_problem(label, svc, 'mag-recorder')
+    if bad:
+        return bad
+    samples = last_mag_samples(env.reader, mag_dir, env.now)
+    newest = _sample_time(samples[-1]) if samples else None
+    if newest is None or env.now - newest > MAG_FRESH_S:
+        if is_young(svc, MAG_YOUNG_S):
+            return Line(WAIT, label, 'mag-recorder just started; its first samples come '
+                                     'within a minute')
+        age = 'no sample today' if newest is None else f'no sample for {int(env.now - newest)} s'
+        return Line(FAIL, label, f'{age}.  {MAG_FIX}')
+    why = mag_frozen(samples)
+    if why:
+        return Line(FAIL, label, f'{why}.  {MAG_FIX}')
+    return Line(OK, label, f"samples arriving, {float(samples[-1]['rt']):.1f} C")
+
+
+# ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
 # not apply here at all.  Later tasks add their entries in place.
@@ -507,5 +593,6 @@ def meteor_line(env: Env) -> Line:
 CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('PSK', psk_line),
     ('WSPR', wspr_line),
+    ('magnetometer', mag_line),
     ('meteor scatter', meteor_line),
 ]
