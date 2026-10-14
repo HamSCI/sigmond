@@ -40,12 +40,34 @@ class ServiceStateTests(unittest.TestCase):
                        (['systemctl', 'show'], _cp(show))])
         return check.service_state(pattern, run=run, monotonic=lambda: mono), run
 
-    def test_age_comes_from_the_oldest_active_instance(self):
+    def test_age_comes_from_the_youngest_active_instance(self):
         listing = ('psk-recorder@AC0G\\x3dB4.service loaded active running psk\n'
                    'psk-recorder@AC0G\\x3dB5.service loaded active running psk\n')
         svc, run = self._state(listing, SHOW_ACTIVE)
-        self.assertEqual(svc, check.Service('active', 900.0, True))
+        self.assertEqual(svc, check.Service('active', 600.0, True))  # the younger instance
         self.assertIn('ActiveEnterTimestampMonotonic', run.calls[1])
+
+    def test_one_failed_instance_fails_the_glob(self):
+        show = (SHOW_ACTIVE.split('\n\n')[0] + '\n\n' +
+                'Id=psk-recorder@AC0G\\x3dB5.service\nActiveState=failed\nLoadState=loaded\n'
+                'UnitFileState=enabled\nActiveEnterTimestampMonotonic=0\n')
+        svc, _ = self._state('psk-recorder@a.service loaded active running x\n', show)
+        self.assertEqual(svc.state, 'failed')
+
+    def test_auto_restart_reads_failed_and_restarting(self):
+        show = ('Id=x.service\nActiveState=activating\nSubState=auto-restart\nLoadState=loaded\n'
+                'UnitFileState=enabled\nInactiveExitTimestampMonotonic=990000000\n')
+        svc, _ = self._state('x.service loaded activating auto-restart x\n', show, pattern='x.service')
+        self.assertEqual((svc.state, svc.restarting), ('failed', True))
+        line = check.service_problem('PSK', svc, 'x')
+        self.assertIn('keeps restarting', line.text)
+
+    def test_activating_age_comes_from_inactive_exit(self):
+        show = ('Id=x.service\nActiveState=activating\nSubState=start\nLoadState=loaded\n'
+                'UnitFileState=enabled\nInactiveExitTimestampMonotonic=400000000\n')
+        svc, _ = self._state('x.service loaded activating start x\n', show, pattern='x.service')
+        self.assertEqual((svc.state, svc.age_s), ('activating', 600.0))
+        self.assertFalse(check.is_young(svc, 60))
 
     def test_no_unit_means_absent(self):
         svc, _ = self._state('', '')
@@ -80,6 +102,10 @@ class YoungTests(unittest.TestCase):
     def test_starting_counts_as_young_and_unknown_age_does_not(self):
         self.assertTrue(check.is_young(check.Service('activating', None), 60))
         self.assertFalse(check.is_young(check.Service('active', None), 60))
+
+    def test_activating_past_its_window_is_not_young(self):
+        self.assertFalse(check.is_young(check.Service('activating', 61.0), 60))
+        self.assertTrue(check.is_young(check.Service('activating', 5.0), 60))
 
     def test_a_stopped_service_fails_with_a_fix(self):
         line = check.service_problem('PSK', check.Service('failed', None), 'psk-recorder')
@@ -147,6 +173,23 @@ class JournalTests(unittest.TestCase):
         run = FakeRun([(['sudo', '-n', 'journalctl'], _cp('from sudo\n'))])
         out = check.read_journal(['x.service'], 5, run=run, euid=lambda: 1000, groups=set)
         self.assertEqual(out, ['from sudo'])
+
+    def test_journalctl_runs_with_the_c_locale(self):
+        seen = {}
+
+        def run(argv, **kw):
+            seen.update(kw)
+            return _cp('')
+        check.read_journal(['x.service'], 5, run=run, euid=lambda: 0)
+        self.assertEqual(seen['env']['LC_ALL'], 'C')
+
+    def test_primary_group_alone_counts(self):
+        import grp
+        from unittest import mock
+        with mock.patch.object(os, 'getgroups', return_value=[]), \
+             mock.patch.object(os, 'getgid', return_value=0), \
+             mock.patch.object(grp, 'getgrgid', return_value=mock.Mock(gr_name='adm')):
+            self.assertIn('adm', check._my_groups())
 
     def test_journal_refused_raises_unreadable(self):
         run = FakeRun([(['sudo'], _cp(returncode=1, stderr='sudo: a password is required'))])

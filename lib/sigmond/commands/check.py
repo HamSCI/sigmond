@@ -173,6 +173,7 @@ class Service:
     state: str                  # active | activating | failed | inactive | absent
     age_s: Optional[float]      # since the oldest active unit started; None if unknown
     enabled: bool = False
+    restarting: bool = False    # state is failed because systemd keeps restarting it
 
 
 def service_state(pattern: str, run=subprocess.run, monotonic=time.monotonic) -> Service:
@@ -192,7 +193,8 @@ def service_state(pattern: str, run=subprocess.run, monotonic=time.monotonic) ->
     if not units:
         return Service('absent', None, False)
     show = run(['systemctl', 'show', '-p', 'Id', '-p', 'ActiveState', '-p', 'LoadState',
-                '-p', 'UnitFileState', '-p', 'ActiveEnterTimestampMonotonic', *sorted(units)],
+                '-p', 'UnitFileState', '-p', 'SubState', '-p', 'ActiveEnterTimestampMonotonic',
+                '-p', 'InactiveExitTimestampMonotonic', *sorted(units)],
                capture_output=True, text=True, errors='replace', timeout=15, check=False)
     blocks, cur = [], {}
     for ln in (show.stdout or '').splitlines() + ['']:
@@ -206,22 +208,26 @@ def service_state(pattern: str, run=subprocess.run, monotonic=time.monotonic) ->
     blocks = [b for b in blocks if b.get('LoadState') not in ('not-found', None)]
     if not blocks:
         return Service('absent', None, False)
-    states = [b.get('ActiveState', '') for b in blocks]
     enabled = any(b.get('UnitFileState') in ('enabled', 'enabled-runtime', 'static', 'indirect')
                   for b in blocks)
-    starts = []
-    for b in blocks:
-        if b.get('ActiveState') == 'active':
-            try:
-                us = int(b.get('ActiveEnterTimestampMonotonic') or 0)
-            except ValueError:
-                us = 0
-            if us > 0:
-                starts.append(us / 1e6)
-    for state in ('active', 'activating', 'failed'):
-        if state in states:
-            age = (monotonic() - min(starts)) if (state == 'active' and starts) else None
-            return Service(state, age, enabled)
+
+    def stamp(b, key):
+        try:
+            us = int(b.get(key) or 0)
+        except ValueError:
+            us = 0
+        return us / 1e6 if us > 0 else None
+
+    restarting = [b for b in blocks if b.get('SubState') == 'auto-restart']
+    if restarting or any(b.get('ActiveState') == 'failed' for b in blocks):
+        return Service('failed', None, enabled, bool(restarting))
+    # The youngest instance sets the age, so a fresh restart still reads young.
+    for state, key in (('active', 'ActiveEnterTimestampMonotonic'),
+                       ('activating', 'InactiveExitTimestampMonotonic')):
+        mine = [b for b in blocks if b.get('ActiveState') == state]
+        if mine:
+            starts = [t for t in (stamp(b, key) for b in mine) if t is not None]
+            return Service(state, (monotonic() - max(starts)) if starts else None, enabled)
     return Service('inactive', None, enabled)
 
 
@@ -298,7 +304,7 @@ JOURNAL_GROUPS = ('systemd-journal', 'adm', 'wheel')
 def _my_groups() -> set:
     import grp
     names = set()
-    for gid in os.getgroups():
+    for gid in {os.getgid(), *os.getgroups()}:
         try:
             names.add(grp.getgrgid(gid).gr_name)
         except KeyError:
@@ -317,7 +323,8 @@ def read_journal(units: Sequence[str], minutes: int, *, run=subprocess.run,
     if euid() != 0 and not (set(JOURNAL_GROUPS) & groups()):
         argv = ['sudo', '-n', *argv]
     try:
-        r = run(argv, capture_output=True, text=True, errors='replace', timeout=20, check=False)
+        r = run(argv, capture_output=True, text=True, errors='replace', timeout=20,
+                check=False, env={**os.environ, 'LC_ALL': 'C'})
     except (OSError, subprocess.SubprocessError):
         raise Unreadable('the journal')
     if r.returncode != 0:
@@ -334,13 +341,15 @@ def service_problem(label: str, svc: Service, unit: str) -> Optional[Line]:
         return None
     if svc.state == 'absent':
         return Line(FAIL, label, f'{unit} is installed but has no service.  Tell the fleet admin.')
+    if svc.restarting:
+        return Line(FAIL, label, f'{unit} is failed: it keeps restarting.  {FIX}smd start {unit}')
     return Line(FAIL, label, f'{unit} is {svc.state}.  {FIX}smd start {unit}')
 
 
 def is_young(svc: Service, window_s: float) -> bool:
-    """True while a service has run for less than `window_s`.  Starting
-    counts as young; an unknown age does not, so it can never hide a fault."""
-    if svc.state == 'activating':
+    """True while a service has run for less than `window_s`.  A start
+    of unknown age counts as young; an unknown age otherwise does not, so it can never hide a fault."""
+    if svc.state == 'activating' and svc.age_s is None:
         return True
     return svc.age_s is not None and svc.age_s < window_s
 
