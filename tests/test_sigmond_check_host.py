@@ -42,7 +42,9 @@ NAT = "\n".join(["-P PREROUTING ACCEPT"] + [
     for p in (8000, 8081, 8082, 8765)])
 
 STUBS = {
-    "sigmond-vm": 'cat "$SCENE/vm.out"; exit "$(cat "$SCENE/vm.rc")"',
+    "sigmond-vm": ('printf %s "${SIGMOND_VM_BATCH:-unset}" > "$SCENE/vm.batch"\n'
+                   'readlink /proc/self/fd/0 > "$SCENE/vm.stdin"\n'
+                   'cat "$SCENE/vm.out"; exit "$(cat "$SCENE/vm.rc")"'),
     "ip": 'case "$1" in -4) cat "$SCENE/ip4" ;; -6) cat "$SCENE/ip6" ;; esac',
     "iptables": 'cat "$SCENE/nat"; exit "$(cat "$SCENE/nat.rc")"',
     "sysctl": 'cat "$SCENE/fwd"',
@@ -76,7 +78,10 @@ def scene(tmp_path, vm=VM_LINES, vm_rc=1, ip4=V4, ip6="", nat=NAT, nat_rc=0, fwd
 def run(tmp_path, **kw):
     s, bin_, script = scene(tmp_path, **kw)
     env = dict(os.environ, PATH=f"{bin_}:/usr/bin:/bin", SCENE=str(s), LC_ALL="C.UTF-8")
-    r = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, timeout=60)
+    # stdin a pipe that stays open, as the installer's console would: the VM
+    # call must not be able to read it.
+    r = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, timeout=60,
+                       input="")
     return r.returncode, r.stdout.splitlines()
 
 
@@ -239,3 +244,55 @@ def test_ipv6_falls_back_to_a_temporary_address(tmp_path):
     code, out = run(tmp_path, vm=PSK_OK, vm_rc=0, ip6=ip6,
                     curl=VM_200 + [("http://[2601:db8::abcd]:8081/", "200")], relay=True)
     assert "IPv6 http://[2601:db8::abcd]:8081" in out[1] and "no IPv6 here" not in out[1]
+
+
+# -- final review I4: never wait at an ssh password prompt -------------------
+SIGMOND_VM = pm_align.extract_heredocs((PROXMOX / "sigmond-wizard.sh").read_text())["/usr/local/bin/sigmond-vm"]
+
+
+def test_sigmond_check_asks_sigmond_vm_for_batch_mode(tmp_path):
+    run(tmp_path, vm=PSK_OK, vm_rc=0, curl=VM_200)
+    assert (tmp_path / "scene" / "vm.batch").read_text() == "1"
+
+
+def _sigmond_vm(tmp_path, batch):
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    stubs = {
+        "qm": ('case "$1" in status) echo "status: running" ;;\n'
+               '  agent) echo \'[{"ip-address" : "10.99.0.2"}]\' ;; esac'),
+        "ssh": 'printf "%s\\n" "$@" > "$ARGS"',
+    }
+    for name, body in stubs.items():
+        (bin_ / name).write_text("#!/bin/bash\n" + body + "\n")
+        (bin_ / name).chmod(0o755)
+    script = tmp_path / "sigmond-vm"
+    script.write_text(SIGMOND_VM)
+    args = tmp_path / "ssh.args"
+    env = dict(os.environ, PATH=f"{bin_}:/usr/bin:/bin", SIGMOND_VMID="100", ARGS=str(args))
+    env.pop("SIGMOND_VM_BATCH", None)
+    if batch:
+        env["SIGMOND_VM_BATCH"] = "1"
+    r = subprocess.run(["bash", str(script), "smd", "check"], capture_output=True, text=True,
+                       env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return args.read_text().splitlines()
+
+
+def test_sigmond_vm_batch_mode_never_prompts(tmp_path):
+    argv = _sigmond_vm(tmp_path, batch=True)
+    host = argv.index("sigmond@10.99.0.2")
+    opts = argv[:host]
+    assert "BatchMode=yes" in opts and "ConnectTimeout=5" in opts
+    assert argv[host + 1:] == ["smd", "check"]
+
+
+def test_sigmond_vm_stays_interactive_by_default(tmp_path):
+    argv = _sigmond_vm(tmp_path, batch=False)
+    assert "BatchMode=yes" not in argv
+    assert argv[-3:] == ["sigmond@10.99.0.2", "smd", "check"]
+
+
+def test_sigmond_check_gives_the_vm_no_console_to_read(tmp_path):
+    run(tmp_path, vm=PSK_OK, vm_rc=0, curl=VM_200)
+    assert (tmp_path / "scene" / "vm.stdin").read_text().strip() == "/dev/null"

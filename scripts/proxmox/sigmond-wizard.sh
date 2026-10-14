@@ -3333,9 +3333,14 @@ if [ -z "$IP" ]; then
     echo "sigmond-vm: the guest agent reports no IPv4 yet and ARP has no entry — check the VM's network" >&2; exit 1
 fi
 if [ "${1:-}" = "--ip" ]; then echo "$IP"; exit 0; fi
+# SIGMOND_VM_BATCH=1 (sigmond-check sets it): never stop at a password
+# prompt.  A refused key then fails at once with ssh's status 255, where a
+# prompt under `timeout` would hold the console for the whole minute.
+BATCH=()
+[ "${SIGMOND_VM_BATCH:-}" = 1 ] && BATCH=(-o BatchMode=yes -o ConnectTimeout=5)
 # dedicated known_hosts: sigmond-setup clears it when it regenerates the
 # VM's host keys, so operators never see a MITM warning for their own VM
-exec ssh -o StrictHostKeyChecking=accept-new \
+exec ssh "${BATCH[@]}" -o StrictHostKeyChecking=accept-new \
          -o UserKnownHostsFile=/etc/sigmond-appliance/vm-known_hosts \
          sigmond@"$IP" "$@"
 VMEOF
@@ -3382,7 +3387,9 @@ ascii(){ printf '%s' "$1" | LC_ALL=C tr -c ' -~' '?'; }   # text from elsewhere:
 
 # -- the VM's lines ----------------------------------------------------------
 MAG_PAGE=0
-VM_OUT=$(timeout "$VM_TIMEOUT" sigmond-vm smd check --no-verdict 2>&1); VM_RC=$?
+# Batch mode and no stdin: a key the VM refuses fails at once (status 255)
+# instead of waiting at a password prompt nobody can answer.
+VM_OUT=$(SIGMOND_VM_BATCH=1 timeout "$VM_TIMEOUT" sigmond-vm smd check --no-verdict </dev/null 2>&1); VM_RC=$?
 if printf '%s\n' "$VM_OUT" | grep -qE '^ (ok  |wait|FAIL|--  )  '; then
     KEEP=0
     while IFS= read -r l; do
