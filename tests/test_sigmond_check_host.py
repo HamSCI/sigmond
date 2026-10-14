@@ -184,3 +184,58 @@ def test_everything_it_prints_is_ascii(tmp_path):
     assert out[1] == " FAIL  magnetometer   frozen: 0.00 ??C, no change in 60 s."
     assert any(line.startswith(" ok    receiver page") for line in out), out
     assert sorted({c for line in out for c in line if ord(c) >= 0x80}) == [], out
+
+
+# -- fix round 1 -------------------------------------------------------------
+TWO_LINES = (" ok    PSK            fine\n"
+             " ok    GRAPE          fine\n")
+
+
+@pytest.mark.parametrize("rc, why", [(255, "ssh to the VM failed"), (124, "timed out")])
+def test_partial_vm_output_cannot_pass(tmp_path, rc, why):
+    code, out = run(tmp_path, vm=TWO_LINES, vm_rc=rc, curl=VM_200)
+    assert out[:2] == [" ok    PSK            fine", " ok    GRAPE          fine"]
+    assert out[2].startswith(" FAIL  decoder VM     did not finish (")
+    assert why in out[2]
+    assert out[-1].startswith("FAIL")
+    assert code == 1
+
+
+def test_old_vm_without_smd_check(tmp_path):
+    err = "smd: error: argument command: invalid choice: 'check'\n"
+    code, out = run(tmp_path, vm=err, vm_rc=2, curl=VM_200)
+    assert out[0] == " FAIL  decoder VM     answered, but has no smd check (update the VM)"
+    assert code == 1
+
+
+@pytest.mark.parametrize("rc", [127])
+def test_iptables_missing(tmp_path, rc):
+    code, out = run(tmp_path, vm=PSK_OK, vm_rc=0, nat="", nat_rc=rc, curl=VM_200)
+    assert "does not answer: iptables not found" in out[1]
+    assert "run sigmond-check as root" not in out[1]
+    assert code == 1
+
+
+def _v6(*addrs):
+    return "\n".join(f"2: vmbr0    inet6 {a}/64 scope global {flags} \\       valid_lft 1sec"
+                     for a, flags in addrs)
+
+
+def test_ipv6_prefers_gua_over_ula(tmp_path):
+    ip6 = _v6(("fd00::7", "dynamic mngtmpaddr"), ("2601:db8::50", "dynamic mngtmpaddr"))
+    code, out = run(tmp_path, vm=PSK_OK, vm_rc=0, ip6=ip6, curl=VM_200 + V6_200, relay=True)
+    assert "IPv6 http://[2601:db8::50]:8081" in out[1]
+
+
+def test_ipv6_takes_a_ula_when_it_is_all_there_is(tmp_path):
+    ip6 = _v6(("fd00::7", "dynamic mngtmpaddr"))
+    code, out = run(tmp_path, vm=PSK_OK, vm_rc=0, ip6=ip6,
+                    curl=VM_200 + [("http://[fd00::7]:8081/", "200")], relay=True)
+    assert "IPv6 http://[fd00::7]:8081" in out[1] and "no IPv6 here" not in out[1]
+
+
+def test_ipv6_falls_back_to_a_temporary_address(tmp_path):
+    ip6 = _v6(("2601:db8::abcd", "temporary dynamic"))
+    code, out = run(tmp_path, vm=PSK_OK, vm_rc=0, ip6=ip6,
+                    curl=VM_200 + [("http://[2601:db8::abcd]:8081/", "200")], relay=True)
+    assert "IPv6 http://[2601:db8::abcd]:8081" in out[1] and "no IPv6 here" not in out[1]

@@ -3382,7 +3382,7 @@ ascii(){ printf '%s' "$1" | LC_ALL=C tr -c ' -~' '?'; }   # text from elsewhere:
 
 # -- the VM's lines ----------------------------------------------------------
 MAG_PAGE=0
-VM_OUT=$(timeout "$VM_TIMEOUT" sigmond-vm smd check --no-verdict 2>&1)
+VM_OUT=$(timeout "$VM_TIMEOUT" sigmond-vm smd check --no-verdict 2>&1); VM_RC=$?
 if printf '%s\n' "$VM_OUT" | grep -qE '^ (ok  |wait|FAIL|--  )  '; then
     KEEP=0
     while IFS= read -r l; do
@@ -3402,15 +3402,32 @@ if printf '%s\n' "$VM_OUT" | grep -qE '^ (ok  |wait|FAIL|--  )  '; then
         l=${l//run: /run: sigmond-vm }
         LINES+=("$(ascii "$l")")
     done <<<"$VM_OUT"
+    # Output that stopped partway must not pass: 124 timeout, 255 ssh, 126/127 not runnable.
+    case "$VM_RC" in
+        124) add "$FAILM" "decoder VM" "did not finish (timed out after $VM_TIMEOUT s)" ;;
+        255) add "$FAILM" "decoder VM" "did not finish (ssh to the VM failed)" ;;
+        126|127) add "$FAILM" "decoder VM" "did not finish (sigmond-vm could not run, status $VM_RC)" ;;
+    esac
 else
     WHY=$(printf '%s\n' "$VM_OUT" | grep -v '^[[:space:]]*$' | tail -1)
-    add "$FAILM" "decoder VM" "does not answer: $(ascii "${WHY:-nothing within $VM_TIMEOUT s}")"
+    case "$VM_RC" in 124|255|126|127) WHY_OWN=1 ;; *) WHY_OWN=0 ;; esac
+    if [ -n "$WHY" ] && [ "$WHY_OWN" = 0 ] && [ "${WHY#sigmond-vm:}" = "$WHY" ]; then
+        add "$FAILM" "decoder VM" "answered, but has no smd check (update the VM)"
+    else
+        add "$FAILM" "decoder VM" "does not answer: $(ascii "${WHY:-nothing within $VM_TIMEOUT s}")"
+    fi
 fi
 
 # -- the page lines, through this host's addresses ---------------------------
 V4=$(ip -4 -o addr show dev "$BRIDGE" scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}')
+# IPv6: a non-temporary non-ULA address first, then any non-temporary one (a
+# ULA is reachable from the LAN), then a temporary one.
 V6=$(ip -6 -o addr show dev "$BRIDGE" scope global 2>/dev/null \
-     | grep -v -e temporary -e deprecated -e tentative | awk '{split($4, a, "/"); print a[1]; exit}')
+     | grep -v -e deprecated -e tentative | awk '
+        { split($4, a, "/"); tmp = ($0 ~ /temporary/); ula = (tolower(a[1]) ~ /^f[cd]/)
+          r = tmp ? 3 : (ula ? 2 : 1)
+          if (best == 0 || r < best) { best = r; addr = a[1] } }
+        END { if (best) print addr }')
 NAT=$(iptables -t nat -S PREROUTING 2>/dev/null); NAT_RC=$?
 FWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
 
@@ -3427,7 +3444,9 @@ page(){   # label port
     if [ -n "$V4" ]; then
         part="IPv4 http://$V4:$port"
         to=$(dnat_to "$port")
-        if [ "$NAT_RC" -ne 0 ]; then
+        if [ "$NAT_RC" = 127 ]; then
+            part="$part does not answer: iptables not found"; mark="$FAILM"
+        elif [ "$NAT_RC" -ne 0 ]; then
             part="$part does not answer: cannot read the relay rules (run sigmond-check as root)"; mark="$FAILM"
         elif [ -z "$to" ]; then
             part="$part does not answer: no relay rule for port $port"; mark="$FAILM"
