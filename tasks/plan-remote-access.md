@@ -176,6 +176,69 @@ No phase builds a time limit; add one later if owners ask for it.
 A reflash of AC0G-ND with the v3.71 image proves phases 1 to 3 and 5 on hardware. AC0G-B4 and AI6VN receive
 the host's half through `pm-align` and pair with `sigmond-setup --pair-vm`.
 
+## v3.71 hardware proof
+
+Michael reflashed AC0G-B4 with `sigmond-appliance-v3.71-20261011-release.img` (appliance d243d81, sigmond
+d504c56, sha256 3000f44c…5947320) on 2026-10-13 at about 15:30Z and installed it by `INSTALL.md`. The run
+followed plan Task 12 Step 8. All times UTC.
+
+The install met one fault outside this plan. The RX888 came up with error -71 and no SuperSpeed link. A
+power cycle of its hub port did not clear it; a replug at the card did, at 16:22Z. The bring-up then re-ran
+by itself and finished at 16:30:27Z.
+
+1. **The wizard asked nothing about remote access.** Michael confirmed that it asked no remote-access
+   question. He did not read back the printed `smd remote` commands or the text about what registering
+   sends; that part stays unconfirmed by eye.
+2. **The closing summary read `RAC: on` with 6 of 6 channels.** On the host, `pm-align --status` printed the
+   `pairing (/etc/sigmond-appliance/rac-pairing): paired <UTC>` line.
+3. **After a power cycle the panel still read on, 6 of 6** (Michael).
+4. **A login to the VM printed the banner's remote-access line.**
+5. **`smd remote status` answered `Remote access: on`, 6 of 6 channels, RAC 502 on gw2.wsprdaemon.org.**
+6. **Off from B4's own network, 13 October 17:38:46Z.** `smd remote off` in the VM answered off. The host's
+   `sigmond-rac-host` stopped. gw2 listed all six of B4's channels offline, and a connection to the VM's port
+   through gw2 met a refusal. The host's heartbeat carried a valid `rac` block, "off by the operator since
+   2026-10-13T17:38:46Z". The fleet board's `b4-pm` row first stayed silent, for two reasons older than this
+   plan: wd30 had never authorized the B4 host's heartbeat key, and `ops/fleet.toml` lacked
+   `heartbeat_station = "AC0G/B4-pm"` for that host. With both fixed (ops a4071a7 and the board's roster
+   deploy at 18:49:57Z), the row read `pm, remote access off by the operator`, VALID, with `off` in its `rac`
+   column. Michael did not read the panel's exact words at this step; at check 7 it read `RAC OFF`.
+7. **Power cycle while off, 14 October.** On again from the VM at 01:31:13Z (6 of 6, a login through gw2
+   worked), then off through the tunnel for check 9, then Michael power-cycled the whole station. The host came
+   up at 01:36:52Z and the VM at 01:37:23Z. Everything still read off: the panel (`RAC OFF`), `smd remote
+   status` ("The operator holds it off", still dated 01:31:53Z), the host's `sigmond-rac-host` inactive with
+   no journal line since boot, and a connection through gw2 refused.
+8. **On at the station console, 01:41:01Z.** The panel read `RAC restored`. `smd remote status` answered on,
+   6 of 6 channels; `sigmond-rac-host` ran; a login through gw2 reached `AC0G-B4`.
+9. **Off through the tunnel itself, 01:31:48Z.** From the devbox, through wd30 and gw2 port 36302, as
+   `hamsci` in the VM. The off took effect at 01:31:53Z and the tunnel closed the session that carried it
+   (`Connection to 10.112.0.2 closed by remote host`). Read over the LAN five seconds later: off, "The
+   operator holds it off", `sigmond-rac-host` inactive, and a new connection through gw2 refused.
+10. **The pairing re-asserted itself after the identity restore.** The restore replaced the host's sshd key
+   at 16:58:44Z. The pairing re-asserted itself at 16:58:51Z, seven seconds later, with nobody typing a
+   command. Nobody polled `smd remote status` inside those seven seconds, so a failure that short would have
+   gone unseen; it answered on right after. B4 needed neither `systemctl restart ssh` nor
+   `sigmond-setup --pair-vm`.
+11. **Journals with the uplink pulled, 14 October.** Michael unplugged the host's Ethernet at about
+   01:54:45Z (link down 01:54:09Z by the kernel's clock) and plugged it back in at 02:12:10Z, an outage of
+   eighteen minutes.
+   - `sigmond-rac-register` wrote no line at all: the registration stayed valid, so it had nothing to retry.
+   - The tunnel's own program, `frpc` under `sigmond-rac-host`, wrote two lines per attempt — "try to connect
+     to server" and "connect to server error: dial tcp: lookup gw2.wsprdaemon.org: i/o timeout" — once every
+     20 to 30 seconds: 114 lines in the eighteen minutes, about 380 an hour.
+   - At 02:00:02Z `sigmond-netfix` judged 192.168.1.244 stale on a port with no carrier and removed it from
+     `vmbr0`, then found no live port and stopped. When the cable came back at 02:12:10Z nothing restored the
+     address. netwatch's next pass ran netfix at 02:16:03Z, which retried DHCP on `vmbr0` and got
+     192.168.1.244 back. `frpc` logged in three seconds later, at 02:16:06Z, and all six channels started. The
+     station stayed unreachable for four minutes after the cable returned.
+   - The hour with the gateway reachable, 02:16:07Z to 03:16:07Z: `sigmond-rac-host` wrote 46 lines, every
+     one a request to frpc's local status API and its answer, 23 polls about two and a half minutes apart.
+     It logged no error and no reconnect, and the unit never restarted. `sigmond-rac-register` and
+     `sigmond-rac-pair` wrote nothing. At the end `smd remote status` still read on, 6 of 6 channels.
+
+Filed for v3.72 from this run: `frpc` logs every retry, so a long outage fills the journal; netfix removes
+the address on a lost carrier but does not restore it when the carrier returns, which leaves the host
+dark until netwatch's next pass; the hub power cycle cannot clear an RX888 that needs a replug.
+
 ## Found on the way, not part of this plan
 
 - `ops/bin/site-restore.sh b4` carries the repair for the very key whose loss stopped it reaching B4. A repair
