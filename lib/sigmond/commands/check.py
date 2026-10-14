@@ -566,12 +566,24 @@ def mag_frozen(samples: Sequence[dict]) -> Optional[str]:
     return None
 
 
+def has_mag_history(reader, mag_dir: Path) -> bool:
+    """True when mag-recorder ever wrote a samples-*.jsonl file here."""
+    return any(n.startswith('samples-') and n.endswith('.jsonl')
+               for n in (reader.listdir(mag_dir) or []))
+
+
 def mag_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -> Line:
     label = 'magnetometer'
     if not env.installed('mag-recorder'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('mag-recorder.service')
     if svc.enabled and not env.exists(device):
+        # Every dasi2 image installs and enables mag-recorder; on a station
+        # with no magnetometer it stays dormant (ConditionPathExists=/dev/ttyMAG0)
+        # and writes nothing.  Only an adapter that once delivered samples and
+        # has gone (the B4 hub swap, v3.72 #17) is a fault.
+        if not has_mag_history(env.reader, mag_dir):
+            return Line(ABSENT, label, 'no magnetometer on this station')
         return Line(FAIL, label, f'no magnetometer adapter at {device}.  Check its USB cable.  '
                                  f'{MAG_FIX}')
     bad = service_problem(label, svc, 'mag-recorder')

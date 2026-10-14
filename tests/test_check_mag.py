@@ -96,6 +96,22 @@ class MagTests(unittest.TestCase):
         self.assertEqual(line.text, f'no magnetometer adapter at {self.device}.  '
                                     f'Check its USB cable.  {FIX}')
 
+    def test_a_station_that_never_had_a_magnetometer_reads_absent(self):
+        # Every dasi2 image installs and enables mag-recorder; with no device
+        # its unit never starts (ConditionPathExists=/dev/ttyMAG0) and no
+        # samples file is ever written.
+        self.device.unlink()
+        line = self.line(service=lambda p: svc(state='inactive', age_s=None, enabled=True))
+        self.assertEqual(line, check.Line(ABSENT, 'magnetometer', 'no magnetometer on this station'))
+
+    def test_an_adapter_gone_after_samples_were_written_still_fails(self):
+        # The B4 hub swap (v3.72 #17): samples once came, the adapter is gone now.
+        self.device.unlink()
+        self.write(self.live(), day_t=NOW - 5 * 86400)
+        line = self.line(service=lambda p: svc(state='inactive', age_s=None, enabled=True))
+        self.assertEqual(line.mark, FAIL)
+        self.assertTrue(line.text.startswith('no magnetometer adapter at'))
+
     def test_a_disabled_service_without_its_adapter_reads_as_stopped(self):
         self.device.unlink()
         line = self.line(service=lambda p: svc(state='inactive', age_s=None, enabled=False))
