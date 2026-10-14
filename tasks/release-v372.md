@@ -26,6 +26,10 @@ when it grows past one flow, before code lands.  Update the Status column as ite
 
 | 17 | mag-recorder is skipped silently when its adapter is missing: `ConditionPathExists=/dev/ttyMAG0` leaves it `inactive`, not `failed`, so no alarm fires (B4 10-14, 2 h with no mag after a hub swap left the Pololu adapter unplugged).  The doctor and heartbeat should flag an enabled mag-recorder whose device is absent | mag-recorder, sigmond | open |
 
+| 18 | The LBE-142x GPSDO's PPS output comes up OFF on a new site (DASI-011 10-14: `pps_enabled` false; B4 true and in use).  gpsdo-monitor should turn it on at install, through a tested `set_1pps` (its write path is marked unverified on hardware), and `smd watch gpsdo` / the doctor should say when it is off | gpsdo-monitor, sigmond | open |
+| 19 | First-boot `unattended-upgrade` races the install's power-off: DASI-011's VM shut down 2 s into reconfiguring `grub-cloud-amd64` (20:17:24Z), dpkg stayed half-configured, and first-run bring-up refused to run, so radiod never started.  Hold the power-off until apt finishes, or have bring-up run `dpkg --configure -a` itself | appliance, sigmond | open |
+| 20 | Bring-up froze DASI-011's magnetometer: at 20:47:23Z, 1 s after `smd bringup dasi2` started, the Pololu adapter began failing every read and the samples froze (axes constant, `rt` junk), with no USB event; likely bring-up's device check talks to the adapter mag-usb already holds.  Confirm in code; never probe a held adapter | sigmond | open |
+
 Already on main, ships with no further work: Rob's uplink gate (sigmond de38f63).
 
 Moved out: the per-client sink switch (step 2a-ii, the key split) to v3.73; step 2b to v3.74.
