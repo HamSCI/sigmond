@@ -7,10 +7,14 @@
 each conversion happens only at the boundary, through one set of named helpers.
 
 **Architecture:** `sigmond/lib/sigmond/instance.py` gains the helpers (`systemd_escape`, `systemd_instance`,
-`unit_name`, `display_unit_name`, `parse_instance_arg`) and `display_reporter_id` learns to unescape.  A shared table,
-`tests/data/reporter_id_vectors.json`, pins what every copy of the rules must do.  The sigmond call sites then move
-onto the helpers, grouped by what the fix does: read systemd's names back in storage form (Task 2), build unit names
-through the helpers (Tasks 3-4), parse what an operator types (Task 5), and show people the display form (Tasks 6-7).
+`unit_name`, `display_unit_name`, `legacy_instance_hint`) and `display_reporter_id` learns to unescape.  Reporter ids
+are upper case only: every place a person's text names a reporter-keyed instance goes through the existing
+`parse_user_reporter_id` (unescape, upper-case, `/` → `=`, validate), with no guess based on case.  A host that still
+carries a legacy radiod-named unit or env file reaches it through one exact-name fallback that prints a migrate hint.
+A shared table, `tests/data/reporter_id_vectors.json`, pins what every copy of the rules must do.  The sigmond call
+sites then move onto the helpers, grouped by what the fix does: read systemd's names back in storage form (Task 2),
+build unit names through the helpers (Tasks 3-4), parse what an operator types (Task 5), and show people the display
+form (Tasks 6-7).
 A read-only `smd admin instance canonical` serves shell scripts (Task 8).  Each client (psk-recorder, meteor-scatter,
 wspr-recorder) carries a small `_reporter_id.py` copy and a byte-identical copy of the table (Tasks 9-12); the
 appliance asks smd instead of using `tr` and `systemd-escape` (Task 13); a sigmond test catches a drifted copy (Task
@@ -27,6 +31,8 @@ this plan made" below.
 **Status:** written 2026-10-14 against sigmond `973838b`, meteor-scatter `83213d0`, psk-recorder `8dfb64f`,
 wspr-recorder `65713b5` and sigmond-appliance `753a618`.  The planner re-read every cited line in those trees.
 "Verified anchors" below lists the ones that moved and the rows the inventory got wrong.
+Amended 2026-10-14 after Michael chose uppercase-only reporter ids (no case-based guess; a legacy exact-name
+fallback with a migrate hint).
 
 ## How this plan carries its code
 
@@ -36,7 +42,9 @@ passed after its change.  The sigmond full suite passed on the scratch copy with
 its 2 failures came from the scratch copy lacking `.gitignore`, and pass in the checkout).  The planner also ran the
 new tests of Tasks 2, 3 and 13 against the unchanged code and saw the failures this plan predicts.  These did not
 run: all of Task 10 (psk-recorder's venv carries no pytest), Task 11's unit-template edits, `UnitTemplateTests` and
-Branch B, and Task 14.
+Branch B, and Task 14.  After the amendment, the planner re-ran the changed code of Tasks 1, 2, 5, 6, 9 and 12 on
+the scratch copies: the sigmond full suite passed (4324 passed, the same 2 scratch-only failures), and so did
+meteor-scatter's three touched test files and wspr-recorder's new one.
 
 So treat each red run as a real check.  If a test fails for a reason its step does not name, stop and read before you
 change anything.  If an anchor quoted in a step no longer matches the tree, find where it went, make the same edit by
@@ -79,18 +87,24 @@ Every row the tasks below touch was read at the commits above.  Rows not listed 
 
 ## Decisions this plan made (spec ambiguities)
 
-1. **More helpers than the spec's two.**  Spec §3 adds `systemd_instance` and `unit_name`.  The plan adds three more,
-   because the call sites need them:
+1. **Reporter ids are upper case only, and three more helpers than the spec's two.**  Michael decided this on
+   2026-10-14.  Every place a person's text names a reporter-keyed instance (a watch command's `--instance`,
+   `smd config upload`, the sources verbs, `canonical`, the clients' env paths) uses `parse_user_reporter_id`:
+   unescape, upper-case, `/` → `=`, validate.  So `w1abc-5` always means `W1ABC-5`; nothing guesses from case.
+   Backward compatibility comes from one fallback, not from a guess.  The watch commands parse first; if no unit
+   exists for that reporter id but a unit exists whose instance equals exactly the text typed (unescaped, case
+   kept), they use it and print `legacy instance name <text>; run: smd admin instance migrate`.  Text that fails the
+   parser (`bee1-status.local`) reaches an exact-named unit the same way, or meets the parser's error.  The upload
+   env path does the same with `<storage>.env` and `<exact text>.env`, and never creates a shadow file.
+   `smd admin instance migrate` still finds legacy units in systemd's listings; radiod-keyed clients (hf-tec, S45)
+   stay as they are.  Spec §3 adds `systemd_instance` and `unit_name`; the plan adds:
    - `systemd_escape(name)` escapes without validating.  `lifecycle.py`, `migrate`, the logs screen and the watch
-     commands also handle legacy radiod-keyed names (`my-rx888`, `bee1-status.local`) that fail
+     fallback also handle legacy radiod-keyed names (`my-rx888`, `bee1-status.local`) that fail
      `validate_reporter_id`.  `systemd_instance` = validate, then `systemd_escape`.
    - `display_unit_name(unit)` renders `psk-recorder@AC0G\x3dB4.service` as `psk-recorder@AC0G/B4.service`.  Without
      it, escaping `UnitRef.unit` (S12) would put `\x3d` on every lifecycle line smd prints.
-   - `parse_instance_arg(text)` reads a watch command's `--instance` or an upload instance.  It takes a reporter id in
-     any spelling and also lets a legacy name through.  Its rule: text with `/` or `=` names a reporter id; text in
-     lower case without either names a legacy radiod id; anything else counts as a reporter id when it validates.
-     So `smd watch psk --instance w1abc-5` looks for the legacy unit `w1abc-5`.  The `smd admin instance` verbs keep
-     the strict `parse_user_reporter_id` and upper-case it.  Review Focus 1 covers this.
+   - `legacy_instance_hint(name)` returns the one fallback line, so smd and `upload.py` print the same words.  The
+     clients, which import nothing from sigmond, spell the same line inline.
 2. **`systemd_escape` escapes a backslash too** (`\x5c`).  That makes it the exact inverse of one
    `unescape_systemd_instance`, so a double-escaped orphan (`psk-recorder@AC0G\x5cx3dB4.service`) keeps its own name
    in `lifecycle.py` instead of resolving to the live unit.  Today it resolves to the live unit, and stopping "the
@@ -150,10 +164,9 @@ Every row the tasks below touch was read at the commits above.  Rows not listed 
 
 ## Review Focus
 
-1. **A lower-case reporter id without a slash typed where a legacy name may appear** (`smd watch psk --instance
-   w1abc-5`, `smd config upload psk-recorder w1abc-5 --on`).  A person expects it to mean `W1ABC-5`.  The lenient
-   parser reads it as a legacy radiod name, as decision 1 says.  Task 1 pins the rule; Task 2 makes the upload path
-   use the existing `W1ABC-5.env` when only that file exists, so nobody gets a shadow file.
+1. **A lower-case or mixed-case id typed for a reporter instance**: a person expects it to reach the upper-case
+   instance — pinned in Task 1's table and Task 5's tests; and **a host still carrying a legacy radiod-named unit**:
+   a person expects the watch commands to reach it with a migrate hint.
 2. **A double-escaped orphan unit** (`psk-recorder@AC0G\x5cx3dB4.service`) beside the live one.  A person expects
    smd to flag it as an orphan and never to touch the live unit through it.  Task 3 pins it.
 3. **An smd too old to know `canonical`**, run by a newer appliance script.  A person expects a clear warning, not a
@@ -178,13 +191,14 @@ Every row the tasks below touch was read at the commits above.  Rows not listed 
   (all in `instance.py` today).
 - Produces, in `sigmond.instance`:
   - `display_reporter_id(reporter_id: str) -> str`, now accepting all three spellings.
-  - `parse_instance_arg(text: str) -> str`; raises `InvalidReporterId`.
+  - `legacy_instance_hint(name: str) -> str` — `"legacy instance name <name>; run: smd admin instance migrate"`.
   - `systemd_escape(name: str) -> str`; no validation.
   - `systemd_instance(reporter_id: str) -> str`; validates, raises `InvalidReporterId`.
   - `unit_name(client: str, reporter_id: str, suffix: str = ".service") -> str`.
   - `display_unit_name(unit: str) -> str`.
   - The table `tests/data/reporter_id_vectors.json` with keys `reporter_ids` (input, storage, systemd, display),
-    `legacy_names` (input, storage, systemd), `invalid` (list of str) and `display_only` (input, display).
+    `escape_only` (name, systemd: names that only get escaped, never parsed), `invalid` (list of str) and
+    `display_only` (input, display).
 
 - [ ] **Step 1: Write the shared table**
 
@@ -192,26 +206,28 @@ Create `tests/data/reporter_id_vectors.json` with exactly this content.  Tasks 9
 
 ```json
 {
-  "about": "Reporter-id spellings: display AC0G/B4, storage AC0G=B4, systemd AC0G\\x3dB4. The original lives in sigmond tests/data/; psk-recorder, meteor-scatter and wspr-recorder keep byte-identical copies in their own tests/data/. Edit sigmond's copy, then cp it to each client. sigmond tests/test_reporter_id_drift.py fails while any copy differs.",
+  "about": "Reporter-id spellings: display AC0G/B4, storage AC0G=B4, systemd AC0G\\x3dB4. Reporter ids are upper case only; lower case typed by a person reaches the upper-case id. The original lives in sigmond tests/data/; psk-recorder, meteor-scatter and wspr-recorder keep byte-identical copies in their own tests/data/. Edit sigmond's copy, then cp it to each client. sigmond tests/test_reporter_id_drift.py fails while any copy differs.",
   "reporter_ids": [
     {"input": "AC0G/B4",     "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
     {"input": "AC0G=B4",     "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
     {"input": "AC0G\\x3dB4", "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
+    {"input": "ac0g/b4",     "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
     {"input": " ac0g/b4 ",   "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
     {"input": "AC0G-B4",     "storage": "AC0G-B4",     "systemd": "AC0G-B4",           "display": "AC0G-B4"},
     {"input": "W1ABC-5",     "storage": "W1ABC-5",     "systemd": "W1ABC-5",           "display": "W1ABC-5"},
+    {"input": "w1abc-5",     "storage": "W1ABC-5",     "systemd": "W1ABC-5",           "display": "W1ABC-5"},
     {"input": "KP4MD-RPI-4", "storage": "KP4MD-RPI-4", "systemd": "KP4MD-RPI-4",       "display": "KP4MD-RPI-4"},
     {"input": "AI6VN/P",     "storage": "AI6VN=P",     "systemd": "AI6VN\\x3dP",       "display": "AI6VN/P"},
     {"input": "ai6vn=p",     "storage": "AI6VN=P",     "systemd": "AI6VN\\x3dP",       "display": "AI6VN/P"},
     {"input": "AC0G/B4/P",   "storage": "AC0G=B4=P",   "systemd": "AC0G\\x3dB4\\x3dP", "display": "AC0G/B4/P"}
   ],
-  "legacy_names": [
-    {"input": "my-rx888",             "storage": "my-rx888",             "systemd": "my-rx888"},
-    {"input": "B4-100-rx888mk2",      "storage": "B4-100-rx888mk2",      "systemd": "B4-100-rx888mk2"},
-    {"input": "AC0G-B4-status.local", "storage": "AC0G-B4-status.local", "systemd": "AC0G-B4-status.local"},
-    {"input": "KA9Q_0-10",            "storage": "KA9Q_0-10",            "systemd": "KA9Q_0-10"}
+  "escape_only": [
+    {"name": "my-rx888",             "systemd": "my-rx888"},
+    {"name": "B4-100-rx888mk2",      "systemd": "B4-100-rx888mk2"},
+    {"name": "AC0G-B4-status.local", "systemd": "AC0G-B4-status.local"},
+    {"name": "KA9Q_0-10",            "systemd": "KA9Q_0-10"}
   ],
-  "invalid": ["", "   ", "/B4", "AC0G/", "AC0G/B4!", "AC0G\\x5cx3dB4"],
+  "invalid": ["", "   ", "/B4", "AC0G/", "AC0G/B4!", "AC0G\\x5cx3dB4", "bee1-status.local", "KA9Q_0-10"],
   "display_only": [
     {"input": "AC0G\\x5cx3dB4", "display": "AC0G/B4"}
   ]
@@ -246,7 +262,7 @@ from sigmond.instance import (  # noqa: E402
     InvalidReporterId,
     display_reporter_id,
     display_unit_name,
-    parse_instance_arg,
+    legacy_instance_hint,
     parse_user_reporter_id,
     systemd_escape,
     systemd_instance,
@@ -265,7 +281,6 @@ class VectorTableTests(unittest.TestCase):
         for v in VECTORS["reporter_ids"]:
             with self.subTest(input=v["input"]):
                 self.assertEqual(parse_user_reporter_id(v["input"]), v["storage"])
-                self.assertEqual(parse_instance_arg(v["input"]), v["storage"])
                 self.assertEqual(systemd_instance(v["storage"]), v["systemd"])
                 self.assertEqual(unit_name("psk-recorder", v["storage"]),
                                  f"psk-recorder@{v['systemd']}.service")
@@ -273,19 +288,14 @@ class VectorTableTests(unittest.TestCase):
                 self.assertEqual(display_reporter_id(v["storage"]), v["display"])
                 self.assertEqual(display_reporter_id(v["systemd"]), v["display"])
 
-    def test_legacy_names_pass_through(self):
-        for v in VECTORS["legacy_names"]:
-            with self.subTest(input=v["input"]):
-                self.assertEqual(parse_instance_arg(v["input"]), v["storage"])
-                self.assertEqual(systemd_escape(v["storage"]), v["systemd"])
-                with self.assertRaises(InvalidReporterId):
-                    systemd_instance(v["storage"])
+    def test_unit_names_escape_only_what_systemd_must(self):
+        for v in VECTORS["escape_only"]:
+            with self.subTest(name=v["name"]):
+                self.assertEqual(systemd_escape(v["name"]), v["systemd"])
 
     def test_invalid_text_is_refused(self):
         for text in VECTORS["invalid"]:
             with self.subTest(text=text):
-                with self.assertRaises(InvalidReporterId):
-                    parse_instance_arg(text)
                 with self.assertRaises(InvalidReporterId):
                     parse_user_reporter_id(text)
 
@@ -336,13 +346,18 @@ class HelperTests(unittest.TestCase):
             with self.subTest(unit=unit):
                 self.assertEqual(display_unit_name(unit), want)
 
-    def test_lower_case_without_a_slash_reads_as_a_legacy_name(self):
-        # Review Focus 1: watch commands and `smd config upload` read w1abc-5
-        # as a legacy radiod-keyed name; the instance verbs, which take only
-        # reporter ids, upper-case it.
-        self.assertEqual(parse_instance_arg("w1abc-5"), "w1abc-5")
-        self.assertEqual(parse_user_reporter_id("w1abc-5"), "W1ABC-5")
-        self.assertEqual(parse_instance_arg("ac0g/b4"), "AC0G=B4")
+    def test_lower_and_mixed_case_reach_the_upper_case_instance(self):
+        # Review Focus 1: reporter ids are upper case only.  No guess at a
+        # legacy name: that is a fallback the watch commands make (Task 5).
+        for text in ("w1abc-5", "W1abc-5", "w1abc\\x2d5"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_user_reporter_id(text), "W1ABC-5")
+        self.assertEqual(unit_name("psk-recorder", parse_user_reporter_id("ac0g/b4")),
+                         "psk-recorder@AC0G\\x3dB4.service")
+
+    def test_legacy_instance_hint(self):
+        self.assertEqual(legacy_instance_hint("my-rx888"),
+                         "legacy instance name my-rx888; run: smd admin instance migrate")
 
 
 if __name__ == "__main__":
@@ -408,40 +423,11 @@ def display_reporter_id(reporter_id: str) -> str:
     return name.replace("=", "/")
 
 
-def parse_instance_arg(text: str) -> str:
-    """Read an instance name a person typed, or one systemd passed on.
-
-    Like `parse_user_reporter_id`, but a legacy radiod-keyed name
-    (``my-rx888``, ``AC0G-B4-status.local``, ``KA9Q_0-10``) passes
-    through unchanged instead of failing.  The rule that tells them
-    apart: text with a ``/`` or ``=`` is a reporter id; text in lower
-    case without either is a legacy name (that is the shape radiod ids
-    have); anything else is a reporter id when it validates and a
-    legacy name when it does not.  So ``w1abc-5`` reads as a legacy
-    name; type ``W1ABC-5``.
-
-    Raises InvalidReporterId on empty text, on text that still holds a
-    backslash after one unescape (``AC0G\\x5cx3dB4`` names a different,
-    double-escaped unit), and on a reporter id that fails validation.
-    """
-    if not isinstance(text, str):
-        raise InvalidReporterId("instance name must be a string")
-    plain = unescape_systemd_instance(text.strip())
-    if not plain:
-        raise InvalidReporterId("instance name must be a non-empty string")
-    if "\\" in plain:
-        raise InvalidReporterId(
-            f"instance name {text!r} is escaped twice; it names a "
-            f"different unit from the one systemd created")
-    has_sep = "/" in plain or "=" in plain
-    if not has_sep and plain != plain.upper():
-        return plain
-    try:
-        return parse_user_reporter_id(plain)
-    except InvalidReporterId:
-        if has_sep:
-            raise
-        return plain
+def legacy_instance_hint(name: str) -> str:
+    """The one line smd prints when it falls back to a unit or an env file
+    named exactly as the operator typed it: a legacy radiod-keyed
+    instance (my-rx888, bee1-status.local) that predates reporter ids."""
+    return f"legacy instance name {name}; run: smd admin instance migrate"
 
 
 # Characters systemd keeps as they are in a unit's instance name: letters,
@@ -509,7 +495,8 @@ def display_unit_name(unit: str) -> str:
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `.venv/bin/pytest tests/test_reporter_id_forms.py tests/test_instance.py -q --override-ini addopts=`
-Expected: PASS (10 in the new file, plus `test_instance.py`'s 7).
+Expected: PASS (10 in the new file, plus `test_instance.py`'s 7).  The table's `w1abc-5` and `ac0g/b4` rows pass
+through the existing `parse_user_reporter_id` unchanged: it already upper-cases.
 
 - [ ] **Step 7: Commit**
 
@@ -519,7 +506,8 @@ git commit -m "instance: one set of helpers for the three reporter-id spellings
 
 display_reporter_id now accepts all three spellings.  New:
 systemd_escape, systemd_instance, unit_name, display_unit_name,
-parse_instance_arg.  tests/data/reporter_id_vectors.json pins what every
+legacy_instance_hint.  Reporter ids are upper case only.
+tests/data/reporter_id_vectors.json pins what every
 copy of these rules must do (tasks/spec-reporter-id-v372.md §3)."
 ```
 
@@ -532,7 +520,7 @@ Make each change below with the Edit tool, run the test named, see it FAIL, then
 | `if ch in _UNIT_NAME_CHARS:` → `if ch in _UNIT_NAME_CHARS and ch != "-":` | `tests/test_reporter_id_forms.py` | `test_hyphens_stay_hyphens_toward_systemd` |
 | `prev, name = name, unescape_systemd_instance(name)` → `prev, name = name, name` | same | `test_reporter_ids_convert_to_every_form` |
 | delete `validate_reporter_id(reporter_id)` inside `systemd_instance` | same | `test_systemd_instance_takes_only_the_storage_form` |
-| delete the three lines starting `if "\\" in plain:` | same | `test_invalid_text_is_refused` |
+| in `legacy_instance_hint`, `run: smd admin instance migrate` → `run: smd admin migrate` | same | `test_legacy_instance_hint` |
 
 Finish with `git status --short` printing nothing.
 
@@ -545,17 +533,20 @@ Finish with `git status --short` printing nothing.
 - Modify: `lib/sigmond/instance.py:268-272` (S5), `:691-692` (S7), `:730-731` (S6)
 - Modify: `lib/sigmond/harmonize.py:30` (import), `:908-924` (S13), `:1180-1194` (S15), `:1213` (S16)
 - Modify: `lib/sigmond/upload.py:14` (import), `:41-64` (S18, S19)
-- Modify: `tests/test_upload.py:20-22`
+- Modify: `tests/test_upload.py:3` (imports), `tests/test_upload.py:20-22`
 - Modify: `bin/smd:156-161` (import block), `bin/smd:17064-17066` (S44)
 
 **Interfaces:**
-- Consumes: `unescape_systemd_instance`, `parse_instance_arg`, `parse_user_reporter_id`, `display_reporter_id`,
+- Consumes: `unescape_systemd_instance`, `parse_user_reporter_id`, `legacy_instance_hint`, `display_reporter_id`,
   `display_unit_name`, `systemd_escape` from Task 1.
 - Produces:
-  - `bin/smd` module names `_display_rid`, `_display_unit`, `_parse_instance_arg`, `_systemd_escape`,
-    `_unescape_instance` (aliases of the instance.py helpers).  Tasks 4 and 5 use them.
-  - `upload.env_path_for(client, instance, base="/etc") -> Path`, accepting any spelling; raises
-    `InvalidReporterId` (a `ValueError`) on junk.  `upload.storage_instance` no longer exists.
+  - `bin/smd` module names `_display_rid`, `_display_unit`, `_legacy_hint`, `_parse_reporter_id`,
+    `_systemd_escape`, `_unescape_instance` (aliases of the instance.py helpers).  Tasks 4 and 5 use them.
+  - `upload.env_path_for(client, instance, base="/etc") -> Path`: `<storage>.env` for a reporter id in any spelling
+    or case; falls back to `<exact typed text>.env` when that file exists and the storage one does not (or the text
+    is no reporter id), printing `legacy_instance_hint(text)` on stderr; raises `InvalidReporterId` (a `ValueError`)
+    when the text is no reporter id and no such file exists.  It never creates a shadow file.
+    `upload.storage_instance` no longer exists.
   - `harmonize._active_instances(client) -> list[str]` returns storage forms.
 
 - [ ] **Step 1: Write the failing tests**
@@ -707,7 +698,15 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-In `tests/test_upload.py`, replace
+In `tests/test_upload.py`, replace `import sys` (line 3) with
+
+```python
+import contextlib
+import io
+import sys
+```
+
+and replace
 
 ```python
     def test_storage_form_slash_to_equals(self):
@@ -720,8 +719,9 @@ with
 ```python
     def test_storage_form_slash_to_equals(self):
         base = str(self.base)
-        self.assertEqual(upload.env_path_for("x", "AC0G/S", base=base).name, "AC0G=S.env")
-        self.assertEqual(upload.env_path_for("x", "my-rx888", base=base).name, "my-rx888.env")
+        for typed in ("AC0G/S", "ac0g/s", "AC0G=S"):
+            with self.subTest(typed=typed):
+                self.assertEqual(upload.env_path_for("x", typed, base=base).name, "AC0G=S.env")
 
     def test_escaped_instance_finds_the_storage_env_file(self):
         # S19: systemd's spelling must reach AC0G=B4.env, not AC0G\x3dB4.env.
@@ -737,24 +737,51 @@ with
         self.assertEqual(path.name, "AC0G=B4.env")
         self.assertEqual([p.name for p in path.parent.iterdir()], ["AC0G=B4.env"])
 
-    def test_lower_case_finds_the_upper_case_file(self):
-        # Review Focus 1: w1abc-5 reads as a legacy name, but the existing
-        # W1ABC-5.env wins over a new shadow file.
+    def test_lower_case_reaches_the_upper_case_file(self):
+        # Review Focus 1: reporter ids are upper case only.
         env = self._env("psk-recorder", "W1ABC-5")
         env.parent.mkdir(parents=True)
         env.write_text("")
         self.assertEqual(
             upload.env_path_for("psk-recorder", "w1abc-5", base=str(self.base)), env)
+
+    def _legacy(self, name, typed):
+        env = self._env("psk-recorder", name)
+        env.parent.mkdir(parents=True)
+        env.write_text("")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = upload.env_path_for("psk-recorder", typed, base=str(self.base))
+        return env, got, err.getvalue()
+
+    def test_a_legacy_file_named_exactly_as_typed_is_used_with_a_hint(self):
+        env, got, err = self._legacy("my-rx888", "my-rx888")
+        self.assertEqual(got, env)
+        self.assertIn("legacy instance name my-rx888; run: smd admin instance migrate", err)
+
+    def test_a_legacy_name_that_is_no_reporter_id_is_used_with_a_hint(self):
+        env, got, err = self._legacy("bee1-status.local", "bee1-status.local")
+        self.assertEqual(got, env)
+        self.assertIn("legacy instance name bee1-status.local", err)
+
+    def test_without_a_legacy_file_the_storage_form_wins(self):
+        self.assertEqual(
+            upload.env_path_for("psk-recorder", "my-rx888", base=str(self.base)).name,
+            "MY-RX888.env")
+        with self.assertRaises(ValueError):
+            upload.env_path_for("psk-recorder", "bee1-status.local", base=str(self.base))
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_reporter_id_inbound.py tests/test_upload.py -q --override-ini addopts=`
-Expected: 8 FAIL — `test_an_escaped_unit_still_names_its_instance` (got `[]`),
+Expected: 12 FAIL — `test_an_escaped_unit_still_names_its_instance` (got `[]`),
 `test_the_live_escaped_unit_is_not_legacy`, `test_an_env_file_in_systemd_spelling_is_not_legacy`,
 `test_active_instances_come_back_in_storage_form`, `test_no_private_unescape_is_left`,
-`test_config_lookup_unescapes_the_unit_instance` (got `None`), `test_escaped_instance_finds_the_storage_env_file`,
-`test_escaped_instance_writes_no_shadow_file`.  The rest pass already.
+`test_config_lookup_unescapes_the_unit_instance` (got `None`), `test_storage_form_slash_to_equals` (`ac0g/s` lands
+on `ac0g=s.env`), `test_escaped_instance_finds_the_storage_env_file`, `test_escaped_instance_writes_no_shadow_file`,
+the two `…_is_used_with_a_hint` tests (no hint printed) and `test_without_a_legacy_file_the_storage_form_wins` (old
+code keeps `my-rx888.env` and accepts `bee1-status.local`).  The rest pass already.
 
 - [ ] **Step 3: Fix `instance.py` (S5, S6, S7)**
 
@@ -906,12 +933,22 @@ with
 
 - [ ] **Step 5: Fix `upload.py` (S18, S19)**
 
-Replace `from typing import List, Tuple` (line 14) with
+Replace `import pwd` (line 12) with
+
+```python
+import pwd
+import sys
+```
+
+and `from typing import List, Tuple` (line 14) with
 
 ```python
 from typing import List, Tuple
 
-from .instance import InvalidReporterId, parse_instance_arg, parse_user_reporter_id
+from .instance import (
+    InvalidReporterId, legacy_instance_hint, parse_user_reporter_id,
+    unescape_systemd_instance,
+)
 ```
 
 Replace `storage_instance` and `env_path_for` (lines 41-64), from `def storage_instance(instance: str) -> str:`
@@ -919,25 +956,34 @@ through `    return canonical`, with
 
 ```python
 def env_path_for(client: str, instance: str, base: str = "/etc") -> Path:
-    """The per-instance env file for an instance named in any spelling.
+    """The per-instance env file for a reporter id typed in any spelling.
 
-    The display form (AC0G/S), the storage form (AC0G=S) and systemd's
-    spelling (AC0G\\x3dS) all name <base>/<client>/env/AC0G=S.env.  A
-    legacy radiod-keyed name (my-rx888) keeps its case.  Lower case with
-    no slash (w1abc-5) reads as a legacy name, but when only the
-    upper-case file (W1ABC-5.env) exists, that file wins, so the flag
-    lands in it instead of in a new shadow file.  Raises
-    InvalidReporterId (a ValueError) on text that names nothing.
+    AC0G/S, AC0G=S, AC0G\\x3dS and ac0g/s all name
+    <base>/<client>/env/AC0G=S.env.  One fallback, for a host that still
+    carries an instance under a legacy radiod-keyed name: when that file
+    is absent (or the text is no reporter id, like bee1-status.local) and
+    a file named exactly as typed exists (unescaped, case kept), use it
+    and print one line saying so.  Never invents a second spelling: a
+    missing file is created under the storage form.  Raises
+    InvalidReporterId (a ValueError) when the text is no reporter id and
+    no such legacy file exists.
     """
     env_dir = Path(base) / client / "env"
-    canonical = env_dir / f"{parse_instance_arg(instance)}.env"
-    if canonical.exists():
-        return canonical
+    exact = unescape_systemd_instance(instance.strip())
+    legacy = env_dir / f"{exact}.env" if exact and "/" not in exact else None
     try:
-        strict = env_dir / f"{parse_user_reporter_id(instance)}.env"
+        storage = parse_user_reporter_id(instance)
     except InvalidReporterId:
-        return canonical
-    return strict if strict.exists() else canonical
+        if legacy is not None and legacy.exists():
+            print(legacy_instance_hint(exact), file=sys.stderr)
+            return legacy
+        raise
+    canonical = env_dir / f"{storage}.env"
+    if (not canonical.exists() and exact != storage
+            and legacy is not None and legacy.exists()):
+        print(legacy_instance_hint(exact), file=sys.stderr)
+        return legacy
+    return canonical
 ```
 
 `cmd_config_upload` already catches `ValueError` around `apply_enable` (`commands/config.py:1363-1370`), so an
@@ -963,7 +1009,8 @@ with
     from sigmond.instance import (
         display_reporter_id       as _display_rid,
         display_unit_name         as _display_unit,
-        parse_instance_arg        as _parse_instance_arg,
+        legacy_instance_hint      as _legacy_hint,
+        parse_user_reporter_id    as _parse_reporter_id,
         systemd_escape            as _systemd_escape,
         unescape_systemd_instance as _unescape_instance,
     )
@@ -1024,7 +1071,8 @@ AC0G=B4.toml.  Inventory rows S5-S7, S13, S15, S16, S18, S19, S44."
 | `instance.py`: delete `name = unescape_systemd_instance(name)` (the one after `if not name:`) | same | `test_the_live_escaped_unit_is_not_legacy` |
 | `harmonize.py`: in `_resolve_instance_env`, `unescape_systemd_instance(inst)` → `inst` | same | `test_resolve_instance_env_reads_the_storage_file` |
 | `bin/smd`: delete `instance = _unescape_instance(instance)` | same | `test_config_lookup_unescapes_the_unit_instance` |
-| `upload.py`: `f"{parse_instance_arg(instance)}.env"` → `f"{instance}.env"` | `tests/test_upload.py` | `test_escaped_instance_finds_the_storage_env_file` |
+| `upload.py`: `storage = parse_user_reporter_id(instance)` → `storage = instance` | `tests/test_upload.py` | `test_escaped_instance_finds_the_storage_env_file` |
+| `upload.py`: delete the second `print(legacy_instance_hint(exact), file=sys.stderr)` | same | `test_a_legacy_file_named_exactly_as_typed_is_used_with_a_hint` |
 
 After each, `git checkout -- <file>`.  Finish with `git status --short` printing nothing.
 
@@ -1775,7 +1823,7 @@ After each, `git checkout -- bin/smd`.
 
 **Files:**
 - Create: `tests/test_smd_watch_instance.py`
-- Modify: `bin/smd` — `_watch_preflight` (17016-17044, and a new helper before it), meteor-watch (17679-17758),
+- Modify: `bin/smd` — `_watch_preflight` (17016-17044, and two new helpers before it), meteor-watch (17679-17758),
   verifier-watch (17791-17844), wspr-watch (18260-18415, 19135), psk-watch (20411-20520), mag-watch line 20836,
   `_is_valid_per_instance_client` (16003-16022, and two new helpers after it), `cmd_sources_add` (16160-16163),
   `cmd_sources_remove` (16200-16201), `cmd_sources_apply` (16456-16470), `_BASH_COMPLETION` line 14938,
@@ -1783,10 +1831,12 @@ After each, `git checkout -- bin/smd`.
   (21282-21326).
 
 **Interfaces:**
-- Consumes: `_parse_instance_arg`, `_systemd_escape`, `_display_rid`, `_display_unit`, `_unescape_instance` (Task 2's
-  import block).
+- Consumes: `_parse_reporter_id`, `_legacy_hint`, `_systemd_escape`, `_display_rid`, `_display_unit`,
+  `_unescape_instance` (Task 2's import block).
 - Produces, in `bin/smd`:
-  - `_watch_instance(raw, client: str) -> tuple` — `(storage, unit)` or `(None, None)`; raises `ValueError`.
+  - `_unit_known(unit: str) -> bool` — read-only: systemd lists the unit as loaded or installed.
+  - `_watch_instance(raw, client: str) -> tuple` — `(storage form, unit)`; or, through the legacy fallback,
+    `(exact typed text, its unit)` after printing `_legacy_hint(text)`; or `(None, None)`; raises `ValueError`.
   - `_normalize_instance_client(client: str) -> str`; raises `ValueError`.
   - `_restart_hint(client: str, rid: str) -> str`.
   - `_systemd_escape_reporter` and `_display_reporter` no longer exist.
@@ -1830,31 +1880,69 @@ smd = _load_smd()
 
 class WatchInstanceArgTests(unittest.TestCase):
 
+    def setUp(self):
+        # Which units "exist" on this pretend host.
+        self.known = set()
+        patch = mock.patch.object(smd, "_unit_known", lambda unit: unit in self.known)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _watch(self, text, client):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            got = smd._watch_instance(text, client)
+        return got, out.getvalue()
+
     def test_every_spelling_names_the_same_unit(self):
         for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4", "ac0g/b4"):
             with self.subTest(text=text):
-                self.assertEqual(smd._watch_instance(text, "psk-recorder"),
+                self.assertEqual(self._watch(text, "psk-recorder")[0],
                                  ("AC0G=B4", "psk-recorder@AC0G\\x3dB4.service"))
+
+    def test_lower_and_mixed_case_reach_the_upper_case_instance(self):
+        # Review Focus 1.
+        self.known = {"psk-recorder@W1ABC-5.service"}
+        for text in ("w1abc-5", "W1abc-5"):
+            with self.subTest(text=text):
+                got, said = self._watch(text, "psk-recorder")
+                self.assertEqual(got, ("W1ABC-5", "psk-recorder@W1ABC-5.service"))
+                self.assertNotIn("legacy", said)
 
     def test_hyphens_stay_hyphens(self):
         # S37: systemd-escape turned W1ABC-5 into W1ABC\x2d5, a unit nobody enabled.
-        self.assertEqual(smd._watch_instance("W1ABC-5", "meteor-scatter"),
+        self.assertEqual(self._watch("W1ABC-5", "meteor-scatter")[0],
                          ("W1ABC-5", "meteor-scatter@W1ABC-5.service"))
 
-    def test_a_legacy_name_passes_through(self):
-        self.assertEqual(smd._watch_instance("my-rx888", "wspr-recorder"),
-                         ("my-rx888", "wspr-recorder@my-rx888.service"))
+    def test_a_legacy_unit_named_exactly_as_typed_is_reached_with_a_hint(self):
+        # Review Focus 1: MY-RX888 has no unit; my-rx888 has one.
+        self.known = {"wspr-recorder@my-rx888.service"}
+        got, said = self._watch("my-rx888", "wspr-recorder")
+        self.assertEqual(got, ("my-rx888", "wspr-recorder@my-rx888.service"))
+        self.assertIn("legacy instance name my-rx888; run: smd admin instance migrate", said)
+
+    def test_a_legacy_name_that_is_no_reporter_id_is_reached_with_a_hint(self):
+        self.known = {"psk-recorder@bee1-status.local.service"}
+        got, said = self._watch("bee1-status.local", "psk-recorder")
+        self.assertEqual(got, ("bee1-status.local", "psk-recorder@bee1-status.local.service"))
+        self.assertIn("legacy instance name bee1-status.local", said)
+
+    def test_without_a_legacy_unit_the_reporter_unit_wins(self):
+        got, said = self._watch("my-rx888", "wspr-recorder")
+        self.assertEqual(got, ("MY-RX888", "wspr-recorder@MY-RX888.service"))
+        self.assertEqual(said, "")
 
     def test_no_instance(self):
         self.assertEqual(smd._watch_instance(None, "psk-recorder"), (None, None))
 
     def test_junk_is_refused(self):
-        with self.assertRaises(ValueError):
-            smd._watch_instance("AC0G/", "psk-recorder")
+        for text in ("AC0G/", "bee1-status.local"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                smd._watch_instance(text, "psk-recorder")
 
     def test_the_private_copies_are_gone(self):
         self.assertFalse(hasattr(smd, "_systemd_escape_reporter"))
         self.assertFalse(hasattr(smd, "_display_reporter"))
+        self.assertFalse(hasattr(smd, "_parse_instance_arg"))
 
 
 class WatchCommandUnitTests(unittest.TestCase):
@@ -1869,6 +1957,7 @@ class WatchCommandUnitTests(unittest.TestCase):
         args = argparse.Namespace(instance=instance, recent=0, verbose=False,
                                   backlog=0)
         with mock.patch.object(smd, "_watch_preflight", preflight), \
+             mock.patch.object(smd, "_unit_known", lambda unit: False), \
              contextlib.redirect_stdout(io.StringIO()):
             rc = cmd(args)
         self.assertEqual(rc, 1)
@@ -1975,29 +2064,61 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_smd_watch_instance.py -q --override-ini addopts=`
-Expected: FAIL — `_watch_instance`, `_normalize_instance_client` and `_restart_hint` do not exist yet; psk-watch asks
+Expected: FAIL — `_unit_known`, `_watch_instance`, `_normalize_instance_client` and `_restart_hint` do not exist yet
+(so every `WatchInstanceArgTests` case errors in `setUp`); psk-watch asks
 for `psk-recorder@AC0G/B4.service`; meteor-watch asks for `meteor-scatter@AC0G-B4.service` (systemd-escape turned
 the slash into a hyphen); the preflight message shows `\x3d`; `sources remove` loads `wspr-recorder@AC0G/B4`;
 radiod-watch offers `AC0G\x3dB4` and `W1ABC-5`; the completion pipeline prints all three names.
 
-- [ ] **Step 3: Add `_watch_instance` and fix the preflight message**
+- [ ] **Step 3: Add `_unit_known` and `_watch_instance`, and fix the preflight message**
 
 Insert before `def _watch_preflight(target_label: str, unit_pattern: str,`:
 
 ```python
-def _watch_instance(raw, client: str):
-    """A watch command's ``--instance`` -> (storage form, unit name).
+def _unit_known(unit: str) -> bool:
+    """True when systemd has `unit` loaded or installed.  Read-only."""
+    for argv in (['systemctl', 'list-units', '--all', '--no-legend', '--plain',
+                  '--no-pager', unit],
+                 ['systemctl', 'list-unit-files', '--no-legend', '--no-pager', unit]):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            return False
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    return False
 
-    The operator may type the display form (AC0G/B4), the storage form
-    (AC0G=B4), or systemd's spelling copied from a unit name (AC0G\\x3dB4);
-    a legacy radiod-keyed name (my-rx888) passes through.  Returns
-    (None, None) when --instance was not given.  Raises InvalidReporterId
-    (a ValueError) on text that is neither, before anything asks systemd.
+
+def _watch_instance(raw, client: str):
+    """A watch command's ``--instance`` -> (instance, unit name).
+
+    The text names a reporter id in any spelling (AC0G/B4, AC0G=B4,
+    AC0G\\x3dB4, lower case); parse_user_reporter_id turns it into the
+    storage form.  One fallback, for a host that still runs a unit under
+    a legacy radiod-keyed name (my-rx888, bee1-status.local): when no unit
+    exists for the reporter id, or the text is no reporter id at all, and
+    a unit named exactly as typed (unescaped, case kept) exists, use that
+    unit and say so in one line.  Returns (None, None) without --instance.
+    Raises InvalidReporterId (a ValueError) when the text names neither.
     """
     if raw is None:
         return None, None
-    plain = _parse_instance_arg(raw)
-    return plain, f'{client}@{_systemd_escape(plain)}.service'
+    exact = _unescape_instance(raw.strip())
+    legacy_unit = f'{client}@{_systemd_escape(exact)}.service'
+    can_be_legacy = bool(exact) and '/' not in exact
+    try:
+        rid = _parse_reporter_id(raw)
+    except ValueError:
+        if can_be_legacy and _unit_known(legacy_unit):
+            _warn(_legacy_hint(exact))
+            return exact, legacy_unit
+        raise
+    unit = f'{client}@{_systemd_escape(rid)}.service'
+    if (can_be_legacy and exact != rid and not _unit_known(unit)
+            and _unit_known(legacy_unit)):
+        _warn(_legacy_hint(exact))
+        return exact, legacy_unit
+    return rid, unit
 
 
 ```
@@ -2392,7 +2513,9 @@ git commit -m "smd: watch and sources verbs read any spelling; no reporter ids a
 
 --instance AC0G/B4 used to name AC0G-B4 (systemctl turns a slash into a
 hyphen); systemd-escape turned W1ABC-5 into W1ABC\\x2d5.  Both go through
-parse_instance_arg and systemd_escape now.  sources remove normalises
+parse_user_reporter_id and systemd_escape now; reporter ids are upper case
+only.  A unit still named exactly as typed (a legacy radiod name) is
+reached with a migrate hint.  sources remove normalises
 its key like sources add.  Inventory rows S37-S39, S41-S43, S46, S48,
 S50, S54, S55."
 ```
@@ -2401,8 +2524,9 @@ S50, S54, S55."
 
 | Change in `bin/smd` | Run | Must fail |
 |---|---|---|
-| in `_watch_instance`, `{_systemd_escape(plain)}` → `{plain}` | `tests/test_smd_watch_instance.py` | `test_every_spelling_names_the_same_unit` |
-| in `_watch_instance`, `plain = _parse_instance_arg(raw)` → `plain = raw` | same | `test_every_spelling_names_the_same_unit`, `test_junk_is_refused` |
+| in `_watch_instance`, `unit = f'{client}@{_systemd_escape(rid)}.service'` → `unit = f'{client}@{rid}.service'` | `tests/test_smd_watch_instance.py` | `test_every_spelling_names_the_same_unit` |
+| in `_watch_instance`, `rid = _parse_reporter_id(raw)` → `rid = exact` | same | `test_every_spelling_names_the_same_unit`, `test_lower_and_mixed_case_reach_the_upper_case_instance`, `test_without_a_legacy_unit_the_reporter_unit_wins` |
+| in `_watch_instance`, `            and _unit_known(legacy_unit)):` → `            and False):` | same | `test_a_legacy_unit_named_exactly_as_typed_is_reached_with_a_hint` |
 | in `_radiod_watch_candidate_hosts`, delete the `try: validate_reporter_id(inst) … pass` block | same | `test_radiod_watch_offers_only_peer_names` |
 | in `_BASH_COMPLETION`, delete the ` \| grep -Ev '…'` stage | same | `test_bash_completion_offers_only_peer_names` |
 
@@ -2421,7 +2545,7 @@ After each, `git checkout -- bin/smd`.
 - Modify: `tests/test_harmonize.py:929`, `tests/test_tui_annotation_quality.py` (two new tests)
 
 **Interfaces:**
-- Consumes: `display_reporter_id`, `display_unit_name`, `parse_instance_arg`, `systemd_escape`,
+- Consumes: `display_reporter_id`, `display_unit_name`, `systemd_escape`,
   `unescape_systemd_instance` (Task 1); `harmonize._active_instances` returning storage forms (Task 2).
 - Produces: `TimingConsumerUnit.instance` holds the storage form (was systemd's spelling).
 
@@ -2540,7 +2664,8 @@ class ConfigCommandTests(unittest.TestCase):
 
     def test_upload_change_names_the_instance_and_a_working_restart(self):
         fake = (lambda c, i, on, base="/etc", delivery=None:
-                (Path("/x.env"), "WSPR_USE_HS_UPLOADER", ["wsprnet.org"], None))
+                (Path("/etc/wspr-recorder/env/AC0G=S.env"), "WSPR_USE_HS_UPLOADER",
+                 ["wsprnet.org"], None))
         for typed in ("AC0G/S", "AC0G\\x3dS"):
             with self.subTest(typed=typed):
                 err = io.StringIO()
@@ -2743,7 +2868,7 @@ with
 
 ```python
     from .. import upload
-    from ..instance import display_reporter_id, parse_instance_arg, systemd_escape
+    from ..instance import display_reporter_id, systemd_escape
     client = args.client
 ```
 
@@ -2768,7 +2893,7 @@ replace
 with
 
 ```python
-    rid = parse_instance_arg(instance)      # apply_enable accepted it above
+    rid = path.stem     # what apply_enable resolved: the storage form, or a legacy name
     ok(f"{'enabled' if on else 'disabled'} upload for {client}@{display_reporter_id(rid)}  "
 ```
 
@@ -2881,7 +3006,8 @@ After each, `git checkout -- <file>`.
 - Consumes: `display_reporter_id`, `parse_user_reporter_id` (Task 1); `InstancePaths.unit_name` in systemd spelling
   (Task 3); `detect_migration_candidates` that no longer lists the live unit (Task 2, which closes S27 and S31).
 - Produces: nothing new.  The dropdowns' option values stay in storage form; Task 5 made `smd watch --instance`
-  accept it.
+  accept it.  A `(legacy)` entry passes its exact name; Task 5's fallback reaches that unit and prints the migrate
+  hint.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3403,7 +3529,8 @@ Work in `/home/mjh/hamsci/repos/meteor-scatter` (Michael's).
 - Consumes: sigmond's `tests/data/reporter_id_vectors.json` (Task 1), copied byte for byte.
 - Produces:
   - `meteor_scatter._reporter_id` with `unescape_systemd_instance(name) -> str`, `to_storage(text) -> str`
-    (raises `ValueError`), `systemd_instance(name) -> str` (no validation), `display(name) -> str`.  Tasks 10 and 12
+    (unescape, upper-case, `/` → `=`, validate; raises `ValueError` — the same rule as sigmond's
+    `parse_user_reporter_id`), `systemd_instance(name) -> str` (no validation), `display(name) -> str`.  Tasks 10 and 12
     copy this exact file.
   - `meteor_scatter.cli._normalize_instance_args(args) -> None`.
 
@@ -3453,11 +3580,10 @@ class VectorTableTests(unittest.TestCase):
                 self.assertEqual(display(v["storage"]), v["display"])
                 self.assertEqual(display(v["systemd"]), v["display"])
 
-    def test_legacy_names_pass_through(self):
-        for v in VECTORS["legacy_names"]:
-            with self.subTest(input=v["input"]):
-                self.assertEqual(to_storage(v["input"]), v["storage"])
-                self.assertEqual(systemd_instance(v["storage"]), v["systemd"])
+    def test_unit_names_escape_only_what_systemd_must(self):
+        for v in VECTORS["escape_only"]:
+            with self.subTest(name=v["name"]):
+                self.assertEqual(systemd_instance(v["name"]), v["systemd"])
 
     def test_invalid_text_is_refused(self):
         for text in VECTORS["invalid"]:
@@ -3516,7 +3642,15 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-In `tests/test_configurator.py`, class `StrayInstanceTests`, replace
+In `tests/test_configurator.py`, replace `import os` (line 5) with
+
+```python
+import contextlib
+import io
+import os
+```
+
+Then, in class `StrayInstanceTests`, replace
 
 ```python
         self._enable("AC0G=B4")              # a sigmond per-instance config
@@ -3570,12 +3704,26 @@ and insert before `    def test_interactive_init_disables_the_orphan_on_yes(self
 
     def test_env_file_path_takes_any_spelling(self):
         # M4
-        for typed in ("AC0G\\x3dB4", "AC0G/B4", "AC0G=B4"):
+        for typed in ("AC0G\\x3dB4", "AC0G/B4", "AC0G=B4", "ac0g/b4"):
             with self.subTest(typed=typed):
                 self.assertEqual(configurator._env_file_path(typed),
                                  configurator._ENV_DIR / "AC0G=B4.env")
         self.assertEqual(configurator._env_file_path("bee1-status.local"),
                          configurator._ENV_DIR / "bee1-status.local.env")
+
+    def test_env_file_path_falls_back_to_a_legacy_file_with_a_hint(self):
+        env_dir = self.etc / "env"
+        (env_dir / "my-rx888.env").write_text("")
+        err = io.StringIO()
+        with mock.patch.object(configurator, "_ENV_DIR", env_dir), \
+             contextlib.redirect_stderr(err):
+            got = configurator._env_file_path("my-rx888")
+        self.assertEqual(got, env_dir / "my-rx888.env")
+        self.assertIn("legacy instance name my-rx888; run: smd admin instance migrate",
+                      err.getvalue())
+        with mock.patch.object(configurator, "_ENV_DIR", env_dir):
+            self.assertEqual(configurator._env_file_path("my-rx999"),
+                             env_dir / "MY-RX999.env")
 
 ```
 
@@ -3585,7 +3733,8 @@ Run: `.venv/bin/pytest tests/test_reporter_id.py tests/test_instance_args.py tes
 Expected: two collection errors (`No module named 'meteor_scatter._reporter_id'`; `cannot import name
 '_normalize_instance_args'`), and in `test_configurator.py` FAIL for `test_only_the_orphan_is_stale` (it now also
 lists `AC0G\x3dB4`), `test_a_live_instance_is_never_stale_under_any_spelling`,
-`test_a_stale_reporter_instance_is_named_for_a_person` and `test_env_file_path_takes_any_spelling`.
+`test_a_stale_reporter_instance_is_named_for_a_person`, `test_env_file_path_takes_any_spelling` and
+`test_env_file_path_falls_back_to_a_legacy_file_with_a_hint`.
 `test_interactive_disable_sends_the_unit_systemd_named` passes by accident today; keep it as a guard.
 
 - [ ] **Step 3: Write the module**
@@ -3621,21 +3770,13 @@ def unescape_systemd_instance(name: str) -> str:
 
 
 def to_storage(text: str) -> str:
-    """Any spelling -> storage form.  Lower case with no '/' or '=' reads as
-    a legacy radiod-keyed name (my-rx888) and passes through unchanged.
-    Raises ValueError on text that names nothing."""
-    plain = unescape_systemd_instance(text.strip())
-    if not plain or "\\" in plain:
+    """Any spelling of a reporter id -> storage form: unescape, upper-case,
+    '/' -> '='.  Reporter ids are upper case only, so ac0g/b4 names AC0G=B4.
+    Raises ValueError on text that is no reporter id (bee1-status.local)."""
+    rid = unescape_systemd_instance(text.strip()).upper().replace("/", "=")
+    if not _RID.match(rid):
         raise ValueError(f"not a reporter id: {text!r}")
-    has_sep = "/" in plain or "=" in plain
-    if not has_sep and plain != plain.upper():
-        return plain
-    rid = plain.upper().replace("/", "=")
-    if _RID.match(rid):
-        return rid
-    if has_sep:
-        raise ValueError(f"not a reporter id: {text!r}")
-    return plain
+    return rid
 
 
 def systemd_instance(name: str) -> str:
@@ -3795,19 +3936,32 @@ with
 
 ```python
 def _env_file_path(instance: str) -> Path:
-    """The env file for an instance named in any spelling (AC0G/B4,
-    AC0G=B4, AC0G\\x3dB4 all -> AC0G=B4.env; bee1-status.local stays)."""
+    """The env file for an instance named in any spelling.
+
+    A reporter id in any spelling (AC0G/B4, AC0G=B4, AC0G\\x3dB4, ac0g/b4)
+    names AC0G=B4.env.  A radiod id, which is no reporter id
+    (bee1-status.local), names its own file.  One fallback for a legacy
+    instance: when the storage-form file is absent and a file named
+    exactly as typed exists (my-rx888.env), use it and say so on stderr.
+    """
+    exact = unescape_systemd_instance(instance.strip())
     try:
         stem = to_storage(instance)
     except ValueError:
-        stem = instance
-    return _ENV_DIR / f"{stem}.env"
+        return _ENV_DIR / f"{exact}.env"
+    path = _ENV_DIR / f"{stem}.env"
+    legacy = _ENV_DIR / f"{exact}.env"
+    if exact != stem and not path.exists() and legacy.exists():
+        print(f"legacy instance name {exact}; run: smd admin instance migrate",
+              file=sys.stderr)
+        return legacy
+    return path
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_reporter_id.py tests/test_instance_args.py tests/test_configurator.py -q`
-Expected: PASS.  Then `.venv/bin/pytest tests -q` — expect 286 passed, 1 skipped (275 before, 11 new).
+Expected: PASS.  Then `.venv/bin/pytest tests -q` — expect 287 passed, 1 skipped (275 before, 12 new).
 
 - [ ] **Step 7: Commit**
 
@@ -3899,11 +4053,10 @@ class VectorTableTests(unittest.TestCase):
                 self.assertEqual(display(v["storage"]), v["display"])
                 self.assertEqual(display(v["systemd"]), v["display"])
 
-    def test_legacy_names_pass_through(self):
-        for v in VECTORS["legacy_names"]:
-            with self.subTest(input=v["input"]):
-                self.assertEqual(to_storage(v["input"]), v["storage"])
-                self.assertEqual(systemd_instance(v["storage"]), v["systemd"])
+    def test_unit_names_escape_only_what_systemd_must(self):
+        for v in VECTORS["escape_only"]:
+            with self.subTest(name=v["name"]):
+                self.assertEqual(systemd_instance(v["name"]), v["systemd"])
 
     def test_invalid_text_is_refused(self):
         for text in VECTORS["invalid"]:
@@ -3926,10 +4079,14 @@ Create `tests/test_reporter_id_sites.py`:
 """psk-recorder's two reporter-id sites (sigmond tasks/spec-reporter-id-v372.md
 §5): the daemon's --instance/--radiod-id, which arrive as %i in systemd's
 spelling (P1, P4), and the env file a sigmond call names (P5)."""
+import contextlib
+import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -3959,12 +4116,27 @@ class InstanceArgTests(unittest.TestCase):
 class EnvFilePathTests(unittest.TestCase):
 
     def test_env_file_path_takes_any_spelling(self):
-        for typed in ("AC0G\\x3dB4", "AC0G/B4", "AC0G=B4"):
+        for typed in ("AC0G\\x3dB4", "AC0G/B4", "AC0G=B4", "ac0g/b4"):
             with self.subTest(typed=typed):
                 self.assertEqual(configurator._env_file_path(typed),
                                  configurator._ENV_DIR / "AC0G=B4.env")
         self.assertEqual(configurator._env_file_path("bee1-status.local"),
                          configurator._ENV_DIR / "bee1-status.local.env")
+
+    def test_env_file_path_falls_back_to_a_legacy_file_with_a_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_dir = Path(tmp)
+            (env_dir / "my-rx888.env").write_text("")
+            err = io.StringIO()
+            with mock.patch.object(configurator, "_ENV_DIR", env_dir), \
+                 contextlib.redirect_stderr(err):
+                got = configurator._env_file_path("my-rx888")
+            self.assertEqual(got, env_dir / "my-rx888.env")
+            self.assertIn("legacy instance name my-rx888; run: smd admin instance migrate",
+                          err.getvalue())
+            with mock.patch.object(configurator, "_ENV_DIR", env_dir):
+                self.assertEqual(configurator._env_file_path("my-rx999"),
+                                 env_dir / "MY-RX999.env")
 
 
 if __name__ == "__main__":
@@ -4037,7 +4209,7 @@ from .config import DEFAULT_CONFIG_PATH, DEFAULTS, load_config
 with
 
 ```python
-from ._reporter_id import to_storage
+from ._reporter_id import to_storage, unescape_systemd_instance
 from .config import DEFAULT_CONFIG_PATH, DEFAULTS, load_config
 ```
 
@@ -4052,13 +4224,26 @@ with
 
 ```python
 def _env_file_path(instance: str) -> Path:
-    """The env file for an instance named in any spelling (AC0G/B4,
-    AC0G=B4, AC0G\\x3dB4 all -> AC0G=B4.env; bee1-status.local stays)."""
+    """The env file for an instance named in any spelling.
+
+    A reporter id in any spelling (AC0G/B4, AC0G=B4, AC0G\\x3dB4, ac0g/b4)
+    names AC0G=B4.env.  A radiod id, which is no reporter id
+    (bee1-status.local), names its own file.  One fallback for a legacy
+    instance: when the storage-form file is absent and a file named
+    exactly as typed exists (my-rx888.env), use it and say so on stderr.
+    """
+    exact = unescape_systemd_instance(instance.strip())
     try:
         stem = to_storage(instance)
     except ValueError:
-        stem = instance
-    return _ENV_DIR / f"{stem}.env"
+        return _ENV_DIR / f"{exact}.env"
+    path = _ENV_DIR / f"{stem}.env"
+    legacy = _ENV_DIR / f"{exact}.env"
+    if exact != stem and not path.exists() and legacy.exists():
+        print(f"legacy instance name {exact}; run: smd admin instance migrate",
+              file=sys.stderr)
+        return legacy
+    return path
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
@@ -4775,11 +4960,10 @@ class VectorTableTests(unittest.TestCase):
                 self.assertEqual(rid.display(v["storage"]), v["display"])
                 self.assertEqual(rid.display(v["systemd"]), v["display"])
 
-    def test_legacy_names_pass_through(self):
-        for v in VECTORS["legacy_names"]:
-            with self.subTest(input=v["input"]):
-                self.assertEqual(rid.to_storage(v["input"]), v["storage"])
-                self.assertEqual(rid.systemd_instance(v["storage"]), v["systemd"])
+    def test_unit_names_escape_only_what_systemd_must(self):
+        for v in VECTORS["escape_only"]:
+            with self.subTest(name=v["name"]):
+                self.assertEqual(rid.systemd_instance(v["name"]), v["systemd"])
 
     def test_invalid_text_is_refused(self):
         for text in VECTORS["invalid"]:
@@ -5325,9 +5509,9 @@ Write the result (pass or fail for each check of Steps 2-5, with any `[WARN]` li
   B4 checks form Task 15.  §8 rollout: Task 15 names `smd update --apply` or the image.  §9 stays out.
 - **Placeholders.**  One on purpose: Task 11 Branch B's commit message asks for the file and line that Step 1 found,
   because only that reading can supply it.
-- **Names.**  `systemd_escape`, `systemd_instance`, `unit_name`, `display_unit_name`, `parse_instance_arg`,
-  `display_reporter_id` (sigmond); `_display_rid`, `_display_unit`, `_parse_instance_arg`, `_systemd_escape`,
-  `_unescape_instance`, `_watch_instance`, `_normalize_instance_client`, `_restart_hint`, `cmd_instance_canonical`
-  (smd); `unescape_systemd_instance`, `to_storage`, `systemd_instance`, `display`, `_normalize_instance_args`
-  (clients).  Each later task uses them as Task 1, 2, 5, 8 and 9 define them.
+- **Names.**  `systemd_escape`, `systemd_instance`, `unit_name`, `display_unit_name`, `legacy_instance_hint`,
+  `display_reporter_id`, and the existing `parse_user_reporter_id` (sigmond); `_display_rid`, `_display_unit`,
+  `_legacy_hint`, `_parse_reporter_id`, `_systemd_escape`, `_unescape_instance`, `_unit_known`, `_watch_instance`,
+  `_normalize_instance_client`, `_restart_hint`, `cmd_instance_canonical` (smd); `unescape_systemd_instance`,
+  `to_storage`, `systemd_instance`, `display`, `_normalize_instance_args` (clients).  Each later task uses them as Task 1, 2, 5, 8 and 9 define them.
 
