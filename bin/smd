@@ -17101,6 +17101,20 @@ def _watch_instance(raw, client: str):
     return rid, unit
 
 
+def _spool_watch_instance(raw, client: str):
+    """hfdl-watch / codar-watch ``--instance`` -> the instance as the unit
+    spells it (``%i``: AC0G\\x3dB4), the same value those verbs take from an
+    active unit's name when ``--instance`` is absent.  _watch_instance parses
+    any spelling (AC0G/B4, AC0G=B4, AC0G\\x3dB4) and keeps its exact-name
+    legacy fallback with the migrate hint; the per-instance config lookup
+    unescapes back to AC0G=B4.toml, and the fallback data dir is the one
+    the unit's ExecStartPre makes (/var/lib/<client>/%i).  Returns None
+    without ``--instance``; raises ValueError on a bad one.
+    """
+    instance, _unit = _watch_instance(raw, client)
+    return None if instance is None else _systemd_escape(instance)
+
+
 def _watch_preflight(target_label: str, unit_pattern: str,
                      hint: str = '') -> int:
     """Check that at least one service matching ``unit_pattern`` is
@@ -19393,7 +19407,12 @@ def cmd_hfdl_watch(args) -> int:
     cycle to align with — HFDL frames arrive whenever aircraft
     transmit — so the 15 s window is purely a sampling cadence.
     """
-    instance = getattr(args, 'instance', None)
+    try:
+        instance = _spool_watch_instance(getattr(args, 'instance', None),
+                                         'hfdl-recorder')
+    except ValueError as exc:
+        _err(f'hfdl-watch: --instance: {exc}')
+        return 1
     if instance is None:
         try:
             r = subprocess.run(
@@ -19448,7 +19467,7 @@ def cmd_hfdl_watch(args) -> int:
 
     WIN_SEC = 15.0
 
-    _heading(f'HFDL decoded frames ({instance})')
+    _heading(f'HFDL decoded frames ({_display_rid(instance)})')
     _info('   stage: decoder (dumphfdl) → JSONL spool (pre-SQLite)')
     bands_display = ', '.join(p.stem for p in band_files)
     _info(f'   ▸ {len(band_files)} band file(s): {bands_display}')
@@ -19679,7 +19698,12 @@ def cmd_codar_watch(args) -> int:
     are picked up at the next window with their cursor primed at the
     file's current size, so the watch doesn't dump a same-day backlog.
     """
-    instance = getattr(args, 'instance', None)
+    try:
+        instance = _spool_watch_instance(getattr(args, 'instance', None),
+                                         'codar-sounder')
+    except ValueError as exc:
+        _err(f'codar-watch: --instance: {exc}')
+        return 1
     if instance is None:
         try:
             r = subprocess.run(
@@ -19712,7 +19736,7 @@ def cmd_codar_watch(args) -> int:
                      'recorded yet?')
                 return 1
             instance = candidates[0].name
-            _warn(f'codar-sounder@{instance} not active — tailing '
+            _warn(f'codar-sounder@{_display_rid(instance)} not active — tailing '
                   f'data dir anyway (records will only update once '
                   f'the service starts)')
         else:
@@ -19762,7 +19786,7 @@ def cmd_codar_watch(args) -> int:
 
     WIN_SEC = 15.0  # codar-sounder CPI cadence
 
-    _heading(f'CODAR ionospheric soundings ({instance})')
+    _heading(f'CODAR ionospheric soundings ({_display_rid(instance)})')
     _info('   stage: decoder (codar-sounder) → JSONL spool (pre-SQLite)')
     _info(f'   ▸ {len(stations)} station(s): {", ".join(stations)}')
     _info(f'   ▸ every {int(WIN_SEC)} s (CPI cadence) — '
@@ -20014,13 +20038,15 @@ def _format_superdarn_record(rec: dict) -> str:
 def _superdarn_instance_dir(raw, root=None):
     """A typed ``--instance`` -> (instance, data dir) under the spool root.
 
-    The spool directory is named for the systemd instance, the reporter id
-    in storage form (AC0G=B4), so any spelling the operator types
-    (AC0G/B4, lower case) goes through parse_user_reporter_id first.  One
-    fallback, as in _watch_instance: when the text is no reporter id, or
-    no directory exists for the reporter id, and a directory named exactly
-    as typed (unescaped) exists, use that and print the migrate hint.
-    Raises InvalidReporterId (a ValueError) when the text names neither.
+    superdarn-sounder spools under ``--instance %i``, the instance as systemd
+    spells it (AC0G\\x3dB4), so the text the operator typed (AC0G/B4,
+    AC0G=B4, AC0G\\x3dB4, lower case) goes through parse_user_reporter_id
+    and the directory is tried in this order: systemd's spelling, then the
+    storage form (AC0G=B4), then — as in _watch_instance — a directory named
+    exactly as typed (unescaped; a legacy radiod-keyed name), with the
+    migrate hint.  With none on disk it names systemd's spelling, the
+    directory superdarn-sounder would write.  Raises InvalidReporterId
+    (a ValueError) when the text names no reporter id and no directory.
     """
     root = Path(root or '/var/lib/superdarn-sounder')
     exact = _unescape_instance(raw.strip())
@@ -20032,11 +20058,14 @@ def _superdarn_instance_dir(raw, root=None):
             _warn(_legacy_hint(exact))
             return exact, root / exact
         raise
-    if (can_be_legacy and exact != rid and not (root / rid).is_dir()
-            and (root / exact).is_dir()):
+    escaped = root / _systemd_escape(rid)
+    for candidate in (escaped, root / rid):
+        if candidate.is_dir():
+            return rid, candidate
+    if can_be_legacy and exact != rid and (root / exact).is_dir():
         _warn(_legacy_hint(exact))
         return exact, root / exact
-    return rid, root / rid
+    return rid, escaped
 
 
 def cmd_superdarn_watch(args) -> int:
@@ -20104,17 +20133,19 @@ def cmd_superdarn_watch(args) -> int:
         else:
             unit = lines[0].split()[0]
             try:
-                instance = _unescape_instance(
-                    unit.split('@', 1)[1].rsplit('.', 1)[0])
+                # Exactly as systemd spells it (AC0G\x3dB4): the unit's
+                # --instance %i names the spool directory.
+                instance = unit.split('@', 1)[1].rsplit('.', 1)[0]
             except IndexError:
                 _err(f'unexpected unit name: {unit}')
                 return 1
 
-    # superdarn-sounder spools on the systemd instance (%i) — the reporter id
-    # after `smd instance migrate` — matching the unit's ExecStartPre mkdir %i
-    # (the hf-tec scheme).  So the instance name IS the data-dir key; a legacy
-    # single-instance host names the service after its radiod status, which is
-    # both the instance and the spool key, so this is correct there too.
+    # superdarn-sounder spools on the systemd instance (%i, systemd's own
+    # spelling: AC0G\x3dB4) — the reporter id after `smd instance migrate` —
+    # matching the unit's ExecStartPre mkdir %i (the hf-tec scheme).  So the
+    # instance name IS the data-dir key; a legacy single-instance host names
+    # the service after its radiod status, which is both the instance and the
+    # spool key, so this is correct there too.
     if data_dir is None:
         data_dir = Path(f'/var/lib/superdarn-sounder/{instance}')
     if not data_dir.is_dir():

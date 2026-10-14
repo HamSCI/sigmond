@@ -105,7 +105,11 @@ class WatchInstanceArgTests(unittest.TestCase):
 
 
 class SuperdarnInstanceDirTests(unittest.TestCase):
-    """superdarn-watch's spool directory is named for the storage form."""
+    """superdarn-sounder spools under --instance %i, systemd's spelling
+    (/var/lib/superdarn-sounder/AC0G\\x3dB4/); a storage-form directory
+    (AC0G=B4) is the second choice."""
+
+    ESCAPED = "AC0G\\x3dB4"
 
     def setUp(self):
         import tempfile
@@ -119,13 +123,29 @@ class SuperdarnInstanceDirTests(unittest.TestCase):
             got = smd._superdarn_instance_dir(text, self.root)
         return got, err.getvalue()
 
-    def test_every_spelling_reaches_the_storage_form_directory(self):
-        (self.root / "AC0G=B4").mkdir()
+    def test_every_spelling_reaches_the_directory_superdarn_writes(self):
+        (self.root / self.ESCAPED).mkdir()
         for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4", "ac0g/b4"):
+            with self.subTest(text=text):
+                got, said = self._dir(text)
+                self.assertEqual(got, ("AC0G=B4", self.root / self.ESCAPED))
+                self.assertNotIn("legacy", said)
+
+    def test_the_systemd_spelling_wins_over_the_storage_form(self):
+        (self.root / self.ESCAPED).mkdir()
+        (self.root / "AC0G=B4").mkdir()
+        self.assertEqual(self._dir("AC0G/B4")[0], ("AC0G=B4", self.root / self.ESCAPED))
+
+    def test_a_storage_form_directory_is_the_second_choice(self):
+        (self.root / "AC0G=B4").mkdir()
+        for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4"):
             with self.subTest(text=text):
                 got, said = self._dir(text)
                 self.assertEqual(got, ("AC0G=B4", self.root / "AC0G=B4"))
                 self.assertNotIn("legacy", said)
+
+    def test_with_no_directory_the_one_superdarn_would_write_is_named(self):
+        self.assertEqual(self._dir("AC0G/B4")[0], ("AC0G=B4", self.root / self.ESCAPED))
 
     def test_a_legacy_directory_named_as_typed_is_reached_with_a_hint(self):
         (self.root / "my-rx888").mkdir()
@@ -143,6 +163,88 @@ class SuperdarnInstanceDirTests(unittest.TestCase):
     def test_junk_is_refused(self):
         with self.assertRaises(ValueError):
             smd._superdarn_instance_dir("AC0G/", self.root)
+
+    def test_without_instance_the_unit_names_the_directory_as_systemd_spells_it(self):
+        # The pre-Task-5 behaviour: the active unit's %i IS the spool key.
+        units = "superdarn-sounder@AC0G\\x3dB4.service loaded active running x\n"
+        out = io.StringIO()
+        with mock.patch.object(smd.subprocess, "run", lambda argv, **kw:
+                               subprocess.CompletedProcess(argv, 0, units, "")), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = smd.cmd_superdarn_watch(argparse.Namespace(
+                instance=None, recent=0, verbose=False))
+        self.assertEqual(rc, 1)          # no such directory on this machine
+        self.assertIn("/var/lib/superdarn-sounder/AC0G\\x3dB4", out.getvalue())
+
+
+class SpoolWatchInstanceTests(unittest.TestCase):
+    """Final review 4: hfdl-watch and codar-watch take --instance in any
+    spelling (spec §7), find the per-instance config by its storage name,
+    and fall back to the data dir the unit's %i names (AC0G\\x3dB4)."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.known = set()
+
+    def _rooted(self):
+        real = Path
+
+        def P(*parts):
+            p = real(*parts)
+            s = str(p)
+            if s == "/etc" or s.startswith("/etc/"):
+                return real(self.tmp + s)
+            return p
+        return P
+
+    def _run(self, cmd, text):
+        out = io.StringIO()
+        with mock.patch.object(smd, "Path", self._rooted()), \
+             mock.patch.object(smd, "_unit_known", lambda unit: unit in self.known), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = cmd(argparse.Namespace(instance=text, recent=0, verbose=False))
+        self.assertEqual(rc, 1)          # no data dir on this machine
+        return out.getvalue()
+
+    def _config(self, client, name):
+        cfg = Path(self.tmp) / "etc" / client / f"{name}.toml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('[[radiod]]\nstatus = "b4-status.local"\n')
+
+    CMDS = (("hfdl-recorder", "cmd_hfdl_watch"), ("codar-sounder", "cmd_codar_watch"))
+
+    def test_every_spelling_finds_the_storage_config(self):
+        for client, cmd in self.CMDS:
+            self._config(client, "AC0G=B4")
+            for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4"):
+                with self.subTest(client=client, text=text):
+                    said = self._run(getattr(smd, cmd), text)
+                    self.assertIn(f"/var/lib/{client}/b4-status.local", said)
+
+    def test_without_a_config_the_unit_spelling_names_the_data_dir(self):
+        for client, cmd in self.CMDS:
+            for text in ("AC0G/B4", "AC0G=B4", "AC0G\\x3dB4"):
+                with self.subTest(client=client, text=text):
+                    said = self._run(getattr(smd, cmd), text)
+                    self.assertIn(f"/var/lib/{client}/AC0G\\x3dB4 ", said)
+
+    def test_a_legacy_unit_named_as_typed_is_reached_with_a_hint(self):
+        for client, cmd in self.CMDS:
+            self.known = {f"{client}@my-rx888.service"}
+            with self.subTest(client=client):
+                said = self._run(getattr(smd, cmd), "my-rx888")
+                self.assertIn("legacy instance name my-rx888", said)
+                self.assertIn(f"/var/lib/{client}/my-rx888 ", said)
+
+    def test_junk_is_refused(self):
+        for client, cmd in self.CMDS:
+            with self.subTest(client=client):
+                said = self._run(getattr(smd, cmd), "AC0G/")
+                self.assertIn("--instance", said)
+                self.assertNotIn("/var/lib/", said)
 
 
 class WatchCommandUnitTests(unittest.TestCase):
