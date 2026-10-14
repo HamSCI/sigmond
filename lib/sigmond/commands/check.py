@@ -153,7 +153,7 @@ def cmd_check(args, env: Optional[Env] = None, checks=None) -> int:
     word = verdict(lines)
     if getattr(args, 'json', False):
         print(json.dumps({'lines': [asdict(ln) for ln in lines], 'verdict': word,
-                          'exit': EXIT_CODES[word]}, ensure_ascii=False))
+                          'exit': EXIT_CODES[word]}))
     else:
         for ln in lines:
             print(render_line(ln))

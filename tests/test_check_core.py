@@ -112,6 +112,12 @@ class AsciiTests(unittest.TestCase):
         self.assertEqual(bad, [], out)
         self.assertIn('caf? ? ?', out)
 
+    def test_json_output_is_ascii_too(self):
+        rc, out = _run(types.SimpleNamespace(json=True),
+                       [Line(FAIL, 'GRAPE', 'the check itself failed: OSError: caf\u00e9 \u2014 \u00b0')])
+        self.assertEqual(sorted({c for c in out if ord(c) >= 0x80}), [], out)
+        self.assertIn('caf\\u00e9', out)
+
 
 class GuardTests(unittest.TestCase):
     def test_an_exception_becomes_a_failing_line_with_its_text(self):
@@ -160,7 +166,9 @@ class SmdRegistrationTests(unittest.TestCase):
         def _raise(name):
             raise AssertionError(f'smd check touched the timing judge ({name})')
         poisoned.__getattr__ = _raise
+        import sigmond
         with mock.patch.dict(sys.modules, {'sigmond.timing_judge': poisoned}), \
+                mock.patch.object(sigmond, 'timing_judge', poisoned, create=True), \
                 mock.patch.object(check, 'default_env', return_value=make_env()):
             rc, out = self._main('check', '--json')
         doc = json.loads(out)
