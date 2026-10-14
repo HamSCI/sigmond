@@ -14946,7 +14946,7 @@ _smd_complete() {
 
     if [[ "$prev" == "--host" ]]; then
         # `smd watch radiod --host`: localhost + recorder-instance ssh aliases
-        local _rhosts="localhost $(systemctl list-units --plain --no-legend 'wspr-recorder@*' 'psk-recorder@*' 2>/dev/null | sed -E 's/^(wspr|psk)-recorder@(.+)\.service.*/\2/' | sort -u)"
+        local _rhosts="localhost $(systemctl list-units --plain --no-legend 'wspr-recorder@*' 'psk-recorder@*' 2>/dev/null | sed -E 's/^(wspr|psk)-recorder@(.+)\.service.*/\2/' | grep -Ev '\\x[0-9a-fA-F]{2}|^[A-Z0-9][A-Z0-9=-]*[A-Z0-9]$' | sort -u)"
         COMPREPLY=($(compgen -W "$_rhosts" -- "$cur"))
         return
     fi
@@ -16026,11 +16026,35 @@ def _is_valid_per_instance_client(client: str, known_clients) -> bool:
     if not _HAS_SIGMOND_LIB:
         return True   # can't validate strictly; be permissive
     try:
-        from sigmond.instance import validate_reporter_id
-        validate_reporter_id(instance)
+        # Any spelling: AC0G/B4, AC0G=B4, or AC0G\x3dB4 copied from a unit.
+        from sigmond.instance import parse_user_reporter_id
+        parse_user_reporter_id(instance)
         return True
     except Exception:
         return False
+
+
+def _normalize_instance_client(client: str) -> str:
+    """`<client>@<reporter-id>` with the reporter id in storage form.
+
+    The sources CLI keys per-instance selections by
+    /etc/sigmond/clients/<client>@<storage form>.sources.toml, so
+    `wspr-recorder@AC0G/B4`, `...@AC0G=B4` and `...@AC0G\\x3dB4` must all
+    name one file.  A key without '@' comes back unchanged.  Raises
+    InvalidReporterId (a ValueError) on a bad reporter id.
+    """
+    if '@' not in client:
+        return client
+    from sigmond import instance as _inst
+    base, _, rid = client.partition('@')
+    return f'{base}@{_inst.parse_user_reporter_id(rid)}'
+
+
+def _restart_hint(client: str, rid: str) -> str:
+    """The instance as a person reads it, then a restart command in the
+    form systemctl accepts (a slash would name a different unit)."""
+    return (f"{client}@{_display_rid(rid)}  "
+            f"(sudo systemctl restart '{client}@{_systemd_escape(rid)}.service')")
 
 
 def _sources_inventory():
@@ -16168,10 +16192,11 @@ def cmd_sources_add(args) -> int:
     # WSPRnet reporter id (AC0G/SIGMA) is stored in its canonical `=` form
     # (AC0G=SIGMA) — the same encoder `smd admin instance add` uses.  Without this
     # the raw '/' lands in the .sources.toml path and the write blows up.
-    if '@' in client:
-        from sigmond import instance as _inst
-        _base, _, _rid = client.partition('@')
-        client = f"{_base}@{_inst.parse_user_reporter_id(_rid)}"
+    try:
+        client = _normalize_instance_client(client)
+    except ValueError as exc:
+        _err(str(exc))
+        return 1
     # Per-instance form `<client>@<reporter-id>` is contract-recognised
     # at v0.8 (CLIENT-CONTRACT §19.5).  Suppress the unknown-client
     # warning when the prefix is a known client AND the reporter-id
@@ -16208,7 +16233,11 @@ def cmd_sources_remove(args) -> int:
         return 1
     from sigmond.sources import ClientSources
 
-    client = args.client
+    try:
+        client = _normalize_instance_client(args.client)
+    except ValueError as exc:
+        _err(str(exc))
+        return 1
     cs = ClientSources.load(client)
     if not cs.selected:
         _info(f'{client}: no sources selected (nothing to remove)')
@@ -16466,19 +16495,21 @@ def cmd_sources_apply(args) -> int:
         sel = _ClientSources.load(stem).selected
         if base != 'wspr-recorder':
             if sel:
-                _info(f'  ⊘ {stem}: not yet multi-source aware (deferred)')
+                _info(f'  ⊘ {base}@{_display_rid(rid)}: not yet multi-source '
+                      f'aware (deferred)')
             continue
         inst_config = _IP('/etc/wspr-recorder') / f'{rid}.toml'
         if not inst_config.exists():
-            _info(f'  ⚠ {stem}: no per-instance config at {inst_config} — '
-                  f'run `smd admin instance add wspr-recorder {rid}` first')
+            _info(f'  ⚠ {base}@{_display_rid(rid)}: no per-instance config at '
+                  f'{inst_config} — run `smd admin instance add wspr-recorder '
+                  f'{_display_rid(rid)}` first')
             continue
         changed, message = _apply_sources_to_wspr_recorder(
             sel, inventory_rows, inst_config, dry_run=dry_run)
         print(message, flush=True)
         if changed:
             any_changed = True
-            restart_hints.append(f'wspr-recorder@{rid}.service')
+            restart_hints.append(_restart_hint('wspr-recorder', rid))
 
     if not any_changed:
         _info('  nothing to do; every client already in sync with its selection')
@@ -17024,6 +17055,52 @@ def cmd_storage_trim(args) -> int:
     return 0
 
 
+def _unit_known(unit: str) -> bool:
+    """True when systemd has `unit` loaded or installed.  Read-only."""
+    for argv in (['systemctl', 'list-units', '--all', '--no-legend', '--plain',
+                  '--no-pager', unit],
+                 ['systemctl', 'list-unit-files', '--no-legend', '--no-pager', unit]):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            return False
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    return False
+
+
+def _watch_instance(raw, client: str):
+    """A watch command's ``--instance`` -> (instance, unit name).
+
+    The text names a reporter id in any spelling (AC0G/B4, AC0G=B4,
+    AC0G\\x3dB4, lower case); parse_user_reporter_id turns it into the
+    storage form.  One fallback, for a host that still runs a unit under
+    a legacy radiod-keyed name (my-rx888, bee1-status.local): when no unit
+    exists for the reporter id, or the text is no reporter id at all, and
+    a unit named exactly as typed (unescaped, case kept) exists, use that
+    unit and say so in one line.  Returns (None, None) without --instance.
+    Raises InvalidReporterId (a ValueError) when the text names neither.
+    """
+    if raw is None:
+        return None, None
+    exact = _unescape_instance(raw.strip())
+    legacy_unit = f'{client}@{_systemd_escape(exact)}.service'
+    can_be_legacy = bool(exact) and '/' not in exact
+    try:
+        rid = _parse_reporter_id(raw)
+    except ValueError:
+        if can_be_legacy and _unit_known(legacy_unit):
+            _warn(_legacy_hint(exact))
+            return exact, legacy_unit
+        raise
+    unit = f'{client}@{_systemd_escape(rid)}.service'
+    if (can_be_legacy and exact != rid and not _unit_known(unit)
+            and _unit_known(legacy_unit)):
+        _warn(_legacy_hint(exact))
+        return exact, legacy_unit
+    return rid, unit
+
+
 def _watch_preflight(target_label: str, unit_pattern: str,
                      hint: str = '') -> int:
     """Check that at least one service matching ``unit_pattern`` is
@@ -17048,7 +17125,7 @@ def _watch_preflight(target_label: str, unit_pattern: str,
     if active:
         return 0
     msg = (f'{target_label}: no active service matching '
-           f'{unit_pattern!r} on this host.')
+           f'{_display_unit(unit_pattern)!r} on this host.')
     if hint:
         msg += f'  {hint}'
     _err(msg)
@@ -17690,18 +17767,15 @@ def cmd_meteor_watch(args) -> int:
     psk-recorder's own ``<rid>-ft8.log`` / ``<rid>-ft4.log``, a
     different producer's logs, even though both feed one SQLite table.
     """
-    instance = getattr(args, 'instance', None)
-    # The operator's --instance is a plain reporter ID (e.g. AC0G=S), but
-    # systemd names the template unit with the '=' escaped
-    # (meteor-scatter@AC0G\x3dS.service) while the per-instance config path
-    # keeps the literal '=' (/etc/meteor-scatter/AC0G=S.toml).  Canonicalize
-    # to the unescaped reporter for paths/display; escape only for the unit.
-    reporter = None
-    if instance:
-        reporter = re.sub(r'\\x([0-9a-fA-F]{2})',
-                          lambda m: chr(int(m.group(1), 16)), instance)
-    unit_pattern = (f'meteor-scatter@{_systemd_escape_reporter(reporter)}.service'
-                    if reporter else 'meteor-scatter@*')
+    # --instance in any spelling: `reporter` holds the storage form for
+    # paths (/etc/meteor-scatter/AC0G=B4.toml), `unit` systemd's spelling.
+    try:
+        reporter, unit = _watch_instance(getattr(args, 'instance', None),
+                                         'meteor-scatter')
+    except ValueError as exc:
+        _err(f'meteor-watch: --instance: {exc}')
+        return 1
+    unit_pattern = unit or 'meteor-scatter@*'
     if _watch_preflight(
             'meteor-watch', unit_pattern,
             hint='Start it with `smd start meteor-scatter` '
@@ -17720,7 +17794,7 @@ def cmd_meteor_watch(args) -> int:
         ) or reporter
         msk_log = log_dir / f'{radiod_id}-msk144.log'
         if not msk_log.exists():
-            _err(f'no msk144 log for instance={reporter!r} '
+            _err(f'no msk144 log for instance={_display_rid(reporter)} '
                  f'(radiod_id={radiod_id!r}) in {log_dir}.  '
                  f'Looked for {msk_log.name}.')
             return 1
@@ -17758,13 +17832,13 @@ def cmd_meteor_watch(args) -> int:
     cap: Optional[int] = None if verbose else (n_recent if n_recent > 0 else 0)
 
     if reporter:
-        rep_label = _display_reporter(reporter)
+        rep_label = _display_rid(reporter)
     else:
         r = _run(['systemctl', 'list-units', '--no-legend', '--plain',
                   '--no-pager', '--state=active', 'meteor-scatter@*'])
         _ids = sorted({
-            _display_reporter(ln.split()[0].split('@', 1)[1]
-                              .rsplit('.service', 1)[0])
+            _display_rid(ln.split()[0].split('@', 1)[1]
+                         .rsplit('.service', 1)[0])
             for ln in r.stdout.splitlines() if ln.split() and '@' in ln.split()[0]
         })
         rep_label = ', '.join(_ids)
@@ -17802,9 +17876,14 @@ def cmd_verifier_watch(args) -> int:
     surfaced via a catch-all so a broken pass doesn't silently
     disappear.
     """
-    instance = getattr(args, 'instance', None)
+    try:
+        instance, unit = _watch_instance(getattr(args, 'instance', None),
+                                         'wspr-recorder')
+    except ValueError as exc:
+        _err(f'verifier-watch: --instance: {exc}')
+        return 1
     if instance is not None:
-        unit_pattern = f'wspr-recorder@{instance}.service'
+        unit_pattern = unit
     else:
         # Post-split the verifiers + wsprnet audit run in the standalone
         # wspr-uploader.service; on in-process hosts they run in the decoders.
@@ -17855,7 +17934,7 @@ def cmd_verifier_watch(args) -> int:
         r'(?:\[(?P<rx>[^\]]+)\])?(?:[: ](?P<rest>.*))?$'
     )
 
-    _heading(f'Upload-verifier activity ({unit_pattern})')
+    _heading(f'Upload-verifier activity ({_display_unit(unit_pattern)})')
     _info('   stage: post-upload verification (server-side round-trip check)')
     _info('   ▸ one line per ~5 min verifier pass — confirms our spots')
     _info('     round-tripped through the upload server\'s recent set')
@@ -18271,11 +18350,13 @@ def cmd_wspr_watch(args) -> int:
     edge we care about — the producer tells us exactly when the
     decode cycle has fully landed.
     """
-    instance = getattr(args, 'instance', None)
-    if instance is None:
-        unit_pattern = 'wspr-recorder@*'
-    else:
-        unit_pattern = f'wspr-recorder@{instance}.service'
+    try:
+        instance, unit = _watch_instance(getattr(args, 'instance', None),
+                                         'wspr-recorder')
+    except ValueError as exc:
+        _err(f'wspr-watch: --instance: {exc}')
+        return 1
+    unit_pattern = unit or 'wspr-recorder@*'
 
     if _watch_preflight(
             'wspr-watch', unit_pattern,
@@ -18301,7 +18382,8 @@ def cmd_wspr_watch(args) -> int:
                             if l.strip()]
             if len(active_units) == 1:
                 unit = active_units[0]
-                resolved_reporter = unit.split('@', 1)[1].rsplit('.', 1)[0]
+                resolved_reporter = _unescape_instance(
+                    unit.split('@', 1)[1].rsplit('.', 1)[0])
         except (FileNotFoundError, IndexError):
             pass
 
@@ -18384,7 +18466,7 @@ def cmd_wspr_watch(args) -> int:
     # group numbering stays untouched; absent on older recorder builds.
     dt_re = _re.compile(r'\bdt=([+\-][\d.]+)')
 
-    _heading(f'WSPR cycle activity ({unit_pattern})')
+    _heading(f'WSPR cycle activity ({_display_unit(unit_pattern)})')
     _info('   stage: decoder (wsprd) → SQLite (wspr.spots) → upload (wsprdaemon.org / wsprnet)')
     _info('   ▸ one line per WSPR cycle, fired by wspr-recorder\'s')
     _info('     CycleBatcher the instant all bands\' spots are committed')
@@ -18426,7 +18508,7 @@ def cmd_wspr_watch(args) -> int:
         return probe.returncode == 0
 
     if not _journal_has_data():
-        _info(f'   ⏳ no journal data for {unit_pattern} yet — waiting '
+        _info(f'   ⏳ no journal data for {_display_unit(unit_pattern)} yet — waiting '
               'for wspr-recorder to start (Ctrl-C to exit)')
         try:
             while not _journal_has_data():
@@ -19146,7 +19228,7 @@ def cmd_wspr_watch(args) -> int:
                 # without compressing them.  Shorter names get
                 # trailing spaces so the next column lines up.
                 rx_part = f' rx={short:<16}'
-            reporter_part = (f' reporter={_display_reporter(resolved_reporter)}'
+            reporter_part = (f' reporter={_display_rid(resolved_reporter)}'
                              if resolved_reporter else '')
             # Average decoder dt for the cycle (recorder-supplied, inline).
             dtm = dt_re.search(line)
@@ -20422,9 +20504,13 @@ def cmd_psk_watch(args) -> int:
     192` reads as "uploading is much bigger than queued" — when in
     fact 192 = sum of the last ~3 polls (each ~60 spots).
     """
-    instance = getattr(args, 'instance', None)
-    unit_pattern = (f'psk-recorder@{instance}.service' if instance
-                    else 'psk-recorder@*')
+    try:
+        instance, unit = _watch_instance(getattr(args, 'instance', None),
+                                         'psk-recorder')
+    except ValueError as exc:
+        _err(f'psk-watch: --instance: {exc}')
+        return 1
+    unit_pattern = unit or 'psk-recorder@*'
     if _watch_preflight(
             'psk-watch', unit_pattern,
             hint='Start a recorder with `smd start psk-recorder` '
@@ -20462,7 +20548,7 @@ def cmd_psk_watch(args) -> int:
         ft8_log = log_dir / f'{radiod_id}-ft8.log'
         ft4_log = log_dir / f'{radiod_id}-ft4.log'
         if not (ft8_log.exists() or ft4_log.exists()):
-            _err(f'no per-mode log for instance={instance!r} '
+            _err(f'no per-mode log for instance={_display_rid(instance)} '
                  f'(radiod_id={radiod_id!r}) in {log_dir}.  '
                  f'Looked for {ft8_log.name}, {ft4_log.name}.')
             return 1
@@ -20521,13 +20607,13 @@ def cmd_psk_watch(args) -> int:
     # reporter id; otherwise collect from the active psk-recorder@ units.
     # Same systemd-escape → '/' display transform as the WSPR cycle view.
     if instance:
-        rep_label = _display_reporter(instance)
+        rep_label = _display_rid(instance)
     else:
         r = _run(['systemctl', 'list-units', '--no-legend', '--plain',
                   '--no-pager', '--state=active', 'psk-recorder@*'])
         _ids = sorted({
-            _display_reporter(ln.split()[0].split('@', 1)[1]
-                              .rsplit('.service', 1)[0])
+            _display_rid(ln.split()[0].split('@', 1)[1]
+                         .rsplit('.service', 1)[0])
             for ln in r.stdout.splitlines() if ln.split() and '@' in ln.split()[0]
         })
         rep_label = ', '.join(_ids)
@@ -20847,7 +20933,7 @@ def cmd_mag_watch(args) -> int:
             r = max(vals) - min(vals)
             return f'±{r/2:>6.0f}'
         rid = last.get('reporter_id')
-        rid_part = f'  reporter={_display_reporter(rid)}' if rid else ''
+        rid_part = f'  reporter={_display_rid(rid)}' if rid else ''
         now_str = _dt.datetime.now().strftime('%H:%M:%S')
         print(
             f'[{now_str}] win {int(WIN_SEC)}s  samples={n:>3d} '
@@ -21291,53 +21377,6 @@ def _normalize_reporter_arg(args, inst) -> bool:
         _err(str(exc))
         return False
     return True
-
-
-def _systemd_escape_reporter(reporter_id: str) -> str:
-    """Escape a reporter/instance ID the way systemd names its template
-    unit instance, so a `systemctl` pattern matches the real unit.
-
-    E.g. ``AC0G=S`` → ``AC0G\\x3dS`` (the live unit is
-    ``meteor-scatter@AC0G\\x3dS.service``).  This is the forward inverse
-    of the ``\\xHH`` decode in ``_display_reporter``: callers that hold a
-    plain reporter ID (``AC0G=S``) and need to address its systemd unit
-    must escape first, or the pattern silently matches nothing.  Any
-    ``\\xHH`` already present in the input is decoded first so the call
-    is idempotent.
-    """
-    reporter_id = re.sub(r'\\x([0-9a-fA-F]{2})',
-                         lambda m: chr(int(m.group(1), 16)), reporter_id)
-    try:
-        r = subprocess.run(['systemd-escape', '--', reporter_id],
-                           capture_output=True, text=True, check=False)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    except FileNotFoundError:
-        pass
-    # Fallback: escape the one special char that shows up in reporter IDs.
-    return reporter_id.replace('=', '\\x3d')
-
-
-def _display_reporter(reporter_id: str, inst=None) -> str:
-    """Render a stored reporter ID for user-facing strings.
-
-    Stored form may carry `=` where the user typed `/`; this reverts
-    it.  No-op for hyphen-only IDs.
-
-    Callers that derive the id from a systemd unit name (watch views:
-    ``wspr-recorder@AC0G\\x3dB4.service``) hand us the RAW escaped
-    instance string — decode ``\\xHH`` sequences first so ``\\x3d``
-    becomes ``=`` and then displays as ``/``.
-    """
-    reporter_id = re.sub(r'\\x([0-9a-fA-F]{2})',
-                         lambda m: chr(int(m.group(1), 16)), reporter_id)
-    if inst is None:
-        try:
-            from sigmond.instance import display_reporter_id
-        except ImportError:
-            return reporter_id
-        return display_reporter_id(reporter_id)
-    return inst.display_reporter_id(reporter_id)
 
 
 def cmd_instance_list(args) -> int:
@@ -22476,6 +22515,7 @@ def _radiod_watch_candidate_hosts() -> list:
     name doubles as the --host value.  Returns ['localhost'] when no peers
     are found."""
     import re as _re2
+    from sigmond.instance import InvalidReporterId, validate_reporter_id
     local = set()
     try:
         for unit in _get_radiod_instances():            # 'radiod@<inst>.service'
@@ -22499,9 +22539,17 @@ def _radiod_watch_candidate_hosts() -> list:
             m = _re2.match(r'(?:wspr|psk)-recorder@(.+)\.service$', parts[0])
             if not m:
                 continue
-            inst = m.group(1)
+            inst = _unescape_instance(m.group(1))
             if inst in local or inst in seen:
                 continue
+            # A reporter-keyed instance (AC0G=B4, W1ABC-5) names a station,
+            # not an ssh alias: `ssh AC0G\x3dB4` reaches nothing.  Peers are
+            # named like `bee1`, which never validates as a reporter id.
+            try:
+                validate_reporter_id(inst)
+                continue
+            except InvalidReporterId:
+                pass
             seen.add(inst)
             peers.append(inst)
     except Exception:
