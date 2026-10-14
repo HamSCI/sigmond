@@ -20,11 +20,7 @@ from textual.worker import get_current_worker
 
 from ..mutation import confirm_and_run
 
-try:
-    from ...instance import display_reporter_id as _display_reporter_id
-except ImportError:
-    def _display_reporter_id(rid: str) -> str:
-        return rid.replace("=", "/")
+from ...instance import display_reporter_id as _display_reporter_id
 
 
 def _smd_binary() -> str:
@@ -93,7 +89,7 @@ def _instance_options_for_component(component: str) -> list:
     except Exception:
         return options
     for i in list_instances(catalog_clients=[component]):
-        options.append((i.reporter_id, i.reporter_id))
+        options.append((_display_reporter_id(i.reporter_id), i.reporter_id))
     try:
         for c in detect_migration_candidates():
             if c.client == component:

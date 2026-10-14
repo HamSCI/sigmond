@@ -24,11 +24,7 @@ from textual.widgets import Button, Checkbox, Input, Label, RichLog, Select, Sta
 
 from ..mutation import confirm_and_run
 
-try:
-    from ...instance import display_reporter_id as _display_reporter_id
-except ImportError:
-    def _display_reporter_id(rid: str) -> str:
-        return rid.replace("=", "/")
+from ...instance import display_reporter_id as _display_reporter_id
 
 
 def _smd_binary() -> str:
@@ -212,7 +208,7 @@ class VerifierScreen(Vertical):
         except Exception:
             return options
         for i in list_instances(catalog_clients=[client]):
-            options.append((i.reporter_id, i.reporter_id))
+            options.append((_display_reporter_id(i.reporter_id), i.reporter_id))
         try:
             for c in detect_migration_candidates():
                 if c.client == client:

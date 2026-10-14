@@ -66,11 +66,7 @@ from textual.widgets import Button, DataTable, Label, Select, Static
 
 from ..mutation import confirm_and_run
 
-try:
-    from ...instance import display_reporter_id as _display_reporter_id
-except ImportError:
-    def _display_reporter_id(rid: str) -> str:
-        return rid.replace("=", "/")
+from ...instance import display_reporter_id as _display_reporter_id
 
 
 def _smd_binary() -> str:

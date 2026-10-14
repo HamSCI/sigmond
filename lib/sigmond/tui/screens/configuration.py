@@ -44,18 +44,10 @@ from typing import Optional
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Input, Label, RichLog, Static
 
-
-try:
-    from ...instance import (
-        display_reporter_id as _display,
-        parse_user_reporter_id as _parse_rid,
-    )
-except ImportError:
-    def _display(rid: str) -> str:
-        return rid.replace("=", "/")
-
-    def _parse_rid(s: str) -> str:
-        return s.strip().replace("/", "-").upper()
+from ...instance import (
+    display_reporter_id as _display,
+    parse_user_reporter_id as _parse_rid,
+)
 
 
 def _smd_binary() -> str:
@@ -289,15 +281,14 @@ class ConfigurationScreen(Vertical):
         table.clear()
 
         active_states = _batch_unit_active(
-            [f"{i.client}@{i.reporter_id}.service" for i in instances])
+            [i.paths.unit_name for i in instances])
 
         for i in instances:
             chk = ("✓" if i.has_config else "-") + "/" \
                 + ("✓" if i.has_env else "-") + "/" \
                 + ("✓" if i.has_sources else "-")
             sources = _sources_for(i.client, i.reporter_id)
-            unit = f"{i.client}@{i.reporter_id}.service"
-            state = active_states.get(unit, "unknown")
+            state = active_states.get(i.paths.unit_name, "unknown")
             unit_cell = _unit_markup(state)
             table.add_row(i.client, _display(i.reporter_id),
                           sources, chk, unit_cell,
@@ -484,13 +475,14 @@ class ConfigurationScreen(Vertical):
             self._set_last("[yellow]select a row first[/]")
             return
         client, reporter = sel
-        cmd = [_smd_binary(), 'admin', 'instance', 'remove', client, reporter,
+        shown = _display(reporter)
+        cmd = [_smd_binary(), 'admin', 'instance', 'remove', client, shown,
                '--yes']
         confirm_and_run(
             self.app,
-            title=f"Remove {client}@{_display(reporter)}?",
+            title=f"Remove {client}@{shown}?",
             body=(
-                f"Run [bold]smd admin instance remove {client} {reporter} "
+                f"Run [bold]smd admin instance remove {client} {shown} "
                 f"--yes[/]\n\n"
                 "Removes the per-instance config / env / sources files.  "
                 "Does NOT stop the running unit — `smd admin instance disable` "
@@ -519,16 +511,17 @@ class ConfigurationScreen(Vertical):
         except Exception as exc:
             self._set_last(f"[red]Add: bad reporter ID: {exc}[/]")
             return
-        cmd = [_smd_binary(), 'admin', 'instance', 'add', client, reporter]
+        shown = _display(reporter)
+        cmd = [_smd_binary(), 'admin', 'instance', 'add', client, shown]
         if dry_run:
             cmd.append('--dry-run')
             self._exec_async(cmd)
             return
         confirm_and_run(
             self.app,
-            title=f"Add instance {client}@{_display(reporter)}?",
+            title=f"Add instance {client}@{shown}?",
             body=(
-                f"Run [bold]smd admin instance add {client} {reporter}[/]\n\n"
+                f"Run [bold]smd admin instance add {client} {shown}[/]\n\n"
                 "Creates per-instance config / env / sources skeletons.  "
                 "Does NOT enable or start the systemd unit — that's a "
                 "follow-up step (Edit the config, then "
