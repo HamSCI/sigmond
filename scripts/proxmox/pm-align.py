@@ -257,6 +257,12 @@ WIZARD_HEREDOCS_SINCE_V371 = {
     "/etc/systemd/system/sigmond-rac-pair.timer": 0o644,
     "/etc/systemd/system/sigmond-rac-pair.path": 0o644,
 }
+# The on-site check (sigmond tasks/spec-smd-check-v372.md).  A wizard from
+# before v3.72 does not write it, so it is never required either.
+WIZARD_HEREDOCS_SINCE_V372 = {
+    "/usr/local/bin/sigmond-check": 0o755,
+}
+
 SETUP = "/usr/local/sbin/sigmond-setup"
 PAIR_FLAG = "--pair-vm"
 # Where the wizard's pairing records its outcome, one line: `paired <UTC>` or
@@ -324,6 +330,9 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
         missing = [Path(path).name for path in WIZARD_HEREDOCS_SINCE_V371 if path not in wz]
         notes.append(f"this release's wizard carries {len(carried)} of the "
                      f"{len(WIZARD_HEREDOCS_SINCE_V371)} remote-access files ({', '.join(missing)})")
+    for path, mode in WIZARD_HEREDOCS_SINCE_V372.items():
+        if path in wz:
+            out.append(HostFile(path, wz[path].encode(), mode, "sigmond-wizard.sh"))
     out.extend(relay_units(src.wizard, vmid))
     if "pm-align.py" in src.proxmox:
         out.append(HostFile("/usr/local/sbin/pm-align", src.proxmox["pm-align.py"], 0o755,

@@ -3340,6 +3340,141 @@ exec ssh -o StrictHostKeyChecking=accept-new \
          sigmond@"$IP" "$@"
 VMEOF
 chmod +x /usr/local/bin/sigmond-vm
+# -- sigmond-check: does this station work?  (v3.72 #14) ----------------------
+# The installer types it at this console.  It asks the VM (`smd check`), adds
+# the page lines through this host's addresses, and prints one verdict.
+# pm-align carries this heredoc too (WIZARD_HEREDOCS_SINCE_V372).
+say "installing the sigmond-check helper (is the station working?)"
+cat > /usr/local/bin/sigmond-check <<'CHKEOF'
+#!/bin/bash
+# sigmond-check - does this station work?  Type it at the host's console.
+# Installed by sigmond-setup; pm-align brings it to stations set up before
+# v3.72.  sigmond tasks/spec-smd-check-v372.md.
+#
+# It asks the decoder VM for its lines (`smd check --no-verdict`), adds one
+# line per web page as a person on this network reaches it, and ends with one
+# verdict: PASS (exit 0), WAIT (exit 2) or FAIL (exit 1).  It changes nothing.
+#
+# IPv4: the host relays ports 8081, 8000 and 8082 to the VM with DNAT rules in
+# PREROUTING.  Traffic the host sends to itself never passes PREROUTING, so a
+# GET on the host's own IPv4 address proves nothing.  The line passes when the
+# rule exists, net.ipv4.ip_forward reads 1, and the VM's address answers 200.
+# IPv6: sigmond-vm6proxy relays in userspace, so a GET on the host's own
+# global IPv6 address takes the same path a browser takes.
+#
+# Everything it prints stays ASCII: the console font (Lat15) shows nothing
+# else (Michael, 2026-10-14).
+set -u
+case "${1:-}" in
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+BRIDGE="${SIGMOND_CHECK_BRIDGE:-vmbr0}"
+VM_TIMEOUT="${SIGMOND_CHECK_VM_TIMEOUT:-60}"
+OKM='ok'; FAILM='FAIL'
+LINES=()
+
+add(){   # mark label text -- the same columns as smd check
+    local lab="$2"
+    if [ "${#lab}" -lt 15 ]; then lab=$(printf '%-15s' "$lab"); else lab="$lab  "; fi
+    LINES+=("$(printf ' %-4s  %s%s' "$1" "$lab" "$3")")
+}
+ascii(){ printf '%s' "$1" | LC_ALL=C tr -c ' -~' '?'; }   # text from elsewhere: past ASCII becomes '?'
+
+# -- the VM's lines ----------------------------------------------------------
+MAG_PAGE=0
+VM_OUT=$(timeout "$VM_TIMEOUT" sigmond-vm smd check --no-verdict 2>&1)
+if printf '%s\n' "$VM_OUT" | grep -qE '^ (ok  |wait|FAIL|--  )  '; then
+    KEEP=0
+    while IFS= read -r l; do
+        case "$l" in
+            " ok    "*|" wait  "*|" FAIL  "*|" --    "*)
+                KEEP=1
+                case "${l:7}" in
+                    "receiver page"*|"station pages"*) KEEP=0 ;;   # the host checks these below
+                    "magnetometer page"*) MAG_PAGE=1; KEEP=0 ;;
+                esac ;;
+            "                      "*) ;;    # a fix, under the line before it
+            *) KEEP=0 ;;
+        esac
+        [ "$KEEP" = 1 ] || continue
+        # A command the VM names must reach the VM from this console.
+        l=${l//Fix: /Fix: sigmond-vm }
+        l=${l//run: /run: sigmond-vm }
+        LINES+=("$(ascii "$l")")
+    done <<<"$VM_OUT"
+else
+    WHY=$(printf '%s\n' "$VM_OUT" | grep -v '^[[:space:]]*$' | tail -1)
+    add "$FAILM" "decoder VM" "does not answer: $(ascii "${WHY:-nothing within $VM_TIMEOUT s}")"
+fi
+
+# -- the page lines, through this host's addresses ---------------------------
+V4=$(ip -4 -o addr show dev "$BRIDGE" scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}')
+V6=$(ip -6 -o addr show dev "$BRIDGE" scope global 2>/dev/null \
+     | grep -v -e temporary -e deprecated -e tentative | awk '{split($4, a, "/"); print a[1]; exit}')
+NAT=$(iptables -t nat -S PREROUTING 2>/dev/null); NAT_RC=$?
+FWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+
+code_of(){ curl -g -s -o /dev/null -m 3 -w '%{http_code}' "$1" 2>/dev/null; }
+said(){ case "$1" in ''|000) echo "no answer" ;; *) echo "status $1" ;; esac; }
+dnat_to(){   # port -> the ip:port its DNAT rule sends it to
+    printf '%s\n' "$NAT" | awk -v p="$1" '
+        $0 ~ ("--dport " p "( |$)") && / -j DNAT / {
+            for (i = 1; i <= NF; i++) if ($i == "--to-destination") { print $(i + 1); exit } }'
+}
+
+page(){   # label port
+    local label="$1" port="$2" mark="$OKM" text="" part to code
+    if [ -n "$V4" ]; then
+        part="IPv4 http://$V4:$port"
+        to=$(dnat_to "$port")
+        if [ "$NAT_RC" -ne 0 ]; then
+            part="$part does not answer: cannot read the relay rules (run sigmond-check as root)"; mark="$FAILM"
+        elif [ -z "$to" ]; then
+            part="$part does not answer: no relay rule for port $port"; mark="$FAILM"
+        elif [ "$FWD" != 1 ]; then
+            part="$part does not answer: IPv4 forwarding is off"; mark="$FAILM"
+        else
+            code=$(code_of "http://$to/")
+            [ "$code" = 200 ] || { part="$part does not answer: the VM at $to gave $(said "$code")"; mark="$FAILM"; }
+        fi
+        text="$part"
+    fi
+    if [ -n "$V6" ]; then
+        part="IPv6 http://[$V6]:$port"
+        code=$(code_of "http://[$V6]:$port/")
+        if [ "$code" != 200 ]; then
+            if systemctl is-active --quiet "sigmond-vm6proxy@$port.socket" 2>/dev/null; then
+                part="$part does not answer: $(said "$code")"
+            else
+                part="$part does not answer: the IPv6 relay is not installed"
+            fi
+            mark="$FAILM"
+        fi
+        text="${text:+$text   }$part"
+    elif [ -n "$V4" ]; then
+        text="$text   no IPv6 here"
+    fi
+    if [ -z "$V4$V6" ]; then mark="$FAILM"; text="this host has no address on $BRIDGE"; fi
+    add "$mark" "$label" "$text"
+}
+page "receiver page" 8081
+page "station pages" 8000
+[ "$MAG_PAGE" = 1 ] && page "magnetometer page" 8082
+
+# -- one verdict from both sets ----------------------------------------------
+NFAIL=0; NWAIT=0
+for l in "${LINES[@]}"; do
+    printf '%s\n' "$l"
+    case "$l" in " FAIL  "*) NFAIL=$((NFAIL + 1)) ;; " wait  "*) NWAIT=$((NWAIT + 1)) ;; esac
+done
+PARTS=""
+[ "$NFAIL" -gt 0 ] && PARTS="$NFAIL failing"
+[ "$NWAIT" -gt 0 ] && PARTS="${PARTS:+$PARTS, }$NWAIT waiting"
+if [ "$NFAIL" -gt 0 ]; then V=FAIL; RC=1; elif [ "$NWAIT" -gt 0 ]; then V=WAIT; RC=2; else V=PASS; RC=0; fi
+if [ -n "$PARTS" ]; then echo "$V  ($PARTS)"; else echo "$V"; fi
+exit "$RC"
+CHKEOF
+chmod +x /usr/local/bin/sigmond-check
 
 # ── PROVE the operator login works (don't just claim it) ───────────────────
 # Key login, host→VM, via the same helper path the operator will use.

@@ -2109,3 +2109,39 @@ def test_status_prints_one_printable_line_whatever_the_file_holds(tmp_path, caps
 def test_the_file_status_reads_is_the_file_the_wizard_writes():
     assert pm_align.PAIRING_RECORD == "/etc/sigmond-appliance/rac-pairing"
     assert '"$MARK_DIR/rac-pairing"' in WIZARD and "\nMARK_DIR=/etc/sigmond-appliance\n" in WIZARD
+
+
+# ── the on-site check (sigmond tasks/spec-smd-check-v372.md §6) ─────────────
+#
+# From v3.72 the wizard writes /usr/local/bin/sigmond-check beside sigmond-vm,
+# and pm-align brings it to a station set up before that.
+
+WIZ_V372 = WIZ + '''cat > /usr/local/bin/sigmond-check <<'CHKEOF'
+#!/bin/bash
+echo PASS
+CHKEOF
+'''
+
+
+def test_desired_files_takes_sigmond_check_from_a_v372_wizard():
+    src = pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ_V372, 100), {"pm-heartbeat.py": b"hb"})
+    files = {f.path: f for f in pm_align.desired_files(src, 100)}
+    f = files["/usr/local/bin/sigmond-check"]
+    assert f.mode == 0o755 and f.content == b"#!/bin/bash\necho PASS\n"
+
+
+def test_desired_files_accepts_a_wizard_from_before_v372():
+    paths = {f.path for f in pm_align.desired_files(_src(), 100)}
+    assert "/usr/local/bin/sigmond-check" not in paths
+    assert "/usr/local/bin/sigmond-vm" in paths
+
+
+def test_the_real_wizard_carries_sigmond_check():
+    src = pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZARD, 100), {})
+    files = {f.path: f for f in pm_align.desired_files(src, 100)}
+    for path, mode in pm_align.WIZARD_HEREDOCS_SINCE_V372.items():
+        assert path in files, f"the wizard no longer writes {path} from a quoted heredoc"
+        assert files[path].mode == mode
+    body = files["/usr/local/bin/sigmond-check"].content.decode()
+    assert body.startswith("#!/bin/bash\n")
+    assert "sigmond-vm smd check --no-verdict" in body
