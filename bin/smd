@@ -21866,6 +21866,28 @@ def cmd_instance_migrate(args) -> int:
     return 0
 
 
+def cmd_instance_canonical(args) -> int:
+    """`smd admin instance canonical <text> [--systemd]`: read-only.
+
+    Prints a reporter id, typed in any spelling (AC0G/B4, AC0G=B4,
+    AC0G\\x3dB4, lower case), in its storage form (AC0G=B4), or with
+    --systemd in the form a unit name carries (AC0G\\x3dB4; W1ABC-5 stays
+    W1ABC-5).  Scripts call it instead of `tr '/' '='` and
+    systemd-escape(1).  Prints nothing on stdout and exits 1 on an
+    invalid id, so `$(smd admin instance canonical ...)` is empty then.
+    """
+    inst = _instance_module()
+    if inst is None:
+        return 1
+    try:
+        storage = inst.parse_user_reporter_id(args.text)
+    except inst.InvalidReporterId as exc:
+        print(f'smd: {exc}', file=sys.stderr)
+        return 1
+    print(inst.systemd_instance(storage) if args.systemd else storage)
+    return 0
+
+
 def cmd_radiod_migrate(args) -> int:
     """RADIOD-IDENTIFICATION.md §6 Phase 5 — rewrite legacy radiod-id
     schema in client configs + coordination.toml to use the canonical
@@ -23966,7 +23988,8 @@ def main() -> int:
     p_instance = admin_sub.add_parser(
         'instance',
         help='per-reporter client instance lifecycle '
-             '(list / show / add / remove / edit / enable / disable / migrate)')
+             '(list / show / add / remove / edit / enable / disable / migrate '
+             '/ canonical)')
     instance_sub = p_instance.add_subparsers(dest='instance_command')
     instance_sub.add_parser('help', help='show this help')
 
@@ -24035,6 +24058,18 @@ def main() -> int:
         '--yes', action='store_true',
         help='actually perform the migration (requires root); '
              'without this, only the candidate list is printed')
+
+    p_i_canonical = instance_sub.add_parser(
+        'canonical',
+        help='print a reporter id in its storage form (AC0G/B4 -> AC0G=B4), '
+             'or with --systemd as a unit name carries it; read-only, '
+             'exits 1 on an invalid id')
+    p_i_canonical.add_argument(
+        'text', help='reporter id in any spelling: AC0G/B4, AC0G=B4, '
+                     'or as copied from a unit name')
+    p_i_canonical.add_argument(
+        '--systemd', action='store_true',
+        help='print the form a unit name carries (AC0G/B4 -> AC0G\\x3dB4)')
 
     # smd admin radiod — RADIOD-IDENTIFICATION.md §6 Phase 5
     p_radiod = admin_sub.add_parser(
@@ -25661,6 +25696,8 @@ def main() -> int:
             return cmd_instance_disable(args)
         if ic == 'migrate':
             return cmd_instance_migrate(args)
+        if ic == 'canonical':
+            return cmd_instance_canonical(args)
         p_instance.print_help()
         return 0
 

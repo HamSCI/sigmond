@@ -191,6 +191,7 @@ smd admin instance edit <client> <reporter-id>             # invoke the client's
 smd admin instance enable <client> <reporter-id>           # systemctl enable + start
 smd admin instance disable <client> <reporter-id>          # systemctl disable + stop
 smd admin instance migrate                                 # one-shot migration from radiod-keyed names
+smd admin instance canonical <text> [--systemd]            # print the storage (or unit-name) form; read-only
 ```
 
 **`smd admin instance add <client> <reporter-id>` does:**
