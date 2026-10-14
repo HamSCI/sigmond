@@ -23709,6 +23709,7 @@ def main() -> int:
 
               Operator (daily, read-mostly):
                 status     service health snapshot
+                check      does this station work?  one line per item, then PASS | WAIT | FAIL
                 watch      live tail (wspr | psk | hfdl | codar | superdarn | meteor | hf-tec | mag | ka9q | radiod | uploads | verifier)
                 tui        launch interactive TUI
 
@@ -25167,6 +25168,16 @@ def main() -> int:
              'packaging runs')
     sink_sub.add_parser('fill', help='not available yet (a later release)')
 
+    # check -- read-only: does this station work?  (tasks/spec-smd-check-v372.md)
+    p_check = sub.add_parser('check',
+        help='does this station work?  One line per item and a verdict: PASS, WAIT '
+             'or FAIL.  Read-only; needs no root')
+    p_check.add_argument('--no-verdict', action='store_true',
+        help='print the lines without the verdict line (sigmond-check on the host '
+             'adds its own)')
+    p_check.add_argument('--json', action='store_true',
+        help='print the lines and the verdict as one JSON object')
+
     p_remote = sub.add_parser('remote',
         help='remote access for the fleet admin: status | off | on.  It asks '
              'the Proxmox host, which alone switches the tunnel')
@@ -25312,6 +25323,11 @@ def main() -> int:
             return cmd_secrets_bundle(args)
         p_secrets.print_help()
         return 0
+
+    if args.command == 'check':
+        # Read-only by design: never _need_root, never the timing judge.
+        from sigmond.commands.check import cmd_check
+        return cmd_check(args)
 
     if args.command == 'sink':
         verb = getattr(args, 'sink_command', None) or 'status'
