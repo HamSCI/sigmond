@@ -296,3 +296,41 @@ def test_sigmond_vm_stays_interactive_by_default(tmp_path):
 def test_sigmond_check_gives_the_vm_no_console_to_read(tmp_path):
     run(tmp_path, vm=PSK_OK, vm_rc=0, curl=VM_200)
     assert (tmp_path / "scene" / "vm.stdin").read_text().strip() == "/dev/null"
+
+
+# -- final review m4: the two halves agree on the line format ----------------
+def test_lines_smd_check_renders_parse_on_the_host(tmp_path):
+    """smd check renders, sigmond-check parses: a format change in one half
+    fails here, not at a console."""
+    from sigmond.commands import check
+    from sigmond.commands.check import ABSENT, FAIL, OK, WAIT, Line
+    vm_lines = [
+        Line(WAIT, 'bring-up', 'still running (started 7 min ago)'),
+        Line(FAIL, 'PSK', 'psk-recorder is failed.  Fix: smd start psk-recorder'),
+        Line(FAIL, 'a label of 15+ chars', 'it broke.  Fix: sudo systemctl restart x'),
+        Line(WAIT, 'uploads', 'off, new station: check the lines above, then run: smd sink upload'),
+        Line(OK, 'magnetometer', 'samples arriving, 23.1 °C'),
+        Line(ABSENT, 'meteor scatter', 'not on this station'),
+        Line(OK, 'receiver page', 'http://127.0.0.1:8081 answers'),
+    ]
+    vm = "".join(check.render_line(ln) + "\n" for ln in vm_lines)
+    rc, out = run(tmp_path, vm=vm, vm_rc=1, curl=VM_200)
+    assert out == [
+        " wait  bring-up       still running (started 7 min ago)",
+        " FAIL  PSK            psk-recorder is failed.",
+        "                      Fix: sigmond-vm smd start psk-recorder",
+        " FAIL  a label of 15+ chars  it broke.",
+        "                      Fix: sigmond-vm sudo systemctl restart x",
+        " wait  uploads        off, new station: check the lines above, then run: sigmond-vm smd sink upload",
+        " ok    magnetometer   samples arriving, 23.1 ?C",
+        " --    meteor scatter not on this station",
+        " ok    receiver page  IPv4 http://192.168.1.50:8081   no IPv6 here",
+        " ok    station pages  IPv4 http://192.168.1.50:8000   no IPv6 here",
+        "FAIL  (2 failing, 2 waiting)",
+    ]
+    assert rc == 1
+
+
+def test_the_sigmond_check_heredoc_is_pure_ascii():
+    # sigmond CLAUDE.md: no byte above 0x7F where a guest-agent request may carry it.
+    assert all(ord(c) < 0x80 for c in SCRIPT)
