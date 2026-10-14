@@ -14,10 +14,13 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import re
 import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 # ASCII on purpose: the Proxmox host's console font (Lat15, Fixed 8x16) has
@@ -358,9 +361,151 @@ def minutes(seconds: float) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Science: PSK, WSPR, meteor scatter
+# ---------------------------------------------------------------------------
+
+
+PSK_LOG_DIR = Path('/var/log/psk-recorder')
+PSK_WINDOW_S = 15 * 60
+PSK_TAIL_BYTES = 8 * 1024 * 1024
+# decode_ft8:  "2026/05/07 12:34:56 -15 +0.50 14,074,131.2 ~ K1ABC W1XYZ EM26"
+# jt9:         "260507 123456 14074000 ..."  (psk-recorder ch_tailer.py:58-59)
+_FT8_SPOT = re.compile(r'^(\d{4})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\s.*~')
+_JT9_SPOT = re.compile(r'^(\d{2})(\d{2})(\d{2})\s+(\d{2})(\d{2})(\d{2})\s+\d+\s')
+
+WSPR_UNITS = ('wspr-recorder@*.service',)
+WSPR_WINDOW_MIN = 10
+WSPR_YOUNG_S = 12 * 60
+# spot_sink's cycle line, the one `smd watch wspr` parses (bin/smd cycle_re).
+_WSPR_CYCLE = re.compile(
+    r'cycle\s+UTC\s+\d{2}:\d{2}\s+(?:rx=\S+\s+)?\S+\s+(\d+)\s+spots\s+in\s+wspr\.spots'
+    r'(?:,\s+\d+\s+noise\s+rows\s+in\s+wspr\.noise)?\s+\((\d+)\s+bands?,'
+    r'[^)]*\)(?:.*?\bbands=\[([^\]]*)\])?')
+
+METEOR_UNITS = ('meteor-scatter@*.service',)
+METEOR_WINDOW_MIN = 5
+# meteor-scatter core/recorder.py: "stats MSK144 rx=<id>: spots=N decodes=OK/ALL ..."
+_METEOR_STATS = re.compile(r'\bstats MSK144 rx=\S+: spots=(\d+) decodes=(\d+)/(\d+)')
+
+
+def plural(n: int, word: str) -> str:
+    return f'{n} {word}' + ('' if n == 1 else 's')
+
+
+def _spot_time(line: str) -> Optional[float]:
+    m = _FT8_SPOT.match(line)
+    if m:
+        y, mo, d, hh, mm, ss = (int(x) for x in m.groups())
+    else:
+        m = _JT9_SPOT.match(line)
+        if not m:
+            return None
+        y, mo, d, hh, mm, ss = (int(x) for x in m.groups())
+        y += 2000
+    try:
+        return datetime(y, mo, d, hh, mm, ss, tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def count_psk_spots(reader, log_dir: Path, now: float,
+                    window_s: float = PSK_WINDOW_S) -> dict:
+    """{'ft8': n, 'ft4': n}: spot lines stamped (UTC) inside the window, summed
+    over every receiver's `<radiod_id>-ft8.log` and `-ft4.log`."""
+    counts = {'ft8': 0, 'ft4': 0}
+    names = reader.listdir(log_dir)
+    if names is None:
+        return counts
+    for name in names:
+        for mode in counts:
+            if not name.endswith(f'-{mode}.log'):
+                continue
+            text = reader.tail(log_dir / name, PSK_TAIL_BYTES) or ''
+            for line in text.splitlines():
+                t = _spot_time(line.strip())
+                if t is not None and now - window_s <= t <= now + 60:
+                    counts[mode] += 1
+    return counts
+
+
+def psk_line(env: Env, log_dir: Path = PSK_LOG_DIR) -> Line:
+    label = 'PSK'
+    if not env.installed('psk-recorder'):
+        return Line(ABSENT, label, 'not on this station')
+    svc = env.service('psk-recorder@*.service')
+    bad = service_problem(label, svc, 'psk-recorder')
+    if bad:
+        return bad
+    counts = count_psk_spots(env.reader, log_dir, env.now)
+    if counts['ft8'] or counts['ft4']:
+        return Line(OK, label, f"{counts['ft8']} FT8 and {counts['ft4']} FT4 spots "
+                               f"in the last 15 min")
+    if is_young(svc, PSK_WINDOW_S):
+        return Line(WAIT, label, f'no spots yet; psk-recorder started '
+                                 f'{minutes(svc.age_s or 0)} min ago, wait 15 min')
+    return Line(FAIL, label, 'no FT8 or FT4 spot in 15 min.  Check the antenna and its '
+                             'cable first; if they are fine, tell the fleet admin.')
+
+
+def wspr_line(env: Env) -> Line:
+    label = 'WSPR'
+    if not env.installed('wspr-recorder'):
+        return Line(ABSENT, label, 'not on this station')
+    svc = env.service('wspr-recorder@*.service')
+    bad = service_problem(label, svc, 'wspr-recorder')
+    if bad:
+        return bad
+    spots, bands, band_count = 0, set(), 0
+    for line in env.journal(WSPR_UNITS, WSPR_WINDOW_MIN):
+        m = _WSPR_CYCLE.search(line)
+        if not m:
+            continue
+        spots += int(m.group(1))
+        band_count = max(band_count, int(m.group(2)))
+        if m.group(3):
+            bands.update(tok.split(':', 1)[0] for tok in m.group(3).split()
+                         if tok.split(':', 1)[-1] not in ('0', ''))
+    if spots:
+        n_bands = len(bands) or band_count
+        return Line(OK, label, f'{spots} spots in the last 10 min, on {n_bands} band'
+                               f'{"" if n_bands == 1 else "s"}')
+    if is_young(svc, WSPR_YOUNG_S):
+        return Line(WAIT, label, f'no spots yet; wspr-recorder started '
+                                 f'{minutes(svc.age_s or 0)} min ago, wait 12 min')
+    return Line(FAIL, label, 'no WSPR spot in 10 min.  Check the antenna and its cable '
+                             'first; if they are fine, tell the fleet admin.')
+
+
+def meteor_line(env: Env) -> Line:
+    label = 'meteor scatter'
+    if not env.installed('meteor-scatter'):
+        return Line(ABSENT, label, 'not on this station')
+    svc = env.service('meteor-scatter@*.service')
+    bad = service_problem(label, svc, 'meteor-scatter')
+    if bad:
+        return bad
+    stats = [m for m in (_METEOR_STATS.search(x)
+                         for x in env.journal(METEOR_UNITS, METEOR_WINDOW_MIN)) if m]
+    if stats:
+        spots = sum(int(m.group(1)) for m in stats)
+        decodes = sum(int(m.group(2)) for m in stats)
+        return Line(OK, label, f'decoding: {plural(decodes, "MSK144 decode")} and '
+                               f'{plural(spots, "spot")} in the last 5 min')
+    if is_young(svc, METEOR_WINDOW_MIN * 60):
+        return Line(WAIT, label, f'meteor-scatter started {minutes(svc.age_s or 0)} min ago; '
+                                 f'its first report comes within 5 min')
+    return Line(FAIL, label, 'meteor-scatter has reported nothing in 5 min.  '
+                             'Tell the fleet admin.')
+
+
+# ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
 # not apply here at all.  Later tasks add their entries in place.
 # ---------------------------------------------------------------------------
 
-CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = []
+CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
+    ('PSK', psk_line),
+    ('WSPR', wspr_line),
+    ('meteor scatter', meteor_line),
+]
