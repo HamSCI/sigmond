@@ -411,6 +411,47 @@ def test_uploads_dead_letters_are_invalid():
     assert "wsprnet(4)" in block["reason"]
 
 
+# v3.72 #1: hs-uploader now says how many dead letters are RECENT (24 h).
+# Old ones are history: shown, never condemning.  A store whose hs-uploader
+# predates the field keeps the old rule (test above) -- never greener than
+# the truth.
+
+def _uploads_block(*pipelines):
+    env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
+        "readable": True, "pipelines": list(pipelines), "cursors": []}))
+    return env["blocks"]["uploads"]
+
+
+def test_uploads_old_dead_letters_only_are_valid_and_shown():
+    block = _uploads_block(
+        {"name": "heartbeat", "deliverable_count": 0, "dead_letter_count": 376,
+         "dead_letter_recent_count": 0,
+         "dead_letter_newest": "2026-10-08T13:12:09+00:00"})
+    assert block["verdict"] == "VALID"
+    assert "376 old dead letters in heartbeat" in block["reason"]
+    assert "newest 2026-10-08" in block["reason"]
+
+
+def test_uploads_recent_dead_letters_are_invalid_counting_recent_only():
+    block = _uploads_block(
+        {"name": "heartbeat", "deliverable_count": 0, "dead_letter_count": 378,
+         "dead_letter_recent_count": 2,
+         "dead_letter_newest": "2026-10-14T11:00:00+00:00"})
+    assert block["verdict"] == "INVALID"
+    assert "heartbeat(2)" in block["reason"]
+
+
+def test_uploads_retrying_outranks_old_dead_letters():
+    block = _uploads_block(
+        {"name": "heartbeat", "deliverable_count": 0, "dead_letter_count": 5,
+         "dead_letter_recent_count": 0,
+         "dead_letter_newest": "2026-10-01T00:00:00+00:00"},
+        {"name": "pskreporter", "deliverable_count": 9,
+         "dead_letter_count": 0, "dead_letter_recent_count": 0,
+         "dead_letter_newest": None})
+    assert block["verdict"] == "INCONCLUSIVE"
+
+
 def test_uploads_deliverables_only_are_inconclusive():
     env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
         "readable": True,

@@ -428,13 +428,25 @@ def _map_uploads(raw) -> dict:
         data["policy"] = policy
     disabled = isinstance(policy, dict) and not policy.get("enabled", True)
 
-    dead = [p for p in pipelines if _as_int(p.get("dead_letter_count")) or 0]
+    # v3.72 #1: a dead letter never leaves the store on its own, so counting
+    # every one kept a station INVALID for good after a bring-up hiccup, and
+    # that verdict hid a live fault (B4's RX888 off the bus 10 h, 2026-10-14).
+    # Only RECENT ones condemn; old ones ride along as a note.  A payload from
+    # an hs-uploader that predates the recent count keeps the old rule.
+    def _recent(p):
+        n = _as_int(p.get("dead_letter_recent_count"))
+        return _as_int(p.get("dead_letter_count")) if n is None else n
+
+    dead = [p for p in pipelines if _recent(p) or 0]
     if dead:
-        named = ", ".join(
-            f"{p.get('name')}({_as_int(p.get('dead_letter_count'))})"
-            for p in dead)
+        named = ", ".join(f"{p.get('name')}({_recent(p)})" for p in dead)
         return _block("INVALID", _policy_suffix(
             f"dead letters in {named}", disabled), data)
+    old = [p for p in pipelines if _as_int(p.get("dead_letter_count")) or 0]
+    history = "; ".join(
+        f"{_as_int(p.get('dead_letter_count'))} old dead letters in "
+        f"{p.get('name')}, newest {str(p.get('dead_letter_newest') or '?')[:10]}"
+        for p in old)
 
     retrying = [p for p in pipelines if _as_int(p.get("deliverable_count")) or 0]
     if retrying:
@@ -456,6 +468,8 @@ def _map_uploads(raw) -> dict:
                       f"uploads disabled by policy ({why}) — heartbeat only"
                       if why else "uploads disabled by policy — heartbeat only",
                       data)
+    if history:
+        return _block("VALID", f"no backlog; {history}", data)
     return _block("VALID", "no backlog, no dead letters", data)
 
 

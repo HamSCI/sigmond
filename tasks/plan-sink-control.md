@@ -24,6 +24,12 @@ Michael decided on 2026-10-10 to keep it so.  Step 2a-ii therefore ships in v3.7
 v3.73 (§10.2).  Where §10.4 and the v3.70 plan's carry list say "v3.71" for the key split, read
 v3.72.
 
+**2026-10-14.**  The numbers move once more (D16).  v3.72 carries small field fixes gathered on
+10-13 and 10-14, so step 2a-ii ships in v3.73 and step 2b in v3.74.  Where this document says
+v3.72 for the key split, read v3.73; where it says v3.73 for step 2b, read v3.74.  The research map
+`.superpowers/research/v372-key-split-map.md` keeps its name; its six questions for a person
+remain open.
+
 ## 1. Why
 
 On 2026-10-01 an operator put K3LR on hold with `smd config uploads disable --reason "station under
@@ -100,6 +106,7 @@ right callsign and location.
 | D13.  While a client's in-process sender still runs, the daemon's pipelines skip that producer's rows, so exactly one sender covers each row (§6.2, §10.2 step 1) | Michael | 2026-10-07 |
 | D14.  sigmond keeps a bundled copy of the sink writer for venvs that carry no hs-uploader (codar-sounder, hf-tec, superdarn-sounder); its compatibility import prefers hs-uploader's writer (§6.1) | Michael | 2026-10-07 |
 | D15.  v3.70 fixes the retry requeue that drops a queued retry's key, send record and commit token after its first failed replay (`hs-uploader/src/hs_uploader/core.py:585-594`), because the key migration depends on queued retries keeping their keys (§10.4) | Michael | 2026-10-07 |
+| D16.  v3.72 ships the small field fixes from 10-13/14 first; the key split (2a-ii) moves to v3.73 and step 2b to v3.74.  The six open questions of the key-split map get settled alongside | Michael | 2026-10-14 |
 
 ### 2.1 Terms
 
