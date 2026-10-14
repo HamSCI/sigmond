@@ -148,5 +148,35 @@ class MeteorTests(unittest.TestCase):
         self.assertEqual(line, check.Line(ABSENT, 'meteor scatter', 'not on this station'))
 
 
+class DeadRadioTests(unittest.TestCase):
+    """Final review I5: with radiod down the decoders stay active and hear
+    nothing, so the line must name the radio, not the antenna."""
+    RADIO = 'The radio (radiod) is not running; tell the fleet admin.'
+
+    def env(self, radiod_state):
+        def service(pattern):
+            if pattern.startswith('radiod@'):
+                return svc(state=radiod_state, age_s=None)
+            return svc()
+        return make_env(service=service)
+
+    def test_psk_wspr_and_meteor_name_a_dead_radio(self):
+        with tempfile.TemporaryDirectory() as d:
+            for state in ('failed', 'inactive'):
+                env = self.env(state)
+                psk = check.psk_line(env, log_dir=Path(d))
+                self.assertEqual(psk, check.Line(FAIL, 'PSK', f'no FT8 or FT4 spot in 15 min.  {self.RADIO}'))
+                self.assertEqual(check.wspr_line(env).text, f'no WSPR spot in 10 min.  {self.RADIO}')
+                self.assertEqual(check.meteor_line(env).text,
+                                 f'meteor-scatter has reported nothing in 5 min.  {self.RADIO}')
+
+    def test_a_running_or_remote_radio_still_points_at_the_antenna(self):
+        with tempfile.TemporaryDirectory() as d:
+            for state in ('active', 'absent'):      # absent: radiod runs on another host
+                env = self.env(state)
+                self.assertIn('Check the antenna', check.psk_line(env, log_dir=Path(d)).text)
+                self.assertIn('Check the antenna', check.wspr_line(env).text)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -461,6 +461,20 @@ METEOR_WINDOW_MIN = 5
 _METEOR_STATS = re.compile(r'\bstats MSK144 rx=\S+: spots=(\d+) decodes=(\d+)/(\d+)')
 
 
+RADIOD_UNITS = 'radiod@*.service'
+ANTENNA = 'Check the antenna and its cable first; if they are fine, tell the fleet admin.'
+RADIO_DOWN = 'The radio (radiod) is not running; tell the fleet admin.'
+
+
+def no_signal(env: Env) -> str:
+    """What to do about a decoder that runs and hears nothing.  With radiod
+    down the decoders stay active and silent, which is no antenna fault.  No
+    radiod unit here at all means the radio runs on another host: then the
+    antenna stays the first suspect (final review I5)."""
+    radio = env.service(RADIOD_UNITS)
+    return RADIO_DOWN if radio.state in ('failed', 'inactive') else ANTENNA
+
+
 def plural(n: int, word: str) -> str:
     return f'{n} {word}' + ('' if n == 1 else 's')
 
@@ -516,8 +530,7 @@ def psk_line(env: Env, log_dir: Path = PSK_LOG_DIR) -> Line:
     if is_young(svc, PSK_WINDOW_S):
         return Line(WAIT, label, f'no spots yet; psk-recorder started '
                                  f'{minutes(svc.age_s or 0)} min ago, wait 15 min')
-    return Line(FAIL, label, 'no FT8 or FT4 spot in 15 min.  Check the antenna and its '
-                             'cable first; if they are fine, tell the fleet admin.')
+    return Line(FAIL, label, f'no FT8 or FT4 spot in 15 min.  {no_signal(env)}')
 
 
 def wspr_line(env: Env) -> Line:
@@ -545,8 +558,7 @@ def wspr_line(env: Env) -> Line:
     if is_young(svc, WSPR_YOUNG_S):
         return Line(WAIT, label, f'no spots yet; wspr-recorder started '
                                  f'{minutes(svc.age_s or 0)} min ago, wait 12 min')
-    return Line(FAIL, label, 'no WSPR spot in 10 min.  Check the antenna and its cable '
-                             'first; if they are fine, tell the fleet admin.')
+    return Line(FAIL, label, f'no WSPR spot in 10 min.  {no_signal(env)}')
 
 
 def meteor_line(env: Env) -> Line:
@@ -567,8 +579,9 @@ def meteor_line(env: Env) -> Line:
     if is_young(svc, METEOR_WINDOW_MIN * 60):
         return Line(WAIT, label, f'meteor-scatter started {minutes(svc.age_s or 0)} min ago; '
                                  f'its first report comes within 5 min')
+    radio = no_signal(env)
     return Line(FAIL, label, 'meteor-scatter has reported nothing in 5 min.  '
-                             'Tell the fleet admin.')
+                             + (radio if radio == RADIO_DOWN else 'Tell the fleet admin.'))
 
 
 # ---------------------------------------------------------------------------
