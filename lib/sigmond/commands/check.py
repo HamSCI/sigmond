@@ -120,6 +120,7 @@ class Env:
     coordination_age_s: Callable[[], Optional[float]] = None           # Task 6
     backlog: Callable[[], dict] = None                                 # Task 6
     http: Callable[[str], Tuple[Optional[int], str]] = None            # Task 7
+    bringup: Callable[[], Any] = None                                  # final review I3
 
 
 def _installed(name: str) -> bool:
@@ -129,11 +130,17 @@ def _installed(name: str) -> bool:
 
 def default_env() -> Env:
     reader = Reader()
+    bringup = []        # asked once: every service line consults it
+
+    def bringup_state():
+        if not bringup:
+            bringup.append(service_state(BRINGUP_UNIT))
+        return bringup[0]
     return Env(installed=_installed, service=service_state, reader=reader,
                journal=read_journal, disk=_disk,
                timestd_config=lambda: read_timestd_config(reader),
                coordination=_coordination, coordination_age_s=_coordination_age_s,
-               backlog=read_backlog, http=http_status)
+               backlog=read_backlog, http=http_status, bringup=bringup_state)
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -345,15 +352,74 @@ def read_journal(units: Sequence[str], minutes: int, *, run=subprocess.run,
     return (r.stdout or '').splitlines()
 
 
-def service_problem(label: str, svc: Service, unit: str) -> Optional[Line]:
-    """A FAIL line when the service runs not at all, else None."""
+def service_problem(label: str, svc: Service, unit: str,
+                    bringup_running: bool = False) -> Optional[Line]:
+    """A FAIL line when the service runs not at all, else None.  While the
+    first-run bring-up still runs, a service it has not started yet is no
+    fault: the line waits and offers no Fix (final review I3)."""
     if svc.state in ('active', 'activating'):
         return None
+    if bringup_running:
+        return Line(WAIT, label, f'{unit} is {svc.state}; bring-up has not started it yet')
     if svc.state == 'absent':
         return Line(FAIL, label, f'{unit} is installed but has no service.  Tell the fleet admin.')
     if svc.restarting:
         return Line(FAIL, label, f'{unit} is failed: it keeps restarting.  {FIX}smd start {unit}')
     return Line(FAIL, label, f'{unit} is {svc.state}.  {FIX}smd start {unit}')
+
+
+# ---------------------------------------------------------------------------
+# The first-run bring-up (bin/sigmond-firstrun-bringup)
+# ---------------------------------------------------------------------------
+
+BRINGUP_UNIT = 'sigmond-firstrun-bringup.service'
+BRINGUP_MARKER = Path('/var/lib/sigmond/.firstrun-bringup-done')
+BRINGUP_LOG = '/var/log/sigmond/firstrun-bringup.log'
+BRINGUP_MAX_ATTEMPTS = 3      # MAX_ATTEMPTS in bin/sigmond-firstrun-bringup
+
+
+def bringup_running(env: Env) -> bool:
+    return env.bringup is not None and env.bringup().state in ('active', 'activating')
+
+
+def _marker_fields(reader, marker: Path) -> dict:
+    try:
+        text = reader.tail(marker, 4096) or ''
+    except Unreadable:
+        return {}
+    out = {}
+    for ln in text.splitlines():
+        key, sep, val = ln.partition('=')
+        if sep:
+            out[key.strip()] = val.strip()
+    return out
+
+
+def bringup_line(env: Env, marker: Path = BRINGUP_MARKER) -> Optional[Line]:
+    """A first line while bring-up runs or after it failed; None once it
+    finished, and None on an older image that has no such unit.  The unit
+    exits 0 and counts 1 as success, so after a reboot only its marker
+    remembers a failure (result=retry or result=gave-up)."""
+    label = 'bring-up'
+    if env.bringup is None:
+        return None
+    unit = env.bringup()
+    if unit.state == 'absent':
+        return None
+    if unit.state in ('active', 'activating'):
+        since = '' if unit.age_s is None else f' (started {minutes(unit.age_s)} min ago)'
+        return Line(WAIT, label, f'still running{since}')
+    tell = f'its log is {BRINGUP_LOG}.  Tell the fleet admin.'
+    if unit.state == 'failed':
+        return Line(FAIL, label, f'failed; {tell}')
+    fields = _marker_fields(env.reader, marker)
+    attempts = fields.get('attempts', '?')
+    if fields.get('result') == 'retry':
+        return Line(FAIL, label, f'failed (attempt {attempts} of {BRINGUP_MAX_ATTEMPTS}; it tries '
+                                 f'again at the next boot); {tell}')
+    if fields.get('result') == 'gave-up':
+        return Line(FAIL, label, f'failed {attempts} times and stopped trying; {tell}')
+    return None
 
 
 def is_young(svc: Service, window_s: float) -> bool:
@@ -440,7 +506,7 @@ def psk_line(env: Env, log_dir: Path = PSK_LOG_DIR) -> Line:
     if not env.installed('psk-recorder'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('psk-recorder@*.service')
-    bad = service_problem(label, svc, 'psk-recorder')
+    bad = service_problem(label, svc, 'psk-recorder', bringup_running(env))
     if bad:
         return bad
     counts = count_psk_spots(env.reader, log_dir, env.now)
@@ -459,7 +525,7 @@ def wspr_line(env: Env) -> Line:
     if not env.installed('wspr-recorder'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('wspr-recorder@*.service')
-    bad = service_problem(label, svc, 'wspr-recorder')
+    bad = service_problem(label, svc, 'wspr-recorder', bringup_running(env))
     if bad:
         return bad
     spots, bands, band_count = 0, set(), 0
@@ -488,7 +554,7 @@ def meteor_line(env: Env) -> Line:
     if not env.installed('meteor-scatter'):
         return Line(ABSENT, label, 'not on this station')
     svc = env.service('meteor-scatter@*.service')
-    bad = service_problem(label, svc, 'meteor-scatter')
+    bad = service_problem(label, svc, 'meteor-scatter', bringup_running(env))
     if bad:
         return bad
     stats = [m for m in (_METEOR_STATS.search(x)
@@ -586,7 +652,7 @@ def mag_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -> Lin
             return Line(ABSENT, label, 'no magnetometer on this station')
         return Line(FAIL, label, f'no magnetometer adapter at {device}.  Check its USB cable.  '
                                  f'{MAG_FIX}')
-    bad = service_problem(label, svc, 'mag-recorder')
+    bad = service_problem(label, svc, 'mag-recorder', bringup_running(env))
     if bad:
         return bad
     samples = last_mag_samples(env.reader, mag_dir, env.now)
@@ -683,7 +749,7 @@ def grape_line(env: Env) -> Line:
     if not channels:
         return Line(ABSENT, label, 'hf-timestd archives no channel on this station')
     svc = env.service('timestd-core-recorder.service')
-    bad = service_problem(label, svc, 'hf-timestd')
+    bad = service_problem(label, svc, 'hf-timestd', bringup_running(env))
     if bad:
         return bad
     days = [datetime.fromtimestamp(env.now - back * 86400, tz=timezone.utc).strftime('%Y%m%d')
@@ -869,6 +935,7 @@ def page_check(label: str, port: int, needs: Optional[str]):
 # ---------------------------------------------------------------------------
 
 CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
+    ('bring-up', bringup_line),
     ('PSK', psk_line),
     ('WSPR', wspr_line),
     ('magnetometer', mag_line),
