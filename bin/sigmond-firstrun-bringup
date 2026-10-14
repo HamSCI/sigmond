@@ -128,7 +128,12 @@ SECONDS=0
 partial=0
 for _pass in 1 2 3; do
     partial=0
-    if "$SMD" bringup "$PROFILE" --non-interactive >>"$LOG" 2>&1; then
+    # SIGMOND_FIRSTRUN=1 tells smd that firstrun called it: smd then leaves
+    # the marker alone, because the site wiring and isolation below come
+    # after it and this script writes the marker at the end (bin/smd
+    # _settle_firstrun_marker).  A plain environment variable on a direct
+    # exec: no sudo stands between, and smd's venv re-exec keeps it.
+    if SIGMOND_FIRSTRUN=1 "$SMD" bringup "$PROFILE" --non-interactive >>"$LOG" 2>&1; then
         say "bring-up finished"
         bringup_ok=1
     else

@@ -158,5 +158,26 @@ class FirstrunRetry(unittest.TestCase):
         self.assertIn('measures nothing', r.stdout)
 
 
+    def test_smd_bringup_knows_firstrun_called_it(self):
+        """smd settles a gave-up marker after a hand finish (R1), but not
+        when firstrun is the caller: firstrun's site wiring and isolation
+        come after it, and firstrun writes its own marker."""
+        os.environ.pop('SIGMOND_FIRSTRUN', None)
+        seen = self.d / 'seen'
+        smd = self.d / 'smd-env'
+        smd.write_text(f'#!/bin/bash\nprintf "%s" "${{SIGMOND_FIRSTRUN:-unset}}" > {seen}\nexit 0\n')
+        smd.chmod(0o755)
+        env = dict(os.environ,
+                   SIGMOND_FIRSTRUN_MARKER=str(self.d / 'marker'),
+                   SIGMOND_FIRSTRUN_SENTINEL=str(self.d / 'personalized'),
+                   SIGMOND_FIRSTRUN_PROFILE_FILE=str(self.d / 'profile.toml'),
+                   SIGMOND_FIRSTRUN_LOG=str(self.d / 'log'),
+                   SIGMOND_FIRSTRUN_SMD=str(smd),
+                   SIGMOND_FIRSTRUN_SITE_TIMING=str(self._stub('site-timing', 0, 'site-timing')),
+                   SIGMOND_FIRSTRUN_ISOLATION=str(self._stub('isolation', 0, 'isolation')))
+        subprocess.run(['bash', str(SCRIPT)], env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(seen.read_text(), '1')
+
+
 if __name__ == '__main__':
     unittest.main()
