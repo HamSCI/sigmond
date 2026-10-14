@@ -364,7 +364,8 @@ def service_problem(label: str, svc: Service, unit: str,
     if svc.state == 'absent':
         return Line(FAIL, label, f'{unit} is installed but has no service.  Tell the fleet admin.')
     if svc.restarting:
-        return Line(FAIL, label, f'{unit} is failed: it keeps restarting.  {FIX}smd start {unit}')
+        # systemd already restarts it; `smd start` would do nothing.
+        return Line(FAIL, label, f'{unit} keeps restarting.  Tell the fleet admin.')
     return Line(FAIL, label, f'{unit} is {svc.state}.  {FIX}smd start {unit}')
 
 

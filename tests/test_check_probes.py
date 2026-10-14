@@ -60,7 +60,8 @@ class ServiceStateTests(unittest.TestCase):
         svc, _ = self._state('x.service loaded activating auto-restart x\n', show, pattern='x.service')
         self.assertEqual((svc.state, svc.restarting), ('failed', True))
         line = check.service_problem('PSK', svc, 'x')
-        self.assertIn('keeps restarting', line.text)
+        # `smd start` does nothing for a unit systemd already restarts (final review m1).
+        self.assertEqual(line, check.Line(check.FAIL, 'PSK', 'x keeps restarting.  Tell the fleet admin.'))
 
     def test_activating_age_comes_from_inactive_exit(self):
         show = ('Id=x.service\nActiveState=activating\nSubState=start\nLoadState=loaded\n'
