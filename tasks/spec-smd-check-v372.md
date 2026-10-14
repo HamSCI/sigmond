@@ -1,6 +1,6 @@
 # One command that says whether a station works (v3.72 #14) — design
 
-**Status:** spec, 2026-10-14, awaiting Michael's review.  Written against sigmond `3d8a57e`.
+**Status:** approved by Michael 2026-10-14; marks amended to ASCII words the same day (§2).  Written against sigmond `3d8a57e`.
 Michael chose on 2026-10-14 that the installer types the check on the host, at the console
 (`sigmond-check`), and that the decoder VM gains `smd check` underneath it.
 
@@ -30,16 +30,17 @@ sigmond-check
 It prints one line per item and a verdict, and finishes within about fifteen seconds:
 
 ```
-✓ PSK            214 FT8 and 31 FT4 spots in the last 15 min
-✓ WSPR           48 spots in the last 10 min, on 6 bands
-✗ magnetometer   frozen: 0.00 °C, no change in 60 s.  Fix: sudo systemctl restart mag-recorder
-◌ GRAPE          first files due in about 7 min (hf-timestd started 4 min ago)
-✓ storage        /var/lib has 61 % free
-◌ uploads        off, new station: check the lines above, then run  smd sink upload
-— meteor scatter not on this station
-✓ receiver page  IPv4 http://192.168.1.50:8081   IPv6 http://[2601:db8::50]:8081
-✓ station pages  IPv4 http://192.168.1.50:8000   IPv6 http://[2601:db8::50]:8000
-✓ magnetometer page  IPv4 http://192.168.1.50:8082   IPv6 http://[2601:db8::50]:8082
+ ok    PSK            214 FT8 and 31 FT4 spots in the last 15 min
+ ok    WSPR           48 spots in the last 10 min, on 6 bands
+ FAIL  magnetometer   frozen: 0.00 C, no change in 60 s.
+                      Fix: sigmond-vm sudo systemctl restart mag-recorder
+ wait  GRAPE          first files due in about 7 min (hf-timestd started 4 min ago)
+ ok    storage        /var/lib has 61 % free
+ wait  uploads        off, new station: check the lines above, then run  sigmond-vm smd sink upload
+ --    meteor scatter not on this station
+ ok    receiver page  IPv4 http://192.168.1.50:8081   IPv6 http://[2601:db8::50]:8081
+ ok    station pages  IPv4 http://192.168.1.50:8000   IPv6 http://[2601:db8::50]:8000
+ ok    magnetometer page  IPv4 http://192.168.1.50:8082   IPv6 http://[2601:db8::50]:8082
 FAIL  (1 failing, 2 waiting)
 ```
 
@@ -47,12 +48,16 @@ The marks:
 
 | Mark | Meaning |
 |---|---|
-| `✓` | works |
-| `◌` | not yet, and normal for a new station; the line says how long to wait |
-| `✗` | broken; the line says what to do, or whom to tell |
-| `—` | that part does not run on this station, and nothing counts it |
+| `ok` | works |
+| `wait` | not yet, and normal for a new station; the line says how long to wait |
+| `FAIL` | broken; the line says what to do, or whom to tell |
+| `--` | that part does not run on this station, and nothing counts it |
 
-The verdict takes the worst line: any `✗` gives `FAIL`, else any `◌` gives `WAIT`, else `PASS`.
+Michael chose plain words on 2026-10-14, after a measurement: the host's console font (Lat15) has
+no glyph for a check mark or a dotted circle.  Both programs print ASCII only, everywhere, so the
+installer reads every character on that console.
+
+The verdict takes the worst line: any `FAIL` line gives `FAIL`, else any `wait` line gives `WAIT`, else `PASS`.
 The exit code follows it: 0 for PASS, 2 for WAIT, 1 for FAIL.  The page lines print the very
 addresses a person on the station's network types into a browser, so the check doubles as the
 list of links.
@@ -65,7 +70,7 @@ checks the science items (§4) and the VM's own web pages at `127.0.0.1`.
 
 **`sigmond-check`** runs on the host.  It calls `sigmond-vm smd check --no-verdict`, prints those
 lines, adds the page lines through the host's addresses (§5), and prints the one verdict from
-both sets.  If the VM does not answer, it prints `✗ decoder VM  does not answer: <reason>` and
+both sets.  If the VM does not answer, it prints `FAIL decoder VM  does not answer: <reason>` and
 gives `FAIL`.
 
 Neither program changes anything.  Neither calls the timing judge, `smd doctor`, or a watcher.
@@ -73,9 +78,9 @@ Neither program changes anything.  Neither calls the timing judge, `smd doctor`,
 ## 4. The VM's lines
 
 Each line reads data that already exists.  A client appears only when `compute_state(name)`
-(`lib/sigmond/component_state.py`) reports it installed; otherwise the line shows `—`.
+(`lib/sigmond/component_state.py`) reports it installed; otherwise the line shows `--`.
 
-| Line | Reads | ✓ when | ◌ when | ✗ when |
+| Line | Reads | ok when | wait when | FAIL when |
 |---|---|---|---|---|
 | PSK | `/var/log/psk-recorder/*-ft8.log`, `*-ft4.log` (the files `smd watch psk` reads) | at least one spot in the last 15 min | the service started under 15 min ago | the service has stopped or failed, or no spot in 15 min after that |
 | WSPR | the wspr-recorder journal, last 10 min (the source `smd watch wspr` replays) | at least one spot | the service started under 12 min ago | the service has stopped or failed, or no spot after 12 min |
@@ -87,7 +92,7 @@ Each line reads data that already exists.  A client appears only when `compute_s
 | receiver, station, magnetometer pages (VM view) | HTTP GET on `127.0.0.1:8081`, `:8000`, `:8082`, 3 s each | status 200 | — | anything else |
 
 A WSPR or meteor-scatter quiet spell on a dead band can look like a fault.  The windows above
-match the ones `smd watch` already treats as normal, and a `✗` line for "no spots" says
+match the ones `smd watch` already treats as normal, and a `FAIL` line for "no spots" says
 "check the antenna" before it says anything else.
 
 ### 4.1 The magnetometer freeze
@@ -102,7 +107,7 @@ gives the fix: `sudo systemctl restart mag-recorder`.
 
 The `sigmond` login reads these files today, as the watchers do.  Where a file or the journal
 refuses it, `smd check` tries `sudo -n` once, the way `_file_size` in `bin/smd` already does.  If
-that fails too, the line shows `✗ … cannot read <path> as <user>`, never a pass.
+that fails too, the line shows `FAIL ... cannot read <path> as <user>`, never a pass.
 
 ## 5. The host's page lines
 
@@ -123,7 +128,7 @@ own global IPv6 address goes through the relay a browser would use.
 |---|---|
 | IPv4 only | the IPv4 link; IPv6 reads `no IPv6 here` and counts as nothing |
 | IPv6 and the relay | both links, each checked |
-| IPv6 and no relay | `✗ IPv6 http://[…]:8081 does not answer: the IPv6 relay is not installed` (v3.72 #15 cures this on dual-stack sites) |
+| IPv6 and no relay | `FAIL IPv6 http://[...]:8081 does not answer: the IPv6 relay is not installed` (v3.72 #15 cures this on dual-stack sites) |
 
 The magnetometer page line appears only when the VM reports mag-recorder installed.
 
@@ -146,9 +151,9 @@ The magnetometer page line appears only when the VM reports mag-recorder install
 1. At the station's keyboard press Enter and log in to the host (§8 shows how).  Type
    `sigmond-check`.
 2. A table of the four marks, as in §2.
-3. `WAIT`: run it again after the time the line names.  `FAIL`: do what the `✗` line says; if it
+3. `WAIT`: run it again after the time the line names.  `FAIL`: do what the `FAIL` line says; if it
    names no fix, send the whole output to the fleet admin.
-4. When every line except uploads shows `✓`, and the uploads line says `new station`, run
+4. When every line except uploads shows `ok`, and the uploads line says `new station`, run
    `sigmond-vm smd sink upload`.  The existing paragraphs about the packing window and about
    wsprnet and pskreporter stay, shortened.
 5. Optional, from another computer on the same network: open the page links that
@@ -162,12 +167,12 @@ without the host's.  §11's row "No spots after 30 minutes" points to `sigmond-c
 
 ## 8. Testing
 
-- Each line's function gets tests for ✓, ◌, ✗ and `—`, with the files built in a temporary
+- Each line's function gets tests for `ok`, `wait`, `FAIL` and `--`, with the files built in a temporary
   directory and the clock injected.  Paths come in as parameters with the real paths as
   defaults.
-- The freeze test: 60 samples with `rt` 0.0 give ✗; 60 with real `rt` and varying axes give ✓;
-  59 frozen then one live gives ✓.
-- The verdict and exit code over mixed lines; a line that raises an exception becomes `✗`
+- The freeze test: 60 samples with `rt` 0.0 give FAIL; 60 with real `rt` and varying axes give ok;
+  59 frozen then one live gives ok.
+- The verdict and exit code over mixed lines; a line that raises an exception becomes `FAIL`
   with the exception's text, never a crash and never a pass.
 - `smd check` never calls the timing judge: a test patches `timing_judge` to raise and expects
   the command to finish.
@@ -175,7 +180,7 @@ without the host's.  §11's row "No spots after 30 minutes" points to `sigmond-c
   covering IPv4 only, dual stack with the relay, dual stack without it, and the VM silent.
 - Mutation: break each rule's threshold and watch a test fail.
 - On AC0G-B4 after deploy: `sigmond-check` on the host and `smd check` in the VM, each within
-  15 s; then stop mag-recorder and watch its line turn `✗`, and start it again.
+  15 s; then stop mag-recorder and watch its line turn `FAIL`, and start it again.
 
 ## 9. Out of scope
 
