@@ -31,6 +31,19 @@ def joined(source: str) -> str:
 # The console panel lives in the appliance repository, beside this one.
 FIRSTBOOT = REPO.parent / "sigmond-appliance" / "firstboot-v3.sh"
 FIRSTBOOT_TEXT = FIRSTBOOT.read_text() if FIRSTBOOT.exists() else ""
+# From v3.72 #23 the IPv4 relay's ports live in sigmond-vm4relay, which the
+# importer runs.
+VM4RELAY = REPO.parent / "sigmond-appliance" / "sigmond-vm4relay"
+VM4RELAY_TEXT = VM4RELAY.read_text() if VM4RELAY.exists() else ""
+
+
+def relayed_ports() -> dict:
+    """{host port: VM port} the host relays over IPv4, from sigmond-vm4relay's
+    PORTS line, as long as the importer runs it."""
+    if "/usr/local/sbin/sigmond-vm4relay install" not in FIRSTBOOT_TEXT:
+        return {}
+    m = re.search(r'^PORTS="([^"]*)"', VM4RELAY_TEXT, re.M)
+    return dict(p.split(":") for p in m.group(1).split()) if m else {}
 
 
 def flat(text: str) -> str:
@@ -143,7 +156,7 @@ def test_the_ssh_port_the_page_names_is_the_relay_the_host_runs():
     assert set(re.findall(r"ssh -p (\d+) sigmond@", PAGE)) == {"2222"}
     assert "MGMT_VM=10.99.0.2" in FIRSTBOOT_TEXT or not FIRSTBOOT.exists()
     if FIRSTBOOT.exists():
-        assert "--dport 2222 -j DNAT --to-destination ${MGMT_VM}:22" in FIRSTBOOT_TEXT
+        assert relayed_ports().get("2222") == "22"
 
 
 def test_the_state_blocks_on_the_page_print_exactly_what_the_switch_prints():
@@ -278,8 +291,9 @@ def test_the_relays_the_pages_name_are_relays_the_host_runs():
     # ssh to port 2222; each is a DNAT to the same port on the VM (ssh to 22).
     if not FIRSTBOOT.exists():
         pytest.skip("no sigmond-appliance checkout beside this one")
+    relayed = relayed_ports()
     for port, target in (("8081", "8081"), ("8000", "8000"), ("8082", "8082"), ("2222", "22")):
-        assert (f"--dport {port} -j DNAT --to-destination ${{MGMT_VM}}:{target}") in FIRSTBOOT_TEXT, port
+        assert relayed.get(port) == target, port
     for page in ("README.md", "day-2.md", "troubleshooting.md"):
         text = (DOCS / page).read_text()
         for port in re.findall(r"http://<host address>:(\d+)", text):

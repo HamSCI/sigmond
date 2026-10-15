@@ -46,7 +46,11 @@ STUBS = {
                    'readlink /proc/self/fd/0 > "$SCENE/vm.stdin"\n'
                    'cat "$SCENE/vm.out"; exit "$(cat "$SCENE/vm.rc")"'),
     "ip": 'case "$1" in -4) cat "$SCENE/ip4" ;; -6) cat "$SCENE/ip6" ;; esac',
-    "iptables": 'cat "$SCENE/nat"; exit "$(cat "$SCENE/nat.rc")"',
+    # `iptables -t nat -S [CHAIN]`: with a chain, only that chain's lines, as
+    # the real command prints them.
+    "iptables": ('c="${4:-}"\n'
+                 'if [ -n "$c" ]; then grep -E -- "^-[PAN] $c( |\\$)" "$SCENE/nat"; else cat "$SCENE/nat"; fi\n'
+                 'exit "$(cat "$SCENE/nat.rc")"'),
     "sysctl": 'cat "$SCENE/fwd"',
     "curl": ('for url; do :; done\n'
              'code=$(awk -v u="$url" \'$1 == u {print $2}\' "$SCENE/curl")\n'
@@ -357,3 +361,41 @@ def test_the_host_follows_the_vms_magnetometer_page_decision(tmp_path, has_mag):
     else:
         assert mag_page == []
         assert " --    magnetometer   no magnetometer on this station" in out
+
+
+# -- v3.72 #23: the IPv4 relay in its own chain --------------------------------
+#
+# sigmond-vm4relay puts the DNAT in nat chain SIGMOND-VM4, entered from vmbr0
+# only and matching RFC 1918 plus the host's own LAN subnet.  The IPv4 page
+# proof reads the rule there, and only when PREROUTING enters the chain.
+
+def _nat_v4relay(jump=True):
+    lines = ["-P PREROUTING ACCEPT", "-P INPUT ACCEPT", "-P OUTPUT ACCEPT", "-P POSTROUTING ACCEPT",
+             "-N SIGMOND-VM4"]
+    if jump:
+        lines.append("-A PREROUTING -i vmbr0 -j SIGMOND-VM4")
+    lines.append("-A POSTROUTING -s 10.99.0.0/30 -o vmbr0 -j MASQUERADE")
+    for src in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+        for hp, gp in ((8000, 8000), (8081, 8081), (8082, 8082), (8765, 8765), (2222, 22)):
+            lines.append(f"-A SIGMOND-VM4 -s {src} -p tcp -m tcp --dport {hp} -j DNAT "
+                         f"--to-destination 10.99.0.2:{gp}")
+    return "\n".join(lines) + "\n"
+
+
+def test_the_restricted_chain_proves_the_ipv4_pages(tmp_path):
+    vm = PSK_OK + " ok    magnetometer page  http://127.0.0.1:8082 answers\n"
+    rc, out = run(tmp_path, vm=vm, vm_rc=0, nat=_nat_v4relay(), curl=VM_200)
+    assert out == [
+        " ok    PSK            fine",
+        " ok    receiver page  IPv4 http://192.168.1.50:8081   no IPv6 here",
+        " ok    station pages  IPv4 http://192.168.1.50:8000   no IPv6 here",
+        " ok    magnetometer page  IPv4 http://192.168.1.50:8082   no IPv6 here",
+        "PASS",
+    ]
+    assert rc == 0
+
+
+def test_a_chain_that_prerouting_never_enters_proves_nothing(tmp_path):
+    rc, out = run(tmp_path, vm=PSK_OK, vm_rc=0, nat=_nat_v4relay(jump=False), curl=VM_200)
+    assert "does not answer: no relay rule for port 8081" in out[1]
+    assert rc == 1

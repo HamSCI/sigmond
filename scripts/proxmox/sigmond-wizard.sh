@@ -3360,10 +3360,13 @@ cat > /usr/local/bin/sigmond-check <<'CHKEOF'
 # line per web page as a person on this network reaches it, and ends with one
 # verdict: PASS (exit 0), WAIT (exit 2) or FAIL (exit 1).  It changes nothing.
 #
-# IPv4: the host relays ports 8081, 8000 and 8082 to the VM with DNAT rules in
-# PREROUTING.  Traffic the host sends to itself never passes PREROUTING, so a
-# GET on the host's own IPv4 address proves nothing.  The line passes when the
-# rule exists, net.ipv4.ip_forward reads 1, and the VM's address answers 200.
+# IPv4: the host relays ports 8081, 8000 and 8082 to the VM with DNAT rules.
+# From v3.72 (#23) they sit in nat chain SIGMOND-VM4, which PREROUTING enters
+# from the uplink only (sigmond-vm4relay); older hosts have them in PREROUTING
+# itself.  Traffic the host sends to itself never passes PREROUTING, so a GET
+# on the host's own IPv4 address proves nothing.  The line passes when the
+# rule exists where PREROUTING reaches it, net.ipv4.ip_forward reads 1, and
+# the VM's address answers 200.
 # IPv6: sigmond-vm6proxy relays in userspace, so a GET on the host's own
 # global IPv6 address takes the same path a browser takes.
 #
@@ -3435,15 +3438,21 @@ V6=$(ip -6 -o addr show dev "$BRIDGE" scope global 2>/dev/null \
           r = tmp ? 3 : (ula ? 2 : 1)
           if (best == 0 || r < best) { best = r; addr = a[1] } }
         END { if (best) print addr }')
-NAT=$(iptables -t nat -S PREROUTING 2>/dev/null); NAT_RC=$?
+NAT=$(iptables -t nat -S 2>/dev/null); NAT_RC=$?
 FWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
 
 code_of(){ curl -g -s -o /dev/null -m 3 -w '%{http_code}' "$1" 2>/dev/null; }
 said(){ case "$1" in ''|000) echo "no answer" ;; *) echo "status $1" ;; esac; }
 dnat_to(){   # port -> the ip:port its DNAT rule sends it to
+    # A rule counts in PREROUTING itself, or in SIGMOND-VM4 when PREROUTING
+    # jumps there.
     printf '%s\n' "$NAT" | awk -v p="$1" '
+        $1 == "-A" && $2 == "PREROUTING" && / -j SIGMOND-VM4$/ { entered = 1 }
+        $1 == "-A" && ($2 == "PREROUTING" || $2 == "SIGMOND-VM4") &&
         $0 ~ ("--dport " p "( |$)") && / -j DNAT / {
-            for (i = 1; i <= NF; i++) if ($i == "--to-destination") { print $(i + 1); exit } }'
+            for (i = 1; i <= NF; i++) if ($i == "--to-destination") { to[$2] = $(i + 1) } }
+        END { if ("PREROUTING" in to) print to["PREROUTING"]
+              else if (entered && ("SIGMOND-VM4" in to)) print to["SIGMOND-VM4"] }'
 }
 
 page(){   # label port

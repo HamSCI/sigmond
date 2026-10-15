@@ -95,6 +95,8 @@ class Release:
     manifest_text: str
     # From v3.72 the build records the IPv6 relay's hash; older manifests do not.
     vm6proxy_sha256: Optional[str] = None
+    # From v3.72 #23 the build records the IPv4 relay's hash too.
+    vm4relay_sha256: Optional[str] = None
 
 
 @dataclass
@@ -103,6 +105,7 @@ class Sources:
     wizard: str
     proxmox: dict = field(default_factory=dict)   # name -> bytes; absent names absent
     vm6proxy: Optional[bytes] = None              # None: the appliance commit has no relay
+    vm4relay: Optional[bytes] = None              # None: the appliance commit has no IPv4 relay
 
 
 def _get(url: str, urlopen: Callable) -> bytes:
@@ -156,11 +159,13 @@ def fetch_release(tag: Optional[str] = None, *, urlopen: Callable = urllib.reque
             raise PmAlignError(f"release {tag_name}: {key} {pre.get(key)!r} is not a full commit")
     if not re.match(r"^[0-9a-f]{64}$", pre.get("firstboot_sha256", "")):
         raise PmAlignError(f"release {tag_name}: firstboot_sha256 missing or malformed")
-    vm6 = pre.get("vm6proxy_sha256")
-    if vm6 is not None and not re.match(r"^[0-9a-f]{64}$", vm6):
-        raise PmAlignError(f"release {tag_name}: vm6proxy_sha256 {vm6!r} is malformed")
+    for key in ("vm6proxy_sha256", "vm4relay_sha256"):
+        val = pre.get(key)
+        if val is not None and not re.match(r"^[0-9a-f]{64}$", val):
+            raise PmAlignError(f"release {tag_name}: {key} {val!r} is malformed")
     return Release(tag_name, pre["appliance_commit"], pre["wizard_commit"],
-                   pre["firstboot_sha256"], text, vm6)
+                   pre["firstboot_sha256"], text, pre.get("vm6proxy_sha256"),
+                   pre.get("vm4relay_sha256"))
 
 
 def render_wizard(text: str, vmid: int) -> str:
@@ -194,22 +199,31 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
             if name == "pm-align.py" and getattr(exc, "status", None) == 404:
                 continue
             raise
-    return Sources(firstboot, wizard, proxmox, _fetch_vm6proxy(rel, urlopen))
+    return Sources(firstboot, wizard, proxmox, _fetch_vm6proxy(rel, urlopen),
+                   _fetch_appliance_file(rel, "sigmond-vm4relay", rel.vm4relay_sha256, urlopen))
 
 
 def _fetch_vm6proxy(rel: Release, urlopen: Callable) -> Optional[bytes]:
-    url = f"{RAW}/sigmond-appliance/{rel.appliance_commit}/sigmond-vm6proxy"
+    return _fetch_appliance_file(rel, "sigmond-vm6proxy", rel.vm6proxy_sha256, urlopen)
+
+
+def _fetch_appliance_file(rel: Release, name: str, sha: Optional[str],
+                          urlopen: Callable) -> Optional[bytes]:
+    """``name`` at appliance_commit.  A 404 leaves it absent unless the
+    manifest names its hash; a named hash must match."""
+    key = name.replace("sigmond-", "") + "_sha256"
+    url = f"{RAW}/sigmond-appliance/{rel.appliance_commit}/{name}"
     try:
         body = _get(url, urlopen)
     except PmAlignError as exc:
-        if getattr(exc, "status", None) == 404 and rel.vm6proxy_sha256 is None:
+        if getattr(exc, "status", None) == 404 and sha is None:
             return None
         raise
-    if rel.vm6proxy_sha256 is not None:
+    if sha is not None:
         got = hashlib.sha256(body).hexdigest()
-        if got != rel.vm6proxy_sha256:
-            raise PmAlignError(f"sigmond-vm6proxy at {rel.appliance_commit[:8]} hashes {got[:12]}..., "
-                               f"manifest vm6proxy_sha256 {rel.vm6proxy_sha256[:12]}... - refused")
+        if got != sha:
+            raise PmAlignError(f"{name} at {rel.appliance_commit[:8]} hashes {got[:12]}..., "
+                               f"manifest {key} {sha[:12]}... - refused")
     return body
 
 
@@ -303,11 +317,25 @@ VM6PROXY_CURRENT = ("ipv6 relay: every socket unit carries IPAddressDeny=any and
 VM6PROXY_PORTS = ("8000:8000", "8081:8081", "8082:8082", "8765:8765", "2222:22")
 # Which DNAT rule names the VM's address: ka9q-web first, every host has it.
 VM6PROXY_DNAT_PORTS = (8081, 8000, 2222)
+VM4RELAY = "/usr/local/sbin/sigmond-vm4relay"
+VM4RELAY_FILTER = "VM4RELAY_FILTER=1"
+VM4RELAY_FILTER_RE = re.compile(r"^VM4RELAY_FILTER=1$", re.M)
+VM4RELAY_CHAIN = "SIGMOND-VM4"
+VM4RELAY_UNITS = ("/etc/systemd/system/sigmond-vm4relay.service",
+                  "/etc/systemd/system/sigmond-vm4relay.timer")
+# The five rules firstboot wrote before v3.72 #23: no interface, no source.
+VM4RELAY_PAIRS = {("8000", "8000"), ("8081", "8081"), ("8082", "8082"), ("8765", "8765"), ("2222", "22")}
+_VM4_OLD_RULE = re.compile(r"^-A PREROUTING -p tcp -m tcp --dport (\d+) -j DNAT "
+                           r"--to-destination \d{1,3}(?:\.\d{1,3}){3}:(\d+)$")
+_RELAY_ENV_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
           ("station", 12224, 8000), ("gmag", 12225, 8082))
 NOT_TOUCHED = (
     "network: /etc/network/*, vmbr1 + NAT + sysctl, sigmond-netfix / sigmond-setnet "
-    "and their unit (sigmond-netfix.service)",
+    "and their unit (sigmond-netfix.service).  One exception: sigmond-vm4relay install "
+    "comments out the five unrestricted DNAT post-up lines of the vmbr1 stanza "
+    "(exact lines; the original is kept as /etc/network/interfaces.pre-vm4relay), "
+    "and replaces the five unrestricted DNAT rules with its own chain",
     "tuning: grub, vfio, kernel modules, initramfs, radiod-vm-fence, host IRQ affinity, "
     "resctrl (CAT), and the VM's CPU-pinning hookscript (/var/lib/vz/snippets/*)",
     "Proxmox itself and every apt package (one exception: on a host with no sudo, "
@@ -377,6 +405,12 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
             notes.append(f"this release's sigmond-vm6proxy does not restrict the relay to local "
                          f"networks (no {VM6PROXY_FILTER} line); pm-align keeps this host's copy and "
                          f"never runs that one")
+    if src.vm4relay is not None:
+        if vm4relay_restricts(src.vm4relay):
+            out.append(HostFile(VM4RELAY, src.vm4relay, 0o755, "sigmond-appliance/sigmond-vm4relay"))
+        elif notes is not None:
+            notes.append(f"this release's sigmond-vm4relay has no {VM4RELAY_FILTER} line; "
+                         f"pm-align keeps this host's copy and never runs that one")
     return out
 
 
@@ -426,19 +460,27 @@ def _vm6proxy_missing(root: Path, text: str) -> list:
     return out
 
 
-def vm_dnat_target(run) -> Optional[str]:
-    """The VM address the host's IPv4 DNAT rules send its ports to -- the
-    same rules sigmond-check reads.  None when there is no such rule (a host
-    whose VM sits on the LAN) or iptables cannot be read."""
+def _nat_rules(run) -> Optional[str]:
+    """`iptables -t nat -S`, every chain; None when it cannot be read."""
     try:
-        r = run(["iptables", "-t", "nat", "-S", "PREROUTING"],
-                capture_output=True, text=True, timeout=30)
+        r = run(["iptables", "-t", "nat", "-S"], capture_output=True, text=True, timeout=30)
     except Exception:
         return None
-    if r.returncode != 0:
+    return (r.stdout or "") if r.returncode == 0 else None
+
+
+def vm_dnat_target(run) -> Optional[str]:
+    """The VM address the host's IPv4 DNAT rules send its ports to -- the
+    same rules sigmond-check reads: in PREROUTING (before v3.72 #23) or in
+    sigmond-vm4relay's SIGMOND-VM4 chain.  None when there is no such rule (a
+    host whose VM sits on the LAN) or iptables cannot be read."""
+    text = _nat_rules(run)
+    if text is None:
         return None
     for port in VM6PROXY_DNAT_PORTS:
-        for line in (r.stdout or "").splitlines():
+        for line in text.splitlines():
+            if not (line.startswith("-A PREROUTING ") or line.startswith(f"-A {VM4RELAY_CHAIN} ")):
+                continue
             if re.search(rf"--dport {port}(\s|$)", line) and " -j DNAT " in line:
                 m = re.search(r"--to-destination\s+(\d+\.\d+\.\d+\.\d+)", line)
                 if m:
@@ -497,6 +539,116 @@ def _apply_vm6proxy(root: Path, run, changes: list) -> None:
         _say(f"  {VM6PROXY_CURRENT}")
     else:
         _say(f"  ipv6 relay: {out}")
+
+
+# -- the IPv4 relay (v3.72 #23) ----------------------------------------------
+#
+# sigmond-vm4relay moves the VM's DNAT rules into SIGMOND-VM4, entered from the
+# uplink only, for RFC 1918 and the host's own LAN subnets; its install also
+# removes the five old unrestricted rules and comments out the post-up lines
+# that would bring them back at boot.
+
+def vm4relay_restricts(body) -> bool:
+    """True when this script carries the exact whole line VM4RELAY_FILTER=1."""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    return VM4RELAY_FILTER_RE.search(body) is not None
+
+
+def _vm4relay_live_state(text: str) -> tuple:
+    """(entered, old): whether PREROUTING jumps to SIGMOND-VM4, and how many
+    of the five old unrestricted rules are live."""
+    entered = old = 0
+    for line in text.splitlines():
+        if line.startswith("-A PREROUTING ") and line.endswith(f" -j {VM4RELAY_CHAIN}"):
+            entered = 1
+        m = _VM4_OLD_RULE.match(line)
+        if m and (m.group(1), m.group(2)) in VM4RELAY_PAIRS:
+            old += 1
+    return bool(entered), old
+
+
+def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
+    """Run `sigmond-vm4relay install` when its units are missing, when this
+    apply wrote a new script, when PREROUTING does not enter the chain, or
+    when an old unrestricted rule is live.  "current" otherwise (nothing
+    runs); "installed (...)", "skipped: <why>", "refused: <why>" or
+    "failed: <why>".  Never raises."""
+    try:
+        text = _under(root, VM4RELAY).read_text()
+    except OSError:
+        return "skipped: no sigmond-vm4relay on this host (this release does not carry it)"
+    if not vm4relay_restricts(text):
+        return (f"refused: {VM4RELAY} on this host has no {VM4RELAY_FILTER} line; "
+                f"pm-align does not run it")
+    nat = _nat_rules(run)
+    if nat is None:
+        return "failed: cannot read the nat table (iptables -t nat -S)"
+    entered, old = _vm4relay_live_state(nat)
+    units_missing = [u for u in VM4RELAY_UNITS if not _under(root, u).exists()]
+    why = []
+    if old:
+        why.append(f"{old} unrestricted DNAT rule(s) live")
+    if not entered:
+        why.append(f"PREROUTING does not enter {VM4RELAY_CHAIN}")
+    if units_missing:
+        why.append(f"{len(units_missing)} unit(s) missing")
+    if script_changed:
+        why.append("the relay script changed")
+    if not why:
+        return "current"
+    vm = vm_dnat_target(run)
+    if vm is None:
+        return ("skipped: no IPv4 DNAT rule sends this host's ports to a decoder VM "
+                "(a VM on the LAN has no relay)")
+    try:
+        r = run([VM4RELAY, "install"], capture_output=True, text=True, timeout=120,
+                env={"PATH": _RELAY_ENV_PATH, "LANG": "C", "SIGMOND_MGMT_VM": vm})
+    except Exception as exc:
+        return f"failed: raised {exc!r}"
+    if r.returncode != 0:
+        lines = [ln.strip() for ln in ((r.stdout or "") + (r.stderr or "")).splitlines() if ln.strip()]
+        return f"failed: exit {r.returncode}: {' | '.join(lines[-2:]) or 'no output'}"
+    return f"installed ({'; '.join(why)}; relays to {vm})"
+
+
+def _apply_vm4relay(root: Path, run, changes: list) -> None:
+    """The IPv4 relay step of --apply.  A failure warns and never fails --apply."""
+    script_changed = any(c.file.path == VM4RELAY and c.state != "current" for c in changes)
+    out = vm4relay_step(root, run=run, script_changed=script_changed)
+    if out.startswith("failed") or out.startswith("refused"):
+        _say(f"  ipv4 relay: WARN - {out}")
+        _say(f"  until it installs, the VM's ports keep their old IPv4 rules; retry: "
+             f"SIGMOND_MGMT_VM=<VM address> {VM4RELAY} install")
+    elif out == "current":
+        _say(f"  ipv4 relay: PREROUTING enters {VM4RELAY_CHAIN}, no unrestricted rule is live, "
+             f"and its units are present")
+    else:
+        _say(f"  ipv4 relay: {out}")
+
+
+def _dry_run_vm4relay_note(root: Path, src: Sources) -> tuple:
+    """(message, pending) for the dry-run IPv4 relay line, from files only (a
+    dry run may not be root, and iptables needs root)."""
+    try:
+        on_host = _under(root, VM4RELAY).read_bytes()
+    except OSError:
+        on_host = None
+    carried = src.vm4relay if src.vm4relay is not None and vm4relay_restricts(src.vm4relay) else None
+    body = carried if carried is not None else on_host
+    if body is None:
+        return "ipv4 relay: this release does not carry sigmond-vm4relay", False
+    if _no_private_link(root):
+        return f"ipv4 relay: skipped: {NO_PRIVATE_LINK}", False
+    if not vm4relay_restricts(body):
+        return (f"ipv4 relay: WARN - {VM4RELAY} has no {VM4RELAY_FILTER} line; "
+                f"--apply will not run it"), False
+    missing = [u for u in VM4RELAY_UNITS if not _under(root, u).exists()]
+    changed = carried is not None and on_host != carried
+    if missing or changed:
+        return (f"ipv4 relay: --apply would install it ({VM4RELAY} install: the VM's ports "
+                f"from the station's own network only, the old unrestricted rules removed)"), True
+    return ("ipv4 relay: units present; --apply checks the live rules (it needs root)"), False
 
 
 def _dry_run_vm6proxy_note(root: Path, src: Sources) -> tuple:
@@ -1260,6 +1412,7 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources
     backup_dir = _under(root, f"{BACKUP_BASE}/{stamp}")
     written = apply_files(changes, root, backup_dir)
     enable_new_relays(changes, run=run)
+    _apply_vm4relay(root, run, changes)
     _apply_vm6proxy(root, run, changes)
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     tunnel_kind, _, _ = _tunnel_decision(root)
@@ -1401,6 +1554,8 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
     tunnel_msg, tunnel_pending = _dry_run_tunnel_note(root)
     _say(f"  {tunnel_msg}")
     _say(f"  {_dry_run_heartbeat_note(root)}")
+    vm4_msg, vm4_pending = _dry_run_vm4relay_note(root, src)
+    _say(f"  {vm4_msg}")
     vm6_msg, vm6_pending = _dry_run_vm6proxy_note(root, src)
     _say(f"  {vm6_msg}")
     if _can_pair(src.wizard):
@@ -1409,7 +1564,7 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
         else:
             _say(f"  pairing: --apply pairs the decoder VM with this host, or re-asserts it ({SETUP} {PAIR_FLAG})")
     _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
-    return 1 if (pending or tunnel_pending or vm6_pending) else 0
+    return 1 if (pending or tunnel_pending or vm4_pending or vm6_pending) else 0
 
 
 if __name__ == "__main__":

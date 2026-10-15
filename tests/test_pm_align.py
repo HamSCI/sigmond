@@ -94,6 +94,7 @@ def _source_routes(fb=FB, wizard='VMID="${SIGMOND_VMID:-120}"\n'):
     for n in pm_align.PROXMOX_FILES:
         r["sigmond/" + "d" * 40 + "/scripts/proxmox/" + n] = f"#{n}\n"
     r["sigmond-appliance/" + "a" * 40 + "/sigmond-vm6proxy"] = VM6_BODY
+    r["sigmond-appliance/" + "a" * 40 + "/sigmond-vm4relay"] = VM4_BODY
     return r
 
 
@@ -2178,8 +2179,14 @@ def _vm6_run(calls, *, nat=NAT_S, install_rc=0, install_out="  :8000 -> ...\n"):
         if argv[:2] == ["systemctl", "is-active"]:
             return subprocess.CompletedProcess(argv, 0, "active\n", "")
         if argv[:1] == ["iptables"]:
-            return subprocess.CompletedProcess(argv, 0, nat, "")
-        if argv[:2] == [VM6, "install"]:
+            # `iptables -t nat -S [CHAIN]`: a chain name narrows the listing,
+            # as the real command does.
+            out = nat
+            if len(argv) > 4:
+                out = "".join(ln + "\n" for ln in nat.splitlines()
+                              if re.match(rf"^-[PAN] {re.escape(argv[4])}( |$)", ln))
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        if argv[:2] in ([VM6, "install"], [VM4, "install"]):
             return subprocess.CompletedProcess(argv, install_rc, install_out,
                                                "" if install_rc == 0 else "boom\n")
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -2534,3 +2541,203 @@ def test_the_marker_must_be_the_exact_whole_line():
     for near in ("# VM6PROXY_FILTER=2\n", "VM6PROXY_FILTER=20\n", "VM6PROXY_FILTER=2 \n",
                  "XVM6PROXY_FILTER=2\n", "VM6PROXY_FILTER=1\n", "echo VM6PROXY_FILTER=2\n"):
         assert not pm_align.vm6proxy_restricts("#!/bin/bash\n" + near), near
+
+
+
+# -- v3.72 #23: the IPv4 relay, from the station's own network only ---------
+#
+# sigmond-vm4relay (sigmond-appliance) moves the VM's DNAT rules into nat chain
+# SIGMOND-VM4, entered from the uplink only, for RFC 1918 and the host's own
+# LAN subnets.  pm-align carries it like sigmond-vm6proxy, runs its install
+# (which removes the five old unrestricted rules), and finds the VM address
+# in either shape.
+
+VM4 = "/usr/local/sbin/sigmond-vm4relay"
+VM4_BODY = '#!/bin/bash\nVM4RELAY_FILTER=1\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
+_VM4_KEY = "sigmond-appliance/" + "a" * 40 + "/sigmond-vm4relay"
+NAT_CHAIN = ("-P PREROUTING ACCEPT\n-N SIGMOND-VM4\n"
+             "-A PREROUTING -i vmbr0 -j SIGMOND-VM4\n"
+             "-A SIGMOND-VM4 -s 10.0.0.0/8 -p tcp -m tcp --dport 8000 -j DNAT --to-destination 10.99.0.2:8000\n"
+             "-A SIGMOND-VM4 -s 10.0.0.0/8 -p tcp -m tcp --dport 8081 -j DNAT --to-destination 10.99.0.2:8081\n"
+             "-A SIGMOND-VM4 -s 10.0.0.0/8 -p tcp -m tcp --dport 2222 -j DNAT --to-destination 10.99.0.2:22\n")
+
+
+def _vm4_installs(calls):
+    return [(argv, env) for argv, env in calls if argv[:2] == [VM4, "install"]]
+
+
+def _host_vm4(root, body=VM4_BODY, units=True):
+    p = root / VM4.lstrip("/")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body)
+    if units:
+        d = root / "etc/systemd/system"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "sigmond-vm4relay.service").write_text("[Service]\n")
+        (d / "sigmond-vm4relay.timer").write_text("[Timer]\n")
+
+
+def test_vm_dnat_target_reads_the_chain_shape_too():
+    assert pm_align.vm_dnat_target(_vm6_run([], nat=NAT_CHAIN)) == "10.99.0.2"
+    # The chain alone, with nothing entering it, still names the VM: the
+    # address is what pm-align needs, the jump is the relay's business.
+    assert pm_align.vm_dnat_target(_vm6_run([], nat=NAT_CHAIN.replace(
+        "-A PREROUTING -i vmbr0 -j SIGMOND-VM4\n", ""))) == "10.99.0.2"
+
+
+def test_fetch_sources_carries_the_ipv4_relay():
+    op = _urlopen(_source_routes())
+    src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+    assert src.vm4relay == VM4_BODY.encode()
+
+
+def test_fetch_sources_treats_a_404_on_the_ipv4_relay_as_absent():
+    routes = _source_routes()
+    routes[_VM4_KEY] = urllib.error.HTTPError(_VM4_KEY, 404, "Not Found", None, None)
+    op = _urlopen(routes)
+    assert pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op).vm4relay is None
+
+
+def test_fetch_sources_checks_the_ipv4_relay_against_the_manifest():
+    routes = _source_routes()
+    routes["https://dl/m"] = _manifest() + f"vm4relay_sha256: {hashlib.sha256(VM4_BODY.encode()).hexdigest()}\n"
+    op = _urlopen(routes)
+    assert pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op).vm4relay
+    routes["https://dl/m"] = _manifest() + f"vm4relay_sha256: {'0' * 64}\n"
+    op = _urlopen(routes)
+    with pytest.raises(pm_align.PmAlignError, match="vm4relay_sha256"):
+        pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+
+
+def test_the_ipv4_relay_needs_its_exact_marker_line():
+    assert pm_align.vm4relay_restricts(VM4_BODY)
+    for near in ("# VM4RELAY_FILTER=1\n", "VM4RELAY_FILTER=10\n", "VM4RELAY_FILTER=0\n", ""):
+        assert not pm_align.vm4relay_restricts("#!/bin/bash\n" + near), near
+    src = _src()
+    src.vm4relay = b"#!/bin/bash\n# no marker\n"
+    assert VM4 not in {f.path for f in pm_align.desired_files(src, 100)}
+    src.vm4relay = VM4_BODY.encode()
+    f = {f.path: f for f in pm_align.desired_files(src, 100)}[VM4]
+    assert f.mode == 0o755
+
+
+def test_the_real_ipv4_relay_carries_the_marker():
+    real = REPO.parent / "sigmond-appliance" / "sigmond-vm4relay"
+    if not real.exists():
+        pytest.skip("no sigmond-appliance checkout beside this one")
+    assert pm_align.vm4relay_restricts(real.read_text())
+
+
+def test_vm4relay_step_installs_on_a_host_with_the_old_rules(tmp_path):
+    _host_vm4(tmp_path)
+    calls = []
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_S))
+    assert out.startswith("installed") and "unrestricted" in out
+    (argv, env), = _vm4_installs(calls)
+    assert env == {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "SIGMOND_MGMT_VM": "10.99.0.2"}
+
+
+def test_vm4relay_step_leaves_a_current_host_alone(tmp_path):
+    _host_vm4(tmp_path)
+    calls = []
+    assert pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN)) == "current"
+    assert _vm4_installs(calls) == []
+
+
+def test_vm4relay_step_reinstalls_when_units_are_missing_or_the_script_changed(tmp_path):
+    _host_vm4(tmp_path, units=False)
+    calls = []
+    assert pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN)).startswith("installed")
+    assert len(_vm4_installs(calls)) == 1
+    _host_vm4(tmp_path)
+    calls = []
+    assert pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN),
+                                  script_changed=True).startswith("installed")
+    assert len(_vm4_installs(calls)) == 1
+
+
+def test_vm4relay_step_refuses_a_script_without_the_marker(tmp_path):
+    _host_vm4(tmp_path, body="#!/bin/bash\n# an older relay\n", units=False)
+    calls = []
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_S))
+    assert out.startswith("refused") and "VM4RELAY_FILTER=1" in out
+    assert _vm4_installs(calls) == []
+
+
+def test_vm4relay_step_skips_without_a_vm_address(tmp_path):
+    _host_vm4(tmp_path, units=False)
+    calls = []
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"))
+    assert out.startswith("skipped")
+    assert _vm4_installs(calls) == []
+
+
+def _apply_vm4(tmp_path, monkeypatch, run):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.72", "a" * 40, "d" * 40, "f" * 64, ""))
+    src = _src()
+    src.vm4relay = VM4_BODY.encode()
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
+    return pm_align.main(["--apply"], root=tmp_path, run=run)
+
+
+def test_apply_carries_and_installs_the_ipv4_relay(tmp_path, monkeypatch, capsys):
+    calls = []
+    assert _apply_vm4(tmp_path, monkeypatch, _vm6_run(calls, nat=NAT_S)) == 0
+    p = tmp_path / VM4.lstrip("/")
+    assert p.read_text() == VM4_BODY and oct(p.stat().st_mode & 0o777) == oct(0o755)
+    assert len(_vm4_installs(calls)) == 1
+    assert "ipv4 relay: installed" in capsys.readouterr().out
+
+
+def test_apply_warns_but_does_not_fail_when_the_ipv4_relay_fails(tmp_path, monkeypatch, capsys):
+    rc = _apply_vm4(tmp_path, monkeypatch, _vm6_run([], nat=NAT_S, install_rc=1, install_out="nope\n"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ipv4 relay: WARN" in out and "nope" in out
+
+
+def test_dry_run_reports_the_ipv4_relay_and_runs_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.72", "a" * 40, "d" * 40, "f" * 64, ""))
+    src = _src()
+    src.vm4relay = VM4_BODY.encode()
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
+    (tmp_path / "etc/network").mkdir(parents=True)
+    (tmp_path / "etc/network/interfaces").write_text("auto vmbr1\n")
+    for f in pm_align.desired_files(src, pm_align.host_vmid(tmp_path)):
+        dest = pm_align._under(tmp_path, f.path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f.content)
+    calls = []
+    assert pm_align.main([], root=tmp_path, run=_vm6_run(calls)) == 1
+    out = capsys.readouterr().out
+    assert "ipv4 relay: --apply would install it" in out
+    assert calls == []
+
+
+def test_not_touched_names_the_one_network_exception():
+    text = " ".join(pm_align.NOT_TOUCHED)
+    assert "sigmond-vm4relay" in text and "pre-vm4relay" in text
+
+
+def test_a_failed_iptables_read_names_no_vm_and_installs_nothing(tmp_path):
+    def run(argv, **kw):
+        if argv[:1] == ["iptables"]:
+            return subprocess.CompletedProcess(argv, 4, NAT_S, "Permission denied (you must be root)\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    assert pm_align.vm_dnat_target(run) is None
+    _host_vm4(tmp_path, units=False)
+    assert pm_align.vm4relay_step(tmp_path, run=run).startswith("failed")
+
+
+def test_vm4relay_step_reinstalls_when_prerouting_no_longer_enters_the_chain(tmp_path):
+    # Units and script in place, no old rule live, but nothing jumps to the
+    # chain (a flush, say): the VM's pages answer nobody over IPv4 until install.
+    _host_vm4(tmp_path)
+    calls = []
+    nat = NAT_CHAIN.replace("-A PREROUTING -i vmbr0 -j SIGMOND-VM4\n", "")
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=nat))
+    assert out.startswith("installed") and "does not enter" in out
+    assert len(_vm4_installs(calls)) == 1
