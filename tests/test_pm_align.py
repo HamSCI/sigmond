@@ -2157,7 +2157,12 @@ def test_the_real_wizard_carries_sigmond_check():
 # unit is missing, aimed at the VM address the IPv4 DNAT rules already use.
 
 VM6 = "/usr/local/sbin/sigmond-vm6proxy"
-VM6_BODY = '#!/bin/bash\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
+VM6_BODY = ('#!/bin/bash\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
+            'IPAddressDeny=any\n')
+# A relay from before the local-networks-only restriction (every tag back to
+# 2afd8f0): its socket units carry no IPAddressDeny.
+VM6_OLD = '#!/bin/bash\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
+VM6_DROPIN = "etc/systemd/system/sigmond-vm6proxy@.socket.d/10-allow-local.conf"
 _VM6_KEY = "sigmond-appliance/" + "a" * 40 + "/sigmond-vm6proxy"
 NAT_S = ("-P PREROUTING ACCEPT\n"
          "-A PREROUTING -p tcp -m tcp --dport 8000 -j DNAT --to-destination 10.99.0.2:8000\n"
@@ -2189,7 +2194,10 @@ def _write_vm6_units(root, ports=(8000, 8081, 8082, 8765, 2222)):
     d = root / "etc/systemd/system"
     d.mkdir(parents=True, exist_ok=True)
     for p in ports:
-        (d / f"sigmond-vm6proxy@{p}.socket").write_text("[Socket]\n")
+        (d / f"sigmond-vm6proxy@{p}.socket").write_text("[Socket]\nIPAddressDeny=any\n")
+    dropin = root / VM6_DROPIN
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    dropin.write_text("[Socket]\nIPAddressDeny=any\nIPAddressAllow=localhost link-local\n")
 
 
 def test_fetch_sources_carries_the_relay_from_the_appliance_commit():
@@ -2368,7 +2376,8 @@ def test_dry_run_says_it_would_install_the_relay(tmp_path, monkeypatch, capsys):
 
     _write_vm6_units(tmp_path)
     assert pm_align.main([], root=tmp_path, run=_vm6_run(calls)) == 0
-    assert "ipv6 relay: installed" in capsys.readouterr().out
+    assert ("ipv6 relay: every socket unit carries IPAddressDeny=any and the allow-list "
+            "drop-in is present") in capsys.readouterr().out
 
 
 # A host that already has every unit still needs the new unit text when the
@@ -2409,3 +2418,92 @@ def test_dry_run_says_it_would_reinstall_a_changed_relay_and_runs_nothing(tmp_pa
     assert pm_align.main([], root=tmp_path, run=_vm6_run(calls)) == 1
     assert "ipv6 relay: --apply would re-run install" in capsys.readouterr().out
     assert calls == []
+
+
+# -- final review (2026-10-15): never run a relay that cannot filter ---------
+#
+# Allow without Deny filters nothing.  A relay script from before the
+# restriction writes socket units without IPAddressDeny, so pm-align neither
+# carries such a script to a host nor runs one it finds there, and it counts
+# a unit current only when it denies and the allow-list drop-in exists.
+
+def test_vm6proxy_step_refuses_a_script_without_deny(tmp_path):
+    p = tmp_path / VM6.lstrip("/")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(VM6_OLD)
+    calls = []
+    out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls), script_changed=True)
+    assert out.startswith("refused") and "IPAddressDeny=any" in out
+    assert _vm6_installs(calls) == []
+
+
+def test_apply_warns_on_a_refused_relay_and_never_says_installed(tmp_path, monkeypatch, capsys):
+    p = tmp_path / VM6.lstrip("/")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(VM6_OLD)
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.70", "a" * 40, "d" * 40, "f" * 64, ""))
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: _src())
+    calls = []
+    assert pm_align.main(["--apply"], root=tmp_path, run=_vm6_run(calls)) == 0
+    out = capsys.readouterr().out
+    assert "ipv6 relay: WARN" in out and "ipv6 relay: installed" not in out
+    assert _vm6_installs(calls) == []
+
+
+def test_a_downgrade_neither_carries_nor_runs_the_old_relay(tmp_path, monkeypatch, capsys):
+    _host_with_relay_script(tmp_path)               # the restricted relay
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.70", "a" * 40, "d" * 40, "f" * 64, ""))
+    old = _src()
+    old.vm6proxy = VM6_OLD.encode()                  # what an older release carries
+    assert VM6 not in {f.path for f in pm_align.desired_files(old, 100)}
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: old)
+    calls = []
+    assert pm_align.main(["--apply"], root=tmp_path, run=_vm6_run(calls)) == 0
+    assert (tmp_path / VM6.lstrip("/")).read_text() == VM6_BODY     # kept
+    for argv, env in _vm6_installs(calls):                         # only the kept one runs
+        assert argv == [VM6, "install"]
+    assert "does not restrict" in capsys.readouterr().out
+
+
+def test_a_unit_without_deny_or_a_missing_dropin_is_not_current(tmp_path):
+    _host_with_relay_script(tmp_path)
+    _write_vm6_units(tmp_path)
+    assert pm_align.vm6proxy_step(tmp_path, run=_vm6_run([])) == "current"
+
+    (tmp_path / "etc/systemd/system/sigmond-vm6proxy@2222.socket").write_text("[Socket]\n")
+    calls = []
+    assert pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls)).startswith("installed")
+    assert len(_vm6_installs(calls)) == 1
+
+    _write_vm6_units(tmp_path)
+    (tmp_path / VM6_DROPIN).unlink()
+    calls = []
+    assert pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls)).startswith("installed")
+    assert len(_vm6_installs(calls)) == 1
+
+
+def test_the_relay_runs_with_a_minimal_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIGMOND_VM6PROXY_UNITDIR", "/tmp/elsewhere")
+    monkeypatch.setenv("SIGMOND_VM6PROXY_TEST", "1")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/decoy")
+    _host_with_relay_script(tmp_path)
+    calls = []
+    pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls))
+    (argv, env), = _vm6_installs(calls)
+    assert set(env) == {"PATH", "LANG", "SIGMOND_MGMT_VM"}
+    assert env["PATH"] == "/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def test_the_real_relay_restricts_and_writes_the_dropin_pm_align_checks():
+    real = REPO.parent / "sigmond-appliance" / "sigmond-vm6proxy"
+    if not real.exists():
+        pytest.skip("no sigmond-appliance checkout beside this one")
+    text = real.read_text()
+    assert pm_align.vm6proxy_restricts(text)
+    assert 'DROPDIR="${UNITDIR}/sigmond-vm6proxy@.socket.d"' in text
+    assert 'DROPIN="${DROPDIR}/10-allow-local.conf"' in text
+    assert pm_align.VM6PROXY_DROPIN.endswith("/sigmond-vm6proxy@.socket.d/10-allow-local.conf")

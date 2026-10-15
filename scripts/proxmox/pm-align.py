@@ -294,6 +294,10 @@ PAIRING_RECORD = "/etc/sigmond-appliance/rac-pairing"
 NO_PRIVATE_LINK = ("this host has no private link to its decoder VM (the pre-v3.4x layout); "
                    "smd remote needs that link")
 VM6PROXY = "/usr/local/sbin/sigmond-vm6proxy"
+VM6PROXY_DENY = "IPAddressDeny=any"
+VM6PROXY_DROPIN = "/etc/systemd/system/sigmond-vm6proxy@.socket.d/10-allow-local.conf"
+VM6PROXY_CURRENT = ("ipv6 relay: every socket unit carries IPAddressDeny=any and the allow-list "
+                    "drop-in is present")
 VM6PROXY_PORTS = ("8000:8000", "8081:8081", "8082:8082", "8765:8765", "2222:22")
 # Which DNAT rule names the VM's address: ka9q-web first, every host has it.
 VM6PROXY_DNAT_PORTS = (8081, 8000, 2222)
@@ -365,7 +369,12 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
         out.append(HostFile("/usr/local/sbin/pm-align", src.proxmox["pm-align.py"], 0o755,
                             "scripts/proxmox/pm-align.py"))
     if src.vm6proxy is not None:
-        out.append(HostFile(VM6PROXY, src.vm6proxy, 0o755, "sigmond-appliance/sigmond-vm6proxy"))
+        if vm6proxy_restricts(src.vm6proxy):
+            out.append(HostFile(VM6PROXY, src.vm6proxy, 0o755, "sigmond-appliance/sigmond-vm6proxy"))
+        elif notes is not None:
+            notes.append(f"this release's sigmond-vm6proxy does not restrict the relay to local "
+                         f"networks (no {VM6PROXY_DENY}); pm-align keeps this host's copy and "
+                         f"never runs that one")
     return out
 
 
@@ -383,9 +392,34 @@ def vm6proxy_ports(text: str) -> list:
     return [int(p.split(":", 1)[0]) for p in pairs if p.split(":", 1)[0].isdigit()]
 
 
+def vm6proxy_restricts(body) -> bool:
+    """True when this relay script writes the local-networks-only filter.
+    Allow without Deny filters nothing, and every relay before the
+    restriction (back to 2afd8f0) writes socket units without Deny: running
+    one would open ssh on 2222 to the IPv6 internet (final review,
+    2026-10-15).  The manifest hash is not enough on its own: ab22aeb's build
+    recorded vm6proxy_sha256 for a script with no Deny."""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    return VM6PROXY_DENY in body
+
+
 def _vm6proxy_missing(root: Path, text: str) -> list:
-    return [f"sigmond-vm6proxy@{p}.socket" for p in vm6proxy_ports(text)
-            if not _under(root, f"/etc/systemd/system/sigmond-vm6proxy@{p}.socket").exists()]
+    """Socket units that are not current: absent, or without IPAddressDeny=any.
+    Without the allow-list drop-in every one counts, since then the units
+    allow localhost and link-local alone and the host's own networks
+    cannot reach the pages."""
+    dropin = _under(root, VM6PROXY_DROPIN).exists()
+    out = []
+    for p in vm6proxy_ports(text):
+        name = f"sigmond-vm6proxy@{p}.socket"
+        try:
+            ok = dropin and VM6PROXY_DENY in _under(root, f"/etc/systemd/system/{name}").read_text()
+        except OSError:
+            ok = False
+        if not ok:
+            out.append(name)
+    return out
 
 
 def vm_dnat_target(run) -> Optional[str]:
@@ -423,13 +457,20 @@ def vm6proxy_step(root: Path, *, run, script_changed: bool = False) -> str:
     missing = _vm6proxy_missing(root, text)
     if not missing and not script_changed:
         return "current"
+    if not vm6proxy_restricts(text):
+        return (f"refused: {VM6PROXY} on this host predates the local-networks-only "
+                f"restriction (no {VM6PROXY_DENY}); running it would open the VM's ports, "
+                f"ssh on 2222 included, to the IPv6 internet")
     vm = vm_dnat_target(run)
     if vm is None:
         return ("skipped: no IPv4 DNAT rule sends this host's ports to a decoder VM, "
                 "and the IPv6 relay mirrors those rules")
     try:
+        # A minimal environment: nothing of the caller's (no PYTHON*, no test
+        # hooks) reaches a script that runs as root.
         r = run([VM6PROXY, "install"], capture_output=True, text=True, timeout=120,
-                env={**os.environ, "SIGMOND_MGMT_VM": vm})
+                env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C",
+                     "SIGMOND_MGMT_VM": vm})
     except Exception as exc:
         return f"failed: raised {exc!r}"
     if r.returncode != 0:
@@ -444,12 +485,12 @@ def _apply_vm6proxy(root: Path, run, changes: list) -> None:
     """The relay step of --apply.  A failure warns and never fails --apply."""
     script_changed = any(c.file.path == VM6PROXY and c.state != "current" for c in changes)
     out = vm6proxy_step(root, run=run, script_changed=script_changed)
-    if out.startswith("failed"):
+    if out.startswith("failed") or out.startswith("refused"):
         _say(f"  ipv6 relay: WARN - {out}")
         _say(f"  the VM's pages answer over IPv4 only until it installs; retry: "
              f"SIGMOND_MGMT_VM=<VM address> {VM6PROXY} install")
     elif out == "current":
-        _say("  ipv6 relay: installed (every unit present)")
+        _say(f"  {VM6PROXY_CURRENT}")
     else:
         _say(f"  ipv6 relay: {out}")
 
@@ -457,21 +498,25 @@ def _apply_vm6proxy(root: Path, run, changes: list) -> None:
 def _dry_run_vm6proxy_note(root: Path, src: Sources) -> tuple:
     """(message, pending) for the dry-run relay line.  Reads files only: a dry
     run may not be root, and iptables needs root."""
-    if src.vm6proxy is not None:
-        text = src.vm6proxy.decode("utf-8", "replace")
-    else:
-        try:
-            text = _under(root, VM6PROXY).read_text()
-        except OSError:
-            return "ipv6 relay: this release does not carry sigmond-vm6proxy", False
-    missing = _vm6proxy_missing(root, text)
     try:
         on_host = _under(root, VM6PROXY).read_bytes()
     except OSError:
         on_host = None
-    changed = src.vm6proxy is not None and on_host is not None and on_host != src.vm6proxy
+    # The script --apply would leave on the host: the release's when it
+    # restricts, else the host's own (desired_files never carries one that
+    # does not).
+    carried = src.vm6proxy if src.vm6proxy is not None and vm6proxy_restricts(src.vm6proxy) else None
+    body = carried if carried is not None else on_host
+    if body is None:
+        return "ipv6 relay: this release does not carry sigmond-vm6proxy", False
+    text = body.decode("utf-8", "replace")
+    missing = _vm6proxy_missing(root, text)
+    changed = carried is not None and on_host is not None and on_host != carried
     if not missing and not changed:
-        return "ipv6 relay: installed", False
+        return VM6PROXY_CURRENT, False
+    if not vm6proxy_restricts(text):
+        return (f"ipv6 relay: WARN - {VM6PROXY} predates the local-networks-only restriction; "
+                f"--apply will not run it"), False
     if _no_private_link(root):
         return f"ipv6 relay: skipped: {NO_PRIVATE_LINK}", False
     if not missing:
