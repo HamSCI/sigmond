@@ -234,8 +234,11 @@ def record(kind: str, detail: str = "", *, now: float,
         cur = episodes[-1] if episodes else None
         what = None
         if kind == ARRIVAL_KIND:
+            # A hand replug can come hours after needs-replug: it closes that
+            # episode whatever the gap, so the doctor alarm clears.
             if (cur is not None and cur.back is None
-                    and abs(now - cur.last) <= EPISODE_GAP_S):
+                    and (abs(now - cur.last) <= EPISODE_GAP_S
+                         or "needs-replug" in cur.kinds)):
                 cur.back = now
                 what = "back"
         elif (cur is not None and abs(now - cur.last) <= EPISODE_GAP_S

@@ -9,7 +9,8 @@ fires and the unit sits `active` for hours while the control plane is
 dead.  Every consumer fails downstream (recorders lose SSRCs and flap,
 ka9q-web has no session) and nothing self-heals.  A `systemctl restart`
 recovers it: the stop forces a USB re-enumeration and the RX888 comes
-back clean.
+back clean.  (If the stalls keep coming, sigmond-sdr-recover resets the
+card's hub port; this watchdog only restarts radiod.)
 
 Two detectors, both scoped to the unit's CURRENT invocation:
 

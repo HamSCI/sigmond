@@ -490,3 +490,14 @@ def test_the_replug_clears_the_alarm(tmp_path):
     ev.record("usb-add", "", now=T0 + 60, path=p)
     kind, _ = ev.assess(ev.read_episodes(p, now=T0 + 100), True)
     assert kind != "sdr-needs-replug"
+
+
+def test_a_late_usb_add_clears_the_needs_replug_alarm(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("usb-remove", "", now=T0, path=p)
+    ev.record("port-reset", "1-1p2", now=T0 + 30, path=p)
+    ev.record("needs-replug", "USB2 only", now=T0 + 120, path=p)
+    assert ev.assess(ev.read_episodes(p, now=T0 + 130), True)[0] == "sdr-needs-replug"
+    ev.record("usb-add", "", now=T0 + 7200, path=p)         # a hand replug 2 h later
+    kind, _ = ev.assess(ev.read_episodes(p, now=T0 + 7300), True)
+    assert kind != "sdr-needs-replug"
