@@ -708,10 +708,10 @@ def _add_upload_verbs(p) -> None:
                                             'manifest), e.g. "no HF antenna"')
     d = vs.add_parser('discard',
                       help='send no data and keep no backlog; same as '
-                           '`smd sink off`.  Ending it sends nothing recorded '
-                           'before, except the GRAPE and magnetometer packages '
-                           'for that UTC day, and for the day before until its '
-                           'packaging runs')
+                           '`smd sink off`.  When it ends, today\'s and '
+                           'yesterday\'s (UTC) packages go out, even if built '
+                           'while off.  Older ones stay on the station, and '
+                           'nothing else recorded while off ships')
     d.add_argument('--reason', required=True,
                    help='why, e.g. "bench provisioning for DASI-021"')
     d.add_argument('--yes', action='store_true',

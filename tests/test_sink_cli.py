@@ -228,6 +228,7 @@ class LegacyUploadHelpTests(unittest.TestCase):
         self.assertIn("smd sink upload", out)
         self.assertIn("smd sink off", out)
         self.assertIn("about 24 h", out)
-        self.assertIn("except the GRAPE and magnetometer packages", out)
+        self.assertIn("today's and yesterday's (UTC) packages go out", out)
+        self.assertNotIn("except the GRAPE and magnetometer packages", out)
         self.assertNotIn("store everything", out)
         self.assertNotIn("keeps the data", out)
