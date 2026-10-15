@@ -5,20 +5,22 @@ In v3.69 the site sink switch's `off` rides on the legacy `[uploads] mode =
 magnetometer zips built while it read `off` can therefore still ship once it
 leaves `off` -- above all where their pipelines dropped out of the manifest
 for missing PSWS ids, so nothing discarded them.  Before the written mode
-leaves discard, sigmond moves every package still in each spool (those, and
-any unsent ones built before discard) into a sibling directory OUTSIDE each
+leaves discard, sigmond moves every package older than yesterday (UTC) still
+in each spool (those, and any unsent ones built before discard) into a sibling directory OUTSIDE each
 spool root (hs-uploader's file source searches the whole tree, hidden
-directories included) and marks earlier GRAPE days packaged so the catch-up
+directories included) and marks GRAPE days from two days back packaged so the catch-up
 sweep never rebuilds them.  The caller first asks `packaging_running()` and
 refuses while a packaging unit runs or may run, so sigmond never moves a
 package that a unit still writes.  A refusal moves nothing: `close_doors`
 checks both spools before it renames anything.  A stop partway reports the
-pairs it moved.  tasks/plan-sink-control.md §10.3 item 3.
+pairs it moved.  Today's packages, and yesterday's if not yet packed, stay
+and ship, as INSTALL.md tells the operator.  tasks/plan-sink-control.md §10.3 item 3.
 """
 from __future__ import annotations
 
 import contextlib
 import os
+import re
 import stat
 import subprocess
 from dataclasses import dataclass, field
@@ -36,6 +38,28 @@ PACKAGED_MARKER = ".upload_complete"     # hamsci-physics grape/spool.py, same n
 # A unit that does not exist answers `inactive`.
 PACKAGING_UNITS = ("grape-daily.service", "mag-recorder-upload.service")
 _IDLE_STATES = ("inactive", "failed")
+
+
+_DAY_DIR = re.compile(r"^\d{8}$")                      # GRAPE spool/<YYYYMMDD>/
+_NAME_DAY = re.compile(r"(?:^|\D)(\d{4})-?(\d{2})-?(\d{2})(?:\D|$)")
+
+
+def package_day(path: Path, spool: Path):
+    """The UTC day a spooled package belongs to, or None when its path does
+    not say.  GRAPE packages sit under `<spool>/<YYYYMMDD>/` and are named
+    `OBS<YYYY-MM-DD>T..`; magnetometer zips are named `mag_<YYYYMMDD>.zip`."""
+    rel = path.relative_to(spool)
+    for part in (*rel.parts[:-1], rel.parts[-1]):
+        text = part if _DAY_DIR.match(part) else None
+        m = _NAME_DAY.search(part) if text is None else None
+        try:
+            if text:
+                return date(int(text[:4]), int(text[4:6]), int(text[6:]))
+            if m:
+                return date(int(m[1]), int(m[2]), int(m[3]))
+        except ValueError:
+            continue
+    return None
 
 
 class DoorError(RuntimeError):
@@ -91,7 +115,7 @@ def _check_same_fs(spool: Path) -> None:
 
 
 def set_aside(spool: Path, pattern: str, *, match_dirs: bool,
-              stamp: str) -> List[Tuple[Path, Path]]:
+              stamp: str, keep_from: date = None) -> List[Tuple[Path, Path]]:
     """Move every outermost match of `pattern` under `spool` into
     `held_dir(spool, stamp)`, keeping its path relative to the spool.
     Files always match.  Directories match too when `match_dirs` is true
@@ -99,7 +123,10 @@ def set_aside(spool: Path, pattern: str, *, match_dirs: bool,
     moving anything when the spool and its parent sit on different
     filesystems.  A source that vanished after the scan, such as a
     magnetometer zip the daemon deleted on ack, needs no setting aside and
-    is skipped.  Any other rename failure stops the move; the error lists
+    is skipped.  A package whose UTC day is `keep_from` or later stays in
+    the spool: today's packages, and yesterday's if not yet packed, go out
+    when uploads turn on.  A package whose day the path does not show moves,
+    so the discard guarantee fails closed.  Any other rename failure stops the move; the error lists
     the pairs moved so far."""
     if not spool.is_dir():
         return []
@@ -110,6 +137,10 @@ def set_aside(spool: Path, pattern: str, *, match_dirs: bool,
             continue
         if any(c in p.parents for c in chosen):
             continue
+        if keep_from is not None:
+            day = package_day(p, spool)
+            if day is not None and day >= keep_from:
+                continue
         chosen.append(p)
     dest_root = held_dir(spool, stamp)
     moved: List[Tuple[Path, Path]] = []
@@ -131,8 +162,9 @@ def set_aside(spool: Path, pattern: str, *, match_dirs: bool,
 
 def mark_days_complete(spool: Path, today: date, *, days: int = 7,
                        chown=os.chown, chmod=os.chmod) -> List[Path]:
-    """Write `<spool>/<YYYYMMDD>/.upload_complete` for each of the `days`
-    days before `today`.  A day directory this creates takes the spool's
+    """Write `<spool>/<YYYYMMDD>/.upload_complete` for `days` days, from two
+    days before `today` back.  Today and yesterday stay open: their packages
+    still ship.  A day directory this creates takes the spool's
     owner and mode, and every marker takes the spool's owner: GRAPE's
     packager runs as that owner and must still write inside a day directory
     that root created.  A day directory this call created, and could not
@@ -143,7 +175,7 @@ def mark_days_complete(spool: Path, today: date, *, days: int = 7,
     st = spool.stat()
     mode = stat.S_IMODE(st.st_mode)
     marks: List[Path] = []
-    for back in range(1, days + 1):
+    for back in range(2, days + 2):
         day_dir = spool / (today - timedelta(days=back)).strftime("%Y%m%d")
         unfinished = False                  # made here, not yet handed over
         try:
@@ -193,9 +225,11 @@ def close_doors(now: datetime, *, grape: Path = GRAPE_SPOOL, mag: Path = MAG_SPO
         if spool.is_dir():
             _check_same_fs(spool)
     report = DoorReport()
+    yesterday = now.date() - timedelta(days=1)
     for spool, pattern, match_dirs in ((grape, "OBS*", True), (mag, "*.zip", False)):
         try:
-            report.moved += set_aside(spool, pattern, match_dirs=match_dirs, stamp=stamp)
+            report.moved += set_aside(spool, pattern, match_dirs=match_dirs, stamp=stamp,
+                                      keep_from=yesterday)
         except DoorError as exc:
             raise DoorError(str(exc), report.moved + exc.moved) from exc
     try:

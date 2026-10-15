@@ -1016,9 +1016,10 @@ def _say_set_aside(moved) -> None:
 def _close_doors() -> int:
     """Before the written mode leaves discard (the site sink switch's `off`),
     whatever the new setting: refuse while GRAPE or the magnetometer packages
-    a day; otherwise set aside every GRAPE package and magnetometer zip still
-    in the spools, unsent ones built before off included, and mark earlier
-    GRAPE days packaged
+    a day; otherwise set aside every GRAPE package and magnetometer zip older
+    than yesterday (UTC) still in the spools, unsent ones built before off
+    included, and mark GRAPE days from two days back packaged.  Today's
+    packages, and yesterday's if not yet packed, stay and ship
     (tasks/plan-sink-control.md §10.3 item 3).  Isolated so tests can stub
     it.  Returns 0 on success, 1 on refusal; on 1 the caller writes nothing."""
     from datetime import datetime, timezone

@@ -108,27 +108,28 @@ def test_set_aside_refuses_across_filesystems(tmp_path):
     assert z.exists()                           # nothing moved
 
 
-def test_mark_days_complete_writes_seven_markers(tmp_path):
+def test_mark_days_complete_writes_seven_markers_from_two_days_back(tmp_path):
     spool = tmp_path / "upload"
     spool.mkdir()
     marks = sd.mark_days_complete(spool, date(2026, 10, 7), chown=mock.Mock())
+    # Yesterday (20261006) stays open: INSTALL.md says its package still ships.
     assert [m.parent.name for m in marks] == [
-        "20261006", "20261005", "20261004", "20261003", "20261002", "20261001", "20260930"]
+        "20261005", "20261004", "20261003", "20261002", "20261001", "20260930", "20260929"]
     assert all(m.name == ".upload_complete" and m.is_file() for m in marks)
 
 
 def test_new_day_dirs_and_markers_take_the_spool_owner(tmp_path):
     spool = tmp_path / "upload"
     spool.mkdir()
-    (spool / "20261006").mkdir()               # GRAPE already made this one
+    (spool / "20261005").mkdir()               # GRAPE already made this one
     st = spool.stat()
     chown = mock.Mock()
     sd.mark_days_complete(spool, date(2026, 10, 7), days=2, chown=chown)
     owned = [c.args for c in chown.call_args_list]
-    assert (spool / "20261005", st.st_uid, st.st_gid) in owned          # created here
-    assert (spool / "20261006" / ".upload_complete", st.st_uid, st.st_gid) in owned
+    assert (spool / "20261004", st.st_uid, st.st_gid) in owned          # created here
     assert (spool / "20261005" / ".upload_complete", st.st_uid, st.st_gid) in owned
-    assert all(args[0] != spool / "20261006" for args in owned)      # existing dir untouched
+    assert (spool / "20261004" / ".upload_complete", st.st_uid, st.st_gid) in owned
+    assert all(args[0] != spool / "20261005" for args in owned)      # existing dir untouched
 
 
 def test_mark_days_complete_on_a_missing_spool_does_nothing(tmp_path):
@@ -142,6 +143,7 @@ def test_close_doors_covers_both_spools_under_one_utc_stamp(tmp_path):
     assert {src for src, _ in report.moved} == {obs, z}
     assert all("20261007T153000Z" in str(dst) for _, dst in report.moved)
     assert len(report.marked) == 7
+    assert "20261006" not in {m.parent.name for m in report.marked}
 
 
 # ---- fix round 1: refuse before any rename, keep what moved, fail closed ----
@@ -278,7 +280,7 @@ def test_a_failed_chown_removes_the_day_directory_this_call_made(tmp_path):
     chown = mock.Mock(side_effect=PermissionError(1, "Operation not permitted"))
     with pytest.raises(sd.DoorError) as caught:
         sd.mark_days_complete(spool, date(2026, 10, 7), chown=chown)
-    assert not (spool / "20261006").exists()    # no root-owned day directory left
+    assert not (spool / "20261005").exists()    # no root-owned day directory left
     assert "stays off" in str(caught.value) and caught.value.moved == []
 
 
@@ -288,27 +290,27 @@ def test_a_failed_chmod_removes_the_day_directory_this_call_made(tmp_path):
     chmod = mock.Mock(side_effect=PermissionError(1, "Operation not permitted"))
     with pytest.raises(sd.DoorError):
         sd.mark_days_complete(spool, date(2026, 10, 7), chown=mock.Mock(), chmod=chmod)
-    assert not (spool / "20261006").exists()
+    assert not (spool / "20261005").exists()
 
 
 def test_a_failed_marker_chown_leaves_an_existing_day_directory_alone(tmp_path):
     spool = tmp_path / "upload"
-    (spool / "20261006").mkdir(parents=True)
+    (spool / "20261005").mkdir(parents=True)
     chown = mock.Mock(side_effect=PermissionError(1, "Operation not permitted"))
     with pytest.raises(sd.DoorError):
         sd.mark_days_complete(spool, date(2026, 10, 7), chown=chown)
-    assert (spool / "20261006").is_dir()                      # not ours to remove
-    assert not (spool / "20261006" / ".upload_complete").exists()   # a rerun retries it
+    assert (spool / "20261005").is_dir()                      # not ours to remove
+    assert not (spool / "20261005" / ".upload_complete").exists()   # a rerun retries it
 
 
 def test_a_day_directory_this_call_made_takes_the_spool_mode(tmp_path):
     spool = tmp_path / "upload"
     spool.mkdir()
     os.chmod(spool, 0o750)
-    (spool / "20261006").mkdir()               # GRAPE made this one; leave its mode
+    (spool / "20261005").mkdir()               # GRAPE made this one; leave its mode
     chmod = mock.Mock()
     sd.mark_days_complete(spool, date(2026, 10, 7), days=2, chown=mock.Mock(), chmod=chmod)
-    assert [c.args for c in chmod.call_args_list] == [(spool / "20261005", 0o750)]
+    assert [c.args for c in chmod.call_args_list] == [(spool / "20261004", 0o750)]
 
 
 def test_the_default_chmod_applies_the_spool_mode_under_a_plain_umask(tmp_path):
@@ -320,7 +322,7 @@ def test_the_default_chmod_applies_the_spool_mode_under_a_plain_umask(tmp_path):
         sd.mark_days_complete(spool, date(2026, 10, 7), days=1, chown=mock.Mock())
     finally:
         os.umask(old)
-    assert stat.S_IMODE((spool / "20261006").stat().st_mode) == 0o750
+    assert stat.S_IMODE((spool / "20261005").stat().st_mode) == 0o750
 
 
 def test_set_aside_moves_a_file_named_like_a_grape_package(tmp_path):
@@ -380,7 +382,7 @@ def test_close_doors_reads_a_non_utc_time_as_utc(tmp_path):
     local = datetime(2026, 10, 8, 2, 30, tzinfo=timezone(timedelta(hours=5)))
     report = sd.close_doors(local, grape=g, mag=tmp_path / "absent", chown=mock.Mock())
     assert all("20261007T213000Z" in str(dst) for _, dst in report.moved)
-    assert [m.parent.name for m in report.marked][0] == "20261006"
+    assert [m.parent.name for m in report.marked][0] == "20261005"
 
 
 def test_close_doors_hands_chown_and_chmod_to_the_day_directories(tmp_path):
@@ -388,10 +390,10 @@ def test_close_doors_hands_chown_and_chmod_to_the_day_directories(tmp_path):
     chown, chmod = mock.Mock(), mock.Mock()
     sd.close_doors(NOW, grape=g, mag=tmp_path / "absent", chown=chown, chmod=chmod)
     made = {c.args[0] for c in chmod.call_args_list}
-    assert made == {g / d for d in ("20261006", "20261004", "20261003",
-                                    "20261002", "20261001", "20260930")}
+    assert made == {g / d for d in ("20261004", "20261003", "20261002",
+                                    "20261001", "20260930", "20260929")}
     assert {c.args[1] for c in chmod.call_args_list} == {stat.S_IMODE(g.stat().st_mode)}
-    assert g / "20261006" in {c.args[0] for c in chown.call_args_list}
+    assert g / "20261004" in {c.args[0] for c in chown.call_args_list}
 
 
 # -- the config hook around close_doors (Task 5) ----------------------------
@@ -453,3 +455,60 @@ def test_the_config_hook_prints_what_moved_and_what_it_marked(capsys):
     out = "".join(capsys.readouterr())
     assert str(a) in out and str(b) in out
     assert "marked 2 earlier GRAPE days packaged" in out
+
+
+# -- #5: today's and yesterday's packages stay (INSTALL.md ~339-343) ---------
+
+def _spools_by_age(root: Path):
+    """GRAPE OBS dirs and mag zips for today (7th), yesterday (6th) and 5 days back."""
+    g = root / "timestd" / "upload"
+    m = root / "mag-recorder" / "upload"
+    m.mkdir(parents=True)
+    obs, zips = {}, {}
+    for day in ("20261007", "20261006", "20261002"):
+        d = g / day / "AC0G_EM38ww" / f"OBS{day[:4]}-{day[4:6]}-{day[6:]}T00-00"
+        (d / "ch0").mkdir(parents=True)
+        (d / "ch0" / "rf@1.h5").write_bytes(b"x")
+        obs[day] = d
+        z = m / f"mag_{day}.zip"
+        z.write_bytes(b"z")
+        zips[day] = z
+    return g, m, obs, zips
+
+
+def test_close_doors_keeps_todays_and_yesterdays_packages(tmp_path):
+    g, m, obs, zips = _spools_by_age(tmp_path)
+    report = sd.close_doors(NOW, grape=g, mag=m, chown=mock.Mock())
+    assert {src for src, _ in report.moved} == {obs["20261002"], zips["20261002"]}
+    for day in ("20261007", "20261006"):
+        assert obs[day].is_dir() and zips[day].exists()
+    assert not obs["20261002"].exists() and not zips["20261002"].exists()
+
+
+def test_close_doors_marks_only_days_two_or_more_back(tmp_path):
+    g, m, obs, zips = _spools_by_age(tmp_path)
+    report = sd.close_doors(NOW, grape=g, mag=m, chown=mock.Mock())
+    days = {mk.parent.name for mk in report.marked}
+    assert "20261006" not in days and "20261007" not in days
+    assert "20261005" in days
+    assert not (g / "20261006" / ".upload_complete").exists()
+
+
+def test_set_aside_keeps_a_package_from_yesterday_utc_by_its_name(tmp_path):
+    spool, z = _mag(tmp_path)                    # mag_20261005.zip
+    keep = spool / "mag_20261006.zip"
+    keep.write_bytes(b"z")
+    moved = sd.set_aside(spool, "*.zip", match_dirs=False, stamp="S",
+                         keep_from=date(2026, 10, 6))
+    assert [src for src, _ in moved] == [z]
+    assert keep.exists()
+
+
+def test_set_aside_still_takes_a_package_whose_day_it_cannot_read(tmp_path):
+    spool = tmp_path / "mag-recorder" / "upload"
+    spool.mkdir(parents=True)
+    odd = spool / "mystery.zip"
+    odd.write_bytes(b"z")
+    moved = sd.set_aside(spool, "*.zip", match_dirs=False, stamp="S",
+                         keep_from=date(2026, 10, 6))
+    assert [src for src, _ in moved] == [odd]     # fail closed: discard guarantee holds

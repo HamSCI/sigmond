@@ -464,9 +464,10 @@ Don't judge PSWS on day one.
 > | `⚠ site sink: hold (legacy) — stores for a while and sends no data; …` | an older pause, set with `smd upload hold`. The station keeps FT8 spots for one hour and WSPR spots for 24 hours, then drops them. `smd sink upload` sends what remains; `smd sink off` drops it. DASI002 reads `no HF antenna; no PSWS station/instrument ids` |
 >
 > When the switch leaves `off`, `smd sink upload` moves every GRAPE package and
-> magnetometer zip still waiting into `/var/lib/timestd/upload-held/<UTC time>/` and
+> magnetometer zip still waiting from before yesterday (UTC) into `/var/lib/timestd/upload-held/<UTC time>/` and
 > `/var/lib/mag-recorder/upload-held/<UTC time>/`, where nothing removes them; ask
-> your fleet admin before you delete them.
+> your fleet admin before you delete them.  The packages for today and yesterday stay
+> in place and ship.
 >
 > `smd upload hold` and `smd upload discard` still work; they set the legacy modes
 > that `smd sink status` reports as `hold (legacy)` and `off`. Ask your fleet admin
