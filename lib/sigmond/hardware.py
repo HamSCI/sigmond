@@ -241,19 +241,78 @@ def gpsdo_fix_direct():
     return (fix in ('2D', '3D'), st.maidenhead(), fix)
 
 
-def rm3100_responds() -> Optional[bool]:
+def _mag_held(run, dev: Path) -> bool:
+    """True when mag-recorder is active or any process holds `dev`."""
+    try:
+        if run(['systemctl', 'is-active', '--quiet', 'mag-recorder.service'],
+               capture_output=True, text=True, timeout=10).returncode == 0:
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        return run(['fuser', str(dev)], capture_output=True, text=True,
+                   timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _mag_held_verdict(mag_dir, now) -> tuple:
+    """Judge a held adapter from mag-recorder's samples.  Returns
+    (True|False|None, frozen_reason): fresh and moving, frozen, or unknown."""
+    from .commands.check import (MAG_FRESH_S, Reader, _sample_time,
+                                 last_mag_samples, mag_frozen)
+    samples = last_mag_samples(Reader(), Path(mag_dir), now)
+    newest = _sample_time(samples[-1]) if samples else None
+    if newest is None or now - newest > MAG_FRESH_S:
+        return (None, '')
+    why = mag_frozen(samples)
+    return (False, why) if why else (True, '')
+
+
+def mag_held_hint(run=subprocess.run, dev: Path = Path('/dev/ttyMAG0'),
+                  mag_dir=Path('/var/lib/mag-recorder'), now=None) -> str:
+    """The operator hint when mag-recorder holds the adapter and its readings
+    are frozen; '' otherwise."""
+    now = time.time() if now is None else now
+    if not _mag_held(run, dev):
+        return ''
+    try:
+        ok, _why = _mag_held_verdict(mag_dir, now)
+    except Exception:   # noqa: BLE001
+        return ''
+    if ok is False:
+        return ('mag-recorder is running but its readings are frozen; '
+                'restart it (sudo systemctl restart mag-recorder)')
+    return ''
+
+
+def rm3100_responds(run=subprocess.run,
+                    magusb: Path = Path('/usr/local/bin/mag-usb'),
+                    dev: Path = Path('/dev/ttyMAG0'),
+                    mag_dir=Path('/var/lib/mag-recorder'),
+                    now=None) -> Optional[bool]:
     """Functional magnetometer check: does the RM3100 actually ANSWER on the I2C
     bus (0x23), not merely the Pololu adapter being present?  A USB-presence
     probe passes when the adapter is plugged in but the sensor behind it is
     dead/unpowered/unwired (exactly the B4-100 case), so bring-up must probe the
     sensor itself.  Returns True (responding), False (adapter present but sensor
     silent), or None (can't tell — no /dev/ttyMAG0, or mag-usb not installed
-    yet, so the caller falls back to presence)."""
-    magusb, dev = Path('/usr/local/bin/mag-usb'), Path('/dev/ttyMAG0')
+    yet, so the caller falls back to presence).
+
+    When mag-recorder holds the adapter, `mag-usb` is NEVER run: the probe froze
+    a held device on DASI-011 (2026-10-14).  The verdict then comes from
+    mag-recorder's own samples: fresh and moving True, frozen False, else None."""
+    magusb, dev = Path(magusb), Path(dev)
     if not magusb.exists() or not dev.exists():
         return None
-    r = subprocess.run(['timeout', '8', str(magusb), '-A', '0x23'],
-                       capture_output=True, text=True)
+    if _mag_held(run, dev):
+        now = time.time() if now is None else now
+        try:
+            return _mag_held_verdict(mag_dir, now)[0]
+        except Exception:   # noqa: BLE001 -- unreadable samples: unknown
+            return None
+    r = run(['timeout', '8', str(magusb), '-A', '0x23'],
+            capture_output=True, text=True)
     out = ((getattr(r, 'stdout', '') or '') + (getattr(r, 'stderr', '') or '')).lower()
     if '"x":' in out or 'revid' in out:
         return True
@@ -316,6 +375,7 @@ def gate_checks(prof, local: bool) -> list:
         if present and responds is False:
             checks.append(GateCheck(
                 'Magnetometer (RM3100)', False,
+                mag_held_hint() or
                 'Pololu adapter present but the RM3100 is NOT answering '
                 'at 0x23 — check the sensor wiring/power'))
         else:
