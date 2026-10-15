@@ -18,6 +18,9 @@ Documentation=file:/opt/git/sigmond/sigmond/docs/superpowers/plans/2026-09-26-ra
 # window.  It never stops anything when radiod stops (that was the old
 # PartOf directive, removed 2026-08-31 for good reasons).
 After=radiod@%i.service
+# v3.72 #7: never give up.  A pass that ends failed (radiod still crash-looping
+# at boot) is retried; the start-rate limit would otherwise end the retries.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -28,7 +31,13 @@ Type=oneshot
 # lock) — block-buffered stdout meant nothing reached the journal until it
 # exited (M-1).
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/local/bin/smd admin radiod restart-stale-consumers --unit radiod@%i.service
+# v3.72 #7: --wait-ready 300 (was 90).  radiod crash-looping at boot (RX888
+# race, RestartSec=10) keeps resetting "active 15 s"; 90 s expired, the pass
+# returned 2, the unit ended failed and nothing retried.  Restart=on-failure
+# retries every 30 s for as long as it takes.
+ExecStart=/usr/local/bin/smd admin radiod restart-stale-consumers --unit radiod@%i.service --wait-ready 300
+Restart=on-failure
+RestartSec=30
 # Worst case (final review / R2, M-4): 3 passes x 2 readiness checks per
 # pass x (90s wait_ready + 30s subprocess buffer) = 720s, + ONE run-wide
 # 900s lifecycle-lock budget shared across all passes (not 900s EACH), +
