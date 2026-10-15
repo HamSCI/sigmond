@@ -322,8 +322,8 @@ VM4RELAY = "/usr/local/sbin/sigmond-vm4relay"
 VM4RELAY_FILTER = "VM4RELAY_FILTER=2"
 VM4RELAY_FILTER_RE = re.compile(r"^VM4RELAY_FILTER=2$", re.M)
 VM4RELAY_CHAIN = "SIGMOND-VM4"
-# The FORWARD guard (v3.72 #24): FORWARD's first rule, and the guard's rules,
-# as `iptables -S` prints them.
+# The FORWARD guard (v3.72 #24), in the mangle table: FORWARD's first rule,
+# and the guard's rules, as `iptables -t mangle -S` prints them.
 VM4RELAY_FJUMP = "-A FORWARD -o vmbr1 -j SIGMOND-VM4F"
 VM4RELAY_GUARD = ("-A SIGMOND-VM4F -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
                   "-A SIGMOND-VM4F -m conntrack --ctstate DNAT -j RETURN",
@@ -472,9 +472,10 @@ def _vm6proxy_missing(root: Path, text: str) -> list:
 
 
 def _nat_rules(run) -> Optional[str]:
-    """`iptables -t nat -S`, every chain; None when it cannot be read."""
+    """`iptables -t nat -S`, every chain; None when it cannot be read.  -w:
+    wait for the xtables lock rather than misread a busy table."""
     try:
-        r = run(["iptables", "-t", "nat", "-S"], capture_output=True, text=True, timeout=30)
+        r = run(["iptables", "-w", "-t", "nat", "-S"], capture_output=True, text=True, timeout=30)
     except Exception:
         return None
     return (r.stdout or "") if r.returncode == 0 else None
@@ -633,10 +634,12 @@ def _vm_from_interfaces(root: Path) -> Optional[str]:
 
 
 def _guard_state(run) -> Optional[bool]:
-    """True when FORWARD's first rule leads into the v3.72 #24 guard and the
-    guard holds exactly its three rules; None when iptables cannot be read."""
+    """True when mangle FORWARD's first rule leads into the v3.72 #24 guard
+    and the guard holds exactly its three rules; None when iptables cannot be
+    read.  The guard lives in mangle: it runs before filter FORWARD, where
+    Tailscale and pve-firewall put their own rules."""
     try:
-        r = run(["iptables", "-S"], capture_output=True, text=True, timeout=30)
+        r = run(["iptables", "-w", "-t", "mangle", "-S"], capture_output=True, text=True, timeout=30)
     except Exception:
         return None
     if r.returncode != 0:
@@ -669,6 +672,9 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
         nat = _nat_rules(run)
         old = _vm4relay_live_state(nat, vm)[1] if nat is not None else 0
         lines = _vm4relay_old_lines(root, vm)
+        if _guard_state(run) is False:
+            return (f"warn: removed by the operator ({VM4RELAY_REMOVED}), and FORWARD to the "
+                    f"VM's link is not guarded; sudo {VM4RELAY} refresh puts the guard back")
         if old or lines:
             return (f"warn: removed by the operator ({VM4RELAY_REMOVED}), but {old} unrestricted "
                     f"DNAT rule(s) to {vm} are live and /etc/network/interfaces carries {lines} "
@@ -684,7 +690,7 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
     entered, old = _vm4relay_live_state(nat, vm)
     guarded = _guard_state(run)
     if guarded is None:
-        return "failed: cannot read the filter table (iptables -S)"
+        return "failed: cannot read the mangle table (iptables -t mangle -S)"
     lines = _vm4relay_old_lines(root, vm)
     units_missing = [u for u in VM4RELAY_UNITS if not _under(root, u).exists()]
     why = []

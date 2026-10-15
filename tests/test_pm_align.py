@@ -2171,7 +2171,7 @@ NAT_S = ("-P PREROUTING ACCEPT\n"
          "-A PREROUTING -p tcp -m tcp --dport 2222 -j DNAT --to-destination 10.99.0.2:22\n")
 
 
-# The filter table of a host whose FORWARD guard stands (v3.72 #24).
+# The mangle table of a host whose FORWARD guard stands (v3.72 #24).
 FILT_GUARDED = ("-P FORWARD ACCEPT\n-N SIGMOND-VM4F\n"
                 "-A FORWARD -o vmbr1 -j SIGMOND-VM4F\n"
                 "-A SIGMOND-VM4F -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN\n"
@@ -2196,7 +2196,10 @@ def _vm6_run(calls, *, nat=NAT_S, filt=FILT_GUARDED, install_rc=0, install_out="
         calls.append((list(argv), kw.get("env")))
         if argv[:2] == ["systemctl", "is-active"]:
             return subprocess.CompletedProcess(argv, 0, "active\n", "")
-        if argv == ["iptables", "-S"]:
+        if argv[:1] == ["iptables"]:
+            # -w (wait for the lock) changes nothing a fake has to answer.
+            argv = [a for a in argv if a != "-w"]
+        if argv == ["iptables", "-t", "mangle", "-S"]:
             return subprocess.CompletedProcess(argv, 0, filt, "")
         if argv[:1] == ["iptables"]:
             # `iptables -t nat -S [CHAIN]`: a chain name narrows the listing,
@@ -2952,11 +2955,11 @@ def test_an_unreadable_filter_table_fails_and_installs_nothing(tmp_path):
     calls = []
     def run(argv, **kw):
         calls.append(list(argv))
-        if argv == ["iptables", "-S"]:
+        if argv == ["iptables", "-w", "-t", "mangle", "-S"]:
             return subprocess.CompletedProcess(argv, 4, "", "Permission denied\n")
         return inner(argv, **kw)
     out = pm_align.vm4relay_step(tmp_path, run=run)
-    assert out.startswith("failed") and "filter table" in out
+    assert out.startswith("failed") and "mangle table" in out
     assert [VM4, "install"] not in calls
 
 
@@ -3011,3 +3014,25 @@ def test_the_real_ipv4_relay_has_the_guard_pm_align_checks():
     for rule in pm_align.VM4RELAY_GUARD:
         body = rule.replace("-A SIGMOND-VM4F ", "")
         assert f"'-A %s {body}\\n' \"$FCHAIN\"" in text, rule
+
+
+def test_a_removed_relay_without_its_guard_warns(tmp_path):
+    _host_vm4(tmp_path)
+    (tmp_path / pm_align.VM4RELAY_REMOVED.lstrip("/")).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / pm_align.VM4RELAY_REMOVED.lstrip("/")).write_text("removed\n")
+    calls = []
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n",
+                                                        filt="-P FORWARD ACCEPT\n"))
+    assert out.startswith("warn") and "not guarded" in out and "refresh" in out
+    assert _vm4_installs(calls) == []
+    calls = []
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"))
+    assert out.startswith("skipped")
+
+
+def test_every_iptables_read_waits_for_the_lock(tmp_path):
+    _host_vm4(tmp_path)
+    calls = []
+    pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN))
+    reads = [argv for argv, _ in calls if argv[:1] == ["iptables"]]
+    assert reads and all("-w" in argv for argv in reads), reads
