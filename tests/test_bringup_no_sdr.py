@@ -265,6 +265,8 @@ class FirstrunAwaitingSdr(unittest.TestCase):
         env = dict(os.environ,
                    PATH=f"{self.d / 'bin'}:{os.environ.get('PATH', '')}",
                    SIGMOND_FIRSTRUN_SETTLE_S='0',
+                   SIGMOND_FIRSTRUN_DPKG='true', SIGMOND_FIRSTRUN_FUSER='false',
+                   SIGMOND_FIRSTRUN_APT_WAIT_S='0',
                    SIGMOND_FIRSTRUN_SYSTEMCTL=str(self._argstub('systemctl')),
                    SIGMOND_FIRSTRUN_SYSTEMD_RUN=str(self._argstub('systemd-run', systemd_run_rc)),
                    SIGMOND_FIRSTRUN_MARKER=str(m),

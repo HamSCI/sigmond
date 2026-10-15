@@ -37,6 +37,9 @@ IR="${SIGMOND_FIRSTRUN_ISOLATION:-/usr/local/sbin/sigmond-isolation-reboot}"
 
 SYSTEMCTL="${SIGMOND_FIRSTRUN_SYSTEMCTL:-systemctl}"
 SYSTEMD_RUN="${SIGMOND_FIRSTRUN_SYSTEMD_RUN:-systemd-run}"
+DPKG="${SIGMOND_FIRSTRUN_DPKG:-dpkg}"
+FUSER="${SIGMOND_FIRSTRUN_FUSER:-fuser}"
+DPKG_LOCK="${SIGMOND_FIRSTRUN_DPKG_LOCK:-/var/lib/dpkg/lock-frontend}"
 
 mkdir -p "$(dirname "$LOG")" /var/lib/sigmond 2>/dev/null
 say(){ printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG"; }
@@ -116,6 +119,43 @@ say "this takes many minutes; follow it with: tail -f $LOG"
 # after a partial run, look at the bus again: if the SDR is there now, run
 # bring-up again (it is idempotent) instead of waiting for an event that
 # has already fired.  Bounded, so a card that flaps cannot loop us.
+# ⛔ REPAIR A HALF-CONFIGURED DPKG BEFORE BRING-UP.  DASI-011, 2026-10-14: the
+# first-boot unattended-upgrade was cut by the install power-off two seconds
+# into reconfiguring grub-cloud-amd64.  dpkg stayed half-configured, bring-up's
+# preflight (_bringup_env_blockers) refused, and radiod never started until a
+# hand `dpkg --configure -a`.  Nobody sits at this console, so this script
+# repairs it.  First wait (bounded) for a running apt job to finish: running
+# --configure under it would collide.  unattended-upgrades.service is NOT
+# polled: it stays "active" all day waiting for shutdown and would burn the
+# whole wait; the dpkg lock catches a running upgrade instead.  SECONDS, not the
+# wall clock: chrony may step the clock during first boot.  This step never
+# fails the run; bring-up's own preflight still reports a failed repair.
+apt_busy() {
+    "$SYSTEMCTL" is-active --quiet apt-daily-upgrade.service 2>/dev/null && return 0
+    "$SYSTEMCTL" is-active --quiet apt-daily.service 2>/dev/null && return 0
+    [ -e "$DPKG_LOCK" ] && "$FUSER" "$DPKG_LOCK" >/dev/null 2>&1 && return 0
+    return 1
+}
+APT_WAIT_S="${SIGMOND_FIRSTRUN_APT_WAIT_S:-600}"
+_t0=$SECONDS
+_announced=0
+while apt_busy; do
+    if [ $((SECONDS - _t0)) -ge "$APT_WAIT_S" ]; then
+        say "apt/dpkg still busy after ${APT_WAIT_S} s - going on without it"
+        break
+    fi
+    [ "$_announced" -eq 1 ] || { say "an apt/dpkg job is running — waiting for it (up to ${APT_WAIT_S} s)"; _announced=1; }
+    sleep "${SIGMOND_FIRSTRUN_APT_POLL_S:-5}"
+done
+_audit=$("$DPKG" --audit 2>&1) || true
+if [ -n "$_audit" ]; then
+    say "dpkg is half-configured:"
+    printf '%s\n' "$_audit" | sed 's/^/  /' | tee -a "$LOG"
+    say "running: dpkg --configure -a (timeout 900 s)"
+    DEBIAN_FRONTEND=noninteractive timeout 900 "$DPKG" --configure -a >>"$LOG" 2>&1
+    say "dpkg --configure -a exit $?"
+fi
+
 # The passes share the unit's TimeoutStartSec (90 min), and one full plan can
 # wait up to an hour for FFT wisdom; past PASS_BUDGET_S a further pass is left
 # to a fresh run scheduled after this one exits (below), with its own timeout.

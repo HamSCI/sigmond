@@ -54,6 +54,8 @@ class FirstrunRetry(unittest.TestCase):
             SIGMOND_FIRSTRUN_SENTINEL=str(self.d / 'personalized'),
             SIGMOND_FIRSTRUN_PROFILE_FILE=str(self.d / 'profile.toml'),
             SIGMOND_FIRSTRUN_LOG=str(self.d / 'log'),
+            SIGMOND_FIRSTRUN_DPKG='true', SIGMOND_FIRSTRUN_FUSER='false',
+            SIGMOND_FIRSTRUN_APT_WAIT_S='0',
             SIGMOND_FIRSTRUN_SMD=str(self._stub('smd', smd_rc, 'smd')),
             SIGMOND_FIRSTRUN_SITE_TIMING=(
                 str(self._stub('site-timing', site_rc, 'site-timing'))
@@ -169,6 +171,8 @@ class FirstrunRetry(unittest.TestCase):
         smd.chmod(0o755)
         env = dict(os.environ,
                    SIGMOND_FIRSTRUN_MARKER=str(self.d / 'marker'),
+                   SIGMOND_FIRSTRUN_DPKG='true', SIGMOND_FIRSTRUN_FUSER='false',
+                   SIGMOND_FIRSTRUN_APT_WAIT_S='0',
                    SIGMOND_FIRSTRUN_SENTINEL=str(self.d / 'personalized'),
                    SIGMOND_FIRSTRUN_PROFILE_FILE=str(self.d / 'profile.toml'),
                    SIGMOND_FIRSTRUN_LOG=str(self.d / 'log'),
