@@ -2343,6 +2343,7 @@ def test_apply_warns_but_does_not_fail_when_the_relay_install_fails(tmp_path, mo
 
 def test_apply_does_not_rerun_the_install_when_every_unit_exists(tmp_path, monkeypatch):
     _write_vm6_units(tmp_path)
+    _host_with_relay_script(tmp_path)              # the same bytes the release carries
     calls = []
     assert _apply_vm6(tmp_path, monkeypatch, _vm6_run(calls)) == 0
     assert _vm6_installs(calls) == []
@@ -2368,3 +2369,43 @@ def test_dry_run_says_it_would_install_the_relay(tmp_path, monkeypatch, capsys):
     _write_vm6_units(tmp_path)
     assert pm_align.main([], root=tmp_path, run=_vm6_run(calls)) == 0
     assert "ipv6 relay: installed" in capsys.readouterr().out
+
+
+# A host that already has every unit still needs the new unit text when the
+# relay script itself changed (the local-networks-only restriction, 10-15).
+
+def test_vm6proxy_step_reinstalls_when_the_script_changed(tmp_path):
+    _host_with_relay_script(tmp_path)
+    _write_vm6_units(tmp_path)
+    calls = []
+    out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls), script_changed=True)
+    assert out.startswith("installed") and "changed" in out
+    (argv, env), = _vm6_installs(calls)
+    assert env["SIGMOND_MGMT_VM"] == "10.99.0.2"
+
+
+def test_apply_reinstalls_when_the_host_has_an_older_relay(tmp_path, monkeypatch, capsys):
+    _write_vm6_units(tmp_path)
+    p = tmp_path / VM6.lstrip("/")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("#!/bin/bash\n# the v3.72-rc relay, no allow list\n")
+    calls = []
+    assert _apply_vm6(tmp_path, monkeypatch, _vm6_run(calls)) == 0
+    assert len(_vm6_installs(calls)) == 1
+    assert "ipv6 relay: installed" in capsys.readouterr().out
+
+
+def test_dry_run_says_it_would_reinstall_a_changed_relay_and_runs_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.72", "a" * 40, "d" * 40, "f" * 64, ""))
+    src = _src()
+    src.vm6proxy = VM6_BODY.encode()
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
+    _write_vm6_units(tmp_path)
+    p = tmp_path / VM6.lstrip("/")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("#!/bin/bash\n# older\n")
+    calls = []
+    assert pm_align.main([], root=tmp_path, run=_vm6_run(calls)) == 1
+    assert "ipv6 relay: --apply would re-run install" in capsys.readouterr().out
+    assert calls == []

@@ -408,16 +408,20 @@ def vm_dnat_target(run) -> Optional[str]:
     return None
 
 
-def vm6proxy_step(root: Path, *, run) -> str:
-    """Install the relay's units when any is missing.  "current" when every
-    socket unit exists (they are then left alone: no rewrite, no restart);
-    "installed (...)", "skipped: <why>" or "failed: <why>".  Never raises."""
+def vm6proxy_step(root: Path, *, run, script_changed: bool = False) -> str:
+    """Install the relay's units when any is missing, or when this apply
+    wrote a new /usr/local/sbin/sigmond-vm6proxy (``script_changed``): the
+    units then need the new script's text, e.g. the local-networks-only
+    allow list (2026-10-15).  "current" when neither holds (nothing runs, so
+    no socket is rewritten or restarted); "installed (...)", "skipped:
+    <why>" or "failed: <why>".  Never raises.  The install itself rewrites
+    only units whose text changed and restarts only those sockets."""
     try:
         text = _under(root, VM6PROXY).read_text()
     except OSError:
         return "skipped: no sigmond-vm6proxy on this host (this release does not carry it)"
     missing = _vm6proxy_missing(root, text)
-    if not missing:
+    if not missing and not script_changed:
         return "current"
     vm = vm_dnat_target(run)
     if vm is None:
@@ -431,12 +435,15 @@ def vm6proxy_step(root: Path, *, run) -> str:
     if r.returncode != 0:
         lines = [ln.strip() for ln in ((r.stdout or "") + (r.stderr or "")).splitlines() if ln.strip()]
         return f"failed: exit {r.returncode}: {' | '.join(lines[-2:]) or 'no output'}"
-    return f"installed ({len(missing)} unit(s) were missing; relays to {vm})"
+    why = (f"{len(missing)} unit(s) were missing" if missing
+           else "the relay script changed")
+    return f"installed ({why}; relays to {vm})"
 
 
-def _apply_vm6proxy(root: Path, run) -> None:
+def _apply_vm6proxy(root: Path, run, changes: list) -> None:
     """The relay step of --apply.  A failure warns and never fails --apply."""
-    out = vm6proxy_step(root, run=run)
+    script_changed = any(c.file.path == VM6PROXY and c.state != "current" for c in changes)
+    out = vm6proxy_step(root, run=run, script_changed=script_changed)
     if out.startswith("failed"):
         _say(f"  ipv6 relay: WARN - {out}")
         _say(f"  the VM's pages answer over IPv4 only until it installs; retry: "
@@ -458,10 +465,18 @@ def _dry_run_vm6proxy_note(root: Path, src: Sources) -> tuple:
         except OSError:
             return "ipv6 relay: this release does not carry sigmond-vm6proxy", False
     missing = _vm6proxy_missing(root, text)
-    if not missing:
+    try:
+        on_host = _under(root, VM6PROXY).read_bytes()
+    except OSError:
+        on_host = None
+    changed = src.vm6proxy is not None and on_host is not None and on_host != src.vm6proxy
+    if not missing and not changed:
         return "ipv6 relay: installed", False
     if _no_private_link(root):
         return f"ipv6 relay: skipped: {NO_PRIVATE_LINK}", False
+    if not missing:
+        return (f"ipv6 relay: --apply would re-run install (the relay script changed, "
+                f"so its units may too: {VM6PROXY} install)"), True
     return (f"ipv6 relay: --apply would install it ({len(missing)} of "
             f"{len(vm6proxy_ports(text))} units missing: {VM6PROXY} install)"), True
 
@@ -1196,7 +1211,7 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources
     backup_dir = _under(root, f"{BACKUP_BASE}/{stamp}")
     written = apply_files(changes, root, backup_dir)
     enable_new_relays(changes, run=run)
-    _apply_vm6proxy(root, run)
+    _apply_vm6proxy(root, run, changes)
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     tunnel_kind, _, _ = _tunnel_decision(root)
     record = write_record(root, rel, written, now_iso, tunnel=_TUNNEL_RECORD_VALUE[tunnel_kind])
