@@ -1331,3 +1331,26 @@ class B4ColdBootTimelineTests(PortResetHarness):
         st = json.loads((self.tmp / "sdr-recover.json").read_text())
         self.assertEqual(st["devnum"], "9")
         self.assertIn("card_return_at", st)
+
+
+def test_the_lowered_usb2_threshold_needs_two_consecutive_ticks(monkeypatch):
+    # a healthy card passes through 00f3 at 480 Mb/s while it re-enumerates;
+    # one init failure on that tick must not cost it a reset
+    mod = _load()
+    monkeypatch.setattr(mod.sdr_events, "uptime_s", lambda: 99999.0)
+    out = "rx888_usb_init() failed\nradiod@x.service: Main process exited, code=exited, status=66/NOINPUT"
+    monkeypatch.setattr(mod, "_run", lambda c, timeout=60:
+                        _CP(stdout=out if c[0] == "journalctl" else "0\n"))
+    card = lambda dn: mod.Located("1-1.2", "1-1", "2", "S", "480", product="00f3", devnum=dn)
+    T = 1_760_000_000.0
+    st = {}
+    assert not mod.radiod_is_wedged("radiod@x.service", st, T, card=card("7"))
+    assert mod.radiod_is_wedged("radiod@x.service", st, T + 30, card=card("7"))
+    st = {}
+    assert not mod.radiod_is_wedged("radiod@x.service", st, T, card=card("7"))
+    assert not mod.radiod_is_wedged("radiod@x.service", st, T + 30, card=card("8"))   # re-enumerated
+    st = {}
+    mod.radiod_is_wedged("radiod@x.service", st, T, card=card("7"))
+    ss = mod.Located("1-1.2", "1-1", "2", "S", "5000", product="00f1", devnum="7")
+    assert not mod.radiod_is_wedged("radiod@x.service", st, T + 30, card=ss)
+    assert not mod.radiod_is_wedged("radiod@x.service", st, T + 60, card=card("7"))

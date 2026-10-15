@@ -429,6 +429,14 @@ def radiod_is_wedged(unit: Optional[str], state: dict, now: float,
     grace is the known RX888 firmware race, not a wedge.  The journal is read
     from the latest of: 10 minutes ago, the last reset, the card's last
     return -- lines from before those cannot re-trigger or delay a clear."""
+    # The lowered USB2 threshold applies only when the SAME enumeration of the
+    # card was below SuperSpeed on the previous tick too: a healthy card is
+    # briefly 00f3 at 480 Mb/s while it re-enumerates.
+    below = bool(card is not None and card.speed.isdigit()
+                 and int(card.speed) < SUPERSPEED_MBPS)
+    key = f"{card.devpath}/{card.devnum}" if card is not None else None
+    usb2 = below and state.get("usb2_key") == key
+    state["usb2_key"] = key if below else None
     if not unit:
         return ""
     up = sdr_events.uptime_s()
@@ -438,8 +446,6 @@ def radiod_is_wedged(unit: Optional[str], state: dict, now: float,
     floor = max(now - WEDGE_WINDOW_S, float(state.get("last_cycle_at") or 0),
                 float(state.get("card_return_at") or 0))
     stall, exits = radiod_wedge_signals(unit, now, since=floor)
-    usb2 = bool(card is not None and card.speed.isdigit()
-                and int(card.speed) < SUPERSPEED_MBPS)
     if not is_wedged(stall, exits, delta, usb2=usb2):
         return ""
     return (f"{stall} USB stall lines in {WEDGE_WINDOW_S // 60} min with "
@@ -1058,6 +1064,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if state.get("devnum") and state["devnum"] != card_now.devnum:
             state["card_return_at"] = now       # it re-enumerated: a replug or a reset
         state["devnum"] = card_now.devnum
+    if not present:
+        state.pop("usb2_key", None)
     if not present and radiod_unit:
         sample_nrestarts(radiod_unit, state, now)   # keep the delta fresh
     wedged = (not args.ensure_present and present
