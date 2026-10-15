@@ -295,6 +295,8 @@ NO_PRIVATE_LINK = ("this host has no private link to its decoder VM (the pre-v3.
                    "smd remote needs that link")
 VM6PROXY = "/usr/local/sbin/sigmond-vm6proxy"
 VM6PROXY_DENY = "IPAddressDeny=any"
+VM6PROXY_FILTER = "VM6PROXY_FILTER=2"
+VM6PROXY_FILTER_RE = re.compile(r"^VM6PROXY_FILTER=2$", re.M)
 VM6PROXY_DROPIN = "/etc/systemd/system/sigmond-vm6proxy@.socket.d/10-allow-local.conf"
 VM6PROXY_CURRENT = ("ipv6 relay: every socket unit carries IPAddressDeny=any and the allow-list "
                     "drop-in is present")
@@ -373,7 +375,7 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
             out.append(HostFile(VM6PROXY, src.vm6proxy, 0o755, "sigmond-appliance/sigmond-vm6proxy"))
         elif notes is not None:
             notes.append(f"this release's sigmond-vm6proxy does not restrict the relay to local "
-                         f"networks (no {VM6PROXY_DENY}); pm-align keeps this host's copy and "
+                         f"networks (no {VM6PROXY_FILTER} line); pm-align keeps this host's copy and "
                          f"never runs that one")
     return out
 
@@ -393,15 +395,17 @@ def vm6proxy_ports(text: str) -> list:
 
 
 def vm6proxy_restricts(body) -> bool:
-    """True when this relay script writes the local-networks-only filter.
-    Allow without Deny filters nothing, and every relay before the
-    restriction (back to 2afd8f0) writes socket units without Deny: running
-    one would open ssh on 2222 to the IPv6 internet (final review,
-    2026-10-15).  The manifest hash is not enough on its own: ab22aeb's build
+    """True when this relay script carries the filter generation pm-align
+    demands: the exact whole line VM6PROXY_FILTER=2.  Allow without Deny
+    filters nothing, and every relay before the restriction (back to
+    2afd8f0) writes socket units without Deny: running one would open ssh on
+    2222 to the IPv6 internet (final review, 2026-10-15).  The Deny substring
+    is not enough either: bee0083..314db67 carry it with a blanket fc00::/7
+    in the allow list (re-review).  Nor is the manifest hash: ab22aeb's build
     recorded vm6proxy_sha256 for a script with no Deny."""
     if isinstance(body, bytes):
         body = body.decode("utf-8", "replace")
-    return VM6PROXY_DENY in body
+    return VM6PROXY_FILTER_RE.search(body) is not None
 
 
 def _vm6proxy_missing(root: Path, text: str) -> list:
@@ -459,7 +463,7 @@ def vm6proxy_step(root: Path, *, run, script_changed: bool = False) -> str:
         return "current"
     if not vm6proxy_restricts(text):
         return (f"refused: {VM6PROXY} on this host predates the local-networks-only "
-                f"restriction (no {VM6PROXY_DENY}); running it would open the VM's ports, "
+                f"restriction (no {VM6PROXY_FILTER} line); running it could open the VM's ports, "
                 f"ssh on 2222 included, to the IPv6 internet")
     vm = vm_dnat_target(run)
     if vm is None:

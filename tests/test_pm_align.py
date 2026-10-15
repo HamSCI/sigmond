@@ -2158,7 +2158,7 @@ def test_the_real_wizard_carries_sigmond_check():
 
 VM6 = "/usr/local/sbin/sigmond-vm6proxy"
 VM6_BODY = ('#!/bin/bash\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
-            'IPAddressDeny=any\n')
+            'VM6PROXY_FILTER=2\nIPAddressDeny=any\n')
 # A relay from before the local-networks-only restriction (every tag back to
 # 2afd8f0): its socket units carry no IPAddressDeny.
 VM6_OLD = '#!/bin/bash\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
@@ -2433,7 +2433,7 @@ def test_vm6proxy_step_refuses_a_script_without_deny(tmp_path):
     p.write_text(VM6_OLD)
     calls = []
     out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls), script_changed=True)
-    assert out.startswith("refused") and "IPAddressDeny=any" in out
+    assert out.startswith("refused") and "VM6PROXY_FILTER=2" in out
     assert _vm6_installs(calls) == []
 
 
@@ -2507,3 +2507,30 @@ def test_the_real_relay_restricts_and_writes_the_dropin_pm_align_checks():
     assert 'DROPDIR="${UNITDIR}/sigmond-vm6proxy@.socket.d"' in text
     assert 'DROPIN="${DROPDIR}/10-allow-local.conf"' in text
     assert pm_align.VM6PROXY_DROPIN.endswith("/sigmond-vm6proxy@.socket.d/10-allow-local.conf")
+
+
+# -- the filter version marker (re-review, 2026-10-15) ------------------------
+#
+# The IPAddressDeny=any substring also appears in bee0083..314db67, whose
+# allow list still carried a blanket fc00::/7.  pm-align now demands the exact
+# whole line VM6PROXY_FILTER=2.
+
+def test_a_script_with_deny_but_no_marker_is_refused(tmp_path):
+    body = VM6_OLD + "IPAddressDeny=any\nIPAddressAllow=localhost link-local fc00::/7\n"
+    assert not pm_align.vm6proxy_restricts(body)
+    p = tmp_path / VM6.lstrip("/")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body)
+    calls = []
+    assert pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls)).startswith("refused")
+    assert _vm6_installs(calls) == []
+    src = _src()
+    src.vm6proxy = body.encode()
+    assert VM6 not in {f.path for f in pm_align.desired_files(src, 100)}
+
+
+def test_the_marker_must_be_the_exact_whole_line():
+    assert pm_align.vm6proxy_restricts("#!/bin/bash\nVM6PROXY_FILTER=2\n")
+    for near in ("# VM6PROXY_FILTER=2\n", "VM6PROXY_FILTER=20\n", "VM6PROXY_FILTER=2 \n",
+                 "XVM6PROXY_FILTER=2\n", "VM6PROXY_FILTER=1\n", "echo VM6PROXY_FILTER=2\n"):
+        assert not pm_align.vm6proxy_restricts("#!/bin/bash\n" + near), near
