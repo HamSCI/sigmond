@@ -1073,9 +1073,11 @@ _WORDS = {
                         'step failed (see above), so the uploader may still follow '
                         'the old mode.  Fix that, then run `smd admin uploader '
                         'manifest --write --enable` as root',
-        'nothing_ships': 'nothing recorded during discard will ship, except the '
-                         'GRAPE and magnetometer packages for this UTC day, and for '
-                         'the day before if its packaging has not yet run',
+        'nothing_ships': 'the GRAPE and magnetometer packages for today and '
+                         'yesterday (UTC) go out, even if built while the site '
+                         'sink switch read off.  Older packages stay on the '
+                         'station, and nothing else recorded while it read off '
+                         'ships',
         'rendered_hold': 'this host rendered hold, not discard: the backlog stored '
                          'since then ships now, oldest first',
         'hold_backlog': 'the backlog stored during hold ships now, oldest first',
@@ -1100,10 +1102,11 @@ _WORDS = {
                         'step failed (see above), so the uploader may still follow '
                         'the old setting.  Fix that, then run `smd admin uploader '
                         'manifest --write --enable` as root',
-        'nothing_ships': 'nothing recorded while the site sink switch read off will '
-                         'ship, except the GRAPE and magnetometer packages for this '
-                         'UTC day, and for the day before if its packaging (01:00 '
-                         'to about 05:00 UTC) has not yet run',
+        'nothing_ships': 'the GRAPE and magnetometer packages for today and '
+                         'yesterday (UTC) go out, even if built while the site '
+                         'sink switch read off.  Older packages stay on the '
+                         'station, and nothing else recorded while it read off '
+                         'ships',
         'rendered_hold': 'this host could not discard, so it stored data while the '
                          'site sink switch read off; that backlog ships now, oldest '
                          'first',

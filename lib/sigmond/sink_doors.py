@@ -47,9 +47,10 @@ _NAME_DAY = re.compile(r"(?:^|\D)(\d{4})-?(\d{2})-?(\d{2})(?:\D|$)")
 def package_day(path: Path, spool: Path):
     """The UTC day a spooled package belongs to, or None when its path does
     not say.  GRAPE packages sit under `<spool>/<YYYYMMDD>/` and are named
-    `OBS<YYYY-MM-DD>T..`; magnetometer zips are named `mag_<YYYYMMDD>.zip`."""
+    `OBS<YYYY-MM-DD>T..`; magnetometer zips are named `OBS<YYYY-MM-DD>T00:00.zip`
+    (mag-recorder core/packager.py)."""
     rel = path.relative_to(spool)
-    for part in (*rel.parts[:-1], rel.parts[-1]):
+    for part in rel.parts:
         text = part if _DAY_DIR.match(part) else None
         m = _NAME_DAY.search(part) if text is None else None
         try:

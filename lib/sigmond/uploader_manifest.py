@@ -413,9 +413,9 @@ def policy_banner(coord: Coordination, mode: Optional[str] = None) -> list:
             "# *** SITE SINK OFF: DATA PIPELINES ACK WITHOUT SENDING ***",
             f"# coordination.toml [uploads] mode = \"discard\" sets the site sink switch to off{why}",
             "# Nothing leaves this host except the heartbeat, and no backlog builds.",
-            "# `smd sink upload` sends nothing recorded before it, except the GRAPE and",
-            "# magnetometer packages for that UTC day, and for the day before if its",
-            "# packaging (01:00 to about 05:00 UTC) has not yet run.",
+            "# `smd sink upload` sends the GRAPE and magnetometer packages for today and",
+            "# yesterday (UTC), even if built while off.  Older packages stay on the",
+            "# station, and nothing else recorded while off ships.",
             "#   smd sink upload    (then the manifest regenerates)",
         ]
     lines = [

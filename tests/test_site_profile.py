@@ -537,7 +537,7 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(load_coordination(self.coord).uploads.mode, "upload")
         self.assertNotIn("mode", self.coord.read_text())
-        self.assertIn("nothing recorded during discard will ship", out)
+        self.assertIn("for today and yesterday (UTC) go out", out)
 
     # -- leaving the site sink switch's `off` (tasks/plan-sink-control.md §10.3) --
 
@@ -588,7 +588,7 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self._supports(False)
         rc, out = self._run(uploads_command="on")
         self.assertEqual(rc, 0)
-        self.assertNotIn("nothing recorded during discard will ship", out)
+        self.assertNotIn("for today and yesterday (UTC) go out", out)
         self.assertIn("ships now", out)
         self.doors_mock.assert_called_once()     # the WRITTEN mode left discard
 

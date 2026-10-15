@@ -25,7 +25,7 @@ def _grape(root: Path):
 def _mag(root: Path):
     spool = root / "mag-recorder" / "upload"
     spool.mkdir(parents=True)
-    z = spool / "mag_20261005.zip"
+    z = spool / "OBS2026-10-05T00:00.zip"
     z.write_bytes(b"z")
     return spool, z
 
@@ -71,7 +71,7 @@ def test_set_aside_moves_obs_dirs_outside_the_spool_root(tmp_path):
 def test_set_aside_moves_zips(tmp_path):
     spool, z = _mag(tmp_path)
     moved = sd.set_aside(spool, "*.zip", match_dirs=False, stamp="S")
-    assert moved == [(z, tmp_path / "mag-recorder" / "upload-held" / "S" / "mag_20261005.zip")]
+    assert moved == [(z, tmp_path / "mag-recorder" / "upload-held" / "S" / "OBS2026-10-05T00:00.zip")]
     assert not list(spool.rglob("*.zip"))
 
 
@@ -184,7 +184,7 @@ def test_close_doors_skips_the_filesystem_check_for_an_absent_spool(tmp_path):
 def _two_zips(root: Path):
     spool = root / "mag-recorder" / "upload"
     spool.mkdir(parents=True)
-    zs = [spool / "mag_20261004.zip", spool / "mag_20261005.zip"]
+    zs = [spool / "OBS2026-10-04T00:00.zip", spool / "OBS2026-10-05T00:00.zip"]
     for z in zs:
         z.write_bytes(b"z")
     return spool, zs
@@ -470,7 +470,7 @@ def _spools_by_age(root: Path):
         (d / "ch0").mkdir(parents=True)
         (d / "ch0" / "rf@1.h5").write_bytes(b"x")
         obs[day] = d
-        z = m / f"mag_{day}.zip"
+        z = m / f"OBS{day[:4]}-{day[4:6]}-{day[6:]}T00:00.zip"
         z.write_bytes(b"z")
         zips[day] = z
     return g, m, obs, zips
@@ -495,12 +495,26 @@ def test_close_doors_marks_only_days_two_or_more_back(tmp_path):
 
 
 def test_set_aside_keeps_a_package_from_yesterday_utc_by_its_name(tmp_path):
-    spool, z = _mag(tmp_path)                    # mag_20261005.zip
-    keep = spool / "mag_20261006.zip"
+    spool, z = _mag(tmp_path)                    # OBS2026-10-05T00:00.zip
+    keep = spool / "OBS2026-10-06T00:00.zip"
     keep.write_bytes(b"z")
     moved = sd.set_aside(spool, "*.zip", match_dirs=False, stamp="S",
                          keep_from=date(2026, 10, 6))
     assert [src for src, _ in moved] == [z]
+    assert keep.exists()
+
+
+def test_set_aside_keeps_yesterdays_real_mag_zip_and_moves_older(tmp_path):
+    # mag-recorder core/packager.py names the zip OBS<YYYY-MM-DD>T00:00.zip.
+    spool = tmp_path / "mag-recorder" / "upload"
+    spool.mkdir(parents=True)
+    keep = spool / "OBS2026-10-06T00:00.zip"
+    old = spool / "OBS2026-10-02T00:00.zip"
+    for z in (keep, old):
+        z.write_bytes(b"z")
+    moved = sd.set_aside(spool, "*.zip", match_dirs=False, stamp="S",
+                         keep_from=date(2026, 10, 6))
+    assert [src for src, _ in moved] == [old]
     assert keep.exists()
 
 

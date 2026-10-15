@@ -83,7 +83,7 @@ class SinkCliTests(unittest.TestCase):
         self.doors.assert_called_once()
         self.assertEqual(self._mode(), "upload")
         self.assertIn("site sink: upload", out)
-        self.assertIn("read off will ship", out)
+        self.assertIn("go out, even if built while the site sink switch read off", out)
         self.assertNotIn("during discard", out)
 
     def test_fill_is_refused_and_changes_nothing(self):
