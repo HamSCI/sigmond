@@ -183,13 +183,14 @@ class SinkCommandRegistrationTests(unittest.TestCase):
         for verb in ("status", "off", "upload", "fill"):
             self.assertIn(verb, out)
 
-    def test_sink_help_says_leaving_off_sets_aside_every_spooled_package(self):
-        # close_doors moves EVERY GRAPE package and magnetometer zip still in
-        # the spools, unsent ones built before off included (final review S4).
+    def test_sink_help_says_leaving_off_keeps_today_and_yesterday(self):
+        # close_doors keeps today's and yesterday's (UTC) packages; they ship.
+        # Older ones are set aside (v3.72 #5).
         rc, out = self._smd("sink", "--help")
         self.assertEqual(rc, 0, out)
-        self.assertIn("every GRAPE package and magnetometer zip still in the spools", out)
-        self.assertIn("unsent ones built before off", out)
+        self.assertIn("Today's and yesterday's (UTC) packages stay and ship", out)
+        self.assertIn("older ones are set aside", out)
+        self.assertNotIn("none of them ships", out)
         self.assertNotIn("stored while off", out)
 
     def test_the_contributor_table_says_the_same(self):
@@ -198,7 +199,8 @@ class SinkCommandRegistrationTests(unittest.TestCase):
                 if line.startswith("| `sink` |") or line.startswith("| `upload` |")}
         for verb in ("`sink`", "`upload`"):
             row = " ".join(rows[verb].split())
-            self.assertIn("every GRAPE package and magnetometer zip still in the spools", row, verb)
+            self.assertIn("keeps today's and yesterday's (UTC) packages", row, verb)
+            self.assertNotIn("none of them ships", row, verb)
         self.assertNotIn("stored while off", rows["`sink`"])
 
     def test_sink_fill_refuses_without_root(self):

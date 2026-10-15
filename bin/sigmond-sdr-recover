@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                 "..", "lib"))
 from sigmond.paths import LIFECYCLE_LOCK  # noqa: E402
 from sigmond import sdr_events  # noqa: E402
+from sigmond.radiod_ready import READY_SETTLE_S  # noqa: E402
 
 # The card blips off the bus for a second or two whenever it re-enumerates —
 # including during its own recovery.  Cycling inside that window would
@@ -579,18 +580,21 @@ def _with_lifecycle_lock():
 
 def _unit_started_mono(unit: str) -> Optional[float]:
     """Seconds since boot at which ``unit`` last entered active (monotonic, so
-    a host clock step cannot confuse it); None when not running / unreadable."""
-    r = _run(["systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", unit], timeout=15)
+    a host clock step cannot confuse it); None unless the unit is active NOW.
+    systemd keeps ActiveEnterTimestampMonotonic after a unit stops, so the
+    state must be read too."""
+    r = _run(["systemctl", "show", "-p", "ActiveState",
+              "-p", "ActiveEnterTimestampMonotonic", unit], timeout=15)
     if r.returncode != 0:
         return None
-    for line in (r.stdout or "").splitlines():
-        if line.startswith("ActiveEnterTimestampMonotonic="):
-            try:
-                us = int(line.split("=", 1)[1])
-            except ValueError:
-                return None
-            return us / 1e6 if us > 0 else None
-    return None
+    props = dict(l.split("=", 1) for l in (r.stdout or "").splitlines() if "=" in l)
+    if props.get("ActiveState", "").strip() != "active":
+        return None
+    try:
+        us = int(props.get("ActiveEnterTimestampMonotonic", ""))
+    except ValueError:
+        return None
+    return us / 1e6 if us > 0 else None
 
 
 def restart_station(radiod_unit: str, consumers: Sequence[str],
@@ -616,10 +620,12 @@ def restart_station(radiod_unit: str, consumers: Sequence[str],
     radiod_started = _unit_started_mono(radiod_unit)
     for unit in consumers:
         started = _unit_started_mono(unit)
-        if radiod_started is not None and started is not None and started > radiod_started:
+        if (radiod_started is not None and started is not None
+                and started > radiod_started + READY_SETTLE_S):
             _log(f"consumer {unit} already fresh (started after {radiod_unit}) — not restarting")
             continue
         _log(f"restarting consumer {unit}")
+        _run(["systemctl", "reset-failed", unit])
         r = _run(["systemctl", "restart", "--no-block", unit])
         if r.returncode != 0:
             _log(f"restart of {unit} not accepted rc={r.returncode}: {r.stderr.strip()}")

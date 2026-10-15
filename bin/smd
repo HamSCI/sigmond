@@ -5339,6 +5339,18 @@ def _align_restart_uploader(*, run=subprocess.run, say=print, units_out=None,
     return align_apply.Step('hs-uploader', 'restarted', '')
 
 
+def _reads_radiod(component, catalog) -> bool:
+    """True when ``component`` consumes radiod's RTP: the catalog's
+    `requires` — the same declaration the installer orders after lan.target.
+    Absent from the catalog: assume it does; one restart too many costs less
+    than a stale RTP anchor."""
+    from sigmond import align_live
+    entry = catalog.get(component) if catalog else None
+    if entry is None:
+        return True
+    return align_live.RADIOD in (getattr(entry, 'requires', None) or ())
+
+
 def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) -> dict:
     """What an alignment has left stale on this station right now — the
     inputs align_live needs, read from the station itself, so a run finds
@@ -5400,16 +5412,7 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
             built = None      # only the binary moved: a same-bytes rebuild
         moved_at[RADIOD] = built
 
-    def _reads_radiod(c):
-        # The catalog's `requires` — the same declaration the installer
-        # orders after lan.target.  Absent from the catalog: assume it
-        # does; one restart too many costs less than a stale RTP anchor.
-        entry = catalog.get(c) if catalog else None
-        if entry is None:
-            return True
-        return RADIOD in (getattr(entry, 'requires', None) or ())
-
-    radiod_consumers = {c for c in running if c != RADIOD and _reads_radiod(c)}
+    radiod_consumers = {c for c in running if c != RADIOD and _reads_radiod(c, catalog)}
     stale = align_live.stale_components(running, moved_at, started_at, consumes)
     radiod_start = started_at.get(RADIOD)
     if radiod_start is not None:
@@ -22215,6 +22218,20 @@ _RADIOD_CONSUMERS_MAX_PASSES = 3
 _RADIOD_CONSUMERS_LOCK_BUDGET_S = 900
 
 
+def _radiod_is_stopped(unit, *, run) -> bool:
+    """True when ``unit`` is inactive or failed with no start job queued: an
+    operator stopped it, and retrying the readiness wait forever helps no
+    one.  A radiod that is activating (incl. auto-restart) or has a queued
+    job is still coming up; an unreadable state counts as coming up."""
+    r = _align_run(['systemctl', 'show', '-p', 'ActiveState', '-p', 'Job', unit],
+                   run=run, timeout=15, action=f'systemctl show {unit}')
+    if r.returncode != 0:
+        return False
+    props = dict(line.split('=', 1) for line in (r.stdout or '').splitlines() if '=' in line)
+    return (props.get('ActiveState', '').strip() in ('inactive', 'failed')
+            and not props.get('Job', '').strip())
+
+
 def _radiod_revive_failed_consumers(consumers, services, *, run, say=_info) -> bool:
     """v3.72 #13: a consumer whose start limit was hit during an outage
     stays `failed` after the radio comes back; nothing else clears it.
@@ -22269,6 +22286,9 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotoni
         return r.returncode == 0
 
     if not _radiod_ready():
+        if _radiod_is_stopped(unit, run=run):
+            _info(f'radiod-consumers: radiod stopped; nothing to do ({unit})')
+            return 0, None
         _info(f'radiod-consumers: {unit} not serving — nothing restarted')
         return 2, None
 
@@ -22316,8 +22336,13 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotoni
                 _info(_radiod_consumer_verdict(c, mono_started[c], radiod_start, threshold))
             revive_refused = False
             if not args.dry_run:
+                # DECLARED radiod readers, running or not: a start-limit-hit
+                # unit is failed, so `consumers` (running ones) never has it.
+                from sigmond import align_live
+                declared = {c for c in services
+                            if c != align_live.RADIOD and _reads_radiod(c, catalog)}
                 revive_refused = _radiod_revive_failed_consumers(
-                    consumers, services, run=run)
+                    declared, services, run=run)
             stale = _radiod_stale_consumers(
                 threshold, {'radiod_consumers': consumers, 'started_at': mono_started})
             if not stale:
@@ -25300,10 +25325,10 @@ def main() -> int:
     s_off.add_argument('--yes', action='store_true',
                        help='skip the typed confirmation (for scripts)')
     sink_sub.add_parser('upload',
-        help='store and send.  Leaving off first moves every GRAPE package and '
-             'magnetometer zip still in the spools aside, unsent ones built before '
-             'off included, and none of them ships.  It refuses while their '
-             'packaging runs')
+        help="store and send.  Today's and yesterday's (UTC) packages stay and "
+             'ship.  Leaving off first sets older GRAPE packages and magnetometer '
+             'zips aside, outside the spools; older ones are set aside, not sent.  '
+             'It refuses while their packaging runs')
     sink_sub.add_parser('fill', help='not available yet (a later release)')
 
     # check -- read-only: does this station work?  (tasks/spec-smd-check-v372.md)

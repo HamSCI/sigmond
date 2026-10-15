@@ -814,7 +814,7 @@ class EpisodeAndQuietTests(unittest.TestCase):
 
 # ─── v3.72 #13: restart_station skips a consumer radiod's restart already freshened ──
 
-def _station_run(monkeypatch, mod, mono):
+def _station_run(monkeypatch, mod, mono, stopped=()):
     """Fake _run: ActiveEnterTimestampMonotonic per unit from ``mono`` (secs)."""
     calls = []
 
@@ -823,7 +823,8 @@ def _station_run(monkeypatch, mod, mono):
         if cmd[:2] == ["systemctl", "show"]:
             secs = mono.get(cmd[-1])
             us = 0 if secs is None else int(secs * 1e6)
-            return _CP(stdout=f"ActiveEnterTimestampMonotonic={us}\n")
+            state = "active" if secs is not None and cmd[-1] not in stopped else "inactive"
+            return _CP(stdout=f"ActiveState={state}\nActiveEnterTimestampMonotonic={us}\n")
         if cmd[:2] == ["systemctl", "is-active"]:
             return _CP(stdout="active\n")
         return _CP()
@@ -835,11 +836,37 @@ def _station_run(monkeypatch, mod, mono):
 def test_restart_station_skips_a_consumer_already_fresh(monkeypatch, capsys):
     mod = _load()
     calls = _station_run(monkeypatch, mod, {
-        "radiod@x.service": 500.0, "fresh.service": 510.0, "old.service": 100.0})
+        "radiod@x.service": 500.0, "fresh.service": 530.0, "old.service": 100.0})
     assert mod.restart_station("radiod@x.service", ["fresh.service", "old.service"])
     restarted = [c[-1] for c in calls if c[:3] == ["systemctl", "restart", "--no-block"]]
     assert restarted == ["old.service"]
     assert "already fresh" in capsys.readouterr().out
+
+
+def test_a_consumer_that_crashed_after_radiod_is_still_restarted(monkeypatch):
+    # systemd keeps ActiveEnterTimestampMonotonic after a unit stops.
+    mod = _load()
+    calls = _station_run(monkeypatch, mod,
+                         {"radiod@x.service": 500.0, "crashed.service": 510.0},
+                         stopped={"crashed.service"})
+    mod.restart_station("radiod@x.service", ["crashed.service"])
+    assert ["systemctl", "restart", "--no-block", "crashed.service"] in calls
+
+
+def test_a_consumer_inside_the_settle_window_is_not_fresh(monkeypatch):
+    mod = _load()
+    calls = _station_run(monkeypatch, mod,
+                         {"radiod@x.service": 500.0, "early.service": 505.0})
+    mod.restart_station("radiod@x.service", ["early.service"])
+    assert ["systemctl", "restart", "--no-block", "early.service"] in calls
+
+
+def test_a_start_limited_consumer_is_reset_before_its_restart(monkeypatch):
+    mod = _load()
+    calls = _station_run(monkeypatch, mod, {"radiod@x.service": 500.0})
+    mod.restart_station("radiod@x.service", ["down.service"])
+    assert calls.index(["systemctl", "reset-failed", "down.service"]) < \
+        calls.index(["systemctl", "restart", "--no-block", "down.service"])
 
 
 def test_restart_station_restarts_a_consumer_that_is_not_running(monkeypatch):

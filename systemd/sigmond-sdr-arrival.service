@@ -15,6 +15,7 @@ ExecStart=/usr/local/bin/sigmond-firstrun-bringup --on-sdr-arrival
 # outage, restart for any older than radiod).  --no-block: the pass can wait
 # minutes for radiod and must not hold the bring-up duty above.  The leading
 # "-" keeps a refusal from failing this unit.  Gated by the same
-# ConditionPathExists, so it runs on personalized stations only.  $$ and %%
-# are systemd's escapes for the shell's $ and printf-free text.
-ExecStartPost=-/bin/sh -c 'for u in $$(/usr/bin/systemctl list-units --plain --no-legend --all "radiod@*.service" | /usr/bin/cut -d" " -f1); do i=$${u#radiod@}; i=$${i%%.service}; /usr/bin/systemctl --no-block start "sigmond-radiod-consumers@$$i.service"; done'
+# ConditionPathExists, so it runs on personalized stations only.  $$ is systemd's
+# escape for a literal $, and %% for a literal %.  Only radiod units that run
+# or are starting count (an auto-restarting one reads activating).
+ExecStartPost=-/bin/sh -c 'for u in $$(/usr/bin/systemctl list-units --plain --no-legend --state=active,activating "radiod@*.service" | /usr/bin/cut -d" " -f1); do i=$${u#radiod@}; i=$${i%%.service}; /usr/bin/systemctl --no-block start "sigmond-radiod-consumers@$$i.service"; done'

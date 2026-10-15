@@ -406,7 +406,7 @@ class ConsumersUnitFileTests(unittest.TestCase):
     def test_retries_a_failed_pass_forever(self):
         act = self._active()
         for want in ("Restart=on-failure", "RestartSec=30",
-                     "StartLimitIntervalSec=0", "TimeoutStartSec=3600"):
+                     "StartLimitIntervalSec=0", "TimeoutStartSec=5400"):
             self.assertIn(want, act)
 
     def test_consumer_gate_cannot_give_up_the_same_way(self):
@@ -503,6 +503,94 @@ class ArrivalUnitRevivesConsumersTests(unittest.TestCase):
         self.assertIn("--no-block", post[0])
         self.assertIn("sigmond-radiod-consumers@", post[0])
         self.assertIn("radiod@*.service", post[0])
+
+
+class ReviveSeesFailedUnitsThroughTheRealStalenessPathTests(unittest.TestCase):
+    """Review critical 1: `_align_staleness` lists RUNNING consumers only, so
+    a start-limit-hit (failed) consumer never reached the revive.  Here
+    nothing about staleness is mocked; the fake systemd answers as systemd
+    does: a failed unit reads ActiveState=failed and no start time."""
+
+    def test_a_failed_declared_consumer_is_revived(self):
+        base, calls = _fake_run(mono={"wspr.service": None})
+
+        def run(argv, **kw):
+            if argv[:2] == ["systemctl", "show"] and argv[-1] == "wspr.service":
+                calls.append(list(argv))
+                return subprocess.CompletedProcess(
+                    argv, 0, "ActiveState=failed\nResult=start-limit-hit\n"
+                             "ActiveEnterTimestampMonotonic=0\n", "")
+            return base(argv, **kw)
+
+        args = argparse.Namespace(unit=RADIOD_UNIT, dry_run=False, wait_ready=90)
+        with mock.patch.object(smd, "_align_services", return_value=SERVICES), \
+             mock.patch.object(smd, "load_catalog", return_value={}), \
+             mock.patch.object(smd, "lifecycle_lock",
+                               lambda reason=None, **k: contextlib.nullcontext()), \
+             contextlib.redirect_stdout(io.StringIO()):
+            rc = smd.cmd_radiod_restart_stale_consumers(args, run=run, sleep=lambda s: None)
+        self.assertEqual(rc, 0)
+        self.assertIn(["systemctl", "reset-failed", "wspr.service"], calls)
+        self.assertTrue([c for c in calls if c[:3] == ["systemctl", "start", "--no-block"]
+                         and c[-1] == "wspr.service"])
+
+    def test_reads_radiod_predicate_follows_the_catalog(self):
+        class E:
+            requires = ("ka9q-radio",)
+
+        class F:
+            requires = ()
+        cat = {"a": E(), "b": F()}
+        self.assertTrue(smd._reads_radiod("a", cat))
+        self.assertFalse(smd._reads_radiod("b", cat))
+        self.assertTrue(smd._reads_radiod("absent", cat))
+
+
+class RadiodStoppedTests(unittest.TestCase):
+    """Review important 3."""
+
+    def _run(self, state, job):
+        base, calls = _fake_run(ready_rc=1)
+
+        def run(argv, **kw):
+            if (argv[:2] == ["systemctl", "show"] and argv[-1] == RADIOD_UNIT
+                    and "ActiveState" in argv and "Job" in argv):
+                return subprocess.CompletedProcess(
+                    argv, 0, f"ActiveState={state}\nJob={job}\n", "")
+            return base(argv, **kw)
+        return _run_cmd(run)
+
+    def test_operator_stopped_radiod_is_a_clean_exit(self):
+        rc, out = self._run("inactive", "")
+        self.assertEqual(rc, 0)
+        self.assertIn("radiod stopped; nothing to do", out)
+
+    def test_failed_with_no_job_is_a_clean_exit(self):
+        rc, _ = self._run("failed", "")
+        self.assertEqual(rc, 0)
+
+    def test_activating_keeps_rc_2(self):
+        rc, _ = self._run("activating", "")
+        self.assertEqual(rc, 2)
+
+    def test_inactive_with_a_queued_start_job_keeps_rc_2(self):
+        rc, _ = self._run("inactive", "123")
+        self.assertEqual(rc, 2)
+
+    def test_unit_does_not_retry_an_unloadable_catalog(self):
+        u = (REPO / "systemd" / "sigmond-radiod-consumers@.service").read_text()
+        self.assertIn("RestartPreventExitStatus=4", u)
+
+    def test_timeout_covers_the_300s_budget(self):
+        u = (REPO / "systemd" / "sigmond-radiod-consumers@.service").read_text()
+        self.assertIn("TimeoutStartSec=5400", u)
+        self.assertIn("4680", u)
+
+    def test_arrival_selects_only_active_or_activating_radiod(self):
+        u = (REPO / "systemd" / "sigmond-sdr-arrival.service").read_text()
+        post = next(l for l in u.splitlines() if l.startswith("ExecStartPost="))
+        self.assertIn("--state=active,activating", post)
+        self.assertNotIn("--all", post)
 
 
 class RadiodSettleWindowTests(unittest.TestCase):
@@ -786,12 +874,12 @@ class ConsumerHookUnitTests(unittest.TestCase):
         self.assertIn("Environment=PYTHONUNBUFFERED=1", self.UNIT.read_text())
 
     def test_timeout_covers_three_passes_plus_the_lock_wait(self):
-        """R2/M-4: 3 passes x 2 readiness checks x (90s wait_ready + 30s
-        buffer) + one RUN-WIDE 900s lock budget (shared across all passes,
-        not reset each pass) + 3 passes' restart allowance (600s each) =
-        3420s worst case; TimeoutStartSec must cover it."""
+        """R2/M-4, redone for --wait-ready 300 (v3.72 #7): 3 passes x 2
+        readiness checks x (300s + 30s buffer) + one RUN-WIDE 900s lock budget
+        + 3 passes' restart allowance (600s each) = 4680s worst case;
+        TimeoutStartSec must cover it."""
         t = self.UNIT.read_text()
-        self.assertIn("TimeoutStartSec=3600", t)
+        self.assertIn("TimeoutStartSec=5400", t)
 
 
 if __name__ == "__main__":

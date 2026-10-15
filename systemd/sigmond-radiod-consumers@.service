@@ -38,9 +38,10 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/local/bin/smd admin radiod restart-stale-consumers --unit radiod@%i.service --wait-ready 300
 Restart=on-failure
 RestartSec=30
-# Worst case (final review / R2, M-4): 3 passes x 2 readiness checks per
-# pass x (90s wait_ready + 30s subprocess buffer) = 720s, + ONE run-wide
-# 900s lifecycle-lock budget shared across all passes (not 900s EACH), +
-# a 600s restart allowance per pass x 3 = 1800s.  720 + 900 + 1800 = 3420s;
-# rounded up to 3600s.
-TimeoutStartSec=3600
+# Worst case (v3.72 #7): 3 passes x 2 readiness checks per pass x
+# (300s wait_ready + 30s subprocess buffer) = 1980s, + ONE run-wide 900s
+# lifecycle-lock budget shared across all passes, + a 600s restart allowance
+# per pass x 3 = 1800s.  1980 + 900 + 1800 = 4680s; rounded up to 5400s.
+TimeoutStartSec=5400
+# Exit 4 = the catalog does not load.  That does not heal by waiting.
+RestartPreventExitStatus=4
