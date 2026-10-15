@@ -387,6 +387,124 @@ class RestartStaleConsumersCmdTests(unittest.TestCase):
         self.assertTrue([c for c in calls if c[:2] == ["systemctl", "restart"]])
 
 
+class ConsumersUnitFileTests(unittest.TestCase):
+    """v3.72 #7: a radiod crash-looping at boot (RX888 race, RestartSec=10)
+    kept resetting "active 15 s"; the 90 s wait expired, the pass returned 2,
+    the oneshot ended failed and nothing retried."""
+
+    def _unit(self):
+        return (REPO / "systemd" / "sigmond-radiod-consumers@.service").read_text()
+
+    def _active(self):
+        return [l.strip() for l in self._unit().splitlines()
+                if l.strip() and not l.lstrip().startswith("#")]
+
+    def test_waits_300s_for_radiod(self):
+        exec_line = next(l for l in self._active() if l.startswith("ExecStart="))
+        self.assertIn("--wait-ready 300", exec_line)
+
+    def test_retries_a_failed_pass_forever(self):
+        act = self._active()
+        for want in ("Restart=on-failure", "RestartSec=30",
+                     "StartLimitIntervalSec=0", "TimeoutStartSec=3600"):
+            self.assertIn(want, act)
+
+    def test_consumer_gate_cannot_give_up_the_same_way(self):
+        """The consumers' own ExecStartPre gate stays at 90: its failure
+        fails a start of a Restart=always, StartLimitIntervalSec=0 unit,
+        which systemd simply retries every RestartSec."""
+        conf = (REPO / "systemd" / "sigmond-radiod-consumer.conf.in").read_text()
+        live = [l.strip() for l in conf.splitlines() if not l.lstrip().startswith("#")]
+        self.assertIn("StartLimitIntervalSec=0", live)
+
+
+class ReadinessFailsOnceThenSucceedsTests(unittest.TestCase):
+    """The unit's Restart=on-failure needs the failed pass to exit nonzero,
+    and the retry to do the work."""
+
+    def test_first_invocation_exits_2_second_restarts_the_stale_one(self):
+        run, calls = _fake_run(ready_rcs=[1])
+        rc, _ = _run_cmd(run)
+        self.assertEqual(rc, 2)
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "restart"]])
+        run, calls = _fake_run(ready_rc=0)
+        rc, _ = _run_cmd(run)
+        self.assertEqual(rc, 0)
+        self.assertIn(["systemctl", "restart", "psk.service"], calls)
+
+    def test_the_wait_ready_value_reaches_the_readiness_probe(self):
+        run, calls = _fake_run()
+        _run_cmd(run, wait_ready=300)
+        ready = next(c for c in calls if c[0] == "/usr/local/sbin/sigmond-radiod-ready")
+        self.assertEqual(ready[-1], "300")
+
+
+def _failed_run(failed_units, **kw):
+    """_fake_run plus `systemctl show -p ActiveState -p Result <unit>`
+    answering failed/start-limit-hit for ``failed_units``."""
+    base, calls = _fake_run(**kw)
+
+    def run(argv, **k):
+        if (argv[:2] == ["systemctl", "show"] and "Result" in argv
+                and "ActiveEnterTimestampMonotonic" not in argv):
+            calls.append(list(argv))
+            if argv[-1] in failed_units:
+                return subprocess.CompletedProcess(
+                    argv, 0, "ActiveState=failed\nResult=start-limit-hit\n", "")
+            return subprocess.CompletedProcess(argv, 0, "ActiveState=active\nResult=success\n", "")
+        return base(argv, **k)
+    return run, calls
+
+
+class ReviveFailedConsumersTests(unittest.TestCase):
+    """v3.72 #13: a consumer that hit its start limit during an outage stays
+    failed after a hand replug; nothing ran reset-failed."""
+
+    def test_failed_consumer_is_reset_and_started(self):
+        run, calls = _failed_run({"wspr.service"})
+        rc, out = _run_cmd(run)
+        self.assertEqual(rc, 0)
+        self.assertIn(["systemctl", "reset-failed", "wspr.service"], calls)
+        starts = [c for c in calls if c[:2] == ["systemctl", "start"]]
+        self.assertEqual(len(starts), 1)
+        self.assertIn("wspr.service", starts[0])
+        self.assertLess(calls.index(["systemctl", "reset-failed", "wspr.service"]),
+                        calls.index(starts[0]))
+        self.assertIn("wspr.service", out)
+        self.assertIn("start-limit-hit", out)
+
+    def test_healthy_consumers_are_not_reset(self):
+        run, calls = _failed_run(set())
+        _run_cmd(run)
+        # psk.service is stale and gets the ordinary restart path's own
+        # reset-failed; the fresh wspr.service must be left entirely alone.
+        self.assertNotIn(["systemctl", "reset-failed", "wspr.service"], calls)
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "start"]])
+
+    def test_dry_run_revives_nothing(self):
+        run, calls = _failed_run({"wspr.service"})
+        _run_cmd(run, dry_run=True)
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "reset-failed"]])
+
+
+class ArrivalUnitRevivesConsumersTests(unittest.TestCase):
+    def _unit(self):
+        return (REPO / "systemd" / "sigmond-sdr-arrival.service").read_text()
+
+    def test_keeps_the_firstrun_duty_and_gate(self):
+        u = self._unit()
+        self.assertIn("ExecStart=/usr/local/bin/sigmond-firstrun-bringup --on-sdr-arrival", u)
+        self.assertIn("ConditionPathExists=/etc/sigmond/.personalized", u)
+
+    def test_triggers_the_consumers_pass_without_blocking_or_failing(self):
+        post = [l for l in self._unit().splitlines() if l.startswith("ExecStartPost=")]
+        self.assertEqual(len(post), 1)
+        self.assertTrue(post[0].startswith("ExecStartPost=-"), "must not fail the unit")
+        self.assertIn("--no-block", post[0])
+        self.assertIn("sigmond-radiod-consumers@", post[0])
+        self.assertIn("radiod@*.service", post[0])
+
+
 class RadiodSettleWindowTests(unittest.TestCase):
     """final review / I-1: stale = monotonic start < radiod's monotonic
     start PLUS the settle allowance sigmond-radiod-ready itself waits out —

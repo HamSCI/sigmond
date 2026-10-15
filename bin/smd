@@ -22215,6 +22215,36 @@ _RADIOD_CONSUMERS_MAX_PASSES = 3
 _RADIOD_CONSUMERS_LOCK_BUDGET_S = 900
 
 
+def _radiod_revive_failed_consumers(consumers, services, *, run, say=_info) -> bool:
+    """v3.72 #13: a consumer whose start limit was hit during an outage
+    stays `failed` after the radio comes back; nothing else clears it.
+    `reset-failed` + `start --no-block` every declared consumer unit whose
+    ActiveState is failed (Result=start-limit-hit included), one log line
+    each.  Returns True when systemctl refused a start."""
+    refused = False
+    for comp in sorted(consumers):
+        for unit in _align_service_units(services.get(comp, [])):
+            r = _align_run(['systemctl', 'show', '-p', 'ActiveState', '-p', 'Result', unit],
+                           run=run, timeout=15, action=f'systemctl show {unit}')
+            if r.returncode != 0:
+                continue
+            props = dict(line.split('=', 1) for line in (r.stdout or '').splitlines()
+                         if '=' in line)
+            if props.get('ActiveState', '').strip() != 'failed':
+                continue
+            say(f"  {unit}: failed (Result={props.get('Result', '?').strip()}) "
+                '— reset-failed and start')
+            _align_run(['systemctl', 'reset-failed', unit], run=run, timeout=15,
+                       action=f'systemctl reset-failed {unit}')
+            s = _align_run(['systemctl', 'start', '--no-block', unit], run=run, timeout=30,
+                           action=f'systemctl start {unit}')
+            if s.returncode != 0:
+                say(f'  {unit}: start not accepted rc={s.returncode}: '
+                    f'{(s.stderr or "").strip()}')
+                refused = True
+    return refused
+
+
 def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotonic,
                          lock_deadline_at) -> tuple:
     """One pass: wait for radiod to serve, take the lifecycle lock, restart
@@ -22284,12 +22314,16 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotoni
             # every run, dry or not.
             for c in sorted(consumers):
                 _info(_radiod_consumer_verdict(c, mono_started[c], radiod_start, threshold))
+            revive_refused = False
+            if not args.dry_run:
+                revive_refused = _radiod_revive_failed_consumers(
+                    consumers, services, run=run)
             stale = _radiod_stale_consumers(
                 threshold, {'radiod_consumers': consumers, 'started_at': mono_started})
             if not stale:
                 _info(f"radiod-consumers: nothing older than {unit}'s start "
                       '— nothing to do')
-                return 0, radiod_start
+                return (1 if revive_refused else 0), radiod_start
             for comp in stale:
                 _info(f'  {comp}: started before {unit} — restarting')
             if args.dry_run:
@@ -22302,7 +22336,7 @@ def _radiod_restart_pass(unit, args, catalog, *, run, sleep, clock=time.monotoni
                     line += f' — {step.detail}'
                 print(line)
             failed = any(step.outcome == 'failed' for step in steps)
-            return (1 if failed else 0), radiod_start
+            return (1 if (failed or revive_refused) else 0), radiod_start
     except TimeoutError as exc:
         _err(f'radiod-consumers: {exc}')
         return 3, None

@@ -577,6 +577,22 @@ def _with_lifecycle_lock():
         os.close(fd)
 
 
+def _unit_started_mono(unit: str) -> Optional[float]:
+    """Seconds since boot at which ``unit`` last entered active (monotonic, so
+    a host clock step cannot confuse it); None when not running / unreadable."""
+    r = _run(["systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", unit], timeout=15)
+    if r.returncode != 0:
+        return None
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("ActiveEnterTimestampMonotonic="):
+            try:
+                us = int(line.split("=", 1)[1])
+            except ValueError:
+                return None
+            return us / 1e6 if us > 0 else None
+    return None
+
+
 def restart_station(radiod_unit: str, consumers: Sequence[str],
                     ready_timeout_s: int = 90, consumer_timeout_s: int = 240) -> bool:
     """radiod first, then its consumers — the only order that works."""
@@ -597,7 +613,12 @@ def restart_station(radiod_unit: str, consumers: Sequence[str],
     # Queue every consumer restart without waiting: a recorder can take a
     # minute to stop and another to start (wspr-recorder@AI6VN: ~100 s), and
     # waiting on each in turn is what let one slow unit starve the rest.
+    radiod_started = _unit_started_mono(radiod_unit)
     for unit in consumers:
+        started = _unit_started_mono(unit)
+        if radiod_started is not None and started is not None and started > radiod_started:
+            _log(f"consumer {unit} already fresh (started after {radiod_unit}) — not restarting")
+            continue
         _log(f"restarting consumer {unit}")
         r = _run(["systemctl", "restart", "--no-block", unit])
         if r.returncode != 0:

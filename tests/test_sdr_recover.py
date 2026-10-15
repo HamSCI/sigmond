@@ -810,3 +810,40 @@ class EpisodeAndQuietTests(unittest.TestCase):
     def test_a_dry_run_answers_every_time_with_no_hub_to_cycle(self):
         self._no_hub()
         self._two_dry_runs_then_a_real_one("no hub/port to cycle")
+
+
+# ─── v3.72 #13: restart_station skips a consumer radiod's restart already freshened ──
+
+def _station_run(monkeypatch, mod, mono):
+    """Fake _run: ActiveEnterTimestampMonotonic per unit from ``mono`` (secs)."""
+    calls = []
+
+    def fake(cmd, timeout=60):
+        calls.append(list(cmd))
+        if cmd[:2] == ["systemctl", "show"]:
+            secs = mono.get(cmd[-1])
+            us = 0 if secs is None else int(secs * 1e6)
+            return _CP(stdout=f"ActiveEnterTimestampMonotonic={us}\n")
+        if cmd[:2] == ["systemctl", "is-active"]:
+            return _CP(stdout="active\n")
+        return _CP()
+    monkeypatch.setattr(mod, "_run", fake)
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    return calls
+
+
+def test_restart_station_skips_a_consumer_already_fresh(monkeypatch, capsys):
+    mod = _load()
+    calls = _station_run(monkeypatch, mod, {
+        "radiod@x.service": 500.0, "fresh.service": 510.0, "old.service": 100.0})
+    assert mod.restart_station("radiod@x.service", ["fresh.service", "old.service"])
+    restarted = [c[-1] for c in calls if c[:3] == ["systemctl", "restart", "--no-block"]]
+    assert restarted == ["old.service"]
+    assert "already fresh" in capsys.readouterr().out
+
+
+def test_restart_station_restarts_a_consumer_that_is_not_running(monkeypatch):
+    mod = _load()
+    calls = _station_run(monkeypatch, mod, {"radiod@x.service": 500.0})
+    mod.restart_station("radiod@x.service", ["down.service"])
+    assert ["systemctl", "restart", "--no-block", "down.service"] in calls
