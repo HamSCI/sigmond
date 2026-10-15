@@ -3036,3 +3036,19 @@ def test_every_iptables_read_waits_for_the_lock(tmp_path):
     pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN))
     reads = [argv for argv, _ in calls if argv[:1] == ["iptables"]]
     assert reads and all("-w" in argv for argv in reads), reads
+
+
+def test_a_removed_relay_names_every_reason_at_once(tmp_path):
+    _host_vm4(tmp_path)
+    m = tmp_path / pm_align.VM4RELAY_REMOVED.lstrip("/")
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.write_text("removed\n")
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run([], nat=NAT_S, filt="-P FORWARD ACCEPT\n"))
+    assert out.startswith("warn") and "not guarded" in out and "unrestricted" in out
+    inner = _vm6_run([], nat="-P PREROUTING ACCEPT\n")
+    def run(argv, **kw):
+        if "mangle" in argv:
+            return subprocess.CompletedProcess(argv, 4, "", "denied\n")
+        return inner(argv, **kw)
+    out = pm_align.vm4relay_step(tmp_path, run=run)
+    assert out.startswith("warn") and "cannot be read" in out

@@ -672,13 +672,19 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
         nat = _nat_rules(run)
         old = _vm4relay_live_state(nat, vm)[1] if nat is not None else 0
         lines = _vm4relay_old_lines(root, vm)
-        if _guard_state(run) is False:
-            return (f"warn: removed by the operator ({VM4RELAY_REMOVED}), and FORWARD to the "
-                    f"VM's link is not guarded; sudo {VM4RELAY} refresh puts the guard back")
+        guarded = _guard_state(run)
+        why = []
+        if guarded is None:
+            why.append("the mangle table cannot be read, so the FORWARD guard is unchecked")
+        elif not guarded:
+            why.append(f"FORWARD to the VM's link is not guarded (sudo {VM4RELAY} refresh "
+                       f"puts the guard back)")
         if old or lines:
-            return (f"warn: removed by the operator ({VM4RELAY_REMOVED}), but {old} unrestricted "
-                    f"DNAT rule(s) to {vm} are live and /etc/network/interfaces carries {lines} "
-                    f"old DNAT post-up line(s); sudo {VM4RELAY} install restricts them")
+            why.append(f"{old} unrestricted DNAT rule(s) to {vm} are live and "
+                       f"/etc/network/interfaces carries {lines} old DNAT post-up line(s) "
+                       f"(sudo {VM4RELAY} install restricts them)")
+        if why:
+            return f"warn: removed by the operator ({VM4RELAY_REMOVED}), but " + "; and ".join(why)
         return (f"skipped: removed by the operator ({VM4RELAY_REMOVED}); "
                 f"not reinstalled (sudo {VM4RELAY} install brings it back)")
     if not vm4relay_restricts(text):
