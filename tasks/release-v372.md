@@ -32,6 +32,7 @@ when it grows past one flow, before code lands.  Update the Status column as ite
 
 | 21 | Identity restore leaves the host's `/etc/sigmond-appliance/vm-known_hosts` pinned to the fresh install's VM key, so `sigmond-vm` (and `sigmond-check`) fail with "host key has changed" after a restore (B4 since 10-13; re-pinned by hand 10-14 23:4xZ after matching fingerprints).  The restore should clear or re-pin that file | ops, appliance | open |
 | 22 | TUI: the Lifecycle screen hides behind the menu label "Enable / start / stop"; name it "Lifecycle: enable / start / stop" | sigmond | open |
+| 23 | The IPv4 DNAT relay rules carry no `-i vmbr0`, so a peer arriving over an overlay VPN (Tailscale, ZeroTier) on the host reaches the VM's ports, ssh 2222 included; and at a site where the host holds a public IPv4 with no NAT in front, those ports face the internet.  Bind the DNAT rules to the uplink and decide the public-IPv4 case (found by the #15 security review, 10-15) | appliance | open |
 Already on main, ships with no further work: Rob's uplink gate (sigmond de38f63).
 
 Moved out: the per-client sink switch (step 2a-ii, the key split) to v3.73; step 2b to v3.74.
