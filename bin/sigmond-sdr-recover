@@ -1,11 +1,30 @@
 #!/usr/bin/env python3
-"""sigmond-sdr-recover — power-cycle a vanished RX-888 and bring the station back.
+"""sigmond-sdr-recover — reset the hub port of a vanished or wedged RX-888 and
+bring the station back.
 
-The RX-888 recurrently disappears from the USB bus.  Nothing short of removing
-power from the card recovers it: not a radiod restart, not a USB rebind.  With
-the card behind a hub whose ports switch power independently, this helper cuts
-VBUS on that port alone, waits for the FX3 to re-enumerate, and then restarts
-the station in the one order that works.
+The RX-888 recurrently disappears from the USB bus, and sometimes stays on it
+with its stream wedged.  A radiod restart or a USB rebind does not help.  This
+helper switches the card's hub port off and on ("port reset"), waits for the
+FX3 to re-enumerate, and restarts the station in the one order that works.
+
+⛔ It is a PORT RESET, not a power cycle.  A hub that reports ppps is not
+thereby a hub that cuts VBUS: AC0G-B4's two hubs (VIA 2109:0817/2817 and
+Anker 291a:8307) read 4.98 V through every `uhubctl -a off`, the LEDs stayed
+lit, and the card re-enumerated by itself with the port still "off" (10-14).
+The off drops the data link and so reloads the FX3 firmware, and that cleared
+a stream wedge on 10-11.  It never clears the cold-start latch (no SuperSpeed
+link, kernel -71 or -110): a hand replug did, every time.  04b4:00f3 on return
+proves nothing about power, so nothing here reads it that way.  A port counts
+as switching only when the station says a cut was watched
+(`[radiod] recover_port_verified = true`); otherwise it reads "switching
+unverified".
+
+After a reset the return is classified.  Card back as 00f1 on a SuperSpeed
+path with radiod ready reads "recovered by port reset".  Anything else (USB2
+half only, -71/-110 in the kernel log, bootloader only, never back) raises ONE
+alarm per episode, "needs a hand replug at the RX888", and the helper stops
+resetting until the card comes back healthy.  It never resets a port that
+holds anything but the RX-888.
 
 Two rules govern the design, and AC0G-B4 taught both the hard way.
 
@@ -66,10 +85,27 @@ from sigmond.radiod_ready import READY_SETTLE_S  # noqa: E402
 # interrupt the very thing we are waiting for.
 ABSENT_GRACE_S = 30
 
-# If a cycle did not bring it back, another one straight away will not either.
-# A power-cycle loop is worse than a dead SDR: it denies an operator the stable
+# If a reset did not bring it back, another one straight away will not either.
+# A reset loop is worse than a dead SDR: it denies an operator the stable
 # state they need in order to diagnose.
 CYCLE_COOLDOWN_S = 900
+
+# A present-but-wedged card (radiod restart-looping on USB transfer failures)
+# gets a port reset at most once per WEDGE_RESET_COOLDOWN_S.  A reset costs
+# about two minutes of station downtime and reloads the FX3; if one did not
+# clear the wedge, a second within half an hour will not, while ND's real
+# stalls came hours apart (three in 22 h), so 30 minutes loses none of them.
+WEDGE_RESET_COOLDOWN_S = 1800
+WEDGE_WINDOW_S = 600           # how far back the radiod journal is read
+WEDGE_MIN_HITS = 3             # signal lines in that window
+WEDGE_MIN_RESTARTS = 3         # NRestarts growth between two ticks
+# radiod's own words for a stalled stream.  "USB xfer failures +0" is its
+# routine counter and must not match, so the count must be non-zero.
+WEDGE_RE = re.compile(r"No rx888 data for|USB xfer failures \+[1-9]|"
+                      r"status=6/ABRT|signal=ABRT|Aborted \(core dumped\)")
+# What the kernel says of the cold-start latch.
+LATCH_RE = re.compile(r"error -(71|110)\b")
+SUPERSPEED_MBPS = 5000
 
 RX888_IDS = ("04b4:00f1", "04b4:00f3")     # running, and the FX3 bootloader
 STATE_PATH = Path("/var/lib/sigmond/sdr-recover.json")
@@ -96,6 +132,7 @@ class Located:
     # (VIA VL817 in a Lenovo dock: `-l 4-1` fails, `-l 2-1` works).
     peer_hub: Optional[str] = None
     peer_port: Optional[str] = None
+    product: str = ""       # idProduct: "00f1" running, "00f3" FX3 bootloader
 
 
 def split_devpath(devpath: str) -> Optional[Tuple[str, str]]:
@@ -126,7 +163,7 @@ def parse_uhubctl(stdout: str, port: str) -> Optional[bool]:
     True  — the hub is listed and shows the port: uhubctl only lists hubs whose
             ports it can switch, so the listing IS the capability check.
     False — no compatible hub at that location: try the peer location before
-            concluding the port cannot be power-cycled from software.
+            concluding the port cannot be switched from software.
     None  — uhubctl could not look (permissions / not installed): unknown.
     """
     low = stdout.lower()
@@ -181,7 +218,8 @@ def locate_rx888(root: Path = SYSFS_USB) -> Optional[Located]:
             continue
         peer = peer_of(dev.name, root) or (None, None)
         return Located(dev.name, hp[0], hp[1], _read(dev / "serial"),
-                       _read(dev / "speed"), peer[0], peer[1])
+                       _read(dev / "speed"), peer[0], peer[1],
+                       vid_pid.split(":")[1])
     return None
 
 
@@ -217,6 +255,112 @@ def hub_switchable(loc: Located) -> Tuple[Optional[bool], List[Tuple[str, str, b
     if accepted:
         return True, accepted
     return (None if unknown else False), []
+
+
+def port_claim(cfg: dict) -> str:
+    """What the station knows about this port's switching.  A hub's ppps
+    claim alone proves nothing (B4's two hubs never cut VBUS), so the default
+    is unverified; `[radiod] recover_port_verified = true` records a watched
+    cut."""
+    if cfg.get("recover_port_verified"):
+        return "ppps reported, switching verified (a cut was watched)"
+    return ("ppps reported, switching unverified (a port reset only; "
+            "the hub may not cut VBUS)")
+
+
+def foreign_devices(targets: Sequence[Tuple[str, str, bool]],
+                    root: Path = SYSFS_USB) -> List[Tuple[str, str]]:
+    """Devices behind the target hub ports, on either half, that are not the
+    RX-888: [(devpath, "vid:pid")].  Anything here forbids the reset, because
+    a port reset also drops whatever shares the port (the GPSDO, a TS-1, a
+    Pololu board, a downstream hub)."""
+    prefixes = []
+    for hub, port, _ in targets:
+        prefixes.append(f"{hub}.{port}" if ("-" in hub or "." in hub)
+                        else f"{hub}-{port}")
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    found = []
+    for dev in entries:
+        name = dev.name
+        if ":" in name or not any(name == p or name.startswith(p + ".")
+                                  for p in prefixes):
+            continue
+        vid_pid = f"{_read(dev / 'idVendor')}:{_read(dev / 'idProduct')}"
+        if vid_pid not in RX888_IDS:
+            found.append((name, vid_pid))
+    return found
+
+
+def kernel_latch_errors(since: float) -> List[str]:
+    """Kernel lines since ``since`` (epoch) carrying the cold-start latch's
+    signature, -71 or -110."""
+    when = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since))
+    r = _run(["journalctl", "-k", "--no-pager", "-o", "cat", "--utc",
+              "--since", when], timeout=30)
+    return [l for l in (r.stdout or "").splitlines() if LATCH_RE.search(l)]
+
+
+def classify_return(card: Optional[Located],
+                    kernel_errors: Sequence[str]) -> Tuple[str, str]:
+    """How the card came back from a port reset: (verdict, why).
+
+    "recovered"  00f1 on a SuperSpeed path and no -71/-110 since the reset.
+    "latched"    on the USB2 half only, or the kernel reported -71/-110, or
+                 only its FX3 bootloader (00f3) shows.  04b4:00f3 proves
+                 nothing about power or health.
+    "never-back" not on the bus."""
+    if card is None:
+        return "never-back", "the card did not return to the bus"
+    if kernel_errors:
+        return "latched", f"the kernel reported {kernel_errors[0].strip()[:80]}"
+    if card.product != "00f1":
+        return "latched", (f"only the FX3 bootloader ({card.product or '?'}) "
+                           f"shows; the firmware never started")
+    if card.speed.isdigit() and int(card.speed) < SUPERSPEED_MBPS:
+        return "latched", (f"the card is on the USB2 half only ({card.speed} "
+                           f"Mb/s), with no SuperSpeed link")
+    return "recovered", "00f1 on a SuperSpeed path"
+
+
+def radiod_wedge_hits(unit: str, now: float) -> int:
+    """Lines in radiod's journal, last WEDGE_WINDOW_S, that say its stream is
+    stalled."""
+    when = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now - WEDGE_WINDOW_S))
+    r = _run(["journalctl", "-u", unit, "--no-pager", "-o", "cat", "--utc",
+              "--since", when], timeout=30)
+    return sum(1 for l in (r.stdout or "").splitlines() if WEDGE_RE.search(l))
+
+
+def radiod_nrestarts(unit: str) -> Optional[int]:
+    r = _run(["systemctl", "show", "-p", "NRestarts", "--value", unit], timeout=15)
+    try:
+        return int((r.stdout or "").strip())
+    except ValueError:
+        return None
+
+
+def is_wedged(hits: int, restarts_delta: int) -> bool:
+    return hits >= WEDGE_MIN_HITS or restarts_delta >= WEDGE_MIN_RESTARTS
+
+
+def radiod_is_wedged(unit: Optional[str], state: dict, now: float) -> bool:
+    """Card on the bus, radiod failing: repeated stall lines in its journal,
+    or NRestarts climbing between two ticks.  A radiod that fails inside the
+    boot grace is the known RX888 firmware race, not a wedge."""
+    if not unit:
+        return False
+    up = sdr_events.uptime_s()
+    if up is not None and up < sdr_events.BOOT_GRACE_S:
+        return False
+    n = radiod_nrestarts(unit)
+    prev = state.get("nrestarts")
+    delta = (n - prev) if (n is not None and prev is not None) else 0
+    if n is not None:
+        state["nrestarts"] = n
+    return is_wedged(radiod_wedge_hits(unit, now), delta)
 
 
 def detect_radiod_unit() -> Optional[str]:
@@ -260,7 +404,7 @@ def should_cycle(
     absent_for_s: float,
     last_cycle_age_s: Optional[float],
 ) -> Decision:
-    """Whether to cut power now, and why — or why not.
+    """Whether to reset the port now, and why — or why not.
 
     Returns the reason either way: a watchdog that cannot say why it stayed
     its hand is as hard to trust as one that cannot say why it acted.
@@ -279,7 +423,7 @@ def should_cycle(
             f"cooldown — cycled {last_cycle_age_s:.0f}s ago, holding off until "
             f"{CYCLE_COOLDOWN_S}s so a failed recovery cannot become a loop",
         )
-    return Decision(True, f"device absent {absent_for_s:.0f}s — cutting VBUS")
+    return Decision(True, f"device absent {absent_for_s:.0f}s — resetting its hub port")
 
 
 def expand_consumers(
@@ -371,7 +515,7 @@ def log_on_change(state: dict, msg: str) -> None:
     every 30 s, and a card that stays away used to log "holding: ..." on
     every tick.  Numbers carry no news ("absent 45s" and "absent 75s" say the
     same thing), so the comparison blanks them.  The key lives in the state
-    file; the card's return and each power cut clear it."""
+    file; the card's return and each port reset clear it."""
     key = re.sub(r"\d+", "#", msg)
     if state.get("said") != key:
         _log(msg)
@@ -445,7 +589,7 @@ def bootstrap_locations() -> List[Tuple[str, str, bool]]:
         if pr and pr in occupied:
             _log(f"not cycling hub {hub_c} port {port_c}: its peer "
                  f"{pr[0]} port {pr[1]} has a device, and both halves share "
-                 f"VBUS — cutting it would drop that device too")
+                 f"VBUS — resetting it would drop that device too")
             continue
         paired.append((hub_c, port_c, exact_c))
     found = paired
@@ -463,12 +607,14 @@ def bootstrap_locations() -> List[Tuple[str, str, bool]]:
 
 
 def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> bool:
-    """Cut and restore VBUS on every known location of the physical port.
+    """Switch every known location of the physical port off, then on: a port
+    reset.  Whether the hub also drops VBUS is unverified unless the station
+    says a cut was watched (B4's hubs drop only the data link).
 
-    A short cut is not enough: the FX3 holds state across a brief drop, and a
-    recovery that leaves the card in the state that needed recovering is no
-    recovery.  Verified on AC0G-B4 — with a long enough cut the card returns
-    through its bootloader (04b4:00f3) and the firmware loader promotes it.
+    A short off is not enough: the FX3 holds state across a brief drop.  A
+    long enough off makes the card reload its firmware and re-enumerate,
+    usually through its bootloader (04b4:00f3) and then 00f1.  Seeing 00f3 on
+    the way back proves nothing about power.
 
     Every location, not the first that answers: a USB3 hub exposes the same
     physical port twice, and which half's power bit actually drops VBUS is the
@@ -483,11 +629,12 @@ def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> 
     # numberings in three boots -- so a stale location routinely names a hub
     # that does not exist this boot.  uhubctl then says "No compatible devices
     # detected at location 4-1", nothing was powered off there, and there is
-    # nothing to leave off.  Treating that as POWER LEFT OFF sent rob to the
+    # nothing to leave off.  Treating that as PORT LEFT OFF sent rob to the
     # bench to look at a card that was powered and streaming (2026-09-29).
     powered_off: List[Tuple[str, str, bool]] = []
     for hub, port, exact in locations:
-        _log(f"cutting VBUS on hub {hub} port {port}{' (exact)' if exact else ''}")
+        _log(f"port reset: switching hub {hub} port {port} off"
+             f"{' (exact)' if exact else ''}")
         r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "off"]
                  + (["-e"] if exact else []), timeout=20)
         if r.returncode != 0:
@@ -516,11 +663,11 @@ def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> 
             r2 = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "on"]
                       + ([] if exact else ["-e"]), timeout=20)
             if r2.returncode != 0:
-                _log(f"POWER LEFT OFF on hub {hub} port {port} — both forms "
+                _log(f"PORT LEFT OFF on hub {hub} port {port} — both forms "
                      f"failed (rc={r2.returncode}); this needs a human")
                 ok = False
             else:
-                _log(f"power restored on hub {hub} port {port} via the "
+                _log(f"port switched back on, hub {hub} port {port}, via the "
                      f"{'plain' if exact else 'exact'} form")
     return ok
 
@@ -642,15 +789,28 @@ def restart_station(radiod_unit: str, consumers: Sequence[str],
     return not pending
 
 
+def _raise_replug_alarm(state: dict, now: float, why: str) -> None:
+    """One alarm per episode, never per tick: the sdr-events line `smd doctor`
+    and the heartbeat read, then a latch that stops further resets until the
+    card returns healthy."""
+    state["latched"] = True
+    if not state.get("replug_alarm_at"):
+        state["replug_alarm_at"] = now
+        _log(f"ALARM: the RX888 needs a hand replug at the RX888 — a port reset "
+             f"did not clear it ({why}); not resetting again until it is back")
+        note_event("needs-replug", why)
+    save_state(state)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--off-seconds", type=int, default=25,
-                    help="how long to hold VBUS low (default 10)")
+                    help="how long to hold the port off (default 25)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the decision and change nothing")
     ap.add_argument("--wait-seconds", type=int, default=60,
                     help="with --ensure-present: how long to wait for a slow "
-                         "FX3 to finish enumerating before power-cycling it "
+                         "FX3 to finish enumerating before resetting its port "
                          "(default 60)")
     ap.add_argument("--ensure-present", action="store_true",
                     help="installer/bring-up gate: succeed at once if the card "
@@ -682,7 +842,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # its FX3 bootloader (04b4:00f3) and only becomes 04b4:00f1 once the
         # firmware loader promotes it -- and on a fresh install bring-up
         # installs that firmware and reloads udev in the same run, so the card
-        # can be seconds away from appearing.  Cutting VBUS at that moment
+        # can be seconds away from appearing.  Resetting the port at that moment
         # throws away a card that was about to arrive (AI6VN, v3.42,
         # 2026-09-17: config init found no SDR, the card was healthy on the
         # bus a minute later).  So wait first, and only cycle if it really
@@ -711,11 +871,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              hub=loc.hub, port=loc.port,
                              # every location uhubctl accepted for this port
                              locations=[list(c) for c in ctl])
-                verdict = {True: "switches power — recoverable",
-                           False: "does NOT switch power — cannot be "
-                                  "recovered from software; move the card to "
-                                  "a uhubctl-capable hub port",
-                           None: "power switching UNKNOWN (uhubctl could not "
+                verdict = {True: f"{port_claim(cfg)} — a port reset is possible",
+                           False: "uhubctl cannot switch this port — a port "
+                                  "reset is impossible from software; move the "
+                                  "card to a uhubctl-capable hub port",
+                           None: "port switching UNKNOWN (uhubctl could not "
                                  "look — run as root, is uhubctl installed?)"}
                 via = (" (control: " + ", ".join(
                        f"{h} p{p}{' exact' if e else ''}" for h, p, e in ctl) + ")"
@@ -797,7 +957,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.ensure_present:
         # A gate, not a watchdog.  The grace window exists so a re-enumeration
         # blip is not mistaken for a failure, and the cooldown so a hardware
-        # fault cannot become a power-cycling loop; neither applies when a
+        # fault cannot become a port-reset loop; neither applies when a
         # human or the installer is asking, once, "make the card present".
         # Without this a FRESH INSTALL sits with a latched card and no radiod:
         # bring-up configures radiod against hardware that is not there, the
@@ -808,6 +968,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         decision = should_cycle(present, absent_for,
                                 (now - last_cycle) if last_cycle else None)
 
+    # v3.72 #3: a card that is present but wedged, and the latch brake.
+    card_now = locate_rx888() if present else None
+    wedged = (not args.ensure_present and present
+              and radiod_is_wedged(radiod_unit, state, now))
+    if not args.ensure_present:
+        if state.get("latched"):
+            healthy = (card_now is not None and card_now.product == "00f1"
+                       and card_now.speed.isdigit()
+                       and int(card_now.speed) >= SUPERSPEED_MBPS)
+            if present and healthy and not wedged:
+                _log("the card is back on a SuperSpeed path — resets allowed again")
+                state.pop("latched", None)
+                state.pop("replug_alarm_at", None)
+            else:
+                decision = Decision(False, "a port reset did not clear it; the "
+                                    "RX888 needs a hand replug — not resetting again")
+        elif present and wedged and not decision.cycle:
+            if last_cycle and now - last_cycle < WEDGE_RESET_COOLDOWN_S:
+                decision = Decision(False, f"card on the bus but radiod is wedged; "
+                                    f"last reset {now - last_cycle:.0f}s ago, holding "
+                                    f"off until {WEDGE_RESET_COOLDOWN_S}s")
+            else:
+                decision = Decision(True, "card on the bus but radiod is wedged "
+                                    "(USB transfer failures) — resetting its hub port")
+
     if not decision.cycle:
         # Report when the card is missing, and always under --dry-run: someone
         # who asks what this would do deserves an answer even when the answer
@@ -815,14 +1000,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # say it once per change, never once per 30 s tick.
         if args.dry_run:
             _log(f"holding: {decision.reason}")
-        elif not present:
+        elif not present or state.get("latched"):
             log_on_change(state, f"holding: {decision.reason}")
         save_state(state)
         return 0
 
     _log(decision.reason)
     if args.dry_run:
-        _log("dry run — no power cycle performed")
+        _log("dry run — no port reset performed")
         return 0
 
     state["last_cycle_at"] = now
@@ -856,19 +1041,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             targets += extra
     if not targets:
         targets = [(hub, str(port), False)]
-    # Record before the cut: a failed cut still counts as an attempt, and the
-    # record survives a helper that dies mid-cycle.
-    note_event("power-cycle", " ".join(f"{h}p{p}" for h, p, _ in targets))
+    # ⛔ Never reset a port that holds anything but the RX-888: the reset
+    # drops the data link of everything on it, and a GPSDO loses lock.
+    others = foreign_devices(targets)
+    if others:
+        _log("REFUSING the port reset: "
+             + ", ".join(f"{d} ({i})" for d, i in others)
+             + " sits behind the same hub port as the RX-888 (either half); "
+               "it would be dropped too")
+        save_state(state)
+        return 1 if args.ensure_present else 0
+    # Record before the reset: a failed one still counts as an attempt, and
+    # the record survives a helper that dies mid-reset.
+    note_event("port-reset", " ".join(f"{h}p{p}" for h, p, _ in targets))
     if not cycle_port(targets, args.off_seconds):
         return 1
     if not wait_for_device():
+        _raise_replug_alarm(state, now, "the card never returned to the bus "
+                            "after the port reset")
         if args.ensure_present:
-            _log("card did not return after the power cycle — check the cable "
+            _log("card did not return after the port reset — check the cable "
                  "and the hub's own power; bring-up cannot configure radiod "
                  "against hardware that is not on the bus")
             return 1
-        _log("card did not return after the power cycle — hardware fault, "
+        _log("card did not return after the port reset — hardware fault, "
              "escalating by leaving the station down rather than looping")
+        return 1
+
+    # Classify the return.  00f3 first, then 00f1: give the firmware a moment
+    # to start before judging, and never read the bootloader id as success.
+    card = None
+    for _ in range(10):
+        card = locate_rx888()
+        if card is not None and card.product == "00f1":
+            break
+        time.sleep(2)
+    verdict, why = classify_return(card, kernel_latch_errors(now))
+    if verdict != "recovered":
+        _raise_replug_alarm(state, now, why)
         return 1
 
     units = installed_units()
@@ -887,6 +1097,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     with _with_lifecycle_lock():
         ok = restart_station(radiod_unit, consumers)
+    if ok:
+        _log(f"recovered by port reset ({why}; radiod ready)")
+        state.pop("latched", None)
+        state.pop("replug_alarm_at", None)
+        save_state(state)
     _log("station restored" if ok else "station NOT fully restored")
     return 0 if ok else 1
 

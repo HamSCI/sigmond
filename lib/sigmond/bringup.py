@@ -257,7 +257,7 @@ def build_plan(profile, *, local_radiod: bool,
         # becomes 04b4:00f1 once firmware is loaded, and bring-up installs
         # that firmware and reloads udev EARLIER IN THIS SAME RUN -- so the
         # card appeared moments after config init had already given up.  The
-        # gate therefore waits for the card before resorting to a power cycle.
+        # gate therefore waits for the card before resorting to a port reset.
         #
         # Non-fatal by design: a station with no local card, or a hub that
         # cannot switch power, still brings up everything else.

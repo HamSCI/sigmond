@@ -53,7 +53,7 @@ Read them in this order:
 | Any **other** unit says `failed` | [After a power cut everything is back except one client](#after-a-power-cut-everything-is-back-except-one-client) — that is the general "one unit is down" tree, whether or not you lost power |
 | `df -h /` is 80 % or more | [Disk filling up](#disk-filling-up) |
 | The waterfall is blank or empty | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
-| `smd doctor` names `sdr-lost`, `sdr-down-long`, `sdr-flapping`, `sdr-recovered` or `sdr-record-unreadable` | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
+| `smd doctor` names `sdr-lost`, `sdr-needs-replug`, `sdr-down-long`, `sdr-flapping`, `sdr-recovered` or `sdr-record-unreadable` | [RX888 not found, or the waterfall is blank](#rx888-not-found-or-the-waterfall-is-blank) |
 | No page loads at all | [Web pages don't load but ssh works](#web-pages-dont-load-but-ssh-works) |
 | It all looks fine but no data is arriving upstream | [No spots on wsprnet](#no-spots-on-wsprnet) |
 
@@ -602,6 +602,7 @@ The record starts only after `smd update` has run on the station.
 | `sdr-down-long` | An episode stayed open longer than 30 minutes. The card may sit back on the bus now. | 1 |
 | `sdr-flapping` | The RX888 went away three or more times in 24 h. It came back each time, but something keeps taking it. | 1 |
 | `sdr-lost` | The card sits off the bus right now. | 1 |
+| `sdr-needs-replug` | The station reset the card's hub port and the card did not come back healthy: USB2 only, a -71 or -110 in the kernel log, or not at all. Unplug the RX888's USB cable and plug it in again by hand. The finding clears when the card returns. | 1 |
 | `sdr-record-unreadable` | The record file is not an ordinary file (a link or a pipe, for example), so the station cannot read it. | 1 |
 
 The heartbeat and the fleet board show the exit-1 findings as red, marked FAIL.
@@ -615,8 +616,8 @@ cat /var/lib/sigmond/sdr-events.jsonl
 ```
 
 Each line holds one episode: when it opened and when its last event came (UTC),
-which kinds of event it held (`usb-remove`, `power-cycle`, `radiod-exit`,
-`radiod-wedge`), how many, and when the card came back. Events that follow one
+which kinds of event it held (`usb-remove`, `port-reset`, `needs-replug`, `radiod-exit`,
+`radiod-wedge`; older records say `power-cycle` for `port-reset`), how many, and when the card came back. Events that follow one
 another closely join the same episode. An episode with `radiod-exit` and no
 `usb-remove` means the stream stalled while the card stayed on the bus.
 A `radiod-exit` can also come from a fault in `radiod` itself, for example a

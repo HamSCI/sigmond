@@ -457,3 +457,36 @@ def test_a_lock_released_during_the_wait_lets_the_write_through(tmp_path):
     import threading
     threading.Timer(0.3, lambda: os.close(fd)).start()
     assert ev.record("usb-remove", "x", now=T0, path=p) == "opened"
+
+
+# ─── v3.72 #3: port-reset and needs-replug ────────────────────────────────
+
+def test_port_reset_and_needs_replug_are_recorded_and_read_back(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("port-reset", "1-1p2", now=T0, path=p)
+    ev.record("needs-replug", "USB2 only", now=T0 + 90, path=p)
+    eps = ev.read_episodes(p, now=T0 + 100)
+    assert eps[-1].kinds == ["needs-replug", "port-reset"]
+
+
+def test_a_legacy_power_cycle_line_still_reads(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("power-cycle", "8-1p2", now=T0, path=p)
+    assert ev.read_episodes(p, now=T0 + 10)[-1].kinds == ["power-cycle"]
+
+
+def test_an_open_needs_replug_episode_reads_sdr_needs_replug_even_when_present(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("port-reset", "1-1p2", now=T0, path=p)
+    ev.record("needs-replug", "USB2 only", now=T0 + 90, path=p)
+    kind, detail = ev.assess(ev.read_episodes(p, now=T0 + 100), True)
+    assert kind == "sdr-needs-replug"
+    assert "hand replug" in detail
+
+
+def test_the_replug_clears_the_alarm(tmp_path):
+    p = tmp_path / "e.jsonl"
+    ev.record("needs-replug", "USB2 only", now=T0, path=p)
+    ev.record("usb-add", "", now=T0 + 60, path=p)
+    kind, _ = ev.assess(ev.read_episodes(p, now=T0 + 100), True)
+    assert kind != "sdr-needs-replug"

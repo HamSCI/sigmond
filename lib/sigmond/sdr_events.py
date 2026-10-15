@@ -5,7 +5,13 @@ loses its samples, the station recovers by itself, and until v3.71 nobody
 heard about it.
 
 * The card leaves the USB bus (udev: usb-remove), and maybe returns (usb-add).
-* sigmond-sdr-recover cuts power to bring a vanished card back (power-cycle).
+* sigmond-sdr-recover resets the card's hub port to bring a vanished or wedged
+  card back (port-reset).  A hub's ppps claim is not proof that it cuts VBUS
+  (AC0G-B4's two hubs never did), so the record says "port reset", never
+  "power cycle".  Old lines that say power-cycle still read.
+* The reset did not help: the card came back on the USB2 half only, with
+  -71/-110 in the kernel log, or never (needs-replug).  A person must replug
+  it by hand.
 * The stream stalls with the card still on the bus: radiod logs "No rx888
   data for 5 seconds, quitting" and dies on a libusb assertion
   (radiod-exit).  AC0G-ND did this three times between 2026-10-10 10:13Z and
@@ -56,7 +62,8 @@ LONG_EPISODE_S = 1800        # an episode open longer than this reads INVALID
 DETAIL_MAX = 120
 LOCK_WAIT_S = 5.0            # the writer waits this long for the lock, then raises OSError
 
-LOSS_KINDS = ("usb-remove", "power-cycle", "radiod-exit", "radiod-wedge")
+LOSS_KINDS = ("usb-remove", "power-cycle", "port-reset", "needs-replug",
+              "radiod-exit", "radiod-wedge")
 ARRIVAL_KIND = "usb-add"
 KINDS = LOSS_KINDS + (ARRIVAL_KIND,)
 
@@ -236,7 +243,7 @@ def record(kind: str, detail: str = "", *, now: float,
             cur.last = max(cur.last, now)
             cur.count += 1
             cur.kinds = sorted(set(cur.kinds) | {kind})
-            if kind == "usb-remove":
+            if kind in ("usb-remove", "needs-replug"):
                 cur.back = None
             if detail:
                 cur.detail = clean_text(detail)
@@ -296,7 +303,10 @@ def _tail(ep: Episode) -> str:
 def assess(episodes: Sequence[Episode], present: bool) -> Optional[Tuple[str, str]]:
     """`smd doctor`'s verdict on the window: (kind, detail), or None.
 
-    The present tense wins: a card off the bus now reads sdr-lost.  Then an
+    A reset that did not help comes first: an open episode that holds
+    needs-replug reads sdr-needs-replug, card present or not, until the card
+    returns (usb-add) or a later episode opens.  Then the present tense: a
+    card off the bus now reads sdr-lost.  Then an
     episode open longer than LONG_EPISODE_S reads sdr-down-long, then three
     episodes read sdr-flapping.  Only what remains reads sdr-recovered."""
     if not episodes:
@@ -304,6 +314,10 @@ def assess(episodes: Sequence[Episode], present: bool) -> Optional[Tuple[str, st
     n = len(episodes)
     last = episodes[-1]
     tail = _tail(last)
+    if "needs-replug" in last.kinds and last.back is None:
+        return ("sdr-needs-replug",
+                f"RX888 needs a hand replug at the card since {_hm(last.opened)}; "
+                f"a port reset did not clear it ({tail})")
     if not present:
         return ("sdr-lost",
                 f"RX888 off the bus now; lost at {_hm(last.opened)} ({tail}); "
