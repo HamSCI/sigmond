@@ -2314,11 +2314,13 @@ def test_vm6proxy_step_skips_without_the_script(tmp_path):
     assert calls == []
 
 
-def test_vm6proxy_step_skips_without_an_ipv4_relay_rule(tmp_path):
+def test_vm6proxy_step_skips_without_a_private_link(tmp_path):
     _host_with_relay_script(tmp_path)
+    (tmp_path / "etc/network").mkdir(parents=True)
+    (tmp_path / "etc/network/interfaces").write_text("auto vmbr0\niface vmbr0 inet dhcp\n")
     calls = []
     out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"))
-    assert out.startswith("skipped") and "DNAT" in out
+    assert out.startswith("skipped") and "private link" in out
     assert _vm6_installs(calls) == []
 
 
@@ -2664,11 +2666,13 @@ def test_vm4relay_step_refuses_a_script_without_the_marker(tmp_path):
     assert _vm4_installs(calls) == []
 
 
-def test_vm4relay_step_skips_without_a_vm_address(tmp_path):
+def test_vm4relay_step_skips_without_a_private_link(tmp_path):
     _host_vm4(tmp_path, units=False)
+    (tmp_path / "etc/network").mkdir(parents=True)
+    (tmp_path / "etc/network/interfaces").write_text("auto vmbr0\niface vmbr0 inet dhcp\n")
     calls = []
     out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"))
-    assert out.startswith("skipped")
+    assert out.startswith("skipped") and "private link" in out
     assert _vm4_installs(calls) == []
 
 
@@ -2814,10 +2818,82 @@ def test_a_relay_the_operator_removed_stays_removed(tmp_path, monkeypatch, capsy
     mark.parent.mkdir(parents=True, exist_ok=True)
     mark.write_text("removed 2026-10-15T00:00:00Z\n")
     calls = []
-    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_S), script_changed=True)
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"), script_changed=True)
     assert out.startswith("skipped") and "removed by the operator" in out
     assert _vm4_installs(calls) == []
     # The dry run says the same and does not count it as pending.
     (tmp_path / VM4.lstrip("/")).unlink()
     assert _dry_vm4(tmp_path, monkeypatch) == 0
     assert "ipv4 relay: removed by the operator; not reinstalled" in capsys.readouterr().out
+
+
+
+# -- #23 re-review: the VM address is the vmbr1 /30 peer, never a guess -------
+
+def _lan_host(root):
+    d = root / "etc/network"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "interfaces").write_text("auto vmbr0\niface vmbr0 inet dhcp\n    bridge-ports enp1s0\n")
+
+
+def test_a_host_without_a_private_link_never_runs_either_relay(tmp_path):
+    # The reviewer's case: no vmbr1, and the operator's own DNAT of 8081 to a
+    # LAN host.  Running install there would aim the relay at 192.168.1.77
+    # and take the operator's rule away.
+    _lan_host(tmp_path)
+    _host_vm4(tmp_path, units=False)
+    _host_with_relay_script(tmp_path)
+    calls = []
+    for step in (pm_align.vm4relay_step, pm_align.vm6proxy_step):
+        out = step(tmp_path, run=_vm6_run(calls, nat=OPERATOR), script_changed=True)
+        assert out.startswith("skipped") and "private link" in out, out
+    assert _vm4_installs(calls) == [] and _vm6_installs(calls) == []
+
+
+def test_both_relays_aim_at_the_30_peer(tmp_path):
+    _ifaces(tmp_path)
+    (tmp_path / "etc/network/interfaces").write_text(
+        "auto vmbr1\niface vmbr1 inet static\n    address 10.99.5.1/30\n")
+    _host_vm4(tmp_path, units=False)
+    _host_with_relay_script(tmp_path)
+    calls = []
+    # Even with an operator's rule that a DNAT-reading guess could pick.
+    pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=OPERATOR))
+    pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls, nat=OPERATOR))
+    (_, env4), = _vm4_installs(calls)
+    (_, env6), = _vm6_installs(calls)
+    assert env4["SIGMOND_MGMT_VM"] == "10.99.5.2" and env6["SIGMOND_MGMT_VM"] == "10.99.5.2"
+
+
+def test_the_ipv6_relay_reinstalls_after_the_ipv4_relay_was_removed(tmp_path):
+    # After `sigmond-vm4relay remove` no DNAT rule is left to read an address from.
+    _ifaces(tmp_path)
+    _host_with_relay_script(tmp_path)
+    calls = []
+    out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"))
+    assert out.startswith("installed")
+    (_, env), = _vm6_installs(calls)
+    assert env["SIGMOND_MGMT_VM"] == "10.99.0.2"
+
+
+def _removed(root):
+    mark = root / "etc/sigmond-appliance/vm4relay-removed"
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    mark.write_text("removed\n")
+
+
+def test_a_removed_relay_with_old_rules_live_warns(tmp_path, monkeypatch, capsys):
+    _ifaces(tmp_path)
+    _host_vm4(tmp_path, units=False)
+    _removed(tmp_path)
+    calls = []
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_S))
+    assert out.startswith("warn") and "removed by the operator" in out and "3 unrestricted" in out
+    assert _vm4_installs(calls) == []
+    _ifaces(tmp_path, OLD_LINE_VM)
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run([], nat="-P PREROUTING ACCEPT\n"))
+    assert out.startswith("warn") and "post-up" in out
+    # --apply prints it as a WARN.
+    rc = _apply_vm4(tmp_path, monkeypatch, _vm6_run([], nat=NAT_S))
+    assert rc == 0
+    assert "ipv4 relay: WARN" in capsys.readouterr().out

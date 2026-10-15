@@ -505,6 +505,8 @@ def vm6proxy_step(root: Path, *, run, script_changed: bool = False) -> str:
         text = _under(root, VM6PROXY).read_text()
     except OSError:
         return "skipped: no sigmond-vm6proxy on this host (this release does not carry it)"
+    if _no_private_link(root):
+        return f"skipped: no private link to the VM ({NO_PRIVATE_LINK})"
     missing = _vm6proxy_missing(root, text)
     if not missing and not script_changed:
         return "current"
@@ -512,10 +514,9 @@ def vm6proxy_step(root: Path, *, run, script_changed: bool = False) -> str:
         return (f"refused: {VM6PROXY} on this host predates the local-networks-only "
                 f"restriction (no {VM6PROXY_FILTER} line); running it could open the VM's ports, "
                 f"ssh on 2222 included, to the IPv6 internet")
-    vm = vm_dnat_target(run)
-    if vm is None:
-        return ("skipped: no IPv4 DNAT rule sends this host's ports to a decoder VM, "
-                "and the IPv6 relay mirrors those rules")
+    # The VM is the vmbr1 /30 peer.  Never an address read from DNAT rules: on
+    # a host without the private link those are the operator's own.
+    vm = _vm_from_interfaces(root)
     try:
         # A minimal environment: nothing of the caller's (no PYTHON*, no test
         # hooks) reaches a script that runs as root.
@@ -549,7 +550,8 @@ def _apply_vm6proxy(root: Path, run, changes: list) -> None:
 # -- the IPv4 relay (v3.72 #23) ----------------------------------------------
 #
 # sigmond-vm4relay moves the VM's DNAT rules into SIGMOND-VM4, entered from the
-# uplink only, for RFC 1918 and the host's own LAN subnets; its install also
+# uplink only, for RFC 1918 and the prefixes an administrator lists in
+# /etc/sigmond/vm4relay-allow.conf; its install also
 # removes the five old unrestricted rules and comments out the post-up lines
 # that would bring them back at boot.
 
@@ -619,7 +621,18 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
         text = _under(root, VM4RELAY).read_text()
     except OSError:
         return "skipped: no sigmond-vm4relay on this host (this release does not carry it)"
+    if _no_private_link(root):
+        return f"skipped: no private link to the VM ({NO_PRIVATE_LINK})"
+    # The VM is the vmbr1 /30 peer, never an address read from DNAT rules.
+    vm = _vm_from_interfaces(root)
     if _under(root, VM4RELAY_REMOVED).exists():
+        nat = _nat_rules(run)
+        old = _vm4relay_live_state(nat, vm)[1] if nat is not None else 0
+        lines = _vm4relay_old_lines(root, vm)
+        if old or lines:
+            return (f"warn: removed by the operator ({VM4RELAY_REMOVED}), but {old} unrestricted "
+                    f"DNAT rule(s) to {vm} are live and /etc/network/interfaces carries {lines} "
+                    f"old DNAT post-up line(s); sudo {VM4RELAY} install restricts them")
         return (f"skipped: removed by the operator ({VM4RELAY_REMOVED}); "
                 f"not reinstalled (sudo {VM4RELAY} install brings it back)")
     if not vm4relay_restricts(text):
@@ -628,10 +641,6 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
     nat = _nat_rules(run)
     if nat is None:
         return "failed: cannot read the nat table (iptables -t nat -S)"
-    vm = vm_dnat_target(run)
-    if vm is None:
-        return ("skipped: no IPv4 DNAT rule sends this host's ports to a decoder VM "
-                "(a VM on the LAN has no relay)")
     entered, old = _vm4relay_live_state(nat, vm)
     lines = _vm4relay_old_lines(root, vm)
     units_missing = [u for u in VM4RELAY_UNITS if not _under(root, u).exists()]
@@ -663,7 +672,9 @@ def _apply_vm4relay(root: Path, run, changes: list) -> None:
     """The IPv4 relay step of --apply.  A failure warns and never fails --apply."""
     script_changed = any(c.file.path == VM4RELAY and c.state != "current" for c in changes)
     out = vm4relay_step(root, run=run, script_changed=script_changed)
-    if out.startswith("failed") or out.startswith("refused"):
+    if out.startswith("warn"):
+        _say(f"  ipv4 relay: WARN - {out[len('warn: '):]}")
+    elif out.startswith("failed") or out.startswith("refused"):
         _say(f"  ipv4 relay: WARN - {out}")
         _say(f"  until it installs, the VM's ports keep their old IPv4 rules; retry: "
              f"SIGMOND_MGMT_VM=<VM address> {VM4RELAY} install")
