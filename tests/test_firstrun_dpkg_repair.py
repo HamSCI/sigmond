@@ -29,7 +29,7 @@ class FirstrunDpkgRepair(unittest.TestCase):
         p.chmod(0o755)
         return p
 
-    def run_script(self, *, audit='', configure_rc=0, busy_polls=0, wait_s=30):
+    def run_script(self, *, audit='', configure_rc=0, busy_polls=0, wait_s=30, held=None):
         d = self.d
         (d / 'busy').write_text(str(busy_polls))
         smd = self._exe('smd', f'echo "smd $(cat {d}/calls 2>/dev/null | wc -l)" >> {d}/order\n'
@@ -53,7 +53,14 @@ if [ "$1" = is-active ]; then
 fi
 exit 0
 ''')
-        fuser = self._exe('fuser', 'exit 1\n')
+        (d / 'lock-frontend').write_text('')
+        (d / 'lock').write_text('')
+        # held: basename of the lock file fuser reports as held (rc 0 once, then free)
+        fuser = self._exe('fuser', f'''
+if [ -n "{held or ''}" ] && [ "$(basename "$1")" = "{held or ''}" ] && [ ! -e {d}/freed ]; then
+  echo "fuser $(basename "$1")" >> {d}/calls; touch {d}/freed; exit 0; fi
+exit 1
+''')
         env = dict(
             os.environ,
             SIGMOND_FIRSTRUN_MARKER=str(d / 'marker'),
@@ -66,6 +73,8 @@ exit 0
             SIGMOND_FIRSTRUN_DPKG=str(dpkg),
             SIGMOND_FIRSTRUN_SYSTEMCTL=str(systemctl),
             SIGMOND_FIRSTRUN_FUSER=str(fuser),
+            SIGMOND_FIRSTRUN_DPKG_LOCK=str(d / 'lock-frontend'),
+            SIGMOND_FIRSTRUN_DPKG_LOCK2=str(d / 'lock'),
             SIGMOND_FIRSTRUN_APT_WAIT_S=str(wait_s),
             SIGMOND_FIRSTRUN_APT_POLL_S='0.1',
         )
@@ -99,6 +108,19 @@ exit 0
         _, calls, order, log = self.run_script(audit='', busy_polls=10_000, wait_s=1)
         self.assertIn('smd', order)      # gave up waiting, went on
         self.assertIn('still busy', log)
+
+    def test_still_busy_at_timeout_skips_configure(self):
+        _, calls, order, log = self.run_script(audit='half\n', busy_polls=10_000, wait_s=1)
+        self.assertNotIn('configure', order)
+        self.assertIn('smd', order)
+        self.assertIn('leaving dpkg alone', log)
+        self.assertTrue(all(l.isascii() for l in log.splitlines() if 'apt' in l or 'dpkg' in l),
+                        'console text must be ASCII')
+
+    def test_old_style_lock_held_counts_as_busy(self):
+        _, calls, order, log = self.run_script(audit='half\n', held='lock')
+        self.assertIn('fuser lock', calls)
+        self.assertIn('waiting', log)
 
     def test_configure_failure_is_logged_and_run_continues(self):
         r, calls, order, log = self.run_script(audit='half\n', configure_rc=1)
