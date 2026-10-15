@@ -93,6 +93,7 @@ def _source_routes(fb=FB, wizard='VMID="${SIGMOND_VMID:-120}"\n'):
     r["sigmond/" + "d" * 40 + "/scripts/proxmox/sigmond-wizard.sh"] = wizard
     for n in pm_align.PROXMOX_FILES:
         r["sigmond/" + "d" * 40 + "/scripts/proxmox/" + n] = f"#{n}\n"
+    r["sigmond-appliance/" + "a" * 40 + "/sigmond-vm6proxy"] = VM6_BODY
     return r
 
 
@@ -2145,3 +2146,225 @@ def test_the_real_wizard_carries_sigmond_check():
     body = files["/usr/local/bin/sigmond-check"].content.decode()
     assert body.startswith("#!/bin/bash\n")
     assert "sigmond-vm smd check --no-verdict" in body
+
+
+# -- the IPv6 relay on every host (v3.72 #15) --------------------------------
+#
+# The decoder VM is IPv4-only; the host relays its ports over IPv6 with
+# sigmond-vm6proxy (sigmond-appliance).  Up to v3.71 only the IPv6-only gateway
+# installed it.  pm-align now fetches the script at the release's
+# appliance_commit, installs it as a host file, and runs its `install` when a
+# unit is missing, aimed at the VM address the IPv4 DNAT rules already use.
+
+VM6 = "/usr/local/sbin/sigmond-vm6proxy"
+VM6_BODY = '#!/bin/bash\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
+_VM6_KEY = "sigmond-appliance/" + "a" * 40 + "/sigmond-vm6proxy"
+NAT_S = ("-P PREROUTING ACCEPT\n"
+         "-A PREROUTING -p tcp -m tcp --dport 8000 -j DNAT --to-destination 10.99.0.2:8000\n"
+         "-A PREROUTING -p tcp -m tcp --dport 8081 -j DNAT --to-destination 10.99.0.2:8081\n"
+         "-A PREROUTING -p tcp -m tcp --dport 2222 -j DNAT --to-destination 10.99.0.2:22\n")
+
+
+def _vm6_run(calls, *, nat=NAT_S, install_rc=0, install_out="  :8000 -> ...\n"):
+    """A fake run: iptables answers with ``nat``; the relay's install exits
+    ``install_rc``.  Each call is recorded as (argv, env-or-None)."""
+    def run(argv, **kw):
+        calls.append((list(argv), kw.get("env")))
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0, "active\n", "")
+        if argv[:1] == ["iptables"]:
+            return subprocess.CompletedProcess(argv, 0, nat, "")
+        if argv[:2] == [VM6, "install"]:
+            return subprocess.CompletedProcess(argv, install_rc, install_out,
+                                               "" if install_rc == 0 else "boom\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return run
+
+
+def _vm6_installs(calls):
+    return [(argv, env) for argv, env in calls if argv[:2] == [VM6, "install"]]
+
+
+def _write_vm6_units(root, ports=(8000, 8081, 8082, 8765, 2222)):
+    d = root / "etc/systemd/system"
+    d.mkdir(parents=True, exist_ok=True)
+    for p in ports:
+        (d / f"sigmond-vm6proxy@{p}.socket").write_text("[Socket]\n")
+
+
+def test_fetch_sources_carries_the_relay_from_the_appliance_commit():
+    op = _urlopen(_source_routes())
+    src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+    assert src.vm6proxy == VM6_BODY.encode()
+
+
+def test_fetch_sources_treats_a_404_on_the_relay_as_absent():
+    routes = _source_routes()
+    routes[_VM6_KEY] = urllib.error.HTTPError(_VM6_KEY, 404, "Not Found", None, None)
+    op = _urlopen(routes)
+    src = pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+    assert src.vm6proxy is None
+
+
+def test_fetch_sources_refuses_a_non_404_failure_on_the_relay():
+    routes = _source_routes()
+    routes[_VM6_KEY] = urllib.error.HTTPError(_VM6_KEY, 500, "Server Error", None, None)
+    op = _urlopen(routes)
+    with pytest.raises(pm_align.PmAlignError):
+        pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+
+
+def _vm6_manifest_routes(sha):
+    routes = _source_routes()
+    routes["https://dl/m"] = _manifest() + f"vm6proxy_sha256: {sha}\n"
+    return routes
+
+
+def test_fetch_sources_checks_the_relay_against_the_manifest_hash():
+    good = hashlib.sha256(VM6_BODY.encode()).hexdigest()
+    op = _urlopen(_vm6_manifest_routes(good))
+    rel = pm_align.fetch_release(urlopen=op)
+    assert rel.vm6proxy_sha256 == good
+    assert pm_align.fetch_sources(rel, vmid=100, urlopen=op).vm6proxy == VM6_BODY.encode()
+
+    op = _urlopen(_vm6_manifest_routes("0" * 64))
+    with pytest.raises(pm_align.PmAlignError, match="vm6proxy_sha256"):
+        pm_align.fetch_sources(pm_align.fetch_release(urlopen=op), vmid=100, urlopen=op)
+
+
+def test_fetch_release_refuses_a_malformed_relay_hash():
+    op = _urlopen(_vm6_manifest_routes("not-a-hash"))
+    with pytest.raises(pm_align.PmAlignError, match="vm6proxy_sha256"):
+        pm_align.fetch_release(urlopen=op)
+
+
+def test_fetch_release_without_a_relay_hash_leaves_it_unset():
+    assert pm_align.fetch_release(urlopen=_urlopen(_release_routes())).vm6proxy_sha256 is None
+
+
+def test_desired_files_installs_the_relay_when_the_release_carries_it():
+    src = _src()
+    src.vm6proxy = VM6_BODY.encode()
+    f = {f.path: f for f in pm_align.desired_files(src, 100)}[VM6]
+    assert f.mode == 0o755 and f.content == VM6_BODY.encode()
+    assert VM6 not in {f.path for f in pm_align.desired_files(_src(), 100)}
+
+
+def test_vm6proxy_ports_follow_the_script():
+    assert pm_align.vm6proxy_ports(VM6_BODY) == [8000, 8081, 8082, 8765, 2222]
+    assert pm_align.vm6proxy_ports('PORTS="9000:80"\n') == [9000]
+
+
+def test_vm6proxy_ports_match_the_real_script():
+    real = REPO.parent / "sigmond-appliance" / "sigmond-vm6proxy"
+    if not real.exists():
+        pytest.skip("no sigmond-appliance checkout beside this one")
+    assert pm_align.vm6proxy_ports(real.read_text()) == [8000, 8081, 8082, 8765, 2222]
+
+
+def test_vm_dnat_target_reads_the_ipv4_relay_rule():
+    assert pm_align.vm_dnat_target(_vm6_run([])) == "10.99.0.2"
+    assert pm_align.vm_dnat_target(_vm6_run([], nat="-P PREROUTING ACCEPT\n")) is None
+
+
+def _host_with_relay_script(root):
+    p = root / VM6.lstrip("/")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(VM6_BODY)
+
+
+def test_vm6proxy_step_installs_when_a_unit_is_missing(tmp_path):
+    _host_with_relay_script(tmp_path)
+    _write_vm6_units(tmp_path, ports=(8000, 8081))
+    calls = []
+    out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls))
+    assert out.startswith("installed")
+    (argv, env), = _vm6_installs(calls)
+    assert argv == [VM6, "install"]
+    assert env["SIGMOND_MGMT_VM"] == "10.99.0.2"
+
+
+def test_vm6proxy_step_leaves_existing_units_alone(tmp_path):
+    _host_with_relay_script(tmp_path)
+    _write_vm6_units(tmp_path)
+    calls = []
+    assert pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls)) == "current"
+    assert _vm6_installs(calls) == []
+    assert not any(argv[:1] == ["systemctl"] for argv, _ in calls)
+
+
+def test_vm6proxy_step_skips_without_the_script(tmp_path):
+    calls = []
+    assert pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls)).startswith("skipped")
+    assert calls == []
+
+
+def test_vm6proxy_step_skips_without_an_ipv4_relay_rule(tmp_path):
+    _host_with_relay_script(tmp_path)
+    calls = []
+    out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"))
+    assert out.startswith("skipped") and "DNAT" in out
+    assert _vm6_installs(calls) == []
+
+
+def test_vm6proxy_step_reports_a_failed_install(tmp_path):
+    _host_with_relay_script(tmp_path)
+    out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run([], install_rc=1,
+                                                         install_out="cannot write x\n"))
+    assert out.startswith("failed") and "cannot write x" in out
+
+
+def _apply_vm6(tmp_path, monkeypatch, run):
+    monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.72", "a" * 40, "d" * 40, "f" * 64, ""))
+    src = _src()
+    src.vm6proxy = VM6_BODY.encode()
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
+    return pm_align.main(["--apply"], root=tmp_path, run=run)
+
+
+def test_apply_writes_the_relay_then_installs_its_units(tmp_path, monkeypatch, capsys):
+    calls = []
+    rc = _apply_vm6(tmp_path, monkeypatch, _vm6_run(calls))
+    assert rc == 0
+    p = tmp_path / VM6.lstrip("/")
+    assert p.read_text() == VM6_BODY and oct(p.stat().st_mode & 0o777) == oct(0o755)
+    assert len(_vm6_installs(calls)) == 1
+    assert "ipv6 relay: installed" in capsys.readouterr().out
+
+
+def test_apply_warns_but_does_not_fail_when_the_relay_install_fails(tmp_path, monkeypatch, capsys):
+    rc = _apply_vm6(tmp_path, monkeypatch, _vm6_run([], install_rc=1, install_out="nope\n"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ipv6 relay: WARN" in out and "nope" in out
+
+
+def test_apply_does_not_rerun_the_install_when_every_unit_exists(tmp_path, monkeypatch):
+    _write_vm6_units(tmp_path)
+    calls = []
+    assert _apply_vm6(tmp_path, monkeypatch, _vm6_run(calls)) == 0
+    assert _vm6_installs(calls) == []
+
+
+def test_dry_run_says_it_would_install_the_relay(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.72", "a" * 40, "d" * 40, "f" * 64, ""))
+    src = _src()
+    src.vm6proxy = VM6_BODY.encode()
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
+    (tmp_path / "etc/network").mkdir(parents=True)
+    (tmp_path / "etc/network/interfaces").write_text("auto vmbr1\n")
+    calls = []
+    for f in pm_align.desired_files(src, pm_align.host_vmid(tmp_path)):
+        dest = pm_align._under(tmp_path, f.path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f.content)
+    assert pm_align.main([], root=tmp_path, run=_vm6_run(calls)) == 1
+    assert "ipv6 relay: --apply would install it" in capsys.readouterr().out
+    assert calls == []                                   # a dry run runs nothing
+
+    _write_vm6_units(tmp_path)
+    assert pm_align.main([], root=tmp_path, run=_vm6_run(calls)) == 0
+    assert "ipv6 relay: installed" in capsys.readouterr().out

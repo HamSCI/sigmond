@@ -93,6 +93,8 @@ class Release:
     wizard_commit: str
     firstboot_sha256: str
     manifest_text: str
+    # From v3.72 the build records the IPv6 relay's hash; older manifests do not.
+    vm6proxy_sha256: Optional[str] = None
 
 
 @dataclass
@@ -100,6 +102,7 @@ class Sources:
     firstboot: str
     wizard: str
     proxmox: dict = field(default_factory=dict)   # name -> bytes; absent names absent
+    vm6proxy: Optional[bytes] = None              # None: the appliance commit has no relay
 
 
 def _get(url: str, urlopen: Callable) -> bytes:
@@ -153,8 +156,11 @@ def fetch_release(tag: Optional[str] = None, *, urlopen: Callable = urllib.reque
             raise PmAlignError(f"release {tag_name}: {key} {pre.get(key)!r} is not a full commit")
     if not re.match(r"^[0-9a-f]{64}$", pre.get("firstboot_sha256", "")):
         raise PmAlignError(f"release {tag_name}: firstboot_sha256 missing or malformed")
+    vm6 = pre.get("vm6proxy_sha256")
+    if vm6 is not None and not re.match(r"^[0-9a-f]{64}$", vm6):
+        raise PmAlignError(f"release {tag_name}: vm6proxy_sha256 {vm6!r} is malformed")
     return Release(tag_name, pre["appliance_commit"], pre["wizard_commit"],
-                   pre["firstboot_sha256"], text)
+                   pre["firstboot_sha256"], text, vm6)
 
 
 def render_wizard(text: str, vmid: int) -> str:
@@ -169,7 +175,8 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
     against firstboot_sha256; the wizard and PROXMOX_FILES at wizard_commit.
     A 404 fetching pm-align.py means that commit predates the tool and is
     simply absent; any other failure, on pm-align.py or any other name,
-    raises."""
+    raises.  sigmond-vm6proxy comes from appliance_commit the same way: a 404
+    leaves it absent, and a manifest that names vm6proxy_sha256 must match."""
     raw_fb = _get(f"{RAW}/sigmond-appliance/{rel.appliance_commit}/firstboot-v3.sh",
                   urlopen).decode("utf-8")
     firstboot = raw_fb.replace("@@VERSION@@", rel.tag)
@@ -187,7 +194,23 @@ def fetch_sources(rel: Release, *, vmid: int, urlopen: Callable = urllib.request
             if name == "pm-align.py" and getattr(exc, "status", None) == 404:
                 continue
             raise
-    return Sources(firstboot, wizard, proxmox)
+    return Sources(firstboot, wizard, proxmox, _fetch_vm6proxy(rel, urlopen))
+
+
+def _fetch_vm6proxy(rel: Release, urlopen: Callable) -> Optional[bytes]:
+    url = f"{RAW}/sigmond-appliance/{rel.appliance_commit}/sigmond-vm6proxy"
+    try:
+        body = _get(url, urlopen)
+    except PmAlignError as exc:
+        if getattr(exc, "status", None) == 404 and rel.vm6proxy_sha256 is None:
+            return None
+        raise
+    if rel.vm6proxy_sha256 is not None:
+        got = hashlib.sha256(body).hexdigest()
+        if got != rel.vm6proxy_sha256:
+            raise PmAlignError(f"sigmond-vm6proxy at {rel.appliance_commit[:8]} hashes {got[:12]}..., "
+                               f"manifest vm6proxy_sha256 {rel.vm6proxy_sha256[:12]}... - refused")
+    return body
 
 
 _HEREDOC_START = re.compile(r"""^\s*cat\s+>\s*"?(/[^"\s]+)"?\s+<<\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2\s*$""")
@@ -270,6 +293,10 @@ PAIR_FLAG = "--pair-vm"
 PAIRING_RECORD = "/etc/sigmond-appliance/rac-pairing"
 NO_PRIVATE_LINK = ("this host has no private link to its decoder VM (the pre-v3.4x layout); "
                    "smd remote needs that link")
+VM6PROXY = "/usr/local/sbin/sigmond-vm6proxy"
+VM6PROXY_PORTS = ("8000:8000", "8081:8081", "8082:8082", "8765:8765", "2222:22")
+# Which DNAT rule names the VM's address: ka9q-web first, every host has it.
+VM6PROXY_DNAT_PORTS = (8081, 8000, 2222)
 RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
           ("station", 12224, 8000), ("gmag", 12225, 8082))
 NOT_TOUCHED = (
@@ -337,7 +364,106 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
     if "pm-align.py" in src.proxmox:
         out.append(HostFile("/usr/local/sbin/pm-align", src.proxmox["pm-align.py"], 0o755,
                             "scripts/proxmox/pm-align.py"))
+    if src.vm6proxy is not None:
+        out.append(HostFile(VM6PROXY, src.vm6proxy, 0o755, "sigmond-appliance/sigmond-vm6proxy"))
     return out
+
+
+# -- the IPv6 relay (v3.72 #15) ----------------------------------------------
+#
+# The decoder VM is IPv4-only.  The host forwards its ports over IPv4 with
+# iptables DNAT, which cannot cross address families, so sigmond-vm6proxy
+# relays them over IPv6 in userspace.  Up to v3.71 only the IPv6-only gateway
+# installed it; pm-align brings it to every host already in the field.
+
+def vm6proxy_ports(text: str) -> list:
+    """The ports the relay listens on, from the script's own PORTS line."""
+    m = re.search(r'^PORTS="([^"]*)"', text, re.M)
+    pairs = m.group(1).split() if m else list(VM6PROXY_PORTS)
+    return [int(p.split(":", 1)[0]) for p in pairs if p.split(":", 1)[0].isdigit()]
+
+
+def _vm6proxy_missing(root: Path, text: str) -> list:
+    return [f"sigmond-vm6proxy@{p}.socket" for p in vm6proxy_ports(text)
+            if not _under(root, f"/etc/systemd/system/sigmond-vm6proxy@{p}.socket").exists()]
+
+
+def vm_dnat_target(run) -> Optional[str]:
+    """The VM address the host's IPv4 DNAT rules send its ports to -- the
+    same rules sigmond-check reads.  None when there is no such rule (a host
+    whose VM sits on the LAN) or iptables cannot be read."""
+    try:
+        r = run(["iptables", "-t", "nat", "-S", "PREROUTING"],
+                capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    for port in VM6PROXY_DNAT_PORTS:
+        for line in (r.stdout or "").splitlines():
+            if re.search(rf"--dport {port}(\s|$)", line) and " -j DNAT " in line:
+                m = re.search(r"--to-destination\s+(\d+\.\d+\.\d+\.\d+)", line)
+                if m:
+                    return m.group(1)
+    return None
+
+
+def vm6proxy_step(root: Path, *, run) -> str:
+    """Install the relay's units when any is missing.  "current" when every
+    socket unit exists (they are then left alone: no rewrite, no restart);
+    "installed (...)", "skipped: <why>" or "failed: <why>".  Never raises."""
+    try:
+        text = _under(root, VM6PROXY).read_text()
+    except OSError:
+        return "skipped: no sigmond-vm6proxy on this host (this release does not carry it)"
+    missing = _vm6proxy_missing(root, text)
+    if not missing:
+        return "current"
+    vm = vm_dnat_target(run)
+    if vm is None:
+        return ("skipped: no IPv4 DNAT rule sends this host's ports to a decoder VM, "
+                "and the IPv6 relay mirrors those rules")
+    try:
+        r = run([VM6PROXY, "install"], capture_output=True, text=True, timeout=120,
+                env={**os.environ, "SIGMOND_MGMT_VM": vm})
+    except Exception as exc:
+        return f"failed: raised {exc!r}"
+    if r.returncode != 0:
+        lines = [ln.strip() for ln in ((r.stdout or "") + (r.stderr or "")).splitlines() if ln.strip()]
+        return f"failed: exit {r.returncode}: {' | '.join(lines[-2:]) or 'no output'}"
+    return f"installed ({len(missing)} unit(s) were missing; relays to {vm})"
+
+
+def _apply_vm6proxy(root: Path, run) -> None:
+    """The relay step of --apply.  A failure warns and never fails --apply."""
+    out = vm6proxy_step(root, run=run)
+    if out.startswith("failed"):
+        _say(f"  ipv6 relay: WARN - {out}")
+        _say(f"  the VM's pages answer over IPv4 only until it installs; retry: "
+             f"SIGMOND_MGMT_VM=<VM address> {VM6PROXY} install")
+    elif out == "current":
+        _say("  ipv6 relay: installed (every unit present)")
+    else:
+        _say(f"  ipv6 relay: {out}")
+
+
+def _dry_run_vm6proxy_note(root: Path, src: Sources) -> tuple:
+    """(message, pending) for the dry-run relay line.  Reads files only: a dry
+    run may not be root, and iptables needs root."""
+    if src.vm6proxy is not None:
+        text = src.vm6proxy.decode("utf-8", "replace")
+    else:
+        try:
+            text = _under(root, VM6PROXY).read_text()
+        except OSError:
+            return "ipv6 relay: this release does not carry sigmond-vm6proxy", False
+    missing = _vm6proxy_missing(root, text)
+    if not missing:
+        return "ipv6 relay: installed", False
+    if _no_private_link(root):
+        return f"ipv6 relay: skipped: {NO_PRIVATE_LINK}", False
+    return (f"ipv6 relay: --apply would install it ({len(missing)} of "
+            f"{len(vm6proxy_ports(text))} units missing: {VM6PROXY} install)"), True
 
 
 def _under(root: Path, path: str) -> Path:
@@ -1070,6 +1196,7 @@ def _do_apply(changes: list, rel: Release, root: Path, run, now, *, src: Sources
     backup_dir = _under(root, f"{BACKUP_BASE}/{stamp}")
     written = apply_files(changes, root, backup_dir)
     enable_new_relays(changes, run=run)
+    _apply_vm6proxy(root, run)
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     tunnel_kind, _, _ = _tunnel_decision(root)
     record = write_record(root, rel, written, now_iso, tunnel=_TUNNEL_RECORD_VALUE[tunnel_kind])
@@ -1210,13 +1337,15 @@ def main(argv=None, *, root: Path = Path("/"), urlopen: Callable = urllib.reques
     tunnel_msg, tunnel_pending = _dry_run_tunnel_note(root)
     _say(f"  {tunnel_msg}")
     _say(f"  {_dry_run_heartbeat_note(root)}")
+    vm6_msg, vm6_pending = _dry_run_vm6proxy_note(root, src)
+    _say(f"  {vm6_msg}")
     if _can_pair(src.wizard):
         if _no_private_link(root):
             _say(f"  pairing: skipped: {NO_PRIVATE_LINK}")
         else:
             _say(f"  pairing: --apply pairs the decoder VM with this host, or re-asserts it ({SETUP} {PAIR_FLAG})")
     _say(f"  summary: {len(pending)} file(s) to refresh; re-run with --apply as root")
-    return 1 if (pending or tunnel_pending) else 0
+    return 1 if (pending or tunnel_pending or vm6_pending) else 0
 
 
 if __name__ == "__main__":
