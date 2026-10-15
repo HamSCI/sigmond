@@ -2741,3 +2741,83 @@ def test_vm4relay_step_reinstalls_when_prerouting_no_longer_enters_the_chain(tmp
     out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=nat))
     assert out.startswith("installed") and "does not enter" in out
     assert len(_vm4_installs(calls)) == 1
+
+
+# -- #23 review round 1 --------------------------------------------------------
+
+OLD_LINE_VM = ("    post-up iptables -t nat -C PREROUTING -p tcp --dport 8081 -j DNAT --to-destination "
+               "10.99.0.2:8081 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8081 -j DNAT "
+               "--to-destination 10.99.0.2:8081\n")
+OPERATOR = "-A PREROUTING -p tcp -m tcp --dport 8081 -j DNAT --to-destination 192.168.1.77:8081\n"
+
+
+def _ifaces(root, extra=""):
+    d = root / "etc/network"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "interfaces").write_text("auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.1/30\n" + extra)
+
+
+def test_vm_dnat_target_prefers_the_address_most_relay_ports_go_to():
+    # An operator's own 8081 rule to another host, listed first, is not the VM.
+    assert pm_align.vm_dnat_target(_vm6_run([], nat=OPERATOR + NAT_S)) == "10.99.0.2"
+
+
+def test_an_operators_old_shape_rule_to_another_host_is_not_an_old_rule(tmp_path):
+    _host_vm4(tmp_path)
+    _ifaces(tmp_path)
+    calls = []
+    assert pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN + OPERATOR)) == "current"
+    assert _vm4_installs(calls) == []
+
+
+def test_the_old_post_up_lines_are_a_reason_to_install(tmp_path):
+    _host_vm4(tmp_path)
+    _ifaces(tmp_path, OLD_LINE_VM)
+    calls = []
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN))
+    assert out.startswith("installed") and "interfaces" in out
+    assert len(_vm4_installs(calls)) == 1
+    # The same line, to another host: not the relay's.
+    _ifaces(tmp_path, OLD_LINE_VM.replace("10.99.0.2", "192.168.1.77"))
+    calls = []
+    assert pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN)) == "current"
+
+
+def _dry_vm4(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
+                        pm_align.Release("v3.72", "a" * 40, "d" * 40, "f" * 64, ""))
+    src = _src()
+    src.vm4relay = VM4_BODY.encode()
+    monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
+    for f in pm_align.desired_files(src, pm_align.host_vmid(tmp_path)):
+        dest = pm_align._under(tmp_path, f.path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f.content)
+    calls = []
+    rc = pm_align.main([], root=tmp_path, run=_vm6_run(calls))
+    assert calls == []
+    return rc
+
+
+def test_dry_run_names_the_old_post_up_lines(tmp_path, monkeypatch, capsys):
+    _host_vm4(tmp_path)
+    _ifaces(tmp_path, OLD_LINE_VM)
+    assert _dry_vm4(tmp_path, monkeypatch) == 1
+    out = capsys.readouterr().out
+    assert "ipv4 relay: --apply would install it" in out and "interfaces" in out
+
+
+def test_a_relay_the_operator_removed_stays_removed(tmp_path, monkeypatch, capsys):
+    _host_vm4(tmp_path, units=False)
+    _ifaces(tmp_path)
+    mark = tmp_path / "etc/sigmond-appliance/vm4relay-removed"
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    mark.write_text("removed 2026-10-15T00:00:00Z\n")
+    calls = []
+    out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_S), script_changed=True)
+    assert out.startswith("skipped") and "removed by the operator" in out
+    assert _vm4_installs(calls) == []
+    # The dry run says the same and does not count it as pending.
+    (tmp_path / VM4.lstrip("/")).unlink()
+    assert _dry_vm4(tmp_path, monkeypatch) == 0
+    assert "ipv4 relay: removed by the operator; not reinstalled" in capsys.readouterr().out

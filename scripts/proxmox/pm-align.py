@@ -326,7 +326,9 @@ VM4RELAY_UNITS = ("/etc/systemd/system/sigmond-vm4relay.service",
 # The five rules firstboot wrote before v3.72 #23: no interface, no source.
 VM4RELAY_PAIRS = {("8000", "8000"), ("8081", "8081"), ("8082", "8082"), ("8765", "8765"), ("2222", "22")}
 _VM4_OLD_RULE = re.compile(r"^-A PREROUTING -p tcp -m tcp --dport (\d+) -j DNAT "
-                           r"--to-destination \d{1,3}(?:\.\d{1,3}){3}:(\d+)$")
+                           r"--to-destination (\d{1,3}(?:\.\d{1,3}){3}):(\d+)$")
+# `sigmond-vm4relay remove` leaves this mark; pm-align then leaves it removed.
+VM4RELAY_REMOVED = "/etc/sigmond-appliance/vm4relay-removed"
 _RELAY_ENV_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 RELAYS = (("ssh", 12222, 22), ("web", 12223, 8081),
           ("station", 12224, 8000), ("gmag", 12225, 8082))
@@ -477,15 +479,18 @@ def vm_dnat_target(run) -> Optional[str]:
     text = _nat_rules(run)
     if text is None:
         return None
-    for port in VM6PROXY_DNAT_PORTS:
-        for line in text.splitlines():
-            if not (line.startswith("-A PREROUTING ") or line.startswith(f"-A {VM4RELAY_CHAIN} ")):
-                continue
-            if re.search(rf"--dport {port}(\s|$)", line) and " -j DNAT " in line:
-                m = re.search(r"--to-destination\s+(\d+\.\d+\.\d+\.\d+)", line)
-                if m:
-                    return m.group(1)
-    return None
+    # The address most of the relay's port pairs go to: an operator's own
+    # DNAT of one port to another host must not pass for the VM.
+    score = {}
+    for line in text.splitlines():
+        if not (line.startswith("-A PREROUTING ") or line.startswith(f"-A {VM4RELAY_CHAIN} ")):
+            continue
+        m = re.search(r"--dport (\d+)\s(?:.*\s)?-j DNAT --to-destination (\d+\.\d+\.\d+\.\d+):(\d+)(?:\s|$)", line)
+        if m and (m.group(1), m.group(3)) in VM4RELAY_PAIRS:
+            score.setdefault(m.group(2), set()).add(m.group(1))
+    if not score:
+        return None
+    return max(sorted(score), key=lambda ip: len(score[ip]))
 
 
 def vm6proxy_step(root: Path, *, run, script_changed: bool = False) -> str:
@@ -555,17 +560,53 @@ def vm4relay_restricts(body) -> bool:
     return VM4RELAY_FILTER_RE.search(body) is not None
 
 
-def _vm4relay_live_state(text: str) -> tuple:
+def _vm4relay_live_state(text: str, vm: str) -> tuple:
     """(entered, old): whether PREROUTING jumps to SIGMOND-VM4, and how many
-    of the five old unrestricted rules are live."""
+    of the five old unrestricted rules -- DNAT to ``vm`` -- are live."""
     entered = old = 0
     for line in text.splitlines():
         if line.startswith("-A PREROUTING ") and line.endswith(f" -j {VM4RELAY_CHAIN}"):
             entered = 1
         m = _VM4_OLD_RULE.match(line)
-        if m and (m.group(1), m.group(2)) in VM4RELAY_PAIRS:
+        if m and m.group(2) == vm and (m.group(1), m.group(3)) in VM4RELAY_PAIRS:
             old += 1
     return bool(entered), old
+
+
+_VM4_OLD_LINE = re.compile(r"^\s*post-up iptables -t nat -C PREROUTING -p tcp --dport (\d+) -j DNAT "
+                           r"--to-destination (\d{1,3}(?:\.\d{1,3}){3}):(\d+) 2>/dev/null \|\| "
+                           r"iptables -t nat -A PREROUTING -p tcp --dport \1 -j DNAT "
+                           r"--to-destination \2:\3\s*$")
+
+
+def _vm4relay_old_lines(root: Path, vm: str) -> int:
+    """How many of the old DNAT post-up lines to ``vm`` /etc/network/interfaces
+    still carries (they put the unrestricted rules back at boot)."""
+    try:
+        text = _under(root, "/etc/network/interfaces").read_text(errors="replace")
+    except OSError:
+        return 0
+    n = 0
+    for line in text.splitlines():
+        m = _VM4_OLD_LINE.match(line)
+        if m and m.group(2) == vm and (m.group(1), m.group(3)) in VM4RELAY_PAIRS:
+            n += 1
+    return n
+
+
+def _vm_from_interfaces(root: Path) -> str:
+    """The VM's address from the vmbr1 /30 in /etc/network/interfaces (the
+    host is .1, the VM .2); 10.99.0.2 when it cannot be read.  For the dry
+    run, which cannot read iptables."""
+    try:
+        text = _under(root, "/etc/network/interfaces").read_text(errors="replace")
+    except OSError:
+        return "10.99.0.2"
+    m = re.search(r"^iface vmbr1 .*?^\s*address\s+(\d+)\.(\d+)\.(\d+)\.(\d+)/30\s*$", text, re.M | re.S)
+    if not m:
+        return "10.99.0.2"
+    a, b, c, d = (int(x) for x in m.groups())
+    return f"{a}.{b}.{c}.{d + 1}"
 
 
 def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
@@ -578,17 +619,27 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
         text = _under(root, VM4RELAY).read_text()
     except OSError:
         return "skipped: no sigmond-vm4relay on this host (this release does not carry it)"
+    if _under(root, VM4RELAY_REMOVED).exists():
+        return (f"skipped: removed by the operator ({VM4RELAY_REMOVED}); "
+                f"not reinstalled (sudo {VM4RELAY} install brings it back)")
     if not vm4relay_restricts(text):
         return (f"refused: {VM4RELAY} on this host has no {VM4RELAY_FILTER} line; "
                 f"pm-align does not run it")
     nat = _nat_rules(run)
     if nat is None:
         return "failed: cannot read the nat table (iptables -t nat -S)"
-    entered, old = _vm4relay_live_state(nat)
+    vm = vm_dnat_target(run)
+    if vm is None:
+        return ("skipped: no IPv4 DNAT rule sends this host's ports to a decoder VM "
+                "(a VM on the LAN has no relay)")
+    entered, old = _vm4relay_live_state(nat, vm)
+    lines = _vm4relay_old_lines(root, vm)
     units_missing = [u for u in VM4RELAY_UNITS if not _under(root, u).exists()]
     why = []
     if old:
         why.append(f"{old} unrestricted DNAT rule(s) live")
+    if lines:
+        why.append(f"/etc/network/interfaces still carries {lines} old DNAT post-up line(s)")
     if not entered:
         why.append(f"PREROUTING does not enter {VM4RELAY_CHAIN}")
     if units_missing:
@@ -597,10 +648,6 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
         why.append("the relay script changed")
     if not why:
         return "current"
-    vm = vm_dnat_target(run)
-    if vm is None:
-        return ("skipped: no IPv4 DNAT rule sends this host's ports to a decoder VM "
-                "(a VM on the LAN has no relay)")
     try:
         r = run([VM4RELAY, "install"], capture_output=True, text=True, timeout=120,
                 env={"PATH": _RELAY_ENV_PATH, "LANG": "C", "SIGMOND_MGMT_VM": vm})
@@ -640,14 +687,19 @@ def _dry_run_vm4relay_note(root: Path, src: Sources) -> tuple:
         return "ipv4 relay: this release does not carry sigmond-vm4relay", False
     if _no_private_link(root):
         return f"ipv4 relay: skipped: {NO_PRIVATE_LINK}", False
+    if _under(root, VM4RELAY_REMOVED).exists():
+        return "ipv4 relay: removed by the operator; not reinstalled", False
     if not vm4relay_restricts(body):
         return (f"ipv4 relay: WARN - {VM4RELAY} has no {VM4RELAY_FILTER} line; "
                 f"--apply will not run it"), False
     missing = [u for u in VM4RELAY_UNITS if not _under(root, u).exists()]
     changed = carried is not None and on_host != carried
-    if missing or changed:
+    lines = _vm4relay_old_lines(root, _vm_from_interfaces(root))
+    if missing or changed or lines:
+        extra = (f"; /etc/network/interfaces still carries {lines} old DNAT post-up line(s)"
+                 if lines else "")
         return (f"ipv4 relay: --apply would install it ({VM4RELAY} install: the VM's ports "
-                f"from the station's own network only, the old unrestricted rules removed)"), True
+                f"from the station's own network only, the old unrestricted rules removed{extra})"), True
     return ("ipv4 relay: units present; --apply checks the live rules (it needs root)"), False
 
 
