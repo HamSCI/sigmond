@@ -26,6 +26,7 @@ import argparse
 import base64
 import hashlib
 import json
+import ipaddress
 import os
 import re
 import shutil
@@ -318,9 +319,17 @@ VM6PROXY_PORTS = ("8000:8000", "8081:8081", "8082:8082", "8765:8765", "2222:22")
 # Which DNAT rule names the VM's address: ka9q-web first, every host has it.
 VM6PROXY_DNAT_PORTS = (8081, 8000, 2222)
 VM4RELAY = "/usr/local/sbin/sigmond-vm4relay"
-VM4RELAY_FILTER = "VM4RELAY_FILTER=1"
-VM4RELAY_FILTER_RE = re.compile(r"^VM4RELAY_FILTER=1$", re.M)
+VM4RELAY_FILTER = "VM4RELAY_FILTER=2"
+VM4RELAY_FILTER_RE = re.compile(r"^VM4RELAY_FILTER=2$", re.M)
 VM4RELAY_CHAIN = "SIGMOND-VM4"
+# The FORWARD guard (v3.72 #24): FORWARD's first rule, and the guard's rules,
+# as `iptables -S` prints them.
+VM4RELAY_FJUMP = "-A FORWARD -o vmbr1 -j SIGMOND-VM4F"
+VM4RELAY_GUARD = ("-A SIGMOND-VM4F -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
+                  "-A SIGMOND-VM4F -m conntrack --ctstate DNAT -j RETURN",
+                  "-A SIGMOND-VM4F -j DROP")
+NO_VM_ADDRESS = ("cannot read the VM's address: /etc/network/interfaces has no vmbr1 stanza "
+                 "whose address is the first host of a /30")
 VM4RELAY_UNITS = ("/etc/systemd/system/sigmond-vm4relay.service",
                   "/etc/systemd/system/sigmond-vm4relay.timer")
 # The five rules firstboot wrote before v3.72 #23: no interface, no source.
@@ -517,6 +526,8 @@ def vm6proxy_step(root: Path, *, run, script_changed: bool = False) -> str:
     # The VM is the vmbr1 /30 peer.  Never an address read from DNAT rules: on
     # a host without the private link those are the operator's own.
     vm = _vm_from_interfaces(root)
+    if vm is None:
+        return f"refused: {NO_VM_ADDRESS}"
     try:
         # A minimal environment: nothing of the caller's (no PYTHON*, no test
         # hooks) reaches a script that runs as root.
@@ -556,7 +567,7 @@ def _apply_vm6proxy(root: Path, run, changes: list) -> None:
 # that would bring them back at boot.
 
 def vm4relay_restricts(body) -> bool:
-    """True when this script carries the exact whole line VM4RELAY_FILTER=1."""
+    """True when this script carries the exact whole line VM4RELAY_FILTER=2."""
     if isinstance(body, bytes):
         body = body.decode("utf-8", "replace")
     return VM4RELAY_FILTER_RE.search(body) is not None
@@ -596,19 +607,46 @@ def _vm4relay_old_lines(root: Path, vm: str) -> int:
     return n
 
 
-def _vm_from_interfaces(root: Path) -> str:
-    """The VM's address from the vmbr1 /30 in /etc/network/interfaces (the
-    host is .1, the VM .2); 10.99.0.2 when it cannot be read.  For the dry
-    run, which cannot read iptables."""
+def _vm_from_interfaces(root: Path) -> Optional[str]:
+    """The VM's address from the vmbr1 /30 in /etc/network/interfaces: the
+    host holds the /30's first address, the VM the second.  None when the
+    file, the stanza or that address cannot be read, or the host's address
+    is not the first of its /30: the caller refuses then, never guesses."""
     try:
         text = _under(root, "/etc/network/interfaces").read_text(errors="replace")
     except OSError:
-        return "10.99.0.2"
-    m = re.search(r"^iface vmbr1 .*?^\s*address\s+(\d+)\.(\d+)\.(\d+)\.(\d+)/30\s*$", text, re.M | re.S)
+        return None
+    m = re.search(r"^iface vmbr1 inet static\s*$(.*?)(?=^(?:iface|auto|allow-|source|mapping)\b|\Z)",
+                  text, re.M | re.S)
     if not m:
-        return "10.99.0.2"
-    a, b, c, d = (int(x) for x in m.groups())
-    return f"{a}.{b}.{c}.{d + 1}"
+        return None
+    a = re.search(r"^\s*address\s+(\S+)\s*$", m.group(1), re.M)
+    if not a:
+        return None
+    try:
+        host = ipaddress.IPv4Interface(a.group(1))
+    except ValueError:
+        return None
+    if host.network.prefixlen != 30 or int(host.ip) != int(host.network.network_address) + 1:
+        return None
+    return str(host.ip + 1)
+
+
+def _guard_state(run) -> Optional[bool]:
+    """True when FORWARD's first rule leads into the v3.72 #24 guard and the
+    guard holds exactly its three rules; None when iptables cannot be read."""
+    try:
+        r = run(["iptables", "-S"], capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    lines = (r.stdout or "").splitlines()
+    fwd = [ln for ln in lines if ln.startswith("-A FORWARD ")]
+    guard = tuple(ln for ln in lines if ln.startswith("-A SIGMOND-VM4F "))
+    return (bool(fwd) and fwd[0] == VM4RELAY_FJUMP
+            and sum(ln.endswith(" -j SIGMOND-VM4F") for ln in fwd) == 1
+            and guard == VM4RELAY_GUARD)
 
 
 def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
@@ -625,6 +663,8 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
         return f"skipped: no private link to the VM ({NO_PRIVATE_LINK})"
     # The VM is the vmbr1 /30 peer, never an address read from DNAT rules.
     vm = _vm_from_interfaces(root)
+    if vm is None:
+        return f"refused: {NO_VM_ADDRESS}"
     if _under(root, VM4RELAY_REMOVED).exists():
         nat = _nat_rules(run)
         old = _vm4relay_live_state(nat, vm)[1] if nat is not None else 0
@@ -642,6 +682,9 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
     if nat is None:
         return "failed: cannot read the nat table (iptables -t nat -S)"
     entered, old = _vm4relay_live_state(nat, vm)
+    guarded = _guard_state(run)
+    if guarded is None:
+        return "failed: cannot read the filter table (iptables -S)"
     lines = _vm4relay_old_lines(root, vm)
     units_missing = [u for u in VM4RELAY_UNITS if not _under(root, u).exists()]
     why = []
@@ -651,6 +694,8 @@ def vm4relay_step(root: Path, *, run, script_changed: bool = False) -> str:
         why.append(f"/etc/network/interfaces still carries {lines} old DNAT post-up line(s)")
     if not entered:
         why.append(f"PREROUTING does not enter {VM4RELAY_CHAIN}")
+    if not guarded:
+        why.append("FORWARD to the VM's link is not guarded")
     if units_missing:
         why.append(f"{len(units_missing)} unit(s) missing")
     if script_changed:
@@ -679,8 +724,8 @@ def _apply_vm4relay(root: Path, run, changes: list) -> None:
         _say(f"  until it installs, the VM's ports keep their old IPv4 rules; retry: "
              f"SIGMOND_MGMT_VM=<VM address> {VM4RELAY} install")
     elif out == "current":
-        _say(f"  ipv4 relay: PREROUTING enters {VM4RELAY_CHAIN}, no unrestricted rule is live, "
-             f"and its units are present")
+        _say(f"  ipv4 relay: PREROUTING enters {VM4RELAY_CHAIN}, FORWARD to the VM's link is "
+             f"guarded, no unrestricted rule is live, and its units are present")
     else:
         _say(f"  ipv4 relay: {out}")
 
@@ -703,9 +748,12 @@ def _dry_run_vm4relay_note(root: Path, src: Sources) -> tuple:
     if not vm4relay_restricts(body):
         return (f"ipv4 relay: WARN - {VM4RELAY} has no {VM4RELAY_FILTER} line; "
                 f"--apply will not run it"), False
+    vm = _vm_from_interfaces(root)
+    if vm is None:
+        return f"ipv4 relay: WARN - {NO_VM_ADDRESS}; --apply will not run it", False
     missing = [u for u in VM4RELAY_UNITS if not _under(root, u).exists()]
     changed = carried is not None and on_host != carried
-    lines = _vm4relay_old_lines(root, _vm_from_interfaces(root))
+    lines = _vm4relay_old_lines(root, vm)
     if missing or changed or lines:
         extra = (f"; /etc/network/interfaces still carries {lines} old DNAT post-up line(s)"
                  if lines else "")

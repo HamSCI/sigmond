@@ -2171,13 +2171,33 @@ NAT_S = ("-P PREROUTING ACCEPT\n"
          "-A PREROUTING -p tcp -m tcp --dport 2222 -j DNAT --to-destination 10.99.0.2:22\n")
 
 
-def _vm6_run(calls, *, nat=NAT_S, install_rc=0, install_out="  :8000 -> ...\n"):
-    """A fake run: iptables answers with ``nat``; the relay's install exits
-    ``install_rc``.  Each call is recorded as (argv, env-or-None)."""
+# The filter table of a host whose FORWARD guard stands (v3.72 #24).
+FILT_GUARDED = ("-P FORWARD ACCEPT\n-N SIGMOND-VM4F\n"
+                "-A FORWARD -o vmbr1 -j SIGMOND-VM4F\n"
+                "-A SIGMOND-VM4F -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN\n"
+                "-A SIGMOND-VM4F -m conntrack --ctstate DNAT -j RETURN\n"
+                "-A SIGMOND-VM4F -j DROP\n")
+VMBR1_IFACES = "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.1/30\n"
+
+
+def _default_ifaces(root):
+    """The host-only link every current host has, unless a test wrote its own."""
+    p = root / "etc/network/interfaces"
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(VMBR1_IFACES)
+
+
+def _vm6_run(calls, *, nat=NAT_S, filt=FILT_GUARDED, install_rc=0, install_out="  :8000 -> ...\n"):
+    """A fake run: `iptables -t nat` answers with ``nat``, `iptables -S` with
+    ``filt``; the relay's install exits ``install_rc``.  Each call is
+    recorded as (argv, env-or-None)."""
     def run(argv, **kw):
         calls.append((list(argv), kw.get("env")))
         if argv[:2] == ["systemctl", "is-active"]:
             return subprocess.CompletedProcess(argv, 0, "active\n", "")
+        if argv == ["iptables", "-S"]:
+            return subprocess.CompletedProcess(argv, 0, filt, "")
         if argv[:1] == ["iptables"]:
             # `iptables -t nat -S [CHAIN]`: a chain name narrows the listing,
             # as the real command does.
@@ -2283,6 +2303,7 @@ def test_vm_dnat_target_reads_the_ipv4_relay_rule():
 
 
 def _host_with_relay_script(root):
+    _default_ifaces(root)
     p = root / VM6.lstrip("/")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(VM6_BODY)
@@ -2316,7 +2337,7 @@ def test_vm6proxy_step_skips_without_the_script(tmp_path):
 
 def test_vm6proxy_step_skips_without_a_private_link(tmp_path):
     _host_with_relay_script(tmp_path)
-    (tmp_path / "etc/network").mkdir(parents=True)
+    (tmp_path / "etc/network").mkdir(parents=True, exist_ok=True)
     (tmp_path / "etc/network/interfaces").write_text("auto vmbr0\niface vmbr0 inet dhcp\n")
     calls = []
     out = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"))
@@ -2332,6 +2353,7 @@ def test_vm6proxy_step_reports_a_failed_install(tmp_path):
 
 
 def _apply_vm6(tmp_path, monkeypatch, run):
+    _default_ifaces(tmp_path)
     monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
     monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
                         pm_align.Release("v3.72", "a" * 40, "d" * 40, "f" * 64, ""))
@@ -2372,8 +2394,8 @@ def test_dry_run_says_it_would_install_the_relay(tmp_path, monkeypatch, capsys):
     src = _src()
     src.vm6proxy = VM6_BODY.encode()
     monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
-    (tmp_path / "etc/network").mkdir(parents=True)
-    (tmp_path / "etc/network/interfaces").write_text("auto vmbr1\n")
+    (tmp_path / "etc/network").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "etc/network/interfaces").write_text(VMBR1_IFACES)
     calls = []
     for f in pm_align.desired_files(src, pm_align.host_vmid(tmp_path)):
         dest = pm_align._under(tmp_path, f.path)
@@ -2555,7 +2577,7 @@ def test_the_marker_must_be_the_exact_whole_line():
 # in either shape.
 
 VM4 = "/usr/local/sbin/sigmond-vm4relay"
-VM4_BODY = '#!/bin/bash\nVM4RELAY_FILTER=1\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
+VM4_BODY = '#!/bin/bash\nVM4RELAY_FILTER=2\nPORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"\n'
 _VM4_KEY = "sigmond-appliance/" + "a" * 40 + "/sigmond-vm4relay"
 NAT_CHAIN = ("-P PREROUTING ACCEPT\n-N SIGMOND-VM4\n"
              "-A PREROUTING -i vmbr0 -j SIGMOND-VM4\n"
@@ -2569,6 +2591,7 @@ def _vm4_installs(calls):
 
 
 def _host_vm4(root, body=VM4_BODY, units=True):
+    _default_ifaces(root)
     p = root / VM4.lstrip("/")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(body)
@@ -2613,7 +2636,8 @@ def test_fetch_sources_checks_the_ipv4_relay_against_the_manifest():
 
 def test_the_ipv4_relay_needs_its_exact_marker_line():
     assert pm_align.vm4relay_restricts(VM4_BODY)
-    for near in ("# VM4RELAY_FILTER=1\n", "VM4RELAY_FILTER=10\n", "VM4RELAY_FILTER=0\n", ""):
+    # =1 is #23's script, which has no FORWARD guard (v3.72 #24).
+    for near in ("# VM4RELAY_FILTER=2\n", "VM4RELAY_FILTER=20\n", "VM4RELAY_FILTER=1\n", ""):
         assert not pm_align.vm4relay_restricts("#!/bin/bash\n" + near), near
     src = _src()
     src.vm4relay = b"#!/bin/bash\n# no marker\n"
@@ -2662,13 +2686,13 @@ def test_vm4relay_step_refuses_a_script_without_the_marker(tmp_path):
     _host_vm4(tmp_path, body="#!/bin/bash\n# an older relay\n", units=False)
     calls = []
     out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_S))
-    assert out.startswith("refused") and "VM4RELAY_FILTER=1" in out
+    assert out.startswith("refused") and "VM4RELAY_FILTER=2" in out
     assert _vm4_installs(calls) == []
 
 
 def test_vm4relay_step_skips_without_a_private_link(tmp_path):
     _host_vm4(tmp_path, units=False)
-    (tmp_path / "etc/network").mkdir(parents=True)
+    (tmp_path / "etc/network").mkdir(parents=True, exist_ok=True)
     (tmp_path / "etc/network/interfaces").write_text("auto vmbr0\niface vmbr0 inet dhcp\n")
     calls = []
     out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat="-P PREROUTING ACCEPT\n"))
@@ -2677,6 +2701,7 @@ def test_vm4relay_step_skips_without_a_private_link(tmp_path):
 
 
 def _apply_vm4(tmp_path, monkeypatch, run):
+    _default_ifaces(tmp_path)
     monkeypatch.setattr(pm_align, "_geteuid", lambda: 0)
     monkeypatch.setattr(pm_align, "fetch_release", lambda tag=None, urlopen=None:
                         pm_align.Release("v3.72", "a" * 40, "d" * 40, "f" * 64, ""))
@@ -2708,8 +2733,8 @@ def test_dry_run_reports_the_ipv4_relay_and_runs_nothing(tmp_path, monkeypatch, 
     src = _src()
     src.vm4relay = VM4_BODY.encode()
     monkeypatch.setattr(pm_align, "fetch_sources", lambda rel, vmid, urlopen=None: src)
-    (tmp_path / "etc/network").mkdir(parents=True)
-    (tmp_path / "etc/network/interfaces").write_text("auto vmbr1\n")
+    (tmp_path / "etc/network").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "etc/network/interfaces").write_text(VMBR1_IFACES)
     for f in pm_align.desired_files(src, pm_align.host_vmid(tmp_path)):
         dest = pm_align._under(tmp_path, f.path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2897,3 +2922,92 @@ def test_a_removed_relay_with_old_rules_live_warns(tmp_path, monkeypatch, capsys
     rc = _apply_vm4(tmp_path, monkeypatch, _vm6_run([], nat=NAT_S))
     assert rc == 0
     assert "ipv4 relay: WARN" in capsys.readouterr().out
+
+
+# -- v3.72 #24: the FORWARD guard, and no guessed VM address -----------------
+
+def test_an_unguarded_forward_is_a_reason_to_install(tmp_path):
+    _host_vm4(tmp_path)
+    for filt in ("-P FORWARD ACCEPT\n",                                    # never installed
+                 "-P FORWARD ACCEPT\n-A FORWARD -o vmbr1 -j ACCEPT\n"     # displaced
+                 + FILT_GUARDED.split("-P FORWARD ACCEPT\n", 1)[1],
+                 FILT_GUARDED.replace("-A SIGMOND-VM4F -j DROP\n", ""),     # tampered
+                 FILT_GUARDED + "-A FORWARD -o vmbr1 -j SIGMOND-VM4F\n"):   # duplicated
+        calls = []
+        out = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN, filt=filt))
+        assert out.startswith("installed") and "not guarded" in out, (filt, out)
+        assert len(_vm4_installs(calls)) == 1
+
+
+def test_a_guarded_host_is_current(tmp_path):
+    _host_vm4(tmp_path)
+    calls = []
+    assert pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_CHAIN)) == "current"
+    assert _vm4_installs(calls) == []
+
+
+def test_an_unreadable_filter_table_fails_and_installs_nothing(tmp_path):
+    _host_vm4(tmp_path)
+    inner = _vm6_run([], nat=NAT_CHAIN)
+    calls = []
+    def run(argv, **kw):
+        calls.append(list(argv))
+        if argv == ["iptables", "-S"]:
+            return subprocess.CompletedProcess(argv, 4, "", "Permission denied\n")
+        return inner(argv, **kw)
+    out = pm_align.vm4relay_step(tmp_path, run=run)
+    assert out.startswith("failed") and "filter table" in out
+    assert [VM4, "install"] not in calls
+
+
+@pytest.mark.parametrize("ifaces", [
+    None,                                                                 # no file
+    "auto vmbr1\n",                                                       # no stanza
+    "auto vmbr1\niface vmbr1 inet static\n    bridge-ports none\n",      # no address
+    "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.1/24\n",   # not a /30
+    "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.2/30\n",   # host is not .1
+    "auto vmbr1\niface vmbr1 inet static\n    address 10.99.0.300/30\n", # not an address
+    # The address belongs to the NEXT stanza, not vmbr1's.
+    "auto vmbr1\niface vmbr1 inet static\n    bridge-ports none\n\n"
+    "auto vmbr2\niface vmbr2 inet static\n    address 10.77.0.1/30\n",
+])
+def test_both_relays_refuse_rather_than_guess_the_vm(tmp_path, ifaces):
+    d = tmp_path / "etc/network"
+    d.mkdir(parents=True)
+    if ifaces is not None:
+        (d / "interfaces").write_text(ifaces)
+        _host_vm4(tmp_path)
+        _host_with_relay_script(tmp_path)
+    else:
+        # No interfaces file at all (_no_private_link reads that as "has one").
+        for path, body in ((VM4, VM4_BODY), (VM6, VM6_BODY)):
+            p = tmp_path / path.lstrip("/")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body)
+    calls = []
+    out4 = pm_align.vm4relay_step(tmp_path, run=_vm6_run(calls, nat=NAT_S))
+    out6 = pm_align.vm6proxy_step(tmp_path, run=_vm6_run(calls, nat=NAT_S))
+    assert out4.startswith("refused") and "VM's address" in out4, out4
+    assert out6.startswith("refused") and "VM's address" in out6, out6
+    assert _vm4_installs(calls) == [] and _vm6_installs(calls) == []
+    assert pm_align._vm_from_interfaces(tmp_path) is None
+
+
+def test_the_vm_address_follows_the_30(tmp_path):
+    d = tmp_path / "etc/network"
+    d.mkdir(parents=True)
+    (d / "interfaces").write_text("auto vmbr0\niface vmbr0 inet dhcp\n\n"
+                                  "auto vmbr1\niface vmbr1 inet static\n    address 172.31.4.9/30\n"
+                                  "    bridge-ports none\n")
+    assert pm_align._vm_from_interfaces(tmp_path) == "172.31.4.10"
+
+
+def test_the_real_ipv4_relay_has_the_guard_pm_align_checks():
+    real = REPO.parent / "sigmond-appliance" / "sigmond-vm4relay"
+    if not real.exists():
+        pytest.skip("no sigmond-appliance checkout beside this one")
+    text = real.read_text()
+    assert 'FJUMP="-A FORWARD -o vmbr1 -j $FCHAIN"' in text and "FCHAIN=SIGMOND-VM4F" in text
+    for rule in pm_align.VM4RELAY_GUARD:
+        body = rule.replace("-A SIGMOND-VM4F ", "")
+        assert f"'-A %s {body}\\n' \"$FCHAIN\"" in text, rule
