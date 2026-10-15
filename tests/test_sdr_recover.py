@@ -1,7 +1,8 @@
-"""Tests for sigmond-sdr-recover — RX888 power-cycle recovery.
+"""Tests for sigmond-sdr-recover — RX888 port-reset recovery.
 
-The RX-888 recurrently drops off the USB bus and only a power cycle of the
-card recovers it.  This helper cuts and restores VBUS on the hub port, then
+The RX-888 recurrently drops off the USB bus, or stays on it wedged, and a
+reset of its hub port recovers it.  This helper switches the port off and on
+(a port reset; whether the hub also drops VBUS is unverified), then
 brings the station back in the one order that works: radiod first, then the
 units that consume its RTP streams.
 
@@ -711,7 +712,7 @@ class EpisodeAndQuietTests(unittest.TestCase):
             "_with_lifecycle_lock": contextlib.nullcontext,
             "_log": self.log.append,
             "note_event": lambda kind, detail: self.events.append((kind, detail)),
-            "radiod_is_wedged": lambda unit, state, now: False,
+            "radiod_is_wedged": lambda unit, state, now, **k: False,
             "locate_rx888": lambda *a, **k: sdr.Located(
                 "1-1.2", "1-1", "2", "S", "5000", product="00f1"),
             "kernel_latch_errors": lambda since, prefixes=None: [],
@@ -1063,7 +1064,7 @@ def test_streaming_with_a_nonzero_xfer_counter_is_not_a_wedge(monkeypatch):
     assert reason and "stall" in reason
 
 
-class PortResetLoopTests(unittest.TestCase):
+class PortResetHarness(unittest.TestCase):
     """The watchdog's loop with the new inputs injected."""
 
     CFG = {"recover_hub": "1-1", "recover_port": "2",
@@ -1091,7 +1092,7 @@ class PortResetLoopTests(unittest.TestCase):
             "_with_lifecycle_lock": contextlib.nullcontext,
             "_log": self.log.append,
             "note_event": lambda kind, detail: self.events.append((kind, detail)),
-            "radiod_is_wedged": lambda unit, state, now:
+            "radiod_is_wedged": lambda unit, state, now, **k:
                 ("3 stall lines and a restart" if self.wedged else ""),
             "sample_nrestarts": lambda unit, state, now: 0,
             "locate_rx888": lambda *a, **k: self.card if self.present else None,
@@ -1125,6 +1126,8 @@ class PortResetLoopTests(unittest.TestCase):
     def holding(self):
         return [m for m in self.log if m.startswith("holding:")]
 
+
+class PortResetLoopTests(PortResetHarness):
     def test_a_wedged_card_gets_one_reset_and_is_rate_limited(self):
         self.tick()
         self.assertEqual(len(self.cycles), 1)
@@ -1236,3 +1239,95 @@ class PortResetLoopTests(unittest.TestCase):
         self.assertIn("switching unverified", sdr.port_claim({}))
         self.assertIn("verified", sdr.port_claim({"recover_port_verified": True}))
         self.assertNotIn("unverified", sdr.port_claim({"recover_port_verified": True}))
+
+
+# ─── fix round 2: B4's real cold-boot latch signature, bounded window ────────
+
+B4_LATCH_JOURNAL = "\n".join(
+    ["rx888_usb_init() failed",
+     "device setup returned -5",
+     "radiod@AC0G-B4.service: Main process exited, code=exited, status=66/NOINPUT",
+     "radiod@AC0G-B4.service: Failed with result 'exit-code'."] * 6)
+
+
+def test_b4_latch_lines_count_as_stall_and_restart_evidence(monkeypatch):
+    mod = _load()
+    monkeypatch.setattr(mod, "_run", lambda cmd, timeout=60: _CP(stdout=B4_LATCH_JOURNAL))
+    stall, exits = mod.radiod_wedge_signals("radiod@AC0G-B4.service", 1_760_000_000.0)
+    assert stall >= mod.WEDGE_MIN_HITS and exits >= 1
+    assert mod.is_wedged(stall, exits, 0)
+
+
+def test_a_usb2_card_with_radiod_failing_init_is_wedged_on_one_line():
+    assert not sdr.is_wedged(1, 1, 0)
+    assert sdr.is_wedged(1, 1, 0, usb2=True)
+
+
+def test_the_wedge_window_starts_after_the_last_reset_and_the_card_return(monkeypatch):
+    mod = _load()
+    monkeypatch.setattr(mod.sdr_events, "uptime_s", lambda: 99999.0)
+    argvs = []
+
+    def fake(cmd, timeout=60):
+        argvs.append(list(cmd))
+        return _CP(stdout="7\n" if cmd[0] == "systemctl" else "")
+    monkeypatch.setattr(mod, "_run", fake)
+    now = 1_760_001_000.0
+    since = lambda: [a for a in argvs if a[0] == "journalctl"][-1][
+        [a for a in argvs if a[0] == "journalctl"][-1].index("--since") + 1]
+    mod.radiod_is_wedged("radiod@x.service", {}, now)
+    assert since() == "@%d" % (now - mod.WEDGE_WINDOW_S)
+    mod.radiod_is_wedged("radiod@x.service", {"last_cycle_at": now - 100}, now)
+    assert since() == "@%d" % (now - 100)
+    mod.radiod_is_wedged("radiod@x.service",
+                         {"last_cycle_at": now - 100, "card_return_at": now - 40}, now)
+    assert since() == "@%d" % (now - 40)
+
+
+class B4ColdBootTimelineTests(PortResetHarness):
+    """B4 2026-10-14: card latched on the USB2 half, radiod failing init
+    every 10 s with these exact lines.  One reset, one latched alarm, silence."""
+
+    def setUp(self):
+        super().setUp()
+        sdr.radiod_is_wedged = self._saved["radiod_is_wedged"]   # the real detector
+        sdr.sample_nrestarts = self._saved["sample_nrestarts"]
+        self._more = {}
+        for name, value in {
+            "_run": lambda cmd, timeout=60: _CP(
+                stdout=B4_LATCH_JOURNAL if cmd[0] == "journalctl" else "3\n"),
+        }.items():
+            self._more[name] = getattr(sdr, name)
+            setattr(sdr, name, value)
+        self._uptime = sdr.sdr_events.uptime_s
+        sdr.sdr_events.uptime_s = lambda: 99999.0
+        self.card = sdr.Located("1-1.2", "1-1", "2", "S", "480", product="00f1")
+        self.kernel = ["usb 1-1.2: can't set config #1, error -110"]
+
+    def tearDown(self):
+        for name, value in self._more.items():
+            setattr(sdr, name, value)
+        sdr.sdr_events.uptime_s = self._uptime
+        super().tearDown()
+
+    def test_one_reset_one_alarm_then_silence(self):
+        for _ in range(12):
+            self.tick()
+        self.assertEqual(len(self.cycles), 1)
+        self.assertEqual(self.kinds(), ["port-reset", "needs-replug"])
+        quiet = len(self.log)
+        for _ in range(10):
+            self.t += 600
+            self.tick()
+        self.assertEqual(len(self.log), quiet, self.log[quiet:])
+        self.assertEqual(len(self.cycles), 1)
+
+    def test_a_hand_replug_stamps_the_card_return(self):
+        self.card = sdr.Located("1-1.2", "1-1", "2", "S", "5000", product="00f1", devnum="7")
+        self.wedged = False
+        self.tick()
+        self.card = sdr.Located("1-1.2", "1-1", "2", "S", "5000", product="00f1", devnum="9")
+        self.tick()
+        st = json.loads((self.tmp / "sdr-recover.json").read_text())
+        self.assertEqual(st["devnum"], "9")
+        self.assertIn("card_return_at", st)

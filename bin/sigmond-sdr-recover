@@ -113,9 +113,13 @@ NRESTART_SAMPLE_MAX_AGE_S = 90
 # routine counter and must not match, so the count must be non-zero.  Stall
 # lines alone are not a wedge (a streaming radiod can show a non-zero
 # counter): they need restart evidence beside them.
-STALL_RE = re.compile(r"No rx888 data for|USB xfer failures \+[1-9]")
+#
+# B4's cold-boot latch (2026-10-14, 557 cycles in 1.5 h) shows none of the
+# stream-stall words: radiod fails at init, exits 66, systemd restarts it.
+STALL_RE = re.compile(r"No rx888 data for|USB xfer failures \+[1-9]|"
+                      r"rx888_usb_init\(\) failed|device setup returned -\d+")
 EXIT_RE = re.compile(r"status=6/ABRT|signal=ABRT|Aborted \(core dumped\)|"
-                     r"Scheduled restart job")
+                     r"status=66/NOINPUT|Scheduled restart job")
 # What the kernel says of the cold-start latch.
 LATCH_RE = re.compile(r"error -(71|110)\b")
 SUPERSPEED_MBPS = 5000
@@ -146,6 +150,7 @@ class Located:
     peer_hub: Optional[str] = None
     peer_port: Optional[str] = None
     product: str = ""       # idProduct: "00f1" running, "00f3" FX3 bootloader
+    devnum: str = ""        # changes on every re-enumeration (a hand replug)
 
 
 def split_devpath(devpath: str) -> Optional[Tuple[str, str]]:
@@ -232,7 +237,7 @@ def locate_rx888(root: Path = SYSFS_USB) -> Optional[Located]:
         peer = peer_of(dev.name, root) or (None, None)
         return Located(dev.name, hp[0], hp[1], _read(dev / "serial"),
                        _read(dev / "speed"), peer[0], peer[1],
-                       vid_pid.split(":")[1])
+                       vid_pid.split(":")[1], _read(dev / "devnum"))
     return None
 
 
@@ -381,11 +386,13 @@ def classify_return(card: Optional[Located],
     return "recovered", "00f1 on a SuperSpeed path"
 
 
-def radiod_wedge_signals(unit: str, now: float) -> Tuple[int, int]:
-    """(stall lines, restart/abort lines) in radiod's journal, last
-    WEDGE_WINDOW_S."""
+def radiod_wedge_signals(unit: str, now: float,
+                         since: Optional[float] = None) -> Tuple[int, int]:
+    """(stall lines, restart/abort lines) in radiod's journal from ``since``
+    (default: the last WEDGE_WINDOW_S)."""
+    start = now - WEDGE_WINDOW_S if since is None else since
     r = _run(["journalctl", "-u", unit, "--no-pager", "-o", "cat",
-              "--since", f"@{int(now - WEDGE_WINDOW_S)}"], timeout=30)
+              "--since", f"@{int(start)}"], timeout=30)
     lines = (r.stdout or "").splitlines()
     return (sum(1 for l in lines if STALL_RE.search(l)),
             sum(1 for l in lines if EXIT_RE.search(l)))
@@ -407,24 +414,33 @@ def sample_nrestarts(unit: str, state: dict, now: float) -> int:
     return 0
 
 
-def is_wedged(stall_hits: int, exit_hits: int, restarts_delta: int) -> bool:
+def is_wedged(stall_hits: int, exit_hits: int, restarts_delta: int,
+              usb2: bool = False) -> bool:
     """radiod restart-looping WITH USB stall lines: enough stall lines AND
     evidence of restarts (an abort/restart line, or NRestarts growing).
     Neither alone is a wedge."""
-    return stall_hits >= WEDGE_MIN_HITS and (exit_hits >= 1 or restarts_delta >= 1)
+    need = 1 if usb2 else WEDGE_MIN_HITS     # a card below SuperSpeed needs one
+    return stall_hits >= need and (exit_hits >= 1 or restarts_delta >= 1)
 
 
-def radiod_is_wedged(unit: Optional[str], state: dict, now: float) -> str:
+def radiod_is_wedged(unit: Optional[str], state: dict, now: float,
+                     card: Optional[Located] = None) -> str:
     """"" or the trigger, in words.  A radiod that fails inside the boot
-    grace is the known RX888 firmware race, not a wedge."""
+    grace is the known RX888 firmware race, not a wedge.  The journal is read
+    from the latest of: 10 minutes ago, the last reset, the card's last
+    return -- lines from before those cannot re-trigger or delay a clear."""
     if not unit:
         return ""
     up = sdr_events.uptime_s()
     if up is not None and up < sdr_events.BOOT_GRACE_S:
         return ""
     delta = sample_nrestarts(unit, state, now)
-    stall, exits = radiod_wedge_signals(unit, now)
-    if not is_wedged(stall, exits, delta):
+    floor = max(now - WEDGE_WINDOW_S, float(state.get("last_cycle_at") or 0),
+                float(state.get("card_return_at") or 0))
+    stall, exits = radiod_wedge_signals(unit, now, since=floor)
+    usb2 = bool(card is not None and card.speed.isdigit()
+                and int(card.speed) < SUPERSPEED_MBPS)
+    if not is_wedged(stall, exits, delta, usb2=usb2):
         return ""
     return (f"{stall} USB stall lines in {WEDGE_WINDOW_S // 60} min with "
             f"{exits} abort/restart lines and NRestarts +{delta}")
@@ -885,8 +901,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "window, no cooldown) and wait for it. Exit 0 only if "
                          "the card ends up present.")
     ap.add_argument("--probe", action="store_true",
-                    help="locate the RX-888, verify its hub port switches "
-                         "hub-port switching, report, and exit (changes only the state file)")
+                    help="locate the RX-888, check whether its hub port can be "
+                         "switched, report, and exit (changes only the state file)")
     args = ap.parse_args(argv)
 
     cfg = read_config()
@@ -1013,6 +1029,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if present:
         if state.get("absent_since"):
             _log("device returned to the bus")
+            state["card_return_at"] = now
             state.pop("said", None)     # re-arm "holding" for the next absence
         state["absent_since"] = None
     elif not state.get("absent_since"):
@@ -1037,10 +1054,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # v3.72 #3: a card that is present but wedged, and the latch brake.
     card_now = locate_rx888() if present else None
+    if card_now is not None and card_now.devnum:
+        if state.get("devnum") and state["devnum"] != card_now.devnum:
+            state["card_return_at"] = now       # it re-enumerated: a replug or a reset
+        state["devnum"] = card_now.devnum
     if not present and radiod_unit:
         sample_nrestarts(radiod_unit, state, now)   # keep the delta fresh
     wedged = (not args.ensure_present and present
-              and radiod_is_wedged(radiod_unit, state, now))
+              and radiod_is_wedged(radiod_unit, state, now, card=card_now))
     if not args.ensure_present:
         if state.get("latched"):
             healthy = classify_return(card_now, [])[0] == "recovered" if card_now else False
@@ -1085,7 +1106,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # had already vanished by the time the system came up, so there was never a
     # moment with the card present in which to re-learn -- and the helper then
     # dutifully reset the USB2 hub's port 4, which was EMPTY, once per
-    # attempt, while the card sat unpowered-at on the SuperSpeed half.  rob
+    # attempt, while the card sat on the SuperSpeed half.  rob
     # replugged the cable by hand and it came straight back at 5 Gbps.
     #
     # So when the card is ABSENT, never trust the learned path alone.  Union it
@@ -1128,6 +1149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not cycle_port(targets, args.off_seconds):
         return 1
     t_on = time.time()      # the port is back ON: only the kernel's words after this count
+    state["card_return_at"] = t_on
     if not wait_for_device():
         _raise_replug_alarm(state, now, "the card never returned to the bus "
                             "after the port reset")
