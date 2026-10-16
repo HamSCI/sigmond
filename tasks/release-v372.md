@@ -1,6 +1,6 @@
 # v3.72 — what this release carries
 
-**Status:** open, 2026-10-14.  Michael decided on 2026-10-14 that v3.72 carries the small field fixes
+**Status:** BLESSED 2026-10-15 23:42:38Z (GitHub release v3.72, appliance 51797f2).  Opened 2026-10-14.  Michael decided on 2026-10-14 that v3.72 carries the small field fixes
 gathered on 10-13 and 10-14, and that the send-record key split (sink control step 2a-ii) moves to
 v3.73 (`plan-sink-control.md` D16).  Each item below gets a short design in chat, or a spec and a plan
 when it grows past one flow, before code lands.  Update the Status column as items land.
@@ -41,3 +41,18 @@ Built 2026-10-15: `sigmond-appliance-v3.72-20261015-release.img`, sha256 2f5e3f1
 Not in v3.72 (Michael 10-15: ship as built): Rob's e2488f2, which narrows netfix's de-fossilize to an IPv4 address on a vmbr0 that carries the default route.  Without it an IPv6-only or Wi-Fi-uplink station (DASI sites run cable-free) can still stall boot about 5 minutes, as v3.71 did.  Moves to v3.73.
 
 Moved out: the per-client sink switch (step 2a-ii, the key split) to v3.73; step 2b to v3.74.
+
+Blessed 2026-10-15 23:42:38Z.  Michael typed the confirmation at a terminal; the GitHub release
+carries the manifest and the sha256.  The bless put INSTALL.md and the HTML guide beside the image
+on all three targets (both Drives and wd30), and the shared install page now shows v3.72.  Evidence
+behind it:
+- Nested test PHASE D PASS, 12:58:53Z.
+- Update test PASS, 15:10:29Z, a fresh full run.  It rolled the v3.71 image forward to fee4f30 and
+  back.  Two harness defects came first: E-ter assumed the base install left remote access off
+  (fixed in appliance ff573df), and a push during a run moved the test's target.
+- Ruling on the update test's one new doctor finding, `radiod-dropins-missing` after the rollback:
+  a sanctioned difference, not a v3.72 fault.  Restoring the manifest does not re-run install.sh,
+  so v3.72's consumers unit stays installed.  The run set `U2_ALLOW_NEW_KINDS=radiod-dropins-missing`.
+  Making a restore reinstall its units stays a v3.73 candidate.
+- AC0G-B4, reflashed with the image: #24 proven, sigmond-check passes except the magnetometer (the
+  RM3100 NACKs; hands needed).  AI6VN: a clean install, per Rob (bus 20261015T140658Z).
