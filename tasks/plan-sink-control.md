@@ -27,7 +27,7 @@ v3.72.
 **2026-10-14.**  The numbers move once more (D16).  v3.72 carries small field fixes gathered on
 10-13 and 10-14, so step 2a-ii ships in v3.73 and step 2b in v3.74.  Where this document says
 v3.72 for the key split, read v3.73; where it says v3.73 for step 2b, read v3.74.  The research map
-`.superpowers/research/v372-key-split-map.md` keeps its name; its six questions for a person
+`tasks/research-key-split-v373.md` (copied 10-16 from the git-excluded `.superpowers/research/v372-key-split-map.md`); its six questions for a person
 remain open.
 
 ## 1. Why
