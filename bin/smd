@@ -13404,6 +13404,10 @@ def cmd_status(args) -> int:
                     if tag:
                         parts.append(tag)
                 _info(f'{name}: {", ".join(parts)}' if parts else name)
+                if entry.name == 'meteor-scatter':
+                    from sigmond.msqp_view import msqp_lines
+                    for _lvl, _txt in msqp_lines(inst):
+                        (_warn if _lvl == 'warn' else _info)(f'  {_txt}')
             for issue in issues:
                 sev = issue.get('severity', 'warn') if isinstance(issue, dict) else 'warn'
                 msg = issue.get('message', str(issue)) if isinstance(issue, dict) else str(issue)
