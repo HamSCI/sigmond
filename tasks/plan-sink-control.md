@@ -107,6 +107,7 @@ right callsign and location.
 | D14.  sigmond keeps a bundled copy of the sink writer for venvs that carry no hs-uploader (codar-sounder, hf-tec, superdarn-sounder); its compatibility import prefers hs-uploader's writer (§6.1) | Michael | 2026-10-07 |
 | D15.  v3.70 fixes the retry requeue that drops a queued retry's key, send record and commit token after its first failed replay (`hs-uploader/src/hs_uploader/core.py:585-594`), because the key migration depends on queued retries keeping their keys (§10.4) | Michael | 2026-10-07 |
 | D16.  v3.72 ships the small field fixes from 10-13/14 first; the key split (2a-ii) moves to v3.73 and step 2b to v3.74.  The six open questions of the key-split map get settled alongside | Michael | 2026-10-14 |
+| D17.  The key-split map's six questions, settled (evidence: `tasks/research-key-split-answers-v373.md`).  (1) Every reachable station, B4 included, runs one receiver per client; the B4 caution in §10.3 item 4 no longer applies.  The key form leaves room for an instance; v3.73 builds nothing for one.  (2) No client repository changes for the split: sigmond's `collect_pipelines` rewrites the shared `psk-pskreporter` block into `psk-recorder-pskreporter` (FT8, FT4) and `meteor-scatter-pskreporter` (MSK144), and hs-uploader keeps the old key for a sender that names no producer.  (3) sigmond carries D13's fact at render time: it reads each client's env files with that client's own rule and leaves out the daemon pipeline for that producer and that destination only; harmonize warns on drift; in doubt it renders the daemon pipeline.  (4) The manifest step checks that the installed hs-uploader can form the new keys, renders to a side file, stops the daemon, migrates, and only then moves the manifest into place and starts it; the daemon reads the store's version at start and refuses only the pipelines that need a newer store.  (5) The migration dissolves a queued `psk-pskreporter` retry: it copies the old key's position to both new keys and deletes the retry, so each pipeline re-reads its own rows; if the sink no longer holds the retry's first row, the retry goes whole to `psk-recorder-pskreporter`.  Retries on untouched keys and dead letters stay.  (6) The forward-only rule allows an equal write as a refresh of `last_ack`, refuses only a backward write, and on a failed comparison writes and warns; the read and the write share one `BEGIN IMMEDIATE` transaction | Michael | 2026-10-19 |
 
 ### 2.1 Terms
 
@@ -1084,8 +1085,9 @@ sending a day more than once (D7).  The earlier v3.69 list moves to v3.70.
    `deposit`.  Their rows then carry `forward_to_pskreporter` false, and the daemon's pskreporter
    pipeline posts them under the site sink switch, so `smd sink upload` needs to re-arm nothing.
    The daemon posts every row under the station's single identity, which fits a station with one
-   receiver per client.  A host that runs several psk-recorder instances, as B4 does, keeps its
-   present settings until step 4 of §10.2, and nobody re-runs bring-up there until then.
+   receiver per client.  A host that runs several psk-recorder instances would keep its present
+   settings until step 4 of §10.2.  (B4 ran several when this was written; since its 10-15 reflash it
+   runs one per client, on `server-raw`, D17.)
    `sigmond-setup --reconfigure` counts as a re-run: on a station whose VM sees its RX888, the
    wizard clears the first-run marker and starts bring-up again, which re-runs
    `smd config upload psk-recorder … --via server-raw` and so moves an existing station's
