@@ -1,7 +1,8 @@
 # spec: the send-record key split (sink control step 2a-ii), v3.73
 
-**Status:** draft for Michael's review, 2026-10-19; revised the same day after an adversarial
-review (1 blocker, 9 should-fix, 9 notes, all taken; §11 lists where each landed).  Implements
+**Status:** draft for Michael's review, 2026-10-19.  Michael's 10-19 answers to the six questions
+are in: instances per radiod stay open (§3.3), meteor-scatter will grow destinations (§9).  Revised
+the same day after an adversarial review (1 blocker, 9 should-fix, 9 notes, all taken; §11 lists where each landed).  Implements
 `release-v373.md` row 1 under `plan-sink-control.md` D9, D10, D13, D16 and D17.  Evidence:
 `research-key-split-v373.md` (the map, 10-10) and `research-key-split-answers-v373.md` (the six
 answers, 10-19).  Step 2b follows in v3.74; §9 lists what it inherits.
@@ -27,6 +28,10 @@ Read on 10-19 at B4, ND, K3LR, UACNJ and W2NAF:
 AI6VN and DASI-002 refused the connection.  The spec keeps one guard (§5.3) for a station still
 configured the old way, and builds nothing else that only such a station would need.
 
+One receiver per client is today's fleet, not a limit.  A client may run one instance per radiod
+(`radiod@<id>`), so that one reception can be studied from more than one antenna, and that option
+stays open (Michael, 10-19; §3.3).
+
 ## 3. Keys
 
 ### 3.1 The rule
@@ -38,9 +43,9 @@ source, destination and table (`watermark/sqlite.py:34-42`).  Only the source pa
 |---|---|---|
 | SqliteSource, no producer | `sqlite:<db>.<table>` | today's form, unchanged |
 | SqliteSource with `producer = P` | `sqlite:<db>.<table>@P` | from v3.73 |
-| reserved, not built | `sqlite:<db>.<table>@P/<instance>` | per-instance pipelines, someday |
+| SqliteSource with `producer = P`, `radiod_id = R` | `sqlite:<db>.<table>@P/R` | grammar and source from v3.73; rendered when step 2b decides (§3.3) |
 
-### 3.2 What changes in v3.73
+### 3.2 What changes in v3.73 (the producer split)
 
 | Pipeline today | Source part today | Pipelines from v3.73 | Source parts from v3.73 |
 |---|---|---|---|
@@ -51,6 +56,24 @@ Destination and table stay.  Nothing else moves: not wsprnet, not the wsprdaemon
 not the magnetometer, not the heartbeat.  Their rows do not change owner in v3.73.  Leaving them
 alone also spares the readers that match keys by text (map J10): hamsci-physics' GRAPE spool trim
 and the heartbeat's backlog report.
+
+### 3.3 Instances stay open
+
+A client instance reads one radiod, and every psk and MSK144 row already names it in its payload's
+`radiod_id` field (psk-recorder `ch_tailer.py:460`; meteor-scatter `ch_tailer.py:162`).  So v3.73:
+
+- gives `SqliteSource` a `radiod_id` parameter beside `producer`, which filters on
+  `json_extract(payload_json, '$.radiod_id')` and appends `/R` to the key's source part;
+- tests that key form and filter, and that two instance pipelines of one producer neither overlap
+  nor miss a row;
+- keeps rendering one pipeline per producer, covering all its instances, as the daemon does today.
+
+Rendering one pipeline per instance waits for step 2b's design, which must also settle the identity
+each instance posts under (a pskreporter receiver callsign per antenna, or one for the station).
+Moving from a producer key to instance keys then reuses this release's machinery: a migration
+copies the producer record to each instance key and records it in `superseded_keys`.
+
+### 3.4 Later key changes
 
 The wsprdaemon tar's key changes in step 3, when `include_psk = false` removes psk rows from it.
 That step owns its own migration; this spec fixes only the grammar it will use.
@@ -259,6 +282,8 @@ proved it.
 5. **An old store refuses only producer pipelines**, and `pipeline_state` records why.
 6. **Forward-only**: each row of §4.6's table, two processes racing one key, and the GRAPE spool.
 7. **`commit()` with a producer deletes only its producer's rows.**
+7a. **Instances**: two `radiod_id` sources of one producer select disjoint rows whose union equals the
+    producer source's rows, and each forms `sqlite:psk.spots@<producer>/<radiod_id>`.
 8. **The renderer**: both clients, each alone, each probe answer of §5.1, and every D13 case,
    including an unreadable environment and a variable set only in `coordination.env`.
 9. **Rollback and second update**, on the update rig.
@@ -278,12 +303,13 @@ proved it.
 | a new pipeline starting at its producer's first stored row | the producer filter in the `start_at` anchor | change the default |
 | the store check | at daemon start | run it at each pipeline rebuild too, since client-installed files bypass §5.2's ordering |
 | cleanup inside the daemon | `superseded_keys` | skip superseded keys, or a frozen key blocks psk cleanup for good |
-| later key splits (step 3's wsprdaemon tar) | the key grammar, migration machinery and `superseded_keys` | its own migration |
+| later key splits (step 3's wsprdaemon tar; per-instance pipelines) | the key grammar with its instance slot, the `radiod_id` filter, migration machinery and `superseded_keys` | its own migration; per-instance rendering and the identity each instance posts under |
+| clients with several destinations: meteor-scatter's MSQP recordings to Zenodo today, perhaps I/Q with Digital RF sidecars later | pipeline names of the form `<client>-<destination>` and `Pipeline.client` | pipeline files that let one client declare several destinations, and a decision on whether the Zenodo upload moves under hs-uploader and the sink switch |
 | the index on `(target_db, target_table, producer, id)` | nothing | add it with cleanup |
 
 ## 10. Out of scope
 
-Per-instance pipelines; any key other than the pskreporter pair; client repository changes; the
+Rendering per-instance pipelines (§3.3); any key other than the pskreporter pair; client repository changes; the
 sink switch files, `effective_state()` and `may_send` (step 2b); the wsprdaemon tar split (step 3);
 retiring in-process senders (step 4); the wd30 fleetboard's reading of the superseded mark.
 
