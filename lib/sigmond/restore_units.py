@@ -28,21 +28,27 @@ from typing import Callable, Optional
 UNIT_SUFFIXES = ('.service', '.timer', '.socket', '.path', '.target')
 
 
-def _dest_for(path: str, dest_map: dict, systemd_dir: Path) -> Optional[Path]:
+def _dests_for(path: str, dest_map: dict, systemd_dir: Path,
+               dropin_homes) -> list:
     if not path.startswith('systemd/') or path.count('/') != 1:
-        return None
+        return []
     name = path.split('/', 1)[1]
     if name in dest_map:
-        return systemd_dir / dest_map[name]
+        return [systemd_dir / dest_map[name]]
     if name.endswith(UNIT_SUFFIXES):
-        return systemd_dir / name
-    return None
+        return [systemd_dir / name]
+    if name.endswith('.conf') and dropin_homes is not None:
+        # A drop-in install.sh copied under its own name into some unit's
+        # .d directory; the byte check below decides which copy is ours.
+        return list(dropin_homes(name))
+    return []
 
 
 def plan_retire(removed: list, *,
                 read_newer: Callable[[str], Optional[bytes]],
                 read_installed: Callable[[Path], Optional[bytes]],
-                dest_map: dict, systemd_dir: Path):
+                dest_map: dict, systemd_dir: Path,
+                dropin_homes: Optional[Callable[[str], list]] = None):
     """Return ``(retire, kept)``.
 
     ``retire`` lists the installed paths to disable and remove.  ``kept``
@@ -53,21 +59,21 @@ def plan_retire(removed: list, *,
     returns the installed bytes, or None when nothing sits there.
     ``dest_map`` maps a systemd/ basename to its path below
     ``systemd_dir`` for a file install.sh renames (radiod's drop-ins).
+    ``dropin_homes(name)`` lists the installed paths named ``name`` in any
+    unit's .d directory, for a .conf no map names.
     """
     retire, kept = [], []
     for path in removed:
-        dest = _dest_for(path, dest_map, systemd_dir)
-        if dest is None:
-            continue
-        have = read_installed(dest)
-        if have is None:
-            continue
-        shipped = read_newer(path)
-        if shipped is None:
-            kept.append((dest, f'cannot read {path} at the newer commit'))
-        elif have == shipped:
-            retire.append(dest)
-        else:
-            kept.append((dest, f'differs from the {path} the newer release '
-                               f'shipped (edited since install?)'))
+        for dest in _dests_for(path, dest_map, systemd_dir, dropin_homes):
+            have = read_installed(dest)
+            if have is None:
+                continue
+            shipped = read_newer(path)
+            if shipped is None:
+                kept.append((dest, f'cannot read {path} at the newer commit'))
+            elif have == shipped:
+                retire.append(dest)
+            else:
+                kept.append((dest, f'differs from the {path} the newer '
+                                   f'release shipped (edited since install?)'))
     return retire, kept

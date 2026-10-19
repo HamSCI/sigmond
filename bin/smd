@@ -4445,31 +4445,67 @@ def _restore_rerender_uploader(base) -> int:
 _RESTORE_SYSTEMD_DIR = Path('/etc/systemd/system')
 
 
-def _restore_retire_units(d, name, from_sha, to_sha) -> bool:
+# A unit of these kinds only waits for an event; stopping it stops nothing
+# else, so a retired one gets `disable --now`.  A service or a target gets
+# `disable` alone: stopping it could take down a unit that Requires it,
+# radiod among them.
+_RESTORE_STOP_SUFFIXES = ('.timer', '.socket', '.path')
+
+
+def _restore_unit_instances(template: str, systemd_dir: Path) -> list:
+    """Instances of a template unit `foo@.timer` that this host enables or
+    has loaded: links named `foo@*.timer` in any `*.wants`, `*.requires` or
+    `*.upholds` directory, plus what `systemctl list-units --all` shows."""
+    import fnmatch
+    prefix, suffix = template.split('@.', 1)
+    pattern = f'{prefix}@*.{suffix}'
+    found = set()
+    try:
+        for dep in systemd_dir.iterdir():
+            if dep.is_dir() and dep.name.endswith(('.wants', '.requires', '.upholds')):
+                found.update(p.name for p in dep.glob(pattern))
+    except OSError:
+        pass
+    r = subprocess.run(['systemctl', 'list-units', '--all', '--no-legend',
+                        '--plain', pattern], capture_output=True, text=True)
+    for line in (r.stdout or '').splitlines():
+        unit = line.split()[0] if line.split() else ''
+        if fnmatch.fnmatch(unit, pattern) and unit != template:
+            found.add(unit)
+    return sorted(found)
+
+
+def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
     """Disable and remove the unit files that the commit a restore left
     (`from_sha`, the newer) ships and the commit it reached (`to_sha`, the
     older) does not (release v3.73 row 4).  `sigmond.restore_units`
     decides which: only a file whose installed bytes equal the newer
-    commit's bytes.  A timer gets `disable --now`, which stops the timer
-    alone.  A service gets `disable` and keeps running until its next stop,
-    since stopping it could take down a unit that Requires it, radiod
-    among them.  A drop-in only goes away; the daemon-reload the caller
-    runs once applies that, and radiod picks it up at its next start.
-    Returns True when it removed anything.
+    commit's bytes.  A timer, socket or path unit gets `disable --now`.  A
+    service gets `disable` and keeps running until its next stop
+    (_RESTORE_STOP_SUFFIXES).  A template's enabled or loaded instances get
+    the same treatment, each named.  A drop-in only goes away; the
+    daemon-reload the caller runs once applies that, and radiod picks it up
+    at its next start.  An operator's `<unit>.d` directory stays, named.
+
+    Returns (removed_any, ok).  ``ok`` is False when git could not list
+    the files or a retired file could not be removed: the units then do not
+    stand as the older release installs them, and restore exits 1.
     """
     from sigmond.restore_units import plan_retire
 
+    # --no-renames: a unit the newer commit renamed must count as retired
+    # under its new name, not as a rename git hides from --diff-filter=D.
     r = subprocess.run(
         ['git', '--no-optional-locks', '-C', str(d), 'diff', '--name-only',
-         '--diff-filter=D', from_sha, to_sha],
+         '--no-renames', '--diff-filter=D', from_sha, to_sha],
         capture_output=True, text=True)
     if r.returncode != 0:
-        _warn(f'{name}: cannot list the units the newer commit added — '
-              f'{(r.stdout + r.stderr).strip()}')
-        return False
+        _err(f'{name}: cannot list the units the newer commit added — '
+             f'{(r.stdout + r.stderr).strip()}')
+        return False, False
     removed = [p for p in r.stdout.split() if p.startswith('systemd/')]
     if not removed:
-        return False
+        return False, True
 
     def read_newer(path):
         g = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
@@ -4486,6 +4522,14 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> bool:
         except OSError:
             return None
 
+    def dropin_homes(conf):
+        try:
+            return sorted(p / conf for p in _RESTORE_SYSTEMD_DIR.iterdir()
+                          if p.is_dir() and p.name.endswith('.d')
+                          and (p / conf).is_file())
+        except OSError:
+            return []
+
     dest_map = {}
     if name == 'sigmond':
         # This process runs the newer sigmond, so it knows where its own
@@ -4494,31 +4538,48 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> bool:
     retire, kept = plan_retire(removed, read_newer=read_newer,
                                read_installed=read_installed,
                                dest_map=dest_map,
-                               systemd_dir=_RESTORE_SYSTEMD_DIR)
+                               systemd_dir=_RESTORE_SYSTEMD_DIR,
+                               dropin_homes=dropin_homes)
     for dest, why in kept:
         _warn(f'{name}: {dest} left in place — {why}; the restored release '
               f'does not ship it, so remove it by hand if nothing needs it')
-    removed_any = False
+
+    def disable(unit):
+        argv = ['systemctl', 'disable', '--quiet']
+        if unit.endswith(_RESTORE_STOP_SUFFIXES):
+            argv.append('--now')
+        subprocess.run(_as_root(argv + [unit]), capture_output=True, text=True)
+        return ('disabled and stopped' if unit.endswith(_RESTORE_STOP_SUFFIXES)
+                else 'disabled, still running until its next stop')
+
+    removed_any, ok = False, True
     for dest in retire:
         unit = dest.name
         dropin = dest.parent.name.endswith('.d')
-        if not dropin and '@.' not in unit:
-            argv = ['systemctl', 'disable', '--quiet']
-            if unit.endswith('.timer'):
-                argv.append('--now')
-            subprocess.run(_as_root(argv + [unit]),
-                           capture_output=True, text=True)
+        notes = []
+        if not dropin:
+            if '@.' in unit:
+                for inst in _restore_unit_instances(unit, _RESTORE_SYSTEMD_DIR):
+                    _ok(f'{name}: {inst} {disable(inst)} — an instance of '
+                        f'the retired {unit}')
+            else:
+                notes.append(disable(unit))
+            ddir = dest.parent / f'{unit}.d'
+            if ddir.is_dir():
+                _warn(f'{name}: {ddir} left in place — drop-ins for {unit}, '
+                      f'which the restored release does not ship; remove '
+                      f'them by hand if nothing needs them')
         try:
             dest.unlink()
         except OSError as exc:
             _err(f'{name}: cannot remove {dest}: {exc}')
+            ok = False
             continue
         removed_any = True
-        note = ('' if dropin or unit.endswith('.timer') or '@.' in unit
-                else '; disabled, still running until its next stop')
+        note = f'; {notes[0]}' if notes else ''
         _ok(f'{name}: retired {unit} ({dest}) — the restored release does '
             f'not ship it{note}')
-    return removed_any
+    return removed_any, ok
 
 
 def cmd_manifest_restore(args) -> int:
@@ -4594,10 +4655,15 @@ def cmd_manifest_restore(args) -> int:
        newer commit shipped and the older does not, when its installed
        bytes still equal the newer commit's.  Finally, the SAME restart
        guidance `smd update` prints (`cmd_update`'s "restart not
-       automated here" line) — radiod and the recorders restart by
-       hand, never silently.  Only hs-uploader can start or restart
-       on its own, in step 8, by the restored smd's own rule (see
-       `_restore_rerender_uploader`).
+       automated here" line).  Restore never restarts radiod, and the
+       recorders restart by hand.  A component's own install.sh may
+       restart its own services, exactly as under `smd update`:
+       gpsdo-monitor's restarts gpsdo-monitor.service every time;
+       sigmond's restarts chrony (through sigmond-time-sync) when the
+       chrony config changes, and systemd-journald when the journal cap
+       file changes; mag-recorder's restarts mosquitto when it writes the
+       broker config.  hs-uploader can start or restart in step 8, by
+       the restored smd's own rule (see `_restore_rerender_uploader`).
     7. Post-apply verification: recompute live components and re-run
        `plan_restore` ITSELF against `<path>` (`resolvable` stubbed to
        always return `False` — nothing should need a NEW checkout move
@@ -4794,8 +4860,12 @@ def cmd_manifest_restore(args) -> int:
     # this on pyproject.toml/uv.lock, as restore once did, skipped the
     # units: install.sh also writes systemd units, drop-ins and symlinks,
     # so v3.72's consumers unit survived a rollback to v3.71.  No
-    # install.sh starts, stops or restarts radiod.
+    # install.sh restarts radiod.  Some restart their own services, as they
+    # do under `smd update`: gpsdo-monitor always, chrony (sigmond, via
+    # sigmond-time-sync) and systemd-journald (sigmond) when their config
+    # changes, mosquitto (mag-recorder) when it writes the broker config.
     install_failed = []
+    ran_install = False
     for name, _from, _to in moved:
         d = checkout_by_name[name]
         if name == 'ka9q-radio':
@@ -4805,34 +4875,40 @@ def cmd_manifest_restore(args) -> int:
                   'the binary built before; rebuild it by hand if the '
                   'restored commit must run')
             continue
-        sh = d / 'scripts' / 'install.sh'
-        if not sh.exists():
-            sh = d / 'install.sh'
-        if not sh.exists():
+        if not ((d / 'scripts' / 'install.sh').exists()
+                or (d / 'install.sh').exists()):
             continue  # a library (ka9q-python): the checkout is the update
-        r = subprocess.run(_as_root(['bash', str(sh)]),
-                           capture_output=True, text=True)
-        if r.returncode == 0:
+        # align's own runner: --yes, stdin closed, the output kept in
+        # /var/log/sigmond (the same log `smd update` writes).
+        ran_install = True
+        rc = _align_run_install(d, log_target=name)
+        if rc == 0:
             _ok(f'{name}: install.sh exit 0')
         else:
             install_failed.append(name)
-            _err(f'{name}: install.sh exit {r.returncode} — last lines:')
-            for line in (r.stdout + r.stderr).strip().splitlines()[-15:]:
-                _info(f'  | {line}')
+            _err(f'{name}: install.sh exit {rc}')
+    if ran_install:
+        # install.sh runs as root and leaves root-owned egg-info and venv
+        # paths in the checkouts; give them back, as align does.
+        _align_repair_ownership(base)
 
     # Units the newer release added and the older one never ships: the
     # older install.sh cannot know them, so they would stay installed.
-    retired_any = False
+    retired_any, retire_failed = False, []
     for name, from_sha, to_sha in moved:
-        retired_any |= _restore_retire_units(
+        removed_any, units_ok = _restore_retire_units(
             checkout_by_name[name], name, from_sha, to_sha)
+        retired_any |= removed_any
+        if not units_ok:
+            retire_failed.append(name)
     if retired_any:
         subprocess.run(_as_root(['systemctl', 'daemon-reload']),
                        capture_output=True, text=True)
 
     if moved:
-        # The SAME restart guidance `cmd_update` prints — restarts stay
-        # manual and stated, never silently triggered by this verb.
+        # The SAME restart guidance `cmd_update` prints.  This verb never
+        # restarts radiod or a recorder; only the install.sh runs above
+        # restart their own services (see the comment there).
         _info('restart not automated here — bounce radiod, wait for it to '
               'settle, then the recorders')
 
@@ -4861,6 +4937,11 @@ def cmd_manifest_restore(args) -> int:
               f'all-keep ({len(reverify.strays)} stray component(s) '
               f'untouched)')
         rc = _restore_rerender_uploader(base)
+        if retire_failed:
+            _err(f'admin manifest restore: units the newer release added '
+                 f'still stand for {", ".join(retire_failed)} — see the lines '
+                 f'above; remove them by hand')
+            rc = 1
         if install_failed:
             _err(f'admin manifest restore: install.sh failed for '
                  f'{", ".join(install_failed)} — the checkouts stand at the '
@@ -5955,7 +6036,7 @@ def _align_chown(path, owner) -> None:
     os.chown(p, st.st_uid, st.st_gid)
 
 
-def _align_run_install(repo: Path) -> int:
+def _align_run_install(repo: Path, log_target: Optional[str] = None) -> int:
     """scripts/install.sh else install.sh, run as root — the same
     invocation `admin manifest restore --apply` uses (bin/smd ~4297-4316).
     0 when no installer is found on disk (nothing to run, not a failure).
@@ -5977,11 +6058,14 @@ def _align_run_install(repo: Path) -> int:
     # dies on the empty stdin — igmp-querier did, on AC0G-ND 2026-09-25.
     r = subprocess.run(_as_root(['bash', str(sh), '--yes']), capture_output=True,
                        text=True, stdin=subprocess.DEVNULL)
+    logpath = _write_update_log(log_target, r) if log_target else None
     if r.returncode:
         # These scripts print their errors with plain echo, to stdout.
         tail = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()[-5:]
         for line in tail:
             print(f'  | {line}')
+        if logpath:
+            print(f'  full output: {logpath}')
     return r.returncode
 
 
@@ -24816,7 +24900,8 @@ def main() -> int:
     p_m_restore.add_argument('--apply', action='store_true',
         help='move checkouts onto the manifest SHAs (root; only if the plan '
              'is ok), run each moved component\'s install.sh as `smd update` '
-             'does (never for ka9q-radio), retire unit files that only the '
+             'does (never for ka9q-radio; an install.sh may restart its own '
+             'services, never radiod), retire unit files that only the '
              'newer commit shipped, then re-render the hs-uploader manifest '
              'with the restored sigmond. That re-render passes --enable, so it also '
              'starts an hs-uploader you stopped by hand. Default is dry-run: '

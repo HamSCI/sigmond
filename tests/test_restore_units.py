@@ -74,5 +74,18 @@ class PlanRetireTests(unittest.TestCase):
         self.assertEqual(len(kept), 1)
 
 
+class DropInHomesTests(unittest.TestCase):
+
+    def test_a_conf_lands_in_whichever_unit_dir_holds_it(self):
+        dest = SYS / 'timestd-fusion.service.d' / 'timestd-x.conf'
+        retire, kept = plan_retire(
+            ['systemd/timestd-x.conf'],
+            read_newer=lambda p: b'D',
+            read_installed=lambda d: b'D' if d == dest else None,
+            dest_map={}, systemd_dir=SYS,
+            dropin_homes=lambda name: [dest])
+        self.assertEqual((retire, kept), ([dest], []))
+
+
 if __name__ == '__main__':
     unittest.main()

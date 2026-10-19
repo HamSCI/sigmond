@@ -126,9 +126,13 @@ diverging checkouts *back* onto the manifest SHAs, refusing a dirty tree rather
 than stashing it, and leaving strays alone (source: `smd admin manifest restore
 --help`). After the checkouts it runs each moved component's `install.sh`, as
 `smd update` does, so the units stand as the older release installs them. It
-also disables and removes a unit file that only the newer commit shipped. No
-install.sh restarts radiod, and the operator still restarts radiod and the
-recorders by hand. Blessed means **contained baseline, not frozen equality** — see
+also disables and removes a unit file that only the newer commit shipped. Restore
+never restarts radiod, and the operator restarts radiod and the recorders by
+hand. A component's install.sh may restart its own services, exactly as under
+`smd update`: gpsdo-monitor's restarts `gpsdo-monitor.service` every time;
+sigmond's restarts chrony (through `sigmond-time-sync`) when the chrony config
+changes, and `systemd-journald` when the journal cap file changes;
+mag-recorder's restarts mosquitto when it writes the broker config. Blessed means **contained baseline, not frozen equality** — see
 [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) §5 for why a develop-on-main
 fleet needs that rule to have a meaningful baseline at all.
 

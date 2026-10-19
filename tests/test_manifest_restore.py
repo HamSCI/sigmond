@@ -237,7 +237,8 @@ class _FakeGit:
     def __init__(self, dirty=None, unresolvable=None, changed_files=None,
                  rerender=(0, 'uploader: /etc/hs-uploader/pipelines.toml '
                               'already current (3 pipeline(s))\n', ''),
-                 removed_files=None, blobs=None, install_rc=None):
+                 removed_files=None, blobs=None, install_rc=None,
+                 diff_rc=None, listing=''):
         self.calls = []
         self.dirty = dirty or {}
         self.unresolvable = unresolvable or set()
@@ -249,6 +250,12 @@ class _FakeGit:
         self.removed_files = removed_files or {}
         self.blobs = blobs or {}
         self.install_rc = install_rc or {}
+        # diff_rc: component -> exit code of `git diff --diff-filter=D`.
+        # listing: what `systemctl list-units` prints.
+        # install_kwargs: the keyword arguments each install.sh call got.
+        self.diff_rc = diff_rc or {}
+        self.listing = listing
+        self.install_kwargs = []
         self.rerender = rerender
         self.rerender_kwargs = None
         self.rerender_environ = None
@@ -282,7 +289,11 @@ class _FakeGit:
         if 'checkout' in cmd and '--detach' in cmd:
             return out
         if 'diff' in cmd and '--diff-filter=D' in cmd:
+            out.returncode = self.diff_rc.get(name, 0)
             out.stdout = '\n'.join(self.removed_files.get(name, []))
+            return out
+        if 'systemctl' in cmd and 'list-units' in cmd:
+            out.stdout = self.listing
             return out
         if 'diff' in cmd and '--name-only' in cmd:
             out.stdout = '\n'.join(self.changed_files.get(name, []))
@@ -295,8 +306,10 @@ class _FakeGit:
             else:
                 out.stdout = blob
             return out
-        if 'bash' in cmd and str(cmd[-1]).endswith('install.sh'):
-            sh = Path(cmd[-1])
+        sh_args = [a for a in cmd if str(a).endswith('install.sh')]
+        if 'bash' in cmd and sh_args:
+            self.install_kwargs.append(kwargs)
+            sh = Path(sh_args[0])
             comp = (sh.parent.parent if sh.parent.name == 'scripts'
                     else sh.parent).name
             out.returncode = self.install_rc.get(comp, 0)
@@ -622,7 +635,7 @@ class ManifestRestoreApplyTests(unittest.TestCase):
     @staticmethod
     def _installs(fake):
         return [c for c in fake.calls
-                if 'bash' in c and str(c[-1]).endswith('install.sh')]
+                if 'bash' in c and any(str(a).endswith('install.sh') for a in c)]
 
     def test_install_sh_runs_even_when_only_code_changed(self):
         # v3.73 row 4: `smd update` runs install.sh after every pull, so a
@@ -659,7 +672,7 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         idx = [i for i, c in enumerate(fake.calls)
                if 'checkout' in c and '--detach' in c]
         inst = [i for i, c in enumerate(fake.calls)
-                if 'bash' in c and str(c[-1]).endswith('install.sh')]
+                if 'bash' in c and any(str(a).endswith('install.sh') for a in c)]
         self.assertEqual((len(idx), len(inst)), (2, 2))
         self.assertLess(max(idx), min(inst))
 
@@ -771,6 +784,111 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertFalse(any('systemctl' in c and 'daemon-reload' in c
                              for c in fake.calls))
+
+    # -- fix round 1 --------------------------------------------------
+
+    def test_install_runs_like_align_runs_it(self):
+        # --yes and a closed stdin, as align and bring-up run it; the full
+        # output kept in a log; ownership repaired once after the installs.
+        live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        fake = _FakeGit()
+        logs, repairs = [], []
+        with mock.patch.object(smd, '_write_update_log',
+                               side_effect=lambda t, r: logs.append(t)), \
+             mock.patch.object(smd, '_align_repair_ownership',
+                               side_effect=lambda base: repairs.append(base)):
+            rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
+        self.assertEqual(rc, 0, out)
+        inst = self._installs(fake)
+        self.assertEqual(len(inst), 1)
+        self.assertIn('--yes', inst[0])
+        self.assertIs(fake.install_kwargs[0].get('stdin'), subprocess.DEVNULL)
+        self.assertEqual(logs, ['wspr-recorder'])
+        self.assertEqual(len(repairs), 1)
+
+    def test_a_failing_unit_diff_exits_1(self):
+        fake = _FakeGit(diff_rc={'sigmond': 128})
+        rc, out, fake, sysd = self._sigmond_run(fake, {})
+        self.assertEqual(rc, 1, out)
+        self.assertIn('cannot list the units', out)
+
+    def test_a_retired_unit_that_cannot_be_removed_exits_1(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.timer']},
+            blobs={('sigmond', 'systemd/sigmond-new.timer'): b'T'})
+        real_unlink = Path.unlink
+
+        def unlink(self_, *a, **k):
+            if self_.name == 'sigmond-new.timer':
+                raise PermissionError('read-only')
+            return real_unlink(self_, *a, **k)
+        with mock.patch.object(Path, 'unlink', unlink):
+            rc, out, fake, sysd = self._sigmond_run(fake, {'sigmond-new.timer': b'T'})
+        self.assertEqual(rc, 1, out)
+        self.assertIn('cannot remove', out)
+
+    def test_a_retired_template_timer_takes_its_instances_down(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-x@.timer']},
+            blobs={('sigmond', 'systemd/sigmond-x@.timer'): b'T'},
+            listing='sigmond-x@b.timer loaded active waiting x\n')
+        rc, out, fake, sysd = self._sigmond_run(
+            fake, {'sigmond-x@.timer': b'T',
+                   'timers.target.wants/sigmond-x@a.timer': b''})
+        self.assertEqual(rc, 0, out)
+        sc = [c for c in fake.calls if 'systemctl' in c and 'disable' in c]
+        for inst in ('sigmond-x@a.timer', 'sigmond-x@b.timer'):
+            self.assertTrue(any(inst in c and '--now' in c for c in sc), (inst, sc))
+            self.assertIn(inst, out)
+        self.assertFalse((sysd / 'sigmond-x@.timer').exists())
+
+    def test_a_retired_template_service_disables_instances_without_stopping(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-y@.service']},
+            blobs={('sigmond', 'systemd/sigmond-y@.service'): b'S'},
+            listing='sigmond-y@c.service loaded active running y\n')
+        rc, out, fake, sysd = self._sigmond_run(fake, {'sigmond-y@.service': b'S'})
+        self.assertEqual(rc, 0, out)
+        inst = [c for c in fake.calls if 'systemctl' in c and 'sigmond-y@c.service' in c]
+        self.assertTrue(inst and all('disable' in c and '--now' not in c for c in inst), inst)
+
+    def test_a_retired_socket_is_stopped(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.socket']},
+            blobs={('sigmond', 'systemd/sigmond-new.socket'): b'K'})
+        rc, out, fake, sysd = self._sigmond_run(fake, {'sigmond-new.socket': b'K'})
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(any('systemctl' in c and 'disable' in c and '--now' in c
+                            and 'sigmond-new.socket' in c for c in fake.calls))
+
+    def test_an_operator_drop_in_dir_left_behind_is_named(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.service']},
+            blobs={('sigmond', 'systemd/sigmond-new.service'): b'S'})
+        rc, out, fake, sysd = self._sigmond_run(
+            fake, {'sigmond-new.service': b'S',
+                   'sigmond-new.service.d/override.conf': b'[Service]\n'})
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((sysd / 'sigmond-new.service.d' / 'override.conf').exists())
+        self.assertIn('sigmond-new.service.d', out)
+
+    def test_a_drop_in_of_another_component_is_retired_too(self):
+        p = self.tdir / 'candidate-ht.txt'
+        p.write_text("components (live):\n    hf-timestd       aaaaaaa\n"
+                     + _filler_rows(MIN_COMPONENT_ROWS - 1))
+        live = {'hf-timestd': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'hf-timestd': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        sysd = self.tdir / 'etc-systemd'
+        (sysd / 'timestd-fusion.service.d').mkdir(parents=True)
+        dropin = sysd / 'timestd-fusion.service.d' / 'timestd-x.conf'
+        dropin.write_bytes(b'D')
+        fake = _FakeGit(removed_files={'hf-timestd': ['systemd/timestd-x.conf']},
+                        blobs={('hf-timestd', 'systemd/timestd-x.conf'): b'D'})
+        with mock.patch.object(smd, '_RESTORE_SYSTEMD_DIR', sysd):
+            rc, out, fake = self._run(p, live, fake, after_live=after)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(dropin.exists())
 
     def test_the_newer_units_are_read_before_install_sh_runs(self):
         # The comparison reads the NEWER commit's bytes from git, so it
@@ -1085,3 +1203,44 @@ class RestoreRerenderRealChildTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RetireUnitsRealGitTests(unittest.TestCase):
+    """_restore_retire_units against a real repository."""
+
+    def git(self, *a):
+        _REAL_RUN(['git', '-C', str(self.repo), *a], check=True,
+                  capture_output=True, text=True)
+
+    def test_a_renamed_unit_counts_as_retired(self):
+        tdir = Path(tempfile.mkdtemp())
+        self.repo = tdir / 'sigmond'
+        (self.repo / 'systemd').mkdir(parents=True)
+        self.git('init', '-q')
+        self.git('config', 'user.email', 't@t')
+        self.git('config', 'user.name', 't')
+        unit = b'[Unit]\nDescription=a timer whose body stays the same\n' * 4
+        (self.repo / 'systemd' / 'sigmond-old.timer').write_bytes(unit)
+        self.git('add', '-A'); self.git('commit', '-qm', 'older')
+        older = _REAL_RUN(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'],
+                          capture_output=True, text=True).stdout.strip()
+        self.git('mv', 'systemd/sigmond-old.timer', 'systemd/sigmond-new.timer')
+        self.git('commit', '-qm', 'newer')
+        newer = _REAL_RUN(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'],
+                          capture_output=True, text=True).stdout.strip()
+        sysd = tdir / 'etc-systemd'
+        sysd.mkdir()
+        (sysd / 'sigmond-new.timer').write_bytes(unit)
+        calls = []
+
+        def run(cmd, **kw):
+            if cmd and cmd[0] == 'git':
+                return _REAL_RUN(cmd, **kw)
+            calls.append(list(cmd))
+            return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+        buf = io.StringIO()
+        with mock.patch.object(smd, '_RESTORE_SYSTEMD_DIR', sysd), \
+             mock.patch('subprocess.run', side_effect=run), \
+             contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            smd._restore_retire_units(self.repo, 'sigmond', newer, older)
+        self.assertFalse((sysd / 'sigmond-new.timer').exists(), buf.getvalue())
