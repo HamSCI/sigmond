@@ -131,7 +131,8 @@ destination is a pskreporter destination:
      rendered, else meteor-scatter's (`--keep-retry-for <pipeline>`, which sigmond passes).  That
      retry ships once, and the other pipeline re-sends its own rows of that batch: at most one batch
      of one producer goes out twice (review S2, S6).
-   - A keyless retry from before v3.70 under that name gets the same treatment.
+   - A keyless retry from before v3.70 under that name gets the same treatment.  It may carry no
+     `cursor_after`, so its acknowledgement advances no key, and both producers re-send that batch.
    - Before this item, every `migrate` copies the old record to any producer key that does not
      exist yet, and records it in `superseded_keys`; it never touches an existing key.  A store the
      daemon created stands at version 2 with no producer keys, so without this copy a deleted retry
