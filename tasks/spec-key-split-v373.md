@@ -313,6 +313,7 @@ proved it.
 | clients with several destinations: meteor-scatter's MSQP recordings to Zenodo today, perhaps I/Q with Digital RF sidecars later | pipeline names of the form `<client>-<destination>` and `Pipeline.client` | pipeline files that let one client declare several destinations, and a decision on whether the Zenodo upload moves under hs-uploader and the sink switch |
 | the index on `(target_db, target_table, producer, id)` | nothing | add it with cleanup |
 | the capability contract | `hs-uploader capabilities` prints one bare integer; a v3.73 sigmond reads nothing else | keep that output, or a v3.73 sigmond fails its probe and keeps its old manifest |
+| later migrations | the missing-key fill on every `migrate`, versions 2 through the code's own | keep the fill in every later migration, or a newer store with a missing producer key starts that pipeline at "now" |
 | instance keys | the `@P/R` form | validate the instance name before rendering instances (no `/` or `@`) |
 
 ## 9a. Known limits
