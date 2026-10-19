@@ -10,6 +10,12 @@
 # Idempotent: it compares settings, not comments, so the image's own copy
 # (same settings, with a comment header) stays as it is.  It restarts
 # systemd-journald only when it wrote the file.  Run as root.
+#
+# Policy: the cap is sigmond's, not the operator's.  An operator who edits
+# this file to another SystemMaxUse gets it put back to 4G at the next
+# install or update.  To set a different cap, use a drop-in that sorts
+# after this one (for example 60-site-journal-size.conf), which journald
+# reads last and which this script never touches.
 # Overrides, for tests: JOURNALD_CONF_DIR, SYSTEMCTL.
 set -u
 dir="${JOURNALD_CONF_DIR:-/etc/systemd/journald.conf.d}"
