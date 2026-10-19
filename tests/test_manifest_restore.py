@@ -238,7 +238,7 @@ class _FakeGit:
                  rerender=(0, 'uploader: /etc/hs-uploader/pipelines.toml '
                               'already current (3 pipeline(s))\n', ''),
                  removed_files=None, blobs=None, install_rc=None,
-                 diff_rc=None, listing=''):
+                 diff_rc=None, listing='', disable_rc=None):
         self.calls = []
         self.dirty = dirty or {}
         self.unresolvable = unresolvable or set()
@@ -256,6 +256,8 @@ class _FakeGit:
         self.diff_rc = diff_rc or {}
         self.listing = listing
         self.install_kwargs = []
+        # disable_rc: unit -> exit code of `systemctl disable` for it.
+        self.disable_rc = disable_rc or {}
         self.rerender = rerender
         self.rerender_kwargs = None
         self.rerender_environ = None
@@ -294,6 +296,11 @@ class _FakeGit:
             return out
         if 'systemctl' in cmd and 'list-units' in cmd:
             out.stdout = self.listing
+            return out
+        if 'systemctl' in cmd and 'disable' in cmd:
+            out.returncode = self.disable_rc.get(cmd[-1], 0)
+            if out.returncode:
+                out.stderr = f'Failed to disable unit {cmd[-1]}'
             return out
         if 'diff' in cmd and '--name-only' in cmd:
             out.stdout = '\n'.join(self.changed_files.get(name, []))
@@ -889,6 +896,41 @@ class ManifestRestoreApplyTests(unittest.TestCase):
             rc, out, fake = self._run(p, live, fake, after_live=after)
         self.assertEqual(rc, 0, out)
         self.assertFalse(dropin.exists())
+
+    # -- fix round 2 --------------------------------------------------
+
+    def test_a_failed_disable_names_the_unit_and_exits_1(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.timer']},
+            blobs={('sigmond', 'systemd/sigmond-new.timer'): b'T'},
+            disable_rc={'sigmond-new.timer': 1})
+        rc, out, fake, sysd = self._sigmond_run(fake, {'sigmond-new.timer': b'T'})
+        self.assertEqual(rc, 1, out)
+        self.assertIn('sigmond-new.timer', out)
+        self.assertIn('disable', out)
+        self.assertNotIn('retired sigmond-new.timer', out)
+
+    def test_a_failed_instance_disable_exits_1(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-x@.timer']},
+            blobs={('sigmond', 'systemd/sigmond-x@.timer'): b'T'},
+            listing='sigmond-x@b.timer loaded active waiting x\n',
+            disable_rc={'sigmond-x@b.timer': 1})
+        rc, out, fake, sysd = self._sigmond_run(fake, {'sigmond-x@.timer': b'T'})
+        self.assertEqual(rc, 1, out)
+        self.assertIn('sigmond-x@b.timer', out)
+
+    def test_an_instance_drop_in_dir_left_behind_is_named(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-x@.timer']},
+            blobs={('sigmond', 'systemd/sigmond-x@.timer'): b'T'},
+            listing='sigmond-x@a.timer loaded active waiting x\n')
+        rc, out, fake, sysd = self._sigmond_run(
+            fake, {'sigmond-x@.timer': b'T',
+                   'sigmond-x@a.timer.d/override.conf': b'[Timer]\n'})
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((sysd / 'sigmond-x@a.timer.d' / 'override.conf').exists())
+        self.assertIn('sigmond-x@a.timer.d', out)
 
     def test_the_newer_units_are_read_before_install_sh_runs(self):
         # The comparison reads the NEWER commit's bytes from git, so it

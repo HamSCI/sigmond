@@ -4545,12 +4545,26 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
               f'does not ship it, so remove it by hand if nothing needs it')
 
     def disable(unit):
+        """(ok, words).  A failed disable is named, and the caller keeps
+        the unit file so the operator finds it where it was."""
         argv = ['systemctl', 'disable', '--quiet']
         if unit.endswith(_RESTORE_STOP_SUFFIXES):
             argv.append('--now')
-        subprocess.run(_as_root(argv + [unit]), capture_output=True, text=True)
-        return ('disabled and stopped' if unit.endswith(_RESTORE_STOP_SUFFIXES)
-                else 'disabled, still running until its next stop')
+        r = subprocess.run(_as_root(argv + [unit]), capture_output=True, text=True)
+        if r.returncode != 0:
+            _err(f'{name}: `{" ".join(argv)} {unit}` failed (exit '
+                 f'{r.returncode}): {((r.stdout or "") + (r.stderr or "")).strip()}')
+            return False, ''
+        return True, ('disabled and stopped'
+                      if unit.endswith(_RESTORE_STOP_SUFFIXES)
+                      else 'disabled, still running until its next stop')
+
+    def leftover_dir(unit):
+        ddir = _RESTORE_SYSTEMD_DIR / f'{unit}.d'
+        if ddir.is_dir():
+            _warn(f'{name}: {ddir} left in place — drop-ins for {unit}, '
+                  f'which the restored release does not ship; remove '
+                  f'them by hand if nothing needs them')
 
     removed_any, ok = False, True
     for dest in retire:
@@ -4558,17 +4572,24 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
         dropin = dest.parent.name.endswith('.d')
         notes = []
         if not dropin:
+            disabled = True
             if '@.' in unit:
                 for inst in _restore_unit_instances(unit, _RESTORE_SYSTEMD_DIR):
-                    _ok(f'{name}: {inst} {disable(inst)} — an instance of '
-                        f'the retired {unit}')
+                    done, words = disable(inst)
+                    disabled &= done
+                    if done:
+                        _ok(f'{name}: {inst} {words} — an instance of the '
+                            f'retired {unit}')
+                    leftover_dir(inst)
             else:
-                notes.append(disable(unit))
-            ddir = dest.parent / f'{unit}.d'
-            if ddir.is_dir():
-                _warn(f'{name}: {ddir} left in place — drop-ins for {unit}, '
-                      f'which the restored release does not ship; remove '
-                      f'them by hand if nothing needs them')
+                disabled, words = disable(unit)
+                notes.append(words)
+            leftover_dir(unit)
+            if not disabled:
+                _err(f'{name}: {dest} kept — disable it by hand, then '
+                     f'remove it')
+                ok = False
+                continue
         try:
             dest.unlink()
         except OSError as exc:
