@@ -1377,9 +1377,15 @@ class PortHalvesTests(unittest.TestCase):
         self.assertEqual(self.halves(self.card(), [("10-1", "4", True), ("8-1", "4", False)]),
                          {"ss": True, "usb2": True})
 
-    def test_only_the_usb2_half_reached(self):
-        self.assertEqual(self.halves(self.card(), [("8-1", "4", False)]),
+    def test_only_the_usb2_half_reached_and_only_with_exact(self):
+        self.assertEqual(self.halves(self.card(), [("8-1", "4", True)]),
                          {"ss": False, "usb2": True})
+
+    def test_a_plain_usb2_answer_reaches_the_superspeed_half_by_duality(self):
+        # uhubctl's USB3 duality: a plain `-l <usb2 hub>` also switches the
+        # SuperSpeed companion, so that port is not usb2-only.
+        self.assertEqual(self.halves(self.card(), [("8-1", "4", False)]),
+                         {"ss": None, "usb2": True})
 
     def test_a_usb2_only_hub_has_no_superspeed_half(self):
         loc = self.card(hub="3-1", peer=None)
@@ -1518,7 +1524,7 @@ class LearnedUsb2OnlyTests(PortResetHarness):
         self.card = sdr.Located("10-1.4", "10-1", "4", "S", "5000", "8-1", "4",
                                 product="00f1")
         self.wedged = False
-        self.accepted = [("8-1", "4", False)]
+        self.accepted = [("8-1", "4", True)]
         for name, value in {
             "hub_switchable": lambda loc: (True, list(self.accepted)),
             "hub_speed": lambda hub, root=None: {"10-1": "10000", "8-1": "480"}.get(hub),
@@ -1558,3 +1564,59 @@ class LearnedUsb2OnlyTests(PortResetHarness):
         self.wedged = True
         self.tick()
         self.assertEqual(len(self.cycles), 1)
+
+
+class DualityProbeTests(PortResetHarness):
+    """Fix round 1: the real hub_switchable, with uhubctl answering as B4's
+    StarTech does.  A latched card sits on the USB2 hub (8-1), and its peer
+    10-1 answers only with --exact."""
+
+    CFG = {"unit": "radiod@ac0g.service", "consumers": []}
+
+    def setUp(self):
+        super().setUp()
+        self.card = sdr.Located("8-1.4", "8-1", "4", "S", "480", "10-1", "4",
+                                product="00f1")
+        self.answers = set()          # (hub, exact) pairs uhubctl accepts
+        self.uhub_calls = []
+
+        def fake_run(cmd, timeout=60):
+            if cmd and cmd[0] == sdr.UHUBCTL:
+                hub, exact = cmd[cmd.index("-l") + 1], "-e" in cmd
+                self.uhub_calls.append((hub, exact))
+                if (hub, exact) in self.answers:
+                    return _CP(stdout=f"Current status for hub {hub} [14b0:0131 x, ppps]\n"
+                                      f"  Port 4: 0103 power enable connect\n")
+                return _CP(stderr=f"No compatible devices detected at location {hub}!",
+                           returncode=1)
+            return _CP()
+        for name, value in {
+            "_run": fake_run,
+            "hub_speed": lambda hub, root=None: {"10-1": "10000", "8-1": "480"}.get(hub),
+        }.items():
+            self._saved[name] = getattr(sdr, name)
+            setattr(sdr, name, value)
+
+    def state(self):
+        return json.loads((self.tmp / "sdr-recover.json").read_text())
+
+    def test_the_peer_is_probed_with_exact_too(self):
+        self.answers = {("8-1", True), ("10-1", True)}
+        self.tick()
+        self.assertIn(("10-1", True), self.uhub_calls)
+        self.assertNotEqual(self.state()["power"], "usb2-only")
+        self.assertEqual(len(self.cycles), 1)          # latched + wedged: reset proceeds
+        self.assertNotIn("needs-replug", self.kinds()[:1])
+
+    def test_a_plain_usb2_answer_is_not_usb2_only(self):
+        self.answers = {("8-1", False)}
+        self.tick()
+        self.assertNotEqual(self.state()["power"], "usb2-only")
+        self.assertEqual(len(self.cycles), 1)
+
+    def test_usb2_only_needs_no_superspeed_answer_and_no_plain_usb2_answer(self):
+        self.answers = {("8-1", True)}
+        self.tick()
+        self.assertEqual(self.state()["power"], "usb2-only")
+        self.assertEqual(self.cycles, [])
+        self.assertEqual(self.kinds(), ["needs-replug"])

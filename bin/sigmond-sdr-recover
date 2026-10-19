@@ -270,7 +270,11 @@ def hub_switchable(loc: Located) -> Tuple[Optional[bool], List[Tuple[str, str, b
     the peer half of the same physical port."""
     candidates = [(loc.hub, loc.port, False), (loc.hub, loc.port, True)]
     if loc.peer_hub and loc.peer_port:
-        candidates.append((loc.peer_hub, loc.peer_port, False))
+        # The peer plain, then --exact: a card latched on the USB2 hub has the
+        # SuperSpeed hub as its peer, and B4's StarTech answers that one only
+        # with --exact (`-l 10-1` fails, `-l 10-1 -e` lists the port).
+        candidates += [(loc.peer_hub, loc.peer_port, False),
+                       (loc.peer_hub, loc.peer_port, True)]
     accepted: List[Tuple[str, str, bool]] = []
     unknown = False
     for hub, port, exact in candidates:
@@ -311,7 +315,13 @@ def port_halves(loc: Located, accepted: Sequence[Tuple[str, str, bool]],
     half), False (the half exists and uhubctl accepted none of it) or None (no
     such half, or its speed is unreadable).  The halves are the hub the card
     enumerated under and its sysfs peer; a hub at 5000 Mb/s or more is the
-    SuperSpeed half."""
+    SuperSpeed half.
+
+    A USB2 location uhubctl accepted in the plain form leaves "ss" at None,
+    never False: uhubctl's USB3 duality makes a plain `-l <usb2 hub>` switch
+    the SuperSpeed companion too.  So the SuperSpeed half reads False only
+    when no SuperSpeed location answered, plain or --exact, AND no USB2
+    location answered plain."""
     speed_of = speed_of or hub_speed
     kinds = {}
     for h in [loc.hub] + ([loc.peer_hub] if loc.peer_hub else []):
@@ -321,6 +331,9 @@ def port_halves(loc: Located, accepted: Sequence[Tuple[str, str, bool]],
     for half, want in (("ss", True), ("usb2", False)):
         here = [h for h, k in kinds.items() if k is want]
         out[half] = any(a[0] in here for a in accepted) if here else None
+    usb2_hubs = [h for h, k in kinds.items() if k is False]
+    if out["ss"] is False and any(a[0] in usb2_hubs and not a[2] for a in accepted):
+        out["ss"] = None        # reached through duality, as far as uhubctl says
     return out
 
 
