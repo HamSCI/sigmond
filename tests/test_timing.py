@@ -262,6 +262,27 @@ def test_assess_warn_incident_is_warn():
     assert link.status == 'warn'
 
 
+def test_assess_radiod_restart_info_is_ok_not_a_fault():
+    """hf-timestd's RADIOD_RESTART verdict (severity info) is no timing fault."""
+    f = _healthy()
+    ep = t._parse_iso_epoch('2026-06-29T18:00:00+00:00')
+    f['radiod_timing'] = t.radiod_timing_facts(
+        _incident(verdict='RADIOD_RESTART', severity='info'), now=ep + 600.0)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-timing')
+    assert link.status == 'ok'
+    assert 'radiod restarted 10m ago (not a timing fault)' in link.detail
+    assert 'gpsd reports an epoch' in link.detail          # the verdict's own detail
+
+
+def test_assess_unknown_severity_still_warns():
+    f = _healthy()
+    ep = t._parse_iso_epoch('2026-06-29T18:00:00+00:00')
+    f['radiod_timing'] = t.radiod_timing_facts(
+        _incident(verdict='SOMETHING_NEW', severity='notice'), now=ep + 60.0)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-timing')
+    assert link.status == 'warn'
+
+
 def test_assess_old_incident_is_ok():
     f = _healthy()
     ep = t._parse_iso_epoch('2026-06-29T18:00:00+00:00')

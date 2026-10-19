@@ -299,9 +299,15 @@ def assess(facts: dict) -> list:
     rt = facts.get('radiod_timing', {})
     rt_age = rt.get('age_s')
     if rt.get('present') and rt_age is not None and rt_age <= WATCHDOG_INCIDENT_RECENT_S:
-        sev = 'fail' if rt.get('severity') == 'fail' else 'warn'
-        links.append(Link('radiod-timing', sev,
-                          f"{rt.get('verdict')} {rt_age / 60:.0f}m ago — {rt.get('detail', '')}", ''))
+        if rt.get('severity') == 'info':
+            # RADIOD_RESTART: radiod started a new RTP counter; the clock held.
+            links.append(Link('radiod-timing', 'ok',
+                              f"radiod restarted {rt_age / 60:.0f}m ago (not a timing fault)"
+                              f" — {rt.get('detail', '')}", ''))
+        else:
+            sev = 'fail' if rt.get('severity') == 'fail' else 'warn'
+            links.append(Link('radiod-timing', sev,
+                              f"{rt.get('verdict')} {rt_age / 60:.0f}m ago — {rt.get('detail', '')}", ''))
     else:
         links.append(Link('radiod-timing', 'ok', 'no recent RTP↔UTC thrash incident'))
 
