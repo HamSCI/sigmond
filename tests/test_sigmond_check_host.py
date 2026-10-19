@@ -413,3 +413,42 @@ def test_a_magnetometer_nack_tells_the_operator_what_to_check(tmp_path):
     assert "sensor cable" in advice and "isolated power" in advice
     assert advice.startswith(" " * 22)
     assert any("Fix: sigmond-vm sudo systemctl restart mag-recorder" in ln for ln in out)
+
+
+def _relay_heredocs():
+    return pm_align.extract_heredocs((PROXMOX / "sigmond-wizard.sh").read_text(), quoted_only=False)
+
+
+def test_relay_exits_75_when_the_vm_is_unreachable(tmp_path):
+    """A VM that has not booted is a temporary failure (EX_TEMPFAIL), not a crash:
+    no address found, or none that connects, exits 75 (release-v373 row 5)."""
+    src = _relay_heredocs()["/usr/local/lib/sigmond/vm-port-relay.py"]
+    script = tmp_path / "relay.py"
+    script.write_text(src)
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    for n in ("qm", "ip"):
+        (bin_ / n).write_text("#!/bin/sh\nexit 0\n")
+        (bin_ / n).chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_}:/usr/bin:/bin", SIGMOND_VMID="999")
+    r = subprocess.run([sys.executable, str(script), "1"], capture_output=True,
+                       env=env, input=b"", timeout=60)
+    assert r.returncode == 75, r.stderr
+
+
+def test_relay_script_keeps_exit_1_for_nothing_else():
+    src = _relay_heredocs()["/usr/local/lib/sigmond/vm-port-relay.py"]
+    assert src.count("sys.exit(75)") == 2
+    assert "sys.exit(1)" not in src
+
+
+def test_relay_unit_accepts_exit_75_as_success():
+    unit = _relay_heredocs()["/etc/systemd/system/sigmond-vm-$RNAME-relay@.service"]
+    assert "SuccessExitStatus=75" in unit
+
+
+def test_pm_align_renders_the_same_exit_status_unit():
+    """pm-align renders relay units from the wizard's template, so the setting follows."""
+    units = pm_align.relay_units((PROXMOX / "sigmond-wizard.sh").read_text(), 100)
+    svc = [u for u in units if u.path.endswith("@.service")]
+    assert svc and all(b"SuccessExitStatus=75" in u.content for u in svc)

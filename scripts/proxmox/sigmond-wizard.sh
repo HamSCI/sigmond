@@ -3631,7 +3631,7 @@ if not ips:
     except Exception:
         pass
 if not ips:
-    sys.exit(1)
+    sys.exit(75)      # EX_TEMPFAIL: the VM has not come up yet (the unit accepts 75)
 # Prefer an address on a network THIS HOST is directly attached to.  Taking
 # ips[0] blindly assumes every address the guest reports is reachable from
 # here, and that is exactly the assumption that fails when the site puts the
@@ -3669,7 +3669,7 @@ for cand in ips:                       # try every address, not just the first
     except OSError:
         continue
 if vm is None:
-    sys.exit(1)
+    sys.exit(75)      # EX_TEMPFAIL: no VM address accepted a connection
 vm.settimeout(None)
 client_open, vm_open = True, True
 try:
@@ -3722,6 +3722,7 @@ Environment=SIGMOND_VMID=$VMID
 StandardInput=socket
 StandardOutput=socket
 StandardError=journal
+SuccessExitStatus=75
 ExecStart=/usr/local/lib/sigmond/vm-port-relay.py $RVPORT
 SVCEOF
             done
