@@ -3,6 +3,7 @@ in-process pskreporter sender, read from each instance's effective
 environment, removes only the matching daemon pipeline; a harmonize rule warns
 when the manifest on disk disagrees."""
 
+import contextlib
 import subprocess
 import sys
 import tempfile
@@ -33,9 +34,17 @@ def _fake_show(envs):
     return show
 
 
+_STATION = '[station]\ncallsign = "AC0G"\ngrid_square = "EM38"\n'
+
+
 class Senders(unittest.TestCase):
     def setUp(self):
         self.addCleanup(mock.patch.stopall)
+        # meteor-scatter's config dir: a legacy shared config that names a
+        # callsign and a grid, so an unset mode reads as a sender.
+        self.cfg = Path(tempfile.mkdtemp())
+        (self.cfg / "meteor-scatter-config.toml").write_text(_STATION)
+        mock.patch.object(ips, "MS_CONFIG_DIR", self.cfg).start()
         self.units = {"psk-recorder": ["psk-recorder@a.service"],
                       "meteor-scatter": ["meteor-scatter@a.service"]}
         mock.patch.object(
@@ -92,6 +101,54 @@ class Senders(unittest.TestCase):
 
     def test_ms_empty_value_reads_as_direct(self):
         self.assertIn(MS, self.run_(None, {"METEOR_SCATTER_DELIVERY_MODE": ""}))
+
+    # meteor-scatter starts no sender without a callsign and a grid (M1)
+    def test_ms_direct_without_callsign_or_grid_sends_nothing(self):
+        for body in ('[station]\ngrid_square = "EM38"\n',
+                     '[station]\ncallsign = "AC0G"\n',
+                     '[station]\ncallsign = ""\ngrid_square = "EM38"\n',
+                     '[paths]\n'):
+            (self.cfg / "meteor-scatter-config.toml").write_text(body)
+            self.assertNotIn(MS, self.run_(None, {}), body)
+
+    def test_ms_per_instance_config_wins_over_the_shared_one(self):
+        (self.cfg / "a.toml").write_text('[station]\ncallsign = "AC0G"\n')
+        self.assertNotIn(MS, self.run_(None, {}))
+        (self.cfg / "a.toml").write_text(_STATION)
+        (self.cfg / "meteor-scatter-config.toml").write_text("[paths]\n")
+        self.assertIn(MS, self.run_(None, {}))
+
+    def test_ms_config_env_wins_over_both(self):
+        other = self.cfg / "elsewhere.toml"
+        other.write_text("[paths]\n")
+        (self.cfg / "a.toml").write_text(_STATION)
+        self.assertNotIn(MS, self.run_(None, {"METEOR_SCATTER_CONFIG": str(other)}))
+
+    def test_ms_escaped_instance_reads_its_storage_named_config(self):
+        self.units["meteor-scatter"] = ["meteor-scatter@AC0G\\x3dB4.service"]
+        (self.cfg / "meteor-scatter-config.toml").write_text("[paths]\n")
+        (self.cfg / "AC0G=B4.toml").write_text(_STATION)
+        got = ips.inprocess_senders(
+            _Topo(["meteor-scatter"]),
+            show=_fake_show({"meteor-scatter@AC0G\\x3dB4.service": {}}))
+        self.assertEqual(got, {MS})
+
+    def test_ms_unreadable_config_cannot_tell_so_no_pair(self):
+        cfg = self.cfg / "meteor-scatter-config.toml"
+        for setup in ("missing", "invalid", "not-a-table", "denied"):
+            cfg.write_text({"invalid": "[station\n",
+                            "not-a-table": 'station = "AC0G"\n'}.get(setup, _STATION))
+            if setup == "missing":
+                cfg.unlink()
+            ctx = (mock.patch.object(Path, "read_bytes", side_effect=PermissionError)
+                   if setup == "denied" else contextlib.nullcontext())
+            with ctx, self.assertLogs("sigmond.inprocess_senders", "WARNING"):
+                self.assertNotIn(MS, self.run_(None, {}), setup)
+
+    def test_ms_off_reads_no_config(self):
+        (self.cfg / "meteor-scatter-config.toml").unlink()
+        self.assertEqual(self.run_(None, {"METEOR_SCATTER_DELIVERY_MODE": "off"}),
+                         set())
 
     # unreadable
     def test_unreadable_environment_gives_no_pair_for_that_client(self):

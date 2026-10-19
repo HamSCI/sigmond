@@ -12,9 +12,18 @@ and applies the client's own rule, copied from the client:
   ``direct`` in ``PSK_DELIVERY_PIPELINES`` (comma list; unknown tokens drop),
   else the legacy ``PSK_DELIVERY_MODE`` (``direct`` or ``both`` send), else
   the default ``server-merge``, which runs no sender.
-* meteor-scatter (``core/recorder.py``, ``_delivery_mode``):
-  ``METEOR_SCATTER_DELIVERY_MODE``, read as ``direct`` when unset or empty;
-  ``off``, ``none``, ``disabled`` and ``deposit`` run no sender.
+* meteor-scatter (``core/recorder.py``, ``_delivery_mode`` and
+  ``_start_uploaders``): ``METEOR_SCATTER_DELIVERY_MODE``, read as
+  ``direct`` when unset or empty; ``off``, ``none``, ``disabled`` and
+  ``deposit`` run no sender.  In ``direct`` mode it starts its sender only
+  when ``[station] callsign`` and ``grid_square`` in its config are both
+  set.  It finds that config the way ``config.resolve_config_path`` does:
+  ``METEOR_SCATTER_CONFIG`` from the unit's environment, else
+  ``/etc/meteor-scatter/<instance>.toml`` when it exists (the instance in
+  storage form), else ``/etc/meteor-scatter/meteor-scatter-config.toml``.
+  An instance with no callsign or grid posts nothing, so it must keep its
+  daemon pipeline (final review M1).  A config that cannot be read counts
+  as "cannot tell".
 
 Any doubt keeps the daemon pipeline, because a double post costs less than a
 silent loss: an unreadable environment, a missing unit or an instance that
@@ -28,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import shlex
+import tomllib
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -46,6 +56,8 @@ _PSK_LEGACY = {
     "both": ("direct", "server-raw"),
 }
 _MS_NO_SENDER = ("deposit", "off", "none", "disabled")
+# meteor-scatter's config directory (its config.PER_INSTANCE_CONFIG_DIR).
+MS_CONFIG_DIR = Path("/etc/meteor-scatter")
 
 
 def _systemctl_show(unit: str, *, run=subprocess.run) -> dict:
@@ -104,7 +116,7 @@ def _instance_units(client: str, topology) -> list:
             if u.kind == "service" and u.instance and not u.orphaned]
 
 
-def _psk_recorder_sends(env: dict) -> bool:
+def _psk_recorder_sends(env: dict, unit: str) -> bool:
     raw = (env.get("PSK_DELIVERY_PIPELINES") or "").strip().lower()
     if raw:
         valid = [t.strip() for t in raw.split(",")
@@ -117,9 +129,35 @@ def _psk_recorder_sends(env: dict) -> bool:
     return False
 
 
-def _meteor_scatter_sends(env: dict) -> bool:
+def _ms_config_path(env: dict, unit: str) -> Path:
+    """The config file meteor-scatter's daemon loads for ``unit``."""
+    from .instance import unescape_systemd_instance
+    override = env.get("METEOR_SCATTER_CONFIG")
+    if override:
+        return Path(override)
+    instance = unit.partition("@")[2]
+    if instance.endswith(".service"):
+        instance = instance[:-len(".service")]
+    if instance:
+        per_instance = MS_CONFIG_DIR / f"{unescape_systemd_instance(instance)}.toml"
+        if per_instance.exists():
+            return per_instance
+    return MS_CONFIG_DIR / "meteor-scatter-config.toml"
+
+
+def _meteor_scatter_sends(env: dict, unit: str) -> bool:
     mode = (env.get("METEOR_SCATTER_DELIVERY_MODE") or "direct").strip().lower()
-    return mode not in _MS_NO_SENDER
+    if mode in _MS_NO_SENDER:
+        return False
+    path = _ms_config_path(env, unit)
+    try:
+        config = tomllib.loads(path.read_bytes().decode("utf-8"))
+    except (ValueError, OSError) as exc:   # TOMLDecodeError is a ValueError
+        raise OSError(f"cannot read {path}: {exc}") from exc
+    station = config.get("station", {})
+    if not isinstance(station, dict):
+        raise OSError(f"{path}: [station] is not a table")
+    return bool(station.get("callsign")) and bool(station.get("grid_square"))
 
 
 _RULES = {"psk-recorder": _psk_recorder_sends,
@@ -139,10 +177,11 @@ def inprocess_senders(topology, *,
             units = _instance_units(client, topology)
             if not units:
                 continue
-            sends = [_RULES[client](show(u)) for u in units]
+            sends = [_RULES[client](show(u), u) for u in units]
         except OSError as exc:
-            logger.warning("inprocess-senders: cannot read %s environment (%s)"
-                           " — keeping its daemon pipeline", client, exc)
+            logger.warning("inprocess-senders: cannot read %s environment or "
+                           "config (%s) — keeping its daemon pipeline",
+                           client, exc)
             continue
         if all(sends):
             pairs.add((client, DESTINATION))
