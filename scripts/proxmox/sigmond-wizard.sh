@@ -3411,6 +3411,11 @@ if printf '%s\n' "$VM_OUT" | grep -qE '^ (ok  |wait|FAIL|--  )  '; then
         l=${l//Fix: /Fix: sigmond-vm }
         l=${l//run: /run: sigmond-vm }
         LINES+=("$(ascii "$l")")
+        # "Address NACK" from the magnetometer: the USB-I2C adapter works and
+        # the sensor behind it does not answer.  Say where to look.
+        case "$l" in
+            *"Address NACK"*) LINES+=("                      The adapter works but the sensor does not answer: check the sensor cable and its isolated power.") ;;
+        esac
     done <<<"$VM_OUT"
     # Output that stopped partway must not pass: 124 timeout, 255 ssh, 126/127 not runnable.
     case "$VM_RC" in

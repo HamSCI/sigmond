@@ -399,3 +399,17 @@ def test_a_chain_that_prerouting_never_enters_proves_nothing(tmp_path):
     rc, out = run(tmp_path, vm=PSK_OK, vm_rc=0, nat=_nat_v4relay(jump=False), curl=VM_200)
     assert "does not answer: no relay rule for port 8081" in out[1]
     assert rc == 1
+
+
+def test_a_magnetometer_nack_tells_the_operator_what_to_check(tmp_path):
+    """"Address NACK" means the adapter works and the sensor does not answer
+    (release-v373 row 6): the line says what to look at."""
+    vm = (" FAIL  magnetometer   Address NACK: target device did not respond\n"
+          "                      Fix: sudo systemctl restart mag-recorder\n")
+    rc, out = run(tmp_path, vm=vm, vm_rc=1, curl=VM_200)
+    i = next(n for n, ln in enumerate(out) if "Address NACK" in ln)
+    advice = out[i + 1]
+    assert "adapter works" in advice and "sensor does not answer" in advice
+    assert "sensor cable" in advice and "isolated power" in advice
+    assert advice.startswith(" " * 22)
+    assert any("Fix: sigmond-vm sudo systemctl restart mag-recorder" in ln for ln in out)
