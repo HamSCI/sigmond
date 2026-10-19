@@ -254,7 +254,8 @@ manifest that no longer matches the environments.
 3. Run `hs-uploader migrate --check`.  Exit 3 means a migrate would write;
    exit 0 means it would not.
 4. If the manifest is unchanged and nothing is pending, return.  The daemon
-   keeps running.
+   keeps running, unless `--enable` starts it, or restarts a daemon that
+   started before the manifest file's last write.
 5. Stop `hs-uploader.service`.
 6. Run `hs-uploader migrate`, with `--sink` and `--keep-retry-for` set so a
    queued `psk-pskreporter` retry is deleted or moved.
