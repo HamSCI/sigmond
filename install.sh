@@ -1002,6 +1002,12 @@ done
 # says loudly what is wrong and the timer keeps saying it.
 $SUDO /usr/local/sbin/sigmond-time-sync --apply --wait 30 || warn "clock not synchronised yet — see /var/log/sigmond/time-sync.log"
 
+# journald: an explicit size cap, the one the appliance image bakes, for a
+# station that updates instead of reflashing (v3.73 row 18).  Restarts
+# systemd-journald only when it writes the file.
+$SUDO bash "$REPO_DIR/scripts/install/journald-cap.sh" \
+    || warn "could not set the journald cap — see the line above"
+
 # radiod drop-in: patient retry instead of a five-restart budget.
 if compgen -G "/etc/systemd/system/radiod@*.service" >/dev/null 2>&1 || \
    systemctl list-unit-files "radiod@.service" &>/dev/null; then
