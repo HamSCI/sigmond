@@ -1151,18 +1151,24 @@ def _upload_truthy(v) -> bool:
     return v is not None and str(v).strip().lower() not in ("", "0", "false", "no", "off")
 
 
-def _read_env_file(path: Path) -> dict:
+def parse_env_text(text: str) -> dict:
+    """KEY=VALUE lines of an env file (comments and blanks skipped, one pair
+    of surrounding quotes stripped)."""
     out: dict = {}
-    try:
-        for line in Path(path).read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            out[k.strip()] = v.strip().strip('"').strip("'")
-    except Exception:                                      # noqa: BLE001
-        pass
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip().strip('"').strip("'")
     return out
+
+
+def _read_env_file(path: Path) -> dict:
+    try:
+        return parse_env_text(Path(path).read_text())
+    except Exception:                                      # noqa: BLE001
+        return {}
 
 
 def _resolve_instance_env(client: str, inst: str) -> dict:
@@ -1269,6 +1275,55 @@ def rule_upload_credentials(view: SystemView) -> RuleResult:
         sorted({p.recorder for p in missing}))
 
 
+def rule_uploader_inprocess_drift(view: SystemView) -> RuleResult:
+    """Runtime: the rendered uploader manifest must match what the clients'
+    own environments say (D13, spec §5.3).  A producer whose in-process
+    pskreporter sender runs must have no daemon pipeline of its own; one
+    whose sender is off must have it.  Drift appears when someone edits an
+    env file without re-rendering (`smd admin uploader manifest --write`)."""
+    import tomllib
+    from . import inprocess_senders as ips
+    from . import uploader_manifest as um
+    rid = "uploader-inprocess-drift"
+    try:
+        with open(um.MANIFEST_PATH, "rb") as fh:
+            names = {p.get("name") for p in
+                     (tomllib.load(fh).get("pipeline") or [])}
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return RuleResult(rid, "pass",
+                          f"skipped (manifest not readable: {exc})", [])
+    try:
+        pairs = ips.inprocess_senders(view.topology)
+    except Exception as exc:                               # noqa: BLE001
+        return RuleResult(rid, "pass", f"skipped ({exc})", [])
+    enabled = set(view.topology.enabled_components())
+    data = {n for n in names if n and n != "heartbeat"}
+    problems, affected = [], []
+    for producer, (pipe, _modes) in um.PSK_PRODUCERS.items():
+        if producer not in enabled:
+            continue
+        sends = (producer, ips.DESTINATION) in pairs
+        if sends and pipe in names:
+            problems.append(
+                f"{producer} runs its own pskreporter sender but the manifest "
+                f"still renders {pipe} (double post)")
+            affected.append(producer)
+        elif not sends and data and pipe not in names \
+                and um.SHARED_PSK_PIPELINE not in names:
+            problems.append(
+                f"{producer} runs no pskreporter sender but the manifest has "
+                f"no {pipe} (spots would not post)")
+            affected.append(producer)
+    if not problems:
+        return RuleResult(rid, "pass",
+                          "manifest agrees with the clients' in-process "
+                          "pskreporter senders", [])
+    return RuleResult(
+        rid, "warn",
+        "; ".join(problems) + ".  Re-render: smd admin uploader manifest "
+        "--write", affected)
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_radiod_status_configured,
@@ -1295,6 +1350,7 @@ ALL_RUNTIME_RULES = [
     rule_secrets,
     rule_upload_enabled,
     rule_upload_credentials,
+    rule_uploader_inprocess_drift,
 ]
 
 

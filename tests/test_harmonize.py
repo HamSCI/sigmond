@@ -363,6 +363,7 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
                 "rule_secrets",
                 "rule_upload_enabled",
                 "rule_upload_credentials",
+                "rule_uploader_inprocess_drift",
             ],
         )
 

@@ -554,6 +554,41 @@ def suppressed_pipelines(topology: Optional[Topology] = None,
         topology, coord, store_version=store_version)]
 
 
+def drop_inprocess_pipelines(pipelines: list, senders: set,
+                             *, store_version: int) -> list:
+    """Leave out, per D13 (spec §5.3), each pskreporter daemon pipeline whose
+    producer sends in-process.  Only a split manifest has a pipeline of the
+    producer's own to remove.  In the shared form one pipeline serves both
+    producers, so it stays (a double post beats a silent loss) and one
+    warning says so."""
+    drop = set()
+    for producer, dest in sorted(senders):
+        if dest != "pskreporter" or producer not in PSK_PRODUCERS:
+            continue
+        if store_version >= SPLIT_STORE_VERSION:
+            drop.add(PSK_PRODUCERS[producer][0])
+            logger.info("uploader-manifest: %s runs its own pskreporter "
+                        "sender — leaving out pipeline %s",
+                        producer, PSK_PRODUCERS[producer][0])
+        else:
+            logger.warning(
+                "uploader-manifest: %s runs its own in-process pskreporter "
+                "sender, but the shared %s pipeline serves both producers "
+                "(store schema %d) — keeping it; spots may post twice until "
+                "hs-uploader updates", producer, SHARED_PSK_PIPELINE,
+                store_version)
+    return [p for p in pipelines if p.get("name") not in drop]
+
+
+def _inprocess_pairs(topology, pipelines: list) -> set:
+    """The D13 pairs, asked only when a pskreporter pipeline is in play."""
+    names = {SHARED_PSK_PIPELINE} | {v[0] for v in PSK_PRODUCERS.values()}
+    if not any(p.get("name") in names for p in pipelines):
+        return set()
+    from .inprocess_senders import inprocess_senders
+    return inprocess_senders(topology)
+
+
 def generate(topology: Optional[Topology] = None,
              coord: Optional[Coordination] = None,
              *, supports_discard=None,
@@ -581,13 +616,16 @@ def generate(topology: Optional[Topology] = None,
     call = reporter_call(coord)
     reason = f": {coord.uploads.reason}" if coord.uploads.reason else ""
     mode = effective_mode(coord, supports_discard=supports_discard)
-    if mode == "upload":
+    if mode in ("upload", "discard"):
         pipelines = collect_pipelines(topology, coord,
                                       store_version=store_version)
+        pipelines = drop_inprocess_pipelines(
+            pipelines, _inprocess_pairs(topology, pipelines),
+            store_version=store_version)
+    if mode == "upload":
+        pass
     elif mode == "discard":
-        pipelines = [dict(p, discard=True)
-                     for p in collect_pipelines(
-                         topology, coord, store_version=store_version)]
+        pipelines = [dict(p, discard=True) for p in pipelines]
         logger.warning("uploader-manifest: SITE SINK OFF%s — data pipelines "
                        "ack without sending", reason)
     else:
