@@ -4441,6 +4441,86 @@ def _restore_rerender_uploader(base) -> int:
     return 1
 
 
+# Where install.sh writes units; tests point it at a temp tree.
+_RESTORE_SYSTEMD_DIR = Path('/etc/systemd/system')
+
+
+def _restore_retire_units(d, name, from_sha, to_sha) -> bool:
+    """Disable and remove the unit files that the commit a restore left
+    (`from_sha`, the newer) ships and the commit it reached (`to_sha`, the
+    older) does not (release v3.73 row 4).  `sigmond.restore_units`
+    decides which: only a file whose installed bytes equal the newer
+    commit's bytes.  A timer gets `disable --now`, which stops the timer
+    alone.  A service gets `disable` and keeps running until its next stop,
+    since stopping it could take down a unit that Requires it, radiod
+    among them.  A drop-in only goes away; the daemon-reload the caller
+    runs once applies that, and radiod picks it up at its next start.
+    Returns True when it removed anything.
+    """
+    from sigmond.restore_units import plan_retire
+
+    r = subprocess.run(
+        ['git', '--no-optional-locks', '-C', str(d), 'diff', '--name-only',
+         '--diff-filter=D', from_sha, to_sha],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        _warn(f'{name}: cannot list the units the newer commit added — '
+              f'{(r.stdout + r.stderr).strip()}')
+        return False
+    removed = [p for p in r.stdout.split() if p.startswith('systemd/')]
+    if not removed:
+        return False
+
+    def read_newer(path):
+        g = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
+                            'show', f'{from_sha}:{path}'],
+                           capture_output=True)
+        if g.returncode != 0:
+            return None
+        out = g.stdout
+        return out.encode() if isinstance(out, str) else out
+
+    def read_installed(dest):
+        try:
+            return dest.read_bytes()
+        except OSError:
+            return None
+
+    dest_map = {}
+    if name == 'sigmond':
+        # This process runs the newer sigmond, so it knows where its own
+        # install renamed each drop-in.
+        dest_map = {src: rel for src, rel in _RADIOD_DROPINS + (_QGA_DROPIN,)}
+    retire, kept = plan_retire(removed, read_newer=read_newer,
+                               read_installed=read_installed,
+                               dest_map=dest_map,
+                               systemd_dir=_RESTORE_SYSTEMD_DIR)
+    for dest, why in kept:
+        _warn(f'{name}: {dest} left in place — {why}; the restored release '
+              f'does not ship it, so remove it by hand if nothing needs it')
+    removed_any = False
+    for dest in retire:
+        unit = dest.name
+        dropin = dest.parent.name.endswith('.d')
+        if not dropin and '@.' not in unit:
+            argv = ['systemctl', 'disable', '--quiet']
+            if unit.endswith('.timer'):
+                argv.append('--now')
+            subprocess.run(_as_root(argv + [unit]),
+                           capture_output=True, text=True)
+        try:
+            dest.unlink()
+        except OSError as exc:
+            _err(f'{name}: cannot remove {dest}: {exc}')
+            continue
+        removed_any = True
+        note = ('' if dropin or unit.endswith('.timer') or '@.' in unit
+                else '; disabled, still running until its next stop')
+        _ok(f'{name}: retired {unit} ({dest}) — the restored release does '
+            f'not ship it{note}')
+    return removed_any
+
+
 def cmd_manifest_restore(args) -> int:
     """`smd admin manifest restore <path> [--apply] [--no-fetch]` — the
     remote-rollback half of the blessed-manifest mechanism; `admin
@@ -4501,11 +4581,18 @@ def cmd_manifest_restore(args) -> int:
        HEAD is CORRECT here — the restore point is a specific commit,
        not a branch tip; `smd update` is how a component gets back onto
        `main` afterwards, restore's job stops at reproducing the
-       blessed SHA. Then, only if `pyproject.toml` or `uv.lock` changed
-       between `from_sha` and `to_sha` (`git diff --name-only`),
-       root runs the component's `install.sh` — editable installs
-       auto-track everything else, the same rationale `smd update`
-       uses for its own install step. Finally, the SAME restart
+       blessed SHA. Once every checkout has landed, root runs each
+       moved component's `install.sh`, as `smd update` does after its
+       pulls: install.sh writes the venv and also the systemd units,
+       drop-ins and symlinks, so the units then stand as the older
+       release installs them (v3.73 row 4; an earlier gate on
+       `pyproject.toml`/`uv.lock` left v3.72's consumers unit on a
+       v3.71 guest).  ka9q-radio gets no install step: radiod stays the
+       binary built before, and a rebuild stays manual.  A failed
+       install.sh makes the restore exit 1.  Then
+       `_restore_retire_units` disables and removes each unit file the
+       newer commit shipped and the older does not, when its installed
+       bytes still equal the newer commit's.  Finally, the SAME restart
        guidance `smd update` prints (`cmd_update`'s "restart not
        automated here" line) — radiod and the recorders restart by
        hand, never silently.  Only hs-uploader can start or restart
@@ -4698,28 +4785,50 @@ def cmd_manifest_restore(args) -> int:
                  f'{(r.stdout + r.stderr).strip()}')
             continue
         _ok(f'{name}: checked out {to_sha} (detached HEAD)')
-        moved.append(name)
+        moved.append((name, from_sha, to_sha))
 
-        # install.sh only if pyproject.toml/uv.lock changed between the
-        # SHAs — editable installs auto-track everything else, same
-        # rationale `smd update` uses for its own install step.
-        diff = subprocess.run(
-            ['git', '--no-optional-locks', '-C', str(d), 'diff',
-             '--name-only', from_sha, to_sha],
-            capture_output=True, text=True)
-        changed = set(diff.stdout.split())
-        if changed & {'pyproject.toml', 'uv.lock'}:
-            sh = d / 'scripts' / 'install.sh'
-            if not sh.exists():
-                sh = d / 'install.sh'
-            if sh.exists():
-                r = subprocess.run(_as_root(['bash', str(sh)]),
-                                   capture_output=True, text=True)
-                (_ok if r.returncode == 0 else _err)(
-                    f'{name}: install.sh exit {r.returncode}')
-            else:
-                _warn(f'{name}: pyproject.toml/uv.lock changed but no '
-                      f'install.sh found on disk — venv may be stale')
+    # install.sh for every moved component, after every checkout has
+    # landed: `smd update` pulls everything, then runs each pulled
+    # component's install.sh, and a rollback must leave the host as the
+    # older release's install leaves it (release v3.73 row 4).  Gating
+    # this on pyproject.toml/uv.lock, as restore once did, skipped the
+    # units: install.sh also writes systemd units, drop-ins and symlinks,
+    # so v3.72's consumers unit survived a rollback to v3.71.  No
+    # install.sh starts, stops or restarts radiod.
+    install_failed = []
+    for name, _from, _to in moved:
+        d = checkout_by_name[name]
+        if name == 'ka9q-radio':
+            # A compiled binary: moving its checkout changes nothing that
+            # runs.  The rebuild stays a deliberate step by hand.
+            _info('ka9q-radio: no install.sh run — the running radiod is '
+                  'the binary built before; rebuild it by hand if the '
+                  'restored commit must run')
+            continue
+        sh = d / 'scripts' / 'install.sh'
+        if not sh.exists():
+            sh = d / 'install.sh'
+        if not sh.exists():
+            continue  # a library (ka9q-python): the checkout is the update
+        r = subprocess.run(_as_root(['bash', str(sh)]),
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            _ok(f'{name}: install.sh exit 0')
+        else:
+            install_failed.append(name)
+            _err(f'{name}: install.sh exit {r.returncode} — last lines:')
+            for line in (r.stdout + r.stderr).strip().splitlines()[-15:]:
+                _info(f'  | {line}')
+
+    # Units the newer release added and the older one never ships: the
+    # older install.sh cannot know them, so they would stay installed.
+    retired_any = False
+    for name, from_sha, to_sha in moved:
+        retired_any |= _restore_retire_units(
+            checkout_by_name[name], name, from_sha, to_sha)
+    if retired_any:
+        subprocess.run(_as_root(['systemctl', 'daemon-reload']),
+                       capture_output=True, text=True)
 
     if moved:
         # The SAME restart guidance `cmd_update` prints — restarts stay
@@ -4751,7 +4860,14 @@ def cmd_manifest_restore(args) -> int:
               f'{len(moved)} component(s) moved, re-plan verifies '
               f'all-keep ({len(reverify.strays)} stray component(s) '
               f'untouched)')
-        return _restore_rerender_uploader(base)
+        rc = _restore_rerender_uploader(base)
+        if install_failed:
+            _err(f'admin manifest restore: install.sh failed for '
+                 f'{", ".join(install_failed)} — the checkouts stand at the '
+                 f'manifest, but those components\' venvs and units may not '
+                 f'match it.  Fix the cause, then run each install.sh by hand')
+            return 1
+        return rc
 
     _err(f'admin manifest restore: restored {len(moved)} component(s) but '
          f're-plan verification STILL finds a divergence — treat this '
@@ -24699,8 +24815,10 @@ def main() -> int:
     p_m_restore.add_argument('path', help='local path to a candidate (blessed) manifest file')
     p_m_restore.add_argument('--apply', action='store_true',
         help='move checkouts onto the manifest SHAs (root; only if the plan '
-             'is ok), then re-render the hs-uploader manifest with the '
-             'restored sigmond. That re-render passes --enable, so it also '
+             'is ok), run each moved component\'s install.sh as `smd update` '
+             'does (never for ka9q-radio), retire unit files that only the '
+             'newer commit shipped, then re-render the hs-uploader manifest '
+             'with the restored sigmond. That re-render passes --enable, so it also '
              'starts an hs-uploader you stopped by hand. Default is dry-run: '
              'plan only, never touches a checkout.')
     p_m_restore.add_argument('--no-fetch', action='store_true',

@@ -236,11 +236,19 @@ class _FakeGit:
 
     def __init__(self, dirty=None, unresolvable=None, changed_files=None,
                  rerender=(0, 'uploader: /etc/hs-uploader/pipelines.toml '
-                              'already current (3 pipeline(s))\n', '')):
+                              'already current (3 pipeline(s))\n', ''),
+                 removed_files=None, blobs=None, install_rc=None):
         self.calls = []
         self.dirty = dirty or {}
         self.unresolvable = unresolvable or set()
         self.changed_files = changed_files or {}
+        # removed_files: component -> paths `git diff --name-only
+        # --diff-filter=D <newer> <older>` lists (in the newer commit only).
+        # blobs: (component, path) -> bytes `git show <sha>:<path>` prints.
+        # install_rc: component -> exit code of its install.sh (default 0).
+        self.removed_files = removed_files or {}
+        self.blobs = blobs or {}
+        self.install_rc = install_rc or {}
         self.rerender = rerender
         self.rerender_kwargs = None
         self.rerender_environ = None
@@ -273,10 +281,25 @@ class _FakeGit:
             return out
         if 'checkout' in cmd and '--detach' in cmd:
             return out
+        if 'diff' in cmd and '--diff-filter=D' in cmd:
+            out.stdout = '\n'.join(self.removed_files.get(name, []))
+            return out
         if 'diff' in cmd and '--name-only' in cmd:
             out.stdout = '\n'.join(self.changed_files.get(name, []))
             return out
-        if cmd and cmd[0] == 'bash':
+        if 'show' in cmd and name is not None:
+            path = cmd[-1].split(':', 1)[1]
+            blob = self.blobs.get((name, path))
+            if blob is None:
+                out.returncode, out.stdout = 128, b''
+            else:
+                out.stdout = blob
+            return out
+        if 'bash' in cmd and str(cmd[-1]).endswith('install.sh'):
+            sh = Path(cmd[-1])
+            comp = (sh.parent.parent if sh.parent.name == 'scripts'
+                    else sh.parent).name
+            out.returncode = self.install_rc.get(comp, 0)
             return out
         return out
 
@@ -596,14 +619,173 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         self.assertTrue(any('checkout' in c and '--detach' in c
                             for c in fake.calls))
 
-    def test_install_sh_skipped_when_nothing_relevant_changed(self):
+    @staticmethod
+    def _installs(fake):
+        return [c for c in fake.calls
+                if 'bash' in c and str(c[-1]).endswith('install.sh')]
+
+    def test_install_sh_runs_even_when_only_code_changed(self):
+        # v3.73 row 4: `smd update` runs install.sh after every pull, so a
+        # forward roll rewrites the units.  A restore that skipped it left
+        # v3.72's consumers unit behind on a rolled-back v3.71 guest.
         live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
         after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
-        fake = _FakeGit(changed_files={'wspr-recorder': ['README.md']})
+        fake = _FakeGit(changed_files={'wspr-recorder': ['systemd/x.service']})
         rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
-        self.assertFalse(any(c and c[0] == 'bash' for c in fake.calls))
-        self.assertTrue(any('checkout' in c and '--detach' in c
-                            for c in fake.calls))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self._installs(fake)), 1)
+        self.assertIn('wspr-recorder: install.sh exit 0', out)
+
+    def _two_component_manifest(self):
+        p = self.tdir / 'candidate2.txt'
+        p.write_text(
+            "components (live):\n"
+            "    psk-recorder     bbbbbbb\n"
+            "    wspr-recorder    aaaaaaa\n"
+            + _filler_rows(MIN_COMPONENT_ROWS - 2))
+        return p
+
+    def test_every_checkout_lands_before_any_install_runs(self):
+        # An install.sh resolves its siblings by path ([tool.uv.sources]),
+        # so each one must see every checkout already moved, as `smd
+        # update` pulls everything before it installs anything.
+        fill = _filler_live(MIN_COMPONENT_ROWS - 2)
+        live = {'psk-recorder': 'ddddddd', 'wspr-recorder': 'ccccccc', **fill}
+        after = {'psk-recorder': 'bbbbbbb', 'wspr-recorder': 'aaaaaaa', **fill}
+        fake = _FakeGit()
+        rc, out, fake = self._run(self._two_component_manifest(), live, fake,
+                                  after_live=after)
+        self.assertEqual(rc, 0, out)
+        idx = [i for i, c in enumerate(fake.calls)
+               if 'checkout' in c and '--detach' in c]
+        inst = [i for i, c in enumerate(fake.calls)
+                if 'bash' in c and str(c[-1]).endswith('install.sh')]
+        self.assertEqual((len(idx), len(inst)), (2, 2))
+        self.assertLess(max(idx), min(inst))
+
+    def test_ka9q_radio_runs_no_install_and_names_the_rebuild(self):
+        # radiod is a compiled binary: a checkout move changes nothing
+        # running, and a rebuild stays a deliberate step by hand.
+        p = self.tdir / 'candidate3.txt'
+        p.write_text("components (live):\n"
+                     "    ka9q-radio       aaaaaaa\n"
+                     + _filler_rows(MIN_COMPONENT_ROWS - 1))
+        live = {'ka9q-radio': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'ka9q-radio': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        fake = _FakeGit(changed_files={'ka9q-radio': ['pyproject.toml']})
+        rc, out, fake = self._run(p, live, fake, after_live=after)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._installs(fake), [])
+        self.assertIn('ka9q-radio: no install.sh run', out)
+        self.assertIn('rebuild', out)
+
+    def test_a_failed_install_sh_exits_1_and_names_it(self):
+        live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        fake = _FakeGit(install_rc={'wspr-recorder': 3})
+        rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('wspr-recorder: install.sh exit 3', out)
+        self.assertIn('install.sh failed', out)
+
+    def test_restore_never_starts_stops_or_restarts_a_service(self):
+        live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        fake = _FakeGit()
+        rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
+        for c in fake.calls:
+            if 'systemctl' in c:
+                self.assertFalse({'start', 'stop', 'restart', 'try-restart',
+                                  'reload-or-restart'} & set(c), c)
+
+    # -- units the newer release added, which the older one never ships --
+
+    SIG_MANIFEST_ROW = "    sigmond          aaaaaaa\n"
+
+    def _sigmond_run(self, fake, installed):
+        p = self.tdir / 'candidate-sig.txt'
+        p.write_text("components (live):\n" + self.SIG_MANIFEST_ROW
+                     + _filler_rows(MIN_COMPONENT_ROWS - 1))
+        live = {'sigmond': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'sigmond': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        sysd = self.tdir / 'etc-systemd'
+        sysd.mkdir()
+        for rel, data in installed.items():
+            (sysd / rel).parent.mkdir(parents=True, exist_ok=True)
+            (sysd / rel).write_bytes(data)
+        with mock.patch.object(smd, '_RESTORE_SYSTEMD_DIR', sysd):
+            rc, out, fake = self._run(p, live, fake, after_live=after)
+        return rc, out, fake, sysd
+
+    def test_a_timer_only_the_newer_release_shipped_is_disabled_and_removed(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.timer',
+                                       'systemd/sigmond-new.service']},
+            blobs={('sigmond', 'systemd/sigmond-new.timer'): b'T',
+                   ('sigmond', 'systemd/sigmond-new.service'): b'S'})
+        rc, out, fake, sysd = self._sigmond_run(
+            fake, {'sigmond-new.timer': b'T', 'sigmond-new.service': b'S'})
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((sysd / 'sigmond-new.timer').exists())
+        self.assertFalse((sysd / 'sigmond-new.service').exists())
+        sc = [c for c in fake.calls if 'systemctl' in c]
+        self.assertTrue(any('disable' in c and '--now' in c
+                            and 'sigmond-new.timer' in c for c in sc), sc)
+        # A service is disabled, never stopped: something may Require it.
+        svc = [c for c in sc if 'sigmond-new.service' in c]
+        self.assertTrue(svc and all('disable' in c and '--now' not in c
+                                    for c in svc), svc)
+        self.assertTrue(any('daemon-reload' in c for c in sc), sc)
+        self.assertIn('retired sigmond-new.timer', out)
+
+    def test_a_radiod_drop_in_only_the_newer_release_shipped_is_removed(self):
+        rel = 'radiod@.service.d/45-sigmond-consumers.conf'
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/radiod-consumers.conf']},
+            blobs={('sigmond', 'systemd/radiod-consumers.conf'): b'D'})
+        rc, out, fake, sysd = self._sigmond_run(fake, {rel: b'D'})
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((sysd / rel).exists())
+        sc = [c for c in fake.calls if 'systemctl' in c]
+        # A drop-in needs a daemon-reload and nothing else: radiod picks
+        # the change up at its next start, never from this restore.
+        self.assertFalse(any('disable' in c for c in sc), sc)
+        self.assertTrue(any('daemon-reload' in c for c in sc), sc)
+
+    def test_an_edited_unit_stays_and_the_restore_names_it(self):
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.timer']},
+            blobs={('sigmond', 'systemd/sigmond-new.timer'): b'T'})
+        rc, out, fake, sysd = self._sigmond_run(
+            fake, {'sigmond-new.timer': b'edited'})
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((sysd / 'sigmond-new.timer').exists())
+        self.assertIn('sigmond-new.timer', out)
+        self.assertIn('left in place', out)
+        self.assertFalse(any('systemctl' in c and 'disable' in c
+                             for c in fake.calls))
+
+    def test_no_unit_left_behind_means_no_daemon_reload(self):
+        fake = _FakeGit()
+        rc, out, fake, sysd = self._sigmond_run(fake, {})
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(any('systemctl' in c and 'daemon-reload' in c
+                             for c in fake.calls))
+
+    def test_the_newer_units_are_read_before_install_sh_runs(self):
+        # The comparison reads the NEWER commit's bytes from git, so it
+        # holds whichever order the steps take; it must still diff from the
+        # sha the checkout left (newer) to the one it reached (older).
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.timer']},
+            blobs={('sigmond', 'systemd/sigmond-new.timer'): b'T'})
+        rc, out, fake, sysd = self._sigmond_run(fake, {'sigmond-new.timer': b'T'})
+        diffs = [c for c in fake.calls if '--diff-filter=D' in c]
+        self.assertEqual(len(diffs), 1)
+        self.assertEqual(diffs[0][-2:], ['ccccccc', 'aaaaaaa'])
+        shows = [c for c in fake.calls if 'show' in c and '-C' in c]
+        self.assertTrue(shows and shows[0][-1] == 'ccccccc:systemd/sigmond-new.timer',
+                        shows)
 
     def test_checkout_uses_detach_and_runs_as_owner(self):
         live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}

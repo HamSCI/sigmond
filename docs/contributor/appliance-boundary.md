@@ -124,7 +124,11 @@ the manifest SHA, and it prints the whole diff rather than the first mismatch
 adopt --help`). `smd admin manifest restore` is the other direction: it moves
 diverging checkouts *back* onto the manifest SHAs, refusing a dirty tree rather
 than stashing it, and leaving strays alone (source: `smd admin manifest restore
---help`). Blessed means **contained baseline, not frozen equality** — see
+--help`). After the checkouts it runs each moved component's `install.sh`, as
+`smd update` does, so the units stand as the older release installs them. It
+also disables and removes a unit file that only the newer commit shipped. No
+install.sh restarts radiod, and the operator still restarts radiod and the
+recorders by hand. Blessed means **contained baseline, not frozen equality** — see
 [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) §5 for why a develop-on-main
 fleet needs that rule to have a meaningful baseline at all.
 
