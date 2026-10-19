@@ -57,6 +57,9 @@ _VENV = Path("/opt/hs-uploader/venv")
 # hs-uploader's own default for its store's directory (watermark/sqlite.py
 # default_path); the unit may override it with HS_UPLOADER_STATE_DIR.
 _DEFAULT_STATE_DIR = "/var/lib/hs-uploader"
+# `hs-uploader migrate --check` exits this when a migrate would write
+# (hs-uploader 72a7888 on; an older one always exits 0).
+_CHECK_PENDING = 3
 # Longer than hs-uploader migrate's own 30 s wait for another writer's lock,
 # with room for the interpreter to start on a busy station.
 _MIGRATE_TIMEOUT_S = 120
@@ -165,8 +168,12 @@ def _daemon_store_path() -> Path:
     from ..inprocess_senders import _systemctl_show
     try:
         env = _systemctl_show(SERVICE)
-    except OSError:
-        env = {}
+    except OSError as exc:
+        guess = Path(_DEFAULT_STATE_DIR) / "watermarks.db"
+        _err(f"could not read {SERVICE}'s environment ({exc}); assuming "
+             f"its store sits at {guess}.  A store missing there counts "
+             "as a pending migration.")
+        return guess
     base = (env.get("HS_UPLOADER_STATE_DIR") or "").strip()
     return Path(base or _DEFAULT_STATE_DIR) / "watermarks.db"
 
@@ -195,11 +202,31 @@ def _run_in_group(cmd: list, *, cwd: str, timeout: float
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
-def _check_pending(stdout: str) -> bool:
-    """Whether ``migrate --check`` reports work for a real migrate: a
-    pending migration, a retry it would delete or move, or a crash's
-    journal that only a writing open recovers.  A retry that "stays"
-    needs nothing."""
+def _store_missing(stdout: str) -> bool:
+    """``migrate --check`` found no store at the path it was given.  The
+    path is the daemon's store, or a guess at it, so a missing file may
+    mean a wrong guess rather than a fresh host: run migrate, which
+    creates and stamps a missing store as ``hsupload`` (review #4)."""
+    return any(line.startswith("watermarks.db: not found at ")
+               for line in stdout.splitlines())
+
+
+def _check_pending(rc: int, stdout: str,
+                   store_version: Optional[int] = None) -> bool:
+    """Whether ``migrate --check`` reports work for a real migrate.
+
+    An hs-uploader that reads store version 2 or more says so in its exit
+    code: 3 when a migrate would write, 0 when not.  An older one always
+    exits 0, so its wording decides: a pending migration, a retry it would
+    delete or move, or a crash's journal that only a writing open
+    recovers.  A retry that "stays" needs nothing.  A store missing at the
+    given path counts as pending either way."""
+    if _store_missing(stdout):
+        return True
+    if store_version is not None and store_version >= um.SPLIT_STORE_VERSION:
+        return rc == _CHECK_PENDING
+    if rc == _CHECK_PENDING:
+        return True
     for line in stdout.splitlines():
         text = line.strip()
         if (text.startswith("pending ") or ": would delete" in text
@@ -209,7 +236,8 @@ def _check_pending(stdout: str) -> bool:
 
 
 def _run_migrate(*, db: Path, sink: Optional[Path],
-                 keep_retry_for: Optional[str], check: bool = False) -> int:
+                 keep_retry_for: Optional[str], check: bool = False,
+                 store_version: Optional[int] = None) -> int:
     """Run the daemon's own ``hs-uploader migrate`` as ``hsupload``.
 
     It runs as ``hsupload``, the daemon's account, in the unit's working
@@ -223,7 +251,8 @@ def _run_migrate(*, db: Path, sink: Optional[Path],
     1 on any failure, after saying why.  ``check=True`` runs ``migrate
     --check``, which writes nothing, and returns 0 when nothing waits, 3
     when a migration is pending (``_check_pending``), 1 when the check
-    failed.  Either mode returns 0, with a line saying so, when no daemon
+    failed.  ``store_version`` (the probe's answer) says whether the exit
+    code can be trusted (:func:`_check_pending`).  Either mode returns 0, with a line saying so, when no daemon
     venv exists or the installed hs-uploader predates ``migrate`` (argparse
     exits 2 with ``invalid choice: 'migrate'``)."""
     exe = _VENV / "bin" / "hs-uploader"
@@ -258,12 +287,14 @@ def _run_migrate(*, db: Path, sink: Optional[Path],
                   "send-record migrate skipped")
         return 0
     stdout = r.stdout or ""
-    pending = check and r.returncode == 0 and _check_pending(stdout)
-    if not check or pending or r.returncode != 0:
+    ok = r.returncode == 0 or (check and r.returncode == _CHECK_PENDING)
+    pending = check and ok and _check_pending(r.returncode, stdout,
+                                              store_version)
+    if not check or pending or not ok:
         for line in stdout.splitlines():
             if line.strip():
                 print(f"uploader: {line}")
-    if r.returncode != 0:
+    if not ok:
         _err(f"{what} failed (exit {r.returncode}): "
              f"{stderr or 'no message'}")
         return 1
@@ -272,16 +303,22 @@ def _run_migrate(*, db: Path, sink: Optional[Path],
     return 0
 
 
-def _effective_mode() -> str:
-    """The mode the render will take (``upload``, ``discard`` or
-    ``hold``), from coordination.toml and the daemon's discard support.
-    ``hold`` when coordination cannot be read: generate() then fails on
-    its own read, and no probe runs first."""
+def _render_inputs():
+    """``(coord, mode, supports_discard)`` for the render: coordination.toml,
+    the mode the render will take (``upload``, ``discard`` or ``hold``),
+    and, only when the policy asks for discard, whether the daemon's venv
+    can discard.  The command hands all three to generate(), so the venv
+    is asked once (review #3).  ``(None, "hold", None)`` when coordination
+    cannot be read: generate() then fails on its own read, and no probe
+    runs first."""
     try:
         from ..coordination import load_coordination
-        return um.effective_mode(load_coordination())
+        coord = load_coordination()
     except Exception:  # pragma: no cover - defensive
-        return "hold"
+        return None, "hold", None
+    supports = (um.hs_uploader_supports_discard()
+                if coord.uploads.mode == "discard" else None)
+    return coord, um.effective_mode(coord, supports_discard=supports), supports
 
 
 def _keep_retry_for(text: str) -> Optional[str]:
@@ -345,7 +382,7 @@ def cmd_uploader_manifest(args) -> int:
     # Step 1: ask the daemon's interpreter, once, which store version it
     # reads (spec §5.1), and only when the render needs the answer: a
     # hold renders the heartbeat alone (ruling 9).
-    mode = _effective_mode()
+    coord, mode, supports_discard = _render_inputs()
     store_version = None
     try:
         if mode in ("upload", "discard"):
@@ -354,7 +391,8 @@ def cmd_uploader_manifest(args) -> int:
                 raise um.ProbeFailed(
                     f"cannot ask {um.HS_UPLOADER_PYTHON} for `hs-uploader "
                     "capabilities` (failed or timed out)")
-        text = um.generate(store_version=store_version)
+        text = um.generate(coord=coord, supports_discard=supports_discard,
+                           store_version=store_version)
     except um.ProbeFailed as exc:
         _err(f"uploader manifest: {exc}; the installed manifest and "
              f"{SERVICE} stay as they are")
@@ -367,7 +405,7 @@ def cmd_uploader_manifest(args) -> int:
     # A hold took no probe; it names the shared pipeline.
     try:
         suppressed = um.suppressed_pipelines(
-            store_version=store_version if store_version is not None else 0)
+            coord=coord, store_version=store_version if store_version is not None else 0)
     except Exception:  # pragma: no cover - defensive
         suppressed = []
     if suppressed:
@@ -421,7 +459,8 @@ def cmd_uploader_manifest(args) -> int:
                       keep_retry_for=_keep_retry_for(text) if split else None)
 
     # Step 3: is a migration pending?
-    pending = _run_migrate(check=True, **migrate_kw)
+    pending = _run_migrate(check=True, store_version=store_version,
+                           **migrate_kw)
     if pending not in (0, 3):
         side.unlink(missing_ok=True)
         _err(f"hs-uploader migrate --check failed; {path} and {SERVICE} "
@@ -453,10 +492,36 @@ def cmd_uploader_manifest(args) -> int:
             _run(["systemctl", "restart", SERVICE])
         return 0
 
-    # Step 5: note whether the daemon runs, then stop it.  Stop even an
-    # inactive unit: that cancels a restart systemd has queued, which could
-    # otherwise start the daemon in the middle of the migration.
+    # Steps 5-8 stop the daemon.  Whatever goes wrong before step 8 starts
+    # it again, an exception included, must put it back as found and exit
+    # non-zero (review #2): a stopped uploader under a green `smd apply`
+    # ships nothing until someone notices.
     was_active = _service_active()
+    try:
+        return _stop_migrate_land_start(
+            side=side, path=path, installed=installed, text=text,
+            changed=changed, n=n, enable=enable, daemon_ready=daemon_ready,
+            was_active=was_active, migrate_kw=migrate_kw)
+    except Exception as exc:
+        side.unlink(missing_ok=True)
+        _err(f"uploader manifest step failed after stopping {SERVICE}: "
+             f"{type(exc).__name__}: {exc}")
+        if was_active:
+            try:
+                _start(enable=False)
+            except Exception as exc2:  # pragma: no cover - defensive
+                _err(f"could not start {SERVICE} again: {exc2}")
+        return 1
+
+
+def _stop_migrate_land_start(*, side: Path, path: Path, installed: str,
+                             text: str, changed: bool, n: int, enable: bool,
+                             daemon_ready, was_active: bool,
+                             migrate_kw: dict) -> int:
+    """Spec §5.2 steps 5-8, the daemon's state as found in ``was_active``."""
+    # Step 5: stop the daemon.  Stop even an inactive unit: that cancels a
+    # restart systemd has queued, which could otherwise start the daemon in
+    # the middle of the migration.
     if _run(["systemctl", "stop", SERVICE]) != 0 and was_active:
         side.unlink(missing_ok=True)
         _err(f"could not stop {SERVICE}; nothing migrated, {path} left as "

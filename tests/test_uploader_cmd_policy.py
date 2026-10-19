@@ -124,7 +124,8 @@ class EnableInstallsDaemonFirstTests(unittest.TestCase):
              mock.patch.object(um, "suppressed_pipelines", return_value=[]), \
              mock.patch.object(um, "hs_uploader_store_version", return_value=2), \
              mock.patch.object(um, "MANIFEST_PATH", path), \
-             mock.patch.object(up_cmd, "_effective_mode", return_value="upload"), \
+             mock.patch.object(up_cmd, "_render_inputs",
+                               return_value=(None, "upload", None)), \
              mock.patch.object(up_cmd, "_daemon_store_path",
                                return_value=Path("/x/watermarks.db")), \
              mock.patch.object(up_cmd.os, "geteuid", return_value=euid), \
@@ -360,7 +361,7 @@ class RunMigrateTests(unittest.TestCase):
 
     def test_the_timeout_is_120_seconds(self):
         # Past hs-uploader migrate's own 30 s wait for a lock, and inside the
-        # 240 s that smd align allows the whole manifest step.
+        # 600 s that smd align allows the whole manifest step.
         self.assertEqual(up_cmd._MIGRATE_TIMEOUT_S, 120)
 
     def test_an_hs_uploader_without_migrate_counts_as_skipped(self):

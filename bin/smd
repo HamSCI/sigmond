@@ -6157,13 +6157,20 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
         before = um.MANIFEST_PATH.read_bytes()
     except OSError:
         before = None
-    # 300 s: the child probes hs-uploader (20 s at most), then waits up to
-    # 120 s each for `hs-uploader migrate --check` and `hs-uploader migrate`
-    # (sigmond.commands.uploader._MIGRATE_TIMEOUT_S).  A shorter limit here
-    # would kill smd before its own timeout could report a hung migrate, and
-    # leave hs-uploader stopped.
+    # 600 s, above the step's worst case.  Killing the child after its
+    # `systemctl stop` would leave hs-uploader stopped, so the limit must
+    # cover every wait the child can take, in order:
+    #     20 s  discard-support probe (only under mode = "discard")
+    #   + 20 s  `hs-uploader capabilities` probe
+    #   + 20 s  D13 environment reads, 10 s per psk-recorder/meteor-scatter unit
+    #   + 10 s  `systemctl show` for the daemon's store path
+    #   +120 s  `hs-uploader migrate --check` (_MIGRATE_TIMEOUT_S)
+    #   + 90 s  `systemctl stop` (the unit sets no TimeoutStopSec: default 90 s)
+    #   +120 s  `hs-uploader migrate` (_MIGRATE_TIMEOUT_S)
+    #   + 30 s  `systemctl start` (the unit's TimeoutStartSec)
+    #   = 430 s, plus interpreter start-up; 600 s leaves room.
     r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'uploader', 'manifest', '--write'],
-                   run=run, timeout=300, action='admin uploader manifest --write',
+                   run=run, timeout=600, action='admin uploader manifest --write',
                    stdin=subprocess.DEVNULL)
     detail = _tail(r)
     if r.returncode != 0:

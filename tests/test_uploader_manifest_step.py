@@ -48,7 +48,7 @@ class _Step(unittest.TestCase):
 
     def step(self, *, enable=False, installed=OLD, render=SPLIT, probe=2,
              pending=False, check_rc=None, migrate_rc=0, active=True,
-             mode="upload", stop_rc=0):
+             mode="upload", stop_rc=0, land_error=None):
         d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
         path = Path(d.name) / "pipelines.toml"
         if installed is not None:
@@ -72,10 +72,13 @@ class _Step(unittest.TestCase):
             seen["suppressed_sv"].append(store_version)
             return []
 
-        def fake_migrate(*, db, sink, keep_retry_for, check=False):
+        def fake_migrate(*, db, sink, keep_retry_for, check=False,
+                         store_version=None):
             seen["migrate_kw"].append(dict(db=db, sink=sink,
                                            keep_retry_for=keep_retry_for,
                                            check=check))
+            if check:
+                seen.setdefault("check_sv", []).append(store_version)
             if check:
                 calls.append("check")
                 if check_rc is not None:
@@ -106,7 +109,8 @@ class _Step(unittest.TestCase):
              mock.patch.object(um, "suppressed_pipelines",
                                side_effect=fake_suppressed), \
              mock.patch.object(um, "MANIFEST_PATH", path), \
-             mock.patch.object(up_cmd, "_effective_mode", return_value=mode), \
+             mock.patch.object(up_cmd, "_render_inputs",
+                               return_value=(None, mode, None)), \
              mock.patch.object(up_cmd.os, "geteuid", return_value=0), \
              mock.patch.object(up_cmd, "_ensure_daemon_installed",
                                return_value=True), \
@@ -118,7 +122,11 @@ class _Step(unittest.TestCase):
                                return_value=False), \
              mock.patch.object(up_cmd, "_daemon_store_path", return_value=DB), \
              mock.patch.object(up_cmd, "_run", side_effect=fake_run), \
+             contextlib.ExitStack() as stack, \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            if land_error is not None:
+                stack.enter_context(mock.patch.object(
+                    up_cmd, "_land", side_effect=land_error))
             rc = up_cmd.cmd_uploader_manifest(
                 types.SimpleNamespace(write=True, enable=enable))
         side = path.with_name(path.name + ".new")
@@ -344,7 +352,7 @@ class RunMigrateArgvTests(unittest.TestCase):
         kw = dict(db=DB, sink=None, keep_retry_for=None, check=True)
         for stdout, want in [
                 ("watermarks.db: version 2\n  nothing to do\n", 0),
-                ("watermarks.db: not found at /x; nothing to migrate\n", 0),
+                ("watermarks.db: not found at /x; nothing to migrate\n", 3),
                 ("watermarks.db: version 1\n  pending 2: split the "
                  "pskreporter send record\n", 3),
                 ("watermarks.db: version 2\n  retry 7 (psk-pskreporter, "
@@ -444,6 +452,127 @@ class GenerateHoldNoProbeTests(unittest.TestCase):
              mock.patch.object(um, "host_key_file", return_value="/k"):
             text = um.generate(_Topo(), coord)
         self.assertIn("SITE SINK HOLD", text)
+
+
+class FixRoundTests(_Step):
+    """Task 10 review, fix round 1."""
+
+    def test_the_check_learns_the_probed_store_version(self):
+        r = self.step(probe=2)
+        self.assertEqual(r.check_sv, [2])
+
+    def test_an_exception_after_the_stop_restores_the_daemon(self):
+        # Review #2: an OSError while landing left hs-uploader stopped and
+        # `smd apply` reporting success.
+        for enable in (False, True):
+            for active in (True, False):
+                with self.subTest(enable=enable, active=active):
+                    r = self.step(enable=enable, active=active,
+                                  land_error=OSError("disk full"))
+                    self.assertEqual(r.rc, 1)
+                    self.assertEqual(r.final_active, active)
+                    self.assertEqual(r.manifest, OLD)
+                    self.assertFalse(r.side.exists())
+                    self.assertIn("disk full", r.err)
+
+    def test_discard_support_is_asked_once_and_handed_to_generate(self):
+        # Review #3: the command and generate() each asked the daemon's
+        # venv whether it can discard.
+        from sigmond.coordination import Coordination, Host, Uploads
+        coord = Coordination(host=Host(call="AC0G", grid="EM38ww"),
+                             uploads=Uploads(mode="discard"))
+        seen = {}
+
+        def fake_generate(*a, **k):
+            seen.update(k)
+            return OLD
+
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        with mock.patch("sigmond.coordination.load_coordination",
+                        return_value=coord), \
+             mock.patch.object(um, "hs_uploader_supports_discard",
+                               return_value=True) as asked, \
+             mock.patch.object(um, "hs_uploader_store_version", return_value=2), \
+             mock.patch.object(um, "generate", side_effect=fake_generate), \
+             mock.patch.object(um, "suppressed_pipelines", return_value=[]), \
+             mock.patch.object(um, "MANIFEST_PATH", Path(d.name) / "p.toml"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            rc = up_cmd.cmd_uploader_manifest(types.SimpleNamespace(write=False))
+        self.assertEqual(rc, 1)          # no manifest on disk: would create
+        self.assertEqual(asked.call_count, 1)
+        self.assertIs(seen["supports_discard"], True)
+        self.assertIs(seen["coord"], coord)
+        self.assertEqual(seen["store_version"], 2)
+
+
+class StorePathTests(unittest.TestCase):
+    """Review #4: --db names the daemon's store, and a guess says so."""
+
+    def _path(self, show):
+        err = io.StringIO()
+        with mock.patch("sigmond.inprocess_senders._systemctl_show",
+                        side_effect=show), contextlib.redirect_stderr(err):
+            path = up_cmd._daemon_store_path()
+        return path, err.getvalue()
+
+    def test_the_units_state_dir_wins(self):
+        path, err = self._path(lambda unit: {"HS_UPLOADER_STATE_DIR": "/srv/hs"})
+        self.assertEqual(path, Path("/srv/hs/watermarks.db"))
+        self.assertEqual(err, "")
+
+    def test_a_unit_without_the_variable_gets_the_default_quietly(self):
+        path, err = self._path(lambda unit: {})
+        self.assertEqual(path, Path("/var/lib/hs-uploader/watermarks.db"))
+        self.assertEqual(err, "")
+
+    def test_an_unreadable_unit_falls_back_and_says_so(self):
+        def boom(unit):
+            raise OSError("systemctl show hs-uploader.service exited 1")
+        path, err = self._path(boom)
+        self.assertEqual(path, Path("/var/lib/hs-uploader/watermarks.db"))
+        self.assertIn("could not read", err)
+        self.assertIn("/var/lib/hs-uploader/watermarks.db", err)
+
+
+class CheckMappingTests(unittest.TestCase):
+    """Review #1b and #4: exit codes from an hs-uploader that reports store
+    version 2 or more; the wording only for an older one; a store missing
+    at the daemon's path counts as pending."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        self.venv = Path(d.name) / "venv"
+        exe = self.venv / "bin" / "hs-uploader"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/bin/sh\n")
+
+    def _check(self, rc, stdout, store_version):
+        def fake_group(cmd, **k):
+            return subprocess.CompletedProcess(cmd, rc, stdout, "")
+        with mock.patch.object(up_cmd, "_VENV", self.venv), \
+             mock.patch.object(up_cmd, "_run_in_group", side_effect=fake_group), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            return up_cmd._run_migrate(db=DB, sink=None, keep_retry_for=None,
+                                       check=True, store_version=store_version)
+
+    def test_a_v2_hs_uploader_is_read_by_its_exit_code(self):
+        self.assertEqual(self._check(3, "watermarks.db: version 2\n", 2), 3)
+        # The wording would say pending; exit 0 from a v2 hs-uploader wins.
+        self.assertEqual(self._check(0, "  pending 9: future\n", 2), 0)
+
+    def test_an_older_hs_uploader_is_read_by_its_wording(self):
+        for sv in (None, 0, 1):
+            with self.subTest(store_version=sv):
+                self.assertEqual(self._check(0, "  pending 2: x\n", sv), 3)
+                self.assertEqual(self._check(0, "  nothing to do\n", sv), 0)
+
+    def test_a_store_missing_at_the_daemons_path_counts_as_pending(self):
+        line = ("watermarks.db: not found at /srv/state/watermarks.db; "
+                "nothing to migrate\n")
+        for sv in (None, 2):
+            with self.subTest(store_version=sv):
+                self.assertEqual(self._check(0, line, sv), 3)
 
 
 def _load_smd():
