@@ -132,6 +132,11 @@ destination is a pskreporter destination:
      retry ships once, and the other pipeline re-sends its own rows of that batch: at most one batch
      of one producer goes out twice (review S2, S6).
    - A keyless retry from before v3.70 under that name gets the same treatment.
+   - Before this item, every `migrate` copies the old record to any producer key that does not
+     exist yet, and records it in `superseded_keys`; it never touches an existing key.  A store the
+     daemon created stands at version 2 with no producer keys, so without this copy a deleted retry
+     would leave both pipelines to start at "now" and skip rows (final review I1).  A retry may be
+     deleted only when both producer keys exist.
    - This item, unlike the rest, runs on every `migrate`, not once: a retry queued under
      `psk-pskreporter` by a rolled-back daemon gets the same treatment at the next update.  It
      only ever deletes a retry whose rows the sink still holds, or moves one, so repeating it
@@ -306,6 +311,15 @@ proved it.
 | later key splits (step 3's wsprdaemon tar; per-instance pipelines) | the key grammar with its instance slot, the `radiod_id` filter, migration machinery and `superseded_keys` | its own migration; per-instance rendering and the identity each instance posts under |
 | clients with several destinations: meteor-scatter's MSQP recordings to Zenodo today, perhaps I/Q with Digital RF sidecars later | pipeline names of the form `<client>-<destination>` and `Pipeline.client` | pipeline files that let one client declare several destinations, and a decision on whether the Zenodo upload moves under hs-uploader and the sink switch |
 | the index on `(target_db, target_table, producer, id)` | nothing | add it with cleanup |
+| the capability contract | `hs-uploader capabilities` prints one bare integer; a v3.73 sigmond reads nothing else | keep that output, or a v3.73 sigmond fails its probe and keeps its old manifest |
+| instance keys | the `@P/R` form | validate the instance name before rendering instances (no `/` or `@`) |
+
+## 9a. Known limits
+
+- The retry rule "the sink still holds the retry's rows" (controller Ruling 2) assumes the sink trims
+  oldest first.  The trim orders by id within an age cutoff on `queued_at`; a large backward step of
+  the host clock could break that order.  The host clock follows the registration (no host clock,
+  only fusion), so such a step is itself an alarm.
 
 ## 10. Out of scope
 
