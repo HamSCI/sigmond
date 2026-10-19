@@ -201,15 +201,71 @@ def _pipeline_decls(deploy_path: Path) -> list:
     return decls if isinstance(decls, list) else []
 
 
+# --------------------------------------------------------------------------
+# the pskreporter producer split (tasks/spec-key-split-v373.md §5.1)
+# --------------------------------------------------------------------------
+
+# The store schema from which hs-uploader keys a sqlite source by producer.
+SPLIT_STORE_VERSION = 2
+# The pipeline psk-recorder and meteor-scatter both declare today.
+SHARED_PSK_PIPELINE = "psk-pskreporter"
+# Each producer's own pipeline and the modes it ships.  The clients' deploy.toml
+# keep declaring the shared block (D17 answer 2); sigmond rewrites it.
+PSK_PRODUCERS = {
+    "psk-recorder": ("psk-recorder-pskreporter", ["ft8", "ft4"]),
+    "meteor-scatter": ("meteor-scatter-pskreporter", ["msk144"]),
+}
+
+
+class ProbeFailed(Exception):
+    """The capability probe of the installed hs-uploader failed or timed out,
+    so sigmond cannot tell which manifest form the daemon reads."""
+
+
+def _split_for_producer(rendered: dict, client: str) -> dict:
+    """The shared ``psk-pskreporter`` block, rewritten as ``client``'s own
+    pipeline: its name, ``source.producer``, and the block's ``extra_where``
+    with the mode clause narrowed to the producer's modes.  Every other key
+    and clause copies unchanged."""
+    name, modes = PSK_PRODUCERS[client]
+    out = dict(rendered, name=name)
+    source = dict(out.get("source") or {})
+    where = []
+    replaced = False
+    for clause in source.get("extra_where") or []:
+        if (isinstance(clause, list) and len(clause) == 3
+                and clause[0] == "mode" and str(clause[1]).upper() == "IN"):
+            where.append(["mode", clause[1], list(modes)])
+            replaced = True
+        else:
+            where.append(clause)
+    if not replaced:
+        where.append(["mode", "IN", list(modes)])
+    source["extra_where"] = where
+    source["producer"] = client
+    out["source"] = source
+    return out
+
+
 def collect_pipelines(topology: Optional[Topology] = None,
-                      coord: Optional[Coordination] = None) -> list:
+                      coord: Optional[Coordination] = None,
+                      *, store_version: int) -> list:
     """Every enabled client's outbound pipeline(s), placeholders substituted.
 
     Returns a list of pipeline dicts ready for :func:`render_manifest`.  A
-    pipeline whose required identity is unresolved is skipped with a warning."""
+    pipeline whose required identity is unresolved is skipped with a warning.
+    Each dict carries ``client``: the client whose deploy.toml declared it.
+
+    ``store_version`` is the store schema the installed hs-uploader reports
+    (:func:`hs_uploader_store_version`).  From :data:`SPLIT_STORE_VERSION`
+    on, a ``psk-pskreporter`` block becomes its declaring producer's own
+    pipeline (spec §5.1).  Below it, the shared pipeline renders as before,
+    with one warning that hs-uploader lags sigmond."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
     call = reporter_call(coord)
+    split = store_version >= SPLIT_STORE_VERSION
+    warned_lag = False
 
     pipelines: list = []
     by_name: dict = {}
@@ -232,12 +288,27 @@ def collect_pipelines(topology: Optional[Topology] = None,
                     "unresolved identity: %s",
                     name, client, ", ".join(sorted(missing)))
                 continue
-            # Dedup by name: two clients may declare the SAME shared pipeline
-            # (e.g. psk-recorder + meteor-scatter both declare psk-pskreporter
-            # because MSK144 rides the psk.spots stream).  Emit it once; warn
-            # if the resolved bodies actually differ (keep the first).
+            if name == SHARED_PSK_PIPELINE and client in PSK_PRODUCERS:
+                if split:
+                    rendered = _split_for_producer(rendered, client)
+                    name = rendered["name"]
+                elif not warned_lag:
+                    logger.warning(
+                        "uploader-manifest: hs-uploader lags sigmond (store "
+                        "schema %d, the producer split needs %d) — rendering "
+                        "the shared %s pipeline; update hs-uploader",
+                        store_version, SPLIT_STORE_VERSION, SHARED_PSK_PIPELINE)
+                    warned_lag = True
+            rendered = dict(rendered, client=client)
+            # Dedup by name: below the split, two clients declare the SAME
+            # shared pipeline (psk-recorder + meteor-scatter both declare
+            # psk-pskreporter because MSK144 rides the psk.spots stream).
+            # Emit it once; warn if the resolved bodies actually differ
+            # (keep the first).  ``client`` names the first declarer.
             if name in by_name:
-                if rendered != by_name[name]:
+                if ({k: v for k, v in rendered.items() if k != "client"}
+                        != {k: v for k, v in by_name[name].items()
+                            if k != "client"}):
                     logger.warning(
                         "uploader-manifest: pipeline %s declared twice with "
                         "differing bodies (%s); keeping the first", name, client)
@@ -274,6 +345,8 @@ def heartbeat_pipeline(coord: Coordination) -> Optional[dict]:
         return None
     return {
         "name": "heartbeat",
+        # No client declares the heartbeat; sigmond renders it.
+        "client": "sigmond",
         "source": {
             "type": "filetree",
             "root": "/var/lib/sigmond/heartbeat",
@@ -367,6 +440,31 @@ def render_manifest(pipelines: list, identity: dict,
     return "\n".join(lines) + "\n"
 
 
+def hs_uploader_store_version(python: Path = HS_UPLOADER_PYTHON) -> Optional[int]:
+    """The store schema version the hs-uploader that the service runs
+    supports, from ``hs-uploader capabilities`` (spec §5.1).
+
+    Asks the service's own interpreter, as :func:`hs_uploader_supports_discard`
+    does.  Returns the integer it prints; ``0`` when the subcommand does not
+    exist (an older hs-uploader, whose argparse refuses it with exit 2);
+    ``None`` when the probe failed, timed out or printed something else."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            [str(python), "-m", "hs_uploader.cli", "capabilities"],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 2 and "invalid choice" in (r.stderr or ""):
+        return 0
+    if r.returncode != 0:
+        return None
+    try:
+        return int((r.stdout or "").strip())
+    except ValueError:
+        return None
+
+
 def hs_uploader_supports_discard(python: Path = HS_UPLOADER_PYTHON) -> bool:
     """Whether the hs-uploader that the service runs understands a
     pipeline's ``discard = true``.
@@ -434,21 +532,38 @@ def policy_banner(coord: Coordination, mode: Optional[str] = None) -> list:
 
 
 def suppressed_pipelines(topology: Optional[Topology] = None,
-                         coord: Optional[Coordination] = None) -> list:
+                         coord: Optional[Coordination] = None,
+                         *, store_version: Optional[int] = None) -> list:
     """Names of the client pipelines the uploads policy is holding back or
     discarding — ``[]`` when uploads are enabled.  Lets the command layer
-    print, by name, what the policy actually affects."""
+    print, by name, what the policy actually affects.
+
+    ``store_version`` picks the split or shared names (see
+    :func:`collect_pipelines`); ``None`` probes the installed hs-uploader.
+    The list only informs, so a failed probe names the shared pipeline
+    rather than raising."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
     if coord.uploads.mode == "upload":
         return []
-    return [p["name"] for p in collect_pipelines(topology, coord)]
+    if store_version is None:
+        store_version = hs_uploader_store_version()
+        if store_version is None:
+            store_version = 0
+    return [p["name"] for p in collect_pipelines(
+        topology, coord, store_version=store_version)]
 
 
 def generate(topology: Optional[Topology] = None,
              coord: Optional[Coordination] = None,
-             *, supports_discard=None) -> str:
+             *, supports_discard=None,
+             store_version: Optional[int] = None) -> str:
     """Full pipeline: collect declarations + identity, render the manifest.
+
+    ``store_version`` is the installed hs-uploader's store schema
+    (:func:`collect_pipelines`).  ``None`` probes it once; a probe that
+    fails or times out raises :class:`ProbeFailed`, so the caller keeps the
+    manifest it has rather than render a form the daemon may not read.
 
     ``upload`` renders every client pipeline.  ``hold`` (``enabled =
     false``, sigmond#53) renders the heartbeat alone, with a loud banner.
@@ -457,14 +572,22 @@ def generate(topology: Optional[Topology] = None,
     ships nothing.  The heartbeat never obeys the policy."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
+    if store_version is None:
+        store_version = hs_uploader_store_version()
+        if store_version is None:
+            raise ProbeFailed(
+                f"cannot ask {HS_UPLOADER_PYTHON} for `hs-uploader "
+                "capabilities` (failed or timed out)")
     call = reporter_call(coord)
     reason = f": {coord.uploads.reason}" if coord.uploads.reason else ""
     mode = effective_mode(coord, supports_discard=supports_discard)
     if mode == "upload":
-        pipelines = collect_pipelines(topology, coord)
+        pipelines = collect_pipelines(topology, coord,
+                                      store_version=store_version)
     elif mode == "discard":
         pipelines = [dict(p, discard=True)
-                     for p in collect_pipelines(topology, coord)]
+                     for p in collect_pipelines(
+                         topology, coord, store_version=store_version)]
         logger.warning("uploader-manifest: SITE SINK OFF%s — data pipelines "
                        "ack without sending", reason)
     else:

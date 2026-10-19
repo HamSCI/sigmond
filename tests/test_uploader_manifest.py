@@ -160,7 +160,7 @@ name = "psws-grape-sftp:host:{station_id}"
              mock.patch.object(um.psws, "is_psws_recorder", return_value=True), \
              mock.patch.object(um.psws, "read_state",
                                return_value=_State(station="", instrument="")):
-            pls = um.collect_pipelines(_Topo(["hf-timestd"]), _coord())
+            pls = um.collect_pipelines(_Topo(["hf-timestd"]), _coord(), store_version=2)
         self.assertEqual(pls, [])
 
     def test_skip_when_client_is_not_a_psws_recorder(self):
@@ -169,7 +169,7 @@ name = "psws-grape-sftp:host:{station_id}"
         with mock.patch.object(um, "find_deploy_toml", return_value=deploy), \
              mock.patch.object(um, "list_instances", return_value=[]), \
              mock.patch.object(um.psws, "is_psws_recorder", return_value=False):
-            pls = um.collect_pipelines(_Topo(["hamsci-physics"]), _coord())
+            pls = um.collect_pipelines(_Topo(["hamsci-physics"]), _coord(), store_version=2)
         self.assertEqual(pls, [])
 
     def test_substituted_when_identity_present(self):
@@ -180,7 +180,7 @@ name = "psws-grape-sftp:host:{station_id}"
              mock.patch.object(um.psws, "read_state",
                                return_value=_State(station="S000418",
                                                    instrument="367")):
-            pls = um.collect_pipelines(_Topo(["hf-timestd"]), _coord())
+            pls = um.collect_pipelines(_Topo(["hf-timestd"]), _coord(), store_version=2)
         self.assertEqual(len(pls), 1)
         t = pls[0]["transport"]
         self.assertEqual(t["instrument_id"], "367")
@@ -196,7 +196,7 @@ name = "psws-grape-sftp:host:{station_id}"
                                return_value=_State(station="S000418",
                                                    instrument="367")), \
              mock.patch.object(um, "host_key_file", return_value="/k"):
-            text = um.generate(_Topo(["hf-timestd"]), _coord())
+            text = um.generate(_Topo(["hf-timestd"]), _coord(), store_version=2)
         parsed = tomllib.loads(text)
         self.assertEqual(parsed["identity"]["call"], "AC0G")  # no wspr instance
         self.assertEqual(parsed["identity"]["grid"], "EM38ww")
@@ -225,7 +225,8 @@ decoding_software = "psk-recorder/0.1 (radiod={radiod_status})"
         with mock.patch.object(um, "find_deploy_toml", return_value=deploy), \
              mock.patch.object(um, "list_instances", return_value=[]):
             pls = um.collect_pipelines(
-                _Topo(["psk-recorder", "meteor-scatter"]), _coord())
+                _Topo(["psk-recorder", "meteor-scatter"]), _coord(),
+                store_version=1)
         self.assertEqual([p["name"] for p in pls], ["psk-pskreporter"])
         self.assertEqual(
             pls[0]["source"]["extra_where"],
@@ -253,6 +254,7 @@ class HeartbeatPipelineTests(unittest.TestCase):
         pl = um.heartbeat_pipeline(coord)
         self.assertEqual(pl, {
             "name": "heartbeat",
+            "client": "sigmond",
             "source": {
                 "type": "filetree",
                 "root": "/var/lib/sigmond/heartbeat",
@@ -318,7 +320,7 @@ class HeartbeatPipelineTests(unittest.TestCase):
                                host="drop.hamsci.org")
         with mock.patch.object(um, "host_key_file", return_value="/k"), \
              mock.patch.object(um, "list_instances", return_value=[]):
-            text = um.generate(_Topo([]), coord)
+            text = um.generate(_Topo([]), coord, store_version=2)
         parsed = tomllib.loads(text)
         self.assertEqual([p["name"] for p in parsed["pipeline"]], ["heartbeat"])
 
@@ -392,7 +394,7 @@ class UploadsPolicyRenderTests(unittest.TestCase):
                                return_value=_State(station="S000418",
                                                    instrument="367")), \
              mock.patch.object(um, "host_key_file", return_value="/k"):
-            return um.generate(_Topo(["hf-timestd"]), coord)
+            return um.generate(_Topo(["hf-timestd"]), coord, store_version=2)
 
     def test_disabled_renders_heartbeat_only_with_policy_header(self):
         text = self._generate(self._coord(enabled=False, reason="no HF antenna"))
@@ -422,7 +424,7 @@ class UploadsPolicyRenderTests(unittest.TestCase):
                                return_value=_State(station="S000418",
                                                    instrument="367")), \
              mock.patch.object(um, "host_key_file", return_value="/k"):
-            self.assertEqual(um.suppressed_pipelines(_Topo(["hf-timestd"]), coord),
+            self.assertEqual(um.suppressed_pipelines(_Topo(["hf-timestd"]), coord, store_version=2),
                              ["grape-psws"])
             self.assertEqual(um.suppressed_pipelines(
                 _Topo(["hf-timestd"]), self._coord(enabled=True)), [])
@@ -473,7 +475,7 @@ class DiscardRenderTests(UploadsPolicyRenderTests):
                                return_value=_State(station="S000418",
                                                    instrument="367")), \
              mock.patch.object(um, "host_key_file", return_value="/k"):
-            self.assertEqual(um.suppressed_pipelines(_Topo(["hf-timestd"]), coord),
+            self.assertEqual(um.suppressed_pipelines(_Topo(["hf-timestd"]), coord, store_version=2),
                              ["grape-psws"])
 
     def test_hs_uploader_builds_the_rendered_discard_manifest(self):
