@@ -19,6 +19,12 @@
 # the discovered defaults need a repo-wide override.  Operator-specific
 # pins belong in /etc/sigmond/catalog.toml, where you should declare
 # *only the fields you want to override* — everything else inherits.
+#
+# install_script contract: smd align, `smd admin manifest restore --apply`
+# and bring-up run it as root, as `<install_script> --yes`, with stdin
+# closed.  It must accept --yes (a no-op when it never prompts) and must
+# not wait for input.  tests/test_installer_yes_contract.py checks every
+# installer whose checkout sits beside sigmond's.
 
 [client.ka9q-radio]
 kind            = "server"
