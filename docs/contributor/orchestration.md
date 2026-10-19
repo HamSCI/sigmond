@@ -179,7 +179,7 @@ left to list: the v2 removals in
 | `admin storage` | maintenance | the local sink backend: `migrate-to-sqlite`, `trim`, `tune-timestd` | `cmd_storage_migrate_to_sqlite`, `cmd_storage_trim`, `cmd_timestd_tune_storage` → `storage_migrate.py`, `storage_trim.py` | `--yes`/`--apply` (root) |
 | `admin timing` | debugging | timing-chain reconciler across GPSDO → gpsd → chrony → hf-timestd | `cmd_timing` → `commands/timing.py` | plan-first; applying needs root |
 | `admin uninstall` | teardown | tear down the whole sigmond install; plan-first, `--yes` to execute | `cmd_uninstall` → `uninstall.py` | `--yes` does (root) |
-| `admin uploader` | uploads | generate `/etc/hs-uploader/pipelines.toml` from each client's `deploy.toml` (`manifest`) | `cmd_uploader_manifest` → `commands/uploader.py`, `uploader_manifest.py` | `--write`/`--enable` (root) |
+| `admin uploader` | uploads | generate `/etc/hs-uploader/pipelines.toml` from each client's `deploy.toml` (`manifest`); see [The uploader manifest step](#the-uploader-manifest-step) | `cmd_uploader_manifest` → `commands/uploader.py`, `uploader_manifest.py` | `--write`/`--enable` (root) |
 | `admin validate` | before a change | run the cross-client harmonization rules, read-only | `cmd_validate` → `commands/validate.py`, `harmonize.py`, `sysview.py` | no |
 | `admin verifier` | uploads | upload audit — uploaded → verified → lost, for `wspr`, `psk`, `timestd` (`report`, `rehabilitate`) | `commands/verifier_report.py`, `verifier_report_psk.py`, `verifier_report_timestd.py` | `rehabilitate` does (root) |
 | `admin wisdom` | tuning | FFTW3 wisdom planner radiod reads from `/etc/fftw/wisdomf`: `status`, `plan` | `cmd_wisdom_status`, `cmd_wisdom_plan` → `wisdom.py` | `plan` does (root) |
@@ -222,6 +222,56 @@ once at firstboot and never updated, so it lies after any in-place update — re
 `smd version`, which reports lineage separately from the live component commits.
 The image/appliance side of that boundary gets its own page,
 [`appliance-boundary.md`](appliance-boundary.md) ★.
+
+## The uploader manifest step
+
+`smd admin uploader manifest` renders `/etc/hs-uploader/pipelines.toml`.
+Without `--write` it only compares: it prints "is up to date" or the drift,
+exits non-zero on drift, and changes nothing (no root needed).  `--write` (root) makes the change.  `--enable` takes the same steps, installs the
+daemon first when it is missing, and leaves it enabled and running.  `apply`, `align`,
+bring-up, `sink` and `admin manifest restore` all run the write form.
+
+**What the renderer asks the daemon.**  It asks the daemon's own interpreter
+which store version it reads (`hs-uploader capabilities`).  At version 2 or
+higher it splits the shared `psk-pskreporter` pipeline into
+`psk-recorder-pskreporter` (modes ft8 and ft4) and
+`meteor-scatter-pskreporter` (mode msk144).  Below version 2 it renders the
+shared pipeline and prints a warning.  If the probe fails, the renderer
+keeps the manifest as it stands and exits non-zero.
+
+**In-process senders.**  psk-recorder and meteor-scatter can each post to
+pskreporter from their own process.  The renderer reads each instance's
+environment and leaves out the daemon pipeline of a producer whose instances
+all send in-process, so the same spots do not post twice.  A doubtful
+reading keeps the pipeline.  On the shared form the pipeline stays and the
+renderer warns.  The harmonize rule `uploader-inprocess-drift` flags a
+manifest that no longer matches the environments.
+
+**The write sequence.**
+
+1. Probe the store version, as above, and render.
+2. Render to the side file, `pipelines.toml.new`.
+3. Run `hs-uploader migrate --check`.  Exit 3 means a migrate would write;
+   exit 0 means it would not.
+4. If the manifest is unchanged and nothing is pending, return.  The daemon
+   keeps running.
+5. Stop `hs-uploader.service`.
+6. Run `hs-uploader migrate`, with `--sink` and `--keep-retry-for` set so a
+   queued `psk-pskreporter` retry is deleted or moved.
+7. Move the side file into place, keeping the old file as `.bak`.
+8. Run `reset-failed`, then start the daemon if it ran before the step or
+   if `--enable` asked for it.
+
+A failed migrate drops the side file, returns the daemon to the state it
+had, and exits 1, so the old manifest and the old keys still match.  Any
+other error after step 5 also restores the daemon before the command exits
+non-zero.  The daemon stops for the migrate because the
+migrate takes the store's write lock and must not meet a running pump.
+
+A rollback (`smd admin manifest restore`) re-renders with the restored
+smd.  An older smd knows nothing of the split, so it renders
+`psk-pskreporter` again.  The store keeps its version, and the old send
+record, frozen at the migrate, resumes the shared pipeline.
 
 ## Heartbeat and the board
 
