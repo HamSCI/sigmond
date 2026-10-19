@@ -501,3 +501,19 @@ def test_a_late_usb_add_clears_the_needs_replug_alarm(tmp_path):
     ev.record("usb-add", "", now=T0 + 7200, path=p)         # a hand replug 2 h later
     kind, _ = ev.assess(ev.read_episodes(p, now=T0 + 7300), True)
     assert kind != "sdr-needs-replug"
+
+
+# ─── v3.73 row 9: a replug owed with no reset tried ─────────────────────────
+
+def test_a_replug_owed_without_a_reset_does_not_claim_one_was_tried(tmp_path):
+    # On a hub that cannot cut the card's SuperSpeed half, sdr-recover asks
+    # for the replug at once and resets nothing; the finding must not say a
+    # reset failed.
+    p = tmp_path / "e.jsonl"
+    ev.record("usb-remove", "", now=T0, path=p)
+    ev.record("needs-replug", "uhubctl reaches only the USB2 half", now=T0 + 40, path=p)
+    kind, detail = ev.assess(ev.read_episodes(p, now=T0 + 60), False)
+    assert kind == "sdr-needs-replug"
+    assert "hand replug" in detail
+    assert "did not clear" not in detail
+    assert "cannot clear" in detail

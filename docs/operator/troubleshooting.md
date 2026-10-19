@@ -602,8 +602,28 @@ The record starts only after `smd update` has run on the station.
 | `sdr-down-long` | An episode stayed open longer than 30 minutes. The card may sit back on the bus now. | 1 |
 | `sdr-flapping` | The RX888 went away three or more times in 24 h. It came back each time, but something keeps taking it. | 1 |
 | `sdr-lost` | The card sits off the bus right now. | 1 |
-| `sdr-needs-replug` | The station reset the card's hub port and the card did not come back healthy: USB2 only, a -71 or -110 in the kernel log, or not at all. Unplug the RX888's USB cable and plug it in again by hand. The finding clears when the card returns. | 1 |
+| `sdr-needs-replug` | The station reset the card's hub port and the card did not come back healthy: USB2 only, a -71 or -110 in the kernel log, or not at all. Or the station found that no reset of this port can clear the card, and asked at once without trying one (see below). Unplug the RX888's USB cable and plug it in again by hand. The finding clears when the card returns. | 1 |
 | `sdr-record-unreadable` | The record file is not an ordinary file (a link or a pipe, for example), so the station cannot read it. | 1 |
+
+**When a port reset cannot help.** A USB3 hub shows each physical port twice:
+a SuperSpeed half and a USB2 half. The RX888 streams on the SuperSpeed half.
+While the card sits on the bus, `sigmond-sdr-recover` asks `uhubctl` which
+halves of its port it can switch. If `uhubctl` reaches only the USB2 half, a
+reset never touches the card. The helper then asks for a hand replug as soon as
+the card vanishes, latches or wedges, and resets nothing. Some hubs switch only
+the data link and keep 5 V on the port through every "off" (AC0G-B4's VIA and
+Anker hubs, measured on 2026-10-14 with a meter and by the RX888's LED). Once you have measured that on
+your hub, record it in `/etc/sigmond/topology.toml`:
+
+```toml
+[radiod]
+recover_port_data_only = true
+```
+
+A reset there still clears a stalled stream. A card gone from the bus, or one
+latched without its SuperSpeed link, asks for the replug at once. To see what
+the helper learned, run `sudo sigmond-sdr-recover --probe` `[VM]`; the line
+reads `power=usb2-only`, `data-only`, `unverified` or `both`.
 
 The heartbeat and the fleet board show the exit-1 findings as red, marked FAIL.
 They show `sdr-recovered` as amber, marked "unsure". `smd fleet doctor` lists a host that has only

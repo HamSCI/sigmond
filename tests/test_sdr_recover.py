@@ -1354,3 +1354,207 @@ def test_the_lowered_usb2_threshold_needs_two_consecutive_ticks(monkeypatch):
     ss = mod.Located("1-1.2", "1-1", "2", "S", "5000", product="00f1", devnum="7")
     assert not mod.radiod_is_wedged("radiod@x.service", st, T + 30, card=ss)
     assert not mod.radiod_is_wedged("radiod@x.service", st, T + 60, card=card("7"))
+
+
+# ─── v3.73 row 9: which hubs can switch both halves ──────────────────────────
+
+class PortHalvesTests(unittest.TestCase):
+    """Which halves of the card's physical port uhubctl can switch.  The
+    RX888 runs on the SuperSpeed half; a reset that reaches only the USB2
+    half leaves its latched firmware in place (AC0G-B4, 10-15)."""
+
+    SPEEDS = {"10-1": "10000", "8-1": "480", "3-1": "480", "6": "5000"}
+
+    def halves(self, loc, accepted):
+        return sdr.port_halves(loc, accepted, speed_of=self.SPEEDS.get)
+
+    def card(self, hub="10-1", peer=("8-1", "4")):
+        return sdr.Located(f"{hub}.4", hub, "4", "S", "5000",
+                           peer[0] if peer else None, peer[1] if peer else None,
+                           product="00f1")
+
+    def test_both_halves_reached(self):
+        self.assertEqual(self.halves(self.card(), [("10-1", "4", True), ("8-1", "4", False)]),
+                         {"ss": True, "usb2": True})
+
+    def test_only_the_usb2_half_reached(self):
+        self.assertEqual(self.halves(self.card(), [("8-1", "4", False)]),
+                         {"ss": False, "usb2": True})
+
+    def test_a_usb2_only_hub_has_no_superspeed_half(self):
+        loc = self.card(hub="3-1", peer=None)
+        self.assertEqual(self.halves(loc, [("3-1", "4", False)]),
+                         {"ss": None, "usb2": True})
+
+    def test_a_root_hub_reads_its_speed_from_the_bus(self):
+        loc = sdr.Located("6-2", "6", "2", "S", "5000", product="00f1")
+        self.assertEqual(self.halves(loc, [("6", "2", False)]),
+                         {"ss": True, "usb2": None})
+
+    def test_an_unreadable_speed_counts_as_unknown(self):
+        loc = sdr.Located("9-1.4", "9-1", "4", "S", "5000", product="00f1")
+        self.assertEqual(sdr.port_halves(loc, [("9-1", "4", False)],
+                                         speed_of=lambda h: None),
+                         {"ss": None, "usb2": None})
+
+    def test_hub_speed_reads_sysfs(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "10-1").mkdir()
+        (root / "10-1" / "speed").write_text("10000\n")
+        (root / "usb6").mkdir()
+        (root / "usb6" / "speed").write_text("5000\n")
+        self.assertEqual(sdr.hub_speed("10-1", root), "10000")
+        self.assertEqual(sdr.hub_speed("6", root), "5000")
+        self.assertIsNone(sdr.hub_speed("7-1", root))
+
+
+class PortPowerTests(unittest.TestCase):
+
+    def test_usb2_half_only(self):
+        kind, why = sdr.port_power({"ss": False, "usb2": True}, {})
+        self.assertEqual(kind, "usb2-only")
+        self.assertIn("USB2 half", why)
+
+    def test_both_halves_reached_but_no_cut_watched_is_unverified(self):
+        self.assertEqual(sdr.port_power({"ss": True, "usb2": True}, {})[0], "unverified")
+
+    def test_a_watched_cut_reads_both(self):
+        self.assertEqual(sdr.port_power({"ss": True, "usb2": True},
+                                        {"recover_port_verified": True})[0], "both")
+
+    def test_a_measured_data_only_hub_wins_over_everything(self):
+        kind, why = sdr.port_power({"ss": True, "usb2": True},
+                                   {"recover_port_data_only": True,
+                                    "recover_port_verified": True})
+        self.assertEqual(kind, "data-only")
+        self.assertIn("recover_port_data_only", why)
+
+    def test_unknown_halves_stay_unverified(self):
+        self.assertEqual(sdr.port_power({}, {})[0], "unverified")
+        self.assertEqual(sdr.port_power(None, {})[0], "unverified")
+
+    def test_what_a_reset_can_help(self):
+        can = sdr.reset_can_help
+        for trig in ("absent", "latched", "wedge"):
+            self.assertTrue(can("both", trig))
+            self.assertTrue(can("unverified", trig))
+            self.assertFalse(can("usb2-only", trig))
+        # A data-only cut still drops the link, which reloads the FX3 and
+        # cleared B4's 10-11 stream wedge; it never cleared a latch.
+        self.assertTrue(can("data-only", "wedge"))
+        self.assertFalse(can("data-only", "latched"))
+        self.assertFalse(can("data-only", "absent"))
+
+
+class ReplugAtOnceTests(PortResetHarness):
+    """On a port no reset can clear, ask for the hand replug at once."""
+
+    def data_only(self):
+        self.CFG = dict(PortResetHarness.CFG, recover_port_data_only=True)
+
+    def test_a_vanished_card_on_a_data_only_hub_asks_for_a_replug_at_once(self):
+        self.data_only()
+        self.present = False
+        self.tick()                                   # starts the grace window
+        self.t += sdr.ABSENT_GRACE_S + 5
+        self.tick()
+        self.assertEqual(self.cycles, [])
+        self.assertEqual(self.kinds(), ["needs-replug"])
+        self.assertTrue(any("needs a hand replug" in m and "no port reset tried" in m
+                            for m in self.log), self.log)
+        for _ in range(6):
+            self.t += sdr.CYCLE_COOLDOWN_S
+            self.tick()
+        self.assertEqual(self.cycles, [])
+        self.assertEqual(self.kinds(), ["needs-replug"])
+
+    def test_a_wedge_on_a_data_only_hub_still_gets_its_reset(self):
+        self.data_only()
+        self.tick()
+        self.assertEqual(len(self.cycles), 1)
+        self.assertNotIn("needs-replug", self.kinds())
+
+    def test_a_latched_present_card_on_a_data_only_hub_asks_at_once(self):
+        self.data_only()
+        self.card = sdr.Located("1-1.2", "1-1", "2", "S", "480", product="00f1")
+        self.tick()
+        self.assertEqual(self.cycles, [])
+        self.assertEqual(self.kinds(), ["needs-replug"])
+
+    def test_ensure_present_fails_at_once_on_a_data_only_hub(self):
+        self.data_only()
+        self.present = False
+        rc = self.tick("--ensure-present", "--wait-seconds", "5")
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.cycles, [])
+        self.assertEqual(self.kinds(), ["needs-replug"])
+
+    def test_a_dry_run_answers_and_records_nothing(self):
+        self.data_only()
+        self.present = False
+        self.tick()
+        self.t += sdr.ABSENT_GRACE_S + 5
+        self.tick("--dry-run")
+        self.assertEqual(self.cycles, [])
+        self.assertEqual(self.kinds(), [])
+        self.assertTrue(any("hand replug" in m for m in self.log), self.log)
+
+    def test_the_unverified_default_still_resets_a_vanished_card(self):
+        self.present = False
+        self.tick()
+        self.t += sdr.ABSENT_GRACE_S + 5
+        self.tick()
+        self.assertEqual(len(self.cycles), 1)
+
+
+class LearnedUsb2OnlyTests(PortResetHarness):
+    """The learn path: uhubctl answers only for the USB2 half, as B4's
+    StarTech hub did for `-l 6-1` (10-15)."""
+
+    CFG = {"unit": "radiod@ac0g.service", "consumers": []}
+
+    def setUp(self):
+        super().setUp()
+        self.card = sdr.Located("10-1.4", "10-1", "4", "S", "5000", "8-1", "4",
+                                product="00f1")
+        self.wedged = False
+        self.accepted = [("8-1", "4", False)]
+        for name, value in {
+            "hub_switchable": lambda loc: (True, list(self.accepted)),
+            "hub_speed": lambda hub, root=None: {"10-1": "10000", "8-1": "480"}.get(hub),
+        }.items():
+            self._saved[name] = getattr(sdr, name)
+            setattr(sdr, name, value)
+
+    def test_the_learn_line_names_the_usb2_half(self):
+        self.tick()
+        self.assertTrue(any("USB2 half" in m and "hand replug" in m for m in self.log),
+                        self.log)
+        st = json.loads((self.tmp / "sdr-recover.json").read_text())
+        self.assertEqual(st["power"], "usb2-only")
+
+    def test_a_vanish_then_asks_for_the_replug_and_resets_nothing(self):
+        self.tick()
+        self.present = False
+        self.tick()
+        self.t += sdr.ABSENT_GRACE_S + 5
+        self.tick()
+        self.assertEqual(self.cycles, [])
+        self.assertEqual(self.kinds(), ["needs-replug"])
+        self.assertIn("USB2 half", self.events[0][1])
+
+    def test_a_wedge_there_asks_for_the_replug_too(self):
+        self.tick()
+        self.wedged = True
+        self.tick()
+        self.assertEqual(self.cycles, [])
+        self.assertEqual(self.kinds(), ["needs-replug"])
+
+    def test_both_halves_reached_resets_as_before(self):
+        self.accepted = [("10-1", "4", True), ("8-1", "4", False)]
+        self.tick()
+        st = json.loads((self.tmp / "sdr-recover.json").read_text())
+        self.assertEqual(st["power"], "unverified")
+        self.wedged = True
+        self.tick()
+        self.assertEqual(len(self.cycles), 1)

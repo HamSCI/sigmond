@@ -318,9 +318,15 @@ def assess(episodes: Sequence[Episode], present: bool) -> Optional[Tuple[str, st
     last = episodes[-1]
     tail = _tail(last)
     if "needs-replug" in last.kinds and last.back is None:
+        # sdr-recover asks at once, with no reset, on a port no reset can
+        # clear (a hub whose SuperSpeed half uhubctl cannot switch, or one
+        # measured to hold VBUS through a cut).
+        tried = "port-reset" in last.kinds or "power-cycle" in last.kinds
+        why = ("a port reset did not clear it" if tried
+               else "a port reset on this hub cannot clear it")
         return ("sdr-needs-replug",
                 f"RX888 needs a hand replug at the card since {_hm(last.opened)}; "
-                f"a port reset did not clear it ({tail})")
+                f"{why} ({tail})")
     if not present:
         return ("sdr-lost",
                 f"RX888 off the bus now; lost at {_hm(last.opened)} ({tail}); "

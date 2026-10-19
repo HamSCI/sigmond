@@ -19,6 +19,16 @@ as switching only when the station says a cut was watched
 (`[radiod] recover_port_verified = true`); otherwise it reads "switching
 unverified".
 
+A USB3 hub presents each physical port twice, a SuperSpeed half and a USB2
+half, and the RX888 streams on the SuperSpeed half.  The learn step records
+which halves uhubctl accepts (port_halves).  When it reaches only the USB2
+half, no reset can clear the card, so a vanish, a latch or a wedge raises the
+replug alarm at once, with no reset tried (v3.73 row 9; AC0G-B4 10-15).  A
+station that measured its hub holding VBUS through a cut says so with
+`[radiod] recover_port_data_only = true`: a reset there still clears a stream
+wedge, and a vanish or a latch asks for the replug at once (port_power,
+reset_can_help).
+
 After a reset the return is classified.  Card back as 00f1 on a SuperSpeed
 path with radiod ready reads "recovered by port reset".  Anything else (USB2
 half only, -71/-110 in the kernel log, bootloader only, never back) raises ONE
@@ -284,6 +294,75 @@ def port_claim(cfg: dict) -> str:
         return "ppps reported, switching verified (a cut was watched)"
     return ("ppps reported, switching unverified (a port reset only; "
             "the hub may not cut VBUS)")
+
+
+def hub_speed(hub: str, root: Path = SYSFS_USB) -> Optional[str]:
+    """A hub's link speed in Mb/s as sysfs reports it ("480", "5000",
+    "10000"), or None.  uhubctl names a root hub by its bus number, and sysfs
+    calls that hub "usb<bus>"."""
+    name = hub if ("-" in hub or "." in hub) else f"usb{hub}"
+    return _read(root / name / "speed") or None
+
+
+def port_halves(loc: Located, accepted: Sequence[Tuple[str, str, bool]],
+                speed_of=None) -> dict:
+    """Which halves of the card's physical port uhubctl can switch:
+    {"ss": ..., "usb2": ...}, each True (uhubctl accepted a location on that
+    half), False (the half exists and uhubctl accepted none of it) or None (no
+    such half, or its speed is unreadable).  The halves are the hub the card
+    enumerated under and its sysfs peer; a hub at 5000 Mb/s or more is the
+    SuperSpeed half."""
+    speed_of = speed_of or hub_speed
+    kinds = {}
+    for h in [loc.hub] + ([loc.peer_hub] if loc.peer_hub else []):
+        sp = speed_of(h)
+        kinds[h] = (int(sp) >= SUPERSPEED_MBPS) if sp and sp.isdigit() else None
+    out = {}
+    for half, want in (("ss", True), ("usb2", False)):
+        here = [h for h, k in kinds.items() if k is want]
+        out[half] = any(a[0] in here for a in accepted) if here else None
+    return out
+
+
+def port_power(halves: Optional[dict], cfg: dict) -> Tuple[str, str]:
+    """What a reset of this port can do: (kind, why).
+
+    "data-only"  the station measured VBUS held through a cut
+                 (`[radiod] recover_port_data_only = true`, from a meter or the
+                 RX888's LED).  B4's VIA and Anker hubs measured so (10-14).
+    "usb2-only"  uhubctl reaches only the USB2 half of the port.  The RX888
+                 runs on the SuperSpeed half, so the reset never touches it.
+    "both"       a cut was watched (`recover_port_verified = true`).
+    "unverified" anything else: uhubctl reaches the port, and nobody has
+                 watched a cut.
+    """
+    if cfg.get("recover_port_data_only"):
+        return "data-only", ("the station measured this port: VBUS stays up "
+                             "through a cut ([radiod] recover_port_data_only)")
+    if (halves or {}).get("ss") is False:
+        return "usb2-only", ("uhubctl reaches only the USB2 half of this port, "
+                             "and the RX888 runs on the SuperSpeed half")
+    if cfg.get("recover_port_verified"):
+        return "both", "a cut was watched ([radiod] recover_port_verified)"
+    return "unverified", "switching unverified"
+
+
+# What a port reset can clear, by what the port does (port_power) and what
+# went wrong.  A data-only cut still drops the link, which reloads the FX3
+# firmware and cleared B4's 10-11 stream wedge; it never cleared a latch or
+# brought back a card gone from the bus.
+_TRIGGER_WORDS = {"absent": "a card gone from the bus",
+                  "latched": "a latched card (no SuperSpeed link, or only the "
+                             "FX3 bootloader)",
+                  "wedge": "a stream wedge"}
+
+
+def reset_can_help(power: str, trigger: str) -> bool:
+    if power == "usb2-only":
+        return False
+    if power == "data-only":
+        return trigger == "wedge"
+    return True
 
 
 def _devpath(hub: str, port: str) -> str:
@@ -878,17 +957,32 @@ def restart_station(radiod_unit: str, consumers: Sequence[str],
     return not pending
 
 
-def _raise_replug_alarm(state: dict, now: float, why: str) -> None:
+def _raise_replug_alarm(state: dict, now: float, why: str,
+                        tried: bool = True) -> None:
     """One alarm per episode, never per tick: the sdr-events line `smd doctor`
     and the heartbeat read, then a latch that stops further resets until the
-    card returns healthy."""
+    card returns healthy.  ``tried`` False: no reset ran, because none could
+    clear this fault on this port (reset_can_help)."""
     state["latched"] = True
     if not state.get("replug_alarm_at"):
         state["replug_alarm_at"] = now
-        _log(f"ALARM: the RX888 needs a hand replug at the RX888 — a port reset "
-             f"did not clear it ({why}); not resetting again until it is back")
+        if tried:
+            _log(f"ALARM: the RX888 needs a hand replug at the RX888 — a port "
+                 f"reset did not clear it ({why}); not resetting again until "
+                 f"it is back")
+        else:
+            _log(f"ALARM: the RX888 needs a hand replug at the RX888 — {why}; "
+                 f"no port reset tried")
         note_event("needs-replug", why)
     save_state(state)
+
+
+def _power_now(state: dict, cfg: dict) -> Tuple[str, str]:
+    """port_power for this run.  The halves come from what the learn step
+    recorded; an explicit [radiod] recover_hub has none, so only the
+    station's own flags speak for it."""
+    halves = {} if cfg.get("recover_hub") else state.get("halves")
+    return port_power(halves, cfg)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -955,12 +1049,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                      or now - float(state.get("verified_at") or 0) > REVERIFY_S)
             if loc and stale:
                 sw, ctl = hub_switchable(loc)
+                halves = port_halves(loc, ctl) if sw else {}
+                power, _ = port_power(halves, cfg)
                 state.update(devpath=loc.devpath, serial=loc.serial,
                              speed=loc.speed, switchable=sw, verified_at=now,
                              hub=loc.hub, port=loc.port,
                              # every location uhubctl accepted for this port
-                             locations=[list(c) for c in ctl])
-                verdict = {True: f"{port_claim(cfg)} — a port reset is possible",
+                             locations=[list(c) for c in ctl],
+                             halves=halves, power=power)
+                claim = {"usb2-only": "uhubctl reaches only the USB2 half of "
+                                      "this port — a port reset cannot clear "
+                                      "the RX888, so a vanish, a latch or a "
+                                      "wedge asks for a hand replug at once; "
+                                      "move the card to a hub whose SuperSpeed "
+                                      "half uhubctl can switch",
+                         "data-only": "VBUS stays up through a cut here — a "
+                                      "port reset can clear a stream wedge, "
+                                      "while a vanish or a latch asks for a "
+                                      "hand replug at once"}
+                verdict = {True: claim.get(power,
+                                           f"{port_claim(cfg)} — a port reset is possible"),
                            False: "uhubctl cannot switch this port — a port "
                                   "reset is impossible from software; move the "
                                   "card to a uhubctl-capable hub port",
@@ -979,6 +1087,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.probe:
         _log(f"hub={hub} port={port} ({source}) switchable={state.get('switchable')} "
+             f"power={_power_now(state, cfg)[0]} "
              f"control={locations or 'none'} serial={state.get('serial')} "
              f"radiod_unit={radiod_unit} consumers={patterns or 'NONE DECLARED'}")
         save_state(state)
@@ -1078,8 +1187,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 state.pop("latched", None)
                 state.pop("replug_alarm_at", None)
             else:
-                decision = Decision(False, "a port reset did not clear it; the "
-                                    "RX888 needs a hand replug — not resetting again")
+                decision = Decision(False, "the RX888 needs a hand replug — "
+                                    "not resetting until it is back healthy")
         elif present and wedged and not decision.cycle:
             if last_cycle and now - last_cycle < WEDGE_RESET_COOLDOWN_S:
                 decision = Decision(False, f"card on the bus but radiod is wedged; "
@@ -1088,6 +1197,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 decision = Decision(True, f"card on the bus but radiod is wedged "
                                     f"({wedged}) — resetting its hub port")
+
+    # v3.73 row 9: on a port where no reset can clear this fault, ask for the
+    # hand replug at once instead of resetting and waiting.  AC0G-B4, 10-15: a
+    # reset that reached only the hub's USB2 half left the RX888 latched.
+    if decision.cycle and not bootstrapped:
+        power, pwhy = _power_now(state, cfg)
+        if not present:
+            trigger = "absent"
+        elif card_now is not None and classify_return(card_now, [])[0] == "recovered":
+            trigger = "wedge"
+        else:
+            trigger = "latched"
+        if not reset_can_help(power, trigger):
+            why = f"{pwhy}, so a port reset cannot clear {_TRIGGER_WORDS[trigger]}"
+            if args.dry_run:
+                _log(f"holding: the RX888 needs a hand replug — {why} "
+                     f"(dry run: no alarm recorded)")
+                return 0
+            _raise_replug_alarm(state, now, why, tried=False)
+            return 1 if args.ensure_present else 0
 
     if not decision.cycle:
         # Report when the card is missing, and always under --dry-run: someone
