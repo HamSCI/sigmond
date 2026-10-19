@@ -340,12 +340,13 @@ its own ssh key.
 login on the `[host]`:
 
 - **From another computer:** `ssh root@<host address>`. The console panel
-  prints that command. Beside the login `root` it says which password to use:
+  prints that command. Under `Passwords`, beside `host  root`, it says which password to use:
   `the password you set at install`, or
   `hamsci-sigmond   <-- image default, CHANGE IT`.
 - **At the station, with a keyboard and the monitor.** On a station with the
-  private link, installed at v3.66 or later, the panel's first line reads
-  `KEYBOARD WORKS HERE — press Enter for a login to THIS host`. Press Enter.
+  private link, installed at v3.66 or later, the panel's third line reads
+  `Press Enter here for a hypervisor login; typing does not echo, which is normal.`
+  Press Enter.
   The screen asks for the host's `root` password; type it and press Enter.
   Nothing shows while you type the password. The decoder VM carries your typing
   to the host over the private link, and the host shows the login on its

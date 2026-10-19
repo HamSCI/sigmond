@@ -231,7 +231,7 @@ def test_the_panel_figures_the_page_names_are_the_panels():
     panel_ports = set(re.findall(r"ssh -p (\d+) sigmond@\$\{HOSTIP", FIRSTBOOT_TEXT))
     assert panel_ports == set(re.findall(r"ssh -p (\d+) sigmond@<host address>", PAGE)) != set()
     # Beside the host login the panel says which password to use.
-    assert "Logins   host  root / $PWLINE" in FIRSTBOOT_TEXT
+    assert "host  root / $PWLINE" in FIRSTBOOT_TEXT
     assert 'PWLINE="the password you set at install"' in FIRSTBOOT_TEXT
     assert "the password you set at install" in flat(PAGE)
 
@@ -453,7 +453,7 @@ def test_what_the_page_says_about_the_keyboard_is_what_the_station_does():
     # The host has no keyboard of its own.  A keyboard plugged into the station
     # types into the decoder VM, and the split console carries that to a root
     # login on the host (firstboot-v3.sh: sigmond-console-bridge, -paint, -relay).
-    first_line = "KEYBOARD WORKS HERE \u2014 press Enter for a login to THIS host"
+    first_line = "Press Enter here for a hypervisor login; typing does not echo, which is normal."
     assert first_line in PAGE and first_line in FIRSTBOOT_TEXT
     assert "TYPE THE PROXMOX HOST ROOT PASSWORD" in FIRSTBOOT_TEXT       # what the screen then asks
     assert "Nothing appears while you type" in FIRSTBOOT_TEXT
@@ -462,7 +462,7 @@ def test_what_the_page_says_about_the_keyboard_is_what_the_station_does():
     assert "The host has no keyboard of its own" in page
     assert "types into the decoder VM" in page
     assert "nothing shows while you type" in page.lower()
-    i = page.index("KEYBOARD WORKS HERE")
+    i = page.index("Press Enter here for a hypervisor login")
     after = page[i:i + 900]
     for cmd in ("sigmond-setup --rac-off", "sigmond-setup --rac-on", "sigmond-setup --pair-vm"):
         assert cmd in after, cmd
