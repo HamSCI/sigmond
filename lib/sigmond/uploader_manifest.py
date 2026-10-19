@@ -596,9 +596,10 @@ def generate(topology: Optional[Topology] = None,
     """Full pipeline: collect declarations + identity, render the manifest.
 
     ``store_version`` is the installed hs-uploader's store schema
-    (:func:`collect_pipelines`).  ``None`` probes it once; a probe that
-    fails or times out raises :class:`ProbeFailed`, so the caller keeps the
-    manifest it has rather than render a form the daemon may not read.
+    (:func:`collect_pipelines`).  ``None`` probes it once, and only when
+    the mode renders client pipelines; a probe that fails or times out
+    raises :class:`ProbeFailed`, so the caller keeps the manifest it has
+    rather than render a form the daemon may not read.
 
     ``upload`` renders every client pipeline.  ``hold`` (``enabled =
     false``, sigmond#53) renders the heartbeat alone, with a loud banner.
@@ -607,16 +608,19 @@ def generate(topology: Optional[Topology] = None,
     ships nothing.  The heartbeat never obeys the policy."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
-    if store_version is None:
-        store_version = hs_uploader_store_version()
-        if store_version is None:
-            raise ProbeFailed(
-                f"cannot ask {HS_UPLOADER_PYTHON} for `hs-uploader "
-                "capabilities` (failed or timed out)")
     call = reporter_call(coord)
     reason = f": {coord.uploads.reason}" if coord.uploads.reason else ""
     mode = effective_mode(coord, supports_discard=supports_discard)
     if mode in ("upload", "discard"):
+        # Only a render of client pipelines needs the store version; a
+        # hold renders the heartbeat alone, so a failed probe cannot
+        # block it (ruling 9).
+        if store_version is None:
+            store_version = hs_uploader_store_version()
+            if store_version is None:
+                raise ProbeFailed(
+                    f"cannot ask {HS_UPLOADER_PYTHON} for `hs-uploader "
+                    "capabilities` (failed or timed out)")
         pipelines = collect_pipelines(topology, coord,
                                       store_version=store_version)
         pipelines = drop_inprocess_pipelines(

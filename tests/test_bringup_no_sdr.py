@@ -204,7 +204,7 @@ class Verdict(unittest.TestCase):
         p = build_plan(_dasi2(), local_radiod=True)
         tolerant = sorted(' '.join(s.argv) for s in p.steps if s.may_fail)
         self.assertEqual(tolerant, ['/usr/local/sbin/sigmond-sdr-recover --ensure-present',
-                                    'systemctl restart hs-uploader.service'])
+                                    'systemctl try-restart hs-uploader.service'])
 
 
 class FirstrunAwaitingSdr(unittest.TestCase):

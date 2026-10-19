@@ -514,9 +514,15 @@ def build_plan(profile, *, local_radiod: bool,
     # do" before READY, so the restart exits 1 on a station that is fine.
     # With failed steps now making a run INCOMPLETE (retry, retry, gave-up),
     # that would have condemned such a station on every boot.
+    # try-restart, not restart: the manifest step above starts the daemon
+    # itself when it succeeds.  When it fails (a failed probe or migrate),
+    # it leaves the old manifest and the daemon as it found them, and its
+    # non-zero exit already marks the run INCOMPLETE.  A plain restart here
+    # would start a daemon that step left stopped (spec-key-split-v373
+    # §5.2).
     steps.append(Step(STAGE4, 'restart hs-uploader on the final manifest',
                       'start',
-                      argv=['systemctl', 'restart', 'hs-uploader.service'],
+                      argv=['systemctl', 'try-restart', 'hs-uploader.service'],
                       may_fail=True))
 
     # Now that every client is running, pin them OFF radiod's cache-pair (cores

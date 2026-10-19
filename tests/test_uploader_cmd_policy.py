@@ -25,6 +25,7 @@ class SuppressedPipelinesLineTests(unittest.TestCase):
              mock.patch.object(um, "suppressed_pipelines", return_value=suppressed), \
              mock.patch.object(um, "MANIFEST_PATH", path), \
              mock.patch.object(um, "effective_mode", return_value=mode), \
+             mock.patch.object(um, "hs_uploader_store_version", return_value=2), \
              contextlib.redirect_stdout(out):
             rc = up_cmd.cmd_uploader_manifest(types.SimpleNamespace(write=False))
         return rc, out.getvalue()
@@ -58,24 +59,30 @@ class EnableInstallsDaemonFirstTests(unittest.TestCase):
     saw no SDR wrote its first manifest from Stage 4 `--write --enable`.
     The render probed /opt/hs-uploader/venv for discard support before
     install.sh had made that venv.  So the site sink switch `off` rendered
-    as the legacy hold."""
+    as the legacy hold.
+
+    Since v3.73 the step also stops the daemon, migrates, and only then
+    lands the manifest (spec-key-split-v373 §5.2); the order itself is
+    pinned in test_uploader_manifest_step.py."""
 
     TEXT = "[[pipeline]]\nname = \"heartbeat\"\n"
 
     def _call(self, *, enable=True, write=True, euid=0, install=True,
               render=None, calls=None, migrate=0, active=False,
-              installed=None, path=None, started="after"):
+              installed=None, path=None, started="after", pending=False):
         """Run the command with the daemon install, the render, the
         send-record migration and systemd faked.  ``install`` is what the
         install returns, or an exception it raises.  ``render`` replaces the
         rendered text.  ``migrate`` is what ``_run_migrate`` returns, and
-        ``active`` whether the daemon already runs.  ``installed`` is the
-        manifest already on disk before the call.  ``path`` names a manifest
-        file that persists across calls, for a rerun.  ``started`` says when
-        the running daemon began, relative to the manifest file's mtime at the
+        ``pending`` whether its ``--check`` reports work.  ``active`` says
+        whether the daemon already runs.  ``installed`` is the manifest
+        already on disk before the call.  ``path`` names a manifest file
+        that persists across calls, for a rerun.  ``started`` says when the
+        running daemon began, relative to the manifest file's mtime at the
         time systemd is asked: "after", "before", or None when systemd does
-        not say.  ``calls`` records "install", "generate", "migrate" and each
-        systemctl verb, such as "systemctl enable", in the order they ran."""
+        not say.  ``calls`` records "install", "generate", "check",
+        "migrate" and each systemctl verb, such as "systemctl enable", in
+        the order they ran."""
         if path is None:
             d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
             path = Path(d.name) / "pipelines.toml"
@@ -90,11 +97,14 @@ class EnableInstallsDaemonFirstTests(unittest.TestCase):
                 raise install
             return install
 
-        def fake_generate():
+        def fake_generate(*a, **k):
             calls.append("generate")
             return render() if render else self.TEXT
 
-        def fake_migrate():
+        def fake_migrate(*, check=False, **k):
+            if check:
+                calls.append("check")
+                return 3 if pending else 0
             calls.append("migrate")
             seen["manifest"] = path.read_text() if path.exists() else None
             return migrate
@@ -112,7 +122,11 @@ class EnableInstallsDaemonFirstTests(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(um, "generate", side_effect=fake_generate), \
              mock.patch.object(um, "suppressed_pipelines", return_value=[]), \
+             mock.patch.object(um, "hs_uploader_store_version", return_value=2), \
              mock.patch.object(um, "MANIFEST_PATH", path), \
+             mock.patch.object(up_cmd, "_effective_mode", return_value="upload"), \
+             mock.patch.object(up_cmd, "_daemon_store_path",
+                               return_value=Path("/x/watermarks.db")), \
              mock.patch.object(up_cmd.os, "geteuid", return_value=euid), \
              mock.patch.object(up_cmd, "_ensure_daemon_installed",
                                side_effect=fake_install), \
@@ -129,10 +143,13 @@ class EnableInstallsDaemonFirstTests(unittest.TestCase):
             manifest_at_migrate=seen.get("manifest", "never migrated"),
             out=out.getvalue(), err=err.getvalue())
 
+    FULL = ["check", "systemctl stop", "migrate"]
+    START = ["systemctl reset-failed", "systemctl enable"]
+
     def test_root_enable_installs_before_generate(self):
         r = self._call()
-        self.assertEqual(r.calls, ["install", "generate", "migrate",
-                                   "systemctl enable"])
+        self.assertEqual(r.calls, ["install", "generate"] + self.FULL
+                         + self.START)
         self.assertEqual(r.rc, 0)
         self.assertEqual(r.path.read_text(), self.TEXT)
         r.run.assert_any_call(["systemctl", "enable", "--now", up_cmd.SERVICE])
@@ -150,12 +167,11 @@ class EnableInstallsDaemonFirstTests(unittest.TestCase):
         self.assertEqual(r.rc, 0)
         self.assertEqual(r.path.read_text(), "# mode = discard\n")
 
-    def test_write_without_enable_never_installs(self):
+    def test_write_without_enable_never_installs_or_starts(self):
         r = self._call(enable=False)
-        self.assertEqual(r.calls, ["generate", "migrate"])
+        self.assertEqual(r.calls, ["generate"] + self.FULL)
         self.assertEqual(r.rc, 0)
         self.assertEqual(r.path.read_text(), self.TEXT)
-        r.run.assert_not_called()
 
     def test_check_never_installs(self):
         r = self._call(enable=False, write=False)
@@ -172,108 +188,103 @@ class EnableInstallsDaemonFirstTests(unittest.TestCase):
 
     def test_failed_install_still_writes_and_returns_1(self):
         r = self._call(install=False)
-        self.assertEqual(r.calls, ["install", "generate"])
+        self.assertEqual(r.calls, ["install", "generate"] + self.FULL)
         self.assertEqual(r.rc, 1)
         self.assertEqual(r.path.read_text(), self.TEXT)
-        r.run.assert_not_called()  # no systemctl enable on a failed install
+        self.assertNotIn("systemctl enable", r.calls)
 
     def test_install_error_still_writes_and_returns_1(self):
         r = self._call(install=OSError("no bash"))
-        self.assertEqual(r.calls, ["install", "generate"])
+        self.assertEqual(r.calls, ["install", "generate"] + self.FULL)
         self.assertEqual(r.rc, 1)
         self.assertEqual(r.path.read_text(), self.TEXT)
         self.assertIn("install failed: no bash", r.err)
-        r.run.assert_not_called()
+        self.assertNotIn("systemctl enable", r.calls)
 
-    # -- D10: `hs-uploader migrate` runs after the write, before any start --
+    # -- D10: `hs-uploader migrate` runs before the manifest lands and
+    # before anything starts the daemon --
 
-    def test_migrate_runs_on_the_written_manifest_before_systemctl(self):
-        r = self._call(active=True)
-        self.assertEqual(r.calls, ["install", "generate", "migrate",
-                                   "systemctl enable", "systemctl restart"])
-        self.assertEqual(r.manifest_at_migrate, self.TEXT)
+    def test_migrate_runs_before_the_manifest_lands(self):
+        r = self._call(active=True, installed="# old\n")
+        self.assertEqual(r.calls, ["install", "generate"] + self.FULL
+                         + self.START)
+        self.assertEqual(r.manifest_at_migrate, "# old\n")
+        self.assertEqual(r.path.read_text(), self.TEXT)
         self.assertEqual(r.rc, 0)
 
-    def test_a_failed_migrate_starts_and_restarts_nothing(self):
-        r = self._call(active=True, migrate=1)
+    def test_a_failed_migrate_restores_a_running_daemon_and_keeps_the_manifest(self):
+        r = self._call(active=True, migrate=1, installed="# old\n")
         self.assertEqual(r.rc, 1)
-        self.assertEqual(r.calls, ["install", "generate", "migrate"])
-        r.run.assert_not_called()
-        self.assertEqual(r.path.read_text(), self.TEXT)
-        self.assertIn("neither started nor restarted", r.err)
+        self.assertEqual(r.calls, ["install", "generate"] + self.FULL
+                         + ["systemctl reset-failed", "systemctl start"])
+        self.assertEqual(r.path.read_text(), "# old\n")
+        self.assertIn("running as found", r.err)
 
-    def test_write_alone_migrates_and_fails_when_migrate_fails(self):
+    def test_write_alone_fails_when_migrate_fails(self):
         # smd align runs `--write` alone and restarts hs-uploader itself,
         # only when this step exits 0 (bin/smd, _align_apply).
         r = self._call(enable=False, migrate=1)
-        self.assertEqual(r.calls, ["generate", "migrate"])
+        self.assertEqual(r.calls, ["generate"] + self.FULL)
         self.assertEqual(r.rc, 1)
-        r.run.assert_not_called()
+        self.assertFalse(r.path.exists())
 
-    # -- migrate runs whether or not this call changed the manifest: new
+    # -- a current manifest migrates only when --check reports work: new
     # hs-uploader code over an unchanged manifest is the common upgrade --
 
-    def test_migrate_runs_when_the_manifest_is_already_current(self):
+    def test_a_current_manifest_with_nothing_pending_stops_nothing(self):
         r = self._call(enable=False, installed=self.TEXT)
-        self.assertEqual(r.calls, ["generate", "migrate"])
+        self.assertEqual(r.calls, ["generate", "check"])
         self.assertEqual(r.rc, 0)
         self.assertIn("already current", r.out)
 
-    def test_migrate_runs_before_enable_when_the_manifest_is_already_current(self):
-        r = self._call(installed=self.TEXT, active=True)
-        self.assertEqual(r.calls, ["install", "generate", "migrate",
-                                   "systemctl enable"])
+    def test_a_current_manifest_with_a_pending_migration_migrates(self):
+        r = self._call(enable=False, installed=self.TEXT, pending=True)
+        self.assertEqual(r.calls, ["generate"] + self.FULL)
         self.assertEqual(r.rc, 0)
 
     def test_a_failed_migrate_fails_on_a_current_manifest_too(self):
         for enable in (False, True):
             with self.subTest(enable=enable):
                 r = self._call(enable=enable, installed=self.TEXT, migrate=1,
-                               active=True)
+                               active=True, pending=True)
                 self.assertEqual(r.rc, 1)
-                r.run.assert_not_called()
+                self.assertNotIn("systemctl enable", r.calls)
+                self.assertEqual(r.calls[-1], "systemctl start")
 
-    # -- the daemon reads its manifest once, at start.  Restart an active
-    # daemon that started before the manifest file's last write, even when
-    # this run changed nothing: an earlier run may have written it, failed
-    # to migrate and restarted nothing --
+    # -- the daemon reads its manifest once, at start.  On a current
+    # manifest, restart an active daemon that started before the manifest
+    # file's last write: an older sigmond may have written it and
+    # restarted nothing --
 
-    def test_a_rerun_after_a_failed_migrate_restarts_the_stale_daemon(self):
-        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
-        path = Path(d.name) / "pipelines.toml"
-        first = self._call(path=path, active=True, migrate=1, started="before")
-        self.assertEqual(first.rc, 1)
-        first.run.assert_not_called()
-        self.assertEqual(path.read_text(), self.TEXT)
-        second = self._call(path=path, active=True, started="before")
-        self.assertEqual(second.rc, 0)
-        self.assertEqual(second.calls, ["install", "generate", "migrate",
-                                        "systemctl enable",
-                                        "systemctl restart"])
-        self.assertIn("started before the manifest", second.out)
+    def test_a_current_manifest_newer_than_the_daemon_restarts_it(self):
+        r = self._call(installed=self.TEXT, active=True, started="before")
+        self.assertEqual(r.rc, 0)
+        self.assertEqual(r.calls, ["install", "generate", "check"]
+                         + self.START + ["systemctl restart"])
+        self.assertIn("started before the manifest", r.out)
 
     def test_a_current_manifest_older_than_the_daemon_start_restarts_nothing(self):
         r = self._call(installed=self.TEXT, active=True, started="after")
-        self.assertEqual(r.calls, ["install", "generate", "migrate",
-                                   "systemctl enable"])
+        self.assertEqual(r.calls, ["install", "generate", "check"]
+                         + self.START)
         self.assertNotIn("restarting", r.out)
 
     def test_an_unreadable_start_time_restarts_an_active_daemon(self):
         r = self._call(installed=self.TEXT, active=True, started=None)
-        self.assertEqual(r.calls, ["install", "generate", "migrate",
-                                   "systemctl enable", "systemctl restart"])
+        self.assertEqual(r.calls, ["install", "generate", "check"]
+                         + self.START + ["systemctl restart"])
 
     def test_an_inactive_daemon_is_started_never_restarted(self):
         r = self._call(installed=self.TEXT, active=False, started="before")
-        self.assertEqual(r.calls, ["install", "generate", "migrate",
-                                   "systemctl enable"])
+        self.assertEqual(r.calls, ["install", "generate", "check"]
+                         + self.START)
 
-    def test_a_changed_manifest_restarts_an_active_daemon(self):
+    def test_a_changed_manifest_stops_and_starts_an_active_daemon(self):
         r = self._call(installed="[[pipeline]]\nname = \"old\"\n",
                        active=True, started="after")
-        self.assertEqual(r.calls, ["install", "generate", "migrate",
-                                   "systemctl enable", "systemctl restart"])
-        self.assertIn("manifest changed", r.out)
+        self.assertEqual(r.calls, ["install", "generate"] + self.FULL
+                         + self.START)
+        self.assertIn("wrote", r.out)
 
 
 class RunMigrateTests(unittest.TestCase):
@@ -309,10 +320,11 @@ class RunMigrateTests(unittest.TestCase):
         with mock.patch.object(up_cmd, "_VENV", self.venv), \
              mock.patch.object(up_cmd.shutil, "which",
                                return_value=which) as found, \
-             mock.patch.object(up_cmd.subprocess, "run",
+             mock.patch.object(up_cmd, "_run_in_group",
                                side_effect=fake_run) as run, \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = up_cmd._run_migrate()
+            rc = up_cmd._run_migrate(db=Path("/x/watermarks.db"), sink=None,
+                                     keep_retry_for=None)
         return types.SimpleNamespace(rc=rc, run=run, found=found,
                                      cmd=seen.get("cmd"), kw=seen.get("kw"),
                                      out=out.getvalue(), err=err.getvalue())
@@ -323,7 +335,8 @@ class RunMigrateTests(unittest.TestCase):
                               "changes no row and no table\n", ""))
         self.assertEqual(r.rc, 0)
         self.assertEqual(r.cmd, ["/x/runuser", "-u", "hsupload", "--",
-                                 str(self.exe), "migrate"])
+                                 str(self.exe), "migrate", "--db",
+                                 "/x/watermarks.db"])
         self.assertIn("uploader: watermarks.db: version 1", r.out)
         self.assertIn("uploader:   applied 1: record the schema version", r.out)
 
@@ -336,18 +349,14 @@ class RunMigrateTests(unittest.TestCase):
         r = self._migrate(which=None)
         self.assertEqual(r.cmd[0], "/usr/sbin/runuser")
 
-    def test_the_subprocess_options_are_exactly_these(self):
-        # Each option carries weight: capture_output + text let the old
-        # hs-uploader's stderr reach the skip test, stdin=DEVNULL keeps a
-        # prompt from hanging an unattended run, errors="replace" keeps a
-        # stray byte from raising, and check=False leaves a non-zero exit
-        # to the code that reports it.  No shell, no env.
+    def test_the_run_options_are_exactly_these(self):
+        # The daemon's working directory and the migrate timeout; the
+        # process-group runner fixes the rest (stdin=DEVNULL, pipes, text
+        # with errors="replace", a session of its own), pinned in
+        # test_uploader_manifest_step.py.
         r = self._migrate()
-        self.assertEqual(r.kw, dict(
-            capture_output=True, text=True, errors="replace",
-            stdin=subprocess.DEVNULL, cwd=str(self.venv.parent),
-            timeout=up_cmd._MIGRATE_TIMEOUT_S, check=False))
-        self.assertIs(r.kw["stdin"], subprocess.DEVNULL)
+        self.assertEqual(r.kw, dict(cwd=str(self.venv.parent),
+                                    timeout=up_cmd._MIGRATE_TIMEOUT_S))
 
     def test_the_timeout_is_120_seconds(self):
         # Past hs-uploader migrate's own 30 s wait for a lock, and inside the
@@ -423,7 +432,8 @@ class RunMigrateRealSubprocessTests(unittest.TestCase):
              mock.patch.object(up_cmd.shutil, "which",
                                return_value=str(self.runuser)), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = up_cmd._run_migrate()
+            rc = up_cmd._run_migrate(db=Path("/x/watermarks.db"), sink=None,
+                                     keep_retry_for=None)
         return types.SimpleNamespace(rc=rc, out=out.getvalue(),
                                      err=err.getvalue())
 

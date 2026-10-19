@@ -6157,11 +6157,13 @@ def _align_bringup(*, run=subprocess.run, say=print, site_timing_refreshed: bool
         before = um.MANIFEST_PATH.read_bytes()
     except OSError:
         before = None
-    # 240 s: the child writes, then waits up to 120 s for `hs-uploader migrate`
+    # 300 s: the child probes hs-uploader (20 s at most), then waits up to
+    # 120 s each for `hs-uploader migrate --check` and `hs-uploader migrate`
     # (sigmond.commands.uploader._MIGRATE_TIMEOUT_S).  A shorter limit here
-    # would kill smd before its own timeout could report a hung migrate.
+    # would kill smd before its own timeout could report a hung migrate, and
+    # leave hs-uploader stopped.
     r = _align_run([sys.executable, str(_SCRIPT), 'admin', 'uploader', 'manifest', '--write'],
-                   run=run, timeout=240, action='admin uploader manifest --write',
+                   run=run, timeout=300, action='admin uploader manifest --write',
                    stdin=subprocess.DEVNULL)
     detail = _tail(r)
     if r.returncode != 0:
@@ -10326,6 +10328,30 @@ def _ensure_multicast_rcvbuf(dry_run: bool = False) -> bool:
     return True
 
 
+def _apply_uploader_manifest() -> bool:
+    """`smd apply`'s uploader manifest step (`--write --enable`).  Returns
+    False, after saying so, when the step exits non-zero: a failed probe
+    or migrate keeps the old manifest beside the old keys (tasks/spec-key-
+    split-v373.md §5.2), and apply must not report that as success.  An
+    exception from the step itself still only warns, as before: the
+    uploader is optional on some hosts."""
+    try:
+        from sigmond.commands.uploader import cmd_uploader_manifest
+
+        class _A:  # minimal args shim: write + enable/refresh
+            write = True
+            enable = True
+        rc = cmd_uploader_manifest(_A())
+    except Exception as exc:
+        _warn(f'uploader manifest: skipped ({exc})')
+        return True
+    if rc:
+        _err(f'uploader manifest step failed (exit {rc}); see above.  '
+             f'Re-run: sudo smd admin uploader manifest --write --enable')
+        return False
+    return True
+
+
 def cmd_apply(args) -> int:
     if _need_root('apply'):
         return 1
@@ -10555,17 +10581,11 @@ def cmd_apply(args) -> int:
 
     # Regenerate the single-host uploader manifest from each client's
     # deploy.toml [[hs_uploader.pipeline]] declarations and refresh the daemon
-    # if it drifted.  Best-effort / non-fatal: an apply must not fail because
-    # the optional uploader isn't set up on this host.
+    # if it drifted.  A step that fails fails the apply, but only after the
+    # rest of it has run: the upload-service restarts below still happen.
     if not dry_run and _HAS_SIGMOND_LIB:
-        try:
-            from sigmond.commands.uploader import cmd_uploader_manifest
-            class _A:  # minimal args shim: write + enable/refresh
-                write = True
-                enable = True
-            cmd_uploader_manifest(_A())
-        except Exception as exc:
-            _warn(f'uploader manifest: skipped ({exc})')
+        if not _apply_uploader_manifest():
+            ok = False
 
     # Restart wd-upload-* services AFTER everything else — they depend on
     # decoders being active and fail with "unavailable resources" if started

@@ -420,6 +420,12 @@ def _map_uploads(raw) -> dict:
                       raw.get("reason") or "upload backlog unreadable")
     pipelines = list(raw.get("pipelines") or [])
     data = {"pipelines": pipelines, "cursors": list(raw.get("cursors") or [])}
+    # Dead letters whose pipeline the manifest no longer builds (after the
+    # v3.73 key split, those under psk-pskreporter).  Absent from an older
+    # hs-uploader's summary, and then absent here: no count was taken.
+    orphans = _as_int(raw.get("orphaned_dead_letters"))
+    if orphans is not None:
+        data["orphaned_dead_letters"] = orphans
     # sigmond#53: the site's outbound-uploads policy rides beside the
     # backlog (default_readers merges it in).  Policy never hides a real
     # backlog — it rewords the idle case and annotates the others.
@@ -454,8 +460,9 @@ def _map_uploads(raw) -> dict:
         named = ", ".join(str(p.get("name")) for p in retrying)
         return _block("INCONCLUSIVE", _policy_suffix(
             f"{total} deliverables retrying ({named})", disabled), data)
-    # A fully-idle pipeline is ABSENT from `pipelines`, so an empty list
-    # on a readable store genuinely means nothing is stuck.
+    # No pipeline holds a recent dead letter or a retry.  `pipelines` may
+    # still list idle ones: hs-uploader now lists every pipeline the daemon
+    # knew at its last start (pipeline_state), with zero counts.
     if disabled and policy.get("mode") == "discard":
         why = str(policy.get("reason") or "").strip()
         return _block("VALID",

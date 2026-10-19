@@ -8,33 +8,44 @@ Modes (default is the read-only check):
 
 * ``--check`` / (no flag) — render and diff against the installed manifest;
   exit non-zero on drift.  Read-only, no root.
-* ``--write`` — write the manifest (root); back up any existing file to
-  ``.bak``; then run ``hs-uploader migrate`` as ``hsupload``.
+* ``--write`` — land the manifest (root) by the steps below, backing up
+  any previous file to ``.bak``.
 * ``--enable`` — install the daemon first when it is missing (the render
-  probes its venv), write, migrate, then ensure ``hs-uploader.service`` is
-  enabled + running (restart it when the manifest actually changed).
+  probes its venv), take the same steps, then make sure
+  ``hs-uploader.service`` is enabled and running.
 
-``hs-uploader migrate`` brings ``watermarks.db`` to the schema the
-installed daemon expects.  It runs after the write and before anything
-starts or restarts the daemon, because the daemon never migrates while it
-starts (tasks/plan-sink-control.md D10).  A failed migrate leaves the
-daemon as it stands and exits 1.
+``--write`` and ``--enable`` alike follow tasks/spec-key-split-v373.md
+§5.2:
 
-The daemon reads its manifest once, when it starts.  ``--enable`` therefore
-restarts an active daemon when the manifest changed, and also when the
-daemon started before the manifest file's last write.  The second case
-covers a rerun after a failed migrate: the first run wrote the manifest and
-restarted nothing, so the rerun finds the file current and the daemon stale.
+1. ask the daemon's interpreter which store version it reads (only when
+   the render holds client pipelines; a hold renders without asking);
+2. render to ``pipelines.toml.new``;
+3. ask ``hs-uploader migrate --check`` whether a migration waits;
+4. stop here when the manifest has not changed and nothing waits;
+5. note whether the daemon runs, then stop it;
+6. run ``hs-uploader migrate`` as ``hsupload``; on failure drop the side
+   file, return the daemon to the state it was found in, and exit 1, so
+   the old manifest and the old keys still match;
+7. move the side file into place;
+8. start the daemon if it ran before, or if ``--enable`` asked for it.
+
+The daemon never migrates while it starts (tasks/plan-sink-control.md
+D10), and it reads its manifest once, when it starts.  On a manifest that
+did not change, ``--enable`` still restarts an active daemon that started
+before the manifest file's last write: an older sigmond may have written
+the file and restarted nothing.
 """
 from __future__ import annotations
 
 import difflib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import Optional
 
 from .. import uploader_manifest as um
 
@@ -43,6 +54,9 @@ _UNIT_SRC = Path("/opt/git/sigmond/hs-uploader/systemd/hs-uploader.service")
 _UNIT_DST = Path("/etc/systemd/system/hs-uploader.service")
 _INSTALL_SH = Path("/opt/git/sigmond/hs-uploader/install.sh")
 _VENV = Path("/opt/hs-uploader/venv")
+# hs-uploader's own default for its store's directory (watermark/sqlite.py
+# default_path); the unit may override it with HS_UPLOADER_STATE_DIR.
+_DEFAULT_STATE_DIR = "/var/lib/hs-uploader"
 # Longer than hs-uploader migrate's own 30 s wait for another writer's lock,
 # with room for the interpreter to start on a busy station.
 _MIGRATE_TIMEOUT_S = 120
@@ -140,66 +154,186 @@ def _ensure_daemon_installed() -> bool:
     return True
 
 
-def _run_migrate() -> int:
+
+
+def _daemon_store_path() -> Path:
+    """The daemon's own ``watermarks.db``: ``HS_UPLOADER_STATE_DIR`` from
+    the unit's effective environment when it sets one, else the default
+    ``/var/lib/hs-uploader`` (hs-uploader's ``default_path``).  migrate
+    takes it as ``--db`` so it migrates the store the daemon opens (map
+    J17), not one its own environment would pick."""
+    from ..inprocess_senders import _systemctl_show
+    try:
+        env = _systemctl_show(SERVICE)
+    except OSError:
+        env = {}
+    base = (env.get("HS_UPLOADER_STATE_DIR") or "").strip()
+    return Path(base or _DEFAULT_STATE_DIR) / "watermarks.db"
+
+
+def _run_in_group(cmd: list, *, cwd: str, timeout: float
+                  ) -> subprocess.CompletedProcess:
+    """Run ``cmd`` in a session of its own and wait up to ``timeout``.
+
+    On a timeout it kills the whole process group, then raises
+    ``subprocess.TimeoutExpired``.  ``runuser`` forks to close its PAM
+    session, so killing only the process it started would leave the
+    real ``hs-uploader migrate`` running (map J17)."""
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, errors="replace", cwd=cwd,
+                            start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _check_pending(stdout: str) -> bool:
+    """Whether ``migrate --check`` reports work for a real migrate: a
+    pending migration, a retry it would delete or move, or a crash's
+    journal that only a writing open recovers.  A retry that "stays"
+    needs nothing."""
+    for line in stdout.splitlines():
+        text = line.strip()
+        if (text.startswith("pending ") or ": would delete" in text
+                or ": would move " in text or "journal to recover" in text):
+            return True
+    return False
+
+
+def _run_migrate(*, db: Path, sink: Optional[Path],
+                 keep_retry_for: Optional[str], check: bool = False) -> int:
     """Run the daemon's own ``hs-uploader migrate`` as ``hsupload``.
 
-    The daemon never migrates while it starts (tasks/plan-sink-control.md
-    D10), so this runs after the manifest write and before any start or
-    restart.  It runs as ``hsupload``, the daemon's account, in the unit's
-    working directory.  So no file SQLite creates beside ``watermarks.db``,
-    such as its rollback journal, ever belongs to root (bee1, 2026-05-12:
-    "attempt to write a readonly database").
+    It runs as ``hsupload``, the daemon's account, in the unit's working
+    directory.  So no file SQLite creates beside ``watermarks.db``, such as
+    its rollback journal, ever belongs to root (bee1, 2026-05-12: "attempt
+    to write a readonly database"), and a missing store gets created
+    stamped current.  ``--sink`` and ``--keep-retry-for`` go only when
+    given: an hs-uploader older than the split knows neither.
 
-    Returns 0 when migrate finished or found nothing to do.  Also returns 0,
-    with a line saying so, when no daemon venv exists or the installed
-    hs-uploader predates ``migrate`` (argparse exits 2 with ``invalid
-    choice: 'migrate'``).  Returns 1 on any other failure, after saying
-    why."""
+    ``check=False`` returns 0 when migrate finished or found nothing to do,
+    1 on any failure, after saying why.  ``check=True`` runs ``migrate
+    --check``, which writes nothing, and returns 0 when nothing waits, 3
+    when a migration is pending (``_check_pending``), 1 when the check
+    failed.  Either mode returns 0, with a line saying so, when no daemon
+    venv exists or the installed hs-uploader predates ``migrate`` (argparse
+    exits 2 with ``invalid choice: 'migrate'``)."""
     exe = _VENV / "bin" / "hs-uploader"
     if not exe.exists():
-        print(f"uploader: no {exe}; send-record migrate skipped")
+        if not check:
+            print(f"uploader: no {exe}; send-record migrate skipped")
         return 0
     runuser = shutil.which("runuser") or "/usr/sbin/runuser"
-    cmd = [runuser, "-u", "hsupload", "--", str(exe), "migrate"]
+    cmd = [runuser, "-u", "hsupload", "--", str(exe), "migrate",
+           "--db", str(db)]
+    if sink is not None:
+        cmd += ["--sink", str(sink)]
+    if keep_retry_for is not None:
+        cmd += ["--keep-retry-for", keep_retry_for]
+    if check:
+        cmd.append("--check")
+    what = "hs-uploader migrate --check" if check else "hs-uploader migrate"
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           errors="replace", stdin=subprocess.DEVNULL,
-                           cwd=str(_VENV.parent), timeout=_MIGRATE_TIMEOUT_S,
-                           check=False)
+        r = _run_in_group(cmd, cwd=str(_VENV.parent),
+                          timeout=_MIGRATE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        _err(f"hs-uploader migrate did not finish within "
-             f"{_MIGRATE_TIMEOUT_S} s")
+        _err(f"{what} did not finish within {_MIGRATE_TIMEOUT_S} s; "
+             "killed its process group")
         return 1
     except OSError as exc:
-        _err(f"hs-uploader migrate could not run: {exc}")
+        _err(f"{what} could not run: {exc}")
         return 1
     stderr = (r.stderr or "").strip()
     if r.returncode == 2 and "invalid choice: 'migrate'" in stderr:
-        print("uploader: this hs-uploader predates `migrate`; send-record "
-              "migrate skipped")
+        if not check:
+            print("uploader: this hs-uploader predates `migrate`; "
+                  "send-record migrate skipped")
         return 0
-    for line in (r.stdout or "").splitlines():
-        if line.strip():
-            print(f"uploader: {line}")
+    stdout = r.stdout or ""
+    pending = check and r.returncode == 0 and _check_pending(stdout)
+    if not check or pending or r.returncode != 0:
+        for line in stdout.splitlines():
+            if line.strip():
+                print(f"uploader: {line}")
     if r.returncode != 0:
-        _err(f"hs-uploader migrate failed (exit {r.returncode}): "
+        _err(f"{what} failed (exit {r.returncode}): "
              f"{stderr or 'no message'}")
         return 1
+    if check:
+        return 3 if pending else 0
     return 0
+
+
+def _effective_mode() -> str:
+    """The mode the render will take (``upload``, ``discard`` or
+    ``hold``), from coordination.toml and the daemon's discard support.
+    ``hold`` when coordination cannot be read: generate() then fails on
+    its own read, and no probe runs first."""
+    try:
+        from ..coordination import load_coordination
+        return um.effective_mode(load_coordination())
+    except Exception:  # pragma: no cover - defensive
+        return "hold"
+
+
+def _keep_retry_for(text: str) -> Optional[str]:
+    """The pipeline that inherits a ``psk-pskreporter`` retry migrate cannot
+    delete (spec §4.4 item 4): psk-recorder's when the rendered manifest
+    holds it, else meteor-scatter's, else None.  hs-uploader refuses any
+    other name."""
+    try:
+        names = {str(p.get("name")) for p in
+                 tomllib.loads(text).get("pipeline") or []
+                 if isinstance(p, dict)}
+    except tomllib.TOMLDecodeError:
+        return None
+    for producer in ("psk-recorder", "meteor-scatter"):
+        name = um.PSK_PRODUCERS[producer][0]
+        if name in names:
+            return name
+    return None
+
+
+def _start(enable: bool) -> None:
+    """Start the daemon, clearing a failed state first: a daemon whose
+    every pipeline was refused exits 1, and enough of those trip systemd's
+    start limit (ruling 5).  ``enable`` also enables it at boot.  A start
+    that fails only warns: a manifest with no pipeline makes the daemon
+    exit "nothing to do", on a station that is fine."""
+    _run(["systemctl", "reset-failed", SERVICE])
+    cmd = (["systemctl", "enable", "--now", SERVICE] if enable
+           else ["systemctl", "start", SERVICE])
+    if _run(cmd) != 0:
+        _err(f"`{' '.join(cmd)}` failed; see `journalctl -u {SERVICE}`")
+
+
+def _land(side: Path, path: Path, installed: str, text: str) -> None:
+    """Move the side file into place, keeping the previous manifest as
+    ``.bak`` on any byte change, so it is always recoverable."""
+    if installed and installed != text:
+        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+    os.replace(side, path)
 
 
 def cmd_uploader_manifest(args) -> int:
     write = bool(getattr(args, "write", False) or getattr(args, "enable", False))
     enable = bool(getattr(args, "enable", False))
 
-    # Install the daemon BEFORE rendering.  um.generate() asks the daemon's
-    # own venv whether it can discard.  A fresh host has no venv yet, so
-    # the probe answers no.  The site sink switch `off` then renders as the
-    # legacy hold, and a backlog builds that a later `smd sink upload`
-    # would ship (tasks/plan-sink-control.md §10.3).  Only root installs;
-    # a non-root call reaches the refusal below.  The enable branch reuses
-    # this result, so install.sh runs once.  An install error still lets
-    # the write go ahead, as it did before.
+    # Install the daemon BEFORE rendering.  The render asks the daemon's
+    # own venv what it supports.  A fresh host has no venv yet, so the
+    # probe would fail, or answer no.  The site sink switch `off` would
+    # then render as the legacy hold, and a backlog builds that a later
+    # `smd sink upload` would ship (tasks/plan-sink-control.md §10.3).
+    # Only root installs; a non-root call reaches the refusal below.  The
+    # enable branch reuses this result, so install.sh runs once.
     daemon_ready = None
     if enable and os.geteuid() == 0:
         try:
@@ -208,23 +342,35 @@ def cmd_uploader_manifest(args) -> int:
             _err(f"hs-uploader daemon install failed: {exc}")
             daemon_ready = False
 
+    # Step 1: ask the daemon's interpreter, once, which store version it
+    # reads (spec §5.1), and only when the render needs the answer: a
+    # hold renders the heartbeat alone (ruling 9).
+    mode = _effective_mode()
+    store_version = None
     try:
-        text = um.generate()
+        if mode in ("upload", "discard"):
+            store_version = um.hs_uploader_store_version()
+            if store_version is None:
+                raise um.ProbeFailed(
+                    f"cannot ask {um.HS_UPLOADER_PYTHON} for `hs-uploader "
+                    "capabilities` (failed or timed out)")
+        text = um.generate(store_version=store_version)
+    except um.ProbeFailed as exc:
+        _err(f"uploader manifest: {exc}; the installed manifest and "
+             f"{SERVICE} stay as they are")
+        return 1
     except Exception as exc:  # pragma: no cover - defensive
         _err(f"uploader manifest generation failed: {exc}")
         return 1
 
     # sigmond#53: say, by name, what the uploads policy is holding back.
+    # A hold took no probe; it names the shared pipeline.
     try:
-        suppressed = um.suppressed_pipelines()
+        suppressed = um.suppressed_pipelines(
+            store_version=store_version if store_version is not None else 0)
     except Exception:  # pragma: no cover - defensive
         suppressed = []
     if suppressed:
-        try:
-            from ..coordination import load_coordination
-            mode = um.effective_mode(load_coordination())
-        except Exception:  # pragma: no cover - defensive
-            mode = "hold"
         if mode == "discard":
             print("uploader: SITE SINK OFF — these pipelines ack without "
                   "sending: " + ", ".join(suppressed))
@@ -235,16 +381,16 @@ def cmd_uploader_manifest(args) -> int:
     path = um.MANIFEST_PATH
     installed = path.read_text() if path.exists() else ""
     changed = _semantic(text) != _semantic(installed)
+    n = text.count("[[pipeline]]")
 
     if not write:
         # read-only check
         if not installed:
             print(f"uploader: no manifest at {path} — would create "
-                  f"{text.count('[[pipeline]]')} pipeline(s)")
+                  f"{n} pipeline(s)")
             return 1
         if not changed:
-            print(f"uploader: {path} is up to date "
-                  f"({text.count('[[pipeline]]')} pipeline(s))")
+            print(f"uploader: {path} is up to date ({n} pipeline(s))")
             return 0
         print(f"uploader: {path} DRIFT — `--write` would change it:\n")
         diff = difflib.unified_diff(
@@ -260,52 +406,97 @@ def cmd_uploader_manifest(args) -> int:
              "manifest --write)")
         return 1
 
+    # Step 2: render to the side file.  The installed manifest stays in
+    # force until migrate has moved the keys it names.
     path.parent.mkdir(parents=True, exist_ok=True)
-    n = text.count("[[pipeline]]")
+    side = path.with_name(path.name + ".new")
+    side.write_text(text)
+
+    # --sink only for an hs-uploader that knows the split; a hold took no
+    # probe, so it cannot tell.  --keep-retry-for only names a pipeline the
+    # new manifest holds.
+    split = (store_version or 0) >= um.SPLIT_STORE_VERSION
+    migrate_kw = dict(db=_daemon_store_path(),
+                      sink=Path(um.SINK_PATH) if split else None,
+                      keep_retry_for=_keep_retry_for(text) if split else None)
+
+    # Step 3: is a migration pending?
+    pending = _run_migrate(check=True, **migrate_kw)
+    if pending not in (0, 3):
+        side.unlink(missing_ok=True)
+        _err(f"hs-uploader migrate --check failed; {path} and {SERVICE} "
+             "left as they stand")
+        return 1
+
+    # Step 4: nothing changed and nothing waits: stop nothing.
+    if not changed and pending == 0:
+        stale = _service_active() and _started_before_manifest(path)
+        if installed == text:
+            side.unlink(missing_ok=True)
+            print(f"uploader: {path} already current ({n} pipeline(s))")
+        else:
+            _land(side, path, installed, text)
+            print(f"uploader: refreshed {path} "
+                  f"({n} pipeline(s); no functional change)")
+        if not enable:
+            return 0
+        if daemon_ready is None:
+            daemon_ready = _ensure_daemon_installed()
+        if not daemon_ready:
+            return 1
+        _start(enable=True)
+        # The daemon reads its manifest once, at start.  One that started
+        # before the file's last write still follows an older manifest.
+        if stale:
+            print(f"uploader: {SERVICE} started before the manifest on disk "
+                  f"was written — restarting {SERVICE}")
+            _run(["systemctl", "restart", SERVICE])
+        return 0
+
+    # Step 5: note whether the daemon runs, then stop it.  Stop even an
+    # inactive unit: that cancels a restart systemd has queued, which could
+    # otherwise start the daemon in the middle of the migration.
+    was_active = _service_active()
+    if _run(["systemctl", "stop", SERVICE]) != 0 and was_active:
+        side.unlink(missing_ok=True)
+        _err(f"could not stop {SERVICE}; nothing migrated, {path} left as "
+             "it stands")
+        return 1
+
+    # Step 6: migrate, the daemon stopped.  On failure the old manifest
+    # and the old keys still match: drop the side file and put the daemon
+    # back as found.
+    if _run_migrate(**migrate_kw) != 0:
+        side.unlink(missing_ok=True)
+        if was_active:
+            _start(enable=False)
+        _err(f"hs-uploader migrate failed; {path} left as it stands and "
+             f"{SERVICE} {'running' if was_active else 'stopped'} as found.  "
+             "Run this command again once migrate passes.")
+        return 1
+
+    # Step 7: land the manifest, keeping a .bak.
     if installed == text:
+        side.unlink(missing_ok=True)
         print(f"uploader: {path} already current ({n} pipeline(s))")
     else:
-        # Back up on any byte change (even a semantic no-op — comment/order
-        # churn), so the previous manifest is always recoverable.
-        if installed:
-            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
-        path.write_text(text)
+        _land(side, path, installed, text)
         if changed:
             print(f"uploader: wrote {path} ({n} pipeline(s))")
         else:
             print(f"uploader: refreshed {path} "
                   f"({n} pipeline(s); no functional change)")
 
-    # A failed install still leaves the manifest written above; the call
-    # then reports failure here, and never migrates.
+    # Step 8: start the daemon if it ran before, or if --enable asked.  A
+    # failed install leaves the manifest landed and starts nothing.
     if enable:
         if daemon_ready is None:
             daemon_ready = _ensure_daemon_installed()
         if not daemon_ready:
+            if was_active:
+                _start(enable=False)
             return 1
-
-    # D10: migrate the send-record store after the write and before anything
-    # starts or restarts the daemon.  `--write` alone migrates too: smd align
-    # runs it, then restarts hs-uploader itself only when this exits 0.
-    if _run_migrate() != 0:
-        _err(f"hs-uploader migrate failed; {SERVICE} left as it stands, "
-             "neither started nor restarted.  Run this command again once "
-             "migrate passes.")
-        return 1
-
-    if not enable:
-        return 0
-
-    was_active = _service_active()
-    why = None
-    if was_active:
-        if changed:
-            why = "manifest changed"
-        elif _started_before_manifest(path):
-            why = (f"{SERVICE} started before the manifest on disk "
-                   "was written")
-    _run(["systemctl", "enable", "--now", SERVICE])
-    if why:
-        print(f"uploader: {why} — restarting {SERVICE}")
-        _run(["systemctl", "restart", SERVICE])
+        _start(enable=True)
+    elif was_active:
+        _start(enable=False)
     return 0

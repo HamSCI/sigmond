@@ -1460,7 +1460,7 @@ class AlignBringupTests(unittest.TestCase):
         steps, fake = self._run([(0, "", "")] * 4)
         i = next(n for n, argv in enumerate(fake.calls)
                  if argv[-4:] == ["admin", "uploader", "manifest", "--write"])
-        self.assertEqual(fake.kwargs[i]["timeout"], 240)
+        self.assertEqual(fake.kwargs[i]["timeout"], 300)
         self.assertGreater(fake.kwargs[i]["timeout"], up_cmd._MIGRATE_TIMEOUT_S)
 
 

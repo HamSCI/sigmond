@@ -293,7 +293,7 @@ def test_uploads_unreadable_without_a_reason_still_indeterminate():
 
 
 def test_uploads_readable_with_no_pipelines_is_valid():
-    """A fully-idle pipeline is ABSENT from `pipelines` (hs-uploader f5406ca)."""
+    """A readable store with no pipeline listed holds nothing stuck."""
     env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
         "readable": True, "pipelines": [], "cursors": []}))
     block = env["blocks"]["uploads"]
@@ -395,6 +395,27 @@ def test_manifest_drift_is_invalid_naming_components():
     assert block["verdict"] == "INVALID"
     assert "ka9q-radio" in block["reason"]
     assert "hf-timestd" in block["reason"]
+
+
+def test_uploads_carries_orphaned_dead_letters_from_the_summary():
+    """Ruling 8 (v3.73): summarize() counts dead letters whose pipeline the
+    manifest no longer builds -- after the key split, those under
+    psk-pskreporter.  The heartbeat passes the count through."""
+    env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
+        "readable": True, "orphaned_dead_letters": 3,
+        "pipelines": [{"name": "psk-recorder-pskreporter", "client":
+                       "psk-recorder", "deliverable_count": 0,
+                       "dead_letter_count": 0}],
+        "cursors": []}))
+    assert env["blocks"]["uploads"]["data"]["orphaned_dead_letters"] == 3
+
+
+def test_uploads_without_the_orphan_count_adds_none():
+    """An hs-uploader that predates the count: the key stays absent rather
+    than reading 0, which would claim a count nobody took."""
+    env = assemble(NOW, CONFIG, rich_readers(uploads=lambda: {
+        "readable": True, "pipelines": [], "cursors": []}))
+    assert "orphaned_dead_letters" not in env["blocks"]["uploads"]["data"]
 
 
 def test_uploads_dead_letters_are_invalid():
