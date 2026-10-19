@@ -25,9 +25,13 @@ _HS_PY = _HS / ".venv" / "bin" / "python"
 KEEP = "psk-recorder-pskreporter"
 
 # Builds a store with hs-uploader's own code: argv[1] the kind, argv[2] the
-# path.  "current" holds the shared pskreporter record at version 2 (the
-# store stamps its version on creation), "v1" the same at version 1, and
-# "retry" a current store with a retry queued under psk-pskreporter.
+# path.  "current" holds the shared pskreporter record and both producer
+# keys at version 2 (the store stamps its version on creation), as a
+# migrate leaves it.  "born-shared" holds the shared record alone at version
+# 2: a store the daemon created and a shared pipeline used, whose missing
+# producer keys every migrate fills (hs-uploader final review I1).  "v1"
+# holds the shared record at version 1, and "retry" a current store with a
+# retry queued under psk-pskreporter.
 _BUILD = textwrap.dedent("""
     import sqlite3, sys
     from hs_uploader.watermark.sqlite import SqliteWatermarkStore
@@ -36,6 +40,10 @@ _BUILD = textwrap.dedent("""
            "psk.spots")
     s = SqliteWatermarkStore(path)
     s._write_cursor(*key, cursor=b"5", last_ack="2026-10-18T12:00:00+00:00")
+    if kind in ("current", "retry"):
+        for producer in ("psk-recorder", "meteor-scatter"):
+            s._write_cursor(key[0] + "@" + producer, *key[1:], cursor=b"5",
+                            last_ack="2026-10-18T12:00:00+00:00")
     if kind == "retry":
         s.enqueue_deliverable(
             pipeline="psk-pskreporter", payload_blob=b"IPFIX-8",
@@ -90,10 +98,12 @@ class MigrateCheckContractTests(unittest.TestCase):
 
     def test_check_pending_by_exit_code_and_by_wording(self):
         self.assertGreaterEqual(self.store_version, 2)
-        stores = {kind: self._store(kind) for kind in ("v1", "retry", "current")}
+        stores = {kind: self._store(kind)
+                  for kind in ("v1", "retry", "current", "born-shared")}
         # Exit code (the probe's answer) and the wording fallback agree.
         for sv in (self.store_version, None):
             with self.subTest(store_version=sv):
                 self.assertTrue(self._pending(stores["v1"], sv))
                 self.assertTrue(self._pending(stores["retry"], sv))
                 self.assertFalse(self._pending(stores["current"], sv))
+                self.assertTrue(self._pending(stores["born-shared"], sv))
