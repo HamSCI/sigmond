@@ -3768,6 +3768,9 @@ def cmd_update(args) -> int:
     from sigmond.doctor import component_checkouts, git_state
     from sigmond.wisdom import plans_from_fft_log
     from sigmond.update import plan_update, Action, Refusal
+    # Before any pull: a pulled sigmond must never feed this process code
+    # through a late import (_PRELOAD_MODULES).
+    _preload_sigmond_modules('update')
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
     checkouts = component_checkouts(base)
@@ -4441,6 +4444,34 @@ def _restore_rerender_uploader(base) -> int:
     return 1
 
 
+# Every sigmond module a command needs AFTER it has moved sigmond's own
+# checkout.  A lazy import at that point loads the moved tree's code into a
+# process running the old tree's, or finds the module gone: on the B3 rig
+# (2026-10-20) a restore to v3.72 imported sigmond.restore_units, which
+# v3.72 does not have, and died with ModuleNotFoundError.  Each command
+# imports its list before its first checkout or pull.
+# tests/test_preload_modules.py checks each list against the function-level
+# imports in the command's code path.
+_PRELOAD_MODULES = {
+    'manifest_restore': ('sigmond.doctor', 'sigmond.provenance',
+                         'sigmond.manifest_restore', 'sigmond.restore_units',
+                         'sigmond.installer_args'),
+    'update': ('sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
+               'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
+               'sigmond.installer_args'),
+    'align': ('sigmond.align', 'sigmond.align_apply', 'sigmond.align_live',
+              'sigmond.provenance', 'sigmond.catalog', 'sigmond.discover',
+              'sigmond.commands.uploader', 'sigmond.inprocess_senders',
+              'sigmond.coordination', 'sigmond.installer_args'),
+}
+
+
+def _preload_sigmond_modules(command: str) -> None:
+    import importlib
+    for mod in _PRELOAD_MODULES[command]:
+        importlib.import_module(mod)
+
+
 # Where install.sh writes units; tests point it at a temp tree.
 _RESTORE_SYSTEMD_DIR = Path('/etc/systemd/system')
 
@@ -4475,22 +4506,13 @@ def _restore_unit_instances(template: str, systemd_dir: Path) -> list:
     return sorted(found)
 
 
-def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
-    """Disable and remove the unit files that the commit a restore left
-    (`from_sha`, the newer) ships and the commit it reached (`to_sha`, the
-    older) does not (release v3.73 row 4).  `sigmond.restore_units`
-    decides which: only a file whose installed bytes equal the newer
-    commit's bytes.  A timer, socket or path unit gets `disable --now`.  A
-    service gets `disable` and keeps running until its next stop
-    (_RESTORE_STOP_SUFFIXES).  A template's enabled or loaded instances get
-    the same treatment, each named.  A drop-in only goes away; the
-    daemon-reload the caller runs once applies that, and radiod picks it up
-    at its next start.  An operator's `<unit>.d` directory stays, named.
-
-    Returns (removed_any, ok).  ``ok`` is False when git could not list
-    the files or a retired file could not be removed: the units then do not
-    stand as the older release installs them, and restore exits 1.
-    """
+def _restore_plan_units(d, name, from_sha, to_sha) -> tuple:
+    """The unit files a restore will retire for one component, planned
+    BEFORE any checkout moves (see _restore_retire_units for the rules).
+    Planning reads only git objects and installed files, so it needs no
+    checkout; doing it first means no code from a moved sigmond tree is
+    ever imported.  Returns ((retire, kept), ok); the plan is None when
+    there is nothing to do or git failed."""
     from sigmond.restore_units import plan_retire
 
     # --no-renames: a unit the newer commit renamed must count as retired
@@ -4502,10 +4524,10 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
     if r.returncode != 0:
         _err(f'{name}: cannot list the units the newer commit added — '
              f'{(r.stdout + r.stderr).strip()}')
-        return False, False
+        return None, False
     removed = [p for p in r.stdout.split() if p.startswith('systemd/')]
     if not removed:
-        return False, True
+        return None, True
 
     def read_newer(path):
         g = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
@@ -4540,6 +4562,15 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
                                dest_map=dest_map,
                                systemd_dir=_RESTORE_SYSTEMD_DIR,
                                dropin_homes=dropin_homes)
+    return (retire, kept), True
+
+
+def _restore_apply_units(name, plan) -> tuple:
+    """Carry out a plan from _restore_plan_units.  Returns (removed_any,
+    ok)."""
+    if plan is None:
+        return False, True
+    retire, kept = plan
     for dest, why in kept:
         _warn(f'{name}: {dest} left in place — {why}; the restored release '
               f'does not ship it, so remove it by hand if nothing needs it')
@@ -4601,6 +4632,28 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
         _ok(f'{name}: retired {unit} ({dest}) — the restored release does '
             f'not ship it{note}')
     return removed_any, ok
+
+
+def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
+    """Disable and remove the unit files that the commit a restore left
+    (`from_sha`, the newer) ships and the commit it reached (`to_sha`, the
+    older) does not (release v3.73 row 4).  `sigmond.restore_units`
+    decides which: only a file whose installed bytes equal the newer
+    commit's bytes.  A timer, socket or path unit gets `disable --now`.  A
+    service gets `disable` and keeps running until its next stop
+    (_RESTORE_STOP_SUFFIXES).  A template's enabled or loaded instances get
+    the same treatment, each named.  A drop-in only goes away; the
+    daemon-reload the caller runs once applies that, and radiod picks it up
+    at its next start.  An operator's `<unit>.d` directory stays, named.
+
+    Returns (removed_any, ok).  ``ok`` is False when git could not list
+    the files or a retired file could not be removed: the units then do not
+    stand as the older release installs them, and restore exits 1.
+    """
+    plan, ok = _restore_plan_units(d, name, from_sha, to_sha)
+    if not ok:
+        return False, False
+    return _restore_apply_units(name, plan)
 
 
 def cmd_manifest_restore(args) -> int:
@@ -4736,6 +4789,7 @@ def cmd_manifest_restore(args) -> int:
                                 _sha_equal)
     from sigmond.provenance import component_versions
     from sigmond.manifest_restore import plan_restore
+    _preload_sigmond_modules('manifest_restore')
 
     manifest_path = Path(args.path)
     try:
@@ -4855,6 +4909,16 @@ def cmd_manifest_restore(args) -> int:
               'checkouts)')
         return 0
 
+    # Plan the unit retirements while every checkout still stands where it
+    # was: planning reads git objects and installed files only.
+    unit_plans, plan_failed = {}, []
+    for name, from_sha, to_sha in checkout_actions:
+        plan, units_ok = _restore_plan_units(checkout_by_name[name], name,
+                                             from_sha, to_sha)
+        unit_plans[name] = plan
+        if not units_ok:
+            plan_failed.append(name)
+
     moved = []
     for name, from_sha, to_sha in checkout_actions:
         d = checkout_by_name[name]
@@ -4915,10 +4979,10 @@ def cmd_manifest_restore(args) -> int:
 
     # Units the newer release added and the older one never ships: the
     # older install.sh cannot know them, so they would stay installed.
-    retired_any, retire_failed = False, []
-    for name, from_sha, to_sha in moved:
-        removed_any, units_ok = _restore_retire_units(
-            checkout_by_name[name], name, from_sha, to_sha)
+    retired_any = False
+    retire_failed = [n for n, _f, _t in moved if n in plan_failed]
+    for name, _from, _to in moved:
+        removed_any, units_ok = _restore_apply_units(name, unit_plans.get(name))
         retired_any |= removed_any
         if not units_ok:
             retire_failed.append(name)
@@ -6077,7 +6141,16 @@ def _align_run_install(repo: Path, log_target: Optional[str] = None) -> int:
     # --yes, as bring-up passes it: an install.sh that asks to replace a
     # running service ("Stop and replace …? [y/N]") under `set -e` otherwise
     # dies on the empty stdin — igmp-querier did, on AC0G-ND 2026-09-25.
-    r = subprocess.run(_as_root(['bash', str(sh), '--yes']), capture_output=True,
+    # But only to an installer whose parser names --yes: a restore runs the
+    # OLDER release's installers, and hf-tec 613408c exited 2 on an unknown
+    # argument (B3 rig, 2026-10-20).  Without it, stdin stays closed.
+    from sigmond.installer_args import accepts_yes
+    try:
+        yes = accepts_yes(sh.read_text(errors='replace'))
+    except OSError:
+        yes = False
+    argv = ['bash', str(sh)] + (['--yes'] if yes else [])
+    r = subprocess.run(_as_root(argv), capture_output=True,
                        text=True, stdin=subprocess.DEVNULL)
     logpath = _write_update_log(log_target, r) if log_target else None
     if r.returncode:
@@ -6435,6 +6508,8 @@ def _align_apply(args) -> int:
     from sigmond import align, align_apply
     from sigmond.provenance import record_update, HISTORY_FILE
     from datetime import datetime, timezone
+    # Before any move: align moves sigmond first (_PRELOAD_MODULES).
+    _preload_sigmond_modules('align')
 
     def _now() -> str:
         return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')

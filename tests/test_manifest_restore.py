@@ -594,8 +594,21 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         d = self.base / name
         (d / '.git').mkdir(parents=True)
         (d / 'scripts').mkdir()
-        (d / 'scripts' / 'install.sh').write_text('#!/bin/bash\n')
+        (d / 'scripts' / 'install.sh').write_text(
+            '#!/bin/bash\nfor arg in "$@"; do case "$arg" in --yes) ;; esac; done\n'
+            if getattr(self, '_yes_installer', False) else '#!/bin/bash\n')
         return d
+
+    def test_an_older_installer_without_yes_runs_with_no_arguments(self):
+        live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        fake = _FakeGit()
+        rc, out, fake = self._run(self._manifest(), live, fake, after_live=after)
+        self.assertEqual(rc, 0, out)
+        inst = self._installs(fake)
+        self.assertEqual(len(inst), 1)
+        self.assertNotIn('--yes', inst[0])
+        self.assertIs(fake.install_kwargs[0].get('stdin'), subprocess.DEVNULL)
 
     def _manifest(self, sha='aaaaaaa'):
         p = self.tdir / 'candidate.txt'
@@ -794,6 +807,55 @@ class ManifestRestoreApplyTests(unittest.TestCase):
 
     # -- fix round 1 --------------------------------------------------
 
+    def test_restore_imports_no_sigmond_module_after_the_first_checkout(self):
+        # B3 rig 2026-10-20: restore checked sigmond out at v3.72, whose tree
+        # has no sigmond/restore_units.py, and then imported it lazily.
+        import importlib.abc
+        blocked = []
+
+        class Block(importlib.abc.MetaPathFinder):
+            active = False
+
+            def find_spec(self, fullname, path=None, target=None):
+                if self.active and (fullname == 'sigmond'
+                                    or fullname.startswith('sigmond.')):
+                    blocked.append(fullname)
+                    raise ImportError(f'{fullname}: sigmond moved under restore')
+                return None
+
+        blocker = Block()
+        fake = _FakeGit(
+            removed_files={'sigmond': ['systemd/sigmond-new.timer']},
+            blobs={('sigmond', 'systemd/sigmond-new.timer'): b'T'})
+        inner = fake.__call__
+
+        def call(cmd, **kw):
+            if 'checkout' in cmd and '--detach' in cmd:
+                blocker.active = True
+            return inner(cmd, **kw)
+        fake.__call__ = call
+        saved = sys.modules.pop('sigmond.restore_units', None)
+        sys.meta_path.insert(0, blocker)
+        try:
+            p = self.tdir / 'candidate-sig.txt'
+            p.write_text("components (live):\n" + self.SIG_MANIFEST_ROW
+                         + _filler_rows(MIN_COMPONENT_ROWS - 1))
+            live = {'sigmond': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+            after = {'sigmond': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+            sysd = self.tdir / 'etc-systemd'
+            sysd.mkdir()
+            (sysd / 'sigmond-new.timer').write_bytes(b'T')
+            with mock.patch.object(smd, '_RESTORE_SYSTEMD_DIR', sysd):
+                rc, out, _ = self._run(p, live, call, after_live=after)
+        finally:
+            sys.meta_path.remove(blocker)
+            if saved is not None:
+                sys.modules['sigmond.restore_units'] = saved
+        self.assertTrue(blocker.active, 'the checkout never ran')
+        self.assertEqual(blocked, [])
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((sysd / 'sigmond-new.timer').exists())
+
     def test_install_runs_like_align_runs_it(self):
         # --yes and a closed stdin, as align and bring-up run it; the full
         # output kept in a log; ownership repaired once after the installs.
@@ -801,6 +863,7 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
         fake = _FakeGit()
         logs, repairs = [], []
+        self._yes_installer = True
         with mock.patch.object(smd, '_write_update_log',
                                side_effect=lambda t, r: logs.append(t)), \
              mock.patch.object(smd, '_align_repair_ownership',

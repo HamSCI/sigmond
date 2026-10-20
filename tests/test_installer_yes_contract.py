@@ -18,16 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 REPOS = REPO.parent
 
-_ARG_CASE = re.compile(r'case\s+"\$(?:arg|1|\{1\}|opt)"\s+in(.*?)\besac\b', re.S)
-_CATCH_ALL_EXITS = re.compile(r'^\s*\*\)[^\n]*\b(exit|die)\b', re.M)
-
-
-def rejects_yes(text: str) -> bool:
-    for m in _ARG_CASE.finditer(text):
-        body = m.group(1)
-        if _CATCH_ALL_EXITS.search(body) and '--yes' not in body:
-            return True
-    return False
+from sigmond.installer_args import accepts_yes, rejects_yes  # noqa: E402
 
 
 def _installers():
@@ -47,6 +38,12 @@ def _installers():
 
 
 class InstallerYesContractTests(unittest.TestCase):
+
+    def test_accepts_yes_reads_the_pattern_lists(self):
+        for pat in ('--yes)', '--yes|-y)', '-y|--yes)'):
+            self.assertTrue(accepts_yes(f'case "$arg" in\n  {pat} Y=1 ;;\nesac\n'), pat)
+        self.assertFalse(accepts_yes('case "$arg" in\n  --pull) P=1 ;;\nesac\n'))
+        self.assertFalse(accepts_yes('echo "--yes)"\n'))   # not in an argument case
 
     def test_the_old_hf_tec_parser_is_caught(self):
         old = ('for arg in "$@"; do\n    case "$arg" in\n'

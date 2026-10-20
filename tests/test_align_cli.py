@@ -1111,7 +1111,9 @@ class AlignRunInstallTests(unittest.TestCase):
         # bring-up already passes (ND 2026-09-25: igmp-querier exit 1).
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            (repo / "install.sh").write_text("#!/bin/sh\n")
+            (repo / "install.sh").write_text(
+                '#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in\n'
+                '    --yes|-y) YES=1 ;;\n  esac\ndone\n')
             with mock.patch("subprocess.run",
                             return_value=subprocess.CompletedProcess([], 0, "", "")) as m:
                 smd._align_run_install(repo)
@@ -1131,6 +1133,34 @@ class AlignRunInstallTests(unittest.TestCase):
                 with contextlib.redirect_stdout(out):
                     smd._align_run_install(repo)
         self.assertIn("[ERROR] Service failed to start", out.getvalue())
+
+    # v3.73 row 4, fix round 3: a restore runs the OLDER release's
+    # installers, and those may predate the --yes contract (hf-tec 613408c
+    # exited 2 on it, B3 rig 2026-10-20).
+
+    def test_an_installer_that_rejects_unknown_args_runs_without_yes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "install.sh").write_text(
+                '#!/bin/bash\nfor arg in "$@"; do\n  case "$arg" in\n'
+                '    --build-only) B=1 ;;\n'
+                '    *) echo "unknown arg: $arg" >&2; exit 2 ;;\n  esac\ndone\n'
+                'echo installed\n')
+            out = io.StringIO()
+            with mock.patch.object(smd, "_as_root", side_effect=lambda a: list(a)), \
+                 contextlib.redirect_stdout(out):
+                rc = smd._align_run_install(repo)
+        self.assertEqual(rc, 0, out.getvalue())
+
+    def test_an_installer_that_parses_no_args_gets_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "install.sh").write_text("#!/bin/sh\necho hi\n")
+            with mock.patch("subprocess.run",
+                            return_value=subprocess.CompletedProcess([], 0, "", "")) as m:
+                smd._align_run_install(repo)
+        self.assertNotIn("--yes", m.call_args.args[0])
+        self.assertEqual(m.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
 
     def test_no_installer_on_disk_is_zero_not_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
