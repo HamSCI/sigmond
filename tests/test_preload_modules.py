@@ -1,63 +1,92 @@
 """Commands that move sigmond's own checkout load every sigmond module they
-need before the move (v3.73 row 4, fix round 3).
+need before the move (v3.73 row 4, fix rounds 3 and 4).
 
 B3 rig, 2026-10-20: `smd admin manifest restore --apply` checked sigmond out
 at v3.72 and then imported sigmond.restore_units, which v3.72's tree lacks:
 ModuleNotFoundError.  `smd update` and `smd align --apply` move sigmond the
 same way.  bin/smd keeps one list per command (_PRELOAD_MODULES) and imports
-it first.  This test reads the function-level imports along each command's
-code path and fails when one names a module its list lacks.
+it first.
+
+This test builds the call graph of bin/smd from its AST, starting at each
+command's entry, and collects every function-level `sigmond.*` import it
+can reach.  It then follows the lazy imports inside those modules too
+(sigmond.catalog imports sigmond.discover inside a function).  Each list
+must cover the result.  The closure counts every reachable import, not only
+those after the move: an import that runs earlier costs nothing to preload.
 """
+import ast
 import importlib
 import importlib.machinery
 import importlib.util
 import os
-import re
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SMD = (REPO / 'bin' / 'smd').read_text()
-
-# The functions each command runs from its first checkout or pull onward.
-PATHS = {
-    'manifest_restore': ['cmd_manifest_restore', '_restore_plan_units',
-                         '_restore_apply_units', '_restore_unit_instances',
-                         '_restore_rerender_uploader', '_align_run_install',
-                         '_align_repair_ownership', '_write_update_log'],
-    'update': ['cmd_update', '_record_update_step', '_write_update_log',
-               '_align_run_install'],
-    'align': ['_align_apply', '_align_make_live', '_align_install_and_repair',
-              '_align_run_install', '_align_repair_ownership', '_align_build',
-              '_align_install_missing', '_align_restart_uploader',
-              '_align_staleness'],
-}
+LIB = REPO / 'lib'
+TREE = ast.parse((REPO / 'bin' / 'smd').read_text())
+FUNCS = {n.name: n for n in TREE.body if isinstance(n, ast.FunctionDef)}
+ENTRIES = {'manifest_restore': 'cmd_manifest_restore',
+           'update': 'cmd_update',
+           'align': '_align_apply'}
 
 
-def _body(fn):
-    m = re.search(rf'^def {re.escape(fn)}\(.*?(?=^def |\Z)', SMD, re.S | re.M)
-    assert m, f'{fn} not found in bin/smd'
-    return m.group(0)
+def _sigmond_imports(node, package=None):
+    """Function-level sigmond.* imports below ``node``.  ``package`` resolves
+    relative imports inside a sigmond module."""
+    out = set()
+    for fn in ast.walk(node):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for n in ast.walk(fn):
+            if isinstance(n, ast.ImportFrom):
+                mod = n.module or ''
+                if n.level and package:
+                    parts = package.split('.')
+                    base = '.'.join(parts[:len(parts) - n.level + 1])
+                    mod = f'{base}.{mod}' if mod else base
+                if mod == 'sigmond':
+                    out |= {f'sigmond.{a.name}' for a in n.names}
+                elif mod.startswith('sigmond.'):
+                    out.add(mod)
+            elif isinstance(n, ast.Import):
+                out |= {a.name for a in n.names if a.name.startswith('sigmond.')}
+    return out
 
 
-def _lazy_modules(body):
+def _module_file(mod):
+    rel = Path(*mod.split('.'))
+    for p in (LIB / rel.with_suffix('.py'), LIB / rel / '__init__.py'):
+        if p.is_file():
+            return p
+    return None
+
+
+def needed(command):
+    seen, stack = set(), [ENTRIES[command]]
+    while stack:
+        f = stack.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        stack += [n.id for n in ast.walk(FUNCS[f])
+                  if isinstance(n, ast.Name) and n.id in FUNCS]
     mods = set()
-    for line in body.splitlines():
-        s = line.strip()
-        if not line.startswith((' ', '\t')):
+    for f in seen:
+        mods |= _sigmond_imports(FUNCS[f])
+    # the lazy imports inside those modules, transitively
+    todo = list(mods)
+    while todo:
+        mod = todo.pop()
+        path = _module_file(mod)
+        if path is None:
             continue
-        m = re.match(r'from (sigmond(?:\.[\w.]+)?) import (.+)', s)
-        if m:
-            if m.group(1) == 'sigmond':
-                names = m.group(2).strip('()').split(',')
-                mods.update(f'sigmond.{n.split(" as ")[0].strip()}' for n in names if n.strip())
-            else:
-                mods.add(m.group(1))
-            continue
-        m = re.match(r'import (sigmond\.[\w.]+)', s)
-        if m:
-            mods.add(m.group(1))
-    return mods
+        pkg = mod if path.name == '__init__.py' else mod.rsplit('.', 1)[0]
+        for m in _sigmond_imports(ast.parse(path.read_text()), package=pkg):
+            if m not in mods and _module_file(m) is not None:
+                mods.add(m)
+                todo.append(m)
+    return {m for m in mods if _module_file(m) is not None}
 
 
 def _load_smd():
@@ -75,26 +104,29 @@ class PreloadTests(unittest.TestCase):
     def setUpClass(cls):
         cls.smd = _load_smd()
 
-    def test_each_list_covers_its_command_s_lazy_imports(self):
-        for cmd, fns in PATHS.items():
-            need = set().union(*(_lazy_modules(_body(f)) for f in fns))
-            have = set(self.smd._PRELOAD_MODULES[cmd])
-            self.assertEqual(sorted(need - have), [], cmd)
+    def test_each_list_covers_what_its_command_can_reach(self):
+        for cmd in ENTRIES:
+            missing = sorted(needed(cmd) - set(self.smd._PRELOAD_MODULES[cmd]))
+            self.assertEqual(missing, [], cmd)
+
+    def test_the_closure_reaches_heartbeat_through_align_fast_checks(self):
+        self.assertIn('sigmond.heartbeat', needed('align'))
+        self.assertIn('sigmond.restore_units', needed('manifest_restore'))
 
     def test_each_listed_module_imports(self):
-        for cmd, mods in self.smd._PRELOAD_MODULES.items():
+        for mods in self.smd._PRELOAD_MODULES.values():
             for mod in mods:
                 importlib.import_module(mod)
 
     def test_each_command_preloads_before_it_moves_anything(self):
-        for fn, cmd, move in (('cmd_manifest_restore', 'manifest_restore', "'checkout', '--detach'"),
-                              ('cmd_update', 'update', "'pull', '--ff-only'"),
-                              ('_align_apply', 'align', 'apply_plan(')):
-            body = _body(fn)
+        src = (REPO / 'bin' / 'smd').read_text()
+        for cmd, fn, move in (('manifest_restore', 'cmd_manifest_restore', "'checkout', '--detach'"),
+                              ('update', 'cmd_update', "'pull', '--ff-only'"),
+                              ('align', '_align_apply', 'apply_plan(')):
+            body = ast.get_source_segment(src, FUNCS[fn])
             pre = body.find(f"_preload_sigmond_modules('{cmd}')")
             self.assertGreater(pre, 0, f'{fn} never preloads')
-            mv = body.find(move)
-            self.assertGreater(mv, pre, f'{fn} moves before it preloads')
+            self.assertGreater(body.find(move), pre, f'{fn} moves before it preloads')
 
 
 if __name__ == '__main__':

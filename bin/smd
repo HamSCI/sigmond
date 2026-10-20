@@ -4450,8 +4450,9 @@ def _restore_rerender_uploader(base) -> int:
 # (2026-10-20) a restore to v3.72 imported sigmond.restore_units, which
 # v3.72 does not have, and died with ModuleNotFoundError.  Each command
 # imports its list before its first checkout or pull.
-# tests/test_preload_modules.py checks each list against the function-level
-# imports in the command's code path.
+# tests/test_preload_modules.py walks bin/smd's call graph from each
+# command's entry and fails when a reachable function-level sigmond import
+# is missing from its list.
 _PRELOAD_MODULES = {
     'manifest_restore': ('sigmond.doctor', 'sigmond.provenance',
                          'sigmond.manifest_restore', 'sigmond.restore_units',
@@ -4462,7 +4463,13 @@ _PRELOAD_MODULES = {
     'align': ('sigmond.align', 'sigmond.align_apply', 'sigmond.align_live',
               'sigmond.provenance', 'sigmond.catalog', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
-              'sigmond.coordination', 'sigmond.installer_args'),
+              'sigmond.coordination', 'sigmond.installer_args',
+              # reached through _align_fast_checks and the bring-up
+              # helpers align calls after the move
+              'sigmond.heartbeat', 'sigmond.doctor', 'sigmond.lifecycle',
+              'sigmond.topology', 'sigmond.instance',
+              'sigmond.uploader_manifest', 'sigmond.environment',
+              'sigmond.environment_kinds', 'sigmond.discovery'),
 }
 
 
