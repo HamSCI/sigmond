@@ -6141,14 +6141,15 @@ def _align_run_install(repo: Path, log_target: Optional[str] = None) -> int:
     # --yes, as bring-up passes it: an install.sh that asks to replace a
     # running service ("Stop and replace …? [y/N]") under `set -e` otherwise
     # dies on the empty stdin — igmp-querier did, on AC0G-ND 2026-09-25.
-    # But only to an installer whose parser names --yes: a restore runs the
+    # Not to an installer whose parser would reject it: a restore runs the
     # OLDER release's installers, and hf-tec 613408c exited 2 on an unknown
-    # argument (B3 rig, 2026-10-20).  Without it, stdin stays closed.
-    from sigmond.installer_args import accepts_yes
+    # argument (B3 rig, 2026-10-20).  That one runs with no arguments, stdin
+    # still closed.
+    from sigmond.installer_args import pass_yes
     try:
-        yes = accepts_yes(sh.read_text(errors='replace'))
+        yes = pass_yes(sh.read_text(errors='replace'))
     except OSError:
-        yes = False
+        yes = True
     argv = ['bash', str(sh)] + (['--yes'] if yes else [])
     r = subprocess.run(_as_root(argv), capture_output=True,
                        text=True, stdin=subprocess.DEVNULL)

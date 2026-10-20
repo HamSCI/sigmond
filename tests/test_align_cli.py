@@ -1152,14 +1152,16 @@ class AlignRunInstallTests(unittest.TestCase):
                 rc = smd._align_run_install(repo)
         self.assertEqual(rc, 0, out.getvalue())
 
-    def test_an_installer_that_parses_no_args_gets_none(self):
+    def test_an_installer_that_parses_no_args_still_gets_yes(self):
+        # Fix round 4: --yes goes to every installer unless its parser would
+        # reject it; a script that never reads its arguments loses nothing.
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             (repo / "install.sh").write_text("#!/bin/sh\necho hi\n")
             with mock.patch("subprocess.run",
                             return_value=subprocess.CompletedProcess([], 0, "", "")) as m:
                 smd._align_run_install(repo)
-        self.assertNotIn("--yes", m.call_args.args[0])
+        self.assertIn("--yes", m.call_args.args[0])
         self.assertEqual(m.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
 
     def test_no_installer_on_disk_is_zero_not_a_failure(self):

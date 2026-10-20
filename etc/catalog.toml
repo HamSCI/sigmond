@@ -23,9 +23,9 @@
 # install_script contract: smd align, `smd admin manifest restore --apply`
 # and bring-up run it as root, with stdin closed.  It must accept --yes (a
 # no-op when it never prompts) and must not wait for input.  Align and
-# restore pass --yes only when the script's argument case names it, since
-# a restore runs an older release's installer, which may predate this
-# contract (sigmond.installer_args).  tests/test_installer_yes_contract.py
+# restore pass --yes to every installer except one whose argument parser
+# would reject it, since a restore runs an older release's installer,
+# which may predate this contract (sigmond.installer_args.pass_yes).  tests/test_installer_yes_contract.py
 # checks every installer whose checkout sits beside sigmond's.
 
 [client.ka9q-radio]

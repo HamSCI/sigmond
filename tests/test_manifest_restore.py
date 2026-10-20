@@ -594,12 +594,17 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         d = self.base / name
         (d / '.git').mkdir(parents=True)
         (d / 'scripts').mkdir()
-        (d / 'scripts' / 'install.sh').write_text(
-            '#!/bin/bash\nfor arg in "$@"; do case "$arg" in --yes) ;; esac; done\n'
-            if getattr(self, '_yes_installer', False) else '#!/bin/bash\n')
+        text = '#!/bin/bash\n'
+        if getattr(self, '_yes_installer', False):
+            text += 'for arg in "$@"; do case "$arg" in --yes) ;; esac; done\n'
+        if getattr(self, '_rejecting_installer', False):
+            text += ('for arg in "$@"; do\n  case "$arg" in\n'
+                     '    *) echo "unknown arg: $arg" >&2; exit 2 ;;\n  esac\ndone\n')
+        (d / 'scripts' / 'install.sh').write_text(text)
         return d
 
     def test_an_older_installer_without_yes_runs_with_no_arguments(self):
+        self._rejecting_installer = True
         live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
         after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
         fake = _FakeGit()
