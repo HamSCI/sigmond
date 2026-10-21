@@ -5,6 +5,7 @@ The probe asks the service's own interpreter for
 on the flag, which reads as the empty set.  A failure or timeout reads as
 ``None``.
 """
+import os
 import stat
 import subprocess
 import sys
@@ -21,8 +22,9 @@ from sigmond import uploader_manifest as um
 class FeaturesProbeTests(unittest.TestCase):
 
     def _fake_python(self, body: str) -> Path:
-        d = Path(tempfile.mkdtemp())
-        p = d / "python"
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        p = Path(td.name) / "python"
         p.write_text("#!/bin/sh\n" + body + "\n")
         p.chmod(p.stat().st_mode | stat.S_IXUSR)
         return p
@@ -44,7 +46,7 @@ class FeaturesProbeTests(unittest.TestCase):
             run.return_value = subprocess.CompletedProcess([], 0, "", "")
             um.hs_uploader_features(Path("/x/python"))
         self.assertEqual(run.call_args[0][0],
-                         ["/x/python", "-m", "hs_uploader.cli",
+                         ["/x/python", "-P", "-m", "hs_uploader.cli",
                           "capabilities", "--features"])
 
     def test_old_uploader_unrecognized_arguments_is_empty(self):
@@ -73,8 +75,32 @@ class FeaturesProbeTests(unittest.TestCase):
             self.assertIsNone(um.hs_uploader_features(Path("/x")))
 
     def test_missing_interpreter_is_a_failure(self):
-        missing = Path(tempfile.mkdtemp()) / "no-such-python"
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        missing = Path(td.name) / "no-such-python"
         self.assertIsNone(um.hs_uploader_features(missing))
+
+
+class PlantedModuleTests(unittest.TestCase):
+    """Ruling C23: the probes run as root, so a hs_uploader package in the
+    caller's CWD must not run."""
+
+    def test_neither_probe_runs_a_module_planted_in_the_cwd(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        planted = Path(td.name) / "hs_uploader"
+        planted.mkdir()
+        mark = Path(td.name) / "RAN"
+        (planted / "__init__.py").write_text("")
+        (planted / "cli.py").write_text(
+            f"open({str(mark)!r}, 'w').write('x')\nprint('PLANTED')\n")
+        old = os.getcwd()
+        os.chdir(td.name)
+        self.addCleanup(os.chdir, old)
+        # The real interpreter, with no hs_uploader of its own installed.
+        um.hs_uploader_features(Path(sys.executable))
+        um.hs_uploader_store_version(Path(sys.executable))
+        self.assertFalse(mark.exists(), "the planted cli ran")
 
 
 class RealCheckoutTests(unittest.TestCase):
@@ -82,8 +108,9 @@ class RealCheckoutTests(unittest.TestCase):
         src = Path(__file__).resolve().parent.parent.parent / "hs-uploader" / "src"
         if not (src / "hs_uploader" / "cli.py").is_file():
             raise unittest.SkipTest(f"no hs-uploader at {src}")
-        d = Path(tempfile.mkdtemp())
-        py = d / "python"
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        py = Path(td.name) / "python"
         py.write_text(f'#!/bin/sh\nPYTHONPATH="{src}" exec "{sys.executable}" "$@"\n')
         py.chmod(py.stat().st_mode | stat.S_IXUSR)
         self.assertEqual(um.hs_uploader_features(py),

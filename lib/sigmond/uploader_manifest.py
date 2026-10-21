@@ -451,8 +451,8 @@ def hs_uploader_store_version(python: Path = HS_UPLOADER_PYTHON) -> Optional[int
     import subprocess
     try:
         r = subprocess.run(
-            [str(python), "-m", "hs_uploader.cli", "capabilities"],
-            capture_output=True, text=True, timeout=20)
+            [str(python), "-P", "-m", "hs_uploader.cli", "capabilities"],
+            capture_output=True, text=True, timeout=20, cwd="/")
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode == 2 and "invalid choice" in (r.stderr or ""):
@@ -478,9 +478,9 @@ def hs_uploader_features(python: Path = HS_UPLOADER_PYTHON
     import subprocess
     try:
         r = subprocess.run(
-            [str(python), "-m", "hs_uploader.cli", "capabilities",
+            [str(python), "-P", "-m", "hs_uploader.cli", "capabilities",
              "--features"],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20, cwd="/")
     except (OSError, subprocess.SubprocessError):
         return None
     err = r.stderr or ""

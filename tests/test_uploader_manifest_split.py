@@ -306,11 +306,13 @@ class ProbeTests(unittest.TestCase):
             raise unittest.SkipTest(f"no hs-uploader at {src}")
         py = self._fake_python(
             f'PYTHONPATH="{src}" exec "{sys.executable}" "$@"')
-        sys.path.insert(0, str(src))
-        try:
-            from hs_uploader.watermark.schema import SCHEMA_VERSION
-        finally:
-            sys.path.remove(str(src))
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "from hs_uploader.watermark.schema import SCHEMA_VERSION;"
+             "print(SCHEMA_VERSION)"],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "PYTHONPATH": str(src)}).stdout
+        SCHEMA_VERSION = int(out.strip())
         self.assertEqual(um.hs_uploader_store_version(py), SCHEMA_VERSION)
 
 
