@@ -251,6 +251,90 @@ def locate_rx888(root: Path = SYSFS_USB) -> Optional[Located]:
     return None
 
 
+SS_SPEED = "5000"          # SuperSpeed, what the RX-888 must have to stream
+LINK_BLIP_S = 2            # short enough that the FX3 KEEPS its firmware
+
+
+def link_underspeed(loc: Optional[Located]) -> bool:
+    """Is the card present, running its firmware, and stuck below SuperSpeed?
+
+    ⛔ THE FAULT THIS NAMES.  The RX-888 appears in its FX3 bootloader
+    (04b4:00f3) at HIGH SPEED, takes its firmware, and must then RE-TRAIN the
+    link to SuperSpeed as 04b4:00f1.  Some hubs do not follow that transition
+    and leave the card on the USB2 bus at 480 Mb/s, where radiod refuses it:
+
+        rx888_usb_init() failed / device setup returned -1
+
+    and the station looks like it has a dead card while the card sits there,
+    enumerated and healthy, on the wrong bus.  Measured on AI6VN 2026-10-21:
+    a Lenovo/VIA 17ef:1039 follows it every time; a UGREEN 05e3:0626 never
+    does.  A USB-Ethernet adapter never shows it, because it arrives as a USB3
+    device and links once -- which is why the hub looks fine under every other
+    test (rob diagnosed this from the DFU sequence).
+
+    Only 00f1 counts: the bootloader is EXPECTED at high speed, and calling
+    that underspeed would blip the card mid-firmware-load.
+    """
+    if loc is None or loc.product != "00f1":
+        return False
+    if (loc.speed or "") in ("", SS_SPEED):
+        return False
+    # ⛔ ONLY WHERE SUPERSPEED IS PHYSICALLY ON OFFER.  A USB3 hub presents
+    # each physical port twice and sysfs gives the other half as `peer`; a
+    # card on a genuinely USB2-only path has no peer, so there is no faster
+    # link to re-train onto and a blip would drop a working card for nothing.
+    # (This is the `usb2-only` case the duality tests already cover.)
+    return bool(loc.peer_hub and loc.peer_port)
+
+
+def promote_link(loc: Located, blip_seconds: int = LINK_BLIP_S) -> Optional[Located]:
+    """Blip the card's port BRIEFLY so it re-trains at SuperSpeed.
+
+    ⚡ THE OPPOSITE OF A RECOVERY CYCLE, AND DELIBERATELY SO.  cycle_port()
+    uses a LONG cut precisely so the FX3 loses its firmware and reloads --
+    which would land the card back in the bootloader at 480 Mb/s, the very
+    state we are trying to leave.  Here the cut must be SHORT: this file's own
+    note, "the FX3 holds state across a brief drop", is the lever.  The card
+    comes back as 00f1 with firmware intact, no DFU phase, and negotiates the
+    link afresh.
+
+    Proved on AI6VN 2026-10-21: 2-1.3 speed 480 -> blip -> 4-1.3 speed 5000,
+    and radiod started and reported "rx888 running" immediately after.
+
+    Returns the card's new location, or None if it did not come back.
+    """
+    halves = [(loc.hub, loc.port, False)]
+    if loc.peer_hub and loc.peer_port:
+        halves.append((loc.peer_hub, loc.peer_port, True))
+    _log(f"link is {loc.speed} Mb/s, not {SS_SPEED}: blipping hub {loc.hub} "
+         f"port {loc.port} for {blip_seconds}s so it re-trains at SuperSpeed "
+         f"(a SHORT cut — a long one would send it back through the bootloader)")
+    for hub, port, exact in halves:
+        for extra in ([], ["-f"]):
+            r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "off"]
+                     + (["-e"] if exact else []) + extra, timeout=20)
+            if r.returncode == 0:
+                break
+    time.sleep(blip_seconds)
+    for hub, port, exact in halves:
+        for extra in ([], ["-f"]):
+            r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "on"]
+                     + (["-e"] if exact else []) + extra, timeout=20)
+            if r.returncode == 0:
+                break
+    # The card re-enumerates on the OTHER bus, so re-find it rather than
+    # assuming the devpath survived: 2-1.3 became 4-1.3 when it worked.
+    for _ in range(12):
+        time.sleep(2)
+        now = locate_rx888()
+        if now is not None and now.product == "00f1":
+            if (now.speed or "") == SS_SPEED:
+                _log(f"link promoted: {loc.devpath} @ {loc.speed} -> "
+                     f"{now.devpath} @ {now.speed} Mb/s")
+            return now
+    return None
+
+
 def _uhubctl_sees(hub: str, port: str, exact: bool) -> Optional[bool]:
     """Can uhubctl address this location at all?
 
@@ -1082,6 +1166,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "is on the bus, otherwise recover it NOW (no grace "
                          "window, no cooldown) and wait for it. Exit 0 only if "
                          "the card ends up present.")
+    ap.add_argument("--link-blip-seconds", type=int, default=LINK_BLIP_S,
+                    help="short power blip used to re-train a card stuck below "
+                         "SuperSpeed; deliberately far shorter than "
+                         "--off-seconds, which exists to DROP the firmware")
     ap.add_argument("--probe", action="store_true",
                     help="locate the RX-888, check whether its hub port can be "
                          "switched, report, and exit (changes only the state file)")
@@ -1126,6 +1214,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         if present:
             loc = locate_rx888()
+            # ⚡ A CARD ON THE WRONG BUS IS NOT A DEAD CARD.  If it came back
+            # from its bootloader without re-training to SuperSpeed, radiod
+            # refuses it and the station reads as a hardware failure while the
+            # card sits there healthy.  One short blip fixes it; see
+            # promote_link().  Do this BEFORE anything is learned from loc,
+            # so the location recorded is the one the card ends up on -- it
+            # moves bus when the promotion works (2-1.3 -> 4-1.3).
+            if link_underspeed(loc) and not args.dry_run:
+                promoted = promote_link(loc, args.link_blip_seconds)
+                if promoted is not None:
+                    loc = promoted
+                    # ⚠ NOT an sdr_events record.  Its KINDS are LOSS_KINDS
+                    # plus the arrival, and episode logic keys off that: a
+                    # link promotion is neither a loss nor an arrival but a
+                    # repair, and inventing a kind here would change how
+                    # episodes open and close.  promote_link() already logs
+                    # the before/after, which is the evidence that matters.
+                    # Making it first-class belongs with a decision about
+                    # episode semantics, not with this fix.
+                if link_underspeed(loc):
+                    log_on_change(state,
+                        f"the card is linked at {loc.speed} Mb/s, not {SS_SPEED}, "
+                        f"and a blip did not promote it — this hub does not follow "
+                        f"the bootloader-to-SuperSpeed transition. radiod will "
+                        f"refuse the card. Try another hub port, another cable, "
+                        f"or a hub known to follow it.")
             stale = (state.get("devpath") != (loc.devpath if loc else None)
                      or state.get("switchable") is None
                      or now - float(state.get("verified_at") or 0) > REVERIFY_S)

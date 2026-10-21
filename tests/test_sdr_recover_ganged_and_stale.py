@@ -122,3 +122,63 @@ class StaleTargetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LinkPromotionTests(unittest.TestCase):
+    """A card on the WRONG BUS is not a dead card.
+
+    AI6VN, 2026-10-21, diagnosed by rob from the DFU sequence: the RX-888
+    enumerates in its FX3 bootloader (04b4:00f3) at HIGH SPEED, takes its
+    firmware, and must then RE-TRAIN the link to SuperSpeed as 04b4:00f1.
+    Some hubs do not follow that transition.  The card then sits on the USB2
+    bus at 480 Mb/s, radiod refuses it --
+
+        rx888_usb_init() failed / device setup returned -1
+
+    -- and the station reads as a hardware failure while the card is present
+    and healthy.  Measured: a Lenovo/VIA 17ef:1039 follows it every time, a
+    UGREEN 05e3:0626 never does.  A USB-Ethernet adapter never shows the
+    fault, because it arrives as a USB3 device and links once, which is why
+    the hub passes every other test.
+
+    The fix is a SHORT blip, the opposite of a recovery cycle: the FX3 keeps
+    its firmware across a brief drop, so the card returns as 00f1 with no DFU
+    phase and negotiates afresh.  Proved on the station: 2-1.1 @ 480 -> blip
+    -> 4-1.1 @ 5000, radiod active.
+    """
+    def setUp(self):
+        self.sdr = _load()
+
+    def _loc(self, speed, pid="00f1", peer=("4-1", "1")):
+        return self.sdr.Located("2-1.1", "2-1", "1", "SER", speed,
+                                peer[0], peer[1], pid, "99")
+
+    def test_a_running_card_below_superspeed_is_underspeed(self):
+        self.assertTrue(self.sdr.link_underspeed(self._loc("480")))
+
+    def test_a_superspeed_card_is_left_alone(self):
+        self.assertFalse(self.sdr.link_underspeed(self._loc("5000")))
+
+    def test_the_bootloader_is_never_blipped(self):
+        # ⛔ 00f3 at high speed is CORRECT and expected; blipping there would
+        # interrupt the firmware load the card is in the middle of.
+        self.assertFalse(self.sdr.link_underspeed(self._loc("480", pid="00f3")))
+
+    def test_a_usb2_only_path_is_never_blipped(self):
+        # No SuperSpeed peer means no faster link to re-train onto, so a blip
+        # would drop a working card for nothing.  This is the `usb2-only`
+        # case the duality tests already cover.
+        self.assertFalse(
+            self.sdr.link_underspeed(self._loc("480", peer=(None, None))))
+
+    def test_absent_card_is_not_underspeed(self):
+        self.assertFalse(self.sdr.link_underspeed(None))
+
+    def test_the_blip_is_far_shorter_than_a_recovery_cut(self):
+        # ⛔ The two cuts have OPPOSITE purposes: --off-seconds is long so the
+        # FX3 DROPS its firmware and reloads; the blip is short so it KEEPS
+        # it.  A blip as long as a recovery would send the card back through
+        # the bootloader and land it at 480 again -- the very state it is
+        # meant to leave.
+        self.assertLess(self.sdr.LINK_BLIP_S, 10)
+        self.assertEqual(self.sdr.SS_SPEED, "5000")
