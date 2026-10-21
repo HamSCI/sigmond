@@ -1,6 +1,6 @@
 # v3.74 — what this release carries
 
-**Status:** collecting, 2026-10-20.  v3.73 was blessed 2026-10-20 at 23:43Z, and B4 adopted it
+**Status:** collecting, 2026-10-20; rows 1 and 3 landed 2026-10-21 (rob).  v3.73 was blessed 2026-10-20 at 23:43Z, and B4 adopted it
 in place at 23:45Z.  Nothing here has been ruled yet.  Rows 1 to 5 come from Chris's report on
 the Jenny Jump install (v3.70, IPv6-only site, 2026-10-20).  Rows 6 onward come from v3.73's
 acceptance and its review.  v3.73 moved its rows 10 and 11, and the rest of row 14, to this
@@ -8,9 +8,9 @@ release; they keep their text in `release-v373.md`.
 
 | # | Item | Repos | Status |
 |---|---|---|---|
-| 1 | The USB stick's boot menu counts down a few seconds, then installs without asking, and the install erases the internal disk.  Chris asks for a longer countdown and a plain warning.  We ship the Proxmox auto-installer's menu unchanged.  Fix: lengthen the timeout (30 to 60 s) and name the entry so that it reads "ERASES THE INTERNAL DISK".  The menu lives in the ISO's grub.cfg, so the build has to repack the ISO, much as it already rewrites the ESP | appliance | open |
+| 1 | The USB stick's boot menu counts down a few seconds, then installs without asking, and the install erases the internal disk.  Chris asks for a longer countdown and a plain warning.  We ship the Proxmox auto-installer's menu unchanged.  Fix: lengthen the timeout (30 to 60 s) and name the entry so that it reads "ERASES THE INTERNAL DISK".  The menu lives in the ISO's grub.cfg, so the build has to repack the ISO, much as it already rewrites the ESP | appliance | landed 10-21: appliance f8ac8b3 |
 | 2 | Step 4 of the install has the operator put the stick back into a running host to import the VM.  If the power drops while the stick sits in a machine that boots USB first, the machine reinstalls and erases the station without a word.  Explore: can the installer, or the boot menu, notice an existing Sigmond station and stop?  Failing that, should the menu default to the internal disk once a station exists? | appliance | open |
-| 3 | On an IPv6-only site, first boot prints "vmbr0 is on the PVE installer fallback 192.168.100.2 — that address is not routable here", then hunts for IPv4 and retries DHCP.  The station comes up fine over IPv6, but the screen reads as a fault: Chris concluded the installer gets no IPv6 address.  Fix in netfix (`firstboot-v3.sh`): check for an IPv6 default route first, and when one exists, say once that the site runs on IPv6 and the IPv4 fallback does not matter.  The status panel already says so ("no IPv4 gateway: this site is IPv6 — normal here") | appliance | open |
+| 3 | On an IPv6-only site, first boot prints "vmbr0 is on the PVE installer fallback 192.168.100.2 — that address is not routable here", then hunts for IPv4 and retries DHCP.  The station comes up fine over IPv6, but the screen reads as a fault: Chris concluded the installer gets no IPv6 address.  Fix in netfix (`firstboot-v3.sh`): check for an IPv6 default route first, and when one exists, say once that the site runs on IPv6 and the IPv4 fallback does not matter.  The status panel already says so ("no IPv4 gateway: this site is IPv6 — normal here") | appliance | landed 10-21: appliance 1be48c4 |
 | 4 | Colour on the console status panel, for addresses, logins and the default password (Chris's mockup).  The console prints escape codes from the panel file as is, and they take no columns, so the fit-on-screen limit holds.  Colour adds to the text and never carries the meaning alone.  The panel tests compare text and must strip the codes first | appliance | open |
 | 5 | A console menu after login instead of a bare shell (Chris).  The root password stays in front of it, because anyone at the machine can reach the console and every item acts as root.  Offer `sigmond-check`, `sigmond-setup --reconfigure`, remote access off and on, a gateway and DNS test over IPv4 and IPv6, and a shell.  Console only; SSH keeps the plain shell | appliance, sigmond | open |
 | 6 | `smd restart <client>` restarts radiod too.  On B4, 10-20, `smd restart hf-timestd` and `smd restart hamsci-physics` each restarted `radiod@AC0G-B4` (13:25:41Z, 13:30:02Z).  A client restart should leave the radio alone | sigmond | open |
@@ -24,3 +24,39 @@ release; they keep their text in `release-v373.md`.
 | 14 | `/etc/sigmond/CLAUDE-COORDINATION.md` is missing on B4 | ops | open |
 | 15 | `bless-release.sh` stops at line 43 under `systemd-run`, which sets no HOME.  Default HOME to root's, or say so at the top | appliance | open |
 | 16 | `ops/bin/fleet-ssh` drops stdin across its nested hop, so `fleet-ssh b4 'cat > f' < f` writes an empty file and says nothing.  Pass stdin through, or refuse it | ops | open |
+
+## Landed 2026-10-21 (rob)
+
+**Row 1 — the installer countdown.**  appliance `f8ac8b3`.  The live entry was
+`set timeout=10` under `'Install Proxmox VE (Automated)'` (the list above said
+30 s; the ISO says 10).  It is now 60 s under
+`'Install Sigmond: ERASES THE INTERNAL DISK'`, still first, so an unattended
+install proceeds as before.  `patch-installer-menu.sh` rewrites
+`/boot/grub/grub.cfg` inside the iso9660 **without changing the image's
+length** — build-usb-v3.sh locates the ESP by sector and takes the payload
+offset from the volume size, and both move if the length does.  Verified on
+the real ISO: size, ESP sectors and volsize all unchanged.  INSTALL.md §5
+updated.  Row 2 (refusing to erase an existing station) is untouched and
+waits on Michael's ruling.
+
+**Row 3 — the IPv6-only site.**  appliance `1be48c4`.  netfix now asks whether
+vmbr0 is itself a live IPv6 uplink before hunting for IPv4, and if it is, says
+so once and stops.  The hunt was not only misleading on Chris's screen: it
+costs up to 25 s of dhclient per port and flushes addresses on a machine
+already carrying the station, on every boot, because an IPv6-only site never
+acquires the IPv4 that would quiet it.  The check is scoped to the device
+(`v6_uplink_on()` in the shared net lib) — a bare `ip -6 route show default`
+is true because of the RADIO on a dual-homed host and would excuse a dead
+bridge.  It also clears `.network-unreachable`, extending `6360654`'s rule to
+v6.
+
+**Also in v3.74, not listed above** — five fixes rob pushed 2026-10-21 00:28Z
+from AC1SN (DASI-017) field experience, after this list was opened:
+
+| Repo | Commit | What |
+|---|---|---|
+| sigmond | `eb6236a` | never pass the Rembrandt controllers that hang the host (7735U: three of five xHCIs hard-locked the host) |
+| sigmond | `2ee0ed6` | `sigmond-vm-guard` — autostart only after the VM proves 10 min of uptime, ending a crash-reboot loop |
+| appliance | `6360654` | a real address clears the "no network" marker; a self-healed host printed NO WORKING NETWORK ADDRESS for three days |
+| appliance | `89cf515` | dnsmasq follows the host's resolv.conf instead of freezing the install site's resolver |
+| appliance | `67071d5` | NUL bytes in /etc/motd hid the panel from every ssh login; the install banner is dropped |
