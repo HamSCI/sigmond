@@ -1,6 +1,10 @@
 # spec: sink control step 2b, first image (v3.77): plumbing that sends nothing new
 
-**Status:** draft for Michael's review, 2026-10-21.  Nobody has built any of it.  It implements the
+**Status:** reviewed by Michael 2026-10-21; his three rulings stand in §13.  Nobody has built any of it.
+
+**Release number.**  "v3.77" names this image's place in D18's order, not a promised tag.  rob may
+build further images for his own rows first, so this work takes whatever number comes next once it
+is ready; v3.78 and v3.79 below move with it.  It implements the
 v3.77 image of D18 in `plan-sink-control.md` §2, under D9, D10, D12, D13, D17, D18, D20 and D21.
 D19, the dual write of `site.toml` and `[uploads]`, belongs to v3.78 and appears here only where
 v3.77 must leave room for it.  Evidence: `research-sink-2b-v377.md` (the code map, 10-21, whose
@@ -110,13 +114,13 @@ stands complete or fails loudly; half a declaration never ships.
 
 ### 3.4 Rebuild on change
 
-Before each pump the daemon stats the legacy manifest, the directory, and each file in it
+Before each pump the daemon stats the directory and each file in it
 (modification time in nanoseconds, size, inode).  When that signature differs from the one it last
 built, or when SIGHUP arrives, the daemon rebuilds.  The main loop runs the rebuild between pumps,
 never during one: `Uploader.pump()` joins every pipeline's future before it returns
 (`hsu/core.py:297-339`).
 
-A rebuild reads the whole set again, as a fresh start would, then:
+A rebuild reads every file in `pipelines.d/` again and keeps the legacy manifest's entries as the daemon read them at start, then:
 
 1. builds each entry whose content changed or appeared, and keeps every unchanged pipeline's
    `Pipeline` object and its executor, so its source keeps its open connection and its thread;
@@ -132,13 +136,13 @@ A rebuild reads the whole set again, as a fresh start would, then:
 6. binds the wake socket if the new set first needs it (`hsu/daemon.py:222-241`).  It never unbinds
    one while running.
 
-A change to anything in the legacy manifest outside its `pipeline` list rebuilds every pipeline.
 A rebuild whose set equals the running set changes nothing and logs one DEBUG line.
 
-Watching the legacy manifest too adds no race with sigmond.  The manifest step stops the daemon
-before it moves a new manifest into place (`sigmond/lib/sigmond/commands/uploader.py:517-567`), so
-a running daemon never sees that write.  Only a hand edit reaches a running daemon, which today
-waits for a restart.  v3.77 applies it within one pump instead.
+The daemon does not watch the legacy manifest (Michael, 10-21).  A change to it takes effect when
+the daemon restarts, as today.  sigmond's manifest step already stops the daemon before it moves a
+new manifest into place (`sigmond/lib/sigmond/commands/uploader.py:517-567`), so only a hand edit
+waits, and a hand edit of the legacy manifest calls for a restart.  The rebuild still reads the
+legacy manifest's `[identity]` and host-wide settings as they stood at start.
 
 ### 3.5 The store check at each rebuild
 
@@ -434,7 +438,7 @@ proved it.  hs-uploader's tests live in `hs-uploader/tests/`; sigmond's in `sigm
 | 3 | The directory comes from the manifest's parent: `--manifest /tmp/x/pipelines.toml` reads `/tmp/x/pipelines.d` | hard-code `/etc/hs-uploader/pipelines.d` |
 | 4 | File rules: client from the file name; a mismatched `client`; `../x`, `a@b`, `A` refused; `start_at = "now"` refused; `[daemon]` and `ssh_key_file` refused; `wspr_cycle` defaults to `beginning` in a file and stays `now` in the legacy manifest | drop the `"now"` refusal; apply the `beginning` default to legacy entries |
 | 5 | Collisions: a file that repeats a legacy key or name is refused and both are named; a collision inside the legacy manifest alone logs an ERROR and runs | remove the refusal; make a legacy collision fatal |
-| 6 | Rebuild: a changed file rebuilds without restart; an unchanged pipeline keeps its `Pipeline` object and executor; a removed one's executor shuts down; a queued retry survives; an identical rebuild changes nothing; SIGHUP triggers one | rebuild every pipeline each time; drop the stat check |
+| 6 | Rebuild: a changed file rebuilds without restart; an unchanged pipeline keeps its `Pipeline` object and executor; a removed one's executor shuts down; a queued retry survives; an identical rebuild changes nothing; SIGHUP triggers one; an edit to the legacy manifest alone, or with SIGHUP, changes no running pipeline until restart | rebuild every pipeline each time; drop the stat check; re-read the legacy manifest at rebuild |
 | 7 | The store check at rebuild: a producer pipeline arriving by file on a version-1 store gets refused, and `pipeline_state` says why | skip `split_refused` at rebuild |
 | 8 | A file broken on rebuild keeps its last good build; broken at start, it silences only its client; neither stops the daemon | let the parse error propagate |
 | 9 | Migration 3: a version-2 store reaches 3; columns and `last_send` exist; every other row hashes the same; a version-0 store runs 1, 2 and 3 in order | omit the ALTER for `client` |
@@ -508,7 +512,15 @@ Settled from the code or D1-D21, so not asked:
 - Where the switch-file report lives in v3.77: hs-uploader's journal and `hs-uploader sink status`.
   No switch file exists on a station until v3.78, so sigmond shows nothing yet.
 
-For Michael:
+Ruled by Michael, 2026-10-21:
+
+- **Q1 — wait.**  The heartbeat stays in the legacy manifest until v3.78.
+- **Q2 — restart.**  The daemon does not watch the legacy manifest; an edit takes effect at restart
+  (§3.4).
+- **Q3 — mjh's session takes the copies,** after announcing on the claude-bus, as read-only
+  `sqlite3 .backup` copies like those of 10-08.
+
+The questions as asked:
 
 1. Should v3.77 also move the heartbeat into `pipelines.d/sigmond.toml`?  Doing so would run the new
    loader on every station a release early, with a pipeline whose key and bytes stay the same.  This
