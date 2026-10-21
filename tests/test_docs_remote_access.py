@@ -231,7 +231,14 @@ def test_the_panel_figures_the_page_names_are_the_panels():
     panel_ports = set(re.findall(r"ssh -p (\d+) sigmond@\$\{HOSTIP", FIRSTBOOT_TEXT))
     assert panel_ports == set(re.findall(r"ssh -p (\d+) sigmond@<host address>", PAGE)) != set()
     # Beside the host login the panel says which password to use.
-    assert "host  root / $PWLINE" in FIRSTBOOT_TEXT
+    # ⚠ Match the PAIRING, not the column alignment.  This asserted exactly two
+    # spaces, so sigmond-appliance d3f27f9 -- which only widened the label
+    # column to fit "virtual machine" beside "host" -- failed a test about
+    # whether the password is named at all (mjh, 2026-10-21).  Spacing here is
+    # presentation; the contract is that the host login and its password sit on
+    # one line.
+    assert re.search(r"host\s+root / \$PWLINE", FIRSTBOOT_TEXT), \
+        "the panel no longer names the host password beside the host login"
     assert 'PWLINE="the password you set at install"' in FIRSTBOOT_TEXT
     assert "the password you set at install" in flat(PAGE)
 
