@@ -215,7 +215,11 @@ Either copy picks the sink at construction time:
 
 Each row also carries `producer` and `local` (spec §6.1).  The writer adds
 both columns, by `ALTER TABLE ADD COLUMN` alone, to an older `sink.db` it
-opens.
+opens.  `Writer(local=True)` stores `local = 1`; the default stores 0.  Every
+source skips local rows: `SqliteSource` and `WsprCycleSource` add `local = 0`
+to each statement that selects rows to send, and `SqliteSource`'s
+delete-on-ack adds it too.  A sink without the column gets no such condition.
+The writer also creates the index `idx_pending_uploads_producer`.
 
 SQLite is the sole local sink. On a host carrying a leftover legacy
 ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.

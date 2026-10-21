@@ -239,6 +239,18 @@ higher it splits the shared `psk-pskreporter` pipeline into
 shared pipeline and prints a warning.  If the probe fails, the renderer
 keeps the manifest as it stands and exits non-zero.
 
+It then asks the same interpreter which features it offers
+(`hs-uploader capabilities --features`, `uploader_manifest.hs_uploader_features`)
+and prints one line: `uploader: hs-uploader features: pipelines.d send-log-v3
+switch-files`, the words sorted.  An hs-uploader from v3.73 to v3.76 rejects
+the flag with exit 2, and the line then reads `features: none`.  If the probe
+fails or times out, the step prints a warning and carries on.  Nothing
+reads the answer, so it never changes the manifest or the exit code.  Both
+probes run with `-P` and from `/`, so the working directory cannot shadow
+`hs_uploader`.  No switch file stops or gates anything yet: the daemon
+reads and reports them, and the manifest step creates nothing under
+`/etc/hs-uploader`.
+
 **In-process senders.**  psk-recorder and meteor-scatter can each post to
 pskreporter from their own process.  The renderer reads each instance's
 environment and leaves out the daemon pipeline of a producer whose instances
