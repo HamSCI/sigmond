@@ -1276,9 +1276,10 @@ rac_pair_sudoers(){
 # The decoder VM holds one ssh key.  That key reaches this account, and this
 # account may run one script as root, with no argument.  The script reads the
 # requested word (on, off or status) from SSH_ORIGINAL_COMMAND.
+# No requiretty line: Debian's sudo never requires a tty unless told to, and
+# sudo-rs (Ubuntu 26.04 and later) refuses the whole file over that setting.
 Defaults:$RAC_PAIR_USER env_reset
 Defaults:$RAC_PAIR_USER env_keep = "SSH_ORIGINAL_COMMAND"
-Defaults:$RAC_PAIR_USER !requiretty
 $RAC_PAIR_USER ALL=(root) NOPASSWD: $RAC_SWITCH ""
 SUDOEOF
 }

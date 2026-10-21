@@ -118,7 +118,6 @@ def test_the_sudoers_lines_allow_the_switch_with_no_argument_and_keep_one_variab
     assert rules == [
         "Defaults:sigmond-remote env_reset",
         'Defaults:sigmond-remote env_keep = "SSH_ORIGINAL_COMMAND"',
-        "Defaults:sigmond-remote !requiretty",
         'sigmond-remote ALL=(root) NOPASSWD: /usr/local/sbin/sigmond-rac-switch ""',
     ]
 
