@@ -95,7 +95,25 @@ done
 USB_VID_DID=""
 USB_ADDRS_FOR_ID=""
 USB_SKIPPED=""
+# ⛔ CONTROLLERS THAT MUST NEVER BE PASSED THROUGH, by id, each with the
+# evidence.  All three are on the Ryzen 7 7735U ("Rembrandt"); AC1SN (DASI-017,
+# Beelink SER) crash-looped on its first boot because the rule above took them.
+# Kept to ids we have seen fail: on the 5560U/5825U/5800H fleet the USB
+# controllers ALSO share PCI device 04:00 with the GPU (B4, ND, 2026-10-20) and
+# pass through fine, so "skip anything next to the GPU" would have cut the RX888
+# off on every one of them.  The 15d6/15d7 single-jack controllers on the same
+# chip are the ones to pass; host-apply keeps them out of D3cold.
+declare -A USB_NEVER_PASS=(
+    [1022:161d]="Rembrandt USB4 xHCI #3 (04:00.3): passing it hard-locks the host's amdgpu (AC1SN 2026-10-15)"
+    [1022:161e]="Rembrandt USB4 xHCI #4 (04:00.4): passing it hard-locks the host's amdgpu (AC1SN 2026-10-15)"
+    [1022:161f]="Rembrandt USB4 xHCI #8 (05:00.0): internal Bluetooth only; passing it with its bus-mates froze the host (AC1SN 2026-10-16)"
+)
 for id in $(printf '%s\n' "${!USB_BY_ID[@]}" | sort); do
+    if [[ -n "${USB_NEVER_PASS[$id]:-}" ]]; then
+        USB_SKIPPED="${USB_SKIPPED:+$USB_SKIPPED }${id}:${USB_BY_ID[$id]## }"
+        log "USB controller $id NOT passed through (known to hang this host): ${USB_NEVER_PASS[$id]}"
+        continue
+    fi
     count_total="$(lspci -nn | grep -c "\\[${id}\\]" || true)"
     # Count matching *USB* lines: pipe one-per-line into grep -c.
     count_usb="$(printf '%s\n' "${USB_LINES[@]}" | grep -cE "\\[${id}\\]" || true)"
