@@ -1,5 +1,15 @@
 # v3.74 — what this release carries
 
+> ⛔ **v3.74 IS SUPERSEDED BY v3.75 AND MUST NOT BE INSTALLED AT AN IPv6-ONLY
+> SITE.**  Its row-3 netfix guard short-circuits on a FIRST boot, before the
+> branch that removes the installer fossil 192.168.100.2, strips the dead
+> static stanza and writes the persistent `iface vmbr0 inet6 auto`.  The
+> fossil left on the bridge makes every later do-we-have-IPv4 test lie, and
+> `sigmond-v6-gateway` keys off exactly that question.  Fixed in appliance
+> `a800d13`, shipped as v3.75.  Found by rob on a wired IPv6-only box,
+> 2026-10-21 — the exact case row 3 was written to fix.  v3.74 was never
+> blessed; it sits in `pending/` on all three targets.
+
 **Status:** collecting, 2026-10-20; rows 1 and 3 landed 2026-10-21 (rob).  v3.73 was blessed 2026-10-20 at 23:43Z, and B4 adopted it
 in place at 23:45Z.  Nothing here has been ruled yet.  Rows 1 to 5 come from Chris's report on
 the Jenny Jump install (v3.70, IPv6-only site, 2026-10-20).  Rows 6 onward come from v3.73's
@@ -60,3 +70,22 @@ from AC1SN (DASI-017) field experience, after this list was opened:
 | appliance | `6360654` | a real address clears the "no network" marker; a self-healed host printed NO WORKING NETWORK ADDRESS for three days |
 | appliance | `89cf515` | dnsmasq follows the host's resolv.conf instead of freezing the install site's resolver |
 | appliance | `67071d5` | NUL bytes in /etc/motd hid the panel from every ssh login; the install banner is dropped |
+
+## v3.75 — 2026-10-21
+
+v3.74 + `a800d13` only.  The row-3 guard now additionally requires that
+`iface vmbr0 inet6` is already in `/etc/network/interfaces` and that no
+192.168.100.x remains on vmbr0, so a first boot falls through to the branch
+that establishes both and every later boot takes the quiet path.
+
+Why v3.74's guard was reached at all on a first boot: IPv6 forwarding is
+enabled only by the post-up *inside* that stanza, so on a fresh install
+forwarding is 0, the default `accept_ra=1` is honoured, and vmbr0 acquires a
+SLAAC address and a default route unaided — making `v6_uplink_on()` true
+before any of the persistence work had run.
+
+    sigmond-appliance-v3.75-20261021-release.img
+    5,562,695,680 bytes  sha256 c87ab45f28711a9f84c6abb9b4112f7e064adb8f6541d5acf39d4343b743ff7c
+
+Everything else is as v3.74: row 1 (60 s countdown, renamed entry) and the
+five AC1SN fixes.  Row 2 and row 6 remain open.
