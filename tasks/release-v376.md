@@ -8,7 +8,7 @@ vacation, so rows needing his ruling are marked.
 |---|---|---|---|
 | 1 | **The wizard must not ask for a grid square when a GPSDO is attached.**  rob, 2026-10-21 | sigmond | open, NO ruling needed |
 | 2 | **First boot is slow when a wired cable is connected.**  rob, 2026-10-21 | appliance | open |
-| 3 | Row 2 of the v3.74 list — the installer noticing an existing Sigmond station and refusing to erase it | appliance | waiting on Michael |
+| 3 | Row 2 of the v3.74 list — the installer noticing an existing Sigmond station and refusing to erase it | appliance | ruled 10-21, NOT BUILT: no block.  A flash is a new install.  If a stick left in a USB-first machine reinstalls after a power cut, the operator loses a few minutes by starting again from the beginning, nothing more (Michael) |
 | 4 | Row 6 of the v3.74 list — `smd restart <client>` restarts radiod too (Michael, B4, 10-20) | sigmond | open |
 
 ## Row 1 — no grid question when a GPSDO is present
