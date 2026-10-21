@@ -12704,6 +12704,32 @@ def cmd_diag_cpu_freq(args) -> int:
     return 0
 
 
+def _canonical_names(names) -> set:
+    """Map each name to its catalog name, so `ka9q-radio` and `radiod`
+    compare equal.  Without a catalog the names stand as given."""
+    try:
+        from sigmond.catalog import load_catalog
+        catalog = load_catalog()
+    except Exception:
+        return set(names)
+    alias_to_canonical = {}
+    for canonical_name, entry in catalog.items():
+        alias_to_canonical[canonical_name] = canonical_name
+        a = getattr(entry, 'topology_alias', None)
+        if a:
+            alias_to_canonical[a] = canonical_name
+    return {alias_to_canonical.get(n, n) for n in names}
+
+
+def _restart_verb(component: str, named, canonical=None) -> str:
+    """`restart` for a component the operator named (or for every unit
+    when none was named); `start` for one pulled in only as a dependency."""
+    if named is None:
+        return 'restart'
+    canonical = canonical or _canonical_names
+    return 'restart' if canonical([component]) & named else 'start'
+
+
 def cmd_restart(args) -> int:
     if _need_root('restart'):
         return 1
@@ -12712,9 +12738,14 @@ def cmd_restart(args) -> int:
     if only is not None and not only:
         return 0  # operator named only not-enabled components; already warned
 
-    # Walk the requires closure for the same reason cmd_start does —
-    # restarting a leaf without its deps would race or fail outright.
+    # Walk the requires closure for the same reason cmd_start does: a
+    # leaf whose deps are down would race or fail outright.  But only the
+    # components the operator named get restarted.  A dependency is
+    # started, which leaves a running one alone: `smd restart hf-timestd`
+    # must never bounce radiod (v3.74 row 6, B4 2026-10-20).
+    named = None
     if only is not None:
+        named = _canonical_names(only)
         try:
             from sigmond.catalog import load_catalog
             only = _expand_requires_closure(only, load_catalog())
@@ -12765,11 +12796,13 @@ def cmd_restart(args) -> int:
     _heading('restart')
     any_failed = False
     for unit in units:
+        verb = _restart_verb(unit.component, named)
         # Reset any failed state before restarting
         _run(['systemctl', 'reset-failed', unit.unit], sudo=True)
-        r = _run(['systemctl', 'restart', unit.unit], sudo=True)
+        r = _run(['systemctl', verb, unit.unit], sudo=True)
         if r.returncode == 0:
-            _ok(f'{_display_unit(unit.unit)}')
+            _ok(f'{_display_unit(unit.unit)}'
+                + ('' if verb == 'restart' else ' (dependency: started if down, not restarted)'))
         else:
             _err(f'{_display_unit(unit.unit)}: {r.stderr.strip()}')
             any_failed = True
