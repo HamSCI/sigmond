@@ -248,8 +248,8 @@ fails or times out, the step prints a warning and carries on.  Nothing
 reads the answer, so it never changes the manifest or the exit code.  Both
 probes run with `-P` and from `/`, so the working directory cannot shadow
 `hs_uploader`.  No switch file stops or gates anything yet: the daemon
-reads and reports them, and the manifest step creates nothing under
-`/etc/hs-uploader`.
+reads and reports them.  The manifest step still writes only
+`pipelines.toml`.  It creates no `pipelines.d/` file and no switch file.
 
 **In-process senders.**  psk-recorder and meteor-scatter can each post to
 pskreporter from their own process.  The renderer reads each instance's
