@@ -252,13 +252,64 @@ def locate_rx888(root: Path = SYSFS_USB) -> Optional[Located]:
 
 
 def _uhubctl_sees(hub: str, port: str, exact: bool) -> Optional[bool]:
-    try:
-        r = _run([UHUBCTL, "-l", hub, "-p", port] + (["-e"] if exact else []),
-                 timeout=30)
-    except (OSError, subprocess.SubprocessError) as exc:
-        _log(f"uhubctl unavailable: {exc}")
-        return None
-    return parse_uhubctl(r.stdout + "\n" + r.stderr, port)
+    """Can uhubctl address this location at all?
+
+    ⛔ FALLS BACK TO --force FOR A *GANGED* HUB.  uhubctl refuses any hub whose
+    descriptor says `ganged power switching` rather than per-port, and reports
+    the same "No compatible devices detected" it gives for a location that does
+    not exist -- so a perfectly usable hub reads as not switchable and the card
+    is never recovered.  Measured on AI6VN 2026-10-21: a UGREEN 05e3:0626
+    declares ganged, is refused by default, and under -f REALLY drops VBUS --
+    a USB-Ethernet adapter vanished from the bus on a single port AND on all
+    ports, and returned on restore.  rob's ruling the same day: cutting every
+    port at once is acceptable, the other devices re-enumerate.
+
+    ⚠ -f is tried only AFTER the plain form, so a hub that works normally is
+    never forced, and the answer still means "uhubctl can drive this", which is
+    what the caller asks.  It is NOT a cure for a wrong location: a stale hub
+    path fails under -f exactly as it does without it (proved on 4-2 after the
+    hub had re-enumerated to 4-1).  That needs the right address, not force.
+    """
+    for extra in ([], ["-f"]):
+        try:
+            r = _run([UHUBCTL, "-l", hub, "-p", port]
+                     + (["-e"] if exact else []) + extra, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log(f"uhubctl unavailable: {exc}")
+            return None
+        seen = parse_uhubctl(r.stdout + "\n" + r.stderr, port)
+        if seen:
+            if extra:
+                _log(f"hub {hub} port {port} is driveable only with --force "
+                     f"(its descriptor says ganged, not per-port)")
+            return seen
+        last = seen
+    return last
+
+
+def live_targets(targets: Sequence[Tuple[str, str, bool]]
+                 ) -> Tuple[List[Tuple[str, str, bool]], List[Tuple[str, str, bool]]]:
+    """Split targets into (addressable now, stale).
+
+    ⛔ THE FAULT THIS EXISTS FOR.  AI6VN, 2026-10-21: the state recorded the
+    card on hub 4-2 port 4.  Across a re-enumeration its hub became 4-1, so
+    every cycle ran `uhubctl -l 4-2 -p 4 -a off -e`, got "No compatible devices
+    detected at location 4-2", switched a port THAT DID NOT EXIST, saw no card
+    return, and entered cooldown -- reporting a failed recovery on a hub that
+    was working perfectly.  A plain replug by hand fixed it in seconds.
+
+    A learned bus path is a guess about this boot, not a fact.  Ask uhubctl
+    whether each one is still addressable before spending a cycle on it, so a
+    stale path is named instead of silently cycling nothing.
+    """
+    live: List[Tuple[str, str, bool]] = []
+    stale: List[Tuple[str, str, bool]] = []
+    for hub, port, exact in targets:
+        seen = _uhubctl_sees(hub, port, exact)
+        if seen is None:                 # uhubctl missing / not root: do not
+            return list(targets), []     # second-guess, behave as before
+        (live if seen else stale).append((hub, port, exact))
+    return live, stale
 
 
 def hub_switchable(loc: Located) -> Tuple[Optional[bool], List[Tuple[str, str, bool]]]:
@@ -818,6 +869,15 @@ def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> 
              f"{' (exact)' if exact else ''}")
         r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "off"]
                  + (["-e"] if exact else []), timeout=20)
+        # A GANGED hub is refused by default with the same words uhubctl uses
+        # for a location that does not exist, so retry under --force before
+        # concluding anything.  See _uhubctl_sees() for the measurement.
+        if r.returncode != 0 and "no compatible devices" in (r.stderr or "").lower():
+            r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "off"]
+                     + (["-e"] if exact else []) + ["-f"], timeout=20)
+            if r.returncode == 0:
+                _log(f"hub {hub} port {port}: switched off only under --force "
+                     f"(ganged hub)")
         if r.returncode != 0:
             missing = "no compatible devices" in (r.stderr or "").lower()
             _log(f"uhubctl off failed rc={r.returncode}: {r.stderr.strip()}"
@@ -833,6 +893,15 @@ def cycle_port(locations: Sequence[Tuple[str, str, bool]], off_seconds: int) -> 
     for hub, port, exact in powered_off:
         r = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "on"]
                  + (["-e"] if exact else []), timeout=20)
+        # ⛔ THE ON PATH MUST TRY HARDER THAN THE OFF PATH: a port left dark
+        # needs a human at the machine.  Force first, then the other
+        # addressing below.
+        if r.returncode != 0:
+            rf = _run([UHUBCTL, "-l", hub, "-p", port, "-a", "on"]
+                      + (["-e"] if exact else []) + ["-f"], timeout=20)
+            if rf.returncode == 0:
+                _log(f"hub {hub} port {port}: switched back on under --force")
+                r = rf
         if r.returncode != 0:
             # ⛔ A FAILED "on" LEAVES THE PORT DEAD.  That is strictly worse
             # than never having cycled: the card cannot come back until a human
@@ -1290,6 +1359,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not targets:
         save_state(state)
         return 1 if args.ensure_present else 0
+    # ⛔ DO NOT SPEND A CYCLE -- OR A COOLDOWN -- ON A PORT THAT IS NOT THERE.
+    # See live_targets(): a learned path that no longer resolves is the exact
+    # shape of AI6VN's 2026-10-21 failure, where the cooldown that followed
+    # hid a working hub behind a stale address.
+    # ⚠ REPORT staleness; do NOT withhold the attempt on it.  "uhubctl did
+    # not confirm this port" is not "this port does not exist" -- it is also
+    # what a stubbed, unreadable or merely unlucky probe looks like, and a
+    # probe that cannot confirm must never be the reason a vanished card goes
+    # unrecovered.  So the cycle still runs on everything; what changes is
+    # that a stale address is NAMED, and an all-stale pass does not burn a
+    # cooldown it would spend hiding the real problem.
+    live, stale = live_targets(targets)
+    if stale:
+        log_on_change(state, "learned port(s) uhubctl can no longer address: "
+                      + ", ".join(f"hub {h} port {p}" for h, p, _ in stale)
+                      + " — the bus has renumbered since they were learned; "
+                        "cycling them anyway, but this is the AI6VN 2026-10-21 "
+                        "shape, where a stale path hid a working hub")
     state["last_cycle_at"] = now
     state.pop("said", None)     # after a reset, the next "holding" carries news
     save_state(state)
@@ -1297,6 +1384,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # the record survives a helper that dies mid-reset.
     note_event("port-reset", " ".join(f"{h}p{p}" for h, p, _ in targets))
     if not cycle_port(targets, args.off_seconds):
+        if not live:
+            # Nothing we switched was even addressable, so this was not a real
+            # attempt: clear the cooldown stamp rather than hold off, and force
+            # a fresh probe so the next pass can find the card's true address.
+            state.pop("last_cycle_at", None)
+            state.pop("switchable", None)
+            log_on_change(state, "NO ADDRESSABLE PORT was cycled — every learned "
+                          "location is stale. Not holding off: a cooldown here "
+                          "would hide the fault. If this repeats, the card or "
+                          "its hub needs replugging at the machine.")
+            save_state(state)
         return 1
     t_on = time.time()      # the port is back ON: only the kernel's words after this count
     state["card_return_at"] = t_on
