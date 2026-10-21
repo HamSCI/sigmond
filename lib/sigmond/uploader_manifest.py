@@ -465,6 +465,34 @@ def hs_uploader_store_version(python: Path = HS_UPLOADER_PYTHON) -> Optional[int
         return None
 
 
+def hs_uploader_features(python: Path = HS_UPLOADER_PYTHON
+                         ) -> Optional[frozenset]:
+    """The feature words the hs-uploader that the service runs offers, from
+    ``hs-uploader capabilities --features`` (spec §7.2).
+
+    Asks the service's own interpreter, as :func:`hs_uploader_store_version`
+    does.  Returns the set of non-empty lines, unknown words kept.  A
+    v3.73-v3.76 hs-uploader refuses the flag (or the subcommand) with exit 2,
+    which reads as the empty set.  Any other failure, or a timeout, returns
+    ``None``.  Nothing acts on the answer."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            [str(python), "-m", "hs_uploader.cli", "capabilities",
+             "--features"],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    err = r.stderr or ""
+    if r.returncode == 2 and ("unrecognized arguments" in err
+                              or "invalid choice" in err):
+        return frozenset()
+    if r.returncode != 0:
+        return None
+    return frozenset(w.strip() for w in (r.stdout or "").splitlines()
+                     if w.strip())
+
+
 def hs_uploader_supports_discard(python: Path = HS_UPLOADER_PYTHON) -> bool:
     """Whether the hs-uploader that the service runs understands a
     pipeline's ``discard = true``.

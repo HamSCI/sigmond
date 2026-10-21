@@ -416,6 +416,19 @@ def cmd_uploader_manifest(args) -> int:
             print("uploader: SITE SINK HOLD (LEGACY) ([uploads] enabled = false) "
                   "— not rendered: " + ", ".join(suppressed))
 
+    # Spec §7.2: say what the installed hs-uploader offers.  Nothing reads
+    # the answer, and a failed probe only warns.
+    try:
+        features = um.hs_uploader_features()
+    except Exception:  # pragma: no cover - defensive
+        features = None
+    if features is None:
+        _err("uploader: cannot ask hs-uploader for `capabilities "
+             "--features` (failed or timed out); the manifest is unaffected")
+    else:
+        print("uploader: hs-uploader features: "
+              + (" ".join(sorted(features)) or "none"))
+
     path = um.MANIFEST_PATH
     installed = path.read_text() if path.exists() else ""
     changed = _semantic(text) != _semantic(installed)

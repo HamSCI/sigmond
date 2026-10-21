@@ -298,13 +298,20 @@ class ProbeTests(unittest.TestCase):
             self.assertIsNone(um.hs_uploader_store_version(Path("/x")))
 
     def test_asks_the_real_hs_uploader_checkout(self):
-        """Cross-repo: the landed hs-uploader answers 2 through this probe."""
+        """Cross-repo: the sibling hs-uploader answers its own
+        SCHEMA_VERSION through this probe, so a bump there needs no edit
+        here."""
         src = Path(__file__).resolve().parent.parent.parent / "hs-uploader" / "src"
         if not (src / "hs_uploader" / "cli.py").is_file():
             raise unittest.SkipTest(f"no hs-uploader at {src}")
         py = self._fake_python(
             f'PYTHONPATH="{src}" exec "{sys.executable}" "$@"')
-        self.assertEqual(um.hs_uploader_store_version(py), 2)
+        sys.path.insert(0, str(src))
+        try:
+            from hs_uploader.watermark.schema import SCHEMA_VERSION
+        finally:
+            sys.path.remove(str(src))
+        self.assertEqual(um.hs_uploader_store_version(py), SCHEMA_VERSION)
 
 
 class CrossRepoBuildTests(_Base):

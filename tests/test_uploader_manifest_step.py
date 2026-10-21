@@ -48,7 +48,9 @@ class _Step(unittest.TestCase):
 
     def step(self, *, enable=False, installed=OLD, render=SPLIT, probe=2,
              pending=False, check_rc=None, migrate_rc=0, active=True,
-             mode="upload", stop_rc=0, land_error=None):
+             mode="upload", stop_rc=0, land_error=None,
+             features=frozenset({"pipelines.d", "send-log-v3",
+                                 "switch-files"})):
         d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
         path = Path(d.name) / "pipelines.toml"
         if installed is not None:
@@ -105,6 +107,8 @@ class _Step(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(um, "hs_uploader_store_version",
                                side_effect=fake_probe), \
+             mock.patch.object(um, "hs_uploader_features",
+                               return_value=features), \
              mock.patch.object(um, "generate", side_effect=fake_generate), \
              mock.patch.object(um, "suppressed_pipelines",
                                side_effect=fake_suppressed), \
@@ -452,6 +456,48 @@ class GenerateHoldNoProbeTests(unittest.TestCase):
              mock.patch.object(um, "host_key_file", return_value="/k"):
             text = um.generate(_Topo(), coord)
         self.assertIn("SITE SINK HOLD", text)
+
+
+class FeaturesPrintTests(_Step):
+    """Spec §7.2: the step prints what hs-uploader offers.  Nothing reads it."""
+
+    def test_prints_the_features_sorted(self):
+        r = self.step(features=frozenset({"switch-files", "pipelines.d",
+                                          "send-log-v3"}))
+        self.assertIn("uploader: hs-uploader features: "
+                      "pipelines.d send-log-v3 switch-files\n", r.out)
+
+    def test_an_old_uploader_prints_none(self):
+        r = self.step(features=frozenset())
+        self.assertIn("uploader: hs-uploader features: none\n", r.out)
+
+    def test_a_failed_probe_warns_and_changes_nothing_else(self):
+        ok = self.step(features=frozenset({"pipelines.d"}))
+        bad = self.step(features=None)
+        self.assertIn("features", bad.err)
+        self.assertNotIn("features", ok.err)
+        self.assertEqual(bad.rc, ok.rc)
+        self.assertEqual(bad.rc, 0, bad.err)
+        self.assertEqual(bad.manifest, ok.manifest)
+        self.assertEqual(bad.calls, ok.calls)
+        self.assertEqual(bad.final_active, ok.final_active)
+
+    def test_a_hold_prints_it_too(self):
+        r = self.step(mode="hold", features=frozenset({"pipelines.d"}))
+        self.assertIn("uploader: hs-uploader features: pipelines.d\n", r.out)
+
+    def test_23_store_three_with_a_pending_migration_keeps_the_order(self):
+        # An hs-uploader that reads 3 and has a migration waiting: stop,
+        # migrate, land, start, in that order.
+        r = self.step(probe=3, pending=True, active=True)
+        self.assertEqual(r.rc, 0, r.err)
+        self.assertEqual(r.calls, ["probe", "generate", "check",
+                                   "systemctl stop", "migrate",
+                                   "systemctl reset-failed",
+                                   "systemctl start"])
+        self.assertEqual(r.manifest_at_migrate, OLD)
+        self.assertEqual(r.manifest, SPLIT)
+        self.assertEqual(r.generate_sv, [3])
 
 
 class FixRoundTests(_Step):
