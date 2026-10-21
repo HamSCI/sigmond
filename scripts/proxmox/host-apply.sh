@@ -65,6 +65,101 @@ backup_once() {
     log "backup: $src → $dst"
 }
 
+# ─── sigmond-vm-guard: autostart only once the passthrough has proven safe ────
+# Writes /usr/local/sbin/sigmond-vm-guard plus a boot service and a check
+# timer.  `boot` (once per boot): if onboot is already 1 there is nothing to do;
+# otherwise start the VM, unless the last two starts never reached GUARD_SECS of
+# uptime -- the signature of a host that dies when the VM starts.  `check`
+# (every 2 min): once the VM has been up GUARD_SECS, set onboot=1, clear the
+# count and retire both units.  A station that is fine ends where it always
+# did, with onboot=1 and pve-guests starting the VM.
+# The paths are overridable for tests/test-vm-guard.sh only.
+install_vm_guard() {
+    local vmid="$1"
+    local bin="${SIGMOND_GUARD_BIN:-/usr/local/sbin/sigmond-vm-guard}"
+    local units="${SIGMOND_GUARD_UNITS:-/etc/systemd/system}"
+    mkdir -p "$(dirname "$bin")" "$units"
+    cat > "$bin" <<'GUARDEOF'
+#!/bin/bash
+# sigmond-vm-guard <boot|check> <vmid> — written by sigmond host-apply.
+# Starts the decoder VM at boot until it has proven it can run for GUARD_SECS
+# with its USB passthrough, then hands autostart back to Proxmox (onboot=1).
+# Two starts in a row that never got that far = this host dies when the VM
+# starts (AC1SN, 7735U, 2026-10-15): stop starting it and say so, rather than
+# crash-loop.  To retry after fixing the cause:  rm <state file>; reboot
+set -u
+MODE="${1:?boot|check}"; VMID="${2:?vmid}"
+GUARD_SECS="${GUARD_SECS:-600}"
+MAX_FAILED="${MAX_FAILED:-2}"
+STATE="${SIGMOND_GUARD_STATE:-/var/lib/sigmond/vm-guard-${VMID}}"
+say(){ logger -t sigmond-vm-guard "$*" 2>/dev/null; echo "sigmond-vm-guard: $*"; }
+# disable, never stop, the boot service: retire() can run inside it
+retire(){ systemctl disable sigmond-vm-guard.service >/dev/null 2>&1
+          systemctl disable --now sigmond-vm-guard.timer >/dev/null 2>&1; true; }
+
+if qm config "$VMID" 2>/dev/null | grep -q '^onboot: 1'; then
+    rm -f "$STATE"; retire; exit 0
+fi
+status=$(qm status "$VMID" --verbose 2>/dev/null)
+up=$(awk '/^uptime:/{print $2; exit}' <<<"$status")
+if grep -q '^status: running' <<<"$status"; then
+    if [ "${up:-0}" -ge "$GUARD_SECS" ]; then
+        qm set "$VMID" --onboot 1 >/dev/null && say "VM $VMID ran ${up}s with its passthrough: autostart enabled"
+        rm -f "$STATE"; retire
+    fi
+    exit 0
+fi
+[ "$MODE" = boot ] || exit 0
+mkdir -p "$(dirname "$STATE")"
+n=$(cat "$STATE" 2>/dev/null); n=${n:-0}
+if [ "$n" -ge "$MAX_FAILED" ]; then
+    say "NOT starting VM $VMID: its last $n starts never reached ${GUARD_SECS}s; the host may hang when the VM starts. To retry: rm $STATE; reboot"
+    exit 0
+fi
+echo $((n + 1)) > "$STATE"; sync "$STATE" 2>/dev/null
+say "starting VM $VMID (attempt $((n + 1)) of $MAX_FAILED before autostart is trusted)"
+qm start "$VMID"
+GUARDEOF
+    chmod 755 "$bin"
+    cat > "$units/sigmond-vm-guard.service" <<UNIT
+[Unit]
+Description=Start VM ${vmid} until its USB passthrough has proven safe, then enable onboot
+After=pve-guests.service pve-cluster.service
+
+[Service]
+Type=oneshot
+ExecStart=${bin} boot ${vmid}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    cat > "$units/sigmond-vm-guard-check.service" <<UNIT
+[Unit]
+Description=Enable onboot for VM ${vmid} once it has stayed up
+
+[Service]
+Type=oneshot
+ExecStart=${bin} check ${vmid}
+UNIT
+    cat > "$units/sigmond-vm-guard.timer" <<UNIT
+[Unit]
+Description=Check whether VM ${vmid} has earned autostart
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+Unit=sigmond-vm-guard-check.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+    rm -f "${SIGMOND_GUARD_STATE:-/var/lib/sigmond/vm-guard-${vmid}}"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable sigmond-vm-guard.service sigmond-vm-guard.timer >/dev/null 2>&1 || true
+    systemctl start sigmond-vm-guard.timer >/dev/null 2>&1 || true
+    log "sigmond-vm-guard armed: VM ${vmid} autostarts via the guard until it has run 10 min"
+}
+
 # ─── /etc/default/grub.d/sigmond.cfg ──────────────────────────────────────────
 backup_once /etc/default/grub
 mkdir -p /etc/default/grub.d
@@ -195,10 +290,40 @@ for addr in "${USB_ADDRS[@]}"; do
     i=$((i+1))
 done
 
+# Rembrandt (7735U) single-jack controllers: keep them out of D3cold while the
+# VM owns them.  This is the configuration AC1SN has run on since 2026-10-16;
+# the other Rembrandt functions are refused by host-discover.  Ids not listed
+# here are left exactly as before.
+D3COLD_OFF_IDS=()
+for _id in 1022:15d6 1022:15d7; do
+    case ",${USB_VID_DID}," in *",${_id},"*) D3COLD_OFF_IDS+=("$_id");; esac
+done
+if [[ ${#D3COLD_OFF_IDS[@]} -gt 0 ]]; then
+    {
+        echo "# written by sigmond host-apply: passed-through Rembrandt xHCIs stay out of D3cold"
+        for _id in "${D3COLD_OFF_IDS[@]}"; do
+            echo "ACTION==\"add\", SUBSYSTEM==\"pci\", ATTR{vendor}==\"0x${_id%%:*}\", ATTR{device}==\"0x${_id##*:}\", ATTR{d3cold_allowed}=\"0\""
+        done
+    } > /etc/udev/rules.d/90-sigmond-no-d3cold.rules
+    for addr in "${USB_ADDRS[@]}"; do
+        _f="/sys/bus/pci/devices/0000:${addr}/d3cold_allowed"
+        [[ -w "$_f" ]] && echo 0 > "$_f" 2>/dev/null || true
+    done
+    log "D3cold disabled for ${D3COLD_OFF_IDS[*]} (/etc/udev/rules.d/90-sigmond-no-d3cold.rules)"
+fi
+
 qm set "$VMID" --machine q35
 qm set "$VMID" --cpu host
 qm set "$VMID" --boot order=scsi0
-qm set "$VMID" --onboot 1
+# ⛔ NOT `--onboot 1` HERE.  This is the moment the VM is handed its USB
+# controllers, and nothing has yet proven the host survives that.  On AC1SN
+# (7735U, 2026-10-15) it did not: the host locked up seconds after every VM
+# start, and onboot=1 turned that into a crash-reboot loop that only GRUB
+# surgery at the console could break.  sigmond-vm-guard starts the VM at boot
+# instead, gives up after two starts that never reached 10 minutes, and sets
+# onboot=1 itself (then retires) once the VM has stayed up that long.
+qm set "$VMID" --onboot 0
+install_vm_guard "$VMID"
 qm set "$VMID" --hookscript "local:snippets/cpu-pin-${VMID}.sh"
 qm set "$VMID" --affinity "$ISOLCPUS_RANGE"
 qm set "$VMID" --cores "$VM_CORES" --sockets 1
