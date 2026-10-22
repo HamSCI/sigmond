@@ -330,6 +330,11 @@ def _map_timing(raw) -> dict:
         "t_level_witnesses": list(raw.get("t_level_witnesses") or []),
         "disagreement_flags": list(raw.get("disagreement_flags") or []),
         "t6_authority_state": raw.get("t6_authority_state"),
+        # hf-timestd 2026-10-22 (review-fusion-kalman-20261022.md section
+        # 15, step 5): why T3 is dark.  A T3-only station then runs on T2,
+        # and the heartbeat must say it was demoted, not merely that T2
+        # is active.  None from an older producer.
+        "t3_unavailable_reason": raw.get("t3_unavailable_reason"),
         "snapshot_age_s": raw.get("snapshot_age_s"),
         "source": raw.get("source"),
     }
@@ -359,10 +364,12 @@ def _map_timing(raw) -> dict:
 
     sigma = data["sigma_ns"]
     sigma_txt = f"sigma {sigma} ns" if sigma is not None else "sigma unreported"
+    t3_txt = (f"; T3 unavailable: {data['t3_unavailable_reason']}"
+              if data["t3_unavailable_reason"] else "")
     return _block(
         "VALID",
         f"{data['tier']} active, {sigma_txt}, "
-        f"{len(data['t_level_witnesses'])} witness(es)",
+        f"{len(data['t_level_witnesses'])} witness(es){t3_txt}",
         data)
 
 
@@ -876,6 +883,9 @@ def _read_authority(path: str = AUTHORITY_PATH,
         "disagreement_flags": list(data.get("disagreement_flags") or []),
         # Additive v1 extension; absent when the producer publishes none.
         "t6_authority_state": data.get("t6_authority_state"),
+        # Additive v1 extension (hf-timestd 2026-10-22); absent while T3
+        # is available and from older producers.
+        "t3_unavailable_reason": data.get("t3_unavailable_reason"),
         "snapshot_age_s": age,
     }
 

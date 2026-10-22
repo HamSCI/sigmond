@@ -906,6 +906,45 @@ def test_read_authority_fresh_returns_the_carried_fields(tmp_path):
     assert env["blocks"]["timing"]["verdict"] == "VALID"
 
 
+T3_REASON = ("fused D_clock is calibrated (zeroed against the host); "
+             "not evidence about the clock (ruling 2026-10-22)")
+
+
+def test_read_authority_carries_the_t3_demotion(tmp_path):
+    """hf-timestd's ruling of 2026-10-22 (review-fusion-kalman-20261022.md
+    section 15, step 5) takes T3 dark: a T3-only station runs on T2, and
+    authority.json says why in t3_unavailable_reason.  The heartbeat
+    carries the field and names the demotion in its reason."""
+    path = tmp_path / "authority.json"
+    path.write_text(json.dumps(dict(
+        AUTHORITY_V1, t_level_witnesses=[], t_level_available=["T2"],
+        t3_unavailable_reason=T3_REASON)))
+    now = time.time()
+    os.utime(path, (now - 5, now - 5))
+    out = _read_authority(str(path), now=now)
+    assert out["t3_unavailable_reason"] == T3_REASON
+
+    out["t_level_witnesses"] = ["T4"]
+    block = assemble(NOW, CONFIG, rich_readers(timing=lambda: out))[
+        "blocks"]["timing"]
+    assert block["verdict"] == "VALID"
+    assert block["data"]["t3_unavailable_reason"] == T3_REASON
+    assert "T3 unavailable" in block["reason"]
+    assert "calibrated" in block["reason"]
+
+
+def test_an_older_authority_without_the_field_reads_none(tmp_path):
+    path = tmp_path / "authority.json"
+    path.write_text(json.dumps(AUTHORITY_V1))
+    now = time.time()
+    os.utime(path, (now - 5, now - 5))
+    out = _read_authority(str(path), now=now)
+    assert out["t3_unavailable_reason"] is None
+    block = assemble(NOW, CONFIG, rich_readers(timing=lambda: out))[
+        "blocks"]["timing"]
+    assert "T3 unavailable" not in block["reason"]
+
+
 def test_read_authority_unsupported_schema_is_unavailable(tmp_path):
     path = tmp_path / "authority.json"
     path.write_text(json.dumps(dict(AUTHORITY_V1, schema="v2")))
