@@ -257,14 +257,19 @@ def assess(facts: dict) -> list:
         else:
             links.append(Link('chrony', 'warn', f'not locked to a local refclock (ref {trk.get("ref")})', ''))
 
-    if 'FUSE' not in srcs:
-        links.append(Link('fuse', 'warn', 'FUSE refclock not configured in chrony', ''))
-    elif srcs['FUSE']['reach'] > 0:
-        links.append(Link('fuse', 'ok', f"FUSE reach {srcs['FUSE']['reach']}"))
-    elif met.get('expected', 0) and met.get('running', 0) < met['expected']:
-        links.append(Link('fuse', 'fail', f"FUSE reach 0; metrology {met['running']}/{met['expected']} running", 'start-metrology'))
+    # hf-timestd's FUSE refclock RETIRED on 2026-10-22 (hf-timestd
+    # docs/design/review-fusion-kalman-20261022.md section 15, ruling 5):
+    # fusion no longer writes SHM 1.  Absent is the healthy state.  A FUSE
+    # source chronyd still runs is unfed: say so, and never act on it --
+    # the metrology link below still owns start-metrology.
+    if 'FUSE' in srcs:
+        links.append(Link(
+            'fuse', 'warn',
+            f"FUSE refclock still in chrony (reach {srcs['FUSE']['reach']}) but "
+            f"retired 2026-10-22 and unfed; re-run the hf-timestd installer, "
+            f"then restart chrony when convenient", ''))
     else:
-        links.append(Link('fuse', 'warn', 'FUSE reach 0 (warming up / no HF solution)', ''))
+        links.append(Link('fuse', 'ok', 'FUSE retired 2026-10-22; absent from chrony'))
 
     exp = met.get('expected', 0)
     if exp:

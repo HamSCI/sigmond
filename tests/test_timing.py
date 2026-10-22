@@ -2,10 +2,12 @@
 import subprocess
 from sigmond.commands import timing as t
 
+# FUSE retired on 2026-10-22 (hf-timestd review-fusion-kalman-20261022.md
+# section 15): a healthy chain no longer carries it.
 SOURCES = ("MS Name\n"
            "#- LG29 0 4 377 21 +37ms\n"
            "#* PPS 0 4 377 23 -2ns\n"
-           "#- FUSE 0 4 224 62 -15ms\n"
+           "#? HPPS 0 0 377 1 +1ms\n"
            "^? pool 2 6 0 - +0\n")
 SHM = ("0x4e545030 8 root 666 96 1\n0x4e545031 9 root 666 96\n"
        "0x4e545032 1 root 666 96\n0x4e545033 2 root 666 96\n")
@@ -27,7 +29,29 @@ def _healthy():
 def test_parse_sources():
     s = t.parse_sources(SOURCES)
     assert s['PPS'] == {'reach': 377, 'sel': '#*'}
-    assert s['FUSE']['reach'] == 224
+    assert s['HPPS']['reach'] == 377
+
+
+def _fuse_link(f):
+    return [l for l in t.assess(f) if l.name == 'fuse']
+
+
+def test_fuse_absent_is_the_healthy_state():
+    """FUSE retired 2026-10-22: its absence draws no warning."""
+    assert all(l.status == 'ok' for l in _fuse_link(_healthy()))
+
+
+def test_a_lingering_fuse_warns_without_acting():
+    """chronyd still runs a FUSE source nothing feeds: say so, never act.
+    Whatever its reach, it is not a reason to start metrology."""
+    for reach in (0, 224):
+        f = _healthy()
+        f['sources'] = dict(f['sources'])
+        f['sources']['FUSE'] = {'reach': reach, 'sel': '#?'}
+        links = _fuse_link(f)
+        assert [l.status for l in links] == ['warn']
+        assert 'retired' in links[0].detail
+        assert links[0].action == ''
 
 
 def test_parse_shm():
