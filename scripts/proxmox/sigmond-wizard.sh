@@ -3695,6 +3695,11 @@ try:
                 os.write(1, d)
             else:
                 vm_open = False
+                # Pass the close on.  Without this the client never sees EOF:
+                # a browser reuses the keep-alive connection gunicorn already
+                # dropped and waits out the 15-min idle timeout above.
+                try: socket.socket(fileno=os.dup(1)).shutdown(socket.SHUT_WR)
+                except OSError: pass
                 if not client_open: break
 except (BrokenPipeError, ConnectionResetError):
     pass
