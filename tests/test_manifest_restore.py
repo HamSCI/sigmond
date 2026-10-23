@@ -1257,6 +1257,14 @@ class RestoreRerenderRealChildTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.base = Path(self._tmp.name)
         (self.base / 'sigmond' / 'bin').mkdir(parents=True)
+        # This stub tree lacks sink_carryover.py, so the restore reads it as
+        # below part 2: keep its marker move and sigmond.toml removal off
+        # this host's /var/lib and /etc.
+        for name, rel in (('_RESTORE_MARKER_PATH', 'state/carry-over-v1.done'),
+                          ('_RESTORE_PIPELINES_D', 'etc/pipelines.d')):
+            p = mock.patch.object(smd, name, self.base / rel)
+            p.start()
+            self.addCleanup(p.stop)
 
     def _call(self, stub):
         (self.base / 'sigmond' / 'bin' / 'smd').write_text(stub)
@@ -1354,3 +1362,275 @@ class RetireUnitsRealGitTests(unittest.TestCase):
              contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             smd._restore_retire_units(self.repo, 'sigmond', newer, older)
         self.assertFalse((sysd / 'sigmond-new.timer').exists(), buf.getvalue())
+
+
+# ── restore below part 2: the marker aside, sigmond.toml gone ────────
+# (spec §6.7, §10 "Rollback of both" / "Rollback of sigmond alone", test 22)
+
+import re
+import shutil
+from datetime import datetime, timezone
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_sink_carryover import Runner, Station, needs_real  # noqa: E402
+
+MARKER = 'carry-over-v1.done'
+ASIDE_RE = re.compile(re.escape(MARKER) + r'\.rolled-back-(\d{8}T\d{6}Z)$')
+SWITCHES = {
+    'site.toml': b'state = "fill"\n[[history]]\nto = "fill"\n',
+    'psk-recorder.toml': b'state = "off"\n[[history]]\nto = "off"\n',
+    'wspr-recorder.toml': b'state = "upload"\n',
+}
+
+
+class _HsTree:
+    """A scratch stand-in for /var/lib/hs-uploader and /etc/hs-uploader,
+    and a restore base whose sigmond checkout carries part 2 or not."""
+
+    def __init__(self, test, *, part2, restored_smd=True):
+        self.tmp = Path(tempfile.mkdtemp())
+        test.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state = self.tmp / 'var-lib-hs-uploader'
+        self.state.mkdir()
+        self.marker = self.state / MARKER
+        self.marker.write_bytes(b'marker\n')
+        self.etc = self.tmp / 'etc-hs-uploader'
+        self.pipelines_d = self.etc / 'pipelines.d'
+        self.pipelines_d.mkdir(parents=True)
+        self.sigmond_toml = self.pipelines_d / 'sigmond.toml'
+        self.sigmond_toml.write_text('[[pipeline]]\nname = "heartbeat"\n')
+        self.sinks = self.etc / 'sinks'
+        self.sinks.mkdir()
+        for name, data in SWITCHES.items():
+            (self.sinks / name).write_bytes(data)
+        self.base = self.tmp / 'base'
+        self.sigmond = self.base / 'sigmond'
+        (self.sigmond / 'lib' / 'sigmond').mkdir(parents=True)
+        if restored_smd:
+            (self.sigmond / 'bin').mkdir()
+            (self.sigmond / 'bin' / 'smd').write_text('print("restored")\n')
+        if part2:
+            self.carryover().write_text('# part 2\n')
+
+    def carryover(self):
+        return self.sigmond / 'lib' / 'sigmond' / 'sink_carryover.py'
+
+    def asides(self):
+        return sorted(p.name for p in self.state.iterdir()
+                      if p.name.startswith(MARKER + '.'))
+
+    def switches(self):
+        return {p.name: p.read_bytes() for p in sorted(self.sinks.iterdir())}
+
+    def call(self, now=None):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            rc = smd._restore_below_part2(self.base, marker=self.marker,
+                                          pipelines_d=self.pipelines_d,
+                                          now=now)
+        return rc, buf.getvalue()
+
+
+class RestoreBelowPart2Tests(unittest.TestCase):
+
+    def test_below_part2_moves_the_marker_aside_and_removes_sigmond_toml(self):
+        t = _HsTree(self, part2=False)
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        rc, out = t.call()
+        after = datetime.now(timezone.utc)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(os.path.lexists(t.marker), out)
+        asides = t.asides()
+        self.assertEqual(len(asides), 1, asides)
+        when = datetime.strptime(ASIDE_RE.match(asides[0]).group(1),
+                                 '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+        self.assertLessEqual(before, when)
+        self.assertLessEqual(when, after)
+        self.assertEqual((t.state / asides[0]).read_bytes(), b'marker\n')
+        self.assertFalse(os.path.lexists(t.sigmond_toml), out)
+        self.assertEqual(t.switches(), SWITCHES)
+        self.assertIn(asides[0], out)
+        self.assertIn('sigmond.toml', out)
+
+    def test_a_part2_tree_leaves_both(self):
+        t = _HsTree(self, part2=True)
+        rc, out = t.call()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(t.marker.read_bytes(), b'marker\n')
+        self.assertEqual(t.asides(), [])
+        self.assertTrue(t.sigmond_toml.is_file())
+        self.assertEqual(t.switches(), SWITCHES)
+        self.assertEqual(out, '')
+
+    def test_no_restored_smd_means_the_running_part2_smd_renders(self):
+        # _restore_rerender_uploader falls back to the running smd.
+        t = _HsTree(self, part2=False, restored_smd=False)
+        rc, out = t.call()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(t.marker.is_file())
+        self.assertTrue(t.sigmond_toml.is_file())
+
+    def test_a_symlink_at_sink_carryover_does_not_count_as_part2(self):
+        t = _HsTree(self, part2=False)
+        real = t.tmp / 'elsewhere.py'
+        real.write_text('# part 2\n')
+        t.carryover().symlink_to(real)
+        rc, out = t.call()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(t.asides()), 1)
+        self.assertFalse(os.path.lexists(t.sigmond_toml))
+
+    def test_a_symlinked_lib_sigmond_does_not_count_as_part2(self):
+        t = _HsTree(self, part2=False)
+        other = t.tmp / 'other-lib'
+        other.mkdir()
+        (other / 'sink_carryover.py').write_text('# part 2\n')
+        shutil.rmtree(t.sigmond / 'lib' / 'sigmond')
+        (t.sigmond / 'lib' / 'sigmond').symlink_to(other)
+        rc, out = t.call()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(t.asides()), 1)
+
+    def test_a_symlink_at_the_rolled_back_name_does_not_redirect_the_move(self):
+        t = _HsTree(self, part2=False)
+        now = datetime(2026, 10, 23, 12, 0, 0, tzinfo=timezone.utc)
+        planted = t.state / (MARKER + '.rolled-back-20261023T120000Z')
+        victim = t.tmp / 'victim'
+        victim.write_bytes(b'victim\n')
+        planted.symlink_to(victim)
+        rc, out = t.call(now=now)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(planted.is_symlink())
+        self.assertEqual(os.readlink(planted), str(victim))
+        self.assertEqual(victim.read_bytes(), b'victim\n')
+        moved = t.state / (MARKER + '.rolled-back-20261023T120000Z.1')
+        self.assertFalse(moved.is_symlink())
+        self.assertEqual(moved.read_bytes(), b'marker\n')
+        self.assertFalse(os.path.lexists(t.marker))
+
+    def test_no_marker_and_no_state_directory_change_nothing(self):
+        t = _HsTree(self, part2=False)
+        shutil.rmtree(t.state)
+        rc, out = t.call()
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(os.path.lexists(t.sigmond_toml))
+        # positive control: the same harness sees a move when one happens
+        t2 = _HsTree(self, part2=False)
+        t2.call()
+        self.assertEqual(len(t2.asides()), 1)
+
+    def test_no_hs_uploader_etc_changes_nothing(self):
+        t = _HsTree(self, part2=False)
+        shutil.rmtree(t.etc)
+        rc, out = t.call()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(t.asides()), 1)
+
+    def test_a_symlinked_state_directory_refuses_and_exits_1(self):
+        t = _HsTree(self, part2=False)
+        real = t.tmp / 'real-state'
+        t.state.rename(real)
+        t.state.symlink_to(real)
+        rc, out = t.call()
+        self.assertEqual(rc, 1, out)
+        self.assertTrue((real / MARKER).is_file())
+        self.assertEqual(sorted(p.name for p in real.iterdir()), [MARKER])
+        self.assertIn('could not be moved aside', out)
+        # sigmond.toml still goes: the two steps stand apart
+        self.assertFalse(os.path.lexists(t.sigmond_toml))
+
+    def test_a_symlinked_pipelines_d_refuses_and_exits_1(self):
+        t = _HsTree(self, part2=False)
+        real = t.etc / 'real-pipelines.d'
+        t.pipelines_d.rename(real)
+        t.pipelines_d.symlink_to(real)
+        rc, out = t.call()
+        self.assertEqual(rc, 1, out)
+        self.assertTrue((real / 'sigmond.toml').is_file())
+        self.assertIn('could not be removed', out)
+        self.assertEqual(len(t.asides()), 1)
+
+
+class RestoreBelowPart2BeforeRenderTests(unittest.TestCase):
+    """Through `_restore_rerender_uploader`: the move and the removal land
+    before the restored smd runs, and a failed move still re-renders but
+    exits 1."""
+
+    def _rerender(self, t, child):
+        (t.sigmond / 'bin' / 'smd').write_text(child)
+        buf = io.StringIO()
+        with mock.patch.object(smd, '_RESTORE_MARKER_PATH', t.marker), \
+             mock.patch.object(smd, '_RESTORE_PIPELINES_D', t.pipelines_d), \
+             contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            rc = smd._restore_rerender_uploader(t.base)
+        return rc, buf.getvalue()
+
+    def _probe(self, t):
+        return ("import os\n"
+                f"print('marker', os.path.lexists({str(t.marker)!r}))\n"
+                f"print('toml', os.path.lexists({str(t.sigmond_toml)!r}))\n")
+
+    def test_the_child_renders_after_the_move(self):
+        t = _HsTree(self, part2=False)
+        rc, out = self._rerender(t, self._probe(t))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('| marker False', out)
+        self.assertIn('| toml False', out)
+        self.assertEqual(len(t.asides()), 1)
+
+    def test_a_part2_child_finds_both(self):
+        t = _HsTree(self, part2=True)
+        rc, out = self._rerender(t, self._probe(t))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('| marker True', out)
+        self.assertIn('| toml True', out)
+
+    def test_a_failed_move_still_renders_and_exits_1(self):
+        t = _HsTree(self, part2=False)
+        real = t.tmp / 'real-state'
+        t.state.rename(real)
+        t.state.symlink_to(real)
+        rc, out = self._rerender(t, self._probe(t))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('| marker True', out)
+        self.assertIn('re-rendered by the restored sigmond', out)
+
+
+@needs_real
+class CarryOverRestoreCarryOverTests(unittest.TestCase):
+    """CARRY-OVER GATE: carry-over, restore below part 2, carry-over again
+    (V5 then V8).  The real sink_carryover and the branch hs-uploader, with
+    a fake systemctl; the restore step through its function."""
+
+    def test_the_second_carry_over_writes_the_marker_again_and_keeps_files(self):
+        st = Station(self, 'b4')
+        _, res, _ = st.run()
+        self.assertTrue(res.ok, res.lines())
+        self.assertTrue(st.roots.marker.exists())
+        first = st.snapshot()
+        clients = [n for n in first if n != 'site.toml']
+        self.assertTrue(clients, first)
+        pipelines_d = st.tmp / 'etc' / 'hs-uploader' / 'pipelines.d'
+        pipelines_d.mkdir(parents=True, exist_ok=True)
+        (pipelines_d / 'sigmond.toml').write_text('# gate form\n')
+        base = st.tmp / 'base'
+        (base / 'sigmond' / 'bin').mkdir(parents=True)
+        (base / 'sigmond' / 'bin' / 'smd').write_text('# v3.77\n')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            rc = smd._restore_below_part2(base, marker=st.roots.marker,
+                                          pipelines_d=pipelines_d)
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertFalse(os.path.lexists(st.roots.marker))
+        self.assertFalse(os.path.lexists(pipelines_d / 'sigmond.toml'))
+        self.assertEqual(st.snapshot(), first)
+        p, res2, r2 = st.run()
+        self.assertTrue(res2.ok, res2.lines())
+        self.assertTrue(st.roots.marker.is_file())
+        self.assertEqual(r2.sets(), [])
+        self.assertEqual(st.snapshot(), first)
+        for name in clients:
+            self.assertIn(b'history', first[name], name)
+        aside = [q.name for q in st.roots.marker.parent.iterdir()
+                 if q.name.startswith(MARKER + '.rolled-back-')]
+        self.assertEqual(len(aside), 1, aside)

@@ -4398,6 +4398,94 @@ def cmd_manifest_adopt(args) -> int:
 # missing, a migrate that may wait 120 s, and a daemon restart.
 _RESTORE_RERENDER_TIMEOUT_S = 600
 
+# Where a restore below part 2 finds the carry-over marker and
+# pipelines.d; tests point them at a scratch tree.  None: sink_state's
+# MARKER_PATH and uploader_manifest's PIPELINES_D.
+_RESTORE_MARKER_PATH = None
+_RESTORE_PIPELINES_D = None
+# A sigmond tree that carries this file runs the carry-over (part 2).
+_RESTORE_PART2_PROBE = ('lib', 'sigmond', 'sink_carryover.py')
+
+
+def _restored_sigmond_is_part2(base) -> bool:
+    """Whether the smd a restore re-renders with carries part 2.
+
+    That smd is `<base>/sigmond/bin/smd` when it stands, else the running
+    smd, which is part 2 (`_restore_rerender_uploader`).  The restored tree
+    counts as part 2 only when `lib`, `lib/sigmond` stand as real
+    directories and `sink_carryover.py` as a regular file, each read by
+    lstat: a symlink anywhere on that path reads as below part 2.  A wrong
+    "below" costs one more carry-over at the next manifest step; a wrong
+    "part 2" leaves a marker that an old sigmond never maintains."""
+    import stat as _stat
+    root = Path(base) / 'sigmond'
+    if not (root / 'bin' / 'smd').is_file():
+        return True
+    p = root
+    last = len(_RESTORE_PART2_PROBE) - 1
+    for i, part in enumerate(_RESTORE_PART2_PROBE):
+        p = p / part
+        try:
+            mode = os.lstat(p).st_mode
+        except OSError:
+            return False
+        if not (_stat.S_ISREG(mode) if i == last else _stat.S_ISDIR(mode)):
+            return False
+    return True
+
+
+def _restore_below_part2(base, *, marker=None, pipelines_d=None,
+                         now=None) -> int:
+    """Spec §6.7, §10 (test 22): before the restored smd renders, a restore
+    to a sigmond below part 2 moves the carry-over marker aside and removes
+    `pipelines.d/sigmond.toml`.  A restore to part 2 leaves both.  Switch
+    files always stay.
+
+    The marker moves through `sink_state.move_marker_aside` (Task 19's
+    mover: a no-replace link inside a descriptor on the marker's
+    directory, never following a link there).  `sigmond.toml` goes through
+    `uploader_manifest.land_sigmond_file(None, ...)`, which unlinks through
+    the directory's descriptor and refuses a symlinked directory.  A
+    missing marker, state directory or pipelines.d changes nothing.  Each
+    step runs even when the other fails; returns 1 when either failed."""
+    if _restored_sigmond_is_part2(base):
+        return 0
+    from sigmond import sink_state
+    from sigmond import uploader_manifest as um
+    marker = Path(marker or _RESTORE_MARKER_PATH or sink_state.MARKER_PATH)
+    pipelines_d = Path(pipelines_d or _RESTORE_PIPELINES_D or um.PIPELINES_D)
+    rc = 0
+    try:
+        new = sink_state.move_marker_aside(marker, now=now)
+    except FileNotFoundError:
+        new = None              # no state directory: no marker stands
+    except OSError as exc:
+        new = None
+        rc = 1
+        _err(f'the restored sigmond predates the sink switches, but the '
+             f'carry-over marker {marker} could not be moved aside '
+             f'({exc.strerror or exc}).  A part 2 hs-uploader keeps '
+             f'enforcing switch files the restored sigmond never writes; '
+             f'move it aside by hand')
+    if new is not None:
+        _ok(f'the restored sigmond predates the sink switches: moved the '
+            f'carry-over marker aside to {new}; the carry-over runs again '
+            f'when sigmond returns to part 2')
+    try:
+        removed = um.land_sigmond_file(None, pipelines_d)
+    except FileNotFoundError:
+        removed = False         # no /etc/hs-uploader: nothing stands
+    except OSError as exc:
+        rc = 1
+        _err(f'the restored sigmond predates the sink switches, but '
+             f'{pipelines_d / um.SIGMOND_FILE} could not be removed '
+             f'({exc.strerror or exc}); remove it by hand')
+    else:
+        if removed:
+            _ok(f'removed {pipelines_d / um.SIGMOND_FILE}: the restored '
+                f'sigmond renders the legacy manifest alone')
+    return rc
+
 
 def _restore_rerender_uploader(base) -> int:
     """Re-render pipelines.toml with the sigmond a restore just put back
@@ -4414,11 +4502,16 @@ def _restore_rerender_uploader(base) -> int:
     this process already holds the newer sigmond's modules in memory.
 
     The restored smd lives at `<base>/sigmond/bin/smd`; without a sigmond
-    checkout under `base`, the running smd stands in.  It relays every
+    checkout under `base`, the running smd stands in.  Before it runs, a
+    restored sigmond below part 2 gets the carry-over marker moved aside
+    and `pipelines.d/sigmond.toml` removed (`_restore_below_part2`); a
+    failure there still re-renders, then returns 1.  It relays every
     non-empty line the child printed, stdout then stderr.  After a hang it
     relays what the child printed before the kill.  Returns 0 on success, 1
     when the child failed, hung or could not start.
     """
+    # Spec §6.7, §10: below part 2, the marker and sigmond.toml go first.
+    pre_rc = _restore_below_part2(base)
     smd_path = Path(base) / 'sigmond' / 'bin' / 'smd'
     if not smd_path.is_file():
         smd_path = _SCRIPT
@@ -4454,7 +4547,7 @@ def _restore_rerender_uploader(base) -> int:
             _info(f'| {line}')
     if rc == 0:
         _ok(f'pipelines.toml re-rendered by the restored sigmond ({smd_path})')
-        return 0
+        return pre_rc
     _err(f'pipelines.toml re-render by the restored sigmond FAILED (exit {rc}). '
          f'hs-uploader may still read pipelines a newer sigmond wrote.  Fix the '
          f'cause, then run `smd admin uploader manifest --write --enable`.')
@@ -4473,7 +4566,12 @@ def _restore_rerender_uploader(base) -> int:
 _PRELOAD_MODULES = {
     'manifest_restore': ('sigmond.doctor', 'sigmond.provenance',
                          'sigmond.manifest_restore', 'sigmond.restore_units',
-                         'sigmond.installer_args'),
+                         'sigmond.installer_args', 'sigmond.sink_state',
+                         'sigmond.uploader_manifest',
+                         # uploader_manifest's own lazy imports
+                         'sigmond.catalog', 'sigmond.discover',
+                         'sigmond.inprocess_senders', 'sigmond.instance',
+                         'sigmond.lifecycle'),
     'update': ('sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
                'sigmond.installer_args', 'sigmond.sink_state'),
@@ -4785,7 +4883,10 @@ def cmd_manifest_restore(args) -> int:
     8. Re-render (D11, only after step 7 verifies): the restored smd, as a
        child process, runs `admin uploader manifest --write --enable`
        (`_restore_rerender_uploader`).  A rolled-back hs-uploader then
-       never reads pipelines a newer sigmond rendered.  It runs even when
+       never reads pipelines a newer sigmond rendered.  When the restored
+       sigmond lacks `lib/sigmond/sink_carryover.py` (below part 2), the
+       carry-over marker moves aside and `pipelines.d/sigmond.toml` goes
+       first (spec §6.7, §10); switch files stay.  It runs even when
        nothing moved, so a re-run repairs a re-render that failed.  A
        failed re-render exits 1; a dry run or a refused or unverified
        restore never re-renders.
