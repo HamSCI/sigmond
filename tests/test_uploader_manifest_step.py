@@ -69,9 +69,15 @@ class _Step(unittest.TestCase):
                 return features_effect(*a, **k)
             return features
 
-        def fake_render_inputs():
+        def fake_render_inputs(*a, **k):
             order.append("render_inputs")
             return (None, mode, None)
+
+        def fake_carry_over(roots):
+            # Task 19 owns the carry-over's own tests; here it never
+            # writes the marker, so the render stays part 1's.
+            order.append("carry-over")
+            return True
 
         @contextlib.contextmanager
         def fake_lock(*a, **k):
@@ -130,8 +136,19 @@ class _Step(unittest.TestCase):
                 state["active"] = True
             return 0
 
+        # The part 2 paths (marker, sinks/, pipelines.d/) sit in the scratch
+        # directory, so a marker on the host running the tests changes
+        # nothing here.
+        from sigmond import sink_carryover as co
+        roots = co.CarryRoots(
+            etc=Path(d.name) / "etc", sinks=Path(d.name) / "sinks",
+            marker=Path(d.name) / "carry-over-v1.done", manifest=path,
+            sink_db=Path(d.name) / "sink.db")
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(um, "hs_uploader_store_version",
+        with mock.patch.object(up_cmd, "_step_roots", return_value=roots), \
+             mock.patch.object(up_cmd, "_carry_over",
+                               side_effect=fake_carry_over), \
+             mock.patch.object(um, "hs_uploader_store_version",
                                side_effect=fake_probe), \
              mock.patch.object(um, "hs_uploader_features",
                                side_effect=fake_features), \

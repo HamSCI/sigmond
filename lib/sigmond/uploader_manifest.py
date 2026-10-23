@@ -811,13 +811,15 @@ def generate_forms(topology: Optional[Topology] = None,
 
     ``store_version`` ``None`` probes it, as :func:`generate` does; a
     probe that fails raises :class:`ProbeFailed`."""
-    topology = topology or load_topology()
-    coord = coord or load_coordination()
     if not gate_form(features, marker_stands):
+        # generate() loads what it is not given, as it always has.
         return RenderResult(
-            generate(topology, coord, supports_discard=supports_discard,
+            generate(topology=topology, coord=coord,
+                     supports_discard=supports_discard,
                      store_version=store_version),
             None)
+    topology = topology or load_topology()
+    coord = coord or load_coordination()
     if store_version is None:
         store_version = hs_uploader_store_version()
         if store_version is None:

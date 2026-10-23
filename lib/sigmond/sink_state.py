@@ -30,15 +30,17 @@ marker (ruling X5); ``enforced`` and ``held_pipelines`` do.  So
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from . import uploader_manifest
+from . import safe_write, uploader_manifest
 
 SCHEMA = 1
 UPLOAD = "upload"
@@ -64,6 +66,75 @@ def marker_stands(path: Path = MARKER_PATH) -> bool:
     except OSError:
         return True
     return True
+
+
+ROLLED_BACK = ".rolled-back-"
+_ASIDE_TRIES = 100
+
+
+def _move_noreplace(dfd: int, src: str, dst: str) -> bool:
+    """Give `src` the name `dst` inside the directory `dfd`, never replacing
+    anything at `dst`; False when `dst` is taken.
+
+    A hard link (``linkat`` without AT_SYMLINK_FOLLOW, so a symlink links
+    as itself), then the old name unlinked: the link fails with EEXIST
+    rather than replace.  An object that cannot be hard-linked (a
+    directory) is renamed after a check that `dst` stands empty."""
+    try:
+        os.link(src, dst, src_dir_fd=dfd, dst_dir_fd=dfd,
+                follow_symlinks=False)
+    except FileExistsError:
+        return False
+    except OSError as e:
+        if e.errno not in (errno.EPERM, errno.EMLINK, errno.EOPNOTSUPP,
+                           errno.EXDEV):
+            raise
+        try:
+            os.stat(dst, dir_fd=dfd, follow_symlinks=False)
+            return False
+        except FileNotFoundError:
+            pass
+        os.rename(src, dst, src_dir_fd=dfd, dst_dir_fd=dfd)
+        return True
+    os.unlink(src, dir_fd=dfd)
+    return True
+
+
+def move_marker_aside(path: Path = MARKER_PATH, *,
+                      now: Optional[datetime] = None) -> Optional[Path]:
+    """Move the carry-over marker to ``<name>.rolled-back-<UTC>`` (spec
+    §6.7; plan Ruling 10), so the carry-over runs again once the gate
+    returns.  Returns the new path, or ``None`` when nothing stood there.
+
+    The rename runs inside a descriptor on the marker's directory, opened
+    without following a link there; the marker itself moves as whatever it
+    is (a symlink moves as a link, its target untouched).  A rolled-back
+    name already taken (a second move within one second) is never
+    replaced: ``.1``, ``.2`` ... follow.  The directory is fsynced.
+    Raises OSError when the directory cannot be opened or the move fails.
+    Task 22's restore reuses this helper."""
+    path = Path(path)
+    when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    base = f"{path.name}{ROLLED_BACK}{when.strftime('%Y%m%dT%H%M%SZ')}"
+    dfd = safe_write._open_parent(path.parent)
+    try:
+        try:
+            os.stat(path.name, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        for i in range(_ASIDE_TRIES):
+            name = base if i == 0 else f"{base}.{i}"
+            try:
+                moved = _move_noreplace(dfd, path.name, name)
+            except FileNotFoundError:
+                return None             # gone meanwhile: nothing stands
+            if moved:
+                os.fsync(dfd)
+                return path.parent / name
+        raise FileExistsError(errno.EEXIST, f"{path.parent / base}: "
+                              f"{_ASIDE_TRIES} rolled-back names taken")
+    finally:
+        os.close(dfd)
 
 
 @dataclass(frozen=True)

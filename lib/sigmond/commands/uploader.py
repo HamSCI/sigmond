@@ -29,6 +29,25 @@ Modes (default is the read-only check):
 7. move the side file into place;
 8. start the daemon if it ran before, or if ``--enable`` asked for it.
 
+Before step 1, under the same install lock, the write step runs the part 2
+steps (tasks/spec-sink-2b-part2.md §6.1, §6.4, §7.2, §7.4):
+
+a. ask ``hs-uploader capabilities --features``, once;
+b. ``gate`` and no carry-over marker: the carry-over (sink_carryover);
+   a failed carry-over renders part 1's form and the step exits 1;
+c. ``gate`` and the marker: repair the ``[uploads]`` mirror from
+   ``site.toml`` (sink_mirror; a broken ``site.toml`` leaves everything
+   alone and exits 1), give a late client its file, and run the lever
+   step, which costs nothing once the senders stand lowered;
+d. a feature set without ``gate`` (not a failed probe) and the marker:
+   move the marker aside (plan Ruling 10);
+e. render the form the probe and the marker call for (generate_forms).
+
+Step 7 lands ``pipelines.d/sigmond.toml`` too: in the gate form before the
+legacy manifest, in part 1's form removed after it.  When the legacy
+manifest stays the same, step 4 lands or removes it with no restart (plan
+Ruling 14).  The read-only step previews b-d and writes nothing (Ruling 13).
+
 The daemon never migrates while it starts (tasks/plan-sink-control.md
 D10), and it reads its manifest once, when it starts.  On a manifest that
 did not change, ``--enable`` still restarts an active daemon that started
@@ -48,7 +67,9 @@ import tomllib
 from pathlib import Path
 from typing import Optional
 
-from .. import install_lock
+from .. import install_lock, safe_write
+from .. import sink_carryover as co
+from .. import sink_levers, sink_mirror, sink_state
 from .. import uploader_manifest as um
 
 SERVICE = "hs-uploader.service"
@@ -305,8 +326,9 @@ def _run_migrate(*, db: Path, sink: Optional[Path],
     return 0
 
 
-def _render_inputs():
-    """``(coord, mode, supports_discard)`` for the render: coordination.toml,
+def _render_inputs(path: Optional[Path] = None):
+    """``(coord, mode, supports_discard)`` for the render: coordination.toml
+    (at `path`, the default when None),
     the mode the render will take (``upload``, ``discard`` or ``hold``),
     and, only when the policy asks for discard, whether the daemon's venv
     can discard.  The command hands all three to generate(), so the venv
@@ -315,7 +337,7 @@ def _render_inputs():
     runs first."""
     try:
         from ..coordination import load_coordination
-        coord = load_coordination()
+        coord = load_coordination() if path is None else load_coordination(path)
     except Exception:  # pragma: no cover - defensive
         return None, "hold", None
     supports = (um.hs_uploader_supports_discard()
@@ -362,6 +384,40 @@ def _land(side: Path, path: Path, installed: str, text: str) -> None:
     os.replace(side, path)
 
 
+# The systemctl the carry-over and the lever step call for the recorders
+# (never for hs-uploader.service, which goes through _run).  Tests put a
+# fake here.
+_lever_systemctl = subprocess.run
+
+
+def _euid() -> int:
+    return os.geteuid()
+
+
+def _step_roots() -> co.CarryRoots:
+    """Where the part 2 steps read and write: the production paths, with
+    the legacy manifest wherever this module renders it."""
+    return co.CarryRoots(manifest=um.MANIFEST_PATH)
+
+
+def _say(line: str) -> None:
+    print(f"uploader: {line}")
+
+
+def _warn(line: str) -> None:
+    _err(f"uploader: {line}")
+
+
+def _print_result(lines) -> None:
+    """Lines from the carry-over or the lever step: a failure to stderr,
+    everything else to stdout, each with the step's prefix."""
+    for line in lines:
+        if "FAILED" in line or "still armed" in line:
+            _warn(line)
+        else:
+            _say(line)
+
+
 def cmd_uploader_manifest(args) -> int:
     write = bool(getattr(args, "write", False) or getattr(args, "enable", False))
     enable = bool(getattr(args, "enable", False))
@@ -374,7 +430,7 @@ def cmd_uploader_manifest(args) -> int:
     # Only root installs; a non-root call reaches the refusal below.  The
     # enable branch reuses this result, so install.sh runs once.
     daemon_ready = None
-    if enable and os.geteuid() == 0:
+    if enable and _euid() == 0:
         try:
             daemon_ready = _ensure_daemon_installed()
         except (OSError, subprocess.SubprocessError) as exc:
@@ -387,7 +443,9 @@ def cmd_uploader_manifest(args) -> int:
     # installer takes this lock (v3.79), holding it here would make that
     # installer wait out its bound.  The read-only step writes nothing and
     # takes no lock; a non-root write is refused below, before any write.
-    if not (write and os.geteuid() == 0):
+    # Nothing under the lock calls back into this function (ruling C14-3:
+    # flock would deadlock on itself).
+    if not (write and _euid() == 0):
         return _manifest_step(write=write, enable=enable,
                               daemon_ready=daemon_ready)
     with contextlib.ExitStack() as stack:
@@ -400,14 +458,236 @@ def cmd_uploader_manifest(args) -> int:
                               daemon_ready=daemon_ready)
 
 
+# ---- the part 2 steps before the render (spec §6, §7.2; Rulings 9, 10) -------
+
+def _carry_over(roots: co.CarryRoots) -> bool:
+    """Spec §6.4: plan, print, apply.  True when the marker got written."""
+    try:
+        plan = co.plan(roots)
+    except Exception as exc:
+        _warn(f"carry-over: cannot read the station ({type(exc).__name__}: "
+              f"{exc}); no switch file written, no marker; rendering part "
+              "1's form")
+        return False
+    for line in plan.lines():
+        _say(line)
+    try:
+        res = co.apply(plan, systemctl=_lever_systemctl)
+    except Exception as exc:
+        _warn(f"carry-over: FAILED ({type(exc).__name__}: {exc}); no marker "
+              "written; rendering part 1's form")
+        return False
+    _print_result(res.lines())
+    if not res.ok:
+        _warn("carry-over: rendering part 1's form until a carry-over "
+              "finishes; this step exits 1")
+    return res.ok
+
+
+def _mirror_inputs(roots: co.CarryRoots):
+    return sink_mirror.read_inputs(roots.sinks, roots.coordination,
+                                   roots.etc / "sigmond" / "site-profile.toml")
+
+
+def _mirror_repair(roots: co.CarryRoots) -> Optional[int]:
+    """Ruling 9.  0 on success or nothing to do, 1 on a failed write, and
+    None for a broken site.toml: the caller then leaves everything alone."""
+    try:
+        mp = sink_mirror.plan_mirror(*_mirror_inputs(roots))
+    except Exception as exc:
+        _warn(f"mirror repair: cannot read [uploads] ({type(exc).__name__}: "
+              f"{exc}); nothing repaired")
+        return 1
+    if mp.action == "broken":
+        for line in mp.lines():
+            _warn(line)
+        return None
+    if mp.action == "none":
+        return 0
+
+    def runner(args, stdin=None):
+        return um.run_hs_uploader(args, stdin=stdin, python=roots.python)
+
+    failures = sink_mirror.apply_mirror(mp, runner=runner, sinks=roots.sinks)
+    if failures:
+        for path, why in failures:
+            _warn(f"mirror repair: FAILED {path}: {why}")
+        return 1
+    for line in mp.lines():
+        _say(line)
+    return 0
+
+
+def _lever_step(roots: co.CarryRoots) -> int:
+    """The lever step with the marker standing (spec §8; idempotent): every
+    client hs-uploader reads below ``upload`` loses its in-process senders.
+    A sender already lowered and restarted since costs nothing and prints
+    nothing."""
+    state = sink_state.read_state(
+        python=roots.python, manifest=str(roots.manifest),
+        sinks=str(roots.sinks), marker=str(roots.marker),
+        store=None if roots.store is None else str(roots.store))
+    if state is None:
+        _warn("lever step: cannot read hs-uploader sink status (see above), "
+              "so no in-process sender was checked; this step exits 1")
+        return 1
+    below = [c for c in sink_state.below_upload(state) if c != co.SITE]
+    if not below:
+        return 0
+    try:
+        from ..topology import load_topology
+        lp = sink_levers.plan_levers(
+            below, load_topology(roots.topology),
+            roots=sink_levers.Roots(etc=roots.etc, writer_py=roots.writer_py),
+            systemctl=_lever_systemctl)
+        if not (lp.env_levers or lp.restart_only or lp.mag is not None
+                or lp.wspr_uploader or lp.problems):
+            return 0
+        try:
+            res = sink_levers.apply_levers(lp, systemctl=_lever_systemctl)
+        except sink_levers.RadiodMoved as exc:
+            if exc.result is not None:
+                _print_result(exc.result.lines())
+            _warn(f"lever step: FAILED: {exc}")
+            return 1
+        _print_result(res.lines())
+        verify = sink_levers.verify_levers(lp, systemctl=_lever_systemctl)
+    except Exception as exc:
+        _warn(f"lever step: FAILED ({type(exc).__name__}: {exc})")
+        return 1
+    for v in verify:
+        _warn(f"lever: still armed: {v}")
+    return 1 if (res.failures or verify) else 0
+
+
+def _marker_standing(roots: co.CarryRoots) -> int:
+    """``gate`` and the marker: mirror repair, late clients, lever step."""
+    rc = _mirror_repair(roots)
+    if rc is None:
+        return 1                    # a broken site.toml: touch nothing else
+    try:
+        late = co.late_clients(roots)
+    except Exception as exc:
+        _warn(f"late clients: cannot read the station ({type(exc).__name__}: "
+              f"{exc}); none checked")
+        return 1
+    if late.clients:
+        # apply() levers the union of these and what hs-uploader reads
+        # below upload, so the lever step below would repeat it.
+        for line in late.lines():
+            _say(line)
+        try:
+            res = co.apply(late, systemctl=_lever_systemctl)
+        except Exception as exc:
+            _warn(f"late clients: FAILED ({type(exc).__name__}: {exc})")
+            return 1
+        _print_result(res.lines())
+        return rc or (0 if res.ok else 1)
+    return _lever_step(roots) or rc
+
+
+def _move_aside(roots: co.CarryRoots) -> int:
+    """Ruling 10: hs-uploader offers no ``gate`` while the marker stands."""
+    try:
+        new = sink_state.move_marker_aside(roots.marker)
+    except OSError as exc:
+        _warn(f"the installed hs-uploader offers no `gate`, but the "
+              f"carry-over marker {roots.marker} could not be moved aside "
+              f"({exc.strerror or exc}); this step exits 1")
+        return 1
+    if new is not None:
+        _say(f"the installed hs-uploader offers no `gate`: moved the "
+             f"carry-over marker aside to {new}; the carry-over runs again "
+             "when an hs-uploader with the gate returns")
+    return 0
+
+
+def _sink_steps(roots: co.CarryRoots, features, marker: bool):
+    """Everything the write step does before the render (spec §6.1, §7.4),
+    under the install lock: ``(rc, marker standing now)``."""
+    gate = features is not None and um.GATE_FEATURE in features
+    if gate and not marker:
+        ok = _carry_over(roots)
+        return (0 if ok else 1), sink_state.marker_stands(roots.marker)
+    if gate:
+        return _marker_standing(roots), True
+    if marker and features is not None:
+        return _move_aside(roots), sink_state.marker_stands(roots.marker)
+    # A failed probe (None) cannot tell: nothing moves (spec §7.4).
+    return 0, marker
+
+
+def _preview_sink_steps(roots: co.CarryRoots, features, marker: bool):
+    """Ruling 13: what ``--write`` would do before its render, written
+    nowhere.  ``(something would change, the marker the render assumes)``."""
+    gate = features is not None and um.GATE_FEATURE in features
+    if gate and not marker:
+        try:
+            plan = co.plan(roots)
+        except Exception as exc:
+            _warn(f"carry-over: cannot read the station ({type(exc).__name__}"
+                  f": {exc})")
+            return True, True
+        _say("--write would carry over first, then render the gate form:")
+        for line in plan.lines():
+            _say(line)
+        return True, True
+    if gate:
+        pending = False
+        try:
+            mp = sink_mirror.plan_mirror(*_mirror_inputs(roots))
+            late = co.late_clients(roots)
+        except Exception as exc:
+            _warn(f"cannot read the switches ({type(exc).__name__}: {exc})")
+            return True, True
+        for line in mp.lines():
+            _say(f"--write would repair the mirror: {line}")
+            pending = True
+        for line in late.lines() if late.clients else ():
+            _say(f"--write would: {line}")
+            pending = True
+        return pending, True
+    if marker and features is not None:
+        _say(f"--write would move the carry-over marker {roots.marker} aside "
+             "(the installed hs-uploader offers no `gate`)")
+        return True, False
+    return False, marker
+
+
+def _land_sigmond(text: Optional[str]) -> bool:
+    """Land or remove ``pipelines.d/sigmond.toml`` beside the manifest and
+    say so when it changed.  Raises OSError (a refused symlink, say)."""
+    d = um.MANIFEST_PATH.parent / "pipelines.d"
+    changed = um.land_sigmond_file(text, d)
+    if changed:
+        _say(f"{'wrote' if text is not None else 'removed'} "
+             f"{d / um.SIGMOND_FILE}")
+    return changed
+
+
+def _sigmond_drift(text: Optional[str]) -> bool:
+    """Read-only: whether ``pipelines.d/sigmond.toml`` would change."""
+    path = um.MANIFEST_PATH.parent / "pipelines.d" / um.SIGMOND_FILE
+    try:
+        have = safe_write.read_nofollow(path)
+    except FileNotFoundError:
+        have = None
+    except OSError:
+        return True
+    return have != text
+
+
+# ---- the step ----------------------------------------------------------------
+
 def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
     """The manifest step proper, after the daemon install; under the
     install lock when it writes."""
+    roots = _step_roots()
     # Spec §7.4: ask the installed hs-uploader, once and first, which
     # features it offers; the step holds the answer from here on.  A
     # failed probe (None) warns once and renders part 1's form.
     try:
-        features = um.hs_uploader_features()
+        features = um.hs_uploader_features(python=roots.python)
     except Exception:  # pragma: no cover - defensive
         features = None
     if features is None:
@@ -417,20 +697,36 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
         print("uploader: hs-uploader features: "
               + (" ".join(sorted(features)) or "none"))
 
+    # Spec §6.1, §7.2, §7.4: the carry-over, or mirror repair, late clients
+    # and the lever step, or the move-aside, all before the render.  The
+    # read-only step previews them and writes nothing (Ruling 13); a
+    # non-root write runs none of them and is refused below.
+    marker = sink_state.marker_stands(roots.marker)
+    pre_rc, sink_pending = 0, False
+    if not write:
+        sink_pending, marker = _preview_sink_steps(roots, features, marker)
+    elif _euid() == 0:
+        pre_rc, marker = _sink_steps(roots, features, marker)
+    gate = um.gate_form(features, marker)
+
     # Step 1: ask the daemon's interpreter, once, which store version it
     # reads (spec §5.1), and only when the render needs the answer: a
-    # hold renders the heartbeat alone (ruling 9).
-    coord, mode, supports_discard = _render_inputs()
+    # hold renders the heartbeat alone (ruling 9); the gate form renders
+    # every client pipeline whatever [uploads] says.
+    coord, mode, supports_discard = _render_inputs(roots.coordination)
     store_version = None
     try:
-        if mode in ("upload", "discard"):
-            store_version = um.hs_uploader_store_version()
+        if gate or mode in ("upload", "discard"):
+            store_version = um.hs_uploader_store_version(python=roots.python)
             if store_version is None:
                 raise um.ProbeFailed(
-                    f"cannot ask {um.HS_UPLOADER_PYTHON} for `hs-uploader "
+                    f"cannot ask {roots.python} for `hs-uploader "
                     "capabilities` (failed or timed out)")
-        text = um.generate(coord=coord, supports_discard=supports_discard,
-                           store_version=store_version)
+        form = um.generate_forms(coord=coord, features=features,
+                                 marker_stands=marker,
+                                 supports_discard=supports_discard,
+                                 store_version=store_version)
+        text = form.legacy_text
     except um.ProbeFailed as exc:
         _err(f"uploader manifest: {exc}; the installed manifest and "
              f"{SERVICE} stay as they are")
@@ -440,12 +736,16 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
         return 1
 
     # sigmond#53: say, by name, what the uploads policy is holding back.
-    # A hold took no probe; it names the shared pipeline.
-    try:
-        suppressed = um.suppressed_pipelines(
-            coord=coord, store_version=store_version if store_version is not None else 0)
-    except Exception:  # pragma: no cover - defensive
-        suppressed = []
+    # A hold took no probe; it names the shared pipeline.  The gate form
+    # holds nothing back by render: the switches decide.
+    suppressed = []
+    if not gate:
+        try:
+            suppressed = um.suppressed_pipelines(
+                coord=coord,
+                store_version=store_version if store_version is not None else 0)
+        except Exception:  # pragma: no cover - defensive
+            suppressed = []
     if suppressed:
         if mode == "discard":
             print("uploader: SITE SINK OFF — these pipelines ack without "
@@ -461,13 +761,19 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
 
     if not write:
         # read-only check
+        rc = 1 if sink_pending else 0
+        if _sigmond_drift(form.sigmond_file):
+            what = ("write" if form.sigmond_file is not None else "remove")
+            print(f"uploader: `--write` would {what} "
+                  f"{path.parent / 'pipelines.d' / um.SIGMOND_FILE}")
+            rc = 1
         if not installed:
             print(f"uploader: no manifest at {path} — would create "
                   f"{n} pipeline(s)")
             return 1
         if not changed:
             print(f"uploader: {path} is up to date ({n} pipeline(s))")
-            return 0
+            return rc
         print(f"uploader: {path} DRIFT — `--write` would change it:\n")
         diff = difflib.unified_diff(
             installed.splitlines(), text.splitlines(),
@@ -477,11 +783,25 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
         return 1
 
     # write path — needs root
-    if os.geteuid() != 0:
+    if _euid() != 0:
         _err("writing the manifest requires root (sudo smd admin uploader "
              "manifest --write)")
         return 1
 
+    rc = _land_step(path=path, installed=installed, text=text,
+                    sigmond_file=form.sigmond_file, gate=gate,
+                    changed=changed, n=n, enable=enable,
+                    daemon_ready=daemon_ready, store_version=store_version)
+    return rc or pre_rc
+
+
+def _land_step(*, path: Path, installed: str, text: str,
+               sigmond_file: Optional[str], gate: bool, changed: bool,
+               n: int, enable: bool, daemon_ready,
+               store_version: Optional[int]) -> int:
+    """Steps 2-8 (spec-key-split §5.2), with ``pipelines.d/sigmond.toml``
+    landed beside the manifest (spec §3.6): in the gate form before it, in
+    part 1's form removed after it."""
     # Step 2: render to the side file.  The installed manifest stays in
     # force until migrate has moved the keys it names.
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -505,9 +825,20 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
              "left as they stand")
         return 1
 
-    # Step 4: nothing changed and nothing waits: stop nothing.
+    # Step 4: nothing changed and nothing waits: stop nothing.  Ruling 14:
+    # sigmond.toml still lands or goes here, with no restart; part 1 and
+    # part 2 daemons alike rebuild from pipelines.d/ within one pump.
     if not changed and pending == 0:
+        rc = 0
         stale = _service_active() and _started_before_manifest(path)
+        if gate:
+            try:
+                _land_sigmond(sigmond_file)
+            except OSError as exc:
+                side.unlink(missing_ok=True)
+                _warn(f"could not land pipelines.d/{um.SIGMOND_FILE} "
+                      f"({exc.strerror or exc}); {path} left as it stands")
+                return 1
         if installed == text:
             side.unlink(missing_ok=True)
             print(f"uploader: {path} already current ({n} pipeline(s))")
@@ -515,8 +846,10 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
             _land(side, path, installed, text)
             print(f"uploader: refreshed {path} "
                   f"({n} pipeline(s); no functional change)")
+        if not gate:
+            rc = _remove_sigmond()
         if not enable:
-            return 0
+            return rc
         if daemon_ready is None:
             daemon_ready = _ensure_daemon_installed()
         if not daemon_ready:
@@ -528,7 +861,7 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
             print(f"uploader: {SERVICE} started before the manifest on disk "
                   f"was written — restarting {SERVICE}")
             _run(["systemctl", "restart", SERVICE])
-        return 0
+        return rc
 
     # Steps 5-8 stop the daemon.  Whatever goes wrong before step 8 starts
     # it again, an exception included, must put it back as found and exit
@@ -539,7 +872,8 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
         return _stop_migrate_land_start(
             side=side, path=path, installed=installed, text=text,
             changed=changed, n=n, enable=enable, daemon_ready=daemon_ready,
-            was_active=was_active, migrate_kw=migrate_kw)
+            was_active=was_active, migrate_kw=migrate_kw,
+            sigmond_file=sigmond_file, gate=gate)
     except Exception as exc:
         side.unlink(missing_ok=True)
         _err(f"uploader manifest step failed after stopping {SERVICE}: "
@@ -552,10 +886,24 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
         return 1
 
 
+def _remove_sigmond() -> int:
+    """Part 1's form: no ``pipelines.d/sigmond.toml`` (spec §3.6).  The
+    legacy manifest, holding the heartbeat, has landed already."""
+    try:
+        _land_sigmond(None)
+    except OSError as exc:
+        _warn(f"could not remove pipelines.d/{um.SIGMOND_FILE} "
+              f"({exc.strerror or exc}); the legacy heartbeat may stand "
+              "aside for it")
+        return 1
+    return 0
+
+
 def _stop_migrate_land_start(*, side: Path, path: Path, installed: str,
                              text: str, changed: bool, n: int, enable: bool,
                              daemon_ready, was_active: bool,
-                             migrate_kw: dict) -> int:
+                             migrate_kw: dict, sigmond_file: Optional[str] = None,
+                             gate: bool = False) -> int:
     """Spec §5.2 steps 5-8, the daemon's state as found in ``was_active``."""
     # Step 5: stop the daemon.  Stop even an inactive unit: that cancels a
     # restart systemd has queued, which could otherwise start the daemon in
@@ -578,7 +926,11 @@ def _stop_migrate_land_start(*, side: Path, path: Path, installed: str,
              "Run this command again once migrate passes.")
         return 1
 
-    # Step 7: land the manifest, keeping a .bak.
+    # Step 7: land the manifest, keeping a .bak.  The gate form lands
+    # sigmond.toml first, so the heartbeat never drops out between the two;
+    # a failure there fails the step (the caller puts the daemon back).
+    if gate:
+        _land_sigmond(sigmond_file)
     if installed == text:
         side.unlink(missing_ok=True)
         print(f"uploader: {path} already current ({n} pipeline(s))")
@@ -589,6 +941,7 @@ def _stop_migrate_land_start(*, side: Path, path: Path, installed: str,
         else:
             print(f"uploader: refreshed {path} "
                   f"({n} pipeline(s); no functional change)")
+    rc = 0 if gate else _remove_sigmond()
 
     # Step 8: start the daemon if it ran before, or if --enable asked.  A
     # failed install leaves the manifest landed and starts nothing.
@@ -602,4 +955,4 @@ def _stop_migrate_land_start(*, side: Path, path: Path, installed: str,
         _start(enable=True)
     elif was_active:
         _start(enable=False)
-    return 0
+    return rc
