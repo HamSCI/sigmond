@@ -249,6 +249,25 @@ class SiteTable(unittest.TestCase):
     def test_no_block_reads_upload(self):
         self.assertEqual(self.site("").site.state, "upload")
 
+    def test_operator_reason_kept_first(self):
+        # Ruling C25-1: the wizard's "new station: ..." prefix survives, so
+        # smd check and the install docs still recognise a new station.
+        p = self.site('[uploads]\nenabled = false\nmode = "discard"\n'
+                      'reason = "new station: check reception, then smd sink upload"\n')
+        self.assertEqual(p.site.state, "off")
+        self.assertEqual(
+            p.site.reason,
+            "new station: check reception, then smd sink upload "
+            "(carried over from [uploads] mode = discard)")
+        self.assertTrue(p.site.reason.startswith("new station: "))
+        # client files keep the plain carried-over reason
+        for w in p.clients:
+            self.assertEqual(w.reason, "carried over from [uploads] mode = discard")
+
+    def test_blank_operator_reason_keeps_plain_text(self):
+        p = self.site('[uploads]\nenabled = false\nreason = "   "\n')
+        self.assertEqual(p.site.reason, "carried over from [uploads] mode = hold")
+
 
 class ClientTable(unittest.TestCase):
 
@@ -433,8 +452,10 @@ class StationClasses(unittest.TestCase):
             "K3LR=2": {"callsign": "K3LR/2", "reporter_id": "K3LR/2",
                        "grid": "EN91"}})
         site = st.switch("site")
+        # Ruling C25-1: K3LR's own [uploads] reason leads.
         self.assertEqual(site["history"][0]["reason"],
-                         "carried over from [uploads] mode = hold")
+                         "held until the antenna work ends "
+                         "(carried over from [uploads] mode = hold)")
         self.assertNotIn("identity", site["history"][0])
 
 

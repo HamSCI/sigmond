@@ -99,6 +99,15 @@ GIT_BASE = Path("/opt/git/sigmond")
 
 REASON_UPLOADS = "carried over from [uploads] mode = {mode}"
 REASON_FLAG = "carried over from {flag}=0"
+
+
+def site_reason(uploads_reason: str, mode: str) -> str:
+    """site.toml's reason: the operator's ``[uploads]`` reason first, when
+    one is set, so "new station: …" survives the carry-over (the wizard,
+    the docs and ``smd check`` match on it; ruling C25-1)."""
+    carried = REASON_UPLOADS.format(mode=mode)
+    why = (uploads_reason or "").strip()
+    return f"{why} ({carried})" if why else carried
 REASON_DISABLED = "carried over: not enabled in topology.toml, with rows in sink.db"
 REASON_LATE = ("carried over after the marker: a client new since the "
                "carry-over")
@@ -541,7 +550,8 @@ def plan(roots: CarryRoots = CarryRoots()) -> CarryPlan:
     want = SITE_FROM_MODE[mode]
     reason = REASON_UPLOADS.format(mode=mode)
     have = switch_state(roots.sinks / f"{SITE}.toml")
-    site = None if have == want else FileWrite(SITE, want, reason, have)
+    site = None if have == want else FileWrite(
+        SITE, want, site_reason(st.coord.uploads.reason, mode), have)
     writes, kept, eff = [], [], {}
     for client in st.governed:
         cur = switch_state(roots.sinks / f"{client}.toml")
