@@ -255,3 +255,20 @@ def test_apply_enable_as_root_chowns_by_descriptor_to_the_dir_owner(
     assert seen, "no fchown"
     for fd, u, g in seen:
         assert isinstance(fd, int) and (u, g) == (dst.st_uid, dst.st_gid)
+
+
+def test_set_env_flag_does_not_copy_a_hard_linked_secret(tmp_path):
+    # Security review PoC: the directory owner hard-links a 0600 secret at
+    # env/a.env; set_env_flag must not copy it into a new 0644 file.
+    secret = tmp_path / "secret"
+    secret.write_text("TOKEN=hunter2\n")
+    _os.chmod(secret, 0o600)
+    d = tmp_path / "env"
+    d.mkdir()
+    _os.link(secret, d / "a.env")
+    with pytest.raises(OSError):
+        upload.set_env_flag(d / "a.env", "K", "1")
+    assert _os.stat(d / "a.env").st_nlink == 2           # left as it was
+    assert secret.read_text() == "TOKEN=hunter2\n"
+    for p in d.iterdir():
+        assert "hunter2" not in p.read_text() or p.samefile(secret)

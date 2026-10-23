@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
-from .safe_write import read_nofollow, write_owned
+from .safe_write import rewrite_owned
 from .instance import (
     InvalidReporterId, legacy_instance_hint, parse_user_reporter_id,
     unescape_systemd_instance,
@@ -79,25 +79,31 @@ def set_env_flag(path: Path, key: str, value: str) -> None:
     """Set ``key=value`` in an env file, preserving every other line
     (comments, ordering, the decode flag).  Creates the file if absent.
 
-    The env directory belongs to the service account, so the write goes
-    through ``safe_write.write_owned`` (plan Ruling 17): mode 0644, and as
-    root the file goes to the directory's owner by descriptor.  A symlink
-    at the env file raises OSError rather than being read through."""
+    The env directory belongs to the service account, so the read and the
+    write go through ``safe_write.rewrite_owned`` (plan Ruling 17): one
+    directory descriptor for both, mode 0644, and as root the file goes to
+    the directory's owner by descriptor.  A symlink, a hard link or (as
+    root) a stranger's file at the env file raises OSError; a symlink is
+    refused rather than replaced, since the service can re-arm its own
+    lever anyway and replacing it would read its target or drop the
+    service's settings unseen."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    old = read_nofollow(path)
-    lines = old.splitlines() if old is not None else []
-    out, found = [], False
-    for ln in lines:
-        s = ln.strip()
-        if s and not s.startswith("#") and "=" in s \
-                and s.split("=", 1)[0].strip() == key:
+
+    def edit(old):
+        lines = old.splitlines() if old is not None else []
+        out, found = [], False
+        for ln in lines:
+            s = ln.strip()
+            if s and not s.startswith("#") and "=" in s \
+                    and s.split("=", 1)[0].strip() == key:
+                out.append(f"{key}={value}")
+                found = True
+            else:
+                out.append(ln)
+        if not found:
             out.append(f"{key}={value}")
-            found = True
-        else:
-            out.append(ln)
-    if not found:
-        out.append(f"{key}={value}")
-    write_owned(path, "\n".join(out) + "\n", mode=0o644)
+        return "\n".join(out) + "\n"
+    rewrite_owned(path, edit, mode=0o644)
 
 
 def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
