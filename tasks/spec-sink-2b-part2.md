@@ -87,7 +87,7 @@ beyond its lever (D21).
    there with `client = "sigmond"` (`sigmond/lib/sigmond/uploader_manifest.py:349`), and no legacy entry
    carries `governed = false`.  Without this rule a rollback of sigmond alone would silence the
    heartbeat (part 1 §11).
-3. The marker stands absent: **send**.  Part 1's behaviour holds until the carry-over finishes.
+3. No marker exists: **send**.  Part 1's behaviour holds until the carry-over finishes.
 4. The pipeline names no client (`client = ""`): **send**.  sigmond v3.69 through v3.72 renders no
    `client`.  Its manifest still carries the old rendered policy (`discard`, or a hold), and D19
    keeps `[uploads]` current, so that policy stands.  The daemon logs one INFO line per such
@@ -265,7 +265,7 @@ nothing.
 Design §10.1 also names `smd update`.  The code settles against it.  The first update into part 2 runs
 the old sigmond's update code, which has no hook.  `smd update` restarts nothing and never reaches the
 manifest step (D10), and the carry-over must precede the render that drops `discard`.  So the
-manifest step alone runs it.  `smd update` prints one line when the marker stands absent and the
+manifest step alone runs it.  `smd update` prints one line while no marker exists and the
 installed hs-uploader offers `gate`: "the sink switches take effect at the next `smd align`".
 
 ### 6.2 Inputs
@@ -316,7 +316,9 @@ keeps that behaviour.  Read literally, the design would give it `fill`, and part
 per-client command to lift it.
 
 Each file's first history entry carries `by = "carry-over"`, the reason "carried over from [uploads]
-mode = <mode>" or "… from PSK_USE_HS_UPLOADER=0", and, for a client file, one identity table per
+mode = <mode>" or "… from PSK_USE_HS_UPLOADER=0" (amended, ruling C25-1: when `[uploads]` holds a
+reason, `site.toml`'s reads "<that reason> (carried over from [uploads] mode = <mode>)", so a new
+station's "new station: …" survives), and, for a client file, one identity table per
 instance (design §3.4).  No per-instance lat/lon exists; the host's applies.
 
 D12 forbids a bulk update of `sink.db`.  The carry-over therefore writes no producer into old rows and
@@ -851,6 +853,7 @@ now say what the code does.
 | 6.1 | The install lock lives at `/run/hs-uploader-install/lock`, in a directory only root can write, not at `/run/lock/hs-uploader-install.lock`.  The v3.79 hs-uploader installer must use the new path.  Michael confirms this at merge time. | C14-3 |
 | 6.2 | A name seen only in `sink.db` counts only when it names a catalog entry, and resolves by fixed path alone. | C18-2 |
 | 6.3 | An unreadable or badly named stop-flag env file carries its client at `fill`.  In part 2 no `smd` verb raises a single client: `smd sink` is site-only (D18).  To raise one, run `hs-uploader sink set <client> upload --reason … --by …` as root. | C18-3 and its correction |
+| 6.3 | `site.toml`'s carried-over reason keeps the operator's `[uploads]` reason first, when one is set. | C25-1 |
 | 6.4 | The carry-over reads the states back through `sink status --json` before the lever step.  The marker carries one note line, which names every switch file written. | C18-4, C18-5 |
 | 6.6 | Under a site at `fill` or `off`, every client reads below `upload`, so on K3LR and on a fresh install the lever step lowers the wspr shim, `wspr-uploader` and the mag fallback too, wherever they stand armed. | C18-5 |
 | 6.7, 10 | Restore moves the marker aside, `.1`, `.2` … when the name is taken, and removes `pipelines.d/sigmond.toml`, even when re-verification fails. | Task 22 review |
@@ -863,9 +866,10 @@ now say what the code does.
 | 11.2 | A fourth verdict, INCONCLUSIVE, and the last line `RESULT: PASS (a AGREE, h HELD, d DISAGREE)`. | Task 12 |
 
 One product gap stays open (Task 24).  A restore leaves each checkout it moved detached at the
-restored commit, with no `.pin`.  `smd update` then pulls nothing into it: a detached checkout has no
-upstream, and `--unpin` releases only a pinned one.  Restore's own comment promises that `smd update`
-brings the components back onto main; it does not.  To move such a station forward, the operator runs
-`smd align --apply`, which moves each checkout to the latest blessed release (detached, with a
-`.pin`); `smd update --unpin` then releases them onto their branches.  The release notes say so; the
-fix belongs to the next build.
+restored commit.  Any `.pin` it had stays, still naming the newer commit.  `smd update` then pulls
+nothing into it, since a detached checkout has no upstream, and `smd update --unpin` does not release
+it.  Restore's own comment promises that `smd update` brings the components back onto main; it does
+not.  To move such a station forward, the operator runs `smd align --apply`, which moves each checkout
+to the latest blessed release, pinned, and re-runs bring-up.  Only a station meant to track branches
+then runs `smd update --apply --unpin`; an appliance stays pinned.  The release notes give the steps;
+the fix belongs to the next build.

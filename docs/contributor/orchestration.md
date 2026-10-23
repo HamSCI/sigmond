@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** sigmond ad53b95 on 2026-10-23 — code (`smd sink --help`, `commands/sink.py`, `commands/config.py` `_site_change`, `commands/uploader.py`, `install_lock.py`; earlier rows: `smd fleet --help`, `fleet.py:700,705,1028`)
+> **Verified against:** sigmond 913bfed on 2026-10-23 — code (`smd sink --help`, `commands/sink.py`, `commands/config.py` `_site_change`, `commands/uploader.py`, `install_lock.py`; earlier rows: `smd fleet --help`, `fleet.py:700,705,1028`)
 > **Canonical for:** sigmond's orchestration model and the smd verb→module map
 
 ## The shape
@@ -151,7 +151,7 @@ left to list: the v2 removals in
 | `reload` | operator | reload config in place via the control socket or SIGHUP, falling back to restart | `cmd_reload` → `control_socket.py`, `lifecycle.py` | yes (root + lock) |
 | `remote` | operator | the operator's switch for remote access on an appliance station: `status`, `off` (stays off across reboots), `on`. It asks the Proxmox host over the private link, with a key that can run one script there (`sigmond-rac-switch`), and prints the host's answer; the host alone turns the tunnel on or off (tasks/plan-remote-access.md). `motd` prints the login banner's one line from the last answer | dispatch branch → `commands/remote.py` | all but `motd` do (root: the pairing key belongs to root) |
 | `restart` | operator | restart managed units, `reset-failed` first | `cmd_restart` → `lifecycle.py`, `component_state.py`, `catalog.py` | yes (root + lock) |
-| `sink` | operator | the site sink switch, in the sink words of tasks/plan-sink-control.md §2.1: `status`; `off` (send no data and store nothing new for upload; needs `--reason` and a typed confirmation or `--yes`); `fill` (store and send no data; until hs-uploader cleans the sink itself in v3.79, sigmond's trim keeps FT8 spots for one hour and WSPR spots for 24 hours, sent or not); `upload` (store and send). With an hs-uploader that offers the feature word `gate`, each verb writes `/etc/hs-uploader/sinks/site.toml` and the `[uploads]` mirror together; see [The site sink switch](#the-site-sink-switch). Without `gate` it writes `[uploads]` alone, as v3.78 did, and `fill` sets the legacy hold. Leaving `off`, by any verb, keeps today's and yesterday's (UTC) packages: they stay and ship. Older GRAPE packages and magnetometer zips move aside, outside the spools. It refuses while their packaging runs. The verb is site-only: `smd sink <client>` refuses, and no smd verb raises one client. It drives the same handler as `upload` | `cmd_sink` → `commands/sink.py`, `commands/config.py` (`cmd_config_uploads`, `_site_change`, `_close_doors`), `sink_levers.py`, `sink_mirror.py`, `sink_state.py`, `sink_doors.py` | all but `status` do (root) |
+| `sink` | operator | the site sink switch, in the sink words of tasks/plan-sink-control.md §2.1. `status` shows it. `off` sends no data and stores nothing new for upload; it needs `--reason` and a typed confirmation or `--yes`. `fill` stores and sends no data; until v3.79, sigmond's trim keeps FT8 spots for one hour and WSPR spots for 24 hours, sent or not. `upload` stores and sends. With an hs-uploader that offers `gate`, each verb writes `site.toml` and the `[uploads]` mirror together ([The site sink switch](#the-site-sink-switch)); without it, `[uploads]` alone, as v3.78 did. Leaving `off` keeps today's and yesterday's (UTC) packages and moves older ones aside; it refuses while packaging runs. The verb is site-only: `smd sink <client>` refuses. It shares its handler with `upload` | `cmd_sink` → `commands/sink.py`, `commands/config.py` (`cmd_config_uploads`, `_site_change`, `_close_doors`), `sink_levers.py`, `sink_mirror.py`, `sink_state.py`, `sink_doors.py` | all but `status` do (root) |
 | `status` | daily | service health snapshot plus each client's own inventory: version, channels, frequencies, timing judge, PSWS state | `cmd_status` → `catalog.py`, `cpu.py`, `psws.py`, `timing_judge.py`, `ui.py` | no |
 | `start` | operator | start managed units in `order_units()` order; also enables an installed-but-disabled named component | `cmd_start` → `lifecycle.py`, `component_state.py`, `harmonize.py` | yes (root + lock) |
 | `stop` | operator | stop managed units, reverse start order | `cmd_stop` → `lifecycle.py` | yes (root + lock) |
@@ -254,9 +254,12 @@ working directory, `PYTHONPATH` and the user's site directory out of
 **The install lock.**  `--write` (root) holds hs-uploader's install lock,
 `/run/hs-uploader-install/lock`, from the features probe through the
 landing (`install_lock.held`), so two manifest steps never interleave.
-The lock lives in a directory only root can write (0700, checked by
-`lstat` and again on the open descriptor), not in the world-writable
-`/run/lock`, so no other account can plant a file or a link at its name.
+The lock lives in a directory only root can write, not in the
+world-writable `/run/lock`, so no other account can plant a file or a link
+at its name.  The step creates the directory at mode 0700.  It accepts an
+existing one only when `lstat` shows a real directory owned by root that
+neither group nor other can write, and checks it again on the open
+descriptor.
 The step waits up to 30 s for another holder, then exits 1 with one line.
 hs-uploader's own installer does not take the lock yet; the v3.79
 installer must use this path.  The read-only step takes no lock.
@@ -268,7 +271,8 @@ renders, under the lock, the write step does one of these:
   `/var/lib/hs-uploader/carry-over-v1.done`: the carry-over
   (`sink_carryover.py`).  It writes `site.toml` from `[uploads]`
   (`discard` gives `off`, the legacy hold gives `fill`, anything else
-  `upload`), and a switch file for each governed client that lacks one,
+  `upload`), with `[uploads]`'s own reason first, so a new station's
+  `new station: …` survives, and a switch file for each governed client that lacks one,
   each through `hs-uploader sink set`.  A client goes to `fill` when an
   instance env sets `PSK_USE_HS_UPLOADER=0` or
   `METEOR_SCATTER_USE_HS_UPLOADER=0`, when an instance env file cannot be
@@ -364,10 +368,12 @@ again from `[uploads]`, keeping every client file.  Roll back only with
 `smd admin manifest restore`: after a hand `git checkout`, a part 2 daemon
 keeps enforcing a `site.toml` that the old `smd upload` no longer writes.
 
-A restore leaves each checkout it moved detached, with no `.pin`, and
-`smd update` pulls nothing into a detached checkout.  To move such a
-station forward, run `smd align --apply`, which moves each checkout to the
-latest blessed release.
+A restore leaves each checkout it moved detached at the restored commit.
+Any `.pin` it had stays, still naming the newer commit.  `smd update` pulls
+nothing into such a checkout, and `smd update --unpin` does not release
+it.  To move the station forward, run `smd align` (a dry run), then `smd
+align --apply`, which moves each checkout to the latest blessed release,
+pinned, and re-runs bring-up.
 
 ## The site sink switch
 
@@ -387,10 +393,12 @@ hs-uploader that offers `gate`, `_site_change` runs, in order:
    reading `<file>: [uploads] now mirrors the site sink switch (<state>)`;
 5. the manifest step, which alone takes the install lock.
 
-Before the carry-over marker stands, steps 1 and 2 wait: the carry-over in
-step 5 lowers and restarts once.  A failure in steps 1-4 is named and the
-later steps still run, so an `off` order always lands; the command then
-exits 1.  Leaving `off` closes the doors first (`_close_doors`).  The
+While no carry-over marker exists, steps 1 and 2 wait: the carry-over in
+step 5 lowers and restarts once.  The command names a failure in steps
+1-4 and still runs the later steps, so an `off` order always lands; it then
+exits 1.  One exception: while no marker exists, a failed write of
+coordination.toml's `[uploads]` stops the command before step 5, since the
+carry-over would copy the old mode back into `site.toml`.  Leaving `off` closes the doors first (`_close_doors`).  The
 command closes with one line per state:
 
 - `site sink: off — nothing ships and nothing new is stored for upload;
@@ -411,14 +419,16 @@ sink set <client> upload --reason … --by …`, run as root.
 --json` once the marker stands, and `[uploads]` before.  They print the
 site line, `site sink: upload (store and send); set <time> by <who> —
 <reason>`, then each client's file and effective state and which switch
-sets it, the held pipelines and the refused files.  Faults follow:
-`UNMANAGED: …` for an in-process sender still armed below `upload`,
-`cannot check: …` for one sigmond could not read, `stale writer: …` for a
-recorder still on the old writer code, and `mirror mismatch: …` when
-`[uploads]` disagrees with `site.toml`.  When `sink status` cannot be read,
-the command says so, shows `[uploads]` and exits 1.  `smd update` never
-reaches the manifest step; while the marker stands absent and the
-installed hs-uploader offers `gate`, it prints ``the sink switches take
+sets it, the held pipelines and the refused files.  Faults follow, each
+marked ✗ and each making the command exit 1: `UNMANAGED: …` for an
+in-process sender still armed below `upload`, `cannot check: …` for one
+sigmond could not read, and `mirror mismatch: …` when `[uploads]`
+disagrees with `site.toml`.  `stale writer: …` names a recorder still on
+the old writer code; it prints as a warning (⚠) and leaves the exit code
+alone, since the next change to `off` restarts that recorder first.  When
+sigmond cannot read `sink status`, the command says so, shows `[uploads]`
+and exits 1.  `smd update` never reaches the manifest step; while no
+marker exists and the installed hs-uploader offers `gate`, it prints ``the sink switches take
 effect at the next `smd align` ``.
 
 ## Heartbeat and the board

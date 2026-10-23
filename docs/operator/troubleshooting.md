@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 16f47bc on 2026-10-11 — the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
+> **Verified against:** sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 16f47bc on 2026-10-11: the console panel's bring-up and guest-agent lines checked against sigmond-appliance 68e966a (`firstboot-v3.sh`) and `bin/sigmond-firstrun-bringup`; earlier checks, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
@@ -193,7 +193,7 @@ It follows the uploader until you press Ctrl-C; it changes nothing. There are
 
 That fourth answer is the one most likely to be mistaken for a crash. Confirm it
 with the next two commands: if `smd sink status` says
-`site sink: off` or `site sink: hold (legacy)`, or `smd component list` shows `wspr-recorder` and
+`site sink: off`, `site sink: fill` or `site sink: hold (legacy)`, or `smd component list` shows `wspr-recorder` and
 `psk-recorder` at LIFECYCLE `binary, on PATH` rather than `enabled, running`,
 then this station is not meant to be uploading spots
 ([registration.md → *when it says "no active uploader"*](registration.md#when-it-says-no-active-uploader);
@@ -224,6 +224,13 @@ DASI002's answer and correct for that station. A new station answers
 `⚠ site sink: off — no data ships and no backlog builds — new station: …` until
 someone checks it and runs `smd sink upload`.
 
+On a station with the sink switch files (sink control step 2b part 2) the same
+answers read `⚠ site sink: fill (store and send nothing); set … by … — <reason>`
+and `⚠ site sink: off (nothing ships and nothing new is stored for upload); set …
+by … — new station: …`. A line such as `psk-recorder: its file reads fill;
+effective fill, set by its own switch` means that one client sends nothing, even
+while the site switch reads `upload`.
+
 **What to do**
 
 - `wsprnet=posted:0` with cycles printing → your station is healthy and shipping;
@@ -238,7 +245,7 @@ someone checks it and runs `smd sink upload`.
   ([INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)),
   then run `smd sink upload`. It refuses while GRAPE or the magnetometer
   packages a day (about 01:00 to 05:00 UTC); run it again when that finishes.
-- `site sink: off` or `site sink: hold (legacy)` with any other reason →
+- `site sink: off`, `site sink: fill` or `site sink: hold (legacy)` with any other reason →
   **do not change it yourself.** Somebody set it for a reason
   ([registration.md §6](registration.md#6-confirming-everything-flows)).
   Ask your [fleet admin](glossary.md).
@@ -267,8 +274,8 @@ combination is not something you can fix from the station.
    shows **no `psk-recorder:` block**, the client is installed but switched off
    — the same case as the wsprnet section's fourth outcome. Confirm with
    `smd component list` (LIFECYCLE `binary, on PATH` or `configured` rather than
-   `enabled, running`) and `smd sink status`; if it says `site sink: off` or
-   `site sink: hold (legacy)`, this station does not report FT8/FT4 on purpose and
+   `enabled, running`) and `smd sink status`; if it says `site sink: off`,
+   `site sink: fill` or `site sink: hold (legacy)`, this station does not report FT8/FT4 on purpose and
    there is nothing to fix
    ([day-2.md → *Installed, enabled, shown*](day-2.md#installed-enabled-shown)).
 4. **`psk-recorder` is enabled but not running.**
@@ -428,7 +435,7 @@ all four destinations — that gap is row 8 of the
 **Likely causes, most common first**
 
 1. **Nothing** — the shape above.
-2. **The site sink switch holds uploads back** (`hold (legacy)` on a testbed or a station with no antenna).
+2. **The site sink switch holds uploads back** (`fill` or `hold (legacy)` on a testbed or a station with no antenna).
 3. **A real network outage.** Then *every* counter stops, not one queue.
 
 **What to check**
@@ -441,9 +448,13 @@ smd watch uploads
 ```
 
 *Good:* `✓ site sink: upload`, then counters moving each cycle. *Bad:*
-`⚠ site sink: hold (legacy) — … <reason>` or `⚠ site sink: off — … <reason>` (deliberate unless the reason reads `new station: …`; ask before changing), or
-counters flat while cycles keep printing. An `off` switch keeps no backlog, so
-it does not explain a growing pending count.
+`⚠ site sink: fill (store and send nothing); … — <reason>`,
+`⚠ site sink: hold (legacy) — … <reason>` or `⚠ site sink: off … <reason>`
+(deliberate unless the reason reads `new station: …`; ask before changing), or
+counters flat while cycles keep printing. `fill` and `hold (legacy)` store and
+send nothing, so the pending count grows. `off` stores nothing new for upload,
+so it does not explain a growing count; on a station with the sink switch files
+it keeps what it stored before the switch, and that ships when the switch rises.
 
 Then check the outside world:
 [registration.md §6](registration.md#6-confirming-everything-flows) says where

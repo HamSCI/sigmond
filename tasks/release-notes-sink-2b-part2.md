@@ -26,7 +26,7 @@ The sink switches now decide what leaves a station.
 
 ## The first manifest step after the update
 
-`smd update` pulls the code and changes nothing else.  It prints "the sink switches take effect at
+`smd update` pulls the code and does not run the carry-over.  It prints "the sink switches take effect at
 the next `smd align`".  The next manifest step (`smd align`, `smd apply`, `smd sink …`) carries the
 station's `[uploads]` setting into switch files once, then writes the carry-over marker
 `/var/lib/hs-uploader/carry-over-v1.done`.  Only then do the switches take effect.
@@ -44,15 +44,28 @@ station's `[uploads]` setting into switch files once, then writes the carry-over
 
 ## Rollback
 
-**Roll back only with `smd admin manifest restore`.**  A restore to a sigmond older than this release
-moves the carry-over marker aside and removes `pipelines.d/sigmond.toml`, so the old code and the
-switch files never disagree.  A hand rollback (`git checkout` in `/opt/git/sigmond/…`) is not
-supported: a new hs-uploader keeps enforcing a `site.toml` that the old `smd upload` no longer writes.
+**Roll back only with `smd admin manifest restore <manifest file> --apply`.**  A restore to a
+sigmond older than this release moves the carry-over marker aside and removes
+`pipelines.d/sigmond.toml`, so the old code and the switch files never disagree.  sigmond does not
+support a hand rollback (`git checkout` in `/opt/git/sigmond/…`): a new hs-uploader keeps enforcing a
+`site.toml` that the old `smd upload` no longer writes.
 
-**Known gap.**  A restore leaves each checkout it moved detached at the restored commit.  `smd update`
-pulls nothing into a detached checkout, so after a restore `smd update` alone never brings the
-station forward again.  Run `smd align --apply`: it moves each checkout to the latest blessed
-release.  A fix belongs to the next build.
+**Returning to the current release after a restore.**  After `smd admin manifest restore <manifest
+file> --apply`, each checkout the restore moved sits detached at the restored commit.  Any old `.pin`
+stays and still names the newer commit.  `smd update` pulls nothing into such a checkout, and `smd
+update --unpin` does not release it.  To return the station to the current release:
+
+1. `smd align`: a dry run.  It lists each component that moves forward to the latest blessed release
+   (`--release <tag>` names another).
+2. `smd align --apply`: moves each checkout to that release, pinned, and re-runs bring-up.  Bring-up's
+   manifest step finds no marker, carries the station over again from `[uploads]`, and keeps every
+   client's switch file.  It then restarts each service still running old code.
+3. `smd sink status`: confirm the site line, and that hs-uploader enforces the switches.
+4. Later, run `smd align --verify`.
+
+Only a station meant to track branches runs `smd update --apply --unpin` afterwards.  This gap
+belongs to the next build: restore's own comment promises that `smd update` brings components back
+onto their branches, and it does not.
 
 ## For the next build (v3.79)
 

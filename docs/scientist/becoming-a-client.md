@@ -2,7 +2,7 @@
 
 > **Audience:** scientist
 > **Status:** current
-> **Verified against:** sigmond 3008453 on 2026-10-07 — sink writer links checked against lib/sigmond/hamsci_sink/
+> **Verified against:** sigmond 913bfed on 2026-10-23 — governed pipelines checked against hs-uploader gate.py and lib/sigmond/sink_carryover.py; earlier, at 3008453 on 2026-10-07: sink writer links checked against lib/sigmond/hamsci_sink/
 > **Canonical for:** graduating a capture to a sigmond client (Tier 1)
 
 [Tier 0](capture-quickstart.md) ends with bytes on a disk and a person who
@@ -285,6 +285,14 @@ Placeholders sigmond fills in from the station's own config — `{call}`,
 callsign or a key path. A pipeline whose required identity is missing is
 **skipped with a warning**, not failed. Render and check with
 `smd admin uploader manifest --check` (read-only diff) / `--write` / `--enable`.
+
+Declaring pipelines makes your client a *governed* client: once a station has
+the sink switch files, hs-uploader sends its pipelines only while its switch,
+`/etc/hs-uploader/sinks/<client>.toml`, reads `upload`. With no switch file, the
+pipelines stay held. The next `smd align` (the manifest step) gives a client
+installed after the carry-over its switch file, by the carry-over's table
+(usually `upload`), under the site
+switch.
 
 **What exists today** (`hs_uploader/pipeline_factory.py`, 2026-08-23):
 

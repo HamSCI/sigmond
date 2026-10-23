@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond ad53b95 on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
+> **Verified against:** sigmond 913bfed on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -149,7 +149,7 @@ smd sink status
 smd component list
 ```
 
-`⚠ site sink: off` or `⚠ site sink: hold (legacy)` in the first, or a LIFECYCLE of
+`⚠ site sink: off`, `⚠ site sink: fill` or `⚠ site sink: hold (legacy)` in the first, or a LIFECYCLE of
 `binary, on PATH` / `configured` rather than `enabled, running` for
 `wspr-recorder` and `psk-recorder` in the second, and you have your answer:
 nothing is wrong, this station is not meant to be uploading spots
@@ -471,7 +471,7 @@ Don't judge PSWS on day one.
 > | `✓ site sink: upload (store and send); set <time> by <who> — <reason>` | normal |
 > | `⚠ site sink: fill (store and send nothing); set … by … — <reason>` | a pause: the station stores and sends no data. Until v3.79, the station keeps FT8 spots for one hour and WSPR spots for 24 hours, sent or not. `smd sink upload` sends what remains, oldest first |
 > | `⚠ site sink: off (nothing ships and nothing new is stored for upload); set … by … — <reason>` | no data leaves and nothing new is stored for upload; data stored before `off` waits and ships when the switch rises. A new station starts here, with the reason `new station: …` |
-> | `<client>: its file reads fill; effective fill, set by its own switch` | that one client stays at `fill` whatever the site switch says. Only your fleet admin raises it |
+> | `<client>: its file reads fill; effective fill, set by its own switch` | that one client sends nothing, even while the site switch reads `upload`. Only your fleet admin raises it |
 > | `✗ UNMANAGED: …`, `✗ cannot check: …`, `✗ mirror mismatch: …` | a fault: a sender that still runs outside the switch, one sigmond could not read, or `[uploads]` disagreeing with the switch. Ask your fleet admin |
 >
 > When the switch leaves `off`, `smd sink upload` moves every GRAPE package and
