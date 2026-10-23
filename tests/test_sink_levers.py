@@ -61,7 +61,7 @@ class FakeSystemctl:
     def __init__(self, units):
         self.units = units
         self.calls = []
-        self.clock = int(time.time()) + 100     # later than any file here
+        self.clock = None
         self.on_restart = None
 
     def __call__(self, cmd, **kw):
@@ -76,10 +76,12 @@ class FakeSystemctl:
             u = self.units.setdefault(unit, {})
             if u.get("fail_restart"):
                 return subprocess.CompletedProcess(cmd, 1, "", "failed")
-            self.clock += 1
+            # systemd prints whole seconds: stamp the real current second,
+            # so a lever written in this second compares as systemd would.
+            now = int(time.time()) if self.clock is None else self.clock
             u["ActiveState"] = "active"
-            u["ActiveEnterTimestamp"] = f"@{self.clock}"
-            u["ActiveEnterTimestampMonotonic"] = str(self.clock * 10**6)
+            u["ActiveEnterTimestamp"] = f"@{now}"
+            u["ActiveEnterTimestampMonotonic"] = str(time.monotonic_ns() // 1000)
             if self.on_restart:
                 self.on_restart(unit)
             return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -165,6 +167,7 @@ class Base(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"{name}.env"
         f.write_text(env_text)
+        os.utime(f, (started - 500, started - 500))   # written before it started
         self.inst[client].append(unit)
         self.units[unit] = {"env_files": [str(f)], "ActiveState": "active",
                             "ActiveEnterTimestamp": f"@{started}",
@@ -282,6 +285,30 @@ class EachLever(Base):
         self.lever(["wspr-recorder"])
         self.assertIn(["disable", "--now", UPLOADER], self.sc.calls)
 
+    def test_wspr_uploader_other_unit_file_states_armed(self):
+        for state in ("linked", "indirect", "generated", "enabled-runtime"):
+            with self.subTest(state=state):
+                self.setUp()
+                self.uploader(active="inactive", state=state)
+                plan, res = self.lever(["wspr-recorder"])
+                self.assertIn(["disable", "--now", UPLOADER], self.sc.calls)
+                self.assertEqual(res.disabled, [UPLOADER])
+
+    def test_verify_names_uploader_in_other_states(self):
+        for state in ("linked", "indirect", "generated"):
+            with self.subTest(state=state):
+                self.setUp()
+                self.uploader(active="inactive", state=state)
+                plan = self.plan(["wspr-recorder"])
+                self.assertTrue(any(UPLOADER in m for m in
+                                    L.verify_levers(plan, systemctl=self.sc)))
+        for state in ("disabled", "masked"):           # control
+            with self.subTest(state=state):
+                self.setUp()
+                self.uploader(active="inactive", state=state)
+                plan = self.plan(["wspr-recorder"])
+                self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
+
     def test_wspr_uploader_already_off_left_alone(self):
         self.uploader(active="inactive", state="disabled")
         _, res = self.lever(["wspr-recorder"])
@@ -320,6 +347,10 @@ class EachLever(Base):
         self.assertEqual(self.sc.verbs(), [])
         self.assertEqual(res.changed, [])
         self.assertEqual(sorted(res.left_alone), sorted([PSK_A, MS_A, WSPR_A]))
+        # positive control: the same harness re-armed sees the write and restart
+        self.instance("psk-recorder", PSK_B, "PSK_DELIVERY_PIPELINES=direct\n")
+        _, res = self.lever(["psk-recorder"])
+        self.assertEqual(self.sc.verbs(), [["restart", PSK_B]])
 
 
 class OnlyTouched(Base):
@@ -392,6 +423,8 @@ class OnlyTouched(Base):
         _, res = self.lever([])
         self.assertEqual(self.sc.calls, [])
         self.assertEqual(res.changed, [])
+        self.lever(["psk-recorder"])                   # positive control
+        self.assertIn(["restart", PSK_A], self.sc.verbs())
 
 
 class Failures(Base):
@@ -467,6 +500,51 @@ class Failures(Base):
         self.assertEqual([x[0] for x in res.failures], [PSK_A])
 
 
+class Unrestarted(Base):
+    """Ruling C17-2: a lever written but never restarted is not forgotten."""
+
+    def test_next_run_restarts_what_the_last_wrote_but_did_not_restart(self):
+        f = self.instance("psk-recorder", PSK_A, "PSK_DELIVERY_PIPELINES=direct\n")
+        self.units[PSK_A]["fail_restart"] = True
+        plan, res = self.lever(["psk-recorder"])
+        self.assertEqual(env_of(f)["PSK_DELIVERY_PIPELINES"], "server-raw")
+        self.assertEqual(res.restarted, [])
+        # the env reads lowered, but the process predates the file
+        msgs = L.verify_levers(plan, systemctl=self.sc)
+        self.assertEqual(len(msgs), 1)
+        self.assertIn(PSK_A, msgs[0])
+        del self.units[PSK_A]["fail_restart"]
+        n = len(self.sc.restarts())
+        plan2, res2 = self.lever(["psk-recorder"])
+        self.assertEqual(plan2.restart_only, (PSK_A,))
+        self.assertEqual(plan2.env_levers, ())
+        self.assertEqual(res2.changed, [])               # no write
+        self.assertEqual(self.sc.restarts()[n:], [PSK_A])
+        self.assertEqual(res2.restarted, [PSK_A])
+        self.assertIn(f"restarted {PSK_A}", "\n".join(res2.lines()))
+        self.assertEqual(L.verify_levers(plan2, systemctl=self.sc), [])
+        # and a third run, now current, restarts nothing
+        _, res3 = self.lever(["psk-recorder"])
+        self.assertEqual(res3.restarted, [])
+
+    def test_verify_checks_untouched_in_scope_instance(self):
+        f = self.instance("wspr-recorder", WSPR_A, "WSPR_USE_HS_UPLOADER=0\n")
+        plan = self.plan(["wspr-recorder"])
+        self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])  # control
+        os.utime(f, (4000, 4000))                    # lowered after it started
+        msgs = L.verify_levers(plan, systemctl=self.sc)
+        self.assertEqual(len(msgs), 1)
+        self.assertIn(WSPR_A, msgs[0])
+
+    def test_apply_skip_does_not_restart_again(self):
+        self.instance("psk-recorder", PSK_A, "PSK_DELIVERY_PIPELINES=direct\n")
+        self.instance("psk-recorder", PSK_B, "PSK_DELIVERY_PIPELINES=direct\n")
+        plan = self.plan(["psk-recorder"])
+        res = L.apply_levers(plan, systemctl=self.sc, skip=[PSK_A])
+        self.assertEqual(self.sc.restarts(), [PSK_B])
+        self.assertEqual(res.restarted, [PSK_B])
+
+
 class Radiod(Base):
     """Test 19: radiod's start time is read before the first restart and
     after the last; a move raises RadiodMoved naming the unit."""
@@ -481,6 +559,24 @@ class Radiod(Base):
         with self.assertRaises(L.RadiodMoved) as cm:
             self.lever(["psk-recorder"])
         self.assertIn(RADIOD, str(cm.exception))
+
+    def test_radiod_moved_carries_partial_result(self):
+        f = self.instance("psk-recorder", PSK_A, "PSK_DELIVERY_PIPELINES=direct\n")
+        self.instance("psk-recorder", PSK_B, "PSK_DELIVERY_PIPELINES=direct\n")
+        self.units[PSK_B]["fail_restart"] = True
+
+        def bump(unit):
+            self.units[RADIOD]["ActiveEnterTimestamp"] = "@9999"
+        self.sc.on_restart = bump
+        with self.assertRaises(L.RadiodMoved) as cm:
+            self.lever(["psk-recorder"])
+        r = cm.exception.result
+        self.assertIsNotNone(r)
+        self.assertIn(f, r.changed)
+        self.assertEqual(r.restarted, [PSK_A])
+        self.assertEqual([x[0] for x in r.failures], [PSK_B])
+        self.assertEqual([x[0] for x in cm.exception.failures], [PSK_B])
+        self.assertIn(f"changed {f}", "\n".join(r.lines()))
 
     def test_radiod_still_raises_when_only_one_of_several_moves(self):
         self.units["radiod@second.service"] = {
@@ -518,6 +614,8 @@ class Radiod(Base):
         with self.assertRaises(ValueError):
             L.restart_units([PSK_A, RADIOD], systemctl=self.sc)
         self.assertEqual(self.sc.calls, [])
+        L.restart_units([PSK_A], systemctl=self.sc)    # positive control
+        self.assertEqual(self.sc.restarts(), [PSK_A])
 
     def test_restart_units_one_at_a_time_each_once(self):
         L.restart_units([PSK_A, PSK_A, MS_A], systemctl=self.sc)
@@ -527,6 +625,8 @@ class Radiod(Base):
     def test_nothing_to_restart_reads_nothing(self):
         L.restart_units([], systemctl=self.sc)
         self.assertEqual(self.sc.calls, [])
+        L.restart_units([PSK_A], systemctl=self.sc)    # positive control
+        self.assertEqual(len(self.sc.calls), 3)        # show, restart, show
 
 
 class Verify(Base):
@@ -617,7 +717,8 @@ class StaleWriters(Base):
                                        writer_py=self.writer,
                                        systemctl=self.sc)
         order.append(("change", "off"))
-        self.assertEqual(done, [PSK_A, MS_A, WSPR_A])
+        self.assertEqual(done.restarted, [PSK_A, MS_A, WSPR_A])
+        self.assertEqual(done.notes, [])
         self.assertEqual(order, [("restart", PSK_A), ("restart", MS_A),
                                  ("restart", WSPR_A), ("change", "off")])
         self.assertNotIn(PSK_B, self.sc.restarts())
@@ -625,7 +726,7 @@ class StaleWriters(Base):
         again = L.restart_stale_writers(self.topo, to_off=True,
                                         writer_py=self.writer,
                                         systemctl=self.sc)
-        self.assertEqual(again, [])
+        self.assertEqual(again.restarted, [])
         self.assertEqual(len(self.sc.restarts()), 3)
 
     def test_fill_restarts_nothing(self):
@@ -633,8 +734,13 @@ class StaleWriters(Base):
         done = L.restart_stale_writers(self.topo, to_off=False,
                                        writer_py=self.writer,
                                        systemctl=self.sc)
-        self.assertEqual(done, [])
+        self.assertEqual(done.restarted, [])
         self.assertEqual(self.sc.calls, [])
+        # positive control: the same station going off restarts the stale ones
+        done = L.restart_stale_writers(self.topo, to_off=True,
+                                       writer_py=self.writer,
+                                       systemctl=self.sc)
+        self.assertEqual(done.restarted, [PSK_A, MS_A, WSPR_A])
 
     def test_lever_restarted_instance_not_restarted_twice(self):
         self.station()
@@ -654,12 +760,63 @@ class StaleWriters(Base):
         L.restart_stale_writers(self.topo, to_off=True, writer_py=self.writer,
                                 systemctl=self.sc, skip=[PSK_A, MS_A])
         self.assertEqual(self.sc.restarts(), [WSPR_A])
+        # control: without skip, the same stale units restart
+        self.sc.calls.clear()
+        self.units[PSK_A]["ActiveEnterTimestamp"] = "@2000"
+        L.restart_stale_writers(self.topo, to_off=True, writer_py=self.writer,
+                                systemctl=self.sc)
+        self.assertIn(PSK_A, self.sc.restarts())
 
-    def test_unreadable_writer_counts_every_running_instance_stale(self):
+    def test_unreadable_writer_means_nothing_stale_and_says_so(self):
         self.station()
+        absent = self.tmp / "absent.py"
+        done = L.restart_stale_writers(self.topo, to_off=True,
+                                       writer_py=absent, systemctl=self.sc)
+        self.assertEqual(done.restarted, [])
+        self.assertEqual(self.sc.restarts(), [])
+        self.assertEqual(len(done.notes), 1)
+        self.assertIn(str(absent), done.notes[0])
+        self.assertIn(str(absent), "\n".join(done.lines()))
+        # control: the readable writer finds the stale ones
         self.assertEqual(L.stale_writer_units(
-            self.topo, writer_py=self.tmp / "absent.py", systemctl=self.sc),
-            [PSK_A, PSK_B, MS_A, WSPR_A])
+            self.topo, writer_py=self.writer, systemctl=self.sc),
+            [PSK_A, MS_A, WSPR_A])
+
+    def test_same_second_counts_as_after(self):
+        self.station()
+        self.units[PSK_A]["ActiveEnterTimestamp"] = "@3000"
+        os.utime(self.writer, (3000.9, 3000.9))
+        self.assertNotIn(PSK_A, L.stale_writer_units(
+            self.topo, writer_py=self.writer, systemctl=self.sc))
+        os.utime(self.writer, (3001.0, 3001.0))        # control: next second
+        self.assertIn(PSK_A, L.stale_writer_units(
+            self.topo, writer_py=self.writer, systemctl=self.sc))
+
+    def test_composed_lever_first_then_stale_then_change(self):
+        # Task 20's order (ruling C17-5): the lever step, then the stale
+        # writers skipping what it restarted, then the site write.
+        self.station()
+        (self.etc / "psk-recorder/env/AC0G=S.env").write_text(
+            "PSK_DELIVERY_PIPELINES=direct\n")
+        os.utime(self.etc / "psk-recorder/env/AC0G=S.env", (1000, 1000))
+        (self.etc / "psk-recorder/env/AC0G=T.env").write_text(
+            "PSK_DELIVERY_PIPELINES=server-raw\n")
+        os.utime(self.etc / "psk-recorder/env/AC0G=T.env", (1000, 1000))
+        order = []
+        self.sc.on_restart = lambda u: order.append(("restart", u))
+        res = L.apply_levers(self.plan(["psk-recorder"]), systemctl=self.sc)
+        order.append(("levers done", None))
+        st = L.restart_stale_writers(self.topo, to_off=True,
+                                     writer_py=self.writer, systemctl=self.sc,
+                                     skip=res.restarted)
+        order.append(("change", "off"))
+        self.assertEqual(res.restarted, [PSK_A])
+        self.assertEqual(st.restarted, [MS_A, WSPR_A])
+        self.assertEqual(order, [("restart", PSK_A), ("levers done", None),
+                                 ("restart", MS_A), ("restart", WSPR_A),
+                                 ("change", "off")])
+        restarts = self.sc.restarts()
+        self.assertEqual(len(restarts), len(set(restarts)))
 
 
 class Static(unittest.TestCase):

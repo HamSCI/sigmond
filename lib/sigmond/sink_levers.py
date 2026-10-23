@@ -44,7 +44,14 @@ Stale writers (spec §4.3): before any effective state first reads ``off``,
 each running psk-recorder, meteor-scatter and wspr-recorder instance that
 started before the installed hs-uploader ``sink/writer.py`` changed
 restarts, so no part 1 writer stores rows during ``off``.  An instance the
-lever step already restarted does not restart twice.
+lever step already restarted does not restart twice (the lever step runs
+first; pass ``LeverResult.restarted`` as ``skip``).  A writer file whose
+time cannot be read makes nothing stale and says so.
+
+Start times compare at whole seconds, as systemd prints them.  An instance
+lowered on disk that still runs from before its env file changed (a lever
+written by an earlier run whose restart failed) restarts with no write, and
+``verify_levers`` names it until it does.
 
 This module calls systemctl through ``_systemctl`` alone, with the verbs
 ``restart``, ``disable --now`` and ``show`` (the RESTART GATE's static test
@@ -52,6 +59,7 @@ reads it).  Stdlib only.
 """
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import tomllib
@@ -73,11 +81,23 @@ RADIOD_PATTERNS = ("radiod@*", "radiod.service")
 _RUNNING = ("active", "activating", "reloading", "deactivating")
 _TRUE = ("1", "true", "yes", "on")
 _MS_QUIET = ("off", "none", "disabled")
+# wspr-uploader counts as armed in any other UnitFileState (linked,
+# indirect, generated, static, enabled...); "" means systemd did not say.
+_UNIT_FILE_OFF = ("disabled", "masked", "masked-runtime", "not-found", "")
 _RESTART_TIMEOUT = 300
 
 
 class RadiodMoved(RuntimeError):
-    """A radiod unit's start time changed across the restarts."""
+    """A radiod unit's start time changed across the restarts.
+
+    ``failures`` lists the ``(unit, reason)`` restarts that failed before
+    the check; ``result``, set by ``apply_levers``, holds the partial
+    LeverResult (what was written and restarted before the error)."""
+
+    def __init__(self, msg, failures=()):
+        super().__init__(msg)
+        self.failures = list(failures)
+        self.result = None
 
 
 class RestartFailed(RuntimeError):
@@ -157,6 +177,24 @@ def _radiod_times(systemctl) -> dict:
     return out
 
 
+def _runs_from_before(systemctl, unit, mtime: float) -> bool:
+    """True when ``unit`` runs and started before ``mtime``.
+
+    systemd prints ``ActiveEnterTimestamp`` in whole seconds, so the
+    comparison runs at whole seconds: a unit that started in the same
+    second a file changed counts as started after it (``started <
+    floor(mtime)``).  A running unit whose start time cannot be read counts
+    as started before."""
+    p = _unit_props(systemctl, unit, ("ActiveState", "ActiveEnterTimestamp"))
+    if p.get("ActiveState", "") not in _RUNNING:
+        return False
+    try:
+        started = math.floor(float(p.get("ActiveEnterTimestamp", "").lstrip("@")))
+    except ValueError:
+        return True
+    return started < math.floor(mtime)
+
+
 def _is_radiod(unit: str) -> bool:
     return unit == "radiod" or unit.startswith(("radiod@", "radiod."))
 
@@ -196,7 +234,7 @@ def restart_units(units, *, systemctl=subprocess.run) -> None:
             "radiod moved during the lever step's restarts: "
             + ", ".join(f"{u} (ActiveEnterTimestamp {before.get(u, ('absent',))[0] or 'none'}"
                         f" -> {after.get(u, ('absent',))[0] or 'none'})"
-                        for u in moved))
+                        for u in moved), failures=failed)
     if failed:
         raise RestartFailed(failed)
 
@@ -243,11 +281,13 @@ class LeverPlan:
     wspr_uploader_checked: bool = False
     left_alone: tuple = ()         # units and files already lowered
     problems: tuple = ()           # (unit or file, why) the plan cannot act on
+    restart_only: tuple = ()       # lowered on disk, still running from before
     etc: Path = Path("/etc")
 
     @property
     def restart(self) -> list:
-        return list(dict.fromkeys(lv.unit for lv in self.env_levers))
+        return list(dict.fromkeys([lv.unit for lv in self.env_levers]
+                                  + list(self.restart_only)))
 
 
 @dataclass
@@ -294,7 +334,7 @@ def _uploader_armed(systemctl) -> Optional[bool]:
     if p.get("LoadState", "") in ("", "not-found"):
         return None
     return (p.get("ActiveState", "") in _RUNNING
-            or p.get("UnitFileState", "").startswith("enabled"))
+            or p.get("UnitFileState", "") not in _UNIT_FILE_OFF)
 
 
 def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
@@ -303,7 +343,7 @@ def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
     each instance's effective environment, the mag config, and
     ``wspr-uploader``'s state."""
     below = tuple(sorted(set(clients_below)))
-    instances, levers, alone, problems = [], [], [], []
+    instances, levers, alone, problems, restart_only = [], [], [], [], []
     for client in (c for c in _ENV_LEVERS if c in below):
         armed, key, value = _ENV_LEVERS[client]
         try:
@@ -314,15 +354,18 @@ def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
         for unit in units:
             instances.append((client, unit))
             try:
-                if not armed(_env(systemctl, unit)):
-                    alone.append(unit)
-                    continue
                 path = env_path_for(client, _instance_of(unit),
                                     base=str(roots.etc))
+                if armed(_env(systemctl, unit)):
+                    levers.append(EnvLever(client, unit, path, key, value))
+                elif _lever_unloaded(systemctl, unit, path):
+                    # lowered on disk, but the process predates the file:
+                    # a lever written earlier whose restart never ran.
+                    restart_only.append(unit)
+                else:
+                    alone.append(unit)
             except (OSError, ValueError) as exc:
                 problems.append((unit, f"cannot read or place its lever: {exc}"))
-                continue
-            levers.append(EnvLever(client, unit, path, key, value))
     wspr_uploader = checked_uploader = False
     if "wspr-recorder" in below:
         checked_uploader = True
@@ -349,15 +392,23 @@ def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
                      wspr_uploader=wspr_uploader,
                      wspr_uploader_checked=checked_uploader,
                      left_alone=tuple(alone), problems=tuple(problems),
-                     etc=roots.etc)
+                     restart_only=tuple(restart_only), etc=roots.etc)
 
 
 # ---- applying it -------------------------------------------------------------
 
-def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run) -> LeverResult:
+def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run,
+                 skip=()) -> LeverResult:
     """Write every lever, stop ``wspr-uploader``, then restart each touched
-    instance alone.  Raises RadiodMoved; every other failure lands in
-    ``LeverResult.failures`` and stops no other lever."""
+    instance alone, and each instance the plan found lowered on disk but
+    running from before its env file.  Units in ``skip`` (already restarted
+    after their lever landed) do not restart again; ``verify_levers`` still
+    checks their start time.  ``LeverResult.restarted`` lists what this
+    call restarted, for ``restart_stale_writers(skip=...)``.
+
+    Raises RadiodMoved, with ``exc.result`` holding the partial result;
+    every other failure lands in ``LeverResult.failures`` and stops no
+    other lever."""
     res = LeverResult(left_alone=list(plan.left_alone),
                       failures=list(plan.problems))
     to_restart = []
@@ -382,6 +433,9 @@ def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run) -> LeverResult:
                                  f"{lv.key}); not restarted"))
             continue
         to_restart.append(lv.unit)
+    to_restart += list(plan.restart_only)
+    skip = set(skip)
+    to_restart = [u for u in dict.fromkeys(to_restart) if u not in skip]
     if plan.mag is not None:
         try:
             write_toml_bool(plan.mag, "uploader", "enabled", False)
@@ -403,6 +457,12 @@ def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run) -> LeverResult:
                                                     f"{r.returncode}"))
     try:
         restart_units(to_restart, systemctl=systemctl)
+    except RadiodMoved as exc:
+        bad = {u for u, _ in exc.failures}
+        res.failures.extend(exc.failures)
+        res.restarted = [u for u in to_restart if u not in bad]
+        exc.result = res
+        raise
     except RestartFailed as exc:
         bad = {u for u, _ in exc.failures}
         res.failures.extend(exc.failures)
@@ -414,26 +474,22 @@ def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run) -> LeverResult:
 
 # ---- checking it (spec §8.4) ---------------------------------------------------
 
-def _started_before(systemctl, unit, path: Path) -> bool:
-    """True when the running unit started before ``path`` last changed."""
-    p = _unit_props(systemctl, unit, ("ActiveState", "ActiveEnterTimestamp"))
-    if p.get("ActiveState", "") not in _RUNNING:
-        return False
+def _lever_unloaded(systemctl, unit, path: Path) -> bool:
+    """True when ``unit`` runs from before ``path`` last changed (whole
+    seconds), so whatever the file says has not reached the process.  A
+    missing file loads nothing new."""
     try:
-        started = float(p.get("ActiveEnterTimestamp", "").lstrip("@"))
-    except ValueError:
-        return True
-    try:
-        return started < os.stat(path).st_mtime
-    except OSError:
+        mtime = os.stat(path).st_mtime
+    except FileNotFoundError:
         return False
+    return _runs_from_before(systemctl, unit, mtime)
 
 
 def verify_levers(plan: LeverPlan, *, systemctl=subprocess.run) -> list:
     """One line per sender still armed in the plan's scope; empty means
-    every sender stopped."""
+    every sender stopped.  An instance lowered on disk that still runs from
+    before its env file changed counts as armed."""
     msgs = []
-    touched = {lv.unit: lv.path for lv in plan.env_levers}
     for client, unit in plan.instances:
         armed, key, value = _ENV_LEVERS[client]
         try:
@@ -445,13 +501,11 @@ def verify_levers(plan: LeverPlan, *, systemctl=subprocess.run) -> list:
             msgs.append(f"{unit}: its environment still arms its sender "
                         f"({key}={env.get(key, '')!r}; the lever is {key}={value})")
             continue
-        path = touched.get(unit)
-        if path is None:
-            continue                      # already lowered: not this step's write
         try:
-            stale = _started_before(systemctl, unit, path)
-        except OSError as exc:
-            msgs.append(f"{unit}: cannot read its start time: {exc}")
+            path = env_path_for(client, _instance_of(unit), base=str(plan.etc))
+            stale = _lever_unloaded(systemctl, unit, path)
+        except (OSError, ValueError) as exc:
+            msgs.append(f"{unit}: cannot read its lever file or start time: {exc}")
             continue
         if stale:
             msgs.append(f"{unit}: still runs from before its lever was written "
@@ -479,45 +533,54 @@ def verify_levers(plan: LeverPlan, *, systemctl=subprocess.run) -> list:
 
 # ---- stale writers (spec §4.3) --------------------------------------------------
 
+@dataclass
+class StaleResult:
+    restarted: list = field(default_factory=list)
+    notes: list = field(default_factory=list)   # e.g. an unreadable writer file
+
+    def lines(self) -> list:
+        return ([f"stale writer: restarted {u}" for u in self.restarted]
+                + [f"stale writer: {n}" for n in self.notes])
+
+
 def stale_writer_units(topology, *, writer_py: Path = WRITER_PY,
-                       systemctl=subprocess.run) -> list:
+                       systemctl=subprocess.run, notes=None) -> list:
     """The running psk-recorder, meteor-scatter and wspr-recorder instances
-    that started before ``writer_py`` last changed.  A writer whose time
-    cannot be read makes every running instance stale (a restart costs a
-    cycle; a part 1 writer during ``off`` stores rows that ship later).
-    Raises OSError when a client's instances or a unit cannot be read."""
+    that started before ``writer_py`` last changed (whole seconds).
+
+    A writer whose time cannot be read makes nothing stale (ruling C17-4:
+    the accepted restarts are one-time ones, never a mass restart on a
+    guess); a line naming the file goes to ``notes`` when given.  Raises
+    OSError when a client's instances or a unit cannot be read."""
     try:
         mtime = os.stat(writer_py).st_mtime
-    except OSError:
-        mtime = float("inf")
+    except OSError as exc:
+        if notes is not None:
+            notes.append(f"cannot read {writer_py} ({exc.strerror or exc}); "
+                         "no instance counted stale, none restarted")
+        return []
     stale = []
     for client in WRITER_CLIENTS:
         for unit in _units_of(client, topology):
-            p = _unit_props(systemctl, unit,
-                            ("ActiveState", "ActiveEnterTimestamp"))
-            if p.get("ActiveState", "") not in _RUNNING:
-                continue
-            try:
-                started = float(p.get("ActiveEnterTimestamp", "").lstrip("@"))
-            except ValueError:
-                started = float("-inf")
-            if started < mtime:
+            if _runs_from_before(systemctl, unit, mtime):
                 stale.append(unit)
     return stale
 
 
 def restart_stale_writers(topology, *, to_off: bool,
                           writer_py: Path = WRITER_PY,
-                          systemctl=subprocess.run, skip=()) -> list:
+                          systemctl=subprocess.run, skip=()) -> StaleResult:
     """Before a change that makes a state first read ``off``: restart each
     stale writer alone (``restart_units``), skipping the units in ``skip``
-    (those the lever step already restarted).  Returns the units restarted.
-    For any other change it does nothing."""
+    (``LeverResult.restarted``: the lever step runs first).  For any other
+    change it does nothing."""
+    res = StaleResult()
     if not to_off:
-        return []
+        return res
     skip = set(skip)
     units = [u for u in stale_writer_units(topology, writer_py=writer_py,
-                                           systemctl=systemctl)
+                                           systemctl=systemctl, notes=res.notes)
              if u not in skip]
     restart_units(units, systemctl=systemctl)
-    return units
+    res.restarted = units
+    return res
