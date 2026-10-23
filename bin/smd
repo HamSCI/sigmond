@@ -25685,12 +25685,15 @@ def main() -> int:
     _add_upload_verbs(p_upload)
 
     p_sink = sub.add_parser('sink',
-        help='the site sink switch: status | off (send no data, keep no backlog) | '
+        help='the site sink switch: status | off (send no data, store nothing new) | '
              'fill (store, send nothing) | upload (store and send)')
     sink_sub = p_sink.add_subparsers(dest='sink_command')
     sink_sub.add_parser('status', help='show the site sink switch and what it holds back')
-    s_off = sink_sub.add_parser('off',
-        help='send no data and keep no backlog (a new or staged station)')
+    _off_help = ('send no data and store nothing new for upload (a new or '
+                 'staged station).  With an hs-uploader that offers the gate, '
+                 'data stored earlier waits and ships when the switch rises; '
+                 'with an older one, the stored backlog is dropped')
+    s_off = sink_sub.add_parser('off', help=_off_help, description=_off_help)
     s_off.add_argument('--reason', required=True,
                        help='why (on the fleetboard), e.g. "bench checkout"')
     s_off.add_argument('--yes', action='store_true',

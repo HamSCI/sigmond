@@ -24,7 +24,9 @@ test_uploader_manifest_part2 fakes them.  Nothing touches a service.
 import os
 import subprocess
 import sys
+import time
 import tomllib
+from collections import Counter
 import types
 import unittest
 from pathlib import Path
@@ -95,7 +97,7 @@ class SiteStation(Part2Station):
         os.utime(self.writer, (6000, 6000))
 
     def cmd(self, fn, *, features=REAL, fail=None, patch_fail=None,
-            user="opal", extra=()):
+            user="opal", extra=(), euid=0, patch_exc=None):
         trace = self.trace = []
         real_run = um.run_hs_uploader
         real_patch = cfg._patch_uploads_block
@@ -112,6 +114,8 @@ class SiteStation(Part2Station):
         def patch(path, up):
             trace.append(("uploads", Path(path).name))
             if patch_fail and patch_fail(Path(path)):
+                if patch_exc is not None:
+                    raise patch_exc
                 raise PermissionError(13, "Permission denied", str(path))
             return real_patch(path, up)
 
@@ -126,6 +130,7 @@ class SiteStation(Part2Station):
             mock.patch.object(um, "run_hs_uploader", side_effect=run),
             mock.patch.object(cfg, "_patch_uploads_block", side_effect=patch),
             mock.patch.dict(os.environ, {"SUDO_USER": user}),
+            mock.patch.object(cfg, "_euid", return_value=euid),
             *extra,
         ]
         return self.run(fn, features=features, extra=patches,
@@ -591,6 +596,127 @@ class CaptureTests(unittest.TestCase):
     def test_the_captured_fill_transcript_matches(self):
         """Regenerate with tests/fixtures/capture_sink_fill_part2.py."""
         self.assertEqual(fill_transcript(self), FILL_FIXTURE.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (Task 20 review): C20-2, the door and skip paths, M-3..M-5
+# ---------------------------------------------------------------------------
+
+@needs_real
+class FixRound1Tests(unittest.TestCase):
+
+    def test_off_before_marker_restarts_each_once(self):
+        # Ruling C20-2: before the marker, the carry-over alone levers and
+        # restarts; steps 1 and 2 wait.
+        st = SiteStation(self, carried=False, meteor=True)
+        st.make_stale()
+        r = st.sink("off", reason="rig")
+        self.assertEqual(r.rc, 0, r.both)
+        c = Counter(st.restarts())
+        self.assertEqual(c, Counter({PSK: 1, WSPR: 1, METEOR: 1}))
+        self.assertNotIn(RADIOD, c)
+        self.assertTrue(st.roots.marker.exists())
+        # every restart came from the carry-over, under the lock
+        self.assertLess(st.first(("lock",)), st.first(("restart",)))
+
+    def test_merge_gate_orders_survive_later_manifest_steps(self):
+        for verb, state, mode in (("fill", "fill", "hold"),
+                                  ("off", "off", "discard")):
+            with self.subTest(verb):
+                st = SiteStation(self)
+                r = st.sink(verb, reason="rig")
+                self.assertEqual(r.rc, 0, r.both)
+                for _ in range(2):
+                    again = st.step()
+                    self.assertEqual(again.rc, 0, again.both)
+                    self.assertNotIn("disagreed", again.both)
+                self.assertEqual(st.switch("site")["state"], state)
+                self.assertEqual(st.mode(), mode)
+                self.assertEqual(st.mode(st.profile), mode)
+
+    def test_leaving_off_by_the_uploads_record_alone_closes_the_doors(self):
+        # No site.toml yet; only [uploads] says discard.
+        st = SiteStation(self, carried=False)
+        st.coordination(HOST + '\n[uploads]\nenabled = false\n'
+                        'mode = "discard"\nreason = "bench"\n')
+        self.assertFalse((st.roots.sinks / "site.toml").exists())
+        r = st.sink("fill", reason="rig")
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(st.trace[0], ("doors",))
+        # positive control the other way: [uploads] at hold closes nothing
+        st2 = SiteStation(self, carried=False)
+        st2.coordination(HOST + '\n[uploads]\nenabled = false\n')
+        r = st2.sink("upload")
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(st2.kinds("doors"), [])
+
+    def test_a_writer_newer_than_the_lever_restarts_restarts_nothing_twice(self):
+        # The writer's time lies ahead of every restart this run stamps, so
+        # each instance the lever step restarts still reads stale: only
+        # skip= keeps the stale step off it.
+        st = SiteStation(self, meteor=True)
+        future = time.time() + 100000
+        os.utime(st.writer, (future, future))
+        r = st.sink("off", reason="rig")
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(Counter(st.restarts()),
+                         Counter({PSK: 1, WSPR: 1, METEOR: 1}))
+
+    def test_radiod_moving_during_the_levers(self):
+        st = SiteStation(self, meteor=True)
+        st.make_stale()
+
+        def bump(unit):
+            st.trace.append(("restart", unit))
+            st.units[RADIOD]["ActiveEnterTimestamp"] = "@99999"
+        st.sc.on_restart = bump
+        r = st.sink("off", reason="rig")
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertEqual(st.switch("site")["state"], "off")
+        self.assertNotIn(METEOR, st.restarts())
+        self.assertIn("skips its stale-writer restarts", r.err)
+        self.assertNotIn("no further restart runs", r.err)
+
+    def test_a_non_oserror_from_the_uploads_writer_still_runs_the_manifest_step(self):
+        st = SiteStation(self)
+        r = st.sink("fill", reason="rig",
+                    patch_fail=lambda p: p.name == "site-profile.toml",
+                    patch_exc=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"))
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertIn(str(st.profile), r.err)
+        self.assertEqual(len(st.kinds("lock")), 1)
+        self.assertEqual(st.switch("site")["state"], "fill")
+
+    def test_a_failed_raise_report_still_runs_the_manifest_step(self):
+        st = SiteStation(self)
+        r = st.sink("fill", reason="rig")
+        self.assertEqual(r.rc, 0, r.both)
+        real = cfg.load_coordination
+        calls = []
+
+        def flaky(*a, **k):
+            calls.append(1)
+            if len(calls) == 2:          # the report's own read
+                raise ValueError("coordination.toml went bad")
+            return real(*a, **k)
+        r = st.sink("upload", extra=[mock.patch.object(
+            cfg, "load_coordination", side_effect=flaky)])
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertIn("cannot list the clients this raise lifts", r.err)
+        self.assertEqual(len(st.kinds("lock")), 1)
+        self.assertEqual(st.switch("site")["state"], "upload")
+
+    def test_a_non_root_caller_changes_nothing(self):
+        st = SiteStation(self)
+        r = st.sink("fill", reason="rig", euid=1000)
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertIn("run it as root", r.err)
+        self.assertEqual(st.trace, [])
+        self.assertEqual(st.switch("site")["state"], "upload")
+        # positive control: as root, the same call writes
+        r = st.sink("fill", reason="rig")
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(st.switch("site")["state"], "fill")
 
 
 if __name__ == "__main__":

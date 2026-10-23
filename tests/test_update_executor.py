@@ -5,6 +5,11 @@ install.sh that records its invocation; `runuser` (root-only) is shimmed
 away so the privilege drop does not make the executor untestable."""
 from __future__ import annotations
 
+import sys as _sys_nrs
+from pathlib import Path as _Path_nrs
+_sys_nrs.path.insert(0, str(_Path_nrs(__file__).resolve().parent))
+from conftest import needs_real_sudo  # noqa: E402  (runs the host's real sudo)
+
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -125,6 +130,7 @@ class _Rig(unittest.TestCase):
 
 
 class ExecutorTests(_Rig):
+    @needs_real_sudo
     def test_success_path_pulls_then_installs(self):
         rc, text = self._update()
         self.assertEqual(rc, 0, text)
@@ -141,6 +147,7 @@ class ExecutorTests(_Rig):
                          "install.sh ran after a failed pull")
         self.assertIn("install skipped", text.lower())
 
+    @needs_real_sudo
     def test_install_failure_shows_why_and_keeps_the_full_output(self):
         self._set_install_sh("#!/bin/bash\necho 'uv sync: ENOSPC no space left on device' >&2\nexit 1\n")
         rc, text = self._update()
@@ -187,6 +194,7 @@ class HistoryPerStepTests(_Rig):
         p = Path(tmp) / "update-history.jsonl"
         return p, (p.read_text().splitlines() if p.exists() else [])
 
+    @needs_real_sudo
     def test_pull_is_recorded_even_when_install_fails(self):
         import sigmond.provenance as prov
         hist = Path(self._tmp.name) / "update-history.jsonl"
@@ -198,6 +206,7 @@ class HistoryPerStepTests(_Rig):
         self.assertTrue(any("pull fakeclient" in l for l in lines), lines)
         self.assertFalse(any("install fakeclient" in l for l in lines), lines)
 
+    @needs_real_sudo
     def test_success_records_pull_then_install(self):
         import sigmond.provenance as prov
         hist = Path(self._tmp.name) / "update-history.jsonl"
@@ -232,6 +241,7 @@ class PinnedComponentTests(_Rig):
         self.assertFalse((self.host / ".installed").exists(), text)
         self.assertTrue((self.host / ".pin").exists())
 
+    @needs_real_sudo
     def test_a_pin_hold_does_not_block_or_fail_the_rest_of_the_plan(self):
         """A held component sharing a plan with a real, runnable pull must
         neither block that pull nor push the run's exit code to
@@ -252,6 +262,7 @@ class PinnedComponentTests(_Rig):
         self.assertFalse((self.host / ".installed").exists(), text)
         self.assertTrue((self.host / ".pin").exists())
 
+    @needs_real_sudo
     def test_unpin_checks_out_the_branch_then_pulls_and_removes_pin(self):
         self._pin_at_head()
         args = types.SimpleNamespace(base=self.base, apply=True,
@@ -268,6 +279,7 @@ class PinnedComponentTests(_Rig):
         self.assertEqual(branch, "main")
         self.assertTrue((self.host / ".installed").exists(), text)
 
+    @needs_real_sudo
     def test_unpin_checkout_precedes_pull_and_pin_survives_a_failed_pull(self):
         pin = self._pin_at_head()
         # Cache origin/main at "second" locally while the remote still
@@ -474,6 +486,7 @@ class NativeBuildPinOnionTests(_NativePinRig):
         self.assertNotIn("[pull] onion", text)
         self.assertNotIn("[pull] pinclient", text)
 
+    @needs_real_sudo
     def test_unpin_still_releases_a_pin_file_beside_a_native_pin(self):
         pin = self._at_pin()
         pinned = self._add_pin_file_component("pinclient")

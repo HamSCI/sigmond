@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import sys as _sys_nrs
+from pathlib import Path as _Path_nrs
+_sys_nrs.path.insert(0, str(_Path_nrs(__file__).resolve().parent))
+from conftest import needs_real_sudo  # noqa: E402  (runs the host's real sudo)
+
 import os
 import stat
 import sys
@@ -247,6 +252,7 @@ class EnvBagTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class RunEntrypointTests(unittest.TestCase):
+    @needs_real_sudo
     def test_relative_path_resolves_against_repo_root(self):
         with tempfile.TemporaryDirectory() as d:
             repo = Path(d)
@@ -270,6 +276,7 @@ class RunEntrypointTests(unittest.TestCase):
             self.assertIn('STATION_CALL=W1ABC', body)
             self.assertIn('STATION_GRID=FN42', body)
 
+    @needs_real_sudo
     def test_absolute_path_used_directly(self):
         with tempfile.TemporaryDirectory() as d:
             d_path = Path(d)
@@ -293,6 +300,7 @@ class RunEntrypointTests(unittest.TestCase):
                 'fake', deploy, 'missing.sh', verb='init')
         self.assertEqual(rc, 1)
 
+    @needs_real_sudo
     def test_argv_form_passes_extra_args(self):
         with tempfile.TemporaryDirectory() as d:
             d_path = Path(d)

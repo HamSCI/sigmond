@@ -1327,23 +1327,17 @@ class _Change:
     INTENDED site state (ruling C20-1): ``below`` reads below upload after
     the change; ``lifted`` reads upload after it and below before;
     ``stays`` lists ``(client, state, why)`` held below by its own file
-    while the site rises; ``pending`` names, before the carry-over, the
-    clients with no file yet (the carry-over decides them)."""
+    while the site rises.  Used only with the marker standing (before it,
+    the carry-over decides; ruling C20-2)."""
 
-    def __init__(self, state, new: str, marker: bool):
-        self.below, self.lifted, self.stays, self.pending = [], [], [], []
+    def __init__(self, state, new: str):
+        self.below, self.lifted, self.stays = [], [], []
         for name in sorted(state.clients):
             if name == 'site':
                 continue
             c = state.clients[name]
             if c.file_state in _SITE_STATES:
                 own, why = c.file_state, f'its own switch reads {c.file_state}'
-            elif c.file_state == 'missing' and not marker:
-                if new == 'upload':
-                    self.pending.append(name)
-                else:
-                    self.below.append(name)     # any file reads below fill
-                continue
             else:
                 # a missing or unreadable file fails closed (reads off)
                 own = 'off'
@@ -1407,7 +1401,9 @@ def _site_levers(below, roots, up_cmd):
             done = exc.result.restarted if exc.result is not None else []
             if exc.result is not None:
                 _say_lines(exc.result.lines())
-            err(f'lever step: FAILED: {exc}; no further restart runs')
+            err(f'lever step: FAILED: {exc}; this command skips its '
+                'stale-writer restarts (the manifest step below still runs '
+                'its own lever step)')
             return 1, done, True
         _say_lines(res.lines())
         verify = sink_levers.verify_levers(lp, systemctl=sc)
@@ -1480,9 +1476,11 @@ def _raise_report(change: _Change, roots) -> None:
         info(NOTHING_REFUSED)
     for name, want, why in change.stays:
         warn(f'{name} stays at {want}: {why}')
-    for name in change.pending:
-        info(f'{name} has no switch file yet; the carry-over in the manifest '
-             'step writes one and says what it holds')
+
+
+def _euid() -> int:
+    """This process's effective uid; tests put a fake here."""
+    return os.geteuid()
 
 
 def _site_change(mode: str, reason: str, coord, words, roots) -> int:
@@ -1490,6 +1488,9 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
 
     1. the lever step, for every client below upload after the change;
     2. before a change to off, the stale-writer restarts;
+       (before the carry-over marker stands, steps 1 and 2 wait: the
+       carry-over inside step 5 levers and restarts once, with its own
+       skip; ruling C20-2);
     3. ``hs-uploader sink set site <state>``;
     4. ``[uploads]`` in site-profile.toml and coordination.toml (D19);
     5. the manifest step, which alone takes the install lock (its own
@@ -1503,6 +1504,11 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
     from . import uploader as up_cmd
     new = GATE_STATE[mode]
     site_path = roots.sinks / 'site.toml'
+    if _euid() != 0:
+        err('setting the site sink switch writes root-owned files and '
+            'restarts recorders; run it as root (smd elevates through sudo). '
+            'Nothing changed.')
+        return 1
     current = sink_mirror.read_site(site_path).state
     # Leaving off, by either record, closes the doors first (spec §7.3);
     # _close_doors prints its own refusal, which says the switch stays off.
@@ -1513,21 +1519,28 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
     rc = 0
 
     # 1. the lever step, from the intended states
-    state = _site_status(roots, up_cmd)
     change = None
     restarted: list = []
     radiod_moved = False
-    if state is None:
+    state = _site_status(roots, up_cmd) if marker else None
+    if not marker:
+        # Ruling C20-2: the carry-over in step 5 levers every client below
+        # upload and restarts stale writers, skipping what it restarted;
+        # doing it here too would restart each instance twice.  Nothing
+        # enforces site.toml before the marker (gate rule 3).
+        info('no carry-over marker yet: the carry-over in the manifest step '
+             'below lowers the senders and restarts stale writers, once')
+    elif state is None:
         rc = 1
     else:
-        change = _Change(state, new, marker)
+        change = _Change(state, new)
         if change.below:
             lrc, restarted, radiod_moved = _site_levers(change.below, roots,
                                                         up_cmd)
             rc = rc or lrc
 
     # 2. stale writers, before a change to off only
-    if new == 'off':
+    if new == 'off' and marker:
         if radiod_moved:
             err('stale-writer restarts: skipped, since radiod moved')
         else:
@@ -1550,16 +1563,25 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
             continue
         try:
             _patch_uploads_block(path, up)
-        except OSError as exc:
-            err(f'{path}: [uploads] not written ({exc.strerror or exc}); it '
-                f'now disagrees with the site sink switch, which reads {new}')
+        except Exception as exc:
+            why = (exc.strerror if isinstance(exc, OSError) and exc.strerror
+                   else f'{type(exc).__name__}: {exc}')
+            err(f'{path}: [uploads] not written ({why}); it now disagrees '
+                f'with the site sink switch, which reads {new}')
             rc = 1
             coord_failed = coord_failed or path is COORDINATION_PATH
             continue
-        ok(words['written'].format(path=path, mode=mode, setting=new))
+        ok(f'{path}: [uploads] now mirrors the site sink switch ({new})')
 
     if new == 'upload' and change is not None:
-        _raise_report(change, roots)
+        try:
+            _raise_report(change, roots)
+        except Exception as exc:
+            # The switch and [uploads] stand written; the manifest step
+            # must still run, so a failed report only costs exit 1.
+            err(f'cannot list the clients this raise lifts '
+                f'({type(exc).__name__}: {exc}); the switch is set')
+            rc = 1
 
     # 5. the manifest step
     if coord_failed and not marker:
