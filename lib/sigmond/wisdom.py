@@ -31,8 +31,11 @@ from pathlib import Path
 # the app-specific fallback.  Sigmond plans into the system-wide path
 # because it survives package upgrades and is shared across any other
 # FFTW user on the host.
-# fftwf-wisdom transform mnemonic: [cr] [io] [fb] <size>.
-_PLAN_RE = re.compile(r'[cr][io][fb]\d+')
+# Transform mnemonic: [cr] [iod] [fb] <size>.  The middle letter is
+# placement: i = in place, o = out of place with the input preserved,
+# d = out of place with the input destroyed.  radiod logs `d` since
+# ka9q-radio bc224260 (2026-10-07), and fftwf-wisdom accepts it.
+_PLAN_RE = re.compile(r'[cr][iod][fb]\d+')
 
 WISDOM_FILE = Path('/etc/fftw/wisdomf')
 WISDOM_TMP  = Path('/etc/fftw/wisdomf.new')
@@ -91,6 +94,21 @@ FFT_WISDOM_PROFILES: tuple[str, ...] = (
     'rof3240',   'rof6480',   'rof12960',  'rof16200',  'rof25920',
     'rof32400',  'rof64800',  'rof129600', 'rof162000', 'rof259200',
     'rof324000',
+    # ── input-destroying channel outputs (radiod >= 2026-10-07) ────────
+    # ka9q-radio bc224260 plans every channel's output transform with
+    # FFTW_DESTROY_INPUT (filter.c: slave->rev_plan = plan_complex(...,
+    # false)) and logs it with a `d`: cdb<N>, not cob<N>.  Wisdom for cob<N>
+    # does not satisfy a cdb<N> request, so on current radiod every cob
+    # entry above misses and the channel runs on FFTW_ESTIMATE.  One cdb
+    # twin per cob size; the cob entries stay for stations on older radiod.
+    # Found on DP0GVN (dp0) 2026-10-08, where fft.log listed 26 cdb misses.
+    'cdb15',   'cdb45',   'cdb85',
+    'cdb160',  'cdb200',  'cdb205',  'cdb300',   'cdb320',
+    'cdb400',  'cdb405',  'cdb480',  'cdb512',   'cdb600',  'cdb800',
+    'cdb810',  'cdb960',  'cdb1200', 'cdb1600',  'cdb1620', 'cdb1650',
+    'cdb1920', 'cdb2080', 'cdb2400', 'cdb3200',  'cdb3240', 'cdb3250',
+    'cdb4095', 'cdb4800', 'cdb4860', 'cdb6930',  'cdb8100', 'cdb8125',
+    'cdb9600', 'cdb16200', 'cdb32400', 'cdb40500', 'cdb81000', 'cdb162000',
     # ── front-end forward real FFTs — the expensive pair, planned LAST ──
     'rof1620000',   # RX888 MkII @  64.8 MHz, 20 ms block, overlap 5
     'rof3240000',   # RX888 MkII @ 129.6 MHz, 20 ms block, overlap 5  ← hours
