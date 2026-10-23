@@ -909,13 +909,21 @@ def _read_backlog(paths: HeartbeatPaths, timeout: int = BACKLOG_TIMEOUT_SEC) -> 
     of hs-uploader into sigmond's interpreter — the uploader can be a
     different Python, mid-upgrade, or broken, without taking the whole
     heartbeat down with it.
+
+    ``smd check`` reaches this in-process, often as root, so the child runs
+    with ``-P`` from ``cwd="/"`` (ruling C14-1, the class C23 closed): a
+    ``hs_uploader/`` in the caller's directory never loads.  ``-P``, not
+    ``-I``, because the child finds hs-uploader through the PYTHONPATH set
+    here, which sigmond itself chooses.
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = paths.hs_uploader_src
-    cmd = [sys.executable, "-m", "hs_uploader.backlog", str(paths.watermarks_db)]
+    cmd = [sys.executable, "-P", "-m", "hs_uploader.backlog",
+           str(paths.watermarks_db)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, check=False, env=env)
+                              timeout=timeout, check=False, env=env,
+                              cwd="/")
     except subprocess.TimeoutExpired:
         raise ReaderUnavailable(f"hs_uploader.backlog timed out after {timeout}s")
     except OSError as exc:

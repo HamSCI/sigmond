@@ -1,13 +1,16 @@
-"""``sigmond.install_lock.held`` (plan Ruling 7, spec §6.1).
+"""``sigmond.install_lock.held`` (plan Ruling 7, spec §6.1, ruling C14-3).
 
-The manifest step holds ``/run/lock/hs-uploader-install.lock`` around the
-probe, the render and the landing.  ``/run/lock`` is 1777, so any account
-can plant something at that name before root opens it.  The lock:
+The manifest step holds ``/run/hs-uploader-install/lock`` around the
+probe, the render and the landing.  The directory is root's alone (0700),
+so no other account can plant anything at the lock's name.  The lock:
 
-- opens with O_NOFOLLOW (O_CREAT only to create it), so a planted symlink
-  refuses instead of leading root to another file;
-- refuses a non-regular file and a file owned by anyone but the expected
-  owner (root in production; the tests inject their own uid);
+- creates the directory 0700, or accepts it only as a real directory with
+  the expected owner and no group or other write bit;
+- opens the file relative to the directory with O_NOFOLLOW (O_CREAT only
+  to create it), so a planted symlink refuses instead of leading root to
+  another file;
+- refuses a non-regular file, a hard link, and a file owned by anyone but
+  the expected owner (root in production; the tests inject their own uid);
 - creates the file at 0600 whatever the umask;
 - waits with LOCK_NB and a bounded retry, then raises a clear error.
 
@@ -23,6 +26,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
@@ -61,8 +65,10 @@ class _Dir(unittest.TestCase):
     def setUp(self):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
-        self.dir = Path(d.name)
-        self.path = self.dir / "hs-uploader-install.lock"
+        self.top = Path(d.name)
+        self.dir = self.top / "hs-uploader-install"
+        self.dir.mkdir(mode=0o700)
+        self.path = self.dir / "lock"
 
     def holder(self, seconds):
         p = subprocess.Popen([sys.executable, "-c", _HOLDER, str(self.path),
@@ -84,7 +90,7 @@ class HeldTests(_Dir):
         import inspect
         sig = inspect.signature(install_lock.held)
         self.assertEqual(sig.parameters["path"].default,
-                         Path("/run/lock/hs-uploader-install.lock"))
+                         Path("/run/hs-uploader-install/lock"))
         self.assertEqual(sig.parameters["wait"].default, 30)
 
     def test_creates_the_file_0600_whatever_the_umask(self):
@@ -137,7 +143,7 @@ class HeldTests(_Dir):
 class RefusalTests(_Dir):
 
     def test_a_symlink_at_the_path_refuses_and_its_target_is_untouched(self):
-        target = self.dir / "target"
+        target = self.top / "target"
         target.write_text("keep")
         os.chmod(target, 0o644)
         self.path.symlink_to(target)
@@ -151,7 +157,7 @@ class RefusalTests(_Dir):
         self.assertTrue(self.path.is_symlink())
 
     def test_a_dangling_symlink_refuses_and_creates_nothing(self):
-        target = self.dir / "nowhere"
+        target = self.top / "nowhere"
         self.path.symlink_to(target)
         alive, result, exc = self.take(wait=0.5)
         self.assertFalse(alive)
@@ -159,18 +165,42 @@ class RefusalTests(_Dir):
         self.assertFalse(target.exists())
 
     def test_a_file_owned_by_another_uid_refuses(self):
+        # The directory is the test's own, so only the file's owner can
+        # differ; the test cannot chown, so fstat reports another uid for
+        # the regular file alone.
         self.path.write_text("")
-        os.chmod(self.path, 0o600)
-        def fn():
-            with install_lock.held(self.path, wait=0.5, expected_uid=ME + 1):
-                return "got it"
-        alive, result, exc = _in_thread(fn)
+        os.chmod(self.path, 0o644)
+        real = os.fstat
+
+        def fstat(fd):
+            st = real(fd)
+            if stat.S_ISREG(st.st_mode):
+                lst = list(st)
+                lst[stat.ST_UID] = ME + 1
+                return os.stat_result(lst)
+            return st
+        with mock.patch.object(install_lock.os, "fstat", side_effect=fstat):
+            alive, result, exc = self.take(wait=0.5)
         self.assertFalse(alive)
         self.assertIsInstance(exc, install_lock.InstallLockError)
-        self.assertIn(f"uid {ME}", str(exc))
+        self.assertIn(f"uid {ME + 1}", str(exc))
         self.assertIn(str(self.path), str(exc))
-        # Positive control: the same file, the right owner, takes.
+        # Refused before the fchmod: the mode stays as found.
+        self.assertEqual(stat.S_IMODE(os.lstat(self.path).st_mode), 0o644)
+        # Positive control: the same file, its real owner, takes.
         self.assertEqual(self.take(wait=0.5)[1], "got it")
+
+    def test_a_hard_linked_victim_refuses_and_keeps_its_mode(self):
+        victim = self.top / "victim"
+        victim.write_text("secret")
+        os.chmod(victim, 0o644)
+        os.link(victim, self.path)
+        alive, result, exc = self.take(wait=0.5)
+        self.assertFalse(alive)
+        self.assertIsInstance(exc, install_lock.InstallLockError)
+        self.assertIn("hard link", str(exc))
+        self.assertEqual(stat.S_IMODE(victim.stat().st_mode), 0o644)
+        self.assertEqual(victim.read_text(), "secret")
 
     def test_a_directory_at_the_path_refuses(self):
         self.path.mkdir()
@@ -185,6 +215,66 @@ class RefusalTests(_Dir):
         self.assertFalse(alive, "opening the FIFO hung")
         self.assertIsInstance(exc, install_lock.InstallLockError)
         self.assertIn("not a regular file", str(exc))
+
+    def test_the_directory_is_created_0700_whatever_the_umask(self):
+        path = self.top / "fresh" / "lock"
+        old = os.umask(0)
+        try:
+            with install_lock.held(path, wait=1, expected_uid=ME):
+                pass
+        finally:
+            os.umask(old)
+        st = os.lstat(path.parent)
+        self.assertTrue(stat.S_ISDIR(st.st_mode))
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.lstat(path).st_mode), 0o600)
+
+    def test_a_directory_owned_by_another_uid_refuses(self):
+        # The test cannot chown, so it names another expected owner; the
+        # directory check runs before the file is opened, so no lock file
+        # appears.
+        def fn():
+            with install_lock.held(self.path, wait=0.5, expected_uid=ME + 1):
+                return "got it"
+        alive, result, exc = _in_thread(fn)
+        self.assertFalse(alive)
+        self.assertIsInstance(exc, install_lock.InstallLockError)
+        self.assertIn(str(self.dir), str(exc))
+        self.assertIn(f"uid {ME}", str(exc))
+        self.assertFalse(self.path.exists())
+
+    def test_a_group_or_other_writable_directory_refuses(self):
+        for mode in (0o720, 0o702, 0o777):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(self.dir, mode)
+                alive, result, exc = self.take(wait=0.5)
+                self.assertFalse(alive)
+                self.assertIsInstance(exc, install_lock.InstallLockError)
+                self.assertIn("writable", str(exc))
+                self.assertFalse(self.path.exists())
+        # Positive control: back at 0700 it takes.
+        os.chmod(self.dir, 0o700)
+        self.assertEqual(self.take(wait=0.5)[1], "got it")
+
+    def test_a_symlink_at_the_directorys_name_refuses(self):
+        real = self.top / "elsewhere"
+        real.mkdir(mode=0o700)
+        os.rmdir(self.dir)
+        self.dir.symlink_to(real)
+        alive, result, exc = self.take(wait=0.5)
+        self.assertFalse(alive)
+        self.assertIsInstance(exc, install_lock.InstallLockError)
+        self.assertIn("symlink", str(exc))
+        self.assertIn(str(self.dir), str(exc))
+        self.assertEqual(list(real.iterdir()), [])
+
+    def test_a_file_at_the_directorys_name_refuses(self):
+        os.rmdir(self.dir)
+        self.dir.write_text("")
+        alive, result, exc = self.take(wait=0.5)
+        self.assertFalse(alive)
+        self.assertIsInstance(exc, install_lock.InstallLockError)
+        self.assertIn(str(self.dir), str(exc))
 
     def test_the_expected_owner_defaults_to_the_effective_uid(self):
         # Root in production; here, the test's own uid takes.

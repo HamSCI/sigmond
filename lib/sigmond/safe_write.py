@@ -2,8 +2,9 @@
 plan Ruling 17, Global Constraint 3).
 
 sigmond runs as root and writes into directories another account can
-write: each client's ``/etc/<client>/env/``, ``/etc/mag-recorder/``,
-``/var/lib/hs-uploader`` and ``/run/lock``.  An account that owns such a
+write: each client's ``/etc/<client>/env/``, ``/etc/mag-recorder/`` and
+``/var/lib/hs-uploader``.  (The install lock lives in a root-only
+directory instead; see ``install_lock``.)  An account that owns such a
 directory can plant a symlink at the name root is about to write, or at
 the temporary name it writes first.  Every such write goes through
 ``write_owned``:

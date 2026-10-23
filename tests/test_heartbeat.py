@@ -1107,6 +1107,45 @@ def test_read_backlog_returns_the_parsed_object(tmp_path, monkeypatch):
     assert _read_backlog(_paths(tmp_path)) == {"pending": 7}
 
 
+def test_read_backlog_runs_no_module_planted_in_the_cwd(tmp_path, monkeypatch):
+    # Ruling C14-1: `smd check` reaches this reader in-process, often as
+    # root.  A hs_uploader/backlog.py in root's working directory must
+    # never run.
+    import subprocess as _sp
+    planted = tmp_path / "hs_uploader"
+    planted.mkdir()
+    mark = tmp_path / "RAN"
+    (planted / "__init__.py").write_text("")
+    (planted / "backlog.py").write_text(
+        f"open({str(mark)!r}, 'w').write('x')\nprint('{{}}')\n")
+    monkeypatch.chdir(tmp_path)
+    try:
+        _read_backlog(_paths(tmp_path))
+    except ReaderUnavailable:
+        pass                # no real hs_uploader here; only the mark matters
+    assert not mark.exists(), "the planted backlog module ran"
+    # Positive control: the same interpreter, run plainly from here, does
+    # load the planted module.
+    _sp.run([sys.executable, "-m", "hs_uploader.backlog", "x"],
+            capture_output=True, timeout=20)
+    assert mark.exists(), "the harness cannot see a planted run"
+
+
+def test_read_backlog_child_gets_dash_P_and_root_cwd(tmp_path, monkeypatch):
+    # A real child reports its argv and working directory, so dropping
+    # either protection alone fails here.
+    fake = tmp_path / "python"
+    fake.write_text('#!/bin/sh\nprintf \'{"argv": "%s", "cwd": "%s", '
+                    '"pp": "%s"}\' "$*" "$(pwd)" "$PYTHONPATH"\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(fake))
+    monkeypatch.chdir(tmp_path)
+    got = _read_backlog(_paths(tmp_path))
+    assert got["argv"].split()[:3] == ["-P", "-m", "hs_uploader.backlog"]
+    assert got["cwd"] == "/"
+    assert got["pp"] == str(tmp_path / "src")
+
+
 def test_read_uptime_parses_proc_uptime(tmp_path):
     path = tmp_path / "uptime"
     path.write_text("123456.78 987654.32\n")

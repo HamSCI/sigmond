@@ -47,7 +47,7 @@ class FeaturesProbeTests(unittest.TestCase):
             run.return_value = subprocess.CompletedProcess([], 0, "", "")
             um.hs_uploader_features(Path("/x/python"))
         self.assertEqual(run.call_args[0][0],
-                         ["/x/python", "-P", "-m", "hs_uploader.cli",
+                         ["/x/python", "-I", "-m", "hs_uploader.cli",
                           "capabilities", "--features"])
 
     def test_old_uploader_unrecognized_arguments_is_empty(self):
@@ -133,35 +133,64 @@ class PlantedModuleTests(unittest.TestCase):
 
 
 class RealCheckoutTests(unittest.TestCase):
+    """The branch hs-uploader, through its own venv's interpreter, exactly
+    as the runner calls the daemon's: under ``-I`` the venv's editable
+    install still resolves, with no PYTHONPATH (ruling C14-2)."""
+
+    def setUp(self):
+        self.py = (Path(__file__).resolve().parent.parent.parent
+                   / "hs-uploader" / ".venv" / "bin" / "python")
+        if not self.py.exists():
+            raise unittest.SkipTest(f"no hs-uploader venv at {self.py}")
+
     def test_the_real_hs_uploader_prints_its_words(self):
-        src = Path(__file__).resolve().parent.parent.parent / "hs-uploader" / "src"
-        if not (src / "hs_uploader" / "cli.py").is_file():
-            raise unittest.SkipTest(f"no hs-uploader at {src}")
-        td = tempfile.TemporaryDirectory()
-        self.addCleanup(td.cleanup)
-        py = Path(td.name) / "python"
-        py.write_text(f'#!/bin/sh\nPYTHONPATH="{src}" exec "{sys.executable}" "$@"\n')
-        py.chmod(py.stat().st_mode | stat.S_IXUSR)
-        self.assertEqual(um.hs_uploader_features(py),
-                         frozenset({"gate", "pipelines.d", "send-log-v3",
-                                    "switch-files"}))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PYTHONPATH", None)
+            self.assertEqual(um.hs_uploader_features(self.py),
+                             frozenset({"gate", "pipelines.d", "send-log-v3",
+                                        "switch-files"}))
 
     def test_the_real_hs_uploader_through_the_runner(self):
-        src = Path(__file__).resolve().parent.parent.parent / "hs-uploader" / "src"
-        if not (src / "hs_uploader" / "cli.py").is_file():
-            raise unittest.SkipTest(f"no hs-uploader at {src}")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PYTHONPATH", None)
+            r = um.run_hs_uploader(["capabilities"], python=self.py)
+        self.assertEqual((r.returncode, r.stdout), (0, "3\n"))
+
+
+class CallerEnvTests(unittest.TestCase):
+    """Ruling C14-2: the runner runs ``-I``, so a PYTHONPATH in the
+    caller's environment (root's, under a careless sudo) never reaches
+    the child's sys.path."""
+
+    def setUp(self):
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
-        py = Path(td.name) / "python"
-        py.write_text(f'#!/bin/sh\nPYTHONPATH="{src}" exec "{sys.executable}" "$@"\n')
-        py.chmod(py.stat().st_mode | stat.S_IXUSR)
-        r = um.run_hs_uploader(["capabilities"], python=py)
-        self.assertEqual((r.returncode, r.stdout), (0, "3\n"))
+        self.dir = Path(td.name)
+        planted = self.dir / "hs_uploader"
+        planted.mkdir()
+        self.mark = self.dir / "RAN"
+        (planted / "__init__.py").write_text("")
+        (planted / "cli.py").write_text(
+            f"open({str(self.mark)!r}, 'w').write('x')\n")
+
+    def test_pythonpath_never_reaches_the_child(self):
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.dir)}):
+            r = um._run_daemon_python(
+                ["-c", "import sys; print(repr(sys.path))"],
+                python=Path(sys.executable), stdin=None, timeout=20)
+            um.run_hs_uploader(["capabilities"], python=Path(sys.executable))
+            self.assertNotIn(str(self.dir), r.stdout)
+            self.assertFalse(self.mark.exists(), "the PYTHONPATH cli ran")
+            # Positive control: `-P` alone, with the same environment,
+            # does load it.
+            subprocess.run([sys.executable, "-P", "-m", "hs_uploader.cli"],
+                           capture_output=True, timeout=20, cwd="/")
+        self.assertTrue(self.mark.exists(), "the harness cannot see it")
 
 
 class RunnerTests(unittest.TestCase):
     """Ruling C23 and spec §9.1: one runner for every hs-uploader call.
-    The daemon's interpreter, ``-P``, ``cwd="/"``, a timeout, and stdin
+    The daemon's interpreter, ``-I``, ``cwd="/"``, a timeout, and stdin
     only when given."""
 
     def _fake_python(self, body: str) -> Path:
@@ -183,7 +212,7 @@ class RunnerTests(unittest.TestCase):
         r = um.run_hs_uploader(["sink", "status", "--json"], python=py)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.splitlines(),
-                         ["-P", "-m", "hs_uploader.cli", "sink", "status",
+                         ["-I", "-m", "hs_uploader.cli", "sink", "status",
                           "--json", "cwd=/"])
 
     def test_the_default_interpreter_is_the_daemons(self):

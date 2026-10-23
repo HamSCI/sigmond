@@ -300,18 +300,18 @@ class ProbeTests(unittest.TestCase):
     def test_asks_the_real_hs_uploader_checkout(self):
         """Cross-repo: the sibling hs-uploader answers its own
         SCHEMA_VERSION through this probe, so a bump there needs no edit
-        here."""
-        src = Path(__file__).resolve().parent.parent.parent / "hs-uploader" / "src"
-        if not (src / "hs_uploader" / "cli.py").is_file():
-            raise unittest.SkipTest(f"no hs-uploader at {src}")
-        py = self._fake_python(
-            f'PYTHONPATH="{src}" exec "{sys.executable}" "$@"')
+        here.  It runs the checkout's own venv interpreter, as the runner
+        runs the daemon's: under ``-I`` no PYTHONPATH reaches the child, and
+        the venv's editable install resolves the package (ruling C14-2)."""
+        py = (Path(__file__).resolve().parent.parent.parent / "hs-uploader"
+              / ".venv" / "bin" / "python")
+        if not py.exists():
+            raise unittest.SkipTest(f"no hs-uploader venv at {py}")
         out = subprocess.run(
-            [sys.executable, "-c",
+            [str(py), "-I", "-c",
              "from hs_uploader.watermark.schema import SCHEMA_VERSION;"
              "print(SCHEMA_VERSION)"],
-            capture_output=True, text=True, check=True,
-            env={**os.environ, "PYTHONPATH": str(src)}).stdout
+            capture_output=True, text=True, check=True, cwd="/").stdout
         SCHEMA_VERSION = int(out.strip())
         self.assertEqual(um.hs_uploader_store_version(py), SCHEMA_VERSION)
 

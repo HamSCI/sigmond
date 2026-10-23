@@ -603,7 +603,7 @@ class InstallLockStepTests(_Step):
 
     def test_a_busy_lock_exits_1_with_one_clear_line_and_touches_nothing(self):
         from sigmond import install_lock
-        msg = ("could not take /run/lock/hs-uploader-install.lock within "
+        msg = ("could not take /run/hs-uploader-install/lock within "
                "30 s: another manifest step or hs-uploader install holds it")
         r = self.step(lock_error=install_lock.InstallLockError(msg))
         self.assertEqual(r.rc, 1)

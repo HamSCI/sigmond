@@ -442,19 +442,23 @@ def render_manifest(pipelines: list, identity: dict,
 
 def _run_daemon_python(argv: list, *, python: Path, stdin: Optional[str],
                        timeout: float):
-    """Run the daemon's interpreter with `argv`, safe for root (ruling C23).
+    """Run the daemon's interpreter with `argv`, safe for root (rulings C23,
+    C14-2).
 
-    ``-P`` keeps the working directory (or a script's directory) off
-    ``sys.path``, and ``cwd="/"`` starts the child where no account can
-    plant a package, so a ``hs_uploader/`` in the caller's directory never
-    runs as root.  `stdin` goes to the child as text; without it the child
+    ``-I`` (isolated mode) keeps the working directory, PYTHONPATH and
+    every other PYTHON* variable, and the user site directory, off the
+    child's ``sys.path``; the daemon's venv still finds hs-uploader through
+    its own editable install.  ``cwd="/"`` starts the child where no
+    account can plant a package.  So neither a ``hs_uploader/`` in the
+    caller's directory nor one named by the caller's PYTHONPATH runs as
+    root.  `stdin` goes to the child as text; without it the child
     reads an empty stdin, never the caller's.  Raises OSError or
     subprocess.SubprocessError (a timeout included); callers decide what
     that means."""
     import subprocess
     kw = (dict(input=stdin) if stdin is not None
           else dict(stdin=subprocess.DEVNULL))
-    return subprocess.run([str(python), "-P", *argv], capture_output=True,
+    return subprocess.run([str(python), "-I", *argv], capture_output=True,
                           text=True, timeout=timeout, cwd="/", **kw)
 
 
@@ -465,7 +469,7 @@ def run_hs_uploader(args: list, *, stdin: Optional[str] = None,
 
     The one runner for every hs-uploader call sigmond makes (the probes,
     ``sink status``, ``sink set``, ``sink mark-carried``; spec §9.1): the
-    interpreter the service runs, as ``python -P -m hs_uploader.cli`` from
+    interpreter the service runs, as ``python -I -m hs_uploader.cli`` from
     ``cwd="/"``, with a timeout and optional text on stdin (Ruling 11:
     data passes on stdin, never through a file root writes).  Returns the
     CompletedProcess, output captured as text.  Raises OSError or
@@ -529,7 +533,7 @@ def hs_uploader_supports_discard(python: Path = HS_UPLOADER_PYTHON) -> bool:
     It must, or discard turns dangerous: an older hs-uploader ignores the
     unknown key and SHIPS the pipeline.  So sigmond asks the service's own
     interpreter, not this checkout, and treats any doubt as "no".  The
-    import runs with ``-P`` from ``/``, as every hs-uploader call does, so
+    import runs with ``-I`` from ``/``, as every hs-uploader call does, so
     a planted ``hs_uploader/`` in the caller's directory cannot answer."""
     import subprocess
     try:
