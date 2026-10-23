@@ -44,6 +44,10 @@ CLASSES = sorted(p.name for p in FIXTURES.iterdir() if p.is_dir())
 REAL_PY = (Path(__file__).resolve().parent.parent.parent
            / "hs-uploader" / ".venv" / "bin" / "python")
 RADIOD = "radiod@rx888.service"
+# the catalog keys a station knows, fixed so the tests stay hermetic
+CATALOG = frozenset({"codar-sounder", "hamsci-physics", "hf-timestd",
+                     "mag-recorder", "meteor-scatter", "psk-recorder",
+                     "wspr-recorder"})
 GOVERNED = ("hamsci-physics", "mag-recorder", "meteor-scatter",
             "psk-recorder", "wspr-recorder")
 
@@ -119,7 +123,9 @@ class Station:
             etc=self.tmp / "etc", sinks=self.tmp / "etc" / "hs-uploader" / "sinks",
             marker=self.tmp / "state" / ss.MARKER_NAME,
             sink_db=self.tmp / "sink.db", deploy_dir=self.tmp / "deploy",
-            writer_py=self.writer, python=REAL_PY)
+            writer_py=self.writer, python=REAL_PY,
+            manifest=self.tmp / "etc" / "hs-uploader" / "pipelines.toml",
+            store=self.tmp / "state" / "watermarks.db", catalog=CATALOG)
         self.log = []
         self.units = {RADIOD: {"ActiveState": "active",
                                "ActiveEnterTimestamp": "@1000",
@@ -380,6 +386,10 @@ class StationClasses(unittest.TestCase):
         self.assertEqual(st.sc.restarts(), exp["restarted"])
         self.assertNotIn(RADIOD, st.sc.restarts())
         self.assertTrue(st.roots.marker.exists())
+        fell_back = [ln for ln in res.lines() if "no legacy manifest" in ln]
+        self.assertEqual(len(fell_back), 0 if st.roots.manifest.exists() else 1)
+        self.assertFalse(any("could not be read" in ln and "exists" in ln
+                             for ln in res.lines()))
         return st, p, res
 
     def test_b4(self):
@@ -823,6 +833,307 @@ class NoLockReentry(unittest.TestCase):
         for word in ("cmd_uploader_manifest", "flock", "install_lock",
                      "hs-uploader-install"):
             self.assertNotIn(word, src)
+
+
+# ---------------------------------------------------------------------------
+# fix round 1 (Task 18 review): C18-1 to C18-5
+# ---------------------------------------------------------------------------
+
+import collections
+import dataclasses
+
+from sigmond import discover
+
+
+def _exe(d: Path, name: str, sentinel: Path):
+    f = d / name
+    f.write_text(f"#!/bin/sh\necho ran > '{sentinel}'\nexit 1\n")
+    f.chmod(0o755)
+
+
+class SinkNamesRunNothing(unittest.TestCase):
+    """C18-2: a name seen only in sink.db decides nothing root executes.
+    It counts only as a catalog key, and its deploy.toml resolves by fixed
+    path alone; find_deploy_toml (PATH, `<name> inventory`) never runs."""
+
+    def setUp(self):
+        self.st = Station(self)
+        st = self.st
+        st.coordination('[host]\ncall = "AC0G"\n\n[uploads]\nenabled = true\n')
+        st.topology()                                    # nothing enabled
+        build_sink(st.roots.sink_db,
+                   "INSERT INTO pending_uploads(target_db,target_table,"
+                   "payload_json,queued_at,producer) VALUES "
+                   "('x','y','{}','t','zz-evil'),"
+                   "('hfdl','spots','{}','t',''),"
+                   "('psk','spots','{\"mode\":\"MSK144\"}','t','meteor-scatter');")
+        self.git = st.tmp / "git"
+        for name in ("meteor-scatter", "zz-evil"):     # both governed, fixed path
+            d = self.git / name
+            d.mkdir(parents=True)
+            (d / "deploy.toml").write_text(
+                '[[hs_uploader.pipeline]]\nname = "x"\n')
+        self.bin = st.tmp / "bin"
+        self.bin.mkdir()
+        # hfdl-recorder: a catalog key with rows but no deploy.toml at any
+        # fixed path, the one name find_deploy_toml would chase on PATH
+        self.ran = {n: st.tmp / f"ran-{n}"
+                    for n in ("meteor-scatter", "zz-evil", "hfdl-recorder")}
+        for n, f in self.ran.items():
+            _exe(self.bin, n, f)
+        self.roots = dataclasses.replace(st.roots, deploy_dir=None,
+                                         catalog=CATALOG | {"hfdl-recorder"})
+        for p in (mock.patch.dict(os.environ, {"PATH": str(self.bin)}),
+                  mock.patch.object(co, "GIT_BASE", self.git)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_harness_sees_a_run(self):
+        """Positive control: find_deploy_toml on this PATH runs the script."""
+        discover.find_deploy_toml("hfdl-recorder")
+        self.assertTrue(self.ran["hfdl-recorder"].exists())
+
+    def test_plan_runs_no_sink_name(self):
+        p = co.plan(self.roots)
+        self.assertEqual(states(p), {"meteor-scatter": "fill"})
+        self.assertTrue(any("name no catalog client" in n for n in p.notes),
+                        p.notes)
+        for n, f in self.ran.items():
+            self.assertFalse(f.exists(), n)
+
+    def test_late_pass_runs_no_sink_name(self):
+        self.roots.marker.write_text("x\n")
+        p = co.plan(self.roots)
+        self.assertTrue(p.late)
+        self.assertEqual(states(p), {"meteor-scatter": "fill"})
+        for n, f in self.ran.items():
+            self.assertFalse(f.exists(), n)
+
+
+class StopFlagsFailClosed(unittest.TestCase):
+    """C18-3: an env file the carry-over cannot read or trust reads as an
+    order to stop (fill), with a reason that names the file."""
+
+    def setUp(self):
+        self.st = Station(self)
+        basic(self.st)
+        self.envdir = self.st.tmp / "etc/psk-recorder/env"
+
+    def psk(self):
+        return {w.name: w for w in self.st.plan().clients}["psk-recorder"]
+
+    def test_regular_file_control(self):
+        self.st.env("psk-recorder", "K3LR", "PSK_USE_HS_UPLOADER=1\n")
+        self.assertEqual(self.psk().state, "upload")
+
+    def test_symlinked_env_reads_fill(self):
+        """The reviewer's repro: K3LR.env a symlink carrying the stop flag."""
+        real = self.st.write("elsewhere.env", "PSK_USE_HS_UPLOADER=0\n")
+        self.envdir.mkdir(parents=True)
+        (self.envdir / "K3LR.env").symlink_to(real)
+        w = self.psk()
+        self.assertEqual(w.state, "fill")
+        self.assertIn(str(self.envdir / "K3LR.env"), w.reason)
+        self.assertTrue(w.reason.startswith("carried over at fill: cannot read"))
+
+    def test_hard_linked_env_reads_fill(self):
+        f = self.st.env("psk-recorder", "K3LR", "PSK_USE_HS_UPLOADER=1\n")
+        os.link(f, self.st.tmp / "second-name")
+        w = self.psk()
+        self.assertEqual(w.state, "fill")
+        self.assertIn(str(f), w.reason)
+
+    def test_invalid_name_reads_fill(self):
+        self.st.env("psk-recorder", "k3lr lower", "PSK_USE_HS_UPLOADER=1\n")
+        w = self.psk()
+        self.assertEqual(w.state, "fill")
+        self.assertEqual(w.reason, co.REASON_BADNAME.format(
+            file=self.envdir / "k3lr lower.env", flag="PSK_USE_HS_UPLOADER"))
+
+    def test_coordination_env_flag_counts(self):
+        """m1: coordination.env comes first; an instance setting wins."""
+        self.st.write("etc/sigmond/coordination.env", "PSK_USE_HS_UPLOADER=0\n")
+        self.st.env("psk-recorder", "K3LR", "X=1\n")
+        self.assertEqual(self.psk().state, "fill")
+        self.st.env("psk-recorder", "K3LR", "PSK_USE_HS_UPLOADER=1\n")
+        self.assertEqual(self.psk().state, "upload")
+
+
+def _state(clients, site="upload"):
+    return ss.SinkState(
+        enforced=False,
+        site=ss.SiteState(state=site, error="", set_at="", set_by="", reason=""),
+        clients={n: ss.ClientState(file_state=e, effective=e, held_by=None,
+                                   error="") for n, e in clients.items()})
+
+
+@needs_real
+class ReadBack(unittest.TestCase):
+    """C18-1/C18-4 (X4): after the writes, sink status --json is read back;
+    the lever step lowers the union of its below_upload and the plan's."""
+
+    def test_read_back_adds_a_client(self):
+        st = Station(self, "legacy")                     # psk on direct
+        os.utime(st.writer, (6000, 6000))                # every unit stale
+        fake = _state({"psk-recorder": "fill", "wspr-recorder": "upload",
+                       "site": "off"})
+        p = st.plan()
+        self.assertEqual(p.below, ())
+        res = co.apply(p, runner=Runner(st.log), systemctl=st.sc,
+                       read_state=lambda roots: fake)
+        self.assertTrue(res.ok, res.lines())
+        env = (st.tmp / "etc/psk-recorder/env/W1AW.env").read_text()
+        self.assertIn("PSK_DELIVERY_PIPELINES=server-raw", env)
+        self.assertEqual(st.sc.restarts(), ["psk-recorder@W1AW.service"])
+        self.assertIn("carry-over: read-back: hs-uploader also reads below "
+                      "upload: psk-recorder", res.lines())
+        self.assertTrue(st.roots.marker.exists())
+
+    def test_none_with_a_manifest_stops_before_the_marker(self):
+        st = Station(self, "legacy")
+        res = co.apply(st.plan(), runner=Runner(st.log), systemctl=st.sc,
+                       read_state=lambda roots: None)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.failed[0], "read-back")
+        self.assertFalse(st.roots.marker.exists())
+        self.assertEqual(res.written, ["site", "psk-recorder", "wspr-recorder"])
+
+    def test_none_without_a_manifest_goes_on_and_says_so(self):
+        st = Station(self, "fresh")
+        self.assertFalse(st.roots.manifest.exists())
+        res = co.apply(st.plan(), runner=Runner(st.log), systemctl=st.sc,
+                       read_state=lambda roots: None)
+        self.assertTrue(res.ok, res.lines())
+        said = [ln for ln in res.lines() if "no legacy manifest" in ln]
+        self.assertEqual(len(said), 1)
+        self.assertEqual(st.sc.restarts(), ["psk-recorder@N0CALL.service",
+                                            "wspr-recorder@N0CALL.service"])
+        self.assertTrue(st.roots.marker.exists())
+
+    def test_real_read_back_on_a_v369_manifest(self):
+        """The legacy fixture's manifest names no client on any pipeline;
+        the real hs-uploader still reads it, so nothing falls back."""
+        st = Station(self, "legacy")
+        man = tomllib.loads(st.roots.manifest.read_text())
+        self.assertTrue(man["pipeline"])
+        self.assertFalse(any("client" in pipe for pipe in man["pipeline"]))
+        self.assertIsNotNone(co._default_read_state(st.roots))   # before
+        _, res, _ = st.run()
+        self.assertTrue(res.ok, res.lines())
+        self.assertFalse(any("read-back" in ln for ln in res.lines()))
+        state = co._default_read_state(st.roots)
+        self.assertEqual(state.clients["psk-recorder"].effective, "upload")
+
+
+class Survivors(unittest.TestCase):
+    """C18-5 m2: mutations M6, M16 (plan) here; M10, M14, m3 below."""
+
+    def test_broken_kept_client_reads_below_upload(self):
+        st = Station(self)
+        basic(st)
+        st.write("etc/hs-uploader/sinks/psk-recorder.toml", 'state = "bogus"\n')
+        p = st.plan()
+        self.assertIn(("psk-recorder", "error"), p.kept)
+        self.assertIn("psk-recorder", p.below)
+        self.assertTrue(p.to_off)
+
+    def test_late_client_without_site_file_reads_upload(self):
+        st = Station(self)
+        basic(st, enabled=("wspr-recorder", "meteor-scatter"))
+        st.write("etc/hs-uploader/sinks/wspr-recorder.toml", 'state = "upload"\n')
+        st.roots.marker.write_text("x\n")
+        p = st.plan()
+        self.assertEqual(states(p), {"meteor-scatter": "upload"})
+        self.assertEqual(p.below, ())
+        self.assertFalse(p.to_off)
+
+
+@needs_real
+class SurvivorsApplied(unittest.TestCase):
+
+    def test_verify_branch_stops_the_run(self):
+        """M10: wspr-uploader's disable --now answers 0 but the unit keeps
+        running; apply_levers records no failure, verify_levers names it."""
+        st = Station(self, "k3lr")
+        st.units["wspr-uploader.service"] = {
+            "LoadState": "loaded", "ActiveState": "active",
+            "UnitFileState": "enabled"}
+        real = st.sc
+
+        def sc(cmd, **kw):
+            if cmd[1] == "disable":
+                real.calls.append(list(cmd[1:]))
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return real(cmd, **kw)
+        res = co.apply(st.plan(), runner=Runner(st.log), systemctl=sc)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.lever.failures, [])
+        self.assertTrue(res.failed[1].startswith("a sender still armed"))
+        self.assertIn("wspr-uploader", res.failed[1])
+        self.assertFalse(st.roots.marker.exists())
+
+    def test_stale_pass_skips_what_the_lever_restarted(self):
+        """M14: the lever restarts psk and wspr at a time still before the
+        writer changed; the stale pass must not restart them again."""
+        st = Station(self, "fresh")
+        now = int(time.time())
+        os.utime(st.writer, (now + 1000, now + 1000))
+        st.sc.clock = now + 10
+        _, res, _ = st.run()
+        self.assertTrue(res.ok, res.lines())
+        counts = collections.Counter(st.sc.restarts())
+        self.assertEqual(dict(counts), {"psk-recorder@N0CALL.service": 1,
+                                        "wspr-recorder@N0CALL.service": 1})
+
+    def test_stale_partial_result_kept_on_radiod_moved(self):
+        """m3: radiod moves during the stale pass; the result still names
+        the unit the pass restarted."""
+        st = Station(self, "fresh")
+        st.topology("wspr-recorder", "psk-recorder", "mag-recorder",
+                    "hamsci-physics", "hf-timestd", "meteor-scatter")
+        st.env("meteor-scatter", "N0CALL", "METEOR_SCATTER_DELIVERY_MODE=off\n")
+        os.utime(st.writer, (6000, 6000))
+
+        def bump(unit):
+            st.log.append(("restart", unit))
+            if unit.startswith("meteor-scatter"):
+                st.units[RADIOD]["ActiveEnterTimestamp"] = "@9999"
+        st.sc.on_restart = bump
+        _, res, _ = st.run()
+        self.assertEqual(res.failed[0], "stale-writer restarts")
+        self.assertEqual(res.stale.restarted, ["meteor-scatter@N0CALL.service"])
+        self.assertIn("stale writer: restarted meteor-scatter@N0CALL.service",
+                      res.lines())
+        self.assertFalse(st.roots.marker.exists())
+
+
+class LateScan(unittest.TestCase):
+    """m7: with the marker standing, sink.db is read only when a catalog
+    client, governed but not enabled, lacks a switch file."""
+
+    def setUp(self):
+        self.st = Station(self)
+        basic(self.st)
+        for c in ("site", "wspr-recorder", "psk-recorder"):
+            self.st.write(f"etc/hs-uploader/sinks/{c}.toml", 'state = "upload"\n')
+        self.st.roots.marker.write_text("x\n")
+        build_sink(self.st.roots.sink_db)
+
+    def scans(self, catalog):
+        roots = dataclasses.replace(self.st.roots, catalog=frozenset(catalog))
+        with mock.patch.object(co, "sink_producers",
+                               wraps=co.sink_producers) as sp:
+            co.plan(roots)
+        return sp.call_count
+
+    def test_no_candidate_no_scan(self):
+        self.assertEqual(self.scans({"wspr-recorder", "psk-recorder",
+                                     "hf-timestd"}), 0)
+
+    def test_candidate_scans(self):
+        """Control: meteor-scatter (catalog, governed, disabled, no file)."""
+        self.assertEqual(self.scans({"wspr-recorder", "psk-recorder",
+                                     "meteor-scatter"}), 1)
 
 
 if __name__ == "__main__":

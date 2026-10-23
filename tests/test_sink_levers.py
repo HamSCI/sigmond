@@ -451,6 +451,17 @@ class Failures(Base):
         self.assertEqual([x[0] for x in res.failures], [str(f)])
         self.assertEqual(res.restarted, [])
 
+    def test_mag_missing_config_reads_not_armed(self):
+        """m8: no config, no fallback to run: nothing written, nothing
+        failed, verify quiet.  Control: test_mag_enabled_true_goes_boolean_false."""
+        plan, res = self.lever(["mag-recorder"])
+        cfg = self.etc / "mag-recorder" / "mag-recorder-config.toml"
+        self.assertIsNone(plan.mag)
+        self.assertEqual(res.failures, [])
+        self.assertEqual(res.changed, [])
+        self.assertFalse(cfg.exists())
+        self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
+
     def test_mag_failure_named(self):
         f = self.mag("[uploader]\nenabled = true\n")
         real = self.tmp / "real.toml"

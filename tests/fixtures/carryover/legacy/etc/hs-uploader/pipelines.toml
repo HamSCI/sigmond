@@ -1,0 +1,21 @@
+# legacy manifest (v3.69-v3.72: no client field on any pipeline), as sigmond rendered it; trimmed to what sink status reads
+[identity]
+call = "W1AW"
+
+[[pipeline]]
+name = "wspr-wsprnet"
+[pipeline.source]
+type = "sqlite"
+database = "sigmond"
+table = "wspr.spots"
+[pipeline.transport]
+type = "wsprnet"
+
+[[pipeline]]
+name = "psk-pskreporter"
+[pipeline.source]
+type = "sqlite"
+database = "sigmond"
+table = "psk.spots"
+[pipeline.transport]
+type = "pskreporter"

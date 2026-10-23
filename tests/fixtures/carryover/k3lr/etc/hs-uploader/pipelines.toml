@@ -1,0 +1,3 @@
+# legacy manifest (part 1 under a legacy hold; the heartbeat pipeline left out), as sigmond rendered it
+[identity]
+call = "K3LR"

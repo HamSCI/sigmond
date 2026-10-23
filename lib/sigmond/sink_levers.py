@@ -106,6 +106,7 @@ class RestartFailed(RuntimeError):
 
     def __init__(self, failures):
         self.failures = list(failures)
+        self.result = None      # set by restart_stale_writers: StaleResult
         super().__init__("; ".join(f"{u}: {why}" for u, why in self.failures))
 
 
@@ -319,9 +320,15 @@ def _units_of(client, topology) -> list:
 
 
 def _mag_armed(path: Path) -> bool:
-    text = read_nofollow(path)
+    """True when mag-recorder's fallback uploader would run.  A missing
+    config reads not armed: the fallback has nothing to run from, and a
+    disabled mag-recorder with no config must not block the step."""
+    try:
+        text = read_nofollow(path)
+    except FileNotFoundError:            # no /etc/mag-recorder at all
+        return False
     if text is None:
-        raise FileNotFoundError(f"{path}: no such file")
+        return False
     up = tomllib.loads(text).get("uploader", {})
     return not (isinstance(up, dict) and up.get("enabled", True) is False)
 
@@ -573,7 +580,8 @@ def restart_stale_writers(topology, *, to_off: bool,
     """Before a change that makes a state first read ``off``: restart each
     stale writer alone (``restart_units``), skipping the units in ``skip``
     (``LeverResult.restarted``: the lever step runs first).  For any other
-    change it does nothing."""
+    change it does nothing.  RadiodMoved and RestartFailed carry the
+    partial StaleResult as ``exc.result``."""
     res = StaleResult()
     if not to_off:
         return res
@@ -581,6 +589,12 @@ def restart_stale_writers(topology, *, to_off: bool,
     units = [u for u in stale_writer_units(topology, writer_py=writer_py,
                                            systemctl=systemctl, notes=res.notes)
              if u not in skip]
-    restart_units(units, systemctl=systemctl)
+    try:
+        restart_units(units, systemctl=systemctl)
+    except (RadiodMoved, RestartFailed) as exc:
+        bad = {u for u, _ in exc.failures}
+        res.restarted = [u for u in units if u not in bad]
+        exc.result = res          # the partial result rides the exception
+        raise
     res.restarted = units
     return res

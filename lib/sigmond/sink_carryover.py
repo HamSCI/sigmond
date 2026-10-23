@@ -12,9 +12,12 @@ the station already holds:
 - one file per governed client (one whose deploy.toml declares
   ``[[hs_uploader.pipeline]]`` blocks) that topology enables or that has
   rows in ``sink.db``: ``PSK_USE_HS_UPLOADER=0`` in any psk-recorder
-  instance env gives psk-recorder ``fill``; the same for
-  ``METEOR_SCATTER_USE_HS_UPLOADER=0``; a client topology does not enable
-  gives ``fill``; anything else gives ``upload``.  ``WSPR_USE_HS_UPLOADER``
+  instance env (or in coordination.env, which every instance reads first)
+  gives psk-recorder ``fill``; the same for
+  ``METEOR_SCATTER_USE_HS_UPLOADER=0``; an env file the carry-over cannot
+  read or trust also gives ``fill`` (fail closed); a client topology does
+  not enable gives ``fill``; anything else gives ``upload``.  Systemd
+  drop-ins stay out of this read.  ``WSPR_USE_HS_UPLOADER``
   is ignored: it marks a merge fleet's decode-only role, not an order.  A
   client with no outbound route gets no file; a PSWS client with no ids yet
   still gets ``upload``.
@@ -25,11 +28,18 @@ passed to ``hs-uploader sink set --identity-json -`` on stdin (Ruling 11).
 Every switch file and the marker are written by hs-uploader's own command
 line (``sink set``, ``sink mark-carried``), never by this module.
 
-Order (§6.4): the site, then each missing client file, then the lever step
-for every client whose effective state reads below ``upload`` (computed
-here from the states this run intends; the stricter of site and client),
-then the stale-writer restarts when any state reads ``off``, then the
-marker.  Any failure before the marker leaves none, and the result says
+A name seen only in ``sink.db`` (which recorder accounts can write) counts
+only when it names a catalog entry, and its deploy.toml resolves by fixed
+path alone, so no such name ever runs a program.
+
+Order (§6.4): the site, then each missing client file, then a read-back
+through ``hs-uploader sink status --json`` (ruling X4), then the lever step
+for every client whose effective state reads below ``upload`` (the union of
+the read-back and the states this run intends), then the stale-writer
+restarts when any state reads ``off``, then the marker.  When the read-back
+fails and a legacy manifest exists, the run stops before the marker; with
+no manifest yet (a fresh install), it goes on with its own states and says
+so.  Any failure before the marker leaves none, and the result says
 what was written; the next run writes only what is still missing.
 
 Without the marker, ``site.toml`` is rewritten whenever it differs from
@@ -60,14 +70,16 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import psws, sink_levers
+from . import sink_state
 from . import uploader_manifest as um
+from .catalog import load_catalog
 from .coordination import load_coordination
 from .discover import find_deploy_toml
 from .harmonize import parse_env_text
 from .hamsci_sink import _bundled
 from .instance import InvalidReporterId, display_reporter_id, validate_reporter_id
 from .safe_write import read_nofollow
-from .sink_state import MARKER_PATH, SINKS_DIR, marker_stands
+from .sink_state import MARKER_PATH, SINKS_DIR, below_upload, marker_stands
 from .topology import load_topology
 
 BY = "carry-over"
@@ -81,21 +93,29 @@ STOP_FLAGS = {
 }
 _OFF_WORDS = ("0", "false", "no", "off")
 _CLIENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# The canonical checkout root; a name seen only in sink.db resolves its
+# deploy.toml here (or under topology's client_dir) and nowhere else.
+GIT_BASE = Path("/opt/git/sigmond")
 
 REASON_UPLOADS = "carried over from [uploads] mode = {mode}"
 REASON_FLAG = "carried over from {flag}=0"
 REASON_DISABLED = "carried over: not enabled in topology.toml, with rows in sink.db"
 REASON_LATE = ("carried over after the marker: a client new since the "
                "carry-over")
+REASON_UNREAD = ("carried over at fill: cannot read {file} ({why}), so its "
+                 "{flag} stays unknown")
+REASON_BADNAME = ("carried over at fill: {file} has no valid reporter-id "
+                  "name, so its {flag} goes untrusted")
 
 
 @dataclass(frozen=True)
 class CarryRoots:
     """Where the carry-over reads and writes; a scratch tree can stand in.
 
-    ``deploy_dir`` None means each client's deploy.toml is found as the
-    manifest step finds it (topology's client_dir, then
-    ``discover.find_deploy_toml``)."""
+    ``deploy_dir`` None means an enabled client's deploy.toml is found as
+    the manifest step finds it (topology's client_dir, then
+    ``discover.find_deploy_toml``); a name seen only in sink.db resolves by
+    fixed path alone (client_dir, then GIT_BASE)."""
     etc: Path = Path("/etc")
     sinks: Path = SINKS_DIR
     marker: Path = MARKER_PATH
@@ -103,6 +123,9 @@ class CarryRoots:
     deploy_dir: Optional[Path] = None
     writer_py: Path = sink_levers.WRITER_PY
     python: Path = um.HS_UPLOADER_PYTHON
+    manifest: Path = um.MANIFEST_PATH       # the legacy manifest
+    store: Optional[Path] = None            # None: hs-uploader's default
+    catalog: Optional[frozenset] = None     # None: catalog.load_catalog()
 
     @property
     def coordination(self) -> Path:
@@ -111,6 +134,10 @@ class CarryRoots:
     @property
     def topology(self) -> Path:
         return self.etc / "sigmond" / "topology.toml"
+
+    @property
+    def coordination_env(self) -> Path:
+        return self.etc / "sigmond" / "coordination.env"
 
 
 @dataclass(frozen=True)
@@ -178,6 +205,7 @@ class CarryResult:
     stale: Optional[sink_levers.StaleResult] = None
     marker: bool = False
     failed: Optional[tuple] = None                     # (step, why)
+    notes: list = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -185,6 +213,7 @@ class CarryResult:
 
     def lines(self) -> list:
         out = [f"carry-over: wrote {n}" for n in self.written]
+        out += [f"carry-over: {n}" for n in self.notes]
         if self.lever is not None:
             out += self.lever.lines()
         out += [f"lever: still armed: {v}" for v in self.verify]
@@ -279,15 +308,45 @@ def sink_producers(path: Path) -> tuple:
     return found - bad, notes
 
 
-def _deploy(client: str, roots: CarryRoots, topology) -> Optional[Path]:
-    base = roots.deploy_dir or getattr(topology, "client_dir", None)
-    if base is not None:
+def _deploy_fixed(client: str, roots: CarryRoots, topology) -> Optional[Path]:
+    """deploy.toml by fixed path only: never a program, never PATH."""
+    if roots.deploy_dir is not None:
+        bases = [roots.deploy_dir]
+    else:
+        bases = [getattr(topology, "client_dir", None), GIT_BASE]
+    for base in bases:
+        if base is None:
+            continue
         p = Path(base) / client / "deploy.toml"
         if p.is_file():
             return p
-    if roots.deploy_dir is None:
-        return find_deploy_toml(client)
     return None
+
+
+def _deploy_enabled(client: str, roots: CarryRoots, topology) -> Optional[Path]:
+    """An enabled client's deploy.toml, found as the manifest step finds
+    it (``collect_pipelines``): fixed paths first, then
+    ``find_deploy_toml``, which may run ``<client> inventory --json``.
+    Topology names it, and only root writes topology."""
+    p = _deploy_fixed(client, roots, topology)
+    if p is None and roots.deploy_dir is None:
+        return find_deploy_toml(client)
+    return p
+
+
+def _governed(path: Optional[Path]) -> bool:
+    return path is not None and bool(um._pipeline_decls(path))
+
+
+def _catalog(roots: CarryRoots, notes: list) -> frozenset:
+    if roots.catalog is not None:
+        return frozenset(roots.catalog)
+    try:
+        return frozenset(load_catalog().keys())
+    except (OSError, ValueError) as exc:
+        notes.append(f"cannot load the catalog ({exc}); no client seen only "
+                     "in sink.db counts")
+        return frozenset()
 
 
 def _instances(client: str, roots: CarryRoots) -> list:
@@ -308,23 +367,51 @@ def _instances(client: str, roots: CarryRoots) -> list:
     return out
 
 
-def _stop_order(client: str, roots: CarryRoots, notes: list) -> bool:
-    """True when any instance env of ``client`` sets its stop flag to 0."""
+def _read_env(path: Path, flag: str):
+    """(env dict, None) or (None, the fill reason naming the file)."""
+    try:
+        return parse_env_text(read_nofollow(path) or ""), None
+    except (OSError, UnicodeDecodeError) as exc:
+        why = getattr(exc, "strerror", None) or str(exc)
+        return None, REASON_UNREAD.format(file=path, why=why, flag=flag)
+
+
+def _stop_order(client: str, roots: CarryRoots) -> Optional[str]:
+    """The ``fill`` reason when ``client``'s stop flag reads 0 in any
+    instance's env, or when an env file cannot be read or trusted (fail
+    closed); None otherwise.
+
+    Each instance reads coordination.env first, then its own
+    ``<etc>/<client>/env/<id>.env`` (a later setting wins), as the unit's
+    EnvironmentFile= lines order them.  Pure file reads: systemd drop-ins
+    stay out.  A refused file (a symlink, a hard link, a stranger's file)
+    or an env file whose name is no reporter id reads as an order to stop,
+    since it might carry one."""
     flag = STOP_FLAGS.get(client)
     if flag is None:
-        return False
-    for rid in _instances(client, roots):
-        f = roots.etc / client / "env" / f"{rid}.env"
+        return None
+    base, why = _read_env(roots.coordination_env, flag)
+    if why:
+        return why
+    try:
+        files = sorted((roots.etc / client / "env").glob("*.env"))
+    except OSError:
+        files = []
+    envs = []
+    for f in files:
         try:
-            text = read_nofollow(f) or ""
-        except OSError as exc:
-            notes.append(f"cannot read {f} ({exc.strerror or exc}); its "
-                         f"{flag} was not read")
-            continue
-        val = parse_env_text(text).get(flag)
+            validate_reporter_id(f.stem)
+        except InvalidReporterId:
+            return REASON_BADNAME.format(file=f, flag=flag)
+        env, why = _read_env(f, flag)
+        if why:
+            return why
+        envs.append({**base, **env})
+    for env in envs or [base]:
+        val = env.get(flag)
         if val is not None and val.strip().lower() in _OFF_WORDS:
-            return True
-    return False
+            return REASON_FLAG.format(flag=flag)
+    return None
 
 
 def _psws_ids(client: str, roots: CarryRoots) -> dict:
@@ -385,26 +472,50 @@ class _Station:
     notes: list
 
 
-def _read_station(roots: CarryRoots) -> _Station:
+def _read_station(roots: CarryRoots, *, late: bool = False) -> _Station:
+    """The governed clients: each enabled client whose deploy.toml declares
+    pipelines, and each catalog client, not enabled, with rows in sink.db
+    and pipelines in a deploy.toml at a fixed path.
+
+    ``late``: only clients with no switch file matter, so sink.db is read
+    only when some catalog client, not enabled and governed, lacks one."""
     coord = load_coordination(roots.coordination)
     topology = load_topology(roots.topology)
     enabled = set(topology.enabled_components())
-    producers, notes = sink_producers(roots.sink_db)
-    governed = []
-    for client in sorted(enabled | producers):
-        if not _CLIENT_RE.match(client) or client == SITE:
-            continue
-        deploy = _deploy(client, roots, topology)
-        if deploy is not None and um._pipeline_decls(deploy):
-            governed.append(client)
-    return _Station(coord, topology, enabled, governed, list(notes))
+    notes: list = []
+    governed = [c for c in sorted(enabled)
+                if _CLIENT_RE.match(c) and c != SITE
+                and _governed(_deploy_enabled(c, roots, topology))]
+    catalog = _catalog(roots, notes)
+    if late:
+        wanted = [c for c in sorted(catalog - enabled)
+                  if _CLIENT_RE.match(c) and c != SITE
+                  and switch_state(roots.sinks / f"{c}.toml") == "missing"
+                  and _governed(_deploy_fixed(c, roots, topology))]
+        if wanted:
+            producers, more = sink_producers(roots.sink_db)
+            notes += more
+            governed += [c for c in wanted if c in producers]
+    else:
+        producers, more = sink_producers(roots.sink_db)
+        notes += more
+        others = producers - enabled
+        outside = others - catalog
+        if outside:
+            notes.append(f"{roots.sink_db}: {len(outside)} producer(s) that "
+                         "name no catalog client ignored")
+        governed += [c for c in sorted(others & catalog)
+                     if c != SITE
+                     and _governed(_deploy_fixed(c, roots, topology))]
+    return _Station(coord, topology, enabled, sorted(set(governed)), notes)
 
 
 def _client_write(client: str, st: _Station, roots: CarryRoots, *,
                   default_reason: str) -> FileWrite:
     """§6.3's client table."""
-    if _stop_order(client, roots, st.notes):
-        state, reason = "fill", REASON_FLAG.format(flag=STOP_FLAGS[client])
+    stop = _stop_order(client, roots)
+    if stop:
+        state, reason = "fill", stop
     elif client not in st.enabled:
         state, reason = "fill", REASON_DISABLED
     else:
@@ -416,7 +527,10 @@ def _client_write(client: str, st: _Station, roots: CarryRoots, *,
 # ---- the plan ----------------------------------------------------------------
 
 def plan(roots: CarryRoots = CarryRoots()) -> CarryPlan:
-    """What the carry-over would write and run.  Reads only.
+    """What the carry-over would write and run.  It writes nothing.  It
+    reads the station's files and ``sink.db`` (read-only), and, as the
+    manifest step does, may run ``<client> inventory --json`` for an
+    enabled client whose deploy.toml sits at no fixed path.
 
     With the marker standing it returns :func:`late_clients`: nothing,
     unless a governed client has no switch file."""
@@ -450,7 +564,7 @@ def late_clients(roots: CarryRoots = CarryRoots()) -> CarryPlan:
     """The marker stands: a file, by §6.3's client table, for each governed
     client that has none (§6.5).  The site switch, as its file stands,
     still limits it; the lever step covers only these clients."""
-    st = _read_station(roots)
+    st = _read_station(roots, late=True)
     site = switch_state(roots.sinks / f"{SITE}.toml")
     limit = _site_limit(site)
     writes, eff = [], {}
@@ -485,10 +599,10 @@ def _call(runner: Callable, args: list, stdin, res: CarryResult,
     return True
 
 
-def _lever_step(plan: CarryPlan, res: CarryResult, systemctl) -> bool:
+def _lever_step(plan: CarryPlan, below, res: CarryResult, systemctl) -> bool:
     roots = plan.roots
     lp = sink_levers.plan_levers(
-        plan.below, plan.topology,
+        below, plan.topology,
         roots=sink_levers.Roots(etc=roots.etc, writer_py=roots.writer_py),
         systemctl=systemctl)
     try:
@@ -515,28 +629,72 @@ def _stale_step(plan: CarryPlan, res: CarryResult, systemctl) -> bool:
         res.stale = sink_levers.restart_stale_writers(
             plan.topology, to_off=True, writer_py=plan.roots.writer_py,
             systemctl=systemctl, skip=skip)
-    except (sink_levers.RadiodMoved, sink_levers.RestartFailed,
-            OSError, ValueError) as exc:
+    except (sink_levers.RadiodMoved, sink_levers.RestartFailed) as exc:
+        res.stale = exc.result
+        res.failed = ("stale-writer restarts", str(exc))
+        return False
+    except (OSError, ValueError) as exc:
         res.failed = ("stale-writer restarts", str(exc))
         return False
     return True
 
 
+def _default_read_state(roots: CarryRoots):
+    return sink_state.read_state(
+        python=roots.python, manifest=str(roots.manifest),
+        sinks=str(roots.sinks), marker=str(roots.marker),
+        store=None if roots.store is None else str(roots.store))
+
+
+def _read_back(plan: CarryPlan, res: CarryResult, read_state) -> Optional[tuple]:
+    """(below, to_off) after the writes: the plan's own, joined with what
+    ``hs-uploader sink status --json`` reads below upload (ruling X4).
+    None, with ``res.failed`` set, when the status cannot be read and a
+    legacy manifest exists."""
+    state = read_state(plan.roots)
+    if state is None:
+        man = plan.roots.manifest
+        if os.path.lexists(man):
+            res.failed = ("read-back", "hs-uploader sink status could not be "
+                          f"read, and {man} exists; the switches cannot be "
+                          "confirmed")
+            return None
+        res.notes.append(f"read-back: hs-uploader sink status could not be "
+                         f"read and no legacy manifest stands at {man} yet; "
+                         "the lever step uses the carry-over's own states")
+        return plan.below, plan.to_off
+    seen = [c for c in below_upload(state) if c != SITE]
+    added = sorted(set(seen) - set(plan.below))
+    if added:
+        res.notes.append("read-back: hs-uploader also reads below upload: "
+                         + ", ".join(added))
+    below = tuple(sorted(set(plan.below) | set(seen)))
+    to_off = plan.to_off or any(state.clients[c].effective == "off"
+                                for c in seen)
+    return below, to_off
+
+
 def apply(plan: CarryPlan, *, runner: Optional[Callable] = None,
-          systemctl=subprocess.run) -> CarryResult:
+          systemctl=subprocess.run,
+          read_state: Optional[Callable] = None) -> CarryResult:
     """Carry the plan out, in §6.4's order; the marker last.
 
     ``runner(args, stdin=None)`` runs ``hs-uploader <args>`` and returns a
     CompletedProcess (default: :func:`uploader_manifest.run_hs_uploader`
     with the roots' interpreter).  Stops at the first failure: a failed
     ``sink set``, a lever that failed or left a sender armed, radiod moving,
-    or a failed stale-writer restart.  Then no marker is written, and
-    ``written`` names each file this run wrote."""
+    or a failed stale-writer restart, or a read-back that fails while a
+    legacy manifest exists.  Then no marker is written, and ``written``
+    names each file this run wrote.  ``read_state(roots)`` returns a
+    SinkState or None (default: ``sink_state.read_state`` on the roots'
+    paths)."""
     roots = plan.roots
     if runner is None:
         def runner(args, stdin=None):
             return um.run_hs_uploader(args, stdin=stdin, python=roots.python)
     res = CarryResult()
+    if plan.nothing_to_do:
+        return res
     for w in ([plan.site] if plan.site is not None else []) + list(plan.clients):
         args = ["sink", "set", w.name, w.state, "--reason", w.reason,
                 "--by", BY]
@@ -548,9 +706,13 @@ def apply(plan: CarryPlan, *, runner: Optional[Callable] = None,
         if not _call(runner, args, stdin, res, f"hs-uploader sink set {w.name}"):
             return res
         res.written.append(w.name)
-    if plan.below and not _lever_step(plan, res, systemctl):
+    got = _read_back(plan, res, read_state or _default_read_state)
+    if got is None:
         return res
-    if plan.to_off and not _stale_step(plan, res, systemctl):
+    below, to_off = got
+    if below and not _lever_step(plan, below, res, systemctl):
+        return res
+    if to_off and not _stale_step(plan, res, systemctl):
         return res
     if not plan.marker_stands:
         note = "carry-over wrote: " + (" ".join(res.written) or "nothing new")

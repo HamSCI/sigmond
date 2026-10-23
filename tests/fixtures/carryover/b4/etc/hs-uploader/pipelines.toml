@@ -1,0 +1,33 @@
+# legacy manifest (part 1, v3.78), as sigmond rendered it; trimmed to what sink status reads
+[identity]
+call = "AC0G"
+
+[[pipeline]]
+name = "wspr-wsprnet"
+client = "wspr-recorder"
+[pipeline.source]
+type = "sqlite"
+database = "sigmond"
+table = "wspr.spots"
+[pipeline.transport]
+type = "wsprnet"
+
+[[pipeline]]
+name = "psk-recorder-pskreporter"
+client = "psk-recorder"
+[pipeline.source]
+type = "sqlite"
+database = "sigmond"
+table = "psk.spots"
+[pipeline.transport]
+type = "pskreporter"
+
+[[pipeline]]
+name = "meteor-scatter-pskreporter"
+client = "meteor-scatter"
+[pipeline.source]
+type = "sqlite"
+database = "sigmond"
+table = "psk.spots"
+[pipeline.transport]
+type = "pskreporter"
