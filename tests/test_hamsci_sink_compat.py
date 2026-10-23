@@ -118,6 +118,80 @@ class BundledCopyTests(unittest.TestCase):
             )
 
 
+class BundledSwitchCheckTests(unittest.TestCase):
+    """Spec sink-2b-part2 test 9: the bundled copy's switch check loads
+    hs_uploader.sinkswitch behind a guard.  Without it, or with one that
+    lacks a name the check needs, the writer stores every row and raises
+    nothing.  Each case carries its control: the same harness with the
+    names present drops the row."""
+
+    _SCRIPT = """
+        import sqlite3
+        from pathlib import Path
+        {setup}
+        from sigmond.hamsci_sink import _bundled
+        tmp = Path({tmp!r})
+        (tmp / "sinks").mkdir(exist_ok=True)
+        (tmp / "sinks" / "psk-recorder.toml").write_text('state = "off"\\n')
+        (tmp / "marker").write_text("done\\n")
+        w = _bundled.Writer("psk", "spots", producer="psk-recorder",
+                            config=_bundled.SqliteConfig(path=str(tmp / "sink.db")),
+                            sinks_dir=tmp / "sinks", marker=tmp / "marker")
+        w.insert([{{"mode": "FT8"}}])
+        w.close()
+        db = tmp / "sink.db"
+        n = (sqlite3.connect(db).execute("SELECT count(*) FROM pending_uploads").fetchone()[0]
+             if db.exists() else 0)
+        print(json.dumps({{"stored": n, "dropped": w.dropped}}))
+    """
+
+    def _run(self, setup="", extra_path=()):
+        with tempfile.TemporaryDirectory() as tmp:
+            return _child(self._SCRIPT.format(setup=setup, tmp=tmp),
+                          extra_path=extra_path)
+
+    @staticmethod
+    def _fake_sinkswitch(root, without=""):
+        """An hs_uploader whose sinkswitch reads every client as off,
+        with the marker read by lexists; `without` names one name left out."""
+        pkg = Path(root) / "hs_uploader"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        names = {
+            "effective_state": (
+                "class _E:\n    state = 'off'\n    client_missing = False\n"
+                "def effective_state(client, *, sinks_dir=None):\n    return _E()\n"),
+            "marker_stands": "def marker_stands(p):\n    return os.path.lexists(p)\n",
+            "marker_path": "def marker_path():\n    return '/nonexistent/marker'\n",
+            "DEFAULT_SINKS_DIR": "DEFAULT_SINKS_DIR = '/nonexistent/sinks'\n",
+            "valid_client_name": "def valid_client_name(n):\n    return True\n",
+        }
+        (pkg / "sinkswitch.py").write_text(
+            "import os\n" + "".join(v for k, v in names.items() if k != without))
+
+    def test_without_hs_uploader_the_bundled_writer_stores(self):
+        got = self._run('sys.modules["hs_uploader"] = None')
+        self.assertEqual(got, {"stored": 1, "dropped": {}})
+
+    def test_control_with_the_real_sinkswitch_the_bundled_writer_drops(self):
+        if not _HS_SRC.is_dir():
+            self.skipTest(f"no hs-uploader checkout beside sigmond at {_HS_SRC}")
+        got = self._run(extra_path=[_HS_SRC])
+        self.assertEqual(got, {"stored": 0, "dropped": {"psk-recorder": 1}})
+
+    def test_a_sinkswitch_lacking_marker_stands_stores(self):
+        with tempfile.TemporaryDirectory() as fake:
+            self._fake_sinkswitch(fake, without="marker_stands")
+            got = self._run(extra_path=[fake])
+        self.assertEqual(got, {"stored": 1, "dropped": {}})
+
+    def test_control_the_same_fake_with_every_name_drops(self):
+        with tempfile.TemporaryDirectory() as fake:
+            self._fake_sinkswitch(fake)
+            got = self._run(extra_path=[fake])
+        self.assertEqual(got, {"stored": 0, "dropped": {"psk-recorder": 1}})
+
+
 class SelectionTests(unittest.TestCase):
     """Which copy sigmond.hamsci_sink hands a client, and SINK_IMPL saying so."""
 
