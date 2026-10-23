@@ -436,6 +436,55 @@ def test_relay_exits_75_when_the_vm_is_unreachable(tmp_path):
     assert r.returncode == 75, r.stderr
 
 
+def test_relay_passes_the_vm_close_on_to_the_client(tmp_path):
+    """When the VM end closes, the client must see EOF.
+
+    gunicorn drops an idle keep-alive connection after 2 s.  A relay that only
+    marks the VM side closed leaves the browser holding a live-looking socket:
+    it sends the next request into it and waits out the relay's 15-minute idle
+    timeout (W3USR-06 contest dashboard over the RAC, 2026-10-22)."""
+    import socket
+    src = _relay_heredocs()["/usr/local/lib/sigmond/vm-port-relay.py"]
+    script = tmp_path / "relay.py"
+    script.write_text(src)
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    # No /30 and no agent answer; the neighbour-table fallback finds the "VM".
+    (bin_ / "ip").write_text('#!/bin/sh\ncase "$*" in *neigh*) '
+                             'echo "127.0.0.1 dev lo lladdr 02:00:00:00:00:01 REACHABLE";; esac\nexit 0\n')
+    (bin_ / "qm").write_text('#!/bin/sh\n[ "$1" = config ] && echo "net0: virtio=02:00:00:00:00:01,bridge=vmbr0"\nexit 0\n')
+    for n in ("ip", "qm"):
+        (bin_ / n).chmod(0o755)
+
+    vm = socket.socket()
+    vm.bind(("127.0.0.1", 0))
+    vm.listen(4)
+    port = vm.getsockname()[1]
+    client, relay_end = socket.socketpair()
+    env = dict(os.environ, PATH=f"{bin_}:/usr/bin:/bin", SIGMOND_VMID="999")
+    proc = subprocess.Popen([sys.executable, str(script), str(port)], env=env,
+                            stdin=relay_end.fileno(), stdout=relay_end.fileno())
+    relay_end.close()
+    try:
+        vm.settimeout(30)
+        conn, _ = vm.accept()
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        conn.close()                    # the server's keep-alive timeout fires
+
+        client.settimeout(10)
+        got = b""
+        while True:
+            chunk = client.recv(65536)  # socket.timeout here is the bug
+            if not chunk:
+                break
+            got += chunk
+        assert got.endswith(b"ok")
+    finally:
+        client.close()
+        vm.close()
+        proc.wait(timeout=10)
+
+
 def test_relay_script_keeps_exit_1_for_nothing_else():
     src = _relay_heredocs()["/usr/local/lib/sigmond/vm-port-relay.py"]
     assert src.count("sys.exit(75)") == 2
