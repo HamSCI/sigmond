@@ -59,7 +59,7 @@ update --unpin` does not release it.  To return the station to the current relea
    (`--release <tag>` names another).
 2. `smd align --apply`: moves each checkout to that release, pinned, and re-runs bring-up.  Bring-up's
    manifest step finds no marker, carries the station over again from `[uploads]`, and keeps every
-   client's switch file.  It then restarts each service still running old code.
+   client's switch file.  `smd align` then restarts each service still running old code, radiod first.
 3. `smd sink status`: confirm the site line, and that hs-uploader enforces the switches.
 4. Later, run `smd align --verify`.
 
