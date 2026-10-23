@@ -81,8 +81,11 @@ def set_env_flag(path: Path, key: str, value: str) -> None:
 
     The env directory belongs to the service account, so the read and the
     write go through ``safe_write.rewrite_owned`` (plan Ruling 17): one
-    directory descriptor for both, mode 0644, and as root the file goes to
-    the directory's owner by descriptor.  A symlink, a hard link or (as
+    directory descriptor for both.  An existing file keeps its owner and
+    mode, so a root:root 0600 file never passes to the service account at
+    0644 (systemd reads EnvironmentFile as root; no service needs to read
+    its own env file).  A new file goes to the directory's owner at 0644,
+    by descriptor.  A symlink, a hard link or (as
     root) a stranger's file at the env file raises OSError; a symlink is
     refused rather than replaced, since the service can re-arm its own
     lever anyway and replacing it would read its target or drop the
@@ -103,7 +106,7 @@ def set_env_flag(path: Path, key: str, value: str) -> None:
         if not found:
             out.append(f"{key}={value}")
         return "\n".join(out) + "\n"
-    rewrite_owned(path, edit, mode=0o644)
+    rewrite_owned(path, edit, mode=None, keep_owner=True)
 
 
 def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",

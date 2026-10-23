@@ -213,11 +213,12 @@ def test_set_env_flag_keeps_every_other_line_byte_for_byte(tmp_path):
     p = tmp_path / "env" / "AC0G=B4.env"
     p.parent.mkdir()
     p.write_bytes(_PIN_IN)
+    _os.chmod(p, 0o640)
     upload.set_env_flag(p, "PSK_USE_HS_UPLOADER", "0")
     upload.set_env_flag(p, "PSK_DELIVERY_PIPELINES", "server-raw")
     upload.set_env_flag(p, "NEW_KEY", "v")
     assert p.read_bytes() == _PIN_OUT
-    assert _stat.S_IMODE(_os.lstat(p).st_mode) == 0o644
+    assert _stat.S_IMODE(_os.lstat(p).st_mode) == 0o640   # mode kept
 
 
 def test_set_env_flag_creates_a_missing_file_and_directory(tmp_path):
@@ -238,8 +239,11 @@ def test_set_env_flag_never_writes_through_a_planted_link(tmp_path):
     assert (d / "X.env").is_symlink()          # nothing copied out of it
 
 
-def test_apply_enable_as_root_chowns_by_descriptor_to_the_dir_owner(
-        tmp_path, monkeypatch):
+def _as_root(monkeypatch, file_owner=None, dir_gid=None):
+    """Pretend to be root; record fchown; forbid chown by path.
+
+    `file_owner` makes fstat of a regular file report that (uid, gid);
+    `dir_gid` makes fstat of a directory report that gid."""
     from sigmond import safe_write
     seen = []
     monkeypatch.setattr(safe_write.os, "geteuid", lambda: 0)
@@ -249,12 +253,64 @@ def test_apply_enable_as_root_chowns_by_descriptor_to_the_dir_owner(
     def no_path_chown(*a, **k):
         raise AssertionError(f"chown by path: {a!r}")
     monkeypatch.setattr(_os, "chown", no_path_chown)
-    path, *_ = upload.apply_enable("psk-recorder", "AC0G/B4", True,
+    real = _os.fstat
+
+    def fstat(fd):
+        st = real(fd)
+        t = list(st)[:10]
+        if _stat.S_ISREG(st.st_mode) and file_owner is not None:
+            t[4], t[5] = file_owner
+        elif _stat.S_ISDIR(st.st_mode) and dir_gid is not None:
+            t[5] = dir_gid
+        return _os.stat_result(t)
+    monkeypatch.setattr(safe_write.os, "fstat", fstat)
+    return seen
+
+
+def test_apply_enable_as_root_gives_a_new_env_file_to_the_dir_owner(
+        tmp_path, monkeypatch):
+    # wspr-recorder: one write, so the fake fchown (which moves nothing)
+    # cannot leave a file the second write would then keep as found.
+    env_dir = tmp_path / "wspr-recorder" / "env"
+    env_dir.mkdir(parents=True)
+    dst = _os.stat(env_dir)
+    seen = _as_root(monkeypatch, dir_gid=dst.st_gid + 4242)
+    path, *_ = upload.apply_enable("wspr-recorder", "AC0G/B4", True,
                                    base=str(tmp_path))
-    dst = _os.stat(path.parent)
     assert seen, "no fchown"
     for fd, u, g in seen:
-        assert isinstance(fd, int) and (u, g) == (dst.st_uid, dst.st_gid)
+        assert isinstance(fd, int) and (u, g) == (dst.st_uid, dst.st_gid + 4242)
+    assert _stat.S_IMODE(_os.lstat(path).st_mode) == 0o644
+
+
+def test_set_env_flag_as_root_keeps_a_root_0600_file_root_0600(
+        tmp_path, monkeypatch):
+    # Security review, round 2: a root:root 0600 env file must not pass to
+    # the directory's owner at 0644.  systemd reads EnvironmentFile as root.
+    d = tmp_path / "env"
+    d.mkdir()
+    p = d / "X.env"
+    p.write_text("SECRET=1\n")
+    _os.chmod(p, 0o600)
+    seen = _as_root(monkeypatch, file_owner=(0, 0))
+    upload.set_env_flag(p, "K", "1")
+    assert [(u, g) for _, u, g in seen] == [(0, 0)]
+    assert _stat.S_IMODE(_os.lstat(p).st_mode) == 0o600
+    assert p.read_text() == "SECRET=1\nK=1\n"
+
+
+def test_set_env_flag_as_root_leaves_a_dir_owners_file_as_it_is(
+        tmp_path, monkeypatch):
+    d = tmp_path / "env"
+    d.mkdir()
+    p = d / "X.env"
+    p.write_text("A=1\n")
+    _os.chmod(p, 0o640)
+    fst = _os.stat(p)
+    seen = _as_root(monkeypatch, dir_gid=fst.st_gid + 4242)
+    upload.set_env_flag(p, "K", "1")
+    assert [(u, g) for _, u, g in seen] == [(fst.st_uid, fst.st_gid)]
+    assert _stat.S_IMODE(_os.lstat(p).st_mode) == 0o640
 
 
 def test_set_env_flag_does_not_copy_a_hard_linked_secret(tmp_path):
