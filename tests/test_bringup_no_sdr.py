@@ -201,10 +201,17 @@ class Verdict(unittest.TestCase):
         self.assertNotIn("'dasi2' complete", out.getvalue())
 
     def test_the_may_fail_steps_are_exactly_the_two_by_design(self):
+        # ⚠ Match the COMMANDS, not their full argv.  This asserted the exact
+        # flag string and so failed when the RX-888 gate gained an explicit
+        # --wait-seconds (2026-10-23) -- a test about WHICH steps may fail,
+        # broken by HOW one of them is invoked.  The contract is that exactly
+        # these two are tolerant of failure; their flags are free to change.
         p = build_plan(_dasi2(), local_radiod=True)
-        tolerant = sorted(' '.join(s.argv) for s in p.steps if s.may_fail)
-        self.assertEqual(tolerant, ['/usr/local/sbin/sigmond-sdr-recover --ensure-present',
-                                    'systemctl try-restart hs-uploader.service'])
+        tolerant = sorted(s.argv[0] + (' ' + s.argv[1] if len(s.argv) > 1 else '')
+                          for s in p.steps if s.may_fail)
+        self.assertEqual(tolerant,
+                         ['/usr/local/sbin/sigmond-sdr-recover --ensure-present',
+                          'systemctl try-restart'])
 
 
 class FirstrunAwaitingSdr(unittest.TestCase):

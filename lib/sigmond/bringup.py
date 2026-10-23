@@ -26,6 +26,14 @@ WISDOM_FILE = Path('/etc/fftw/wisdomf')
 CLIENT_STAGGER_S = 20
 
 # Stage labels (also the progress-group headers the executor prints).
+# How long a FIRST bring-up waits for the RX-888 to appear before giving up.
+# Measured worst case: AI6VN 2026-10-23 took over three minutes from the gate
+# running to the card being usable, on a VM with passed-through USB and a hub
+# needing a link blip.  240 s covers that with margin; see the gate step below
+# for why the first boot is the worst case and why waiting is the cheap side
+# of the trade.
+RX888_FIRSTBOOT_WAIT_S = 240
+
 STAGE1 = 'Stage 1 — radiod + host tuning'
 STAGE2 = 'Stage 2 — hf-timestd (timing authority)'
 STAGE3A = 'Stage 3a — radiod-bound clients'
@@ -261,10 +269,30 @@ def build_plan(profile, *, local_radiod: bool,
         #
         # Non-fatal by design: a station with no local card, or a hub that
         # cannot switch power, still brings up everything else.
+        # ⛔ WAIT FAR LONGER THAN THE ROUTINE DEFAULT.  sdr-recover's 60 s is
+        # right for a recovery run on a settled station; a FIRST boot is the
+        # worst case there is for card timing, and the two compound:
+        #   - the FX3 firmware was installed moments ago in this same run,
+        #   - udev was reloaded in this same run,
+        #   - a passed-through USB controller in a VM settles late,
+        #   - and on a hub that does not follow the bootloader-to-SuperSpeed
+        #     transition the card must ALSO be blipped by sdr-recover's timer
+        #     before it is usable (see promote_link()).
+        # AI6VN, v3.78 greenfield install 2026-10-23: the gate gave up, the
+        # hard checkpoint failed with "/etc/radio: 0 radiod conf(s)", radiod
+        # was never enabled, and the card was healthy on the bus minutes
+        # later.  Re-running `smd bringup dasi2` by hand then worked first
+        # time and wrote 10 configs -- nothing was wrong but the waiting.
+        #
+        # The cost of waiting is paid ONLY by a station whose card really is
+        # absent, once, on its first boot.  The cost of not waiting is a
+        # station that comes up with no radio at all and needs a human.
         steps.append(Step(STAGE1, 'ensure the RX-888 is on the bus (wait for a '
                                   'slow FX3, recover a latched card)', 'tune',
                           argv=['/usr/local/sbin/sigmond-sdr-recover',
-                                '--ensure-present'], may_fail=True))
+                                '--ensure-present',
+                                '--wait-seconds', str(RX888_FIRSTBOOT_WAIT_S)],
+                          may_fail=True))
         configure(STAGE1, 'radiod')
         # Tune AFTER `configure radiod`, never before: `smd apply` writes
         # per-INSTANCE affinity drop-ins and enables + starts any radiod
