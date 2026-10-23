@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 007bf72 on 2026-10-10 — remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond ad53b95 on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 007bf72 on 2026-10-10: remote-access words, the addresses the host relays and the keyboard note checked against commands/remote.py, the wizard's switch and the appliance's console panel and split console; held packages against sink_doors.py
 > **Canonical for:** day-2 operation — what healthy looks like, the weekly check, updates, power loss
 
 The station is meant to be boring. It runs itself, it restarts itself after a
@@ -404,10 +404,11 @@ raised the switch since the install: finish
 [INSTALL.md §9](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#9-fifteen-minutes-later--check-its-alive)
 and run `smd sink upload`. It refuses while GRAPE or the magnetometer packages a
 day (about 01:00 to 05:00 UTC); run it again when that finishes. Any other
-`⚠ site sink: off` or `⚠ site sink: hold (legacy)`
+`⚠ site sink: off`, `⚠ site sink: fill` or `⚠ site sink: hold (legacy)`
 means somebody set it on purpose: **expect zero spots and report nothing**, and do not
-change it yourself. `smd upload hold` and `smd upload discard` still work; they set the
-legacy modes that `smd sink status` reports as `hold (legacy)` and `off`. The full
+change it yourself. `smd upload hold` and `smd upload discard` still work; they set
+`fill` and `off`, or, on a station older than the sink switch files, the legacy modes
+that `smd sink status` reports as `hold (legacy)` and `off`. The full
 explanation sits in the closing blockquote of
 [registration.md §6 — Confirming everything flows](registration.md#6-confirming-everything-flows).
 

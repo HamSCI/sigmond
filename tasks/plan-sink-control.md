@@ -155,8 +155,9 @@ ships data from its `off` period.  A machine needs one PSWS key.  The adaptive s
 ### 3.2 Who owns what
 
 **hs-uploader, the courier.**  One copy per host.  Whichever client arrives first installs it.  Its
-installer runs safely more than once.  It holds the lock `/run/lock/hs-uploader-install.lock` while
-it works, tolerates an existing user or group, creates `/etc/hs-uploader/pipelines.d` and
+installer runs safely more than once.  It holds the lock `/run/hs-uploader-install/lock` while
+it works (amended 2026-10-23, sink-2b part 2 ruling C14-3: the lock lives in a directory only root
+can write, not in the world-writable `/run/lock`; the v3.79 installer must use this path), tolerates an existing user or group, creates `/etc/hs-uploader/pipelines.d` and
 `/etc/hs-uploader/sinks`, and enables the unit.
 
 - The library, as now.
@@ -935,7 +936,8 @@ Such a client carries over as `fill`, so it keeps storing.
   carry-over, and starts its clients `off`.  A station whose clients ship only through in-process
   senders, with no legacy `pipelines.toml`, therefore still carries over.
 - Sigmond runs it, from `smd align` and `smd update`, under hs-uploader's install lock,
-  `/run/lock/hs-uploader-install.lock`.  It takes the client list from the enabled components in
+  `/run/hs-uploader-install/lock` (amended 2026-10-23, ruling C14-3; part 2 runs it from the manifest
+  step alone, spec-sink-2b-part2 §6.1).  It takes the client list from the enabled components in
   `topology.toml`, plus any producer with rows in `sink.db`.  It never takes the list from
   `pipelines.toml`, which names pipelines rather than clients and, while the legacy
   `[uploads] mode` reads `hold`, lists only the heartbeat.

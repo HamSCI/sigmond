@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 6406025 on 2026-10-10 — remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; sink words checked at 58fb909 against commands/sink.py and commands/config.py; held packages against sink_doors.py
+> **Verified against:** sigmond ad53b95 on 2026-10-23 — sink words checked against commands/sink.py and commands/config.py (sink control step 2b part 2); earlier, at 6406025 on 2026-10-10: remote-access words and the addresses the host relays checked against commands/remote.py, the wizard's switch and the appliance console panel; held packages against sink_doors.py
 > **Canonical for:** getting a station's uploads accepted (PSWS, wsprnet, pskreporter, wsprdaemon)
 
 Your station starts hearing signals the moment the install finishes. This page
@@ -463,14 +463,26 @@ Don't judge PSWS on day one.
 > | `⚠ site sink: off — no data ships and no backlog builds` | no data leaves; only the heartbeat goes out. A new station starts here, with the reason `new station: …`, until someone checks it and runs `smd sink upload`; a bench machine being provisioned sits here too. `smd sink upload` sends the GRAPE and magnetometer packages for today and yesterday (UTC), even if the station built them while off. Older packages stay on the station, and nothing else recorded before it ships. Some stations built before v3.69 run senders of their own, and the site sink switch does not stop them: psk-recorder or meteor-scatter set to `direct`, B4's wspr-uploader, an optional hfdl-recorder feed. Ask your fleet admin |
 > | `⚠ site sink: hold (legacy) — stores for a while and sends no data; …` | an older pause, set with `smd upload hold`. The station keeps FT8 spots for one hour and WSPR spots for 24 hours, then drops them. `smd sink upload` sends what remains; `smd sink off` drops it. DASI002 reads `no HF antenna; no PSWS station/instrument ids` |
 >
+> A station whose software carries the sink switch files (sink control step 2b
+> part 2) words the site line differently, and adds a line for each client after it:
+>
+> | It says | Meaning |
+> |---|---|
+> | `✓ site sink: upload (store and send); set <time> by <who> — <reason>` | normal |
+> | `⚠ site sink: fill (store and send nothing); set … by … — <reason>` | a pause: the station stores and sends no data. Until v3.79, the station keeps FT8 spots for one hour and WSPR spots for 24 hours, sent or not. `smd sink upload` sends what remains, oldest first |
+> | `⚠ site sink: off (nothing ships and nothing new is stored for upload); set … by … — <reason>` | no data leaves and nothing new is stored for upload; data stored before `off` waits and ships when the switch rises. A new station starts here, with the reason `new station: …` |
+> | `<client>: its file reads fill; effective fill, set by its own switch` | that one client stays at `fill` whatever the site switch says. Only your fleet admin raises it |
+> | `✗ UNMANAGED: …`, `✗ cannot check: …`, `✗ mirror mismatch: …` | a fault: a sender that still runs outside the switch, one sigmond could not read, or `[uploads]` disagreeing with the switch. Ask your fleet admin |
+>
 > When the switch leaves `off`, `smd sink upload` moves every GRAPE package and
 > magnetometer zip still waiting from before yesterday (UTC) into `/var/lib/timestd/upload-held/<UTC time>/` and
 > `/var/lib/mag-recorder/upload-held/<UTC time>/`, where nothing removes them; ask
 > your fleet admin before you delete them.  The packages for today and yesterday stay
 > in place and ship.
 >
-> `smd upload hold` and `smd upload discard` still work; they set the legacy modes
-> that `smd sink status` reports as `hold (legacy)` and `off`. Ask your fleet admin
+> `smd upload hold` and `smd upload discard` still work.  On a station with the sink
+> switch files they set `fill` and `off`; on an older one, the legacy modes that
+> `smd sink status` reports as `hold (legacy)` and `off`. Ask your fleet admin
 > before changing the switch, unless the reason reads `new station: …` and you have
 > just finished INSTALL.md §9. The station's 5-minute [heartbeat](glossary.md) ignores
 > the switch, so a station that sends no data still shows up on the fleet board.

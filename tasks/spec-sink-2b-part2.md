@@ -1,6 +1,9 @@
 # spec: sink control step 2b, part 2: the switches take effect
 
-**Status:** draft for Michael, 2026-10-23.  Nobody has built any of it.  §16 ends with four questions.
+**Status:** built on branch `sink-2b-part2` (hs-uploader 77db5c8, sigmond ad53b95, sigmond-appliance
+36da796), not yet merged.  Michael answered §16's questions on 2026-10-23 (end of file).  Where the
+build's rulings departed from this text, the text now says what the code does, marked "(amended)";
+§17 lists each amendment and the ruling behind it.
 
 **Release number.**  Part 1 shipped in v3.78, blessed 2026-10-22.  This work takes whatever number comes
 next once it is ready.  "Part 1" below means the code v3.78 carries; "part 2" means this spec; "v3.79"
@@ -150,9 +153,11 @@ whole `fill` backlog.
 So at each build, while the marker stands, the daemon gives every governed pipeline whose key holds
 no send record, and whose source starts at `now`, a starting record at the source's present
 position.  Each such source gains `initial_cursor() -> Optional[bytes]`: the highest id within its
-scope for `SqliteSource`, the current cycle floor for `WsprCycleSource`.  The daemon writes it through
-`advance_cursor`, which accepts any first write.  This writes exactly what the first unheld pump would
-have written, only earlier.  It never moves an existing record.  On every station today each key
+scope for `SqliteSource`; for `WsprCycleSource`, the cycle before the current cycle floor, where its
+first pump anchors, so the cycle in progress still ships (amended, ruling C10).  The daemon writes it
+through the store's `start_cursor`, an insert that does nothing when the key already holds a row
+(amended, ruling C13).  This writes exactly what the first unheld pump would have written, only
+earlier.  It never moves an existing record, nor its `last_ack`.  On every station today each key
 holds a record, so this writes nothing there; §11 run 3 confirms it.
 
 ### 3.6 The heartbeat moves to `pipelines.d/sigmond.toml`
@@ -250,7 +255,10 @@ design, D18 and the task for this spec state the simpler rule.  §16 Q1 asks Mic
 The carry-over runs inside the manifest step, after the features probe and before the render, and
 only when the probe returns `gate`.  `smd align`, `smd apply`, bring-up, `smd sink`, restore and the
 image's own update sequence all reach the manifest step.  It runs under hs-uploader's install lock,
-`/run/lock/hs-uploader-install.lock` (design §10.1).  The read-only form of the step,
+`/run/hs-uploader-install/lock` (design §10.1; amended, ruling C14-3).  The lock lives in a directory
+only root can write, mode 0700, not in the world-writable `/run/lock`, so no other account can plant a
+file or a link at its name.  The v3.79 hs-uploader installer, when it learns to take the lock, must use
+this path.  The read-only form of the step,
 `smd admin uploader manifest` without `--write`, prints the carry-over it would make and writes
 nothing.
 
@@ -265,7 +273,9 @@ installed hs-uploader offers `gate`: "the sink switches take effect at the next 
 All exist on stations today:
 
 - the enabled components in `topology.toml`, and the producers with rows in `sink.db`
-  (`SELECT DISTINCT producer`, with D12's inference for `''`);
+  (`SELECT DISTINCT producer`, with D12's inference for `''`).  A name seen only in `sink.db`, which
+  recorder accounts can write, counts only when it names a catalog entry, and its `deploy.toml`
+  resolves by fixed path alone; any other name earns one counted note (amended, ruling C18-2);
 - each client's `deploy.toml` declarations (`uploader_manifest._pipeline_decls`, `:191-201`);
 - coordination.toml's `[uploads]` block (`enabled`, `mode`, `reason`);
 - each instance's env file and effective environment (`sigmond/lib/sigmond/upload.py:47-75`,
@@ -289,6 +299,7 @@ Each governed client, enabled or with rows in the sink, gets a switch file:
 |---|---|
 | `PSK_USE_HS_UPLOADER=0` in any psk-recorder instance env (K3LR's `smd config upload psk-recorder K3LR --off`) | psk-recorder `fill` |
 | `METEOR_SCATTER_USE_HS_UPLOADER=0` in any meteor-scatter instance env | meteor-scatter `fill` |
+| an instance env file that cannot be read, or whose name fails the reporter-id check (amended, ruling C18-3) | that client `fill`, with a reason naming the file |
 | the client is not enabled in `topology.toml` | `fill` |
 | otherwise | `upload` |
 
@@ -319,11 +330,14 @@ part 1's deferred re-probe of a missing `local` column waits for step 4, as the 
 2. Write `site.toml` if absent, then each missing client file, each through `hs-uploader sink set`
    (§9.1), which calls `write_switch()`.  An existing file stays as it stands; the carry-over appends
    nothing to it.
-3. Run the lever step (§8) for every client whose effective state reads below `upload`, and the
-   stale-writer restarts (§4.3) when any reads `off`.  A failure here stops the carry-over before the
-   marker.
+3. Read the states back through `hs-uploader sink status --json` (amended, ruling C18-4).  Run the
+   lever step (§8) for every client that the read-back or this run's own plan puts below `upload`,
+   and the stale-writer restarts (§4.3) when any reads `off`.  A failure here stops the carry-over
+   before the marker.  A read-back that fails also stops it, while a legacy manifest exists; on a
+   fresh install, with no legacy manifest yet, the plan's own states decide, and one line says so.
 4. Write the marker through `hs-uploader sink mark-carried`: a temporary file and a rename, mode
-   0644, holding the UTC time and one line per file written.
+   0644.  It holds two lines: `carried over at <UTC time>`, then one note line that names every
+   switch file this run wrote, `carry-over wrote: site psk-recorder …` (amended, ruling C18-5).
 5. Print each client's before and after, as design §10.1 asks.
 
 Any failure before step 4 leaves no marker, so nothing enforces and the next manifest step tries
@@ -349,10 +363,10 @@ case.  What each class of station should see:
 | Station | Expect |
 |---|---|
 | AC0G-B4, on part 1 since 2026-10-21, `[uploads]` at upload | site `upload`; wspr-recorder, psk-recorder, mag-recorder and hamsci-physics `upload`, plus meteor-scatter if enabled.  No lever to touch (psk on `server-raw` since 10-15, D17).  The manifest step lands a changed manifest (the heartbeat moves), so the daemon restarts once. |
-| A fresh install from the next image | the wizard writes `mode = "discard"` (the B4 field fact); the carry-over gives site `off` and every client `upload`.  `smd sink upload` then lifts the site, and every pipeline ships, as `smd upload on` did on B4. |
+| A fresh install from the next image | the wizard writes `mode = "discard"` (the B4 field fact); the carry-over gives site `off` and every client `upload`.  Under a site at `off` every client reads below `upload`, so the lever step lowers every armed sender: psk-recorder and meteor-scatter, the wspr shim, `wspr-uploader` and the mag fallback (amended, ruling C18-5).  `smd sink upload` then lifts the site, and every pipeline ships, as `smd upload on` did on B4. |
 | A station on sigmond v3.69-v3.72 (no `client` rendered) | the update brings part 1 and part 2 together.  Until the first manifest step, the daemon's rule 4 (§3.1) leaves the old render's policy in charge. |
 | AC0G-ND, w2naf, uacnj (DASI-010) and others on v3.70 or later | as B4, by their own `[uploads]`.  Each env file decides its levers. |
-| K3LR (legacy hold, `PSK_USE_HS_UPLOADER=0`, `server-merge`) | site `fill`, psk-recorder `fill`.  The lever step moves psk-recorder to `server-raw` and restarts each psk instance alone. |
+| K3LR (legacy hold, `PSK_USE_HS_UPLOADER=0`, `server-merge`) | site `fill`, psk-recorder `fill`.  Under a site at `fill` every client reads below `upload`.  The lever step moves psk-recorder to `server-raw` and restarts each psk instance alone.  It also lowers the wspr shim, `wspr-uploader` and the mag fallback wherever K3LR arms them (amended, ruling C18-5). |
 
 Before the image ships, mjh's session reads each reachable station's inputs read-only, after a bus
 post, and predicts its carry-over by these tables (§13.2).
@@ -361,7 +375,8 @@ post, and predicts its carry-over by these tables (§13.2).
 
 A rollback never deletes a switch file.  The restore that runs sigmond back below part 2 moves the
 marker aside, to `carry-over-v1.done.rolled-back-<UTC time>`, and removes `pipelines.d/sigmond.toml`
-(§10).  An update after such a rollback finds no marker, so the carry-over runs again.  It rewrites
+(§10).  When that name is taken, it adds `.1`, `.2` … and never replaces a file.  It does both even
+when the restore's re-verification fails (amended, Task 22 review).  An update after such a rollback finds no marker, so the carry-over runs again.  It rewrites
 `site.toml` from `[uploads]` when the two differ, since `[uploads]` held the truth meanwhile, and keeps
 every client file.
 
@@ -381,14 +396,18 @@ The legacy `off` keeps its fixed meaning, `fill` (design §2.1).  The per-client
 
 ### 7.2 The write (D19)
 
-With the word `gate`, the handler (`sigmond/lib/sigmond/commands/config.py:1146-1253`) writes, in
-order:
+With the word `gate`, the handler (`_site_change` in `sigmond/lib/sigmond/commands/config.py`) runs,
+in order (amended, rulings C20-1 and C20-2):
 
-1. `site.toml`, through `hs-uploader sink set site <state> --reason … --by "smd sink (<user>)"`;
-2. `[uploads]` in site-profile.toml and coordination.toml, through `_patch_uploads_block`
-   (`:950-994`), as today.
+1. the lever step (§8) for every client that reads below `upload` after the change;
+2. before a change to `off`, the stale-writer restarts (§4.3), skipping each instance step 1 restarted;
+3. `site.toml`, through `hs-uploader sink set site <state> --reason … --by "smd sink (<user>)"`;
+4. `[uploads]` in site-profile.toml and coordination.toml, through `_patch_uploads_block`, as today;
+5. the manifest step, which alone takes the install lock.
 
-If either write fails, the command exits 1 and names the file that now disagrees.  The manifest step
+Before the marker stands, steps 1 and 2 wait: the carry-over inside step 5 lowers and restarts once.
+A failure in steps 1-4 is named, and the later steps still run, so an `off` order always lands; the
+command then exits 1.  If either write fails, the line names the file that now disagrees.  The manifest step
 repairs the mirror at its next run: with the marker standing, `site.toml` holds the truth, and the
 step rewrites `[uploads]` in both files from it when they differ, with one line saying so.  That also
 undoes a hand edit of site-profile's `[uploads]` that `smd config render` copied into coordination.toml
@@ -433,6 +452,11 @@ probes once, first, and passes the answer.
 | lacks `gate`, or returns the empty set | — | exactly part 1's render, by `[uploads]`; the heartbeat in the legacy manifest |
 | `None` (failed or timed out) | — | part 1's render, and one warning, as part 1 §7.2 promised |
 
+With the marker standing and `sink status` unreadable, the step still renders and lands the gate
+form, skips the lever step with one line naming the cause, and exits 1 (amended, ruling C19-1).  An
+unreadable status must never block an `off` order or a render; the daemon's gate enforces the
+switches either way.
+
 D13 stays: the renderer still leaves out a producer's daemon pskreporter pipeline while its
 in-process sender runs (`:585-608`).  Once the lever step stops that sender, the next render includes
 the daemon pipeline, and the gate decides.
@@ -474,7 +498,11 @@ every manifest step.
 | `wspr-uploader.service` | `systemctl disable --now wspr-uploader` | the unit runs or stands enabled | `wspr-recorder/systemd/wspr-uploader.service` |
 | mag-recorder's fallback | `[uploader] enabled = false`, a TOML boolean | it reads true or stays absent | `/etc/mag-recorder/mag-recorder-config.toml`; reader `mag-recorder/src/mag_recorder/cli.py:436`; runs only when hs-uploader stands inactive (`mag-recorder/systemd/mag-recorder-upload.service:38`) |
 
-The env writes go through `set_env_flag` and `_chown_to_env_dir_owner` (`sigmond/lib/sigmond/upload.py:78-105`).
+The env writes go through `set_env_flag` (`sigmond/lib/sigmond/upload.py`), which now writes through
+`safe_write.rewrite_owned`: one descriptor on the env directory for the read and the write (amended,
+Task 13).  An existing env file keeps its owner and mode.  A new one goes to the directory's owner at
+0644.  The write refuses a lever file that is a symlink, a hard link, or (as root) a file owned by
+anyone but root or the directory's owner; the lever then fails loudly and names the file.
 The mag write needs a boolean-aware setter.  `_set_toml_field` (`sigmond/lib/sigmond/psws.py:198`)
 writes `"false"`, a string that mag-recorder reads as true.  The new setter writes `false` bare and
 re-reads the file with `tomllib` to confirm a boolean.
@@ -524,14 +552,22 @@ a sender outside the daemon, after the restart time.
 - `write_switch()` names the file in any emitter error, for example a hand-written TOML datetime it
   cannot re-emit (part 1 final review, "emitter errors name the file").
 
-sigmond calls them through the daemon's own interpreter, with `-P` and `cwd=/`, as its probes do
-(ruling C23).  So one implementation writes every switch file, as design §3.4 requires.
+sigmond calls them through the daemon's own interpreter, as `python -I -m hs_uploader.cli` from
+`cwd=/` (amended, ruling C14-2: `-I`, isolated mode, in place of `-P`).  The package has no
+`__main__`.  So one implementation writes every switch file, as design §3.4 requires.
+`sink status` also takes `--marker PATH` (amended, ruling X5).
 
 ### 9.2 `sink status` and the switch report
 
 - `hs-uploader sink status` reads "enforced" when the marker stands, and lists each held pipeline with
   its client and the switch that holds it.  It lists a client whose pipeline file the daemon refused
-  (part 1 deferred minor, Task 11).
+  (part 1 deferred minor, Task 11).  The effective states and `held_by` do not depend on the marker;
+  only `enforced` and the held list do (amended, ruling X5).
+- `sink status --json` carries `"schema": 1`, with the keys `schema`, `enforced`, `marker`,
+  `sinks_dir`, `site`, `clients[]` (with `held_by`), `held_pipelines[]` (with `held_by`),
+  `refused_files[]` (with `pipeline`; `file` may be null, for a pipeline the daemon refused for the
+  store's schema), `no_client_pipelines`, `builder_pipelines` and `errors` (amended, Task 9).
+  sigmond refuses any other schema number.
 - `report_switches` (`hsu/daemon.py:626-647`) drops "not enforced in this release".  The gate logs
   each pipeline's transition once, at INFO: "pipeline X held: sink filling (site)" and "pipeline X
   sending: sink uploading".  At start it logs one line per held pipeline.  A pipeline held for a week
@@ -556,9 +592,9 @@ step runs the carry-over and renders.
 | **Part 2 sigmond, v3.73-v3.76 hs-uploader** | The probe returns the empty set.  As the row above. | as part 1 |
 | **Part 1 or older sigmond, part 2 hs-uploader** | No sigmond writes the marker, so rule 3 passes every pipeline, the writer stores, and the rider keeps every row. | as part 1 |
 | **Rollback of both** after part 2 ran, through `smd admin manifest restore` | The part 2 restore code sees that the restored sigmond carries no `lib/sigmond/sink_carryover.py`.  Before the restored smd renders, it moves the marker aside and removes `pipelines.d/sigmond.toml`.  The restored sigmond renders by `[uploads]`, which D19 kept current.  The old daemon ignores the switch files.  The lowered levers stay lowered.  A client file at `fill` no longer counts; K3LR's psk-recorder then behaves as before part 2, still on `server-raw`. | by the current site setting |
-| **Rollback of hs-uploader alone** | The restore's manifest step probes: no `gate`.  sigmond renders the old way by the site setting, puts the heartbeat back in the legacy manifest, and removes `sigmond.toml`.  The marker stays, and the old code ignores it.  Client files at `fill` go unenforced until hs-uploader returns. | by the site setting |
+| **Rollback of hs-uploader alone** | The restore's manifest step probes: no `gate`.  sigmond renders the old way by the site setting, puts the heartbeat back in the legacy manifest, and removes `sigmond.toml`.  It moves the marker aside (amended, Michael's answer 5), so when the gate returns the carry-over runs again from the current `[uploads]`.  Client files at `fill` go unenforced until hs-uploader returns. | by the site setting |
 | **Rollback of sigmond alone** | As "both" for the marker and `sigmond.toml`.  The part 2 daemon then passes everything by rule 3, and the restored render's policy governs. | by the site setting |
-| **A hand rollback** (`git checkout`, no restore) | Unsupported.  A part 2 daemon keeps enforcing `site.toml`, which the old `smd upload` no longer writes.  The release notes say: roll back only with `smd admin manifest restore`. | — |
+| **A hand rollback** (`git checkout`, no restore) | Unsupported.  A part 2 daemon keeps enforcing `site.toml`, which the old `smd upload` no longer writes.  The release notes say: roll back only with `smd admin manifest restore` (`tasks/release-notes-sink-2b-part2.md`). | — |
 | **Update after a rollback** | No marker: the carry-over runs again, re-derives `site.toml` from `[uploads]`, keeps client files, writes the marker. | by the switch files |
 
 No row depends on a changed unit file, or on hs-uploader's installer.
@@ -584,7 +620,15 @@ then ends in one of three verdicts:
 
 - AGREE: both sides produced the same key, record, retries, limits and batch digest;
 - HELD: NEW produced no batch, popped no retry and wrote no record, where the switches say it holds;
-- DISAGREE: anything else.
+- DISAGREE: anything else;
+- INCONCLUSIVE (amended, Task 12): once the marker stands, a pipeline the tool cannot find in its own
+  read of the manifest (a builder entry), or one of several entries that share a name whose build
+  order the tool cannot confirm.
+
+The last line counts the verdicts and reads `RESULT: PASS (a AGREE, h HELD, d DISAGREE)`, or
+`RESULT: DISAGREE (…)`, or `RESULT: INCONCLUSIVE (…; reason)`.  The tool exits 0 only on PASS.  It
+diffs the store copy's send records around NEW's starting-record pass itself and names each key the
+pass added; a record that existed and changed ends the run DISAGREE.
 
 For `wspr-wsprdaemon`, the tool computes the expected NEW batch on its own: OLD's batch minus the
 psk rows whose producer, read from the column or by D12's rule copied into the tool, does not read
@@ -792,3 +836,36 @@ of the weight in sigmond.
    stays" row: when the probe lacks `gate`, the manifest step moves the carry-over marker aside, so a
    later return of the gate re-runs the carry-over from the current `[uploads]` and an operator's
    order given meanwhile (e.g. `fill`) survives.
+
+## 17. Amendments after the build, 2026-10-23
+
+The build on branch `sink-2b-part2` departed from this text in the places below.  The build's
+ledger holds each ruling in full; it joins `tasks/` as `ledger-sink-2b-part2.md` at merge, as part 1's
+did.  The sections above
+now say what the code does.
+
+| § | What changed | Ruling |
+|---|---|---|
+| 3.5 | `WsprCycleSource` anchors its starting record at the cycle before the current floor, where its first pump anchors, not at the floor itself.  The floor would skip the cycle in progress, which an unheld pipeline ships. | C10 |
+| 3.5 | The starting record goes through the store's insert-only `start_cursor`, not `advance_cursor`.  An existing record and its `last_ack` never move. | C13 |
+| 6.1 | The install lock lives at `/run/hs-uploader-install/lock`, in a directory only root can write, not at `/run/lock/hs-uploader-install.lock`.  The v3.79 hs-uploader installer must use the new path.  Michael confirms this at merge time. | C14-3 |
+| 6.2 | A name seen only in `sink.db` counts only when it names a catalog entry, and resolves by fixed path alone. | C18-2 |
+| 6.3 | An unreadable or badly named stop-flag env file carries its client at `fill`.  In part 2 no `smd` verb raises a single client: `smd sink` is site-only (D18).  To raise one, run `hs-uploader sink set <client> upload --reason … --by …` as root. | C18-3 and its correction |
+| 6.4 | The carry-over reads the states back through `sink status --json` before the lever step.  The marker carries one note line, which names every switch file written. | C18-4, C18-5 |
+| 6.6 | Under a site at `fill` or `off`, every client reads below `upload`, so on K3LR and on a fresh install the lever step lowers the wspr shim, `wspr-uploader` and the mag fallback too, wherever they stand armed. | C18-5 |
+| 6.7, 10 | Restore moves the marker aside, `.1`, `.2` … when the name is taken, and removes `pipelines.d/sigmond.toml`, even when re-verification fails. | Task 22 review |
+| 7.2 | A site change runs the lever step first, then stale-writer restarts before `off`, then `site.toml`, then `[uploads]`, then the manifest step.  Before the marker, the carry-over alone levers. | C20-1, C20-2 |
+| 7.4 | With the marker standing and `sink status` unreadable, the step renders and lands, skips the lever step, and exits 1. | C19-1 |
+| 8.2 | Lever writes go through the safe writer.  An existing env file keeps its owner and mode.  A symlink, a hard link or a stranger's file at a lever path refuses. | Task 13 |
+| 9.1 | sigmond runs hs-uploader as `python -I -m hs_uploader.cli`; `-I` replaces `-P`.  `sink status` takes `--marker`. | C14-2, X5 |
+| 9.2 | `sink status --json` schema 1 gains `held_pipelines[].held_by`, `errors`, `builder_pipelines` and `refused_files[].pipeline`, with `file` null for a store-schema refusal. | Task 9 |
+| 10 | Rollback of hs-uploader alone moves the marker aside. | Michael's answer 5 |
+| 11.2 | A fourth verdict, INCONCLUSIVE, and the last line `RESULT: PASS (a AGREE, h HELD, d DISAGREE)`. | Task 12 |
+
+One product gap stays open (Task 24).  A restore leaves each checkout it moved detached at the
+restored commit, with no `.pin`.  `smd update` then pulls nothing into it: a detached checkout has no
+upstream, and `--unpin` releases only a pinned one.  Restore's own comment promises that `smd update`
+brings the components back onto main; it does not.  To move such a station forward, the operator runs
+`smd align --apply`, which moves each checkout to the latest blessed release (detached, with a
+`.pin`); `smd update --unpin` then releases them onto their branches.  The release notes say so; the
+fix belongs to the next build.

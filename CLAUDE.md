@@ -221,6 +221,25 @@ to each statement that selects rows to send, and `SqliteSource`'s
 delete-on-ack adds it too.  A sink without the column gets no such condition.
 The writer also creates the index `idx_pending_uploads_producer`.
 
+Since sink control step 2b part 2 (`tasks/spec-sink-2b-part2.md` §4), the
+writer stores nothing for a repository while a producer's sink switch reads
+`off`.  `insert()` drops a row when all four hold: the writer is not local,
+the carry-over marker `/var/lib/hs-uploader/carry-over-v1.done` stands,
+`/etc/hs-uploader/sinks/<producer>.toml` exists, and the producer's
+effective state reads `off`.  A broken switch file reads `off`, so its rows
+drop too.  `fill` and `upload` store, and so does a producer with no switch
+file.  The check reads the switch at each `insert()`, so a change counts
+without a restart.  A check that fails stores the row.  The writer logs one
+INFO line when a producer's verdict changes, never one per row.
+
+The check imports `hs_uploader.sinkswitch` inside a guard.  The bundled copy
+runs in venvs without hs-uploader (codar-sounder, hf-tec, superdarn-sounder),
+where the import fails and nothing is enforced; those clients own no switch
+file.  A recorder loads the writer once, at start.  So before any switch
+first reads `off`, sigmond restarts each psk-recorder, meteor-scatter and
+wspr-recorder instance that started before the installed hs-uploader
+`sink/writer.py` last changed (`sink_levers.restart_stale_writers`).
+
 SQLite is the sole local sink. On a host carrying a leftover legacy
 ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
 
