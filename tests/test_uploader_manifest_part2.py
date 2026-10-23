@@ -622,6 +622,159 @@ class LandOrderTests(unittest.TestCase):
                          ["legacy", "remove sigmond"])
 
 
+def runner_spy():
+    """(calls, side_effect) counting every hs-uploader call the step makes."""
+    calls = []
+    real = um.run_hs_uploader
+
+    def counting(args, **kw):
+        calls.append(list(args))
+        return real(args, **kw)
+    return calls, counting
+
+
+@needs_real
+class FixRound1Tests(unittest.TestCase):
+    """Task 19 review, fix round 1."""
+
+    def standing(self):
+        st = Part2Station(self)
+        first = st.step()
+        self.assertEqual(first.rc, 0, first.both)
+        return st
+
+    def set_site(self, st, state):
+        r = Runner()(["sink", "set", "site", state, "--reason", "bench",
+                      "--by", "test", "--sinks", str(st.roots.sinks)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # I-1 (C19-1) --------------------------------------------------------------
+    def test_unreadable_status_exits_1_after_landing_with_one_line(self):
+        st = self.standing()
+        self.set_site(st, "fill")            # a readable status would lever
+        st.roots.manifest.write_text(PART1_TEXT)      # stale legacy manifest
+        st.sigmond_toml.unlink()
+
+        def unreadable(**kw):
+            print("sigmond: cannot read hs-uploader sink status: exit 2: "
+                  "boom", file=sys.stderr)
+            return None
+
+        with mock.patch.object(ss, "read_state", side_effect=unreadable):
+            r = st.step()
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertEqual(r.manifest, GATE_TEXT)
+        self.assertEqual(st.sigmond_toml.read_text(), SIGMOND_TEXT)
+        self.assertEqual(len(r.err.splitlines()), 1, r.err)
+        self.assertTrue(r.err.startswith("smd: uploader: lever step: "), r.err)
+        self.assertIn("exit 2: boom", r.err)
+        self.assertEqual(st.sc.restarts(), [])
+        # positive control: the same station with a readable status levers
+        r2 = st.step()
+        self.assertEqual(r2.rc, 0, r2.both)
+        self.assertEqual(sorted(st.sc.restarts()),
+                         ["psk-recorder@W1AW.service",
+                          "wspr-recorder@W1AW.service"])
+
+    # I-2 ------------------------------------------------------------------------
+    def test_a_gate_land_failure_in_step_7_puts_the_daemon_back(self):
+        st = self.standing()
+        st.roots.manifest.write_text(PART1_TEXT)      # changed: steps 5-8
+        st.sigmond_toml.unlink()
+        target = st.tmp / "elsewhere"
+        target.write_text("keep\n")
+        st.sigmond_toml.symlink_to(target)
+        for active in (True, False):
+            with self.subTest(active=active):
+                st.daemon["active"] = active
+                # a link planted after the preflight: the landing itself
+                # must refuse it
+                with mock.patch.object(up_cmd, "_sigmond_preflight",
+                                       return_value=None):
+                    r = st.step()
+                self.assertEqual(r.rc, 1, r.both)
+                self.assertIn("systemctl stop", r.calls)
+                self.assertEqual(st.daemon["active"], active)
+                self.assertEqual(target.read_text(), "keep\n")
+                self.assertTrue(st.sigmond_toml.is_symlink())
+                self.assertEqual(r.manifest, PART1_TEXT)
+
+    # M-4 ------------------------------------------------------------------------
+    def test_a_symlink_refuses_before_anything_stops(self):
+        st = self.standing()
+        st.roots.manifest.write_text(PART1_TEXT)
+        for where in ("file", "dir"):
+            with self.subTest(where=where):
+                target = st.tmp / f"elsewhere-{where}"
+                if st.pipelines_d.is_symlink():
+                    st.pipelines_d.unlink()
+                if where == "file":
+                    st.pipelines_d.mkdir(exist_ok=True)
+                    if os.path.lexists(st.sigmond_toml):
+                        st.sigmond_toml.unlink()
+                    target.write_text("keep\n")
+                    st.sigmond_toml.symlink_to(target)
+                else:
+                    for p in st.pipelines_d.iterdir():
+                        p.unlink()
+                    st.pipelines_d.rmdir()
+                    target.mkdir()
+                    st.pipelines_d.symlink_to(target)
+                r = st.step()
+                self.assertEqual(r.rc, 1, r.both)
+                self.assertEqual(daemon_restarts(r), [])
+                self.assertNotIn("migrate", r.calls)
+                self.assertTrue(st.daemon["active"])
+                self.assertEqual(r.manifest, PART1_TEXT)
+                self.assertIn("symlink", r.err)
+                self.assertFalse(os.path.exists(
+                    st.roots.manifest.with_name("pipelines.toml.new")))
+
+    # I-3 ------------------------------------------------------------------------
+    def test_a_non_root_write_writes_and_restarts_nothing(self):
+        st = Part2Station(self)
+        before = tree_sum(st.tmp)
+        calls, counting = runner_spy()
+        with mock.patch.object(um, "run_hs_uploader", side_effect=counting):
+            r = st.step(write=True, euid=1000)
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertIn("requires root", r.err)
+        self.assertEqual(tree_sum(st.tmp), before)
+        self.assertFalse(any(a[:2] == ["sink", "set"] for a in calls), calls)
+        self.assertEqual(st.sc.restarts(), [])
+        self.assertEqual(daemon_restarts(r), [])
+        self.assertNotIn("lock", r.order)
+        # positive control: the spy sees the hs-uploader calls it makes
+        self.assertTrue(calls)
+
+    # M-2 ------------------------------------------------------------------------
+    def test_a_failed_mirror_write_still_runs_the_lever_step(self):
+        st = self.standing()
+        self.set_site(st, "fill")
+        import errno
+        from sigmond.commands import config as cfg
+        with mock.patch.object(cfg, "_patch_uploads_block",
+                               side_effect=PermissionError(errno.EACCES,
+                                                           "denied")):
+            r = st.step()
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertIn("mirror repair: FAILED", r.err)
+        self.assertEqual(sorted(st.sc.restarts()),
+                         ["psk-recorder@W1AW.service",
+                          "wspr-recorder@W1AW.service"])
+
+    # M-3 ------------------------------------------------------------------------
+    def test_the_preview_of_a_broken_site_never_says_repair(self):
+        st = self.standing()
+        (st.roots.sinks / "site.toml").write_text("state = [broken\n")
+        before = tree_sum(st.tmp)
+        r = st.step(write=False)
+        self.assertEqual(tree_sum(st.tmp), before)
+        self.assertNotIn("would repair", r.both)
+        self.assertIn("would leave [uploads] and the site switch alone", r.err)
+        self.assertEqual(r.rc, 1)
+
+
 class MoveAsideTests(unittest.TestCase):
     """Ruling 10's helper, which Task 22's restore reuses: a rename inside
     the state directory's descriptor, never following a link, never

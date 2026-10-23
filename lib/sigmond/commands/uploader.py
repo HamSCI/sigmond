@@ -58,9 +58,11 @@ from __future__ import annotations
 
 import contextlib
 import difflib
+import io
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tomllib
@@ -89,7 +91,10 @@ _MIGRATE_TIMEOUT_S = 120
 
 
 def _err(msg: str) -> None:
-    print(f"smd: {msg}", file=sys.stderr)
+    """Every line this command prints to stderr reads ``smd: uploader: ``
+    (stdout lines read ``uploader: ``), so a parser of the step's output
+    matches one prefix per stream."""
+    print(f"smd: uploader: {msg}", file=sys.stderr)
 
 
 def _strip_secrets(obj):
@@ -405,7 +410,7 @@ def _say(line: str) -> None:
 
 
 def _warn(line: str) -> None:
-    _err(f"uploader: {line}")
+    _err(line)
 
 
 def _print_result(lines) -> None:
@@ -416,6 +421,40 @@ def _print_result(lines) -> None:
             _warn(line)
         else:
             _say(line)
+
+
+_STATUS_CAUSE = "sigmond: cannot read hs-uploader sink status: "
+
+
+@contextlib.contextmanager
+def _relayed_stderr(lines: list):
+    """Collect what a helper prints to stderr (sink_state's one-line
+    cause, which reads ``sigmond: ...``) into `lines`, so this step can
+    print it under its own prefix."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            yield
+    finally:
+        lines.extend(ln.strip() for ln in buf.getvalue().splitlines()
+                     if ln.strip())
+
+
+def _cause(lines: list) -> str:
+    """The relayed lines as one cause, sink_state's own prefix dropped."""
+    return "; ".join(ln[len(_STATUS_CAUSE):] if ln.startswith(_STATUS_CAUSE)
+                     else ln for ln in lines)
+
+
+def _apply_relayed(plan, what: str):
+    """``co.apply`` with sink_state's stderr line relayed under the
+    step's prefix (the read-back reads ``sink status``)."""
+    relayed: list = []
+    with _relayed_stderr(relayed):
+        res = co.apply(plan, systemctl=_lever_systemctl)
+    for ln in relayed:
+        _warn(f"{what}: {_cause([ln])}")
+    return res
 
 
 def cmd_uploader_manifest(args) -> int:
@@ -452,7 +491,7 @@ def cmd_uploader_manifest(args) -> int:
         try:
             stack.enter_context(install_lock.held())
         except install_lock.InstallLockError as exc:
-            _err(f"uploader manifest: {exc}")
+            _err(f"manifest step: {exc}")
             return 1
         return _manifest_step(write=write, enable=enable,
                               daemon_ready=daemon_ready)
@@ -472,7 +511,7 @@ def _carry_over(roots: co.CarryRoots) -> bool:
     for line in plan.lines():
         _say(line)
     try:
-        res = co.apply(plan, systemctl=_lever_systemctl)
+        res = _apply_relayed(plan, "carry-over: read-back")
     except Exception as exc:
         _warn(f"carry-over: FAILED ({type(exc).__name__}: {exc}); no marker "
               "written; rendering part 1's form")
@@ -523,14 +562,20 @@ def _lever_step(roots: co.CarryRoots) -> int:
     client hs-uploader reads below ``upload`` loses its in-process senders.
     A sender already lowered and restarted since costs nothing and prints
     nothing."""
-    state = sink_state.read_state(
-        python=roots.python, manifest=str(roots.manifest),
-        sinks=str(roots.sinks), marker=str(roots.marker),
-        store=None if roots.store is None else str(roots.store))
+    relayed: list = []
+    with _relayed_stderr(relayed):
+        state = sink_state.read_state(
+            python=roots.python, manifest=str(roots.manifest),
+            sinks=str(roots.sinks), marker=str(roots.marker),
+            store=None if roots.store is None else str(roots.store))
     if state is None:
-        _warn("lever step: cannot read hs-uploader sink status (see above), "
-              "so no in-process sender was checked; this step exits 1")
+        # One line, naming the cause (ruling C19-1: fail loud, exit 1).
+        _warn("lever step: cannot read hs-uploader sink status ("
+              f"{_cause(relayed) or 'no reason given'}), so no in-process "
+              "sender was checked; this step exits 1")
         return 1
+    for ln in relayed:
+        _warn(f"lever step: {ln}")
     below = [c for c in sink_state.below_upload(state) if c != co.SITE]
     if not below:
         return 0
@@ -577,7 +622,7 @@ def _marker_standing(roots: co.CarryRoots) -> int:
         for line in late.lines():
             _say(line)
         try:
-            res = co.apply(late, systemctl=_lever_systemctl)
+            res = _apply_relayed(late, "late clients: read-back")
         except Exception as exc:
             _warn(f"late clients: FAILED ({type(exc).__name__}: {exc})")
             return 1
@@ -640,6 +685,11 @@ def _preview_sink_steps(roots: co.CarryRoots, features, marker: bool):
         except Exception as exc:
             _warn(f"cannot read the switches ({type(exc).__name__}: {exc})")
             return True, True
+        if mp.action == "broken":
+            for line in mp.lines():
+                _warn(f"--write would leave [uploads] and the site switch "
+                      f"alone and exit 1: {line}")
+            return True, True
         for line in mp.lines():
             _say(f"--write would repair the mirror: {line}")
             pending = True
@@ -663,6 +713,30 @@ def _land_sigmond(text: Optional[str]) -> bool:
         _say(f"{'wrote' if text is not None else 'removed'} "
              f"{d / um.SIGMOND_FILE}")
     return changed
+
+
+def _sigmond_preflight() -> Optional[str]:
+    """Why ``pipelines.d/`` or ``pipelines.d/sigmond.toml`` cannot be
+    landed or removed, by lstat, before the daemon stops; None when they
+    can.  A symlink at either, or a directory that is no directory, or a
+    file that is no regular file, refuses here, so nothing stops for a
+    landing that :func:`uploader_manifest.land_sigmond_file` would refuse.
+    A link planted between this check and the landing still refuses
+    there, and the step puts the daemon back."""
+    d = um.MANIFEST_PATH.parent / "pipelines.d"
+    for p, want, kind in ((d, stat.S_ISDIR, "a directory"),
+                          (d / um.SIGMOND_FILE, stat.S_ISREG, "a regular file")):
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return f"cannot lstat {p} ({exc.strerror or exc})"
+        if stat.S_ISLNK(st.st_mode):
+            return f"{p} is a symlink; refusing to work through it"
+        if not want(st.st_mode):
+            return f"{p} is not {kind}"
+    return None
 
 
 def _sigmond_drift(text: Optional[str]) -> bool:
@@ -691,7 +765,7 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
     except Exception:  # pragma: no cover - defensive
         features = None
     if features is None:
-        _err("uploader: cannot ask hs-uploader for `capabilities "
+        _err("cannot ask hs-uploader for `capabilities "
              "--features` (failed or timed out); rendering without it")
     else:
         print("uploader: hs-uploader features: "
@@ -728,11 +802,11 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
                                  store_version=store_version)
         text = form.legacy_text
     except um.ProbeFailed as exc:
-        _err(f"uploader manifest: {exc}; the installed manifest and "
+        _err(f"manifest step: {exc}; the installed manifest and "
              f"{SERVICE} stay as they are")
         return 1
     except Exception as exc:  # pragma: no cover - defensive
-        _err(f"uploader manifest generation failed: {exc}")
+        _err(f"manifest generation failed: {exc}")
         return 1
 
     # sigmond#53: say, by name, what the uploads policy is holding back.
@@ -802,6 +876,13 @@ def _land_step(*, path: Path, installed: str, text: str,
     """Steps 2-8 (spec-key-split §5.2), with ``pipelines.d/sigmond.toml``
     landed beside the manifest (spec §3.6): in the gate form before it, in
     part 1's form removed after it."""
+    # Before anything stops: pipelines.d/sigmond.toml must be landable.
+    refused = _sigmond_preflight()
+    if refused is not None:
+        _warn(f"{refused}; {path}, pipelines.d/ and {SERVICE} left as they "
+              f"stand.  Remove it, then run this command again")
+        return 1
+
     # Step 2: render to the side file.  The installed manifest stays in
     # force until migrate has moved the keys it names.
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -876,7 +957,7 @@ def _land_step(*, path: Path, installed: str, text: str,
             sigmond_file=sigmond_file, gate=gate)
     except Exception as exc:
         side.unlink(missing_ok=True)
-        _err(f"uploader manifest step failed after stopping {SERVICE}: "
+        _err(f"manifest step failed after stopping {SERVICE}: "
              f"{type(exc).__name__}: {exc}")
         if was_active:
             try:

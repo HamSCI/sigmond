@@ -624,7 +624,7 @@ class InstallLockStepTests(_Step):
                "30 s: another manifest step or hs-uploader install holds it")
         r = self.step(lock_error=install_lock.InstallLockError(msg))
         self.assertEqual(r.rc, 1)
-        self.assertEqual(r.err, f"smd: uploader manifest: {msg}\n")
+        self.assertEqual(r.err, f"smd: uploader: manifest step: {msg}\n")
         self.assertEqual(r.order, ["lock"])
         self.assertEqual(r.calls, [])
         self.assertEqual(r.manifest, OLD)
