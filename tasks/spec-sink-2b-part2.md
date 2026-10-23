@@ -788,3 +788,7 @@ of the weight in sigmond.
 3. The B4 bench runs the **short form**: 2 h fill, 1 h off, 30 min rider test, until v3.79.
 4. The one-time restarts of recorders on old writer code are **accepted**, one at a time, never radiod,
    announced to Rob on the bus beforehand.
+5. **Rollback without the gate moves the marker aside** (Michael, 2026-10-23), replacing §10's "marker
+   stays" row: when the probe lacks `gate`, the manifest step moves the carry-over marker aside, so a
+   later return of the gate re-runs the carry-over from the current `[uploads]` and an operator's
+   order given meanwhile (e.g. `fill`) survives.
