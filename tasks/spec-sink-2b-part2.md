@@ -408,7 +408,7 @@ in order (amended, rulings C20-1 and C20-2):
 5. the manifest step, which alone takes the install lock.
 
 Before the marker stands, steps 1 and 2 wait: the carry-over inside step 5 lowers and restarts once.
-A failure in steps 1-4 is named, and the later steps still run, so an `off` order always lands; the
+The command names each failure in steps 1-4 and still runs the later steps, so an `off` order always lands; the
 command then exits 1.  If either write fails, the line names the file that now disagrees.  The manifest step
 repairs the mirror at its next run: with the marker standing, `site.toml` holds the truth, and the
 step rewrites `[uploads]` in both files from it when they differ, with one line saying so.  That also
