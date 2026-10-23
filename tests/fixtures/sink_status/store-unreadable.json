@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "enforced": true,
+  "marker": "@TREE@/state/carry-over-v1.done",
+  "sinks_dir": "@TREE@/etc/sinks",
+  "site": {
+    "state": "upload",
+    "error": "",
+    "set_at": "2026-10-01T00:00:00Z",
+    "set_by": "carry-over",
+    "reason": "fixture"
+  },
+  "clients": [
+    {
+      "client": "mag-recorder",
+      "file_state": "upload",
+      "effective": "upload",
+      "held_by": null,
+      "error": "",
+      "pipelines": [
+        "mag-recorder-psws"
+      ]
+    },
+    {
+      "client": "psk-recorder",
+      "file_state": "fill",
+      "effective": "fill",
+      "held_by": "client",
+      "error": "",
+      "pipelines": [
+        "psk-recorder-pskreporter"
+      ]
+    },
+    {
+      "client": "wspr-recorder",
+      "file_state": "upload",
+      "effective": "upload",
+      "held_by": null,
+      "error": "",
+      "pipelines": [
+        "wspr-recorder-wsprnet"
+      ]
+    }
+  ],
+  "held_pipelines": [
+    {
+      "pipeline": "psk-recorder-pskreporter",
+      "client": "psk-recorder",
+      "held_by": "client",
+      "reason": "sink filling (client)"
+    }
+  ],
+  "refused_files": [],
+  "no_client_pipelines": [],
+  "builder_pipelines": [],
+  "errors": [
+    "cannot read the store @TREE@/state/watermarks.db: DatabaseError: file is not a database; refusals the daemon recorded are not shown"
+  ]
+}

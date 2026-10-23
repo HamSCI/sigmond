@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "enforced": true,
+  "marker": "@TREE@/state/carry-over-v1.done",
+  "sinks_dir": "@TREE@/etc/sinks",
+  "site": {
+    "state": "upload",
+    "error": "",
+    "set_at": "2026-10-01T00:00:00Z",
+    "set_by": "carry-over",
+    "reason": "fixture"
+  },
+  "clients": [
+    {
+      "client": "mag-recorder",
+      "file_state": "upload",
+      "effective": "upload",
+      "held_by": null,
+      "error": "",
+      "pipelines": [
+        "mag-recorder-psws"
+      ]
+    },
+    {
+      "client": "meteor-scatter",
+      "file_state": "upload",
+      "effective": "upload",
+      "held_by": null,
+      "error": "",
+      "pipelines": []
+    },
+    {
+      "client": "psk-recorder",
+      "file_state": "upload",
+      "effective": "upload",
+      "held_by": null,
+      "error": "",
+      "pipelines": [
+        "psk-recorder-pskreporter"
+      ]
+    },
+    {
+      "client": "wspr-recorder",
+      "file_state": "upload",
+      "effective": "upload",
+      "held_by": null,
+      "error": "",
+      "pipelines": [
+        "wspr-recorder-wsprnet"
+      ]
+    }
+  ],
+  "held_pipelines": [],
+  "refused_files": [
+    {
+      "file": null,
+      "pipeline": "store-held",
+      "client": "wspr-recorder",
+      "reason": "store schema too old"
+    },
+    {
+      "file": "meteor-scatter.toml",
+      "pipeline": null,
+      "client": "meteor-scatter",
+      "reason": "pipeline 'meteor-scatter-pskreporter': start_at = \"now\" is not allowed in a pipeline file"
+    }
+  ],
+  "no_client_pipelines": [],
+  "builder_pipelines": [],
+  "errors": []
+}

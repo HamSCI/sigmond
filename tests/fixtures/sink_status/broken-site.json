@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "enforced": true,
+  "marker": "@TREE@/state/carry-over-v1.done",
+  "sinks_dir": "@TREE@/etc/sinks",
+  "site": {
+    "state": "error",
+    "error": "@TREE@/etc/sinks/site.toml: parse error: Illegal character '\\n' (at line 1, column 16)",
+    "set_at": "",
+    "set_by": "",
+    "reason": ""
+  },
+  "clients": [
+    {
+      "client": "mag-recorder",
+      "file_state": "upload",
+      "effective": "off",
+      "held_by": "fault",
+      "error": "@TREE@/etc/sinks/site.toml: parse error: Illegal character '\\n' (at line 1, column 16)",
+      "pipelines": [
+        "mag-recorder-psws"
+      ]
+    },
+    {
+      "client": "psk-recorder",
+      "file_state": "upload",
+      "effective": "off",
+      "held_by": "fault",
+      "error": "@TREE@/etc/sinks/site.toml: parse error: Illegal character '\\n' (at line 1, column 16)",
+      "pipelines": [
+        "psk-recorder-pskreporter"
+      ]
+    },
+    {
+      "client": "wspr-recorder",
+      "file_state": "upload",
+      "effective": "off",
+      "held_by": "fault",
+      "error": "@TREE@/etc/sinks/site.toml: parse error: Illegal character '\\n' (at line 1, column 16)",
+      "pipelines": [
+        "wspr-recorder-wsprnet"
+      ]
+    }
+  ],
+  "held_pipelines": [
+    {
+      "pipeline": "mag-recorder-psws",
+      "client": "mag-recorder",
+      "held_by": "fault",
+      "reason": "switch unreadable (site)"
+    },
+    {
+      "pipeline": "psk-recorder-pskreporter",
+      "client": "psk-recorder",
+      "held_by": "fault",
+      "reason": "switch unreadable (site)"
+    },
+    {
+      "pipeline": "wspr-recorder-wsprnet",
+      "client": "wspr-recorder",
+      "held_by": "fault",
+      "reason": "switch unreadable (site)"
+    }
+  ],
+  "refused_files": [],
+  "no_client_pipelines": [],
+  "builder_pipelines": [],
+  "errors": []
+}
