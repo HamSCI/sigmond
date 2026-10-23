@@ -190,3 +190,68 @@ class TestConfigUploadCommand(unittest.TestCase):
             upload.apply_enable = orig
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [("wspr-recorder", "AC0G/S", True)])
+
+
+# ---- set_env_flag on the safe writer (plan Ruling 17, spec section 8.2) ----
+
+import os as _os
+import stat as _stat
+
+import pytest
+
+# Pinned from set_env_flag at sigmond b2b9cd5 (before the move onto
+# safe_write): every other line survives byte for byte.
+_PIN_IN = (b"# psk-recorder env\n\nPSK_DECODE=1\n  PSK_USE_HS_UPLOADER = 1   \n"
+           b"export FOO=bar\n#PSK_USE_HS_UPLOADER=1\nPSK_DELIVERY_PIPELINES=direct\n"
+           b"TRAIL=x\t\nNOEQ\nlast=1")
+_PIN_OUT = (b"# psk-recorder env\n\nPSK_DECODE=1\nPSK_USE_HS_UPLOADER=0\n"
+            b"export FOO=bar\n#PSK_USE_HS_UPLOADER=1\n"
+            b"PSK_DELIVERY_PIPELINES=server-raw\nTRAIL=x\t\nNOEQ\nlast=1\nNEW_KEY=v\n")
+
+
+def test_set_env_flag_keeps_every_other_line_byte_for_byte(tmp_path):
+    p = tmp_path / "env" / "AC0G=B4.env"
+    p.parent.mkdir()
+    p.write_bytes(_PIN_IN)
+    upload.set_env_flag(p, "PSK_USE_HS_UPLOADER", "0")
+    upload.set_env_flag(p, "PSK_DELIVERY_PIPELINES", "server-raw")
+    upload.set_env_flag(p, "NEW_KEY", "v")
+    assert p.read_bytes() == _PIN_OUT
+    assert _stat.S_IMODE(_os.lstat(p).st_mode) == 0o644
+
+
+def test_set_env_flag_creates_a_missing_file_and_directory(tmp_path):
+    p = tmp_path / "psk-recorder" / "env" / "X.env"
+    upload.set_env_flag(p, "K", "1")
+    assert p.read_bytes() == b"K=1\n"
+
+
+def test_set_env_flag_never_writes_through_a_planted_link(tmp_path):
+    victim = tmp_path / "victim"
+    victim.write_text("SECRET=1\n")
+    d = tmp_path / "env"
+    d.mkdir()
+    (d / "X.env").symlink_to(victim)
+    with pytest.raises(OSError, match="symlink"):
+        upload.set_env_flag(d / "X.env", "K", "1")
+    assert victim.read_text() == "SECRET=1\n"
+    assert (d / "X.env").is_symlink()          # nothing copied out of it
+
+
+def test_apply_enable_as_root_chowns_by_descriptor_to_the_dir_owner(
+        tmp_path, monkeypatch):
+    from sigmond import safe_write
+    seen = []
+    monkeypatch.setattr(safe_write.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(safe_write.os, "fchown",
+                        lambda fd, u, g: seen.append((fd, u, g)))
+
+    def no_path_chown(*a, **k):
+        raise AssertionError(f"chown by path: {a!r}")
+    monkeypatch.setattr(_os, "chown", no_path_chown)
+    path, *_ = upload.apply_enable("psk-recorder", "AC0G/B4", True,
+                                   base=str(tmp_path))
+    dst = _os.stat(path.parent)
+    assert seen, "no fchown"
+    for fd, u, g in seen:
+        assert isinstance(fd, int) and (u, g) == (dst.st_uid, dst.st_gid)

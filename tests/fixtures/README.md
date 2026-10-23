@@ -20,6 +20,13 @@ output correctly across refactors.
   the header still equals `gap_hourly.HEADER` and cross-checks a row
   produced by `build_row()`/`append_row()` itself, so a column change
   on either side fails loudly instead of silently reading `NA` as 0.
+- `mag-recorder-config.toml.template` — mag-recorder's shipped config
+  template, `config/mag-recorder-config.toml.template` at mag-recorder
+  main `55a450c` (file last changed in `df26bc9`), copied verbatim below a
+  provenance header.  `tests/test_safe_write.py` sets the mag lever
+  (`[uploader] enabled = false`, spec §8.2) on it.  Refresh with
+  `git -C ../mag-recorder show main:config/mag-recorder-config.toml.template`
+  and update the header's commit.
 
 ## Refreshing
 

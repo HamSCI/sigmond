@@ -8,12 +8,12 @@ per-instance ENABLE flag (the otherwise-invisible decode->upload gap).
 """
 from __future__ import annotations
 
-import os
 import pwd
 import sys
 from pathlib import Path
 from typing import List, Tuple
 
+from .safe_write import read_nofollow, write_owned
 from .instance import (
     InvalidReporterId, legacy_instance_hint, parse_user_reporter_id,
     unescape_systemd_instance,
@@ -77,9 +77,15 @@ def env_path_for(client: str, instance: str, base: str = "/etc") -> Path:
 
 def set_env_flag(path: Path, key: str, value: str) -> None:
     """Set ``key=value`` in an env file, preserving every other line
-    (comments, ordering, the decode flag).  Creates the file if absent."""
+    (comments, ordering, the decode flag).  Creates the file if absent.
+
+    The env directory belongs to the service account, so the write goes
+    through ``safe_write.write_owned`` (plan Ruling 17): mode 0644, and as
+    root the file goes to the directory's owner by descriptor.  A symlink
+    at the env file raises OSError rather than being read through."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = path.read_text().splitlines() if path.exists() else []
+    old = read_nofollow(path)
+    lines = old.splitlines() if old is not None else []
     out, found = [], False
     for ln in lines:
         s = ln.strip()
@@ -91,18 +97,7 @@ def set_env_flag(path: Path, key: str, value: str) -> None:
             out.append(ln)
     if not found:
         out.append(f"{key}={value}")
-    path.write_text("\n".join(out) + "\n")
-
-
-def _chown_to_env_dir_owner(path: Path) -> None:
-    """chown the env file to the env dir's owner (the service user) so the
-    daemon can read it; no-op if not root / dir missing."""
-    try:
-        st = path.parent.stat()
-        os.chown(path, st.st_uid, st.st_gid)
-        os.chmod(path, 0o644)
-    except (PermissionError, FileNotFoundError):
-        pass
+    write_owned(path, "\n".join(out) + "\n", mode=0o644)
 
 
 def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
@@ -137,7 +132,6 @@ def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
             f"{client} has no delivery-pipeline selection"
             if client not in DELIVERY_ON_ENABLE else
             "delivery pipeline only applies when enabling (--on)")
-    _chown_to_env_dir_owner(path)
     return path, flag, dests, delivery_set
 
 
