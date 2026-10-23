@@ -116,17 +116,26 @@ def _instance_units(client: str, topology) -> list:
             if u.kind == "service" and u.instance and not u.orphaned]
 
 
-def _psk_recorder_sends(env: dict, unit: str) -> bool:
+def _psk_delivery_pipelines(env: dict) -> tuple:
+    """psk-recorder's delivery pipelines for ``env``, in canonical order
+    (its ``_resolve_delivery_pipelines``): the valid tokens of
+    ``PSK_DELIVERY_PIPELINES``, else the legacy ``PSK_DELIVERY_MODE``,
+    else the default ``server-merge``.  The sink lever step reads this too
+    (``sink_levers``): anything but ``server-raw`` alone sends or marks rows
+    for a server to forward."""
     raw = (env.get("PSK_DELIVERY_PIPELINES") or "").strip().lower()
     if raw:
-        valid = [t.strip() for t in raw.split(",")
-                 if t.strip() in _PSK_VALID]
+        valid = {t.strip() for t in raw.split(",")} & set(_PSK_VALID)
         if valid:
-            return "direct" in valid
+            return tuple(p for p in _PSK_VALID if p in valid)
     mode = (env.get("PSK_DELIVERY_MODE") or "").strip().lower()
     if mode in _PSK_LEGACY:
-        return "direct" in _PSK_LEGACY[mode]
-    return False
+        return tuple(p for p in _PSK_VALID if p in _PSK_LEGACY[mode])
+    return ("server-merge",)
+
+
+def _psk_recorder_sends(env: dict, unit: str) -> bool:
+    return "direct" in _psk_delivery_pipelines(env)
 
 
 def _ms_config_path(env: dict, unit: str) -> Path:
@@ -145,8 +154,16 @@ def _ms_config_path(env: dict, unit: str) -> Path:
     return MS_CONFIG_DIR / "meteor-scatter-config.toml"
 
 
+def _ms_delivery_mode(env: dict) -> str:
+    """meteor-scatter's delivery mode for ``env`` (its ``_delivery_mode``):
+    ``METEOR_SCATTER_DELIVERY_MODE``, ``direct`` when unset or empty.  Any
+    mode but ``off``, ``none``, ``disabled`` and ``deposit`` starts the
+    in-process sender; ``deposit`` marks rows for a server to forward."""
+    return (env.get("METEOR_SCATTER_DELIVERY_MODE") or "direct").strip().lower()
+
+
 def _meteor_scatter_sends(env: dict, unit: str) -> bool:
-    mode = (env.get("METEOR_SCATTER_DELIVERY_MODE") or "direct").strip().lower()
+    mode = _ms_delivery_mode(env)
     if mode in _MS_NO_SENDER:
         return False
     path = _ms_config_path(env, unit)
