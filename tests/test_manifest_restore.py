@@ -1745,3 +1745,133 @@ class CarryOverRestoreCarryOverTests(unittest.TestCase):
         aside = [q.name for q in st.roots.marker.parent.iterdir()
                  if q.name.startswith(MARKER + '.rolled-back-')]
         self.assertEqual(len(aside), 1, aside)
+
+
+# ── the restore run and the next manifest step, captured (Task 24) ───
+# sigmond-appliance's update rig reads, at G-bis, what a restore to a sigmond
+# below part 2 prints and leaves, and at G-ter what the next manifest step
+# prints and leaves (global constraint 4: its parsers read real output).
+# restore_rerun_capture runs the whole chain here once: the V1 manifest step
+# (Task 19's scenario), a verified `smd admin manifest restore --apply` to a
+# sigmond below part 2 (the real cmd_manifest_restore and the real
+# _restore_below_part2; git, the restored child and the units faked as
+# ManifestRestoreApplyTests fakes them), then the next manifest step (V8).
+# tests/fixtures/capture_restore_part2.py writes what it returns to
+# tests/fixtures/restore_part2/.
+
+RESTORE_CAPTURE = Path(__file__).resolve().parent / 'fixtures' / 'restore_part2'
+_CAPTURE_UTC = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z')
+_CAPTURE_ASIDE = re.compile(r'(\.rolled-back-)\d{8}T\d{6}Z')
+
+
+def restore_rerun_capture(case) -> dict:
+    """{relative file name: text} for tests/fixtures/restore_part2/.
+
+    restore.txt          the restore's whole output, in the order printed
+    rerun.txt            the next manifest step's whole output
+    coordination.toml    the station's [uploads], as the steps read it
+    sinks-v1/<n>         every switch file after the first carry-over
+    sinks-restored/<n>   ... after the restore
+    sinks-rerun/<n>      ... after the next manifest step
+    marker-v1.txt, marker-rerun.txt   the marker each carry-over wrote
+
+    The scratch root reads @ROOT@, each wall-clock time 2026-10-23T12:00:00Z
+    and the rolled-back stamp 20261023T120000Z, so a re-run leaves `git
+    diff` empty."""
+    from test_uploader_manifest_part2 import Part2Station, normalise
+    st = Part2Station(case)
+
+    def norm(text):
+        text = normalise(text, st)
+        text = _CAPTURE_UTC.sub('2026-10-23T12:00:00Z', text)
+        return _CAPTURE_ASIDE.sub(r'\g<1>20261023T120000Z', text)
+
+    def sinks(tag):
+        return {f'{tag}/{p.name}': norm(p.read_text())
+                for p in sorted(st.roots.sinks.iterdir())
+                if not p.name.startswith('.')}
+
+    out = {}
+    first = st.step()
+    case.assertEqual(first.rc, 0, first.both)
+    out.update(sinks('sinks-v1'))
+    out['marker-v1.txt'] = norm(st.roots.marker.read_text())
+
+    fill = _filler_live(MIN_COMPONENT_ROWS - 1)
+    base = st.tmp / 'opt-git-sigmond'
+    for name in ('sigmond', *fill):
+        d = base / name
+        (d / '.git').mkdir(parents=True)
+        (d / 'scripts').mkdir()
+        (d / 'scripts' / 'install.sh').write_text('#!/bin/bash\n')
+    # The restored sigmond: its own smd, and no sink_carryover.py.
+    (base / 'sigmond' / 'bin').mkdir()
+    (base / 'sigmond' / 'bin' / 'smd').write_text('#!/usr/bin/env python3\n')
+    manifest = st.tmp / 'blessed.manifest.txt'
+    manifest.write_text('components (live):\n    sigmond          aaaaaaa\n'
+                        + _filler_rows(MIN_COMPONENT_ROWS - 1))
+    sysd = st.tmp / 'etc-systemd'
+    sysd.mkdir()
+    args = types.SimpleNamespace(path=str(manifest), apply=True, no_fetch=True,
+                                 base=str(base))
+    versions = mock.Mock(side_effect=[{'sigmond': 'ccccccc', **fill},
+                                      {'sigmond': 'aaaaaaa', **fill}])
+    both = io.StringIO()
+    with mock.patch.object(smd, '_need_root', return_value=False), \
+         mock.patch('sigmond.provenance.component_versions',
+                    side_effect=versions), \
+         mock.patch('subprocess.run', side_effect=_FakeGit()), \
+         mock.patch.object(smd, '_RESTORE_SYSTEMD_DIR', sysd), \
+         mock.patch.object(smd, '_RESTORE_MARKER_PATH', st.roots.marker), \
+         mock.patch.object(smd, '_RESTORE_PIPELINES_D', st.pipelines_d), \
+         contextlib.redirect_stdout(both), contextlib.redirect_stderr(both):
+        rc = smd.cmd_manifest_restore(args)
+    case.assertEqual(rc, 0, both.getvalue())
+    out['restore.txt'] = norm(both.getvalue())
+    out.update(sinks('sinks-restored'))
+
+    second = st.step()
+    case.assertEqual(second.rc, 0, second.both)
+    out['rerun.txt'] = norm(second.both)
+    out.update(sinks('sinks-rerun'))
+    out['marker-rerun.txt'] = norm(st.roots.marker.read_text())
+    out['coordination.toml'] = norm(
+        (st.tmp / 'etc' / 'sigmond' / 'coordination.toml').read_text())
+    return out
+
+
+@needs_real
+class RestoreCaptureTests(unittest.TestCase):
+    """The files Task 24's static test reads stay what this chain prints
+    and leaves.  Regenerate with tests/fixtures/capture_restore_part2.py."""
+
+    def test_the_captured_files_match(self):
+        got = restore_rerun_capture(self)
+        have = {str(p.relative_to(RESTORE_CAPTURE)): p.read_text()
+                for p in sorted(RESTORE_CAPTURE.rglob('*')) if p.is_file()}
+        self.assertEqual(sorted(got), sorted(have))
+        for name in got:
+            self.assertEqual(got[name], have[name], name)
+
+    def test_the_chain_is_the_one_task_24_asserts(self):
+        got = restore_rerun_capture(self)
+        restore = got['restore.txt']
+        self.assertIn('restored to manifest', restore)
+        self.assertIn('sigmond: checked out', restore)
+        self.assertIn('moved the carry-over marker aside to @ROOT@/state/'
+                      'carry-over-v1.done.rolled-back-20261023T120000Z;',
+                      restore)
+        self.assertIn('removed @ROOT@/etc/hs-uploader/pipelines.d/sigmond.toml',
+                      restore)
+        self.assertIn('re-rendered by the restored sigmond', restore)
+        rerun = got['rerun.txt']
+        self.assertIn('uploader: carry-over: marker written\n', rerun)
+        self.assertLess(rerun.index('carry-over: marker written'),
+                        rerun.index('uploader: wrote @ROOT@/etc/hs-uploader/'
+                                    'pipelines.d/sigmond.toml'))
+        clients = [n.split('/', 1)[1] for n in got
+                   if n.startswith('sinks-v1/') and n != 'sinks-v1/site.toml']
+        self.assertTrue(clients)
+        for n in clients:
+            self.assertEqual(got[f'sinks-rerun/{n}'], got[f'sinks-v1/{n}'], n)
+            self.assertEqual(got[f'sinks-restored/{n}'], got[f'sinks-v1/{n}'], n)
