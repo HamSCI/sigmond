@@ -4407,21 +4407,25 @@ _RESTORE_PIPELINES_D = None
 _RESTORE_PART2_PROBE = ('lib', 'sigmond', 'sink_carryover.py')
 
 
-def _restored_sigmond_is_part2(base) -> bool:
-    """Whether the smd a restore re-renders with carries part 2.
+def _restore_smd_path(base) -> Path:
+    """The smd a restore re-renders with: `<base>/sigmond/bin/smd` when it
+    stands as a file, else the running smd.  The one place that chooses."""
+    smd_path = Path(base) / 'sigmond' / 'bin' / 'smd'
+    return smd_path if smd_path.is_file() else _SCRIPT
 
-    That smd is `<base>/sigmond/bin/smd` when it stands, else the running
-    smd, which is part 2 (`_restore_rerender_uploader`).  The restored tree
-    counts as part 2 only when `lib`, `lib/sigmond` stand as real
-    directories and `sink_carryover.py` as a regular file, each read by
-    lstat: a symlink anywhere on that path reads as below part 2.  A wrong
-    "below" costs one more carry-over at the next manifest step; a wrong
-    "part 2" leaves a marker that an old sigmond never maintains."""
+
+def _restored_sigmond_is_part2(smd_path) -> bool:
+    """Whether the tree that renders, the one holding `smd_path` once links
+    resolve, carries part 2.
+
+    It counts as part 2 only when `lib`, `lib/sigmond` stand as real
+    directories and `sink_carryover.py` as a regular file under that tree,
+    each read by lstat: a symlink anywhere on that path reads as below
+    part 2.  A wrong "below" costs one more carry-over at the next manifest
+    step; a wrong "part 2" leaves a marker that an old sigmond never
+    maintains."""
     import stat as _stat
-    root = Path(base) / 'sigmond'
-    if not (root / 'bin' / 'smd').is_file():
-        return True
-    p = root
+    p = Path(smd_path).resolve().parent.parent
     last = len(_RESTORE_PART2_PROBE) - 1
     for i, part in enumerate(_RESTORE_PART2_PROBE):
         p = p / part
@@ -4435,7 +4439,7 @@ def _restored_sigmond_is_part2(base) -> bool:
 
 
 def _restore_below_part2(base, *, marker=None, pipelines_d=None,
-                         now=None) -> int:
+                         now=None, smd_path=None) -> int:
     """Spec §6.7, §10 (test 22): before the restored smd renders, a restore
     to a sigmond below part 2 moves the carry-over marker aside and removes
     `pipelines.d/sigmond.toml`.  A restore to part 2 leaves both.  Switch
@@ -4448,7 +4452,9 @@ def _restore_below_part2(base, *, marker=None, pipelines_d=None,
     the directory's descriptor and refuses a symlinked directory.  A
     missing marker, state directory or pipelines.d changes nothing.  Each
     step runs even when the other fails; returns 1 when either failed."""
-    if _restored_sigmond_is_part2(base):
+    if smd_path is None:
+        smd_path = _restore_smd_path(base)
+    if _restored_sigmond_is_part2(smd_path):
         return 0
     from sigmond import sink_state
     from sigmond import uploader_manifest as um
@@ -4463,7 +4469,8 @@ def _restore_below_part2(base, *, marker=None, pipelines_d=None,
         new = None
         rc = 1
         _err(f'the restored sigmond predates the sink switches, but the '
-             f'carry-over marker {marker} could not be moved aside '
+             f'carry-over marker {marker} could not be moved aside to '
+             f'{marker}{sink_state.ROLLED_BACK}<UTC> '
              f'({exc.strerror or exc}).  A part 2 hs-uploader keeps '
              f'enforcing switch files the restored sigmond never writes; '
              f'move it aside by hand')
@@ -4511,10 +4518,8 @@ def _restore_rerender_uploader(base) -> int:
     when the child failed, hung or could not start.
     """
     # Spec §6.7, §10: below part 2, the marker and sigmond.toml go first.
-    pre_rc = _restore_below_part2(base)
-    smd_path = Path(base) / 'sigmond' / 'bin' / 'smd'
-    if not smd_path.is_file():
-        smd_path = _SCRIPT
+    smd_path = _restore_smd_path(base)
+    pre_rc = _restore_below_part2(base, smd_path=smd_path)
     argv = [sys.executable, str(smd_path), 'admin', 'uploader', 'manifest',
             '--write', '--enable']
     # errors='replace': the checkouts have moved by now, so a stray byte in
@@ -5167,6 +5172,11 @@ def cmd_manifest_restore(args) -> int:
         _err(r)
     for n, a, f, t in non_keep:
         _err(f'{n}: still {a} ({f} -> {t}) after --apply')
+    # Spec §6.7, §10: the checkouts have moved whatever the verification
+    # says, so a sigmond now below part 2 still gets the marker moved aside
+    # and sigmond.toml removed.  Always called: on a part 2 tree it does
+    # nothing, and it never renders (D11 holds the render back).
+    _restore_below_part2(base)
     _info('pipelines.toml not re-rendered: a restore re-renders only once '
           'it verifies')
     return 1

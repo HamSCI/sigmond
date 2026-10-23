@@ -214,6 +214,12 @@ def _load_smd():
 
 
 smd = _load_smd()
+# A restore that reads its sigmond tree as below part 2 moves the marker and
+# removes sigmond.toml.  Paths that never exist keep every test here off this
+# host's /var/lib/hs-uploader and /etc/hs-uploader; a test that wants the step
+# points these at its own scratch tree.
+smd._RESTORE_MARKER_PATH = Path('/nonexistent/sigmond-test/state/carry-over-v1.done')
+smd._RESTORE_PIPELINES_D = Path('/nonexistent/sigmond-test/etc/pipelines.d')
 
 
 class _FakeGit:
@@ -1551,6 +1557,96 @@ class RestoreBelowPart2Tests(unittest.TestCase):
         self.assertEqual(len(t.asides()), 1)
 
 
+class RestoreProbeTheRenderingTreeTests(unittest.TestCase):
+    """M-1: the probe judges the tree whose smd renders, so a restored
+    bin/smd that links into another tree is judged by that tree."""
+
+    def test_smd_linking_into_an_old_tree_counts_as_below_part2(self):
+        t = _HsTree(self, part2=True)       # the checkout looks like part 2
+        old = t.tmp / 'old-sigmond'
+        (old / 'bin').mkdir(parents=True)
+        (old / 'lib' / 'sigmond').mkdir(parents=True)
+        (old / 'bin' / 'smd').write_text('print("v3.76")\n')
+        smd_link = t.sigmond / 'bin' / 'smd'
+        smd_link.unlink()
+        smd_link.symlink_to(old / 'bin' / 'smd')
+        rc, out = t.call()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(t.asides()), 1)
+        self.assertFalse(os.path.lexists(t.sigmond_toml))
+
+    def test_smd_linking_into_a_part2_tree_leaves_both(self):
+        t = _HsTree(self, part2=False)      # the checkout looks old
+        new = t.tmp / 'new-sigmond'
+        (new / 'bin').mkdir(parents=True)
+        (new / 'lib' / 'sigmond').mkdir(parents=True)
+        (new / 'lib' / 'sigmond' / 'sink_carryover.py').write_text('#\n')
+        (new / 'bin' / 'smd').write_text('print("part 2")\n')
+        smd_link = t.sigmond / 'bin' / 'smd'
+        smd_link.unlink()
+        smd_link.symlink_to(new / 'bin' / 'smd')
+        rc, out = t.call()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(t.asides(), [])
+        self.assertTrue(t.sigmond_toml.is_file())
+
+    def test_the_failure_line_names_the_marker_and_its_target(self):
+        t = _HsTree(self, part2=False)
+        real = t.tmp / 'real-state'
+        t.state.rename(real)
+        t.state.symlink_to(real)
+        rc, out = t.call()
+        self.assertEqual(rc, 1, out)
+        self.assertIn(str(t.marker), out)
+        self.assertIn(f'{t.marker}.rolled-back-<UTC>', out)
+
+
+class RestoreUnverifiedStillMovesTheMarkerTests(unittest.TestCase):
+    """I-1: a restore that moved sigmond below part 2 but fails
+    re-verification still moves the marker aside and removes sigmond.toml;
+    it still never re-renders (D11)."""
+
+    setUp = ManifestRestoreApplyTests.setUp
+    _mkcheckout = ManifestRestoreApplyTests._mkcheckout
+    _run = ManifestRestoreApplyTests._run
+
+    def _go(self, after_sha):
+        t = _HsTree(self, part2=False)
+        restored = self.base / 'sigmond' / 'bin' / 'smd'
+        restored.parent.mkdir(parents=True)
+        restored.write_text('#!/usr/bin/env python3\n')
+        p = self.tdir / 'candidate-sig.txt'
+        p.write_text("components (live):\n    sigmond          aaaaaaa\n"
+                     + _filler_rows(MIN_COMPONENT_ROWS - 1))
+        fill = _filler_live(MIN_COMPONENT_ROWS - 1)
+        sysd = self.tdir / 'etc-systemd'
+        sysd.mkdir()
+        with mock.patch.object(smd, '_RESTORE_SYSTEMD_DIR', sysd), \
+             mock.patch.object(smd, '_RESTORE_MARKER_PATH', t.marker), \
+             mock.patch.object(smd, '_RESTORE_PIPELINES_D', t.pipelines_d):
+            rc, out, fake = self._run(
+                p, {'sigmond': 'ccccccc', **fill}, _FakeGit(),
+                after_live={'sigmond': after_sha, **fill})
+        rerenders = [c for c in fake.calls
+                     if 'uploader' in c and 'manifest' in c]
+        return t, rc, out, rerenders
+
+    def test_an_unverified_restore_moves_the_marker_but_never_renders(self):
+        t, rc, out, rerenders = self._go('bbbbbbb')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('STILL finds a divergence', out)
+        self.assertEqual(rerenders, [])
+        self.assertEqual(len(t.asides()), 1, out)
+        self.assertFalse(os.path.lexists(t.sigmond_toml))
+        self.assertEqual(t.switches(), SWITCHES)
+
+    def test_positive_control_a_verified_restore_moves_and_renders(self):
+        t, rc, out, rerenders = self._go('aaaaaaa')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(rerenders), 1)
+        self.assertEqual(len(t.asides()), 1, out)
+
+
 class RestoreBelowPart2BeforeRenderTests(unittest.TestCase):
     """Through `_restore_rerender_uploader`: the move and the removal land
     before the restored smd runs, and a failed move still re-renders but
@@ -1624,11 +1720,26 @@ class CarryOverRestoreCarryOverTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(st.roots.marker))
         self.assertFalse(os.path.lexists(pipelines_d / 'sigmond.toml'))
         self.assertEqual(st.snapshot(), first)
+        # The restored sigmond keeps [uploads] current meanwhile (V8).
+        coord = st.tmp / 'etc/sigmond/coordination.toml'
+        text = coord.read_text()
+        self.assertIn('enabled = true\nmode = "upload"', text)
+        coord.write_text(text.replace('enabled = true\nmode = "upload"',
+                                      'enabled = false\nmode = "hold"'))
         p, res2, r2 = st.run()
         self.assertTrue(res2.ok, res2.lines())
         self.assertTrue(st.roots.marker.is_file())
-        self.assertEqual(r2.sets(), [])
-        self.assertEqual(st.snapshot(), first)
+        self.assertEqual(r2.sets(), ['site'])
+        second = st.snapshot()
+        self.assertEqual({n: second[n] for n in clients},
+                         {n: first[n] for n in clients})
+        self.assertEqual(sorted(second), sorted(first))
+        site = st.switch('site')
+        self.assertEqual(site['state'], 'fill')
+        self.assertEqual([h['to'] for h in site['history']],
+                         ['upload', 'fill'])
+        self.assertEqual(site['history'][1]['reason'],
+                         'carried over from [uploads] mode = hold')
         for name in clients:
             self.assertIn(b'history', first[name], name)
         aside = [q.name for q in st.roots.marker.parent.iterdir()
