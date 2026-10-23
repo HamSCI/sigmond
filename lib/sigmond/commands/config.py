@@ -1167,6 +1167,13 @@ def cmd_config_uploads(args) -> int:
     words = _WORDS['sink' if getattr(args, 'sink_words', False) else 'legacy']
 
     if verb == 'status':
+        # Spec §7.5: the switch files once the marker stands; [uploads]
+        # before, or when hs-uploader cannot say what they read.
+        from . import sink as sink_cmd
+        rc = sink_cmd.switch_status()
+        if rc is not None and rc != sink_cmd.FELL_BACK:
+            return rc
+        fell_back = rc == sink_cmd.FELL_BACK
         up = coord.uploads
         why = f' — {up.reason}' if up.reason else ''
         if up.mode == 'upload':
@@ -1193,7 +1200,7 @@ def cmd_config_uploads(args) -> int:
         if prof is not None and not prof.uploads_declared:
             info(f'{SITE_PROFILE_PATH.name} declares no [uploads] block '
                  '(coordination.toml is authoritative until it does)')
-        return 0
+        return 1 if fell_back else 0
 
     mode = UPLOAD_VERBS.get(verb)
     if mode is None:

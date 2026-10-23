@@ -155,3 +155,61 @@ class ReadBacklogTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SwitchAgeTests(unittest.TestCase):
+    """Spec §7.5: once the carry-over marker stands, uploads_line dates the
+    last change of the site sink switch by site.toml's ``set_at``, not by
+    coordination.toml's mtime (a mirror repair or a hand edit moves that)."""
+
+    def setUp(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = Path(d.name)
+        self.marker = root / 'carry-over-v1.done'
+        self.site = root / 'site.toml'
+        self.coord = root / 'coordination.toml'
+        self.coord.write_text('[uploads]\nenabled = true\n')
+        os.utime(self.coord, (NOW - 2 * 86400, NOW - 2 * 86400))
+
+    def age(self):
+        return check._switch_age_s(now=NOW, marker=self.marker, site=self.site,
+                                   coordination=self.coord)
+
+    def write_site(self, set_at):
+        self.site.write_text(f'state = "upload"\nreason = "x"\nset_by = "smd sink (opal)"\n'
+                             f'set_at = "{set_at}"\n')
+
+    def test_with_the_marker_set_at_dates_the_change(self):
+        self.marker.write_text('')
+        self.write_site(datetime.fromtimestamp(NOW - 300, tz=timezone.utc)
+                        .strftime('%Y-%m-%dT%H:%M:%SZ'))
+        self.assertEqual(self.age(), 300)
+
+    def test_without_the_marker_coordination_toml_dates_it(self):
+        self.write_site(datetime.fromtimestamp(NOW - 300, tz=timezone.utc)
+                        .strftime('%Y-%m-%dT%H:%M:%SZ'))
+        self.assertEqual(self.age(), 2 * 86400)
+
+    def test_with_the_marker_an_unreadable_set_at_dates_nothing(self):
+        self.marker.write_text('')
+        self.assertIsNone(self.age())                 # no site.toml
+        self.site.write_text('state = "upload"\n')    # no set_at
+        self.assertIsNone(self.age())
+        self.write_site('yesterday')
+        self.assertIsNone(self.age())
+
+    def test_the_uploads_line_waits_on_a_switch_raised_minutes_ago(self):
+        # The station's real chain: default_env wires _switch_age_s.
+        self.assertIs(check.default_env().coordination_age_s, check._switch_age_s)
+        self.marker.write_text('')
+        self.write_site(datetime.fromtimestamp(NOW - 300, tz=timezone.utc)
+                        .strftime('%Y-%m-%dT%H:%M:%SZ'))
+        env = make_env(coordination=lambda: coord(), backlog=lambda: backlog(ack_age_s=None),
+                       coordination_age_s=self.age)
+        self.assertEqual(check.uploads_line(env),
+                         check.Line(WAIT, 'uploads', 'on since 5 min ago; the first delivery '
+                                                     'comes within 30 min'))

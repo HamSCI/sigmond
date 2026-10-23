@@ -117,6 +117,8 @@ class Env:
     disk: Callable[[str], Tuple[int, int]] = None                      # Task 5
     timestd_config: Callable[[], Optional[dict]] = None                # Task 5
     coordination: Callable[[], Any] = None                             # Task 6
+    # how long the site sink switch has stood: site.toml's set_at once the
+    # carry-over marker stands, coordination.toml's mtime before (§7.5)
     coordination_age_s: Callable[[], Optional[float]] = None           # Task 6
     backlog: Callable[[], dict] = None                                 # Task 6
     http: Callable[[str], Tuple[Optional[int], str]] = None            # Task 7
@@ -141,7 +143,7 @@ def default_env() -> Env:
     return Env(installed=_installed, service=service_state, reader=reader,
                journal=read_journal, disk=_disk,
                timestd_config=lambda: read_timestd_config(reader),
-               coordination=_coordination, coordination_age_s=_coordination_age_s,
+               coordination=_coordination, coordination_age_s=_switch_age_s,
                backlog=read_backlog, http=http_status, bringup=bringup_state,
                mag_psws_id=lambda: read_mag_psws_id(reader))
 
@@ -979,14 +981,36 @@ def _coordination():
     return load_coordination(COORDINATION_PATH)
 
 
-def _coordination_age_s() -> Optional[float]:
-    """Seconds since coordination.toml last changed: how long the site sink
-    switch has stood where it stands."""
+def _switch_age_s(*, now: Optional[float] = None, marker=None, site=None,
+                  coordination=None) -> Optional[float]:
+    """Seconds since the site sink switch last changed.
+
+    Once the carry-over marker stands, ``site.toml`` holds the switch and
+    its ``set_at`` dates the change (spec §7.5); coordination.toml only
+    mirrors it, and a mirror repair or a hand edit moves its mtime.  A
+    ``set_at`` that cannot be read dates nothing (None).  Before the
+    marker, coordination.toml's mtime dates it, as part 1 did.  Reads
+    files only, never through a link."""
+    import tomllib
+    from .. import sink_state
     from ..paths import COORDINATION_PATH
+    from ..safe_write import read_nofollow
+    now = time.time() if now is None else now
+    marker = sink_state.MARKER_PATH if marker is None else marker
+    if not sink_state.marker_stands(marker):
+        path = COORDINATION_PATH if coordination is None else coordination
+        try:
+            return now - os.stat(path).st_mtime
+        except OSError:
+            return None
+    site = sink_state.SINKS_DIR / 'site.toml' if site is None else site
     try:
-        return time.time() - COORDINATION_PATH.stat().st_mtime
-    except OSError:
+        text = read_nofollow(site)
+        at = tomllib.loads(text).get('set_at') if text is not None else None
+    except (OSError, ValueError):            # TOMLDecodeError is a ValueError
         return None
+    ts = _parse_ts(at) if isinstance(at, str) and at else None
+    return None if ts is None else now - ts
 
 
 # ---------------------------------------------------------------------------

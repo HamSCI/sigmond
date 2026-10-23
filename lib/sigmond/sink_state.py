@@ -68,6 +68,25 @@ def marker_stands(path: Path = MARKER_PATH) -> bool:
     return True
 
 
+UPDATE_NOTICE = "the sink switches take effect at the next `smd align`"
+
+
+def update_notice(*, marker: Path = MARKER_PATH,
+                  python: Path = uploader_manifest.HS_UPLOADER_PYTHON
+                  ) -> Optional[str]:
+    """The line `smd update` prints (spec §6.1): the carry-over runs in the
+    manifest step alone, which `smd update` never reaches.  So while the
+    marker stands absent and the installed hs-uploader offers ``gate``,
+    the switches wait for the next `smd align`.  None otherwise; a failed
+    features probe reads as no ``gate``.  Reads only."""
+    if marker_stands(marker):
+        return None
+    features = uploader_manifest.hs_uploader_features(python=python)
+    if features is None or uploader_manifest.GATE_FEATURE not in features:
+        return None
+    return UPDATE_NOTICE
+
+
 ROLLED_BACK = ".rolled-back-"
 _ASIDE_TRIES = 100
 

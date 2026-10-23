@@ -900,19 +900,55 @@ class TestUploadEnabled(unittest.TestCase):
     the host probes so it's hermetic (the same pattern the other runtime rules
     use).  Identity/credentials are owned elsewhere and not checked here."""
 
-    def _run(self, *, installed, instances, envs, coord=None):
+    def _run(self, *, installed, instances, envs, coord=None, below=None):
         import sigmond.harmonize as H
         saved = (H._client_installed, H._active_instances,
-                 H._resolve_instance_env, H._read_env_file)
+                 H._resolve_instance_env, H._read_env_file,
+                 H._sink_below_upload)
         try:
             H._client_installed = lambda c: c in installed
             H._active_instances = lambda c: instances.get(c, [])
             H._resolve_instance_env = lambda c, i: envs.get((c, i), {})
             H._read_env_file = lambda p: (coord or {})
+            # None: no marker (or no reading), so part 1's rule
+            H._sink_below_upload = lambda: below
             return H.rule_upload_enabled(None)
         finally:
             (H._client_installed, H._active_instances,
-             H._resolve_instance_env, H._read_env_file) = saved
+             H._resolve_instance_env, H._read_env_file,
+             H._sink_below_upload) = saved
+
+    # -- spec §7.5, test 21: quiet for a client the sink switches lower ------
+
+    def test_quiet_for_an_instance_whose_client_reads_below_upload(self):
+        kw = dict(installed={"wspr-recorder", "psk-recorder"},
+                  instances={"wspr-recorder": ["W1AW"], "psk-recorder": ["W1AW"]},
+                  envs={("wspr-recorder", "W1AW"): {"WSPR_USE_HS_UPLOADER": "0"},
+                        ("psk-recorder", "W1AW"): {}})
+        r = self._run(below={"wspr-recorder", "psk-recorder"}, **kw)
+        self.assertEqual(r.severity, "pass", r.message)
+        # Positive control: the same instances, their clients at upload,
+        # with uploads off, still warn.
+        r = self._run(below=set(), **kw)
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("wspr-recorder@W1AW", r.message)
+        self.assertIn("psk-recorder@W1AW", r.message)
+
+    def test_only_the_lowered_client_goes_quiet(self):
+        r = self._run(
+            installed={"wspr-recorder", "psk-recorder"},
+            instances={"wspr-recorder": ["W1AW"], "psk-recorder": ["W1AW"]},
+            envs={}, below={"psk-recorder"})
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("wspr-recorder@W1AW", r.message)
+        self.assertNotIn("psk-recorder", r.message)
+        self.assertEqual(r.affected, ["wspr-recorder"])
+
+    def test_without_a_reading_part_1_rule_stands(self):
+        r = self._run(installed={"wspr-recorder"},
+                      instances={"wspr-recorder": ["W1AW"]}, envs={}, below=None)
+        self.assertEqual(r.severity, "warn")
+
 
     def test_all_enabled_passes(self):
         r = self._run(
@@ -1056,3 +1092,44 @@ class TestRuleKa9qWebTarget(unittest.TestCase):
         r = rule_ka9q_web_target(_make_view(coord))
         self.assertEqual(r.severity, "pass")
         self.assertIn("skipped", r.message)
+
+
+class TestSinkBelowUpload(unittest.TestCase):
+    """harmonize._sink_below_upload: the clients the sink switches hold below
+    upload, read through `hs-uploader sink status --json` (Ruling 12), and
+    only once the carry-over marker stands."""
+
+    FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sink_status"
+
+    def _call(self, *, marker, case=None):
+        import io
+        from contextlib import redirect_stderr
+        import sigmond.harmonize as H
+        from sigmond import sink_state as ss
+        reads = []
+
+        def read():
+            reads.append(1)
+            if case is None:
+                return None
+            with redirect_stderr(io.StringIO()):
+                return ss.parse_status((self.FIXTURES / f"{case}.json").read_text())
+        out = H._sink_below_upload(marker_stands=lambda: marker, read=read)
+        return out, reads
+
+    def test_no_marker_reads_nothing(self):
+        out, reads = self._call(marker=False, case="psk-fill")
+        self.assertIsNone(out)
+        self.assertEqual(reads, [])
+
+    def test_marker_reads_the_switches(self):
+        out, reads = self._call(marker=True, case="psk-fill")
+        self.assertEqual(out, {"psk-recorder"})
+        self.assertEqual(reads, [1])
+        out, _ = self._call(marker=True, case="site-off")
+        self.assertIn("wspr-recorder", out)
+
+    def test_an_unreadable_status_falls_back_to_part_1(self):
+        out, reads = self._call(marker=True, case=None)
+        self.assertIsNone(out)
+        self.assertEqual(reads, [1])

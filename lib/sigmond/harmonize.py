@@ -1212,15 +1212,39 @@ def _client_installed(client: str) -> bool:
     return Path(f"/etc/{client}").exists()
 
 
+def _sink_below_upload(*, marker_stands=None, read=None):
+    """The clients whose effective sink state reads below ``upload``, once
+    the carry-over marker stands; None before it, or when hs-uploader's
+    ``sink status --json`` cannot be read (Ruling 12: hs-uploader holds the
+    one implementation of the read rules).  Effective states do not depend
+    on the marker (ruling X5), so the marker check here is deliberate:
+    before the carry-over the switches govern nothing."""
+    from . import sink_state
+    marker_stands = marker_stands or (lambda: sink_state.marker_stands())
+    if not marker_stands():
+        return None
+    state = (read or sink_state.read_state)()
+    if state is None:
+        return None
+    return set(sink_state.below_upload(state))
+
+
 def rule_upload_enabled(view: SystemView) -> RuleResult:
     """Runtime: flag any ACTIVE radiod-keyed recorder instance whose
     per-instance env does not enable upload — it decodes to the local sink but
     silently never ships.  Off MAY be intentional on a decode-only /
     merge-feeder node, so this is a soft warn for visibility, not a hard fail.
     Identity (site-profile) and credentials (`smd admin secrets`) are owned
-    elsewhere and intentionally not re-checked here."""
+    elsewhere and intentionally not re-checked here.
+
+    Spec §7.5: an instance whose client's effective sink state reads below
+    ``upload`` stays quiet.  The lever step turned its sender off on
+    purpose; warning there would warn on every station part 2 lowers.  The
+    switches are read once, and only when some instance would warn."""
     coord = _read_env_file(Path("/etc/sigmond/coordination.env"))
     off = []
+    below = None
+    asked = False
     for client, (flag, dest) in _UPLOAD_ENABLE.items():
         if not _client_installed(client):
             continue
@@ -1228,6 +1252,10 @@ def rule_upload_enabled(view: SystemView) -> RuleResult:
             env = dict(coord)
             env.update(_resolve_instance_env(client, inst))
             if not _upload_truthy(env.get(flag)):
+                if not asked:
+                    below, asked = _sink_below_upload(), True
+                if below is not None and client in below:
+                    continue
                 off.append(f"{client}@{display_reporter_id(inst)} -> {' / '.join(dest)}")
     if not off:
         return RuleResult("upload_enabled", "pass",
