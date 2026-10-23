@@ -331,7 +331,7 @@ def _run_migrate(*, db: Path, sink: Optional[Path],
     return 0
 
 
-def _render_inputs(path: Optional[Path] = None):
+def _render_inputs(path: Optional[Path] = None, *, gate: bool = False):
     """``(coord, mode, supports_discard)`` for the render: coordination.toml
     (at `path`, the default when None),
     the mode the render will take (``upload``, ``discard`` or ``hold``),
@@ -339,12 +339,15 @@ def _render_inputs(path: Optional[Path] = None):
     can discard.  The command hands all three to generate(), so the venv
     is asked once (review #3).  ``(None, "hold", None)`` when coordination
     cannot be read: generate() then fails on its own read, and no probe
-    runs first."""
+    runs first.  The gate form renders no ``discard``, so with ``gate``
+    the venv is never asked (spec §7.3)."""
     try:
         from ..coordination import load_coordination
         coord = load_coordination() if path is None else load_coordination(path)
     except Exception:  # pragma: no cover - defensive
         return None, "hold", None
+    if gate:
+        return coord, coord.uploads.mode, None
     supports = (um.hs_uploader_supports_discard()
                 if coord.uploads.mode == "discard" else None)
     return coord, um.effective_mode(coord, supports_discard=supports), supports
@@ -787,7 +790,8 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
     # reads (spec §5.1), and only when the render needs the answer: a
     # hold renders the heartbeat alone (ruling 9); the gate form renders
     # every client pipeline whatever [uploads] says.
-    coord, mode, supports_discard = _render_inputs(roots.coordination)
+    coord, mode, supports_discard = _render_inputs(roots.coordination,
+                                                   gate=gate)
     store_version = None
     try:
         if gate or mode in ("upload", "discard"):

@@ -101,6 +101,15 @@ class Part2Station(Station):
 
     def step(self, *, write=True, enable=False, features=REAL, euid=0,
              carry_apply=None):
+        return self.run(lambda: up_cmd.cmd_uploader_manifest(
+            types.SimpleNamespace(write=write, enable=enable)),
+            features=features, euid=euid, carry_apply=carry_apply)
+
+    def run(self, fn, *, features=REAL, euid=0, carry_apply=None, extra=(),
+            on_lock=None):
+        """Run ``fn()`` with the daemon's fakes in place (the manifest step
+        or any command that reaches it).  ``extra`` adds patches;
+        ``on_lock()`` runs as the install lock is taken."""
         calls, order = [], []
         st = self
 
@@ -116,6 +125,8 @@ class Part2Station(Station):
         @contextlib.contextmanager
         def fake_lock(*a, **k):
             order.append("lock")
+            if on_lock is not None:
+                on_lock()
             try:
                 yield
             finally:
@@ -164,13 +175,13 @@ class Part2Station(Station):
         if carry_apply is not None:
             patches.append(mock.patch.object(co, "apply",
                                              side_effect=carry_apply))
+        patches.extend(extra)
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
             stack.enter_context(contextlib.redirect_stdout(out))
             stack.enter_context(contextlib.redirect_stderr(err))
-            rc = up_cmd.cmd_uploader_manifest(
-                types.SimpleNamespace(write=write, enable=enable))
+            rc = fn()
         return types.SimpleNamespace(
             rc=rc, calls=calls, order=order, out=out.getvalue(),
             err=err.getvalue(), both=both.getvalue(),

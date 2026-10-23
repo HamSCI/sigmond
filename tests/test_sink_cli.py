@@ -30,6 +30,10 @@ class SinkCliTests(unittest.TestCase):
         mock.patch("sigmond.uploader_manifest.hs_uploader_supports_discard", return_value=True).start()
         mock.patch("sigmond.uploader_manifest.suppressed_pipelines",
                    return_value=["wspr-wsprnet"]).start()
+        # Part 1's path: no `gate`, so no hs-uploader call and no site.toml
+        # (the gate path has its own tests in test_sink_site_form).
+        mock.patch("sigmond.uploader_manifest.hs_uploader_features",
+                   return_value=frozenset()).start()
 
     def _run(self, **kw):
         args = types.SimpleNamespace(**{"sink_command": None, "reason": None, "yes": False, **kw})
@@ -86,12 +90,15 @@ class SinkCliTests(unittest.TestCase):
         self.assertIn("go out, even if built while the site sink switch read off", out)
         self.assertNotIn("during discard", out)
 
-    def test_fill_is_refused_and_changes_nothing(self):
-        rc, out = self._run(sink_command="fill")
-        self.assertEqual(rc, 2)
-        self.assertIn("not available yet", out)
-        self.regen.assert_not_called()
-        self.assertEqual(self._mode(), "upload")
+    def test_fill_without_gate_writes_the_legacy_hold(self):
+        # V2: an hs-uploader without `gate` gets part 1's write, where fill
+        # rides on the legacy hold.
+        rc, out = self._run(sink_command="fill", reason="rig")
+        self.assertEqual(rc, 0, out)
+        self.regen.assert_called_once()
+        self.assertEqual(self._mode(), "hold")
+        self.assertIn("site sink: hold (legacy)", out)
+        self.assertIn("waits for an hs-uploader that offers the gate", out)
 
     def test_status_reports_upload(self):
         rc, out = self._run()
@@ -203,11 +210,21 @@ class SinkCommandRegistrationTests(unittest.TestCase):
             self.assertNotIn("none of them ships", row, verb)
         self.assertNotIn("stored while off", rows["`sink`"])
 
-    def test_sink_fill_refuses_without_root(self):
-        # `fill` is refused before any root check, with exit code 2.
-        rc, out = self._smd("sink", "fill")
+    def test_sink_fill_takes_a_reason(self):
+        # Never run a mutating verb here: it elevates through sudo and would
+        # write this host's /etc.  --help exits at the parser.
+        rc, out = self._smd("sink", "fill", "--help")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("--reason", out)
+        self.assertIn("FT8 spots for one hour and WSPR spots for 24 hours", out)
+        self.assertNotIn("not available yet", out)
+
+    def test_the_client_form_keeps_refusing(self):
+        # D18: `smd sink <client> ...` stays out of part 2; the parser
+        # refuses it before any root check.
+        rc, out = self._smd("sink", "psk-recorder", "fill")
         self.assertEqual(rc, 2, out)
-        self.assertIn("not available yet", out)
+        self.assertIn("invalid choice", out)
 
     def test_sink_off_needs_a_reason_at_the_parser(self):
         rc, out = self._smd("sink", "off")

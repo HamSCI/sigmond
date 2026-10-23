@@ -25686,7 +25686,7 @@ def main() -> int:
 
     p_sink = sub.add_parser('sink',
         help='the site sink switch: status | off (send no data, keep no backlog) | '
-             'upload (store and send)')
+             'fill (store, send nothing) | upload (store and send)')
     sink_sub = p_sink.add_subparsers(dest='sink_command')
     sink_sub.add_parser('status', help='show the site sink switch and what it holds back')
     s_off = sink_sub.add_parser('off',
@@ -25700,7 +25700,13 @@ def main() -> int:
              'ship.  Leaving off first sets older GRAPE packages and magnetometer '
              'zips aside, outside the spools; older ones are set aside, not sent.  '
              'It refuses while their packaging runs')
-    sink_sub.add_parser('fill', help='not available yet (a later release)')
+    _fill_help = ('store and send no data; `smd sink upload` ships what was '
+                  "stored.  Until hs-uploader cleans the sink itself, sigmond's "
+                  'trim keeps FT8 spots for one hour and WSPR spots for 24 hours, '
+                  'sent or not')
+    s_fill = sink_sub.add_parser('fill', help=_fill_help, description=_fill_help)
+    s_fill.add_argument('--reason',
+                        help='why (on the fleetboard), e.g. "no HF antenna"')
 
     # check -- read-only: does this station work?  (tasks/spec-smd-check-v372.md)
     p_check = sub.add_parser('check',
@@ -25865,7 +25871,7 @@ def main() -> int:
 
     if args.command == 'sink':
         verb = getattr(args, 'sink_command', None) or 'status'
-        if verb not in ('status', 'fill') and _need_root(f'sink {verb}'):
+        if verb != 'status' and _need_root(f'sink {verb}'):
             return 1
         from sigmond.commands.sink import cmd_sink
         return cmd_sink(args)

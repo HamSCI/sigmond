@@ -423,6 +423,11 @@ class ConfigUploadsVerbTests(unittest.TestCase):
         self.regen_mock = self.regen.start(); self.addCleanup(self.regen.stop)
         self.doors = mock.patch.object(cfg, "_close_doors", return_value=0)
         self.doors_mock = self.doors.start(); self.addCleanup(self.doors.stop)
+        # Part 1's path: no `gate`, so no hs-uploader call and no site.toml
+        # (the gate path has its own tests in test_sink_site_form).
+        feats = mock.patch("sigmond.uploader_manifest.hs_uploader_features",
+                           return_value=frozenset())
+        feats.start(); self.addCleanup(feats.stop)
 
     def _run(self, **kw):
         import io, contextlib, types

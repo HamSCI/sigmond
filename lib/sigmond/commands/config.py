@@ -18,6 +18,8 @@ from ..paths import COORDINATION_ENV, COORDINATION_PATH
 from ..site_profile import (
     SITE_PROFILE_PATH, TEMPLATE as SITE_PROFILE_TEMPLATE, load_site_profile,
 )
+from .. import sink_mirror, sink_state
+from .. import uploader_manifest as um
 from ..sysview import build_system_view
 from ..ui import err, heading, info, ok, warn
 
@@ -1147,7 +1149,11 @@ def cmd_config_uploads(args) -> int:
     """``smd upload status | on | hold | off | discard`` (and the older
     ``smd config uploads status | enable | disable``).
 
-    The policy goes into BOTH site-profile.toml (the one-file identity
+    With an hs-uploader that offers ``gate`` (spec §7.2, D19), each verb
+    sets the site sink switch: ``hs-uploader sink set site`` writes
+    ``site.toml``, and ``[uploads]`` in both files mirrors it, in ruling
+    C20-1's order (:func:`_site_change`).  Without ``gate``, as part 1:
+    the policy goes into BOTH site-profile.toml (the one-file identity
     source `smd config render` copies from — so a re-render keeps it) and
     coordination.toml (what the renderer and the heartbeat read).  Then the
     uploader manifest regenerates: every pipeline for ``upload``, the
@@ -1195,11 +1201,21 @@ def cmd_config_uploads(args) -> int:
         return 2
 
     reason = (getattr(args, 'reason', None) or '').strip()
+    if mode == 'discard' and not reason:
+        err(words['need_reason'])
+        return 2
+    # Spec §7.2: the feature word `gate` decides the write.  One probe, from
+    # the interpreter the service runs (the manifest step asks again under
+    # its own lock).
+    from . import uploader as up_cmd
+    roots = up_cmd._step_roots()
+    features = um.hs_uploader_features(python=roots.python)
+    gate = features is not None and um.GATE_FEATURE in features
     if mode == 'discard':
-        if not reason:
-            err(words['need_reason'])
-            return 2
-        if not um.hs_uploader_supports_discard():
+        # With the gate, `off` lives in site.toml and the daemon's gate
+        # enforces it; the render carries no `discard` key, so the old
+        # question about discard no longer arises (spec §7.3).
+        if not gate and not um.hs_uploader_supports_discard():
             err(words['cannot_discard'].format(python=um.HS_UPLOADER_PYTHON))
             return 1
         if not _confirm_discard(args, words):
@@ -1208,6 +1224,9 @@ def cmd_config_uploads(args) -> int:
     elif mode == 'hold' and not reason:
         warn('no --reason given; the board will say "held by policy" '
              'with no why — consider re-running with --reason')
+
+    if gate:
+        return _site_change(mode, reason, coord, words, roots)
 
     # Leaving the written discard -- the site sink switch's `off` -- for ANY
     # setting closes the doors first, so discard -> hold -> on cannot slip
@@ -1228,6 +1247,7 @@ def cmd_config_uploads(args) -> int:
     except PermissionError:
         err(words['denied'])
         return 1
+    _say_site_waits(roots.sinks / 'site.toml', features)
 
     rc = _regenerate_uploader_manifest()
     if rc:
@@ -1251,6 +1271,318 @@ def cmd_config_uploads(args) -> int:
     else:
         ok(words['hold'] + (f' ({reason})' if reason else ''))
     return rc
+
+
+# ---------------------------------------------------------------------------
+# The site form of `smd sink` with the gate (spec §7.1-§7.3; D19; C20-1)
+# ---------------------------------------------------------------------------
+
+# The site switch each [uploads] mode means (spec §7.1): the legacy hold is
+# `fill`, discard is `off`.  sink_carryover.SITE_FROM_MODE reads the same
+# table the other way, so a carry-over that runs after this write (no marker
+# yet) finds site.toml already matching [uploads] and leaves it alone.
+GATE_STATE = {'upload': 'upload', 'hold': 'fill', 'discard': 'off'}
+_SITE_STATES = ('off', 'fill', 'upload')          # strictest first
+
+GATE_OFF = ('site sink: off — nothing ships and nothing new is stored for '
+            'upload; data stored earlier waits and ships when the switch rises')
+GATE_FILL = ('site sink: fill — stores and sends no data; `smd sink upload` '
+             'ships what it stored, oldest first')
+GATE_FILL_LIMIT = ("until hs-uploader cleans the sink itself, sigmond's trim "
+                   'keeps FT8 spots for one hour and WSPR spots for 24 hours, '
+                   'sent or not')
+GATE_UPLOAD = 'site sink: upload — store and send'
+GATE_FILL_BACKLOG = 'the data stored under fill ships now, oldest first'
+NOTHING_REFUSED = ("the identity check that can refuse this arrives with each "
+                   "client's `sink check` (step 4); nothing refused")
+
+
+def _say_site_waits(site_path: Path, features) -> None:
+    """Part 1's write, without the gate: one line says site.toml waits."""
+    why = ('the features probe failed' if features is None
+           else 'this one offers no `gate`')
+    info(f'{site_path} not written: the site sink switch file waits for an '
+         f'hs-uploader that offers the gate ({why})')
+
+
+def _operator() -> str:
+    """Who gave the order, for site.toml's ``set_by``: the sudo caller,
+    else this process's user."""
+    user = os.environ.get('SUDO_USER') or ''
+    if not user:
+        import getpass
+        try:
+            user = getpass.getuser()
+        except Exception:                       # no passwd entry, no LOGNAME
+            user = f'uid {os.geteuid()}'
+    return user
+
+
+def _stricter(a: str, b: str) -> str:
+    return _SITE_STATES[min(_SITE_STATES.index(a), _SITE_STATES.index(b))]
+
+
+class _Change:
+    """What a site change does to each client hs-uploader names, from the
+    INTENDED site state (ruling C20-1): ``below`` reads below upload after
+    the change; ``lifted`` reads upload after it and below before;
+    ``stays`` lists ``(client, state, why)`` held below by its own file
+    while the site rises; ``pending`` names, before the carry-over, the
+    clients with no file yet (the carry-over decides them)."""
+
+    def __init__(self, state, new: str, marker: bool):
+        self.below, self.lifted, self.stays, self.pending = [], [], [], []
+        for name in sorted(state.clients):
+            if name == 'site':
+                continue
+            c = state.clients[name]
+            if c.file_state in _SITE_STATES:
+                own, why = c.file_state, f'its own switch reads {c.file_state}'
+            elif c.file_state == 'missing' and not marker:
+                if new == 'upload':
+                    self.pending.append(name)
+                else:
+                    self.below.append(name)     # any file reads below fill
+                continue
+            else:
+                # a missing or unreadable file fails closed (reads off)
+                own = 'off'
+                why = (f'its switch file reads {c.file_state}'
+                       + (f' ({c.error})' if c.error else '')
+                       + ', which holds it at off')
+            want = _stricter(new, own)
+            if want != 'upload':
+                self.below.append(name)
+                if new == 'upload':
+                    self.stays.append((name, want, why))
+            elif c.effective != 'upload':
+                self.lifted.append(name)
+
+
+def _say_lines(lines, prefix: str = '') -> None:
+    for line in lines:
+        if 'FAILED' in line or 'still armed' in line:
+            err(prefix + line)
+        else:
+            info(prefix + line)
+
+
+def _site_status(roots, up_cmd):
+    """hs-uploader's own reading of the switches, or None with one line
+    naming the cause (ruling C19-1: the order still lands)."""
+    relayed: list = []
+    with up_cmd._relayed_stderr(relayed):
+        state = sink_state.read_state(
+            python=roots.python, manifest=str(roots.manifest),
+            sinks=str(roots.sinks), marker=str(roots.marker),
+            store=None if roots.store is None else str(roots.store))
+    if state is None:
+        err('lever step: cannot read hs-uploader sink status ('
+            f'{up_cmd._cause(relayed) or "no reason given"}), so no '
+            'in-process sender was checked; the site sink switch is set all '
+            'the same, and this command exits 1')
+        return None
+    for ln in relayed:
+        warn(f'lever step: {ln}')
+    return state
+
+
+def _site_levers(below, roots, up_cmd):
+    """Step 1: the lever step for ``below``.  Returns ``(rc, restarted,
+    radiod moved)``; a failure is printed and never stops the site write."""
+    from .. import sink_levers
+    from ..topology import load_topology
+    sc = up_cmd._lever_systemctl
+    try:
+        lp = sink_levers.plan_levers(
+            below, load_topology(roots.topology),
+            roots=sink_levers.Roots(etc=roots.etc, writer_py=roots.writer_py),
+            systemctl=sc)
+        if not (lp.env_levers or lp.restart_only or lp.mag is not None
+                or lp.wspr_uploader or lp.problems):
+            return 0, [], False
+        try:
+            res = sink_levers.apply_levers(lp, systemctl=sc)
+        except sink_levers.RadiodMoved as exc:
+            done = exc.result.restarted if exc.result is not None else []
+            if exc.result is not None:
+                _say_lines(exc.result.lines())
+            err(f'lever step: FAILED: {exc}; no further restart runs')
+            return 1, done, True
+        _say_lines(res.lines())
+        verify = sink_levers.verify_levers(lp, systemctl=sc)
+    except Exception as exc:
+        err(f'lever step: FAILED ({type(exc).__name__}: {exc})')
+        return 1, [], False
+    for v in verify:
+        err(f'lever: still armed: {v}')
+    return (1 if (res.failures or verify) else 0), list(res.restarted), False
+
+
+def _site_stale(roots, restarted, up_cmd) -> int:
+    """Step 2, before a change to off: restart each stale writer once,
+    skipping what the lever step restarted (ruling C17-5)."""
+    from .. import sink_levers
+    from ..topology import load_topology
+    try:
+        res = sink_levers.restart_stale_writers(
+            load_topology(roots.topology), to_off=True,
+            writer_py=roots.writer_py, systemctl=up_cmd._lever_systemctl,
+            skip=restarted)
+    except (sink_levers.RadiodMoved, sink_levers.RestartFailed) as exc:
+        if exc.result is not None:
+            _say_lines(exc.result.lines())
+        err(f'stale-writer restarts: FAILED: {exc}')
+        return 1
+    except Exception as exc:
+        err(f'stale-writer restarts: FAILED ({type(exc).__name__}: {exc})')
+        return 1
+    _say_lines(res.lines())
+    return 0
+
+
+def _set_site(new: str, reason: str, roots) -> Optional[str]:
+    """Step 3: ``hs-uploader sink set site``.  None on success, else why."""
+    import subprocess
+    args = ['sink', 'set', 'site', new, '--reason', reason,
+            '--by', f'smd sink ({_operator()})', '--sinks', str(roots.sinks)]
+    try:
+        r = um.run_hs_uploader(args, python=roots.python)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f'{type(exc).__name__}: {exc}'
+    if r.returncode != 0:
+        lines = [ln for ln in (r.stderr or '').splitlines() if ln.strip()]
+        return (f'hs-uploader sink set exited {r.returncode}: '
+                f'{lines[-1].strip() if lines else "no message"}')
+    return None
+
+
+def _raise_report(change: _Change, roots) -> None:
+    """Spec §7.3, raising: each lifted client's identity, then the clients
+    that stay below and the switch that keeps them there."""
+    from .. import sink_carryover as co
+    coord = load_coordination(COORDINATION_PATH)
+    for client in change.lifted:
+        try:
+            tables = co.identity_tables(client, roots, coord)
+        except Exception as exc:
+            warn(f'raised to upload: {client}; its identity cannot be read '
+                 f'({type(exc).__name__}: {exc})')
+            continue
+        info(f'raised to upload: {client}')
+        for inst, t in sorted(tables.items()):
+            psws = t.get('psws') or {}
+            ids = ', '.join(f'{k} {v}' for k, v in sorted(psws.items())) or 'none'
+            info(f'  {client} {inst}: callsign {t.get("callsign") or "-"}, '
+                 f'reporter id {t.get("reporter_id") or "-"}, grid '
+                 f'{t.get("grid") or "-"}, PSWS ids {ids}')
+    if change.lifted:
+        info(NOTHING_REFUSED)
+    for name, want, why in change.stays:
+        warn(f'{name} stays at {want}: {why}')
+    for name in change.pending:
+        info(f'{name} has no switch file yet; the carry-over in the manifest '
+             'step writes one and says what it holds')
+
+
+def _site_change(mode: str, reason: str, coord, words, roots) -> int:
+    """With the gate: one site change, in ruling C20-1's order.
+
+    1. the lever step, for every client below upload after the change;
+    2. before a change to off, the stale-writer restarts;
+    3. ``hs-uploader sink set site <state>``;
+    4. ``[uploads]`` in site-profile.toml and coordination.toml (D19);
+    5. the manifest step, which alone takes the install lock (its own
+       lever step then finds nothing to do).
+
+    A failure in any of steps 1-4 is named and the later steps still run,
+    so an off order always lands; the command then exits 1.  One exception:
+    with no carry-over marker yet, a coordination.toml that kept its old
+    mode would have the carry-over (step 5) copy that mode back into
+    site.toml, so step 5 waits."""
+    from . import uploader as up_cmd
+    new = GATE_STATE[mode]
+    site_path = roots.sinks / 'site.toml'
+    current = sink_mirror.read_site(site_path).state
+    # Leaving off, by either record, closes the doors first (spec §7.3);
+    # _close_doors prints its own refusal, which says the switch stays off.
+    if new != 'off' and (current == 'off' or coord.uploads.mode == 'discard'):
+        if _close_doors():
+            return 1
+    marker = sink_state.marker_stands(roots.marker)
+    rc = 0
+
+    # 1. the lever step, from the intended states
+    state = _site_status(roots, up_cmd)
+    change = None
+    restarted: list = []
+    radiod_moved = False
+    if state is None:
+        rc = 1
+    else:
+        change = _Change(state, new, marker)
+        if change.below:
+            lrc, restarted, radiod_moved = _site_levers(change.below, roots,
+                                                        up_cmd)
+            rc = rc or lrc
+
+    # 2. stale writers, before a change to off only
+    if new == 'off':
+        if radiod_moved:
+            err('stale-writer restarts: skipped, since radiod moved')
+        else:
+            rc = _site_stale(roots, restarted, up_cmd) or rc
+
+    # 3. site.toml
+    why = _set_site(new, reason, roots)
+    if why is None:
+        ok(f'{site_path}: site sink switch set to {new}')
+    else:
+        err(f'{site_path}: the site sink switch was not written ({why}); it '
+            f'still reads {current}, and [uploads] now disagrees with it')
+        rc = 1
+
+    # 4. the [uploads] mirror, in both files
+    up = Uploads(mode=mode, reason='' if mode == 'upload' else reason)
+    coord_failed = False
+    for path in (SITE_PROFILE_PATH, COORDINATION_PATH):
+        if not (path is COORDINATION_PATH or path.exists()):
+            continue
+        try:
+            _patch_uploads_block(path, up)
+        except OSError as exc:
+            err(f'{path}: [uploads] not written ({exc.strerror or exc}); it '
+                f'now disagrees with the site sink switch, which reads {new}')
+            rc = 1
+            coord_failed = coord_failed or path is COORDINATION_PATH
+            continue
+        ok(words['written'].format(path=path, mode=mode, setting=new))
+
+    if new == 'upload' and change is not None:
+        _raise_report(change, roots)
+
+    # 5. the manifest step
+    if coord_failed and not marker:
+        err(f'the manifest step did not run: no carry-over has run yet, and '
+            f'it would carry {COORDINATION_PATH}\'s old mode back into '
+            f'{site_path}.  Fix {COORDINATION_PATH}, then run the command '
+            'again')
+        return 1
+    mrc = _regenerate_uploader_manifest()
+    if mrc:
+        warn(words['regen_failed'].format(mode=mode, setting=new))
+    if new == 'off':
+        ok(GATE_OFF + (f' ({reason})' if reason else ''))
+    elif new == 'fill':
+        ok(GATE_FILL + (f' ({reason})' if reason else ''))
+        info(GATE_FILL_LIMIT)
+    else:
+        ok(GATE_UPLOAD)
+        if current == 'off' or coord.uploads.mode == 'discard':
+            info(words['nothing_ships'])
+        elif current == 'fill' or coord.uploads.mode == 'hold':
+            info(GATE_FILL_BACKLOG)
+    return 1 if (rc or mrc) else 0
 
 
 def cmd_config_profile_install(args, chown=os.chown) -> int:

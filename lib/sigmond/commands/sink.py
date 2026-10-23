@@ -1,10 +1,12 @@
-"""`smd sink off|upload|status` -- the site sink switch.
+"""`smd sink off|fill|upload|status` -- the site sink switch.
 
-tasks/plan-sink-control.md §10.3 item 1: v3.69 ships the site form only, as a
-thin wrapper over the legacy `[uploads] mode` handler (`off` writes discard,
-`upload` writes upload).  `fill` waits for step 2 of §10.2, when it truly keeps
-data: the legacy hold it would ride on keeps FT8 spots for one hour and WSPR
-spots for 24 hours.  The per-client form, `smd sink <client>`, waits for step 5.
+tasks/spec-sink-2b-part2.md §7: each verb sets the site switch, through
+`cmd_config_uploads`, the one handler the legacy words share (`smd upload`,
+`smd config uploads`).  With an hs-uploader that offers the feature word
+`gate`, it writes `/etc/hs-uploader/sinks/site.toml` and the `[uploads]`
+mirror together (D19); without it, `[uploads]` alone, as part 1 did, where
+`fill` rides on the legacy hold.  The per-client form, `smd sink <client>`,
+waits for step 5 (D18); the parser refuses it.
 """
 from __future__ import annotations
 
@@ -13,21 +15,12 @@ import types
 from ..ui import err, info, ok, warn
 from . import config as cfg
 
-FILL_NOT_YET = (
-    '`smd sink fill` is not available yet.  The legacy hold it would use keeps FT8 '
-    'spots for one hour and WSPR spots for 24 hours, so it cannot keep data for '
-    'later sending.  Use `smd sink off` (send no data, keep no backlog) or '
-    '`smd sink upload` (store and send).')
-
 
 def cmd_sink(args) -> int:
     verb = getattr(args, 'sink_command', None) or 'status'
     if verb == 'status':
         return _status()
-    if verb == 'fill':
-        err(FILL_NOT_YET)
-        return 2
-    legacy_verb = {'off': 'discard', 'upload': 'on'}[verb]
+    legacy_verb = {'off': 'discard', 'fill': 'hold', 'upload': 'on'}[verb]
     return cfg.cmd_config_uploads(types.SimpleNamespace(
         uploads_command=legacy_verb,
         reason=getattr(args, 'reason', None),
