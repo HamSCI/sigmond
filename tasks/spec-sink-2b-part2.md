@@ -779,3 +779,12 @@ tool).  sigmond: about 750 lines and 950 of tests (carry-over, two render forms,
 form, levers and restarts, readers, restore).  sigmond-appliance: about 150 lines in the two rig
 scripts.  In all about 1,350 lines of code and 1,750 of tests, a little larger than part 1, with more
 of the weight in sigmond.
+
+
+## Michael's answers, 2026-10-23 (all as recommended)
+
+1. The psk rider checks the switch at **ship time only**: a client raised from fill to upload ships what it held.
+2. A client installed after the carry-over gets **upload** under the site switch.
+3. The B4 bench runs the **short form**: 2 h fill, 1 h off, 30 min rider test, until v3.79.
+4. The one-time restarts of recorders on old writer code are **accepted**, one at a time, never radiod,
+   announced to Rob on the bus beforehand.
