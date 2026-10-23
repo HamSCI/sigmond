@@ -440,19 +440,51 @@ def render_manifest(pipelines: list, identity: dict,
     return "\n".join(lines) + "\n"
 
 
+def _run_daemon_python(argv: list, *, python: Path, stdin: Optional[str],
+                       timeout: float):
+    """Run the daemon's interpreter with `argv`, safe for root (ruling C23).
+
+    ``-P`` keeps the working directory (or a script's directory) off
+    ``sys.path``, and ``cwd="/"`` starts the child where no account can
+    plant a package, so a ``hs_uploader/`` in the caller's directory never
+    runs as root.  `stdin` goes to the child as text; without it the child
+    reads an empty stdin, never the caller's.  Raises OSError or
+    subprocess.SubprocessError (a timeout included); callers decide what
+    that means."""
+    import subprocess
+    kw = (dict(input=stdin) if stdin is not None
+          else dict(stdin=subprocess.DEVNULL))
+    return subprocess.run([str(python), "-P", *argv], capture_output=True,
+                          text=True, timeout=timeout, cwd="/", **kw)
+
+
+def run_hs_uploader(args: list, *, stdin: Optional[str] = None,
+                    timeout: float = 20,
+                    python: Path = HS_UPLOADER_PYTHON):
+    """Run ``hs-uploader <args>`` through the daemon's own interpreter.
+
+    The one runner for every hs-uploader call sigmond makes (the probes,
+    ``sink status``, ``sink set``, ``sink mark-carried``; spec §9.1): the
+    interpreter the service runs, as ``python -P -m hs_uploader.cli`` from
+    ``cwd="/"``, with a timeout and optional text on stdin (Ruling 11:
+    data passes on stdin, never through a file root writes).  Returns the
+    CompletedProcess, output captured as text.  Raises OSError or
+    subprocess.SubprocessError, a timeout included."""
+    return _run_daemon_python(["-m", "hs_uploader.cli", *args],
+                              python=python, stdin=stdin, timeout=timeout)
+
+
 def hs_uploader_store_version(python: Path = HS_UPLOADER_PYTHON) -> Optional[int]:
     """The store schema version the hs-uploader that the service runs
     supports, from ``hs-uploader capabilities`` (spec §5.1).
 
-    Asks the service's own interpreter, as :func:`hs_uploader_supports_discard`
-    does.  Returns the integer it prints; ``0`` when the subcommand does not
+    Asks the service's own interpreter, through :func:`run_hs_uploader`.
+    Returns the integer it prints; ``0`` when the subcommand does not
     exist (an older hs-uploader, whose argparse refuses it with exit 2);
     ``None`` when the probe failed, timed out or printed something else."""
     import subprocess
     try:
-        r = subprocess.run(
-            [str(python), "-P", "-m", "hs_uploader.cli", "capabilities"],
-            capture_output=True, text=True, timeout=20, cwd="/")
+        r = run_hs_uploader(["capabilities"], python=python)
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode == 2 and "invalid choice" in (r.stderr or ""):
@@ -470,17 +502,14 @@ def hs_uploader_features(python: Path = HS_UPLOADER_PYTHON
     """The feature words the hs-uploader that the service runs offers, from
     ``hs-uploader capabilities --features`` (spec §7.2).
 
-    Asks the service's own interpreter, as :func:`hs_uploader_store_version`
-    does.  Returns the set of non-empty lines, unknown words kept.  A
-    v3.73-v3.76 hs-uploader refuses the flag (or the subcommand) with exit 2,
-    which reads as the empty set.  Any other failure, or a timeout, returns
-    ``None``.  Nothing acts on the answer."""
+    Asks the service's own interpreter, through :func:`run_hs_uploader`.
+    Returns the set of non-empty lines, unknown words kept.  A v3.73-v3.76
+    hs-uploader refuses the flag (or the subcommand) with exit 2, which
+    reads as the empty set.  Any other failure, or a timeout, returns
+    ``None``.  The manifest step asks once, first (spec §7.4)."""
     import subprocess
     try:
-        r = subprocess.run(
-            [str(python), "-P", "-m", "hs_uploader.cli", "capabilities",
-             "--features"],
-            capture_output=True, text=True, timeout=20, cwd="/")
+        r = run_hs_uploader(["capabilities", "--features"], python=python)
     except (OSError, subprocess.SubprocessError):
         return None
     err = r.stderr or ""
@@ -499,12 +528,13 @@ def hs_uploader_supports_discard(python: Path = HS_UPLOADER_PYTHON) -> bool:
 
     It must, or discard turns dangerous: an older hs-uploader ignores the
     unknown key and SHIPS the pipeline.  So sigmond asks the service's own
-    interpreter, not this checkout, and treats any doubt as "no"."""
+    interpreter, not this checkout, and treats any doubt as "no".  The
+    import runs with ``-P`` from ``/``, as every hs-uploader call does, so
+    a planted ``hs_uploader/`` in the caller's directory cannot answer."""
     import subprocess
     try:
-        r = subprocess.run(
-            [str(python), "-c", "import hs_uploader.transports.discard"],
-            capture_output=True, timeout=20)
+        r = _run_daemon_python(["-c", "import hs_uploader.transports.discard"],
+                               python=python, stdin=None, timeout=20)
     except (OSError, subprocess.SubprocessError):
         return False
     return r.returncode == 0

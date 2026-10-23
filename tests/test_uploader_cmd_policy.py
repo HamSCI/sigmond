@@ -124,6 +124,9 @@ class EnableInstallsDaemonFirstTests(unittest.TestCase):
              mock.patch.object(um, "suppressed_pipelines", return_value=[]), \
              mock.patch.object(um, "hs_uploader_store_version", return_value=2), \
              mock.patch.object(um, "MANIFEST_PATH", path), \
+             mock.patch.object(up_cmd.install_lock, "held",
+                               side_effect=lambda *a, **k:
+                               contextlib.nullcontext()), \
              mock.patch.object(up_cmd, "_render_inputs",
                                return_value=(None, "upload", None)), \
              mock.patch.object(up_cmd, "_daemon_store_path",

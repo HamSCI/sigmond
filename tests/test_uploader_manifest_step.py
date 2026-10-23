@@ -50,14 +50,38 @@ class _Step(unittest.TestCase):
              pending=False, check_rc=None, migrate_rc=0, active=True,
              mode="upload", stop_rc=0, land_error=None,
              features=frozenset({"pipelines.d", "send-log-v3",
-                                 "switch-files"})):
+                                 "switch-files"}),
+             features_effect=None, lock_error=None, write=True, euid=0):
         d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
         path = Path(d.name) / "pipelines.toml"
         if installed is not None:
             path.write_text(installed)
         calls, seen = [], {"migrate_kw": [], "generate_sv": [],
-                           "suppressed_sv": []}
+                           "suppressed_sv": [], "generate_kw": []}
         state = {"active": active}
+        # ``order`` records the features probe, the render inputs, the
+        # lock's edges and every entry of ``calls``, in one sequence.
+        order = []
+
+        def fake_features(*a, **k):
+            order.append("features")
+            if features_effect is not None:
+                return features_effect(*a, **k)
+            return features
+
+        def fake_render_inputs():
+            order.append("render_inputs")
+            return (None, mode, None)
+
+        @contextlib.contextmanager
+        def fake_lock(*a, **k):
+            order.append("lock")
+            if lock_error is not None:
+                raise lock_error
+            try:
+                yield
+            finally:
+                order.append("unlock")
 
         def fake_probe(*a, **k):
             calls.append("probe")
@@ -65,7 +89,9 @@ class _Step(unittest.TestCase):
 
         def fake_generate(*a, store_version=None, **k):
             calls.append("generate")
+            order.append("generate")
             seen["generate_sv"].append(store_version)
+            seen["generate_kw"].append(dict(k, store_version=store_version))
             if store_version is None and mode in ("upload", "discard"):
                 raise AssertionError("generate would have probed again")
             return render
@@ -108,14 +134,16 @@ class _Step(unittest.TestCase):
         with mock.patch.object(um, "hs_uploader_store_version",
                                side_effect=fake_probe), \
              mock.patch.object(um, "hs_uploader_features",
-                               return_value=features), \
+                               side_effect=fake_features), \
+             mock.patch.object(up_cmd.install_lock, "held",
+                               side_effect=fake_lock), \
              mock.patch.object(um, "generate", side_effect=fake_generate), \
              mock.patch.object(um, "suppressed_pipelines",
                                side_effect=fake_suppressed), \
              mock.patch.object(um, "MANIFEST_PATH", path), \
              mock.patch.object(up_cmd, "_render_inputs",
-                               return_value=(None, mode, None)), \
-             mock.patch.object(up_cmd.os, "geteuid", return_value=0), \
+                               side_effect=fake_render_inputs), \
+             mock.patch.object(up_cmd.os, "geteuid", return_value=euid), \
              mock.patch.object(up_cmd, "_ensure_daemon_installed",
                                return_value=True), \
              mock.patch.object(up_cmd, "_run_migrate",
@@ -132,14 +160,14 @@ class _Step(unittest.TestCase):
                 stack.enter_context(mock.patch.object(
                     up_cmd, "_land", side_effect=land_error))
             rc = up_cmd.cmd_uploader_manifest(
-                types.SimpleNamespace(write=True, enable=enable))
+                types.SimpleNamespace(write=write, enable=enable))
         side = path.with_name(path.name + ".new")
         bak = path.with_name(path.name + ".bak")
         return types.SimpleNamespace(
             rc=rc, calls=calls, path=path, side=side, bak=bak,
             manifest=path.read_text() if path.exists() else None,
             final_active=state["active"], out=out.getvalue(),
-            err=err.getvalue(), **seen)
+            err=err.getvalue(), order=order, **seen)
 
 
 class OrderTests(_Step):
@@ -498,6 +526,102 @@ class FeaturesPrintTests(_Step):
         self.assertEqual(r.manifest_at_migrate, OLD)
         self.assertEqual(r.manifest, SPLIT)
         self.assertEqual(r.generate_sv, [3])
+
+
+class ProbeFirstTests(_Step):
+    """Spec §7.4, Task 14: the step asks for the features once, first,
+    before anything that reads coordination or renders."""
+
+    def test_the_features_probe_runs_before_the_render_inputs(self):
+        for mode in ("upload", "hold", "discard"):
+            with self.subTest(mode=mode):
+                r = self.step(mode=mode)
+                self.assertEqual(r.rc, 0, r.err)
+                self.assertEqual(r.order.count("features"), 1)
+                self.assertLess(r.order.index("features"),
+                                r.order.index("render_inputs"))
+                self.assertLess(r.order.index("render_inputs"),
+                                r.order.index("generate"))
+
+    def test_the_printed_line_stays(self):
+        r = self.step(features=frozenset({"gate", "pipelines.d"}))
+        self.assertIn("uploader: hs-uploader features: gate pipelines.d\n",
+                      r.out)
+
+    def test_the_read_only_step_probes_first_too(self):
+        r = self.step(write=False, installed=SPLIT)
+        self.assertEqual(r.rc, 0, r.err)
+        self.assertEqual(r.order[:2], ["features", "render_inputs"])
+
+
+class Test15NoneHalfTests(_Step):
+    """Spec test 15, the ``None`` half: a probe that times out still
+    renders part 1's form and prints one warning."""
+
+    def _timed_out_probe(self):
+        # The real probe, its runner timing out.
+        real = um.hs_uploader_features
+        def effect(*a, **k):
+            with mock.patch.object(
+                    um, "run_hs_uploader",
+                    side_effect=subprocess.TimeoutExpired("python", 20)):
+                return real(*a, **k)
+        return effect
+
+    def test_a_timed_out_probe_renders_part_1s_form_and_warns_once(self):
+        r = self.step(features_effect=self._timed_out_probe())
+        part1 = self.step(features=frozenset())
+        self.assertEqual(r.rc, 0, r.err)
+        self.assertEqual(r.generate_kw, part1.generate_kw)
+        self.assertEqual(r.manifest, part1.manifest)
+        self.assertEqual(r.calls, part1.calls)
+        warnings = [ln for ln in r.err.splitlines() if "features" in ln]
+        self.assertEqual(len(warnings), 1, r.err)
+        self.assertIn("failed or timed out", warnings[0])
+        self.assertNotIn("features", part1.err)
+        self.assertNotIn("hs-uploader features:", r.out)
+
+
+class InstallLockStepTests(_Step):
+    """Plan Ruling 7: the write step holds the install lock around the
+    probe, the render and the landing."""
+
+    def test_the_lock_surrounds_probe_render_and_land(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                r = self.step(pending=pending)
+                self.assertEqual(r.rc, 0, r.err)
+                self.assertEqual(r.order[0], "lock")
+                self.assertEqual(r.order[1], "features")
+                self.assertEqual(r.order[-1], "unlock")
+                self.assertEqual(r.order.count("lock"), 1)
+
+    def test_the_lock_is_released_when_the_step_fails(self):
+        r = self.step(land_error=OSError("disk full"))
+        self.assertEqual(r.rc, 1)
+        self.assertEqual(r.order[-1], "unlock")
+
+    def test_a_busy_lock_exits_1_with_one_clear_line_and_touches_nothing(self):
+        from sigmond import install_lock
+        msg = ("could not take /run/lock/hs-uploader-install.lock within "
+               "30 s: another manifest step or hs-uploader install holds it")
+        r = self.step(lock_error=install_lock.InstallLockError(msg))
+        self.assertEqual(r.rc, 1)
+        self.assertEqual(r.err, f"smd: uploader manifest: {msg}\n")
+        self.assertEqual(r.order, ["lock"])
+        self.assertEqual(r.calls, [])
+        self.assertEqual(r.manifest, OLD)
+        self.assertTrue(r.final_active)
+
+    def test_the_read_only_step_takes_no_lock(self):
+        r = self.step(write=False, installed=SPLIT)
+        self.assertNotIn("lock", r.order)
+
+    def test_a_non_root_write_takes_no_lock_and_is_refused(self):
+        r = self.step(euid=1000)
+        self.assertEqual(r.rc, 1)
+        self.assertNotIn("lock", r.order)
+        self.assertIn("requires root", r.err)
 
 
 class FixRoundTests(_Step):

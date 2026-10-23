@@ -37,6 +37,7 @@ the file and restarted nothing.
 """
 from __future__ import annotations
 
+import contextlib
 import difflib
 import os
 import shutil
@@ -47,6 +48,7 @@ import tomllib
 from pathlib import Path
 from typing import Optional
 
+from .. import install_lock
 from .. import uploader_manifest as um
 
 SERVICE = "hs-uploader.service"
@@ -379,6 +381,42 @@ def cmd_uploader_manifest(args) -> int:
             _err(f"hs-uploader daemon install failed: {exc}")
             daemon_ready = False
 
+    # Plan Ruling 7: the write step holds hs-uploader's install lock from
+    # the probe through the landing, so two manifest steps never interleave.
+    # The daemon install above runs outside it: once hs-uploader's own
+    # installer takes this lock (v3.79), holding it here would make that
+    # installer wait out its bound.  The read-only step writes nothing and
+    # takes no lock; a non-root write is refused below, before any write.
+    if not (write and os.geteuid() == 0):
+        return _manifest_step(write=write, enable=enable,
+                              daemon_ready=daemon_ready)
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(install_lock.held())
+        except install_lock.InstallLockError as exc:
+            _err(f"uploader manifest: {exc}")
+            return 1
+        return _manifest_step(write=write, enable=enable,
+                              daemon_ready=daemon_ready)
+
+
+def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
+    """The manifest step proper, after the daemon install; under the
+    install lock when it writes."""
+    # Spec §7.4: ask the installed hs-uploader, once and first, which
+    # features it offers; the step holds the answer from here on.  A
+    # failed probe (None) warns once and renders part 1's form.
+    try:
+        features = um.hs_uploader_features()
+    except Exception:  # pragma: no cover - defensive
+        features = None
+    if features is None:
+        _err("uploader: cannot ask hs-uploader for `capabilities "
+             "--features` (failed or timed out); rendering without it")
+    else:
+        print("uploader: hs-uploader features: "
+              + (" ".join(sorted(features)) or "none"))
+
     # Step 1: ask the daemon's interpreter, once, which store version it
     # reads (spec §5.1), and only when the render needs the answer: a
     # hold renders the heartbeat alone (ruling 9).
@@ -415,19 +453,6 @@ def cmd_uploader_manifest(args) -> int:
         else:
             print("uploader: SITE SINK HOLD (LEGACY) ([uploads] enabled = false) "
                   "— not rendered: " + ", ".join(suppressed))
-
-    # Spec §7.2: say what the installed hs-uploader offers.  Nothing reads
-    # the answer, and a failed probe only warns.
-    try:
-        features = um.hs_uploader_features()
-    except Exception:  # pragma: no cover - defensive
-        features = None
-    if features is None:
-        _err("uploader: cannot ask hs-uploader for `capabilities "
-             "--features` (failed or timed out); the manifest is unaffected")
-    else:
-        print("uploader: hs-uploader features: "
-              + (" ".join(sorted(features)) or "none"))
 
     path = um.MANIFEST_PATH
     installed = path.read_text() if path.exists() else ""
