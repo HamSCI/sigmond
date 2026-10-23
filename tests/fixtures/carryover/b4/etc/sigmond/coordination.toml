@@ -1,0 +1,13 @@
+[host]
+call = "AC0G"
+grid = "EM38ww"
+lat = 38.92
+lon = -92.33
+
+[station]
+psws_id = "S000171"
+reporter_id = "AC0G/B4"
+
+[uploads]
+enabled = true
+mode = "upload"

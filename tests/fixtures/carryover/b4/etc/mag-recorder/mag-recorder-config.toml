@@ -1,0 +1,6 @@
+[station]
+psws_station_id = "S000171"
+instrument_id = "MAG1"
+
+[uploader]
+enabled = true

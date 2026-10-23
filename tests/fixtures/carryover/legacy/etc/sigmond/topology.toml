@@ -1,0 +1,8 @@
+[component.radiod]
+enabled = true
+
+[component.wspr-recorder]
+enabled = true
+
+[component.psk-recorder]
+enabled = true

@@ -1,0 +1,8 @@
+[host]
+call = "N0CALL"
+grid = "FN20"
+
+[uploads]
+enabled = false
+mode = "discard"
+reason = "bench provisioning"

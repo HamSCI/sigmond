@@ -1,0 +1,3 @@
+# no [[hs_uploader.pipeline]]: no outbound route
+[package]
+name = "hf-timestd"

@@ -1,0 +1,7 @@
+[host]
+call = "K3LR"
+grid = "EN91"
+
+[uploads]
+enabled = false
+reason = "held until the antenna work ends"

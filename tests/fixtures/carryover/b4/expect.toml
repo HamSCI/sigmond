@@ -1,0 +1,14 @@
+# spec §6.6, AC0G-B4: site upload; wspr-recorder, psk-recorder, mag-recorder and
+# hamsci-physics upload, plus meteor-scatter (enabled here).  No lever to touch
+# (psk on server-raw since 10-15, D17).  WSPR_USE_HS_UPLOADER=0 is ignored.
+site = "upload"
+no_file = ["hf-timestd"]
+below = []
+to_off = false
+restarted = []
+[clients]
+hamsci-physics = "upload"
+mag-recorder = "upload"
+meteor-scatter = "upload"
+psk-recorder = "upload"
+wspr-recorder = "upload"

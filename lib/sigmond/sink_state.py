@@ -31,6 +31,7 @@ marker (ruling X5); ``enforced`` and ``held_pipelines`` do.  So
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -41,6 +42,28 @@ from . import uploader_manifest
 
 SCHEMA = 1
 UPLOAD = "upload"
+
+# The carry-over marker (spec §1, ruling X15: one helper set on the sigmond
+# side).  Same path as hs-uploader's ``sinkswitch.marker_path()`` under its
+# default state directory.
+MARKER_NAME = "carry-over-v1.done"
+STATE_DIR = Path("/var/lib/hs-uploader")
+MARKER_PATH = STATE_DIR / MARKER_NAME
+SINKS_DIR = Path("/etc/hs-uploader/sinks")
+
+
+def marker_stands(path: Path = MARKER_PATH) -> bool:
+    """True when anything stands at ``path``, a dangling link included, as
+    hs-uploader's ``sinkswitch.marker_stands`` reads it (Ruling 4).  Only
+    "no such file" reads absent; any other error (EACCES on the directory)
+    reads as standing, so nothing carries over twice on a guess."""
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
 
 
 @dataclass(frozen=True)

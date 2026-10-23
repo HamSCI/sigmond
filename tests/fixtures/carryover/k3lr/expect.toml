@@ -1,0 +1,13 @@
+# spec §6.6, K3LR: site fill, psk-recorder fill.  The lever step moves
+# psk-recorder to server-raw and restarts each psk instance alone.
+# wspr-recorder's own file reads upload; under the site switch it reads fill.
+# Its shim is already off (WSPR_USE_HS_UPLOADER=0), so the lever step leaves
+# it alone.  Had the shim read 1, the lever step would lower it too.
+site = "fill"
+no_file = []
+below = ["psk-recorder", "wspr-recorder"]
+to_off = false
+restarted = ["psk-recorder@K3LR.service", "psk-recorder@K3LR=2.service"]
+[clients]
+psk-recorder = "fill"
+wspr-recorder = "upload"

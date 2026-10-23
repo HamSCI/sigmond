@@ -1,0 +1,8 @@
+[host]
+call = "AC0G"
+grid = "EN16"
+lat = 46.88
+lon = -96.79
+
+[uploads]
+enabled = true

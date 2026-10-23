@@ -1,0 +1,6 @@
+[station]
+psws_station_id = "<YOUR_STATION_ID>"
+instrument_id = "<YOUR_INSTRUMENT_ID>"
+
+[uploader]
+enabled = true

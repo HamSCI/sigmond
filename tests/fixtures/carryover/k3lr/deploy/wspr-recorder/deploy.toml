@@ -1,0 +1,7 @@
+# minimal deploy.toml: only the [[hs_uploader.pipeline]] names count here
+
+[[hs_uploader.pipeline]]
+name = "wspr-wsprdaemon"
+
+[[hs_uploader.pipeline]]
+name = "wspr-wsprnet"

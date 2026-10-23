@@ -1,0 +1,20 @@
+[component.radiod]
+enabled = true
+
+[component.wspr-recorder]
+enabled = true
+
+[component.psk-recorder]
+enabled = true
+
+[component.meteor-scatter]
+enabled = true
+
+[component.mag-recorder]
+enabled = true
+
+[component.hamsci-physics]
+enabled = true
+
+[component.hf-timestd]
+enabled = true

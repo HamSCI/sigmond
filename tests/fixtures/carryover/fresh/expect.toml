@@ -1,0 +1,13 @@
+# spec §6.6, a fresh install: site off, every client upload.  Every client
+# then reads off, so the lever step lowers each armed sender (§8.1: whichever
+# switch puts it there) and the stale-writer pass runs (nothing stale here).
+site = "off"
+no_file = ["hf-timestd"]
+below = ["hamsci-physics", "mag-recorder", "psk-recorder", "wspr-recorder"]
+to_off = true
+restarted = ["psk-recorder@N0CALL.service", "wspr-recorder@N0CALL.service"]
+[clients]
+hamsci-physics = "upload"
+mag-recorder = "upload"
+psk-recorder = "upload"
+wspr-recorder = "upload"

@@ -1,0 +1,2 @@
+INSERT INTO pending_uploads(target_db,target_table,payload_json,queued_at,producer) VALUES
+ ('psk','spots','{"mode":"FT8"}','2026-10-22T00:00:00Z','psk-recorder');

@@ -1,0 +1,10 @@
+# spec §6.6, a station on v3.69-v3.72: no [uploads] block reads upload, so
+# site upload and each client upload; nothing reads below upload, no lever.
+site = "upload"
+no_file = []
+below = []
+to_off = false
+restarted = []
+[clients]
+psk-recorder = "upload"
+wspr-recorder = "upload"

@@ -1,0 +1,12 @@
+# spec §6.6, ND and the other v3.70+ stations: as B4, by their own [uploads]
+# (enabled = true, no mode).  hamsci-physics has no PSWS id yet and still
+# carries over at upload (§6.3); hf-timestd has rows but no outbound route.
+site = "upload"
+no_file = ["hf-timestd"]
+below = []
+to_off = false
+restarted = []
+[clients]
+hamsci-physics = "upload"
+psk-recorder = "upload"
+wspr-recorder = "upload"
