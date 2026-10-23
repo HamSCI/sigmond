@@ -46,6 +46,11 @@ def _status() -> int:
 # caller must show [uploads] (after the line saying so) and exit 1.
 FELL_BACK = -1
 
+# What each site state does, in part 1's words where part 1 had them.
+_SITE_WORDS = {'upload': 'store and send',
+               'fill': 'store and send nothing',
+               'off': 'nothing ships and nothing new is stored for upload'}
+
 _HELD_BY = {'site': 'set by the site switch',
             'client': 'set by its own switch',
             'fault': 'set by a fault, which reads off'}
@@ -101,10 +106,12 @@ def _show_switches(state) -> int:
             + '), so every client reads off')
         rc = 1
     else:
-        said = ', '.join(x for x in (
-            f'set {site.set_at}' if site.set_at else '',
-            f'by {site.set_by}' if site.set_by else '') if x)
-        line = (f'site sink: {site.state}' + (f' ({said})' if said else '')
+        # The part 1 phrase first, whole: the nested rig greps for
+        # 'site sink: upload (store and send)' (Task 21 review I-1).
+        words = _SITE_WORDS.get(site.state)
+        line = (f'site sink: {site.state}' + (f' ({words})' if words else '')
+                + (f'; set {site.set_at}' if site.set_at else '')
+                + (f' by {site.set_by}' if site.set_by else '')
                 + (f' — {site.reason}' if site.reason else ''))
         (ok if site.state == 'upload' else warn)(line)
     if not state.enforced:
@@ -168,9 +175,20 @@ def _show_unmanaged(state, roots, up_cmd) -> int:
             f'{exc})')
         return 1
     for line in armed:
-        err(f'UNMANAGED: {line}; it sends outside the sink switches until '
-            '`smd align` lowers it')
+        if _UNREAD in line:
+            # verify_levers could not read this one: it may or may not
+            # send, so it is no UNMANAGED finding, but still a fault.
+            err(f'cannot check: {line}')
+        else:
+            err(f'UNMANAGED: {line}; it sends outside the sink switches '
+                'until `smd align` lowers it')
     return 1 if armed else 0
+
+
+# verify_levers' lines for an instance it could not read say ": cannot ..."
+# ("cannot read its environment", "cannot read its lever file or start
+# time", "cannot enumerate its instances", "cannot read its state").
+_UNREAD = ': cannot '
 
 
 def _show_stale(roots, up_cmd) -> None:

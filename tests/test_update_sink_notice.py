@@ -86,3 +86,18 @@ class UpdateWiringTests(_Rig):
                 rc, text = self._run(marker=marker, features=features)
                 self.assertIn("[pull]", text)
                 self.assertNotIn(NOTICE, text)
+
+    def test_a_notice_that_raises_stays_silent_and_keeps_the_exit_code(self):
+        rc_ok, _ = self._run(marker=True, features=GATE)
+        import contextlib
+        import io
+        out = io.StringIO()
+        args = types.SimpleNamespace(base=self.base, apply=False, no_fetch=False)
+        with mock.patch.object(ss, "update_notice",
+                               side_effect=RuntimeError("probe blew up")), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = smd.cmd_update(args)
+        self.assertEqual(rc, rc_ok)
+        self.assertIn("[pull]", out.getvalue())
+        self.assertNotIn("probe blew up", out.getvalue())
+        self.assertNotIn(NOTICE, out.getvalue())

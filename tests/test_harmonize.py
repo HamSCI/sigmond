@@ -944,6 +944,30 @@ class TestUploadEnabled(unittest.TestCase):
         self.assertNotIn("psk-recorder", r.message)
         self.assertEqual(r.affected, ["wspr-recorder"])
 
+    def test_the_switches_are_asked_once_per_run(self):
+        import sigmond.harmonize as H
+        asks = []
+        saved = H._sink_below_upload
+        try:
+            def counted():
+                asks.append(1)
+                return {"wspr-recorder", "psk-recorder"}
+            with mock.patch.object(H, "_client_installed",
+                                   side_effect=lambda c: True), \
+                    mock.patch.object(H, "_active_instances",
+                                      side_effect=lambda c: ["a", "b", "c"]), \
+                    mock.patch.object(H, "_resolve_instance_env",
+                                      side_effect=lambda c, i: {}), \
+                    mock.patch.object(H, "_read_env_file",
+                                      side_effect=lambda p: {}), \
+                    mock.patch.object(H, "_sink_below_upload",
+                                      side_effect=counted):
+                r = H.rule_upload_enabled(None)
+        finally:
+            H._sink_below_upload = saved
+        self.assertEqual(len(asks), 1)
+        self.assertIn("meteor-scatter@a", r.message)    # still warns there
+
     def test_without_a_reading_part_1_rule_stands(self):
         r = self._run(installed={"wspr-recorder"},
                       instances={"wspr-recorder": ["W1AW"]}, envs={}, below=None)

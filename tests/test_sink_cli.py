@@ -492,3 +492,91 @@ class SwitchStatusTests(unittest.TestCase):
         self.assertIn("site sink: cannot read", r.both)
         self.assertIn("parse error", r.both)
         self.assertIn("effective off, set by a fault", r.both)
+
+
+@needs_real
+class StatusReviewTests(unittest.TestCase):
+    """Task 21 review: part 1's words, and the remaining reader paths."""
+
+    def set_site(self, st, state):
+        r = um.run_hs_uploader(
+            ["sink", "set", "site", state, "--reason", "rig", "--by", "test",
+             "--sinks", str(st.roots.sinks)], python=st.roots.python)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def lower_levers(self, st):
+        st.env("psk-recorder", "W1AW", "PSK_DELIVERY_PIPELINES=server-raw\n")
+        st.env("wspr-recorder", "W1AW", "WSPR_USE_HS_UPLOADER=0\n")
+
+    def test_both_views_keep_part_1s_site_phrases(self):
+        # The nested rig greps these (sigmond-appliance test-nested-v3.sh
+        # :861 and :1316), whichever view the station shows.
+        before, after = StatusStation(self, carried=False), StatusStation(self)
+        for st in (before, after):
+            self.assertIn("site sink: upload (store and send)", st.status().both)
+        self.assertIn("effective", after.status().both)      # the switch view
+        before.hand_edit_uploads('[uploads]\nenabled = false\nmode = "discard"\n'
+                                 'reason = "rig"\n')
+        self.set_site(after, "off")
+        for st in (before, after):
+            self.assertIn("site sink: off", st.status().both)
+        self.set_site(after, "fill")
+        self.assertIn("site sink: fill (store and send nothing)",
+                      after.status().both)
+
+    def test_not_enforced_is_a_fault(self):
+        st = StatusStation(self)
+        self.lower_levers(st)
+        r = st.status(runner=_fixture_runner("psk-fill"))
+        self.assertEqual(r.rc, 0, r.both)              # control: no fault
+        r = st.status(runner=_fixture_runner("marker-absent"))
+        self.assertIn("does not enforce the switches", r.both)
+        self.assertNotIn("UNMANAGED", r.both)
+        self.assertEqual(r.rc, 1, r.both)
+
+    def test_upload_status_falls_back_with_exit_1(self):
+        st = StatusStation(self)
+        r = st.status(legacy=True, runner=_fixture_runner("manifest-unreadable"))
+        self.assertIn("falling back to [uploads]", r.both)
+        self.assertIn("uploads: on (store and ship)", r.both)
+        self.assertEqual(r.rc, 1, r.both)
+
+    def test_a_missing_site_file_reads_as_a_mirror_mismatch_left_alone(self):
+        st = StatusStation(self)
+        site = st.roots.sinks / "site.toml"
+        site.unlink()
+        r = st.status()
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertIn(f"mirror mismatch: the site switch {site} is missing",
+                      r.both)
+        self.assertIn("recreates it at upload", r.both)
+        self.assertFalse(site.exists())
+
+    def test_a_broken_site_file_reads_as_a_mirror_mismatch_left_alone(self):
+        st = StatusStation(self)
+        site = st.roots.sinks / "site.toml"
+        site.write_text("state = \n")
+        before = st.coord_path.read_bytes()
+        r = st.status()
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertIn(f"mirror mismatch: the site sink switch {site} cannot be "
+                      "read", r.both)
+        self.assertEqual(site.read_text(), "state = \n")
+        self.assertEqual(st.coord_path.read_bytes(), before)
+
+    def test_an_unreadable_sender_reads_cannot_check_not_unmanaged(self):
+        st = StatusStation(self)
+        st.set_client("psk-recorder", "fill")
+        real_show = st.sc._show
+
+        def show(cmd, rest):
+            if "Environment" in rest and any(a.startswith("psk-recorder@")
+                                             for a in rest):
+                return subprocess.CompletedProcess(cmd, 1, "", "no bus")
+            return real_show(cmd, rest)
+        st.sc._show = show
+        r = st.status()
+        self.assertIn("cannot check: psk-recorder@W1AW.service: cannot read "
+                      "its environment", r.both)
+        self.assertNotIn("UNMANAGED", r.both)
+        self.assertEqual(r.rc, 1, r.both)    # unknown arming is still a fault

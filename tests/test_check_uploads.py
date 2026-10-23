@@ -213,3 +213,16 @@ class SwitchAgeTests(unittest.TestCase):
         self.assertEqual(check.uploads_line(env),
                          check.Line(WAIT, 'uploads', 'on since 5 min ago; the first delivery '
                                                      'comes within 30 min'))
+
+    def test_a_symlink_at_site_toml_is_refused(self):
+        import os
+        self.marker.write_text('')
+        real = self.site.with_name('elsewhere.toml')
+        real.write_text('state = "upload"\nset_at = "%s"\n' % datetime.fromtimestamp(
+            NOW - 300, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        os.symlink(real, self.site)
+        self.assertIsNone(self.age())
+        # control: the same file, not through a link, dates the change
+        os.unlink(self.site)
+        os.rename(real, self.site)
+        self.assertEqual(self.age(), 300)
