@@ -352,6 +352,18 @@ no decoder findings in `doctor`.
   mjh's request until his v3.80 rig update test finishes, since it targets
   `origin/main`.
 - **AI6VN's checkout** goes back to `main` once this is pushed (above).
+- **⚠ Gap: nothing notices a service still running the OTHER build.**  A
+  decode client holds its decoder for the life of the process, so after
+  `--select` flips the symlink a client that was not restarted keeps using
+  the implementation it opened with — and reports perfectly healthy while
+  doing it.  `cmd_decoders` prints "Restart the decode clients to pick it
+  up", which is advice, not a check.  The fleet already answers the same
+  question for Python (`ActiveEnterTimestamp` vs the library's commit time);
+  the compiled equivalent is the unit's start time vs the selected binary's
+  mtime, and `_decoder_findings` could raise `decoder-stale-client` from
+  exactly that comparison.  Raised by the UberSDR/WD session, which hit this
+  for real: two services shared one installed `jt9`, a decoder update
+  restarted only the first, and the second ran the old binary unnoticed.
 
 ## Open questions for rob
 
