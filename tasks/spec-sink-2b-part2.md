@@ -1,7 +1,7 @@
 # spec: sink control step 2b, part 2: the switches take effect
 
-**Status:** built on branch `sink-2b-part2` (hs-uploader 77db5c8, sigmond ad53b95, sigmond-appliance
-36da796), not yet merged.  Michael answered §16's questions on 2026-10-23 (end of file).  Where the
+**Status:** merged to main on 2026-10-24 (hs-uploader 5267103, sigmond af1d564, sigmond-appliance
+c0e87b4), by Michael's word before the rig and bench runs, which now run from main.  Michael answered §16's questions on 2026-10-23 (end of file).  Where the
 build's rulings departed from this text, the text now says what the code does, marked "(amended)";
 §17 lists each amendment and the ruling behind it.
 
