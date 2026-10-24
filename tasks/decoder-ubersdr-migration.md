@@ -1,12 +1,13 @@
 # Moving to the UberSDR `wsprd` and `jt9`
 
-**Status:** 2026-10-24 — **built, verified and shipped to main-local on B3;
-NOT pushed, and not yet run on a station.**  rob's ask: adopt madpsy's
-optimised decoders, built from source on the host, selectable, with the new
-ones as the default and the WSJT-X reference as the fallback.
+**Status:** 2026-10-24 — **built, verified, and now RUNNING on a real
+station (AI6VN, rob's lab box).  Still NOT pushed.**  rob's ask: adopt
+madpsy's optimised decoders, built from source on the host, selectable, with
+the new ones as the default and the WSJT-X reference as the fallback.
 
-Steps 1-7 below are done.  What remains is station work, and one check that
-must happen before psk-recorder runs on the new build (see Risks).
+Steps 1-7 are done.  The station run is below ("On a station: AI6VN"), and it
+closed the one open regression risk — in an unexpected way.  What remains is
+the push, which waits on mjh's rig run.
 
 ## Why
 
@@ -207,8 +208,15 @@ the compiler baseline, same results) when any is missing, recording which it
 used in the provenance marker.  Our own fleet (Ryzen 5825U, Zen 3) has all
 three; a greenfield on salvaged hardware may not.
 
-**psk-recorder's `jt9_decode` now gets the UberSDR `jt9`, and that is the
-one live regression risk in this change.**  `core/slot.py:594` derives the
+**psk-recorder's `jt9_decode` now gets the UberSDR `jt9`.**  This was
+recorded here as the one live regression risk.  ✅ **Closed on AI6VN
+2026-10-24** — and the answer was not the one expected; see "On a station"
+below.  Two things turned out to be true at once: stations do not use this
+path at all (`decoder_kind = "decode_ft8"` is the configured default), and
+when it is turned on it fails *identically on both builds*, for a reason
+that has nothing to do with the decoder.  The original reasoning is kept
+below because the shared-memory evidence it weighs is what the interop test
+went on to confirm.  `core/slot.py:594` derives the
 decoder as the *sibling of the wrapper* —
 `jt9_bin = Path(wrapper).with_name("jt9")` — so with `jt9_decode` at
 `/usr/local/bin/jt9_decode` it resolves `/usr/local/bin/jt9`, which is now
@@ -230,24 +238,120 @@ The residual risk is that **our `jt9_decode` is a *triggered-mode fork*** of
 madpsy/jt9-decode, and a fork can have moved the protocol.  So this is
 strong evidence, not a proof, and it has not been exercised against our fork.
 
-⚠ **Pre-deployment check, before any station runs psk-recorder on the new
-build:** on one station, select ubersdr, restart psk-recorder, and confirm
-FT8 *and* FT4 spots keep arriving for a full cycle — not that the process
-stays up.  `jt9_decode` failing to attach would leave a running service
-producing nothing, which is the same silent shape everything else here
-guards against.  If it fails, the fallback is `smd admin decoders --select
-wsjtx`, one command, no rebuild — which is why the design keeps both.
+✅ **That pre-deployment check ran on AI6VN on 2026-10-24** — see the
+next section.  The fallback it names was exercised too, live, in both
+directions.
 
 **Two upstreams instead of one.** We now track `madpsy/ubersdr_wsprd` as well
 as `WSJTX/wsjtx`.  Both get pinned commits and both appear in the manifest.
 
+## On a station: AI6VN, 2026-10-24
+
+rob's lab box (DASI-009, image v3.78, Ryzen 5 5560U, almost no antenna but a
+live receiver).  The four commits were cherry-picked onto the box's own
+sigmond commit (`f362461`) and delivered as a git bundle, so what ran there
+was the decoder change against exactly the code the box already had — not
+`main` plus a sink release.  Branch `ai6vn-decoder-test` in
+`/opt/git/sigmond/sigmond`; the box is still on it.
+
+**What the box was before:** the pre-split layout — real `wsprd` and `jt9` at
+`/usr/local/bin`, no `decoders/` directory.  So this is the first real run of
+`_adopt_legacy_decoders`, which until now existed only under test.
+
+**The build.**  `_build_decoders()` end to end, unattended:
+
+| step | result |
+|---|---|
+| adopt the legacy binaries | both moved into `decoders/wsjtx/`, **sha256 unchanged**, symlinked back |
+| wsjtx build | skipped — adopted marker already matched the pin.  No Qt rebuild. |
+| `jt9_decode` | already installed, source unchanged |
+| arch probe | `avx2 fma bmi2` present → `-march=x86-64-v3`, chosen not assumed |
+| clone | 182 MB, ~4 min, unprivileged, tree stayed `sigmond:sigmond` |
+| parity: wsprd | **194 cases as WSJT-X's stored outputs, 0 differing** |
+| parity: jt9 | **222 cases (119 FT8, 73 FT4, 19 FT2), 0 differing** |
+| select | `ubersdr`, matching `coordination.toml` |
+
+**The swap is live-safe.**  Adoption moved the live binaries at 13:42 while
+`wspr-recorder` was decoding.  The cycles either side of it (13:42, 13:44,
+13:46) each produced spots.  The link-back-immediately fix is what makes that
+true, and it was observed rather than argued.
+
+**WSPR on the new `wsprd`, live:** selected 13:51; 12 cycles to 14:14 gave 14
+spots, 1.17/cycle, against a 7-hour baseline of 0.67-1.13/cycle on the old
+one.  At or above baseline, no errors, 17/17 bands reporting noise.
+
+**The `jt9_decode` interop test — the thing the plan was waiting for.**  Run
+offline against the repo's own recordings, both builds driven through *our*
+`jt9_decode` over Qt5 shared memory, same files, same flags:
+
+| mode | files | wsjtx decodes | ubersdr decodes | verdict |
+|---|---|---|---|---|
+| FT8 | 69 | 425 | 425 | 3 lines differ of 425 |
+| FT4 | 19 | 44 | 44 | **identical** |
+| FT2 | 31 | 0 | 192 | v3.0.2 decodes no FT2 here at all |
+
+(jt9's own `HHMMSS` label is excluded — psk-recorder discards it, and the two
+arms ran seconds apart.)  The three FT8 differences are one reordering, one
+decode at 997 Hz vs 998 Hz, and one at -4 dB vs -5 dB.  None is a defect:
+UberSDR is byte-identical to **WSJT-X 3.2.0-rc1** and our fallback is pinned
+to **v3.0.2**, so these are two WSJT-X versions disagreeing, not a rewrite
+disagreeing with its original.  FT2 is the same story at full volume — the
+recordings are 3.2.0's FT2, which 3.0.2 cannot decode.
+
+So: **our triggered-mode fork of `jt9_decode` drives UberSDR's `jt9`
+correctly.**  That risk is closed.
+
+**⛔ But psk-recorder's `jt9` decoder path does not work on this box at all —
+with EITHER build.**  Switching `decoder_kind` to `"jt9"` and restarting gave
+19 resident `jt9_decode` processes, **zero** `jt9` children, 105 restarts in
+two minutes and `decodes=0/14`.  Flipping the symlink to the wsjtx build
+changed nothing: 67 restarts a minute, still zero `jt9`.  The decoder is not
+the variable.
+
+Reproduced outside psk-recorder, under a replica of its own unit sandbox:
+
+    Failed to create shared memory:
+    QSharedMemoryPrivate::initKey: unable to set key on lock
+
+`psk-recorder@.service` sets `ProtectSystem=strict` with `PrivateTmp=false`
+and does not list `/tmp` in `ReadWritePaths`.  Under `strict` the whole
+hierarchy is read-only but for `/dev`, `/proc` and `/sys` — so `/tmp` is
+read-only, and Qt 5's `QSharedMemory` cannot create the `ftok` key file its
+System V lock needs.  Adding `/tmp` to `ReadWritePaths` in that replica makes
+it decode immediately.  The same command run outside the sandbox, as
+`pskrec`, from psk-recorder's own read-only working directory, always worked
+— which is why this never showed up anywhere but under systemd.
+
+This is a **pre-existing psk-recorder defect, not a regression**, and it is
+evidence the path has never run: the unit even carries a sizing comment about
+"19+ concurrent jt9 children at ~60 MB RSS each", so somebody provisioned for
+it without getting it up.  (Measured here: wsjtx `jt9` peaks at 54 MiB, the
+UberSDR one at 27 MiB — half.)  Fleet exposure is nil, because every station
+is configured `decoder_kind = "decode_ft8"`.  Raised for psk-recorder's
+owner; not fixed here, because it is a separate repo and a separate change.
+
+**The fallback switch, live and both ways.**  `smd admin decoders --select
+wsjtx` then `--select ubersdr`, each under a second, no rebuild, the station
+decoding afterwards either way.
+
+**Left behind on the box:** `/opt/git/sigmond/sigmond` is on branch
+`ai6vn-decoder-test`, not `main`.  Leave it there until this is pushed, then
+`git checkout main && git pull`.  Going back early is worse than leaving it:
+the old `_build_wsjtx_decoders` installs real files to `/usr/local/bin` and
+would overwrite the symlinks, and the old `smd` has no `admin decoders` and
+no decoder findings in `doctor`.
+
 ## What is left
 
-- **Deploy to a station and run the psk-recorder FT8/FT4 check** in Risks
-  above.  Nothing else should happen until that passes somewhere.
 - **Push.**  The work is committed on main locally and deliberately not
   pushed: it changes what every station decodes with, and
-  `smd component update` would carry it.
+  `smd component update` would carry it.  Rebased cleanly onto mjh's
+  sink-2b-part2 main (`8134d4b`) on 2026-10-24; suite is 5306 passed, 0
+  failed, against 5264/0 on that main — the 7 `test_sink_paths_contract` /
+  `test_sink_state` errors are present on clean `origin/main` too.  Held at
+  mjh's request until his v3.80 rig update test finishes, since it targets
+  `origin/main`.
+- **AI6VN's checkout** goes back to `main` once this is pushed (above).
 
 ## Open questions for rob
 
