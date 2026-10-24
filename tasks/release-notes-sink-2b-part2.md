@@ -24,6 +24,18 @@ The sink switches now decide what leaves a station.
   recorder instance alone, one at a time, and never radiod.  Raising the switch turns none of them
   back on.
 
+## Two limits of the psk rider
+
+wspr-recorder's wsprdaemon tar carries psk rows as riders.  The rider judges each row by its
+producer's sink switch.
+
+- A station's manifest may predate this release and name no client.  The gate then lets each of its
+  pipelines send.  The rider still drops a held producer's psk rows from the wsprdaemon tar.  The next
+  manifest step re-renders the manifest and ends the mismatch.
+- A psk producer may carry no switch file, because the carry-over does not govern it.  The rider reads
+  such a producer below `upload`, so its rows stay out of the wsprdaemon tar, even with every switch at
+  `upload`.  The rider fails closed by design.  B4 and ND carry no such producer.
+
 ## The first manifest step after the update
 
 `smd update` pulls the code and does not run the carry-over.  It prints "the sink switches take effect at

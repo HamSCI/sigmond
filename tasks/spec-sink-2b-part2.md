@@ -864,6 +864,8 @@ now say what the code does.
 | 9.2 | `sink status --json` schema 1 gains `held_pipelines[].held_by`, `errors`, `builder_pipelines` and `refused_files[].pipeline`, with `file` null for a store-schema refusal. | Task 9 |
 | 10 | Rollback of hs-uploader alone moves the marker aside. | Michael's answer 5 |
 | 11.2 | A fourth verdict, INCONCLUSIVE, and the last line `RESULT: PASS (a AGREE, h HELD, d DISAGREE)`. | Task 12 |
+| 3, 5 | A station's manifest may predate part 2 and name no client, so rule 4 lets each pipeline send.  The psk rider still judges each row by its producer's switch.  Until the next re-render, it drops a held producer's psk rows from the wsprdaemon tar. | C27-1 (b) |
+| 5 | The carry-over may leave a psk producer without a switch file.  The rider reads that producer below `upload`, as §5 fails closed, so its rows never ride in the WSPR tar, even with every switch at `upload`.  B4 and ND carry no such producer.  Michael may choose otherwise at merge. | C27-1 (M-2) |
 
 One product gap stays open (Task 24).  A restore leaves each checkout it moved detached at the
 restored commit.  Any `.pin` it had stays, still naming the newer commit.  `smd update` then pulls
