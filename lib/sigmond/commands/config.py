@@ -1218,6 +1218,15 @@ def cmd_config_uploads(args) -> int:
     roots = up_cmd._step_roots()
     features = um.hs_uploader_features(python=roots.python)
     gate = features is not None and um.GATE_FEATURE in features
+    if features is None and sink_state.marker_stands(roots.marker):
+        # Task 27 I-1: the carry-over marker stands, so hs-uploader's gate
+        # reads site.toml.  Part 1's path would write [uploads] alone and
+        # exit 0, and the next mirror repair would copy site.toml back over
+        # the order.  `sink set` either lands the order or fails loudly.
+        warn('the features probe failed, but the carry-over marker '
+             f'{roots.marker} stands: setting the site sink switch through '
+             'hs-uploader all the same')
+        gate = True
     if mode == 'discard':
         # With the gate, `off` lives in site.toml and the daemon's gate
         # enforces it; the render carries no `discard` key, so the old

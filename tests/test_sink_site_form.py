@@ -719,5 +719,67 @@ class FixRound1Tests(unittest.TestCase):
         self.assertEqual(st.switch("site")["state"], "fill")
 
 
+# ---------------------------------------------------------------------------
+# Task 27 I-1: the marker stands and the features probe fails
+# ---------------------------------------------------------------------------
+
+@needs_real
+class FailedProbeWithTheMarkerTests(unittest.TestCase):
+    """With the carry-over marker standing, a failed features probe never
+    sends `smd sink` down part 1's path: that path wrote [uploads] alone,
+    exited 0, and the next mirror repair copied site.toml back over the
+    order.  The order goes through `sink set` instead."""
+
+    def flaky(self):
+        """The command's own probe fails; every later one answers."""
+        real = um.hs_uploader_features
+        n = {"i": 0}
+
+        def probe(*a, **k):
+            n["i"] += 1
+            return None if n["i"] == 1 else real(*a, **k)
+        return mock.patch.object(um, "hs_uploader_features",
+                                 side_effect=probe)
+
+    def check(self, verb, site, mode, *, extra=()):
+        st = SiteStation(self)
+        self.assertEqual(st.switch("site")["state"], "upload")
+        r = st.sink(verb, reason="bench", extra=[*extra, mock.patch.object(
+            um, "hs_uploader_supports_discard", return_value=True)])
+        if r.rc == 0:
+            self.assertEqual(st.switch("site")["state"], site, r.both)
+            self.assertEqual(st.mode(), mode, r.both)
+            self.assertEqual(st.kinds("set"), [("set", "site", site)])
+        else:
+            self.assertEqual(r.rc, 1, r.both)
+            self.assertEqual(st.switch("site")["state"], "upload")
+            self.assertEqual(st.mode(), "upload")
+        self.assertNotIn("waits for an hs-uploader that offers the gate",
+                         r.both)
+        return st, r
+
+    def test_off_during_a_failed_probe_lands_in_site_toml(self):
+        st, r = self.check("off", "off", "discard", extra=[self.flaky()])
+        self.assertEqual(r.rc, 0, r.both)
+
+    def test_fill_during_a_failed_probe_lands_in_site_toml(self):
+        st, r = self.check("fill", "fill", "hold", extra=[self.flaky()])
+        self.assertEqual(r.rc, 0, r.both)
+
+    def test_every_probe_failing_still_lands_or_fails_loudly(self):
+        self.check("off", "off", "discard", extra=[mock.patch.object(
+            um, "hs_uploader_features", return_value=None)])
+
+    def test_without_the_marker_a_failed_probe_keeps_part_1s_path(self):
+        """Positive control: no marker, failed probe: part 1's write."""
+        st = SiteStation(self, carried=False)
+        r = st.sink("fill", reason="rig", extra=[self.flaky()])
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertIn("waits for an hs-uploader that offers the gate", r.both)
+        # the command itself sets nothing; only the carry-over, under the
+        # manifest step's lock, writes the switches
+        self.assertLess(st.first(("lock",)), st.first(("set",)))
+
+
 if __name__ == "__main__":
     unittest.main()
