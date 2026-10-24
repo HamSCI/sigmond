@@ -783,6 +783,9 @@ class LinkedEnabledUploader(Base):
                          ("loaded", "linked", "inactive"))
         self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
         self.assertIn(f"lever: removed {links[0]}", "\n".join(res.lines()))
+        self.assertIn(f"lever: stopped {UPLOADER} (its unit file is a link: "
+                      "its enablement links removed, the link kept)",
+                      res.lines())
         self.assertEqual(self.record().read_text(),
                          f"{links[0]}\t{self.unit_src}\n")
 

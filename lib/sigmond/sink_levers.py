@@ -349,8 +349,10 @@ class LeverResult:
                 "link stays, and the raise to upload puts this back)"
                 for p in self.unwanted]
         out += [f"lever: stopped and disabled {u}" for u in self.disabled]
-        out += [f"lever: stopped {u} (its unit file names no enablement; "
-                "left as it stands)" for u in self.stopped]
+        out += [f"lever: stopped {u} (its unit file is a link: its "
+                "enablement links removed, the link kept)" if self.unwanted
+                else f"lever: stopped {u} (its unit file names no "
+                "enablement; left as it stands)" for u in self.stopped]
         out += [f"lever: restarted {u}" for u in self.restarted]
         out += [f"lever: left alone {x} (already lowered)" for x in self.left_alone]
         out += [f"lever: FAILED {x}: {why}" for x, why in self.failures]
