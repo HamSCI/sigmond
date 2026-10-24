@@ -538,18 +538,29 @@ class NativeBuildPinWsjtxTests(_NativePinRig):
 class NativeBuildPinTableTests(unittest.TestCase):
     """One table, derived from the build constants — never copied."""
 
-    def test_the_table_covers_onion_and_wsjtx(self):
+    def test_the_table_covers_every_pinned_native_source(self):
         self.assertEqual(smd._native_build_pins(),
                          {"onion": smd._ONION_COMMIT,
-                          "wsjtx": smd._WSJTX_COMMIT})
+                          "wsjtx": smd._WSJTX_COMMIT,
+                          "ubersdr_wsprd": smd._UBERSDR_COMMIT})
 
     def test_the_table_follows_the_constants(self):
         with mock.patch.object(smd, "_ONION_COMMIT", "a" * 40), \
-             mock.patch.object(smd, "_WSJTX_COMMIT", "b" * 40):
+             mock.patch.object(smd, "_WSJTX_COMMIT", "b" * 40), \
+             mock.patch.object(smd, "_UBERSDR_COMMIT", "c" * 40):
             self.assertEqual(smd._native_build_pins(),
-                             {"onion": "a" * 40, "wsjtx": "b" * 40})
+                             {"onion": "a" * 40, "wsjtx": "b" * 40,
+                              "ubersdr_wsprd": "c" * 40})
 
     def test_every_key_names_a_checkout_the_build_clones(self):
         for name in smd._native_build_pins():
             self.assertIn(Path("/opt/git/sigmond") / name,
-                          (smd._ONION_SRC, smd._WSJTX_SRC))
+                          (smd._ONION_SRC, smd._WSJTX_SRC, smd._UBERSDR_SRC))
+
+    def test_every_pinned_source_has_a_named_build(self):
+        # _NATIVE_BUILD_OF drives the off-pin warning's "re-run X" advice.
+        # A pin added without its build name prints the checkout directory
+        # instead, which tells an operator nothing about what to run.
+        for name in smd._native_build_pins():
+            self.assertIn(name, smd._NATIVE_BUILD_OF,
+                          f"{name} is pinned but no build claims it")

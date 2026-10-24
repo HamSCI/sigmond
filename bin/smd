@@ -1106,6 +1106,36 @@ _WSJTX_SRC    = Path('/opt/git/sigmond/wsjtx')      # sibling checkout, like /op
 # cheap add-on to the WSJT-X toolchain (needs jt9 at runtime, Qt5Core at build).
 _JT9_DECODE_SRC = Path('/opt/git/sigmond/psk-recorder/vendor/jt9-decode')
 
+# UberSDR's wsprd and jt9 (madpsy/ubersdr_wsprd) — WSJT-X's two decoders
+# rewritten in C++, a drop-in replacement for the pair built above: the same
+# command line (plus -n), and the same stdout, ALL_WSPR.TXT, wspr_spots.txt,
+# hashtable.txt and -c output, byte for byte, from the same samples.  Built
+# from WSJT-X 3.2.0-rc1.  Roughly 10x less CPU for wsprd on x86-64 and 2-7x
+# for jt9 depending on mode, which is why it is the default (see
+# tasks/decoder-ubersdr-migration.md).
+#
+# ⛔ NO -march=native here, deliberately.  Upstream's CMakeLists sets
+# -ffp-contract=off on every decoder source, and on GCC < 13 adds -mno-fma to
+# the FT8/FT4/FT2 files, so that every multiply and add rounds exactly as
+# WSJT-X rounds it — that is what makes the output bit-identical.  Its default
+# -march=x86-64-v3 is the tuned value already (AVX2/FMA/BMI2, eight lanes);
+# upstream offers "native" and says it tunes for the build machine with the
+# same results, so the headroom is tuning, not vectorisation.  We do not reach
+# into an arithmetic contract we did not write.  Contrast _build_wsjtx_decoders,
+# where the lesson was to KEEP an upstream flag; here it is to add none.
+_UBERSDR_REPO   = 'https://github.com/madpsy/ubersdr_wsprd.git'
+_UBERSDR_COMMIT = '529ec5d2530f5ffc2ad4a73a3be6c10c0a8b4027'   # 2026-10-22; parity-checked on B3 2026-10-24
+_UBERSDR_SRC    = Path('/opt/git/sigmond/ubersdr_wsprd')
+
+# Both decoder implementations live here; /usr/local/bin/{wsprd,jt9} are
+# symlinks into one of them.  Clients resolve the decoders by name off PATH
+# (shutil.which), so selection needs no client change and no config plumbing:
+# it is one atomic symlink swap, visible in `ls -l`, reversible with no rebuild.
+_DECODER_DIR     = Path('/usr/local/libexec/sigmond/decoders')
+_DECODER_IMPLS   = ('ubersdr', 'wsjtx')
+_DECODER_DEFAULT = 'ubersdr'
+_DECODER_BINS    = ('wsprd', 'jt9')
+
 # Build provenance for upstream C projects sigmond builds itself (the
 # upstream-built analogue of native-binaries.md's committed .provenance
 # sidecar, which we can't write into a repo we don't own).
@@ -1140,12 +1170,14 @@ def _native_build_pins() -> dict:
     return {
         _ONION_SRC.name: _ONION_COMMIT,
         _WSJTX_SRC.name: _WSJTX_COMMIT,
+        _UBERSDR_SRC.name: _UBERSDR_COMMIT,
     }
 
 
 # The build that returns each pinned source to its pin, for the off-pin
 # warning.  Keyed like _native_build_pins(); a name missing here prints as is.
-_NATIVE_BUILD_OF = {'onion': 'ka9q-web', 'wsjtx': 'wsjtx-decoders'}
+_NATIVE_BUILD_OF = {'onion': 'ka9q-web', 'wsjtx': 'wsjtx-decoders',
+                    'ubersdr_wsprd': 'ubersdr-decoders'}
 
 
 def _git_remote_url(repo: Path) -> str:
@@ -1500,10 +1532,27 @@ def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
     return True
 
 
+def _install_root_text(content: str, dest: Path, mode: str = '644') -> None:
+    """Write text to a root-owned path.  _run has no stdin-input path, so
+    stage the text in a temp file and install it."""
+    import tempfile
+    with tempfile.NamedTemporaryFile('w', delete=False) as tf:
+        tf.write(content)
+        tmp = tf.name
+    _run(['install', f'-m{mode}', tmp, str(dest)], sudo=True)
+    os.unlink(tmp)
+
+
 def _build_wsjtx_decoders() -> bool:
     """Build the WSJT-X decoders (jt9, wsprd) from pinned upstream source,
-    optimized for this host's CPU, and install to /usr/local/bin — shadowing
-    the generic Debian `wsjtx` package binaries.
+    optimized for this host's CPU, into the `wsjtx` decoder slot.
+
+    Since 2026-10-24 these are the FALLBACK, not the default: UberSDR's
+    rewrites of the same two decoders are what a station normally runs (see
+    tasks/decoder-ubersdr-migration.md).  This build stays a hard requirement
+    anyway — psk-recorder's jt9_decode drives THIS jt9 over Qt5 shared
+    memory, and a fallback that has to be built before it can be used is not
+    a fallback.
 
     Treated like onion (a from-source native dependency, not a catalog
     component): wspr-recorder runs `jt9` (FST4W) and `wsprd` (WSPR) by name off
@@ -1519,19 +1568,16 @@ def _build_wsjtx_decoders() -> bool:
     marker.  Measured gain (2026-07-22): ~1.5x on jt9 DEEP decode only; the case
     is reproducibility / current-version (3.0.2 vs Debian 2.7.0) / licensing.
     """
-    import tempfile
-
-    def _install_text(content: str, dest: Path, mode: str = '644') -> None:
-        # _run has no stdin-input path; stage the text then install as root.
-        with tempfile.NamedTemporaryFile('w', delete=False) as tf:
-            tf.write(content)
-            tmp = tf.name
-        _run(['install', f'-m{mode}', tmp, str(dest)], sudo=True)
-        os.unlink(tmp)
-
     prefix = Path('/usr/local')
-    jt9, wsprd = prefix / 'bin' / 'jt9', prefix / 'bin' / 'wsprd'
-    marker = prefix / 'bin' / '.wsjtx-decoders.provenance'
+    # Installed into its own slot, NOT /usr/local/bin: the two implementations
+    # sit side by side and /usr/local/bin/{wsprd,jt9} are symlinks into one of
+    # them (_select_decoders).  A station upgrading from the single-build
+    # layout has its existing binaries moved here by _adopt_legacy_decoders,
+    # so the fallback is present from the first moment it might be wanted.
+    dest = _DECODER_DIR / 'wsjtx'
+    jt9, wsprd = dest / 'jt9', dest / 'wsprd'
+    marker = dest / '.provenance'
+    _adopt_legacy_decoders()
     # Idempotency: the installed build already matches this pin.
     if jt9.exists() and wsprd.exists():
         try:
@@ -1588,7 +1634,7 @@ def _build_wsjtx_decoders() -> bool:
             'miscompiles wsprd under -O3/native).\n'
             'No source logic was changed. Upstream source retained at '
             f'{src}; license in COPYING. Built targets: jt9, wsprd only.\n')
-    _install_text(mods, src / 'MODIFICATIONS.sigmond.txt')
+    _install_root_text(mods, src / 'MODIFICATIONS.sigmond.txt')
 
     build = src / 'build-sigmond'
     _run(['rm', '-rf', str(build)], sudo=True)
@@ -1612,24 +1658,324 @@ def _build_wsjtx_decoders() -> bool:
         return False
 
     docdir = prefix / 'share' / 'doc' / 'wsjtx-decoders-sigmond'
+    _run(['install', '-d', str(dest)], sudo=True)
     _run(['install', '-m755', str(build / 'jt9'), str(jt9)], sudo=True)
     _run(['install', '-m755', str(build / 'wsprd'), str(wsprd)], sudo=True)
     _run(['install', '-d', str(docdir)], sudo=True)
     _run(['install', '-m644', str(src / 'COPYING'), str(docdir / 'COPYING')], sudo=True)
     _run(['install', '-m644', str(src / 'MODIFICATIONS.sigmond.txt'),
           str(docdir / 'MODIFICATIONS.txt')], sudo=True)
-    _install_text(f'wsjtx-decoders {_WSJTX_TAG} {_WSJTX_COMMIT} '
+    _install_root_text(f'wsjtx-decoders {_WSJTX_TAG} {_WSJTX_COMMIT} '
                   'flags=-march=native -O3 (-fbounds-check retained)\n', marker)
     _write_build_manifest('wsjtx-decoders', [
         {'name': 'wsjtx', 'url': _WSJTX_REPO, 'ref': _WSJTX_TAG,
          'pin': _WSJTX_COMMIT, 'sha': _git_head(src)},
     ], builder='_build_wsjtx_decoders')
-    _ok('wsjtx-decoders: built and installed (jt9, wsprd → /usr/local/bin)')
+    _ok(f'wsjtx-decoders: built and installed (jt9, wsprd → {dest})')
     # jt9_decode wrapper (psk-recorder's resident FT8/FT4 driver): a cheap C++
     # add-on to the toolchain we just built.  Best-effort — a wrapper failure
     # must not fail wspr-recorder, which needs only jt9/wsprd (both installed).
     _build_jt9_decode()
     return True
+
+
+def _decoder_x86_arch() -> str:
+    """The -march value to build UberSDR's decoders with on this host.
+
+    Upstream defaults to x86-64-v3, which needs AVX2, FMA and BMI2 (Haswell /
+    Zen or newer).  On an older CPU that binary does not run slowly — it dies
+    with SIGILL on its first AVX2 instruction, and from wspr-recorder's side
+    that looks exactly like a decoder that decodes nothing.  So probe, and
+    fall back to the compiler's baseline (an empty value: the plain code,
+    upstream says the same results) rather than ship a binary that cannot run.
+
+    Returns '' on non-x86 too: CMakeLists only applies -march on x86_64, where
+    NEON is always present.
+    """
+    import platform
+    if platform.machine() not in ('x86_64', 'AMD64'):
+        return ''
+    try:
+        info = Path('/proc/cpuinfo').read_text()
+    except OSError:
+        return ''            # cannot prove AVX2 is there; do not assume it.
+    flags = set()
+    for line in info.splitlines():
+        if line.startswith('flags'):
+            flags = set(line.split(':', 1)[1].split())
+            break
+    missing = [f for f in ('avx2', 'fma', 'bmi2') if f not in flags]
+    if missing:
+        _warn('ubersdr-decoders: this CPU lacks ' + ', '.join(missing) +
+              ' — building for the compiler baseline, not x86-64-v3')
+        return ''
+    return 'x86-64-v3'
+
+
+def _decoder_parity_check(build: Path, src: Path) -> bool:
+    """Run upstream's own comparison of the binaries we just built against
+    WSJT-X's stored outputs, and report whether they decode identically.
+
+    This gates selection rather than being a post-hoc note, because the
+    failure mode of a wrong decoder is not a crash: it is slightly different
+    spots, uploaded as authoritative, indefinitely.  A decoder that is merely
+    fast is worthless.
+
+    The scripts need nothing of WSJT-X and no network — the recordings and the
+    stored outputs are in the checkout — so a station can verify its own build
+    offline.  On aarch64 some jt9 cases differ because FFTW's NEON codelets
+    round differently from the AVX ones the stored outputs were made with;
+    upstream lists those in tests/data/jt9-arm64-accepted.txt and counts them
+    "accepted", not differing.  We read the script's exit status and let it
+    make that distinction — grepping the output for the word "differ" would
+    fail a build upstream considers correct.
+    """
+    ok = True
+    for name, script, args in (
+            ('wsprd', 'scripts/wsprd-stored-check.sh',
+             [str(build / 'wsprd'), str(build / 'stored-wsprd')]),
+            ('jt9', 'scripts/jt9-wine-check.sh',
+             [str(build / 'jt9'), str(build / 'stored-jt9')])):
+        _info(f'ubersdr-decoders: checking {name} against '
+              "WSJT-X's stored outputs ...")
+        r = _run([str(src / script)] + args, sudo=True)
+        tail = (r.stdout or '').strip().splitlines()
+        summary = tail[-1] if tail else ''
+        if r.returncode != 0:
+            _err(f'ubersdr-decoders: {name} does NOT match WSJT-X: '
+                 f'{summary or (r.stderr or "")[-300:]}')
+            ok = False
+        else:
+            _ok(f'ubersdr-decoders: {name} — {summary or "matches WSJT-X"}')
+    return ok
+
+
+def _build_ubersdr_decoders(*, check: bool = True) -> bool:
+    """Build UberSDR's wsprd and jt9 from pinned source into
+    /usr/local/libexec/sigmond/decoders/ubersdr/, verify they decode exactly
+    as WSJT-X's do, and leave them there for _select_decoders to point at.
+
+    Deliberately does NOT install to /usr/local/bin: both implementations stay
+    installed side by side so that falling back costs a symlink swap, not a
+    five-minute Qt build on a station that is already failing.
+
+    See the constants above for why no -march=native.  Idempotent via the
+    provenance marker, which also records the arch actually used and whether
+    the parity check passed — a build that did not pass must not be selected.
+    """
+    dest   = _DECODER_DIR / 'ubersdr'
+    marker = dest / '.provenance'
+    if all((dest / b).exists() for b in _DECODER_BINS):
+        try:
+            if _UBERSDR_COMMIT in marker.read_text():
+                _ok(f'ubersdr-decoders: already built from '
+                    f'{_UBERSDR_COMMIT[:12]}')
+                return True
+        except OSError:
+            pass
+
+    if not _ensure_native_build_deps(label='ubersdr-decoders'):
+        return False
+    # A fraction of WSJT-X's build deps: no Qt, no boost, no hamlib, no
+    # portaudio, no Fortran.  libfftw3-dev matters twice over — CMakeLists
+    # links its static libfftw3f.a in, so the binaries need nothing installed
+    # at runtime.
+    _info('ubersdr-decoders: installing build deps ...')
+    r = _apt('install', '-y', '--no-install-recommends',
+             'build-essential', 'cmake', 'pkg-config', 'libfftw3-dev',
+             sudo=True)
+    if r.returncode != 0:
+        _err(f'ubersdr-decoders: build-dep install failed: {r.stderr.strip()}')
+        return False
+
+    src = _UBERSDR_SRC
+    if not src.exists():
+        _info(f'Cloning ubersdr_wsprd → {src} ...')
+        r = _run(['git', 'clone', _UBERSDR_REPO, str(src)], sudo=True)
+        if r.returncode != 0:
+            _err(f'git clone ubersdr_wsprd failed: {r.stderr.strip()}')
+            return False
+    if not _git_head(src).startswith(_UBERSDR_COMMIT):
+        _run(['git', '-C', str(src), 'fetch', '--quiet', 'origin'], sudo=True)
+        r = _run(['git', '-C', str(src), 'checkout', '--quiet',
+                  _UBERSDR_COMMIT], sudo=True)
+        if r.returncode != 0:
+            _err(f'ubersdr_wsprd: checkout {_UBERSDR_COMMIT[:12]} failed: '
+                 f'{r.stderr.strip()}')
+            return False
+
+    arch  = _decoder_x86_arch()
+    build = src / 'build-sigmond'
+    _run(['rm', '-rf', str(build)], sudo=True)
+    version = f'sigmond-{_UBERSDR_COMMIT[:9]}'
+    _info(f'ubersdr-decoders: configure (Release, '
+          f'-march={arch or "<baseline>"}) ...')
+    r = _run(['cmake', '-S', str(src), '-B', str(build),
+              '-DCMAKE_BUILD_TYPE=Release',
+              f'-DWSPRD_X86_ARCH={arch}',
+              f'-DWSPRD_VERSION={version}'], sudo=True)
+    if r.returncode != 0:
+        _err(f'ubersdr-decoders: cmake failed: {r.stderr[-400:]}')
+        return False
+    nproc = str(max(1, (os.cpu_count() or 2) - 1))
+    _info(f'ubersdr-decoders: building wsprd + jt9 (-j{nproc}) ...')
+    r = _run(['cmake', '--build', str(build), '-j', nproc], sudo=True)
+    if r.returncode != 0:
+        _err(f'ubersdr-decoders: build failed: {r.stderr[-400:]}')
+        return False
+
+    passed = _decoder_parity_check(build, src) if check else False
+    if check and not passed:
+        _err('ubersdr-decoders: built, but it does not decode as WSJT-X does '
+             '— NOT installing.  The wsjtx build stays selected.')
+        return False
+
+    _run(['install', '-d', str(dest)], sudo=True)
+    for b in _DECODER_BINS:
+        _run(['install', '-m755', str(build / b), str(dest / b)], sudo=True)
+    docdir = Path('/usr/local/share/doc/ubersdr-decoders-sigmond')
+    _run(['install', '-d', str(docdir)], sudo=True)
+    _run(['install', '-m644', str(src / 'LICENSE'), str(docdir / 'LICENSE')],
+         sudo=True)
+    _install_root_text(
+        f'ubersdr-decoders {_UBERSDR_COMMIT} version={version} '
+        f'march={arch or "baseline"} '
+        f'parity={"verified" if passed else "SKIPPED"}\n', marker)
+    _write_build_manifest('ubersdr-decoders', [
+        {'name': 'ubersdr_wsprd', 'url': _UBERSDR_REPO, 'ref': 'main',
+         'pin': _UBERSDR_COMMIT, 'sha': _git_head(src)},
+    ], builder='_build_ubersdr_decoders')
+    _ok(f'ubersdr-decoders: built and installed → {dest}')
+    return True
+
+
+def _decoder_selected() -> str:
+    """Which implementation /usr/local/bin/wsprd currently resolves to, or ''
+    if it is not one of ours (a real file, a Debian binary, or absent)."""
+    try:
+        target = os.readlink(Path('/usr/local/bin') / 'wsprd')
+    except OSError:
+        return ''
+    for impl in _DECODER_IMPLS:
+        if f'decoders/{impl}/' in target:
+            return impl
+    return ''
+
+
+def _adopt_legacy_decoders() -> None:
+    """Move a pre-split /usr/local/bin/{wsprd,jt9} into decoders/wsjtx/.
+
+    Stations installed before this change hold the WSJT-X build as real files
+    at those paths.  Replacing them with symlinks would otherwise throw away
+    the only decoder the station has, leaving it with nothing to fall back to
+    until a five-minute Qt build completes.  So the files are moved, not
+    overwritten, and the old provenance marker goes with them.
+    """
+    dest = _DECODER_DIR / 'wsjtx'
+    for b in _DECODER_BINS:
+        live = Path('/usr/local/bin') / b
+        if not live.exists() or live.is_symlink() or (dest / b).exists():
+            continue
+        _run(['install', '-d', str(dest)], sudo=True)
+        _run(['mv', str(live), str(dest / b)], sudo=True)
+        _info(f'decoders: adopted the existing {b} as the wsjtx build')
+    old = Path('/usr/local/bin/.wsjtx-decoders.provenance')
+    if old.exists() and not (dest / '.provenance').exists():
+        _run(['install', '-d', str(dest)], sudo=True)
+        _run(['cp', str(old), str(dest / '.provenance')], sudo=True)
+
+
+def _select_decoders(impl: str = _DECODER_DEFAULT) -> bool:
+    """Point /usr/local/bin/{wsprd,jt9} at one implementation's binaries.
+
+    The switch is the whole fallback story: both builds stay on disk, so
+    moving between them is two symlinks and no rebuild.  Refuses an
+    implementation whose binaries are not present, and refuses ubersdr whose
+    parity check did not pass — selecting an unverified decoder is the one
+    outcome this design exists to prevent.
+    """
+    if impl not in _DECODER_IMPLS:
+        _err(f'decoders: unknown implementation {impl!r} '
+             f'(known: {", ".join(_DECODER_IMPLS)})')
+        return False
+    _adopt_legacy_decoders()
+    dest = _DECODER_DIR / impl
+    missing = [b for b in _DECODER_BINS if not (dest / b).exists()]
+    if missing:
+        _err(f'decoders: cannot select {impl} — not built '
+             f'({", ".join(missing)} missing from {dest})')
+        return False
+    if impl == 'ubersdr':
+        try:
+            if 'parity=verified' not in (dest / '.provenance').read_text():
+                _err('decoders: refusing to select ubersdr — its build did '
+                     'not pass the WSJT-X parity check')
+                return False
+        except OSError:
+            _err('decoders: refusing to select ubersdr — no provenance '
+                 'marker, so the parity check cannot be confirmed')
+            return False
+    for b in _DECODER_BINS:
+        link = Path('/usr/local/bin') / b
+        # Relative, so the pair stays correct under any prefix, and atomic:
+        # -T replaces the link itself rather than making one inside a
+        # directory, -f via a temp name so no window has the name absent.
+        r = _run(['ln', '-sfnT', f'../libexec/sigmond/decoders/{impl}/{b}',
+                  str(link)], sudo=True)
+        if r.returncode != 0:
+            _err(f'decoders: could not point {link} at {impl}: '
+                 f'{r.stderr.strip()}')
+            return False
+    _ok(f'decoders: {impl} selected (wsprd, jt9 → {dest})')
+    return True
+
+
+def _decoder_preference() -> str:
+    """The decoder implementation this host asks for.
+
+    `[decoders] implementation = "ubersdr" | "wsjtx"` in coordination.toml,
+    defaulting to ubersdr.  Read straight from the file rather than through
+    the Coordination dataclass: that renders coordination.env for the
+    services, and which binary /usr/local/bin/wsprd points at is not a
+    service's environment — it is a property of the host's filesystem.
+    """
+    try:
+        data = tomllib.loads(Path('/etc/sigmond/coordination.toml').read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return _DECODER_DEFAULT
+    want = (data.get('decoders') or {}).get('implementation')
+    if not want:
+        return _DECODER_DEFAULT
+    want = str(want).strip().lower()
+    if want not in _DECODER_IMPLS:
+        _warn(f'coordination.toml: [decoders] implementation = {want!r} is '
+              f'not one of {", ".join(_DECODER_IMPLS)}; '
+              f'using {_DECODER_DEFAULT}')
+        return _DECODER_DEFAULT
+    return want
+
+
+def _build_decoders() -> bool:
+    """Build both decoder implementations and select the configured one.
+
+    The WSJT-X build is not optional even when UberSDR is selected: its jt9 is
+    what psk-recorder's jt9_decode wrapper drives over Qt5 shared memory, and
+    it is the fallback that makes the symlink switch meaningful.  So it stays
+    a hard requirement, exactly as before.
+
+    UberSDR failing is NOT fatal.  A station that cannot build or verify the
+    new decoders should keep decoding with the old ones and say so, rather
+    than fail an install over a performance improvement.
+    """
+    if not _build_wsjtx_decoders():
+        return False
+    _adopt_legacy_decoders()
+    want = _decoder_preference()
+    if want == 'ubersdr' and not _build_ubersdr_decoders():
+        _warn('decoders: falling back to the wsjtx build '
+              '(ubersdr unavailable on this host)')
+        want = 'wsjtx'
+    return _select_decoders(want)
 
 
 def _build_jt9_decode() -> bool:
@@ -8128,7 +8474,14 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
     _guarded('chrony-refclock-captured', _chrony_captured)
     _guarded('radiod-dropins', _radiod_dropins)
     _guarded('qga-dropin', _qga_dropin)
+    def _decoders() -> None:
+        # Which decoder build is actually live, and does it match the one
+        # asked for?  A station decodes happily with the wrong one.
+        # See _decoder_findings.
+        findings.extend(_decoder_findings())
+
     _guarded('sdr-events', _sdr)
+    _guarded('decoders', _decoders)
 
     if unassessed:
         clean = None
@@ -9771,8 +10124,10 @@ def _install_single_client(args) -> int:
 
     if dry_run:
         if entry.name == 'wspr-recorder':
-            _info(f'(dry-run) would build WSJT-X decoders (jt9, wsprd) from '
-                  f'{_WSJTX_TAG} source (-march=native -O3) → /usr/local/bin')
+            _info(f'(dry-run) would build the WSJT-X decoders (jt9, wsprd) '
+                  f'from {_WSJTX_TAG} source and UberSDR\'s rewrites of the '
+                  f'same two from {_UBERSDR_COMMIT[:9]}, then select '
+                  f'{_decoder_preference()}')
         _info('(dry-run) would clone repo and run install.sh')
         if getattr(args, 'no_enable', False):
             _info('(dry-run) --no-enable: would leave it disabled in topology')
@@ -9793,8 +10148,8 @@ def _install_single_client(args) -> int:
     # wrapper) is available regardless of install order.  NOTE (mjh): this makes
     # every psk-recorder install build the WSJT-X toolchain even for the common
     # decode_ft8 case — consider gating on the configured decoder_kind=jt9.
-    if entry.name in ('wspr-recorder', 'psk-recorder') and not _build_wsjtx_decoders():
-        _err(f'{entry.name}: wsjtx-decoders (jt9/wsprd/jt9_decode) build failed')
+    if entry.name in ('wspr-recorder', 'psk-recorder') and not _build_decoders():
+        _err(f'{entry.name}: decoder (jt9/wsprd/jt9_decode) build failed')
         return 1
 
     try:
@@ -10018,15 +10373,16 @@ def _install_full_suite(args) -> int:
         if not _install_gmag_webui_native(catalog, force=getattr(args, 'force', False)):
             errors += 1
 
-    # --- 2c. wsjtx-decoders (jt9/wsprd + jt9_decode, sigmond-native) — the
+    # --- 2c. decoders (jt9/wsprd + jt9_decode, sigmond-native) — the
     # from-source decoder dependency, built before install.sh (onion analogue).
     # wspr-recorder needs jt9/wsprd; psk-recorder's jt9 option needs jt9 +
-    # jt9_decode.  (mjh: consider gating the psk-recorder trigger on
+    # jt9_decode.  Both implementations are built and one is selected; see
+    # tasks/decoder-ubersdr-migration.md.  (mjh: consider gating the psk-recorder trigger on
     # decoder_kind=jt9 so decode_ft8-only sites skip the WSJT-X build.)
     if any(getattr(e, 'name', None) in ('wspr-recorder', 'psk-recorder')
            for e in catalog_queue):
-        _heading('wsjtx-decoders (jt9, wsprd, jt9_decode — from pinned source)')
-        if not _build_wsjtx_decoders():
+        _heading('decoders (wsprd, jt9, jt9_decode — from pinned source)')
+        if not _build_decoders():
             errors += 1
 
     # --- 3. Catalog-driven clients ---
@@ -11571,6 +11927,115 @@ def _qga_dropin_findings(*, systemd_dir: Path = Path('/etc/systemd/system'),
         f'{missing[0]} missing or stale: a request that outgrows the guest '
         f'agent\'s 128 MB cap may still stop the whole agent (smd doctor --fix)',
         fixable=True)]
+
+
+def cmd_decoders(args) -> int:
+    """Show which decoder build is live, or switch to the other one.
+
+    The switch exists because the fallback has to be reachable in one command
+    under pressure.  Both builds are on disk; this repoints two symlinks.
+    """
+    want = getattr(args, 'select', None)
+    if want:
+        if not _select_decoders(want):
+            return 1
+        _info('Restart the decode clients to pick it up: '
+              'smd restart wspr-recorder psk-recorder')
+        return 0
+
+    _heading('decoders')
+    live = _decoder_selected()
+    cfg = _decoder_preference()
+    for impl in _DECODER_IMPLS:
+        d = _DECODER_DIR / impl
+        built = all((d / b).exists() for b in _DECODER_BINS)
+        try:
+            prov = (d / '.provenance').read_text().strip()
+        except OSError:
+            prov = ''
+        mark = '→' if impl == live else ' '
+        state = 'built' if built else 'NOT BUILT'
+        print(f'  {mark} {impl:<8} {state}')
+        if prov:
+            print(f'      {prov}')
+    print()
+    any_built = any(all((_DECODER_DIR / i / b).exists() for b in _DECODER_BINS)
+                    for i in _DECODER_IMPLS)
+    if not any_built:
+        # Nothing built is the normal state of a host that runs no decode
+        # client.  Saying "not selected" there would be noise, not a finding.
+        _info('No decoder is built on this host.  `smd install wspr-recorder` '
+              'builds both and selects one.')
+    elif not live:
+        _warn('/usr/local/bin/wsprd is not a link into '
+              f'{_DECODER_DIR} — sigmond did not place it')
+    elif live != cfg:
+        _warn(f'live: {live}, but coordination.toml asks for {cfg} '
+              f'— run: smd admin decoders --select {cfg}')
+    else:
+        _ok(f'{live} selected, matching coordination.toml')
+    for f in _decoder_findings():
+        _err(f'{f.kind}: {f.detail}')
+    return 0
+
+
+def _decoder_findings(*, bindir=None, decdir=None, want=None) -> list:
+    """Is this station decoding with the build it is supposed to be?
+
+    Silent on a host that has no decoders built — plenty of stations run no
+    wspr-recorder or psk-recorder and have nothing to say here.
+
+    The three things worth a finding all share one property: the station keeps
+    running and keeps reporting while they are true.
+
+    * wsprd and jt9 resolved to DIFFERENT implementations.  WSPR decoded by
+      one build and FST4W by the other is the kind of state nobody writes on
+      purpose and nobody notices, because both decode.
+    * the live build is not the configured one — an edit that was never
+      applied, which looks exactly like an edit that was.
+    * a dangling link, which does not report "no decoder": it reports
+      whatever wspr-recorder makes of an exec failure, cycle after cycle.
+    """
+    from sigmond.doctor import Finding
+    bindir = Path(bindir) if bindir else Path('/usr/local/bin')
+    decdir = Path(decdir) if decdir else _DECODER_DIR
+    if not decdir.exists():
+        return []
+    found, live = [], {}
+    for b in _DECODER_BINS:
+        link = bindir / b
+        if not link.exists():
+            # A broken symlink fails exists(); a path that is simply absent
+            # is only a finding if we have something to point it at.
+            if link.is_symlink():
+                found.append(Finding('wspr-recorder', 'decoder-dangling',
+                                     f'{link} points at '
+                                     f'{os.readlink(link)}, which is not there'))
+            continue
+        try:
+            target = os.readlink(link)
+        except OSError:
+            found.append(Finding('wspr-recorder', 'decoder-unmanaged',
+                                 f'{link} is a file, not a link into {decdir} '
+                                 '— sigmond did not place it'))
+            continue
+        for impl in _DECODER_IMPLS:
+            if f'decoders/{impl}/' in target:
+                live[b] = impl
+    if len(set(live.values())) > 1:
+        found.append(Finding(
+            'wspr-recorder', 'decoder-split',
+            'wsprd and jt9 are from different builds ('
+            + ', '.join(f'{b}={i}' for b, i in sorted(live.items())) + ')'))
+    elif live:
+        want = want or _decoder_preference()
+        got = next(iter(live.values()))
+        if got != want:
+            found.append(Finding(
+                'wspr-recorder', 'decoder-not-selected',
+                f'decoding with the {got} build, but coordination.toml asks '
+                f'for {want} — run `smd admin decoders --select {want}`'))
+    return found
 
 
 def _sdr_findings(*, path=None, sysfs=None, now=None) -> list:
@@ -25035,6 +25500,15 @@ def main() -> int:
     )
 
     # completion
+    p_decoders = admin_sub.add_parser(
+        'decoders',
+        help='show which WSPR/FT8 decoder build is live, or switch to the other')
+    p_decoders.add_argument(
+        '--select', choices=list(_DECODER_IMPLS), metavar='IMPL',
+        help='point /usr/local/bin/{wsprd,jt9} at this build '
+             f'({", ".join(_DECODER_IMPLS)}); both stay installed, '
+             'so switching back needs no rebuild')
+
     p_completion = admin_sub.add_parser('completion', help='emit shell tab-completion script')
     completion_sub = p_completion.add_subparsers(dest='completion_command')
     p_bash = completion_sub.add_parser('bash', help='emit bash completion script (source or install)')
@@ -26113,6 +26587,11 @@ def main() -> int:
             return cmd_sources_apply(args)
         p_sources.print_help()
         return 0
+
+    if args.command == 'decoders':
+        if getattr(args, 'select', None) and _need_root('decoders --select'):
+            return 1
+        return cmd_decoders(args)
 
     if args.command == 'completion':
         return cmd_completion(args)
