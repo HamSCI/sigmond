@@ -1,8 +1,12 @@
 # Moving to the UberSDR `wsprd` and `jt9`
 
-**Status:** planned 2026-10-24, implementation started.  rob's ask: adopt
-madpsy's optimised decoders, built from source on the host, selectable, with
-the new ones as the default and the WSJT-X reference as the fallback.
+**Status:** 2026-10-24 — **built, verified and shipped to main-local on B3;
+NOT pushed, and not yet run on a station.**  rob's ask: adopt madpsy's
+optimised decoders, built from source on the host, selectable, with the new
+ones as the default and the WSJT-X reference as the fallback.
+
+Steps 1-7 below are done.  What remains is station work, and one check that
+must happen before psk-recorder runs on the new build (see Risks).
 
 ## Why
 
@@ -94,24 +98,80 @@ reporting and the spots are wrong.
 must treat "accepted" as a pass and "differs:" as a failure, exactly as
 upstream's script does — not grep for the word "differ".
 
-## Implementation steps
+## Implementation steps — all done
 
-1. **`_build_ubersdr_decoders()`** in `bin/smd`, mirroring
-   `_build_wsjtx_decoders()`: pinned repo + commit, light apt deps, an AVX2
-   probe driving `-DWSPRD_X86_ARCH`, build, install to `libexec/.../ubersdr/`,
-   provenance marker.  **No `-march=native`.**  *(in progress)*
-2. **Move the WSJT-X build's output** into `libexec/.../wsjtx/` instead of
-   `/usr/local/bin`, so neither implementation owns the name.
-3. **`_select_decoders(impl)`** — repoint the two symlinks atomically,
-   refusing to select an implementation that is not installed or has not
-   passed its parity check.
-4. **Parity gate** — run the repo's own check after building; record the
-   result in the provenance marker; refuse selection on failure.
-5. **Config + doctor** — read the setting, apply on `smd apply`, report in
-   `smd doctor` (which implementation, parity result, when checked).
-6. **Bring-up** — build both, check, select the default.
-7. **Tests** — selection logic, refusal paths, the arm64 "accepted" rule,
-   and that the fallback needs no rebuild.
+1. ✅ **`_build_ubersdr_decoders()`** in `bin/smd`: pinned repo + commit,
+   light apt deps, an AVX2 probe driving `-DWSPRD_X86_ARCH`, build, install
+   to `libexec/.../ubersdr/`, provenance marker.  **No `-march=native`.**
+2. ✅ **The WSJT-X build installs to `libexec/.../wsjtx/`**, so neither
+   implementation owns `/usr/local/bin`.  An upgrading station's existing
+   binaries are *moved* there and linked back in the same breath.
+3. ✅ **`_select_decoders(impl)`** — repoints both symlinks, refusing an
+   implementation that is not installed or has not passed its parity check.
+4. ✅ **Parity gate** — upstream's own check runs after the build, its
+   result is recorded in the provenance marker, and selection refuses on
+   failure.  Reads the script's exit status, so arm64's accepted FFTW
+   differences stay a pass.
+5. ✅ **Config + doctor** — `[decoders] implementation`, and findings for a
+   split pair, an unapplied config change, a dangling link and a
+   hand-placed binary.  Plus `smd admin decoders [--select IMPL]`.
+6. ✅ **Bring-up** — both install paths call `_build_decoders()`, which
+   builds both, selects the configured one, and falls back with a warning
+   rather than failing the install if UberSDR cannot be built or verified.
+7. ✅ **Tests** — 41, covering selection, every refusal path, graceful
+   degradation, adoption and the clone-ownership rule.  Every mutation
+   tried against them was caught; one exposed a test passing for the wrong
+   reason, and one reproduced a bug that had already been committed.
+
+## What was actually measured
+
+Upstream's own comparison against WSJT-X's stored outputs, on a sigmond
+build of the pinned commit, on B3 (Ryzen 5825U, GCC 14, `-march=x86-64-v3`):
+
+| check | result |
+|---|---|
+| `wsprd` vs WSJT-X's stored outputs | 201 cases, **0 differing** |
+| `jt9` vs WSJT-X's stored outputs | 222 cases (119 FT8, 73 FT4, 19 FT2), **0 differing** |
+| 32-bit float input vs the same samples as 16-bit | 40 runs, **0 differing** |
+| FT8/FT4/FT2 float input and `--feed` vs 16-bit file mode | 72 runs, **0 differing** |
+| FT8/FT4/FT2 `--fast-subtract` (and `-w 2`) vs its own WSJT-X decodes | 48 runs held to 99 %, **0 short** |
+
+The whole `_build_ubersdr_decoders` → `_select_decoders` path then ran on a
+greenfield box (no `/opt/git/sigmond`, no decoders): it cloned, configured
+with `-march=x86-64-v3` *chosen by the probe, not hard-coded*, built,
+checked, installed, linked, and `wsprd` off PATH decoded a real 40 m
+recording to the same three spots.
+
+### The A/B, both builds on the same host
+
+Both built by sigmond on B3, run over the same five real 40 m WSPR cycles:
+
+| | UberSDR | WSJT-X (ours) | speedup |
+|---|---|---|---|
+| `wsprd`, plain | 2.41 s CPU | 5.51 s | **2.3x** |
+| `wsprd -d` (deep) | 8.01 s CPU | 19.73 s | **2.5x** |
+| `jt9 -8 -d 3` (FT8) | 1.60 s CPU | 2.74 s | **1.7x** |
+
+and the decodes are **identical**: byte-identical stdout across all five
+cycles (21 spots) and an identical `ALL_WSPR.TXT`.
+
+⚠ **This is 2.5x, not the ~10x upstream reports, and the difference is
+expected rather than a disappointment.**  Upstream measures against a stock
+WSJT-X build; ours is already `-march=native -O3`, which is a large part of
+that gap.  The arithmetic is consistent: the native WSJT-X build was
+measured at ~3.7x the stock Debian package (0.73 s vs 2.71 s on a real
+window, 2026-07-22), and 10 / 3.7 ≈ 2.7 — close to the 2.3-2.5x measured
+here.  That is an inference from two separate measurements, not a
+controlled experiment; the honest claim is "2.5x over what we ship today".
+
+2.5x on `wsprd` and 1.7x on FT8 is still the headroom rob asked for, and it
+arrives with a build that drops Qt, boost, hamlib, portaudio and gfortran.
+
+Two faults surfaced only because that real run happened, not from the unit
+tests: a `sudo` clone that made the *next* build impossible by creating a
+root-owned `/opt/git/sigmond`, and an adoption step that left no decoder on
+PATH between moving the old binaries and linking the new ones.  Both fixed,
+both now guarded by tests.
 
 ## Risks, and what they would look like
 
@@ -180,6 +240,14 @@ wsjtx`, one command, no rebuild — which is why the design keeps both.
 
 **Two upstreams instead of one.** We now track `madpsy/ubersdr_wsprd` as well
 as `WSJTX/wsjtx`.  Both get pinned commits and both appear in the manifest.
+
+## What is left
+
+- **Deploy to a station and run the psk-recorder FT8/FT4 check** in Risks
+  above.  Nothing else should happen until that passes somewhere.
+- **Push.**  The work is committed on main locally and deliberately not
+  pushed: it changes what every station decodes with, and
+  `smd component update` would carry it.
 
 ## Open questions for rob
 
