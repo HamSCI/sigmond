@@ -81,9 +81,15 @@ RADIOD_PATTERNS = ("radiod@*", "radiod.service")
 _RUNNING = ("active", "activating", "reloading", "deactivating")
 _TRUE = ("1", "true", "yes", "on")
 _MS_QUIET = ("off", "none", "disabled")
-# wspr-uploader counts as armed in any other UnitFileState (linked,
-# indirect, generated, static, enabled...); "" means systemd did not say.
+# wspr-uploader counts as armed while it runs, and while stopped in any
+# UnitFileState that enables it (enabled, enabled-runtime...); "" means
+# systemd did not say.
 _UNIT_FILE_OFF = ("disabled", "masked", "masked-runtime", "not-found", "")
+# These name no enablement of their own, so a unit in one of them counts
+# as armed only while it runs.  `disable --now` never touches it stopped:
+# on a linked unit, disable would remove the link itself (Task 27 (a)).
+_UNIT_FILE_IF_RUNNING = ("linked", "linked-runtime", "static", "indirect",
+                         "generated")
 _RESTART_TIMEOUT = 300
 
 
@@ -335,13 +341,16 @@ def _mag_armed(path: Path) -> bool:
 
 def _uploader_armed(systemctl) -> Optional[bool]:
     """True when wspr-uploader runs or stands enabled; None when systemd
-    does not know the unit (wspr-recorder never installed it)."""
+    does not know the unit (wspr-recorder never installed it).  A linked,
+    static, indirect or generated unit counts only while it runs."""
     p = _unit_props(systemctl, WSPR_UPLOADER,
                     ("LoadState", "ActiveState", "UnitFileState"))
     if p.get("LoadState", "") in ("", "not-found"):
         return None
-    return (p.get("ActiveState", "") in _RUNNING
-            or p.get("UnitFileState", "") not in _UNIT_FILE_OFF)
+    if p.get("ActiveState", "") in _RUNNING:
+        return True
+    state = p.get("UnitFileState", "")
+    return state not in _UNIT_FILE_OFF and state not in _UNIT_FILE_IF_RUNNING
 
 
 def plan_levers(clients_below, topology, *, roots: Roots = Roots(),

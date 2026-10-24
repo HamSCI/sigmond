@@ -285,21 +285,45 @@ class EachLever(Base):
         self.lever(["wspr-recorder"])
         self.assertIn(["disable", "--now", UPLOADER], self.sc.calls)
 
-    def test_wspr_uploader_other_unit_file_states_armed(self):
-        for state in ("linked", "indirect", "generated", "enabled-runtime"):
+    def test_wspr_uploader_enabled_runtime_stopped_still_armed(self):
+        self.uploader(active="inactive", state="enabled-runtime")
+        plan, res = self.lever(["wspr-recorder"])
+        self.assertIn(["disable", "--now", UPLOADER], self.sc.calls)
+        self.assertEqual(res.disabled, [UPLOADER])
+
+    # Final batch (a): linked, static, indirect and generated name no
+    # enablement of their own; such a unit is armed only while it runs,
+    # and `disable --now` never touches it while it stands inactive (on a
+    # linked unit, disable removes the link itself).
+    NOT_ENABLED = ("linked", "linked-runtime", "static", "indirect",
+                   "generated")
+
+    def test_inactive_linked_and_kin_left_alone(self):
+        for state in self.NOT_ENABLED:
             with self.subTest(state=state):
                 self.setUp()
                 self.uploader(active="inactive", state=state)
                 plan, res = self.lever(["wspr-recorder"])
+                self.assertNotIn(["disable", "--now", UPLOADER], self.sc.calls)
+                self.assertIn(UPLOADER, res.left_alone)
+                self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
+
+    def test_active_linked_and_kin_armed(self):
+        for state in self.NOT_ENABLED:
+            with self.subTest(state=state):
+                self.setUp()
+                self.uploader(active="active", state=state)
+                plan, res = self.lever(["wspr-recorder"])
                 self.assertIn(["disable", "--now", UPLOADER], self.sc.calls)
                 self.assertEqual(res.disabled, [UPLOADER])
 
-    def test_verify_names_uploader_in_other_states(self):
-        for state in ("linked", "indirect", "generated"):
+    def test_verify_names_a_running_uploader_in_other_states(self):
+        for state in self.NOT_ENABLED + ("enabled",):
             with self.subTest(state=state):
                 self.setUp()
-                self.uploader(active="inactive", state=state)
+                self.uploader(active="inactive", state="disabled")
                 plan = self.plan(["wspr-recorder"])
+                self.uploader(active="active", state=state)
                 self.assertTrue(any(UPLOADER in m for m in
                                     L.verify_levers(plan, systemctl=self.sc)))
         for state in ("disabled", "masked"):           # control
