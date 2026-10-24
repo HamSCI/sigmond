@@ -979,6 +979,38 @@ class StopFlagsFailClosed(unittest.TestCase):
         self.st.env("psk-recorder", "K3LR", "PSK_USE_HS_UPLOADER=1\n")
         self.assertEqual(self.psk().state, "upload")
 
+    def test_refused_coordination_env_fails_closed_for_psk_and_meteor(self):
+        """R3: a coordination.env the carry-over refuses (a symlink) holds
+        both stop-flag clients at fill, each reason naming that file."""
+        basic(self.st, enabled=("wspr-recorder", "psk-recorder",
+                                "meteor-scatter"))
+        self.st.env("psk-recorder", "K3LR", "PSK_USE_HS_UPLOADER=1\n")
+        self.st.env("meteor-scatter", "K3LR",
+                    "METEOR_SCATTER_USE_HS_UPLOADER=1\n")
+        coord_env = self.st.tmp / "etc/sigmond/coordination.env"
+
+        def got():
+            return {w.name: w for w in self.st.plan().clients}
+
+        # positive control: a regular coordination.env with no flag
+        coord_env.write_text("X=1\n")
+        w = got()
+        self.assertEqual(w["psk-recorder"].state, "upload")
+        self.assertEqual(w["meteor-scatter"].state, "upload")
+        coord_env.unlink()
+        real = self.st.write("elsewhere.env", "X=1\n")
+        coord_env.symlink_to(real)
+        w = got()
+        for client, flag in (("psk-recorder", "PSK_USE_HS_UPLOADER"),
+                             ("meteor-scatter",
+                              "METEOR_SCATTER_USE_HS_UPLOADER")):
+            with self.subTest(client=client):
+                self.assertEqual(w[client].state, "fill")
+                self.assertIn(str(coord_env), w[client].reason)
+                self.assertIn(flag, w[client].reason)
+                self.assertTrue(w[client].reason.startswith(
+                    "carried over at fill: cannot read"))
+
 
 def _state(clients, site="upload"):
     return ss.SinkState(
@@ -1009,6 +1041,28 @@ class ReadBack(unittest.TestCase):
         self.assertIn("carry-over: read-back: hs-uploader also reads below "
                       "upload: psk-recorder", res.lines())
         self.assertTrue(st.roots.marker.exists())
+
+    def test_read_back_off_runs_the_stale_pass(self):
+        """R1: a client the read-back finds at off sets to_off, so the
+        stale-writer pass runs even though the plan's own to_off is false;
+        the same client at fill (control) runs no stale pass."""
+        for effective, stale in (("fill", False), ("off", True)):
+            with self.subTest(effective=effective):
+                st = Station(self, "legacy")
+                os.utime(st.writer, (6000, 6000))        # every unit stale
+                fake = _state({"psk-recorder": effective,
+                               "wspr-recorder": "upload"})
+                p = st.plan()
+                self.assertFalse(p.to_off)
+                self.assertEqual(p.below, ())
+                res = co.apply(p, runner=Runner(st.log), systemctl=st.sc,
+                               read_state=lambda roots: fake)
+                self.assertTrue(res.ok, res.lines())
+                self.assertEqual(res.stale is not None, stale, res.lines())
+                want = ["psk-recorder@W1AW.service"]
+                if stale:
+                    want.append("wspr-recorder@W1AW.service")
+                self.assertEqual(st.sc.restarts(), want)
 
     def test_none_with_a_manifest_stops_before_the_marker(self):
         st = Station(self, "legacy")
