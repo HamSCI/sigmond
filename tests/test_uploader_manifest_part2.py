@@ -956,31 +956,42 @@ class StateDirOverrideStepTests(unittest.TestCase):
             types.SimpleNamespace(write=True, enable=False)),
             features=features, extra=list(extra))
 
-    def test_the_gate_step_refuses_before_any_write(self):
+    def lines(self, r):
+        return [ln for ln in r.err.splitlines()
+                if "HS_UPLOADER_STATE_DIR=/srv/hsu" in ln]
+
+    def test_a_moved_state_dir_reads_as_no_gate(self):
+        """M-3': no refusal; the step renders and lands part 1's form, runs
+        no carry-over, and says why in one line."""
         st = Part2Station(self)
-        before = tree_sum(st.tmp)
-        r = self.step(st, self.MOVED)
-        self.assertEqual(r.rc, 1, r.both)
-        self.assertEqual(tree_sum(st.tmp), before)
+        calls, counting = runner_spy()
+        with mock.patch.object(um, "run_hs_uploader", side_effect=counting):
+            r = self.step(st, self.MOVED)
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(r.render, "part1")
+        self.assertEqual(r.manifest, PART1_TEXT)
         self.assertFalse(st.roots.marker.exists())
-        refusals = [ln for ln in r.err.splitlines()
-                    if "HS_UPLOADER_STATE_DIR=/srv/hsu" in ln]
-        self.assertEqual(len(refusals), 1, r.both)
-        self.assertEqual(daemon_restarts(r), [])
+        self.assertFalse(any(a[:2] == ["sink", "set"] for a in calls), calls)
+        self.assertEqual(len(self.lines(r)), 1, r.both)
+        self.assertIn("no `gate`", self.lines(r)[0])
         # positive control: the default state directory carries over
         r = self.step(st)
         self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(r.render, "gate")
         self.assertTrue(st.roots.marker.exists())
 
-    def test_the_marker_standing_still_refuses(self):
+    def test_the_marker_standing_reads_as_no_gate_too(self):
+        """uploader.env moving it, with the marker standing: part 1's
+        render, and the no-gate step moves the marker aside (Ruling 10)."""
         st = Part2Station(self)
         self.assertEqual(self.step(st).rc, 0)
         st.write("etc/hs-uploader/uploader.env",
                  "HS_UPLOADER_STATE_DIR=/srv/hsu\n")
-        before = tree_sum(st.tmp)
         r = self.step(st)
-        self.assertEqual(r.rc, 1, r.both)
-        self.assertEqual(tree_sum(st.tmp), before)
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(r.render, "part1")
+        self.assertFalse(st.roots.marker.exists())
+        self.assertEqual(len(self.lines(r)), 1, r.both)
 
     def test_without_gate_the_step_does_not_refuse(self):
         st = Part2Station(self)

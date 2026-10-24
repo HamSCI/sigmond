@@ -794,29 +794,44 @@ class StateDirOverrideSinkTests(unittest.TestCase):
             up_cmd, "_unit_environment",
             return_value={"HS_UPLOADER_STATE_DIR": "/srv/hsu"})
 
-    def check_refused(self, st, r):
-        self.assertEqual(r.rc, 1, r.both)
-        self.assertEqual([ln for ln in r.err.splitlines()
-                          if "HS_UPLOADER_STATE_DIR=/srv/hsu" in ln].__len__(),
-                         1, r.both)
-        self.assertEqual(st.trace, [])
+    def check_part1(self, st, r, mode):
+        """M-3': part 1's write: [uploads] alone, no `sink set`, the site
+        switch as it stood, part 1's render; one loud line from smd sink
+        and one from the manifest step it runs."""
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(st.kinds("set"), [])
         self.assertEqual(st.switch("site")["state"], "upload")
-        self.assertEqual(st.mode(), "upload")
+        self.assertEqual(st.mode(), mode)
+        self.assertEqual(r.render, "part1")
+        said = [ln for ln in r.err.splitlines()
+                if "HS_UPLOADER_STATE_DIR=/srv/hsu" in ln]
+        self.assertEqual(len([ln for ln in said if "uploader:" not in ln]), 1,
+                         r.both)
+        self.assertEqual(len([ln for ln in said if "uploader:" in ln]), 1,
+                         r.both)
 
-    def test_the_gate_form_refuses_before_any_write(self):
+    def test_a_moved_state_dir_takes_part_1s_write(self):
         st = SiteStation(self)
         r = st.sink("fill", reason="rig", extra=[self.moved()])
-        self.check_refused(st, r)
+        self.check_part1(st, r, "hold")
         # positive control: the default state directory sets the switch
+        st = SiteStation(self)
         r = st.sink("fill", reason="rig")
         self.assertEqual(r.rc, 0, r.both)
         self.assertEqual(st.switch("site")["state"], "fill")
 
-    def test_a_failed_probe_with_the_marker_refuses_too(self):
+    def test_a_failed_probe_with_the_marker_takes_part_1s_write_too(self):
         st = SiteStation(self)
-        r = st.sink("off", reason="rig", features=None, extra=[self.moved()])
-        self.check_refused(st, r)
-
+        r = st.sink("off", reason="rig", features=None, extra=[
+            self.moved(), mock.patch.object(
+                um, "hs_uploader_supports_discard", return_value=True)])
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(st.kinds("set"), [])
+        self.assertEqual(st.switch("site")["state"], "upload")
+        self.assertEqual(st.mode(), "discard")
+        self.assertEqual(len([ln for ln in r.err.splitlines()
+                              if "HS_UPLOADER_STATE_DIR=/srv/hsu" in ln
+                              and "uploader:" not in ln]), 1, r.both)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1218,7 +1218,18 @@ def cmd_config_uploads(args) -> int:
     roots = up_cmd._step_roots()
     features = um.hs_uploader_features(python=roots.python)
     gate = features is not None and um.GATE_FEATURE in features
-    if features is None and sink_state.marker_stands(roots.marker):
+    moved = None
+    if gate or features is None:
+        # Task 27 M-3': a moved HS_UPLOADER_STATE_DIR reads as no `gate`:
+        # part 1's write, with one loud line naming the override.
+        moved = up_cmd._state_dir_override()
+        if moved:
+            err(moved)
+            gate = False
+            if features is not None:
+                features = features - {um.GATE_FEATURE}
+    if (not moved and features is None
+            and sink_state.marker_stands(roots.marker)):
         # Task 27 I-1: the carry-over marker stands, so hs-uploader's gate
         # reads site.toml.  Part 1's path would write [uploads] alone and
         # exit 0, and the next mirror repair would copy site.toml back over
@@ -1227,11 +1238,6 @@ def cmd_config_uploads(args) -> int:
              f'{roots.marker} stands: setting the site sink switch through '
              'hs-uploader all the same')
         gate = True
-    if gate:
-        why = up_cmd._state_dir_override()
-        if why:
-            err(why)
-            return 1
     if mode == 'discard':
         # With the gate, `off` lives in site.toml and the daemon's gate
         # enforces it; the render carries no `discard` key, so the old

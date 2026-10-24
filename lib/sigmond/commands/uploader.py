@@ -237,15 +237,15 @@ def _env_file_value(path: Path, key: str) -> Optional[str]:
 
 
 def _state_dir_override() -> Optional[str]:
-    """Task 27 M-3: one line refusing the gate path when hs-uploader's unit
+    """Task 27 M-3': one line naming the override when hs-uploader's unit
     environment or ``uploader.env`` sets ``HS_UPLOADER_STATE_DIR`` to
     anything but the default; None otherwise.
 
     sigmond reads and writes the carry-over marker at sink_state's fixed
     MARKER_PATH, while hs-uploader looks for it under its state directory.
-    Until sigmond derives the marker the same way (v3.79), a moved state
-    directory would leave the two reading different markers, so sigmond
-    refuses instead of guessing."""
+    Until sigmond derives the marker the same way (v3.79), the two would
+    read different markers, so a caller treats the probe as offering no
+    ``gate``: part 1's write and part 1's render."""
     found = []
     try:
         env = _unit_environment()
@@ -260,9 +260,10 @@ def _state_dir_override() -> Optional[str]:
         if value and os.path.normpath(value) != _DEFAULT_STATE_DIR:
             return (f"{source} sets HS_UPLOADER_STATE_DIR={value}, but "
                     f"sigmond reads the carry-over marker at "
-                    f"{sink_state.MARKER_PATH} only; it refuses the sink "
-                    "switches until it derives the marker from that "
-                    "directory (v3.79).  Nothing changed")
+                    f"{sink_state.MARKER_PATH} only; it treats hs-uploader "
+                    "as offering no `gate` (part 1's write and render) "
+                    "until it derives the marker from that directory "
+                    "(v3.79)")
     return None
 
 
@@ -851,7 +852,7 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
         why = _state_dir_override()
         if why:
             _err(why)
-            return 1
+            features = features - {um.GATE_FEATURE}
 
     # Spec §6.1, §7.2, §7.4: the carry-over, or mirror repair, late clients
     # and the lever step, or the move-aside, all before the render.  The
