@@ -637,6 +637,47 @@ class StandingLeverTests(unittest.TestCase):
         self.assertFalse(any(c[0] == "disable" for c in st.sc.calls))
 
 
+class RestoreGateTests(unittest.TestCase):
+    """Review M-1, M-5: the lever step restores wspr-uploader's links only
+    while hs-uploader reads wspr-recorder at upload: never while it reads
+    below, and never when the status names no wspr-recorder."""
+
+    def run_step(self, clients):
+        state = ss.SinkState(
+            enforced=True, site=ss.SiteState("upload", "", "", "", ""),
+            clients={c: ss.ClientState(e, e, None if e == "upload" else "client", "")
+                     for c, e in clients.items()})
+        st = Station(self)
+        called = []
+        with mock.patch.object(up_cmd.sink_state, "read_state",
+                               return_value=state), \
+             mock.patch.object(up_cmd, "_lever_systemctl", st.sc), \
+             mock.patch.object(up_cmd.sink_levers, "restore_uploader_links",
+                               side_effect=lambda **kw: called.append(kw)
+                               or up_cmd.sink_levers.RestoreResult()), \
+             mock.patch.object(up_cmd.sink_levers, "plan_levers",
+                               return_value=up_cmd.sink_levers.LeverPlan()), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            rc = up_cmd._lever_step(st.roots)
+        return rc, called
+
+    def test_wspr_recorder_at_upload_restores(self):       # positive control
+        rc, called = self.run_step({"wspr-recorder": "upload"})
+        self.assertEqual((rc, len(called)), (0, 1))
+
+    def test_wspr_recorder_below_upload_restores_nothing(self):
+        for e in ("fill", "off"):
+            with self.subTest(effective=e):
+                _, called = self.run_step({"wspr-recorder": e,
+                                           "psk-recorder": "upload"})
+                self.assertEqual(called, [])
+
+    def test_no_wspr_recorder_in_the_status_restores_nothing(self):
+        _, called = self.run_step({"psk-recorder": "upload"})
+        self.assertEqual(called, [])
+
+
 @needs_real
 class LandOrderTests(unittest.TestCase):
     """Task 16's forward note: the gate form lands sigmond.toml first, then

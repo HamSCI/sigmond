@@ -643,9 +643,12 @@ def _lever_step(roots: co.CarryRoots) -> int:
         _warn(f"lever step: {ln}")
     below = [c for c in sink_state.below_upload(state) if c != co.SITE]
     rc = 0
-    if "wspr-recorder" not in below:
+    wspr = state.clients.get("wspr-recorder")
+    if wspr is not None and wspr.effective == sink_state.UPLOAD:
         # The raise (Task 28 F2): a linked wspr-uploader gets back the
         # enablement links an earlier lever removed.  No record, no call.
+        # Only at upload: a status that names no wspr-recorder restores
+        # nothing (review M-5).
         try:
             back = sink_levers.restore_uploader_links(
                 roots=sink_levers.Roots(etc=roots.etc,

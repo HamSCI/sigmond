@@ -24,7 +24,8 @@ mag-recorder          ``[uploader] enabled = false`` (a boolean)   it reads true
 The step reads each instance's effective environment with
 ``inprocess_senders``' own readers, so the rule that decides "this
 instance sends" lives in one place.  It never raises a lever back:
-raising restores nothing (spec §8.2); step 4 retires these senders.
+raising restores nothing (spec §8.2), with one exception, the enablement
+links of a linked wspr-uploader (below); step 4 retires these senders.
 
 Order (spec §8.3): every lever file is written first; then
 ``wspr-uploader`` stops through its own ``disable --now`` (``stop`` alone
@@ -340,6 +341,7 @@ class LeverResult:
     disabled: list = field(default_factory=list)
     stopped: list = field(default_factory=list)      # stopped, not disabled
     unwanted: list = field(default_factory=list)     # enablement links removed
+    unwant_tried: bool = False     # a linked, enabled unit: links were due
     left_alone: list = field(default_factory=list)
     failures: list = field(default_factory=list)     # (file or unit, why)
 
@@ -349,10 +351,16 @@ class LeverResult:
                 "link stays, and the raise to upload puts this back)"
                 for p in self.unwanted]
         out += [f"lever: stopped and disabled {u}" for u in self.disabled]
-        out += [f"lever: stopped {u} (its unit file is a link: its "
-                "enablement links removed, the link kept)" if self.unwanted
-                else f"lever: stopped {u} (its unit file names no "
-                "enablement; left as it stands)" for u in self.stopped]
+        for u in self.stopped:
+            if self.unwanted:
+                out.append(f"lever: stopped {u} (its unit file is a link: its "
+                           "enablement links removed, the link kept)")
+            elif self.unwant_tried:
+                out.append(f"lever: stopped {u} (its unit file is a link; its "
+                           "enablement stays, see the FAILED line)")
+            else:
+                out.append(f"lever: stopped {u} (its unit file names no "
+                           "enablement; left as it stands)")
         out += [f"lever: restarted {u}" for u in self.restarted]
         out += [f"lever: left alone {x} (already lowered)" for x in self.left_alone]
         out += [f"lever: FAILED {x}: {why}" for x, why in self.failures]
@@ -401,7 +409,8 @@ def _uploader_lever(systemctl, etc: Path = Path("/etc")) -> Optional[str]:
     it runs or stands enabled; ``"unwant"`` when it stands enabled and its
     unit file is a link (Task 28 F2: remove the enablement links, reload,
     stop); ``"stop"`` when it runs and its UnitFileState names no
-    enablement (linked, static, indirect, generated; ruling C27-2); ``""``
+    enablement (linked, static, indirect, generated; ruling C27-2), or when
+    its unit file is a link and its UnitFileState reads off or blank; ``""``
     when it is quiet; None when systemd does not know the unit
     (wspr-recorder never installed it)."""
     p = _unit_props(systemctl, WSPR_UPLOADER,
@@ -413,9 +422,13 @@ def _uploader_lever(systemctl, etc: Path = Path("/etc")) -> Optional[str]:
     running = p.get("ActiveState", "") in _RUNNING
     if state in _UNIT_FILE_IF_RUNNING:
         return "stop" if running else ""
-    if state not in _UNIT_FILE_OFF and _is_linked(etc,
-                                                  p.get("FragmentPath", "")):
-        return "unwant"
+    # A link is tested before any "disable", whatever UnitFileState reads:
+    # systemd prints it blank when its lookup fails for a loaded unit (the
+    # link's target moved), and disable would still unlink it (review I-1).
+    if _is_linked(etc, p.get("FragmentPath", "")):
+        if state not in _UNIT_FILE_OFF:
+            return "unwant"
+        return "stop" if running else ""
     if running or state not in _UNIT_FILE_OFF:
         return "disable"
     return ""
@@ -540,6 +553,7 @@ def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run,
         else:
             res.changed.append(plan.mag)
     if plan.wspr_uploader and plan.wspr_uploader_unwant:
+        res.unwant_tried = True
         _unwant_uploader(plan.etc, res, systemctl)
     if plan.wspr_uploader and (plan.wspr_uploader_stop
                                or plan.wspr_uploader_unwant):
@@ -690,9 +704,10 @@ def restore_uploader_links(*, roots: Roots = Roots(),
     the lever recorded and removed from a linked wspr-uploader, then reload
     systemd.  It starts nothing; the operator's enable acts at the next
     boot, as it did.  A record line outside a ``.wants`` or ``.requires``
-    directory under ``<etc>/systemd/system``, or a link path something else
-    now holds, is named and kept in the record; the record goes once every
-    line stands restored."""
+    directory under ``<etc>/systemd/system``, a link path something else
+    now holds, or a target the unit link no longer names (the unit link
+    gone included) is named and kept in the record; the record goes once
+    every line stands restored."""
     res = RestoreResult()
     etc = roots.etc
     try:
@@ -704,8 +719,27 @@ def restore_uploader_links(*, roots: Roots = Roots(),
     if not pairs:
         return res
     unit_dir = etc / UNIT_DIR
+    # What the operator did since the fill wins (review M-5): a unit link
+    # gone (`systemctl disable`) or linked again from elsewhere gets no
+    # enablement back from an old record.
+    unit_link = unit_dir / WSPR_UPLOADER
+    try:
+        now = os.readlink(unit_link) if unit_link.is_symlink() else None
+    except OSError:
+        now = None
     kept = []
     for link, target in pairs:
+        if now is None:
+            res.failures.append((str(link), f"{unit_link} no longer stands as "
+                                 "a unit link; not restored, the record kept"))
+            kept.append((link, target))
+            continue
+        if now != target:
+            res.failures.append((str(link), f"the unit link now names {now}, "
+                                 f"not the recorded {target}; not restored, "
+                                 "the record kept"))
+            kept.append((link, target))
+            continue
         if link.name != WSPR_UPLOADER or link.parent.parent != unit_dir \
                 or not link.parent.name.endswith(_ENABLEMENT_DIRS):
             res.failures.append((str(link), "not a .wants or .requires link "

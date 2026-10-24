@@ -513,7 +513,9 @@ The lowering runs one way, with one exception.  Raising restores nothing; step 4
 senders.  The exception: `disable` on a linked unit removes the unit's own link, and the unit vanishes
 (Task 28 F2).  So for a linked wspr-uploader that someone has enabled, the lever writes each enablement
 link it removes to `/etc/sigmond/sink-levers/wspr-uploader.links`.  When wspr-recorder reads `upload`
-again, the manifest step's lever step puts back exactly those links and reloads systemd.  It starts
+again, the manifest step's lever step puts back exactly those links and reloads systemd.  It skips
+a link, keeps it in the record and says so, when the unit link has gone or names another target
+(amended, Task 28 review M-5).  It starts
 nothing; the operator's enable acts at the next boot, as before.  `smd sink status` names any sender
 still armed.
 

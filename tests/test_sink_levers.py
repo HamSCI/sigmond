@@ -838,6 +838,40 @@ class LinkedEnabledUploader(Base):
         self.assertTrue(any(UPLOADER in m for m in
                             L.verify_levers(plan, systemctl=self.sc)))
 
+    def test_linked_running_blank_state_stopped_never_disabled(self):
+        """Review I-1: systemd prints a blank UnitFileState when its lookup
+        fails for a loaded unit (the link's target moved).  A link stands,
+        so the lever stops it and never disables it."""
+        self.linked_uploader(active="active", wants=())
+        self.sc.units[UPLOADER]["UnitFileState"] = ""
+        plan, res = self.lever(["wspr-recorder"])
+        self.assertFalse(any(c[0] == "disable" for c in self.sc.calls),
+                         self.sc.calls)
+        self.assertEqual(self.sc.verbs(), [["stop", UPLOADER]])
+        self.assertTrue(self.unit_link.is_symlink())
+        self.assertEqual(res.stopped, [UPLOADER])
+        self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
+
+    def test_linked_stopped_blank_state_gets_no_call(self):
+        self.linked_uploader(active="inactive", wants=())
+        self.sc.units[UPLOADER]["UnitFileState"] = ""
+        _, res = self.lever(["wspr-recorder"])
+        self.assertEqual(self.sc.verbs(), [])
+        self.assertIn(UPLOADER, res.left_alone)
+
+    def test_failed_unwant_stop_line_never_says_left_as_it_stands(self):
+        """Review M-2: with its enablement still standing, the stop line
+        says so, and never repeats C27-2's "left as it stands"."""
+        self.linked_uploader(active="active")
+        self.record().parent.mkdir(parents=True)
+        self.record().mkdir()                       # the record fails
+        _, res = self.lever(["wspr-recorder"])
+        text = "\n".join(res.lines())
+        self.assertNotIn("left as it stands", text)
+        self.assertNotIn("the link kept", text)
+        self.assertIn(f"lever: stopped {UPLOADER} (its unit file is a link; "
+                      "its enablement stays, see the FAILED line)", text)
+
     def test_enabled_but_no_link_found_is_named(self):
         """A link that reads enabled through a link this lever does not
         look in (say, /run) is never disabled and is named."""
@@ -894,15 +928,54 @@ class LinkedEnabledUploader(Base):
     def test_restore_refuses_a_record_line_outside_the_enablement_dirs(self):
         self.linked_uploader(wants=())
         self.record().parent.mkdir(parents=True)
-        bad = self.unit_dir / UPLOADER            # the unit's own link path
-        self.unit_link.unlink()
-        self.record().write_text(f"{bad}\t/tmp/evil.service\n"
+        # Both lines name the unit link's own target, so only the path
+        # check can refuse them.
+        bad = self.unit_dir / "multi-user.target" / UPLOADER   # no .wants
+        self.record().write_text(f"{bad}\t{self.unit_src}\n"
                                  f"{self.tmp}/x.wants/{UPLOADER}\t{self.unit_src}\n")
         res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
         self.assertEqual(res.restored, [])
         self.assertEqual(len(res.failures), 2, res.failures)
+        self.assertTrue(all("not a .wants or .requires link" in why
+                            for _, why in res.failures), res.failures)
         self.assertFalse(os.path.lexists(bad))
+        self.assertFalse(os.path.lexists(self.tmp / "x.wants"))
         self.assertTrue(self.record().exists())      # kept for the operator
+        self.assertEqual(self.sc.verbs(), [])
+
+    def test_restore_skips_when_the_unit_link_is_gone(self):
+        """Review M-5: an operator who ran `systemctl disable` after the
+        fill removed the unit link; the raise puts nothing back."""
+        links = self.linked_uploader()
+        self.lever(["wspr-recorder"])
+        self.unit_link.unlink()
+        self.sc.calls.clear()
+        res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual(res.restored, [])
+        self.assertTrue(any("no longer stands as a unit link" in why
+                            for _, why in res.failures),
+                        res.failures)
+        self.assertFalse(any(os.path.lexists(p) for p in links))
+        self.assertTrue(self.record().exists())
+        self.assertEqual(self.sc.verbs(), [])
+
+    def test_restore_skips_a_target_the_unit_link_no_longer_names(self):
+        """Review M-5: the checkout moved and the unit was linked again from
+        there; the recorded target is stale."""
+        links = self.linked_uploader()
+        self.lever(["wspr-recorder"])
+        moved = self.tmp / "opt2" / UPLOADER
+        moved.parent.mkdir()
+        moved.write_text("[Service]\nExecStart=/bin/true\n")
+        self.unit_link.unlink()
+        self.unit_link.symlink_to(moved)
+        self.sc.calls.clear()
+        res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual(res.restored, [])
+        self.assertEqual(len(res.failures), 1, res.failures)
+        self.assertIn(str(moved), res.failures[0][1])
+        self.assertFalse(os.path.lexists(links[0]))
+        self.assertTrue(self.record().exists())
         self.assertEqual(self.sc.verbs(), [])
 
     def test_restore_with_no_record_does_nothing(self):

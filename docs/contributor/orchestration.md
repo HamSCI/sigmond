@@ -311,13 +311,21 @@ only the daemon.  So for each client whose effective state reads below
 `PSK_DELIVERY_PIPELINES=server-raw`, `METEOR_SCATTER_DELIVERY_MODE=off`,
 `WSPR_USE_HS_UPLOADER=0` in each instance's env file, `systemctl disable
 --now wspr-uploader`, and `[uploader] enabled = false` in the mag-recorder
-config.  Each env write goes through `safe_write.rewrite_owned`: an
+config.  A wspr-uploader whose unit file is a link (wspr-recorder's
+installer runs `systemctl link`) never gets `disable`, which would remove
+the unit's own link.  When it runs with no enablement, it gets `stop`
+alone.  When someone has also enabled it, sigmond records its `.wants` and
+`.requires` links in `/etc/sigmond/sink-levers/wspr-uploader.links`,
+removes only those, reloads systemd and stops it.  Each env write goes through `safe_write.rewrite_owned`: an
 existing file keeps its owner and mode, and a symlink, a hard link or a
 file owned by anyone but root or the directory's owner refuses.  Each
 touched recorder instance then restarts alone, by `systemctl restart
 <unit>`, one at a time.  The step never restarts radiod; it reads radiod's
 start time before the first restart and after the last, and fails loudly
-if it moved.  It never raises a lever back.
+if it moved.  It raises one lever back, and only one.  When hs-uploader
+reads wspr-recorder at `upload` again, the step restores the recorded
+enablement links, provided the unit link still names the recorded target.
+It starts nothing.  Every other lever stays lowered.
 
 **In-process senders.**  psk-recorder and meteor-scatter can each post to
 pskreporter from their own process.  The renderer reads each instance's
