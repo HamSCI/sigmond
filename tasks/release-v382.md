@@ -1,0 +1,13 @@
+# v3.82 — what this release carries
+
+**Status:** collecting, opened 2026-10-24 while v3.81 ran on the rig.  Michael
+ruled that rows 1 to 3 go in this build; none of them may slip silently to a
+later one.
+
+| # | Item | Repos | Status |
+|---|---|---|---|
+| 1 | **Bring-up pulls every component.**  `bringup.py` calls `smd install --components X`, which runs with `pull=True` (`bin/smd`, since 2026-05-24), so a fresh install fetches and checks out each component's origin/main instead of the image's manifest pin.  On the v3.80 update rig, a fresh v3.78 install sat at hf-timestd e5009c2 against the manifest's 55c9670, with psk-recorder and wspr-recorder also off their pins.  It breaks the rule that bring-up never pulls.  Fix: a `--no-pull` for `smd install`, passed by bring-up.  The update rig warns on this drift after install until then (appliance 9fc247c).  Evidence: `.superpowers/sdd/plan-sink-2b-part2/phase-g-rootcause.md` | sigmond | ruled 2026-10-24 (Michael): fix in v3.82, not v3.81 |
+| 2 | **Colour on the console status panel** (Chris, Jenny Jump report; v3.74 row 4): addresses, logins and the default password, after his mockup.  The console prints escape codes from the panel file as they stand, and they take no columns, so the fit-on-screen limit holds.  Colour adds emphasis and never carries meaning alone.  The panel tests must strip the codes before they compare text | appliance | ruled 2026-10-24 (Michael): include in v3.82 |
+| 3 | **A console menu after login** (Chris; v3.74 row 5), instead of a bare shell.  The root password stays in front of it, because anyone at the machine can reach the console and every item acts as root.  Offer `sigmond-check`, `sigmond-setup --reconfigure`, remote access off and on, a gateway and DNS test over IPv4 and IPv6, and a shell.  Console only; SSH keeps the plain shell.  Needs a short design pass first | appliance, sigmond | ruled 2026-10-24 (Michael): include in v3.82 |
+| 4 | psk-recorder `decoder_kind = "jt9"` never ran under systemd: `ProtectSystem=strict` leaves /tmp read-only and Qt's QSharedMemory cannot make its key file (Rob, bus 2026-10-24 14:16Z).  Fix: `PrivateTmp=true` in `psk-recorder@.service`.  No station uses jt9 today | psk-recorder | open |
+| 5 | After an operator disables or re-links wspr-uploader following a fill, every manifest step at upload prints FAILED and exits 1 until the links record is removed; the message names no way out (review N-1, Task 28 fix round) | sigmond | parked |
