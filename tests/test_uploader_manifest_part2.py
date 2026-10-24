@@ -168,6 +168,12 @@ class Part2Station(Station):
             mock.patch.object(up_cmd, "_daemon_store_path",
                               return_value=roots.store),
             mock.patch.object(up_cmd, "_run", side_effect=fake_run),
+            # the daemon's environment (Task 27 M-3): the unit's is empty,
+            # and uploader.env sits in the scratch tree, absent until a
+            # test writes it
+            mock.patch.object(up_cmd, "_unit_environment", return_value={}),
+            mock.patch.object(up_cmd, "_UPLOADER_ENV",
+                              roots.manifest.parent / "uploader.env"),
         ]
         if features is not REAL:
             patches.append(mock.patch.object(um, "hs_uploader_features",
@@ -897,6 +903,90 @@ class PlanMirrorTests(unittest.TestCase):
         self.assertEqual(p.action, "broken")
         self.assertEqual(p.files, ())
         self.assertTrue(any(str(self.SITE) in ln for ln in p.lines()))
+
+
+# ---------------------------------------------------------------------------
+# Task 27 M-3: a moved state directory refuses the gate path
+# ---------------------------------------------------------------------------
+
+class StateDirOverrideUnitTests(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.env_file = Path(td.name) / "uploader.env"
+
+    def why(self, unit_env=None, *, unit_exc=None):
+        kw = ({"side_effect": unit_exc} if unit_exc is not None
+              else {"return_value": unit_env or {}})
+        with mock.patch.object(up_cmd, "_unit_environment", **kw), \
+                mock.patch.object(up_cmd, "_UPLOADER_ENV", self.env_file):
+            return up_cmd._state_dir_override()
+
+    def test_nothing_set_passes(self):
+        self.assertIsNone(self.why())
+
+    def test_the_default_spelled_out_passes(self):
+        self.assertIsNone(self.why({"HS_UPLOADER_STATE_DIR":
+                                    "/var/lib/hs-uploader/"}))
+        self.env_file.write_text('HS_UPLOADER_STATE_DIR="/var/lib/hs-uploader"\n')
+        self.assertIsNone(self.why())
+
+    def test_the_unit_environment_moving_it_refuses(self):
+        why = self.why({"HS_UPLOADER_STATE_DIR": "/srv/hsu"})
+        self.assertIn("HS_UPLOADER_STATE_DIR=/srv/hsu", why)
+        self.assertIn("hs-uploader.service", why)
+        self.assertEqual(len(why.splitlines()), 1)
+
+    def test_uploader_env_moving_it_refuses_even_when_systemctl_fails(self):
+        self.env_file.write_text("# moved\nexport HS_UPLOADER_STATE_DIR='/srv/hsu'\n")
+        why = self.why(unit_exc=OSError("no systemd"))
+        self.assertIn("HS_UPLOADER_STATE_DIR=/srv/hsu", why)
+        self.assertIn(str(self.env_file), why)
+
+
+@needs_real
+class StateDirOverrideStepTests(unittest.TestCase):
+    MOVED = mock.patch.object(up_cmd, "_unit_environment",
+                              return_value={"HS_UPLOADER_STATE_DIR": "/srv/hsu"})
+
+    def step(self, st, *extra, features=REAL):
+        return st.run(lambda: up_cmd.cmd_uploader_manifest(
+            types.SimpleNamespace(write=True, enable=False)),
+            features=features, extra=list(extra))
+
+    def test_the_gate_step_refuses_before_any_write(self):
+        st = Part2Station(self)
+        before = tree_sum(st.tmp)
+        r = self.step(st, self.MOVED)
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertEqual(tree_sum(st.tmp), before)
+        self.assertFalse(st.roots.marker.exists())
+        refusals = [ln for ln in r.err.splitlines()
+                    if "HS_UPLOADER_STATE_DIR=/srv/hsu" in ln]
+        self.assertEqual(len(refusals), 1, r.both)
+        self.assertEqual(daemon_restarts(r), [])
+        # positive control: the default state directory carries over
+        r = self.step(st)
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertTrue(st.roots.marker.exists())
+
+    def test_the_marker_standing_still_refuses(self):
+        st = Part2Station(self)
+        self.assertEqual(self.step(st).rc, 0)
+        st.write("etc/hs-uploader/uploader.env",
+                 "HS_UPLOADER_STATE_DIR=/srv/hsu\n")
+        before = tree_sum(st.tmp)
+        r = self.step(st)
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertEqual(tree_sum(st.tmp), before)
+
+    def test_without_gate_the_step_does_not_refuse(self):
+        st = Part2Station(self)
+        r = self.step(st, self.MOVED, features=NO_GATE)
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertNotIn("HS_UPLOADER_STATE_DIR", r.both)
 
 
 if __name__ == "__main__":

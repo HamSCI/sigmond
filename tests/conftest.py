@@ -146,3 +146,15 @@ def _no_elevation(monkeypatch):
                     "test; the suite never elevates.")
             return _real(file, *a, **kw)
         monkeypatch.setattr(os, name, guarded)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_uploader_environment(monkeypatch):
+    """The gate path asks hs-uploader.service's environment and reads
+    /etc/hs-uploader/uploader.env for a moved HS_UPLOADER_STATE_DIR (Task
+    27 M-3).  Keep every test off the host's: the unit reads empty and the
+    file stands absent.  A test of that check patches both itself."""
+    from sigmond.commands import uploader as up_cmd
+    monkeypatch.setattr(up_cmd, "_unit_environment", lambda: {})
+    monkeypatch.setattr(up_cmd, "_UPLOADER_ENV",
+                        Path("/nonexistent/sigmond-test/uploader.env"))

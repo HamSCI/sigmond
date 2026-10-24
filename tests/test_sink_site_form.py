@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sigmond import sink_state as ss
 from sigmond import uploader_manifest as um
 from sigmond.commands import config as cfg
+from sigmond.commands import uploader as up_cmd
 from sigmond.commands import sink
 from sigmond.coordination import load_coordination
 
@@ -779,6 +780,42 @@ class FailedProbeWithTheMarkerTests(unittest.TestCase):
         # the command itself sets nothing; only the carry-over, under the
         # manifest step's lock, writes the switches
         self.assertLess(st.first(("lock",)), st.first(("set",)))
+
+
+# ---------------------------------------------------------------------------
+# Task 27 M-3: a moved state directory refuses `smd sink`
+# ---------------------------------------------------------------------------
+
+@needs_real
+class StateDirOverrideSinkTests(unittest.TestCase):
+
+    def moved(self):
+        return mock.patch.object(
+            up_cmd, "_unit_environment",
+            return_value={"HS_UPLOADER_STATE_DIR": "/srv/hsu"})
+
+    def check_refused(self, st, r):
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertEqual([ln for ln in r.err.splitlines()
+                          if "HS_UPLOADER_STATE_DIR=/srv/hsu" in ln].__len__(),
+                         1, r.both)
+        self.assertEqual(st.trace, [])
+        self.assertEqual(st.switch("site")["state"], "upload")
+        self.assertEqual(st.mode(), "upload")
+
+    def test_the_gate_form_refuses_before_any_write(self):
+        st = SiteStation(self)
+        r = st.sink("fill", reason="rig", extra=[self.moved()])
+        self.check_refused(st, r)
+        # positive control: the default state directory sets the switch
+        r = st.sink("fill", reason="rig")
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(st.switch("site")["state"], "fill")
+
+    def test_a_failed_probe_with_the_marker_refuses_too(self):
+        st = SiteStation(self)
+        r = st.sink("off", reason="rig", features=None, extra=[self.moved()])
+        self.check_refused(st, r)
 
 
 if __name__ == "__main__":

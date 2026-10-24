@@ -1227,6 +1227,11 @@ def cmd_config_uploads(args) -> int:
              f'{roots.marker} stands: setting the site sink switch through '
              'hs-uploader all the same')
         gate = True
+    if gate:
+        why = up_cmd._state_dir_override()
+        if why:
+            err(why)
+            return 1
     if mode == 'discard':
         # With the gate, `off` lives in site.toml and the daemon's gate
         # enforces it; the render carries no `discard` key, so the old

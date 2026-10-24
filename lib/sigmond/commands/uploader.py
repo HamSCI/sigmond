@@ -206,6 +206,66 @@ def _daemon_store_path() -> Path:
     return Path(base or _DEFAULT_STATE_DIR) / "watermarks.db"
 
 
+# The daemon's own environment file (hs-uploader.service EnvironmentFile=-).
+_UPLOADER_ENV = Path("/etc/hs-uploader/uploader.env")
+
+
+def _unit_environment() -> dict:
+    """hs-uploader.service's effective environment; raises OSError."""
+    from ..inprocess_senders import _systemctl_show
+    return _systemctl_show(SERVICE)
+
+
+def _env_file_value(path: Path, key: str) -> Optional[str]:
+    """``key``'s last value in a systemd environment file, or None."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    value = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        k, sep, v = line.partition("=")
+        if sep and k.strip() == key:
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            value = v
+    return value
+
+
+def _state_dir_override() -> Optional[str]:
+    """Task 27 M-3: one line refusing the gate path when hs-uploader's unit
+    environment or ``uploader.env`` sets ``HS_UPLOADER_STATE_DIR`` to
+    anything but the default; None otherwise.
+
+    sigmond reads and writes the carry-over marker at sink_state's fixed
+    MARKER_PATH, while hs-uploader looks for it under its state directory.
+    Until sigmond derives the marker the same way (v3.79), a moved state
+    directory would leave the two reading different markers, so sigmond
+    refuses instead of guessing."""
+    found = []
+    try:
+        env = _unit_environment()
+    except OSError:
+        env = {}
+    found.append((f"{SERVICE}'s environment",
+                  env.get("HS_UPLOADER_STATE_DIR")))
+    found.append((str(_UPLOADER_ENV),
+                  _env_file_value(_UPLOADER_ENV, "HS_UPLOADER_STATE_DIR")))
+    for source, value in found:
+        value = (value or "").strip()
+        if value and os.path.normpath(value) != _DEFAULT_STATE_DIR:
+            return (f"{source} sets HS_UPLOADER_STATE_DIR={value}, but "
+                    f"sigmond reads the carry-over marker at "
+                    f"{sink_state.MARKER_PATH} only; it refuses the sink "
+                    "switches until it derives the marker from that "
+                    "directory (v3.79).  Nothing changed")
+    return None
+
+
 def _run_in_group(cmd: list, *, cwd: str, timeout: float
                   ) -> subprocess.CompletedProcess:
     """Run ``cmd`` in a session of its own and wait up to ``timeout``.
@@ -773,6 +833,11 @@ def _manifest_step(*, write: bool, enable: bool, daemon_ready) -> int:
     else:
         print("uploader: hs-uploader features: "
               + (" ".join(sorted(features)) or "none"))
+    if features is not None and um.GATE_FEATURE in features:
+        why = _state_dir_override()
+        if why:
+            _err(why)
+            return 1
 
     # Spec §6.1, §7.2, §7.4: the carry-over, or mirror repair, late clients
     # and the lever step, or the move-aside, all before the render.  The
