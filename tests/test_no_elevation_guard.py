@@ -64,16 +64,16 @@ class NoElevationTests(unittest.TestCase):
         execs = []
         with mock.patch("os.geteuid", return_value=1000), \
                 mock.patch("os.execvp", side_effect=lambda *a: execs.append(a)), \
-                mock.patch("shutil.which", return_value="/usr/bin/sudo"):
+                mock.patch("shutil.which", return_value="/nonexistent/sudo"):
             with self.assertRaises(SystemExit) as cm:
                 ns["_need_root"]("sink fill")
         self.assertEqual(cm.exception.code, 1)
         self.assertEqual(execs, [])
 
     def test_an_absolute_sudo_through_subprocess_is_refused(self):
-        for argv, kw in ((["/usr/bin/sudo", "-n", "true"], {}),
-                         ("/usr/bin/sudo -n true", {"shell": True}),
-                         (["true"], {"executable": "/usr/bin/sudo"}),
+        for argv, kw in ((["/nonexistent/sudo", "-n", "true"], {}),
+                         ("/nonexistent/sudo -n true", {"shell": True}),
+                         (["true"], {"executable": "/nonexistent/sudo"}),
                          (["/nonexistent/doas", "true"], {}),
                          (["/nonexistent/pkexec", "true"], {}),
                          (["/nonexistent/run0", "true"], {})):
@@ -82,16 +82,16 @@ class NoElevationTests(unittest.TestCase):
                     subprocess.run(argv, capture_output=True, timeout=30, **kw)
                 self.assertIn("never elevates", str(cm.exception))
         with self.assertRaises(AssertionError):
-            subprocess.Popen(["/usr/bin/sudo", "-n", "true"])
+            subprocess.Popen(["/nonexistent/sudo", "-n", "true"])
 
     def test_spawn_and_system_refuse_sudo(self):
         calls = (
-            lambda: os.system("/usr/bin/sudo -n true"),
-            lambda: os.posix_spawn("/usr/bin/sudo", ["sudo", "-n", "true"],
+            lambda: os.system("/nonexistent/sudo -n true"),
+            lambda: os.posix_spawn("/nonexistent/sudo", ["sudo", "-n", "true"],
                                    dict(os.environ)),
             lambda: os.posix_spawnp("sudo", ["sudo", "-n", "true"],
                                     dict(os.environ)),
-            lambda: os.spawnv(os.P_WAIT, "/usr/bin/sudo",
+            lambda: os.spawnv(os.P_WAIT, "/nonexistent/sudo",
                               ["sudo", "-n", "true"]),
             lambda: os.spawnlp(os.P_WAIT, "sudo", "sudo", "-n", "true"),
         )
