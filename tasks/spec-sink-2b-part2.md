@@ -497,7 +497,7 @@ every manifest step.
 | psk-recorder direct, or `server-merge` (rows marked for wd30's forwarder) | `PSK_DELIVERY_PIPELINES=server-raw` | the instance's effective delivery, by `inprocess_senders._psk_recorder_sends` and the legacy `PSK_DELIVERY_MODE`, reads anything but `server-raw` alone | `/etc/psk-recorder/env/<id>.env`; reader `psk-recorder/src/psk_recorder/core/recorder.py:206` |
 | meteor-scatter direct or `deposit` | `METEOR_SCATTER_DELIVERY_MODE=off` | the mode reads `direct` (or unset) or `deposit` | `/etc/meteor-scatter/env/<id>.env`; reader `meteor-scatter/src/meteor_scatter/core/recorder.py:627-645` |
 | wspr-recorder's in-process shim | `WSPR_USE_HS_UPLOADER=0` | the flag reads true | `/etc/wspr-recorder/env/<id>.env`; reader `wspr-recorder/wspr_recorder/hs_uploader_shim.py:243-259` |
-| `wspr-uploader.service` | `systemctl disable --now wspr-uploader` | the unit runs or stands enabled | `wspr-recorder/systemd/wspr-uploader.service` |
+| `wspr-uploader.service` | `systemctl disable --now wspr-uploader`; a running linked, static, indirect or generated unit gets `stop` alone (C27-2); a linked unit that stands enabled loses only its `.wants` and `.requires` links, then `daemon-reload` and `stop` (amended, Task 28 F2) | the unit runs or stands enabled | `wspr-recorder/systemd/wspr-uploader.service` |
 | mag-recorder's fallback | `[uploader] enabled = false`, a TOML boolean | it reads true or stays absent | `/etc/mag-recorder/mag-recorder-config.toml`; reader `mag-recorder/src/mag_recorder/cli.py:436`; runs only when hs-uploader stands inactive (`mag-recorder/systemd/mag-recorder-upload.service:38`) |
 
 The env writes go through `set_env_flag` (`sigmond/lib/sigmond/upload.py`), which now writes through
@@ -509,8 +509,13 @@ The mag write needs a boolean-aware setter.  `_set_toml_field` (`sigmond/lib/sig
 writes `"false"`, a string that mag-recorder reads as true.  The new setter writes `false` bare and
 re-reads the file with `tomllib` to confirm a boolean.
 
-The lowering runs one way.  Raising restores nothing; step 4 retires these senders.  `smd sink
-status` names any sender still armed.
+The lowering runs one way, with one exception.  Raising restores nothing; step 4 retires these
+senders.  The exception: `disable` on a linked unit removes the unit's own link, and the unit vanishes
+(Task 28 F2).  So for a linked wspr-uploader that someone has enabled, the lever writes each enablement
+link it removes to `/etc/sigmond/sink-levers/wspr-uploader.links`.  When wspr-recorder reads `upload`
+again, the manifest step's lever step puts back exactly those links and reloads systemd.  It starts
+nothing; the operator's enable acts at the next boot, as before.  `smd sink status` names any sender
+still armed.
 
 ### 8.3 Restarts
 
@@ -518,7 +523,8 @@ status` names any sender still armed.
   lever step never calls `cmd_restart`, never restarts a client by name, and never touches radiod.
   sigmond c478b40 already keeps `smd restart <client>` off radiod; the lever step still restarts single
   units, since only the touched instance needs it.
-- `wspr-uploader.service` stops through its own `disable --now`.  The mag fallback runs from a timer
+- `wspr-uploader.service` stops through its own `disable --now`, or through `stop` when §8.2 says a
+  link stands at its unit file.  The mag fallback runs from a timer
   and reads its config each run, so it needs no restart.
 - The stale-writer restarts of §4.3 use the same path, and skip an instance the lever step already
   restarted.

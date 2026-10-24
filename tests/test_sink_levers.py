@@ -91,8 +91,32 @@ class FakeSystemctl:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         if verb == "disable" and args[1] == "--now":
             u = self.units.setdefault(args[2], {})
+            unit_dir = u.get("unit_dir")
+            if unit_dir is not None:
+                # As systemd does (Task 28 F2): disable removes every link
+                # to the unit file, the unit's own link included, so the
+                # unit vanishes and the stop half exits 5.
+                for link in Path(unit_dir).rglob(args[2]):
+                    if link.is_symlink():
+                        link.unlink()
+                u.update(LoadState="not-found", UnitFileState="",
+                         ActiveState="inactive")
+                return subprocess.CompletedProcess(cmd, 5, "", "not loaded")
             u["ActiveState"] = "inactive"
             u["UnitFileState"] = "disabled"
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if verb == "daemon-reload":
+            # A unit with a scratch unit dir re-reads its enablement from
+            # the links there, as systemd's reload does.
+            for u in self.units.values():
+                unit_dir = u.get("unit_dir")
+                if unit_dir is None:
+                    continue
+                name = Path(u["FragmentPath"]).name
+                wanted = [p for pat in ("*.wants", "*.requires")
+                          for p in Path(unit_dir).glob(f"{pat}/{name}")
+                          if p.is_symlink()]
+                u["UnitFileState"] = "enabled" if wanted else "linked"
             return subprocess.CompletedProcess(cmd, 0, "", "")
         raise AssertionError(f"unexpected systemctl verb {args}")
 
@@ -188,6 +212,38 @@ class Base(unittest.TestCase):
     def uploader(self, active="active", state="enabled"):
         self.units[UPLOADER] = {"LoadState": "loaded", "ActiveState": active,
                                 "UnitFileState": state}
+
+    def linked_uploader(self, active="active", wants=("multi-user.target",),
+                        requires=(), fragment_outside=False):
+        """wspr-uploader as wspr-recorder's installer leaves it
+        (``systemctl link``), then ``systemctl enable``d: the unit's own
+        link in the scratch /etc/systemd/system, plus one enablement link
+        per target in ``wants`` and ``requires``.  systemd 257 reports
+        FragmentPath as the link's own path; ``fragment_outside`` reports
+        the checkout's copy instead, with no link at /etc, as an older
+        systemd may."""
+        self.unit_dir = self.etc / "systemd" / "system"
+        self.unit_dir.mkdir(parents=True, exist_ok=True)
+        self.unit_src = self.tmp / "opt" / UPLOADER
+        self.unit_src.parent.mkdir(parents=True, exist_ok=True)
+        self.unit_src.write_text("[Service]\nExecStart=/bin/true\n")
+        self.unit_link = self.unit_dir / UPLOADER
+        if not fragment_outside:
+            self.unit_link.symlink_to(self.unit_src)
+        links = []
+        for kind, targets in (("wants", wants), ("requires", requires)):
+            for t in targets:
+                d = self.unit_dir / f"{t}.{kind}"
+                d.mkdir(exist_ok=True)
+                (d / UPLOADER).symlink_to(self.unit_src)
+                links.append(d / UPLOADER)
+        self.units[UPLOADER] = {
+            "LoadState": "loaded", "ActiveState": active,
+            "UnitFileState": "enabled" if links else "linked",
+            "FragmentPath": str(self.unit_src if fragment_outside
+                                else self.unit_link),
+            "unit_dir": str(self.unit_dir)}
+        return links
 
     def plan(self, below):
         return L.plan_levers(below, self.topo, roots=self.roots,
@@ -358,6 +414,15 @@ class EachLever(Base):
                 self.uploader(active="inactive", state=state)
                 plan = self.plan(["wspr-recorder"])
                 self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
+
+    def test_inactive_linked_with_unit_link_gets_no_call(self):
+        """B4 and ND today: linked by the installer, never enabled."""
+        self.linked_uploader(active="inactive", wants=())
+        plan, res = self.lever(["wspr-recorder"])
+        self.assertEqual(self.sc.verbs(), [])
+        self.assertIn(UPLOADER, res.left_alone)
+        self.assertTrue(self.unit_link.is_symlink())
+        self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
 
     def test_wspr_uploader_already_off_left_alone(self):
         self.uploader(active="inactive", state="disabled")
@@ -690,6 +755,159 @@ class Radiod(Base):
         self.assertEqual(len(self.sc.calls), 3)        # show, restart, show
 
 
+class LinkedEnabledUploader(Base):
+    """Task 28 F2: wspr-uploader linked by its installer and later enabled.
+    `disable` would remove the unit's own link and lose the unit, so the
+    lever removes only the enablement links, reloads systemd and stops the
+    unit, and records each link it removed; the raise to upload puts back
+    exactly those."""
+
+    def record(self):
+        return self.etc / L.UPLOADER_LINKS_RECORD
+
+    def test_running_linked_enabled_never_disabled(self):
+        links = self.linked_uploader(active="active")
+        plan, res = self.lever(["wspr-recorder"])
+        self.assertFalse(any(c[0] == "disable" for c in self.sc.calls),
+                         self.sc.calls)
+        self.assertEqual(self.sc.verbs(), [["daemon-reload"],
+                                           ["stop", UPLOADER]])
+        self.assertTrue(self.unit_link.is_symlink())          # the unit stays
+        self.assertFalse(any(os.path.lexists(p) for p in links))
+        self.assertEqual(res.unwanted, links)
+        self.assertEqual(res.stopped, [UPLOADER])
+        self.assertEqual(res.disabled, [])
+        self.assertEqual(res.failures, [])
+        u = self.sc.units[UPLOADER]
+        self.assertEqual((u["LoadState"], u["UnitFileState"], u["ActiveState"]),
+                         ("loaded", "linked", "inactive"))
+        self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
+        self.assertIn(f"lever: removed {links[0]}", "\n".join(res.lines()))
+        self.assertEqual(self.record().read_text(),
+                         f"{links[0]}\t{self.unit_src}\n")
+
+    def test_stopped_linked_enabled_loses_its_enablement(self):
+        links = self.linked_uploader(active="inactive")
+        plan, res = self.lever(["wspr-recorder"])
+        self.assertFalse(any(c[0] == "disable" for c in self.sc.calls))
+        self.assertFalse(any(os.path.lexists(p) for p in links))
+        self.assertTrue(self.unit_link.is_symlink())
+        self.assertEqual(self.sc.units[UPLOADER]["UnitFileState"], "linked")
+        self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
+
+    def test_wants_and_requires_go_other_units_links_stay(self):
+        links = self.linked_uploader(wants=("multi-user.target",),
+                                     requires=("hs-uploader.target",))
+        other = self.unit_dir / "multi-user.target.wants" / "radiod@rx888.service"
+        other.symlink_to("/nonexistent/radiod@.service")
+        _, res = self.lever(["wspr-recorder"])
+        self.assertEqual(sorted(res.unwanted), sorted(links))
+        self.assertFalse(any(os.path.lexists(p) for p in links))
+        self.assertTrue(other.is_symlink())
+
+    def test_fragment_outside_the_unit_dirs_counts_as_linked(self):
+        links = self.linked_uploader(fragment_outside=True)
+        _, res = self.lever(["wspr-recorder"])
+        self.assertFalse(any(c[0] == "disable" for c in self.sc.calls))
+        self.assertEqual(res.unwanted, links)
+
+    def test_plain_enabled_unit_keeps_disable_now(self):
+        """Control: a unit file in the unit dirs, not a link."""
+        self.uploader(active="active", state="enabled")
+        self.units[UPLOADER]["FragmentPath"] = "/usr/lib/systemd/system/" + UPLOADER
+        _, res = self.lever(["wspr-recorder"])
+        self.assertIn(["disable", "--now", UPLOADER], self.sc.calls)
+        self.assertEqual(res.unwanted, [])
+
+    def test_no_record_no_removal(self):
+        """A record that cannot be written removes nothing: the raise could
+        never put the links back.  The unit still stops; the fill fails
+        loudly."""
+        links = self.linked_uploader(active="active")
+        self.record().parent.mkdir(parents=True)
+        self.record().mkdir()                       # not a file
+        plan, res = self.lever(["wspr-recorder"])
+        self.assertTrue(all(p.is_symlink() for p in links))
+        self.assertFalse(any(c[0] == "disable" for c in self.sc.calls))
+        self.assertIn(["stop", UPLOADER], self.sc.calls)
+        self.assertTrue(any(x == UPLOADER and "record" in why
+                            for x, why in res.failures), res.failures)
+        self.assertTrue(any(UPLOADER in m for m in
+                            L.verify_levers(plan, systemctl=self.sc)))
+
+    def test_enabled_but_no_link_found_is_named(self):
+        """A link that reads enabled through a link this lever does not
+        look in (say, /run) is never disabled and is named."""
+        self.linked_uploader(active="active", wants=())
+        self.sc.units[UPLOADER]["UnitFileState"] = "enabled-runtime"
+        _, res = self.lever(["wspr-recorder"])
+        self.assertFalse(any(c[0] == "disable" for c in self.sc.calls))
+        self.assertTrue(self.unit_link.is_symlink())
+        self.assertTrue(any(x == UPLOADER for x, _ in res.failures),
+                        res.failures)
+
+    def test_second_run_touches_nothing(self):
+        self.linked_uploader(active="active")
+        self.lever(["wspr-recorder"])
+        n = len(self.sc.verbs())
+        _, res = self.lever(["wspr-recorder"])
+        self.assertEqual(len(self.sc.verbs()), n)
+        self.assertIn(UPLOADER, res.left_alone)
+
+    def test_restore_puts_back_exactly_what_was_removed(self):
+        links = self.linked_uploader(wants=("multi-user.target",),
+                                     requires=("hs-uploader.target",))
+        self.lever(["wspr-recorder"])
+        self.sc.calls.clear()
+        res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual(sorted(res.restored), sorted(links))
+        for p in links:
+            self.assertTrue(p.is_symlink())
+            self.assertEqual(Path(os.readlink(p)), self.unit_src)
+        self.assertEqual(self.sc.verbs(), [["daemon-reload"]])
+        self.assertEqual(self.sc.units[UPLOADER]["UnitFileState"], "enabled")
+        self.assertFalse(os.path.lexists(self.record()))
+        self.assertEqual(res.failures, [])
+        self.assertIn(f"lever: restored {links[0]}", "\n".join(res.lines()))
+        # it starts nothing: the operator's enable acts at the next boot
+        self.assertEqual(self.sc.units[UPLOADER]["ActiveState"], "inactive")
+        self.sc.calls.clear()
+        again = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual((again.restored, again.failures), ([], []))
+        self.assertEqual(self.sc.verbs(), [])
+
+    def test_restore_after_two_fills_puts_back_both(self):
+        first = self.linked_uploader(wants=("multi-user.target",))
+        self.lever(["wspr-recorder"])
+        later = self.unit_dir / "timers.target.wants" / UPLOADER
+        later.parent.mkdir()
+        later.symlink_to(self.unit_src)                 # enabled again
+        self.sc.units[UPLOADER]["UnitFileState"] = "enabled"
+        self.lever(["wspr-recorder"])
+        self.assertFalse(os.path.lexists(later))
+        res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual(sorted(res.restored), sorted(first + [later]))
+
+    def test_restore_refuses_a_record_line_outside_the_enablement_dirs(self):
+        self.linked_uploader(wants=())
+        self.record().parent.mkdir(parents=True)
+        bad = self.unit_dir / UPLOADER            # the unit's own link path
+        self.unit_link.unlink()
+        self.record().write_text(f"{bad}\t/tmp/evil.service\n"
+                                 f"{self.tmp}/x.wants/{UPLOADER}\t{self.unit_src}\n")
+        res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual(res.restored, [])
+        self.assertEqual(len(res.failures), 2, res.failures)
+        self.assertFalse(os.path.lexists(bad))
+        self.assertTrue(self.record().exists())      # kept for the operator
+        self.assertEqual(self.sc.verbs(), [])
+
+    def test_restore_with_no_record_does_nothing(self):
+        res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual((res.restored, res.failures, res.lines()), ([], [], []))
+        self.assertEqual(self.sc.calls, [])
+
+
 class Verify(Base):
     """§8.4: verify_levers names whatever still arms a sender."""
 
@@ -882,7 +1100,8 @@ class StaleWriters(Base):
 
 class Static(unittest.TestCase):
     """The RESTART GATE's source scan: no lifecycle restart helper, no
-    cmd_restart, and only the verbs restart, disable --now and show."""
+    cmd_restart, and only the verbs restart, disable --now, show, stop
+    (wspr-uploader alone) and daemon-reload."""
 
     def setUp(self):
         self.src = MODULE.read_text()
@@ -905,7 +1124,7 @@ class Static(unittest.TestCase):
                   if isinstance(n, ast.Constant) and isinstance(n.value, str)}
         for bad in ("start", "kill", "reload", "try-restart",
                     "reload-or-restart", "is-active", "is-enabled", "enable",
-                    "mask", "daemon-reload", "isolate", "reset-failed"):
+                    "mask", "isolate", "reset-failed"):
             self.assertNotIn(bad, consts)
         # every systemctl call goes through _systemctl with a literal verb
         verbs = []
@@ -914,11 +1133,14 @@ class Static(unittest.TestCase):
                 first = node.args[1]
                 self.assertIsInstance(first, ast.Constant)
                 verbs.append(first.value)
-        self.assertEqual(set(verbs), {"restart", "disable", "show", "stop"})
-        # C27-2: `stop` passes for wspr-uploader alone
+        self.assertEqual(set(verbs), {"restart", "disable", "show", "stop",
+                                      "daemon-reload"})
+        # C27-2: `stop` passes for wspr-uploader alone; Task 28 F2:
+        # `daemon-reload` alone, with no argument, after the lever removes
+        # or restores wspr-uploader's enablement links
         self.assertEqual(L.ALLOWED_VERBS,
                          {("restart",), ("disable", "--now"), ("show",),
-                          ("stop", L.WSPR_UPLOADER)})
+                          ("stop", L.WSPR_UPLOADER), ("daemon-reload",)})
         # the only literal "systemctl" sits in the one helper
         self.assertEqual(self.src.count('"systemctl"'), 1)
 
@@ -932,6 +1154,8 @@ class Static(unittest.TestCase):
             L._systemctl(sc, "disable", "x.service")
         with self.assertRaises(ValueError):
             L._systemctl(sc, "restart", "a.service", "b.service")
+        with self.assertRaises(ValueError):
+            L._systemctl(sc, "daemon-reload", "x.service")
         self.assertEqual(sc.calls, [])
 
 

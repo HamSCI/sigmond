@@ -604,6 +604,39 @@ class StandingLeverTests(unittest.TestCase):
         self.assertNotIn("lever:", again.out)
 
 
+    def test_a_linked_enabled_uploader_comes_back_at_the_raise(self):
+        """Task 28 F2: fill removes a linked wspr-uploader's enablement
+        link and keeps the unit; the raise to upload puts the link back."""
+        st = Part2Station(self)
+        unit_dir = st.tmp / "etc/systemd/system"
+        (unit_dir / "multi-user.target.wants").mkdir(parents=True)
+        src = st.tmp / "opt" / "wspr-uploader.service"
+        src.parent.mkdir()
+        src.write_text("[Service]\nExecStart=/bin/true\n")
+        (unit_dir / "wspr-uploader.service").symlink_to(src)
+        want = unit_dir / "multi-user.target.wants" / "wspr-uploader.service"
+        want.symlink_to(src)
+        st.units["wspr-uploader.service"] = {
+            "LoadState": "loaded", "ActiveState": "active",
+            "UnitFileState": "enabled",
+            "FragmentPath": str(unit_dir / "wspr-uploader.service"),
+            "unit_dir": str(unit_dir)}
+        self.assertEqual(st.step().rc, 0)
+        self.assertTrue(want.is_symlink())         # upload: left as it is
+        for state, linked in (("fill", False), ("upload", True)):
+            r = Runner()(["sink", "set", "site", state, "--reason", "bench",
+                          "--by", "test", "--sinks", str(st.roots.sinks)])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            step = st.step()
+            self.assertEqual(step.rc, 0, step.both)
+            self.assertEqual(want.is_symlink(), linked, (state, step.both))
+            self.assertTrue((unit_dir / "wspr-uploader.service").is_symlink())
+        self.assertIn(f"uploader: lever: restored {want}", step.out)
+        self.assertEqual(st.units["wspr-uploader.service"]["UnitFileState"],
+                         "enabled")
+        self.assertFalse(any(c[0] == "disable" for c in st.sc.calls))
+
+
 @needs_real
 class LandOrderTests(unittest.TestCase):
     """Task 16's forward note: the gate form lands sigmond.toml first, then

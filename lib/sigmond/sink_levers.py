@@ -15,8 +15,8 @@ meteor-scatter        ``METEOR_SCATTER_DELIVERY_MODE=off``         mode starts a
                                                                    sender or marks
                                                                    rows (deposit)
 wspr-recorder shim    ``WSPR_USE_HS_UPLOADER=0``                   the flag reads true
-wspr-uploader         ``systemctl disable --now``                  it runs or stands
-                                                                   enabled
+wspr-uploader         ``systemctl disable --now``; for a linked    it runs or stands
+                      unit, its enablement links go and it stops   enabled
 mag-recorder          ``[uploader] enabled = false`` (a boolean)   it reads true or
                                                                    stays absent
 ====================  ===========================================  ============
@@ -55,9 +55,21 @@ lowered on disk that still runs from before its env file changed (a lever
 written by an earlier run whose restart failed) restarts with no write, and
 ``verify_levers`` names it until it does.
 
+A linked wspr-uploader that someone has also enabled (wspr-recorder's
+installer runs ``systemctl link``; an operator's ``systemctl enable``
+adds ``.wants`` links) never gets ``disable`` either: disable removes
+every link to the unit file, the unit's own link with them, and the unit
+vanishes (Task 28 F2).  The lever writes each ``.wants`` and ``.requires``
+link named for the unit under ``/etc/systemd/system`` to a record
+(``UPLOADER_LINKS_RECORD``), removes those links alone, runs
+``daemon-reload`` and stops the unit.  ``restore_uploader_links`` puts
+back exactly the recorded links when wspr-recorder reads ``upload``
+again; it starts nothing.  This is the one lever that a raise reverses.
+
 This module calls systemctl through ``_systemctl`` alone, with the verbs
-``restart``, ``disable --now`` and ``show`` (the RESTART GATE's static test
-reads it).  Stdlib only.
+``restart``, ``disable --now``, ``stop`` (wspr-uploader alone),
+``daemon-reload`` and ``show`` (the RESTART GATE's static test reads it).
+Stdlib only.
 """
 from __future__ import annotations
 
@@ -70,7 +82,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import inprocess_senders as ips
-from .safe_write import read_nofollow, write_toml_bool
+from .safe_write import read_nofollow, write_owned, write_toml_bool
 from .upload import env_path_for, set_env_flag
 
 WRITER_PY = Path("/opt/git/sigmond/hs-uploader/src/hs_uploader/sink/writer.py")
@@ -80,8 +92,24 @@ MAG_CONFIG = Path("mag-recorder") / "mag-recorder-config.toml"
 WRITER_CLIENTS = ("psk-recorder", "meteor-scatter", "wspr-recorder")
 # `stop` passes for wspr-uploader alone: a running linked, static, indirect
 # or generated unit stops but never disables (ruling C27-2).
+# `daemon-reload`, with no argument, follows a change to wspr-uploader's
+# enablement links (Task 28 F2).
 ALLOWED_VERBS = {("restart",), ("disable", "--now"), ("show",),
-                 ("stop", WSPR_UPLOADER)}
+                 ("stop", WSPR_UPLOADER), ("daemon-reload",)}
+# Under Roots.etc: where systemctl link and enable put their links, and the
+# record of the enablement links the lever removed from a linked
+# wspr-uploader, one "<link>\t<target>" line each.
+UNIT_DIR = Path("systemd") / "system"
+UPLOADER_LINKS_RECORD = Path("sigmond") / "sink-levers" / "wspr-uploader.links"
+_ENABLEMENT_DIRS = (".wants", ".requires")
+# The unit directories systemd searches.  A FragmentPath outside them means
+# a linked unit file (an older systemd reports the link's target there).
+_UNIT_SEARCH_DIRS = ("/etc/systemd/system", "/run/systemd/system",
+                     "/run/systemd/transient", "/run/systemd/generator",
+                     "/run/systemd/generator.early",
+                     "/run/systemd/generator.late",
+                     "/usr/local/lib/systemd/system",
+                     "/usr/lib/systemd/system", "/lib/systemd/system")
 RADIOD_PATTERNS = ("radiod@*", "radiod.service")
 _RUNNING = ("active", "activating", "reloading", "deactivating")
 _TRUE = ("1", "true", "yes", "on")
@@ -134,7 +162,7 @@ class Roots:
 def _systemctl(systemctl: Callable, *args: str, timeout: int = 30):
     """Run ``systemctl <args>``; only the verbs in ALLOWED_VERBS pass, and
     ``restart``, ``stop`` and ``disable --now`` take exactly one unit."""
-    one_unit = {"restart": 2, "disable": 3, "stop": 2}
+    one_unit = {"restart": 2, "disable": 3, "stop": 2, "daemon-reload": 1}
     if not args or not any(tuple(args[:len(v)]) == v for v in ALLOWED_VERBS) \
             or len(args) != one_unit.get(args[0], len(args)):
         raise ValueError(f"sink_levers: systemctl {' '.join(args)} is not "
@@ -292,6 +320,7 @@ class LeverPlan:
     mag_checked: Optional[Path] = None
     wspr_uploader: bool = False    # lower wspr-uploader
     wspr_uploader_stop: bool = False   # by `stop` alone (C27-2), not disable
+    wspr_uploader_unwant: bool = False  # linked and enabled: links, then stop
     wspr_uploader_checked: bool = False
     left_alone: tuple = ()         # units and files already lowered
     problems: tuple = ()           # (unit or file, why) the plan cannot act on
@@ -310,11 +339,15 @@ class LeverResult:
     restarted: list = field(default_factory=list)
     disabled: list = field(default_factory=list)
     stopped: list = field(default_factory=list)      # stopped, not disabled
+    unwanted: list = field(default_factory=list)     # enablement links removed
     left_alone: list = field(default_factory=list)
     failures: list = field(default_factory=list)     # (file or unit, why)
 
     def lines(self) -> list:
         out = [f"lever: changed {p}" for p in self.changed]
+        out += [f"lever: removed {p} ({WSPR_UPLOADER}'s enablement; its unit "
+                "link stays, and the raise to upload puts this back)"
+                for p in self.unwanted]
         out += [f"lever: stopped and disabled {u}" for u in self.disabled]
         out += [f"lever: stopped {u} (its unit file names no enablement; "
                 "left as it stands)" for u in self.stopped]
@@ -349,30 +382,48 @@ def _mag_armed(path: Path) -> bool:
     return not (isinstance(up, dict) and up.get("enabled", True) is False)
 
 
-def _uploader_lever(systemctl) -> Optional[str]:
+def _is_linked(etc: Path, fragment: str) -> bool:
+    """True when wspr-uploader's unit file is a link (``systemctl link``):
+    ``<etc>/systemd/system/wspr-uploader.service`` is a symlink, or the
+    FragmentPath lies outside every unit directory systemd searches."""
+    if (etc / UNIT_DIR / WSPR_UPLOADER).is_symlink():
+        return True
+    if not fragment:
+        return False
+    parent = str(Path(fragment).parent)
+    return parent not in _UNIT_SEARCH_DIRS and parent != str(etc / UNIT_DIR)
+
+
+def _uploader_lever(systemctl, etc: Path = Path("/etc")) -> Optional[str]:
     """How to lower wspr-uploader: ``"disable"`` (``disable --now``) when
-    it runs or stands enabled; ``"stop"`` when it runs and its
-    UnitFileState names no enablement (linked, static, indirect,
-    generated; ruling C27-2); ``""`` when it is quiet; None when systemd
-    does not know the unit (wspr-recorder never installed it)."""
+    it runs or stands enabled; ``"unwant"`` when it stands enabled and its
+    unit file is a link (Task 28 F2: remove the enablement links, reload,
+    stop); ``"stop"`` when it runs and its UnitFileState names no
+    enablement (linked, static, indirect, generated; ruling C27-2); ``""``
+    when it is quiet; None when systemd does not know the unit
+    (wspr-recorder never installed it)."""
     p = _unit_props(systemctl, WSPR_UPLOADER,
-                    ("LoadState", "ActiveState", "UnitFileState"))
+                    ("LoadState", "ActiveState", "UnitFileState",
+                     "FragmentPath"))
     if p.get("LoadState", "") in ("", "not-found"):
         return None
     state = p.get("UnitFileState", "")
     running = p.get("ActiveState", "") in _RUNNING
     if state in _UNIT_FILE_IF_RUNNING:
         return "stop" if running else ""
+    if state not in _UNIT_FILE_OFF and _is_linked(etc,
+                                                  p.get("FragmentPath", "")):
+        return "unwant"
     if running or state not in _UNIT_FILE_OFF:
         return "disable"
     return ""
 
 
-def _uploader_armed(systemctl) -> Optional[bool]:
+def _uploader_armed(systemctl, etc: Path = Path("/etc")) -> Optional[bool]:
     """True when wspr-uploader runs or stands enabled; None when systemd
     does not know the unit.  A linked, static, indirect or generated unit
     counts only while it runs."""
-    how = _uploader_lever(systemctl)
+    how = _uploader_lever(systemctl, etc)
     return None if how is None else bool(how)
 
 
@@ -405,16 +456,17 @@ def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
                     alone.append(unit)
             except (OSError, ValueError) as exc:
                 problems.append((unit, f"cannot read or place its lever: {exc}"))
-    wspr_uploader = checked_uploader = uploader_stop = False
+    wspr_uploader = checked_uploader = uploader_stop = uploader_unwant = False
     if "wspr-recorder" in below:
         checked_uploader = True
         try:
-            how = _uploader_lever(systemctl)
+            how = _uploader_lever(systemctl, roots.etc)
         except OSError as exc:
             problems.append((WSPR_UPLOADER, f"cannot read its state: {exc}"))
         else:
             wspr_uploader = bool(how)
             uploader_stop = how == "stop"
+            uploader_unwant = how == "unwant"
             if how == "":
                 alone.append(WSPR_UPLOADER)
     mag = mag_checked = None
@@ -431,6 +483,7 @@ def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
                      env_levers=tuple(levers), mag=mag, mag_checked=mag_checked,
                      wspr_uploader=wspr_uploader,
                      wspr_uploader_stop=uploader_stop,
+                     wspr_uploader_unwant=uploader_unwant,
                      wspr_uploader_checked=checked_uploader,
                      left_alone=tuple(alone), problems=tuple(problems),
                      restart_only=tuple(restart_only), etc=roots.etc)
@@ -484,7 +537,10 @@ def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run,
             res.failures.append((str(plan.mag), f"not written: {exc}"))
         else:
             res.changed.append(plan.mag)
-    if plan.wspr_uploader and plan.wspr_uploader_stop:
+    if plan.wspr_uploader and plan.wspr_uploader_unwant:
+        _unwant_uploader(plan.etc, res, systemctl)
+    if plan.wspr_uploader and (plan.wspr_uploader_stop
+                               or plan.wspr_uploader_unwant):
         try:
             r = _systemctl(systemctl, "stop", WSPR_UPLOADER,
                            timeout=_RESTART_TIMEOUT)
@@ -522,6 +578,160 @@ def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run,
         res.restarted = [u for u in to_restart if u not in bad]
     else:
         res.restarted = list(dict.fromkeys(to_restart))
+    return res
+
+
+# ---- a linked, enabled wspr-uploader (Task 28 F2) -----------------------------
+
+def _enablement_links(etc: Path) -> list:
+    """Each ``*.wants``/``*.requires`` symlink named for wspr-uploader under
+    ``<etc>/systemd/system``; a directory that is itself a symlink is not
+    followed."""
+    unit_dir = etc / UNIT_DIR
+    out = []
+    try:
+        entries = sorted(unit_dir.iterdir())
+    except FileNotFoundError:
+        return out
+    for d in entries:
+        if d.name.endswith(_ENABLEMENT_DIRS) and not d.is_symlink() \
+                and d.is_dir():
+            link = d / WSPR_UPLOADER
+            if link.is_symlink():
+                out.append(link)
+    return out
+
+
+def _read_links_record(etc: Path) -> list:
+    """The record's ``(link, target)`` pairs, in order; [] when absent."""
+    try:
+        text = read_nofollow(etc / UPLOADER_LINKS_RECORD)
+    except FileNotFoundError:
+        return []
+    out = []
+    for line in (text or "").splitlines():
+        link, sep, target = line.partition("\t")
+        if sep and link and target:
+            out.append((Path(link), target))
+    return out
+
+
+def _write_links_record(etc: Path, pairs) -> None:
+    """Write the record whole, through ``write_owned`` (atomic, never
+    through a symlinked directory)."""
+    path = etc / UPLOADER_LINKS_RECORD
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    write_owned(path, "".join(f"{link}\t{target}\n"
+                              for link, target in pairs), mode=0o644)
+
+
+def _unwant_uploader(etc: Path, res: LeverResult, systemctl) -> None:
+    """Record, then remove, each enablement link of a linked wspr-uploader,
+    and reload systemd; never the unit's own link.  A record that cannot
+    be written removes nothing, since the raise could never put the links
+    back.  The caller stops the unit."""
+    links = _enablement_links(etc)
+    if not links:
+        res.failures.append((WSPR_UPLOADER, "its unit file is a link and it "
+                             "stands enabled, but no .wants or .requires link "
+                             f"to it lies under {etc / UNIT_DIR}; left enabled "
+                             "(disable would remove the unit's own link)"))
+        return
+    try:
+        pairs = _read_links_record(etc)
+        known = {str(link) for link, _ in pairs}
+        pairs += [(link, os.readlink(link)) for link in links
+                  if str(link) not in known]
+        _write_links_record(etc, pairs)
+    except (OSError, ValueError) as exc:
+        res.failures.append((WSPR_UPLOADER, "cannot write the record of its "
+                             f"enablement links ({exc}); removed none, "
+                             "left enabled"))
+        return
+    for link in links:
+        try:
+            os.unlink(link)
+        except OSError as exc:
+            res.failures.append((str(link), f"not removed: {exc}"))
+        else:
+            res.unwanted.append(link)
+    if res.unwanted:
+        _daemon_reload(res, systemctl)
+
+
+def _daemon_reload(res, systemctl) -> None:
+    try:
+        r = _systemctl(systemctl, "daemon-reload")
+    except (OSError, subprocess.SubprocessError) as exc:
+        res.failures.append(("systemd", f"daemon-reload: {exc}"))
+        return
+    if r.returncode != 0:
+        res.failures.append(("systemd",
+                             f"daemon-reload exited {r.returncode}"))
+
+
+@dataclass
+class RestoreResult:
+    restored: list = field(default_factory=list)
+    failures: list = field(default_factory=list)     # (link, why)
+
+    def lines(self) -> list:
+        return ([f"lever: restored {p} ({WSPR_UPLOADER}'s enablement, which "
+                 "an earlier lever removed; nothing started)"
+                 for p in self.restored]
+                + [f"lever: FAILED {x}: {why}" for x, why in self.failures])
+
+
+def restore_uploader_links(*, roots: Roots = Roots(),
+                           systemctl=subprocess.run) -> RestoreResult:
+    """The raise to upload for wspr-recorder: put back each enablement link
+    the lever recorded and removed from a linked wspr-uploader, then reload
+    systemd.  It starts nothing; the operator's enable acts at the next
+    boot, as it did.  A record line outside a ``.wants`` or ``.requires``
+    directory under ``<etc>/systemd/system``, or a link path something else
+    now holds, is named and kept in the record; the record goes once every
+    line stands restored."""
+    res = RestoreResult()
+    etc = roots.etc
+    try:
+        pairs = _read_links_record(etc)
+    except (OSError, ValueError) as exc:
+        res.failures.append((str(etc / UPLOADER_LINKS_RECORD),
+                             f"cannot read it: {exc}"))
+        return res
+    if not pairs:
+        return res
+    unit_dir = etc / UNIT_DIR
+    kept = []
+    for link, target in pairs:
+        if link.name != WSPR_UPLOADER or link.parent.parent != unit_dir \
+                or not link.parent.name.endswith(_ENABLEMENT_DIRS):
+            res.failures.append((str(link), "not a .wants or .requires link "
+                                 f"under {unit_dir}; not restored"))
+            kept.append((link, target))
+            continue
+        if link.is_symlink() and os.readlink(link) == target:
+            continue                       # someone enabled it again
+        try:
+            link.parent.mkdir(exist_ok=True, mode=0o755)
+            if link.parent.is_symlink():
+                raise OSError(f"{link.parent} is a symlink")
+            os.symlink(target, link)
+        except OSError as exc:
+            res.failures.append((str(link), f"not restored: {exc}"))
+            kept.append((link, target))
+        else:
+            res.restored.append(link)
+    try:
+        if kept:
+            _write_links_record(etc, kept)
+        else:
+            os.unlink(etc / UPLOADER_LINKS_RECORD)
+    except OSError as exc:
+        res.failures.append((str(etc / UPLOADER_LINKS_RECORD),
+                             f"cannot update it: {exc}"))
+    if res.restored:
+        _daemon_reload(res, systemctl)
     return res
 
 
@@ -570,7 +780,7 @@ def verify_levers(plan: LeverPlan, *, systemctl=subprocess.run) -> list:
             msgs.append(f"{name}: {why}")
     if plan.wspr_uploader_checked:
         try:
-            if _uploader_armed(systemctl):
+            if _uploader_armed(systemctl, plan.etc):
                 msgs.append(f"{WSPR_UPLOADER}: still running or enabled")
         except OSError as exc:
             msgs.append(f"{WSPR_UPLOADER}: cannot read its state: {exc}")

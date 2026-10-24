@@ -625,7 +625,8 @@ def _lever_step(roots: co.CarryRoots) -> int:
     """The lever step with the marker standing (spec §8; idempotent): every
     client hs-uploader reads below ``upload`` loses its in-process senders.
     A sender already lowered and restarted since costs nothing and prints
-    nothing."""
+    nothing.  With wspr-recorder at ``upload``, a linked wspr-uploader gets
+    back the enablement links an earlier lever removed (Task 28 F2)."""
     relayed: list = []
     with _relayed_stderr(relayed):
         state = sink_state.read_state(
@@ -641,8 +642,24 @@ def _lever_step(roots: co.CarryRoots) -> int:
     for ln in relayed:
         _warn(f"lever step: {ln}")
     below = [c for c in sink_state.below_upload(state) if c != co.SITE]
+    rc = 0
+    if "wspr-recorder" not in below:
+        # The raise (Task 28 F2): a linked wspr-uploader gets back the
+        # enablement links an earlier lever removed.  No record, no call.
+        try:
+            back = sink_levers.restore_uploader_links(
+                roots=sink_levers.Roots(etc=roots.etc,
+                                        writer_py=roots.writer_py),
+                systemctl=_lever_systemctl)
+        except Exception as exc:
+            _warn(f"lever step: FAILED restoring wspr-uploader's links "
+                  f"({type(exc).__name__}: {exc})")
+            rc = 1
+        else:
+            _print_result(back.lines())
+            rc = 1 if back.failures else 0
     if not below:
-        return 0
+        return rc
     try:
         from ..topology import load_topology
         lp = sink_levers.plan_levers(
@@ -651,7 +668,7 @@ def _lever_step(roots: co.CarryRoots) -> int:
             systemctl=_lever_systemctl)
         if not (lp.env_levers or lp.restart_only or lp.mag is not None
                 or lp.wspr_uploader or lp.problems):
-            return 0
+            return rc
         try:
             res = sink_levers.apply_levers(lp, systemctl=_lever_systemctl)
         except sink_levers.RadiodMoved as exc:
@@ -666,7 +683,7 @@ def _lever_step(roots: co.CarryRoots) -> int:
         return 1
     for v in verify:
         _warn(f"lever: still armed: {v}")
-    return 1 if (res.failures or verify) else 0
+    return 1 if (res.failures or verify or rc) else 0
 
 
 def _marker_standing(roots: co.CarryRoots) -> int:
