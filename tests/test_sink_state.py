@@ -26,9 +26,25 @@ from sigmond import uploader_manifest as um
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sink_status"
 CAPTURE = FIXTURES / "capture.sh"
-REAL_PY = (Path(__file__).resolve().parent.parent.parent
-           / "hs-uploader" / ".venv" / "bin" / "python")
+HSU_CHECKOUT = Path(__file__).resolve().parent.parent.parent / "hs-uploader"
+REAL_PY = HSU_CHECKOUT / ".venv" / "bin" / "python"
 CASES = sorted(p.stem for p in FIXTURES.glob("*.json"))
+
+
+def real_python(checkout: Path = HSU_CHECKOUT) -> Path:
+    """The branch hs-uploader's interpreter, for a contract test.
+
+    Skips only when no checkout sits beside sigmond.  A checkout without
+    its venv fails the test (Task 15): a skip there would hide every
+    contract this suite pins against hs-uploader."""
+    if not checkout.is_dir():
+        raise unittest.SkipTest(f"no hs-uploader checkout at {checkout}")
+    py = checkout / ".venv" / "bin" / "python"
+    if not py.exists():
+        raise AssertionError(
+            f"{checkout} has no venv at {py}: the contract tests need it "
+            "(run its own install, or `uv sync` there)")
+    return py
 
 
 def _text(case: str) -> str:
@@ -301,8 +317,7 @@ class ContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if not REAL_PY.exists():
-            raise unittest.SkipTest(f"no hs-uploader checkout at {REAL_PY}")
+        real_python()
         cls.td = tempfile.TemporaryDirectory()
         cls.out = Path(cls.td.name) / "out"
         cls.work = Path(cls.td.name) / "work"
@@ -347,6 +362,33 @@ class ContractTests(unittest.TestCase):
                 want = ss.parse_status(_text(c).replace("@TREE@", str(tree)))
                 self.assertIsNotNone(want)
                 self.assertEqual(got, want)
+
+
+class RealPythonGuardTests(unittest.TestCase):
+    """Task 15: the contract skips only when no checkout stands."""
+
+    def test_a_checkout_without_its_venv_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                real_python(Path(td))
+            except unittest.SkipTest as exc:
+                self.fail(f"a checkout without its venv skipped: {exc}")
+            except AssertionError as exc:
+                self.assertIn("no venv", str(exc))
+            else:
+                self.fail("a checkout without its venv answered a python")
+
+    def test_no_checkout_skips(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(unittest.SkipTest):
+                real_python(Path(td) / "hs-uploader")
+
+    def test_a_checkout_with_its_venv_answers_its_python(self):
+        with tempfile.TemporaryDirectory() as td:
+            py = Path(td) / ".venv" / "bin" / "python"
+            py.parent.mkdir(parents=True)
+            py.write_text("")
+            self.assertEqual(real_python(Path(td)), py)
 
 
 if __name__ == "__main__":
