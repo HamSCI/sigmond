@@ -16013,7 +16013,12 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin"
+    # ⛔ Keep in step with argparse.  tests/test_bash_completion.py fails
+    # when this list and `smd --help` disagree: on 2026-10-24 thirteen
+    # verbs had accumulated here unoffered (adopt, align, check, doctor,
+    # fleet, notify, psws, remote, sink, timing, update, upload, version),
+    # which tells an operator a subcommand does not exist.
+    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin adopt align check doctor fleet notify psws remote sink timing update upload version"
     local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing uploader radiod instance uninstall completion"
     local components="ka9q-radio radiod ka9q-web hf-timestd wspr-recorder psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter gpsdo-monitor igmp-querier rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter"
@@ -16074,7 +16079,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar superdarn meteor hf-tec mag ka9q radiod gpsdo uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar superdarn meteor hf-tec mag ka9q radiod gpsdo usb uploads verifier" -- "$cur"))
                     ;;
                 admin)
                     COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
@@ -16091,14 +16096,29 @@ _smd_complete() {
                         wspr)
                             COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
                             ;;
-                        psk|hfdl|codar|superdarn|meteor|mag|hf-tec)
+                        psk|hfdl|codar|superdarn|meteor|hf-tec)
                             COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
+                            ;;
+                        mag)
+                            COMPREPLY=($(compgen -W "-v --verbose --backlog" -- "$cur"))
                             ;;
                         ka9q)
                             COMPREPLY=($(compgen -W "--ka9q-python --ka9q-radio --remote --branch --no-fetch --json" -- "$cur"))
                             ;;
                         radiod)
                             COMPREPLY=($(compgen -W "--host -n --lines --all-lines" -- "$cur"))
+                            ;;
+                        gpsdo)
+                            COMPREPLY=($(compgen -W "--interval --once" -- "$cur"))
+                            ;;
+                        usb)
+                            COMPREPLY=($(compgen -W "--seconds --interval --once" -- "$cur"))
+                            ;;
+                        uploads)
+                            COMPREPLY=($(compgen -W "--backlog" -- "$cur"))
+                            ;;
+                        verifier)
+                            COMPREPLY=($(compgen -W "--backlog --instance" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -22350,6 +22370,445 @@ def cmd_gpsdo_watch(args) -> int:
         return 0
 
 
+# ---------------------------------------------------------------------------
+# smd watch usb — per-RX888 USB DELIVERY, measured at the wire
+# ---------------------------------------------------------------------------
+#
+# ⛔ WHY THIS EXISTS, AND WHY radiod CANNOT TELL YOU
+#
+# An RX888 can send FEWER SAMPLES THAN IT PROMISES while every layer above it
+# reports health.  radiod's block-drop counter only counts what radiod's own
+# filters miss, so it reads 0; the USB stack completes every transfer with
+# status 0, so the kernel logs nothing; the WAVs are simply short.
+#
+# Measured at KX4AZ-T (3 x RX888mk2, one host, 2026-10-23/24, reported by the
+# WD session that built this check there): the E-W Beverage radio was 4 %
+# short over 11 h, with some 1-minute WAVs only 13 % full, and 162 bad minutes
+# out of 622 overnight while the other two radios had none.  usbmon on its bus
+# showed every bulk-in transfer completing with status 0 and the full 512 KiB
+# length -- but only 12,351 completions/min = 53.96 Msps against 14,833/min =
+# 64.80 Msps from the sibling radio on the SAME bus, and 265 gaps > 10 ms per
+# minute (max 89 ms) where the sibling's worst was 4 ms.  So the data never
+# left the radio.  Not the cable, not the port, not the xHCI, not the driver
+# -- which is exactly why nothing logged it.
+#
+# The discriminator is therefore DELIVERED RATE vs NOMINAL, read off the bus
+# itself, plus the status field to separate a sick radio from a sick link:
+#
+#   no completions at all        NO DATA          no reader, or the radio hung
+#   any completion status != 0   TRANSFER ERRORS  cable / port  (-71, -75, …)
+#   < 98 % of nominal, all clean SHORT            THE RADIO ITSELF
+#   otherwise                    ok
+#
+# ⚠ Read-only by construction.  This counts packets; it never resets a port,
+# unbinds an xHCI, or power-cycles anything.  At KX4AZ-T cutting a live
+# RX888's port in software to "test" it wedged a HEALTHY sibling radio with
+# -71 "device not accepting address" until its VBUS was physically pulled:
+# port disable and xHCI rebind do not remove VBUS.  See
+# [[reference_rx888_power_cycle_recovery]].  If this verdict says SHORT, the
+# answer is a human and a power cycle, not a command.
+
+_USBMON_DEFAULT_SECS = 10
+_USBMON_DIR          = Path('/sys/kernel/debug/usb/usbmon')
+# 98 %: the honest floor.  A healthy radio measured over 10 s lands within a
+# fraction of a percent of nominal (KX4AZ-T's good pair: 64.80 of 64.80).
+# 4 % short was the fault.  Anything under 2 % off is sampling noise.
+_USB_SHORT_FRACTION  = 0.98
+_RX888_PROGRAMMED_PID = '00f1'   # 00f3 is the unprogrammed DFU identity
+_RX888_VID            = '04b4'
+
+
+def _radiod_conf_rx888(text: str) -> dict:
+    """`{'samprate': int|None, 'serial': str}` from a radiod conf's **[rx888]**
+    section.
+
+    ⛔ TWO WAYS TO READ THE WRONG NUMBER, both seen in the field.
+
+    1. **The wrong `samprate`.**  A radiod conf carries at least two.
+       `[global] samprate = 12000` is the CHANNEL OUTPUT rate the decoders
+       ask for; `[rx888] samprate = 129600000` is the ADC rate, and only the
+       second one says how many samples should cross the USB bus.  Taking the
+       first match in the file gives 12 kHz and every radio reads 5000 %
+       over nominal.  So the section is tracked, not ignored.
+
+    2. **The trailing comment.**  KX4AZ-T's line is
+
+           samprate=64800000  # 2026-09-05: ... 32.4 MHz ... (was 129600000)
+
+       Stripping non-digits before stripping the `#` comment yields
+       648000002026090474242048.  The comment goes FIRST.  (That is how the
+       WD implementation got it wrong the first time.)
+    """
+    samprate, serial, section = None, '', ''
+    for raw in text.splitlines():
+        line = raw.split('#', 1)[0].strip()     # ⛔ comment first, always
+        if not line:
+            continue
+        if line.startswith('[') and line.endswith(']'):
+            section = line[1:-1].strip().lower()
+            continue
+        if section != 'rx888' or '=' not in line:
+            continue
+        key, _, val = line.partition('=')
+        key, val = key.strip().lower(), val.strip().strip('"').strip("'")
+        if key == 'samprate':
+            digits = ''.join(c for c in val if c.isdigit())
+            if digits:
+                samprate = int(digits)
+        elif key == 'serial':
+            serial = val
+    return {'samprate': samprate, 'serial': serial}
+
+
+def _usbmon_parse(lines, want: set, secs: float) -> dict:
+    """Per-device delivery stats from usbmon text lines.
+
+    `want` holds `(bus, dev)` pairs as zero-padded strings, exactly as usbmon
+    prints them.  Returns `{(bus, dev): {transfers, errors, bytes,
+    max_gap_us}}` for every wanted device, present or not.
+
+    usbmon's text format is::
+
+        URB-ID  TIMESTAMP(us)  TYPE  ADDRESS  STATUS  LENGTH  ...
+        ffff88  3453459797     C     Bi:2:005:1  0    524288  = ...
+
+    Only **completions** (`C`) of **bulk-in** (`Bi:`) transfers count: a
+    submission says what was asked for, a completion says what arrived, and
+    this check is about what arrived.  The gap is the time between successive
+    completions for one device -- the sibling comparison that made the
+    KX4AZ-T fault legible (max 4 ms healthy, 89 ms sick).
+    """
+    out = {k: {'transfers': 0, 'errors': 0, 'bytes': 0, 'max_gap_us': 0}
+           for k in want}
+    last_us = {}
+    for raw in lines:
+        f = raw.split()
+        if len(f) < 6 or f[2] != 'C' or not f[3].startswith('Bi:'):
+            continue
+        parts = f[3].split(':')
+        if len(parts) < 4:
+            continue
+        key = (parts[1], parts[2])
+        st = out.get(key)
+        if st is None:
+            continue
+        st['transfers'] += 1
+        if f[4] != '0':
+            st['errors'] += 1
+        try:
+            st['bytes'] += int(f[5])
+        except ValueError:
+            pass
+        try:
+            ts = int(f[1])
+        except ValueError:
+            continue
+        prev = last_us.get(key)
+        if prev is not None:
+            gap = ts - prev
+            if gap > st['max_gap_us']:
+                st['max_gap_us'] = gap
+        last_us[key] = ts
+    return out
+
+
+def _usb_delivery_verdict(st: dict, nominal_sps, secs: float) -> tuple:
+    """`(verdict, delivered_msps)` for one device.
+
+    The RX888 ships 16-bit real samples, so delivered samples = bytes / 2.
+    A missing nominal (no radiod conf for this serial) is NOT an excuse to
+    guess one: the rate is still reported, and the verdict falls back to what
+    can be judged without it -- errors and silence.
+    """
+    secs = max(0.001, float(secs))
+    msps = (st['bytes'] / 2.0) / secs / 1e6
+    if st['transfers'] == 0:
+        return 'NO DATA', msps
+    if st['errors']:
+        return 'TRANSFER ERRORS', msps
+    if nominal_sps:
+        if msps * 1e6 < _USB_SHORT_FRACTION * float(nominal_sps):
+            return 'SHORT', msps
+        return 'ok', msps
+    return 'ok?', msps
+
+
+def _rx888_usb_devices(root=None) -> list:
+    """Every PROGRAMMED RX888 on this host, with the bus and device numbers
+    usbmon speaks.
+
+    `04b4:00f1` only: `00f3` is the FX3's unprogrammed DFU identity, which
+    moves no samples and has no serial worth mapping.  A radio sitting in
+    `00f3` is its own finding and `smd check` already makes it.
+    """
+    base = Path(root) if root is not None else Path(_USB_SYSFS_ROOT)
+    found = []
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return []
+    for dev in entries:
+        try:
+            vid = (dev / 'idVendor').read_text().strip().lower()
+            pid = (dev / 'idProduct').read_text().strip().lower()
+        except OSError:
+            continue
+        if vid != _RX888_VID or pid != _RX888_PROGRAMMED_PID:
+            continue
+        def _read(name, default=''):
+            try:
+                return (dev / name).read_text().strip()
+            except OSError:
+                return default
+        busnum, devnum = _read('busnum'), _read('devnum')
+        if not busnum or not devnum:
+            continue
+        found.append({
+            'serial':  _read('serial'),
+            'bus':     busnum,
+            'dev':     devnum,
+            # usbmon prints the device number zero-padded to three places
+            # while sysfs does not: 5 in sysfs is 005 on the bus.
+            'key':     (busnum, devnum.zfill(3)),
+            'speed':   _read('speed'),
+            'path':    dev.name,
+        })
+    return found
+
+
+def _radiod_rx888_nominals(confdir=None) -> list:
+    """`[{'instance', 'serial', 'samprate'}]` for every radiod conf on the host.
+
+    A conf with no `serial` line is the common single-SDR case -- sigmond
+    writes it commented out and says why ("sole SDR: unbound by design").  It
+    is kept with an empty serial so the caller can bind it to a lone radio;
+    binding by position is only safe when there is exactly one of each, and
+    the caller enforces that rather than guessing here.
+    """
+    base = Path(confdir) if confdir is not None else Path('/etc/radio')
+    out = []
+    try:
+        confs = sorted(base.glob('radiod@*.conf'))
+    except OSError:
+        return []
+    for c in confs:
+        try:
+            text = c.read_text(errors='replace')
+        except OSError:
+            continue
+        got = _radiod_conf_rx888(text)
+        out.append({'instance': c.stem.split('@', 1)[1],
+                    'serial': got['serial'],
+                    'samprate': got['samprate']})
+    return out
+
+
+def _usb_watch_rows(devices, nominals, stats, secs) -> list:
+    """Join the three inputs into one row per radio, ready to render.
+
+    The join is BY SERIAL, because a bus/device number changes on every
+    replug and a row that renames itself is a row nobody trusts.  The single
+    SDR case has no serial in the conf, so exactly-one-each falls back to
+    position -- and anything else reports `?` rather than inventing a
+    binding.  A wrong nominal would turn a healthy radio SHORT, which is the
+    one failure this table must not invent.
+    """
+    by_serial = {n['serial']: n for n in nominals if n['serial']}
+    lone = (nominals[0] if len(nominals) == 1 and len(devices) == 1
+            and not nominals[0]['serial'] else None)
+    rows = []
+    for d in devices:
+        n = by_serial.get(d['serial']) or lone
+        nominal = n['samprate'] if n else None
+        st = stats.get(d['key'], {'transfers': 0, 'errors': 0,
+                                  'bytes': 0, 'max_gap_us': 0})
+        verdict, msps = _usb_delivery_verdict(st, nominal, secs)
+        rows.append({
+            'serial':   d['serial'] or '—',
+            'usb':      f"{d['bus']}:{d['dev']}",
+            'instance': (n['instance'] if n else '?'),
+            'msps':     msps,
+            'nominal':  nominal,
+            'errors':   st['errors'],
+            'transfers': st['transfers'],
+            'gap_ms':   st['max_gap_us'] / 1000.0,
+            'verdict':  verdict,
+        })
+    return rows
+
+
+def _render_usb_rows(rows, secs) -> list:
+    """The table, as a list of lines.  Separated from the capture so the
+    formatting is testable without a USB bus underneath it."""
+    GREEN = '\033[32m'; RED = '\033[31m'; YEL = '\033[33m'
+    DIM = '\033[2m'; BOLD = '\033[1m'; RST = '\033[0m'
+    colour = {'ok': GREEN, 'ok?': DIM, 'SHORT': RED,
+              'TRANSFER ERRORS': RED, 'NO DATA': RED}
+    head = (f"{BOLD}{'serial':<18} {'usb':<8} {'radiod':<14} "
+            f"{'delivered':>22} {'errors':>12} {'max gap':>9}  verdict{RST}")
+    out = [head]
+    for r in rows:
+        nominal = (f"{r['nominal'] / 1e6:.2f}" if r['nominal'] else '?')
+        delivered = f"{r['msps']:.2f} Msps ({nominal})"
+        errs = f"{r['errors']}/{r['transfers']}"
+        gap = f"{r['gap_ms']:.0f} ms" if r['transfers'] else '—'
+        c = colour.get(r['verdict'], '')
+        out.append(f"{r['serial']:<18} {r['usb']:<8} {r['instance']:<14} "
+                   f"{delivered:>22} {errs:>12} {gap:>9}  {c}{r['verdict']}{RST}")
+    if not rows:
+        out.append(f'{DIM}no programmed RX888 (04b4:00f1) on this host{RST}')
+    out.append('')
+    out.append(f'{DIM}{secs:.0f} s of usbmon per bus; delivered = bulk-in bytes / 2'
+               f' (16-bit real samples).  SHORT = the radio, '
+               f'TRANSFER ERRORS = the cable or port.{RST}')
+    return out
+
+
+def _usbmon_dir_ready() -> bool:
+    """Is `/sys/kernel/debug/usb/usbmon` there — asked AS ROOT?
+
+    ⛔ NOT `Path.is_dir()`.  `/sys/kernel/debug` is mode 0700 root:root, so
+    for the unprivileged account smd actually runs as, `stat(2)` raises
+    PermissionError rather than returning False.  The first draft used
+    `is_dir()` and died with a traceback on a perfectly healthy station
+    (AI6VN, 2026-10-24) — the directory was there and readable by the only
+    identity that matters, and the check could not see it.  Root is the
+    identity that reads usbmon, so root is the identity that must be asked
+    whether it can.
+    """
+    return _run(['test', '-d', str(_USBMON_DIR)], sudo=True).returncode == 0
+
+
+def _usbmon_buses(wanted) -> list:
+    """Which of `wanted` have a usbmon node, as root sees it.  Same reason as
+    above: an unprivileged `Path.exists()` cannot answer this."""
+    out = []
+    for b in sorted(set(wanted)):
+        if _run(['test', '-r', str(_USBMON_DIR / f'{b}u')],
+                sudo=True).returncode == 0:
+            out.append(b)
+    return out
+
+
+def _ensure_usbmon() -> str:
+    """Make `/sys/kernel/debug/usb/usbmon/<N>u` readable, or say why not.
+
+    Returns '' on success and a one-line reason otherwise.  Two things are
+    usually missing: the module, and debugfs.  Both are cheap and reversible
+    -- loading usbmon adds a read-only observer, it does not touch a device.
+    """
+    if _usbmon_dir_ready():
+        return ''
+    _run(['modprobe', 'usbmon'], sudo=True)
+    if _usbmon_dir_ready():
+        return ''
+    if _run(['test', '-d', '/sys/kernel/debug'], sudo=True).returncode != 0:
+        return '/sys/kernel/debug does not exist (no debugfs in this kernel)'
+    r = _run(['mount', '-t', 'debugfs', 'none', '/sys/kernel/debug'], sudo=True)
+    if _usbmon_dir_ready():
+        return ''
+    detail = (r.stderr or '').strip().splitlines()
+    return ('usbmon is not available: ' +
+            (detail[-1] if detail else 'no /sys/kernel/debug/usb/usbmon'))
+
+
+def _usbmon_capture(buses, secs: float) -> list:
+    """`secs` of usbmon text from every bus in `buses`, read IN PARALLEL.
+
+    One reader per bus, all started together: reading them one after another
+    would measure each radio over a different stretch of time, and the whole
+    point is to compare siblings over the SAME window (the KX4AZ-T fault was
+    only obvious side by side).  `timeout` bounds each reader so a wedged
+    bus cannot hang the table.
+    """
+    import subprocess as _sp
+    procs = []
+    for b in _usbmon_buses(buses):
+        node = _USBMON_DIR / f'{b}u'
+        procs.append(_sp.Popen(
+            _as_root(['timeout', str(int(max(1, secs))), 'cat', str(node)]),
+            stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True, errors='replace'))
+    lines = []
+    for p in procs:
+        try:
+            out, _ = p.communicate(timeout=secs + 20)
+        except Exception:
+            p.kill()
+            continue
+        lines.extend((out or '').splitlines())
+    return lines
+
+
+def cmd_usb_watch(args) -> int:
+    """Per-RX888 USB delivery, measured on the bus.  See the block comment
+    above `_USBMON_DEFAULT_SECS` for why radiod cannot answer this.
+
+    Read-only: it counts completions and never touches a port.
+    """
+    import time as _time
+
+    secs = max(1.0, float(getattr(args, 'seconds', _USBMON_DEFAULT_SECS)
+                          or _USBMON_DEFAULT_SECS))
+    once = bool(getattr(args, 'once', False))
+    interval = max(0.0, float(getattr(args, 'interval', 0.0) or 0.0))
+
+    why = _ensure_usbmon()
+    if why:
+        _err(why)
+        _info('usbmon is a read-only kernel observer; '
+              'load it with: sudo modprobe usbmon')
+        return 1
+
+    first = True
+    while True:
+        devices = _rx888_usb_devices()
+        if not devices:
+            _warn('no programmed RX888 (04b4:00f1) on this host')
+            if once:
+                return 1
+        nominals = _radiod_rx888_nominals()
+        stats = _usbmon_parse(
+            _usbmon_capture([d['bus'] for d in devices], secs),
+            {d['key'] for d in devices}, secs) if devices else {}
+        rows = _usb_watch_rows(devices, nominals, stats, secs)
+        lines = _render_usb_rows(rows, secs)
+        if once:
+            for ln in lines:
+                print(ln)
+            # Exit status carries the verdict so a timer or a test can read
+            # it without parsing the table.
+            return 1 if any(r['verdict'] in ('SHORT', 'TRANSFER ERRORS',
+                                             'NO DATA') for r in rows) else 0
+        if not first:
+            # Redraw in place, like `smd watch gpsdo`.
+            sys.stdout.write('\033[H\033[J')
+        first = False
+        print(f"{_time.strftime('%H:%M:%SZ', _time.gmtime())}  smd watch usb — RX888 delivery")
+        print()
+        for ln in lines:
+            print(ln)
+        sys.stdout.flush()
+        try:
+            _time.sleep(interval)
+        except KeyboardInterrupt:
+            print()
+            return 0
+
+
+def _add_usb_watch_args(p) -> None:
+    """Argument spec for `smd watch usb`."""
+    p.add_argument('--seconds', type=float, default=_USBMON_DEFAULT_SECS,
+                   metavar='SEC',
+                   help=f'usbmon capture window per pass '
+                        f'(default: {_USBMON_DEFAULT_SECS})')
+    p.add_argument('--interval', type=float, default=0.0, metavar='SEC',
+                   help='extra pause between passes (default: 0 — '
+                        'the capture window itself is the cadence)')
+    p.add_argument('--once', action='store_true',
+                   help='one pass, then exit non-zero if any radio is '
+                        'SHORT, erroring, or silent (scripting-friendly)')
+
+
 def _add_gpsdo_watch_args(p) -> None:
     """Argument spec for `smd watch gpsdo`."""
     p.add_argument('--interval', type=float, default=2.0, metavar='SEC',
@@ -26027,7 +26486,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | hfdl | codar | superdarn | meteor | mag | ka9q | radiod | gpsdo | uploads | verifier)')
+                                  '(smd watch wspr | psk | hfdl | codar | superdarn | meteor | mag | ka9q | radiod | gpsdo | usb | uploads | verifier)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -26115,6 +26574,13 @@ def main() -> int:
              'USB/xhci resets highlighted as the cause)',
     )
     _add_radiod_watch_args(p_w_radiod)
+
+    p_w_usb = watch_sub.add_parser(
+        'usb',
+        help='per-RX888 USB delivery measured on the bus with usbmon — '
+             'catches a radio sending fewer samples than nominal, which '
+             'the block-drop counter in radiod cannot see.  Read-only.')
+    _add_usb_watch_args(p_w_usb)
 
     p_w_gpsdo = watch_sub.add_parser(
         'gpsdo',
@@ -26676,6 +27142,8 @@ def main() -> int:
             return cmd_radiod_watch(args)
         if target == 'gpsdo':
             return cmd_gpsdo_watch(args)
+        if target == 'usb':
+            return cmd_usb_watch(args)
         if target == 'ka9q':
             if not _HAS_SIGMOND_LIB:
                 print('smd: sigmond library not found; install '
