@@ -27,7 +27,9 @@ instance sends" lives in one place.  It never raises a lever back:
 raising restores nothing (spec §8.2); step 4 retires these senders.
 
 Order (spec §8.3): every lever file is written first; then
-``wspr-uploader`` stops through its own ``disable --now``; then each touched
+``wspr-uploader`` stops through its own ``disable --now`` (``stop`` alone
+when its unit file reads linked, static, indirect or generated, since
+``disable`` would unlink it; ruling C27-2); then each touched
 instance restarts alone, by ``systemctl restart <unit>``, one at a time.  A
 lever that fails (a symlink or hard link at the env file, an override that
 still arms the sender) is named in ``LeverResult.failures`` and stops no
@@ -76,7 +78,10 @@ WSPR_UPLOADER = "wspr-uploader.service"
 MAG_CONFIG = Path("mag-recorder") / "mag-recorder-config.toml"
 # The clients that write governed sink rows (spec §4.3).
 WRITER_CLIENTS = ("psk-recorder", "meteor-scatter", "wspr-recorder")
-ALLOWED_VERBS = {("restart",), ("disable", "--now"), ("show",)}
+# `stop` passes for wspr-uploader alone: a running linked, static, indirect
+# or generated unit stops but never disables (ruling C27-2).
+ALLOWED_VERBS = {("restart",), ("disable", "--now"), ("show",),
+                 ("stop", WSPR_UPLOADER)}
 RADIOD_PATTERNS = ("radiod@*", "radiod.service")
 _RUNNING = ("active", "activating", "reloading", "deactivating")
 _TRUE = ("1", "true", "yes", "on")
@@ -86,8 +91,9 @@ _MS_QUIET = ("off", "none", "disabled")
 # systemd did not say.
 _UNIT_FILE_OFF = ("disabled", "masked", "masked-runtime", "not-found", "")
 # These name no enablement of their own, so a unit in one of them counts
-# as armed only while it runs.  `disable --now` never touches it stopped:
-# on a linked unit, disable would remove the link itself (Task 27 (a)).
+# as armed only while it runs.  The lever stops it and never disables it:
+# on a linked unit, disable would remove the link itself (Task 27 (a),
+# ruling C27-2).
 _UNIT_FILE_IF_RUNNING = ("linked", "linked-runtime", "static", "indirect",
                          "generated")
 _RESTART_TIMEOUT = 300
@@ -127,8 +133,8 @@ class Roots:
 
 def _systemctl(systemctl: Callable, *args: str, timeout: int = 30):
     """Run ``systemctl <args>``; only the verbs in ALLOWED_VERBS pass, and
-    ``restart`` and ``disable --now`` take exactly one unit."""
-    one_unit = {"restart": 2, "disable": 3}
+    ``restart``, ``stop`` and ``disable --now`` take exactly one unit."""
+    one_unit = {"restart": 2, "disable": 3, "stop": 2}
     if not args or not any(tuple(args[:len(v)]) == v for v in ALLOWED_VERBS) \
             or len(args) != one_unit.get(args[0], len(args)):
         raise ValueError(f"sink_levers: systemctl {' '.join(args)} is not "
@@ -284,7 +290,8 @@ class LeverPlan:
     env_levers: tuple = ()         # EnvLever to write, then restart its unit
     mag: Optional[Path] = None     # mag config to set [uploader] enabled=false
     mag_checked: Optional[Path] = None
-    wspr_uploader: bool = False    # disable --now wspr-uploader
+    wspr_uploader: bool = False    # lower wspr-uploader
+    wspr_uploader_stop: bool = False   # by `stop` alone (C27-2), not disable
     wspr_uploader_checked: bool = False
     left_alone: tuple = ()         # units and files already lowered
     problems: tuple = ()           # (unit or file, why) the plan cannot act on
@@ -302,12 +309,15 @@ class LeverResult:
     changed: list = field(default_factory=list)      # files written
     restarted: list = field(default_factory=list)
     disabled: list = field(default_factory=list)
+    stopped: list = field(default_factory=list)      # stopped, not disabled
     left_alone: list = field(default_factory=list)
     failures: list = field(default_factory=list)     # (file or unit, why)
 
     def lines(self) -> list:
         out = [f"lever: changed {p}" for p in self.changed]
         out += [f"lever: stopped and disabled {u}" for u in self.disabled]
+        out += [f"lever: stopped {u} (its unit file names no enablement; "
+                "left as it stands)" for u in self.stopped]
         out += [f"lever: restarted {u}" for u in self.restarted]
         out += [f"lever: left alone {x} (already lowered)" for x in self.left_alone]
         out += [f"lever: FAILED {x}: {why}" for x, why in self.failures]
@@ -339,18 +349,31 @@ def _mag_armed(path: Path) -> bool:
     return not (isinstance(up, dict) and up.get("enabled", True) is False)
 
 
-def _uploader_armed(systemctl) -> Optional[bool]:
-    """True when wspr-uploader runs or stands enabled; None when systemd
-    does not know the unit (wspr-recorder never installed it).  A linked,
-    static, indirect or generated unit counts only while it runs."""
+def _uploader_lever(systemctl) -> Optional[str]:
+    """How to lower wspr-uploader: ``"disable"`` (``disable --now``) when
+    it runs or stands enabled; ``"stop"`` when it runs and its
+    UnitFileState names no enablement (linked, static, indirect,
+    generated; ruling C27-2); ``""`` when it is quiet; None when systemd
+    does not know the unit (wspr-recorder never installed it)."""
     p = _unit_props(systemctl, WSPR_UPLOADER,
                     ("LoadState", "ActiveState", "UnitFileState"))
     if p.get("LoadState", "") in ("", "not-found"):
         return None
-    if p.get("ActiveState", "") in _RUNNING:
-        return True
     state = p.get("UnitFileState", "")
-    return state not in _UNIT_FILE_OFF and state not in _UNIT_FILE_IF_RUNNING
+    running = p.get("ActiveState", "") in _RUNNING
+    if state in _UNIT_FILE_IF_RUNNING:
+        return "stop" if running else ""
+    if running or state not in _UNIT_FILE_OFF:
+        return "disable"
+    return ""
+
+
+def _uploader_armed(systemctl) -> Optional[bool]:
+    """True when wspr-uploader runs or stands enabled; None when systemd
+    does not know the unit.  A linked, static, indirect or generated unit
+    counts only while it runs."""
+    how = _uploader_lever(systemctl)
+    return None if how is None else bool(how)
 
 
 def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
@@ -382,16 +405,17 @@ def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
                     alone.append(unit)
             except (OSError, ValueError) as exc:
                 problems.append((unit, f"cannot read or place its lever: {exc}"))
-    wspr_uploader = checked_uploader = False
+    wspr_uploader = checked_uploader = uploader_stop = False
     if "wspr-recorder" in below:
         checked_uploader = True
         try:
-            armed = _uploader_armed(systemctl)
+            how = _uploader_lever(systemctl)
         except OSError as exc:
             problems.append((WSPR_UPLOADER, f"cannot read its state: {exc}"))
         else:
-            wspr_uploader = bool(armed)
-            if armed is False:
+            wspr_uploader = bool(how)
+            uploader_stop = how == "stop"
+            if how == "":
                 alone.append(WSPR_UPLOADER)
     mag = mag_checked = None
     if "mag-recorder" in below:
@@ -406,6 +430,7 @@ def plan_levers(clients_below, topology, *, roots: Roots = Roots(),
     return LeverPlan(below=below, instances=tuple(instances),
                      env_levers=tuple(levers), mag=mag, mag_checked=mag_checked,
                      wspr_uploader=wspr_uploader,
+                     wspr_uploader_stop=uploader_stop,
                      wspr_uploader_checked=checked_uploader,
                      left_alone=tuple(alone), problems=tuple(problems),
                      restart_only=tuple(restart_only), etc=roots.etc)
@@ -459,7 +484,19 @@ def apply_levers(plan: LeverPlan, *, systemctl=subprocess.run,
             res.failures.append((str(plan.mag), f"not written: {exc}"))
         else:
             res.changed.append(plan.mag)
-    if plan.wspr_uploader:
+    if plan.wspr_uploader and plan.wspr_uploader_stop:
+        try:
+            r = _systemctl(systemctl, "stop", WSPR_UPLOADER,
+                           timeout=_RESTART_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            res.failures.append((WSPR_UPLOADER, f"stop: {exc}"))
+        else:
+            if r.returncode == 0:
+                res.stopped.append(WSPR_UPLOADER)
+            else:
+                res.failures.append((WSPR_UPLOADER,
+                                     f"stop exited {r.returncode}"))
+    elif plan.wspr_uploader:
         try:
             r = _systemctl(systemctl, "disable", "--now", WSPR_UPLOADER,
                            timeout=_RESTART_TIMEOUT)

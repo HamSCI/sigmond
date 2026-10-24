@@ -85,6 +85,10 @@ class FakeSystemctl:
             if self.on_restart:
                 self.on_restart(unit)
             return subprocess.CompletedProcess(cmd, 0, "", "")
+        if verb == "stop":
+            u = self.units.setdefault(args[1], {})
+            u["ActiveState"] = "inactive"
+            return subprocess.CompletedProcess(cmd, 0, "", "")
         if verb == "disable" and args[1] == "--now":
             u = self.units.setdefault(args[2], {})
             u["ActiveState"] = "inactive"
@@ -308,14 +312,36 @@ class EachLever(Base):
                 self.assertIn(UPLOADER, res.left_alone)
                 self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
 
-    def test_active_linked_and_kin_armed(self):
+    def test_active_linked_and_kin_stopped_never_disabled(self):
+        """C27-2: running, such a unit is armed, and the lever stops it
+        only: `disable` would unlink a linked unit.  Verify then reads it
+        quiet, and its UnitFileState stays as it stood."""
         for state in self.NOT_ENABLED:
             with self.subTest(state=state):
                 self.setUp()
                 self.uploader(active="active", state=state)
                 plan, res = self.lever(["wspr-recorder"])
-                self.assertIn(["disable", "--now", UPLOADER], self.sc.calls)
-                self.assertEqual(res.disabled, [UPLOADER])
+                self.assertIn(["stop", UPLOADER], self.sc.calls)
+                self.assertFalse(any(c[0] == "disable" for c in self.sc.calls),
+                                 self.sc.calls)
+                self.assertEqual(res.stopped, [UPLOADER])
+                self.assertEqual(res.disabled, [])
+                self.assertIn(f"lever: stopped {UPLOADER}", "\n".join(res.lines()))
+                self.assertEqual(self.sc.units[UPLOADER]["UnitFileState"], state)
+                self.assertEqual(L.verify_levers(plan, systemctl=self.sc), [])
+
+    def test_active_enabled_keeps_disable_now(self):
+        self.uploader(active="active", state="enabled")
+        plan, res = self.lever(["wspr-recorder"])
+        self.assertIn(["disable", "--now", UPLOADER], self.sc.calls)
+        self.assertNotIn(["stop", UPLOADER], self.sc.calls)
+        self.assertEqual(res.disabled, [UPLOADER])
+        self.assertEqual(res.stopped, [])
+
+    def test_inactive_linked_gets_no_call(self):
+        self.uploader(active="inactive", state="linked")
+        self.lever(["wspr-recorder"])
+        self.assertEqual([c for c in self.sc.calls if c[0] != "show"], [])
 
     def test_verify_names_a_running_uploader_in_other_states(self):
         for state in self.NOT_ENABLED + ("enabled",):
@@ -877,7 +903,7 @@ class Static(unittest.TestCase):
     def test_systemctl_verbs_restricted(self):
         consts = {n.value for n in ast.walk(self.tree)
                   if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-        for bad in ("stop", "start", "kill", "reload", "try-restart",
+        for bad in ("start", "kill", "reload", "try-restart",
                     "reload-or-restart", "is-active", "is-enabled", "enable",
                     "mask", "daemon-reload", "isolate", "reset-failed"):
             self.assertNotIn(bad, consts)
@@ -888,9 +914,11 @@ class Static(unittest.TestCase):
                 first = node.args[1]
                 self.assertIsInstance(first, ast.Constant)
                 verbs.append(first.value)
-        self.assertEqual(set(verbs), {"restart", "disable", "show"})
+        self.assertEqual(set(verbs), {"restart", "disable", "show", "stop"})
+        # C27-2: `stop` passes for wspr-uploader alone
         self.assertEqual(L.ALLOWED_VERBS,
-                         {("restart",), ("disable", "--now"), ("show",)})
+                         {("restart",), ("disable", "--now"), ("show",),
+                          ("stop", L.WSPR_UPLOADER)})
         # the only literal "systemctl" sits in the one helper
         self.assertEqual(self.src.count('"systemctl"'), 1)
 
@@ -898,6 +926,8 @@ class Static(unittest.TestCase):
         sc = FakeSystemctl({})
         with self.assertRaises(ValueError):
             L._systemctl(sc, "stop", "x.service")
+        with self.assertRaises(ValueError):
+            L._systemctl(sc, "stop", L.WSPR_UPLOADER, "x.service")
         with self.assertRaises(ValueError):
             L._systemctl(sc, "disable", "x.service")
         with self.assertRaises(ValueError):
