@@ -183,6 +183,71 @@ def _argv0(args, shell):
         return ""
 
 
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "mksh", "ash",
+                     "busybox"})
+
+
+def _shell_words(text):
+    """The unquoted words of a shell string (G-1).  `;`, `&`, `|`, `(`,
+    `)`, `<`, `>` and backticks split words, so `a; b`, `a && b`,
+    `$(b)` and `` `b` `` each yield b.  A quoted string stays one token
+    and is skipped: it is data (`echo "run sudo"`), and the wizard tests
+    print sudoers lines that way."""
+    import shlex
+    lex = shlex.shlex(os.fsdecode(text).replace("\n", " ; "), posix=False,
+                      punctuation_chars="();<>|&`")
+    lex.whitespace_split = True
+    lex.commenters = ""
+    try:
+        tokens = list(lex)
+    except ValueError:                  # an unclosed quote: plain split
+        tokens = os.fsdecode(text).split()
+    for tok in tokens:
+        if tok[:1] in ("'", '"'):
+            continue
+        yield tok.lstrip("$!{")
+
+
+def _shell_elevator(text):
+    """The first unquoted word of a shell string that names an elevator
+    by a path (``/usr/bin/sudo``, ``./doas``), or None.
+
+    Every word is scanned, but a bare ``sudo`` passes here: the shell
+    resolves it through PATH at run time, where the refusing stand-in
+    stands first.  A path skips PATH, so only this scan can refuse it.
+    Refusing bare names too would refuse the wizard's own shell
+    functions, which name sudo in bodies the tests stub or never run."""
+    for word in _shell_words(text):
+        if word and "/" in word and _elevator(word):
+            return word
+    return None
+
+
+def _popen_shell_text(args, shell):
+    """The shell text a Popen call runs, or None: a string under
+    ``shell=True``, ``args[0]`` of a list under it, or every argument after
+    ``-c`` (or a flag cluster holding ``c``, like ``-lc``) of a shell."""
+    import re
+    if isinstance(args, (str, bytes)):
+        return os.fsdecode(args) if shell else None
+    try:
+        argv = [os.fsdecode(a) for a in args]
+    except TypeError:
+        return None
+    if not argv:
+        return None
+    if shell:
+        return " ".join(argv)
+    if os.path.basename(argv[0]) not in _SHELLS:
+        return None
+    for i, a in enumerate(argv[1:], 1):
+        if a == "--":
+            break
+        if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", a):
+            return " ".join(argv[i + 1:])
+    return None
+
+
 @pytest.fixture(autouse=True)
 def _no_elevation(monkeypatch):
     """An in-process exec of an elevator (bin/smd's `_need_root` re-exec)
@@ -214,6 +279,10 @@ def _no_elevation(monkeypatch):
         for p in (prog, kw.get("executable")):
             if p is not None and _elevator(p):
                 _refuse("subprocess.Popen", p)
+        text = _popen_shell_text(args, kw.get("shell", False))
+        hit = _shell_elevator(text) if text is not None else None
+        if hit is not None:
+            _refuse("subprocess.Popen (shell)", hit)
         if kw.get("env") is not None:
             kw["env"] = _guarded_env(kw["env"])
         return real_init(self, args, *a, **kw)
@@ -251,9 +320,9 @@ def _no_elevation(monkeypatch):
     real_system = os.system
 
     def system(command):
-        prog = _argv0(command, True)
-        if _elevator(prog):
-            _refuse("os.system", prog)
+        hit = _shell_elevator(command)
+        if hit is not None:
+            _refuse("os.system", hit)
         return real_system(command)
     monkeypatch.setattr(os, "system", system)
 

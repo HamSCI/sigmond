@@ -25,8 +25,14 @@ class NoElevationTests(unittest.TestCase):
         self.assertIn("sigmond-test-nosudo-", found)
 
     def test_a_child_that_runs_sudo_is_refused(self):
-        r = subprocess.run(["sh", "-c", "sudo -n true"], capture_output=True,
-                           text=True, timeout=30)
+        """A script the in-process scan cannot read still meets the
+        stand-in first on PATH."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td) / "elevate.sh"
+            script.write_text("sudo -n true\n")
+            r = subprocess.run(["sh", str(script)], capture_output=True,
+                               text=True, timeout=30)
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("sudo refused under pytest", r.stderr)
 
@@ -83,6 +89,42 @@ class NoElevationTests(unittest.TestCase):
                 self.assertIn("never elevates", str(cm.exception))
         with self.assertRaises(AssertionError):
             subprocess.Popen(["/nonexistent/sudo", "-n", "true"])
+
+    def test_every_word_of_a_shell_string_is_scanned(self):
+        """G-1: an elevator anywhere in a shell string refuses, not only
+        as its first word."""
+        cases = (
+            ("true; /nonexistent/sudo -n true", {"shell": True}),
+            (["sh", "-c", "echo hi && /nonexistent/sudo true"], {}),
+            (["bash", "-lc", "true | /nonexistent/pkexec true"], {}),
+            (["/bin/sh", "-c", "x=$(/nonexistent/doas true)"], {}),
+            (["dash", "-c", "true", "/nonexistent/run0"], {}),
+            (["true; `/nonexistent/sudo true`"], {"shell": True}),
+        )
+        for argv, kw in cases:
+            with self.subTest(argv=argv):
+                with self.assertRaises(AssertionError) as cm:
+                    subprocess.run(argv, capture_output=True, timeout=30, **kw)
+                self.assertIn("never elevates", str(cm.exception))
+        for cmd in ("true && /nonexistent/sudo true",
+                    "echo $(/nonexistent/run0 true)"):
+            with self.subTest(system=cmd):
+                with self.assertRaises(AssertionError):
+                    os.system(cmd)
+        # a bare name inside a shell string meets the stand-in at run time
+        r = subprocess.run(["sh", "-c", "true; sudo -n true"],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("sudo refused under pytest", r.stderr)
+        # a quoted path is data, not a command
+        r = subprocess.run(["sh", "-c", "echo '/nonexistent/sudo -n true'"],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # positive control: a shell string without an elevator runs
+        r = subprocess.run(["sh", "-c", "echo fine; true"], capture_output=True,
+                           text=True, timeout=30)
+        self.assertEqual((r.returncode, r.stdout), (0, "fine\n"))
+        self.assertEqual(os.system("true"), 0)
 
     def test_spawn_and_system_refuse_sudo(self):
         calls = (
