@@ -989,5 +989,49 @@ class StateDirOverrideStepTests(unittest.TestCase):
         self.assertNotIn("HS_UPLOADER_STATE_DIR", r.both)
 
 
+# ---------------------------------------------------------------------------
+# Task 19 (final batch): the old form and a symlinked pipelines.d
+# ---------------------------------------------------------------------------
+
+@needs_real
+class OldFormSymlinkedPipelinesDTests(unittest.TestCase):
+    """Part 1's form only removes pipelines.d/sigmond.toml.  A symlinked
+    pipelines.d refuses only when a sigmond.toml stands behind it;
+    otherwise the legacy manifest lands."""
+
+    def station(self, *, with_file):
+        st = Part2Station(self)
+        st.roots.manifest.write_text(GATE_TEXT)       # changed: steps 5-8
+        target = st.tmp / "elsewhere"
+        target.mkdir()
+        if with_file:
+            (target / um.SIGMOND_FILE).write_text("keep\n")
+        if st.pipelines_d.exists():
+            for p in st.pipelines_d.iterdir():
+                p.unlink()
+            st.pipelines_d.rmdir()
+        st.pipelines_d.symlink_to(target)
+        return st, target
+
+    def test_no_sigmond_toml_behind_the_link_lands_the_legacy_manifest(self):
+        st, target = self.station(with_file=False)
+        r = st.step(features=NO_GATE)
+        self.assertEqual(r.rc, 0, r.both)
+        self.assertEqual(r.render, "part1")
+        self.assertEqual(r.manifest, PART1_TEXT)
+        self.assertTrue(st.pipelines_d.is_symlink())
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_sigmond_toml_behind_the_link_refuses_before_anything_stops(self):
+        st, target = self.station(with_file=True)
+        r = st.step(features=NO_GATE)
+        self.assertEqual(r.rc, 1, r.both)
+        self.assertIn("symlink", r.err)
+        self.assertEqual(daemon_restarts(r), [])
+        self.assertNotIn("migrate", r.calls)
+        self.assertEqual(r.manifest, GATE_TEXT)
+        self.assertEqual((target / um.SIGMOND_FILE).read_text(), "keep\n")
+
+
 if __name__ == "__main__":
     unittest.main()

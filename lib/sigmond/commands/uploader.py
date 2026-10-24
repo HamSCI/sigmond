@@ -802,6 +802,20 @@ def _sigmond_preflight() -> Optional[str]:
     return None
 
 
+def _nothing_behind_a_linked_pipelines_d() -> bool:
+    """Part 1's form only removes ``pipelines.d/sigmond.toml``: True when
+    ``pipelines.d`` is a symlink and no sigmond.toml stands behind it, so
+    there is nothing to remove and the legacy manifest may land (Task 19).
+    Reads only: an lstat of the link, and of the file through it."""
+    d = um.MANIFEST_PATH.parent / "pipelines.d"
+    try:
+        if not stat.S_ISLNK(os.lstat(d).st_mode):
+            return False
+    except OSError:
+        return False
+    return not os.path.lexists(d / um.SIGMOND_FILE)
+
+
 def _sigmond_drift(text: Optional[str]) -> bool:
     """Read-only: whether ``pipelines.d/sigmond.toml`` would change."""
     path = um.MANIFEST_PATH.parent / "pipelines.d" / um.SIGMOND_FILE
@@ -946,7 +960,12 @@ def _land_step(*, path: Path, installed: str, text: str,
     landed beside the manifest (spec §3.6): in the gate form before it, in
     part 1's form removed after it."""
     # Before anything stops: pipelines.d/sigmond.toml must be landable.
-    refused = _sigmond_preflight()
+    # Part 1's form refuses a symlinked pipelines.d only when a sigmond.toml
+    # stands behind it to remove.
+    if not gate and _nothing_behind_a_linked_pipelines_d():
+        refused = None
+    else:
+        refused = _sigmond_preflight()
     if refused is not None:
         _warn(f"{refused}; {path}, pipelines.d/ and {SERVICE} left as they "
               f"stand.  Remove it, then run this command again")
@@ -1039,6 +1058,8 @@ def _land_step(*, path: Path, installed: str, text: str,
 def _remove_sigmond() -> int:
     """Part 1's form: no ``pipelines.d/sigmond.toml`` (spec §3.6).  The
     legacy manifest, holding the heartbeat, has landed already."""
+    if _nothing_behind_a_linked_pipelines_d():
+        return 0                # nothing to remove, and never through a link
     try:
         _land_sigmond(None)
     except OSError as exc:
