@@ -306,6 +306,42 @@ class Adoption(unittest.TestCase):
             "already here")
 
 
+class CloneOwnership(unittest.TestCase):
+    """Every native-build clone into /opt/git/sigmond runs UNPRIVILEGED.
+
+    ⛔ This test exists because the first draft of _build_ubersdr_decoders
+    cloned with sudo=True.  On a greenfield box that created
+    /opt/git/sigmond as root:root, and the very next unprivileged clone --
+    WSJT-X's, the FALLBACK decoder -- died with
+
+        fatal: could not create work tree dir '/opt/git/sigmond/wsjtx':
+        Permission denied
+
+    One build had quietly made the next one impossible, and the only visible
+    symptom was the second build failing for a reason that had nothing to do
+    with it.  /opt/git/sigmond is sigmond:sigmond with setgid (install.sh);
+    a root-owned subtree inside it is the recurring ownership fault this
+    codebase keeps relearning.
+    """
+
+    def test_no_git_clone_in_smd_runs_under_sudo(self):
+        import re
+        src = open("bin/smd").read()
+        # Each `_run([... 'git', 'clone' ...], ...)` call, up to its close.
+        offenders = []
+        for m in re.finditer(r"_run\(\[([^\]]*'git',\s*'clone'[^\]]*)\]([^)]*)\)",
+                             src):
+            if "sudo=True" in m.group(2):
+                line = src[:m.start()].count("\n") + 1
+                offenders.append(f"bin/smd:{line}")
+        self.assertEqual(offenders, [],
+                         "git clone must not run under sudo: " +
+                         ", ".join(offenders))
+
+    def test_the_ubersdr_checkout_sits_under_the_shared_git_root(self):
+        self.assertEqual(_SMD._UBERSDR_SRC.parent, Path("/opt/git/sigmond"))
+
+
 class CombinedBuild(unittest.TestCase):
     """_build_decoders: what happens when one of the two builds fails.
 

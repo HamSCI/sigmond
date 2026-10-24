@@ -1789,16 +1789,24 @@ def _build_ubersdr_decoders(*, check: bool = True) -> bool:
         return False
 
     src = _UBERSDR_SRC
+    # ⛔ Clone UNPRIVILEGED, like onion, wsjtx and every catalog client.
+    # /opt/git/sigmond is sigmond:sigmond with setgid (install.sh), and a
+    # sudo clone lands a root-owned tree inside it.  The first draft here did
+    # exactly that on a greenfield box: it created /opt/git/sigmond as
+    # root:root, and the very next unprivileged clone -- WSJT-X's, the
+    # fallback decoder -- failed with "could not create work tree dir:
+    # Permission denied".  One build quietly made the next one impossible.
+    # See reference_ownership_recurrence_root_cause: one tree, several roles.
     if not src.exists():
         _info(f'Cloning ubersdr_wsprd → {src} ...')
-        r = _run(['git', 'clone', _UBERSDR_REPO, str(src)], sudo=True)
+        r = _run(['git', 'clone', _UBERSDR_REPO, str(src)])
         if r.returncode != 0:
             _err(f'git clone ubersdr_wsprd failed: {r.stderr.strip()}')
             return False
     if not _git_head(src).startswith(_UBERSDR_COMMIT):
-        _run(['git', '-C', str(src), 'fetch', '--quiet', 'origin'], sudo=True)
+        _run(['git', '-C', str(src), 'fetch', '--quiet', 'origin'])
         r = _run(['git', '-C', str(src), 'checkout', '--quiet',
-                  _UBERSDR_COMMIT], sudo=True)
+                  _UBERSDR_COMMIT])
         if r.returncode != 0:
             _err(f'ubersdr_wsprd: checkout {_UBERSDR_COMMIT[:12]} failed: '
                  f'{r.stderr.strip()}')
@@ -1870,6 +1878,15 @@ def _adopt_legacy_decoders() -> None:
     the only decoder the station has, leaving it with nothing to fall back to
     until a five-minute Qt build completes.  So the files are moved, not
     overwritten, and the old provenance marker goes with them.
+
+    ⚠ The move is followed IMMEDIATELY by a link back to it.  Otherwise the
+    upgrade opens a window in which /usr/local/bin/wsprd does not exist at
+    all: whatever runs in that window decodes nothing, and if the step that
+    was going to select an implementation then fails -- a failed build, a
+    raised exception -- the window never closes and the station is left with
+    no decoder on PATH and every service still reporting healthy.  Adoption
+    must leave the station no worse off at every instant, not merely at the
+    end.
     """
     dest = _DECODER_DIR / 'wsjtx'
     for b in _DECODER_BINS:
@@ -1878,6 +1895,8 @@ def _adopt_legacy_decoders() -> None:
             continue
         _run(['install', '-d', str(dest)], sudo=True)
         _run(['mv', str(live), str(dest / b)], sudo=True)
+        _run(['ln', '-sfnT', f'../libexec/sigmond/decoders/wsjtx/{b}',
+              str(live)], sudo=True)
         _info(f'decoders: adopted the existing {b} as the wsjtx build')
     old = Path('/usr/local/bin/.wsjtx-decoders.provenance')
     if old.exists() and not (dest / '.provenance').exists():
