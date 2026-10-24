@@ -306,6 +306,73 @@ class Adoption(unittest.TestCase):
             "already here")
 
 
+class CombinedBuild(unittest.TestCase):
+    """_build_decoders: what happens when one of the two builds fails.
+
+    The asymmetry is the point.  The WSJT-X build is a hard requirement —
+    psk-recorder's jt9_decode drives THAT jt9 over Qt5 shared memory, and a
+    fallback that must be built before it can be used is not a fallback.
+    UberSDR failing is not fatal: a station that cannot build or verify the
+    new decoders should keep decoding with the old ones and say so, rather
+    than fail an install over a performance improvement.
+    """
+
+    def setUp(self):
+        self.p = [mock.patch.object(_SMD, "_adopt_legacy_decoders",
+                                    lambda: None),
+                  mock.patch.object(_SMD, "_warn"),
+                  mock.patch.object(_SMD, "_ok"), mock.patch.object(_SMD, "_err")]
+        for q in self.p:
+            q.start()
+            self.addCleanup(q.stop)
+
+    def _run(self, wsjtx, ubersdr, want="ubersdr"):
+        picked = []
+        with mock.patch.object(_SMD, "_build_wsjtx_decoders",
+                               lambda: wsjtx), \
+             mock.patch.object(_SMD, "_build_ubersdr_decoders",
+                               lambda **k: ubersdr), \
+             mock.patch.object(_SMD, "_decoder_preference", lambda: want), \
+             mock.patch.object(_SMD, "_select_decoders",
+                               lambda i: picked.append(i) or True):
+            ok = _SMD._build_decoders()
+        return ok, picked
+
+    def test_both_build_and_the_wanted_one_is_selected(self):
+        self.assertEqual(self._run(True, True), (True, ["ubersdr"]))
+
+    def test_a_failed_wsjtx_build_fails_the_install(self):
+        ok, picked = self._run(False, True)
+        self.assertFalse(ok)
+        self.assertEqual(picked, [], "nothing may be selected without the "
+                                     "fallback in place")
+
+    def test_a_failed_ubersdr_build_falls_back_rather_than_failing(self):
+        # ⚠ A performance improvement must not be able to fail an install.
+        ok, picked = self._run(True, False)
+        self.assertTrue(ok)
+        self.assertEqual(picked, ["wsjtx"])
+
+    def test_the_fallback_is_announced_not_silent(self):
+        with mock.patch.object(_SMD, "_warn") as warn:
+            self._run(True, False)
+        self.assertTrue(warn.called,
+                        "falling back must say so — a station quietly on the "
+                        "old decoder looks identical to one on the new")
+
+    def test_wsjtx_preference_does_not_build_ubersdr(self):
+        # An operator who pinned wsjtx should not pay for a build they
+        # asked not to use.
+        built = []
+        with mock.patch.object(_SMD, "_build_wsjtx_decoders", lambda: True), \
+             mock.patch.object(_SMD, "_build_ubersdr_decoders",
+                               lambda **k: built.append(1) or True), \
+             mock.patch.object(_SMD, "_decoder_preference", lambda: "wsjtx"), \
+             mock.patch.object(_SMD, "_select_decoders", lambda i: True):
+            _SMD._build_decoders()
+        self.assertEqual(built, [])
+
+
 class DoctorFindings(unittest.TestCase):
     """What doctor says about a station decoding with the wrong build.
 

@@ -147,11 +147,36 @@ the compiler baseline, same results) when any is missing, recording which it
 used in the provenance marker.  Our own fleet (Ryzen 5825U, Zen 3) has all
 three; a greenfield on salvaged hardware may not.
 
-**psk-recorder's `jt9-decode` expects a Qt5 `jt9`.** It attaches over
-`QSharedMemory`.  The UberSDR `jt9` supports `-s KEY` shared memory, but this
-needs proving before the WSJT-X `jt9` can be removed from any host running
-psk-recorder.  Until then: both stay installed, which the design already
-requires.
+**psk-recorder's `jt9_decode` now gets the UberSDR `jt9`, and that is the
+one live regression risk in this change.**  `core/slot.py:594` derives the
+decoder as the *sibling of the wrapper* —
+`jt9_bin = Path(wrapper).with_name("jt9")` — so with `jt9_decode` at
+`/usr/local/bin/jt9_decode` it resolves `/usr/local/bin/jt9`, which is now
+our symlink.  FT8 and FT4 on every DASI2 station run through that path.
+
+The evidence says it works, and it is better evidence than "upstream claims
+drop-in":
+
+- UberSDR's `src/jt9_shm.cpp` implements `jt9 -s` as *"lib/jt9a.f90 at
+  WSJT-X v2.7.0, its loop exactly"*, over the same `dec_data_t`.
+- `src/qt_shm.h` reproduces Qt 5's `QSharedMemory` System V wire format —
+  native name, key file, `ftok`, the `qipc_systemsem_` lock — and its own
+  header says it **came from jt9-decode's `tests/test_shm_interop.cpp`**
+  (`qt_shm_compat.h`) and is verified against Qt 5.15.
+- The direction matches ours exactly: the Qt side (`jt9_decode`) creates the
+  segment, the UberSDR `jt9` attaches to it.
+
+The residual risk is that **our `jt9_decode` is a *triggered-mode fork*** of
+madpsy/jt9-decode, and a fork can have moved the protocol.  So this is
+strong evidence, not a proof, and it has not been exercised against our fork.
+
+⚠ **Pre-deployment check, before any station runs psk-recorder on the new
+build:** on one station, select ubersdr, restart psk-recorder, and confirm
+FT8 *and* FT4 spots keep arriving for a full cycle — not that the process
+stays up.  `jt9_decode` failing to attach would leave a running service
+producing nothing, which is the same silent shape everything else here
+guards against.  If it fails, the fallback is `smd admin decoders --select
+wsjtx`, one command, no rebuild — which is why the design keeps both.
 
 **Two upstreams instead of one.** We now track `madpsy/ubersdr_wsprd` as well
 as `WSJTX/wsjtx`.  Both get pinned commits and both appear in the manifest.

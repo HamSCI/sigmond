@@ -47,7 +47,7 @@ Current sigmond clients:
 | Client | Binary | Decision | Why |
 |---|---|---|---|
 | `hfdl-recorder` | `dumphfdl` (+ libacars, liquid-dsp) | **both** (prebuilt + script) | ~15 min build, 3 upstream clones, 10+ apt deps |
-| `wspr-recorder` | `wsprd`, `jt9` | **both** (prebuilt + script) | Qt + boost + fftw, ~5 min build |
+| `wspr-recorder` | `wsprd`, `jt9` | **both** (prebuilt + script) | two implementations, one selected — see "Two builds of the same two binaries" |
 | `mag-recorder` | `mag-usb` | **both** (prebuilt + script) | small build but likely RPi target (ARM); ship x86_64 prebuilt, build-fresh covers ARM |
 | `hf-timestd` | PHaRLAP | **external only** | closed-source (DST), can't redistribute — operator-staged via the client's `scripts/install-pharlap.sh` (or baked into the **controlled** DASI2 golden image as single-licensee internal use). GCC/gfortran-built static libs in 4.7.4 — no Intel Fortran, no MATLAB MCR. |
 | `hf-timestd` | pyLAP | **build-on-install (pinned)** | open fork (`HamSCI/PyLap`) built into the venv; pin (`PYLAP_REF`) lives in the client's `scripts/ensure-pylap.sh` — the single idempotent builder run by both `install.sh` and `deploy.toml` `[build].steps`, so clones self-heal raytracing after a venv rebuild. Stand-alone: paths derive from the script's own location, no sigmond required. |
@@ -84,6 +84,8 @@ provenance moves out of the (un-ownable) upstream repo and into sigmond:
 |---|---|---|---|---|---|
 | `ka9q-radio` | radiod + `fobos` driver | `ka9q/ka9q-radio` (fobos in-tree) | tracks upstream | no | `fobos` disabled by default; `libfobos` is proprietary/external, so it stays opt-in |
 | `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ fully migrated (pin + manifest + `smd admin diag` drift check) |
+| `wspr-recorder`, `psk-recorder` | `wsprd`, `jt9` (WSJT-X) | `WSJTX/wsjtx` | **yes** — `_WSJTX_COMMIT` | **yes** — `build-manifest/wsjtx-decoders.toml` | ✓ the FALLBACK since 2026-10-24 |
+| `wspr-recorder`, `psk-recorder` | `wsprd`, `jt9` (UberSDR) | `madpsy/ubersdr_wsprd` | **yes** — `_UBERSDR_COMMIT` | **yes** — `build-manifest/ubersdr-decoders.toml` | ✓ the DEFAULT; selection gated on a parity check |
 
 `onion` was the first migration: it is pinned (`_ONION_COMMIT`) and
 `_build_ka9q_web_with_onion` writes
@@ -96,8 +98,44 @@ pin + manifest + diag treatment to any future upstream-built dep. The
 principles are identical to mag-usb; only the storage location differs
 because we don't own the source repo.
 
-`smd update` holds these pinned sources at their pin. `onion` and `wsjtx`
-carry no `.pin` file, because sigmond's build checks the commit out. So
+### Two builds of the same two binaries
+
+`wsprd` and `jt9` are the one case where sigmond builds **two
+implementations of the same binary** and chooses between them, so the
+layout differs from everything above:
+
+    /usr/local/libexec/sigmond/decoders/ubersdr/{wsprd,jt9}
+    /usr/local/libexec/sigmond/decoders/wsjtx/{wsprd,jt9}
+    /usr/local/bin/{wsprd,jt9}  ->  ../libexec/sigmond/decoders/<selected>/…
+
+Neither owns `/usr/local/bin`.  Clients resolve both by name off PATH
+(`shutil.which`), so selection is one atomic symlink swap: no client
+change, and a fallback costs no rebuild.  `[decoders] implementation` in
+`coordination.toml` picks one (default `ubersdr`); `smd admin decoders
+[--select IMPL]` shows and switches it.
+
+Selection is **gated on a parity check**, not merely preceded by one.
+UberSDR's binaries claim byte-identical output to WSJT-X's, and the build
+proves that with upstream's own comparison against WSJT-X's stored outputs
+before installing.  A build that does not match is not installed, and
+`_select_decoders` refuses it even if it somehow is.  The reason is the
+shape of the failure: a wrong decoder does not crash, it decodes slightly
+differently, and the station keeps uploading for as long as nobody looks.
+
+⛔ **No `-march=native` on the UberSDR build**, deliberately — the inverse
+of the `-fbounds-check` rule for the WSJT-X build, and the same cause.
+Upstream sets `-ffp-contract=off` on every decoder source so each multiply
+and add rounds exactly as WSJT-X rounds it; that is what makes the output
+identical.  Its `x86-64-v3` default is already tuned, and `_decoder_x86_arch`
+drops to the compiler baseline on a CPU without AVX2/FMA/BMI2 — there a v3
+binary does not run slowly, it dies with SIGILL, which looks from the
+client's side exactly like a decoder that decodes nothing.
+
+Full design: `tasks/decoder-ubersdr-migration.md`.
+
+`smd update` holds these pinned sources at their pin. `onion`, `wsjtx` and
+`ubersdr_wsprd` carry no `.pin` file, because sigmond's build checks the
+commit out. So
 `smd update` reads their pins from the same constants the builds use
 (`_native_build_pins` in `bin/smd`). A checkout at its pin shows as
 `HELD — pinned by sigmond's native build`; the plan pulls nothing and
