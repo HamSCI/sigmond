@@ -34,14 +34,26 @@ if not ALLOW_SUDO:
     import atexit
     import shutil as _shutil
     import tempfile as _tempfile
-    _NOSUDO = _tempfile.mkdtemp(prefix="sigmond-test-nosudo-")
-    atexit.register(_shutil.rmtree, _NOSUDO, True)
-    with open(os.path.join(_NOSUDO, "sudo"), "w") as _f:
-        _f.write("#!/bin/sh\n"
-                 "echo \"sudo refused under pytest (tests/conftest.py): $*\" >&2\n"
-                 "exit 1\n")
-    os.chmod(os.path.join(_NOSUDO, "sudo"), 0o755)
-    os.environ["PATH"] = _NOSUDO + os.pathsep + os.environ.get("PATH", "")
+    # A second load of this file (a test that execs it again) reuses the
+    # stand-in the first load made, so PATH carries exactly one.
+    _NOSUDO = os.environ.get("SIGMOND_TEST_NOSUDO_DIR", "")
+    if not (_NOSUDO and os.path.isfile(os.path.join(_NOSUDO, "sudo"))):
+        _NOSUDO = _tempfile.mkdtemp(prefix="sigmond-test-nosudo-")
+        atexit.register(_shutil.rmtree, _NOSUDO, True)
+        with open(os.path.join(_NOSUDO, "sudo"), "w") as _f:
+            _f.write("#!/bin/sh\n"
+                     "echo \"sudo refused under pytest (tests/conftest.py): $*\" >&2\n"
+                     "exit 1\n")
+        os.chmod(os.path.join(_NOSUDO, "sudo"), 0o755)
+        os.environ["SIGMOND_TEST_NOSUDO_DIR"] = _NOSUDO
+    if os.environ.get("PATH", "").split(os.pathsep)[0] != _NOSUDO:
+        os.environ["PATH"] = _NOSUDO + os.pathsep + os.environ.get("PATH", "")
+    # bin/smd's `_need_root` refuses outright, exit 1, while this is set
+    # (Task 27): the second wall, for a child whose PATH lost the stand-in.
+    os.environ["SIGMOND_TEST_NO_ELEVATE"] = "1"
+
+# The programs an elevation runs through, by basename.
+ELEVATORS = frozenset({"sudo", "doas", "pkexec", "run0"})
 
 _LIB = Path(__file__).resolve().parent.parent / 'lib'
 if str(_LIB) not in sys.path:
@@ -125,13 +137,64 @@ def needs_real_sudo(obj):
         ALLOW_SUDO, "runs real sudo; set SIGMOND_TEST_ALLOW_SUDO=1 to run")(obj)
 
 
+def _elevator(name) -> bool:
+    try:
+        return os.path.basename(os.fsdecode(name)) in ELEVATORS
+    except TypeError:
+        return False
+
+
+def _refuse(how, what):
+    raise AssertionError(
+        f"a test reached {how}({what!r}, ...): an elevation through "
+        f"{os.path.basename(os.fsdecode(what))}.  Patch `_need_root` (or the "
+        "exec) in the test; the suite never elevates.")
+
+
+def _guarded_env(env):
+    """An explicit env for a child: the stand-in first on its PATH, and
+    SIGMOND_TEST_NO_ELEVATE set, so a child that strips the environment
+    still cannot reach the host's sudo."""
+    env = dict(env)
+    path = env.get("PATH")
+    parts = (path if path is not None else os.defpath).split(os.pathsep)
+    if not parts or parts[0] != _NOSUDO:
+        env["PATH"] = os.pathsep.join([_NOSUDO] + [p for p in parts if p])
+    env["SIGMOND_TEST_NO_ELEVATE"] = "1"
+    return env
+
+
+def _argv0(args, shell):
+    """The program a Popen ``args`` names (the first word of a shell
+    string)."""
+    import shlex
+    if isinstance(args, (str, bytes, os.PathLike)):
+        if shell or isinstance(args, (str, bytes)):
+            text = os.fsdecode(args)
+            try:
+                words = shlex.split(text)
+            except ValueError:
+                words = text.split()
+            return words[0] if words else ""
+        return args
+    try:
+        return list(args)[0]
+    except (IndexError, TypeError):
+        return ""
+
+
 @pytest.fixture(autouse=True)
 def _no_elevation(monkeypatch):
-    """An in-process exec of sudo (bin/smd's `_need_root` re-exec) would
-    replace the pytest process, or elevate it.  Raise instead.  A test
-    that patches os.execvp itself replaces this wrapper."""
+    """An in-process exec of an elevator (bin/smd's `_need_root` re-exec)
+    would replace the pytest process, or elevate it; a child started
+    through subprocess, posix_spawn, spawn* or system would elevate.  Each
+    raises instead when the program's basename is sudo, doas, pkexec or
+    run0, by any path.  A child given its own env still gets the stand-in
+    first on PATH.  A test that patches one of these itself replaces this
+    wrapper."""
     if ALLOW_SUDO:
         return
+    import subprocess
     for name in ("execv", "execve", "execvp", "execvpe", "execl", "execle",
                  "execlp", "execlpe"):
         real = getattr(os, name, None)
@@ -139,13 +202,60 @@ def _no_elevation(monkeypatch):
             continue
 
         def guarded(file, *a, _real=real, _name=name, **kw):
-            if os.path.basename(os.fsdecode(file)) == "sudo":
-                raise AssertionError(
-                    f"a test reached os.{_name}({file!r}, ...): an elevation "
-                    "through sudo.  Patch `_need_root` (or os.execvp) in the "
-                    "test; the suite never elevates.")
+            if _elevator(file):
+                _refuse(f"os.{_name}", file)
             return _real(file, *a, **kw)
         monkeypatch.setattr(os, name, guarded)
+
+    real_init = subprocess.Popen.__init__
+
+    def popen_init(self, args, *a, **kw):
+        prog = _argv0(args, kw.get("shell", False))
+        for p in (prog, kw.get("executable")):
+            if p is not None and _elevator(p):
+                _refuse("subprocess.Popen", p)
+        if kw.get("env") is not None:
+            kw["env"] = _guarded_env(kw["env"])
+        return real_init(self, args, *a, **kw)
+    monkeypatch.setattr(subprocess.Popen, "__init__", popen_init)
+
+    for name in ("posix_spawn", "posix_spawnp"):
+        real = getattr(os, name, None)
+        if real is None:
+            continue
+
+        def spawn(path, argv, *a, _real=real, _name=name, **kw):
+            for p in (path, *(list(argv)[:1])):
+                if _elevator(p):
+                    _refuse(f"os.{_name}", p)
+            return _real(path, argv, *a, **kw)
+        monkeypatch.setattr(os, name, spawn)
+
+    for name in ("spawnv", "spawnve", "spawnvp", "spawnvpe", "spawnl",
+                 "spawnle", "spawnlp", "spawnlpe"):
+        real = getattr(os, name, None)
+        if real is None:
+            continue
+
+        def spawn_mode(mode, file, *a, _real=real, _name=name, **kw):
+            # spawnv*: a[0] is the argv list; spawnl*: a[0] is arg0
+            first = a[0] if a else None
+            if isinstance(first, (list, tuple)):
+                first = first[0] if first else None
+            for p in (file, first):
+                if p is not None and _elevator(p):
+                    _refuse(f"os.{_name}", p)
+            return _real(mode, file, *a, **kw)
+        monkeypatch.setattr(os, name, spawn_mode)
+
+    real_system = os.system
+
+    def system(command):
+        prog = _argv0(command, True)
+        if _elevator(prog):
+            _refuse("os.system", prog)
+        return real_system(command)
+    monkeypatch.setattr(os, "system", system)
 
 
 @pytest.fixture(autouse=True)

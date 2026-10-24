@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import sys as _sys_nrs
 from pathlib import Path as _Path_nrs
-_sys_nrs.path.insert(0, str(_Path_nrs(__file__).resolve().parent))
-from conftest import needs_real_sudo  # noqa: E402  (runs the host's real sudo)
+_sys_nrs.path.insert(0, str(_Path_nrs(__file__).resolve().parents[1]))
+from tests.conftest import needs_real_sudo  # noqa: E402  (runs the host's real sudo)
 
 import os
 import stat

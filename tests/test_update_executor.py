@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import sys as _sys_nrs
 from pathlib import Path as _Path_nrs
-_sys_nrs.path.insert(0, str(_Path_nrs(__file__).resolve().parent))
-from conftest import needs_real_sudo  # noqa: E402  (runs the host's real sudo)
+_sys_nrs.path.insert(0, str(_Path_nrs(__file__).resolve().parents[1]))
+from tests.conftest import needs_real_sudo  # noqa: E402  (runs the host's real sudo)
 
 import contextlib
 import importlib.machinery
@@ -40,10 +40,14 @@ _REAL_RUN = subprocess.run
 
 
 def _run_without_runuser(cmd, *a, **kw):
-    """Tests are not root: `runuser -u X -- git ...` would be refused.
-    Strip the privilege-drop prefix and run the git command as ourselves."""
-    if isinstance(cmd, list) and cmd[:1] == ["runuser"] and "--" in cmd:
-        cmd = cmd[cmd.index("--") + 1:]
+    """Tests are not root: `[sudo -n] /usr/sbin/runuser -u X -- git ...`
+    would be refused (and the suite never elevates: tests/conftest.py).
+    Strip the privilege-drop prefix, sudo included, and run the git
+    command as ourselves."""
+    if isinstance(cmd, list) and "--" in cmd:
+        head = cmd[:cmd.index("--")]
+        if any(os.path.basename(str(w)) == "runuser" for w in head):
+            cmd = cmd[cmd.index("--") + 1:]
     return _REAL_RUN(cmd, *a, **kw)
 
 
