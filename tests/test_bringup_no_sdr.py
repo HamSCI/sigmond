@@ -75,7 +75,7 @@ class DeferredPlan(unittest.TestCase):
 
     def test_the_radio_half_is_installed_but_never_enabled(self):
         for c in ('ka9q-radio', 'igmp-querier') + RADIOD_BOUND:
-            inst = [a for a in self.argv if a.endswith(f'--components {c} --yes --no-enable')]
+            inst = [a for a in self.argv if a.endswith(f'--components {c} --yes --no-enable --no-pull')]
             self.assertEqual(len(inst), 1, f'{c} must install with --no-enable')
             self.assertFalse(any(a.endswith(f'enable {c}') for a in self.argv),
                              f'{c} must not be enabled before it is configured')
@@ -83,7 +83,7 @@ class DeferredPlan(unittest.TestCase):
 
     def test_the_independent_track_runs_whole(self):
         self.assertIn('smd enable mag-recorder', self.argv)
-        self.assertTrue(any(a.endswith('install --components mag-recorder --yes')
+        self.assertTrue(any(a.endswith('install --components mag-recorder --yes --no-pull')
                             for a in self.argv))
         self.assertIn('smd config init mag-recorder --non-interactive', self.argv)
         self.assertIn('smd start --components mag-recorder', self.argv)

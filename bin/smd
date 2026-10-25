@@ -10074,6 +10074,10 @@ def _install_single_client(args) -> int:
             _err(f"unknown client '{client}' — see: smd component list --catalog")
             return 1
 
+    # --no-pull: install what sits on disk (bring-up passes it; the image ships
+    # each checkout at its manifest pin).
+    pull = not getattr(args, 'no_pull', False)
+
     if not entry.install_script:
         # wd-rac is handled natively (frpc binary + ini + service).
         if entry.name == 'wd-rac':
@@ -10101,7 +10105,8 @@ def _install_single_client(args) -> int:
                 return 1
             _netdiag_auto_refresh('install')
             _heading('ka9q-web (onion + make install)')
-            if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)):
+            if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False),
+                                            pull=pull):
                 return 1
             _enable_after_install(entry, args)
             return 0
@@ -10118,7 +10123,8 @@ def _install_single_client(args) -> int:
             if _need_root('install'):
                 return 1
             _netdiag_auto_refresh('install')
-            if not _install_gmag_webui_native(catalog, force=getattr(args, 'force', False)):
+            if not _install_gmag_webui_native(catalog, force=getattr(args, 'force', False),
+                                              pull=pull):
                 return 1
             _enable_after_install(entry, args)
             return 0
@@ -10172,7 +10178,7 @@ def _install_single_client(args) -> int:
         return 1
 
     try:
-        result = _do_install_client(entry, dry_run=dry_run, yes=yes, pull=True,
+        result = _do_install_client(entry, dry_run=dry_run, yes=yes, pull=pull,
                                     catalog=catalog)
     except RuntimeError as exc:
         _err(str(exc))
@@ -10295,6 +10301,9 @@ def _install_full_suite(args) -> int:
 
     dry_run = getattr(args, 'dry_run', False)
     yes = getattr(args, 'yes', False)
+    # --no-pull: install what sits on disk (bring-up passes it; the image ships
+    # each checkout at its manifest pin).
+    pull = not getattr(args, 'no_pull', False)
 
     # Load the catalog to classify each component.
     try:
@@ -10374,13 +10383,15 @@ def _install_full_suite(args) -> int:
     # --- 2. radiod (C build, sigmond-native) ---
     if radiod_needed:
         _heading('ka9q-radio (apt deps + make install)')
-        if not _install_radiod_native(catalog, force=getattr(args, 'force', False)):
+        if not _install_radiod_native(catalog, force=getattr(args, 'force', False),
+                                      pull=pull):
             errors += 1
 
     # --- 2b. ka9q-web (C build, sigmond-native) ---
     if ka9q_web_needed:
         _heading('ka9q-web (onion + make install)')
-        if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)):
+        if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False),
+                                        pull=pull):
             errors += 1
 
     # --- 2b'. gmag-webui (Deno static dashboard, sigmond-native) — after the
@@ -10389,7 +10400,8 @@ def _install_full_suite(args) -> int:
     # server: it just serves files.
     if gmag_webui_needed:
         _heading('gmag-webui (pinned Deno + static dashboard)')
-        if not _install_gmag_webui_native(catalog, force=getattr(args, 'force', False)):
+        if not _install_gmag_webui_native(catalog, force=getattr(args, 'force', False),
+                                          pull=pull):
             errors += 1
 
     # --- 2c. decoders (jt9/wsprd + jt9_decode, sigmond-native) — the
@@ -10408,7 +10420,7 @@ def _install_full_suite(args) -> int:
     for entry in catalog_queue:
         _heading(f'install {entry.name}')
         try:
-            result = _do_install_client(entry, dry_run=False, yes=yes, pull=True,
+            result = _do_install_client(entry, dry_run=False, yes=yes, pull=pull,
                                         catalog=catalog)
             if result:
                 _ok(f'{entry.name} installed')
@@ -10583,7 +10595,8 @@ def _install_wisdom_service() -> None:
         'when absent; `systemctl start sigmond-wisdom` to run now)')
 
 
-def _install_radiod_native(catalog, *, force: bool = False) -> bool:
+def _install_radiod_native(catalog, *, force: bool = False,
+                           pull: bool = True) -> bool:
     """Install ka9q-radio natively under /opt/git/sigmond/ka9q-radio.
 
     Recipe (mirrors github.com/ka9q/ka9q-radio docs/INSTALL.md plus the
@@ -10605,6 +10618,9 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     `force=True` triggers a `make clean` and bypasses the
     "binary already current" short-circuit so the operator can rebuild
     after changing apt deps or build flags.
+
+    `pull=False` (`smd install --no-pull`) builds the checkout on disk: no
+    fetch, and the compat pin must already be in it.
     """
     entry = get_entry('ka9q-radio', catalog)
     if entry is None:
@@ -10624,10 +10640,11 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     try:
         if pin:
             _info(f'ka9q-radio: pinning to ka9q-python compat commit {pin[:12]}')
-            src_dir = _clone_repo(entry, pull_if_exists=True, ref=pin)
+            src_dir = _clone_repo(entry, pull_if_exists=pull, ref=pin,
+                                  fetch=pull)
         else:
             _warn('ka9q-radio: no ka9q-python pin found — building current HEAD')
-            src_dir = _clone_repo(entry, pull_if_exists=True)
+            src_dir = _clone_repo(entry, pull_if_exists=pull, fetch=pull)
     except RuntimeError as exc:
         _err(f'ka9q-radio clone failed: {exc}')
         return False
@@ -10762,18 +10779,21 @@ def _write_gmag_webui_unit(checkout: Path) -> bool:
     return True
 
 
-def _install_gmag_webui_native(catalog, *, force: bool = False) -> bool:
+def _install_gmag_webui_native(catalog, *, force: bool = False,
+                               pull: bool = True) -> bool:
     """smd-native install of gmag_webui (see lib/sigmond/gmag_webui.py):
     clone/pull the checkout, pinned Deno, unzip Font Awesome, service user,
     .env, our unit, pre-warmed Deno module cache.  Upstream's deploy/ (its
-    install.sh and 5-minute git-reset auto-update timer) is never run."""
+    install.sh and 5-minute git-reset auto-update timer) is never run.
+    `pull=False` (`smd install --no-pull`) uses the checkout on disk as it
+    stands."""
     from sigmond import gmag_webui as _gw
     entry = get_entry('gmag-webui', catalog)
     if entry is None:
         _err('gmag-webui: not in catalog')
         return False
     try:
-        checkout = _clone_repo(entry, pull_if_exists=True)
+        checkout = _clone_repo(entry, pull_if_exists=pull, fetch=pull)
     except RuntimeError as exc:
         _err(f'gmag-webui clone failed: {exc}')
         return False
@@ -10822,7 +10842,8 @@ def _install_gmag_webui_native(catalog, *, force: bool = False) -> bool:
     return True
 
 
-def _install_ka9q_web_native(catalog, *, force: bool = False) -> bool:
+def _install_ka9q_web_native(catalog, *, force: bool = False,
+                             pull: bool = True) -> bool:
     """Install ka9q-web natively under /opt/git/sigmond/ka9q-web.
 
     ka9q-web is a C project (no install_script): clone it via the catalog,
@@ -10830,14 +10851,15 @@ def _install_ka9q_web_native(catalog, *, force: bool = False) -> bool:
     _build_ka9q_web_with_onion (recipe and onion params owned in-tree — see
     _ONION_REPO).  `force` is accepted for signature parity with
     _install_radiod_native; the build self-checks freshness via sha256 and
-    rebuilds as needed.
+    rebuilds as needed.  `pull=False` (`smd install --no-pull`) builds the
+    checkout on disk as it stands.
     """
     entry = get_entry('ka9q-web', catalog)
     if entry is None:
         _err('ka9q-web not in catalog — cannot determine repo URL')
         return False
     try:
-        src_dir = _clone_repo(entry, pull_if_exists=True)
+        src_dir = _clone_repo(entry, pull_if_exists=pull, fetch=pull)
     except RuntimeError as exc:
         _err(f'ka9q-web clone failed: {exc}')
         return False
@@ -16058,7 +16080,7 @@ _smd_complete() {
         2)
             case "${words[1]}" in
                 install)
-                    COMPREPLY=($(compgen -W "$components --components --profile --client-dir --dry-run --yes --force --no-enable --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "$components --components --profile --client-dir --dry-run --yes --force --no-enable --no-pull --topology" -- "$cur"))
                     ;;
                 bringup)
                     COMPREPLY=($(compgen -W "$profiles --remote-radiod --with-optional --non-interactive --dry-run" -- "$cur"))
@@ -16165,7 +16187,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "--components --catalog --no-fetch --json --topology" -- "$cur"))
                             ;;
                         install)
-                            COMPREPLY=($(compgen -W "$components --components --profile --client-dir --dry-run --yes --force --no-enable --topology" -- "$cur"))
+                            COMPREPLY=($(compgen -W "$components --components --profile --client-dir --dry-run --yes --force --no-enable --no-pull --topology" -- "$cur"))
                             ;;
                         update)
                             COMPREPLY=($(compgen -W "$components --components --fetch --ref --dry-run --json --topology" -- "$cur"))
@@ -25493,6 +25515,10 @@ def main() -> int:
                        help='do not enable the component in topology after install '
                             '(default: a single-client install enables it so '
                             '`smd start <name>` runs it)')
+        p.add_argument('--no-pull', action='store_true', dest='no_pull',
+                       help='install what sits on disk: no fetch, no checkout of '
+                            'origin (bring-up passes it; the image ships each '
+                            'checkout at its manifest pin)')
 
     def _add_apply_args(p):
         p.add_argument('--dry-run', action='store_true')

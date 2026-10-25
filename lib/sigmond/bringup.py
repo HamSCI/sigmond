@@ -196,13 +196,16 @@ def build_plan(profile, *, local_radiod: bool,
             steps.append(Step(stage, f'install {comp} (not enabled — radio deferred)',
                               'install',
                               argv=[smd, 'install', '--components', comp, '--yes',
-                                    '--no-enable']))
+                                    '--no-enable', '--no-pull']))
             return
         activated.append(comp)
         steps.append(Step(stage, f'enable {comp}', 'enable',
                           argv=[smd, 'enable', comp]))
+        # --no-pull: install the checkout the image shipped at its manifest
+        # pin, never a fresh origin/main (v3.82 row 1).
         steps.append(Step(stage, f'install {comp}', 'install',
-                          argv=[smd, 'install', '--components', comp, '--yes']))
+                          argv=[smd, 'install', '--components', comp, '--yes',
+                                '--no-pull']))
 
     def configure(stage: str, client: str) -> None:
         argv = [smd, 'config', 'init', client]
@@ -317,7 +320,7 @@ def build_plan(profile, *, local_radiod: bool,
             steps.append(Step(STAGE1, 'install ka9q-web unit (post-radiod-config)',
                               'install',
                               argv=[smd, 'install', '--components', 'ka9q-web',
-                                    '--yes']))
+                                    '--yes', '--no-pull']))
     else:
         dns = remote_status_dns or 'auto-discover'
         steps.append(Step(STAGE1, f'using remote radiod ({dns}) — skipping radiod '

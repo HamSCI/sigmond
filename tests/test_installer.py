@@ -336,3 +336,97 @@ class TestCloneRepoOffline(TestCheckoutRefShallow):
         entry = _entry(repo=None)
         with pytest.raises(RuntimeError, match='not in the local checkout'):
             clone_repo(entry, base=tmp_path, ref='deadbeef' * 5)
+
+
+class TestCloneRepoNoFetch(TestCheckoutRefShallow):
+    """``fetch=False`` installs what sits on disk (v3.82 row 1).
+
+    Bring-up passes ``smd install --no-pull``: the appliance image ships every
+    checkout at its manifest pin, and a fresh install must build THOSE commits,
+    not whatever origin/main holds on the day.  So with ``fetch=False`` an
+    existing checkout sees no git network command at all.  Real git repos, as
+    above; a spy on ``installer._git`` records every git command run.
+    """
+
+    def _clone_then_advance_origin(self, tmp_path):
+        """Clone at `new`, then give origin a third commit the clone lacks."""
+        upstream = tmp_path / 'up'
+        old, new = self._make_upstream(upstream)
+        repo = tmp_path / 'fake-client'
+        self._git(tmp_path, 'clone', '--quiet', f'file://{upstream}', str(repo))
+        (upstream / 'f').write_text('v3\n')
+        self._git(upstream, 'commit', '-qam', 'newest')
+        newest = self._git(upstream, 'rev-parse', 'HEAD').stdout.strip()
+        return repo, old, new, newest
+
+    @staticmethod
+    def _spy_git():
+        from sigmond import installer
+        calls = []
+        real = installer._git
+
+        def spy(repo_dir, *git_args):
+            calls.append(git_args)
+            return real(repo_dir, *git_args)
+        return mock.patch('sigmond.installer._git', side_effect=spy), calls
+
+    def test_no_fetch_leaves_an_existing_checkout_on_its_commit(self, tmp_path):
+        repo, old, new, newest = self._clone_then_advance_origin(tmp_path)
+        entry = _entry(repo=None)
+        patcher, calls = self._spy_git()
+        with patcher:
+            result = clone_repo(entry, base=tmp_path, pull_if_exists=True,
+                                fetch=False)
+        assert result == repo
+        assert self._git(repo, 'rev-parse', 'HEAD').stdout.strip() == new
+        assert not any('fetch' in c for c in calls)
+
+    def test_no_fetch_checks_out_a_local_pin_without_fetching(self, tmp_path):
+        repo, old, new, newest = self._clone_then_advance_origin(tmp_path)
+        entry = _entry(repo=None)
+        patcher, calls = self._spy_git()
+        with patcher:
+            result = clone_repo(entry, base=tmp_path, ref=old, fetch=False)
+        assert result == repo
+        assert self._git(repo, 'rev-parse', 'HEAD').stdout.strip() == old
+        assert not any('fetch' in c for c in calls)
+
+    def test_no_fetch_refuses_a_pin_it_does_not_have(self, tmp_path):
+        """`newest` lives only on origin.  Without a fetch the pin cannot be
+        built, and building the commit that happens to be checked out instead
+        would silently ship the wrong code."""
+        repo, old, new, newest = self._clone_then_advance_origin(tmp_path)
+        entry = _entry(repo=None)
+        patcher, calls = self._spy_git()
+        with patcher, pytest.raises(RuntimeError, match='no fetch') as exc:
+            clone_repo(entry, base=tmp_path, ref=newest, fetch=False)
+        assert newest in str(exc.value)
+        assert not any('fetch' in c for c in calls)
+        assert self._git(repo, 'rev-parse', 'HEAD').stdout.strip() == new
+
+    def test_no_fetch_refuses_a_pin_beyond_a_shallow_clone(self, tmp_path):
+        """A shallow clone lacks the older pin; `_checkout_ref` would deepen it
+        with `fetch --unshallow`.  fetch=False must refuse instead."""
+        upstream = tmp_path / 'up'
+        old, new = self._make_upstream(upstream)
+        repo = tmp_path / 'fake-client'
+        self._git(tmp_path, 'clone', '--quiet', '--depth', '1',
+                  f'file://{upstream}', str(repo))
+        entry = _entry(repo=None)
+        patcher, calls = self._spy_git()
+        with patcher, pytest.raises(RuntimeError, match='no fetch'):
+            clone_repo(entry, base=tmp_path, ref=old, fetch=False)
+        assert not any('fetch' in c for c in calls)
+
+    def test_no_fetch_still_clones_when_absent(self, tmp_path):
+        """With nothing on disk there is nothing to install from, so the
+        checkout must still come from the remote."""
+        upstream = tmp_path / 'up'
+        old, new = self._make_upstream(upstream)
+        base = tmp_path / 'base'
+        entry = _entry(repo=f'file://{upstream}')
+        with mock.patch('sigmond.installer._apply_canonical_perms'):
+            result = clone_repo(entry, base=base, pull_if_exists=True,
+                                fetch=False)
+        assert result == base / 'fake-client'
+        assert self._git(result, 'rev-parse', 'HEAD').stdout.strip() == new

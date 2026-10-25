@@ -503,3 +503,41 @@ def test_bringup_leaves_the_daemon_as_the_only_pskreporter_sender():
            if s.argv and s.argv[:3] == ['smd', 'config', 'upload']}
     assert ups['psk-recorder'][-2:] == ['--via', 'server-raw']
     assert '--via' not in ups['wspr-recorder']
+
+
+# --- v3.82 row 1: bring-up installs what the image shipped -------------------
+# The appliance image ships each checkout at its manifest pin.  Every install
+# step must pass `--no-pull`, or `smd install` fetches and checks out
+# origin/main and the station runs code nobody blessed.
+
+def _assert_every_install_passes_no_pull(plan):
+    installs = [s for s in plan.steps if s.kind == 'install']
+    assert installs
+    missing = [s.label for s in installs if '--no-pull' not in s.argv]
+    assert not missing, f'install steps without --no-pull: {missing}'
+
+
+def test_every_bringup_install_passes_no_pull():
+    _assert_every_install_passes_no_pull(build_plan(_dasi2(), local_radiod=True))
+
+
+def test_every_remote_radiod_install_passes_no_pull():
+    _assert_every_install_passes_no_pull(
+        build_plan(_dasi2(), local_radiod=False, remote_status_dns='x'))
+
+
+def test_every_deferred_radio_install_passes_no_pull():
+    p = build_plan(_dasi2(), local_radiod=True, sdr_absent=True)
+    assert any('radio deferred' in s.label for s in p.steps if s.kind == 'install')
+    _assert_every_install_passes_no_pull(p)
+
+
+def test_ka9q_web_unit_reinstall_passes_no_pull():
+    prof = Profile(
+        name='dasi2',
+        clients=('hf-timestd',),
+        local_radiod_infra=('igmp-querier', 'gpsdo-monitor', 'ka9q-web'),
+    )
+    p = build_plan(prof, local_radiod=True)
+    assert 'install ka9q-web unit (post-radiod-config)' in _labels(p, 'install')
+    _assert_every_install_passes_no_pull(p)

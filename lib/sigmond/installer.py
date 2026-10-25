@@ -184,6 +184,7 @@ def clone_repo(
     base: Path = GIT_BASE,
     pull_if_exists: bool = False,
     ref: Optional[str] = None,
+    fetch: bool = True,
 ) -> Path:
     """Clone or update a client repo.
 
@@ -191,8 +192,28 @@ def clone_repo(
     Otherwise pull --ff-only to advance to the latest upstream HEAD.
     Returns the repo directory path.
     Raises RuntimeError on clone/pull/checkout failure.
+
+    ``fetch=False`` installs what sits on disk (`smd install --no-pull`, which
+    bring-up passes: the appliance image ships each checkout at its manifest
+    pin).  An existing checkout then sees no git network command at all.  With
+    no *ref* it stays as it stands, whatever *pull_if_exists* says; a *ref*
+    the checkout already holds gets checked out; a *ref* it lacks raises, since
+    building whatever happens to be checked out would ship the wrong code.  A
+    missing checkout still clones -- there is nothing on disk to install.
     """
     repo_dir = base / entry.name
+    if repo_dir.exists() and not fetch:
+        if ref is not None:
+            have = _git(repo_dir, 'rev-parse', '--verify', '--quiet',
+                        f'{ref}^{{commit}}')
+            if have.returncode != 0:
+                raise RuntimeError(
+                    f"pinned ref {ref!r} is not in the local checkout "
+                    f"{repo_dir}, and no fetch ran (--no-pull installs only "
+                    f"what sits on disk)"
+                )
+            _checkout_ref(repo_dir, ref)
+        return repo_dir
     if repo_dir.exists():
         if pull_if_exists or ref is not None:
             if entry.repo and entry.repo.startswith('https://'):
