@@ -259,8 +259,14 @@ class _FakeGit:
                  removed_files=None, blobs=None, install_rc=None,
                  diff_rc=None, listing='', disable_rc=None,
                  dirty_after_checkout=None, dirty_after_install=None,
-                 discard_rc=None):
+                 discard_rc=None, status_rc=None):
         self.calls = []
+        # status_rc: component -> exit codes of its successive `status
+        # --porcelain` calls (the dirty-tree check, then before and after
+        # its install.sh); a missing entry means 0.  A failed call prints
+        # nothing on stdout.
+        self.status_rc = status_rc or {}
+        self.status_calls = {}
         self.dirty = dirty or {}
         # dirty_after_checkout / dirty_after_install: component -> paths
         # `status --porcelain` adds once that component's checkout has
@@ -311,6 +317,12 @@ class _FakeGit:
         if 'fetch' in cmd:
             return out
         if 'status' in cmd and '--porcelain' in cmd:
+            n = self.status_calls[name] = self.status_calls.get(name, 0) + 1
+            rcs = self.status_rc.get(name, [])
+            if n <= len(rcs) and rcs[n - 1]:
+                out.returncode = rcs[n - 1]
+                out.stderr = 'fatal: detected dubious ownership'
+                return out
             lines = list(self.dirty.get(name, []))
             if name in self.checked_out:
                 lines += self.dirty_after_checkout.get(name, [])
@@ -505,6 +517,18 @@ class ManifestRestoreDirtyTreeTests(unittest.TestCase):
         self.assertFalse(any('checkout' in c and '--detach' in c
                              for c in fake.calls))
         self.assertIn('wspr-recorder', out + '')
+
+    def test_an_unreadable_tree_refuses_and_never_checks_out(self):
+        live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        fake = _FakeGit(status_rc={'wspr-recorder': [128]})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self._run(self._manifest(), live, fake)
+        out += err.getvalue()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('wspr-recorder: cannot read the working tree', out)
+        self.assertFalse(any('checkout' in c and '--detach' in c
+                             for c in fake.calls))
 
     def test_dirty_uv_lock_gets_the_specific_hint(self):
         live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
@@ -1348,7 +1372,35 @@ class ManifestRestoreApplyTests(unittest.TestCase):
         d = self.base / 'wspr-recorder'
         self.assertIn(f'git -C {d} checkout -- uv.lock', out)
         self.assertIn('unable to unlink', out)
-        self.assertIn('wspr-recorder', out.split('install.sh failed for')[1])
+        self.assertIn('wspr-recorder', out.split('put back for')[1])
+
+    def test_a_failed_status_before_install_discards_nothing(self):
+        # Review Focus 2: an unreadable `before` must not read as "clean",
+        # or a uv.lock changed before the install would count as a rewrite.
+        fake = _FakeGit(dirty_after_checkout={'wspr-recorder': ['uv.lock']},
+                        dirty_after_install={'wspr-recorder': ['uv.lock']},
+                        status_rc={'wspr-recorder': [0, 128]})
+        rc, out, fake = self._lock_run(fake)
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self._discards(fake), [])
+        self.assertIn('wspr-recorder: cannot read the working tree', out)
+        self.assertIn('wspr-recorder', out.split('put back for')[1])
+
+    def test_a_failed_status_after_install_discards_nothing(self):
+        fake = _FakeGit(dirty_after_install={'wspr-recorder': ['uv.lock']},
+                        status_rc={'wspr-recorder': [0, 0, 128]})
+        rc, out, fake = self._lock_run(fake)
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self._discards(fake), [])
+        self.assertIn('wspr-recorder: cannot read the working tree', out)
+
+    def test_a_failed_discard_is_not_reported_as_a_failed_install(self):
+        fake = _FakeGit(dirty_after_install={'wspr-recorder': ['uv.lock']},
+                        discard_rc={'uv.lock': 1})
+        rc, out, fake = self._lock_run(fake)
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn('install.sh failed', out)
+        self.assertIn('wspr-recorder', out.split('put back for')[1])
 
     def test_the_discard_runs_as_the_checkout_owner(self):
         fake = _FakeGit(dirty_after_install={'wspr-recorder': ['uv.lock']})

@@ -5150,31 +5150,46 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
     return _restore_apply_units(name, plan)
 
 
-def _restore_tracked_dirty(d: Path) -> set:
+def _restore_tracked_dirty(d: Path) -> Optional[set]:
     """The checkout's tracked changes, as paths: the `git status` the
-    restore's dirty-tree check runs.  Untracked files are not dirt."""
+    restore's dirty-tree check runs.  Untracked files are not dirt.
+    None when git status fails: an unread tree must never pass for a
+    clean one, neither to the dirty-tree check nor to the lock-file
+    put-back, which would then take a change made before the install
+    for the installer's own."""
     r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
                         'status', '--porcelain', '--untracked-files=no'],
                        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
     return {line[3:].strip() for line in r.stdout.splitlines()
             if line.strip()}
 
 
 def _restore_discard_lock_rewrites(name: str, d: Path, owner: str,
-                                   before: set) -> bool:
+                                   before: Optional[set]) -> bool:
     """Put back each lock file the component's install.sh just rewrote
     (v3.82 row 6).  An older install.sh may run `uv sync` without
     `--frozen` and rewrite uv.lock as root; rolling v3.81 back to v3.78
     left superdarn-sounder's tree dirty that way.  ``before`` holds the
     tracked changes that stood before the install ran; none of those is
     ever touched.  git runs as the checkout's owner.  Returns False when a
-    checkout failed, after naming the command to run by hand."""
+    checkout failed, after naming the command to run by hand, or when git
+    status could not read the tree before or after the install (``before``
+    None): then nothing is put back, since no change can be told apart
+    from one that stood before."""
     # The module object the restore preloaded before its first checkout
     # (_PRELOAD_MODULES): sys.modules answers this, the moved tree never.
     from sigmond import manifest_restore
+    after = _restore_tracked_dirty(d) if before is not None else None
+    if after is None:
+        _warn(f'{name}: cannot read the working tree (git status failed '
+              f'{"before" if before is None else "after"} install.sh); no '
+              f'lock file put back — check `git -C {d} status` and revert '
+              f'by hand any uv.lock the install rewrote')
+        return False
     ok = True
-    for path in manifest_restore.lock_rewrites(before,
-                                               _restore_tracked_dirty(d)):
+    for path in manifest_restore.lock_rewrites(before, after):
         r = subprocess.run(
             _runuser(owner or 'root',
                      ['git', '-C', str(d), 'checkout', '--', path]),
@@ -5237,7 +5252,8 @@ def cmd_manifest_restore(args) -> int:
        `config_paths.h` is not dirt): a dirty tree is always a refusal,
        naming the files and pointing at CONTRIBUTING.md §8 — restore
        NEVER stashes and NEVER discards, because a local modification
-       may be a real fix nobody committed yet. The `uv.lock` case (that
+       may be a real fix nobody committed yet. A tree git status cannot
+       read refuses too: it is never taken for a clean one. The `uv.lock` case (that
        file is rewritten by every consumer's `install.sh`) gets a
        specific hint instead of a generic "go fix it".
     5. Dry-run (default): print the plan — keeps, checkouts (from ->
@@ -5407,7 +5423,14 @@ def cmd_manifest_restore(args) -> int:
     dirty_refusals = []
     for name, _from, _to in checkout_actions:
         d = checkout_by_name[name]
-        files = sorted(_restore_tracked_dirty(d))
+        dirty = _restore_tracked_dirty(d)
+        if dirty is None:
+            dirty_refusals.append(
+                f'{name}: cannot read the working tree (git status failed) '
+                f'— an unread tree is never taken for a clean one; check '
+                f'`git -C {d} status`, then retry')
+            continue
+        files = sorted(dirty)
         if files:
             hint = ''
             if 'uv.lock' in files:
@@ -5488,7 +5511,7 @@ def cmd_manifest_restore(args) -> int:
     # do under `smd update`: gpsdo-monitor always, chrony (sigmond, via
     # sigmond-time-sync) and systemd-journald (sigmond) when their config
     # changes, mosquitto (mag-recorder) when it writes the broker config.
-    install_failed = []
+    install_failed, discard_failed = [], []
     ran_install = False
     for name, _from, _to in moved:
         d = checkout_by_name[name]
@@ -5514,9 +5537,8 @@ def cmd_manifest_restore(args) -> int:
             _err(f'{name}: install.sh exit {rc}')
         # Whatever the exit code: an unfrozen `uv sync` in an older
         # install.sh rewrites uv.lock before anything later can fail.
-        if (not _restore_discard_lock_rewrites(name, d, _owner_of(d), before)
-                and name not in install_failed):
-            install_failed.append(name)
+        if not _restore_discard_lock_rewrites(name, d, _owner_of(d), before):
+            discard_failed.append(name)
     if ran_install:
         # install.sh runs as root and leaves root-owned egg-info and venv
         # paths in the checkouts; give them back, as align does.
@@ -5571,6 +5593,11 @@ def cmd_manifest_restore(args) -> int:
             _err(f'admin manifest restore: units the newer release added '
                  f'still stand for {", ".join(retire_failed)} — see the lines '
                  f'above; remove them by hand')
+            rc = 1
+        if discard_failed:
+            _err(f'admin manifest restore: lock files not put back for '
+                 f'{", ".join(discard_failed)} — see the lines above; a '
+                 f'uv.lock the older install.sh rewrote may still stand')
             rc = 1
         if install_failed:
             _err(f'admin manifest restore: install.sh failed for '
