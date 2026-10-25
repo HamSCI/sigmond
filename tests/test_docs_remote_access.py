@@ -31,6 +31,25 @@ def joined(source: str) -> str:
 # The console panel lives in the appliance repository, beside this one.
 FIRSTBOOT = REPO.parent / "sigmond-appliance" / "firstboot-v3.sh"
 FIRSTBOOT_TEXT = FIRSTBOOT.read_text() if FIRSTBOOT.exists() else ""
+
+
+def _panel_plain(text: str) -> str:
+    """The panel's source as the operator reads it, colour switched off.
+
+    The appliance colours a few panel tokens through `_hl <kind> <text>` and
+    names three logins and the host address in variables (`_LROOT`, `_LSIG`,
+    `_LHAM`, `_HIP`).  With SIGMOND_PANEL_COLOUR=0, `_hl` prints its text
+    alone.  Do the same here: replace each call by its text, then expand
+    those variables from their own assignments."""
+    text = re.sub(r"\$\(_hl (?:addr|login|pw) \"?([^\"()]*?)\"?\)", r"\1", text)
+    defs = dict(re.findall(r"^(_HIP)=(\S+)$", text, re.M))
+    defs.update(re.findall(r"\b(_L[A-Z]+)=(\w+)\b", text))
+    for name, value in defs.items():
+        text = text.replace("${%s}" % name, value)
+    return text
+
+
+PANEL_TEXT = _panel_plain(FIRSTBOOT_TEXT)
 # From v3.72 #23 the IPv4 relay's ports live in sigmond-vm4relay, which the
 # importer runs.
 VM4RELAY = REPO.parent / "sigmond-appliance" / "sigmond-vm4relay"
@@ -228,7 +247,11 @@ def test_the_panel_figures_the_page_names_are_the_panels():
     word = {1: "one", 2: "two", 3: "three", 5: "five", 10: "ten", 15: "fifteen"}[int(m.group(1))]
     assert f"`STATE NOT READ` {word} minutes later" in flat(PAGE)
     # The ssh command the panel prints for the VM is the one the page gives.
-    panel_ports = set(re.findall(r"ssh -p (\d+) sigmond@\$\{HOSTIP", FIRSTBOOT_TEXT))
+    panel_ports = set(re.findall(r"ssh -p (\d+) sigmond@\$\{HOSTIP", PANEL_TEXT))
+    # ... and the main panel's own line, "via this host  ssh -p 2222 ${_LSIG}@${_HIP}",
+    # which only the plain rendering shows in this form.
+    assert re.search(r"via this host\s+ssh -p 2222 sigmond@\$\{HOSTIP", PANEL_TEXT), \
+        "the main panel no longer prints the VM ssh command"
     assert panel_ports == set(re.findall(r"ssh -p (\d+) sigmond@<host address>", PAGE)) != set()
     # Beside the host login the panel says which password to use.
     # ⚠ Match the PAIRING, not the column alignment.  This asserted exactly two
@@ -237,9 +260,9 @@ def test_the_panel_figures_the_page_names_are_the_panels():
     # whether the password is named at all (mjh, 2026-10-21).  Spacing here is
     # presentation; the contract is that the host login and its password sit on
     # one line.
-    assert re.search(r"host\s+root / \$PWLINE", FIRSTBOOT_TEXT), \
+    assert re.search(r"host\s+root / \$PWLINE", PANEL_TEXT), \
         "the panel no longer names the host password beside the host login"
-    assert 'PWLINE="the password you set at install"' in FIRSTBOOT_TEXT
+    assert 'PWLINE="the password you set at install"' in PANEL_TEXT
     assert "the password you set at install" in flat(PAGE)
 
 
@@ -488,7 +511,7 @@ def test_what_the_page_says_about_the_keyboard_is_what_the_station_does():
 def test_the_two_password_notes_the_page_quotes_are_the_panels():
     for quoted in ("the password you set at install", "hamsci-sigmond <-- image default, CHANGE IT"):
         assert quoted in flat(PAGE), quoted
-        assert quoted in flat(FIRSTBOOT_TEXT), quoted
+        assert quoted in flat(PANEL_TEXT), quoted
     assert "with a warning to change it" not in PAGE             # a paraphrase the panel never prints
 
 
