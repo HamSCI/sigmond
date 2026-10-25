@@ -700,14 +700,16 @@ class RestoreResult:
                 + ([f"lever: {self.remedy}"] if self.remedy else []))
 
 
-def _name_remedy(res: RestoreResult, etc: Path, instead: str) -> None:
-    """Name both ways out of a record the operator's change made stale,
-    once: keep the change and drop the record, or undo the change."""
+def _name_remedy(res: RestoreResult, etc: Path) -> None:
+    """Name the way out of a record the operator's change made stale, once:
+    keep the change and drop the record.  No second remedy: no narrow
+    command is known to re-create the links, and `smd apply` restarts
+    radiod."""
     if res.remedy is None:
         res.remedy = (f"the operator changed {WSPR_UPLOADER}'s link after the "
                       "fill, so the record no longer applies. To keep that "
                       "change and clear this failure: sudo rm "
-                      f"{etc / UPLOADER_LINKS_RECORD}. {instead}: smd apply")
+                      f"{etc / UPLOADER_LINKS_RECORD}")
 
 
 def restore_uploader_links(*, roots: Roots = Roots(),
@@ -748,14 +750,14 @@ def restore_uploader_links(*, roots: Roots = Roots(),
             res.failures.append((str(link), f"{unit_link} no longer stands as "
                                  "a unit link; not restored, the record kept"))
             kept.append((link, target))
-            _name_remedy(res, etc, "To re-enable the uploader instead")
+            _name_remedy(res, etc)
             continue
         if now_at != resolved(target):
             res.failures.append((str(link), f"the unit link now names {now}, "
                                  f"not the recorded {target}; not restored, "
                                  "the record kept"))
             kept.append((link, target))
-            _name_remedy(res, etc, "To return to the fill's state instead")
+            _name_remedy(res, etc)
             continue
         if link.name != WSPR_UPLOADER or link.parent.parent != unit_dir \
                 or not link.parent.name.endswith(_ENABLEMENT_DIRS):

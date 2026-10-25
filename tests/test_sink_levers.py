@@ -959,8 +959,7 @@ class LinkedEnabledUploader(Base):
         self.assertTrue(self.record().exists())
         self.assertEqual(self.sc.verbs(), [])
         self.assertIn(f"sudo rm {self.record()}", res.remedy)
-        self.assertIn("To re-enable the uploader instead: smd apply",
-                      res.remedy)
+        self.assertNotIn("smd apply", res.remedy)
         self.assertEqual(res.lines()[-1], f"lever: {res.remedy}")
         self.assertNotIn("sudo smd", res.remedy)
 
@@ -983,8 +982,7 @@ class LinkedEnabledUploader(Base):
         self.assertTrue(self.record().exists())
         self.assertEqual(self.sc.verbs(), [])
         self.assertIn(f"sudo rm {self.record()}", res.remedy)
-        self.assertIn("To return to the fill's state instead: smd apply",
-                      res.remedy)
+        self.assertNotIn("smd apply", res.remedy)
         self.assertEqual(res.lines()[-1], f"lever: {res.remedy}")
 
     def test_a_relative_relink_to_the_same_file_restores(self):

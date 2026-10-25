@@ -664,6 +664,8 @@ class StandingLeverTests(unittest.TestCase):
         self.assertEqual(step.rc, 1, step.both)
         record = st.tmp / "etc/sigmond/sink-levers/wspr-uploader.links"
         self.assertIn(f"sudo rm {record}", step.both)
+        self.assertNotIn("smd apply", step.both)
+        self.assertNotIn("sudo smd", step.both)
         self.assertEqual(st.step().rc, 1)        # keeps failing until removed
 
 
