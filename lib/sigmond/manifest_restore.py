@@ -162,3 +162,19 @@ def plan_restore(manifest_text: str, live_components: dict,
 
     return RestorePlan(ok=not refusals, refusals=refusals, actions=actions,
                        strays=strays)
+
+
+# Tracked files an install.sh may rewrite that a restore puts back.  An
+# older install.sh can run `uv sync` without `--frozen`, which rewrites
+# uv.lock as root (superdarn-sounder before 36fa026); the restore must not
+# leave the checkout dirty for that.
+LOCK_FILE_NAMES = frozenset({'uv.lock'})
+
+
+def lock_rewrites(before: set, after: set) -> list:
+    """The lock files an install.sh changed: the tracked dirty paths in
+    ``after`` that were clean in ``before`` and whose basename is in
+    ``LOCK_FILE_NAMES``, sorted.  A path already dirty before the install
+    never appears, so a change somebody made by hand is never discarded."""
+    return sorted(p for p in set(after) - set(before)
+                  if p.rsplit('/', 1)[-1] in LOCK_FILE_NAMES)

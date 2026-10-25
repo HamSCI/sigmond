@@ -25,7 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from sigmond.doctor import MIN_COMPONENT_ROWS
-from sigmond.manifest_restore import RestorePlan, plan_restore
+from sigmond.manifest_restore import RestorePlan, lock_rewrites, plan_restore
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -201,6 +201,19 @@ class PlanRestoreTests(unittest.TestCase):
         self.assertEqual(plan.actions, [])
 
 
+class LockRewritesTests(unittest.TestCase):
+    """v3.82 row 6: which tracked changes a restore's install.sh made that
+    the restore discards — lock files only, and only new ones."""
+
+    def test_lock_rewrites_picks_new_lock_files_only(self):
+        self.assertEqual(
+            lock_rewrites({'a.py'}, {'a.py', 'uv.lock', 'sub/uv.lock', 'b.py'}),
+            ['sub/uv.lock', 'uv.lock'])
+
+    def test_lock_rewrites_ignores_a_lock_file_dirty_before(self):
+        self.assertEqual(lock_rewrites({'uv.lock'}, {'uv.lock'}), [])
+
+
 # ── CLI wrapper in bin/smd ───────────────────────────────────────────
 
 def _load_smd():
@@ -244,9 +257,19 @@ class _FakeGit:
                  rerender=(0, 'uploader: /etc/hs-uploader/pipelines.toml '
                               'already current (3 pipeline(s))\n', ''),
                  removed_files=None, blobs=None, install_rc=None,
-                 diff_rc=None, listing='', disable_rc=None):
+                 diff_rc=None, listing='', disable_rc=None,
+                 dirty_after_checkout=None, dirty_after_install=None,
+                 discard_rc=None):
         self.calls = []
         self.dirty = dirty or {}
+        # dirty_after_checkout / dirty_after_install: component -> paths
+        # `status --porcelain` adds once that component's checkout has
+        # landed / its install.sh has run.  discard_rc: path -> exit code
+        # of `git checkout -- <path>` (default 0).
+        self.dirty_after_checkout = dirty_after_checkout or {}
+        self.dirty_after_install = dirty_after_install or {}
+        self.discard_rc = discard_rc or {}
+        self.checked_out, self.installed = set(), set()
         self.unresolvable = unresolvable or set()
         self.changed_files = changed_files or {}
         # removed_files: component -> paths `git diff --name-only
@@ -288,13 +311,23 @@ class _FakeGit:
         if 'fetch' in cmd:
             return out
         if 'status' in cmd and '--porcelain' in cmd:
-            lines = self.dirty.get(name, [])
-            out.stdout = ''.join(f' M {f}\n' for f in lines)
+            lines = list(self.dirty.get(name, []))
+            if name in self.checked_out:
+                lines += self.dirty_after_checkout.get(name, [])
+            if name in self.installed:
+                lines += self.dirty_after_install.get(name, [])
+            out.stdout = ''.join(f' M {f}\n' for f in dict.fromkeys(lines))
             return out
         if 'rev-parse' in cmd and '--verify' in cmd:
             out.returncode = 1 if name in self.unresolvable else 0
             return out
         if 'checkout' in cmd and '--detach' in cmd:
+            self.checked_out.add(name)
+            return out
+        if 'checkout' in cmd and cmd[-2] == '--':
+            out.returncode = self.discard_rc.get(cmd[-1], 0)
+            if out.returncode:
+                out.stderr = f"error: unable to unlink '{cmd[-1]}'"
             return out
         if 'diff' in cmd and '--diff-filter=D' in cmd:
             out.returncode = self.diff_rc.get(name, 0)
@@ -326,6 +359,7 @@ class _FakeGit:
             comp = (sh.parent.parent if sh.parent.name == 'scripts'
                     else sh.parent).name
             out.returncode = self.install_rc.get(comp, 0)
+            self.installed.add(comp)
             return out
         return out
 
@@ -1249,6 +1283,82 @@ class ManifestRestoreApplyTests(unittest.TestCase):
     def test_a_dirty_tree_refusal_with_apply_never_rerenders(self):
         self._refused_apply_never_rerenders(
             _FakeGit(dirty={'wspr-recorder': ['lib/x.py']}))
+
+
+    # -- v3.82 row 6: lock files an older install.sh rewrote --
+
+    @staticmethod
+    def _discards(fake):
+        return [c for c in fake.calls
+                if 'checkout' in c and len(c) > 1 and c[-2] == '--']
+
+    def _lock_run(self, fake):
+        live = {'wspr-recorder': 'ccccccc', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        after = {'wspr-recorder': 'aaaaaaa', **_filler_live(MIN_COMPONENT_ROWS - 1)}
+        return self._run(self._manifest(), live, fake, after_live=after)
+
+    def test_a_lock_file_the_installer_rewrote_is_discarded_and_named(self):
+        # Rolling v3.81 back to v3.78 ran superdarn-sounder's old install.sh,
+        # whose unfrozen `uv sync` rewrote uv.lock and left the tree dirty.
+        fake = _FakeGit(dirty_after_install={'wspr-recorder': ['uv.lock']})
+        rc, out, fake = self._lock_run(fake)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(any(c[-3:] == ['checkout', '--', 'uv.lock']
+                            for c in fake.calls), fake.calls)
+        self.assertIn('wspr-recorder: discarded uv.lock', out)
+
+    def test_the_discard_follows_the_install(self):
+        fake = _FakeGit(dirty_after_install={'wspr-recorder': ['uv.lock']})
+        rc, out, fake = self._lock_run(fake)
+        inst = [i for i, c in enumerate(fake.calls)
+                if 'bash' in c and any(str(a).endswith('install.sh') for a in c)]
+        disc = [i for i, c in enumerate(fake.calls) if c in self._discards(fake)]
+        self.assertEqual((len(inst), len(disc)), (1, 1))
+        self.assertLess(inst[0], disc[0])
+
+    def test_a_lock_file_dirty_before_install_is_kept(self):
+        # Review Focus 2: a change that stood before the install.sh ran (here
+        # it appears once the checkout lands, as a sibling's install could
+        # make it) is not the installer's to discard.
+        fake = _FakeGit(dirty_after_checkout={'wspr-recorder': ['uv.lock']},
+                        dirty_after_install={'wspr-recorder': ['uv.lock']})
+        rc, out, fake = self._lock_run(fake)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._discards(fake), [])
+        self.assertNotIn('discarded', out)
+
+    def test_a_non_lock_file_the_installer_changed_is_left_alone(self):
+        fake = _FakeGit(dirty_after_install={'wspr-recorder': ['src/x.py']})
+        rc, out, fake = self._lock_run(fake)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._discards(fake), [])
+
+    def test_a_failed_install_still_discards_its_lock_rewrite(self):
+        fake = _FakeGit(dirty_after_install={'wspr-recorder': ['uv.lock']},
+                        install_rc={'wspr-recorder': 3})
+        rc, out, fake = self._lock_run(fake)
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(len(self._discards(fake)), 1)
+
+    def test_a_failed_discard_warns_with_the_command(self):
+        fake = _FakeGit(dirty_after_install={'wspr-recorder': ['uv.lock']},
+                        discard_rc={'uv.lock': 1})
+        rc, out, fake = self._lock_run(fake)
+        self.assertEqual(rc, 1, out)
+        d = self.base / 'wspr-recorder'
+        self.assertIn(f'git -C {d} checkout -- uv.lock', out)
+        self.assertIn('unable to unlink', out)
+        self.assertIn('wspr-recorder', out.split('install.sh failed for')[1])
+
+    def test_the_discard_runs_as_the_checkout_owner(self):
+        fake = _FakeGit(dirty_after_install={'wspr-recorder': ['uv.lock']})
+        rc, out, fake = self._lock_run(fake)
+        (dc,) = self._discards(fake)
+        i = next(n for n, a in enumerate(dc) if a.endswith('runuser'))
+        owner = (self.base / 'wspr-recorder').owner()
+        self.assertEqual(dc[i + 1:i + 4], ['-u', owner, '--'])
+        self.assertEqual(dc[i + 4:], ['git', '-C', str(self.base / 'wspr-recorder'),
+                                      'checkout', '--', 'uv.lock'])
 
 
 class RestoreRerenderRealChildTests(unittest.TestCase):

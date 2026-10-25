@@ -290,6 +290,10 @@ most of our operational pain.
   alone and leaves stale sibling copies in place.
 * Never `git add -A` in a deploy tree. A stray test artifact committed
   that way broke `git pull` on a field unit.
+* `smd admin manifest restore` never stashes or discards a local change,
+  with one exception: after it runs an older release's `install.sh`, it
+  puts back any `uv.lock` that install rewrote, and names each file. A
+  lock file already changed before that install stays as it was.
 
 ## 9. Verify the thing that runs, not the thing you installed
 

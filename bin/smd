@@ -5150,6 +5150,47 @@ def _restore_retire_units(d, name, from_sha, to_sha) -> tuple:
     return _restore_apply_units(name, plan)
 
 
+def _restore_tracked_dirty(d: Path) -> set:
+    """The checkout's tracked changes, as paths: the `git status` the
+    restore's dirty-tree check runs.  Untracked files are not dirt."""
+    r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
+                        'status', '--porcelain', '--untracked-files=no'],
+                       capture_output=True, text=True)
+    return {line[3:].strip() for line in r.stdout.splitlines()
+            if line.strip()}
+
+
+def _restore_discard_lock_rewrites(name: str, d: Path, owner: str,
+                                   before: set) -> bool:
+    """Put back each lock file the component's install.sh just rewrote
+    (v3.82 row 6).  An older install.sh may run `uv sync` without
+    `--frozen` and rewrite uv.lock as root; rolling v3.81 back to v3.78
+    left superdarn-sounder's tree dirty that way.  ``before`` holds the
+    tracked changes that stood before the install ran; none of those is
+    ever touched.  git runs as the checkout's owner.  Returns False when a
+    checkout failed, after naming the command to run by hand."""
+    # The module object the restore preloaded before its first checkout
+    # (_PRELOAD_MODULES): sys.modules answers this, the moved tree never.
+    from sigmond import manifest_restore
+    ok = True
+    for path in manifest_restore.lock_rewrites(before,
+                                               _restore_tracked_dirty(d)):
+        r = subprocess.run(
+            _runuser(owner or 'root',
+                     ['git', '-C', str(d), 'checkout', '--', path]),
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            _warn(f'{name}: could not discard {path}, which the older '
+                  f'install.sh rewrote — {(r.stdout + r.stderr).strip()}; '
+                  f'run as {owner or "root"}: '
+                  f'git -C {d} checkout -- {path}')
+            ok = False
+            continue
+        _info(f'{name}: discarded {path}: the older install.sh rewrote it, '
+              f'and a restore keeps no installer\'s lock-file rewrite')
+    return ok
+
+
 def cmd_manifest_restore(args) -> int:
     """`smd admin manifest restore <path> [--apply] [--no-fetch]` — the
     remote-rollback half of the blessed-manifest mechanism; `admin
@@ -5218,7 +5259,10 @@ def cmd_manifest_restore(args) -> int:
        `pyproject.toml`/`uv.lock` left v3.72's consumers unit on a
        v3.71 guest).  ka9q-radio gets no install step: radiod stays the
        binary built before, and a rebuild stays manual.  A failed
-       install.sh makes the restore exit 1.  Then
+       install.sh makes the restore exit 1.  After each install.sh, the
+       owner puts back every lock file (uv.lock) that install.sh rewrote,
+       and the restore names each one; a change that stood before the
+       install stays (v3.82 row 6).  A failed put-back also exits 1.  Then
        `_restore_retire_units` disables and removes each unit file the
        newer commit shipped and the older does not, when its installed
        bytes still equal the newer commit's.  Finally, the SAME restart
@@ -5353,6 +5397,8 @@ def cmd_manifest_restore(args) -> int:
     # dirty tree on a 'keep' needs no working-tree change here and is
     # `smd doctor`'s concern, not restore's. NEVER stash, NEVER discard
     # — a local modification may be a real fix nobody committed yet.
+    # One exception, after --apply: a lock file the restore's own
+    # install.sh rewrote goes back (_restore_discard_lock_rewrites).
     # Untracked files are not dirt — the definition align_apply.dirty_files,
     # doctor.git_state and _repo_is_dirty already use. ka9q-web's Makefile
     # generates an untracked config_paths.h, and counting it refused the
@@ -5361,11 +5407,7 @@ def cmd_manifest_restore(args) -> int:
     dirty_refusals = []
     for name, _from, _to in checkout_actions:
         d = checkout_by_name[name]
-        r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
-                            'status', '--porcelain', '--untracked-files=no'],
-                           capture_output=True, text=True)
-        files = [line[3:].strip() for line in r.stdout.splitlines()
-                if line.strip()]
+        files = sorted(_restore_tracked_dirty(d))
         if files:
             hint = ''
             if 'uv.lock' in files:
@@ -5463,12 +5505,18 @@ def cmd_manifest_restore(args) -> int:
         # align's own runner: --yes, stdin closed, the output kept in
         # /var/log/sigmond (the same log `smd update` writes).
         ran_install = True
+        before = _restore_tracked_dirty(d)
         rc = _align_run_install(d, log_target=name)
         if rc == 0:
             _ok(f'{name}: install.sh exit 0')
         else:
             install_failed.append(name)
             _err(f'{name}: install.sh exit {rc}')
+        # Whatever the exit code: an unfrozen `uv sync` in an older
+        # install.sh rewrites uv.lock before anything later can fail.
+        if (not _restore_discard_lock_rewrites(name, d, _owner_of(d), before)
+                and name not in install_failed):
+            install_failed.append(name)
     if ran_install:
         # install.sh runs as root and leaves root-owned egg-info and venv
         # paths in the checkouts; give them back, as align does.
