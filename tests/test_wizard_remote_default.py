@@ -61,6 +61,9 @@ ASK_PRELUDE = textwrap.dedent("""
     RAC_BASE_VMSSH=35800; RAC_BASE_VMWEB=45800; RAC_BASE_HSSH=50800; RAC_BASE_HUI=55800
     RAC_REG_PORT=35737; RAC_PORT_SECURE=35736; RAC_PORT_UNSEC=35735
     _hs=vpn.hamsci.org; _wd=gw2.wsprdaemon.org
+    _hs1=vpn1.hamsci.org; _hs2=vpn2.hamsci.org; _hs_sni=$_hs
+    RAC_CA_GW2=/etc/sigmond/frps-ca-gw2.crt
+    RAC_CA_HAMSCI=/etc/sigmond/frps-ca-hamsci.crt
     RAC_SERVER=gw2.wsprdaemon.org
     HAVE_RX888=1; HAVE_GPSDO=1; HAVE_TS1=1; HAVE_MAG=1
     rd(){ read "$@" || { echo "STDIN-RAN-DRY"; exit 9; }; }

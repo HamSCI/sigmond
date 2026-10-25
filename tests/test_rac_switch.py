@@ -676,7 +676,12 @@ def test_no_wizard_line_outside_the_switch_turns_the_tunnel_on_or_off():
     for verb in ("enable", "disable", "start", "stop", "restart"):
         assert not re.search(rf"systemctl {verb}( --now)? [^\n]*sigmond-rac-host", outside), verb
         assert not re.search(rf"systemctl {verb}( --now)? [^\n]*sigmond-vm-[a-z]+-relay", outside), verb
-    assert "systemctl try-restart sigmond-rac-host.service" in outside     # registration only
+    # Registration may only TRY-restart, and it must do so for EVERY session:
+    # a station that re-registers and reloads one gateway's tunnel while the
+    # other keeps the old configuration is half-registered, which is worse
+    # than either state alone because both look healthy.
+    assert 'for _u in ${RAC_UNITS:-sigmond-rac-host.service}; do' in outside
+    assert 'systemctl try-restart "$_u"' in outside                        # registration only
 
 
 def test_the_wizard_run_brings_the_tunnel_up_through_the_switch():

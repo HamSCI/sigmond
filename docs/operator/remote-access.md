@@ -50,15 +50,26 @@ That direction is the whole point:
   doing science exactly as before.
 
 Concretely: a small program called `frpc` runs on the **Proxmox host** and keeps
-one connection open to the gateway (source: `/etc/sigmond/frpc-host.toml` on the
-`[host]`). Your station tries gateways in order, best first. Each stop is a
-tier, and `smd remote status` names the one you got. The console panel and the
-install summary show it as well while the tunnel is up. On the wsprdaemon gateway's secure tier,
-`wsprdaemon (secure)`, TLS protects the connection, and the host checks the
-gateway against a certificate authority pinned into the image at
-`/etc/sigmond/frps-ca.crt`. A DASI station's `HamSCI secure (TOFU)` tier
-encrypts without that check. The unsecured tiers (`HamSCI unsecured (direct)`
-and `wsprdaemon (UNSECURED)`) carry no TLS.
+a connection open to the gateway. A HamSCI station keeps **two of them, to two
+different gateways, at the same time** — `vpn1.hamsci.org` and
+`vpn2.hamsci.org` — and publishes the same channels on each. There is no
+failover and nothing to switch: both are live, so if whoever is helping you
+cannot reach your station through one, they use the other. Each session has its
+own configuration (`/etc/sigmond/frpc-host-vpn1.toml`,
+`frpc-host-vpn2.toml`) and its own service, so one gateway going down costs
+the other nothing.
+
+Every one of those connections is secured: TLS, and the host checks the gateway
+against a certificate pinned into the image —
+`/etc/sigmond/frps-ca-hamsci.crt` for the HamSCI gateways,
+`/etc/sigmond/frps-ca-gw2.crt` for the wsprdaemon one. A new install will not
+fall back to an unsecured connection; the tiers that did (`HamSCI unsecured
+(direct)` and `wsprdaemon (UNSECURED)`) were retired on 2026-10-24. Stations
+already running on the wsprdaemon gateway keep its `wsprdaemon (secure)` tier.
+`smd remote status` names the gateways you are on, and says so if one of your
+two sessions is down. The names it prints are the tiers the wizard tried:
+`HamSCI secure (TOFU) vpn1` and `HamSCI secure (TOFU) vpn2` for a HamSCI
+station, `wsprdaemon (secure)` for one on the wsprdaemon gateway.
 
 ### It runs on the host, not on the VM
 

@@ -134,6 +134,37 @@ RAC_PORT_SECURE="${SIGMOND_RAC_PORT_SECURE:-35736}"
 RAC_PORT_UNSEC="${SIGMOND_RAC_PORT_UNSECURED:-35735}"
 _hs="vpn.hamsci.org"
 _wd="gw2.wsprdaemon.org"
+# TWO HamSCI gateways, both live, both secure.  A station holds a session to
+# each at once; there is no failover and no election between them, so an admin
+# who cannot reach a station through one uses the other (rob, 2026-10-24).
+_hs1="vpn1.hamsci.org"
+_hs2="vpn2.hamsci.org"
+# ⛔ Both gateways present the SAME self-signed cert, whose CN and only SAN is
+# `vpn.hamsci.org`.  So the vpn2 session must send that name as the TLS
+# serverName or hostname verification cannot succeed — and ⛔ the answer is
+# never to drop trustedCaFile, which leaves frpc verifying nothing at all.
+_hs_sni="$_hs"
+# ⛔ ONE CA PER GATEWAY.  gw2 presents CN=GW2.WSPRDAEMON.ORG, the HamSCI pair
+# CN=vpn.hamsci.org.  Until 2026-10-24 one file held gw2's cert for every
+# station, so a HamSCI station could not complete a TLS login at all and fell
+# silently to the legacy OPEN port 35735 — where AI6VN was found that day.
+RAC_CA_GW2="${SIGMOND_RAC_CA_GW2:-/etc/sigmond/frps-ca-gw2.crt}"
+RAC_CA_HAMSCI="${SIGMOND_RAC_CA_HAMSCI:-/etc/sigmond/frps-ca-hamsci.crt}"
+# name|host|port|ca|serverName|adminPort  — the set a station publishes on.
+#
+# ⛔ EACH SESSION NEEDS ITS OWN ADMIN PORT.  frpc's [webServer] is a real
+# listener: two sessions sharing 7500 means the second dies at startup with
+# "address already in use", and a station that believes it holds two gateways
+# holds one.  The switch reads each session's own port to count its channels.
+rac_gateway_set(){
+    case "$1" in
+        *hamsci.org)
+            printf 'vpn1|%s|%s|%s|%s|7500\nvpn2|%s|%s|%s|%s|7501\n' \
+                "$_hs1" "$RAC_PORT_SECURE" "$RAC_CA_HAMSCI" "$_hs_sni" \
+                "$_hs2" "$RAC_PORT_SECURE" "$RAC_CA_HAMSCI" "$_hs_sni" ;;
+        *)  printf 'gw2|%s|%s|%s||7500\n' "$1" "${RAC_PORT:-$RAC_PORT_SECURE}" "$RAC_CA_GW2" ;;
+    esac
+}
 build_rac_tiers() {
     case "$RAC_PROFILE" in
         standard)
@@ -159,10 +190,18 @@ build_rac_tiers() {
                 # is the admission, a working tunnel the point (proven from
                 # the AI6VN box 2026-08-09).  --rac-upgrade climbs to the TOFU
                 # rung once 35736 opens.
-                RAC_TIERS="HamSCI secure (TOFU)|$_hs|DIRECT|opp|$RAC_PORT_SECURE
-HamSCI unsecured (direct)|$_hs|DIRECT|off|$RAC_PORT_UNSEC
-wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
-wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
+                # SECURE ONLY, on both HamSCI gateways (rob, 2026-10-24).
+                # The two UNSECURED rungs that used to sit here are gone: a new
+                # install must not land on the legacy open port.  vpn1 keeps
+                # 35735 for the stations already on it; vpn2 never had one.
+                # tls=on, not opp — the pinned CA is the gateway's own now
+                # ($RAC_CA_HAMSCI), so there is nothing left to be lenient
+                # about.  Either HamSCI gateway may answer the claim: they
+                # merge their TOFU registries both ways, so one registration
+                # is on file at both within ~5 minutes.
+                RAC_TIERS="HamSCI secure (TOFU) vpn1|$_hs1|DIRECT|on|$RAC_PORT_SECURE
+HamSCI secure (TOFU) vpn2|$_hs2|DIRECT|on|$RAC_PORT_SECURE
+wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE"
             else
                 # NO HamSCI rung here, and that is deliberate.  Until
                 # 2026-09-15 this branch led with two rungs pointing at
@@ -181,8 +220,7 @@ wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNS
                 # no number there is no way to choose a HamSCI RAC, so gw2 is
                 # the only honest option — but say so out loud rather than
                 # discovering it four failed rungs later.
-                RAC_TIERS="wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
-wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
+                RAC_TIERS="wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE"
             fi
             ;;
     esac
@@ -304,6 +342,7 @@ rac_ladder(){
     # RAC_TIER_LABEL.  Reads SITE, DASI_NUM, HAMSCI_TOKEN and $RAC_HOSTKEY.pub.
     local _lbl _cand _cand_reg _tls _fport
     local _racn _pvs _pvw _phs _phu _pst _pgm _duser _tf _dtls _spec _n _lp _rp
+    local _gwca_probe _gwsni_probe
     local _tpid _drun _derr _api _i
     REG=""
     RAC_TRIED=""
@@ -332,6 +371,7 @@ rac_ladder(){
             _phs=$((RAC_BASE_HSSH+_racn)); _phu=$((RAC_BASE_HUI+_racn))
             _pst=$((RAC_BASE_VMSTN+_racn)); _pgm=$((RAC_BASE_VMGMAG+_racn))
             _duser="DASI-$(printf '%03d' "$DASI_NUM")"
+            IFS='|' read -r _ _ _ _gwca_probe _gwsni_probe _ <<<"$(rac_gateway_set "$_cand" | head -1)"
             say "  deterministic mapping: $_duser -> RAC #$_racn (attempting, not probing)"
             _tf=$(mktemp /tmp/frpc-dasi-XXXXXX.toml)
             _dtls=true; [ "$_tls" = "off" ] && _dtls=false
@@ -345,6 +385,14 @@ rac_ladder(){
                 # auth.token is empty, so the client sends an empty token too.
                 printf '[auth]\nmethod = "token"\ntoken = ""\n'
                 printf '[transport.tls]\nenable = %s\n' "$_dtls"
+                # ⛔ The claim attempt must verify exactly as the live session
+                # will.  A probe that trusts anything proves the gateway is
+                # reachable, not that this station can actually log in to it —
+                # and the whole point of the attempt is that it IS the test.
+                if [ "$_tls" = "on" ] && [ -s "$_gwca_probe" ]; then
+                    printf 'trustedCaFile = "%s"\n' "$_gwca_probe"
+                    [ -n "$_gwsni_probe" ] && printf 'serverName = "%s"\n' "$_gwsni_probe"
+                fi
                 printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
                 for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu" \
                              "vm-station:12224:$_pst" "vm-gmag:12225:$_pgm"; do
@@ -441,27 +489,39 @@ rac_write_config(){
     # transport follows the tier that actually answered: a secure tier pins
     # the fleet CA, opportunistic (opp) encrypts without pinning (server cert
     # is self-signed — vpn.hamsci.org today), and an unsecured one has no TLS.
-    case "$RAC_TLS" in
-        off) RAC_TLS_BLOCK="[transport.tls]
-enable = false" ;;
-        opp) RAC_TLS_BLOCK="[transport.tls]
-enable = true" ;;
-        *)   RAC_TLS_BLOCK="[transport.tls]
-enable = true
-trustedCaFile = \"$RAC_CA\"" ;;
-    esac
-    say "writing $RAC_TOML (6 channels, one tunnel)"
+    # Each gateway's transport is built inside the loop below, from ITS OWN
+    # pinned CA and serverName.  An unsecured tier keeps no TLS at all; it
+    # survives only for a legacy station already on one.
+    rac_tls_block(){
+        # $1 = ca path, $2 = serverName (may be empty)
+        case "$RAC_TLS" in
+            off) printf '[transport.tls]\nenable = false\n' ;;
+            opp) printf '[transport.tls]\nenable = true\n' ;;
+            *)   printf '[transport.tls]\nenable = true\ntrustedCaFile = "%s"\n' "$1"
+                 [ -n "$2" ] && printf 'serverName = "%s"\n' "$2" ;;
+        esac
+    }
+    # ONE CONFIG PER GATEWAY.  The station publishes the same six channels on
+    # every gateway in its set and holds a session to each at once.
+    local _gw _gwname _gwhost _gwport _gwca _gwsni _gwadmin _toml _first=""
+    RAC_UNITS=""
+    while IFS='|' read -r _gwname _gwhost _gwport _gwca _gwsni _gwadmin; do
+        [ -n "$_gwname" ] || continue
+        _toml="$(dirname "$RAC_TOML")/frpc-host-$_gwname.toml"
+        [ -n "$_first" ] || _first="$_toml"
+        RAC_UNITS="${RAC_UNITS:+$RAC_UNITS }sigmond-rac-host@$_gwname.service"
+        say "writing $_toml (6 channels, gateway $_gwname at $_gwhost:$_gwport)"
     # Write beside the live file under a closed umask, then rename: the file
     # holds the station's token, and frpc must never read half of it.
-    if ! ( umask 077; cat > "$RAC_TOML.new" <<TOMLEOF
+    if ! ( umask 077; cat > "$_toml.new" <<TOMLEOF
 # Written by sigmond-setup $(date -u +%F) — RAC #$RACN, site $SITE.
 # ONE frpc on the Proxmox host carries every channel; the vm-* channels
 # ride the local relays (12222-12225), so this file never needs the VM's
 # address.
 # serverPort comes from the TIER that answered (35736 TLS / 35735 legacy),
 # not from the registrar's reply — the registrar only knows the legacy stack.
-serverAddr = "$SRV"
-serverPort = ${RAC_PORT:-$SPORT}
+serverAddr = "$_gwhost"
+serverPort = $_gwport
 user = "$RUSER"
 
 # The station's pubkey rides every login as metadata (any tier): servers
@@ -476,11 +536,11 @@ dasi = "${DASI_NUM:+DASI-$(printf '%03d' "$DASI_NUM")}"
 method = "token"
 token = "$RTOKEN"
 
-$RAC_TLS_BLOCK
+$(rac_tls_block "$_gwca" "$_gwsni")
 
 [webServer]
 addr = "127.0.0.1"
-port = 7500
+port = $_gwadmin
 
 [[proxies]]
 name = "$SITE-vm-ssh"
@@ -524,11 +584,18 @@ localIP = "127.0.0.1"
 localPort = 8006
 remotePort = $P_HUI
 TOMLEOF
-    ) || ! mv -f "$RAC_TOML.new" "$RAC_TOML"; then
-        rm -f "$RAC_TOML.new"
-        RAC_FAIL="could not write $RAC_TOML"
+    ) || ! mv -f "$_toml.new" "$_toml"; then
+        rm -f "$_toml.new"
+        RAC_FAIL="could not write $_toml"
         return 1
     fi
+    done <<GWEOF
+$(rac_gateway_set "$SRV")
+GWEOF
+    # ⛔ ONE source of truth.  pm-align, identity and the switch all name
+    # /etc/sigmond/frpc-host.toml; point it at the first gateway's file rather
+    # than leaving a second real copy that can drift out of step with it.
+    ln -sfn "$(basename "$_first")" "$RAC_TOML"
     # The marks come last: a station counts as registered once the tunnel
     # configuration stands, and never before.
     printf '%s\n' "$RAC_TIER_LABEL" > "$MARK_DIR/rac-tier"
@@ -565,7 +632,9 @@ rac_register_locked(){
     rac_write_config || return 1
     # A tunnel that runs takes up the new configuration.  One that stands
     # stopped stays stopped.
-    systemctl try-restart sigmond-rac-host.service >>"$LOG" 2>&1
+    for _u in ${RAC_UNITS:-sigmond-rac-host.service}; do
+        systemctl try-restart "$_u" >>"$LOG" 2>&1
+    done
     return 0
 }
 
@@ -812,6 +881,21 @@ WAIT_S="${SIGMOND_RAC_WAIT_S:-60}"
 WAIT_STEP="${SIGMOND_RAC_WAIT_STEP:-5}"
 LOCK_WAIT_S="${SIGMOND_RAC_LOCK_WAIT_S:-120}"
 UNIT=sigmond-rac-host.service
+# !! THE SWITCH ACTS ON THE WHOLE SET.  A station holds one session per
+# gateway; an operator who turns remote access off and leaves one gateway live
+# has not turned it off, and one that comes back on with only half its
+# sessions is not redundant any more -- it just looks it.  rac_units() names
+# every session this station actually has: the per-gateway instances when its
+# configs exist, and the legacy single unit otherwise.
+rac_units(){
+    local _t _n out=""
+    for _t in "$(dirname "$TOML")"/frpc-host-*.toml; do
+        [ -e "$_t" ] || continue
+        _n=${_t##*/frpc-host-}; _n=${_n%.toml}
+        out="${out:+$out }sigmond-rac-host@$_n.service"
+    done
+    printf '%s' "${out:-$UNIT}"
+}
 SOCKETS="sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket"
 RETRY_TIMER=sigmond-rac-register.timer
 PAIR_USER=sigmond-remote
@@ -829,15 +913,47 @@ registered(){ [ -s "$TOML" ]; }
 tunnel_running(){
     # `activating` is the unit inside its restart delay: the service keeps
     # trying, so "does not run" would come and go between two tries.
-    case "$(systemctl is-active "$UNIT" 2>/dev/null)" in active|activating) return 0 ;; esac
+    # Reachable while ANY session is up: that is what an admin trying to get
+    # in experiences.  !! This DELIBERATELY reads "on" when one of the two
+    # gateways is down, so the operator is not told remote access has failed
+    # when it has not.  Which sessions are up is not reported here yet -- see
+    # tasks/plan-rac-dual-gateway.md, phase 5.
+    local _u
+    for _u in $(rac_units); do
+        case "$(systemctl is-active "$_u" 2>/dev/null)" in active|activating) return 0 ;; esac
+    done
     return 1
 }
 declared(){ local n; n=$(grep -c '^name *=' "$TOML" 2>/dev/null); echo "${n:-0}"; }
+rac_admin_ports(){
+    # Each session's frpc admin port, read from its own config.  !! They MUST
+    # differ: two sessions sharing one [webServer] port means the second frpc
+    # dies with "address already in use" and the station holds one tunnel
+    # while every surface says two.
+    local _t _p out=""
+    for _t in "$(dirname "$TOML")"/frpc-host-*.toml; do
+        [ -e "$_t" ] || continue
+        _p=$(awk -F'= *' '/^\[webServer\]/{w=1;next} w&&/^port/{print $2;exit}' "$_t" 2>/dev/null)
+        [ -n "$_p" ] && out="${out:+$out }$_p"
+    done
+    printf '%s' "${out:-${API##*127.0.0.1:}}" | sed 's|/api/status||'
+}
 channels_up(){
     # grep -o | wc -l, not grep -c: the API answers with one line of JSON.
-    local n
-    n=$(curl -s --max-time 3 "$API" 2>/dev/null | grep -o '"status":"running"' | wc -l | tr -d ' ')
-    echo "${n:-0}"
+    #
+    # !! The HIGHEST count across the sessions, not the sum and not the
+    # lowest.  The sum would call a station healthy with one dead gateway and
+    # one doubly-counted live one.  The lowest would make `--rac-on` fail
+    # whenever a single gateway is unreachable -- redundancy causing the
+    # outage it exists to prevent.  The highest answers the question the
+    # caller is really asking: can anyone get in.
+    local _p n best=0
+    for _p in $(rac_admin_ports); do
+        n=$(curl -s --max-time 3 "http://127.0.0.1:$_p/api/status" 2>/dev/null \
+            | grep -o '"status":"running"' | wc -l | tr -d ' ')
+        [ "${n:-0}" -gt "$best" ] && best=$n
+    done
+    echo "$best"
 }
 wish_on_file(){
     local w
@@ -851,7 +967,13 @@ wish(){
     # No wish on file: a station installed before v3.71.  Read the wish from
     # what stands.  Registered and enabled means on; anything else means off,
     # so a station whose owner declined at install stays as it stands.
-    if registered && systemctl is-enabled --quiet "$UNIT" 2>/dev/null; then echo on; else echo off; fi
+    local _u
+    if registered; then
+        for _u in $(rac_units); do
+            systemctl is-enabled --quiet "$_u" 2>/dev/null && { echo on; return; }
+        done
+    fi
+    echo off
 }
 set_wish(){
     # Record who and when only when the wish changes.
@@ -1017,7 +1139,7 @@ switch_off(){
     # caller's own session.
     # shellcheck disable=SC2086
     systemctl disable --now $SOCKETS >/dev/null 2>&1
-    systemctl disable --now "$UNIT" >/dev/null 2>&1
+    for _u in $(rac_units); do systemctl disable --now "$_u" >/dev/null 2>&1; done
     # With no `off` on file, nothing tells a later run of the retry timer that
     # the operator said off.  So the timer goes too.
     [ "$recorded" = yes ] || systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
@@ -1040,7 +1162,7 @@ switch_off(){
         # stops a unit and cannot remove the link that enables it.
         if [ "$RUNS" = running ]; then
             did="off asked systemd to stop and disable the tunnel, its relays and the retry timer, and the tunnel service STILL RUNS."
-        elif systemctl is-enabled --quiet "$UNIT" 2>/dev/null; then
+        elif systemctl is-enabled --quiet "$(rac_units | awk '{print $1}')" 2>/dev/null; then
             did="off stopped the tunnel and its relays, and the tunnel service STAYS ENABLED: systemd could not disable it, so it starts again at the next boot."
         else
             did="off stopped and disabled the tunnel, its relays and the retry timer."
@@ -1080,7 +1202,7 @@ switch_on(){
         systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
         # shellcheck disable=SC2086
         systemctl enable --now $SOCKETS >/dev/null 2>&1
-        systemctl enable --now "$UNIT" >/dev/null 2>&1
+        for _u in $(rac_units); do systemctl enable --now "$_u" >/dev/null 2>&1; done
         echo "Waiting up to ${WAIT_S}s for the gateway to accept the channels."
         wait_for_channels
     else

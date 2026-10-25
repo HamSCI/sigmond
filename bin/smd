@@ -2088,8 +2088,55 @@ _FRPC_BIN       = Path('/usr/local/sbin/frpc')
 _FRPC_INI       = Path('/etc/sigmond/frpc.ini')      # legacy — kept for migration removal
 _FRPC_CONFIG    = Path('/etc/sigmond/frpc.toml')     # current config (TOML, TLS + token auth)
 _FRPC_KEY       = Path('/etc/sigmond/frpc_id_rsa')   # dedicated keypair for this station
-_FRPS_CA_CERT   = Path('/etc/sigmond/frps-ca.crt')  # gateway self-signed cert
+_FRPS_CA_CERT   = Path('/etc/sigmond/frps-ca.crt')  # legacy single-CA path
+_FRPS_CA_HAMSCI = Path('/etc/sigmond/frps-ca-hamsci.crt')
+_FRPS_CA_GW2    = Path('/etc/sigmond/frps-ca-gw2.crt')
 _RAC_SERVICE    = 'wd-rac'
+
+# A GATEWAY IS DATA.  name -> (host, port, pinned CA, TLS serverName).
+#
+# ⛔ There is no single "the" frps CA.  gw2 presents CN=GW2.WSPRDAEMON.ORG;
+# vpn1 and vpn2 present CN=vpn.hamsci.org.  Pinning one file for all of them
+# is why every HamSCI station failed its TLS login and fell back to the legacy
+# OPEN port — measured on AI6VN 2026-10-24.  See tasks/plan-rac-dual-gateway.md.
+#
+# ⛔ serverName is REQUIRED for vpn2 and harmless for vpn1: both gateways
+# present the same cert, whose CN and only SAN is `vpn.hamsci.org`, so
+# verifying the name `vpn2.hamsci.org` against it fails.  Never answer that by
+# emptying trustedCaFile — frpc then verifies nothing at all.
+#
+# ⛔ EACH SESSION NEEDS ITS OWN ADMIN PORT.  frpc's [webServer] is a real
+# listener: two sessions sharing 7500 means the second dies at startup with
+# "address already in use", and a station that believes it has two gateways
+# has one.  The port is part of the gateway, not of the host.
+_RAC_GATEWAYS = {
+    'vpn1': ('vpn1.hamsci.org',    _FRPS_PORT, _FRPS_CA_HAMSCI, 'vpn.hamsci.org', 7500),
+    'vpn2': ('vpn2.hamsci.org',    _FRPS_PORT, _FRPS_CA_HAMSCI, 'vpn.hamsci.org', 7501),
+    'gw2':  ('gw2.wsprdaemon.org', _FRPS_PORT, _FRPS_CA_GW2,    '',               7500),
+}
+# Every HamSCI station holds BOTH sessions at once.  No failover, no election:
+# both are live, and an admin who cannot reach a station through one gateway
+# uses the other (rob, 2026-10-24).
+_RAC_GATEWAYS_HAMSCI = ('vpn1', 'vpn2')
+_RAC_GATEWAYS_WD     = ('gw2',)
+
+
+def _rac_gateways_for(rac_number: int) -> tuple:
+    """Which gateways this station publishes on.
+
+    Channels 200-299 are HamSCI-managed and get both HamSCI gateways;
+    everything else stays on the wsprdaemon gateway.
+    """
+    try:
+        n = int(rac_number)
+    except (TypeError, ValueError):
+        return _RAC_GATEWAYS_WD
+    return _RAC_GATEWAYS_HAMSCI if 200 <= n <= 299 else _RAC_GATEWAYS_WD
+
+
+def _frpc_config_path(gateway: str) -> Path:
+    """This gateway's own frpc config.  One session per gateway, so one file."""
+    return Path(f'/etc/sigmond/frpc-{gateway}.toml')
 
 
 def _frpc_arch_suffix() -> str:
@@ -2518,37 +2565,68 @@ def _rac_register(cli_rac_id=None, force: bool = False) -> int:
     return 0 if _bootstrap_rac_registration(rac_id, force=force) else 1
 
 
-def _fetch_frps_ca_cert(dry_run: bool = False) -> bool:
-    """Fetch the frps server's TLS cert and save to _FRPS_CA_CERT."""
-    if _FRPS_CA_CERT.exists():
-        _ok(f'frps CA cert: {_FRPS_CA_CERT}')
-        return True
-    if dry_run:
-        _info(f'dry-run: would fetch TLS cert from {_FRPS_URL}:{_FRPS_PORT}')
-        return True
+def _fetch_frps_ca_cert(gateways=None, dry_run: bool = False) -> bool:
+    """Pin each gateway's OWN cert at its own path.
+
+    ⛔ The cert must come from the gateway the config will name.  Until
+    2026-10-24 this fetched from gw2 unconditionally while `_write_frpc_config`
+    pointed a HamSCI station at vpn.hamsci.org — so the pin and the use
+    disagreed by construction and no HamSCI station could ever complete a TLS
+    login.  Take the gateways from the caller, never from a default.
+    """
+    if gateways is None:
+        gateways = _RAC_GATEWAYS_WD
+    ok = True
+    done: set = set()
+    for gw in gateways:
+        host, port, ca, _sni, _admin = _RAC_GATEWAYS[gw]
+        if ca in done:                      # vpn1 and vpn2 share one cert today
+            continue
+        done.add(ca)
+        if ca.exists():
+            _ok(f'frps CA cert ({gw}): {ca}')
+            continue
+        if dry_run:
+            _info(f'dry-run: would fetch TLS cert from {host}:{port} → {ca}')
+            continue
+        pem = _fetch_tls_cert_pem(host, port)
+        if pem is None:
+            ok = False
+            continue
+        if not _install_ca_pem(pem, ca):
+            ok = False
+            continue
+        _ok(f'frps CA cert ({gw}): fetched from {host}:{port}  →  {ca}')
+    return ok
+
+
+def _fetch_tls_cert_pem(host: str, port: int):
+    """The PEM a server presents, or None.  No verification — this IS the pin."""
     import ssl as _ssl, socket as _sock2
     try:
         ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = _ssl.CERT_NONE
-        with _sock2.create_connection((_FRPS_URL, _FRPS_PORT), timeout=10) as raw:
+        with _sock2.create_connection((host, port), timeout=10) as raw:
             with ctx.wrap_socket(raw) as s:
                 der = s.getpeercert(binary_form=True)
-        pem = _ssl.DER_cert_to_PEM_cert(der)
+        return _ssl.DER_cert_to_PEM_cert(der)
     except Exception as exc:
-        _err(f'failed to fetch frps CA cert from {_FRPS_URL}:{_FRPS_PORT}: {exc}')
-        return False
+        _err(f'failed to fetch frps CA cert from {host}:{port}: {exc}')
+        return None
+
+
+def _install_ca_pem(pem: str, dest: Path) -> bool:
     import tempfile as _tf3
     with _tf3.NamedTemporaryFile('w', suffix='.crt', delete=False) as tf:
         tf.write(pem)
         tf_path = tf.name
-    _run(['mkdir', '-p', str(_FRPS_CA_CERT.parent)], sudo=True)
-    r = _run(['install', '-m', '644', tf_path, str(_FRPS_CA_CERT)], sudo=True)
+    _run(['mkdir', '-p', str(dest.parent)], sudo=True)
+    r = _run(['install', '-m', '644', tf_path, str(dest)], sudo=True)
     Path(tf_path).unlink(missing_ok=True)
     if r.returncode != 0:
         _err(f'failed to save CA cert: {r.stderr.strip()}')
         return False
-    _ok(f'frps CA cert: fetched and saved  →  {_FRPS_CA_CERT}')
     return True
 
 
@@ -2569,34 +2647,22 @@ def _rac_service_port(rac_id: str, service: str) -> int:
     return base + int(hashlib.sha256(rac_id.encode()).hexdigest()[:8], 16) % width
 
 
-def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> bool:
-    """Write /etc/sigmond/frpc.toml with TLS + token auth for the secure frps port."""
-    if not rac_id:
-        _err('wd-rac: rac_id is empty')
-        return False
+def _render_frpc_config(rac_id: str, gateway: str, *, ssh_port: int, web_port: int,
+                        user_field: str, ssh_user: str, local_ssh_port: int) -> str:
+    """One gateway's frpc.toml, as text.  Pure — no disk, no sudo.
 
-    # rac_number is retired for port assignment (ports derive from the name);
-    # it is honored only to route channels 200-299 via the HamSCI frps.
-    frps_host = _FRPS_URL_HAMSCI if 200 <= rac_number <= 299 else _FRPS_URL
-    ssh_port = _rac_service_port(rac_id, 'ssh')
-    web_port = _rac_service_port(rac_id, 'web')
-    user_field = _frpc_user_field()
-    # SSH login user advertised to the gw2 dashboard via proxy metadata. Default
-    # to the human who ran (sudo) install; override with WD_RAC_SSH_USER.
-    ssh_user = (os.environ.get('WD_RAC_SSH_USER', '').strip()
-                or os.environ.get('SUDO_USER', '').strip() or 'root')
-
-    local_ssh_port = 22
-    try:
-        for line in Path('/etc/ssh/sshd_config').read_text().splitlines():
-            if line.startswith('Port '):
-                local_ssh_port = int(line.split()[1])
-    except Exception:
-        pass
-
+    Every gateway gets the SAME rac_id, ports, user and pubkey: the gateways
+    file a station by TOFU and merge their registries both ways, and a
+    DIFFERENT key for the same user is refused as impersonation.  Only the
+    server address, its pinned CA and its TLS serverName differ.
+    """
+    host, port, ca, sni, admin = _RAC_GATEWAYS[gateway]
     lines = [
-        f'serverAddr = "{frps_host}"',
-        f'serverPort = {_FRPS_PORT}',
+        f'# Written by smd — RAC {rac_id}, gateway {gateway}.',
+        '# One session per gateway; a station holds them all at once, with no',
+        '# failover between them.  See tasks/plan-rac-dual-gateway.md.',
+        f'serverAddr = "{host}"',
+        f'serverPort = {port}',
     ]
     if user_field:
         lines.append(f'user = "{user_field}"')
@@ -2608,11 +2674,18 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
         '',
         '[transport.tls]',
         'enable = true',
-        f'trustedCaFile = "{_FRPS_CA_CERT}"',
+        f'trustedCaFile = "{ca}"',
+    ]
+    if sni:
+        # ⛔ Without this the handshake fails: the cert's only SAN is
+        # `vpn.hamsci.org`, so verifying the name `vpn2.hamsci.org` against it
+        # cannot succeed.
+        lines.append(f'serverName = "{sni}"')
+    lines += [
         '',
         '[webServer]',
         'addr = "127.0.0.1"',
-        'port = 7500',
+        f'port = {admin}',
         '',
         '[[proxies]]',
         f'name = "{rac_id}-ssh"',
@@ -2629,13 +2702,61 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
         'localPort = 8081',
         f'remotePort = {web_port}',
     ]
-    content = '\n'.join(lines) + '\n'
+    return '\n'.join(lines) + '\n'
 
+
+def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> bool:
+    """Write ONE frpc config PER GATEWAY, plus the legacy frpc.toml symlink."""
+    if not rac_id:
+        _err('wd-rac: rac_id is empty')
+        return False
+
+    gateways = _rac_gateways_for(rac_number)
+    ssh_port = _rac_service_port(rac_id, 'ssh')
+    web_port = _rac_service_port(rac_id, 'web')
+    user_field = _frpc_user_field()
+    # SSH login user advertised to the dashboard via proxy metadata. Default
+    # to the human who ran (sudo) install; override with WD_RAC_SSH_USER.
+    ssh_user = (os.environ.get('WD_RAC_SSH_USER', '').strip()
+                or os.environ.get('SUDO_USER', '').strip() or 'root')
+
+    local_ssh_port = 22
+    try:
+        for line in Path('/etc/ssh/sshd_config').read_text().splitlines():
+            if line.startswith('Port '):
+                local_ssh_port = int(line.split()[1])
+    except Exception:
+        pass
+
+    ok = True
+    for gw in gateways:
+        content = _render_frpc_config(
+            rac_id, gw, ssh_port=ssh_port, web_port=web_port,
+            user_field=user_field, ssh_user=ssh_user,
+            local_ssh_port=local_ssh_port)
+        dest = _frpc_config_path(gw)
+        if dry_run:
+            _info(f'dry-run: would write {dest}:\n{textwrap.indent(content, "     ")}')
+            continue
+        if not _install_frpc_config(content, dest):
+            ok = False
     if dry_run:
-        _info(f'dry-run: would write {_FRPC_CONFIG}:\n{textwrap.indent(content, "     ")}')
-        return True
+        _info(f'dry-run: would point {_FRPC_CONFIG} at '
+              f'{_frpc_config_path(gateways[0]).name}')
+        return ok
 
-    _run(['mkdir', '-p', str(_FRPC_CONFIG.parent)], sudo=True)
+    # ⛔ ONE source of truth.  Several readers still name /etc/sigmond/frpc.toml
+    # (rac_config, the TUI, `smd admin rac status`); a symlink keeps them right
+    # without a second real file that can drift out of step with the first.
+    first = _frpc_config_path(gateways[0])
+    if _FRPC_CONFIG.exists() or _FRPC_CONFIG.is_symlink():
+        _run(['rm', '-f', str(_FRPC_CONFIG)], sudo=True)
+    _run(['ln', '-s', first.name, str(_FRPC_CONFIG)], sudo=True)
+    return ok
+
+
+def _install_frpc_config(content: str, dest: Path) -> bool:
+    _run(['mkdir', '-p', str(dest.parent)], sudo=True)
     import tempfile as _tf4
     with _tf4.NamedTemporaryFile('w', suffix='.toml', delete=False) as tf:
         tf.write(content)
@@ -2648,16 +2769,15 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
     import grp as _grp
     try:
         _grp.getgrnam('sigmond')
-        install_cmd = ['install', '-m', '640', '-g', 'sigmond',
-                       tf_path, str(_FRPC_CONFIG)]
+        install_cmd = ['install', '-m', '640', '-g', 'sigmond', tf_path, str(dest)]
     except KeyError:
-        install_cmd = ['install', '-m', '640', tf_path, str(_FRPC_CONFIG)]
+        install_cmd = ['install', '-m', '640', tf_path, str(dest)]
     r = _run(install_cmd, sudo=True)
     Path(tf_path).unlink(missing_ok=True)
     if r.returncode != 0:
-        _err(f'frpc.toml write failed: {r.stderr.strip()}')
+        _err(f'{dest}: write failed: {r.stderr.strip()}')
         return False
-    _ok(f'frpc.toml: written ({rac_id}: ssh gw2:{ssh_port}, web gw2:{web_port})')
+    _ok(f'wd-rac: wrote {dest}')
     return True
 
 
@@ -2721,18 +2841,27 @@ remote_port = {web_port}
     return True
 
 
-def _install_rac_service(dry_run: bool = False) -> bool:
-    """Write and enable the wd-rac systemd service."""
-    unit_path = Path('/etc/systemd/system/wd-rac.service')
+def _install_rac_service(gateways=None, dry_run: bool = False) -> bool:
+    """Install the templated wd-rac unit and enable ONE INSTANCE PER GATEWAY.
+
+    ⛔ The instances are independent on purpose: one gateway down, or
+    unreachable from this station's network, must cost the other nothing.
+    That is the whole point of the second session, so nothing here may make
+    one instance's state depend on the other's.
+    """
+    if gateways is None:
+        gateways = _RAC_GATEWAYS_WD
+    unit_path = Path(f'/etc/systemd/system/{_RAC_SERVICE}@.service')
     unit_content = f"""\
 [Unit]
-Description=WsprDaemon Remote Access Channel (frpc tunnel)
+Description=Remote Access Channel to gateway %i (frpc tunnel)
 After=network-online.target
 Wants=network-online.target
+ConditionPathExists=/etc/sigmond/frpc-%i.toml
 
 [Service]
 Type=simple
-ExecStart={_FRPC_BIN} -c {_FRPC_CONFIG}
+ExecStart={_FRPC_BIN} -c /etc/sigmond/frpc-%i.toml
 Restart=always
 RestartSec=30s
 TimeoutStartSec=30
@@ -2740,8 +2869,9 @@ TimeoutStartSec=30
 [Install]
 WantedBy=multi-user.target
 """
+    instances = [f'{_RAC_SERVICE}@{gw}.service' for gw in gateways]
     if dry_run:
-        _info(f'dry-run: would write {unit_path} and enable wd-rac.service')
+        _info(f'dry-run: would write {unit_path} and enable {", ".join(instances)}')
         return True
 
     import tempfile
@@ -2751,15 +2881,22 @@ WantedBy=multi-user.target
     r = _run(['install', '-m', '644', tf_path, str(unit_path)], sudo=True)
     Path(tf_path).unlink(missing_ok=True)
     if r.returncode != 0:
-        _err(f'wd-rac.service write failed: {r.stderr.strip()}')
+        _err(f'{unit_path.name} write failed: {r.stderr.strip()}')
         return False
     # Remove legacy frpc.ini now that we use frpc.toml.
     if _FRPC_INI.exists():
         _run(['rm', '-f', str(_FRPC_INI)], sudo=True)
     _run(['systemctl', 'daemon-reload'], sudo=True)
-    _run(['systemctl', 'enable', 'wd-rac.service'], sudo=True)
-    _run(['systemctl', 'restart', 'wd-rac.service'], sudo=True)
-    _ok('wd-rac.service: installed and enabled')
+    for inst in instances:
+        _run(['systemctl', 'enable', inst], sudo=True)
+        _run(['systemctl', 'restart', inst], sudo=True)
+    # ⛔ The single-session unit goes LAST, and only after the replacements are
+    # up: stop it first and the station is briefly unreachable by any route.
+    legacy = f'{_RAC_SERVICE}.service'
+    if Path(f'/etc/systemd/system/{legacy}').exists():
+        _run(['systemctl', 'disable', '--now', legacy], sudo=True)
+        _info(f'{legacy}: stopped and disabled — replaced by {", ".join(instances)}')
+    _ok(f'{_RAC_SERVICE}: installed and enabled ({", ".join(gateways)})')
     return True
 
 
@@ -2883,12 +3020,13 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False,
     ok = True
     ok = _install_frpc(dry_run) and ok
     ok = _ensure_frpc_keypair(dry_run) and ok
-    ok = _fetch_frps_ca_cert(dry_run) and ok
+    gateways = _rac_gateways_for(rac_number)
+    ok = _fetch_frps_ca_cert(gateways, dry_run) and ok
     if rac_id:
         _bootstrap_rac_registration(rac_id, dry_run)   # non-fatal; ignore return value
     if rac_id and rac_number >= 0:
         ok = _write_frpc_config(rac_id, rac_number, dry_run) and ok
-        ok = _install_rac_service(dry_run) and ok
+        ok = _install_rac_service(gateways, dry_run) and ok
     return ok
 
 
@@ -2936,8 +3074,24 @@ def rac_status() -> dict:
         except Exception:
             pass
 
-    r = _run(['systemctl', 'is-active', 'wd-rac.service'])
-    result['service_active'] = (r.returncode == 0 and r.stdout.strip() == 'active')
+    # One session per gateway.  ⛔ `service_active` means THE STATION IS
+    # REACHABLE — true while any session is up, because that is what an admin
+    # trying to get in cares about.  `sessions_down` is what tells the operator
+    # a gateway has been lost, which `service_active` alone would hide: two
+    # sessions whose health is reported as one number is how a redundant pair
+    # silently degrades to a single point of failure.
+    result['sessions'] = {}
+    for gw in _rac_gateways_for(result['rac_number']):
+        if not _frpc_config_path(gw).exists():
+            continue
+        rr = _run(['systemctl', 'is-active', f'{_RAC_SERVICE}@{gw}.service'])
+        result['sessions'][gw] = (rr.returncode == 0 and rr.stdout.strip() == 'active')
+    result['sessions_down'] = sorted(g for g, up in result['sessions'].items() if not up)
+    if result['sessions']:
+        result['service_active'] = any(result['sessions'].values())
+    else:
+        r = _run(['systemctl', 'is-active', f'{_RAC_SERVICE}.service'])   # legacy
+        result['service_active'] = (r.returncode == 0 and r.stdout.strip() == 'active')
 
     if result['service_active']:
         import socket

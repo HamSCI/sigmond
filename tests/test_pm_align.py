@@ -1519,7 +1519,7 @@ def test_wizard_records_the_rac_number_only_once_the_configuration_stands():
     # reads on the console panel as "assigned, but frpc-host.toml is missing".
     i = WIZARD.index("rac_write_config(){")
     body = WIZARD[i:WIZARD.index("\n}\n", i)]
-    assert body.index('mv -f "$RAC_TOML.new" "$RAC_TOML"') < body.index("rac-number")
+    assert body.index('mv -f "$_toml.new" "$_toml"') < body.index("rac-number")
 
 
 def test_wizard_installs_pm_align_on_the_host():

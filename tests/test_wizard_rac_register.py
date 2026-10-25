@@ -24,8 +24,8 @@ REPO = Path(__file__).resolve().parent.parent
 WIZARD = REPO / "scripts" / "proxmox" / "sigmond-wizard.sh"
 TEXT = WIZARD.read_text()
 
-FUNCS = ("build_rac_tiers", "rac_load_pin", "rac_save_pin", "rac_site_name",
-         "rac_payload_ready", "rac_ladder", "rac_write_config",
+FUNCS = ("build_rac_tiers", "rac_gateway_set", "rac_load_pin", "rac_save_pin",
+         "rac_site_name", "rac_payload_ready", "rac_ladder", "rac_write_config",
          "rac_register_locked", "rac_register")
 
 PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFake root@test"
@@ -119,6 +119,11 @@ def host(tmp_path, *, tiers, relays=True, frpc=True, configured="AC0G/B4 EM38ww 
         RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800
         DASI_NUM=""; HAMSCI_TOKEN=""
         RAC_SERVER=""; RAC_TLS="on"; RAC_TIER_LABEL=""
+        RAC_CA_GW2={tmp_path}/ca.crt
+        RAC_CA_HAMSCI={tmp_path}/ca-hamsci.crt
+        RAC_PORT_SECURE=35736
+        _hs="vpn.hamsci.org"; _hs1="vpn1.hamsci.org"; _hs2="vpn2.hamsci.org"
+        _hs_sni="$_hs"; _wd="gw2.wsprdaemon.org"
         RAC_TIERS='{tiers}'
         say(){{ echo "[wizard] $*"; }}
         systemctl(){{ echo "$*" >> {tmp_path}/systemctl.calls; }}
@@ -198,7 +203,7 @@ def test_registration_never_starts_stops_or_enables_the_tunnel(tmp_path, registr
     run(pre + "rac_register ensure\n", tmp_path)
     # A running tunnel takes up the new configuration; a stopped one stays
     # stopped.  try-restart does exactly that and nothing else may appear.
-    assert calls(tmp_path) == ["try-restart sigmond-rac-host.service"]
+    assert calls(tmp_path) == ["try-restart sigmond-rac-host@gw2.service"]
     body = "".join(shell_func(n) for n in FUNCS)
     for verb in ("systemctl enable", "systemctl start", "systemctl restart",
                  "systemctl stop", "systemctl disable"):

@@ -232,10 +232,36 @@ def test_each_gateway_base_belongs_to_its_channel():
 
 def test_the_tiers_the_page_names_are_the_wizards_labels():
     page = flat(PAGE)
-    for label in ("HamSCI secure (TOFU)", "wsprdaemon (secure)",
-                  "HamSCI unsecured (direct)", "wsprdaemon (UNSECURED)"):
+    for label in ("HamSCI secure (TOFU)", "wsprdaemon (secure)"):
         assert label in page, label
-        assert f"{label}|" in WIZARD, label
+        assert f"{label}" in WIZARD, label
+
+
+def test_the_page_does_not_still_offer_the_retired_unsecured_tiers():
+    """Secure-only for new installs (rob, 2026-10-24).
+
+    A page that still describes an unsecured fallback tells an operator their
+    station may legitimately end up on one.  It may not: the two unsecured
+    rungs are gone from the ladder, and the page has to say so rather than
+    quietly dropping the subject.
+    """
+    page = flat(PAGE)
+    for retired in ("HamSCI unsecured (direct)", "wsprdaemon (UNSECURED)"):
+        assert f"{retired}|" not in WIZARD, f"{retired} is back in the ladder"
+    assert "retired" in page, "the page must say the unsecured tiers are gone"
+
+
+def test_the_page_describes_both_gateways():
+    """The operator is told there are TWO live sessions, and why.
+
+    A page that describes one tunnel leaves an operator unable to read
+    `smd remote status`, which now names two gateways and reports one being
+    down while the station is still reachable through the other.
+    """
+    page = flat(PAGE)
+    for needle in ("vpn1.hamsci.org", "vpn2.hamsci.org",
+                   "frpc-host-vpn1.toml", "frps-ca-hamsci.crt"):
+        assert needle in page, needle
 
 
 def test_the_panel_figures_the_page_names_are_the_panels():
