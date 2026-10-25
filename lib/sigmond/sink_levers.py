@@ -690,12 +690,24 @@ def _daemon_reload(res, systemctl) -> None:
 class RestoreResult:
     restored: list = field(default_factory=list)
     failures: list = field(default_factory=list)     # (link, why)
+    remedy: Optional[str] = None    # the ways out of an operator's change
 
     def lines(self) -> list:
         return ([f"lever: restored {p} ({WSPR_UPLOADER}'s enablement, which "
                  "an earlier lever removed; nothing started)"
                  for p in self.restored]
-                + [f"lever: FAILED {x}: {why}" for x, why in self.failures])
+                + [f"lever: FAILED {x}: {why}" for x, why in self.failures]
+                + ([f"lever: {self.remedy}"] if self.remedy else []))
+
+
+def _name_remedy(res: RestoreResult, etc: Path, instead: str) -> None:
+    """Name both ways out of a record the operator's change made stale,
+    once: keep the change and drop the record, or undo the change."""
+    if res.remedy is None:
+        res.remedy = (f"the operator changed {WSPR_UPLOADER}'s link after the "
+                      "fill, so the record no longer applies. To keep that "
+                      "change and clear this failure: sudo rm "
+                      f"{etc / UPLOADER_LINKS_RECORD}. {instead}: smd apply")
 
 
 def restore_uploader_links(*, roots: Roots = Roots(),
@@ -728,17 +740,22 @@ def restore_uploader_links(*, roots: Roots = Roots(),
     except OSError:
         now = None
     kept = []
+    def resolved(x):
+        return os.path.normpath(os.path.join(unit_dir, x))
+    now_at = resolved(now) if now is not None else None
     for link, target in pairs:
         if now is None:
             res.failures.append((str(link), f"{unit_link} no longer stands as "
                                  "a unit link; not restored, the record kept"))
             kept.append((link, target))
+            _name_remedy(res, etc, "To re-enable the uploader instead")
             continue
-        if now != target:
+        if now_at != resolved(target):
             res.failures.append((str(link), f"the unit link now names {now}, "
                                  f"not the recorded {target}; not restored, "
                                  "the record kept"))
             kept.append((link, target))
+            _name_remedy(res, etc, "To return to the fill's state instead")
             continue
         if link.name != WSPR_UPLOADER or link.parent.parent != unit_dir \
                 or not link.parent.name.endswith(_ENABLEMENT_DIRS):

@@ -636,6 +636,36 @@ class StandingLeverTests(unittest.TestCase):
                          "enabled")
         self.assertFalse(any(c[0] == "disable" for c in st.sc.calls))
 
+    def test_upload_step_after_an_operator_disable_fails_and_names_the_record(self):
+        """Review N-1: the step keeps failing, and says how to stop."""
+        st = Part2Station(self)
+        unit_dir = st.tmp / "etc/systemd/system"
+        (unit_dir / "multi-user.target.wants").mkdir(parents=True)
+        src = st.tmp / "opt" / "wspr-uploader.service"
+        src.parent.mkdir()
+        src.write_text("[Service]\nExecStart=/bin/true\n")
+        (unit_dir / "wspr-uploader.service").symlink_to(src)
+        (unit_dir / "multi-user.target.wants" / "wspr-uploader.service"
+         ).symlink_to(src)
+        st.units["wspr-uploader.service"] = {
+            "LoadState": "loaded", "ActiveState": "active",
+            "UnitFileState": "enabled",
+            "FragmentPath": str(unit_dir / "wspr-uploader.service"),
+            "unit_dir": str(unit_dir)}
+        self.assertEqual(st.step().rc, 0)
+        for state in ("fill", "upload"):
+            r = Runner()(["sink", "set", "site", state, "--reason", "bench",
+                          "--by", "test", "--sinks", str(st.roots.sinks)])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            if state == "fill":
+                self.assertEqual(st.step().rc, 0)
+                (unit_dir / "wspr-uploader.service").unlink()   # operator
+        step = st.step()
+        self.assertEqual(step.rc, 1, step.both)
+        record = st.tmp / "etc/sigmond/sink-levers/wspr-uploader.links"
+        self.assertIn(f"sudo rm {record}", step.both)
+        self.assertEqual(st.step().rc, 1)        # keeps failing until removed
+
 
 class RestoreGateTests(unittest.TestCase):
     """Review M-1, M-5: the lever step restores wspr-uploader's links only

@@ -958,6 +958,11 @@ class LinkedEnabledUploader(Base):
         self.assertFalse(any(os.path.lexists(p) for p in links))
         self.assertTrue(self.record().exists())
         self.assertEqual(self.sc.verbs(), [])
+        self.assertIn(f"sudo rm {self.record()}", res.remedy)
+        self.assertIn("To re-enable the uploader instead: smd apply",
+                      res.remedy)
+        self.assertEqual(res.lines()[-1], f"lever: {res.remedy}")
+        self.assertNotIn("sudo smd", res.remedy)
 
     def test_restore_skips_a_target_the_unit_link_no_longer_names(self):
         """Review M-5: the checkout moved and the unit was linked again from
@@ -977,6 +982,33 @@ class LinkedEnabledUploader(Base):
         self.assertFalse(os.path.lexists(links[0]))
         self.assertTrue(self.record().exists())
         self.assertEqual(self.sc.verbs(), [])
+        self.assertIn(f"sudo rm {self.record()}", res.remedy)
+        self.assertIn("To return to the fill's state instead: smd apply",
+                      res.remedy)
+        self.assertEqual(res.lines()[-1], f"lever: {res.remedy}")
+
+    def test_a_relative_relink_to_the_same_file_restores(self):
+        links = self.linked_uploader()
+        self.lever(["wspr-recorder"])
+        self.unit_link.unlink()
+        self.unit_link.symlink_to(
+            os.path.relpath(self.unit_src, self.unit_dir))
+        self.sc.calls.clear()
+        res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual(res.failures, [])
+        self.assertIsNone(res.remedy)
+        self.assertEqual(res.restored, links)
+        self.assertTrue(all(p.is_symlink() for p in links))
+        self.assertFalse(self.record().exists())
+
+    def test_a_bad_record_line_names_no_operator_remedy(self):
+        self.linked_uploader()
+        bad = self.tmp / "x.wants" / UPLOADER
+        L._write_links_record(self.etc, [(bad, str(self.unit_src))])
+        res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
+        self.assertEqual(len(res.failures), 1, res.failures)
+        self.assertIsNone(res.remedy)
+        self.assertNotIn("sudo rm", "\n".join(res.lines()))
 
     def test_restore_with_no_record_does_nothing(self):
         res = L.restore_uploader_links(roots=self.roots, systemctl=self.sc)
