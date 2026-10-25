@@ -3052,3 +3052,44 @@ def test_a_removed_relay_names_every_reason_at_once(tmp_path):
         return inner(argv, **kw)
     out = pm_align.vm4relay_step(tmp_path, run=run)
     assert out.startswith("warn") and "cannot be read" in out
+
+
+# -- the console menu (v3.82 row 3) ------------------------------------------
+#
+# From v3.82 the wizard writes the root menu and its profile hook; pm-align
+# carries both to a station set up before that.
+
+WIZ_V382 = WIZ + '''cat > /usr/local/sbin/sigmond-console-menu <<'CMENUEOF'
+#!/bin/bash
+echo menu
+CMENUEOF
+cat > /etc/profile.d/sigmond-console-menu.sh <<'CHOOKEOF'
+: hook
+CHOOKEOF
+'''
+
+
+def test_desired_files_carries_the_console_menu_when_the_wizard_has_it():
+    src = pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZ_V382, 100), {"pm-heartbeat.py": b"hb"})
+    files = {f.path: f for f in pm_align.desired_files(src, 100)}
+    assert files["/usr/local/sbin/sigmond-console-menu"].mode == 0o755
+    assert files["/usr/local/sbin/sigmond-console-menu"].content == b"#!/bin/bash\necho menu\n"
+    assert files["/etc/profile.d/sigmond-console-menu.sh"].mode == 0o644
+
+
+def test_desired_files_tolerates_a_wizard_without_the_menu():
+    paths = {f.path for f in pm_align.desired_files(_src(), 100)}
+    assert "/usr/local/sbin/sigmond-console-menu" not in paths
+    assert "/etc/profile.d/sigmond-console-menu.sh" not in paths
+
+
+def test_the_real_wizard_carries_the_console_menu():
+    src = pm_align.Sources(FB_FULL, pm_align.render_wizard(WIZARD, 100), {})
+    files = {f.path: f for f in pm_align.desired_files(src, 100)}
+    assert pm_align.WIZARD_HEREDOCS_SINCE_V382 == {
+        "/usr/local/sbin/sigmond-console-menu": 0o755,
+        "/etc/profile.d/sigmond-console-menu.sh": 0o644,
+    }
+    for path, mode in pm_align.WIZARD_HEREDOCS_SINCE_V382.items():
+        assert path in files, f"the wizard no longer writes {path} from a quoted heredoc"
+        assert files[path].mode == mode

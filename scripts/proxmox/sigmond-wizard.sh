@@ -3516,6 +3516,173 @@ if [ -n "$PARTS" ]; then echo "$V  ($PARTS)"; else echo "$V"; fi
 exit "$RC"
 CHKEOF
 chmod +x /usr/local/bin/sigmond-check
+# -- the console menu: what an operator at this machine can do  (v3.82 row 3) --
+# After a root login at the console, a whiptail menu offers the common jobs.
+# The console here mostly arrives over SSH: the PM has no keyboard, so the
+# VM's console bridge logs in from 10.99.0.2 to 10.99.0.1.  That counts as
+# the console, and so does a real /dev/ttyN login.  LAN and RAC SSH keep the
+# plain shell.  pm-align carries both heredocs (WIZARD_HEREDOCS_SINCE_V382).
+say "installing the console menu (root logins at this machine's console)"
+mkdir -p /usr/local/sbin /etc/profile.d
+cat > /usr/local/sbin/sigmond-console-menu <<'CMENUEOF'
+#!/bin/bash
+# sigmond-console-menu - the station's jobs, as a menu, at the console.
+#
+#   sigmond-console-menu           show the menu
+#   sigmond-console-menu --login   show it only when this login is at the
+#                                  console (the profile hook passes this)
+#
+# The console: a login on /dev/ttyN, or the split-console bridge, which logs
+# in over SSH from the VM (10.99.0.2) to this host (10.99.0.1).  Any other
+# SSH login keeps the plain shell.  Shell or Esc leaves the menu.
+# Keep this file ASCII: the bridge paints raw bytes onto a TERM=linux VT.
+# Test knobs: SIGMOND_MENU_TTY, SIGMOND_MENU_CONF, SIGMOND_MENU_RAC_TIMEOUT.
+
+CONF="${SIGMOND_MENU_CONF:-/etc/sigmond-appliance/.configured}"
+
+# console or other
+console_kind() {
+    local t="${SIGMOND_MENU_TTY:-$(tty 2>/dev/null)}"
+    case "$t" in /dev/tty[0-9]*) echo console; return 0 ;; esac
+    # SSH_CONNECTION: client-addr client-port server-addr server-port
+    set -- ${SSH_CONNECTION:-}
+    if [ "${1:-}" = 10.99.0.2 ] && [ "${3:-}" = 10.99.0.1 ]; then
+        echo console; return 0
+    fi
+    echo other
+}
+
+# The remote-access actions that apply now: off, on, or "on off" when the
+# switch cannot say (missing, hung, or a line this menu does not know).
+rac_actions() {
+    local line
+    line=$(timeout "${SIGMOND_MENU_RAC_TIMEOUT:-10}" sigmond-rac-switch status 2>/dev/null | head -n 1)
+    case "$line" in
+        "Remote access: on"|"Remote access: wanted on, not up") echo off ;;
+        "Remote access: off") echo on ;;
+        *) echo "on off" ;;
+    esac
+}
+
+station_name() {
+    local n=""
+    [ -r "$CONF" ] && n=$(awk 'NR==1{print $1}' "$CONF" 2>/dev/null)
+    [ -n "$n" ] || n=$(hostname -s 2>/dev/null)
+    printf '%s\n' "${n:-unknown}"
+}
+
+# Four lines, each with its verdict in words.
+net_test() {
+    local gw dev
+    read -r gw dev < <(ip -4 route show default 2>/dev/null | awk '$1 == "default" {
+        for (i = 2; i < NF; i++) { if ($i == "via") g = $(i + 1); if ($i == "dev") d = $(i + 1) }
+        if (g != "") { print g, d; exit } }')
+    if [ -z "$gw" ]; then
+        echo "IPv4 gateway: none (no IPv4 default route)"
+    elif ping -4 -c 2 -W 2 "$gw" >/dev/null 2>&1; then
+        echo "IPv4 gateway $gw: answers"
+    else
+        echo "IPv4 gateway $gw: does NOT answer"
+    fi
+    gw=""; dev=""
+    read -r gw dev < <(ip -6 route show default 2>/dev/null | awk '$1 == "default" {
+        for (i = 2; i < NF; i++) { if ($i == "via") g = $(i + 1); if ($i == "dev") d = $(i + 1) }
+        if (g != "") { print g, d; exit } }')
+    if [ -z "$gw" ]; then
+        echo "IPv6 gateway: none (no IPv6 default route)"
+    else
+        local target="$gw${dev:+%$dev}"
+        if ping -6 -c 2 -W 2 "$target" >/dev/null 2>&1; then
+            echo "IPv6 gateway $target: answers"
+        else
+            echo "IPv6 gateway $target: does NOT answer"
+        fi
+    fi
+    local fam addr
+    for fam in 4 6; do
+        addr=$(timeout 15 getent "ahostsv$fam" github.com 2>/dev/null | awk 'NR == 1 {print $1}')
+        echo "DNS (IPv$fam answer) github.com: ${addr:-FAILED}"
+    done
+}
+
+# Run one item; a failure is reported and the menu comes back.
+run_item() {
+    local rc
+    echo
+    "$@"; rc=$?
+    [ "$rc" -eq 0 ] || echo "($* ended with exit status $rc)"
+}
+
+pause() {
+    echo
+    printf 'Press Enter to return to the menu'
+    read -r _ || echo
+}
+
+# Until Shell or Esc.  Always returns 0, so the login carries on.
+menu_loop() {
+    local title acts choice rc items
+    title="Sigmond station $(station_name)"
+    while true; do
+        acts=$(rac_actions)
+        items=(check "Check the station" settings "Change station settings")
+        case "$acts" in
+            off) items+=(remote "Remote access off") ;;
+            on) items+=(remote "Remote access on") ;;
+            *) items+=(remote-on "Remote access on (state unknown)"
+                       remote-off "Remote access off (state unknown)") ;;
+        esac
+        items+=(net "Test gateway and DNS (IPv4 and IPv6)" shell "Shell")
+        choice=$(whiptail --title "$title" --notags --cancel-button Shell \
+                     --menu "Choose with the arrow keys and Enter.  Esc leaves for a shell." \
+                     20 72 8 "${items[@]}" 3>&1 1>&2 2>&3)
+        rc=$?
+        [ "$rc" -eq 0 ] || return 0
+        case "$choice" in
+            check) run_item sigmond-check ;;
+            settings) run_item sigmond-setup --reconfigure ;;
+            remote) run_item sigmond-setup "--rac-$acts" ;;
+            remote-on) run_item sigmond-setup --rac-on ;;
+            remote-off) run_item sigmond-setup --rac-off ;;
+            net) echo; net_test ;;
+            *) return 0 ;;
+        esac
+        pause
+    done
+}
+
+[ "${SIGMOND_MENU_LIB:-}" = 1 ] && return 0
+
+main() {
+    if [ "${1:-}" = --login ] && [ "$(console_kind)" != console ]; then
+        return 0
+    fi
+    if ! command -v whiptail >/dev/null 2>&1; then
+        echo "sigmond-console-menu: whiptail not installed; plain shell"
+        return 0
+    fi
+    # Ctrl-C stops the item that runs, not the menu.
+    trap : INT
+    menu_loop
+}
+main "$@"
+exit 0
+CMENUEOF
+chmod 755 /usr/local/sbin/sigmond-console-menu
+cat > /etc/profile.d/sigmond-console-menu.sh <<'CHOOKEOF'
+# Written by sigmond-setup; pm-align keeps it current.
+# Offers the station menu after a root login.  The menu itself returns at
+# once unless the login came in at the console.  SIGMOND_MENU_SHOWN keeps
+# it from coming back in a nested login shell (bash -l, tmux).
+# SIGMOND_MENU_BIN is a test knob.
+if [ -n "${BASH_VERSION:-}" ] && [ -z "${SIGMOND_MENU_SHOWN:-}" ] && shopt -q login_shell; then
+    export SIGMOND_MENU_SHOWN=1
+    if [ "$(id -u)" = 0 ] && [ -t 0 ] && [ -x "${SIGMOND_MENU_BIN:-/usr/local/sbin/sigmond-console-menu}" ]; then
+        "${SIGMOND_MENU_BIN:-/usr/local/sbin/sigmond-console-menu}" --login
+    fi
+fi
+CHOOKEOF
+chmod 644 /etc/profile.d/sigmond-console-menu.sh
 
 # ── PROVE the operator login works (don't just claim it) ───────────────────
 # Key login, host→VM, via the same helper path the operator will use.

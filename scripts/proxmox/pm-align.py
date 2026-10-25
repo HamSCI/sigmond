@@ -300,6 +300,12 @@ WIZARD_HEREDOCS_SINCE_V371 = {
 WIZARD_HEREDOCS_SINCE_V372 = {
     "/usr/local/bin/sigmond-check": 0o755,
 }
+# The root menu at the station console and the login hook that offers it
+# (v3.82 row 3).  A wizard from before v3.82 writes neither.
+WIZARD_HEREDOCS_SINCE_V382 = {
+    "/usr/local/sbin/sigmond-console-menu": 0o755,
+    "/etc/profile.d/sigmond-console-menu.sh": 0o644,
+}
 
 SETUP = "/usr/local/sbin/sigmond-setup"
 PAIR_FLAG = "--pair-vm"
@@ -402,7 +408,7 @@ def desired_files(src: Sources, vmid: int, notes: Optional[list] = None) -> list
         missing = [Path(path).name for path in WIZARD_HEREDOCS_SINCE_V371 if path not in wz]
         notes.append(f"this release's wizard carries {len(carried)} of the "
                      f"{len(WIZARD_HEREDOCS_SINCE_V371)} remote-access files ({', '.join(missing)})")
-    for path, mode in WIZARD_HEREDOCS_SINCE_V372.items():
+    for path, mode in {**WIZARD_HEREDOCS_SINCE_V372, **WIZARD_HEREDOCS_SINCE_V382}.items():
         if path in wz:
             out.append(HostFile(path, wz[path].encode(), mode, "sigmond-wizard.sh"))
     out.extend(relay_units(src.wizard, vmid))
