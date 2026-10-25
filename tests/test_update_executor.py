@@ -163,6 +163,65 @@ class ExecutorTests(_Rig):
         self.assertIn(str(logs[0]), text)                          # and named
 
 
+class InstallerInvocationTests(_Rig):
+    """The update runs install.sh as restore does: --yes where the parser
+    takes it, stdin closed (v3.82 row 7).  No sudo: _as_root is identity."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(smd, "_as_root", side_effect=lambda argv: argv)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _update_with_stdin_line(self):
+        # fd 0 is a pipe that holds a line: an installer that inherits it
+        # can read the line, one that gets stdin closed cannot.
+        r, w = os.pipe()
+        os.write(w, b"y\n")
+        saved = os.dup(0)
+        os.dup2(r, 0)
+        try:
+            return self._update()
+        finally:
+            os.dup2(saved, 0)
+            for fd in (saved, r, w):
+                os.close(fd)
+
+    def test_update_install_passes_yes_and_closes_stdin(self):
+        self._set_install_sh(
+            '#!/bin/bash\n'
+            'case "$1" in --yes|-y|"") ;; *) exit 2 ;; esac\n'
+            'printf "%s\\n" "$@" > "$(dirname "$0")/../.args"\n'
+            'if read -r _; then echo open; else echo closed; fi'
+            ' > "$(dirname "$0")/../.stdin"\n')
+        rc, text = self._update_with_stdin_line()
+        self.assertEqual(rc, 0, text)
+        self.assertEqual((self.host / ".args").read_text().split(), ["--yes"])
+        self.assertEqual((self.host / ".stdin").read_text().strip(), "closed")
+
+    def test_an_installer_that_rejects_yes_runs_without_it(self):
+        self._set_install_sh(
+            '#!/bin/bash\n'
+            'while [ $# -gt 0 ]; do\n'
+            '  case "$1" in\n'
+            '    --help) echo usage ;;\n'
+            '    *) exit 2 ;;\n'
+            '  esac\n'
+            '  shift\n'
+            'done\n'
+            'echo ran > "$(dirname "$0")/../.ran"\n')
+        rc, text = self._update_with_stdin_line()
+        self.assertEqual(rc, 0, text)
+        self.assertTrue((self.host / ".ran").exists(), text)
+
+    def test_update_install_goes_through_align_run_install(self):
+        with mock.patch.object(smd, "_align_run_install", return_value=0) as m:
+            rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        m.assert_called_once_with(self.base / self.COMP,
+                                  log_target=self.COMP, tail_lines=15)
+
+
 class NetworkBoundTests(unittest.TestCase):
     def test_fetch_and_pull_are_bounded(self):
         seen = []

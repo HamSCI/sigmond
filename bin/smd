@@ -4413,29 +4413,23 @@ def cmd_update(args) -> int:
                 which = 'checkout' if step.target in checkout_failed else 'pull'
                 _warn(f'{step.target}: install skipped — {which} failed above')
                 continue
-            sh = base / step.target / 'scripts' / 'install.sh'
-            if not sh.exists():
-                sh = base / step.target / 'install.sh'
             # Every consumer's install.sh refuses to run unprivileged, and smd
             # itself refuses to run under sudo — so the escalation belongs
             # here.  Without it every [install] step on B4 came back
             # "Run as root (sudo)" while the pulls above had succeeded,
             # leaving checkouts updated and venvs stale (2026-09-03).
-            r = subprocess.run(_as_root(['bash', str(sh)]),
-                               capture_output=True, text=True)
-            logpath = _write_update_log(step.target, r)
-            if r.returncode == 0:
+            # The same call restore makes: --yes where the installer's parser
+            # takes it, stdin closed (v3.82 row 7).  hf-timestd with no
+            # config otherwise opened its setup wizard here and exited 1.
+            rc = _align_run_install(base / step.target,
+                                    log_target=step.target, tail_lines=15)
+            if rc == 0:
                 _ok(f'{step.target}: install.sh exit 0')
                 applied.add(f'install {step.target}')
                 _record_update_step(f'install {step.target}')
             else:
                 failed += 1
-                _err(f'{step.target}: install.sh exit {r.returncode} — last lines:')
-                tail = (r.stdout + r.stderr).strip().splitlines()[-15:]
-                for line in tail:
-                    _info(f'  | {line}')
-                if logpath:
-                    _info(f'full output: {logpath}')
+                _err(f'{step.target}: install.sh exit {rc}')
         elif step.kind == 'restart':
             _info('restart not automated here — bounce radiod, wait for it to '
                   'settle, then the recorders')
@@ -6629,7 +6623,8 @@ def _align_chown(path, owner) -> None:
     os.chown(p, st.st_uid, st.st_gid)
 
 
-def _align_run_install(repo: Path, log_target: Optional[str] = None) -> int:
+def _align_run_install(repo: Path, log_target: Optional[str] = None,
+                       *, tail_lines: int = 5) -> int:
     """scripts/install.sh else install.sh, run as root — the same
     invocation `admin manifest restore --apply` uses (bin/smd ~4297-4316).
     0 when no installer is found on disk (nothing to run, not a failure).
@@ -6664,7 +6659,7 @@ def _align_run_install(repo: Path, log_target: Optional[str] = None) -> int:
     logpath = _write_update_log(log_target, r) if log_target else None
     if r.returncode:
         # These scripts print their errors with plain echo, to stdout.
-        tail = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()[-5:]
+        tail = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()[-tail_lines:]
         for line in tail:
             print(f'  | {line}')
         if logpath:

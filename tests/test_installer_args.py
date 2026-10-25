@@ -80,3 +80,28 @@ class AlignRunInstallWithRealScriptsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AlignRunInstallTailTests(unittest.TestCase):
+
+    def test_align_run_install_prints_tail_lines_on_failure(self):
+        import contextlib
+        import io
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader(
+            'smd_under_test_tail', str(FIX.parents[2] / 'bin' / 'smd'))
+        spec = importlib.util.spec_from_loader('smd_under_test_tail', loader)
+        smd = importlib.util.module_from_spec(spec)
+        loader.exec_module(smd)
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'install.sh').write_text(
+                '#!/bin/bash\nfor i in $(seq 1 20); do echo line$i; done\nexit 1\n')
+            out = io.StringIO()
+            with mock.patch.object(smd, '_as_root', side_effect=lambda a: a), \
+                    contextlib.redirect_stdout(out):
+                rc = smd._align_run_install(Path(tmp), tail_lines=15)
+        self.assertEqual(rc, 1)
+        lines = [l for l in out.getvalue().splitlines() if l.startswith('  | ')]
+        self.assertEqual(len(lines), 15)
+        self.assertEqual(lines[0], '  | line6')
