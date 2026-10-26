@@ -111,9 +111,10 @@ proxy ports (36029 and its siblings) are **closed to the public internet on
 all four**.  No action needed on the result.
 
 **But the result is not the mechanism, and the mechanism is what fails.**  On
-gw1/gw2 we know the answer: a DigitalOcean cloud firewall, outside the host,
-which holds even if a service is misconfigured or restarts with new settings.
-On vpn1/vpn2 we do not know, and the possibilities fail very differently:
+gw1/gw2 the answer is a **DigitalOcean Cloud Firewall** — outside the host, so
+it holds even if a service is misconfigured or restarts with new settings.
+On vpn1/vpn2 we cannot see what holds it, and the candidates fail very
+differently:
 
 - a **cloud firewall** — equivalent to ours, holds across service changes;
 - **host nftables/iptables** — fine, but lost on a rebuild unless persisted;
@@ -124,6 +125,23 @@ On vpn1/vpn2 we do not know, and the possibilities fail very differently:
 So the question is not "please firewall these" — they evidently are.  It is
 **what is enforcing it**, because stations' ssh ports ride those hosts and the
 third answer would make that protection far more fragile than it looks.
+
+**vpn1 and vpn2 are Linode servers** (rob, 2026-10-26), so the exact
+equivalent of what protects gw1/gw2 is available: a **Linode Cloud Firewall**,
+attached to both. If one is not already in place, the inbound allowlist that
+matches observed behaviour is small:
+
+| allow inbound | why |
+|---|---|
+| `22/tcp` | station uploads (chrooted sftp) and operator access |
+| `35736/tcp` | frps secure tier — every station registers here |
+| `35735/tcp` | only if the legacy open tier is still wanted (vpn1 has it, vpn2 does not) |
+| WireGuard `udp` listen port | mesh peers |
+| everything else | **deny** |
+
+That denies 7500/7501 and the whole per-station proxy range from the public
+internet by policy rather than by binding — which is what makes it survive a
+frp config change.
 
 One asymmetry worth a sentence while you are there: **vpn1 accepts the legacy
 unsecured frps tier on 35735; vpn2 does not** (gw1 does not either; gw2 does).
