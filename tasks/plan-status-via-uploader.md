@@ -1,6 +1,10 @@
 # Status reporting through the uploader, into ClickHouse
 
-**Status:** DESIGN AGREED 2026-10-26, nothing built.  Supersedes the stcp/RAC
+**Status:** DESIGN AGREED 2026-10-26.  **Phase 2 BUILT 2026-10-26**
+(hs-uploader `905ef13`): the persistent ssh connection is in
+`WsprdaemonTarSftp`, with its tmpfiles.d entry and 16 tests, all eight guards
+mutation-checked.  It is NOT yet soaked — the 48 h single-station soak below
+is the remaining Phase 2 item, and nothing else has started.  Supersedes the stcp/RAC
 carrier agreed 2026-10-25 (see "Why not the RAC tunnel" — the record of that
 decision is kept deliberately).  Carrier: the station's EXISTING wsprdaemon tar
 upload to gw1/gw2, over a PERSISTENT ssh connection.  Receiver:
@@ -400,13 +404,36 @@ Choices worth their rationale:
 Done first and separately, because it changes every existing upload and must be
 provable in isolation: a regression here breaks spots, not just status.
 
-- [ ] `ControlMaster`/`ControlPath`/`ControlPersist` + keepalives on the argv
+- [x] `ControlMaster`/`ControlPath`/`ControlPersist` + keepalives on the argv
       in `WsprdaemonTarSftp._run_sftp`.  `tmpfiles.d` entry for
-      `/run/hs-uploader`.  Opt-out env var for a host where it misbehaves.
-- [ ] Test that the `ControlPath` differs per server — mutate `%h` out of it
-      and the test must fail (trap 5).
+      `/run/hs-uploader`.  Opt-out env var (`HS_UPLOADER_SSH_MULTIPLEX=0`) for
+      a host where it misbehaves, plus `HS_UPLOADER_SSH_CONTROL_DIR`.
+- [x] Test that the `ControlPath` differs per server — mutate `%h` out of it
+      and the test must fail (trap 5).  Done, and the mutation is run: the
+      first version of that test asserted on the stored attribute rather than
+      the emitted argv and did NOT fail when `%h` was dropped from the
+      command.  Both are asserted now.
 - [ ] Soak on ONE station for 48 h: spot delivery unchanged, handshake count
-      down, no stuck master across a deliberate network drop.
+      down, no stuck master across a deliberate network drop.  **NOT DONE —
+      this is the gate on Phase 2, and nothing downstream should assume it
+      passed.**
+
+Three decisions made while building it, none of them in the design above:
+
+- **`ssh` refuses an over-long `ControlPath` rather than falling back.**  So
+  the expansion is MEASURED against this transport's own `servers` and user
+  and declined if it will not fit, rather than assumed to fit under a short
+  directory.  Falling back to plain connections is always correct; emitting a
+  path ssh will reject would break every upload on that host.
+- **An unusable control directory is not an error.**  Opt-out, a directory
+  that cannot be created, and a directory that exists but is not writable (the
+  ownership drift the tmpfiles.d `z` line repairs) all fall back to today's
+  behaviour.  A transport that refused to ship because it could not open a
+  socket would trade a cost win for an outage.
+- **A host-key change tears the master down and retries without it.**  Not in
+  the design, and load-bearing: reusing a master authenticated against the key
+  we have just decided is stale would carry the tar over the connection whose
+  identity is in question, and would make clearing `known_hosts` mean nothing.
 
 ### Phase 3 — the VM producer, its own pipeline
 
