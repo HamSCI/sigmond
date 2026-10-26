@@ -83,6 +83,23 @@ NAT64 cases.
 **Cost: a DigitalOcean checkbox and a DNS record, per host.  Benefit: the two
 most critical paths stop depending on the most fragile component.**
 
+This holds whichever way translation is done.  Whether the CLAT runs in the
+station or NAT64 runs at the site edge, native AAAA on gw1/gw2 takes uploads
+and RAC out of the translator entirely — so the translator stops being a
+single point of failure for the two things a station cannot lose.
+
+### 1c. AI6VN is now a standing Case A rig
+
+Added 2026-10-26.  rob is taking AI6VN IPv6-only on a wired segment, with the
+odroid (`rob@10.22.23.3`) acting as the IPv6-to-IPv4 translator, and a major
+acceptance test is that the station comes up in that environment.
+
+So Case A stops being a bench result from 2026-09-28 and becomes a rig every
+image is tested against before it ships.  **Confirm which variant the odroid
+implements** — NAT64 **with** DNS64 (station unaware, no clatd) or NAT64
+**without** it (station needs a CLAT).  That is §7 Q1 asked of a host we can
+actually inspect, and the answer predicts what McMurdo will need.
+
 ## 2. What is IPv4 today, and what must NOT change
 
 Audited across `sigmond-appliance` and `sigmond`: **zero IPv6 handling

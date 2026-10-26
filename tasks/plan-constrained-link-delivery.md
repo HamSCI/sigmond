@@ -281,15 +281,48 @@ So **every wsprdaemon-operated host and every science upload destination
 except wsprnet is IPv4-only.**  An IPv6-only station's entire function — both
 uploading and being reachable — runs through NAT64/clatd.
 
-Two consequences for this work:
+### The odroid is the translator, so AI6VN tests Case A
 
-1. **The capture must record, per destination, whether it was reached over v6
-   natively or through the CLAT.**  A list that says only "it talked to
-   github.com" does not tell USAP whether an IPv6-only firewall can carry it.
-2. **The IPv6-only test is really a clatd test.**  Whatever AI6VN does on
-   first boot will be dominated by whether the CLAT came up, not by station
-   code — see `plan-ipv6-support.md` for the boot-race failure mode, where
-   clatd exits 0, never retries, and the VM loses all connectivity.
+rob, 2026-10-26: **the odroid operates as an IPv6-to-IPv4 translator.**
+
+That makes AI6VN a standing test bed for exactly the architecture
+`plan-ipv6-support.md` calls **Case A — the site provides NAT64 + DNS64**, and
+names as the most likely McMurdo configuration.  That case was validated once
+on a bench (2026-09-28); AI6VN turns it into a permanent rig where every image
+is exercised against it on first boot.
+
+**This corrects something written earlier in this document.**  The claim that
+"the IPv6-only test is really a clatd test" is right for only one of two
+architectures, and probably the wrong one:
+
+| architecture | what translates | does the station need clatd? |
+|---|---|---|
+| NAT64 **+ DNS64** at the edge | the odroid, and the station sees synthetic AAAA | **no** — "the VM is unaware" |
+| NAT64 without DNS64 | the station's own CLAT | **yes** — 464XLAT, prefix discovery |
+
+Which one the odroid implements is **the single most valuable thing to
+establish**, because it is the same question `plan-ipv6-support.md` asks about
+McMurdo (§7 Q1: "Is there NAT64/DNS64?").  If USAP provides DNS64, the station
+needs nothing.  If NAT64 only, clatd is load-bearing and its boot race is a
+deployment blocker.  **Verify on the odroid** — which service (tayga, jool),
+and whether a resolver there synthesizes AAAA.
+
+### Capture on the TRANSLATED side, or the list is useless elsewhere
+
+A trap specific to this setup.  Under DNS64 the station sees synthetic AAAA
+addresses — the NAT64 prefix with the real IPv4 address embedded in the low
+bits.  **A capture taken on the station, or on the v6 side of the odroid,
+yields a list of NAT64-prefix addresses that mean nothing to any other
+network's firewall**, including USAP's.
+
+So capture on the odroid's **IPv4 side**, or decode the embedded v4 address
+out of each synthetic one.  A translator is the ideal capture point precisely
+because it sees both halves and can log the mapping — but only if the capture
+is taken from the half that is portable.
+
+The list must therefore record, per destination: the real IPv4 address, the
+hostname, and whether the flow was native v6 or translated.  Only the last of
+those tells USAP whether an IPv6-only firewall can carry it unaided.
 
 ### These three plans are one deployment program
 
