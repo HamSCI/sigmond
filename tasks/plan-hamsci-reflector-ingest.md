@@ -181,6 +181,31 @@ property that matters.
 
 ### Phase 0 — settle whether this path is needed at all
 
+**Measured on AI6VN, 2026-10-26.**  The two planes are already separate, and
+only one of them exists on the HamSCI side:
+
+| plane | AI6VN today | state |
+|---|---|---|
+| RAC | `sigmond-rac-host@vpn1` + `@vpn2`, user `DASI-009`, TLS tier 35736 | **both registered, 6 proxies running each** — dual-RAC confirmed on hardware |
+| uploads | `servers = ["gw1.wsprdaemon.org", "gw2.wsprdaemon.org"]`, `hs-uploader` active | works; spots reach wd10/20/30 through the wsprdaemon reflectors |
+
+So AI6VN already rides vpn1/vpn2 for remote access while its spots go by a
+different path entirely.  RAC proxies are ssh/web/station/gmag TCP tunnels;
+they are not an upload path and never carry a tar.
+
+**This makes AI6VN the ready-made pilot the moment HamSCI acts**, because the
+station side is a one-line change — point the `wsprdaemon_tar` pipeline's
+`servers` list at the HamSCI gateways — and nothing else moves.  The blocker
+is entirely on the far side: there is no upload account and no reflector
+there, and `/var/spool/wsprdaemon` on wd30 still shows only `from-gw1` and
+`from-gw2`.
+
+The ask can also be staged, and the first stage proves something on its own:
+an upload account alone lets us confirm the SFTP leg (tars land on vpn1) with
+no reflector and no pull service built yet.  Files would sit there going
+nowhere, which is a complete test of half the path and costs HamSCI one
+account.
+
 - [ ] **Does anything deposit uploads on vpn1/vpn2 today?**  wd30 shows no
       `from-vpn*` spool, and those hosts may be purely frp/RAC endpoints with
       no upload role.  If nothing deposits there, this is a pipe for traffic
