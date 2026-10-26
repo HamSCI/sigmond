@@ -75,6 +75,33 @@ State persists in /var/lib/sigmond/sdr-recover.json, including the latch
 ("latched", "replug_alarm_at") that stops resets after a failed return.  The
 latch clears only when the card is back as 00f1 at SuperSpeed with radiod
 healthy, so a reboot does not forget that a hand replug is owed.
+
+**Manual power control: --off / --on.**  Everything above is automatic and
+brief.  Judging a hub needs the opposite: the radio down and STAYING down,
+long enough to look at the RX-888's LED, swap a cable, or move the card.
+That is what the WsprDaemon pair `wd -U off` / `wd -U on` does, and
+`--off` / `--on` are its sigmond equivalent.
+
+    sudo /usr/local/sbin/sigmond-sdr-recover --off      # radio down, held
+    sudo /usr/local/sbin/sigmond-sdr-recover --status    # what is held, since when
+    sudo /usr/local/sbin/sigmond-sdr-recover --on       # ports back, station back
+
+`--off` refuses unless uhubctl can switch EVERY half of the card's jack and
+nothing else shares it, stops the consumers and then radiod, switches both
+halves off, and confirms the card actually left the bus — "I ran uhubctl off"
+is not "the port is off".  It then writes a hold to
+/var/lib/sigmond/sdr-hold.json, and while that hold stands both the recovery
+timer here and sigmond-radiod-watchdog stand down, so neither turns the port
+back on under the operator's hands.  `--on` switches the same ports on with
+the SuperSpeed half first, waits for the card, promotes a link that came back
+below SuperSpeed, restarts radiod and its consumers, and clears the hold —
+and KEEPS the hold if the port or the card does not come back, because a dark
+port needs a human and not a watchdog.
+
+A station with more than one RX-888 must name the card: `--serial <SERIAL>`.
+`--off` with two cards and no serial is refused, never guessed.  (The
+automatic path above still watches one card per host; see
+tasks/plan-multi-rx888-sources.md.)
 """
 from __future__ import annotations
 
@@ -136,6 +163,12 @@ SUPERSPEED_MBPS = 5000
 
 RX888_IDS = ("04b4:00f1", "04b4:00f3")     # running, and the FX3 bootloader
 STATE_PATH = Path("/var/lib/sigmond/sdr-recover.json")
+# A manual --off writes here and --on clears it.  While a serial is
+# held, every automatic path in this helper AND in
+# sigmond-radiod-watchdog leaves that radio alone: the operator took
+# the port down on purpose and a watchdog "recovering" it would turn
+# the port back on under their hands.
+HOLD_PATH = Path("/var/lib/sigmond/sdr-hold.json")
 UHUBCTL = "/usr/sbin/uhubctl"              # NOT on a non-root PATH
 CONFIG_PATH = Path("/etc/sigmond/topology.toml")
 SYSFS_USB = Path("/sys/bus/usb/devices")
@@ -231,12 +264,22 @@ def _read(p: Path) -> str:
         return ""
 
 
-def locate_rx888(root: Path = SYSFS_USB) -> Optional[Located]:
-    """Find the RX-888 (running or in its FX3 bootloader) in sysfs."""
+def all_rx888(root: Path = SYSFS_USB) -> List["Located"]:
+    """Every RX-888 on the bus (running 00f1 or FX3 bootloader 00f3), in sysfs
+    order.
+
+    ⛔ A STATION MAY HAVE MORE THAN ONE.  N8UR, ON5KQ and KX4AZ-T each run two
+    or three cards under WsprDaemon.  The automatic recovery path below still
+    watches ONE card (STATE_PATH holds one devpath, and there is no serial →
+    radiod@instance map yet), which is a known gap — but the manual --off/--on
+    pair must never act on "whichever card sysfs listed first", so it selects
+    by serial and refuses an ambiguous station.  See tasks/plan-multi-rx888-sources.md.
+    """
     try:
         entries = sorted(root.iterdir())
     except OSError:
-        return None
+        return []
+    found: List[Located] = []
     for dev in entries:
         vid_pid = f"{_read(dev / 'idVendor')}:{_read(dev / 'idProduct')}"
         if vid_pid not in RX888_IDS:
@@ -245,9 +288,26 @@ def locate_rx888(root: Path = SYSFS_USB) -> Optional[Located]:
         if hp is None:
             continue
         peer = peer_of(dev.name, root) or (None, None)
-        return Located(dev.name, hp[0], hp[1], _read(dev / "serial"),
-                       _read(dev / "speed"), peer[0], peer[1],
-                       vid_pid.split(":")[1], _read(dev / "devnum"))
+        found.append(Located(dev.name, hp[0], hp[1], _read(dev / "serial"),
+                             _read(dev / "speed"), peer[0], peer[1],
+                             vid_pid.split(":")[1], _read(dev / "devnum")))
+    return found
+
+
+def locate_rx888(root: Path = SYSFS_USB,
+                 serial: Optional[str] = None) -> Optional[Located]:
+    """Find the RX-888 (running or in its FX3 bootloader) in sysfs.
+
+    With ``serial``, the card carrying that serial and no other; without it,
+    the first — which is what every caller in the automatic path wants and
+    has always got.
+    """
+    cards = all_rx888(root)
+    if serial is None:
+        return cards[0] if cards else None
+    for card in cards:
+        if card.serial == serial:
+            return card
     return None
 
 
@@ -1151,6 +1211,312 @@ def _power_now(state: dict, cfg: dict) -> Tuple[str, str]:
     return port_power(halves, cfg)
 
 
+# ─── manual power control: --off / --on ──────────────────────────────────────
+#
+# Why this exists.  The only proof that a hub really cuts VBUS is watching the
+# RX-888's LED go dark, and an automatic 5-25 s reset is not watchable: by the
+# time you look up the card is back.  rob needs a pair of commands that take
+# the radio down and LEAVE it down, so the hub can be judged by eye, the cable
+# swapped, or the card moved -- the same job WsprDaemon's `wd -U off` / `-U on`
+# do (wd-usb-power.sh, commit b0c142c).
+#
+# What makes it more than two uhubctl calls:
+#   * both halves of a USB3 jack must go off, and the card must be confirmed
+#     gone from the bus afterwards, or "off" is a claim and not a measurement;
+#   * radiod must stop FIRST, or it spends the outage logging USB errors and
+#     re-exec'ing, and its consumers sit on a stale RTP anchor;
+#   * the automatic watchdogs must be told to stand down, or the next timer
+#     tick "recovers" the radio the operator just switched off.
+#
+# The hold file is that stand-down.  It is deliberately a FILE and not a
+# stopped timer: a stopped timer is invisible a week later and survives no
+# reboot policy, whereas `--status` reads the hold and says who holds what and
+# since when.
+
+
+def load_hold() -> dict:
+    try:
+        data = json.loads(HOLD_PATH.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_hold(holds: dict) -> None:
+    try:
+        HOLD_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if holds:
+            HOLD_PATH.write_text(json.dumps(holds, indent=2, sort_keys=True))
+        elif HOLD_PATH.exists():
+            HOLD_PATH.unlink()
+    except OSError as exc:
+        _log(f"could not write {HOLD_PATH}: {exc}")
+
+
+def held_serials() -> List[str]:
+    return sorted(load_hold().keys())
+
+
+def _ss_first(locations: Sequence[Tuple[str, str, bool]]
+              ) -> List[Tuple[str, str, bool]]:
+    """SuperSpeed half first.  Switching the SS half on first is what lets the
+    FX3 train at 5 Gb/s on the way back; bringing the USB2 half up first can
+    leave the card enumerated at 480 and radiod refusing it."""
+    def rank(loc):
+        sp = hub_speed(loc[0])
+        return 0 if (sp and sp.isdigit() and int(sp) >= SUPERSPEED_MBPS) else 1
+    return sorted(locations, key=rank)
+
+
+def _uhubctl_set(hub: str, port: str, exact: bool, action: str) -> bool:
+    """One uhubctl action, with the two retries the automatic path learned:
+    --force for a ganged hub, and the other addressing when the first form
+    fails or hangs.  Returns whether the port ended up in the asked state."""
+    base = [UHUBCTL, "-l", hub, "-p", port, "-a", action]
+    forms = [base + (["-e"] if exact else []),
+             base + (["-e"] if exact else []) + ["-f"],
+             base + ([] if exact else ["-e"]),
+             base + ([] if exact else ["-e"]) + ["-f"]]
+    for i, cmd in enumerate(forms):
+        r = _run(cmd, timeout=20)
+        if r.returncode == 0:
+            if i:
+                _log(f"hub {hub} port {port}: {action} accepted on attempt "
+                     f"{i + 1} ({' '.join(cmd[5:]) or 'plain'})")
+            return True
+        if "no compatible devices" not in (r.stderr or "").lower() and i >= 2:
+            _log(f"uhubctl {action} failed rc={r.returncode}: {r.stderr.strip()}")
+    return False
+
+
+def _stop_station(radiod_unit: Optional[str], consumers: Sequence[str]) -> None:
+    """Consumers down first, then radiod -- the reverse of restart_station()."""
+    for unit in reversed(list(consumers)):
+        _log(f"stopping consumer {unit}")
+        _run(["systemctl", "stop", unit], timeout=180)
+    if radiod_unit:
+        _log(f"stopping {radiod_unit}")
+        _run(["systemctl", "stop", radiod_unit], timeout=180)
+
+
+def _select_card(serial: Optional[str]) -> Tuple[Optional[Located], Optional[str]]:
+    """(card, error).  Refuses to guess on a multi-card station."""
+    cards = all_rx888()
+    if not cards:
+        return None, "no RX-888 is on the bus — nothing to switch off"
+    if serial:
+        for card in cards:
+            if card.serial == serial:
+                return card, None
+        return None, (f"no RX-888 with serial {serial} on the bus; present: "
+                      + ", ".join(c.serial or "(no serial)" for c in cards))
+    if len(cards) > 1:
+        return None, ("this station has " + str(len(cards)) + " RX-888s ("
+                      + ", ".join(f"{c.serial or '(no serial)'} on {c.devpath}"
+                                  for c in cards)
+                      + ") — name one with --serial; guessing which radio to "
+                        "power down is not something this command will do")
+    return cards[0], None
+
+
+def manual_off(serial: Optional[str], cfg: dict) -> int:
+    """Take one RX-888's port down and LEAVE it down, under a hold."""
+    card, err = _select_card(serial)
+    if err or card is None:
+        _log(err or "could not locate the card")
+        return 1
+    key = card.serial or card.devpath
+    holds = load_hold()
+    if key in holds:
+        _log(f"{key} is already held off since "
+             f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(holds[key].get('since', 0)))}"
+             f" — run --on first")
+        return 1
+
+    # 1. Every half of the physical jack must be switchable, or "off" is a
+    #    half-measure: the card keeps VBUS from the half uhubctl could not
+    #    reach and never leaves the bus.
+    sw, accepted = hub_switchable(card)
+    if not accepted:
+        _log(f"uhubctl cannot switch the port {card.devpath} sits on "
+             f"(hub {card.hub} port {card.port}"
+             + (f", peer {card.peer_hub} port {card.peer_port}" if card.peer_hub else "")
+             + ") — this hub has no per-port power switching, so there is "
+               "nothing to turn off")
+        return 1
+    halves = port_halves(card, accepted)
+    unreachable = [h for h, ok in halves.items() if ok is False]
+    if unreachable:
+        _log(f"REFUSING: uhubctl does not accept the {', '.join(unreachable)} "
+             f"half of this jack, and both halves share VBUS — switching only "
+             f"one leaves the card powered while reporting success")
+        return 1
+
+    # 2. Nothing but the RX-888 may share the jack, either half.
+    clean, dirty = partition_targets(accepted)
+    if dirty:
+        _log("REFUSING: " + ", ".join(
+            f"hub {h} port {p} also holds " + ", ".join(f"{d} ({i})" for d, i in o)
+            for (h, p, _), o in dirty)
+            + " — a power cut would drop it too")
+        return 1
+
+    radiod_unit = cfg.get("unit") or detect_radiod_unit()
+    consumers, missing = expand_consumers_checked(cfg.get("consumers", []),
+                                                  installed_units())
+    if missing:
+        _log(f"declared consumers that match no installed unit: {missing}")
+    if not consumers:
+        _log("NO CONSUMERS DECLARED in [radiod].consumers — only radiod will "
+             "be stopped and restarted; recorders keep a stale RTP anchor "
+             "until restarted by hand.  Declare them in topology.toml.")
+
+    power, why = port_power(halves, cfg)
+    # 3. Write the hold BEFORE touching anything, so a timer that fires while
+    #    the units are stopping finds the hold and stands down.
+    holds[key] = {
+        "serial": card.serial, "devpath": card.devpath,
+        "locations": [list(a) for a in clean],
+        "radiod_unit": radiod_unit, "consumers": consumers,
+        "since": time.time(), "port_power": power,
+    }
+    save_hold(holds)
+    _log(f"hold written for {key}: the recovery timer and the radiod watchdog "
+         f"will leave this radio alone until --on")
+
+    with _with_lifecycle_lock():
+        _stop_station(radiod_unit, consumers)
+        ok = True
+        for hub, port, exact in clean:
+            _log(f"switching hub {hub} port {port} OFF"
+                 f"{' (exact)' if exact else ''}")
+            if not _uhubctl_set(hub, port, exact, "off"):
+                _log(f"uhubctl could not switch hub {hub} port {port} off")
+                ok = False
+
+    # 4. "Off" is a measurement, not a claim: the card must leave the bus.
+    gone = False
+    for _ in range(10):
+        time.sleep(1)
+        if locate_rx888(serial=card.serial) is None:
+            gone = True
+            break
+    if not gone:
+        _log(f"⛔ {card.serial or card.devpath} is STILL on the bus after the "
+             f"port was switched off — the hold stands and the ports are off, "
+             f"so run --on to restore, but do not trust this hub's switching")
+        return 1
+    if not ok:
+        _log("⚠ at least one uhubctl off failed, though the card did leave "
+             "the bus — read the lines above before trusting this port")
+    _log(f"{card.serial or card.devpath} is off the bus and its port is held "
+         f"off.  Port switching is {power}: {why}.")
+    _log("Look at the RX-888's LED now: dark means this hub really cuts VBUS; "
+         "still lit means it dropped only the data link.  "
+         "Restore with: sigmond-sdr-recover --on"
+         + (f" --serial {card.serial}" if card.serial else ""))
+    return 0
+
+
+def manual_on(serial: Optional[str], cfg: dict) -> int:
+    """Restore a port taken down by --off, then bring the station back."""
+    holds = load_hold()
+    if not holds:
+        _log(f"no hold in {HOLD_PATH} — nothing is held off by this command")
+        return 1
+    if serial:
+        keys = [k for k in holds if k == serial or holds[k].get("serial") == serial]
+        if not keys:
+            _log(f"no hold for serial {serial}; held: {sorted(holds)}")
+            return 1
+    elif len(holds) > 1:
+        _log(f"{len(holds)} radios are held off ({sorted(holds)}) — name one "
+             f"with --serial")
+        return 1
+    else:
+        keys = list(holds)
+    key = keys[0]
+    hold = holds[key]
+    locations = [(str(h), str(p), bool(e)) for h, p, e in hold.get("locations", [])]
+    if not locations:
+        _log(f"the hold for {key} records no port locations — clearing it; "
+             f"restore the port by hand")
+        holds.pop(key, None)
+        save_hold(holds)
+        return 1
+
+    ok = True
+    for hub, port, exact in _ss_first(locations):
+        _log(f"switching hub {hub} port {port} ON{' (exact)' if exact else ''}")
+        if not _uhubctl_set(hub, port, exact, "on"):
+            _log(f"⛔ PORT LEFT OFF on hub {hub} port {port} — every uhubctl "
+                 f"form failed; this needs a human at the hub")
+            ok = False
+    if not ok:
+        _log("the hold STAYS so the watchdogs do not fight you while the port "
+             "is dark; clear it with --on once the port is back")
+        return 1
+
+    if not wait_for_device(timeout_s=90):
+        _log("⛔ the card did not come back within 90s of switching the port "
+             "on; the hold stays — check the cable, then run --on again")
+        return 1
+
+    # The card can come back on the USB2 half after a real power cut: it
+    # enumerates as the FX3 bootloader, the firmware loader promotes it, and
+    # some hubs do not follow it up to SuperSpeed on their own.
+    card = locate_rx888(serial=hold.get("serial") or None) or locate_rx888()
+    if link_underspeed(card):
+        _log(f"card returned at {card.speed} Mb/s, not {SS_SPEED} — blipping "
+             f"the link to promote it")
+        card = promote_link(card) or card
+    if card is None:
+        _log("the card is on the bus but could not be located in sysfs")
+    else:
+        _log(f"card back: {card.devpath} 04b4:{card.product} at "
+             f"{card.speed} Mb/s")
+        if link_underspeed(card):
+            _log(f"⚠ still linked at {card.speed} Mb/s — radiod will refuse "
+                 f"it; try another port or cable")
+
+    radiod_unit = hold.get("radiod_unit") or cfg.get("unit") or detect_radiod_unit()
+    consumers = hold.get("consumers") or []
+    restored = True
+    if radiod_unit:
+        with _with_lifecycle_lock():
+            restored = restart_station(radiod_unit, consumers)
+    else:
+        _log("no radiod instance to start — set [radiod].unit in topology.toml")
+
+    # Clear the hold last: until here a timer tick could have raced the
+    # restart and cycled the port under it.
+    holds.pop(key, None)
+    save_hold(holds)
+    _log(f"hold cleared for {key}; automatic recovery is active again")
+    return 0 if restored else 1
+
+
+def manual_status(cfg: dict) -> int:
+    holds = load_hold()
+    cards = all_rx888()
+    if not cards:
+        _log("no RX-888 on the bus")
+    for card in cards:
+        _log(f"card {card.serial or '(no serial)'}: {card.devpath} "
+             f"04b4:{card.product} at {card.speed} Mb/s")
+    if not holds:
+        _log("no manual hold is in force — automatic recovery is active")
+        return 0
+    for key, hold in sorted(holds.items()):
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                              time.gmtime(hold.get("since", 0)))
+        locs = ", ".join(f"hub {h} port {p}" for h, p, _ in hold.get("locations", []))
+        _log(f"HELD OFF: {key} since {since} ({locs}); port switching is "
+             f"{hold.get('port_power', 'unknown')}.  Restore with "
+             f"--on --serial {key}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--off-seconds", type=int, default=25,
@@ -1173,11 +1539,49 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--probe", action="store_true",
                     help="locate the RX-888, check whether its hub port can be "
                          "switched, report, and exit (changes only the state file)")
+    ap.add_argument("--off", action="store_true",
+                    help="MANUAL: stop radiod and its consumers, switch both "
+                         "halves of the card's jack off, confirm the card left "
+                         "the bus, and HOLD it off (automatic recovery stands "
+                         "down) until --on.  For judging whether a hub really "
+                         "cuts VBUS: watch the LED.")
+    ap.add_argument("--on", action="store_true",
+                    help="MANUAL: undo --off — switch the same ports back on "
+                         "(SuperSpeed half first), wait for the card, restart "
+                         "radiod and its consumers, and clear the hold")
+    ap.add_argument("--status", action="store_true",
+                    help="report every RX-888 on the bus and any manual hold")
+    ap.add_argument("--serial",
+                    help="which RX-888 to act on, by its USB serial; required "
+                         "with --off/--on on a station with more than one card")
     args = ap.parse_args(argv)
 
     cfg = read_config()
+
+    # ── manual power control runs before every automatic guard ───────────
+    if sum(bool(x) for x in (args.off, args.on, args.status)) > 1:
+        _log("--off, --on and --status are mutually exclusive")
+        return 2
+    if args.status:
+        return manual_status(cfg)
+    if args.off:
+        return manual_off(args.serial, cfg)
+    if args.on:
+        return manual_on(args.serial, cfg)
+
     patterns = cfg.get("consumers", [])
     radiod_unit = cfg.get("unit") or detect_radiod_unit()
+
+    # ⛔ A MANUAL HOLD OUTRANKS EVERY AUTOMATIC PATH.  An operator who ran
+    # --off took the port down deliberately — to watch the LED, swap a cable,
+    # or move the card.  A timer tick that "recovers" it turns the port back
+    # on under their hands and, worse, makes the hub look like it recovered
+    # the card by itself.  Nothing below this point runs while a hold stands.
+    held = held_serials()
+    if held:
+        _log(f"manual hold in force for {', '.join(held)} ({HOLD_PATH}) — "
+             f"standing down.  Release with: sigmond-sdr-recover --on")
+        return 0
 
     present = device_present()
     state = load_state()

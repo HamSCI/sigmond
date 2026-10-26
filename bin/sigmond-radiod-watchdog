@@ -64,6 +64,34 @@ DRY_RUN = os.environ.get('RWD_DRY_RUN', '') not in ('', '0')
 
 STATE_DIR = Path('/run/sigmond-radiod-watchdog')
 
+# ⛔ A MANUAL RX-888 HOLD OUTRANKS THIS WATCHDOG.
+# `sigmond-sdr-recover --off` powers a card's port down and leaves it down so
+# an operator can watch the LED, swap a cable, or move the card.  radiod then
+# fails exactly the way a wedge looks -- no samples, repeated exits -- and a
+# watchdog that "restarted" it would fight the operator and muddy the very
+# measurement they stopped the radio to make.  The hold names the radiod unit
+# it covers; a hold that names none covers every instance, because without a
+# serial -> instance map we cannot tell which radio lost its card.
+HOLD_PATH = Path('/var/lib/sigmond/sdr-hold.json')
+
+
+def _held_units() -> tuple:
+    """(held_unit_names, hold_covers_everything)."""
+    try:
+        holds = json.loads(HOLD_PATH.read_text())
+    except Exception:              # noqa: BLE001 -- absent is the normal case
+        return (), False
+    if not isinstance(holds, dict) or not holds:
+        return (), False
+    units, blanket = [], False
+    for hold in holds.values():
+        unit = (hold or {}).get('radiod_unit') if isinstance(hold, dict) else None
+        if unit:
+            units.append(unit)
+        else:
+            blanket = True
+    return tuple(units), blanket
+
 # The station's record of losing its RX888 (v3.71, lib/sigmond/sdr_events.py),
 # which `smd doctor` reads.  None means the library's own path,
 # /var/lib/sigmond/sdr-events.jsonl; the tests point it at a scratch file.
@@ -319,6 +347,18 @@ def main() -> int:
     units = _active_radiod_units()
     if not units:
         return 0                    # no radiod on this host — no-op
+    try:
+        held, blanket = _held_units()
+    except Exception as exc:        # noqa: BLE001 — watchdog must not die
+        print(f'hold: check failed: {exc}', file=sys.stderr)
+        held, blanket = (), False
+    if blanket or held:
+        skipped = list(units) if blanket else [u for u in units if u in held]
+        if skipped:
+            print(f'manual RX-888 hold in force ({HOLD_PATH}) — not touching '
+                  f'{", ".join(skipped)}; release with '
+                  f'sigmond-sdr-recover --on')
+            units = [u for u in units if u not in skipped]
     for unit in units:
         try:
             check_unit(unit, now)
