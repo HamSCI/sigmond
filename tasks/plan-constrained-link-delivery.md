@@ -300,12 +300,11 @@ architectures, and probably the wrong one:
 | NAT64 **+ DNS64** at the edge | the odroid, and the station sees synthetic AAAA | **no** — "the VM is unaware" |
 | NAT64 without DNS64 | the station's own CLAT | **yes** — 464XLAT, prefix discovery |
 
-Which one the odroid implements is **the single most valuable thing to
-establish**, because it is the same question `plan-ipv6-support.md` asks about
-McMurdo (§7 Q1: "Is there NAT64/DNS64?").  If USAP provides DNS64, the station
-needs nothing.  If NAT64 only, clatd is load-bearing and its boot race is a
-deployment blocker.  **Verify on the odroid** — which service (tayga, jool),
-and whether a resolver there synthesizes AAAA.
+**Measured 2026-10-26: it is the first row.**  The odroid runs `tayga`
+(NAT64) with `unbound` (DNS64) and `radvd`, prefix
+`fd4f:a955:ac3d:64::/96` — a site-specific ULA, not the well-known
+`64:ff9b::/96`.  So the station needs no CLAT, and clatd's boot race is not a
+blocker for a Case A site.  Detail in `plan-ipv6-support.md` §1c.
 
 ### Capture on the TRANSLATED side, or the list is useless elsewhere
 
@@ -315,10 +314,14 @@ bits.  **A capture taken on the station, or on the v6 side of the odroid,
 yields a list of NAT64-prefix addresses that mean nothing to any other
 network's firewall**, including USAP's.
 
-So capture on the odroid's **IPv4 side**, or decode the embedded v4 address
-out of each synthetic one.  A translator is the ideal capture point precisely
-because it sees both halves and can log the mapping — but only if the capture
-is taken from the half that is portable.
+Concretely, with the prefix now known: the station's packets go to
+`fd4f:a955:ac3d:64::<v4 in the low 32 bits>`.  Those addresses mean nothing to
+USAP, and a list of them is not an allowlist.
+
+So capture on the odroid's **IPv4 side** (`wan0`, beyond tayga), or decode the
+low 32 bits of each synthetic address.  A translator is the ideal capture
+point precisely because it sees both halves and can log the mapping — but only
+if the capture is taken from the half that is portable.
 
 The list must therefore record, per destination: the real IPv4 address, the
 hostname, and whether the flow was native v6 or translated.  Only the last of

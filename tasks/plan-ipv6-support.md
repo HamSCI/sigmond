@@ -95,10 +95,48 @@ odroid (`rob@10.22.23.3`) acting as the IPv6-to-IPv4 translator, and a major
 acceptance test is that the station comes up in that environment.
 
 So Case A stops being a bench result from 2026-09-28 and becomes a rig every
-image is tested against before it ships.  **Confirm which variant the odroid
-implements** — NAT64 **with** DNS64 (station unaware, no clatd) or NAT64
-**without** it (station needs a CLAT).  That is §7 Q1 asked of a host we can
-actually inspect, and the answer predicts what McMurdo will need.
+image is tested against before it ships.
+
+**ANSWERED 2026-10-26, measured on the odroid itself** (`odroidxu4`, Armbian
+26.8.1 trixie):
+
+```
+ACTIVE: tayga      NAT64 translator          ipv4-addr 192.168.255.1
+ACTIVE: unbound    the resolver — DNS64
+ACTIVE: radvd      router advertisements on v6lan
+nat64 prefix:      fd4f:a955:ac3d:64::/96     (dev nat64, from /etc/tayga.conf)
+v6 LAN:            fd4f:a955:ac3d:1::/64      (dev v6lan — AI6VN's segment)
+```
+
+So this rig is **Case A: NAT64 + DNS64 at the edge, and the station needs no
+CLAT.**  That is the good case, and it is the one §7 Q1 hoped for.
+
+Three things follow, and the second is a trap:
+
+1. **No clatd on the station** — so clatd's boot race is not a blocker for a
+   Case A site.  It becomes one only at a NAT64-without-DNS64 site.
+2. ⛔ **The prefix is a custom ULA, `fd4f:a955:ac3d:64::/96`, NOT the
+   well-known `64:ff9b::/96`.**  Anything that assumes the well-known prefix
+   is wrong here.  More important: **the station must use the odroid's unbound
+   as its resolver.**  Point it at a public resolver — 8.8.8.8, 1.1.1.1, or
+   anything baked into an image — and every IPv4-only upstream becomes
+   unreachable while DNS still appears to work.  Names resolve, connections
+   fail, and nothing says why.  That is the failure this rig exists to catch.
+3. **A station that does run a CLAT must discover the prefix** via RFC 7050
+   (`ipv4only.arpa`), never assume one.
+
+### 1d. This reframes the question to ask USAP
+
+Added 2026-10-26.  §7 Q1 asks "is there NAT64/DNS64?"  The odroid shows that
+is not specific enough.  The three answers that actually determine the design:
+
+1. **NAT64 and DNS64, or NAT64 alone?**  The first needs nothing of us; the
+   second makes clatd load-bearing.
+2. **Which prefix?**  Well-known or site-specific — it changes what a CLAT
+   must discover and what any filtering must match.
+3. **Which resolver must the station use, and how is it learned** (RA, DHCPv6)?
+   This is the one that fails silently, and a station shipped with a hardcoded
+   public resolver will look healthy and reach nothing.
 
 ## 2. What is IPv4 today, and what must NOT change
 
