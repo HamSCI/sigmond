@@ -1,10 +1,18 @@
 # Status reporting through the uploader, into ClickHouse
 
-**Status:** DESIGN AGREED 2026-10-26.  **Phase 2 BUILT 2026-10-26**
-(hs-uploader `905ef13`): the persistent ssh connection is in
-`WsprdaemonTarSftp`, with its tmpfiles.d entry and 16 tests, all eight guards
-mutation-checked.  It is NOT yet soaked — the 48 h single-station soak below
-is the remaining Phase 2 item, and nothing else has started.  Supersedes the stcp/RAC
+**Status:** DESIGN AGREED 2026-10-26.  **Phases 1 and 2 BUILT 2026-10-26.**
+
+| phase | state |
+|---|---|
+| 1 — the sink | **BUILT**, wsprdaemon-server `d649275` (2.28.0).  `station.heartbeat` schema, `process_status_files()`, gated `--ingest-status` / `WSPRDAEMON_INGEST_STATUS=1`, 21 tests, twelve guards mutation-checked.  **Replay of wd30's `heartbeats.db` NOT done.** |
+| 2 — persistent connection | **BUILT**, hs-uploader `905ef13`.  **48 h soak NOT done** — that is the gate on the phase. |
+| 3 — the VM producer | not started.  Nothing emits a `status/` subdir yet. |
+| 4-7 | not started. |
+
+Phase 1 was landed first on purpose: it is provable without touching a
+station, and with the gate off not one line of the existing path changes.
+Nothing downstream should read either phase as finished while its measurement
+item above is unchecked.  Supersedes the stcp/RAC
 carrier agreed 2026-10-25 (see "Why not the RAC tunnel" — the record of that
 decision is kept deliberately).  Carrier: the station's EXISTING wsprdaemon tar
 upload to gw1/gw2, over a PERSISTENT ssh connection.  Receiver:
@@ -383,21 +391,30 @@ Choices worth their rationale:
 
 ### Phase 1 — the sink, proven without touching a station
 
-- [ ] `schema/station.heartbeat.sql` in wsprdaemon-server.
-- [ ] `process_status_files()` in `wsprdaemon_server.py`, beside
+- [x] `schema/station.heartbeat.sql` in wsprdaemon-server, mirrored inline in
+      `setup_status_tables()` so a fresh wd self-bootstraps.  A test asserts
+      the two copies agree: a row key with no column fails the INSERT for the
+      WHOLE batch — every station's heartbeat in that flush, not just the one.
+- [x] `process_status_files()` in `wsprdaemon_server.py`, beside
       `process_mode_files()`; `config['status_subdir']` (default `status`);
       gated `--ingest-status` / `WSPRDAEMON_INGEST_STATUS=1`, exactly as psk
       ingestion is gated.
-- [ ] `gateway` derived from the incoming dir (`from-gw1` / `from-gw2`);
-      `received_at` from the tar's mtime; `role` from the TAR PATH, never
-      inferred from which blocks are present.  Inferring "pm" from the `rac`
-      block would misfile every Proxmox host that carries no switch script —
-      `pm-heartbeat.py:191` leaves `rac` out on exactly those hosts, so the
-      inference fails for the hosts least likely to be noticed.
-- [ ] `tests/test_status_ingest.py` against synthetic extracted trees, no
+- [x] `gateway` derived from the incoming dir (`from-gw1` / `from-gw2`);
+      `received_at` from the tar's mtime, read BEFORE extraction touches the
+      file; `role` and `host_id` from the TAR PATH, never inferred from which
+      blocks are present.
+- [x] `tests/test_status_ingest.py` against synthetic extracted trees, no
       ClickHouse required — the shape `tests/test_psk_ingest.py` already uses.
+      21 tests; twelve guards mutation-checked.
 - [ ] Replay wd30's existing `heartbeats.db` through the parser.  Every envelope
-      the sqlite board holds must land, with the same verdicts.
+      the sqlite board holds must land, with the same verdicts.  **NOT DONE.**
+
+One rule the design did not state, added while building: **status is the
+passenger in this tar, not the cargo.**  The parse is contained (one bad line
+costs that line, one bad file that file, one bad tar its status and not its
+spots), and a failed status INSERT never pins a tar on the gateway — that
+would turn a status fault into a SPOT outage.  The next envelope is 60 s
+away.
 
 ### Phase 2 — the persistent connection, on its own
 
