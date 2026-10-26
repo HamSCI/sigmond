@@ -93,6 +93,43 @@ complete test of the delivery leg, proves the account and the chroot work, and
 commits you to no service, no key exchange and no ongoing operation.  If it
 works we come back for the forwarding half.
 
+## A separate question: what enforces the closed ports?
+
+Measured from outside, 2026-10-26.  All four gateways look the same, and that
+is the good news:
+
+```
+HOST     22     7500  7501  35735  35736  50080  36029
+gw1      OPEN   -     -     -      OPEN   -      -
+gw2      OPEN   -     -     OPEN   OPEN   -      -
+vpn1     OPEN   -     -     OPEN   OPEN   -      -
+vpn2     OPEN   -     -     -      OPEN   -      -
+```
+
+The frps admin APIs (7500/7501), the RAC board (50080) and the per-station
+proxy ports (36029 and its siblings) are **closed to the public internet on
+all four**.  No action needed on the result.
+
+**But the result is not the mechanism, and the mechanism is what fails.**  On
+gw1/gw2 we know the answer: a DigitalOcean cloud firewall, outside the host,
+which holds even if a service is misconfigured or restarts with new settings.
+On vpn1/vpn2 we do not know, and the possibilities fail very differently:
+
+- a **cloud firewall** — equivalent to ours, holds across service changes;
+- **host nftables/iptables** — fine, but lost on a rebuild unless persisted;
+- **frp binding proxies to the WireGuard interface only** — in which case the
+  posture is one config edit away from publishing every enrolled station's ssh
+  port to the internet, with nothing to alarm on it.
+
+So the question is not "please firewall these" — they evidently are.  It is
+**what is enforcing it**, because stations' ssh ports ride those hosts and the
+third answer would make that protection far more fragile than it looks.
+
+One asymmetry worth a sentence while you are there: **vpn1 accepts the legacy
+unsecured frps tier on 35735; vpn2 does not** (gw1 does not either; gw2 does).
+If the TLS tier on 35736 is the standard now, the open tier on vpn1 is a door
+that does not need to be there.
+
 ## Contact
 
 Rob Robinett (AI6VN) / Michael Hauan (AC0G).  Repo:
