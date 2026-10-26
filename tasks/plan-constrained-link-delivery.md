@@ -252,31 +252,53 @@ install as well as steady state.  Those are different firewall cases and the
 install-time set is the one a steady-state capture silently misses — package
 and repo endpoints a station touches once and never again.
 
-### Where to capture
+### Where to capture: the odroid, and it is now a COMPLETE point
 
-The odroid (ODROID-XU4, `rob@10.22.23.3`) was the obvious point — it is
-AI6VN's default IPv6 router, its ASIX dongle at `fd4f:a955:ac3d:1::1`, and
-AI6VN's v6 segment holds exactly two nodes, so every v6 packet crossed it
-(`ops/ssh/config.fleet:104-122`).  **rob is retiring that link** (2026-10-26),
-and that simplifies this rather than complicating it: with no odroid there is
-no v6 default route, so AI6VN's egress collapses to one IPv4 path through the
-EdgeRouter (SPV-ERX, `10.22.22.1`) on `10.22.23.0/24`.
+rob, 2026-10-26: **keep the IPv6 path through the odroid, drop the IPv4 path
+through the EdgeRouter.**  A major test on AI6VN is that it comes up in a
+wired IPv6-only environment.
 
-One path means one capture point and no risk of the split-capture error that
-would otherwise apply — capturing only the odroid would have yielded the v6
-half and silently omitted every IPv4 destination, which is worse than no list
-at all, because the station then deploys and fails on what was missed.
+That makes the odroid (ODROID-XU4, `rob@10.22.23.3`) the right capture point
+and a complete one.  It is AI6VN's default IPv6 router — ASIX dongle at
+`fd4f:a955:ac3d:1::1`, v6 segment of exactly two nodes
+(`ops/ssh/config.fleet:104-122`) — so with IPv4 gone, **every packet the
+station sends crosses it.**  The split-capture hazard disappears: there is one
+path, and the odroid is on it.
 
-Capture on the station itself (PM and VM), which sees every flow whatever path
-it takes and does not depend on borrowing the EdgeRouter.  AI6VN is rob's lab
-box, so the standing no-heavy-diagnostics-on-station-VMs rule does not bind
-here — but it must be light enough to leave running for a week.
+### The allowlist needs an AAAA column, because almost nothing has one
 
-⚠ **Confirm AI6VN still has the connectivity the capture assumes** once the
-odroid goes.  If the station turns out to have been reaching anything over
-IPv6, that traffic disappears from the capture by disappearing from the
-station, and the allowlist will be right about a station that no longer
-matches the one shipping to the Pole.
+An IPv6-only station cannot reach an IPv4-only service without NAT64.
+Measured 2026-10-26 (and see `tasks/plan-ipv6-support.md` §1, which found the
+same a month earlier — nothing has changed since):
+
+- **No AAAA:** gw1, gw2, remote/vpn.wsprdaemon.org, vpn1/vpn2.hamsci.org,
+  wd30, `report.pskreporter.info`, `pswsnetwork.eng.ua.edu`, github.com,
+  api.github.com, pool.ntp.org.
+- **Has AAAA:** wsprnet.org, raw.githubusercontent.com, pypi.org,
+  files.pythonhosted.org, astral.sh.
+
+So **every wsprdaemon-operated host and every science upload destination
+except wsprnet is IPv4-only.**  An IPv6-only station's entire function — both
+uploading and being reachable — runs through NAT64/clatd.
+
+Two consequences for this work:
+
+1. **The capture must record, per destination, whether it was reached over v6
+   natively or through the CLAT.**  A list that says only "it talked to
+   github.com" does not tell USAP whether an IPv6-only firewall can carry it.
+2. **The IPv6-only test is really a clatd test.**  Whatever AI6VN does on
+   first boot will be dominated by whether the CLAT came up, not by station
+   code — see `plan-ipv6-support.md` for the boot-race failure mode, where
+   clatd exits 0, never retries, and the VM loses all connectivity.
+
+### These three plans are one deployment program
+
+`plan-ipv6-support.md` was written for **McMurdo, which uses only IPv6**.
+This plan is for the **South Pole**, with its scheduled satellite outages.
+Both are USAP sites on the same program, so the Pole station is likely to be
+**IPv6-only AND satellite-constrained at once**, and neither plan is
+sufficient alone.  AI6VN is where the combination gets tested before anything
+ships.
 
 ### What the list has to contain
 

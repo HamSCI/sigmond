@@ -29,6 +29,26 @@ framing is wrong, and building to it would waste the effort.
 | `pool.ntp.org` | ✅ (4) | ❌ | time bootstrap |
 | `wsprnet.org` | ✅ | ✅ | the one upstream that would work |
 
+**Re-measured 2026-10-26, a month on: nothing has gained an AAAA**, and the
+set is wider than the table above.  Full result, with the endpoints the
+original audit missed:
+
+| host | AAAA | note |
+|---|---|---|
+| `gw1.wsprdaemon.org` | ❌ | **uploads** — the spot/status path, not just RAC |
+| `gw2.wsprdaemon.org` | ❌ | RAC, and uploads |
+| `remote.wsprdaemon.org`, `vpn.wsprdaemon.org` | ❌ | same host as gw2 |
+| `vpn1.hamsci.org`, `vpn2.hamsci.org` | ❌ | both HamSCI gateways |
+| `wd30.wsprdaemon.org` | ❌ | today's heartbeat destination |
+| `report.pskreporter.info` | ❌ | the endpoint actually used |
+| `pskreporter.info` | ✅ | but we do not use this name |
+| `pswsnetwork.eng.ua.edu` | ❌ | PSWS uploads |
+| `github.com`, `api.github.com` | ❌ | clone, update, bring-up |
+| `raw.githubusercontent.com` | ✅ | |
+| `pypi.org`, `files.pythonhosted.org`, `astral.sh` | ✅ | the uv/Python path works |
+| `pool.ntp.org` | ❌ | time bootstrap |
+| `wsprnet.org` | ✅ | |
+
 So a station at McMurdo could speak flawless IPv6 and still reach almost
 nothing it needs. **Dual-stacking our code is neither sufficient nor the
 main problem.** The problem is reaching IPv4-only services from a network
@@ -36,6 +56,32 @@ that has no IPv4.
 
 That is a translation problem, and translation belongs at a boundary — not
 smeared across 25 components.
+
+### 1b. The cheapest fix is on OUR side, and nobody has proposed it
+
+Added 2026-10-26.  The table treats every IPv4-only upstream as a fixed
+constraint.  **Four of them are not.**  `gw1`, `gw2`, `remote` and
+`vpn.wsprdaemon.org` are hosts rob operates, on DigitalOcean (64.225.18.143,
+178.128.187.162), where IPv6 is free and a per-droplet setting.
+
+Giving those AAAA records would mean an IPv6-only station reaches **uploads
+and RAC natively** — the two things it cannot do without — and NAT64/clatd
+stops being load-bearing for the critical path.  It would still be needed for
+GitHub, PSWS, NTP and PSKReporter, but a clatd failure would then degrade
+updates rather than sever the station.
+
+That matters because clatd is the known-fragile piece: it has been observed to
+lose a boot race, exit 0, never retry, and take all of the VM's connectivity
+with it.  An architecture whose remote access depends on it has no way to
+recover remotely from its failure — the one failure that removes the means of
+repair.
+
+`wd30.wsprdaemon.org` (38.212.29.29) is Michael's and a separate ask.  The
+HamSCI gateways and the science endpoints are other people's hosts; those stay
+NAT64 cases.
+
+**Cost: a DigitalOcean checkbox and a DNS record, per host.  Benefit: the two
+most critical paths stop depending on the most fragile component.**
 
 ## 2. What is IPv4 today, and what must NOT change
 
