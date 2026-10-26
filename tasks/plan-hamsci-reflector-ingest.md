@@ -7,9 +7,19 @@ reflectors."
 
 ## Threat model, stated first because it decides the design
 
-vpn1 and vpn2 are **operated by HamSCI, not by us**.  Probing on 2026-10-25
-confirmed neither accepts root for any key we hold.  The stations behind them
-are not necessarily ones we vet or can audit.
+vpn1 and vpn2 are **operated by HamSCI**, with rob (AI6VN) and mjh (AC0G) as
+co-administrators alongside W2NAF.  The stations behind them are not
+necessarily ones we vet or can audit.
+
+> **Correction, 2026-10-26.**  An earlier revision of this document said we
+> held no account on vpn1 or vpn2.  That was wrong.  It came from probing
+> `root`, `wsprdaemon` and `hamsci`, all of which are refused, and never
+> trying rob's own username.  Administrative access exists and is documented.
+> The threat model below is unchanged, because it never rested on who
+> administers the gateway: layers 1-3 assume a vpn host may be compromised or
+> misconfigured **by anyone**, ourselves included, and layer 3 is the only one
+> that survives that.  Having the keys is a reason to build the confinement,
+> not a reason to skip it.
 
 So the design must hold under three assumptions:
 
@@ -209,13 +219,13 @@ account.
 - [ ] **Does anything deposit uploads on vpn1/vpn2 today?**  wd30 shows no
       `from-vpn*` spool, and those hosts may be purely frp/RAC endpoints with
       no upload role.  If nothing deposits there, this is a pipe for traffic
-      that does not exist and should wait.  We hold no account there, so this
-      is a question for HamSCI, not something to probe.
+      that does not exist and should wait.  Answerable directly: rob and mjh
+      administer both hosts.
 - [ ] If stations behind vpn1/2 upload to **gw1/gw2** instead (as every
       sigmond station currently does), the gap closes with no new path at all
       and this plan is unnecessary.  Check before building.
 
-### Phase 1 — the ask to HamSCI
+### Phase 1 — the accounts on vpn1/vpn2
 
 - [ ] One `wdpull` account per vpn host; three `restrict` + `rrsync -ro`
       authorized_keys entries; an agreed `outbound/` directory and sweep age.
