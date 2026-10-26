@@ -237,6 +237,55 @@ distinguishes **dark-as-expected** from **missed its window**.  The tick stream
 restores the fine-grained record retrospectively once the link returns, so
 nothing is lost but promptness, which the link had already taken.
 
+## TODO before any Pole deployment — measure the station's egress
+
+USAP will want the list of everything a sigmond station talks to: a restricted
+network needs an allowlist, and a bandwidth budget needs to know who is
+spending it.  **Measure it on AI6VN before anything ships**, because the list
+has to be complete before deployment, not discovered after.
+
+### Where to capture — and the hole in the obvious answer
+
+The odroid (ODROID-XU4, `rob@10.22.23.3`) is the natural capture point: it is
+AI6VN's **default IPv6 router** — its ASIX dongle sits at
+`fd4f:a955:ac3d:1::1`, and AI6VN's v6 segment holds exactly two nodes, so every
+v6 packet the station sends crosses it (`ops/ssh/config.fleet:104-122`).
+
+**But AI6VN also has IPv4** on `10.22.23.0/24`, routed by the EdgeRouter
+(SPV-ERX, `10.22.22.1`), which does not pass through the odroid.  Capturing
+only on the odroid yields the v6 half and **silently omits every IPv4
+destination** — a confident, incomplete allowlist, which is worse than none,
+because the station deploys and then fails on whatever was missed.
+
+So capture at BOTH routers, or on the station itself (PM and VM), where both
+paths are visible regardless of which one a flow takes.  AI6VN is rob's lab
+box, so the standing no-heavy-diagnostics-on-station-VMs rule does not bind
+here — but whatever is used must be light enough to leave running for a week.
+
+### What the list has to contain
+
+- **Hostnames, not just addresses.**  An IP allowlist breaks on every
+  CDN-backed service (GitHub, PyPI/Astral, Google Drive, pskreporter), whose
+  addresses rotate.  Log DNS queries, which is also cheaper than packet
+  capture.
+- **Bytes per destination per day.**  The Pole needs a budget, not just a
+  permission list, and this is what decides which endpoints are affordable.
+- **Which unit caused each flow**, so endpoints can be dropped selectively —
+  above all, which are needed at RUNTIME versus only at install time.  A
+  station that reaches GitHub only during `smd update` is a different firewall
+  case from one that reaches it hourly.
+- **At least 7 days**, to catch anything weekly or periodic: certificate
+  renewal, scheduled updates, log shipping, and the schedule fetch this plan
+  adds.
+
+### Make the capture falsifiable
+
+A capture nobody can check is not a measurement.  These are known to be in the
+set, so the capture must find them or the capture is wrong: the wsprdaemon
+gateways (gw1/gw2), the frp gateway for RAC, pskreporter, wsprnet, PSWS, NTP,
+GitHub and the uv/PyPI endpoints.  Anything the capture finds that is NOT on
+that list is the interesting part, and the reason to do this at all.
+
 ## Non-goals
 
 - **A custom streaming protocol terminating on the gateway.**  It trades
