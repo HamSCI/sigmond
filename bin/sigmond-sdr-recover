@@ -93,10 +93,22 @@ is not "the port is off".  It then writes a hold to
 /var/lib/sigmond/sdr-hold.json, and while that hold stands both the recovery
 timer here and sigmond-radiod-watchdog stand down, so neither turns the port
 back on under the operator's hands.  `--on` switches the same ports on with
-the SuperSpeed half first, waits for the card, promotes a link that came back
-below SuperSpeed, restarts radiod and its consumers, and clears the hold —
-and KEEPS the hold if the port or the card does not come back, because a dark
-port needs a human and not a watchdog.
+the SuperSpeed half first, waits for the card to be READY, restarts radiod
+and its consumers, and clears the hold — and KEEPS the hold if the port or
+the card does not get there, because a dark port needs a human and not a
+watchdog.
+
+⛔ READY MEANS 04b4:00f1 AT SUPERSPEED, NOT "SOMETHING IS ON THE BUS".
+After a real VBUS cut the card's FIRST appearance is its FX3 bootloader,
+04b4:00f3 at 480 Mb/s on the USB2 half; `rx888_boot` then loads the firmware
+and it re-enumerates as 00f1 at 5000 on the SuperSpeed half seconds later.
+Taking that first sighting as arrival started radiod against the bootloader
+on AI6VN (2026-10-26 21:42:49Z) and radiod exited status=66/NOINPUT — it
+recovered only because systemd's `Restart=` tried again 11 s later, which is
+what kept the fault invisible.  So the bootloader is waited THROUGH, a card
+that came back at 480 with its firmware gets one link blip, and a card that
+never reaches 00f1 at 5000 keeps the hold and leaves radiod stopped, naming
+which of the three ways it failed.
 
 A station with more than one RX-888 must name the card: `--serial <SERIAL>`.
 `--off` with two cards and no serial is refused, never guessed.  (The
@@ -313,6 +325,11 @@ def locate_rx888(root: Path = SYSFS_USB,
 
 SS_SPEED = "5000"          # SuperSpeed, what the RX-888 must have to stream
 LINK_BLIP_S = 2            # short enough that the FX3 KEEPS its firmware
+# How long --on waits for 00f1 at SuperSpeed.  Longer than the automatic
+# path's 90 s because a real VBUS cut adds a whole bootloader + firmware-load
+# + re-enumeration cycle before the card is usable (AI6VN measured ~37 s end
+# to end on 2026-10-26, and that was a healthy run).
+MANUAL_ON_WAIT_S = 120
 
 
 def link_underspeed(loc: Optional[Located]) -> bool:
@@ -1418,7 +1435,83 @@ def manual_off(serial: Optional[str], cfg: dict) -> int:
     return 0
 
 
-def manual_on(serial: Optional[str], cfg: dict) -> int:
+def wait_for_running_card(locations: Sequence[Tuple[str, str, bool]],
+                          serial: Optional[str],
+                          timeout_s: int = 120,
+                          blip_seconds: int = LINK_BLIP_S
+                          ) -> Tuple[Optional[Located], str]:
+    """Wait for the card to be READY — 04b4:00f1 at SuperSpeed — not merely
+    on the bus.  Returns (card, why): card is None if it never got there.
+
+    ⛔ "ON THE BUS" IS NOT "READY", AND THE DIFFERENCE COST US A FAILED START.
+    Measured on AI6VN 2026-10-26 21:42:49Z: after a real VBUS cut the card
+    comes back as its FX3 BOOTLOADER, 04b4:00f3 at 480 Mb/s, on the USB2 half
+    (3-1.4).  `rx888_boot` then loads the firmware and the card re-enumerates
+    as 04b4:00f1 at 5000 on the SuperSpeed half (4-1.4) a few seconds later.
+    An --on that took the first sighting as "back" started radiod against the
+    bootloader; radiod exited status=66/NOINPUT and only recovered because
+    systemd's Restart= tried again 11 s later.  A station without Restart=,
+    or one where the retry also lands early, is simply down.
+
+    So the bootloader is an EXPECTED intermediate state and is waited through,
+    not treated as arrival.  The three terminal answers are: ready; present
+    but stuck (00f3 that never promoted, or 00f1 the hub never re-trained
+    past 480); or never seen at all.  Each is reported in its own words,
+    because the operator's next move differs for each.
+
+    Identity: the card is matched by (hub, port) against the ports --off
+    switched, and by serial.  The hub/port test is what carries the match
+    through the bootloader phase, where the FX3 need not present the serial
+    the running firmware does.
+    """
+    jacks = {(h, p) for h, p, _ in locations}
+
+    def candidate() -> Optional[Located]:
+        best = None
+        for card in all_rx888():
+            if serial and card.serial == serial:
+                return card
+            if (card.hub, card.port) in jacks:
+                best = best or card
+        return best
+
+    deadline = time.monotonic() + timeout_s
+    seen = None
+    blipped = False
+    while time.monotonic() < deadline:
+        card = candidate()
+        if card is not None:
+            seen = card
+            if card.product == "00f1" and (card.speed or "") == SS_SPEED:
+                return card, "ready"
+            if link_underspeed(card) and not blipped:
+                # 00f1 but the hub did not follow the bootloader-to-SuperSpeed
+                # transition.  One short blip re-trains it; see promote_link.
+                _log(f"card returned at {card.speed} Mb/s, not {SS_SPEED} — "
+                     f"blipping the link to promote it")
+                blipped = True
+                promoted = promote_link(card, blip_seconds)
+                if promoted is not None:
+                    seen = promoted
+                    if (promoted.speed or "") == SS_SPEED:
+                        return promoted, "ready after a link blip"
+        time.sleep(2)
+
+    if seen is None:
+        return None, (f"the card never returned to the bus within {timeout_s}s")
+    if seen.product == "00f3":
+        return None, (f"the card is stuck in its FX3 bootloader "
+                      f"(04b4:00f3 at {seen.speed} Mb/s on {seen.devpath}) "
+                      f"after {timeout_s}s — the firmware loader did not "
+                      f"finish; check rx888_boot and its udev rule")
+    return None, (f"the card is on the bus as 04b4:{seen.product} at "
+                  f"{seen.speed} Mb/s, not {SS_SPEED}, after {timeout_s}s — "
+                  f"this hub does not follow the bootloader-to-SuperSpeed "
+                  f"transition; radiod would refuse the card")
+
+
+def manual_on(serial: Optional[str], cfg: dict,
+              wait_seconds: int = MANUAL_ON_WAIT_S) -> int:
     """Restore a port taken down by --off, then bring the station back."""
     holds = load_hold()
     if not holds:
@@ -1457,27 +1550,18 @@ def manual_on(serial: Optional[str], cfg: dict) -> int:
              "is dark; clear it with --on once the port is back")
         return 1
 
-    if not wait_for_device(timeout_s=90):
-        _log("⛔ the card did not come back within 90s of switching the port "
-             "on; the hold stays — check the cable, then run --on again")
-        return 1
-
-    # The card can come back on the USB2 half after a real power cut: it
-    # enumerates as the FX3 bootloader, the firmware loader promotes it, and
-    # some hubs do not follow it up to SuperSpeed on their own.
-    card = locate_rx888(serial=hold.get("serial") or None) or locate_rx888()
-    if link_underspeed(card):
-        _log(f"card returned at {card.speed} Mb/s, not {SS_SPEED} — blipping "
-             f"the link to promote it")
-        card = promote_link(card) or card
+    # ⛔ WAIT FOR A RUNNING CARD, NOT A PRESENT ONE.  After a real VBUS cut
+    # the card's FIRST appearance is its bootloader at 480 Mb/s; starting
+    # radiod there gets status=66/NOINPUT.  See wait_for_running_card.
+    card, why = wait_for_running_card(locations, hold.get("serial") or None,
+                                      timeout_s=wait_seconds)
     if card is None:
-        _log("the card is on the bus but could not be located in sysfs")
-    else:
-        _log(f"card back: {card.devpath} 04b4:{card.product} at "
-             f"{card.speed} Mb/s")
-        if link_underspeed(card):
-            _log(f"⚠ still linked at {card.speed} Mb/s — radiod will refuse "
-                 f"it; try another port or cable")
+        _log(f"⛔ {why}.  The hold STAYS, so the watchdogs will not fight you "
+             f"while you look at it; radiod was NOT started.  Run --on again "
+             f"once the card is back, or --status to see the hold.")
+        return 1
+    _log(f"card back: {card.devpath} 04b4:{card.product} at "
+         f"{card.speed} Mb/s ({why})")
 
     radiod_unit = hold.get("radiod_unit") or cfg.get("unit") or detect_radiod_unit()
     consumers = hold.get("consumers") or []
@@ -1551,6 +1635,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "radiod and its consumers, and clear the hold")
     ap.add_argument("--status", action="store_true",
                     help="report every RX-888 on the bus and any manual hold")
+    ap.add_argument("--on-wait-seconds", type=int, default=MANUAL_ON_WAIT_S,
+                    help="with --on: how long to wait for the card to reach "
+                         "04b4:00f1 at SuperSpeed before giving up and "
+                         f"keeping the hold (default {MANUAL_ON_WAIT_S})")
     ap.add_argument("--serial",
                     help="which RX-888 to act on, by its USB serial; required "
                          "with --off/--on on a station with more than one card")
@@ -1567,7 +1655,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.off:
         return manual_off(args.serial, cfg)
     if args.on:
-        return manual_on(args.serial, cfg)
+        return manual_on(args.serial, cfg, wait_seconds=args.on_wait_seconds)
 
     patterns = cfg.get("consumers", [])
     radiod_unit = cfg.get("unit") or detect_radiod_unit()

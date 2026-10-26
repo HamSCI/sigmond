@@ -25,7 +25,9 @@ Three things make it more than two uhubctl calls, and each is a test here:
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
+import io
 import importlib.util
 import json
 import sys
@@ -218,8 +220,9 @@ class TestOn(unittest.TestCase):
         self.set = mock.patch.object(sdr, "_uhubctl_set", return_value=True).start()
         self.restart = mock.patch.object(sdr, "restart_station",
                                          return_value=True).start()
-        mock.patch.object(sdr, "wait_for_device", return_value=True).start()
-        mock.patch.object(sdr, "locate_rx888", return_value=_card()).start()
+        self.wait = mock.patch.object(
+            sdr, "wait_for_running_card",
+            return_value=(_card(), "ready")).start()
         self.addCleanup(mock.patch.stopall)
         self.addCleanup(self.tmp.cleanup)
         self.hold.write_text(json.dumps({"RX0001": {
@@ -255,11 +258,32 @@ class TestOn(unittest.TestCase):
         self.assertIn("RX0001", json.loads(self.hold.read_text()))
 
     def test_a_card_that_never_returns_KEEPS_the_hold(self):
-        with mock.patch.object(sdr, "wait_for_device", return_value=False):
-            rc = sdr.manual_on(None, {})
+        self.wait.return_value = (None, "the card never returned to the bus")
+        rc = sdr.manual_on(None, {})
         self.assertEqual(rc, 1)
         self.restart.assert_not_called()
         self.assertIn("RX0001", json.loads(self.hold.read_text()))
+
+    def test_a_card_STUCK_IN_ITS_BOOTLOADER_does_not_start_radiod(self):
+        """⛔ The 2026-10-26 defect.  After a real VBUS cut the card's FIRST
+        appearance is 04b4:00f3 at 480 Mb/s; --on took that as arrival and
+        started radiod, which exited status=66/NOINPUT.  It recovered only
+        because systemd's Restart= tried again 11 s later.  A station without
+        that, or one whose retry also lands early, is simply down."""
+        self.wait.return_value = (None, "the card is stuck in its FX3 "
+                                        "bootloader (04b4:00f3 at 480 Mb/s)")
+        rc = sdr.manual_on(None, {})
+        self.assertEqual(rc, 1)
+        self.restart.assert_not_called()
+        self.assertIn("RX0001", json.loads(self.hold.read_text()),
+                      "the hold must stand while the card is not usable")
+
+    def test_the_wait_is_told_which_ports_and_serial_to_watch(self):
+        sdr.manual_on(None, {})
+        locations, serial = self.wait.call_args.args[:2]
+        self.assertEqual(sorted(locations),
+                         [("3-1", "4", False), ("4-1", "4", True)])
+        self.assertEqual(serial, "RX0001")
 
     def test_two_held_radios_without_a_serial_is_refused(self):
         self.hold.write_text(json.dumps({"RX0001": {"locations": [["4-1", "4", True]]},
@@ -274,6 +298,118 @@ class TestOn(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.set.assert_not_called()
         self.restart.assert_not_called()
+
+
+class TestWaitForRunningCard(unittest.TestCase):
+    """⛔ "ON THE BUS" IS NOT "READY".
+
+    Measured on AI6VN 2026-10-26 21:42:49Z.  After a real VBUS cut the card
+    comes back as its FX3 bootloader, 04b4:00f3 at 480 Mb/s on the USB2 half
+    (3-1.4).  rx888_boot loads the firmware and it re-enumerates as 00f1 at
+    5000 on the SuperSpeed half (4-1.4) seconds later.  --on took the first
+    sighting as arrival, started radiod against the bootloader, and radiod
+    exited status=66/NOINPUT.  It recovered only because systemd restarted it
+    11 s later -- so the bug was invisible behind Restart=.
+    """
+
+    LOCS = [("4-1", "4", True), ("3-1", "4", False)]
+
+    def setUp(self):
+        mock.patch.object(sdr.time, "sleep").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _run(self, sightings, **kw):
+        """Each call to all_rx888() returns the next sighting, then repeats
+        the last one for as long as the wait keeps polling."""
+        queue = list(sightings)
+
+        def next_sighting():
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+
+        with mock.patch.object(sdr, "all_rx888", side_effect=next_sighting):
+            return sdr.wait_for_running_card(self.LOCS, "RX0001", **kw)
+
+    def test_waits_THROUGH_the_bootloader_to_the_running_card(self):
+        boot = _card(devpath="3-1.4", hub="3-1", port="4", speed="480",
+                     peer_hub="4-1", product="00f3", serial="")
+        ready = _card()          # 4-1.4, 00f1, 5000
+        card, why = self._run([[boot], [boot], [ready]])
+        self.assertIsNotNone(card)
+        self.assertEqual((card.product, card.speed), ("00f1", "5000"))
+        self.assertEqual(why, "ready")
+
+    def test_a_card_that_stays_in_its_bootloader_is_NOT_ready(self):
+        boot = _card(devpath="3-1.4", hub="3-1", port="4", speed="480",
+                     peer_hub="4-1", product="00f3", serial="")
+        card, why = self._run([[boot]], timeout_s=1)
+        self.assertIsNone(card)
+        self.assertIn("00f3", why)
+        # Distinct from the "hub does not follow the transition" message,
+        # which also says "bootloader": the operator's next move differs.
+        # Stuck at 00f3 means the FIRMWARE LOADER did not run.
+        self.assertIn("firmware loader did not finish", why)
+
+    def test_a_BOOTLOADER_AT_SUPERSPEED_is_still_not_ready(self):
+        """The readiness test is on the PRODUCT ID, not on speed alone.  An
+        FX3 bootloader that happens to link at 5000 carries no firmware and
+        radiod would refuse it exactly as it refuses one at 480."""
+        boot = _card(product="00f3", speed="5000", serial="")
+        card, why = self._run([[boot]], timeout_s=1)
+        self.assertIsNone(card)
+        self.assertIn("00f3", why)
+
+    def test_a_card_at_480_WITH_ITS_FIRMWARE_gets_one_blip(self):
+        """00f1 at 480 is the hub not following the bootloader-to-SuperSpeed
+        transition.  One blip re-trains it; this is promote_link's case, and
+        it must happen inside the wait rather than after radiod starts."""
+        slow = _card(devpath="3-1.4", hub="3-1", port="4", speed="480",
+                     peer_hub="4-1")
+        with mock.patch.object(sdr, "all_rx888", return_value=[slow]), \
+             mock.patch.object(sdr, "promote_link",
+                               return_value=_card()) as blip:
+            card, why = sdr.wait_for_running_card(self.LOCS, "RX0001",
+                                                  timeout_s=2)
+        self.assertIsNotNone(card)
+        self.assertEqual(card.speed, "5000")
+        self.assertIn("blip", why)
+        blip.assert_called_once()
+
+    def test_the_blip_is_tried_ONCE_not_every_poll(self):
+        """A blip per poll would hammer a card that cannot be promoted, and
+        each one drops the link again -- turning a slow link into a loop."""
+        slow = _card(devpath="3-1.4", hub="3-1", port="4", speed="480",
+                     peer_hub="4-1")
+        with mock.patch.object(sdr, "all_rx888", return_value=[slow]), \
+             mock.patch.object(sdr, "promote_link", return_value=slow) as blip:
+            card, why = sdr.wait_for_running_card(self.LOCS, "RX0001",
+                                                  timeout_s=2)
+        self.assertIsNone(card)
+        self.assertEqual(blip.call_count, 1)
+        self.assertIn("does not follow", why)
+
+    def test_a_card_that_never_appears_says_so_in_its_own_words(self):
+        card, why = self._run([[]], timeout_s=1)
+        self.assertIsNone(card)
+        self.assertIn("never returned", why)
+
+    def test_the_card_is_matched_by_JACK_when_the_bootloader_has_no_serial(self):
+        """The FX3 bootloader need not present the serial the running
+        firmware does, so a serial-only match would lose the card for the
+        whole bootloader phase -- which is exactly the phase being waited
+        through.  (hub, port) against the ports --off switched carries it."""
+        boot = _card(devpath="3-1.4", hub="3-1", port="4", speed="480",
+                     peer_hub="4-1", product="00f3", serial="")
+        card, why = self._run([[boot]], timeout_s=1)
+        self.assertIsNone(card)
+        self.assertIn("bootloader", why,
+                      "the card must have been RECOGNISED, not merely absent")
+
+    def test_another_station_card_on_a_DIFFERENT_jack_is_ignored(self):
+        """On a two-card station the other radio must not end the wait."""
+        other = _card(serial="RX0002", devpath="4-1.7", port="7")
+        card, why = self._run([[other]], timeout_s=1)
+        self.assertIsNone(card)
+        self.assertIn("never returned", why)
 
 
 class TestHoldStandsDownTheAutomaticPaths(unittest.TestCase):
@@ -321,6 +457,34 @@ class TestHoldStandsDownTheAutomaticPaths(unittest.TestCase):
         with mock.patch.object(wd, "HOLD_PATH", self.hold):
             units, blanket = wd._held_units()
         self.assertTrue(blanket)
+
+    def test_the_watchdog_SAYS_SO_when_a_hold_stays_its_hand(self):
+        """⛔ --off STOPS radiod, so the watchdog's unit list is EMPTY exactly
+        when a hold is in force.  Returning 0 in silence left an operator on
+        AI6VN unable to tell whether the hold had been seen at all.  A
+        watchdog that cannot say why it stayed its hand is as hard to trust
+        as one that cannot say why it acted."""
+        self.hold.write_text(json.dumps({"RX0001": {"since": 1}}))
+        buf = io.StringIO()
+        with mock.patch.object(wd, "HOLD_PATH", self.hold), \
+             mock.patch.object(wd, "_active_radiod_units", return_value=[]), \
+             mock.patch.object(wd, "_honor_restart_request"), \
+             contextlib.redirect_stdout(buf):
+            rc = wd.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("hold in force", buf.getvalue())
+        self.assertIn("--on", buf.getvalue())
+
+    def test_the_watchdog_says_NOTHING_about_holds_when_none_stands(self):
+        """Mutation guard for the test above: the line must be conditional,
+        not unconditional, or every ordinary minute logs a hold notice."""
+        buf = io.StringIO()
+        with mock.patch.object(wd, "HOLD_PATH", self.hold), \
+             mock.patch.object(wd, "_active_radiod_units", return_value=[]), \
+             mock.patch.object(wd, "_honor_restart_request"), \
+             contextlib.redirect_stdout(buf):
+            wd.main()
+        self.assertNotIn("hold in force", buf.getvalue())
 
     def test_no_hold_file_means_the_watchdog_works_as_before(self):
         with mock.patch.object(wd, "HOLD_PATH", self.hold):

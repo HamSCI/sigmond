@@ -344,21 +344,28 @@ def main() -> int:
         _honor_restart_request(now)
     except Exception as exc:        # noqa: BLE001 — watchdog must not die
         print(f'restart-request: check failed: {exc}', file=sys.stderr)
-    units = _active_radiod_units()
-    if not units:
-        return 0                    # no radiod on this host — no-op
+    # ⛔ THE HOLD IS CHECKED BEFORE THE UNIT LIST, AND IT SPEAKS EITHER WAY.
+    # `--off` STOPS radiod, so _active_radiod_units() is empty exactly when a
+    # hold is in force and the old order returned 0 in silence -- leaving an
+    # operator to wonder whether the watchdog had seen the hold at all
+    # (AI6VN, 2026-10-26: the run was correct and said nothing).  A watchdog
+    # that cannot say why it stayed its hand is as hard to trust as one that
+    # cannot say why it acted.
     try:
         held, blanket = _held_units()
     except Exception as exc:        # noqa: BLE001 — watchdog must not die
         print(f'hold: check failed: {exc}', file=sys.stderr)
         held, blanket = (), False
+    units = _active_radiod_units()
     if blanket or held:
         skipped = list(units) if blanket else [u for u in units if u in held]
-        if skipped:
-            print(f'manual RX-888 hold in force ({HOLD_PATH}) — not touching '
-                  f'{", ".join(skipped)}; release with '
-                  f'sigmond-sdr-recover --on')
-            units = [u for u in units if u not in skipped]
+        named = ', '.join(skipped) if skipped else (
+            ', '.join(held) if held else 'every radiod instance')
+        print(f'manual RX-888 hold in force ({HOLD_PATH}) — not touching '
+              f'{named}; release with sigmond-sdr-recover --on')
+        units = [u for u in units if u not in skipped]
+    if not units:
+        return 0                    # no radiod to check — no-op
     for unit in units:
         try:
             check_unit(unit, now)
