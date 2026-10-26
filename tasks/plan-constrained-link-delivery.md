@@ -244,23 +244,39 @@ network needs an allowlist, and a bandwidth budget needs to know who is
 spending it.  **Measure it on AI6VN before anything ships**, because the list
 has to be complete before deployment, not discovered after.
 
-### Where to capture — and the hole in the obvious answer
+### When: from the next image installation (rob, 2026-10-26)
 
-The odroid (ODROID-XU4, `rob@10.22.23.3`) is the natural capture point: it is
-AI6VN's **default IPv6 router** — its ASIX dongle sits at
-`fd4f:a955:ac3d:1::1`, and AI6VN's v6 segment holds exactly two nodes, so every
-v6 packet the station sends crosses it (`ops/ssh/config.fleet:104-122`).
+Do NOT start on the running box.  Begin the capture at the **next image
+install on AI6VN**, running from first boot, so the record covers bring-up and
+install as well as steady state.  Those are different firewall cases and the
+install-time set is the one a steady-state capture silently misses — package
+and repo endpoints a station touches once and never again.
 
-**But AI6VN also has IPv4** on `10.22.23.0/24`, routed by the EdgeRouter
-(SPV-ERX, `10.22.22.1`), which does not pass through the odroid.  Capturing
-only on the odroid yields the v6 half and **silently omits every IPv4
-destination** — a confident, incomplete allowlist, which is worse than none,
-because the station deploys and then fails on whatever was missed.
+### Where to capture
 
-So capture at BOTH routers, or on the station itself (PM and VM), where both
-paths are visible regardless of which one a flow takes.  AI6VN is rob's lab
+The odroid (ODROID-XU4, `rob@10.22.23.3`) was the obvious point — it is
+AI6VN's default IPv6 router, its ASIX dongle at `fd4f:a955:ac3d:1::1`, and
+AI6VN's v6 segment holds exactly two nodes, so every v6 packet crossed it
+(`ops/ssh/config.fleet:104-122`).  **rob is retiring that link** (2026-10-26),
+and that simplifies this rather than complicating it: with no odroid there is
+no v6 default route, so AI6VN's egress collapses to one IPv4 path through the
+EdgeRouter (SPV-ERX, `10.22.22.1`) on `10.22.23.0/24`.
+
+One path means one capture point and no risk of the split-capture error that
+would otherwise apply — capturing only the odroid would have yielded the v6
+half and silently omitted every IPv4 destination, which is worse than no list
+at all, because the station then deploys and fails on what was missed.
+
+Capture on the station itself (PM and VM), which sees every flow whatever path
+it takes and does not depend on borrowing the EdgeRouter.  AI6VN is rob's lab
 box, so the standing no-heavy-diagnostics-on-station-VMs rule does not bind
-here — but whatever is used must be light enough to leave running for a week.
+here — but it must be light enough to leave running for a week.
+
+⚠ **Confirm AI6VN still has the connectivity the capture assumes** once the
+odroid goes.  If the station turns out to have been reaching anything over
+IPv6, that traffic disappears from the capture by disappearing from the
+station, and the allowlist will be right about a station that no longer
+matches the one shipping to the Pole.
 
 ### What the list has to contain
 
