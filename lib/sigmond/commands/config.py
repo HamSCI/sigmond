@@ -683,6 +683,7 @@ def cmd_config_render(args) -> int:
         reporter_id=profile.effective_reporter_id,
         wsprnet_call=profile.effective_wsprnet_call,
         pskreporter_call=profile.effective_pskreporter_call,
+        wsprnet_proxy=profile.wsprnet_proxy,
     )
 
     # [heartbeat] (sigmond#task-8) — copied through field-for-field ONLY
@@ -865,6 +866,12 @@ def _patch_station_block(path: Path, station: Station) -> None:
         body.append(f'wsprnet_call = "{station.wsprnet_call}"')
     if station.pskreporter_call:
         body.append(f'pskreporter_call = "{station.pskreporter_call}"')
+    if station.wsprnet_proxy:
+        # ⛔ Written ONLY when true.  An explicit `false` in every station's
+        # coordination.toml would read as a decision each operator made,
+        # and absent is what the whole chain treats as "unset" — down to
+        # the per-spot field the server leaves alone.
+        body.append('wsprnet_proxy = true')
     body.append('')
 
     if not path.exists():

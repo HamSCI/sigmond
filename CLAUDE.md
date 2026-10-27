@@ -310,6 +310,61 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
     ka9q-watch screen. Operator-triggered; no scheduler installed —
     rerun manually before deploying a new ka9q-radio build.
 
+## Proxied uploads (`[station] wsprnet_proxy`)
+
+A station can hand an upstream to the WsprDaemon servers instead of posting to
+it itself.  The spots already travel in the wsprdaemon tar, so the second
+upload simply stops existing.  Measured on AC0G/B4, 2026-10-27:
+
+| | MB/day |
+|---|---|
+| tar to wsprdaemon (sent either way) | 5.75 |
+| direct POSTs to wsprnet.org | 7.91 |
+| direct frames to PSKReporter | 11.10 |
+| **today, all direct** | **24.77** |
+| **proxied** | **5.75 (77% less)** |
+
+Fleet-wide that is ~790 MB/day leaving stations' own links today, against ~304
+MB/day from one WD server afterwards.  The WSPR half is mostly *overhead* —
+78 % of a direct wsprnet upload is a fresh TLS handshake every two minutes,
+and a 500-spot/day site spends ~13 kB of link per spot delivered.  The FT8
+half is mostly *data*: 39.6 B/spot as PSKReporter frames against ~10 B/spot
+compressed in the tar.
+
+Set it in site-profile.toml (`[reporters] wsprnet_proxy = true`), which
+`smd config render` carries into coordination.toml's `[station]`, which
+`uploader_manifest.apply_proxying` turns into two manifest changes:
+`forward_to_wsprnet = true` on the wspr-wsprdaemon transport, and the
+`wspr-wsprnet` pipeline removed.
+
+Three rules the implementation depends on, each because its opposite is a bug
+that hides itself:
+
+- **⛔ The two halves move together, and only together.**  Dropping the direct
+  pipeline without flagging the tar leaves NOBODY posting: the station stops,
+  the server never starts, and spots stop appearing upstream with no error
+  anywhere.  So a missing or malformed carrier pipeline REFUSES to drop the
+  direct one and logs at ERROR.  A station that keeps posting for itself
+  merely forfeits the saving; the other way round loses data.
+- **⛔ Off writes nothing, never `false`.**  Absent is what the whole chain
+  reads as unset, down to the per-spot field the server leaves alone — and
+  hs-uploader writes that field 0 when unset, so switching off still switches
+  off.  An explicit `false` in every station's config would read as a
+  decision each operator made.
+- **The reporter identity travels only as a NARROWER override**
+  (`[station] wsprnet_call`).  With none, the server posts under the spot's
+  own rx_sign, which is already this station's reporter id.
+
+**⚠ This puts the station's callsign on uploads sent from a WD server's
+address.**  It is the operator's decision — never a site-profile default, and
+never something a fleet-wide change should switch on for someone.
+
+Server side (the `proxy_upload` column, the forwarder, the batching window):
+`rrobinett/wsprdaemon-server`, CLAUDE.md § "wsprnet.org forwarder".
+`tests/test_uploader_manifest_proxy.py` holds a cross-repo test that the
+manifest keys are the ones hs-uploader's `pipeline_factory` actually reads —
+a rename on either side is silent.
+
 ## Still to build
 
 - **TUI per-client config screens** — wspr-recorder, hf-timestd, psk-recorder

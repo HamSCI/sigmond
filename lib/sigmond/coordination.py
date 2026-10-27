@@ -42,6 +42,18 @@ class Station:
     reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
+    # Ask the WsprDaemon servers to post this station's WSPR spots to
+    # wsprnet.org on its behalf, instead of this station posting them
+    # itself.  The spots already travel in the wsprdaemon tar, so the
+    # second upload stops existing: measured 24.8 -> 5.8 MB/day on a real
+    # station, and a small site currently spends ~13 kB of its link per
+    # spot delivered because every cycle opens a fresh TLS connection.
+    #
+    # ⚠ THIS PUTS THIS STATION'S CALLSIGN ON SOMEONE ELSE'S UPLOADS.
+    # wsprnet will see these spots arrive from a WD server's address under
+    # this operator's call, so it is the operator's decision, never a
+    # default inherited from a site profile.
+    wsprnet_proxy: bool = False
 
 
 @dataclass
@@ -249,6 +261,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         instrument_id=str(station_raw.get('instrument_id', '') or ''),
         reporter_id=str(station_raw.get('reporter_id', '') or ''),
         wsprnet_call=str(station_raw.get('wsprnet_call', '') or ''),
+        wsprnet_proxy=bool(station_raw.get('wsprnet_proxy', False)),
         pskreporter_call=str(station_raw.get('pskreporter_call', '') or ''),
     )
 

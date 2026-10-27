@@ -58,6 +58,12 @@ instrument_id = ""                 # legacy single id (= hf-timestd/GRAPE's)
 reporter_id      = ""              # WSPR/PSK reporter instance id, e.g. AC0G/S
 wsprnet_call     = ""
 pskreporter_call = ""
+# Let the WsprDaemon servers post this station's WSPR spots to wsprnet.org
+# instead of this station posting them itself.  The spots already travel in
+# the wsprdaemon tar, so the second upload stops existing.
+# ⚠ This puts THIS station's callsign on uploads sent from a WD server's
+# address, so it is the operator's decision, never a site-profile default.
+wsprnet_proxy    = false
 
 [host]
 hostname = ""                      # radiod instance/mDNS names derive from this
@@ -108,6 +114,7 @@ class SiteProfile:
     reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
+    wsprnet_proxy: bool = False
     hostname: str = ""
     sdr: str = ""
     sdr_serial: str = ""
@@ -252,6 +259,7 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
         },
         reporter_id=_clean(rep.get("reporter_id")).upper(),
         wsprnet_call=_clean(rep.get("wsprnet_call")).upper(),
+        wsprnet_proxy=bool(rep.get("wsprnet_proxy", False)),
         pskreporter_call=_clean(rep.get("pskreporter_call")).upper(),
         hostname=_clean(host.get("hostname")),
         sdr=_clean(hw.get("sdr")),

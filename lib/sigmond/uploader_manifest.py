@@ -259,6 +259,85 @@ def _split_for_producer(rendered: dict, client: str) -> dict:
     return out
 
 
+@dataclass(frozen=True)
+class _Proxied:
+    """One upstream a station can hand to the WD servers.
+
+    ``carrier`` is the pipeline whose transport gains the flag (the tar
+    that already carries the spots); ``direct`` is the pipeline that
+    stops existing because the server now does its job.
+    """
+    flag: str
+    carrier: str
+    direct: str
+    call_key: str
+    grid_key: str
+    call_attr: str
+    enabled_attr: str
+
+
+PROXIED_SERVICES = (
+    _Proxied(flag="forward_to_wsprnet",
+             carrier="wspr-wsprdaemon", direct="wspr-wsprnet",
+             call_key="wsprnet_reporter_call",
+             grid_key="wsprnet_reporter_grid",
+             call_attr="wsprnet_call", enabled_attr="wsprnet_proxy"),
+)
+
+
+def apply_proxying(pipelines: list, coord: Coordination) -> list:
+    """Hand an upstream to the WD servers: flag the tar, drop the direct post.
+
+    ⛔ THE TWO HALVES MUST MOVE TOGETHER, AND ONLY TOGETHER.  Dropping the
+    direct pipeline without flagging the tar leaves nobody posting: the
+    station stops, the server never starts, and the spots simply stop
+    appearing on the upstream with nothing anywhere reporting an error.
+    So if the carrier pipeline is absent — a client disabled, a rename, a
+    deploy.toml that no longer declares it — this REFUSES to drop the
+    direct one and says so at ERROR.  A station that keeps posting for
+    itself is merely not saving bandwidth; the other way round loses data.
+
+    ⚠ Proxying OFF emits nothing rather than ``false``.  Absent means
+    "leave the per-spot field alone" to the server, and hs-uploader writes
+    that field 0 when unset, so switching off still switches off — while
+    an explicit ``false`` from every station in the fleet would be a
+    statement none of them made.
+    """
+    out = list(pipelines)
+    for svc in PROXIED_SERVICES:
+        if not getattr(coord.station, svc.enabled_attr, False):
+            continue
+        carrier = next((p for p in out if p.get("name") == svc.carrier), None)
+        if carrier is None or not isinstance(carrier.get("transport"), dict):
+            logger.error(
+                "uploader-manifest: [station] %s is set but the %s pipeline "
+                "is not being rendered — keeping %s so this station still "
+                "posts for itself; nothing would post otherwise",
+                svc.enabled_attr, svc.carrier, svc.direct)
+            continue
+        transport = dict(carrier["transport"])
+        transport[svc.flag] = True
+        call = (getattr(coord.station, svc.call_attr, "") or "").strip()
+        if call:
+            # Only a NARROWER override travels.  With none, the server
+            # posts under the spot's own rx_sign, which is already this
+            # station's reporter id — sending it again could only
+            # disagree with itself.
+            transport[svc.call_key] = call
+            grid = (coord.host.grid or "").strip()
+            if grid:
+                transport[svc.grid_key] = grid
+        out = [dict(p, transport=transport) if p is carrier else p
+               for p in out]
+        before = len(out)
+        out = [p for p in out if p.get("name") != svc.direct]
+        logger.info("uploader-manifest: %s proxied by the WD servers — "
+                    "%s flagged, %s %s", svc.enabled_attr, svc.carrier,
+                    svc.direct,
+                    "dropped" if len(out) < before else "was not present")
+    return out
+
+
 def collect_pipelines(topology: Optional[Topology] = None,
                       coord: Optional[Coordination] = None,
                       *, store_version: int) -> list:
@@ -327,7 +406,7 @@ def collect_pipelines(topology: Optional[Topology] = None,
                 continue
             by_name[name] = rendered
             pipelines.append(rendered)
-    return pipelines
+    return apply_proxying(pipelines, coord)
 
 
 def heartbeat_pipeline(coord: Coordination) -> Optional[dict]:
