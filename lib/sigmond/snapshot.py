@@ -233,14 +233,18 @@ def write_requested(req_dir: Path, out_dir: Path,
     if _consume_requests(req_dir) == 0:
         return None
     last = _last_request(out_dir)
-    wait = min_interval_s - (now() - last)
+    # Clamped: a stamp from the future (the clock stepped back) must not
+    # make this oneshot sleep for hours while "Check now" waits.
+    wait = min(max(min_interval_s - (now() - last), 0.0), min_interval_s)
     if wait > 0:
         sleep(wait)
-    # Never record a time inside the window just waited out.
-    t = max(now(), last + min_interval_s)
-    # Recorded before the run, so a check that fails still holds the limit.
-    _write_atomic(out_dir / LAST_REQUEST, f"{t}\n")
-    return write_snapshots(["check"], out_dir, run=run, now=now, smd=smd)
+    try:
+        return write_snapshots(["check"], out_dir, run=run, now=now, smd=smd)
+    finally:
+        # Recorded after the run, at the clock's time, so a future stamp
+        # heals itself; in `finally`, so a run that fails still holds the
+        # limit.
+        _write_atomic(out_dir / LAST_REQUEST, f"{now()}\n")
 
 
 def _print_written(names: List[str], written: Dict[str, dict]) -> int:

@@ -286,6 +286,18 @@ class WriteRequestedTests(unittest.TestCase):
         self.assertEqual(self.slept, [20])
         self.assertEqual(len(self.run.calls), 2)
         self.assertEqual(self._last(), NOW + 30)
+
+    def test_a_future_last_request_sleeps_at_most_the_interval(self):
+        # The clock stepped back past the stamp.
+        (self.out / ".last-request").write_text(f"{NOW + 3600}\n")
+        self._ask("a")
+        written = self._answer()
+        self.assertEqual(list(written), ["check"])
+        self.assertEqual(len(self.slept), 1)
+        self.assertLessEqual(self.slept[0], 30)
+        self.assertEqual(len(self.run.calls), 1)
+        # The stamp healed to the clock's time.
+        self.assertEqual(self._last(), NOW + self.slept[0])
         self.assertEqual(list(self.req.iterdir()), [])
 
     def test_a_request_after_the_window_does_not_wait(self):
