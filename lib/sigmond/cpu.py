@@ -95,6 +95,12 @@ AFFINITY_UNITS = {
     # bursty and operator-triggered — exactly the kind of spike that reads
     # as cache/DRAM contention on radiod's strip chart when it lands there.
     'station-web@.service':              'other',
+    # station-web's snapshots: oneshot jobs that run every smd read verb
+    # every 5 minutes (and on request), plus the daily git fetch.  Short,
+    # but bursty python and git work, so they stay off radiod's CPUs too.
+    'sigmond-snapshot.service':          'other',
+    'sigmond-snapshot-request.service':  'other',
+    'sigmond-component-fetch.service':   'other',
 }
 
 

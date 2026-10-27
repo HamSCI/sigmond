@@ -40,8 +40,9 @@ SNAPSHOT_COMMANDS: Dict[str, List[str]] = {
     "viewers": ["admin", "viewers", "--json"],
     "manifest": ["admin", "manifest", "status", "--json"],
     # Exits 1 when the spool holds no tick; that envelope then carries
-    # data null and the error, which the page reads as "heartbeat not
-    # running here".
+    # data null and the error.  hs-uploader deletes each tick once it
+    # ships, so the page reads that as "no tick waiting", not as a
+    # heartbeat that is not running.
     "heartbeat": ["admin", "heartbeat", "show", "--json"],
 }
 

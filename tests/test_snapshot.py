@@ -399,6 +399,30 @@ class CommandParityTests(unittest.TestCase):
         self.assertIn("--only", flags)
         self.assertIn("--request", flags)
 
+    def test_the_only_choices_are_the_snapshot_names(self):
+        only = live_verb_parsers()["admin snapshot write"]._option_string_actions["--only"]
+        self.assertEqual(list(only.choices), list(snapshot.SNAPSHOT_COMMANDS))
+
+    def test_the_parser_survives_an_unimportable_snapshot_module(self):
+        # None in sys.modules makes `from sigmond.snapshot import ...` raise
+        # ImportError; every other verb must still build.
+        with mock.patch.dict(sys.modules, {"sigmond.snapshot": None}):
+            parsers = live_verb_parsers()
+        self.assertIn("check", parsers)
+        only = parsers["admin snapshot write"]._option_string_actions["--only"]
+        self.assertEqual(list(only.choices), list(snapshot.SNAPSHOT_COMMANDS))
+
+
+class AffinityTests(unittest.TestCase):
+
+    def test_snapshot_jobs_stay_off_radiods_cpus(self):
+        from sigmond.cpu import AFFINITY_UNITS
+        for unit in ("sigmond-snapshot.service",
+                     "sigmond-snapshot-request.service",
+                     "sigmond-component-fetch.service"):
+            self.assertTrue((REPO / "systemd" / unit).is_file(), unit)
+            self.assertEqual(AFFINITY_UNITS.get(unit), "other", unit)
+
 
 if __name__ == "__main__":
     unittest.main()

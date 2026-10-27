@@ -139,6 +139,56 @@ class FetchedAtTest(unittest.TestCase):
         self.assertRegex(got, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
+class BehindCountTest(unittest.TestCase):
+    """A rev-list that cannot count gives no count, never a bare zero."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.smd = _load_smd()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "r"
+        _make_repo(self.repo)
+
+    def test_counts_against_a_real_ref(self):
+        _git(self.repo, "branch", "-q", "base")
+        (self.repo / "g").write_text("x")
+        _git(self.repo, "add", "g")
+        _git(self.repo, "commit", "-q", "-m", "d")
+        self.assertEqual(self.smd._git_behind_ahead(self.repo, "base"), (0, 1))
+        self.assertEqual(
+            self.smd._git_behind_ahead(self.repo, "HEAD")[0], 0)
+
+    def test_a_failed_rev_list_is_none(self):
+        self.assertEqual(
+            self.smd._git_behind_ahead(self.repo, "origin/main"), (None, None))
+
+    def test_no_ref_is_none(self):
+        self.assertEqual(self.smd._git_behind_ahead(self.repo, ""), (None, None))
+
+    def test_the_row_carries_null_and_an_honest_verdict(self):
+        from unittest import mock
+        entry = type("E", (), {"name": "comp", "kind": "client", "repo": "x"})()
+        topo = type("T", (), {"components": {}})()
+        args = type("A", (), {"components": "comp", "topology": None})()
+        with mock.patch.object(self.smd, "load_catalog",
+                               return_value={"comp": entry}), \
+             mock.patch("sigmond.topology.load_topology", return_value=topo), \
+             mock.patch.object(self.smd, "_resolve_repo_dir",
+                               return_value=self.repo), \
+             mock.patch.object(self.smd, "_git_default_ref",
+                               return_value="origin/main"):
+            rows = self.smd._component_statuses(args, fetch=False)
+        row = next(r for r in rows if r["name"] == "comp")
+        self.assertIsNone(row["behind"])
+        self.assertFalse(row["behind_exact"])
+        self.assertEqual(row["verdict"], "behind unknown")
+        self.assertIsNone(row["fetched_at"])
+        self.assertIn('"behind": null', json.dumps(row))
+
+
 class CliTest(unittest.TestCase):
     def test_status_json_prints_the_dict(self):
         import contextlib

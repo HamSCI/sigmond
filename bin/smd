@@ -172,6 +172,11 @@ try:
 except ImportError:
     _HAS_SIGMOND_LIB = False
 
+# `smd admin snapshot write --only` choices when sigmond.snapshot will not
+# import; tests/test_snapshot.py keeps it equal to SNAPSHOT_COMMANDS' keys.
+_SNAPSHOT_NAMES_FALLBACK = ('check', 'components', 'catalog', 'instances',
+                            'validate', 'viewers', 'manifest', 'heartbeat')
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -15077,18 +15082,24 @@ def _git_default_ref(repo_dir: Path) -> str:
     return ''
 
 
-def _git_behind_ahead(repo_dir: Path, ref: str) -> tuple[int, int]:
-    """(behind, ahead) of HEAD relative to ref; (0, 0) if ref empty/invalid."""
+def _git_behind_ahead(repo_dir: Path,
+                      ref: str) -> tuple[int | None, int | None]:
+    """(behind, ahead) of HEAD relative to ref; (None, None) when ref is
+    empty or rev-list cannot count.  A failed count is no count: (0, 0)
+    here once read as "up to date" on a repo nothing had compared."""
     if not ref:
-        return 0, 0
+        return None, None
     sd = f'safe.directory={repo_dir}'
-    out = subprocess.run(['git', '-c', sd, '-C', str(repo_dir), 'rev-list',
-                          '--left-right', '--count', f'{ref}...HEAD'],
-                         capture_output=True, text=True).stdout.split()
+    proc = subprocess.run(['git', '-c', sd, '-C', str(repo_dir), 'rev-list',
+                           '--left-right', '--count', f'{ref}...HEAD'],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None, None
+    out = proc.stdout.split()
     try:
         return int(out[0]), int(out[1])
     except (IndexError, ValueError):
-        return 0, 0
+        return None, None
 
 
 def _fetched_at(repo_dir) -> str | None:
@@ -15296,6 +15307,8 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 behind_exact = (_bstat == 'exact')
         else:
             behind_main, _ah = _git_behind_ahead(repo_dir, default_ref)
+        if behind_main is None:
+            behind_exact = False        # no count at all, exact or not
         on_feature = bool(default_branch) and branch != default_branch
 
         # Verdict ladder — first match wins.  Separate the materially-different
@@ -15313,6 +15326,8 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                        else f'pinned drift: at {local} (want {policy})')
         elif ahead > 0:
             verdict = f'{ahead} unpushed commit{"s" if ahead != 1 else ""}'
+        elif behind_main is None:
+            verdict = 'behind unknown'
         elif behind_main > 0:
             verdict = ('behind main (run update)' if not behind_exact
                        else f'{behind_main} commit'
@@ -15385,12 +15400,16 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                     s_behind_exact = (_sbstat == 'exact')
             else:
                 s_behind_main, _sa = _git_behind_ahead(sigmond_dir, s_default_ref)
+            if s_behind_main is None:
+                s_behind_exact = False
             s_on_feature = bool(s_default) and s_branch != s_default
             if s_dirty and (s_reason or '').startswith('uncommitted'):
                 s_verdict = f'dirty: {s_reason}'
             elif s_ahead > 0:
                 s_verdict = (f'{s_ahead} unpushed commit'
                              f'{"s" if s_ahead != 1 else ""}')
+            elif s_behind_main is None:
+                s_verdict = 'behind unknown'
             elif s_behind_main > 0:
                 s_verdict = ('behind main (run update)' if not s_behind_exact
                              else f'{s_behind_main} commit'
@@ -15518,6 +15537,8 @@ def _print_status_table(rows: list[dict]) -> None:
         b_exact  = r.get('behind_exact', True)
         if not r['repo_dir']:
             behind = ''       # not a repo / not installed — column blank
+        elif behind_n is None:
+            behind = '?'      # rev-list could not count: no number to show
         elif behind_n and not b_exact:
             behind = '?'      # behind, but exact count needs a fetch (ls-remote only)
         else:
@@ -15610,7 +15631,7 @@ def _print_action_hint(rows: list[dict]) -> None:
     needs_apply = [r for r in rows
                    if r['repo_dir'] and not r['dirty']
                    and r['policy'] != 'ignore'
-                   and (r['behind'] > 0 or
+                   and ((r['behind'] or 0) > 0 or
                         (r['policy'] != 'latest' and 'pinned drift' in r['verdict']))]
     if needs_apply:
         names = ', '.join(r['name'] for r in needs_apply)
@@ -26483,7 +26504,14 @@ def main() -> int:
     p_viewers.add_argument('--json', action='store_true',
         help='print {"viewers": [...], "conflicts": [...]}')
 
-    from sigmond.snapshot import SNAPSHOT_COMMANDS
+    # A lib that will not import must not cost every smd verb its parser;
+    # the literal list stands in, and tests/test_snapshot.py pins it to
+    # SNAPSHOT_COMMANDS.
+    try:
+        from sigmond.snapshot import SNAPSHOT_COMMANDS as _SNAP_CMDS
+        _snap_names = list(_SNAP_CMDS)
+    except ImportError:
+        _snap_names = list(_SNAPSHOT_NAMES_FALLBACK)
     p_snapshot = admin_sub.add_parser(
         'snapshot',
         help="write smd's read-only JSON to /run/sigmond/snapshot/ for "
@@ -26493,7 +26521,7 @@ def main() -> int:
         'write',
         help='run each snapshot command and write its envelope (root)')
     snap_which = p_snap_write.add_mutually_exclusive_group()
-    snap_which.add_argument('--only', choices=list(SNAPSHOT_COMMANDS),
+    snap_which.add_argument('--only', choices=_snap_names,
         help='write this one snapshot only')
     snap_which.add_argument('--request', action='store_true',
         help='consume station-web refresh requests and write the check '
