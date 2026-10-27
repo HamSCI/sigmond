@@ -45,7 +45,7 @@ Uploads switched on recently. Wait.
 
 **FAIL: `on, but nothing delivered in 30 min.  Tell the fleet admin.`**
 Uploads run in principle, yet the far end confirmed nothing for half an hour.
-The network, the uploader, or the account may have broken. Tell the fleet admin.
+Tell the fleet admin.
 
 ## What to do
 
@@ -54,3 +54,8 @@ Follow the line. Do not switch uploads on by hand to clear a red line.
 ## Where to look closer
 
 Run `smd watch uploads` in the VM for live upload events.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

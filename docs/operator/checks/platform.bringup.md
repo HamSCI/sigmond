@@ -43,11 +43,15 @@ lines show WAIT with "it starts once the SDR is plugged in".
 
 ## What to do
 
-Wait for a WAIT. For a FAIL about the SDR, check the USB cable and the
-receiver's power. For any other FAIL, send the fleet admin the log named in
-the message.
+Wait for a WAIT. For a FAIL about the SDR, plug the SDR in. For any other FAIL, tell the
+fleet admin, as the line says.
 
 ## Where to look closer
 
 Read `/var/log/sigmond/firstrun-bringup.log` in the VM. Run `smd check` again
 after a few minutes.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

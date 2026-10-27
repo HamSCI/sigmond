@@ -33,11 +33,11 @@ The decoder runs and hears nothing. The antenna or its cable most often cause
 this. Check them first.
 
 **FAIL: `no FT8 or FT4 spot in 15 min.  The radio (radiod) is not running; tell the fleet admin.`**
-The radio program `radiod` stopped, so the decoder has nothing to decode. Tell
-the fleet admin.
+The radio program `radiod` is not running (stopped or failed), so the decoder
+has nothing to decode. Tell the fleet admin.
 
-**FAIL: `psk-recorder is inactive.  Fix: smd start psk-recorder`** (or another state)
-The decoder stopped. Run the command the line gives.
+**FAIL: `psk-recorder is <state>.  Fix: smd start psk-recorder`**
+The line names the state the service has: `inactive`, `failed` or another word. Run the command the line gives.
 
 **FAIL: `psk-recorder keeps restarting.  Tell the fleet admin.`** and
 **`psk-recorder is installed but has no service.  Tell the fleet admin.`**
@@ -46,14 +46,18 @@ The service crashes or does not exist. Tell the fleet admin.
 **WAIT: `psk-recorder is ...; bring-up has not started it yet`** or
 **`...; it starts once the SDR is plugged in`**
 Bring-up has not started this service, or the radio receiver (SDR) was
-missing. Wait, or plug the SDR in. See [platform.bringup](platform.bringup.md).
+missing. Wait, or plug the SDR in. See the bring-up check page.
 
 ## What to do
 
-Follow the line. A quiet band can empty a 15-minute window, but a working
-station on a busy band rarely sees zero.
+Follow the line.
 
 ## Where to look closer
 
-Run `smd watch psk` in the VM for live upload counts. The TUI Activity screen
-shows the same tail.
+Run `smd watch psk` in the VM for live upload counts. The Activity screen in the
+TUI offers the same tail.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

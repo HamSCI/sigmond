@@ -32,10 +32,10 @@ The decoder started recently. Wait.
 The decoder runs and hears nothing. Check the antenna and cable.
 
 **FAIL: `no WSPR spot in 10 min.  The radio (radiod) is not running; tell the fleet admin.`**
-The radio program `radiod` stopped. Tell the fleet admin.
+The radio program `radiod` is not running (stopped or failed). Tell the fleet admin.
 
-**FAIL: `wspr-recorder is inactive.  Fix: smd start wspr-recorder`** (or another state)
-The decoder stopped. Run the command the line gives.
+**FAIL: `wspr-recorder is <state>.  Fix: smd start wspr-recorder`**
+The line names the state the service has: `inactive`, `failed` or another word. Run the command the line gives.
 
 **FAIL: `wspr-recorder keeps restarting.  Tell the fleet admin.`** and
 **`wspr-recorder is installed but has no service.  Tell the fleet admin.`**
@@ -43,13 +43,17 @@ The service crashes or does not exist. Tell the fleet admin.
 
 **WAIT: `wspr-recorder is ...; bring-up has not started it yet`** or
 **`...; it starts once the SDR is plugged in`**
-See [platform.bringup](platform.bringup.md). Wait, or plug the SDR in.
+See the bring-up check page. Wait, or plug the SDR in.
 
 ## What to do
 
-Follow the line. WSPR hears fewer stations than FT8, so a thin window on a
-poor band may pass with few spots, but a window of zero means trouble.
+Follow the line.
 
 ## Where to look closer
 
 Run `smd watch wspr` in the VM. It shows each upload batch to WSPRnet.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

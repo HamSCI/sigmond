@@ -28,11 +28,14 @@ data, so act before it reaches zero.
 
 ## What to do
 
-Tell the fleet admin. Do not delete files by hand under `/var/lib`; the
-recorders own them. The fleet admin decides what to trim or whether the disk
-needs to grow.
+Tell the fleet admin, as the line says.
 
 ## Where to look closer
 
-Open the TUI's Resources screen (`smd tui`). It lists each filesystem and the
-sigmond data folders with their sizes.
+Open the Resources screen in the TUI (`smd tui`). It lists the filesystems
+and the sigmond data folders.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

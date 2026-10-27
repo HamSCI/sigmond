@@ -23,17 +23,21 @@ ok    receiver page  http://127.0.0.1:8081 answers
 
 **FAIL: `http://127.0.0.1:8081 does not answer: <reason>`**
 The page server refused or timed out. The reason names the cause, for example
-"Connection refused". The `ka9q-web` service stopped or stalled.
+"Connection refused".
 
 **FAIL: `http://127.0.0.1:8081 does not answer: status N`**
-The server answered, but with an error status instead of 200.
+The server answered, but with any answer other than 200 OK.
 
 ## What to do
 
-Tell the fleet admin. If the decoders pass, the data keeps flowing and only
-the page has failed.
+Tell the fleet admin.
 
 ## Where to look closer
 
-The TUI Logs screen tails `ka9q-web`. Run `smd watch ka9q` in the VM for the
-live view.
+Run `smd status` in the VM, or open the Overview screen in the TUI
+(`smd tui`). Both show the state of the `ka9q-web` service.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

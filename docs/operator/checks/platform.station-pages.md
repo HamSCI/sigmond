@@ -25,7 +25,7 @@ ok    station pages  http://127.0.0.1:8000 answers
 The page server refused or timed out. The reason names the cause.
 
 **FAIL: `http://127.0.0.1:8000 does not answer: status N`**
-The server answered with an error status instead of 200.
+The server answered with any answer other than 200 OK.
 
 ## What to do
 
@@ -34,4 +34,10 @@ so run `smd check` in the VM to see the line, and send it on.
 
 ## Where to look closer
 
-The TUI Logs screen tails the `station-web` service.
+Run `smd status` in the VM, or open the Overview screen in the TUI
+(`smd tui`). Both show the state of the `station-web` service.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

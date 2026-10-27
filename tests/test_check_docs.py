@@ -27,4 +27,17 @@ def test_no_page_without_a_check():
 def test_readme_links_every_page():
     readme = (DOCS / "README.md").read_text()
     for check_id in IDS:
-        assert f"({check_id}.md)" in readme
+        assert f"{check_id}.md" in readme
+
+
+def test_pages_use_no_markdown_links_and_name_the_generic_fails():
+    # station-web's docs viewer cannot follow a relative .md link
+    for page in DOCS.glob("*.md"):
+        text = page.read_text()
+        assert ".md)" not in text, page.name
+        if page.name != "README.md":
+            assert 'See "When a check cannot run"' in " ".join(text.split()), page.name
+    readme = (DOCS / "README.md").read_text()
+    assert "## When a check cannot run" in readme
+    assert "cannot read <path> as <user>" in readme
+    assert "the check itself failed: <Type>: <message>" in readme

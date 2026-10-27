@@ -35,10 +35,10 @@ The service started recently. Wait.
 The service runs but sends no report. Tell the fleet admin.
 
 **FAIL: `meteor-scatter has reported nothing in 5 min.  The radio (radiod) is not running; tell the fleet admin.`**
-The radio program `radiod` stopped. Tell the fleet admin.
+The radio program `radiod` is not running (stopped or failed). Tell the fleet admin.
 
-**FAIL: `meteor-scatter is inactive.  Fix: smd start meteor-scatter`** (or another state)
-The service stopped. Run the command the line gives.
+**FAIL: `meteor-scatter is <state>.  Fix: smd start meteor-scatter`**
+The line names the state the service has: `inactive`, `failed` or another word. Run the command the line gives.
 
 **FAIL: `meteor-scatter keeps restarting.  Tell the fleet admin.`** and
 **`meteor-scatter is installed but has no service.  Tell the fleet admin.`**
@@ -46,7 +46,7 @@ The service crashes or does not exist. Tell the fleet admin.
 
 **WAIT: `meteor-scatter is ...; bring-up has not started it yet`** or
 **`...; it starts once the SDR is plugged in`**
-See [platform.bringup](platform.bringup.md).
+See the bring-up check page.
 
 ## What to do
 
@@ -54,4 +54,9 @@ Follow the line.
 
 ## Where to look closer
 
-Run `smd watch meteor` in the VM for the live report lines.
+Run `smd watch meteor` in the VM for a live tail of MSK144 decodes.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

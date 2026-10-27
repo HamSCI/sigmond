@@ -35,11 +35,11 @@ The settings file is missing. Tell the fleet admin.
 The recorder started within the last 12 minutes. Wait.
 
 **FAIL: `no file in 11 min from <channels>.  Tell the fleet admin.`**
-The named channels wrote nothing. The radio, the recorder, or the disk may
-have stalled. Tell the fleet admin, and name the channels.
+The named channels wrote no file in that time. Tell the fleet admin, and name
+the channels.
 
-**FAIL: `hf-timestd is inactive.  Fix: smd start hf-timestd`** (or another state)
-The recorder stopped. Run the command the line gives.
+**FAIL: `hf-timestd is <state>.  Fix: smd start hf-timestd`**
+The line names the state the service has: `inactive`, `failed` or another word. Run the command the line gives.
 
 **FAIL: `hf-timestd keeps restarting.  Tell the fleet admin.`** and
 **`hf-timestd is installed but has no service.  Tell the fleet admin.`**
@@ -47,14 +47,18 @@ The service crashes or does not exist. Tell the fleet admin.
 
 **WAIT: `hf-timestd is ...; bring-up has not started it yet`** or
 **`...; it starts once the SDR is plugged in`**
-See [platform.bringup](platform.bringup.md).
+See the bring-up check page.
 
 ## What to do
 
-Follow the line. A GRAPE failure with a PSK or WSPR failure points at the
-radio itself, so check the SDR and the antenna.
+Follow the line.
 
 ## Where to look closer
 
-The TUI Logs screen tails the `hf-timestd` services. The Resources screen
-shows whether the disk fills up.
+The Logs screen in the TUI follows the `hf-timestd` service journal. The
+storage check covers the disk.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.

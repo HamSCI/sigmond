@@ -28,13 +28,19 @@ ok    magnetometer page  http://127.0.0.1:8082 answers
 The page server refused or timed out. The reason names the cause.
 
 **FAIL: `http://127.0.0.1:8082 does not answer: status N`**
-The server answered with an error status instead of 200.
+The server answered with any answer other than 200 OK.
 
 ## What to do
 
-Tell the fleet admin. Check the [magnetometer line](sensor.magnetometer.md) too.
-If it fails as well, fix that first.
+Tell the fleet admin. Read the magnetometer check page too; if that line
+fails as well, deal with it first.
 
 ## Where to look closer
 
-Run `smd watch mag` in the VM. The TUI Logs screen tails the web service.
+Run `smd watch mag` in the VM to see the recorder at work. `smd status` shows
+the web service's state.
+
+## Two further FAIL lines
+
+Any check can print one of two generic FAIL lines. See "When a check cannot
+run" in the checks README.
