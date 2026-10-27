@@ -100,13 +100,10 @@ class TestLoadCatalog:
         assert sw.contract == '0.8'
         assert sw.install_script is None or sw.install_script == ''
         assert sw.start_priority == 220                 # after hf-timestd (50) and hamsci-physics (60)
-        # hs-uploader is REQUIRED, not incidental: the installer clones only
-        # what `requires` names, and station-web's deploy.toml [build] runs
-        # `pip install -e /opt/git/sigmond/hs-uploader` (hamsci-physics needs
-        # it; it is not on PyPI).  Without it the build pointed at a directory
-        # nothing had cloned.
-        assert set(sw.requires) == {'hf-timestd', 'hamsci-physics', 'hamsci-dsp',
-                                    'hs-uploader'}
+        # The core needs nothing scientific: a station without hf-timestd or
+        # hamsci-physics still gets the status and documentation pages.  The
+        # science siblings arrive through hamsci-physics's own `requires`.
+        assert not sw.requires
         assert 'ka9q-radio' not in sw.requires
 
     def test_station_web_in_dasi2_profile(self):
@@ -116,6 +113,13 @@ class TestLoadCatalog:
         clients = cat['profile']['dasi2']['clients']
         assert clients[-1] == 'station-web'
         assert clients.index('station-web') > clients.index('hamsci-physics')
+
+    def test_station_web_last_in_every_station_profile(self):
+        import tomllib
+        with open(REPO_CATALOG, 'rb') as fh:
+            cat = tomllib.load(fh)
+        for name in ('dasi2', 'base', 'client'):
+            assert cat['profile'][name]['clients'][-1] == 'station-web', name
 
     def test_every_late_client_belongs_to_a_profile(self):
         """Spec §17: a client no profile names is INSTALLABLE BUT NEVER

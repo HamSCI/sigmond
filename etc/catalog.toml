@@ -95,15 +95,15 @@ start_priority  = 60                                  # after the timing core (5
 
 [client.station-web]
 kind            = "client"
-description     = "Station data reports and documentation (metrology, ionospheric science, GNSS vTEC); reads products under /var/lib/timestd"
+description     = "Station status, documentation and data reports; timing and science pages where hf-timestd runs"
 repo            = "https://github.com/mijahauan/station-web"   # staging: transfers to HamSCI/
 uses            = []
-# The installer clones ONLY what `requires` names, and station-web's
-# deploy.toml [build] installs hs-uploader editable (hamsci-physics needs it
-# and it is not on PyPI).  Leaving it out left the build step pointing at a
-# directory that was never cloned.  gnss-vtec stays optional: station-web
-# reads its product when present and reports it not-applicable when absent.
-requires        = ["hf-timestd", "hamsci-physics", "hamsci-dsp", "hs-uploader"]
+# The core needs nothing scientific, so `requires` is empty and station-web
+# installs on every kind of station.  Where hf-timestd runs, hamsci-physics's
+# own entry pulls hf-timestd, hamsci-dsp and hs-uploader, and the timing and
+# science pages load.  gnss-vtec stays optional: station-web reads its
+# product when present and reports it not-applicable when absent.
+requires        = []
 contract        = "0.8"
 install_script  = ""                                  # deploy.toml [build]/[install] drive it
 start_priority  = 220
@@ -351,12 +351,12 @@ optional           = ["codar-sounder", "hf-tec", "hfdl-recorder", "superdarn-sou
 
 [profile.base]
 description        = "Base SDR station — local radiod + web + timing, no recording clients"
-clients            = ["hf-timestd"]
+clients            = ["hf-timestd", "station-web"]
 local_radiod_infra = ["igmp-querier", "ka9q-web"]
 optional           = ["gpsdo-monitor"]
 
 [profile.client]
 description        = "Decode-only station — clients against a REMOTE radiod (no local ka9q-radio/web)"
-clients            = ["hf-timestd", "wspr-recorder", "psk-recorder"]
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "station-web"]
 local_radiod_infra = []
 optional           = ["mag-recorder", "codar-sounder", "hfdl-recorder", "hf-tec", "superdarn-sounder"]
