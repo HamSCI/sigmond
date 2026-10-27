@@ -4785,6 +4785,24 @@ def cmd_version(args) -> int:
     return 0
 
 
+def cmd_manifest_status(args) -> int:
+    """`smd admin manifest status [--json]` -- adopted manifest vs live HEADs.
+    Read-only, so no _need_root."""
+    import json as _json
+    from sigmond.manifest_status import manifest_status
+    st = manifest_status()
+    if getattr(args, 'json', False):
+        print(_json.dumps(st))
+        return 0
+    if not st['present']:
+        print(f"no usable manifest at {st['source']}")
+        return 0
+    print(f"manifest {st['source']} (release {st['release'] or 'unknown'})")
+    for name, status in st['components'].items():
+        print(f"  {name:<24} {status}")
+    return 0
+
+
 def cmd_manifest_adopt(args) -> int:
     """`smd admin manifest adopt <path> [--apply]` — let an already-running
     host adopt a blessed manifest in place.
@@ -15073,12 +15091,22 @@ def _git_behind_ahead(repo_dir: Path, ref: str) -> tuple[int, int]:
         return 0, 0
 
 
+def _fetched_at(repo_dir) -> str | None:
+    """ISO-8601 UTC mtime of <repo>/.git/FETCH_HEAD, or None if never fetched."""
+    try:
+        mtime = (Path(repo_dir) / '.git' / 'FETCH_HEAD').stat().st_mtime
+    except OSError:
+        return None
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(mtime))
+
+
 def _component_statuses(args, *, fetch: bool) -> list[dict]:
     """Build a status row per catalog component.
 
     Returns a list of dicts: {name, kind, lifecycle, repo_dir, local,
     local_date, upstream, upstream_date, behind, ahead, commit_index,
-    dirty, dirty_reason, policy, verdict}.
+    dirty, dirty_reason, policy, verdict, fetched_at}.  `fetched_at` is the
+    FETCH_HEAD mtime (ISO UTC) or None; missing-repo rows carry none.
 
     `fetch=True` runs `git fetch --quiet` per repo first so divergence is
     live; otherwise relies on whatever upstream refs were last cached.
@@ -15315,6 +15343,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             'dirty_reason': reason or '',
             'policy': policy,
             'verdict': verdict,
+            'fetched_at': _fetched_at(repo_dir),
         })
 
     # --- sigmond itself (the smd host tool) ----------------------------------
@@ -15391,6 +15420,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 'dirty_reason': s_reason or '',
                 'policy': 'latest',
                 'verdict': s_verdict,
+                'fetched_at': _fetched_at(sigmond_dir),
             })
     return rows
 
@@ -26390,6 +26420,13 @@ def main() -> int:
              'only, never writes.')
     p_m_adopt.add_argument('--base', help='component checkout root (default /opt/git/sigmond)')
 
+    p_m_status = manifest_sub.add_parser(
+        'status',
+        help='report how each live component stands against the adopted '
+             'manifest (read-only)')
+    p_m_status.add_argument('--json', action='store_true',
+                            help='machine-readable output')
+
     p_m_restore = manifest_sub.add_parser(
         'restore',
         help='roll live component checkouts BACK to a blessed manifest — '
@@ -27325,6 +27362,8 @@ def main() -> int:
             return cmd_manifest_adopt(args)
         if m_cmd == 'restore':
             return cmd_manifest_restore(args)
+        if m_cmd == 'status':
+            return cmd_manifest_status(args)
         p_manifest.print_help()
         return 0
 
