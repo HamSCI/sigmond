@@ -270,8 +270,6 @@ class _Proxied:
     flag: str
     carrier: str
     direct: str
-    call_key: str
-    grid_key: str
     call_attr: str
     enabled_attr: str
 
@@ -279,8 +277,6 @@ class _Proxied:
 PROXIED_SERVICES = (
     _Proxied(flag="forward_to_wsprnet",
              carrier="wspr-wsprdaemon", direct="wspr-wsprnet",
-             call_key="wsprnet_reporter_call",
-             grid_key="wsprnet_reporter_grid",
              call_attr="wsprnet_call", enabled_attr="wsprnet_proxy"),
 )
 
@@ -317,16 +313,28 @@ def apply_proxying(pipelines: list, coord: Coordination) -> list:
             continue
         transport = dict(carrier["transport"])
         transport[svc.flag] = True
-        call = (getattr(coord.station, svc.call_attr, "") or "").strip()
-        if call:
-            # Only a NARROWER override travels.  With none, the server
-            # posts under the spot's own rx_sign, which is already this
-            # station's reporter id — sending it again could only
-            # disagree with itself.
-            transport[svc.call_key] = call
-            grid = (coord.host.grid or "").strip()
-            if grid:
-                transport[svc.grid_key] = grid
+        # ⛔ NO IDENTITY IS SENT, ON PURPOSE.  The server posts under the
+        # spot's own rx_sign, which IS this station's reporter id — the
+        # same call the direct pipeline used — so switching to the proxy
+        # cannot change who the spots are credited to.
+        #
+        # ⚠ [station] wsprnet_call looks like the key to use here and is
+        # NOT.  The direct wsprnet pipeline never read it either: that
+        # transport takes [identity] call, which comes from the reporter
+        # id.  Found set to "AC0G" on AC0G/B4 while the station posted as
+        # "AC0G/B4" — honouring it here would have silently moved a live
+        # station's wsprnet credit the moment it opted in.  A site that
+        # genuinely needs a different wsprnet identity sets it once on the
+        # server, in wsprnet_reporters.json, where it is visible to the
+        # person who would have to debug it.
+        stale = (getattr(coord.station, svc.call_attr, "") or "").strip()
+        mine = (coord.station.reporter_id or coord.host.call or "").strip()
+        if stale and mine and stale != mine:
+            logger.warning(
+                "uploader-manifest: [station] %s is %r but this station "
+                "reports as %r; %s is read by NO upload path, direct or "
+                "proxied — spots stay credited to %r",
+                svc.call_attr, stale, mine, svc.call_attr, mine)
         out = [dict(p, transport=transport) if p is carrier else p
                for p in out]
         before = len(out)

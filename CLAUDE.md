@@ -351,9 +351,17 @@ that hides itself:
   hs-uploader writes that field 0 when unset, so switching off still switches
   off.  An explicit `false` in every station's config would read as a
   decision each operator made.
-- **The reporter identity travels only as a NARROWER override**
-  (`[station] wsprnet_call`).  With none, the server posts under the spot's
-  own rx_sign, which is already this station's reporter id.
+- **⛔ NO IDENTITY IS SENT, and `[station] wsprnet_call` is NOT it.**  The
+  server posts under the spot's own rx_sign, which *is* the reporter id the
+  direct pipeline used, so switching to the proxy cannot change who the
+  spots are credited to.  `wsprnet_call` looks like the key for this and is
+  read by no upload path, direct or proxied — the direct wsprnet transport
+  takes `[identity] call`.  Found set to `"AC0G"` on AC0G/B4 while the
+  station posted as `"AC0G/B4"`; honouring it would have silently moved a
+  live station's wsprnet credit the moment it opted in.  A contradiction
+  now logs a warning instead.  A site that genuinely needs a different
+  wsprnet identity sets it once on the server, in `wsprnet_reporters.json`,
+  where whoever has to debug it can see it.
 
 **⚠ This puts the station's callsign on uploads sent from a WD server's
 address.**  It is the operator's decision — never a site-profile default, and

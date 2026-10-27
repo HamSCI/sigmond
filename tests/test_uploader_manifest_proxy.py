@@ -25,6 +25,7 @@ from sigmond.uploader_manifest import apply_proxying          # noqa: E402
 def _coord(*, proxy=False, call="", grid="EM38ww"):
     return Coordination(host=Host(call="AC0G/B4", grid=grid),
                         station=Station(wsprnet_proxy=proxy,
+                                        reporter_id="AC0G/B4",
                                         wsprnet_call=call))
 
 
@@ -86,18 +87,39 @@ def test_a_malformed_carrier_also_keeps_the_direct_pipeline():
     assert "wspr-wsprnet" in _names(out)
 
 
-def test_the_identity_travels_only_when_it_is_a_NARROWER_override():
-    """With no [station] wsprnet_call the server posts under the spot's own
-    rx_sign — already this station's reporter id.  Sending it again could
-    only disagree with itself."""
-    out = apply_proxying(_pipes(), _coord(proxy=True, call=""))
-    tar = next(p for p in out if p["name"] == "wspr-wsprdaemon")
-    assert "wsprnet_reporter_call" not in tar["transport"]
+def test_SWITCHING_TO_THE_PROXY_CANNOT_MOVE_THE_CREDIT(caplog):
+    """⛔⛔ FOUND ON A LIVE STATION.  AC0G/B4 has [station] wsprnet_call =
+    "AC0G" while it actually posts to wsprnet as "AC0G/B4" — the direct
+    pipeline never read that key, it takes [identity] call.  An earlier
+    version of this renderer honoured it, which would have silently moved
+    a live station's wsprnet credit the moment it opted in.
 
+    No identity is sent at all: the server posts under the spot's own
+    rx_sign, which IS the reporter id the direct pipeline used, so the
+    switch cannot change who gets credited."""
+    import logging
     out = apply_proxying(_pipes(), _coord(proxy=True, call="AC0G"))
     tar = next(p for p in out if p["name"] == "wspr-wsprdaemon")
-    assert tar["transport"]["wsprnet_reporter_call"] == "AC0G"
-    assert tar["transport"]["wsprnet_reporter_grid"] == "EM38ww"
+    assert "wsprnet_reporter_call" not in tar["transport"]
+    assert "wsprnet_reporter_grid" not in tar["transport"]
+
+
+def test_a_contradictory_wsprnet_call_is_reported_not_obeyed(caplog):
+    """It reads as a request nobody honours, so say so rather than leave
+    the operator believing it does something."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        apply_proxying(_pipes(), _coord(proxy=True, call="AC0G"))
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("wsprnet_call" in m and "AC0G/B4" in m for m in msgs), msgs
+
+
+def test_a_matching_wsprnet_call_says_nothing(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING):
+        apply_proxying(_pipes(), _coord(proxy=True, call="AC0G/B4"))
+    assert not [r for r in caplog.records
+                if "wsprnet_call" in r.getMessage()]
 
 
 def test_proxying_does_not_mutate_the_caller_s_pipelines():
