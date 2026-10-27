@@ -23254,6 +23254,11 @@ def cmd_instance_list(args) -> int:
     client_filter = getattr(args, 'client', None)
     clients = [client_filter] if client_filter else None
     instances = inst.list_instances(catalog_clients=clients)
+    if getattr(args, 'json', False):
+        import json
+        from sigmond import instance_report
+        print(json.dumps({'instances': instance_report.instance_rows(instances)}))
+        return 0
     if not instances:
         if client_filter:
             _info(f'no instances of {client_filter} on this host')
@@ -25890,6 +25895,9 @@ def main() -> int:
         help='list all per-reporter instances on this host')
     p_i_list.add_argument('client', nargs='?', default=None,
                           help='restrict to one client (e.g. wspr-recorder)')
+    p_i_list.add_argument('--json', action='store_true',
+                          help='print {"instances": [...]} with enabled and '
+                               'active state per unit')
 
     p_i_show = instance_sub.add_parser(
         'show',
