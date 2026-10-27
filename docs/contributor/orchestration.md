@@ -179,6 +179,7 @@ left to list: the v2 removals in
 | `admin sources` | multi-SDR hosts | which SDR source each client consumes from: `list`, `add`, `remove`, `apply` | `cmd_sources_*` → `sources.py`, `instance.py` | `add`/`remove`/`apply` (root) |
 | `admin storage` | maintenance | the local sink backend: `migrate-to-sqlite`, `trim`, `tune-timestd` | `cmd_storage_migrate_to_sqlite`, `cmd_storage_trim`, `cmd_timestd_tune_storage` → `storage_migrate.py`, `storage_trim.py` | `--yes`/`--apply` (root) |
 | `admin timing` | debugging | timing-chain reconciler across GPSDO → gpsd → chrony → hf-timestd | `cmd_timing` → `commands/timing.py` | plan-first; applying needs root |
+| `admin viewers` | debugging | list the station web viewers (ka9q-web per radiod, gmag-webui) with port, unit, state and port conflicts | `cmd_admin_viewers` → `viewers.py` | read-only |
 | `admin uninstall` | teardown | tear down the whole sigmond install; plan-first, `--yes` to execute | `cmd_uninstall` → `uninstall.py` | `--yes` does (root) |
 | `admin uploader` | uploads | generate `/etc/hs-uploader/pipelines.toml` from each client's `deploy.toml` (`manifest`); see [The uploader manifest step](#the-uploader-manifest-step) | `cmd_uploader_manifest` → `commands/uploader.py`, `uploader_manifest.py` | `--write`/`--enable` (root) |
 | `admin validate` | before a change | run the cross-client harmonization rules, read-only | `cmd_validate` → `commands/validate.py`, `harmonize.py`, `sysview.py` | no |

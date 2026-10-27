@@ -23247,6 +23247,33 @@ def _normalize_reporter_arg(args, inst) -> bool:
     return True
 
 
+def cmd_admin_viewers(args) -> int:
+    """List the web viewers (ka9q-web per radiod, gmag-webui) with ports,
+    units, state and port conflicts.  Read-only."""
+    from sigmond import viewers
+    from sigmond.component_state import compute_state
+    try:
+        gmag_installed = compute_state('gmag-webui').installed
+    except Exception:
+        gmag_installed = False
+    rows = viewers.list_viewers(_ka9q_web_targets(), gmag_installed,
+                                viewers.systemctl_is_active)
+    if getattr(args, 'json', False):
+        import json
+        print(json.dumps({'viewers': rows,
+                          'conflicts': viewers.port_conflicts(rows)}))
+        return 0
+    _heading('viewers')
+    if not rows:
+        _info('no web viewers on this station')
+    for r in rows:
+        print(f'  {r["name"]:<14} {r["port"]:>5}  {r["active"]:<9} '
+              f'{r["unit"]}  {r["label"]}')
+    for c in viewers.port_conflicts(rows):
+        _warn(f'port {c["port"]} claimed by {", ".join(c["names"])}')
+    return 0
+
+
 def cmd_instance_list(args) -> int:
     inst = _instance_module()
     if inst is None:
@@ -26412,6 +26439,13 @@ def main() -> int:
     p_hb_show.add_argument('--json', dest='json', action='store_true',
         help='print the raw envelope instead of the verdict table')
 
+    p_viewers = admin_sub.add_parser(
+        'viewers',
+        help='list the station web viewers (ka9q-web, gmag-webui) with '
+             'ports, units, state and port conflicts')
+    p_viewers.add_argument('--json', action='store_true',
+        help='print {"viewers": [...], "conflicts": [...]}')
+
     p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
     p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
@@ -27305,6 +27339,9 @@ def main() -> int:
             return cmd_admin_heartbeat_show(args)
         p_heartbeat.print_help()
         return 0
+
+    if args.command == 'viewers':
+        return cmd_admin_viewers(args)
 
     if args.command == 'personalize':
         return cmd_personalize(args)
