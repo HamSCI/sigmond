@@ -23,7 +23,9 @@ import grp
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -106,13 +108,20 @@ def _run_one(name: str, args: List[str], run: Callable, now: Callable,
                 "ran_at": _iso_utc(now()), "exit": -1, "data": None,
                 "error": None}
     try:
+        # errors="replace": a stray non-UTF-8 byte must not cost the
+        # snapshot; json.loads below judges what it got.
         proc = run([smd, *args], stdin=subprocess.DEVNULL,
-                   capture_output=True, text=True, timeout=TIMEOUT_S)
+                   capture_output=True, text=True, errors="replace",
+                   timeout=TIMEOUT_S)
     except subprocess.TimeoutExpired:
         envelope["error"] = "timed out"
         return envelope
     except (OSError, subprocess.SubprocessError) as exc:
         envelope["error"] = f"could not run: {exc}"
+        return envelope
+    except Exception as exc:
+        # Anything else still becomes an envelope, never a missing file.
+        envelope["error"] = f"{type(exc).__name__}: {exc}"
         return envelope
     envelope["exit"] = proc.returncode
     try:
@@ -135,9 +144,10 @@ def write_snapshots(names: Iterable[str], out_dir: Path,
     """Run each named command and write `<out_dir>/<name>.json`.
 
     Each name runs on its own: one that fails, times out or prints
-    something other than JSON gets an envelope saying so, and the rest
-    are still written.  An unknown name raises KeyError before anything
-    runs.  Returns the envelopes by name.
+    something other than JSON gets an envelope saying so, and one whose
+    file cannot be written is reported on stderr and left out of the
+    result; the rest are still written.  An unknown name raises KeyError
+    before anything runs.  Returns the envelopes written, by name.
     """
     # Resolved at call time, so a test's patch of subprocess.run applies.
     run = run or subprocess.run
@@ -147,34 +157,47 @@ def write_snapshots(names: Iterable[str], out_dir: Path,
     written: Dict[str, dict] = {}
     for name, args in jobs:
         envelope = _run_one(name, args, run, now, smd)
-        _write_atomic(out_dir / f"{name}.json", json.dumps(envelope) + "\n")
+        try:
+            _write_atomic(out_dir / f"{name}.json",
+                          json.dumps(envelope) + "\n")
+        except Exception as exc:
+            print(f"{name}: could not write the snapshot: {exc}",
+                  file=sys.stderr)
+            continue
         written[name] = envelope
     return written
 
 
-def take_requests(req_dir: Path, last_run: float, now: float,
-                  min_interval_s: float = MIN_REQUEST_INTERVAL_S) -> bool:
-    """Delete every request file in `req_dir`; return whether a refresh
-    should run.
+def _consume_requests(req_dir: Path) -> int:
+    """Remove every entry in `req_dir` and return how many there were.
 
-    It should when at least one request was waiting and the last requested
-    refresh ran `min_interval_s` or more ago.  The files go either way:
-    left in place, they would set sigmond-snapshot-request.path off again
-    the moment its service finished.
+    Every entry counts as a request and every entry goes, whatever its
+    kind: sigmond-snapshot-request.path's PathExistsGlob matches
+    directories and symlinks too, so one left behind would set the path
+    unit off again the moment its service finished, until systemd failed
+    it.  Symlinks are unlinked, never followed.
     """
     try:
         entries = list(Path(req_dir).iterdir())
     except FileNotFoundError:
-        return False
-    asked = False
+        return 0
     for entry in entries:
         if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
             continue
         try:
             entry.unlink()
         except FileNotFoundError:
             pass
-        asked = True
+    return len(entries)
+
+
+def take_requests(req_dir: Path, last_run: float, now: float,
+                  min_interval_s: float = MIN_REQUEST_INTERVAL_S) -> bool:
+    """Remove every request in `req_dir`; return whether a refresh may run
+    now: at least one request waited, and the last requested refresh ran
+    `min_interval_s` or more ago."""
+    asked = _consume_requests(req_dir) > 0
     return asked and now - last_run >= min_interval_s
 
 
@@ -188,38 +211,63 @@ def _last_request(out_dir: Path) -> float:
 def write_requested(req_dir: Path, out_dir: Path,
                     run: Optional[Callable] = None,
                     now: Optional[Callable] = None,
-                    smd: str = SMD) -> bool:
-    """Answer station-web's refresh requests: consume them, and write the
-    check snapshot if take_requests allows.  The time of the last answered
-    request lives in `<out_dir>/.last-request`.  Returns whether it wrote."""
+                    sleep: Optional[Callable] = None,
+                    smd: str = SMD,
+                    min_interval_s: float = MIN_REQUEST_INTERVAL_S
+                    ) -> Optional[Dict[str, dict]]:
+    """Answer station-web's refresh requests with one check snapshot.
+
+    It consumes every waiting request first, so a burst collapses into one
+    refresh.  No request is ever dropped: when the last requested refresh
+    ran under `min_interval_s` ago, it sleeps out the remainder and then
+    refreshes.  A request that arrives during the sleep stays in place and
+    sets the path unit off again afterwards.  The time of the last answered
+    request lives in `<out_dir>/.last-request`.
+
+    Returns None when no request waited, else write_snapshots' result
+    (empty if the check snapshot could not be written).
+    """
     now = now or time.time
+    sleep = sleep or time.sleep
     out_dir = Path(out_dir)
-    t = now()
-    if not take_requests(req_dir, _last_request(out_dir), t):
-        return False
+    if _consume_requests(req_dir) == 0:
+        return None
+    last = _last_request(out_dir)
+    wait = min_interval_s - (now() - last)
+    if wait > 0:
+        sleep(wait)
+    # Never record a time inside the window just waited out.
+    t = max(now(), last + min_interval_s)
     # Recorded before the run, so a check that fails still holds the limit.
     _write_atomic(out_dir / LAST_REQUEST, f"{t}\n")
-    write_snapshots(["check"], out_dir, run=run, now=now, smd=smd)
-    return True
+    return write_snapshots(["check"], out_dir, run=run, now=now, smd=smd)
+
+
+def _print_written(names: List[str], written: Dict[str, dict]) -> int:
+    for name in names:
+        env = written.get(name)
+        if env is None:
+            print(f"{name}: NOT WRITTEN")
+            continue
+        line = f"{name}: exit {env['exit']}"
+        if env["error"]:
+            line += f" ({env['error'].splitlines()[-1]})"
+        print(line)
+    return 0 if all(n in written for n in names) else 1
 
 
 def cmd_write(only: Optional[str] = None, request: bool = False) -> int:
     """`smd admin snapshot write [--only NAME | --request]`.
 
-    Exits 0 once the envelopes are written, whatever the commands returned:
-    each envelope records its own command's failure.
+    Exits 0 once every envelope is written, whatever the commands
+    returned (each envelope records its own command's failure), and 1
+    when any snapshot file could not be written.
     """
     if request:
-        if write_requested(REQUEST_DIR, OUT_DIR):
-            print("check: refreshed on request")
-        else:
-            print("no refresh: no request waiting, or one ran under "
-                  f"{MIN_REQUEST_INTERVAL_S:.0f} s ago")
-        return 0
+        written = write_requested(REQUEST_DIR, OUT_DIR)
+        if written is None:
+            print("no refresh: no request waiting")
+            return 0
+        return _print_written(["check"], written)
     names = [only] if only else list(SNAPSHOT_COMMANDS)
-    for name, env in write_snapshots(names, OUT_DIR).items():
-        line = f"{name}: exit {env['exit']}"
-        if env["error"]:
-            line += f" ({env['error'].splitlines()[-1]})"
-        print(line)
-    return 0
+    return _print_written(names, write_snapshots(names, OUT_DIR))

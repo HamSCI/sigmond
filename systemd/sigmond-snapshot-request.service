@@ -2,8 +2,9 @@
 [Unit]
 Description=Refresh the check snapshot on station-web's request
 Documentation=https://github.com/HamSCI/sigmond
-# Started by sigmond-snapshot-request.path.  `--request` consumes the
-# request files and refreshes at most once per 30 s.
+# Started by sigmond-snapshot-request.path.  `--request` consumes every
+# waiting request, then refreshes once; inside 30 s of the last requested
+# refresh it waits out the rest of the 30 s first, so no request is dropped.
 
 [Service]
 Type=oneshot

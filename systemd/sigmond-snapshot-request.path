@@ -5,8 +5,15 @@ Documentation=https://github.com/HamSCI/sigmond
 
 [Path]
 # station-web drops an empty file here (the directory is 2770
-# root:sigmond-status).  The service deletes every request it finds, so the
-# glob stops matching and this unit waits for the next one.
+# root:sigmond-status).  The service removes every entry it finds, of any
+# kind (the glob matches directories and symlinks too), so the glob stops
+# matching and this unit waits for the next one.
+# ⚠ While anything still matches, this unit re-fires each time the service
+# ends.  So a service that fails BEFORE it consumes the requests (smd
+# missing, a broken import, /run/sigmond/snapshot absent) re-fires it until
+# systemd's start limit fails the unit, and "Check now" stops answering
+# with nothing on the page to say why.  Look here first:
+#   systemctl status sigmond-snapshot-request.path sigmond-snapshot-request.service
 PathExistsGlob=/run/sigmond/snapshot-request/*
 Unit=sigmond-snapshot-request.service
 

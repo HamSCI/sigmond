@@ -1,4 +1,6 @@
 """`smd admin snapshot write`: smd's JSON, wrapped in envelopes for station-web."""
+import contextlib
+import io
 import json
 import os
 import stat
@@ -212,25 +214,159 @@ class RequestTests(unittest.TestCase):
     def test_a_missing_request_dir_means_no_refresh(self):
         self.assertFalse(snapshot.take_requests(self.req / "gone", 0.0, NOW))
 
-    def test_write_requested_keeps_last_run_and_writes_check_only(self):
-        out = Path(self._tmp.name) / "snapshot"
-        out.mkdir()
-        run = _fake_run()
-        self._ask("a")
-        self.assertTrue(snapshot.write_requested(
-            self.req, out, run=run, now=lambda: NOW, smd=SMD))
-        self.assertEqual(sorted(p.name for p in out.iterdir()),
-                         [".last-request", "check.json"])
-        self.assertEqual(float((out / ".last-request").read_text()), NOW)
-        self._ask("b")
-        self.assertFalse(snapshot.write_requested(
-            self.req, out, run=run, now=lambda: NOW + 10, smd=SMD))
-        self.assertEqual(len(run.calls), 1)
+    def test_every_kind_of_entry_counts_and_goes(self):
+        # PathExistsGlob matches all of these; any one left behind would
+        # re-fire the path unit until systemd failed it.
+        self._ask("plain")
+        (self.req / "adir").mkdir()
+        (self.req / "adir" / "inner").touch()
+        outside = Path(self._tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "keep").touch()
+        (self.req / "link-to-dir").symlink_to(outside)
+        (self.req / "dangling").symlink_to(Path(self._tmp.name) / "nowhere")
+        os.mkfifo(self.req / "fifo")
+        self.assertEqual(snapshot._consume_requests(self.req), 5)
         self.assertEqual(list(self.req.iterdir()), [])
-        self._ask("c")
-        self.assertTrue(snapshot.write_requested(
-            self.req, out, run=run, now=lambda: NOW + 40, smd=SMD))
-        self.assertEqual(len(run.calls), 2)
+        # The symlink went, not what it pointed at.
+        self.assertTrue((outside / "keep").exists())
+
+    def test_a_directory_alone_is_a_request(self):
+        (self.req / "adir").mkdir()
+        self.assertTrue(snapshot.take_requests(self.req, 0.0, NOW))
+        self.assertEqual(list(self.req.iterdir()), [])
+
+
+class WriteRequestedTests(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.req = Path(self._tmp.name) / "snapshot-request"
+        self.req.mkdir()
+        self.out = Path(self._tmp.name) / "snapshot"
+        self.out.mkdir()
+        self.run = _fake_run()
+        self.clock = [NOW]
+        self.slept = []
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _ask(self, tag):
+        (self.req / tag).touch()
+
+    def _sleep(self, s):
+        self.slept.append(s)
+        self.clock[0] += s
+
+    def _answer(self):
+        return snapshot.write_requested(
+            self.req, self.out, run=self.run, now=lambda: self.clock[0],
+            sleep=self._sleep, smd=SMD)
+
+    def _last(self):
+        return float((self.out / ".last-request").read_text())
+
+    def test_first_request_refreshes_check_only_without_waiting(self):
+        self._ask("a")
+        written = self._answer()
+        self.assertEqual(list(written), ["check"])
+        self.assertEqual(self.slept, [])
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()),
+                         [".last-request", "check.json"])
+        self.assertEqual(self._last(), NOW)
+
+    def test_a_request_inside_the_window_waits_then_refreshes(self):
+        self._ask("a")
+        self._answer()
+        self.clock[0] = NOW + 10
+        self._ask("b")
+        written = self._answer()
+        self.assertEqual(list(written), ["check"])
+        self.assertEqual(self.slept, [20])
+        self.assertEqual(len(self.run.calls), 2)
+        self.assertEqual(self._last(), NOW + 30)
+        self.assertEqual(list(self.req.iterdir()), [])
+
+    def test_a_request_after_the_window_does_not_wait(self):
+        self._ask("a")
+        self._answer()
+        self.clock[0] = NOW + 40
+        self._ask("b")
+        self._answer()
+        self.assertEqual(self.slept, [])
+        self.assertEqual(self._last(), NOW + 40)
+
+    def test_a_burst_collapses_into_one_refresh(self):
+        for tag in ("a", "b", "c"):
+            self._ask(tag)
+        self._answer()
+        self.assertEqual(len(self.run.calls), 1)
+        self.assertEqual(list(self.req.iterdir()), [])
+
+    def test_no_request_means_no_refresh(self):
+        self.assertIsNone(self._answer())
+        self.assertEqual(self.run.calls, [])
+        self.assertEqual(list(self.out.iterdir()), [])
+
+
+class IndependenceTests(unittest.TestCase):
+    """One snapshot never stops the others."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self._tmp.name) / "snapshot"
+        self.out.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_run_is_asked_to_replace_undecodable_bytes(self):
+        run = _fake_run()
+        snapshot.write_snapshots(["check"], self.out, run=run,
+                                 now=lambda: NOW, smd=SMD)
+        self.assertEqual(run.calls[0][1].get("errors"), "replace")
+
+    def test_an_unexpected_exception_in_one_run_is_recorded(self):
+        def undecodable(cmd):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        written = snapshot.write_snapshots(
+            list(snapshot.SNAPSHOT_COMMANDS), self.out,
+            run=_fake_run({"components": undecodable}), now=lambda: NOW, smd=SMD)
+        self.assertEqual(len(written), 8)
+        env = json.loads((self.out / "components.json").read_text())
+        self.assertEqual(env["exit"], -1)
+        self.assertIsNone(env["data"])
+        self.assertIn("UnicodeDecodeError", env["error"])
+        self.assertEqual(len(list(self.out.glob("*.json"))), 8)
+
+    def test_one_write_failure_leaves_the_others_and_fails_the_verb(self):
+        real = snapshot._write_atomic
+
+        def flaky(path, text):
+            if path.name == "viewers.json":
+                raise OSError(28, "No space left on device")
+            return real(path, text)
+
+        err = io.StringIO()
+        with mock.patch.object(snapshot, "_write_atomic", flaky), \
+                mock.patch.object(snapshot, "OUT_DIR", self.out), \
+                mock.patch.object(snapshot.subprocess, "run", _fake_run()), \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(err):
+            rc = snapshot.cmd_write()
+        self.assertEqual(rc, 1)
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()),
+                         sorted(f"{n}.json" for n in snapshot.SNAPSHOT_COMMANDS
+                                if n != "viewers"))
+        self.assertIn("viewers: could not write the snapshot", err.getvalue())
+        self.assertIn("viewers: NOT WRITTEN", out.getvalue())
+
+    def test_all_written_returns_zero(self):
+        with mock.patch.object(snapshot, "OUT_DIR", self.out), \
+                mock.patch.object(snapshot.subprocess, "run", _fake_run()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(snapshot.cmd_write(), 0)
 
 
 class CommandParityTests(unittest.TestCase):

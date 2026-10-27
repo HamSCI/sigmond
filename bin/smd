@@ -26496,8 +26496,8 @@ def main() -> int:
     snap_which.add_argument('--only', choices=list(SNAPSHOT_COMMANDS),
         help='write this one snapshot only')
     snap_which.add_argument('--request', action='store_true',
-        help='consume station-web refresh requests; write the check '
-             'snapshot at most once per 30 s')
+        help='consume station-web refresh requests and write the check '
+             'snapshot once, at least 30 s after the last one')
 
     p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
