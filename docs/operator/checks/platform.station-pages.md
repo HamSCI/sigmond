@@ -34,8 +34,8 @@ so run `smd check` in the VM to see the line, and send it on.
 
 ## Where to look closer
 
-Run `smd status` in the VM, or open the Overview screen in the TUI
-(`smd tui`). Both show the state of the `station-web` service.
+No `smd watch` target covers the station pages. The reason after the colon in
+the line says what the check met.
 
 ## Two further FAIL lines
 

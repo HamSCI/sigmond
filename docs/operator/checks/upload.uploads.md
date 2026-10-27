@@ -49,7 +49,7 @@ Tell the fleet admin.
 
 ## What to do
 
-Follow the line. Do not switch uploads on by hand to clear a red line.
+Follow the line.
 
 ## Where to look closer
 
