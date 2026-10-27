@@ -91,8 +91,35 @@ class RenderTests(unittest.TestCase):
     def test_json_carries_lines_verdict_and_exit(self):
         rc, out = _run(types.SimpleNamespace(json=True), [Line(WAIT, 'GRAPE', 'soon')])
         doc = json.loads(out)
-        self.assertEqual(doc, {'lines': [{'mark': 'wait', 'label': 'GRAPE', 'text': 'soon'}],
+        self.assertEqual(doc, {'lines': [{'mark': 'wait', 'label': 'GRAPE', 'text': 'soon',
+                                          'id': 'sink.grape', 'stage': 'sink',
+                                          'client': 'hamsci-physics', 'fix': None}],
                                'verdict': 'WAIT', 'exit': 2})
+
+
+class JsonLineTests(unittest.TestCase):
+    def test_json_line_splits_the_fix(self):
+        text = 'psk-recorder is failed.  Fix: smd start psk-recorder'
+        d = check.json_line(Line(FAIL, 'PSK', text))
+        self.assertEqual(d['text'], text)
+        self.assertEqual(d['fix'], 'smd start psk-recorder')
+        self.assertEqual((d['id'], d['stage'], d['client']),
+                         ('decode.psk', 'decode', 'psk-recorder'))
+
+    def test_json_line_without_fix_has_none(self):
+        self.assertIsNone(check.json_line(Line(OK, 'PSK', 'fine'))['fix'])
+
+    def test_unknown_label_gets_a_derived_id(self):
+        d = check.json_line(Line(OK, 'new thing', 'x'))
+        self.assertEqual((d['id'], d['stage'], d['client']), ('other.new-thing', 'platform', None))
+
+    def test_every_check_has_meta(self):
+        for label, _fn in check.CHECKS:
+            self.assertIn(label, check.CHECK_META)
+        ids = [m[0] for m in check.CHECK_META.values()]
+        self.assertEqual(len(ids), len(set(ids)))
+        for _id, stage, _client in check.CHECK_META.values():
+            self.assertIn(stage, check.STAGES)
 
 
 class AsciiTests(unittest.TestCase):

@@ -50,6 +50,37 @@ class Line:
     text: str
 
 
+# The web groups checks by stage and links each to its client.  The ids stay
+# stable when a label's wording changes.  label -> (id, stage, client).
+STAGES = ('platform', 'sensor', 'decode', 'sink', 'upload')
+CHECK_META = {
+    'bring-up':          ('platform.bringup', 'platform', None),
+    'storage':           ('platform.storage', 'platform', None),
+    'magnetometer':      ('sensor.magnetometer', 'sensor', 'mag-recorder'),
+    'PSK':               ('decode.psk', 'decode', 'psk-recorder'),
+    'WSPR':              ('decode.wspr', 'decode', 'wspr-recorder'),
+    'meteor scatter':    ('decode.meteor', 'decode', 'meteor-scatter'),
+    'GRAPE':             ('sink.grape', 'sink', 'hamsci-physics'),
+    'uploads':           ('upload.uploads', 'upload', 'hs-uploader'),
+    'receiver page':     ('platform.receiver-page', 'platform', 'ka9q-web'),
+    'station pages':     ('platform.station-pages', 'platform', 'station-web'),
+    'magnetometer page': ('platform.magnetometer-page', 'platform', 'gmag-webui'),
+}
+FIX_SEP = '  ' + FIX
+
+
+def json_line(ln: Line) -> dict:
+    """A line as the --json document carries it: the text unchanged, plus
+    id, stage, client and the fix hint split from the text."""
+    meta = CHECK_META.get(ln.label)
+    if meta is None:
+        slug = re.sub(r'[^a-z0-9]+', '-', ln.label.lower()).strip('-')
+        meta = ('other.' + slug, 'platform', None)
+    _head, sep, fix = ln.text.partition(FIX_SEP)
+    return {**asdict(ln), 'id': meta[0], 'stage': meta[1], 'client': meta[2],
+            'fix': fix if sep else None}
+
+
 def verdict(lines: Sequence[Line]) -> str:
     marks = {ln.mark for ln in lines}
     if FAIL in marks:
@@ -176,7 +207,7 @@ def cmd_check(args, env: Optional[Env] = None, checks=None) -> int:
     lines = run_checks(env or default_env(), checks)
     word = verdict(lines)
     if getattr(args, 'json', False):
-        print(json.dumps({'lines': [asdict(ln) for ln in lines], 'verdict': word,
+        print(json.dumps({'lines': [json_line(ln) for ln in lines], 'verdict': word,
                           'exit': EXIT_CODES[word]}))
     else:
         for ln in lines:
