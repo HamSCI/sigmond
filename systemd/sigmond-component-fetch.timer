@@ -1,0 +1,13 @@
+# /etc/systemd/system/sigmond-component-fetch.timer
+[Unit]
+Description=Daily upstream fetch for component version comparisons
+Documentation=https://github.com/HamSCI/sigmond
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3600
+# A fetch missed while the host was down still matters: run it on resume.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

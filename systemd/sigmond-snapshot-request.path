@@ -1,0 +1,14 @@
+# /etc/systemd/system/sigmond-snapshot-request.path
+[Unit]
+Description=Watch for station-web's requests to refresh the check snapshot
+Documentation=https://github.com/HamSCI/sigmond
+
+[Path]
+# station-web drops an empty file here (the directory is 2770
+# root:sigmond-status).  The service deletes every request it finds, so the
+# glob stops matching and this unit waits for the next one.
+PathExistsGlob=/run/sigmond/snapshot-request/*
+Unit=sigmond-snapshot-request.service
+
+[Install]
+WantedBy=paths.target

@@ -820,7 +820,7 @@ ok "Venv ready at $VENV_DIR"
 # worth scraping.  gap-hourly IS enabled by default (see below) — it's
 # gated by ConditionPathExists so it's inert without hf-timestd.
 info "Installing sigmond systemd units → /etc/systemd/system/"
-for _unit in "$REPO_DIR"/systemd/sigmond-*.service "$REPO_DIR"/systemd/sigmond-*.timer; do
+for _unit in "$REPO_DIR"/systemd/sigmond-*.service "$REPO_DIR"/systemd/sigmond-*.timer "$REPO_DIR"/systemd/sigmond-*.path; do
     [[ -f "$_unit" ]] || continue
     $SUDO install -m 0644 "$_unit" /etc/systemd/system/
 done
@@ -841,6 +841,23 @@ if [[ -f "$REPO_DIR/systemd/sigmond-heartbeat.conf" ]]; then
     $SUDO systemd-tmpfiles --create /etc/tmpfiles.d/sigmond-heartbeat.conf 2>/dev/null \
         || warn "sigmond-heartbeat.conf: could not create /var/lib/sigmond/heartbeat yet (hsupload group not present?) — self-heals next boot or once hs-uploader is installed"
     ok "sigmond-heartbeat.conf installed"
+fi
+
+# station-web snapshots (lib/sigmond/snapshot.py).  sigmond-status is the
+# group that may read /run/sigmond/snapshot/ and drop refresh requests into
+# /run/sigmond/snapshot-request/.  sigmond owns it, so it never depends on a
+# client's install having run first; station-web's install adds its own user.
+# The group must exist before systemd-tmpfiles applies the conf below.
+if ! getent group sigmond-status >/dev/null 2>&1; then
+    info "Creating system group sigmond-status (readers of station snapshots)"
+    $SUDO groupadd --system sigmond-status
+fi
+if [[ -f "$REPO_DIR/systemd/sigmond-snapshot.conf" ]]; then
+    info "Installing sigmond-snapshot.conf → /etc/tmpfiles.d/"
+    $SUDO install -m 0644 "$REPO_DIR/systemd/sigmond-snapshot.conf" /etc/tmpfiles.d/
+    $SUDO systemd-tmpfiles --create /etc/tmpfiles.d/sigmond-snapshot.conf \
+        || warn "sigmond-snapshot.conf: could not create /run/sigmond/snapshot* — the snapshot timer will fail until it exists (next boot re-applies it)"
+    ok "sigmond-snapshot.conf installed"
 fi
 
 # Helper script invoked by sigmond-decode-health-collect.service.  Symlinked
@@ -1213,6 +1230,13 @@ $SUDO systemctl enable --now sigmond-guest-irq-affinity.service 2>/dev/null || t
 # owner of GPSDO/gpsd/chrony/hf-timestd recovery, replacing the hf-timestd watchdogs.
 # Service is ConditionFileIsExecutable=/usr/sbin/gpsd, so harmless where no local GPS.
 $SUDO systemctl enable --now sigmond-timing-reconcile.timer 2>/dev/null || true
+# station-web snapshots: the 5-minute writer, the refresh-request watcher, and
+# the daily upstream fetch that keeps "behind main" honest.  All read-only
+# toward the station, so safe on greenfield; on a host without station-web
+# the files simply go unread.
+$SUDO systemctl enable --now sigmond-snapshot.timer 2>/dev/null || true
+$SUDO systemctl enable --now sigmond-snapshot-request.path 2>/dev/null || true
+$SUDO systemctl enable --now sigmond-component-fetch.timer 2>/dev/null || true
 ok "sigmond-storage-trim-all.timer enabled + started (15-min cadence)"
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────

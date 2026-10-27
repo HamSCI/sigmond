@@ -26483,6 +26483,22 @@ def main() -> int:
     p_viewers.add_argument('--json', action='store_true',
         help='print {"viewers": [...], "conflicts": [...]}')
 
+    from sigmond.snapshot import SNAPSHOT_COMMANDS
+    p_snapshot = admin_sub.add_parser(
+        'snapshot',
+        help="write smd's read-only JSON to /run/sigmond/snapshot/ for "
+             'station-web (run by sigmond-snapshot.timer)')
+    snapshot_sub = p_snapshot.add_subparsers(dest='snapshot_command')
+    p_snap_write = snapshot_sub.add_parser(
+        'write',
+        help='run each snapshot command and write its envelope (root)')
+    snap_which = p_snap_write.add_mutually_exclusive_group()
+    snap_which.add_argument('--only', choices=list(SNAPSHOT_COMMANDS),
+        help='write this one snapshot only')
+    snap_which.add_argument('--request', action='store_true',
+        help='consume station-web refresh requests; write the check '
+             'snapshot at most once per 30 s')
+
     p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
     p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
@@ -27381,6 +27397,17 @@ def main() -> int:
 
     if args.command == 'viewers':
         return cmd_admin_viewers(args)
+
+    if args.command == 'snapshot':
+        if getattr(args, 'snapshot_command', None) != 'write':
+            p_snapshot.print_help()
+            return 0
+        # Writes /run; run as root by sigmond-snapshot*.service, where
+        # _need_root returns at once.
+        if _need_root('admin snapshot write'):
+            return 1
+        from sigmond.snapshot import cmd_write
+        return cmd_write(only=args.only, request=args.request)
 
     if args.command == 'personalize':
         return cmd_personalize(args)

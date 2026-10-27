@@ -1,0 +1,18 @@
+# /etc/systemd/system/sigmond-snapshot-request.service
+[Unit]
+Description=Refresh the check snapshot on station-web's request
+Documentation=https://github.com/HamSCI/sigmond
+# Started by sigmond-snapshot-request.path.  `--request` consumes the
+# request files and refreshes at most once per 30 s.
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Nice=19
+IOWeight=10
+ExecStart=/usr/local/bin/smd admin snapshot write --request
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-snapshot

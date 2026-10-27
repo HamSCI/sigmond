@@ -1,0 +1,20 @@
+# /etc/systemd/system/sigmond-snapshot.service
+[Unit]
+Description=Write smd's read-only JSON snapshots for station-web
+Documentation=https://github.com/HamSCI/sigmond
+# station-web runs unprivileged and runs no subprocess; it reads the files
+# this writes to /run/sigmond/snapshot/ (0640 root:sigmond-status).  See
+# lib/sigmond/snapshot.py.
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+# Background work: never compete with radiod or the decoders.
+Nice=19
+IOWeight=10
+ExecStart=/usr/local/bin/smd admin snapshot write
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-snapshot

@@ -1,0 +1,18 @@
+# /etc/systemd/system/sigmond-component-fetch.service
+[Unit]
+Description=Fetch each component's upstream so "behind main" stays current
+Documentation=https://github.com/HamSCI/sigmond
+# `smd component list --json` fetches each checkout as its owner
+# (_git_fetch_as_owner drops from root) and records FETCH_HEAD, whose mtime
+# the snapshot's --no-fetch rows report as fetched_at.  The listing itself
+# goes nowhere; the snapshot timer publishes the rows.
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Nice=19
+ExecStart=/usr/local/bin/smd component list --json
+StandardOutput=null
+StandardError=journal
+SyslogIdentifier=sigmond-component-fetch
