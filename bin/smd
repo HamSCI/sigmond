@@ -18646,6 +18646,17 @@ def _wsprnet_post_server_summary(server: str) -> str:
     return _WSPRNET_POST_DIAG_RE.sub('', server).strip()
 
 
+_WSPRNET_POST_CLEAN_RE = re.compile(r'(\d+)/(\d+) added')
+
+
+def _wsprnet_post_is_clean(server: str) -> bool:
+    """True when the (already trimmed) ``server`` tail says every posted
+    spot was added — "59/59 added" — i.e. nothing an operator needs to
+    see on the default `smd watch wspr` view."""
+    m = _WSPRNET_POST_CLEAN_RE.fullmatch(server.strip())
+    return bool(m) and m.group(1) == m.group(2)
+
+
 def _wspr_band_label(band: str) -> str:
     """wsprdaemon band name -> display label: '20' -> '20m', but the
     EU channels '80eu' / '60eu' are names, not metres ('60eum' was wrong)."""
@@ -19865,6 +19876,9 @@ def cmd_wspr_watch(args) -> int:
     show_spots = cap != 0
     backlog_min = max(0, int(getattr(args, 'backlog', 10) or 0))
     show_rejected = bool(getattr(args, 'rejected', False))
+    # Upload rows are two extra lines per cycle that almost always say
+    # 'all added' — hidden unless -u, or unless wsprnet bounced something.
+    show_uploads = bool(getattr(args, 'uploads', False))
 
     import re as _re
     import datetime as _datetime
@@ -19939,6 +19953,11 @@ def cmd_wspr_watch(args) -> int:
     _info('   stage: decoder (wsprd) → SQLite (wspr.spots) → upload (wsprdaemon.org / wsprnet)')
     _info('   ▸ one line per WSPR cycle, fired by wspr-recorder\'s')
     _info('     CycleBatcher the instant all bands\' spots are committed')
+    if show_uploads:
+        _info('   + wsprnet POST start / POST done row per upload batch (-u)')
+    else:
+        _info('   ▸ wsprnet upload rows hidden while every spot is added '
+              '(-u shows them; rejections always shown)')
     if cap is None:
         _info('   + ALL spots per band')
     elif cap > 0:
@@ -20480,13 +20499,14 @@ def cmd_wspr_watch(args) -> int:
                     tail = f'({kb} KB)'
                 else:
                     tail = f'(cycles {" + ".join(cl)}, {kb} KB)'
-                print(
-                    f'[{hms_now}] cycle UTC {hh_}:{mm_}'
-                    f'{" POST start":<20}  '
-                    f'{int(n_spots):>3} spots  '
-                    f'{tail}',
-                    flush=True,
-                )
+                if show_uploads:
+                    print(
+                        f'[{hms_now}] cycle UTC {hh_}:{mm_}'
+                        f'{" POST start":<20}  '
+                        f'{int(n_spots):>3} spots  '
+                        f'{tail}',
+                        flush=True,
+                    )
                 continue
             udm = upload_done_re.search(line)
             if udm:
@@ -20506,13 +20526,14 @@ def cmd_wspr_watch(args) -> int:
                         f'(cycles {" + ".join(cl)}) in {secs}s '
                         f'({rate} spots/s); server {server}'
                     )
-                print(
-                    f'[{hms_now}] cycle UTC {hh_}:{mm_}'
-                    f'{" POST done":<20}  '
-                    f'{int(n_spots):>3} spots  '
-                    f'{tail}',
-                    flush=True,
-                )
+                if show_uploads or not _wsprnet_post_is_clean(server):
+                    print(
+                        f'[{hms_now}] cycle UTC {hh_}:{mm_}'
+                        f'{" POST done":<20}  '
+                        f'{int(n_spots):>3} spots  '
+                        f'{tail}',
+                        flush=True,
+                    )
                 continue
 
             rjm = upload_rej_re.search(line)
@@ -24477,6 +24498,12 @@ def _add_wspr_watch_args(p) -> None:
                         'history (default 10; rows for those cycles have '
                         'usually been shipped + deleted so per-band '
                         'detail will be missing)')
+    p.add_argument('--uploads', '-u', action='store_true',
+                   help='also print the wsprnet "POST start" / "POST done" '
+                        'row for every upload batch.  Default: one line per '
+                        'cycle; a POST done row appears only when wsprnet '
+                        'did not add every spot (rejections are always '
+                        'listed).')
     p.add_argument('--rejected', '-r', action='store_true',
                    help='when a cycle ships with posted > added (wsprnet '
                         'rejected some spots), list the individual '

@@ -83,3 +83,18 @@ class WsprWatchHelpersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WsprPostCleanTests(unittest.TestCase):
+    """Default `smd watch wspr` hides POST rows that say 'all added'."""
+
+    def test_all_added_is_clean(self):
+        self.assertTrue(smd._wsprnet_post_is_clean("59/59 added"))
+
+    def test_short_count_is_not_clean(self):
+        self.assertFalse(smd._wsprnet_post_is_clean("61/62 added, 1 rejected"))
+        self.assertFalse(smd._wsprnet_post_is_clean("0/62 added"))
+
+    def test_unexpected_text_is_not_clean(self):
+        self.assertFalse(smd._wsprnet_post_is_clean("HTTP 503"))
+        self.assertFalse(smd._wsprnet_post_is_clean(""))
