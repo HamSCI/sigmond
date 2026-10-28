@@ -704,3 +704,22 @@ class BuildStepTests(_Rig):
         rc, text = self._update()
         self.assertNotEqual(rc, 0, text)
         self.assertIn("build exit 1", text)
+
+    def _malformed_build_component(self, name, body: bytes):
+        host = self._add_build_component(name)
+        (host / "deploy.toml").write_bytes(body)
+        # Committed locally so the tree stays clean for the pull.
+        _git("add", "-A", cwd=host); _git("commit", "-m", "bad", cwd=host)
+        return host
+
+    def test_a_deploy_toml_that_is_not_utf8_declares_no_build(self):
+        host = self._malformed_build_component("badbytes", b"[build]\nsteps = [\"\xff\xfe\"]\n")
+        rc, text = self._update()
+        self.assertNotIn("Traceback", text)
+        self.assertFalse((host / "built.marker").exists(), text)
+
+    def test_a_build_that_is_a_string_declares_no_build(self):
+        host = self._malformed_build_component("strbuild", b'build = "x"\n')
+        rc, text = self._update()
+        self.assertNotIn("Traceback", text)
+        self.assertFalse((host / "built.marker").exists(), text)

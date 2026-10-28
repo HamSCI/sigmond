@@ -4545,11 +4545,16 @@ def cmd_update(args) -> int:
         # rule as install_client: the build stands in only for an absent
         # installer, which the planner enforces.  A file that will not
         # parse declares no build.
+        # Read before the pull, like `installer`: a component gaining its
+        # first [build] in this very pull builds on the next update.
+        build = False
         try:
             with open(d / 'deploy.toml', 'rb') as _fh:
-                build = bool((tomllib.load(_fh).get('build') or {})
-                             .get('steps'))
-        except (OSError, tomllib.TOMLDecodeError):
+                _bsec = tomllib.load(_fh).get('build')
+            _steps = _bsec.get('steps') if isinstance(_bsec, dict) else None
+            build = isinstance(_steps, list) and bool(_steps)
+        except (OSError, ValueError):
+            # TOMLDecodeError and UnicodeDecodeError are both ValueError.
             build = False
         repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
                          'incoming': incoming, 'owner': owner,
