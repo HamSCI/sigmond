@@ -154,9 +154,8 @@ def test_refusing_origin_fails_and_leaves_the_clone_as_it_was(
 
 def test_component_fetch_deepens_before_it_fetches(origin, tmp_path,
                                                    monkeypatch):
-    """The daily fetch path (`_component_statuses` with fetch=True, which
-    `smd component list --json` in sigmond-component-fetch.service runs)
-    deepens each checkout before its usual fetch."""
+    """`_fetch_checkout` deepens a checkout before its usual fetch.  (The
+    test below checks that the daily fetch path calls `_fetch_checkout`.)"""
     order = []
     monkeypatch.setattr(smd, 'deepen_history',
                         lambda repo, **kw: order.append(('deepen', repo)) or 'full')
@@ -167,3 +166,46 @@ def test_component_fetch_deepens_before_it_fetches(origin, tmp_path,
     clone = _shallow_clone(origin, tmp_path / 'clone')
     smd._fetch_checkout(clone)
     assert order == [('deepen', clone), ('fetch', clone)]
+
+
+def test_component_statuses_fetches_through_fetch_checkout():
+    """Both fetch sites in `_component_statuses` (the per-component rows and
+    sigmond's own row) go through `_fetch_checkout`, so the daily fetch that
+    sigmond-component-fetch.service runs deepens every checkout."""
+    import inspect
+    src = inspect.getsource(smd._component_statuses)
+    assert '_fetch_checkout(repo_dir)' in src
+    assert '_fetch_checkout(sigmond_dir)' in src
+    assert '_git_fetch_as_owner(' not in src
+
+
+def test_fetch_that_fails_after_unshallowing_counts_as_deepened(origin,
+                                                               tmp_path):
+    """git can exit nonzero after it wrote the unshallowed packs.  Taking the
+    promisor key out then would leave promisor packs with no promisor
+    remote, a broken clone.  So a non-shallow result counts as deepened."""
+    clone = _shallow_clone(origin, tmp_path / 'clone')
+
+    def fetch_lies(cmd, **kw):
+        r = subprocess.run(cmd, **kw)
+        if 'fetch' in cmd and '--unshallow' in cmd:
+            return subprocess.CompletedProcess(cmd, 1, '', 'simulated failure')
+        return r
+
+    assert smd.deepen_history(clone, run=fetch_lies) == 'deepened'
+    assert git('rev-parse', '--is-shallow-repository', cwd=clone) == 'false'
+    assert git('rev-list', '--count', 'HEAD', cwd=clone) == '3'
+    assert _config(clone, 'remote.origin.promisor') == 'true'
+    assert _config(clone, 'remote.origin.partialclonefilter') is None
+
+
+def test_failure_keeps_keys_that_were_already_there(origin, tmp_path):
+    clone = _shallow_clone(origin, tmp_path / 'clone')
+    git('config', 'remote.origin.promisor', 'true', cwd=clone)
+    shutil.rmtree(origin)          # the origin now refuses every fetch
+
+    assert smd.deepen_history(clone) == 'failed'
+
+    assert git('rev-parse', '--is-shallow-repository', cwd=clone) == 'true'
+    assert _config(clone, 'remote.origin.promisor') == 'true'
+    assert _config(clone, 'remote.origin.partialclonefilter') is None

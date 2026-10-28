@@ -492,7 +492,15 @@ def deepen_history(repo: Path, run=subprocess.run) -> str:
     Returns "full" (not shallow; nothing fetched), "deepened" or "failed".
     Every write runs as the checkout's owner, the same way
     `_git_fetch_as_owner` runs its fetch.  A failure leaves the checkout
-    shallow, takes the two promisor keys back out, and logs one line.
+    shallow, takes back out whichever of the two keys this call added (a
+    key already there stays), and logs one line.
+
+    git can exit nonzero after it has written the unshallowed packs, and on
+    a timeout a git child under `sudo -u` can outlive the killed sudo.  So a
+    failed fetch re-asks whether the checkout is still shallow.  If it no
+    longer is, the call counts as "deepened" and keeps the promisor key:
+    taking it out would leave promisor packs with no promisor remote, a
+    broken clone.
     """
     repo = Path(repo)
     base = ['git', '-c', f'safe.directory={repo}', '-C', str(repo)]
@@ -522,24 +530,34 @@ def deepen_history(repo: Path, run=subprocess.run) -> str:
     if prefix is None:
         return _fail(_git_refused(repo, 'fetch --unshallow').stderr)
 
-    def _unset_keys():
-        for key, _ in _PROMISOR_KEYS:
+    # Only keys this call adds ever come back out.
+    added = []
+
+    def _unset(keys):
+        for key in keys:
             _git(prefix, ['config', '--unset', key])
 
     for key, value in _PROMISOR_KEYS:
+        if _git([], ['config', '--get', key]).returncode == 0:
+            continue
         r = _git(prefix, ['config', key, value])
         if r.returncode != 0:
-            _unset_keys()
+            _unset(added)
             return _fail(r.stderr)
+        added.append(key)
     r = _git(prefix, ['fetch', '--quiet', '--unshallow', '--filter=blob:none',
                       'origin'], timeout=_DEEPEN_TIMEOUT_S)
     if r.returncode != 0:
-        _unset_keys()
-        return _fail(r.stderr or r.stdout)
-    r = _git(prefix, ['config', '--unset', 'remote.origin.partialclonefilter'])
-    if r.returncode != 0:
-        _warn(f'{repo.name}: deepened, but later fetches stay blob-less — '
-              f'could not unset remote.origin.partialclonefilter')
+        again = _git([], ['rev-parse', '--is-shallow-repository'])
+        if not (again.returncode == 0 and again.stdout.strip() == 'false'):
+            _unset(added)
+            return _fail(r.stderr or r.stdout)
+    _filter = 'remote.origin.partialclonefilter'
+    if _filter in added:
+        r = _git(prefix, ['config', '--unset', _filter])
+        if r.returncode != 0:
+            _warn(f'{repo.name}: deepened, but later fetches stay blob-less — '
+                  f'could not unset {_filter}')
     return 'deepened'
 
 
