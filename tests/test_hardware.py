@@ -168,6 +168,24 @@ class TestRm3100HeldAdapter(unittest.TestCase):
         self.assertIs(self._call(False), True)
         self.assertTrue(self._probed())
 
+    def test_rm3100_probe_uses_the_configured_address(self):
+        cfg = self.d / 'mag-recorder-config.toml'
+        cfg.write_text('[mag]\ni2c_address = 0x20\n')
+        run = self._run(False)
+        hardware.rm3100_responds(run=run, magusb=self.magusb, dev=self.dev,
+                                 mag_dir=self.d, now=self.now, config_path=cfg)
+        argv = next(c for c in self.calls if str(self.magusb) in c)
+        self.assertEqual(argv[argv.index('-A') + 1], '0x20')
+
+    def test_rm3100_probe_falls_back_to_0x23_without_a_config(self):
+        cfg = self.d / 'absent.toml'
+        run = self._run(False)
+        hardware.rm3100_responds(run=run, magusb=self.magusb, dev=self.dev,
+                                 mag_dir=self.d, now=self.now, config_path=cfg)
+        argv = next(c for c in self.calls if str(self.magusb) in c)
+        self.assertEqual(argv[argv.index('-A') + 1], '0x23')
+        self.assertEqual(hardware.configured_mag_address(cfg), 0x23)
+
     def test_fuser_holder_also_skips_probe(self):
         import types
         self._samples()

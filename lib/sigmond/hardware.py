@@ -286,13 +286,30 @@ def mag_held_hint(run=subprocess.run, dev: Path = Path('/dev/ttyMAG0'),
     return ''
 
 
+MAG_CONFIG = Path('/etc/mag-recorder/mag-recorder-config.toml')
+
+
+def configured_mag_address(path=MAG_CONFIG) -> int:
+    """The RM3100 I2C address mag-recorder is configured for (`[mag].i2c_address`),
+    0x23 when the file or key is missing or unreadable."""
+    try:
+        import tomllib
+        with open(path, 'rb') as f:
+            addr = tomllib.load(f)['mag']['i2c_address']
+        if isinstance(addr, int) and not isinstance(addr, bool) and 0 <= addr <= 0x7F:
+            return addr
+    except Exception:   # noqa: BLE001 -- unreadable config: the default
+        pass
+    return 0x23
+
+
 def rm3100_responds(run=subprocess.run,
                     magusb: Path = Path('/usr/local/bin/mag-usb'),
                     dev: Path = Path('/dev/ttyMAG0'),
                     mag_dir=Path('/var/lib/mag-recorder'),
-                    now=None) -> Optional[bool]:
+                    now=None, config_path=MAG_CONFIG) -> Optional[bool]:
     """Functional magnetometer check: does the RM3100 actually ANSWER on the I2C
-    bus (0x23), not merely the Pololu adapter being present?  A USB-presence
+    bus (at the address mag-recorder is configured for, 0x23 by default), not merely the Pololu adapter being present?  A USB-presence
     probe passes when the adapter is plugged in but the sensor behind it is
     dead/unpowered/unwired (exactly the B4-100 case), so bring-up must probe the
     sensor itself.  Returns True (responding), False (adapter present but sensor
@@ -311,7 +328,8 @@ def rm3100_responds(run=subprocess.run,
             return _mag_held_verdict(mag_dir, now)[0]
         except Exception:   # noqa: BLE001 -- unreadable samples: unknown
             return None
-    r = run(['timeout', '8', str(magusb), '-A', '0x23'],
+    r = run(['timeout', '8', str(magusb), '-A',
+             f'0x{configured_mag_address(config_path):02X}'],
             capture_output=True, text=True)
     out = ((getattr(r, 'stdout', '') or '') + (getattr(r, 'stderr', '') or '')).lower()
     if '"x":' in out or 'revid' in out:
@@ -377,7 +395,7 @@ def gate_checks(prof, local: bool) -> list:
                 'Magnetometer (RM3100)', False,
                 mag_held_hint() or
                 'Pololu adapter present but the RM3100 is NOT answering '
-                'at 0x23 — check the sensor wiring/power'))
+                f'at 0x{configured_mag_address():02X} — check the sensor wiring/power'))
         else:
             checks.append(GateCheck(
                 'Magnetometer (RM3100)', present,
