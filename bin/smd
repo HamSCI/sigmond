@@ -420,6 +420,37 @@ def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     return _run_git_net(git_cmd, 'pull')
 
 
+def _git_owner_prefix(repo_dir: Path) -> 'list | None':
+    """The argv prefix that runs a git command in `repo_dir` as a user who
+    may write its .git: [] to run as ourselves, a sudo prefix to drop to
+    another user, or None when no unprivileged identity exists (the caller
+    then refuses rather than run git as root — sigmond#43).
+
+    As root, drop to $SUDO_USER, else the repo's owning user.  As anyone
+    else, drop to the checkout's owner when that is someone else."""
+    if os.geteuid() == 0:
+        target_user = _git_target_user(repo_dir)
+        if not target_user:
+            return None
+        return ['sudo', '-u', target_user, '-H', '--']
+    # Not root, and the checkout probably belongs to someone else
+    # (sigmond, timestd, wsprrec...).  A fetch needs to WRITE FETCH_HEAD
+    # and objects, so running as the invoking operator fails on every
+    # repo they do not own — and the failure used to be swallowed,
+    # leaving origin/* stale and `smd update` reporting "host is
+    # current" while components were behind (AC0G-ND 2026-09-03:
+    # gpsdo-monitor 2 behind, hf-timestd 1 behind, both reported clean).
+    # These remotes are https, so no per-user key is needed to fetch.
+    try:
+        owner = repo_dir.owner()
+    except Exception:                        # noqa: BLE001
+        owner = None
+    import getpass
+    if owner and owner != getpass.getuser():
+        return ['sudo', '-n', '-u', owner, '-H', '--']
+    return []
+
+
 def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     """git fetch --quiet, dropping privileges to a user who can talk to the
     remote — mirrors _git_pull_as_owner.  smd auto-elevates to root, which has
@@ -427,31 +458,105 @@ def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     fetch as root silently fails, leaving origin/* stale so `component list`
     falsely reports 'up to date' when origin/main has actually advanced.  Drop
     to $SUDO_USER (the human who ran smd, who has a registered key), else the
-    repo's owning user."""
+    repo's owning user.  See `_git_owner_prefix`."""
     git_cmd = ['git', '-c', f'safe.directory={repo_dir}', '-C', str(repo_dir),
                'fetch', '--quiet']
-    if os.geteuid() == 0:
-        target_user = _git_target_user(repo_dir)
-        if not target_user:
-            return _git_refused(repo_dir, 'fetch')
-        git_cmd = ['sudo', '-u', target_user, '-H', '--'] + git_cmd
-    else:
-        # Not root, and the checkout probably belongs to someone else
-        # (sigmond, timestd, wsprrec...).  A fetch needs to WRITE FETCH_HEAD
-        # and objects, so running as the invoking operator fails on every
-        # repo they do not own — and the failure used to be swallowed,
-        # leaving origin/* stale and `smd update` reporting "host is
-        # current" while components were behind (AC0G-ND 2026-09-03:
-        # gpsdo-monitor 2 behind, hf-timestd 1 behind, both reported clean).
-        # These remotes are https, so no per-user key is needed to fetch.
+    prefix = _git_owner_prefix(repo_dir)
+    if prefix is None:
+        return _git_refused(repo_dir, 'fetch')
+    return _run_git_net(prefix + git_cmd, 'fetch')
+
+
+_DEEPEN_TIMEOUT_S = 300
+_PROMISOR_KEYS = (('remote.origin.promisor', 'true'),
+                  ('remote.origin.partialclonefilter', 'blob:none'))
+
+
+def deepen_history(repo: Path, run=subprocess.run) -> str:
+    """Give a shallow checkout its full commit history, without old blobs.
+
+    Most component checkouts on a station come from `--depth 1` clones, so
+    `git log -- <page>` can only name the one boundary commit and the docs
+    browser cannot date a page.  A blob-less unshallow fetches every commit
+    and tree but no old file contents; git turns the checkout into a partial
+    clone whose promisor remote supplies a blob only if something asks for
+    one.  On B4 a depth-1 hf-timestd took 1 s and 2 MB, and its worktree
+    stayed clean.
+
+    After a successful unshallow the filter key comes back out, while
+    `remote.origin.promisor true` stays.  Later fetches then bring full
+    contents for new commits, so a pull or checkout of new work needs no
+    lazy fetch.  Only the blobs of commits older than the old shallow tip
+    stay lazy, and the shallow clone could not check those out at all.
+
+    Returns "full" (not shallow; nothing fetched), "deepened" or "failed".
+    Every write runs as the checkout's owner, the same way
+    `_git_fetch_as_owner` runs its fetch.  A failure leaves the checkout
+    shallow, takes the two promisor keys back out, and logs one line.
+    """
+    repo = Path(repo)
+    base = ['git', '-c', f'safe.directory={repo}', '-C', str(repo)]
+
+    def _git(prefix, args, timeout=30):
         try:
-            owner = repo_dir.owner()
-        except Exception:                        # noqa: BLE001
-            owner = None
-        import getpass
-        if owner and owner != getpass.getuser():
-            git_cmd = ['sudo', '-n', '-u', owner, '-H', '--'] + git_cmd
-    return _run_git_net(git_cmd, 'fetch')
+            return run(prefix + base + args, stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, timeout=timeout,
+                       env=_git_net_env())
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                args, 124, '', f'git {args[0]} timed out after {timeout}s')
+
+    shallow = _git([], ['rev-parse', '--is-shallow-repository'])
+    if shallow.returncode == 0 and shallow.stdout.strip() == 'false':
+        return 'full'
+
+    def _fail(why: str) -> str:
+        lines = (why or '').strip().splitlines()
+        _warn(f'{repo.name}: could not deepen shallow history — '
+              f'{lines[-1] if lines else "(no output)"}')
+        return 'failed'
+
+    if shallow.returncode != 0:
+        return _fail(shallow.stderr)
+    prefix = _git_owner_prefix(repo)
+    if prefix is None:
+        return _fail(_git_refused(repo, 'fetch --unshallow').stderr)
+
+    def _unset_keys():
+        for key, _ in _PROMISOR_KEYS:
+            _git(prefix, ['config', '--unset', key])
+
+    for key, value in _PROMISOR_KEYS:
+        r = _git(prefix, ['config', key, value])
+        if r.returncode != 0:
+            _unset_keys()
+            return _fail(r.stderr)
+    r = _git(prefix, ['fetch', '--quiet', '--unshallow', '--filter=blob:none',
+                      'origin'], timeout=_DEEPEN_TIMEOUT_S)
+    if r.returncode != 0:
+        _unset_keys()
+        return _fail(r.stderr or r.stdout)
+    r = _git(prefix, ['config', '--unset', 'remote.origin.partialclonefilter'])
+    if r.returncode != 0:
+        _warn(f'{repo.name}: deepened, but later fetches stay blob-less — '
+              f'could not unset remote.origin.partialclonefilter')
+    return 'deepened'
+
+
+def _fetch_checkout(repo_dir: Path) -> subprocess.CompletedProcess:
+    """The daily component fetch for one checkout: give a shallow clone its
+    history first (so the docs index can date pages), then the usual fetch.
+    A failed deepen never stops the fetch.
+
+    Interactive `smd component list` runs this path too, not only
+    sigmond-component-fetch.service.  That is fine: a checkout deepens once,
+    cheaply, and reads "full" on every later call."""
+    try:
+        deepen_history(repo_dir)
+    except Exception as e:                       # noqa: BLE001
+        _warn(f'{Path(repo_dir).name}: deepen failed — '
+              f'{e.__class__.__name__}: {e}')
+    return _git_fetch_as_owner(repo_dir)
 
 
 def _git_behind_main_live(repo_dir: Path, branch: str) -> tuple[int, str]:
@@ -15336,7 +15441,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
 
         fetch_ok = True
         if fetch:
-            fetch_ok = _git_fetch_as_owner(repo_dir).returncode == 0
+            fetch_ok = _fetch_checkout(repo_dir).returncode == 0
 
         local, upstream, behind, ahead = _git_divergence(repo_dir)
         local_date  = _git_commit_date(repo_dir, 'HEAD')
@@ -15442,7 +15547,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
         if (sigmond_dir / '.git').exists():
             s_fetch_ok = True
             if fetch:
-                s_fetch_ok = _git_fetch_as_owner(sigmond_dir).returncode == 0
+                s_fetch_ok = _fetch_checkout(sigmond_dir).returncode == 0
             s_local, s_upstream, s_behind, s_ahead = _git_divergence(sigmond_dir)
             s_up_date = ''
             if s_upstream:
