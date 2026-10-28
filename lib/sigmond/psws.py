@@ -637,11 +637,14 @@ def cmd_site_motd() -> int:
 # The archive holds private keys and restore runs as root, so restore checks
 # EVERY member before it writes ANY.  One symlink, hard link, device, fifo,
 # absolute path, `..` component or path outside the two trees refuses the
-# whole archive.  Nothing here prints a key's contents.
+# whole archive.  Every write, chown and chmod under the two trees then goes
+# through an fd opened O_NOFOLLOW (see _DIR_FLAGS).  Nothing here prints a
+# key's contents.
 # ---------------------------------------------------------------------------
 KEY_TREES = ("etc/hs-uploader/keys", "home/timestd/.ssh")
 KEYS_ARCHIVE = "site-keys.tar.gz"
-RESTORE_REFUSED = 4
+RESTORE_REFUSED = 4                 # nothing written
+RESTORE_PARTIAL = 5                 # a write failed partway
 
 
 def _lookup_owner(user: str, group: str):
@@ -671,52 +674,195 @@ def _invoking_user() -> tuple:
     return pw.pw_name, pw.pw_uid, pw.pw_gid, Path(pw.pw_dir)
 
 
-def save_keys(output: Path, *, root: Path = Path("/")) -> int:
+# Every privileged touch of a file under the two trees goes through an open
+# file descriptor, never a path.  /etc/hs-uploader/keys is group-writable
+# (root:sigmond 2775) and /home/timestd/.ssh belongs to timestd, so either
+# account could swap a directory or file for a symlink between a check and a
+# use; a path-based open, chown or chmod would then follow it as root.  The
+# ancestors (/etc, /home/timestd) resolve normally: their owners already
+# control what lies beneath them.
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_tree_top(root: Path, tree: str, create: bool = False):
+    """fd of the key tree's own directory, opened without following a link
+    at its last component; None when it does not exist (and create is
+    False).  A symlink there raises OSError (ELOOP/ENOTDIR)."""
+    parts = tree.split("/")
+    parent = root.joinpath(*parts[:-1])
+    if create:
+        parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    try:
+        pfd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            return os.open(parts[-1], _DIR_FLAGS, dir_fd=pfd)
+        except FileNotFoundError:
+            if not create:
+                return None
+        try:
+            os.mkdir(parts[-1], 0o755, dir_fd=pfd)
+        except FileExistsError:
+            pass
+        return os.open(parts[-1], _DIR_FLAGS, dir_fd=pfd)
+    finally:
+        os.close(pfd)
+
+
+def _walk_dirs(top_fd: int, parts: tuple, create: bool = False) -> int:
+    """fd of top/parts..., each component opened O_NOFOLLOW relative to the
+    one above.  A symlinked component raises OSError rather than lead the
+    walk elsewhere.  The caller closes the returned fd."""
+    fd = os.dup(top_fd)
+    try:
+        for name in parts:
+            try:
+                nfd = os.open(name, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(name, 0o755, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                nfd = os.open(name, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_entry(dir_fd: int, name: str):
+    """(fd, stat) for a plain file or directory `name` in dir_fd, or
+    (None, None) for anything else -- a symlink, device, fifo, or an entry
+    swapped between the lstat and the open.  Never follows a link."""
+    import stat as _stat
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None, None
+    is_dir = _stat.S_ISDIR(st.st_mode)
+    if not (is_dir or _stat.S_ISREG(st.st_mode)):
+        return None, None
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    if is_dir:
+        flags |= os.O_DIRECTORY
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except OSError:
+        return None, None
+    fst = os.fstat(fd)
+    if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) \
+            or _stat.S_IFMT(fst.st_mode) != _stat.S_IFMT(st.st_mode):
+        os.close(fd)
+        return None, None
+    return fd, fst
+
+
+def _tarinfo(name: str, st, is_dir: bool):
+    import tarfile as _tarfile
+    ti = _tarfile.TarInfo(name)
+    ti.type = _tarfile.DIRTYPE if is_dir else _tarfile.REGTYPE
+    ti.mode = st.st_mode & 0o7777
+    ti.uid, ti.gid, ti.mtime = st.st_uid, st.st_gid, int(st.st_mtime)
+    try:
+        import grp as _grp
+        import pwd as _pwd
+        ti.uname = _pwd.getpwuid(st.st_uid).pw_name
+        ti.gname = _grp.getgrgid(st.st_gid).gr_name
+    except (KeyError, ImportError):
+        pass
+    return ti
+
+
+def _add_tree(tf, top_fd: int, arcname: str, skipped: list) -> int:
+    """Add the tree at top_fd to tf as arcname, reading every entry through
+    an O_NOFOLLOW fd.  Anything not a plain file or directory goes to
+    `skipped` (restore refuses it).  Returns the number of files added."""
+    import io as _io
+    import stat as _stat
+    tf.addfile(_tarinfo(arcname, os.fstat(top_fd), True))
+    nfiles = 0
+    for name in sorted(os.listdir(top_fd)):
+        member = f"{arcname}/{name}"
+        fd, st = _open_entry(top_fd, name)
+        if fd is None:
+            skipped.append(member)
+            continue
+        try:
+            if _stat.S_ISDIR(st.st_mode):
+                nfiles += _add_tree(tf, fd, member, skipped)
+            else:
+                with os.fdopen(os.dup(fd), "rb") as fh:
+                    data = fh.read()
+                ti = _tarinfo(member, st, False)
+                ti.size = len(data)
+                tf.addfile(ti, _io.BytesIO(data))
+                nfiles += 1
+        finally:
+            os.close(fd)
+    return nfiles
+
+
+def save_keys(output: Path, *, root: Path = Path("/"), owner=None,
+              chown=os.fchown) -> int:
     """Write a gzip tar of whichever KEY_TREES exist under `root` to `output`,
-    mode 600.  Members carry the names `tar -C /` gives them.  Returns 0, or
-    1 when neither tree exists (or the write fails)."""
+    mode 600.  Members carry the names `tar -C /` gives them.  `owner`
+    (uid, gid), when given, goes onto the file through chown(fd, uid, gid)
+    before it takes its name.  Returns 0, or 1 when neither tree exists (or
+    the write fails)."""
     import tarfile as _tarfile
     root = Path(root)
     output = Path(os.path.abspath(output))
-    trees = [t for t in KEY_TREES
-             if (root / t).is_dir() and not (root / t).is_symlink()]
-    if not trees:
+    tops = []
+    for t in KEY_TREES:
+        try:
+            fd = _open_tree_top(root, t)
+        except OSError:
+            fd = None              # a link at the tree's top: not a tree
+        if fd is not None:
+            tops.append((t, fd))
+    if not tops:
         print(f"{_R}✗ no station keys here{_X} — neither "
               f"{' nor '.join('/' + t for t in KEY_TREES)} exists.")
         return 1
     skipped: list = []
-
-    def _keep(ti):
-        # restore refuses anything but plain files and directories, so the
-        # archive never carries one: a skipped link is named, not saved.
-        if ti.isreg() or ti.isdir():
-            return ti
-        skipped.append(ti.name)
-        return None
-
-    # mkstemp creates the file 600 from the first byte; the rename then
-    # replaces whatever stood at `output` (even a symlink) without
-    # following it.
-    fd, tmp = _tempfile.mkstemp(dir=str(output.parent),
-                                prefix=".site-keys.", suffix=".tmp")
+    nfiles = 0
+    # mkstemp creates the file 600 from the first byte, and the owner lands
+    # on its fd before the rename gives it a name the operator can reach.
+    # The rename replaces whatever stood at `output` (even a symlink)
+    # without following it.
+    tmp = None
     try:
+        fd, tmp = _tempfile.mkstemp(dir=str(output.parent),
+                                    prefix=".site-keys.", suffix=".tmp")
         os.fchmod(fd, 0o600)
+        if owner is not None:
+            chown(fd, owner[0], owner[1])
         with os.fdopen(fd, "wb") as fh:
             with _tarfile.open(fileobj=fh, mode="w:gz") as tf:
-                for t in trees:
-                    tf.add(str(root / t), arcname=t, recursive=True,
-                           filter=_keep)
-                nfiles = sum(1 for m in tf.getmembers() if m.isreg())
+                for t, tfd in tops:
+                    nfiles += _add_tree(tf, tfd, t, skipped)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, output)
     except OSError as e:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         print(f"{_R}✗ could not write {output}: {e.strerror or e}{_X}")
         return 1
+    finally:
+        for _t, tfd in tops:
+            os.close(tfd)
     print(f"{_G}✓ wrote {output}{_X} — {nfiles} key file(s) from "
-          f"{', '.join('/' + t for t in trees)}; mode 600")
+          f"{', '.join('/' + t for t, _ in tops)}; mode 600")
     for name in skipped:
         print(f"  {_Y}⚠ left out {name!r}: not a plain file "
               f"(restore-keys refuses links and devices){_X}")
@@ -769,49 +915,79 @@ def _target_problem(root: Path, parts: tuple, is_dir: bool) -> str:
     return ""
 
 
+def _fix_tree(dir_fd: int, owner, chown, top_mode=None, file_mode=None) -> None:
+    """chown everything under dir_fd (and dir_fd itself) to owner through
+    O_NOFOLLOW fds; links, devices and fifos stay untouched.  top_mode sets
+    dir_fd's own mode; file_mode(name) gives a mode for a plain file directly
+    inside dir_fd, or None to leave it."""
+    import stat as _stat
+    if owner is not None:
+        chown(dir_fd, owner[0], owner[1])
+    if top_mode is not None:
+        os.fchmod(dir_fd, top_mode)
+    for name in os.listdir(dir_fd):
+        fd, st = _open_entry(dir_fd, name)
+        if fd is None:
+            continue
+        try:
+            if _stat.S_ISDIR(st.st_mode):
+                _fix_tree(fd, owner, chown)
+            else:
+                if owner is not None:
+                    chown(fd, owner[0], owner[1])
+                mode = file_mode(name) if file_mode else None
+                if mode is not None:
+                    os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+
+
+def _wizard_key_mode(name: str):
+    # sigmond-wizard.sh: chmod 600 id_ed25519*, then chmod 644 *.pub
+    if name.endswith(".pub"):
+        return 0o644
+    if name.startswith("id_ed25519"):
+        return 0o600
+    return None
+
+
 def _set_key_owners(root: Path, chown) -> None:
     """Owners and modes as sigmond-wizard.sh sets them after its restore:
     keys hsupload:sigmond (root:sigmond without an hsupload user),
-    id_ed25519* 600 then *.pub 644; .ssh timestd:timestd, its dir 700."""
-    def _chown_tree(top: Path, owner) -> None:
+    id_ed25519* 600 then *.pub 644, and the directory 2775 as hs-uploader's
+    install.sh makes it; .ssh timestd:timestd, its dir 700."""
+    keys_owner = _lookup_owner("hsupload", "sigmond") \
+        or _lookup_owner("root", "sigmond")
+    ssh_owner = _lookup_owner("timestd", "timestd")
+    for tree, owner, top_mode, file_mode, missing in (
+            (KEY_TREES[0], keys_owner, 0o2775, _wizard_key_mode,
+             "no group sigmond"),
+            (KEY_TREES[1], ssh_owner, 0o700, None, "no user timestd")):
+        try:
+            top = _open_tree_top(root, tree)
+        except OSError:
+            print(f"  {_Y}⚠ /{tree} is not a plain directory — owners left "
+                  f"alone{_X}")
+            continue
+        if top is None:
+            continue
         if owner is None:
-            return
-        uid, gid = owner
-        chown(str(top), uid, gid)
-        for dirpath, dirnames, filenames in os.walk(top):
-            for n in dirnames + filenames:
-                p = os.path.join(dirpath, n)
-                if not os.path.islink(p):
-                    chown(p, uid, gid)
-
-    keys = root / KEY_TREES[0]
-    if keys.is_dir() and not keys.is_symlink():
-        owner = _lookup_owner("hsupload", "sigmond") \
-            or _lookup_owner("root", "sigmond")
-        if owner is None:
-            print(f"  {_Y}⚠ no group sigmond — /{KEY_TREES[0]} keeps its "
-                  f"owner{_X}")
-        _chown_tree(keys, owner)
-        for pat, mode in (("id_ed25519*", 0o600), ("*.pub", 0o644)):
-            for f in keys.glob(pat):
-                if f.is_file() and not f.is_symlink():
-                    os.chmod(f, mode)
-    ssh = root / KEY_TREES[1]
-    if ssh.is_dir() and not ssh.is_symlink():
-        owner = _lookup_owner("timestd", "timestd")
-        if owner is None:
-            print(f"  {_Y}⚠ no user timestd — /{KEY_TREES[1]} keeps its "
-                  f"owner{_X}")
-        _chown_tree(ssh, owner)
-        os.chmod(ssh, 0o700)
+            print(f"  {_Y}⚠ {missing} — /{tree} keeps its owner{_X}")
+        try:
+            _fix_tree(top, owner, chown, top_mode, file_mode)
+        finally:
+            os.close(top)
 
 
-def restore_keys(archive: Path, *, root: Path = Path("/"), chown=os.chown,
+
+def restore_keys(archive: Path, *, root: Path = Path("/"), chown=os.fchown,
                  verify=None) -> int:
     """Put a save-keys (or wizard tar) archive back under `root`, then return
-    verify()'s exit code.  Refuses -- returns 4 and writes nothing -- when any
-    member could land outside KEY_TREES or is not a plain file or directory,
-    or when the archive cannot be read."""
+    verify()'s exit code (0-3).  Refuses -- returns 4 and writes nothing --
+    when any member could land outside KEY_TREES or is not a plain file or
+    directory, or when the archive cannot be read.  Returns 5 when a write
+    fails partway; the owners and modes still go onto what landed.
+    chown(fd, uid, gid) receives an open fd, never a path."""
     import tarfile as _tarfile
     if verify is None:
         verify = cmd_site_verify
@@ -861,37 +1037,69 @@ def restore_keys(archive: Path, *, root: Path = Path("/"), chown=os.chown,
         except (OSError, _tarfile.TarError, EOFError) as e:
             return _refuse(f"damaged archive ({e})")
 
-    # Pass 2: write.  Directories first (shallowest first), then files, each
-    # through a 600 temp file renamed into place.  Set-id bits never land.
-    written = 0
+    # Pass 2: write, every step relative to an fd opened O_NOFOLLOW from the
+    # tree's own directory down (see _DIR_FLAGS).  Directories first,
+    # shallowest first, then files, each through an O_EXCL 600 temp file
+    # renamed into place.  Set-id bits never land; the tree tops get their
+    # modes from _set_key_owners.
+    def _split(parts):
+        for t in KEY_TREES:
+            tp = tuple(t.split("/"))
+            if parts[:len(tp)] == tp:
+                return t, parts[len(tp):]
+        raise ValueError(parts)               # pass 1 excluded this
+
+    written, partial, tops = 0, False, {}
     try:
         for parts, ti in sorted((x for x in plan if x[1].isdir()),
                                 key=lambda x: len(x[0])):
-            d = root.joinpath(*parts)
-            d.mkdir(mode=0o755, parents=True, exist_ok=True)
-            os.chmod(d, ti.mode & 0o777)
-        for parts, ti, data in files:
-            dest = root.joinpath(*parts)
-            dest.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-            fd, tmp = _tempfile.mkstemp(dir=str(dest.parent),
-                                        prefix=".restore.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "wb") as fh:
-                    fh.write(data)
-                    os.fchmod(fh.fileno(), ti.mode & 0o777)
-                os.replace(tmp, dest)
-            except BaseException:
+            tree, sub = _split(parts)
+            if tree not in tops:
+                tops[tree] = _open_tree_top(root, tree, create=True)
+            if sub:
+                dfd = _walk_dirs(tops[tree], sub, create=True)
                 try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+                    os.fchmod(dfd, ti.mode & 0o777)
+                finally:
+                    os.close(dfd)
+        for n, (parts, ti, data) in enumerate(files):
+            tree, sub = _split(parts)
+            if tree not in tops:
+                tops[tree] = _open_tree_top(root, tree, create=True)
+            dfd = _walk_dirs(tops[tree], sub[:-1], create=True)
+            tmp = f".restore.{os.getpid()}.{n}.tmp"
+            try:
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                             | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                             dir_fd=dfd)
+                try:
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(data)
+                        os.fchmod(fh.fileno(), ti.mode & 0o777)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.rename(tmp, sub[-1], src_dir_fd=dfd, dst_dir_fd=dfd)
+                except BaseException:
+                    try:
+                        os.unlink(tmp, dir_fd=dfd)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                os.close(dfd)
             written += 1
     except OSError as e:
-        print(f"{_R}✗ restore stopped after {written} file(s): "
-              f"{e.strerror or e}{_X} — run it again as root.")
-        return RESTORE_REFUSED
+        partial = True
+        print(f"{_R}✗ restore stopped after {written} of {len(files)} "
+              f"file(s): {e.strerror or e}{_X}")
+    finally:
+        for fd in tops.values():
+            os.close(fd)
     _set_key_owners(root, chown)
+    if partial:
+        print(f"  {_Y}owners and modes set on what landed; fix the cause "
+              f"and run restore-keys again.{_X}")
+        return RESTORE_PARTIAL
     print(f"{_G}✓ restored {written} key file(s){_X} into "
           f"{', '.join('/' + t for t in KEY_TREES if (root / t).is_dir())}"
           f" — now checking the PSWS login")
@@ -899,15 +1107,14 @@ def restore_keys(archive: Path, *, root: Path = Path("/"), chown=os.chown,
 
 
 def cmd_site_save_keys(output=None, *, root: Path = Path("/"),
-                       chown=os.chown) -> int:
+                       chown=os.fchown) -> int:
     """`smd psws save-keys`: write the archive (default ~/site-keys.tar.gz
-    of the invoking user) and hand it to that user."""
+    of the invoking user), owned by that user from before it has a name."""
     _name, uid, gid, home = _invoking_user()
     out = Path(os.path.abspath(output)) if output else home / KEYS_ARCHIVE
-    rc = save_keys(out, root=root)
+    rc = save_keys(out, root=root, owner=(uid, gid), chown=chown)
     if rc != 0:
         return rc
-    chown(str(out), uid, gid)
     print(f"  Copy it off this station before the flash, then onto the "
           f"install stick's small EFI drive.")
     print(f"  {_K}It holds private keys: delete every copy once the new "

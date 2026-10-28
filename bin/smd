@@ -27583,7 +27583,9 @@ def main() -> int:
     p_restore_keys = psws_site_sub.add_parser('restore-keys',
         help='after a reflash: put the keys from a save-keys archive back '
              'with the right owners, then run `smd psws verify`.  Refuses an '
-             'archive holding links or paths outside the two key directories')
+             'archive holding links or paths outside the two key directories.  '
+             'Exit: 0-3 from verify (0 verified), 4 refused (nothing written), '
+             '5 partial (a write failed; owners set on what landed)')
     p_restore_keys.add_argument('file', metavar='FILE',
         help='the site-keys.tar.gz that save-keys wrote')
 

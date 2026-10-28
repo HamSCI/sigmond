@@ -48,6 +48,10 @@ class FakeChown:
         self.calls = {}
 
     def __call__(self, path, uid, gid, **kw):
+        # restore and save hand over an open fd, never a path; name it the
+        # way the kernel does, so tests can say which file it was.
+        if isinstance(path, int):
+            path = os.readlink(f"/proc/self/fd/{path}")
         self.calls[str(path)] = (uid, gid)
 
 
@@ -341,17 +345,29 @@ def test_restore_never_prints_key_contents(tmp_path, capsys):
 
 # ── the CLI wrapper: default output and owner ───────────────────────────────
 
-def test_save_defaults_to_the_invoking_users_home_and_chowns_it(tmp_path, monkeypatch):
+def test_save_sets_the_owner_before_the_rename_in_the_users_home(tmp_path, monkeypatch):
     src = tmp_path / "old"
     _station(src)
     home = tmp_path / "home-op"
     home.mkdir()
     monkeypatch.setattr(psws, "_invoking_user", lambda: ("op", 1234, 1234, home))
-    ch = FakeChown()
-    assert psws.cmd_site_save_keys(None, root=src, chown=ch) == 0
     out = home / "site-keys.tar.gz"
+    seen = []
+
+    def chown(fd, uid, gid):
+        # The owner must land on the open temp file, before the rename gives
+        # it a name: a path-based chown after the rename would follow a
+        # symlink the user planted at that name.
+        assert isinstance(fd, int)
+        seen.append((os.readlink(f"/proc/self/fd/{fd}"), out.exists(),
+                     uid, gid))
+
+    assert psws.cmd_site_save_keys(None, root=src, chown=chown) == 0
     assert out.is_file()
-    assert ch.calls[str(out)] == (1234, 1234)
+    assert len(seen) == 1
+    tmpname, existed, uid, gid = seen[0]
+    assert Path(tmpname).parent == home and tmpname.endswith(".tmp")
+    assert not existed and (uid, gid) == (1234, 1234)
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
 
 
@@ -409,3 +425,112 @@ def test_restore_makes_the_ssh_dir_700_whatever_the_archive_says(tmp_path):
     assert psws.restore_keys(path, root=dst, chown=FakeChown(),
                              verify=lambda: 0) == 0
     assert stat.S_IMODE((dst / SSH).stat().st_mode) == 0o700
+
+
+# ── fix round 1: nothing privileged follows a link inside the trees ─────────
+
+def test_restore_sets_the_keys_dir_2775_as_install_does(tmp_path):
+    _, out = _save(tmp_path)
+    dst = tmp_path / "new"
+    dst.mkdir()
+    assert psws.restore_keys(out, root=dst, chown=FakeChown(),
+                             verify=lambda: 0) == 0
+    assert stat.S_IMODE((dst / KEYS).stat().st_mode) == 0o2775
+
+
+def test_restore_never_follows_a_directory_swapped_for_a_link_after_the_check(
+        tmp_path, monkeypatch):
+    """timestd (or a sigmond member) swaps a directory under a tree for a
+    symlink between pass 1 and pass 2: root's write must not follow it."""
+    arc = tmp_path / "race.tar.gz"
+    with tarfile.open(arc, "w:gz") as tf:
+        d = tarfile.TarInfo(SSH)
+        d.type = tarfile.DIRTYPE
+        tf.addfile(d)
+        s = tarfile.TarInfo(f"{SSH}/sub")
+        s.type, s.mode = tarfile.DIRTYPE, 0o777
+        tf.addfile(s)
+        f = tarfile.TarInfo(f"{SSH}/sub/authorized_keys")
+        f.size = 4
+        tf.addfile(f, io.BytesIO(b"evil"))
+    dst = tmp_path / "new"
+    dst.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_mode = stat.S_IMODE(outside.stat().st_mode)
+    real = psws._target_problem
+    calls = []
+
+    def racing(root, parts, is_dir):
+        r = real(root, parts, is_dir)
+        calls.append(parts)
+        if len(calls) == 3:                  # the last check of pass 1
+            (dst / SSH).mkdir(parents=True)
+            (dst / SSH / "sub").symlink_to(outside)
+        return r
+
+    monkeypatch.setattr(psws, "_target_problem", racing)
+    ch = FakeChown()
+    rc = psws.restore_keys(arc, root=dst, chown=ch, verify=_never_verify)
+    assert rc == psws.RESTORE_PARTIAL
+    assert list(outside.iterdir()) == []
+    assert stat.S_IMODE(outside.stat().st_mode) == outside_mode
+    assert not any(k.startswith(str(outside)) for k in ch.calls)
+
+
+def test_walk_dirs_refuses_a_symlinked_component(tmp_path):
+    top = tmp_path / "top"
+    top.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (top / "sub").symlink_to(outside)
+    fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError):
+            psws._walk_dirs(fd, ("sub", "deeper"), create=True)
+    finally:
+        os.close(fd)
+    assert list(outside.iterdir()) == []
+
+
+def test_the_owner_pass_never_follows_a_link_in_the_trees(tmp_path):
+    _, out = _save(tmp_path)
+    dst = tmp_path / "new"
+    _station(dst)
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"x")
+    os.chmod(victim, 0o640)
+    victim_dir = tmp_path / "victim-dir"
+    victim_dir.mkdir()
+    (victim_dir / "f").write_bytes(b"y")
+    (dst / KEYS / "id_ed25519_planted").symlink_to(victim)
+    (dst / KEYS / "planted.pub").symlink_to(victim)
+    (dst / SSH / "elsewhere").symlink_to(victim_dir)
+    ch = FakeChown()
+    assert psws.restore_keys(out, root=dst, chown=ch, verify=lambda: 0) == 0
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o640
+    assert not any(k.startswith((str(victim), str(victim_dir)))
+                   for k in ch.calls)
+    assert ch.calls[str(dst / KEYS / "id_ed25519_host")] == IDS[("hsupload", "sigmond")]
+
+
+def test_a_write_failing_partway_returns_5_and_still_sets_owners(tmp_path, monkeypatch):
+    _, out = _save(tmp_path)
+    dst = tmp_path / "new"
+    dst.mkdir()
+    real_rename = os.rename
+    n = []
+
+    def flaky(*a, **kw):
+        n.append(1)
+        if len(n) == 2:
+            raise OSError(28, "No space left on device")
+        return real_rename(*a, **kw)
+
+    monkeypatch.setattr(os, "rename", flaky)
+    ch = FakeChown()
+    rc = psws.restore_keys(out, root=dst, chown=ch, verify=_never_verify)
+    assert rc == psws.RESTORE_PARTIAL == 5
+    landed = [p for p in (dst / KEYS).iterdir()]
+    assert landed and all(str(p) in ch.calls for p in landed)
+    assert not [p for p in dst.rglob(".restore.*")]
