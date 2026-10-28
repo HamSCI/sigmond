@@ -217,6 +217,18 @@ def _pages(base: Path) -> list[str]:
     return found[:MAX_LISTED]
 
 
+def _own_docs_dir(checkout: Path, docs: Path) -> bool:
+    """True when ``docs`` is a real directory inside ``checkout``.  smd runs
+    this as root, so a docs/ symlink would hand root's reads of whatever it
+    names to the snapshot; refuse every symlink rather than judge where it
+    points."""
+    try:
+        return (not docs.is_symlink() and docs.is_dir()
+                and checkout.resolve() in docs.resolve().parents)
+    except OSError:
+        return False
+
+
 def _read_head(path: Path) -> str:
     try:
         with path.open(errors="replace") as fh:
@@ -286,7 +298,7 @@ def build_index(components: list[tuple[str, Path]], now: float,
     for name, checkout in components:
         checkout = Path(checkout)
         docs = checkout / "docs"
-        if not docs.is_dir():
+        if not _own_docs_dir(checkout, docs):
             continue
         key = str(checkout)
         head = head_sha(checkout)

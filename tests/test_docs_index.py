@@ -331,6 +331,22 @@ def test_build_index_skips_a_component_without_docs(tmp_path):
     assert index["roots"] == []
 
 
+def test_build_index_refuses_docs_that_leave_the_checkout(tmp_path):
+    """smd runs this as root.  A docs/ that is a symlink, here to a folder
+    outside the checkout, must not hand root's reads of that folder to the
+    snapshot."""
+    secret = tmp_path / "elsewhere"
+    secret.mkdir()
+    (secret / "notes.md").write_text("# private heading\n")
+    linked = _repo(tmp_path / "linked", {"README.md": "# r\n"})
+    (linked / "docs").symlink_to(secret)
+    inside = _repo(tmp_path / "inside", {"real/a.md": "# a\n"})
+    (inside / "docs").symlink_to(inside / "real")
+    index, _ = build_index([("linked", linked), ("inside", inside)], now=T0, cache={})
+    assert index["roots"] == []
+    assert "private heading" not in repr(index)
+
+
 def test_cache_skips_git_when_head_unchanged(tmp_path, monkeypatch):
     repo = _repo(tmp_path / "r", {"docs/INDEX.md": "# I\n", "docs/a.md": "# A\n"})
     calls = []
