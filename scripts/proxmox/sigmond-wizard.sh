@@ -3970,6 +3970,8 @@ try:
             break  # idle 15 min
         if 0 in r:
             d = os.read(0, 65536)
+            if d and not vm_open:
+                break  # the VM already closed; nothing can answer this
             if d:
                 vm.sendall(d)
             else:
@@ -3983,7 +3985,13 @@ try:
             if d:
                 os.write(1, d)
             else:
+                # Pass the VM's close on to the client, as the branch above
+                # does the other way.  Without it a browser keeps the dead
+                # keep-alive connection, and its next request hangs (B4,
+                # 2026-10-28: station-web closes idle connections after 5 s).
                 vm_open = False
+                try: socket.socket(fileno=os.dup(1)).shutdown(socket.SHUT_WR)
+                except OSError: pass
                 if not client_open: break
 except (BrokenPipeError, ConnectionResetError):
     pass

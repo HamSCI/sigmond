@@ -436,6 +436,59 @@ def test_relay_exits_75_when_the_vm_is_unreachable(tmp_path):
     assert r.returncode == 75, r.stderr
 
 
+def test_relay_passes_the_vms_close_back_to_the_client(tmp_path):
+    """When the VM closes (uvicorn drops an idle keep-alive after 5 s), the
+    client must see the close.  Before the fix the relay only noted it, so a
+    browser reused the dead connection and its next request hung — station-web
+    pages through gw2 loaded briskly, then hung (B4, 2026-10-28)."""
+    import socket
+    import threading
+    src = _relay_heredocs()["/usr/local/lib/sigmond/vm-port-relay.py"]
+    script = tmp_path / "relay.py"
+    script.write_text(src)
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    # A /30 at 127.0.0.1 makes the relay's management peer 127.0.0.2.
+    (bin_ / "ip").write_text("#!/bin/sh\necho '1: lo    inet 127.0.0.1/30 scope host lo'\n")
+    (bin_ / "qm").write_text("#!/bin/sh\nexit 0\n")
+    for n in ("ip", "qm"):
+        (bin_ / n).chmod(0o755)
+
+    vm = socket.socket()
+    vm.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    vm.bind(("127.0.0.2", 0))
+    vm.listen(4)
+    port = vm.getsockname()[1]
+
+    def serve():
+        for _ in range(2):                      # the relay's probe, then the client
+            conn, _ = vm.accept()
+            data = conn.recv(4096)
+            if data:
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            conn.close()                        # keep-alive timeout: the VM closes
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    client, relay_end = socket.socketpair()
+    env = dict(os.environ, PATH=f"{bin_}:/usr/bin:/bin", SIGMOND_VMID="999")
+    proc = subprocess.Popen([sys.executable, str(script), str(port)], env=env,
+                            stdin=relay_end, stdout=relay_end, stderr=subprocess.PIPE)
+    relay_end.close()
+    try:
+        client.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        client.settimeout(5)
+        got = b""
+        while not got.endswith(b"ok"):
+            got += client.recv(4096)
+        assert got.startswith(b"HTTP/1.1 200")
+        assert client.recv(4096) == b"", "the client never saw the VM close"
+    finally:
+        client.close()
+        proc.wait(timeout=10)
+        vm.close()
+
+
 def test_relay_script_keeps_exit_1_for_nothing_else():
     src = _relay_heredocs()["/usr/local/lib/sigmond/vm-port-relay.py"]
     assert src.count("sys.exit(75)") == 2
