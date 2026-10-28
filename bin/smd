@@ -27561,7 +27561,8 @@ def main() -> int:
 
     p_psws = sub.add_parser('psws',
         help='PSWS enrollment: status | enroll (print key + portal steps) | '
-             'verify (live SFTP login test)')
+             'verify (live SFTP login test) | save-keys / restore-keys '
+             '(carry the keys across a reflash)')
     psws_site_sub = p_psws.add_subparsers(dest='psws_site_verb')
     psws_site_sub.add_parser('status',
         help='enrollment state (read-only, offline)')
@@ -27573,6 +27574,18 @@ def main() -> int:
              'in /etc/sigmond/.psws-verified')
     psws_site_sub.add_parser('motd',
         help='login-banner hook (invoked from /etc/update-motd.d)')
+    p_save_keys = psws_site_sub.add_parser('save-keys',
+        help='before a reflash: write this station\'s upload and timestd SSH '
+             'keys to site-keys.tar.gz (mode 600) in your home directory, for '
+             'the install stick')
+    p_save_keys.add_argument('--output', metavar='FILE',
+        help='write here instead of ~/site-keys.tar.gz')
+    p_restore_keys = psws_site_sub.add_parser('restore-keys',
+        help='after a reflash: put the keys from a save-keys archive back '
+             'with the right owners, then run `smd psws verify`.  Refuses an '
+             'archive holding links or paths outside the two key directories')
+    p_restore_keys.add_argument('file', metavar='FILE',
+        help='the site-keys.tar.gz that save-keys wrote')
 
     # environment — situational awareness (site inventory + reconciliation).
     p_env = admin_sub.add_parser('environment',
@@ -27723,10 +27736,16 @@ def main() -> int:
     if args.command == 'psws':
         from sigmond import psws
         verb = getattr(args, 'psws_site_verb', None) or 'status'
-        # enroll creates the key, verify writes the marker — root work;
-        # status/motd stay unprivileged (motd runs at every login).
-        if verb in ('enroll', 'verify') and _need_root(f'psws {verb}'):
+        # enroll creates the key, verify writes the marker, save-keys reads
+        # private keys and restore-keys writes them — root work; status/motd
+        # stay unprivileged (motd runs at every login).
+        if verb in ('enroll', 'verify', 'save-keys', 'restore-keys') \
+                and _need_root(f'psws {verb}'):
             return 1
+        if verb == 'save-keys':
+            return psws.cmd_site_save_keys(getattr(args, 'output', None))
+        if verb == 'restore-keys':
+            return psws.restore_keys(Path(args.file))
         if verb == 'enroll':
             return psws.cmd_site_enroll()
         if verb == 'verify':

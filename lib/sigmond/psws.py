@@ -622,6 +622,299 @@ def cmd_site_motd() -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Station keys across a reflash: `smd psws save-keys` / `restore-keys`.
+#
+# PSWS knows a station by the public key registered for it.  A reflash wipes
+# the keys, and the fresh install makes new ones that PSWS refuses (B4,
+# 2026-10-26: the keys went back by hand, nothing ran verify, and uploads
+# stood refused for a day).  save-keys writes the archive the install wizard
+# already restores from the stick -- the same members as
+#   tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+# -- and restore-keys puts one back on a running station, with the wizard's
+# owners and modes, then runs `smd psws verify`.
+#
+# The archive holds private keys and restore runs as root, so restore checks
+# EVERY member before it writes ANY.  One symlink, hard link, device, fifo,
+# absolute path, `..` component or path outside the two trees refuses the
+# whole archive.  Nothing here prints a key's contents.
+# ---------------------------------------------------------------------------
+KEY_TREES = ("etc/hs-uploader/keys", "home/timestd/.ssh")
+KEYS_ARCHIVE = "site-keys.tar.gz"
+RESTORE_REFUSED = 4
+
+
+def _lookup_owner(user: str, group: str):
+    """(uid, gid) for user:group, or None when either name is unknown."""
+    import grp as _grp
+    import pwd as _pwd
+    try:
+        return _pwd.getpwnam(user).pw_uid, _grp.getgrnam(group).gr_gid
+    except KeyError:
+        return None
+
+
+def _invoking_user() -> tuple:
+    """(name, uid, gid, home) of the human who ran smd.  smd elevates by
+    re-executing itself under sudo, which sets SUDO_USER; without it, the
+    caller is whoever this process runs as."""
+    import pwd as _pwd
+    pw = None
+    sudo_user = os.environ.get("SUDO_USER", "").strip()
+    if sudo_user:
+        try:
+            pw = _pwd.getpwnam(sudo_user)
+        except KeyError:
+            pw = None
+    if pw is None:
+        pw = _pwd.getpwuid(os.getuid())
+    return pw.pw_name, pw.pw_uid, pw.pw_gid, Path(pw.pw_dir)
+
+
+def save_keys(output: Path, *, root: Path = Path("/")) -> int:
+    """Write a gzip tar of whichever KEY_TREES exist under `root` to `output`,
+    mode 600.  Members carry the names `tar -C /` gives them.  Returns 0, or
+    1 when neither tree exists (or the write fails)."""
+    import tarfile as _tarfile
+    root = Path(root)
+    output = Path(os.path.abspath(output))
+    trees = [t for t in KEY_TREES
+             if (root / t).is_dir() and not (root / t).is_symlink()]
+    if not trees:
+        print(f"{_R}✗ no station keys here{_X} — neither "
+              f"{' nor '.join('/' + t for t in KEY_TREES)} exists.")
+        return 1
+    skipped: list = []
+
+    def _keep(ti):
+        # restore refuses anything but plain files and directories, so the
+        # archive never carries one: a skipped link is named, not saved.
+        if ti.isreg() or ti.isdir():
+            return ti
+        skipped.append(ti.name)
+        return None
+
+    # mkstemp creates the file 600 from the first byte; the rename then
+    # replaces whatever stood at `output` (even a symlink) without
+    # following it.
+    fd, tmp = _tempfile.mkstemp(dir=str(output.parent),
+                                prefix=".site-keys.", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            with _tarfile.open(fileobj=fh, mode="w:gz") as tf:
+                for t in trees:
+                    tf.add(str(root / t), arcname=t, recursive=True,
+                           filter=_keep)
+                nfiles = sum(1 for m in tf.getmembers() if m.isreg())
+        os.replace(tmp, output)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        print(f"{_R}✗ could not write {output}: {e.strerror or e}{_X}")
+        return 1
+    print(f"{_G}✓ wrote {output}{_X} — {nfiles} key file(s) from "
+          f"{', '.join('/' + t for t in trees)}; mode 600")
+    for name in skipped:
+        print(f"  {_Y}⚠ left out {name!r}: not a plain file "
+              f"(restore-keys refuses links and devices){_X}")
+    return 0
+
+
+def _member_parts(ti):
+    """(parts, problem) for one archive member.  `problem` names why restore
+    refuses it, or is '' when the member may land."""
+    name = ti.name
+    if name.startswith("/"):
+        return (), "absolute path"
+    parts = tuple(p for p in name.split("/") if p not in ("", "."))
+    if ".." in parts:
+        return parts, "'..' in the path"
+    if ti.issym():
+        return parts, "symbolic link"
+    if ti.islnk():
+        return parts, "hard link"
+    if ti.ischr() or ti.isblk():
+        return parts, "device file"
+    if ti.isfifo():
+        return parts, "fifo"
+    if not (ti.isreg() or ti.isdir()):
+        return parts, "not a plain file or directory"
+    for t in KEY_TREES:
+        tp = tuple(t.split("/"))
+        if parts[:len(tp)] == tp:
+            return parts, ""
+    return parts, "outside " + " and ".join("/" + t for t in KEY_TREES)
+
+
+def _target_problem(root: Path, parts: tuple, is_dir: bool) -> str:
+    """Why writing this member under `root` would be unsafe, or ''.  Every
+    existing component from the key tree's own directory down must be a real
+    directory: a link planted there would carry the write somewhere else."""
+    tree_len = next(len(t.split("/")) for t in KEY_TREES
+                    if parts[:len(t.split("/"))] == tuple(t.split("/")))
+    upto = len(parts) if is_dir else len(parts) - 1
+    for i in range(tree_len, upto + 1):
+        p = root.joinpath(*parts[:i])
+        if p.is_symlink():
+            return f"/{'/'.join(parts[:i])} is a symbolic link on this station"
+        if p.exists() and not p.is_dir():
+            return f"/{'/'.join(parts[:i])} is not a directory on this station"
+    if not is_dir:
+        p = root.joinpath(*parts)
+        if p.is_dir() and not p.is_symlink():
+            return f"/{'/'.join(parts)} is a directory on this station"
+    return ""
+
+
+def _set_key_owners(root: Path, chown) -> None:
+    """Owners and modes as sigmond-wizard.sh sets them after its restore:
+    keys hsupload:sigmond (root:sigmond without an hsupload user),
+    id_ed25519* 600 then *.pub 644; .ssh timestd:timestd, its dir 700."""
+    def _chown_tree(top: Path, owner) -> None:
+        if owner is None:
+            return
+        uid, gid = owner
+        chown(str(top), uid, gid)
+        for dirpath, dirnames, filenames in os.walk(top):
+            for n in dirnames + filenames:
+                p = os.path.join(dirpath, n)
+                if not os.path.islink(p):
+                    chown(p, uid, gid)
+
+    keys = root / KEY_TREES[0]
+    if keys.is_dir() and not keys.is_symlink():
+        owner = _lookup_owner("hsupload", "sigmond") \
+            or _lookup_owner("root", "sigmond")
+        if owner is None:
+            print(f"  {_Y}⚠ no group sigmond — /{KEY_TREES[0]} keeps its "
+                  f"owner{_X}")
+        _chown_tree(keys, owner)
+        for pat, mode in (("id_ed25519*", 0o600), ("*.pub", 0o644)):
+            for f in keys.glob(pat):
+                if f.is_file() and not f.is_symlink():
+                    os.chmod(f, mode)
+    ssh = root / KEY_TREES[1]
+    if ssh.is_dir() and not ssh.is_symlink():
+        owner = _lookup_owner("timestd", "timestd")
+        if owner is None:
+            print(f"  {_Y}⚠ no user timestd — /{KEY_TREES[1]} keeps its "
+                  f"owner{_X}")
+        _chown_tree(ssh, owner)
+        os.chmod(ssh, 0o700)
+
+
+def restore_keys(archive: Path, *, root: Path = Path("/"), chown=os.chown,
+                 verify=None) -> int:
+    """Put a save-keys (or wizard tar) archive back under `root`, then return
+    verify()'s exit code.  Refuses -- returns 4 and writes nothing -- when any
+    member could land outside KEY_TREES or is not a plain file or directory,
+    or when the archive cannot be read."""
+    import tarfile as _tarfile
+    if verify is None:
+        verify = cmd_site_verify
+    root = Path(root)
+
+    def _refuse(why: str) -> int:
+        print(f"{_R}✗ refused {archive}: {why}{_X} — nothing restored.")
+        return RESTORE_REFUSED
+
+    try:
+        tf = _tarfile.open(str(archive), mode="r:*")
+    except (OSError, _tarfile.TarError, EOFError) as e:
+        return _refuse(f"cannot read it as a tar archive ({e})")
+    with tf:
+        try:
+            members = tf.getmembers()
+        except (OSError, _tarfile.TarError, EOFError) as e:
+            return _refuse(f"damaged archive ({e})")
+        # Pass 1: judge every member.  Nothing is written until all pass.
+        plan, problems = [], []
+        for ti in members:
+            parts, problem = _member_parts(ti)
+            if not problem:
+                problem = _target_problem(root, parts, ti.isdir())
+            if problem:
+                problems.append(f"{ti.name!r}: {problem}")
+            else:
+                plan.append((parts, ti))
+        # A path that arrives both as a file and as a directory, or a file
+        # with members beneath it, cannot land whole.
+        file_paths = {parts for parts, ti in plan if ti.isreg()}
+        for parts, ti in plan:
+            if any(parts[:i] in file_paths for i in range(1, len(parts))) \
+                    or (ti.isdir() and parts in file_paths):
+                problems.append(f"{ti.name!r}: conflicts with a file of the "
+                                f"same path in the archive")
+        if problems:
+            print(f"{_R}✗ refused {archive}{_X} — nothing restored:")
+            for p in problems:
+                print(f"    {p}")
+            return RESTORE_REFUSED
+        if not any(ti.isreg() for _, ti in plan):
+            return _refuse("it holds no key files")
+        try:
+            files = [(parts, ti, tf.extractfile(ti).read())
+                     for parts, ti in plan if ti.isreg()]
+        except (OSError, _tarfile.TarError, EOFError) as e:
+            return _refuse(f"damaged archive ({e})")
+
+    # Pass 2: write.  Directories first (shallowest first), then files, each
+    # through a 600 temp file renamed into place.  Set-id bits never land.
+    written = 0
+    try:
+        for parts, ti in sorted((x for x in plan if x[1].isdir()),
+                                key=lambda x: len(x[0])):
+            d = root.joinpath(*parts)
+            d.mkdir(mode=0o755, parents=True, exist_ok=True)
+            os.chmod(d, ti.mode & 0o777)
+        for parts, ti, data in files:
+            dest = root.joinpath(*parts)
+            dest.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            fd, tmp = _tempfile.mkstemp(dir=str(dest.parent),
+                                        prefix=".restore.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                    os.fchmod(fh.fileno(), ti.mode & 0o777)
+                os.replace(tmp, dest)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            written += 1
+    except OSError as e:
+        print(f"{_R}✗ restore stopped after {written} file(s): "
+              f"{e.strerror or e}{_X} — run it again as root.")
+        return RESTORE_REFUSED
+    _set_key_owners(root, chown)
+    print(f"{_G}✓ restored {written} key file(s){_X} into "
+          f"{', '.join('/' + t for t in KEY_TREES if (root / t).is_dir())}"
+          f" — now checking the PSWS login")
+    return verify()
+
+
+def cmd_site_save_keys(output=None, *, root: Path = Path("/"),
+                       chown=os.chown) -> int:
+    """`smd psws save-keys`: write the archive (default ~/site-keys.tar.gz
+    of the invoking user) and hand it to that user."""
+    _name, uid, gid, home = _invoking_user()
+    out = Path(os.path.abspath(output)) if output else home / KEYS_ARCHIVE
+    rc = save_keys(out, root=root)
+    if rc != 0:
+        return rc
+    chown(str(out), uid, gid)
+    print(f"  Copy it off this station before the flash, then onto the "
+          f"install stick's small EFI drive.")
+    print(f"  {_K}It holds private keys: delete every copy once the new "
+          f"station passes `smd psws verify`.{_X}")
+    return 0
+
+
 def _prompt(label: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
     try:
