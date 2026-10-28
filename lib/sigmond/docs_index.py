@@ -260,6 +260,15 @@ def _root(name: str, base: Path, listed: bool, has_index: bool,
             "has_index": has_index, "documents": docs}
 
 
+def _cache_entry_ok(entry) -> bool:
+    """True for ``{"head": str, "commits": {str: int}}``; anything else is a miss."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("head"), str):
+        return False
+    commits = entry.get("commits")
+    return isinstance(commits, dict) and all(
+        isinstance(k, str) and type(v) is int for k, v in commits.items())
+
+
 def build_index(components: list[tuple[str, Path]], now: float,
                 cache: dict) -> tuple[dict, dict]:
     """The docs index for ``components`` ((name, checkout) pairs), and the new cache.
@@ -267,8 +276,9 @@ def build_index(components: list[tuple[str, Path]], now: float,
     Each component with a ``docs/`` folder becomes one root of the same name.
     The ``sigmond`` component also yields the unlisted ``checks`` root
     (``docs/operator/checks``).  ``cache`` maps a checkout path to
-    ``{"head": sha, "commits": {...}}``; a checkout whose HEAD still equals the
-    cached head reuses those commits and runs no ``git log``.
+    ``{"head": sha, "commits": {...}}``; a full (not shallow) checkout whose
+    HEAD still equals the cached head reuses those commits and runs no
+    ``git log``.  A shallow checkout neither reads nor writes the cache.
     """
     roots: list[dict] = []
     extra: list[dict] = []
@@ -280,13 +290,17 @@ def build_index(components: list[tuple[str, Path]], now: float,
             continue
         key = str(checkout)
         head = head_sha(checkout)
+        # A shallow checkout never feeds or reads the cache: `git fetch
+        # --unshallow` (or --deepen) adds history without moving HEAD, so a
+        # result computed while shallow would outlive the deepening.  Its
+        # git log stays cheap, because the clone holds few commits.
+        full = head is not None and _shallow_boundary(checkout, 10.0) == set()
         cached = cache.get(key) if isinstance(cache, dict) else None
-        if (head is not None and isinstance(cached, dict) and cached.get("head") == head
-                and isinstance(cached.get("commits"), dict)):
+        if full and _cache_entry_ok(cached) and cached["head"] == head:
             commits = cached["commits"]
         else:
             commits = git_last_commits(checkout)
-        if head is not None and commits is not None:
+        if full and commits is not None:
             new_cache[key] = {"head": head, "commits": commits}
 
         index_path = docs / "INDEX.md"

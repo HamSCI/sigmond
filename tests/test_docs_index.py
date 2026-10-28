@@ -142,18 +142,27 @@ def test_index_links_star_belongs_to_its_own_link_only():
 
 
 def test_index_links_against_the_real_indexes():
+    """Parser invariants on the sibling repos' live INDEX.md files.
+
+    No ★ flag is pinned here: an honest docs edit in a sibling repo must
+    not fail sigmond's suite.
+    """
     repos = Path(__file__).resolve().parents[2]
-    for name, must in (("hf-timestd", {"ARCHITECTURE.md": True, "OVERVIEW.md": False}),
-                       ("sigmond", {"operator/README.md": True, "README.md": False}),
-                       ("wspr-recorder", {"ARCHITECTURE.md": True, "INSTALL.md": False})):
-        p = repos / name / "docs" / "INDEX.md"
+    checked = 0
+    for name in ("hf-timestd", "sigmond", "wspr-recorder"):
+        docs = repos / name / "docs"
+        p = docs / "INDEX.md"
         if not p.is_file():
-            pytest.skip(f"{p} not present in this checkout layout")
+            continue
+        checked += 1
         links = index_links(p.read_text())
-        for page, star in must.items():
-            assert links.get(page) is star, (name, page)
-        assert all(not k.startswith("..") and "#" not in k and "://" not in k
-                   and k.endswith(".md") for k in links), name
+        assert isinstance(links, dict) and links, name
+        for page, star in links.items():
+            assert isinstance(page, str) and type(star) is bool, (name, page)
+            assert not page.startswith("../") and not page.endswith("/"), (name, page)
+            assert (docs / page).is_file(), (name, page)
+    if not checked:
+        pytest.skip("no sibling checkouts with docs/INDEX.md beside this one")
 
 
 # --- git ---------------------------------------------------------------------
@@ -213,6 +222,36 @@ def test_shallow_clone_never_dates_a_page_from_the_boundary(tmp_path):
 
     got = git_last_commits(clone)
     assert got == {"new.md": T0 + 5 * DAY}
+
+
+def test_cache_not_trusted_across_unshallow(tmp_path):
+    origin = _repo(tmp_path / "origin", {"docs/a.md": "# A\n"}, when=T0)
+    _write(origin, "docs/b.md", "# B\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-qm", "b", when=T0 + DAY)
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+                   stdin=subprocess.DEVNULL, capture_output=True, check=True)
+
+    shallow, cache = build_index([("c", clone)], now=T0 + 2 * DAY, cache={})
+    assert _doc(_root(shallow, "c"), "a.md")["last_commit"] is None
+
+    _git(clone, "fetch", "-q", "--unshallow")
+    deep, cache = build_index([("c", clone)], now=T0 + 2 * DAY, cache=cache)
+    root = _root(deep, "c")
+    assert _doc(root, "a.md")["age_days"] == 2
+    assert _doc(root, "b.md")["age_days"] == 1
+    assert cache[str(clone)]["commits"] == {"a.md": T0, "b.md": T0 + DAY}
+
+
+def test_cache_with_a_bad_commit_value_is_a_miss(tmp_path):
+    repo = _repo(tmp_path / "r", {"docs/a.md": "# A\n"})
+    head = head_sha(repo)
+    for bad in ({"a.md": "yesterday"}, {"a.md": None}, {"a.md": True}, {1: T0}):
+        index, cache = build_index([("r", repo)], now=T0 + DAY,
+                                   cache={str(repo): {"head": head, "commits": bad}})
+        assert _doc(_root(index, "r"), "a.md")["age_days"] == 1, bad
+        assert cache[str(repo)]["commits"] == {"a.md": T0}
 
 
 # --- build_index ---------------------------------------------------------------
