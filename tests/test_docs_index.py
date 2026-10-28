@@ -209,6 +209,25 @@ def test_git_missing_or_slow_gives_none(tmp_path, monkeypatch):
     assert head_sha(repo) is None
 
 
+def test_git_reads_run_hardened(tmp_path, monkeypatch):
+    """Root runs these reads in checkouts other users own.  No signature
+    check, no fsmonitor hook, and no lazy fetch of a missing blob."""
+    seen = []
+
+    def spy(argv, **kw):
+        seen.append((argv, kw.get("env") or {}))
+        return subprocess.CompletedProcess(argv, 0, "abc\n", "")
+    monkeypatch.setattr(docs_index.subprocess, "run", spy)
+    head_sha(tmp_path)
+    assert seen
+    argv, env = seen[0]
+    sub = argv.index("rev-parse")
+    for opt in ("log.showSignature=false", "core.fsmonitor=false"):
+        i = argv.index(opt)
+        assert argv[i - 1] == "-c" and i < sub, argv
+    assert env.get("GIT_NO_LAZY_FETCH") == "1"
+
+
 def test_shallow_clone_never_dates_a_page_from_the_boundary(tmp_path):
     origin = _repo(tmp_path / "origin", {"docs/old.md": "1"}, when=T0)
     _write(origin, "docs/old.md", "2")

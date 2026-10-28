@@ -1,4 +1,6 @@
-"""Index each installed component's ``docs/`` folder for station-web's browser.
+"""Index the ``docs/`` folder of each component checked out under
+/opt/git/sigmond, for station-web's browser.  The index lists every catalog
+checkout it finds, including a pre-cloned client the station does not run.
 
 station-web never runs git and never walks a checkout for facts beyond the
 files it serves.  This module gathers those facts once, in sigmond, and
@@ -10,7 +12,7 @@ files it serves.  This module gathers those facts once, in sigmond, and
 * the page's last git commit, and its age in days.
 
 Git runs read-only as ``git -c safe.directory=<repo> -C <repo> ...`` with a
-timeout.  Whenever git cannot answer (no git, not a repository, a timeout, a
+timeout, with signature checks, fsmonitor and lazy blob fetches turned off.  Whenever git cannot answer (no git, not a repository, a timeout, a
 non-zero exit) the functions return None, and the index gives the page no
 date.  A shallow clone dates no page from its boundary commit, because that
 commit shows every file as new.
@@ -110,9 +112,14 @@ def _run_git(repo: Path, args: list[str], timeout: float) -> str | None:
     """stdout of a read-only git command in ``repo``, or None on any failure."""
     env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # Root reads checkouts that other users own: run no signature check and
+    # no fsmonitor hook, and never lazy-fetch a missing blob (git >= 2.44
+    # honours GIT_NO_LAZY_FETCH; older git ignores it).
+    env["GIT_NO_LAZY_FETCH"] = "1"
     try:
         r = subprocess.run(
             [GIT, "-c", f"safe.directory={repo}", "-c", "core.quotePath=false",
+             "-c", "log.showSignature=false", "-c", "core.fsmonitor=false",
              "-C", str(repo), *args],
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             errors="replace", timeout=timeout, env=env)

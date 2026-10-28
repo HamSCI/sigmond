@@ -209,3 +209,24 @@ def test_failure_keeps_keys_that_were_already_there(origin, tmp_path):
     assert git('rev-parse', '--is-shallow-repository', cwd=clone) == 'true'
     assert _config(clone, 'remote.origin.promisor') == 'true'
     assert _config(clone, 'remote.origin.partialclonefilter') is None
+
+
+def test_unshallow_fetch_argv_bounds_a_stalled_link(origin, tmp_path):
+    """sudo's env_reset drops GIT_HTTP_LOW_SPEED_*, so behind `sudo -u owner`
+    the env alone cannot bound a stalled fetch.  The low-speed limit rides on
+    the unshallow fetch's argv, which survives sudo, ahead of the subcommand."""
+    clone = _shallow_clone(origin, tmp_path / 'clone')
+    fetches = []
+
+    def spy(cmd, **kw):
+        if 'fetch' in cmd and '--unshallow' in cmd:
+            fetches.append(cmd)
+        return subprocess.run(cmd, **kw)
+
+    assert smd.deepen_history(clone, run=spy) == 'deepened'
+    assert len(fetches) == 1, fetches
+    cmd = fetches[0]
+    sub = cmd.index('fetch')
+    for opt in ('http.lowSpeedLimit=1000', 'http.lowSpeedTime=30'):
+        i = cmd.index(opt)
+        assert cmd[i - 1] == '-c' and i < sub, cmd

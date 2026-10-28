@@ -468,6 +468,8 @@ def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
 
 
 _DEEPEN_TIMEOUT_S = 300
+_DEEPEN_LOW_SPEED = ('-c', 'http.lowSpeedLimit=1000',
+                     '-c', 'http.lowSpeedTime=30')
 _PROMISOR_KEYS = (('remote.origin.promisor', 'true'),
                   ('remote.origin.partialclonefilter', 'blob:none'))
 
@@ -505,9 +507,10 @@ def deepen_history(repo: Path, run=subprocess.run) -> str:
     repo = Path(repo)
     base = ['git', '-c', f'safe.directory={repo}', '-C', str(repo)]
 
-    def _git(prefix, args, timeout=30):
+    def _git(prefix, args, timeout=30, opts=()):
         try:
-            return run(prefix + base + args, stdin=subprocess.DEVNULL,
+            return run(prefix + base + list(opts) + args,
+                       stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, timeout=timeout,
                        env=_git_net_env())
         except subprocess.TimeoutExpired:
@@ -545,8 +548,12 @@ def deepen_history(repo: Path, run=subprocess.run) -> str:
             _unset(added)
             return _fail(r.stderr)
         added.append(key)
+    # sudo's env_reset drops the GIT_HTTP_LOW_SPEED_* that _git_net_env
+    # sets, so behind `sudo -u owner` the argv has to carry the low-speed
+    # limit.  Without it only the 300 s ceiling would stop a stalled link.
     r = _git(prefix, ['fetch', '--quiet', '--unshallow', '--filter=blob:none',
-                      'origin'], timeout=_DEEPEN_TIMEOUT_S)
+                      'origin'], timeout=_DEEPEN_TIMEOUT_S,
+             opts=_DEEPEN_LOW_SPEED)
     if r.returncode != 0:
         again = _git([], ['rev-parse', '--is-shallow-repository'])
         if not (again.returncode == 0 and again.stdout.strip() == 'false'):
