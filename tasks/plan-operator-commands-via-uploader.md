@@ -8,6 +8,12 @@ receivers that the servers must act on.
 Merge selection is the worked example throughout, because it is the case that
 forced the question and the only one with running code today.
 
+**Status, 2026-10-28:** reviewed by Michael (bus 20261028T002659Z), amended
+here.  The command now rides the **client's own upload**, written by
+hs-uploader, never by `smd` — Michael's principle is that each client keeps
+responsibility for its own uploads and stays usable without sigmond.  One
+question is open for Michael and Rob; see "Open items".
+
 ## Why this path and not a web page
 
 The obvious design is a page on a WD server where an operator picks which of
@@ -51,12 +57,19 @@ the design driver, not an afterthought.
 
 ### The envelope
 
-Mirrors the status layout, one command per line:
+One command per line, at the root of the **client's own** tar, beside the
+`routing.json` it generalises:
 
 ```
 <tar root>/
-  command/<HOST_ID>/<YYYYMMDDTHHMMSSZ>.jsonl
+  routing.json                       (today: per-receiver forwarding flags)
+  command.jsonl                      (new: one operator_command per line)
+  wspr/spots/<RX_SITE>/<RECEIVER>/…
 ```
+
+It is deliberately NOT under a `<HOST_ID>` directory the way status is: a
+command belongs to the client that uploaded it, and that client is already
+named by the tar it rides in.
 
 ```json
 {"kind": "operator_command", "schema_version": 1,
@@ -112,16 +125,42 @@ if authority is somehow wrong.
 Today the operator edits `site-profile.toml` on each of the three stations and
 has no way to see the group as a group.  With commands:
 
-1. Operator declares the group once, naming its members.
-2. `smd` emits three `set_reporter_identity` commands — one per member key —
-   into the sink.
-3. They ride the next tar from whichever station is uploading.
+1. Operator declares the group once, naming its members, in each member's
+   own uploader config.
+2. **hs-uploader** writes the resulting `set_reporter_identity` facts into
+   that client's own tar, the way it already writes `routing.json`
+   (`_render_routing_json`, `transports/wsprdaemon.py`).  `smd` may help the
+   operator author the config, as it does for all config, but it never
+   carries the command.
+3. They ride that client's next upload.
 4. Each WD server applies them; `ch-sync-peers` converges the rest.
 5. The elected forwarder groups by resolved identity and posts one reporter.
 
-Step 2 is the only change from what already works: the operator states the
-group, and the tool expands it into per-receiver facts, instead of the
-operator hand-maintaining N configs that must agree.
+The only change from what already works is that the declaration gains an
+envelope — `command_id`, `issued_at`, `issued_by` — so three servers can
+apply it idempotently and newest-wins.  The channel itself is unchanged and
+needs no sigmond.
+
+### ⛔ Two merges, and they must not both fire
+
+wspr-recorder already merges on the station: its merge instance
+(`WD_MERGE_REPORTERS`, `wspr_completion.cycle_complete`) waits for every
+named receiver and keeps the best SNR per spot *before the tar leaves*.
+
+So a receiver can be merged in two places, and must never be merged in both
+— "best SNR per spot" applied twice against different populations is not the
+same answer twice.  The rule:
+
+```
+a receiver that arrives ALREADY MERGED is not a candidate for server merging
+```
+
+**Code fact, and the two paths are NOT symmetric:** that station-side merge
+is **WSPR-only**.  There is no FT8/FT4 equivalent — psk-recorder writes
+per-receiver rows and the merge decision lives in the server forwarder.  For
+FT the server is not a fallback for separate stations; today it is the only
+place a merge can happen at all.  Do not assume symmetry between the two
+upload paths.
 
 ### Migration — nothing to undo
 
@@ -163,15 +202,60 @@ boards rather than inventing a fourth transport.
 - [ ] Precedence wired into both forwarders' identity resolution.
 - [ ] Added to `ch-sync-peers` with a sorting key that carries changes.
 
-### Phase B — the station half, riding status Phase 3
-- [ ] `smd` command emit → sink rows → the same tar pipeline status uses.
-- [ ] Group expansion: operator names a group, tool emits per-receiver facts.
+### Phase B — the client half, in hs-uploader
+- [ ] hs-uploader writes the command envelope into the client's own tar,
+      beside `routing.json` or extending it.  No `smd`, no sink, no status
+      pipeline — a standalone client must be able to do this.
+- [ ] Group expansion: the operator names a group in the client's config;
+      hs-uploader expands it into per-receiver facts.
+- [ ] Enforce the already-merged rule above.
 
 ### Phase C — results
 - [ ] `station.command_result`, surfaced on the fleetboard.
 
 Phase A is testable with synthetic tars, exactly as the status ingest is, and
 depends on nothing a station does.
+
+## What a tar names today — and what it does not
+
+Measured on `origin/main`, 2026-10-28, because Michael's point 5 asks the
+fleet view to treat a standalone client as a first-class kind of site.
+
+Present today:
+
+- `<RX_SITE>/<RECEIVER>` in the path of every spot file.
+- `uploads_config.txt` — `CLIENT_VERSION` plus three format-version lines
+  (`_config_bytes`).  A version, and **no client name**: it cannot tell
+  wspr-recorder from a clone of it.
+- `routing.json`, only when ft* files are present.
+- The delivering account, which identifies the uploader, not the software.
+
+**⛔ RX_SITE IS NOT A STABLE SITE KEY.**  `_build_rx_site(call, grid)` returns
+`<call, / as => _ <grid>`, so it changes when the grid changes.  It changed
+under us on 2026-10-27: AC0G/ND moved from `AC0G=ND_EM38ww` to
+`AC0G=ND_EN16ov` at 19:18Z when its stale client configs were corrected.  A
+fleet view joined on RX_SITE would have shown ND as two sites, the first of
+which "went silent" that afternoon.
+
+So two changes are needed before a fleet view can list standalone clients:
+
+1. A **client-name** field.  `uploads_config.txt` is the natural home: it
+   already exists, is already metadata-shaped, and rides every tar.
+2. A join key of **callsign + receiver, with the grid excluded.**
+
+## Status in two layers (Michael's point 3)
+
+- **Client layer, always present** — a small status block in the client's own
+  tar: client name and version, instances, last cycle's output, decoder
+  errors.  A standalone client reports itself with no sigmond.
+- **Station layer, only under sigmond** — the heartbeat on its own pipeline,
+  as `plan-status-via-uploader.md` designs it.
+- The server joins the two by station identity (see the join key above).
+- **Arrival stays the backstop.**  A client that stops uploading goes silent
+  where it matters, whatever it last said about itself.
+
+⚠ The unresolved part is what happens when a client is deliberately not
+uploading — see "Open items".
 
 ## Non-goals
 
@@ -181,10 +265,37 @@ depends on nothing a station does.
 - **A web page on a WD server or a gateway.**  See the opening section.
 - **Changing the heartbeat envelope.**  Not one field.
 
-## Open items for rob
+## Open items
 
-1. **The return leg** — A and C above, or something better.
-2. **Authority: delivering station, or an operator token?**  The delivering
-   account is simpler and needs no new secret.  A token would let an operator
-   manage receivers at a site they do not upload from.  Start with the account.
-3. **Vocabulary beyond identity.**  Nothing else is proposed yet, deliberately.
+### 1. FOR MICHAEL AND ROB — may a down data switch silence a client?
+
+`plan-status-via-uploader.md` trap 2 says, of folding status into the data
+tar: *"A station must not stop reporting because an operator turned its data
+flow down — that is the moment status matters most... re-read this trap
+before ever folding status back into the cycle tar."*
+
+A client status block inside the client's data tar is that fold.  Under
+sigmond it is survivable: the heartbeat rides its own pipeline and covers
+the gap.  For a **standalone client** there is no heartbeat, so one whose
+sink switch reads `fill` or `off` ships no tar, carries no status, and reads
+as DEAD rather than healthy-and-not-sending — the trap-2 failure, in the
+configuration Michael is designing for.
+
+- *Michael / mjh:* the block rides the client's own data upload; simplest,
+  and arrival is the backstop.
+- *rob's instance:* same, **plus** a client whose data switch is down still
+  ships a status-only tar, so status is never gated by the data switch.
+
+This is a policy question about what silence is allowed to mean.  Neither
+assistant should rule on it.
+
+### 2. The return leg
+A and C above, or something better.
+
+### 3. Authority: delivering station, or an operator token?
+The delivering account is simpler and needs no new secret.  A token would let
+an operator manage receivers at a site they do not upload from.  Start with
+the account.
+
+### 4. Vocabulary beyond identity
+Nothing else is proposed yet, deliberately.
