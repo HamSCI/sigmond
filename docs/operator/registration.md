@@ -500,12 +500,15 @@ Don't judge PSWS on day one.
 
 ## 7. Returning station, or moving a station
 
-**Replacing an old station with new hardware?** Save the old machine's keys
-before you wipe it and put them on the install stick — the installer restores
-them and **your PSWS registration carries over**, so you never touch the portal
-again. Do this at install time; it is
-[INSTALL.md §4](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#4-returning-station-put-your-old-keys-on-the-stick-optional),
-and it is optional only in the sense that the alternative is re-registering.
+**Reflashing a station, or replacing it with new hardware?** Save the old
+machine's keys before you wipe it. On the old station, `smd psws save-keys`
+writes `site-keys.tar.gz` into your home directory; copy it off the station and
+onto the install stick. The installer restores the keys, and **your PSWS
+registration carries over**, so you never touch the portal again. If the file
+missed the stick, copy it to the new station and run
+`smd psws restore-keys site-keys.tar.gz`. Either way, finish with
+`smd psws verify`. [INSTALL.md §4](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md#4-reflashing-or-replacing-a-station-keep-its-keys) gives the steps. Skipping them costs you
+a fresh registration.
 
 If you did not save them, that is recoverable: register the new station's key
 at the portal exactly as in §5b, under the same site. Your station ID and
