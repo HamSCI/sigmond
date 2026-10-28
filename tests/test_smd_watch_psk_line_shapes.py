@@ -98,3 +98,37 @@ class WsprPostCleanTests(unittest.TestCase):
     def test_unexpected_text_is_not_clean(self):
         self.assertFalse(smd._wsprnet_post_is_clean("HTTP 503"))
         self.assertFalse(smd._wsprnet_post_is_clean(""))
+
+
+class PskFormatSpotTests(unittest.TestCase):
+    """`smd watch psk -v` rows are fixed-column like the WSPR view."""
+
+    def test_jt9_row(self):
+        row = smd._psk_format_spot(
+            "261028 155830 7074000 0 -13 0.7 663 ~ YB9GAN 7P8GE -05 FT8",
+            0.65, "40m")
+        self.assertEqual(
+            row, " 40m    7.074663 MHz  SNR -13 dB  DT +0.70s  YB9GAN 7P8GE -05")
+
+    def test_jt9_ap_marker_whitespace_collapsed(self):
+        row = smd._psk_format_spot(
+            "261028 155830 14074000 0 -15 0.3 1032 ~ CQ N1NRA FN34"
+            "                         a1 FT8", 0.65, "20m")
+        self.assertTrue(row.endswith("DT +0.30s  CQ N1NRA FN34 a1"), row)
+
+    def test_decode_ft8_row_gets_dt_cal(self):
+        row = smd._psk_format_spot(DECODE_FT8_LINE, 0.65, "40m")
+        self.assertEqual(
+            row, " 40m    7.048250 MHz  SNR  30 dB  DT -0.22s  N2RSI K4XL +08")
+
+    def test_columns_align_across_rows(self):
+        a = smd._psk_format_spot(
+            "261028 155830 7074000 0 5 0.1 750 ~ BG4FRZ W7UDH R-12 FT8", 0, "40m")
+        b = smd._psk_format_spot(
+            "261028 155830 14074000 0 -11 -1.0 1688 ~ N0VTY N0NAC R+10 FT8", 0, "20m")
+        self.assertEqual(a.index("SNR"), b.index("SNR"))
+        self.assertEqual(a.index("DT "), b.index("DT "))
+        self.assertEqual(a.index("dB  DT"), b.index("dB  DT"))
+
+    def test_unparseable_line_verbatim(self):
+        self.assertEqual(smd._psk_format_spot("garbage", 0.65, "??"), "garbage")

@@ -18635,6 +18635,43 @@ def _psk_spot_fields(line: str):
     return None
 
 
+_PSK_MODE_TAGS = frozenset({'FT8', 'FT4'})
+
+
+def _psk_format_spot(line: str, cal: float, band_label: str) -> str:
+    """One `smd watch psk -v` / `N` spot row in fixed columns, like the
+    WSPR view's per-spot rows:
+
+        40m   7.074663 MHz  SNR -13 dB  DT +0.70s  YB9GAN 7P8GE -05
+
+    Works for both log shapes (see _psk_spot_fields).  ``cal`` is the
+    decode_ft8 dt convention offset, subtracted from decode_ft8 lines only.
+    Message whitespace is collapsed (jt9 pads its AP-decode marker, e.g.
+    "CQ N1NRA FN34 <spaces> a1") and psk-recorder's trailing mode tag is
+    dropped (the row is already under an ft8:/ft4: label).  Unparseable
+    lines are returned verbatim so nothing is hidden."""
+    f = _psk_spot_fields(line)
+    if f is None:
+        return line
+    _t, hz, dt, is_jt9 = f
+    parts = line.split()
+    if is_jt9:
+        snr = parts[4]
+        msg_parts = parts[8:]
+        if msg_parts and msg_parts[-1] in _PSK_MODE_TAGS:
+            msg_parts = msg_parts[:-1]
+    else:
+        snr = parts[2]
+        dt -= cal
+        msg_parts = line.partition('~')[2].split()
+    try:
+        snr_s = f'{int(snr):>3}'
+    except ValueError:
+        snr_s = f'{snr:>3}'
+    return (f'{band_label:>4}  {hz / 1e6:>10.6f} MHz  SNR {snr_s} dB  '
+            f'DT {dt:+.2f}s  {" ".join(msg_parts)}')
+
+
 _WSPRNET_POST_DIAG_RE = re.compile(r'\s*\[async status=[^\]]*\]\s*$')
 
 
@@ -18890,23 +18927,6 @@ def _psk_watch_cycle_loop(
     # FT4 has its own decode_ft8 offset (~0.6, see psk-recorder ch_tailer).
     _ft4_dt_cal = float(os.environ.get('PSK_WATCH_FT4_DT_CAL_SEC', '0.6'))
 
-    def _cal_spot_line(spot_line, cal):
-        """Subtract the decode_ft8 dt offset from a raw decoder spot line for
-        verbose display (reformats only the dt field; leaves the rest).
-        jt9 lines are already in the WSJT-X convention: left untouched."""
-        f = _psk_spot_fields(spot_line)
-        if f is not None and f[3]:
-            return spot_line
-        head, sep, msg = spot_line.partition('~')
-        parts = head.split()
-        if sep and len(parts) >= 4:
-            try:
-                parts[3] = f'{float(parts[3]) - cal:+.2f}'
-                return ' '.join(parts) + ' ~' + msg
-            except ValueError:
-                pass
-        return spot_line
-
     try:
         while True:
             # Next fire: next 15 s UTC boundary + SETTLE.
@@ -19003,7 +19023,8 @@ def _psk_watch_cycle_loop(
                     print(f'─── slot UTC {wall}  {_rep}rx={label} ─────────────',
                           flush=True)
                     for line in ft8_show:
-                        print(f'  ft8: {_cal_spot_line(line, _ft8_dt_cal)}', flush=True)
+                        print(f'  ft8: {_psk_format_spot(line, _ft8_dt_cal, _band(line))}',
+                              flush=True)
                     if cap is not None and len(ft8_lines) > len(ft8_show):
                         print(f'  ft8: … ({len(ft8_lines) - len(ft8_show)} more)',
                               flush=True)
@@ -19019,7 +19040,8 @@ def _psk_watch_cycle_loop(
                         this_ts = _f[0] if _f else ''
                         if prev_ts and this_ts and this_ts != prev_ts:
                             print(flush=True)
-                        print(f'  ft4: {_cal_spot_line(line, _ft4_dt_cal)}', flush=True)
+                        print(f'  ft4: {_psk_format_spot(line, _ft4_dt_cal, _band(line))}',
+                              flush=True)
                         prev_ts = this_ts
                     if cap is not None and len(ft4_lines) > len(ft4_show):
                         print(f'  ft4: … ({len(ft4_lines) - len(ft4_show)} more)',
