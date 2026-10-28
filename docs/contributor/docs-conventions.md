@@ -18,6 +18,13 @@ narrative subtrees are `operator/`, `scientist/`, `contributor/`, and
 mechanics, a library's API — is linked from here, never copied or moved
 into this tree.
 
+Each INDEX.md also decides what an operator sees on a station.
+station-web's documentation browser shows, by default, only the pages
+that its repo's INDEX.md links by an explicit `.md` link.  A link to a
+directory indexes nothing.  So a page missing from INDEX.md drops out of
+the operator's view, and shows only under "Show everything".  A repo with
+no INDEX.md shows every page outside `archive/` and `superpowers/`.
+
 ## 2. One canonical page per topic
 
 Every topic has exactly one ★-marked page in an `INDEX.md`. When two pages
