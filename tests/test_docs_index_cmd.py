@@ -70,6 +70,40 @@ class DocsIndexCmdTest(unittest.TestCase):
             rc = self.smd.cmd_admin_docs_index(args)
         return rc, buf.getvalue()
 
+    def test_sigmond_itself_is_a_root_though_the_catalog_omits_it(self):
+        """sigmond is not a catalog entry, yet its docs/ is the station's
+        main documentation folder (and yields the unlisted `checks` root)."""
+        own = self.base / "sigmond" / "docs"
+        (own / "operator" / "checks").mkdir(parents=True)
+        (own / "INDEX.md").write_text("# Index\n")
+        (own / "operator" / "checks" / "a.md").write_text("# A\n")
+        self.assertNotIn("sigmond", self.catalog)
+        rc, out = self._run()
+        self.assertEqual(rc, 0)
+        roots = {r["name"]: r for r in json.loads(out)["roots"]}
+        self.assertIn("sigmond", roots)
+        self.assertIn("checks", roots)
+        self.assertFalse(roots["checks"]["listed"])
+        self.catalog["sigmond"] = _entry("sigmond")
+        rc, out = self._run()
+        names = [r["name"] for r in json.loads(out)["roots"]]
+        self.assertEqual(names.count("sigmond"), 1)
+
+    def test_checkouts_outside_the_base_are_not_roots(self):
+        """ka9q-radio lives at /opt/git/ka9q-radio, outside the base, where
+        station-web would refuse it anyway."""
+        outside = Path(self.tmp.name) / "elsewhere" / "gamma"
+        (outside / "docs").mkdir(parents=True)
+        (outside / "docs" / "x.md").write_text("# X\n")
+        self.catalog["gamma"] = _entry("gamma")
+        real = self.smd._resolve_repo_dir
+        def resolve(name, repo, base):
+            return outside if name == "gamma" else real(name, repo, base)
+        with mock.patch.object(self.smd, "_resolve_repo_dir", resolve):
+            rc, out = self._run()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("gamma", [r["name"] for r in json.loads(out)["roots"]])
+
     def test_json_names_every_component_that_has_docs(self):
         rc, out = self._run()
         self.assertEqual(rc, 0)

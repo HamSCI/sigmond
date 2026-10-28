@@ -4960,11 +4960,21 @@ def cmd_admin_docs_index(args) -> int:
     except FileNotFoundError as exc:
         _err(str(exc))
         return 1
+    # sigmond is no catalog entry, yet its docs/ is the station's main
+    # documentation.  A checkout outside the base (ka9q-radio sits at
+    # /opt/git/ka9q-radio) is left out; station-web would refuse it anyway.
+    base_real = Path(base).resolve()
+    found = {name: _resolve_repo_dir(name, catalog[name].repo, base)
+             for name in catalog}
+    found.setdefault('sigmond', Path(base) / 'sigmond')
     components = []
-    for name in sorted(catalog):
-        repo_dir = _resolve_repo_dir(name, catalog[name].repo, base)
-        if repo_dir is not None and (repo_dir / 'docs').is_dir():
-            components.append((name, repo_dir))
+    for name in sorted(found):
+        repo_dir = found[name]
+        if repo_dir is None or not (repo_dir / 'docs').is_dir():
+            continue
+        if base_real not in repo_dir.resolve().parents:
+            continue
+        components.append((name, repo_dir))
     is_root = os.geteuid() == 0
     cache = _read_docs_cache(DOCS_INDEX_CACHE) if is_root else {}
     index, new_cache = docs_index.build_index(components, _time.time(), cache)
