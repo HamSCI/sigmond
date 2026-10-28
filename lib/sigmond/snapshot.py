@@ -44,6 +44,9 @@ SNAPSHOT_COMMANDS: Dict[str, List[str]] = {
     # ships, so the page reads that as "no tick waiting", not as a
     # heartbeat that is not running.
     "heartbeat": ["admin", "heartbeat", "show", "--json"],
+    # Runs git for each docs/ tree, so it takes the longest here; root keeps
+    # a cache that skips repos whose HEAD has not moved.
+    "docs": ["admin", "docs", "index", "--json"],
 }
 
 OUT_DIR = Path("/run/sigmond/snapshot")
