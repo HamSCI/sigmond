@@ -46,6 +46,12 @@ The traps, and how each is encoded:
   `--unpin` does not release them.  A pull would move the source off the
   commit the installed library was built from (onion, 2026-10-07).
 
+* **a pull is not a build** — station-web and hamsci-physics have no
+  install.sh; their deploy.toml `[build]` makes the venv.  Each successful
+  build records the HEAD it built (sigmond.build_stamp), and the plan builds
+  whenever that record is absent or names another commit, even with nothing
+  to pull: a v3.82 smd pulled station-web and built nothing.
+
 Every action carries a `verify`, because today's failures were uniformly
 of the form "looked fine, wasn't done" — a deploy that restarted
 nothing, a checkout at the right commit whose venv imported something
@@ -103,6 +109,13 @@ def _has_installer(info: dict) -> bool:
     behaviour unchanged.
     """
     return info.get('installer', True) is not False
+
+
+def _build_stale(info: dict) -> bool:
+    """No successful deploy.toml build of this checkout's HEAD on record
+    (sigmond.build_stamp).  ABSENT means current: only a caller that read
+    the stamp can say the build is missing."""
+    return info.get('build_stale') is True
 
 
 def _has_build(info: dict) -> bool:
@@ -179,6 +192,12 @@ def plan_update(state: dict) -> list:
                 verify='git rev-parse HEAD == origin/main'))
             to_install.add(name)
             needs_restart = True
+        elif (_build_stale(info) and not _has_installer(info)
+                and _has_build(info)):
+            # Current with upstream, but no build of this HEAD on record: a
+            # v3.82 smd pulled it without building (v3.83 final review,
+            # finding 1).  Build alone; there is nothing to pull.
+            to_install.add(name)
 
     # A skewed venv needs install.sh even when the source is current.
     for name in sorted(skew | to_install):

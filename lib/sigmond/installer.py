@@ -14,7 +14,7 @@ import tomllib
 from pathlib import Path
 from typing import Optional
 
-from . import gitowner
+from . import build_stamp, gitowner
 from .catalog import CatalogEntry
 
 GIT_BASE = Path('/opt/git/sigmond')
@@ -555,9 +555,13 @@ def run_deploy_build_steps(repo_dir: Path, *, dry_run: bool = False,
         return True, []
 
     if not force and produces and all(p.exists() for p in produces):
+        # No stamp here: present artefacts say nothing about which commit
+        # built them, so the next `smd update` still builds once.
         return True, [f'  already built ({len(produces)} artefact(s) present)'
                       f' — skipping {len(steps)} build step(s)']
 
+    # The commit these steps build, read before they run.
+    head = None if dry_run else build_stamp.head_of(repo_dir)
     msgs: list[str] = []
     for step in steps:
         if dry_run:
@@ -586,6 +590,13 @@ def run_deploy_build_steps(repo_dir: Path, *, dry_run: bool = False,
         msgs.append('  build steps all exited 0 but declared artefact(s) are '
                     'absent: ' + ', '.join(absent))
         return False, msgs
+    # Record the built commit, so `smd update` and `smd align` can tell a
+    # venv built from this HEAD from one built before a pull (v3.83 final
+    # review, finding 1).  Only a build that succeeded writes it.
+    if head:
+        warning = build_stamp.write_stamp(repo_dir, head)
+        if warning:
+            msgs.append(warning)
     return True, msgs
 
 

@@ -260,6 +260,11 @@ class Ctx:
     prefetched: dict = field(default_factory=dict)
     chown: Optional[Callable[[Path, str], None]] = None
     build: Optional[Callable[[str, Path], int]] = None
+    # deploy.toml [build] for a component with no install.sh (station-web,
+    # hamsci-physics): None when no build is due (an installer owns the
+    # build, no [build], or the build stamp names HEAD already), else the
+    # build's exit code.  See sigmond.build_stamp.
+    deploy_build: Optional[Callable[[str, Path], Optional[int]]] = None
 
 
 @dataclass
@@ -268,6 +273,25 @@ class Step:
     outcome: str
     detail: str = ""
     bytes: Optional[int] = None
+    # A deploy.toml [build] ran for this component in this run.
+    built: bool = False
+
+
+_BUILT_NOTE = "deploy.toml [build] rebuilt its venv"
+
+
+def _deploy_build(name: str, repo: Path, ctx: Ctx) -> tuple:
+    """(ran, why): run ``ctx.deploy_build`` when wired.  ``why`` is empty
+    on success or when no build was due, else what failed."""
+    if ctx.deploy_build is None:
+        return False, ""
+    try:
+        rc = ctx.deploy_build(name, repo)
+    except Exception as e:  # noqa: BLE001 — a builder is foreign code
+        return True, f"deploy.toml [build] raised: {e}"
+    if rc is None:
+        return False, ""
+    return True, (f"deploy.toml [build] exit {rc}" if rc else "")
 
 
 def _chown_pin(repo: Path, owner: str, ctx: Ctx) -> None:
@@ -460,10 +484,38 @@ def _move(it: Item, ctx: Ctx) -> Step:
             return Step(name, "failed",
                         _roll_back(repo, owner, from_full, full, prev_pin, branch, why, ctx), fetched)
 
+    # 6b. a component with no install.sh builds through deploy.toml [build]
+    # whenever its build stamp does not name the new HEAD — the same
+    # rollback as a failed install.sh when that build fails.
+    built = False
+    if name not in BUILT_COMPONENTS:
+        built, why = _deploy_build(name, repo, ctx)
+        if why:
+            return Step(name, "failed",
+                        _roll_back(repo, owner, from_full, full, prev_pin, branch, why, ctx), fetched)
+
     # 7. moved. from_full[:8], not it.live[:8]: Item.live can be a 7-char
     # short SHA, which would shorten the left side of the detail to fewer
     # characters than the right — a B4 finding.
-    return Step(name, "moved", f"{detail_prefix}{from_full[:8]} -> {full[:8]}", fetched)
+    note = f"; {_BUILT_NOTE}" if built else ""
+    return Step(name, "moved", f"{detail_prefix}{from_full[:8]} -> {full[:8]}{note}",
+                fetched, built=built)
+
+
+def _build_current(step: Step, it: Item, ctx: Ctx) -> Step:
+    """A `current` component may still lack a build of its HEAD: a v3.82
+    `smd update` pulled station-web onto the release commit and built
+    nothing (v3.83 final review, finding 1).  A failed build is a failed
+    step; nothing restarts after it."""
+    if it.component in BUILT_COMPONENTS:
+        return step
+    built, why = _deploy_build(it.component, ctx.base / it.component, ctx)
+    if why:
+        return Step(it.component, "failed", why, step.bytes)
+    if not built:
+        return step
+    detail = f"{step.detail}; {_BUILT_NOTE}" if step.detail else _BUILT_NOTE
+    return Step(it.component, step.outcome, detail, step.bytes, built=True)
 
 
 def _refresh_pin(it: Item, ctx: Ctx) -> Step:
@@ -512,7 +564,10 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
             steps.append(Step(it.component, "skipped", stopped))
             continue
         if it.status == "current":
-            steps.append(_refresh_pin(it, ctx))
+            step = _build_current(_refresh_pin(it, ctx), it, ctx)
+            steps.append(step)
+            if step.outcome == "failed":
+                stopped = f"stopped after {it.component} failed"
         elif it.status == "stray":
             steps.append(Step(it.component, "left"))
         elif it.status == "missing":
@@ -569,12 +624,13 @@ _BLOCKING_OUTCOMES = ("failed", "skipped", "refused")
 
 def record_history(rel: Release, steps: list, *, history: Callable[[dict], None],
                    now: Callable[[], str]) -> None:
-    """One history line per component that moved, installed, or failed.
+    """One history line per component that moved, installed, failed, or
+    had its deploy.toml [build] run.
     The sigmond bootstrap calls this alone before it re-execs: the child
     run writes the manifest and aligned.json only once the whole plan
     has come out."""
     for step in steps:
-        if step.outcome in _LOGGED_OUTCOMES:
+        if step.outcome in _LOGGED_OUTCOMES or getattr(step, "built", False):
             history({"at": now(),
                      "what": f"smd align --apply {rel.tag}: {step.component} {step.outcome} {step.detail}"})
 

@@ -705,6 +705,76 @@ class BuildStepTests(_Rig):
         self.assertNotEqual(rc, 0, text)
         self.assertIn("build exit 1", text)
 
+    # v3.83 final review, finding 1: the build stamp.
+    def _stamp(self, name="webby"):
+        p = Path(os.environ["SIGMOND_BUILD_STAMP_DIR"]) / name
+        return p.read_text().strip() if p.exists() else None
+
+    def _head(self, host):
+        return subprocess.run(["git", "-C", str(host), "rev-parse", "HEAD"],
+                               capture_output=True, text=True,
+                               check=True).stdout.strip()
+
+    def test_a_successful_build_stamps_the_pulled_head(self):
+        host = self._add_build_component()
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(self._stamp(), self._head(host), text)
+
+    def test_a_failed_build_writes_no_stamp(self):
+        host = self._add_build_component()
+        (host / "built.marker").mkdir()
+        rc, text = self._update()
+        self.assertNotEqual(rc, 0, text)
+        self.assertIsNone(self._stamp(), text)
+
+    def test_the_v382_hop_builds_a_checkout_already_at_head(self):
+        """A v3.82 smd pulled station-web and built nothing: the checkout
+        sits at the new HEAD, nothing is behind, and no stamp exists."""
+        host = self._add_build_component()
+        _git("pull", "--ff-only", cwd=host)
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("[build] webby", text)
+        self.assertNotIn("[pull] webby", text)
+        self.assertEqual((host / "built.marker").read_text().split(),
+                         ["ran"], text)
+        self.assertEqual(self._stamp(), self._head(host), text)
+
+    def test_a_rerun_after_a_build_plans_nothing(self):
+        host = self._add_build_component()
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn("[build]", text)
+        self.assertEqual((host / "built.marker").read_text().split(),
+                         ["ran"], text)
+
+    def test_a_stamp_naming_another_commit_rebuilds(self):
+        host = self._add_build_component()
+        _git("pull", "--ff-only", cwd=host)
+        d = Path(os.environ["SIGMOND_BUILD_STAMP_DIR"]); d.mkdir(parents=True)
+        (d / "webby").write_text("0" * 40 + "\n")
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("[build] webby", text)
+        self.assertEqual(self._stamp(), self._head(host), text)
+
+    def test_the_build_output_is_kept_in_the_update_log(self):
+        """Finding 3: a pip resolver error must survive in UPDATE_LOG_DIR,
+        not only as a 15-line tail."""
+        host = self._add_build_component()
+        (host / "built.marker").mkdir()
+        rc, text = self._update()
+        self.assertNotEqual(rc, 0, text)
+        logs = sorted(self.logdir.glob("update-*-webby.log"))
+        self.assertEqual(len(logs), 1, text)
+        body = logs[0].read_text()
+        self.assertIn("build webby", body)
+        self.assertIn("build step FAILED", body)
+        self.assertIn(str(logs[0]), text)
+
     def _malformed_build_component(self, name, body: bytes):
         host = self._add_build_component(name)
         (host / "deploy.toml").write_bytes(body)

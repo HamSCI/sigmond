@@ -40,7 +40,9 @@ def run(repo_dir: Path, *, runner=subprocess.run) -> tuple[bool, list[str]]:
     """Build, link, and reload systemd when a unit link landed.
 
     ``force=True``: an update builds even when every ``produces`` artefact
-    exists, since the venv exists and holds the old dependencies.
+    exists, since the venv exists and holds the old dependencies.  A build
+    that succeeds records the checkout's HEAD (sigmond.build_stamp), so the
+    next `smd update` or `smd align` plans no build for it.
     """
     ok, msgs = installer.run_deploy_build_steps(
         repo_dir, runner=runner, force=True)

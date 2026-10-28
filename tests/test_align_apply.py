@@ -1580,3 +1580,65 @@ class RecordLiveTests(unittest.TestCase):
             align_apply.record_live(ap, {"at": "one"})
             align_apply.record_live(ap, {"at": "two"})
             self.assertEqual(json.loads(ap.read_text())["live"], {"at": "two"})
+
+
+class DeployBuildTests(unittest.TestCase):
+    """v3.83 final review, finding 1: a component with no install.sh but a
+    deploy.toml [build] builds during align whenever its build stamp does
+    not name HEAD.  ``ctx.deploy_build`` decides (None = no build due) and
+    runs it; these tests fake it."""
+
+    def _plan(self, base, git, status, deploy_build):
+        _repo(base, "station-web")
+        ctx = _ctx(base, git, ["station-web"], deploy_build=deploy_build)
+        target = TARGET
+        items = [align.Item("station-web", status, LIVE if status == "forward" else target,
+                            target),
+                 align.Item("hf-timestd", "stray", "3" * 40, "3" * 40)]
+        return align_apply.apply_plan(rel(), items, ctx)
+
+    def test_a_current_component_due_a_build_is_built(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = []
+            steps = self._plan(Path(tmp), _MultiFakeGit(), "current",
+                               lambda n, r: calls.append((n, r)) or 0)
+            self.assertEqual(calls, [("station-web", Path(tmp) / "station-web")])
+            self.assertEqual(steps[0].outcome, "current")
+            self.assertTrue(steps[0].built)
+            self.assertIn("deploy.toml [build]", steps[0].detail)
+
+    def test_a_current_component_with_no_build_due_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            steps = self._plan(Path(tmp), _MultiFakeGit(), "current", lambda n, r: None)
+            self.assertEqual(steps[0].outcome, "current")
+            self.assertFalse(steps[0].built)
+            self.assertNotIn("[build]", steps[0].detail)
+
+    def test_a_failed_build_of_a_current_component_fails_and_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            steps = self._plan(Path(tmp), _MultiFakeGit(), "current", lambda n, r: 2)
+            self.assertEqual(steps[0].outcome, "failed")
+            self.assertIn("deploy.toml [build] exit 2", steps[0].detail)
+            self.assertEqual(steps[1].outcome, "skipped")
+
+    def test_a_moved_component_due_a_build_is_built(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            steps = self._plan(Path(tmp), _MultiFakeGit(), "forward", lambda n, r: 0)
+            self.assertEqual(steps[0].outcome, "moved")
+            self.assertTrue(steps[0].built)
+            self.assertIn("deploy.toml [build]", steps[0].detail)
+
+    def test_a_failed_build_of_a_moved_component_rolls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            git = _MultiFakeGit()
+            steps = self._plan(Path(tmp), git, "forward", lambda n, r: 1)
+            self.assertEqual(steps[0].outcome, "failed")
+            self.assertIn("deploy.toml [build] exit 1 — rolled back to 11111111",
+                          steps[0].detail)
+            self.assertEqual(_detach_targets(git), [TARGET, LIVE])
+
+    def test_a_built_current_step_logs_a_history_line(self):
+        lines = []
+        step = align_apply.Step("station-web", "current", "x", built=True)
+        align_apply.record_history(rel(), [step], history=lines.append, now=lambda: "T")
+        self.assertEqual(len(lines), 1)

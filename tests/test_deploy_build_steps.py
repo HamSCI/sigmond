@@ -283,3 +283,70 @@ class FindClientBinaryKnowsTheRealLayout(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuildStampTests(unittest.TestCase):
+    """v3.83 final review, finding 1: a build that succeeds records the
+    checkout's HEAD; nothing else does.  `smd install` and `smd update` both
+    build through run_deploy_build_steps, so both stamp."""
+
+    def setUp(self):
+        import os
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name) / "a-client"
+        self.repo.mkdir()
+        (self.repo / "deploy.toml").write_text(
+            '[build]\nsteps = ["touch built"]\n'
+            f'produces = ["{self.repo / "built"}"]\n')
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        for argv in (["init", "-q", "-b", "main"], ["add", "-A"],
+                     ["commit", "-q", "-m", "c"]):
+            subprocess.run(["git", "-C", str(self.repo), *argv], check=True,
+                           env=env, capture_output=True)
+        self.head = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        self.stamp = Path(os.environ["SIGMOND_BUILD_STAMP_DIR"]) / "a-client"
+
+    def test_a_successful_build_stamps_head(self):
+        ok, msgs = installer.run_deploy_build_steps(self.repo)
+        self.assertTrue(ok, msgs)
+        self.assertEqual(self.stamp.read_text().strip(), self.head)
+
+    def test_a_failed_build_writes_no_stamp(self):
+        def runner(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 1, "", "boom")
+        ok, msgs = installer.run_deploy_build_steps(self.repo, runner=runner)
+        self.assertFalse(ok)
+        self.assertFalse(self.stamp.exists())
+
+    def test_absent_products_write_no_stamp(self):
+        def runner(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        ok, msgs = installer.run_deploy_build_steps(self.repo, runner=runner)
+        self.assertFalse(ok)
+        self.assertFalse(self.stamp.exists())
+
+    def test_a_dry_run_writes_no_stamp(self):
+        installer.run_deploy_build_steps(self.repo, dry_run=True)
+        self.assertFalse(self.stamp.exists())
+
+    def test_skipping_on_present_products_writes_no_stamp(self):
+        """Present artefacts say nothing about which commit built them."""
+        (self.repo / "built").touch()
+        ok, msgs = installer.run_deploy_build_steps(self.repo)
+        self.assertTrue(ok, msgs)
+        self.assertFalse(self.stamp.exists())
+
+    def test_an_unwritable_stamp_dir_warns_and_keeps_the_build(self):
+        import os
+        blocker = Path(self._tmp.name) / "file"
+        blocker.write_text("")
+        with mock.patch.dict(os.environ,
+                             {"SIGMOND_BUILD_STAMP_DIR": str(blocker / "x")}):
+            ok, msgs = installer.run_deploy_build_steps(self.repo)
+        self.assertTrue(ok, msgs)
+        self.assertTrue(any("could not record the build" in m for m in msgs), msgs)

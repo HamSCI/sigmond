@@ -4395,7 +4395,7 @@ def _record_update_step(what: str) -> None:
         _warn(f'could not record "{what}" in {_prov.HISTORY_FILE}: {exc}')
 
 
-def _write_update_log(target: str, r) -> 'Path | None':
+def _write_update_log(target: str, r, what: str = 'install') -> 'Path | None':
     """Keep install.sh's full output (sigmond#48: "install.sh exit 1" with
     the reason swallowed is a loud failure that cannot be diagnosed).
     Best-effort: a log that cannot be written never fails the update."""
@@ -4405,11 +4405,38 @@ def _write_update_log(target: str, r) -> 'Path | None':
         ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
         path = UPDATE_LOG_DIR / f'update-{ts}-{target}.log'
         path.write_text(
-            f'# smd update --apply: install {target} — exit {r.returncode}\n'
+            f'# smd update --apply: {what} {target} — exit {r.returncode}\n'
             f'# --- stdout ---\n{r.stdout}\n# --- stderr ---\n{r.stderr}\n')
         return path
     except OSError:
         return None
+
+
+def _run_update_build(repo: Path, log_target: str, *,
+                      tail_lines: int = 15) -> int:
+    """Run a component's deploy.toml [build] as root through
+    update_build.py, as `smd update` and `smd align` both do.
+
+    smd refuses to run under sudo, so root comes from running
+    update_build.py as a script, as `smd install` does the same work (steps,
+    then the deploy.toml links).  The full output goes to UPDATE_LOG_DIR,
+    as install.sh's does: a pip resolver error must survive the run.  On a
+    failure the last lines print too."""
+    import subprocess
+    script = (Path(__file__).resolve().parent.parent / 'lib'
+              / 'sigmond' / 'update_build.py')
+    r = subprocess.run(
+        _as_root([sys.executable, str(script), str(repo)]),
+        capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    logpath = _write_update_log(log_target, r, what='build')
+    if r.returncode:
+        tail = ((r.stdout or '') + (r.stderr or '')
+                ).strip().splitlines()[-tail_lines:]
+        for line in tail:
+            print(f'  | {line}')
+        if logpath:
+            print(f'  full output: {logpath}')
+    return r.returncode
 
 
 def cmd_update(args) -> int:
@@ -4547,18 +4574,18 @@ def cmd_update(args) -> int:
         # parse declares no build.
         # Read before the pull, like `installer`: a component gaining its
         # first [build] in this very pull builds on the next update.
-        build = False
-        try:
-            with open(d / 'deploy.toml', 'rb') as _fh:
-                _bsec = tomllib.load(_fh).get('build')
-            _steps = _bsec.get('steps') if isinstance(_bsec, dict) else None
-            build = isinstance(_steps, list) and bool(_steps)
-        except (OSError, ValueError):
-            # TOMLDecodeError and UnicodeDecodeError are both ValueError.
-            build = False
+        from sigmond import build_stamp
+        build = build_stamp.declares_build(d)
         repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
                          'incoming': incoming, 'owner': owner,
                          'installer': installer, 'build': build}
+        if build and not installer:
+            # Whether the venv was built from this HEAD at all.  A v3.82
+            # smd pulled station-web and built nothing, so "not behind"
+            # alone would leave its venv stale for good (v3.83 final
+            # review, finding 1).
+            repos[d.name]['build_stale'] = build_stamp.is_stale(
+                d, head=st['head'] or None)
         if native_hold:
             repos[d.name]['pinned'] = native_pin
             repos[d.name]['at_pin'] = True
@@ -4743,26 +4770,17 @@ def cmd_update(args) -> int:
                 which = 'checkout' if step.target in checkout_failed else 'pull'
                 _warn(f'{step.target}: build skipped — {which} failed above')
                 continue
-            # smd refuses to run under sudo, so root comes from running
-            # update_build.py as a script, as `smd install` does the same
-            # work (steps, then the deploy.toml links).
-            script = (Path(__file__).resolve().parent.parent / 'lib'
-                      / 'sigmond' / 'update_build.py')
-            r = subprocess.run(
-                _as_root([sys.executable, str(script),
-                          str(base / step.target)]),
-                capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            if r.returncode == 0:
+            # As root, through update_build.py; the full output lands in
+            # UPDATE_LOG_DIR beside install.sh's.
+            rc = _run_update_build(base / step.target, step.target,
+                                   tail_lines=15)
+            if rc == 0:
                 _ok(f'{step.target}: build exit 0')
                 applied.add(f'build {step.target}')
                 _record_update_step(f'build {step.target}')
             else:
                 failed += 1
-                tail = ((r.stdout or '') + (r.stderr or '')
-                        ).strip().splitlines()[-15:]
-                for line in tail:
-                    print(f'  | {line}')
-                _err(f'{step.target}: build exit {r.returncode}')
+                _err(f'{step.target}: build exit {rc}')
         elif step.kind == 'restart':
             _info('restart not automated here — bounce radiod, wait for it to '
                   'settle, then the recorders')
@@ -5372,7 +5390,8 @@ _PRELOAD_MODULES = {
                          'sigmond.lifecycle'),
     'update': ('sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
-               'sigmond.installer_args', 'sigmond.sink_state'),
+               'sigmond.installer_args', 'sigmond.sink_state',
+               'sigmond.build_stamp', 'sigmond.gitowner'),
     'align': ('sigmond.align', 'sigmond.align_apply', 'sigmond.align_live',
               'sigmond.provenance', 'sigmond.catalog', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
@@ -5382,7 +5401,9 @@ _PRELOAD_MODULES = {
               'sigmond.heartbeat', 'sigmond.doctor', 'sigmond.lifecycle',
               'sigmond.topology', 'sigmond.instance',
               'sigmond.uploader_manifest', 'sigmond.environment',
-              'sigmond.environment_kinds', 'sigmond.discovery'),
+              'sigmond.environment_kinds', 'sigmond.discovery',
+              # _align_deploy_build's stamp check
+              'sigmond.build_stamp', 'sigmond.gitowner'),
 }
 
 
@@ -7279,6 +7300,25 @@ def _align_build(name: str, repo: Path) -> int:
     return 0 if _build_ka9q_radio(repo, force=True) else 1
 
 
+def _align_deploy_build(name: str, repo: Path, base) -> 'int | None':
+    """`Ctx.deploy_build`: a component with no install.sh but a deploy.toml
+    [build] (station-web, hamsci-physics) builds as root through
+    update_build.py, as `smd update` does, whenever its build stamp is
+    absent or names another commit than HEAD.  None when no build is due.
+
+    v3.83 final review, finding 1: a v3.82 `smd update` pulled station-web
+    and built nothing, and align found no install.sh to run, so the next
+    restart started station-web on a venv without its new dependencies."""
+    from sigmond import build_stamp
+    if not build_stamp.needs_build(repo):
+        return None
+    print(f'  {name}: running deploy.toml [build] …')
+    try:
+        return _run_update_build(repo, name, tail_lines=5)
+    finally:
+        _align_repair_ownership(Path(base))
+
+
 def _align_install_missing(name, sha, *, base, catalog):
     """A component the release pins but this station has no checkout of at
     all: clone it at the pinned commit and run its installer. Never flips
@@ -7584,7 +7624,8 @@ def _align_apply(args) -> int:
                 name, sha, base=base, catalog=catalog),
             run_install=lambda repo: _align_install_and_repair(repo, base),
             say=print, prefetched=prefetched,
-            chown=_align_chown, build=_align_build)
+            chown=_align_chown, build=_align_build,
+            deploy_build=lambda name, repo: _align_deploy_build(name, repo, base))
 
         passthrough = ['--base', str(base)]
         if getattr(args, 'allow_rollback', False):
@@ -7749,7 +7790,8 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     # is never a no-op: this run re-checks what it restarted (below).
     # Read before `record` rewrites aligned.json without it.
     prior_live = _align_aligned_live()
-    changed = any(s.outcome in ('moved', 'installed') for s in move_steps)
+    changed = any(s.outcome in ('moved', 'installed') or getattr(s, 'built', False)
+                  for s in move_steps)
     refreshed = any(s.outcome == 'refreshed' for s in image_steps)
     if (not changed and not refreshed and _align_aligned_release() == rel.tag
             and _align_live_passed(prior_live)):

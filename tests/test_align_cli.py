@@ -3809,3 +3809,68 @@ class AlignHostLineTests(unittest.TestCase):
         lines = out.splitlines()
         summary_i = next(i for i, l in enumerate(lines) if l.strip().startswith("summary:"))
         self.assertIn("host:", lines[summary_i + 1])
+
+
+class AlignDeployBuildTests(unittest.TestCase):
+    """v3.83 final review, finding 1: `_align_deploy_build` (Ctx.deploy_build)
+    builds a no-install.sh component's deploy.toml [build] when its build
+    stamp is absent or names another commit, and not when it names HEAD."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name) / "base"
+        self.repo = self.base / "station-web"
+        self.repo.mkdir(parents=True)
+        (self.repo / "deploy.toml").write_text('[build]\nsteps = ["true"]\n')
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        for argv in (["init", "-q", "-b", "main"], ["add", "-A"],
+                     ["commit", "-q", "-m", "c"]):
+            subprocess.run(["git", "-C", str(self.repo), *argv], check=True,
+                           env=env, capture_output=True)
+        self.head = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                   capture_output=True, text=True,
+                                   check=True).stdout.strip()
+        self.stamps = Path(os.environ["SIGMOND_BUILD_STAMP_DIR"])
+        self.calls = []
+        for p in (mock.patch.object(smd, "_run_update_build",
+                                    side_effect=lambda repo, t, **kw:
+                                    self.calls.append(repo) or 0),
+                  mock.patch.object(smd, "_align_repair_ownership")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _build(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return smd._align_deploy_build("station-web", self.repo, self.base)
+
+    def test_no_stamp_builds(self):
+        self.assertEqual(self._build(), 0)
+        self.assertEqual(self.calls, [self.repo])
+
+    def test_a_stamp_naming_another_commit_builds(self):
+        self.stamps.mkdir(parents=True)
+        (self.stamps / "station-web").write_text("0" * 40 + "\n")
+        self.assertEqual(self._build(), 0)
+        self.assertEqual(self.calls, [self.repo])
+
+    def test_a_stamp_naming_head_builds_nothing(self):
+        self.stamps.mkdir(parents=True)
+        (self.stamps / "station-web").write_text(self.head + "\n")
+        self.assertIsNone(self._build())
+        self.assertEqual(self.calls, [])
+
+    def test_a_component_with_an_installer_builds_nothing(self):
+        (self.repo / "install.sh").write_text("#!/bin/bash\n")
+        self.assertIsNone(self._build())
+        self.assertEqual(self.calls, [])
+
+    def test_the_build_exit_code_is_returned(self):
+        with mock.patch.object(smd, "_run_update_build", return_value=3):
+            self.assertEqual(self._build(), 3)
+
+    def test_align_wires_the_hook(self):
+        src = (REPO / "bin" / "smd").read_text()
+        self.assertIn("deploy_build=lambda name, repo: _align_deploy_build(name, repo, base)",
+                      src)

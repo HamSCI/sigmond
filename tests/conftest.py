@@ -337,3 +337,12 @@ def _no_host_uploader_environment(monkeypatch):
     monkeypatch.setattr(up_cmd, "_unit_environment", lambda: {})
     monkeypatch.setattr(up_cmd, "_UPLOADER_ENV",
                         Path("/nonexistent/sigmond-test/uploader.env"))
+
+
+@pytest.fixture(autouse=True)
+def _build_stamps_in_tmp(monkeypatch, tmp_path):
+    """A successful deploy.toml build records its HEAD under
+    /var/lib/sigmond/build-stamps (sigmond.build_stamp).  Keep every test's
+    stamps in its own directory, inherited by the subprocesses it starts
+    (update_build.py runs as one)."""
+    monkeypatch.setenv("SIGMOND_BUILD_STAMP_DIR", str(tmp_path / "build-stamps"))

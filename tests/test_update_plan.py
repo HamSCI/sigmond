@@ -283,6 +283,50 @@ def test_venv_skew_on_a_build_component_plans_the_build():
     assert [a.kind for a in plan if a.kind == 'build'] == ['build']
 
 
+def test_a_current_build_component_with_a_stale_stamp_is_built():
+    """v3.83 final review, finding 1: a v3.82 smd pulled station-web and
+    built nothing.  Nothing is behind now, but no build of HEAD is on
+    record, so the plan builds it (and restarts) without a pull."""
+    plan = plan_update(_state(repos={'station-web': {
+        'behind': 0, 'dirty': [], 'owner': 'sigmond',
+        'installer': False, 'build': True, 'build_stale': True}}))
+
+    assert [a.kind for a in plan] == ['build', 'restart']
+
+
+def test_a_current_build_component_whose_stamp_names_head_needs_nothing():
+    plan = plan_update(_state(repos={'station-web': {
+        'behind': 0, 'dirty': [], 'owner': 'sigmond',
+        'installer': False, 'build': True, 'build_stale': False}}))
+
+    assert plan == []
+
+
+def test_a_stale_stamp_never_builds_beside_an_installer():
+    plan = plan_update(_state(repos={'hf-timestd': {
+        'behind': 0, 'dirty': [], 'owner': 'timestd',
+        'installer': True, 'build': True, 'build_stale': True}}))
+
+    assert plan == []
+
+
+def test_a_stale_stamp_on_a_pinned_checkout_stays_held():
+    plan = plan_update(_state(repos={'station-web': {
+        'behind': 0, 'dirty': [], 'owner': 'sigmond',
+        'installer': False, 'build': True, 'build_stale': True,
+        'pinned': 'a' * 40, 'at_pin': True}}))
+
+    assert [type(s) for s in plan] == [Refusal]
+
+
+def test_behind_and_stale_plans_one_build():
+    plan = plan_update(_state(repos={'station-web': {
+        'behind': 1, 'dirty': [], 'owner': 'sigmond',
+        'installer': False, 'build': True, 'build_stale': True}}))
+
+    assert [a.kind for a in plan] == ['pull', 'build', 'restart']
+
+
 def test_the_plan_says_why_it_skipped_the_install_rather_than_going_quiet():
     """A step that vanishes without explanation reads as an oversight."""
     plan = plan_update(_state(repos={'ka9q-python': {
