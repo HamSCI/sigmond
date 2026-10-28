@@ -74,7 +74,64 @@ else
     info "host RAC skipped (--skip-rac)"
 fi
 
-# ─── 2. CPU/passthrough base tuning ───────────────────────────────────────────
+# ─── 2. console keys must not be able to stop the station ────────────────────
+# ⛔ A STATION MUST NOT BE SHUT DOWN BY SOMEONE PLUGGING IN A KEYBOARD.
+# systemd ships HandlePowerKey=poweroff.  On an appliance a power-key press
+# is almost never a decision: it is an operator connecting a monitor and a
+# USB keyboard to find out why the station is misbehaving, and catching the
+# button on the way past.  Measured on AI6VN 2026-10-28 — logind logged
+# "Power key pressed short" at 19:48:17, a clean poweroff followed one second
+# later, and the station was off the air until somebody walked over to it.
+# On a box at McMurdo that is a field visit to undo a cable insertion.
+#
+# Suspend and hibernate go with it, and for a worse reason: a suspended
+# station is as dead as a powered-off one and does not even look off.
+#
+# ⛔ THIS BELONGS ON THE HOST ONLY — NEVER INSIDE THE VM.  Proxmox stops a
+# guest by sending it an ACPI power-key event (`qm shutdown`, and pve-guests
+# at host shutdown).  A VM that ignored its power key would sit out the full
+# shutdown timeout — 180 s by default — and then be killed, so every host
+# reboot would turn into an unclean guest shutdown.  In the guest the power
+# key is the mechanism by which it is stopped CORRECTLY; only on the host is
+# it a hazard.  The two look like the same setting and are opposites.
+#
+# This does not lock anyone out: a firmware long-press (hold ~4 s) still cuts
+# power below anything systemd sees, so the hardware escape hatch remains.
+LOGIND_DROPIN=/etc/systemd/logind.conf.d/10-sigmond-console-keys.conf
+read -r -d '' LOGIND_BODY <<'LOGIND_EOF' || true
+# Written by sigmond host-setup.sh — do not edit by hand.
+# Why: scripts/proxmox/host-setup.sh, section 2.
+# HOST ONLY.  The decoder VM keeps systemd's defaults so that `qm shutdown`
+# can stop it cleanly.
+[Login]
+HandlePowerKey=ignore
+HandlePowerKeyLongPress=ignore
+HandleSuspendKey=ignore
+HandleSuspendKeyLongPress=ignore
+HandleHibernateKey=ignore
+HandleHibernateKeyLongPress=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+LOGIND_EOF
+
+mkdir -p "$(dirname "$LOGIND_DROPIN")"
+if [[ -f "$LOGIND_DROPIN" ]] && [[ "$(cat "$LOGIND_DROPIN")" == "$LOGIND_BODY" ]]; then
+    ok "console keys already inert ($LOGIND_DROPIN)"
+else
+    printf '%s\n' "$LOGIND_BODY" > "$LOGIND_DROPIN"
+    chmod 0644 "$LOGIND_DROPIN"
+    ok "console power/suspend keys disabled ($LOGIND_DROPIN)"
+    # reload, never restart: restarting logind drops live sessions, and this
+    # script is routinely run over the very ssh session that would be dropped.
+    if systemctl reload systemd-logind 2>/dev/null; then
+        ok "systemd-logind reloaded — in effect now"
+    else
+        warn "could not reload systemd-logind; the setting applies at next boot"
+    fi
+fi
+
+# ─── 3. CPU/passthrough base tuning ───────────────────────────────────────────
 REBOOT_REQUIRED=0
 if [[ "$DO_TUNING" == 1 ]]; then
     info "discovering host topology (no VM yet)…"
@@ -121,7 +178,7 @@ else
     info "CPU/passthrough tuning skipped (--skip-tuning)"
 fi
 
-# ─── 3. summary ───────────────────────────────────────────────────────────────
+# ─── 4. summary ───────────────────────────────────────────────────────────────
 echo
 echo -e "${BOLD}${GREEN}Phase 1 (host) complete.${NC}"
 echo "  Next:"
