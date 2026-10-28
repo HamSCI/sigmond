@@ -18597,6 +18597,61 @@ def _radiod_status_from_per_instance_config(client: str, instance: str) -> Optio
     return None
 
 
+# psk-recorder writes one of two spot-line shapes to <rid>-ft8.log /
+# <rid>-ft4.log, selected by its decoder_kind:
+#   decode_ft8:  YYYY/MM/DD HH:MM:SS  SCORE  +DT  F,REQ,HZ.d  ~  MSG
+#   jt9:         YYMMDD HHMMSS DIAL_HZ SYNC SNR DT AUDIO_OFF_HZ ~ MSG... MODE
+# Until 2026-10-28 `smd watch psk` knew only the first, so a jt9 site
+# (KJ6MKI) rendered every spot in the lowest band bucket (field 5 is the
+# SNR there) with a constant dt (field 4 is the always-0 sync column).
+_PSK_SPOT_DECODE_FT8_RE = re.compile(
+    r'^\d{4}/\d{2}/\d{2}\s+(\d{2}:\d{2}:\d{2})\s')
+_PSK_SPOT_JT9_RE = re.compile(r'^\d{6}\s+(\d{6})\s')
+
+
+def _psk_spot_fields(line: str):
+    """``(time 'HH:MM:SS', freq_hz, dt_s, is_jt9)`` for one psk log line,
+    or None when the line is neither shape.  ``freq_hz`` is the RF
+    frequency: decode_ft8 logs it directly, jt9 logs dial + audio offset.
+    jt9's dt is already in the WSJT-X convention; decode_ft8's carries the
+    ~0.65 s offset the watch subtracts for display (``is_jt9`` tells the
+    caller which)."""
+    parts = line.split()
+    m = _PSK_SPOT_DECODE_FT8_RE.match(line)
+    if m and len(parts) >= 5:
+        try:
+            return (m.group(1), float(parts[4].replace(',', '')),
+                    float(parts[3]), False)
+        except ValueError:
+            return None
+    j = _PSK_SPOT_JT9_RE.match(line)
+    if j and len(parts) >= 7:
+        t = j.group(1)
+        try:
+            return (f'{t[:2]}:{t[2:4]}:{t[4:]}',
+                    float(parts[2]) + float(parts[6]), float(parts[5]), True)
+        except ValueError:
+            return None
+    return None
+
+
+_WSPRNET_POST_DIAG_RE = re.compile(r'\s*\[async status=[^\]]*\]\s*$')
+
+
+def _wsprnet_post_server_summary(server: str) -> str:
+    """Drop the wsprnet transport's async-API diagnostics
+    ("[async status=done, 1000ms, nonce <hex>]") from the ``server: M/N
+    added`` tail.  The watch shows the outcome; the nonce stays in
+    ``journalctl -u hs-uploader`` for anyone chasing a server-side issue."""
+    return _WSPRNET_POST_DIAG_RE.sub('', server).strip()
+
+
+def _wspr_band_label(band: str) -> str:
+    """wsprdaemon band name -> display label: '20' -> '20m', but the
+    EU channels '80eu' / '60eu' are names, not metres ('60eum' was wrong)."""
+    return band if band.endswith('eu') else f'{band}m'
+
+
 def _psk_watch_cycle_loop(
     receivers: list,
     *, max_lines_per_mode: Optional[int],
@@ -18715,21 +18770,13 @@ def _psk_watch_cycle_loop(
         pos[(_lbl, 'msk')] = _file_size(_msk_log_for(_f8))
 
     import re as _re
-    # Each spot line: "YYYY/MM/DD HH:MM:SS  SCORE  +DT  FREQ  ~  MSG"
-    spot_re = _re.compile(r'^\d{4}/\d{2}/\d{2}\s+(\d{2}:\d{2}:\d{2})\s')
+    # Spot lines come in the decode_ft8 or the jt9 shape; _psk_spot_fields
+    # (module level) understands both.
 
     def _key(line: str):
         """(time, freq) for sort.  Lines that don't parse sink to the end."""
-        m = spot_re.match(line)
-        parts = line.split()
-        if not m or len(parts) < 5:
-            return ('zz', 0.0)
-        time_str = m.group(1)
-        try:
-            freq = float(parts[4].replace(',', ''))
-        except ValueError:
-            freq = 0.0
-        return (time_str, freq)
+        f = _psk_spot_fields(line)
+        return (f[0], f[1]) if f else ('zz', 0.0)
 
     # Map a spot frequency to a ham-band label.  Upper bounds match
     # the spread covered by each band's FT8/FT4 channel — generous
@@ -18744,13 +18791,10 @@ def _psk_watch_cycle_loop(
                    for idx, (_hi, label) in enumerate(_BAND_RANGES)}
 
     def _band(line: str) -> str:
-        parts = line.split()
-        if len(parts) < 5:
+        f = _psk_spot_fields(line)
+        if f is None:
             return '??'
-        try:
-            mhz = float(parts[4].replace(',', '')) / 1e6
-        except ValueError:
-            return '??'
+        mhz = f[1] / 1e6
         for hi, label in _BAND_RANGES:
             if mhz < hi:
                 return label
@@ -18768,20 +18812,18 @@ def _psk_watch_cycle_loop(
                          key=lambda b: _BAND_ORDER.get(b, 99))
         return ' '.join(f'{b}:{counts[b]}' for b in ordered)
 
-    def _avg_dt(lines: list):
+    def _avg_dt(lines: list, cal: float = 0.0):
         """Mean decoder dt (seconds) over a cycle's spot lines, or None.
         Averaged over many spots the transmitters' own timing errors cancel,
         so this approximates the recorder's slot-anchor offset from true UTC
         plus any uncompensated chain delay (the 'why is dt ~0.8s' lens).
-        dt is the 4th whitespace field: 'YYYY/MM/DD HH:MM:SS SNR dt freq ~ msg'."""
+        ``cal`` is the decode_ft8 convention offset, subtracted from
+        decode_ft8 lines only; jt9 lines already read in WSJT-X dt."""
         dts = []
         for line in lines:
-            parts = line.split()
-            if len(parts) >= 4:
-                try:
-                    dts.append(float(parts[3]))
-                except ValueError:
-                    pass
+            f = _psk_spot_fields(line)
+            if f is not None:
+                dts.append(f[2] if f[3] else f[2] - cal)
         return (sum(dts) / len(dts)) if dts else None
 
     # FT8 carries many bands, so render it with fixed-width per-band
@@ -18839,7 +18881,11 @@ def _psk_watch_cycle_loop(
 
     def _cal_spot_line(spot_line, cal):
         """Subtract the decode_ft8 dt offset from a raw decoder spot line for
-        verbose display (reformats only the dt field; leaves the rest)."""
+        verbose display (reformats only the dt field; leaves the rest).
+        jt9 lines are already in the WSJT-X convention: left untouched."""
+        f = _psk_spot_fields(spot_line)
+        if f is not None and f[3]:
+            return spot_line
         head, sep, msg = spot_line.partition('~')
         parts = head.split()
         if sep and len(parts) >= 4:
@@ -18921,12 +18967,9 @@ def _psk_watch_cycle_loop(
                 ft4_bands_part = f' ({ft4_bands})' if ft4_bands else ''
                 # Average decoder dt for the cycle's spots (fixed-width so the
                 # column lines up; '----' when no spots to average).
-                _d8 = _avg_dt(ft8_lines)
-                if _d8 is not None:
-                    _d8 -= _ft8_dt_cal   # decode_ft8 → WSJT-X dt convention
-                _d4 = _avg_dt(ft4_lines)
-                if _d4 is not None:
-                    _d4 -= _ft4_dt_cal
+                # (decode_ft8 → WSJT-X dt convention applied per line)
+                _d8 = _avg_dt(ft8_lines, _ft8_dt_cal)
+                _d4 = _avg_dt(ft4_lines, _ft4_dt_cal)
                 ft8_dt_part = f' dt={_d8:+.2f}' if _d8 is not None else ' dt= ----'
                 ft4_dt_part = f' dt={_d4:+.2f}' if _d4 is not None else ''
                 # msk= only renders on hosts with a meteor-scatter log; the
@@ -18961,8 +19004,8 @@ def _psk_watch_cycle_loop(
                         print(flush=True)
                     prev_ts = ''
                     for line in ft4_show:
-                        m = spot_re.match(line)
-                        this_ts = m.group(1) if m else ''
+                        _f = _psk_spot_fields(line)
+                        this_ts = _f[0] if _f else ''
                         if prev_ts and this_ts and this_ts != prev_ts:
                             print(flush=True)
                         print(f'  ft4: {_cal_spot_line(line, _ft4_dt_cal)}', flush=True)
@@ -20238,7 +20281,7 @@ def cmd_wspr_watch(args) -> int:
         # Emit EVERY known band so the closing ']' and each band column
         # land at the same offset on every line; absent bands are spaces.
         return ''.join(
-            (f'{b}m:{counts[b]}'.ljust(_BAND_CELL_W) if b in counts
+            (f'{_wspr_band_label(b)}:{counts[b]}'.ljust(_BAND_CELL_W) if b in counts
              else ' ' * _BAND_CELL_W)
             for b in _known_bands
         )
@@ -20430,7 +20473,8 @@ def cmd_wspr_watch(args) -> int:
             usm = upload_start_re.search(line)
             if usm:
                 n_spots, cycles, kb = usm.group(1), usm.group(2), usm.group(3)
-                hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
+                # UTC, like the cycle lines above (the host may not run UTC).
+                hms_now = time.strftime('%H:%M:%S', time.gmtime())
                 hh_, mm_, cl = _post_header_cycle(cycles)
                 if len(cl) == 1:
                     tail = f'({kb} KB)'
@@ -20448,9 +20492,10 @@ def cmd_wspr_watch(args) -> int:
             if udm:
                 n_spots, cycles, secs, rate, server = (
                     udm.group(1), udm.group(2), udm.group(3),
-                    udm.group(4), udm.group(5),
+                    udm.group(4), _wsprnet_post_server_summary(udm.group(5)),
                 )
-                hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
+                # UTC, like the cycle lines above (the host may not run UTC).
+                hms_now = time.strftime('%H:%M:%S', time.gmtime())
                 hh_, mm_, cl = _post_header_cycle(cycles)
                 # ``server`` capture group is `.*` — already includes
                 # the trailing word ``added`` (e.g. "49/49 added").
@@ -20708,7 +20753,7 @@ def cmd_wspr_watch(args) -> int:
                     if cap is not None and len(group_list) > len(to_show):
                         extras.append(
                             f'           … ({len(group_list) - len(to_show)} '
-                            f'more on {band}m)'
+                            f'more on {_wspr_band_label(band)})'
                         )
 
             # Print each rx's cycle commit line on its OWN line as it
