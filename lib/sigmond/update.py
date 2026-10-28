@@ -80,13 +80,12 @@ class Refusal:
 # Ordering is load-bearing, not cosmetic: sources land before they are
 # installed, radiod is rebuilt before wisdom is planned against it, and
 # everything settles before services are bounced.
-_ORDER = ('pull', 'install', 'rebuild-radiod', 'wisdom', 'restart')
+_ORDER = ('pull', 'install', 'build', 'rebuild-radiod', 'wisdom', 'restart')
 
 #: Said on the pull, so a missing install step reads as a decision
 #: rather than an oversight.
 _NO_INSTALLER_NOTE = (
-    'no install script: a library consumed editably through its '
-    "consumers' [tool.uv.sources], so the pull is the whole update")
+    'no install.sh and no deploy.toml [build], so the pull is the whole update')
 
 
 def _has_installer(info: dict) -> bool:
@@ -104,6 +103,16 @@ def _has_installer(info: dict) -> bool:
     behaviour unchanged.
     """
     return info.get('installer', True) is not False
+
+
+def _has_build(info: dict) -> bool:
+    """Whether deploy.toml declares `[build] steps` to run in place of an
+    install script (station-web, hamsci-physics).
+
+    ABSENT means NO build, the reverse of `_has_installer`: a build step
+    run on a guess would be a root command nobody planned for.
+    """
+    return info.get('build') is True
 
 
 def plan_update(state: dict) -> list:
@@ -161,7 +170,7 @@ def plan_update(state: dict) -> list:
             continue
         if info.get('behind'):
             detail = f'{info["behind"]} commit(s) behind upstream'
-            if not _has_installer(info):
+            if not _has_installer(info) and not _has_build(info):
                 detail += f' — {_NO_INSTALLER_NOTE}'
             actions.append(Action(
                 'pull', name,
@@ -173,7 +182,19 @@ def plan_update(state: dict) -> list:
 
     # A skewed venv needs install.sh even when the source is current.
     for name in sorted(skew | to_install):
-        if not _has_installer(repos.get(name) or {}):
+        info = repos.get(name) or {}
+        if not _has_installer(info) and _has_build(info):
+            # No install.sh, but deploy.toml [build] makes the venv: the
+            # same repair an install.sh would be, run by update_build.
+            actions.append(Action(
+                'build', name,
+                detail='run deploy.toml [build] steps (no install.sh)',
+                run_as='root',
+                verify='the [build] produces artefacts exist and the '
+                       'component imports from its rebuilt venv'))
+            needs_restart = True
+            continue
+        if not _has_installer(info):
             # Nothing to run. For a library that is the correct outcome —
             # consumers' editable installs already track the checkout —
             # but a SKEWED venv is a real defect that install.sh is the

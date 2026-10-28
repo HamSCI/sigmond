@@ -135,6 +135,26 @@ class BuildStepsRun(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(any("already built" in m for m in msgs), msgs)
 
+    def test_force_runs_the_steps_even_when_every_product_exists(self):
+        """An update needs the build exactly when the venv already exists."""
+        artefact = self._tmp / "already-there"
+        artefact.write_text("x")
+        repo = _write(self._tmp, f"""
+            [build]
+            steps = ["rebuild"]
+            produces = ["{artefact}"]
+        """)
+        calls = []
+
+        def runner(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        ok, msgs = installer.run_deploy_build_steps(
+            repo, runner=runner, force=True)
+        self.assertTrue(ok, msgs)
+        self.assertEqual(calls, ["rebuild"])
+
     def test_a_missing_artefact_rebuilds(self):
         artefact = self._tmp / "not-yet"
         repo = _write(self._tmp, f"""

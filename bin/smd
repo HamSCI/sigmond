@@ -4540,9 +4540,20 @@ def cmd_update(args) -> int:
         # Same two candidates the executor tries, in the same order.
         installer = ((d / 'scripts' / 'install.sh').exists()
                      or (d / 'install.sh').exists())
+        # A component with no install script may still build itself: its
+        # deploy.toml `[build] steps` (station-web, hamsci-physics).  Same
+        # rule as install_client: the build stands in only for an absent
+        # installer, which the planner enforces.  A file that will not
+        # parse declares no build.
+        try:
+            with open(d / 'deploy.toml', 'rb') as _fh:
+                build = bool((tomllib.load(_fh).get('build') or {})
+                             .get('steps'))
+        except (OSError, tomllib.TOMLDecodeError):
+            build = False
         repos[d.name] = {'behind': behind, 'dirty': st['dirty'],
                          'incoming': incoming, 'owner': owner,
-                         'installer': installer}
+                         'installer': installer, 'build': build}
         if native_hold:
             repos[d.name]['pinned'] = native_pin
             repos[d.name]['at_pin'] = True
@@ -4722,6 +4733,31 @@ def cmd_update(args) -> int:
             else:
                 failed += 1
                 _err(f'{step.target}: install.sh exit {rc}')
+        elif step.kind == 'build':
+            if step.target in pull_failed:
+                which = 'checkout' if step.target in checkout_failed else 'pull'
+                _warn(f'{step.target}: build skipped — {which} failed above')
+                continue
+            # smd refuses to run under sudo, so root comes from running
+            # update_build.py as a script, as `smd install` does the same
+            # work (steps, then the deploy.toml links).
+            script = (Path(__file__).resolve().parent.parent / 'lib'
+                      / 'sigmond' / 'update_build.py')
+            r = subprocess.run(
+                _as_root([sys.executable, str(script),
+                          str(base / step.target)]),
+                capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            if r.returncode == 0:
+                _ok(f'{step.target}: build exit 0')
+                applied.add(f'build {step.target}')
+                _record_update_step(f'build {step.target}')
+            else:
+                failed += 1
+                tail = ((r.stdout or '') + (r.stderr or '')
+                        ).strip().splitlines()[-15:]
+                for line in tail:
+                    print(f'  | {line}')
+                _err(f'{step.target}: build exit {r.returncode}')
         elif step.kind == 'restart':
             _info('restart not automated here — bounce radiod, wait for it to '
                   'settle, then the recorders')

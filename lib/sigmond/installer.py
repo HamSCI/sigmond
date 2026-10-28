@@ -505,7 +505,8 @@ def apply_systemd_enables(repo_dir: Path, dry_run: bool = False) -> list[str]:
 
 
 def run_deploy_build_steps(repo_dir: Path, *, dry_run: bool = False,
-                           runner=subprocess.run) -> tuple[bool, list[str]]:
+                           runner=subprocess.run,
+                           force: bool = False) -> tuple[bool, list[str]]:
     """Execute a deploy.toml ``[build].steps`` sequence.  Returns (ok, messages).
 
     The client contract (docs/CLIENT-CONTRACT.md §5) has always described
@@ -532,6 +533,11 @@ def run_deploy_build_steps(repo_dir: Path, *, dry_run: bool = False,
     ``produces`` doubles as the idempotence check: if every declared artefact
     is already present, the steps are skipped.  Steps run with the repo root as
     cwd, because the contract writes them relative to it.
+
+    ``force`` skips that shortcut.  `smd update` passes it: the check guards a
+    first install, while an update needs the build precisely when the venv
+    exists already, holding old dependencies.  ``produces`` is still checked
+    after the steps.
     """
     deploy_toml = repo_dir / 'deploy.toml'
     if not deploy_toml.exists():
@@ -548,7 +554,7 @@ def run_deploy_build_steps(repo_dir: Path, *, dry_run: bool = False,
     if not steps:
         return True, []
 
-    if produces and all(p.exists() for p in produces):
+    if not force and produces and all(p.exists() for p in produces):
         return True, [f'  already built ({len(produces)} artefact(s) present)'
                       f' — skipping {len(steps)} build step(s)']
 

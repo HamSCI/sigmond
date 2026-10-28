@@ -244,13 +244,52 @@ def test_a_component_without_an_installer_is_pulled_but_not_installed():
     assert [a.kind for a in plan] == ['pull', 'restart']
 
 
+def test_neither_installer_nor_build_says_so_plainly():
+    plan = plan_update(_state(repos={'ka9q-python': {
+        'behind': 3, 'dirty': [], 'owner': 'sigmond',
+        'installer': False, 'build': False}}))
+
+    assert [a.kind for a in plan] == ['pull', 'restart']
+    pull = plan[0]
+    assert 'no install.sh and no deploy.toml [build]' in pull.detail
+    assert 'consumed editably' not in pull.detail
+
+
+def test_a_component_with_a_build_and_no_installer_is_built_after_the_pull():
+    plan = plan_update(_state(repos={'station-web': {
+        'behind': 2, 'dirty': [], 'owner': 'sigmond',
+        'installer': False, 'build': True}}))
+
+    assert [a.kind for a in plan] == ['pull', 'build', 'restart']
+    assert next(a for a in plan if a.kind == 'build').run_as == 'root'
+    assert 'no install.sh' not in plan[0].detail
+
+
+def test_a_component_with_an_installer_and_a_build_runs_only_the_installer():
+    plan = plan_update(_state(repos={'hf-timestd': {
+        'behind': 2, 'dirty': [], 'owner': 'timestd',
+        'installer': True, 'build': True}}))
+
+    assert [a.kind for a in plan] == ['pull', 'install', 'restart']
+
+
+def test_venv_skew_on_a_build_component_plans_the_build():
+    plan = plan_update(_state(
+        repos={'station-web': {'behind': 0, 'dirty': [], 'owner': 'sigmond',
+                               'installer': False, 'build': True}},
+        venv_skew=['station-web']))
+
+    assert not [s for s in plan if isinstance(s, Refusal)]
+    assert [a.kind for a in plan if a.kind == 'build'] == ['build']
+
+
 def test_the_plan_says_why_it_skipped_the_install_rather_than_going_quiet():
     """A step that vanishes without explanation reads as an oversight."""
     plan = plan_update(_state(repos={'ka9q-python': {
         'behind': 3, 'dirty': [], 'owner': 'sigmond', 'installer': False}}))
 
     pull = next(a for a in plan if a.kind == 'pull')
-    assert 'no install script' in pull.detail
+    assert 'no install.sh and no deploy.toml [build]' in pull.detail
 
 
 def test_a_component_with_an_installer_still_gets_one():

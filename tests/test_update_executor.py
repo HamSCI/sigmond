@@ -623,3 +623,84 @@ class NativeBuildPinTableTests(unittest.TestCase):
         for name in smd._native_build_pins():
             self.assertIn(name, smd._NATIVE_BUILD_OF,
                           f"{name} is pinned but no build claims it")
+
+
+class BuildStepTests(_Rig):
+    """v3.83 row 11: a component with no install.sh but a deploy.toml [build]
+    is rebuilt by the update.  `_as_root` is identity (the suite never
+    elevates); update_build.py still runs as a real subprocess."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(smd, "_as_root", side_effect=lambda argv: argv)
+        p.start()
+        self.addCleanup(p.stop)
+        # Only the component under test: drop the rig's installer checkout.
+        import shutil
+        shutil.rmtree(self.host)
+
+    def _add_build_component(self, name="webby", installer=False,
+                             produces_present=False):
+        root = Path(self._tmp.name)
+        origin = root / f"{name}-origin.git"
+        _git("init", "--bare", "-b", "main", str(origin), cwd=root)
+        seed = root / f"{name}-seed"
+        _git("clone", str(origin), str(seed), cwd=root)
+        toml = '[build]\nsteps = ["echo ran >> built.marker"]\n'
+        if produces_present:
+            toml += f'produces = ["{self.base / name / "built.marker"}"]\n'
+            (seed / "built.marker").write_text("seeded\n")
+        (seed / "deploy.toml").write_text(toml)
+        if installer:
+            (seed / "install.sh").write_text(
+                "#!/bin/bash\necho install-ran > \"$(dirname \"$0\")/.installed\"\n")
+        (seed / "a.txt").write_text("a\n")
+        _git("add", "-A", cwd=seed); _git("commit", "-m", "first", cwd=seed)
+        _git("push", "-u", "origin", "main", cwd=seed)
+        host = self.base / name
+        _git("clone", str(origin), str(host), cwd=root)
+        (seed / "b.txt").write_text("b\n")
+        _git("add", "-A", cwd=seed); _git("commit", "-m", "second", cwd=seed)
+        _git("push", "origin", "main", cwd=seed)
+        return host
+
+    def test_update_runs_the_build_of_a_component_without_an_installer(self):
+        host = self._add_build_component()
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertTrue((host / "built.marker").exists(), text)
+        self.assertIn("build exit 0", text)
+
+    def test_update_builds_even_when_every_product_exists(self):
+        host = self._add_build_component(produces_present=True)
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertEqual((host / "built.marker").read_text().split(),
+                         ["seeded", "ran"], text)
+
+    def test_update_runs_only_the_installer_when_there_is_also_a_build(self):
+        host = self._add_build_component(installer=True)
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertTrue((host / ".installed").exists(), text)
+        self.assertFalse((host / "built.marker").exists(),
+                         "the build ran beside install.sh")
+
+    def test_update_skips_the_build_when_the_pull_failed(self):
+        host = self._add_build_component()
+        _git("fetch", cwd=host)
+        _git("remote", "set-url", "origin", "/nonexistent/origin.git", cwd=host)
+        rc, text = self._update()
+        self.assertNotEqual(rc, 0)
+        self.assertFalse((host / "built.marker").exists(),
+                         "the build ran after a failed pull")
+        self.assertIn("build skipped", text.lower())
+
+    def test_a_failing_build_step_counts_as_a_failed_update(self):
+        host = self._add_build_component()
+        # The step is `echo ran >> built.marker`; a directory of that name
+        # makes it fail.
+        (host / "built.marker").mkdir()
+        rc, text = self._update()
+        self.assertNotEqual(rc, 0, text)
+        self.assertIn("build exit 1", text)
