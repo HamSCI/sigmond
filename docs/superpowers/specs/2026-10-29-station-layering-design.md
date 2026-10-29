@@ -1,6 +1,6 @@
 # Station layering: a stable host, an independent sigmond, autonomous clients
 
-Design, 2026-10-29.  Status: draft for Michael's approval.  Rob's three
+Design, 2026-10-29.  Status: approved by Michael 2026-10-29.  Rob's three
 questions (§10) remain open; they block steps 6 and 8 only.
 
 Related:
