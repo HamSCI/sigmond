@@ -4805,6 +4805,8 @@ def cmd_update(args) -> int:
     # an install had broken. DASI002's rc=1 on 2026-08-17 came entirely
     # from the HELD refusal; ka9q-python's `install.sh exit 127` in the
     # same run contributed nothing to it.
+    if apply_ and not failed:
+        _refresh_cli_reference()
     _say_sink_notice(update_notice)
     return _update_exit(held, failed)
 
@@ -5056,6 +5058,20 @@ def cmd_admin_docs_index(args) -> int:
     for root in index.get('roots', []):
         print(f"  {root['name']:<24} {len(root.get('documents', []))} documents")
     return 0
+
+
+def _refresh_cli_reference() -> None:
+    """Rebuild the per-program CLI reference after a successful install,
+    update or align.  Never changes the caller's exit code: any failure is
+    one warning line."""
+    try:
+        from sigmond import cli_reference
+        results = cli_reference.build(smd_parser=_build_parser)
+        failed = sum(1 for r in results if not r['ok'])
+        print(f'  cli reference: {len(results)} programs ({failed} failed)',
+              file=_report_stream())
+    except Exception as exc:
+        _warn(f'cli reference not refreshed: {exc}')
 
 
 def cmd_admin_cli_reference(args, build_parser=None) -> int:
@@ -5427,7 +5443,14 @@ _PRELOAD_MODULES = {
     'update': ('sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
                'sigmond.installer_args', 'sigmond.sink_state',
-               'sigmond.build_stamp', 'sigmond.gitowner'),
+               'sigmond.build_stamp', 'sigmond.gitowner',
+               'sigmond.cli_reference', 'sigmond.cli_walk',
+               # _refresh_cli_reference walks smd's own parser, which
+               # reaches these
+               'sigmond.discovery', 'sigmond.environment_kinds',
+               'sigmond.inprocess_senders', 'sigmond.instance',
+               'sigmond.lifecycle', 'sigmond.psws', 'sigmond.site_profile',
+               'sigmond.snapshot', 'sigmond.uploader_manifest'),
     'align': ('sigmond.align', 'sigmond.align_apply', 'sigmond.align_live',
               'sigmond.provenance', 'sigmond.catalog', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
@@ -5439,7 +5462,10 @@ _PRELOAD_MODULES = {
               'sigmond.uploader_manifest', 'sigmond.environment',
               'sigmond.environment_kinds', 'sigmond.discovery',
               # _align_deploy_build's stamp check
-              'sigmond.build_stamp', 'sigmond.gitowner'),
+              'sigmond.build_stamp', 'sigmond.gitowner',
+              # _refresh_cli_reference, after the restart stage
+              'sigmond.cli_reference', 'sigmond.cli_walk', 'sigmond.psws',
+              'sigmond.site_profile', 'sigmond.snapshot'),
 }
 
 
@@ -8005,8 +8031,10 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
     align_apply.record_live(align_apply.ALIGNED_RECORD, dict(live))
     checks_ok = checks_ok and not still_down
 
-    _align_print_summary(steps)
     bad = any(s.outcome in _ALIGN_BLOCKING for s in steps)
+    if not (bad or not checks_ok):
+        _refresh_cli_reference()
+    _align_print_summary(steps)
     return 1 if (bad or not checks_ok) else 0
 
 
@@ -11036,6 +11064,9 @@ def _install_full_suite(args) -> int:
         _heading('wd-rac (Remote Access Channel)')
         if not _install_wd_rac(topology, dry_run, yes=yes):
             errors += 1
+
+    if not errors:
+        _refresh_cli_reference()
 
     # --- Summary ---
     print()
