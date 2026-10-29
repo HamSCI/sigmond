@@ -3338,14 +3338,17 @@ fi
 # appliance version visible inside the VM too (rob 2026-07-30) — same
 # path as on the host; placed after personalize so identity reset can't
 # touch it
-gexec 15 "mkdir -p /etc/sigmond-appliance && echo '$(cat /etc/sigmond-appliance/version 2>/dev/null || echo unknown)' > /etc/sigmond-appliance/version" \
+# Guard (spec 4.1, 7.1): stamp only a VM with no version.  The host's copy is
+# install-time; a newer VM must not claim the host's old release.
+gexec 15 "[ -s /etc/sigmond-appliance/version ] || { mkdir -p /etc/sigmond-appliance; echo '$(cat /etc/sigmond-appliance/version 2>/dev/null || echo unknown)' > /etc/sigmond-appliance/version; }" \
     || say "WARN: could not stamp appliance version into the VM"
 # Component pin manifest: the importer installs the host copy, but `smd doctor`
 # and the heartbeat run IN THE VM and read the same path there -- without this
 # copy every imaged decoder VM reports "manifest: unassessed" and the drift
 # check the manifest exists for never runs (AI6VN v3.37, 2026-09-05).
 if [ -s /etc/sigmond-appliance/manifest.txt ]; then
-    gexec 30 "echo $(base64 -w0 /etc/sigmond-appliance/manifest.txt) | base64 -d > /etc/sigmond-appliance/manifest.txt" \
+    # Guard (spec 4.1, 7.1): copy only into a VM with no manifest of its own.
+    gexec 30 "[ -s /etc/sigmond-appliance/manifest.txt ] || { echo $(base64 -w0 /etc/sigmond-appliance/manifest.txt) | base64 -d > /etc/sigmond-appliance/manifest.txt; }" \
         || say "WARN: could not copy the component manifest into the VM — drift check unavailable there"
 fi
 
@@ -4379,7 +4382,9 @@ rac_activate(){
             || say "WARN: could not record the remote-access wish in $MARK_DIR; carrying on with it on"
     fi
     rac_install_relays
-    install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py /usr/local/sbin/pm-align 2>/dev/null \
+    # Guard (spec 4.1, 7.1): pm-align refreshes itself on --apply; this tree is
+    # never refreshed, so copying over an installed one downgrades it.
+    [ -e /usr/local/sbin/pm-align ] || install -m 755 /root/sigmond-appliance/sigmond/scripts/proxmox/pm-align.py /usr/local/sbin/pm-align 2>/dev/null \
         || say "WARN: pm-align not installed (sigmond tree lacks it)"
     rac_record_inputs
     if ! rac_install_host_files; then
