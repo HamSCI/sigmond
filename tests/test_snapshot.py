@@ -74,6 +74,7 @@ class WriteSnapshotsTests(unittest.TestCase):
             "manifest": ["admin", "manifest", "status", "--json"],
             "heartbeat": ["admin", "heartbeat", "show", "--json"],
             "docs": ["admin", "docs", "index", "--json"],
+            "cli-reference": ["admin", "cli-reference", "show", "--json"],
         })
 
     def test_each_snapshot_gets_an_envelope(self):
@@ -106,7 +107,7 @@ class WriteSnapshotsTests(unittest.TestCase):
         self.assertIsNone(env["data"])
         self.assertEqual(env["error"], "output was not JSON")
         others = [n for n in snapshot.SNAPSHOT_COMMANDS if n != "viewers"]
-        self.assertEqual(len(others), 8)
+        self.assertEqual(len(others), 9)
         for name in others:
             self.assertEqual(self._read(name)["data"]["cmd"],
                              snapshot.SNAPSHOT_COMMANDS[name])
@@ -161,7 +162,7 @@ class WriteSnapshotsTests(unittest.TestCase):
                 self._write(_fake_run())
         finally:
             os.umask(old)
-        self.assertEqual(len(replace.call_args_list), 9)
+        self.assertEqual(len(replace.call_args_list), 10)
         for call in replace.call_args_list:
             src, dst = (Path(a) for a in call.args)
             self.assertEqual(src.parent, self.out)
@@ -170,7 +171,7 @@ class WriteSnapshotsTests(unittest.TestCase):
         for p in self.out.iterdir():
             self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o640, p.name)
         # No temp file left behind.
-        self.assertEqual(len(list(self.out.iterdir())), 9)
+        self.assertEqual(len(list(self.out.iterdir())), 10)
 
     def test_an_unknown_name_is_refused(self):
         with self.assertRaises(KeyError):
@@ -346,12 +347,12 @@ class IndependenceTests(unittest.TestCase):
         written = snapshot.write_snapshots(
             list(snapshot.SNAPSHOT_COMMANDS), self.out,
             run=_fake_run({"components": undecodable}), now=lambda: NOW, smd=SMD)
-        self.assertEqual(len(written), 9)
+        self.assertEqual(len(written), 10)
         env = json.loads((self.out / "components.json").read_text())
         self.assertEqual(env["exit"], -1)
         self.assertIsNone(env["data"])
         self.assertIn("UnicodeDecodeError", env["error"])
-        self.assertEqual(len(list(self.out.glob("*.json"))), 9)
+        self.assertEqual(len(list(self.out.glob("*.json"))), 10)
 
     def test_one_write_failure_leaves_the_others_and_fails_the_verb(self):
         real = snapshot._write_atomic

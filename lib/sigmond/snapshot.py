@@ -47,6 +47,8 @@ SNAPSHOT_COMMANDS: Dict[str, List[str]] = {
     # Runs git for each docs/ tree, so it takes the longest here; root keeps
     # a cache that skips repos whose HEAD has not moved.
     "docs": ["admin", "docs", "index", "--json"],
+    # Reads the files `smd admin cli-reference build` wrote; runs no walk.
+    "cli-reference": ["admin", "cli-reference", "show", "--json"],
 }
 
 OUT_DIR = Path("/run/sigmond/snapshot")

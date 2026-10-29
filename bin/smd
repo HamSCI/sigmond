@@ -175,7 +175,8 @@ except ImportError:
 # `smd admin snapshot write --only` choices when sigmond.snapshot will not
 # import; tests/test_snapshot.py keeps it equal to SNAPSHOT_COMMANDS' keys.
 _SNAPSHOT_NAMES_FALLBACK = ('check', 'components', 'catalog', 'instances',
-                            'validate', 'viewers', 'manifest', 'heartbeat', 'docs')
+                            'validate', 'viewers', 'manifest', 'heartbeat', 'docs',
+                            'cli-reference')
 
 # Cache for `smd admin docs index` (root reads and writes it; tests redirect it).
 DOCS_INDEX_CACHE = Path('/var/lib/sigmond/docs-index-cache.json')
@@ -5054,6 +5055,41 @@ def cmd_admin_docs_index(args) -> int:
         return 0
     for root in index.get('roots', []):
         print(f"  {root['name']:<24} {len(root.get('documents', []))} documents")
+    return 0
+
+
+def cmd_admin_cli_reference(args, build_parser=None) -> int:
+    """`smd admin cli-reference build | show` -- each client program's
+    command tree, recorded as JSON.  build needs root unless --out names a
+    writable directory; a failed walk is recorded and warned about, never
+    fatal.  show reads the files and runs no walk."""
+    import json as _json
+    from sigmond import cli_reference
+    out = getattr(args, 'out', None)
+    out_dir = Path(out) if out else cli_reference.DEFAULT_OUT
+    if args.cliref_command == 'build':
+        if not out and _need_root('admin cli-reference build'):
+            return 1
+        try:
+            results = cli_reference.build(out_dir, smd_parser=build_parser)
+        except OSError as exc:
+            _err(f'cli-reference not written: {exc}')
+            return 1
+        for r in results:
+            if not r['ok']:
+                _warn(f"cli-reference: {r['program']}: {r['error']}")
+        done = sum(1 for r in results if r['ok'])
+        _info(f'cli-reference: {done} of {len(results)} programs recorded '
+              f'in {out_dir}')
+        return 0
+    data = cli_reference.show(out_dir)
+    if getattr(args, 'json', False):
+        print(_json.dumps(data))
+        return 0
+    for prog in data['programs']:
+        note = prog.get('error') or ('stale' if prog['stale'] else 'current')
+        print(f"  {prog['program']:<24} {len(prog.get('commands', [])):>4} "
+              f"commands  {prog.get('version') or '-':<12} {note}")
     return 0
 
 
@@ -26893,6 +26929,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_docs_index.add_argument('--base',
         help='component checkout root (default /opt/git/sigmond)')
 
+    p_cliref = admin_sub.add_parser(
+        'cli-reference',
+        help="record and show each client program's command tree "
+             "(station-web's Commands page)")
+    cliref_sub = p_cliref.add_subparsers(dest='cliref_command')
+    p_cliref_build = cliref_sub.add_parser(
+        'build',
+        help="walk every client program's argparse tree and write one JSON "
+             'file each (root, unless --out names a writable directory); '
+             'a failed walk is recorded, not fatal')
+    p_cliref_build.add_argument('--out',
+        help='write here instead of /var/lib/sigmond/cli-reference')
+    p_cliref_show = cliref_sub.add_parser(
+        'show',
+        help='print the recorded command trees, marking those whose program '
+             'has a different version installed now')
+    p_cliref_show.add_argument('--json', action='store_true',
+        help='print {"schema": 1, "programs": [...]} as JSON')
+    p_cliref_show.add_argument('--out',
+        help='read from here instead of /var/lib/sigmond/cli-reference')
+
     p_viewers = admin_sub.add_parser(
         'viewers',
         help='list the station web viewers (ka9q-web, gmag-webui) with '
@@ -27683,6 +27740,7 @@ def _build_parser() -> argparse.ArgumentParser:
         'p_component': p_component,
         'p_config': p_config,
         'p_docs': p_docs,
+        'p_cliref': p_cliref,
         'p_env': p_env,
         'p_heartbeat': p_heartbeat,
         'p_i_list': p_i_list,
@@ -27745,6 +27803,7 @@ def main() -> int:
     p_component = parser._smd_parts['p_component']
     p_config = parser._smd_parts['p_config']
     p_docs = parser._smd_parts['p_docs']
+    p_cliref = parser._smd_parts['p_cliref']
     p_env = parser._smd_parts['p_env']
     p_heartbeat = parser._smd_parts['p_heartbeat']
     p_i_list = parser._smd_parts['p_i_list']
@@ -27934,6 +27993,13 @@ def main() -> int:
             p_docs.print_help()
             return 0
         return cmd_admin_docs_index(args)
+
+    if args.command == 'cli-reference':
+        sub_cmd = getattr(args, 'cliref_command', None)
+        if sub_cmd not in ('build', 'show'):
+            p_cliref.print_help()
+            return 0
+        return cmd_admin_cli_reference(args, _build_parser)
 
     if args.command == 'snapshot':
         if getattr(args, 'snapshot_command', None) != 'write':
