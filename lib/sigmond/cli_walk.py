@@ -19,10 +19,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import importlib
 import importlib.metadata
 import json
+import os
 import sys
 from typing import Any, Callable
 
@@ -202,9 +202,7 @@ def build(entry: str | None, program: str, dist: str | None) -> dict:
     }
     try:
         func = _load_entry(entry)
-        # The program may print before it parses; stdout carries only JSON.
-        with contextlib.redirect_stdout(sys.stderr):
-            parser = capture_parser(func)
+        parser = capture_parser(func)
         result["commands"] = walk_parser(parser, program)
     except SystemExit as exc:
         result["error"] = f"{NO_PARSER} (SystemExit: {exc.code})"
@@ -217,6 +215,37 @@ def build(entry: str | None, program: str, dist: str | None) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """The CLI path.  Never returns: ends in os._exit(0).
+
+    The JSON goes to a saved copy of the real stdout.  For the whole walk,
+    fd 1 points at stderr, so Python-level, C-level and child-process
+    output from the program (import time included) cannot reach it.  The
+    hard exit keeps a client's non-daemon thread from writing after the
+    JSON or holding the process open.
+    """
+    json_fd = os.dup(1)
+    sys.stdout.flush()
+    os.dup2(2, 1)
+    try:
+        text = json.dumps(_run(argv), indent=2) + "\n"
+    except SystemExit as exc:  # argparse usage error: report it, exit 2
+        _hard_exit(exc.code if isinstance(exc.code, int) else 2)
+    data = text.encode()
+    while data:
+        data = data[os.write(json_fd, data):]
+    _hard_exit(0)
+
+
+def _hard_exit(code: int):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
+def _run(argv: list[str] | None) -> dict:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--entry", help="MODULE:FUNC of the program's main")
     ap.add_argument("--program", help="name to show as the command root")
@@ -241,9 +270,8 @@ def main(argv: list[str] | None = None) -> int:
                   "entry": None, "commands": [], "error": error}
     else:
         result = build(entry, program, dist)
-    sys.stdout.write(json.dumps(result, indent=2) + "\n")
-    return 0
+    return result
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

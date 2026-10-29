@@ -67,6 +67,15 @@ class WalkParserTests(unittest.TestCase):
         self.assertEqual(by['prog b']['description'], 'long b')
         self.assertEqual(by['prog a y']['help'], '')
 
+    def test_aliases_walk_once(self):
+        from sigmond.cli_walk import walk_parser
+        p = argparse.ArgumentParser(prog='prog')
+        sub = p.add_subparsers()
+        sub.add_parser('install', aliases=['i', 'add'], help='h')
+        sub.add_parser('other')
+        paths = [c['path'] for c in walk_parser(p, 'prog')]
+        self.assertEqual(paths, ['prog', 'prog install', 'prog other'])
+
     def test_records_arguments(self):
         from sigmond.cli_walk import walk_parser
         cmd = walk_parser(_args_parser(), 'prog')[0]
@@ -173,6 +182,46 @@ class SubprocessTests(unittest.TestCase):
         self.assertEqual(out['entry'], 'fixtures_cli:main')
         self.assertEqual(out['commands'][0]['path'], 'p')
         self.assertEqual(out['commands'][0]['arguments'][0]['flags'], ['--q'])
+
+    def _run_timed(self, body, name):
+        import time
+        d = self._fixture_dir(body)
+        t = time.monotonic()
+        out = self._run('--entry', f'fixtures_cli:{name}', '--program', 'p',
+                        pythonpath=d)
+        self.assertLess(time.monotonic() - t, 10)
+        return out
+
+    def test_import_time_output_stays_off_stdout(self):
+        out = self._run_timed(
+            'import argparse, sys, os\n'
+            'print("IMPORT-TIME OUTPUT")\n'
+            'os.write(1, b"C-LEVEL\\n")\n'
+            'def main():\n'
+            '    argparse.ArgumentParser().parse_args()\n', 'main')
+        self.assertIsNone(out['error'])
+
+    def test_nondaemon_thread_printing_later_is_cut_off(self):
+        out = self._run_timed(
+            'import argparse, threading, time\n'
+            'def _w():\n'
+            '    time.sleep(0.5)\n'
+            '    print("LATE")\n'
+            'def main():\n'
+            '    threading.Thread(target=_w).start()\n'
+            '    argparse.ArgumentParser().parse_args()\n', 'main')
+        self.assertIsNone(out['error'])
+
+    def test_looping_thread_cannot_hold_the_walker(self):
+        out = self._run_timed(
+            'import argparse, threading, time\n'
+            'def _w():\n'
+            '    while True:\n'
+            '        print("spin"); time.sleep(0.05)\n'
+            'def main():\n'
+            '    threading.Thread(target=_w).start()\n'
+            '    argparse.ArgumentParser().parse_args()\n', 'main')
+        self.assertIsNone(out['error'])
 
     def test_missing_script_reports_error(self):
         out = self._run('--script', 'no-such-script-xyz')
