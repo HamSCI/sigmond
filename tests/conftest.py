@@ -346,3 +346,27 @@ def _build_stamps_in_tmp(monkeypatch, tmp_path):
     stamps in its own directory, inherited by the subprocesses it starts
     (update_build.py runs as one)."""
     monkeypatch.setenv("SIGMOND_BUILD_STAMP_DIR", str(tmp_path / "build-stamps"))
+
+
+@pytest.fixture(autouse=True)
+def _no_host_sink_files(tmp_path, monkeypatch):
+    """Keep every in-process sink_path() off the host's real sink files.
+
+    Both writer copies bind /etc/hs-uploader/sink.toml and
+    /var/lib/sigmond/sink.db as keyword defaults, so `Writer.from_env(env={})`
+    would resolve to a live station's sink.  Re-point those defaults at paths
+    that do not exist.  A test that passes its own `config_file=`,
+    `legacy_path=` or `state_dir=`, or sets the env, still wins.  (A test
+    that starts a subprocess names its sink through the env.)
+    """
+    import importlib
+    nowhere = tmp_path / "no-such-host-sink"
+    for modname in ("hs_uploader.sink.writer", "sigmond.hamsci_sink._bundled"):
+        try:
+            mod = importlib.import_module(modname)
+        except ImportError:
+            continue
+        kw = dict(mod.sink_path.__kwdefaults__)
+        kw["config_file"] = str(nowhere / "sink.toml")
+        kw["legacy_path"] = str(nowhere / "legacy" / "sink.db")
+        monkeypatch.setattr(mod.sink_path, "__kwdefaults__", kw)

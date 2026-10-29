@@ -164,13 +164,20 @@ class TestWriterFromEnvDispatch(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             from sigmond.hamsci_sink import writer as writer_mod
-            original_path = writer_mod._DEFAULT_SQLITE_PATH
-            writer_mod._DEFAULT_SQLITE_PATH = str(Path(tmpdir) / "sink.db")
+            # No env, no config, no legacy file: the state dir holds the sink.
+            state_dir = str(Path(tmpdir) / "state")
+            Path(state_dir).mkdir()
+            original = writer_mod.sink_path
+            writer_mod.sink_path = lambda env=None, **kw: original(
+                env, state_dir=state_dir, **kw)
             try:
                 w = Writer.from_env(table="spots", mode="psk", env={})
                 self.assertFalse(w.is_noop)
+                w.insert([{"mode": "ft8"}])
+                w.close()
+                self.assertTrue((Path(state_dir) / "sink.db").exists())
             finally:
-                writer_mod._DEFAULT_SQLITE_PATH = original_path
+                writer_mod.sink_path = original
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

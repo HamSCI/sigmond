@@ -209,9 +209,16 @@ that comparison when no `../hs-uploader` checkout sits beside this one.
 
 Either copy picks the sink at construction time:
 
-- `SIGMOND_SQLITE_PATH` set → `Writer` at that path (override).
-- Unset                    → `Writer` at `/var/lib/sigmond/sink.db`
-  if writable, else no-op (preserves standalone-safety).
+`sink_path()` resolves the path, first match wins:
+
+1. `HAMSCI_SINK_PATH`, then `SIGMOND_SQLITE_PATH` (env overrides).
+2. `path` in `/etc/hs-uploader/sink.toml` (hs-uploader's install writes it).
+3. `/var/lib/sigmond/sink.db`, if that file exists (legacy stations keep it).
+4. `<HS_UPLOADER_STATE_DIR or /var/lib/hs-uploader>/sink.db`, if writable.
+5. Otherwise a no-op writer (preserves standalone-safety).
+
+Tests pass `config_file=`, `legacy_path=` and `state_dir=` to `sink_path`, or
+set the env, and never touch the host's real sink files.
 
 Each row also carries `producer` and `local` (spec §6.1).  The writer adds
 both columns, by `ALTER TABLE ADD COLUMN` alone, to an older `sink.db` it

@@ -17,13 +17,16 @@ here, and this package hands each one a copy of the same code:
 tests/test_hamsci_sink_compat.py fails when the two copies differ.
 
 ``sigmond.hamsci_sink.writer`` names the chosen module itself, not a
-re-export.  A global set through it, such as ``_DEFAULT_SQLITE_PATH`` in a
+re-export.  A global set through it, such as ``SINK_CONFIG`` in a
 test, changes what ``Writer.from_env`` reads.
 
-Either copy picks the sink the same way.  ``SIGMOND_SQLITE_PATH`` names it
-when set.  Otherwise the writer uses ``/var/lib/sigmond/sink.db`` if that
-directory is writable, and falls back to a no-op, so a client outside a
-sigmond install stays safe.  ``BufferFull`` reports prolonged sink failure
+Either copy picks the sink the same way, through ``sink_path()``.  The first
+match wins: ``HAMSCI_SINK_PATH``, then ``SIGMOND_SQLITE_PATH``, then ``path`` in
+``/etc/hs-uploader/sink.toml``, then ``/var/lib/sigmond/sink.db`` if that file
+exists, then ``<state dir>/sink.db`` (``HS_UPLOADER_STATE_DIR`` or
+``/var/lib/hs-uploader``) if writable.  With none of these the writer falls
+back to a no-op, so a client outside a sigmond install stays safe.
+``BufferFull`` reports prolonged sink failure
 instead of losing rows silently.
 """
 

@@ -316,7 +316,8 @@ class SurfaceTests(unittest.TestCase):
         from sigmond.hamsci_sink.writer import (  # noqa: F401
             DEFAULT_SQLITE_AUTO_FLUSH_SECONDS, DEFAULT_SQLITE_BATCH_ROWS,
             HEALTH_DEGRADED, HEALTH_NOOP, HEALTH_OK, HEALTH_UNREACHABLE,
-            _DEFAULT_SQLITE_PATH, _default_sqlite_writable, _resolve_db_alias,
+            LEGACY_SINK_PATH, SINK_CONFIG, _default_sqlite_writable, _resolve_db_alias,
+            sink_path,
         )
         self.assertIn(SINK_IMPL, ("hs_uploader", "bundled"))
         self.assertEqual(sorted(hs.__all__),
