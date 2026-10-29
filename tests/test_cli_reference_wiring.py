@@ -127,6 +127,50 @@ class InstallTests(unittest.TestCase):
         b.assert_not_called()
 
 
+# --- single-client install -------------------------------------------------
+
+def _single(*, dry_run=False, install_ok=True):
+    entry = CatalogEntry(name='fake', kind='client', description='t',
+                         repo='https://github.com/test/fake',
+                         install_script='/opt/git/sigmond/fake/install.sh')
+    args = argparse.Namespace(client='fake', components=None, profile=None,
+                              client_dir=None, dry_run=dry_run, yes=True, force=False,
+                              no_enable=False, topology=None, no_pull=True)
+    out = io.StringIO()
+    with contextlib.ExitStack() as st:
+        for name, kw in (
+                ('load_catalog', dict(return_value=[entry])),
+                ('get_entry', dict(return_value=entry)),
+                ('_need_root', dict(return_value=False)),
+                ('_netdiag_auto_refresh', {}), ('_build_decoders', dict(return_value=True)),
+                ('_post_install_fixups', {}), ('_enable_after_install', {}),
+                ('_do_install_client', dict(return_value=install_ok))):
+            st.enter_context(mock.patch.object(smd, name, **kw))
+        st.enter_context(mock.patch('sigmond.preflight.check_requires', return_value=True))
+        b = st.enter_context(_build())
+        st.enter_context(contextlib.redirect_stdout(out))
+        st.enter_context(contextlib.redirect_stderr(out))
+        rc = smd._install_single_client(args)
+    return rc, out.getvalue(), b
+
+
+class SingleClientInstallTests(unittest.TestCase):
+    def test_success_refreshes_once(self):
+        rc, out, b = _single()
+        self.assertEqual(rc, 0)
+        b.assert_called_once()
+
+    def test_failure_never_refreshes(self):
+        rc, out, b = _single(install_ok=False)
+        self.assertEqual(rc, 1)
+        b.assert_not_called()
+
+    def test_dry_run_never_refreshes(self):
+        rc, out, b = _single(dry_run=True)
+        self.assertEqual(rc, 0)
+        b.assert_not_called()
+
+
 # --- update ----------------------------------------------------------------
 
 def _update(*, apply, raises=False):
@@ -194,13 +238,27 @@ class AlignTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         b.assert_not_called()
 
+    def test_no_restart_refreshes_once_before_the_summary(self):
+        rc, out, b = self._go(no_restart=True)
+        self.assertEqual(rc, 0)
+        b.assert_called_once()
+        self.assertLess(out.index('cli reference'), out.index('summary:'))
+
     def test_dry_run_never_refreshes(self):
-        with _build() as b, mock.patch('sigmond.align.fetch_release',
-                                       side_effect=RuntimeError('stop')):
-            with contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(Exception):
-                    smd.cmd_align(argparse.Namespace(
-                        apply=False, base='/nonexistent', release=None))
+        from sigmond import align
+        rel = _tac.APPLY_REL
+        out = io.StringIO()
+        with _build() as b, contextlib.redirect_stdout(out), \
+                mock.patch('sigmond.align.fetch_release', return_value=rel), \
+                mock.patch.object(smd, '_align_live_state',
+                                  return_value=(dict(rel.components), {}, {}, {})), \
+                mock.patch.object(smd, '_align_print_restarts', return_value=0), \
+                mock.patch.object(smd, '_align_ancestry',
+                                  return_value=lambda c, a, b: True), \
+                mock.patch('sigmond.catalog.load_catalog', return_value={}):
+            rc = smd.cmd_align(argparse.Namespace(
+                apply=False, base='/nonexistent', release=None))
+        self.assertIn('dry run', out.getvalue())
         b.assert_not_called()
 
 

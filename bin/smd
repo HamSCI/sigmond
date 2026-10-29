@@ -7926,6 +7926,8 @@ def _align_make_live(args, rel, move_steps, *, base, catalog, now) -> int:
             verb = 'services still run' if n != 1 else 'service still runs'
             print(f"  {n} {verb} old code: {', '.join(names)} — "
                   f"re-run smd align --apply to restart them")
+        if not any(s.outcome in _ALIGN_BLOCKING for s in steps):
+            _refresh_cli_reference()
         _align_print_summary(steps)
         return 0
 
@@ -10677,7 +10679,17 @@ def _enable_after_install(entry, args) -> None:
 
 
 def _install_single_client(args) -> int:
-    """Catalog-driven install of a single client: smd install <client>."""
+    """Catalog-driven install of a single client: smd install <client>.
+
+    The reference refreshes after every success exit, never after a dry run
+    or a failure."""
+    rc = _install_single_client_run(args)
+    if rc == 0 and not getattr(args, 'dry_run', False):
+        _refresh_cli_reference()
+    return rc
+
+
+def _install_single_client_run(args) -> int:
     client = args.client
     dry_run = getattr(args, 'dry_run', False)
     yes = getattr(args, 'yes', False)
