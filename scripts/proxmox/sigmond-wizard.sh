@@ -2096,6 +2096,24 @@ h = (d or {}).get("health") or {}
 fix = h.get("gps_fix")
 sats = h.get("sats_used")
 grid = h.get("grid")
+# gpsdo-monitor carries a "grid" field and leaves it null (AI6VN, 2026-10-29),
+# while reporting the ubx-nav-pvt position it derives from.  Compute it here
+# rather than ask the operator for what the hardware is already holding.
+# Same arithmetic as the embedded HID helper -- tests hold the two together.
+if not grid:
+    lat, lon = h.get("latitude"), h.get("longitude")
+    locked = h.get("gps_locked") or (fix not in (None, "", "none", "no_fix"))
+    ok = (locked
+          and type(lat) in (int, float) and type(lon) in (int, float)
+          and -90.0 <= lat <= 90.0 and -180.0 <= lon < 180.0
+          and (lat, lon) != (0.0, 0.0))
+    if ok:
+        L, A = lon + 180.0, lat + 90.0
+        f1, f2 = int(L / 20), int(A / 10)
+        s1, s2 = int((L - f1 * 20) / 2), int(A - f2 * 10)
+        u1 = int((L - f1 * 20 - s1 * 2) * 12)
+        u2 = int((A - f2 * 10 - s2) * 24)
+        grid = "%c%c%d%d%c%c" % (65 + f1, 65 + f2, s1, s2, 97 + u1, 97 + u2)
 if h.get("gps_locked") and not fix:
     fix = "lock"
 print("%s|%s|%s" % (fix or "", "" if sats is None else sats, grid or ""))
@@ -2155,6 +2173,15 @@ GPSDO_HID_GRID=""; GPSDO_HID_FIX=""; GPSDO_HID_SATS=""
 gpsdo_mini_grid() {
     GPSDO_HID_GRID=""; GPSDO_HID_FIX=""; GPSDO_HID_SATS=""
     [ "${GPSDO_ID:-}" = "1dd2:2211" ] || return 1
+    # ⛔ ONLY where the USB controllers still belong to the host.  Once
+    # firstboot hands them to vfio-pci the Proxmox host has NO USB at all --
+    # `lsusb` is empty and /dev/hidraw* does not exist -- so the scan below
+    # can only fail, and its failure reads to the operator as a GPSDO fault
+    # (AI6VN, 2026-10-29: "no position from HID" with a 3D fix on 12 sats).
+    # Past passthrough gpsdo-monitor in the VM owns the device and already
+    # holds the position; gpsdo_lock_report asks it.  Do not duplicate that
+    # read here -- two readers on one hidraw node, for the same bytes.
+    [ "${PREFLIGHT_SRC:-host}" = "host" ] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
     local helper out
     helper=$(mktemp /tmp/sigmond-mini-grid.XXXXXX.py) || return 1
@@ -2447,15 +2474,26 @@ ask_grid() {
         if [ "${GPSDO_ID:-}" = "1dd2:2211" ]; then
             echo "GPSDO present (LBE-Mini). It reports over USB HID (UBX), not"
             echo "  NMEA."
-            printf "  Reading its position over HID... "
+            # Name the side we are about to ask.  Before passthrough that is
+            # this host, over HID; after it, the decoder VM, which owns the
+            # device.  Announcing an HID read we will not attempt described a
+            # failure that never happened (AI6VN, 2026-10-29).
+            if [ "${PREFLIGHT_SRC:-host}" = "host" ]; then
+                printf "  Reading its position over HID... "
+            else
+                printf "  Asking gpsdo-monitor in the decoder VM, which owns it... "
+            fi
             if gpsdo_mini_grid 8; then
                 echo "$GPSDO_HID_GRID  ($GPSDO_HID_FIX fix, $GPSDO_HID_SATS satellites)"
                 GRID_DEFAULT="$GPSDO_HID_GRID"
             elif gpsdo_lock_report; then
-                echo "no position from HID; gpsdo-monitor in the decoder VM answered."
-                gpsdo_say_lock
-                GRID_DEFAULT="$GPSDO_GRID_UBX"
-                [ -n "$GRID_DEFAULT" ] && echo "  position from the GPSDO: $GRID_DEFAULT"
+                if [ -n "$GPSDO_GRID_UBX" ]; then
+                    echo "$GPSDO_GRID_UBX  ($GPSDO_FIX fix, ${GPSDO_SATS:-?} satellites)"
+                    GRID_DEFAULT="$GPSDO_GRID_UBX"
+                else
+                    echo "answered, but is holding no position."
+                    gpsdo_say_lock
+                fi
             else
                 echo "no answer."
                 # UNKNOWN is not the same as NO LOCK, and must never be printed
@@ -2468,7 +2506,7 @@ ask_grid() {
                 echo "    the agent 'active' inside the guest while the host said"
                 echo "    'QEMU guest agent is not running'. Clear that with, in"
                 echo "    the VM:  sudo systemctl restart qemu-guest-agent"
-                echo "    Then:  smd gpsdo status"
+                echo "    Then, in the VM:  gpsdo-monitor status"
             fi
         else
             printf "Reading position from the GPSDO (%s)... " "$GPSDO_MODEL"
@@ -2499,7 +2537,8 @@ ask_grid() {
             # sigmond-site-timing.  Whatever is entered now is provisional.
             echo "  Your GPSDO will set the grid automatically once it locks —"
             echo "  the value below is only used until then."
-            echo "  To see what it is reporting:  smd gpsdo status"
+            echo "  To see what it is reporting, in the decoder VM:"
+            echo "    gpsdo-monitor status"
         fi
     fi
     # A live GPSDO fix IS the answer — don't ask (mjh 2026-08-11).  The

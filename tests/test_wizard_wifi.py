@@ -19,6 +19,7 @@ nested-test hunt.  test_unattended_consumes_no_stdin is the guard on that.
 """
 import os
 import pty
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -243,12 +244,27 @@ class WiringTests(unittest.TestCase):
         self.assertLess(run.index("\nask_wifi\n"), run.index("\nask_rac\n"))
 
     def test_review_screen_lists_and_can_re_edit_it(self):
+        """DERIVE Wi-Fi's slot; never hardcode it.
+
+        This test asserted "8) Wi-Fi:" and went red the moment the Time entry
+        was added and Wi-Fi slid to 7 (2026-10-29) -- it was testing the
+        numbering, which is free to change, instead of the property that
+        matters: whatever number Wi-Fi is listed under re-edits Wi-Fi, and the
+        advertised range includes it.
+        """
         review = self.text[self.text.index("── Review —"):]
-        self.assertIn("8) Wi-Fi:", review)
-        self.assertIn("8) ask_wifi;;", review)
-        # the operator has to be told 8 is a valid choice, not just that it works
-        self.assertIn("1-8", review)
-        self.assertNotIn("entry number 1-7", review)
+        m = re.search(r"(\d+)\) Wi-Fi:", review)
+        self.assertIsNotNone(m, "Wi-Fi is not listed on the review screen")
+        n = m.group(1)
+        self.assertIn("%s) ask_wifi;;" % n, review,
+                      "entry %s is listed as Wi-Fi but re-edits something else" % n)
+        # The operator has to be TOLD n is a valid choice, not merely find
+        # that it works.
+        hi = re.search(r"1-(\d+) = re-edit", review)
+        self.assertIsNotNone(hi, "the prompt no longer advertises a range")
+        self.assertLessEqual(int(n), int(hi.group(1)),
+                             "Wi-Fi is entry %s but the prompt offers 1-%s"
+                             % (n, hi.group(1)))
 
 
 class _fake_tool:

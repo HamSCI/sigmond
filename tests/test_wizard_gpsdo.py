@@ -48,8 +48,14 @@ def ask_grid() -> str:
 
 
 def run(gpsdo_id: str, model: str, grid_from_device: str = "",
-        monitor=None) -> str:
-    """monitor: None = gpsdo-monitor does not answer; else (fix, sats, grid)."""
+        monitor=None, src: str = "vm") -> str:
+    """monitor: None = gpsdo-monitor does not answer; else (fix, sats, grid).
+
+    src: which side owns the USB controllers -- "host" before passthrough,
+    "vm" after it.  The wizard must say which one it asked; announcing an HID
+    read on a host with no USB described a failure that never happened
+    (AI6VN, 2026-10-29).
+    """
     stub = (f'gpsdo_grid(){{ printf "%s\\n" "{grid_from_device}"; '
             f'[ -n "{grid_from_device}" ]; }}')
     if monitor is None:
@@ -64,7 +70,7 @@ def run(gpsdo_id: str, model: str, grid_from_device: str = "",
         rd(){{ read "$@" || true; }}
         say(){{ printf '%s\\n' "$*"; }}
         HAVE_GPSDO=1
-        PREFLIGHT_SRC=vm
+        PREFLIGHT_SRC={src}
         GPSDO_ID="{gpsdo_id}"
         GPSDO_MODEL="{model}"
         GPSDO_FIX=""; GPSDO_SATS=""; GPSDO_GRID_UBX=""
@@ -122,13 +128,20 @@ class GpsdoMessageTests(unittest.TestCase):
         self.assertNotIn("cannot read it directly", out)
         self.assertNotIn("is not a fault", out)
 
-    def test_mini_announces_the_direct_hid_read(self):
+    def test_mini_announces_the_direct_hid_read_before_passthrough(self):
         """It CAN read it now, and must say so -- the operator needs to know
         where a grid came from.  The old test asserted the reverse and passed
         only because the new wording is 'Reading its position', so a substring
         check for 'Reading position' missed it."""
-        out = run(self.MINI, "LBE-Mini")
+        out = run(self.MINI, "LBE-Mini", src="host")
         self.assertIn("Reading its position over HID", out)
+
+    def test_mini_names_the_vm_once_the_controllers_are_handed_over(self):
+        """Past passthrough this host owns no USB; the HID read is not even
+        attempted, so claiming one was is a false failure report."""
+        out = run(self.MINI, "LBE-Mini", src="vm")
+        self.assertIn("gpsdo-monitor in the decoder VM", out)
+        self.assertNotIn("Reading its position over HID", out)
 
     def test_serial_gpsdo_without_a_fix_says_no_fix(self):
         out = run(self.SERIAL, "LBE-1421")
@@ -166,14 +179,20 @@ class GpsdoMessageTests(unittest.TestCase):
 
     def test_mini_reports_a_lock_when_it_has_one(self):
         out = run(self.MINI, "LBE-Mini", monitor=self.LOCKED)
-        self.assertIn("GPS lock: 3d (11 satellites)", out)
+        # Stated on the answer line now that the answer carries it, rather
+        # than on a second line repeating what the first already said.
+        self.assertIn("3d fix", out)
+        self.assertIn("11 satellites", out)
         self.assertNotIn("NO GPS LOCK", out)
 
     def test_mini_can_now_supply_a_grid_via_the_monitor(self):
         """The NMEA path never could; going through gpsdo-monitor can."""
         out = run(self.MINI, "LBE-Mini", monitor=self.LOCKED)
-        self.assertIn("position from the GPSDO: CM87tj", out)
+        self.assertIn("CM87tj", out)
         self.assertIn("GRID=CM87tj", out)
+        # The operator must be able to see it came from the device, not from
+        # a default we invented.
+        self.assertIn("from the GPSDO fix", out)
 
     def test_mini_says_so_when_the_monitor_cannot_be_reached(self):
         """Unknown must not be reported as 'no lock' — they differ."""
@@ -210,7 +229,7 @@ class GpsdoMessageTests(unittest.TestCase):
         for gid, model in ((self.MINI, "LBE-Mini"), (self.SERIAL, "LBE-1421")):
             with self.subTest(model=model):
                 out = run(gid, model)
-                self.assertIn("smd gpsdo status", out)
+                self.assertIn("gpsdo-monitor status", out)
                 self.assertIn("only used until then", out)
 
 
