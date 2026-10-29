@@ -78,11 +78,11 @@ adoptable:
   run `smd adopt <name>` to record its sources, then enable and start what it brings
 ```
 
-Look at the marks. A check mark means healthy, a warning mark means look soon, and a cross means a fault. This run returned exit code 1 because of the crosses under the timing judge. B4 is a test bench, so those offset violations stay under study there. On a production station, a cross needs follow-up. The line `[stale]` means the check last ran long ago.
+Look at the marks. A check mark means healthy, a warning mark means look soon, and a cross means a fault. This run returned exit code 1 because of the crosses under the timing judge. An OFFSET VIOLATION line comes from the judge in hf-timestd. It names one timing source and shows that source's smoothed offset. The judge raises the flag when that offset departs from the judge's expected value by more than 5 times the combined uncertainty (sigma) for at least 60 seconds. A cross needs follow-up. The line `[stale]` means the check last ran long ago.
 
 ## smd timing
 
-Use this to see which timing tier governs the station and how far the system clock is off.
+Use this to see two separate things. The first block shows what hf-timestd, the timing authority, reports. The second shows how the system clock compares with its reference.
 
 ```
 smd timing
@@ -98,7 +98,9 @@ System clock (chrony)
   reference  192.168.1.80   stratum 2   offset -1.4 us   rms 3.0 us   leap Normal
 ```
 
-Look at two things. The tier shows how good the timing source is, and T6 is the best. The `published` age should stay in seconds. Then look at the chrony line. A small offset and a small rms mean the system clock follows its reference well. A large offset, a high stratum or a leap warning needs a closer look.
+Read the authority block first. The tier names the best timing source in use, and T6 is the best. The offset gives the correction the authority publishes. For T6 that offset registers the station's sample counter against UTC through the chain delay. It does not describe the system clock. B4 shows about -16 ms here and that is expected: the learned T6 chain delay there measures about -16 ms. Sigma gives the uncertainty. The governor names the radiod instance that supplies the timing the authority follows. The `published` age should stay in seconds.
+
+Then read the chrony block. It compares the system clock with its reference. A small offset and a small rms mean the clock follows its reference well. A large offset, a high stratum or a leap warning needs a closer look.
 
 ## smd component list
 
@@ -127,7 +129,7 @@ The real list holds 26 rows. This example keeps seven and marks the cut with `â€
      run: smd component update  (preview: smd component update --dry-run)
 ```
 
-Look at LIFECYCLE and VERDICT. A component that should run shows `enabled, running`. `behind` means newer commits wait upstream, and BEHIND counts them. Pinned stations stay behind on purpose; `smd align` decides what they should run. `dirty` means uncommitted changes in a checkout, which deserves attention.
+Look at LIFECYCLE and VERDICT. A component that should run shows `enabled, running`. `behind` means newer commits wait upstream, and BEHIND counts them. `on branch` in VERDICT means the checkout sits on something other than the default branch, a detached commit included. `binary, missing` in LIFECYCLE means the component ships as a command-line tool and the command does not exist on the PATH. Pinned stations stay behind on purpose; `smd align` decides what they should run. `dirty` means uncommitted changes in a checkout, which deserves attention.
 
 ## smd align
 
