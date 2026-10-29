@@ -26004,41 +26004,12 @@ def cmd_capture_prep(args) -> int:
     return 0
 
 
-def main() -> int:
-    # v2 canonical `smd admin log set-level [<client>] <level>` — pre-argparse
-    # intercept because argparse can't cleanly mix a sub-verb with the
-    # legacy positional-client shape (`smd admin log [<client>]`), which must
-    # keep working.  Routes the same write semantics as the legacy
-    # `smd admin log [<client>] --level <level>` path.
-    # Narrow intercept: only matches when `log` is the FIRST positional
-    # (no `--topology` etc. before it).  Operators needing a topology
-    # override should use the legacy `log <client> --level X` shape
-    # during the deprecation window.
-    # Two argv shapes:
-    #   smd admin log set-level <level>            — global CLIENT_LOG_LEVEL default
-    #   smd admin log set-level <client> <level>   — per-client override + SIGHUP
-    if len(sys.argv) >= 3 and sys.argv[1] == 'log' and sys.argv[2] == 'set-level':
-        if len(sys.argv) == 4:
-            return cmd_log(argparse.Namespace(
-                command='log',
-                client=None,
-                level=sys.argv[3],
-                files=False,
-                topology=None,
-            ))
-        if len(sys.argv) >= 5:
-            return cmd_log(argparse.Namespace(
-                command='log',
-                client=sys.argv[3],
-                level=sys.argv[4],
-                files=False,
-                topology=None,
-            ))
-        print('smd admin log set-level: requires <level> (global default) '
-              'or <client> <level> (per-client)',
-              file=sys.stderr)
-        return 2
+def _build_parser() -> argparse.ArgumentParser:
+    """Build smd's whole argparse tree and nothing else.
 
+    main() parses with it; the CLI reference walks it in process.  The
+    verb parsers that main() prints help from ride on `_smd_parts`.
+    """
     # Hide argparse's auto-generated subparser listing — the grouped
     # epilog covers the same verbs categorised by intent (Configure /
     # Observe / Operate, mirroring the TUI tree), and the alphabetical
@@ -27705,6 +27676,92 @@ def main() -> int:
 
     # tui — primary entry point (replaces `smd config edit`).
     sub.add_parser('tui', help='launch the sigmond TUI')
+
+    parser._smd_parts = {
+        'p_admin': p_admin,
+        'p_c_list': p_c_list,
+        'p_component': p_component,
+        'p_config': p_config,
+        'p_docs': p_docs,
+        'p_env': p_env,
+        'p_heartbeat': p_heartbeat,
+        'p_i_list': p_i_list,
+        'p_instance': p_instance,
+        'p_manifest': p_manifest,
+        'p_rac': p_rac,
+        'p_radiod': p_radiod,
+        'p_secrets': p_secrets,
+        'p_snapshot': p_snapshot,
+        'p_sources': p_sources,
+        'p_src_list': p_src_list,
+        'p_storage': p_storage,
+        'p_uploader': p_uploader,
+        'p_v_report': p_v_report,
+        'p_verifier': p_verifier,
+        'p_watch': p_watch,
+        'p_wisdom': p_wisdom,
+    }
+    return parser
+
+
+def main() -> int:
+    # v2 canonical `smd admin log set-level [<client>] <level>` — pre-argparse
+    # intercept because argparse can't cleanly mix a sub-verb with the
+    # legacy positional-client shape (`smd admin log [<client>]`), which must
+    # keep working.  Routes the same write semantics as the legacy
+    # `smd admin log [<client>] --level <level>` path.
+    # Narrow intercept: only matches when `log` is the FIRST positional
+    # (no `--topology` etc. before it).  Operators needing a topology
+    # override should use the legacy `log <client> --level X` shape
+    # during the deprecation window.
+    # Two argv shapes:
+    #   smd admin log set-level <level>            — global CLIENT_LOG_LEVEL default
+    #   smd admin log set-level <client> <level>   — per-client override + SIGHUP
+    if len(sys.argv) >= 3 and sys.argv[1] == 'log' and sys.argv[2] == 'set-level':
+        if len(sys.argv) == 4:
+            return cmd_log(argparse.Namespace(
+                command='log',
+                client=None,
+                level=sys.argv[3],
+                files=False,
+                topology=None,
+            ))
+        if len(sys.argv) >= 5:
+            return cmd_log(argparse.Namespace(
+                command='log',
+                client=sys.argv[3],
+                level=sys.argv[4],
+                files=False,
+                topology=None,
+            ))
+        print('smd admin log set-level: requires <level> (global default) '
+              'or <client> <level> (per-client)',
+              file=sys.stderr)
+        return 2
+
+    parser = _build_parser()
+    p_admin = parser._smd_parts['p_admin']
+    p_c_list = parser._smd_parts['p_c_list']
+    p_component = parser._smd_parts['p_component']
+    p_config = parser._smd_parts['p_config']
+    p_docs = parser._smd_parts['p_docs']
+    p_env = parser._smd_parts['p_env']
+    p_heartbeat = parser._smd_parts['p_heartbeat']
+    p_i_list = parser._smd_parts['p_i_list']
+    p_instance = parser._smd_parts['p_instance']
+    p_manifest = parser._smd_parts['p_manifest']
+    p_rac = parser._smd_parts['p_rac']
+    p_radiod = parser._smd_parts['p_radiod']
+    p_secrets = parser._smd_parts['p_secrets']
+    p_snapshot = parser._smd_parts['p_snapshot']
+    p_sources = parser._smd_parts['p_sources']
+    p_src_list = parser._smd_parts['p_src_list']
+    p_storage = parser._smd_parts['p_storage']
+    p_uploader = parser._smd_parts['p_uploader']
+    p_v_report = parser._smd_parts['p_v_report']
+    p_verifier = parser._smd_parts['p_verifier']
+    p_watch = parser._smd_parts['p_watch']
+    p_wisdom = parser._smd_parts['p_wisdom']
 
     args = parser.parse_args()
 
