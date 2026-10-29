@@ -162,7 +162,14 @@ rac_gateway_set(){
             printf 'vpn1|%s|%s|%s|%s|7500\nvpn2|%s|%s|%s|%s|7501\n' \
                 "$_hs1" "$RAC_PORT_SECURE" "$RAC_CA_HAMSCI" "$_hs_sni" \
                 "$_hs2" "$RAC_PORT_SECURE" "$RAC_CA_HAMSCI" "$_hs_sni" ;;
-        *)  printf 'gw2|%s|%s|%s||7500\n' "$1" "${RAC_PORT:-$RAC_PORT_SECURE}" "$RAC_CA_GW2" ;;
+        # ⛔ 7503, NOT 7500.  A DASI station publishes vpn1 (7500), vpn2
+        # (7501) AND gw2, and the claim-probe binds 7502 while the ladder
+        # runs.  gw2 carried 7500 from the single-gateway era, so the moment
+        # a DASI station fell back to it the frpc died at startup with
+        # "listen tcp 127.0.0.1:7500: bind: address already in use" -- on a
+        # 30 s restart loop, while the wizard reported "6 of 6 channels
+        # accepted" (AI6VN, 2026-10-29).  The rule is eight lines above.
+        *)  printf 'gw2|%s|%s|%s||7503\n' "$1" "${RAC_PORT:-$RAC_PORT_SECURE}" "$RAC_CA_GW2" ;;
     esac
 }
 build_rac_tiers() {
@@ -335,6 +342,20 @@ rac_payload_ready(){
     [ -x "$RAC_FRPC" ] && [ -f "$RAC_CA" ]
 }
 
+# Does THIS host already hold a live tunnel to the named gateway?
+#
+# ⛔ This is what tells "we are already registered" apart from "somebody else
+# took our names".  frps answers BOTH with `proxy [...] already exists`, and
+# on a --reconfigure the taker is almost always this station's own frpc from
+# the previous run, still connected and still holding every proxy name.
+# Reading that as a failure demoted AI6VN from HamSCI TOFU to the wsprdaemon
+# gateway on 2026-10-29 -- a SECURITY DOWNGRADE caused by its own healthy
+# registration.
+rac_own_session_active(){
+    [ -n "${1:-}" ] || return 1
+    systemctl is-active --quiet "sigmond-rac-host@$1.service" 2>/dev/null
+}
+
 rac_ladder(){
     # Walk $RAC_TIERS, best first, and stop at the first tier that registers
     # this station.  Sets REG (empty when none did), RAC_TRIED, and for the
@@ -342,7 +363,7 @@ rac_ladder(){
     # RAC_TIER_LABEL.  Reads SITE, DASI_NUM, HAMSCI_TOKEN and $RAC_HOSTKEY.pub.
     local _lbl _cand _cand_reg _tls _fport
     local _racn _pvs _pvw _phs _phu _pst _pgm _duser _tf _dtls _spec _n _lp _rp
-    local _gwca_probe _gwsni_probe
+    local _gwca_probe _gwsni_probe _gwshort
     local _tpid _drun _derr _api _i
     REG=""
     RAC_TRIED=""
@@ -419,6 +440,21 @@ rac_ladder(){
                 say "  ** RAC #$_racn ports are TAKEN on $_cand — is another unit already"
                 say "  ** using DASI number $DASI_NUM?  Choose a different number via"
                 say "  ** sigmond-setup --reconfigure, or let the ladder continue below."
+            elif echo "$_derr" | grep -qi "already exists"; then
+                # The NAMES are taken.  If our own session for this gateway is
+                # up, it is the one holding them: we are registered, on this
+                # tier, with these very ports -- which is the outcome the
+                # ladder is trying to reach.  Take it, and do not demote.
+                _gwshort="${_cand%%.*}"
+                if rac_own_session_active "$_gwshort"; then
+                    say "  already registered on $_cand as RAC #$_racn — this host's own"
+                    say "  tunnel holds the names; keeping that registration"
+                    REG="RACN=$_racn RUSER=$_duser RTOKEN=$HAMSCI_TOKEN P_VMSSH=$_pvs P_VMWEB=$_pvw P_HSSH=$_phs P_HUI=$_phu SRV=$_cand SPORT=$_fport"
+                else
+                    say "  ** the RAC #$_racn names are held on $_cand by a host that is"
+                    say "  ** NOT this one — is another station using DASI number $DASI_NUM?"
+                    say "  ** Choose a different number via sigmond-setup --reconfigure."
+                fi
             else
                 say "  HamSCI direct attempt failed (${_derr:-login refused — check the token}); see $LOG"
             fi
@@ -956,7 +992,34 @@ channels_up(){
     # whenever a single gateway is unreachable -- redundancy causing the
     # outage it exists to prevent.  The highest answers the question the
     # caller is really asking: can anyone get in.
-    local _p n best=0
+    #
+    # !! WITH A GATEWAY NAME it answers a DIFFERENT question: how many
+    # channels THAT session holds.  The highest-across-sessions form above is
+    # right for "can anyone get in" and wrong beside a named gateway -- it
+    # told AI6VN "the gateway accepted 6 of 6 channels (RAC 151 on
+    # gw2.wsprdaemon.org)" while gw2's frpc had never started and the six
+    # counted were vpn1's (2026-10-29).  A count printed next to a gateway's
+    # name must be that gateway's.
+    local _p n best=0 _only="${1:-}" _cfg=""
+    [ -n "$_only" ] && _cfg="$(dirname "$TOML")/frpc-host-$_only.toml"
+    # !! ONLY a station that keeps PER-GATEWAY sessions can be asked about
+    # one.  A single-session station has frpc-host.toml and nothing else, and
+    # there "this gateway" and "the station" are the same question -- so fall
+    # through to the fleet-wide answer below rather than report zero for a
+    # tunnel that is up.  Reporting zero there would have taken every
+    # un-migrated station's status to "down" (caught by test_rac_switch,
+    # 2026-10-29; the first cut of this returned 0 whenever the per-gateway
+    # config was absent).
+    if [ -n "$_cfg" ] && [ -e "$_cfg" ]; then
+        [ "$(systemctl is-active "sigmond-rac-host@$_only.service" 2>/dev/null)" = active ] \
+            || { echo 0; return; }
+        _p=$(awk -F'= *' '/^\[webServer\]/{w=1;next} w&&/^port/{print $2;exit}' \
+             "$_cfg" 2>/dev/null)
+        [ -n "$_p" ] || { echo 0; return; }
+        curl -s --max-time 3 "http://127.0.0.1:$_p/api/status" 2>/dev/null \
+            | grep -o '"status":"running"' | wc -l | tr -d ' '
+        return
+    fi
     for _p in $(rac_admin_ports); do
         n=$(curl -s --max-time 3 "http://127.0.0.1:$_p/api/status" 2>/dev/null \
             | grep -o '"status":"running"' | wc -l | tr -d ' ')
@@ -1001,15 +1064,19 @@ read_state(){
     if [ -n "$(wish_on_file)" ]; then WSRC=file; else WSRC=units; fi
     if registered; then REGD=yes; else REGD=no; fi
     DECL=$(declared)
+    # !! GW FIRST.  print_state prints the count beside this name, so the
+    # count has to be this gateway's -- see channels_up.  Reading the name
+    # after the number is what let another session's health be reported as
+    # this one's (AI6VN, 2026-10-29).
+    RACN=$(head -1 "$MARK_DIR/rac-number" 2>/dev/null)
+    TIER=$(head -1 "$MARK_DIR/rac-tier" 2>/dev/null)
+    GW=$(awk -F'"' '/^serverAddr/{print $2; exit}' "$TOML" 2>/dev/null)
     UP=0; RUNS=stopped
-    if tunnel_running; then RUNS=running; UP=$(channels_up); fi
+    if tunnel_running; then RUNS=running; UP=$(channels_up "${GW%%.*}"); fi
     if [ "$W" = off ]; then STATE=off
     elif [ "$RUNS" = running ] && [ "$UP" -ge 1 ]; then STATE=on
     else STATE=down
     fi
-    RACN=$(head -1 "$MARK_DIR/rac-number" 2>/dev/null)
-    TIER=$(head -1 "$MARK_DIR/rac-tier" 2>/dev/null)
-    GW=$(awk -F'"' '/^serverAddr/{print $2; exit}' "$TOML" 2>/dev/null)
     CHANGED_AT=""; CHANGED_BY=""
     if [ -r "$MARK_DIR/rac-changed" ]; then
         read -r _ CHANGED_AT CHANGED_BY < "$MARK_DIR/rac-changed"

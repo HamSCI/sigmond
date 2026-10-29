@@ -2251,7 +2251,11 @@ _RAC_SERVICE    = 'wd-rac'
 _RAC_GATEWAYS = {
     'vpn1': ('vpn1.hamsci.org',    _FRPS_PORT, _FRPS_CA_HAMSCI, 'vpn.hamsci.org', 7500),
     'vpn2': ('vpn2.hamsci.org',    _FRPS_PORT, _FRPS_CA_HAMSCI, 'vpn.hamsci.org', 7501),
-    'gw2':  ('gw2.wsprdaemon.org', _FRPS_PORT, _FRPS_CA_GW2,    '',               7500),
+    # 7503, NOT 7500: a DASI station that falls back to gw2 holds vpn1
+    # (7500) and vpn2 (7501) at the same time, and the claim-probe binds
+    # 7502 while the ladder runs.  Sharing 7500 meant gw2's frpc never
+    # started -- "address already in use", every 30 s (AI6VN, 2026-10-29).
+    'gw2':  ('gw2.wsprdaemon.org', _FRPS_PORT, _FRPS_CA_GW2,    '',               7503),
 }
 # Every HamSCI station holds BOTH sessions at once.  No failover, no election:
 # both are live, and an admin who cannot reach a station through one gateway
