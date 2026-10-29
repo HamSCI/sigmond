@@ -110,15 +110,25 @@ class GpsdoMessageTests(unittest.TestCase):
         out = run(self.MINI, "LBE-Mini")
         self.assertNotIn("not readable", out)
 
-    def test_mini_says_why_and_that_it_is_not_a_fault(self):
+    def test_mini_says_it_is_hid_and_reads_it(self):
+        """⚠ REVERSED 2026-10-29.  This used to assert the opposite -- that the
+        wizard says it "cannot read it directly" and that this "is not a
+        fault".  Both were true while the Mini's position could only come from
+        gpsdo-monitor in the decoder VM, which during a greenfield first boot
+        is not running yet.  The wizard now reads the Mini over HID itself, so
+        the old reassurance would be a lie."""
         out = run(self.MINI, "LBE-Mini")
         self.assertIn("USB HID", out)
-        self.assertIn("is not a fault", out)
+        self.assertNotIn("cannot read it directly", out)
+        self.assertNotIn("is not a fault", out)
 
-    def test_mini_does_not_claim_to_be_reading_the_device(self):
-        """It cannot read it, so it must not print 'Reading position...'."""
+    def test_mini_announces_the_direct_hid_read(self):
+        """It CAN read it now, and must say so -- the operator needs to know
+        where a grid came from.  The old test asserted the reverse and passed
+        only because the new wording is 'Reading its position', so a substring
+        check for 'Reading position' missed it."""
         out = run(self.MINI, "LBE-Mini")
-        self.assertNotIn("Reading position", out)
+        self.assertIn("Reading its position over HID", out)
 
     def test_serial_gpsdo_without_a_fix_says_no_fix(self):
         out = run(self.SERIAL, "LBE-1421")

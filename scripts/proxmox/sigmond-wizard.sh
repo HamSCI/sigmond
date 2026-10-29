@@ -2136,6 +2136,235 @@ gpsdo_say_lock() {
     esac
 }
 
+# ── LBE-Mini: read the position over USB HID, here, on the host ────────────
+# The Mini is HID-only (UBX on interrupt-IN, no serial node), so gpsdo_grid's
+# NMEA path can never read it.  The wizard used to ask gpsdo-monitor in the
+# decoder VM instead -- which on a greenfield first boot is not running yet,
+# because it is installed by the very bring-up the operator is still
+# answering questions for.  So on the commonest DASI GPSDO the "a live GPSDO
+# fix IS the answer" skip never fired, and the operator typed a grid the
+# hardware already knew (rob, AI6VN v3.83 bring-up 2026-10-29).
+#
+# Embedded rather than shipped as a fourth file because pm-align refreshes a
+# FIXED set of host scripts (sigmond-issue, sigmond-setup, sigmond-rac-switch);
+# a separate file would never reach a host that updates with pm-align.
+#
+# Sets GPSDO_HID_GRID / GPSDO_HID_FIX / GPSDO_HID_SATS.  Returns 1 and sets
+# nothing if there is no Mini, no fix, or no answer in the window.
+GPSDO_HID_GRID=""; GPSDO_HID_FIX=""; GPSDO_HID_SATS=""
+gpsdo_mini_grid() {
+    GPSDO_HID_GRID=""; GPSDO_HID_FIX=""; GPSDO_HID_SATS=""
+    [ "${GPSDO_ID:-}" = "1dd2:2211" ] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    local helper out
+    helper=$(mktemp /tmp/sigmond-mini-grid.XXXXXX.py) || return 1
+    cat >"$helper" <<'MINIGRIDEOF'
+#!/usr/bin/env python3
+"""Read a Leo Bodnar LBE-Mini's GPS position directly over USB HID.
+
+WHY THIS EXISTS.  The Mini (1dd2:2211) is HID-only: UBX on interrupt-IN, no
+serial node, so the wizard's NMEA path cannot read it at all.  The wizard
+therefore asked gpsdo-monitor in the decoder VM instead -- which during a
+greenfield first boot is not running yet, because it is installed later in
+the very bring-up the operator is still answering questions for.  So on the
+commonest DASI GPSDO the "a live GPSDO fix IS the answer" skip never fired
+and the operator was asked to type a grid the hardware already knew.
+
+This talks to /dev/hidrawN with ioctls and stdlib only: no hidapi, no venv,
+nothing installed.  That is the whole point -- it has to work on a bare
+Proxmox host at first boot.
+
+Protocol ported from gpsdo-monitor (models/lbe_mini.py, ubx.py), which in
+turn follows bvernoux/lbe-142x.  Keep the two in step.
+
+Prints one JSON object and exits 0 on success, or exits 1 with a JSON
+"error".  Never raises into the caller's face: a wizard must not abort
+because a GPSDO was unplugged.
+"""
+import array, fcntl, json, os, struct, sys, time
+
+VID, PID = 0x1DD2, 0x2211
+REPORT_SIZE = 60                 # feature report payload
+INTERRUPT_REPORT_SIZE = 64       # interrupt-IN frame
+OPC_MINI_UBX_WRAP = 0x08
+OPC_MINI_NAV_STREAM = 0x0A
+UBX_SYNC = b"\xb5\x62"
+
+
+def _iowr(nr, size):
+    return (3 << 30) | (size << 16) | (0x48 << 8) | nr   # _IOWR('H', nr, size)
+
+
+def hidraw_node():
+    """The /dev/hidrawN whose parent USB device is our VID:PID."""
+    want = "HID_ID=0003:%08X:%08X" % (VID, PID)
+    base = "/sys/class/hidraw"
+    for name in sorted(os.listdir(base)):
+        try:
+            with open(os.path.join(base, name, "device", "uevent")) as fh:
+                if want in fh.read().upper():
+                    return "/dev/" + name
+        except OSError:
+            continue
+    return None
+
+
+def feature_set(fd, opcode, args=b""):
+    """One 60-byte feature report, prefixed with report id 0 (the Mini uses
+    no HID report ID on the wire, but hidraw still wants the byte)."""
+    buf = bytearray(1 + REPORT_SIZE)
+    buf[1] = opcode
+    end = min(1 + REPORT_SIZE, 2 + len(args))
+    buf[2:end] = args[: end - 2]
+    fcntl.ioctl(fd, _iowr(0x06, len(buf)), array.array("B", buf), True)
+
+
+def enable_stream(fd):
+    """Turn on NAV-PVT on the interrupt-IN endpoint.  Mirrors upstream
+    mini_enable_gps_stream; the three CFG-MSG frames are byte-for-byte
+    gpsdo-monitor's."""
+    feature_set(fd, OPC_MINI_NAV_STREAM)
+    for cfg in (bytes([0x06, 0x01, 0x08, 0x00, 0x01, 0x35, 0x14]),   # NAV-SAT
+                bytes([0x06, 0x01, 0x08, 0x00, 0x01, 0x22, 0x14]),   # NAV-CLOCK
+                bytes([0x06, 0x01, 0x08, 0x00, 0x01, 0x07, 0x0A])):  # NAV-PVT
+        feature_set(fd, OPC_MINI_UBX_WRAP, cfg)
+
+
+def decode_frame(raw):
+    """-> (carries_ubx, payload).  Keepalive frames carry 0xFF/0x00 filler
+    and MUST NOT be folded into the reassembly buffer, or any message that
+    spans two frames is corrupted."""
+    if len(raw) < 2:
+        return False, b""
+    return bool(raw[1] & 0x80), bytes(raw[2:])
+
+
+def fletcher8(data):
+    a = b = 0
+    for byte in data:
+        a = (a + byte) & 0xFF
+        b = (b + a) & 0xFF
+    return a, b
+
+
+def iter_messages(buf):
+    """Yield (class_id, msg_id, payload) and return the unconsumed tail."""
+    out, i = [], 0
+    while True:
+        j = buf.find(UBX_SYNC, i)
+        if j < 0 or len(buf) - j < 8:
+            break
+        length = int.from_bytes(buf[j + 4:j + 6], "little")
+        if length > 512:                      # implausible: resync past it
+            i = j + 2
+            continue
+        end = j + 6 + length + 2
+        if end > len(buf):
+            break
+        body = buf[j + 2:j + 6 + length]
+        ck_a, ck_b = fletcher8(body)
+        if (ck_a, ck_b) == (buf[end - 2], buf[end - 1]):
+            out.append((buf[j + 2], buf[j + 3], bytes(buf[j + 6:j + 6 + length])))
+        i = end
+    return out, buf[i:]
+
+
+def parse_nav_pvt(payload):
+    """NAV-PVT (0x01,0x07): fixType 20, numSV 23, lon 24-27, lat 28-31."""
+    if len(payload) < 32:
+        return None
+    return {
+        "fix_type": payload[20],
+        "sats": payload[23],
+        "lon": int.from_bytes(payload[24:28], "little", signed=True) / 1e7,
+        "lat": int.from_bytes(payload[28:32], "little", signed=True) / 1e7,
+    }
+
+
+def maidenhead(lat, lon):
+    """6-character locator.  Same arithmetic as the wizard's NMEA path."""
+    L, A = lon + 180.0, lat + 90.0
+    f1, f2 = int(L / 20), int(A / 10)
+    s1, s2 = int((L - f1 * 20) / 2), int(A - f2 * 10)
+    u1 = int((L - f1 * 20 - s1 * 2) * 12)
+    u2 = int((A - f2 * 10 - s2) * 24)
+    return "%c%c%d%d%c%c" % (65 + f1, 65 + f2, s1, s2, 97 + u1, 97 + u2)
+
+
+def main():
+    deadline = time.time() + (float(sys.argv[1]) if len(sys.argv) > 1 else 8.0)
+    node = hidraw_node()
+    if not node:
+        print(json.dumps({"error": "no LBE-Mini hidraw node"}))
+        return 1
+    try:
+        fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
+    except OSError as exc:
+        print(json.dumps({"error": "cannot open %s: %s" % (node, exc)}))
+        return 1
+    try:
+        try:
+            enable_stream(fd)
+        except OSError as exc:
+            print(json.dumps({"error": "stream enable failed: %s" % exc}))
+            return 1
+        buf, best = b"", None
+        while time.time() < deadline:
+            try:
+                raw = os.read(fd, INTERRUPT_REPORT_SIZE)
+            except BlockingIOError:
+                time.sleep(0.02)
+                continue
+            except OSError as exc:
+                print(json.dumps({"error": "read failed: %s" % exc}))
+                return 1
+            carries, payload = decode_frame(raw)
+            if not carries:
+                continue
+            buf += payload
+            msgs, buf = iter_messages(buf)
+            for cls, mid, pl in msgs:
+                if (cls, mid) != (0x01, 0x07):
+                    continue
+                pvt = parse_nav_pvt(pl)
+                if not pvt:
+                    continue
+                best = pvt
+                # fixType 2 = 2D, 3 = 3D.  Anything less is not a position.
+                if pvt["fix_type"] >= 2 and not (pvt["lat"] == 0 and pvt["lon"] == 0):
+                    print(json.dumps({
+                        "grid": maidenhead(pvt["lat"], pvt["lon"]),
+                        "fix": "3d" if pvt["fix_type"] >= 3 else "2d",
+                        "sats": pvt["sats"],
+                    }))
+                    return 0
+        if best is not None:
+            print(json.dumps({"error": "no fix", "sats": best["sats"],
+                              "fix_type": best["fix_type"]}))
+        else:
+            print(json.dumps({"error": "no NAV-PVT in window"}))
+        return 1
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:                 # never abort the wizard
+        print(json.dumps({"error": "unexpected: %s" % exc}))
+        sys.exit(1)
+MINIGRIDEOF
+    out=$(python3 "$helper" "${1:-8}" 2>/dev/null)
+    rm -f "$helper"
+    [ -n "$out" ] || return 1
+    GPSDO_HID_GRID=$(printf '%s' "$out" | sed -n 's/.*"grid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    GPSDO_HID_FIX=$(printf  '%s' "$out" | sed -n 's/.*"fix"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    GPSDO_HID_SATS=$(printf '%s' "$out" | sed -n 's/.*"sats"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')
+    [ -n "$GPSDO_HID_GRID" ] || return 1
+    return 0
+}
+
 gpsdo_grid() {
     [ "$HAVE_GPSDO" = 1 ] || return 1
     # Find the GPSDO's OWN serial node.  Never walk /dev/ttyACM* blindly:
@@ -2217,11 +2446,13 @@ ask_grid() {
         # signal).  Say which of the two situations this actually is.
         if [ "${GPSDO_ID:-}" = "1dd2:2211" ]; then
             echo "GPSDO present (LBE-Mini). It reports over USB HID (UBX), not"
-            echo "  NMEA, so this wizard cannot read it directly — that is"
-            echo "  normal and is not a fault. Asking gpsdo-monitor in the"
-            printf "  decoder VM, which speaks UBX... "
-            if gpsdo_lock_report; then
-                echo "answered."
+            echo "  NMEA."
+            printf "  Reading its position over HID... "
+            if gpsdo_mini_grid 8; then
+                echo "$GPSDO_HID_GRID  ($GPSDO_HID_FIX fix, $GPSDO_HID_SATS satellites)"
+                GRID_DEFAULT="$GPSDO_HID_GRID"
+            elif gpsdo_lock_report; then
+                echo "no position from HID; gpsdo-monitor in the decoder VM answered."
                 gpsdo_say_lock
                 GRID_DEFAULT="$GPSDO_GRID_UBX"
                 [ -n "$GRID_DEFAULT" ] && echo "  position from the GPSDO: $GRID_DEFAULT"
@@ -2648,40 +2879,28 @@ ask_psws() {
     fi
 }
 
-# ── fleet heartbeat ────────────────────────────────────────────────────────
-# The heartbeat existed and shipped OFF: nothing in this wizard ever asked
-# about it, so every greenfield install ended silent, and the one station
-# reporting (AC0G-B4) had been hand-edited to a LAN address that would stop
-# working the moment the station moved.  Ask, default ON, and default to the
-# PUBLIC name so the answer survives the station leaving the bench.
+# ── fleet heartbeat: REMOVED ───────────────────────────────────────────────
+# ⛔ A station no longer opens a direct connection to wd30, and this wizard no
+# longer asks about one (rob, 2026-10-29).
 #
-# Re-pointing later takes no reflash: edit [heartbeat].host in
-# /etc/sigmond/site-profile.toml on the decoder VM and run `smd config render`.
-# That matters -- wd30 is a temporary home for the fleetboard.
-HB_DEFAULT_HOST="wd30.wsprdaemon.org"
-# ⛔ The PORT is not optional and its code default is WRONG for this host.
-# site_profile.py defaults [heartbeat].port to 22, but wd30 answers only on
-# 38222 (the operator's router-forward); measured 2026-09-23, :22 refuses and
-# :38222 accepts.  Writing the host without a port would give every new
-# station a heartbeat that silently never delivers -- which is how the
-# feature came to be neglected in the first place.
-HB_DEFAULT_PORT="38222"
-ask_heartbeat() {
-    echo
-    echo "  A status heartbeat lets the fleet dashboard show this station is"
-    echo "  alive and healthy. It sends a small report every 5 minutes, outbound"
-    echo "  only — nothing listens on this machine for it."
-    rd -r -p "Send status heartbeats? [Y/n] " _hb
-    case "${_hb:-Y}" in
-        [Nn]*) HB_ENABLED=0; HB_HOST=""; return ;;
-    esac
-    HB_ENABLED=1
-    rd -r -p "  heartbeat collector host [$HB_DEFAULT_HOST]: " HB_HOST
-    HB_HOST="${HB_HOST:-$HB_DEFAULT_HOST}"
-    rd -r -p "  heartbeat collector port [$HB_DEFAULT_PORT]: " HB_PORT
-    HB_PORT=$(echo "${HB_PORT:-$HB_DEFAULT_PORT}" | tr -d ' ')
-    case "$HB_PORT" in ''|*[!0-9]*) HB_PORT="$HB_DEFAULT_PORT" ;; esac
-}
+# What it used to do: ask "Send status heartbeats?", default ON, and write
+# [heartbeat] host=wd30.wsprdaemon.org port=38222 into site-profile.toml, so
+# every new station held an outbound ssh to one operator's box on a
+# router-forwarded port.
+#
+# Why it is gone: station status moves onto the UPLOAD path in Phase 3 —
+# carried in the client's own tar and delivered through the reflector, the
+# same channel the spots already use (sigmond tasks/plan-status-via-uploader.md
+# and tasks/plan-operator-commands-via-uploader.md).  That path is
+# outbound-only, already authenticated by the station's gateway account,
+# already replicated to wd10/wd20/wd30, and needs no second destination.
+# Keeping the prompt would hand every greenfield station a direct dependency
+# on a host that is, in the wizard's own earlier words, "a temporary home for
+# the fleetboard".
+#
+# ⚠ This removes the prompt and the configuration, NOT the sender.
+# lib/sigmond/heartbeat.py and the units stay, so a station already configured
+# keeps working until Phase 3 lands.  Nothing NEW is pointed at wd30.
 
 ask_names() {
     # Station naming convention (rob 2026-07-29): the decoder VM carries the
@@ -2749,7 +2968,6 @@ ask_wifi
 require_uplink
 ask_rac
 ask_psws
-ask_heartbeat
 ask_names
 
 # ── review: everything on one screen, any entry editable ───────────────────
@@ -2772,13 +2990,8 @@ while :; do
     else
         echo "  5) PSWS:      (skipped)"
     fi
-    if [ "${HB_ENABLED:-0}" = 1 ]; then
-        echo "  6) Heartbeat: enabled → $HB_HOST:$HB_PORT  (change later: site-profile.toml + smd config render)"
-    else
-        echo "  6) Heartbeat: disabled"
-    fi
-    echo "  7) Names:     VM $VMNAME · Proxmox host $PMNAME"
-    echo "  8) Wi-Fi:     ${WIFI_SUMMARY:-(not offered)}"
+    echo "  6) Names:     VM $VMNAME · Proxmox host $PMNAME"
+    echo "  7) Wi-Fi:     ${WIFI_SUMMARY:-(not offered)}"
     # Every other answer is inert until Apply; a Wi-Fi join is a live link the
     # moment it succeeds.  Say so rather than let the header above imply
     # otherwise — an operator who aborts here still has the association.
@@ -2786,19 +2999,18 @@ while :; do
         joined*) echo "                (already live — a link, not a setting applied later)";;
     esac
     echo "  ─────────────────────────────────────────────────────"
-    rd -r -p "Apply? [Y = apply / 1-8 = re-edit that entry / n = abort] " OK
+    rd -r -p "Apply? [Y = apply / 1-7 = re-edit that entry / n = abort] " OK
     case "${OK:-Y}" in
         1) ask_reporter;;
         2) ask_grid ask;;
         3) ask_antenna;;
         4) ask_rac;;
         5) ask_psws;;
-        6) ask_heartbeat;;
-        7) ask_names;;
-        8) ask_wifi;;
+        6) ask_names;;
+        7) ask_wifi;;
         [Nn]*) say "aborted by operator — nothing was applied. Rerun any time: sigmond-setup"; exit 1;;
         [Yy]*|"") break;;
-        *) echo "  ✗ Y, n, or an entry number 1-8";;
+        *) echo "  ✗ Y, n, or an entry number 1-7";;
     esac
 done
 
@@ -2878,15 +3090,6 @@ station_id = \"$PSWS_ID\"
     PSWS_TOML="$PSWS_TOML
 "
 fi
-HB_TOML=""
-if [ "${HB_ENABLED:-0}" = 1 ] && [ -n "${HB_HOST:-}" ]; then
-    HB_TOML="
-[heartbeat]
-enabled  = true
-host     = \"$HB_HOST\"
-port     = $HB_PORT
-"
-fi
 UPLOADS_TOML=$(uploads_toml)
 PROFILE=$(cat <<PEOF
 # Written by the Sigmond appliance first-boot wizard $(date -u +%Y-%m-%dT%H:%MZ)
@@ -2897,7 +3100,6 @@ description = "$ANTENNA"
 $PSWS_TOML
 [reporters]
 reporter_id = "$REPORTER"
-$HB_TOML
 $UPLOADS_TOML
 
 [host]
@@ -2961,41 +3163,21 @@ say "rendering site config in VM..."
 gexec_unit 600 render "smd config render" \
     || say "WARN: smd config render reported issues (continuing; rerun inside VM)"
 
-# sigmond-heartbeat.timer ships installed everywhere but never auto-enabled
-# by design — answering "yes" above only wrote [heartbeat] into the site
-# profile, which is how v3.52 shipped a station that never reported
-# (sigmond#94).  Arm (or, on a rerun that turned it off, disarm) the timer
-# to match what was just written.
-if [ "${HB_ENABLED:-0}" = 1 ]; then
-    gexec 30 "systemctl enable --now sigmond-heartbeat.timer" \
-        && say "fleet heartbeat timer enabled" \
-        || say "WARN: could not enable the fleet heartbeat timer — run in the VM: systemctl enable --now sigmond-heartbeat.timer"
-else
-    gexec 30 "systemctl disable --now sigmond-heartbeat.timer 2>/dev/null; true"
-fi
+# ⛔ Both heartbeat timers are DISARMED, in the VM and on this host, and this
+# wizard no longer offers to arm either (rob, 2026-10-29).  Status moves onto
+# the upload path in Phase 3 and rides the client's own tar through the
+# reflector; until then a fresh station simply does not report, which is the
+# intended state and not a fault.
+#
+# Disarm rather than merely skip: a RERUN of this wizard on a station that was
+# configured by an older build must actively take the timer down, or the old
+# answer survives a wizard that no longer has a question for it.
+gexec 30 "systemctl disable --now sigmond-heartbeat.timer 2>/dev/null; true"
 
-# The PM (this Proxmox host, not the VM) ships its own heartbeat emitter —
-# firstboot unpacks the whole sigmond tree to /root/sigmond-appliance/sigmond/,
-# pm-heartbeat-setup.sh included — but nothing ever ran it, so every PM row
-# on the fleet board stayed silent after a fresh install (sigmond-appliance#9).
-# The station name is the reporter id plus "-pm"; the inventory maps that to
-# its fleet name (heartbeat_station, sigmond#95).
-PM_HEARTBEAT_SETUP=/root/sigmond-appliance/sigmond/scripts/proxmox/pm-heartbeat-setup.sh
-if [ "${HB_ENABLED:-0}" = 1 ]; then
-    if [ -x "$PM_HEARTBEAT_SETUP" ]; then
-        if "$PM_HEARTBEAT_SETUP" --station "${REPORTER}-pm" --vmid "$VMID" \
-                --dest-host "$HB_HOST" --dest-port "$HB_PORT" >>"$LOG" 2>&1; then
-            say "host heartbeat enabled — authorize its public key on the fleetboard server:"
-            say "$(cat /etc/pm-heartbeat/id_ed25519.pub 2>/dev/null)"
-        else
-            say "WARN: host heartbeat setup failed — rerun by hand: $PM_HEARTBEAT_SETUP --station ${REPORTER}-pm --vmid $VMID --dest-host $HB_HOST --dest-port $HB_PORT"
-        fi
-    else
-        say "WARN: host heartbeat setup script missing at $PM_HEARTBEAT_SETUP — rerun by hand once present: pm-heartbeat-setup.sh --station ${REPORTER}-pm --vmid $VMID --dest-host $HB_HOST --dest-port $HB_PORT"
-    fi
-else
-    systemctl disable --now pm-heartbeat.timer 2>/dev/null; true
-fi
+# The PM shipped its own heartbeat emitter to the same destination.  It is no
+# longer set up here, and an existing one is taken down, for the same reason as
+# the VM timer above: no station opens a direct connection to wd30.
+systemctl disable --now pm-heartbeat.timer 2>/dev/null; true
 
 # mag-recorder identity: render pushes the SITE PSWS station id, but the
 # magnetometer often lives under its OWN portal station, and the config's
