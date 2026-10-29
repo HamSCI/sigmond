@@ -896,6 +896,15 @@ rac_units(){
     done
     printf '%s' "${out:-$UNIT}"
 }
+# !! THE LEGACY UNIT GOES WHEN THE PER-GATEWAY ONES ARRIVE.  sigmond-rac's
+# install-host.sh enables $UNIT on every run, and the wizard points
+# frpc-host.toml at the first gateway's config, which satisfies the unit's
+# ConditionPathExists.  Left enabled, it opens a second session to that gateway
+# under the same proxy names at every boot, and comes back even with the wish
+# off.  Both directions of the switch retire it.
+retire_legacy_unit(){
+    [ "$(rac_units)" = "$UNIT" ] || systemctl disable --now "$UNIT" >/dev/null 2>&1
+}
 SOCKETS="sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket"
 RETRY_TIMER=sigmond-rac-register.timer
 PAIR_USER=sigmond-remote
@@ -1140,6 +1149,7 @@ switch_off(){
     # shellcheck disable=SC2086
     systemctl disable --now $SOCKETS >/dev/null 2>&1
     for _u in $(rac_units); do systemctl disable --now "$_u" >/dev/null 2>&1; done
+    retire_legacy_unit
     # With no `off` on file, nothing tells a later run of the retry timer that
     # the operator said off.  So the timer goes too.
     [ "$recorded" = yes ] || systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
@@ -1202,6 +1212,7 @@ switch_on(){
         systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
         # shellcheck disable=SC2086
         systemctl enable --now $SOCKETS >/dev/null 2>&1
+        retire_legacy_unit
         for _u in $(rac_units); do systemctl enable --now "$_u" >/dev/null 2>&1; done
         echo "Waiting up to ${WAIT_S}s for the gateway to accept the channels."
         wait_for_channels

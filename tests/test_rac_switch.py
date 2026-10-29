@@ -1051,3 +1051,38 @@ def test_a_program_the_switch_starts_holds_no_copy_of_its_lock(tmp_path, word):
     assert [ln for ln in seen if ln.startswith("CALL")], (r.stdout, r.stderr)
     assert {ln for ln in seen if ln.startswith("FD9")} == {"FD9 "}, seen
     assert {ln for ln in seen if ln.startswith("LOCK")} == {"LOCK held"}, seen      # and the switch still holds it
+
+
+# -- the legacy single-tunnel unit -------------------------------------------------
+
+def _two_gateways(h):
+    # The wizard's layout: one config per gateway, frpc-host.toml a symlink to
+    # the first.  install-host.sh has enabled the legacy unit.
+    for gw in ("vpn1", "vpn2"):
+        (h.d / f"frpc-host-{gw}.toml").write_text(TOML)
+    (h.d / "frpc-host.toml").unlink()
+    (h.d / "frpc-host.toml").symlink_to("frpc-host-vpn1.toml")
+    (h.d / "enabled").touch()
+
+
+@pytest.mark.parametrize("word", ["on", "off"])
+def test_the_switch_retires_the_legacy_unit_once_per_gateway_configs_exist(tmp_path, word):
+    # v3.83 nested Phase D: off left sigmond-rac-host.service enabled, and the
+    # symlink satisfies its condition, so it would start at the next boot.
+    h = Host(tmp_path)
+    _two_gateways(h)
+    h.run(word)
+    assert f"disable --now {UNIT}" in h.changes()
+    assert f"enable --now {UNIT}" not in h.changes()
+    assert not (tmp_path / "enabled").exists()
+    verb = "enable" if word == "on" else "disable"
+    for gw in ("vpn1", "vpn2"):
+        assert f"{verb} --now sigmond-rac-host@{gw}.service" in h.changes()
+
+
+def test_a_single_gateway_station_keeps_its_legacy_unit(tmp_path):
+    # No per-gateway config: the legacy unit IS the tunnel, and on enables it.
+    h = Host(tmp_path)
+    h.run("on")
+    assert f"enable --now {UNIT}" in h.changes()
+    assert f"disable --now {UNIT}" not in h.changes()
