@@ -1210,6 +1210,58 @@ class AlignInstallMissingTests(unittest.TestCase):
             self.assertFalse((repo / ".pin").exists())
 
 
+class AlignInstallMissingNativeSourceTests(unittest.TestCase):
+    """A release pins smd's from-source native dependencies (ubersdr_wsprd,
+    wsjtx, onion) beside the catalog clients, but none of them is a catalog
+    component.  On 2026-10-28 AC0G-ND, installed before the UberSDR decoders
+    existed, had no ubersdr_wsprd checkout; align sent it to the catalog
+    installer, which raised "not in the catalog", and the run stopped before
+    wspr-recorder and restarted nothing.  A missing decoder source must build
+    through the decoder build, as an install does."""
+
+    def _install(self, name, built=True, selected="ubersdr"):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with mock.patch.object(smd, "_clone_repo") as m_clone, \
+                 mock.patch.object(smd, "_build_decoders", return_value=built) as m_build, \
+                 mock.patch.object(smd, "_decoder_selected", return_value=selected), \
+                 mock.patch.object(smd, "_align_repair_ownership") as m_repair:
+                try:
+                    note = smd._align_install_missing(name, "529ec5d", base=base, catalog={})
+                    err = None
+                except RuntimeError as e:
+                    note, err = None, e
+            return note, err, m_clone, m_build, m_repair
+
+    def test_a_missing_ubersdr_source_builds_the_decoders(self):
+        note, err, m_clone, m_build, m_repair = self._install("ubersdr_wsprd")
+        self.assertIsNone(err)
+        m_build.assert_called_once_with()
+        m_clone.assert_not_called()
+        m_repair.assert_called_once()
+        self.assertIn("ubersdr", note)
+
+    def test_a_missing_wsjtx_source_builds_the_decoders(self):
+        note, err, m_clone, m_build, _ = self._install("wsjtx", selected="wsjtx")
+        self.assertIsNone(err)
+        m_build.assert_called_once_with()
+        m_clone.assert_not_called()
+
+    def test_a_failed_decoder_build_fails_the_step(self):
+        note, err, m_clone, m_build, _ = self._install("ubersdr_wsprd", built=False)
+        self.assertIsNotNone(err)
+        self.assertIn("decoder build failed", str(err))
+        m_clone.assert_not_called()
+
+    def test_a_missing_onion_source_names_its_installer(self):
+        note, err, m_clone, m_build, _ = self._install("onion")
+        self.assertIsNotNone(err)
+        self.assertIn("smd install ka9q-web", str(err))
+        self.assertNotIn("not in the catalog", str(err))
+        m_build.assert_not_called()
+        m_clone.assert_not_called()
+
+
 class AlignRefreshImageFilesTests(unittest.TestCase):
     """_align_refresh_image_files — the `--apply` glue between
     align.image_file_drift (read-only compare) and align_apply.refresh_image_file

@@ -254,7 +254,7 @@ class Ctx:
     origins: dict
     allow_rollback: bool = False
     max_bytes: Optional[int] = None
-    install_missing: Optional[Callable[[str, str], None]] = None
+    install_missing: Optional[Callable[[str, str], Optional[str]]] = None
     run_install: Optional[Callable[[Path], int]] = None
     say: Callable[[str], None] = print
     prefetched: dict = field(default_factory=dict)
@@ -575,12 +575,12 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
                 steps.append(Step(it.component, "refused", "no installer wired"))
             else:
                 try:
-                    ctx.install_missing(it.component, it.target)
+                    note = ctx.install_missing(it.component, it.target)
                 except Exception as e:  # noqa: BLE001 — an installer is foreign code
                     steps.append(Step(it.component, "failed", f"install failed: {e}"))
                     stopped = f"stopped after {it.component} failed"
                 else:
-                    steps.append(Step(it.component, "installed"))
+                    steps.append(Step(it.component, "installed", note or ""))
         elif it.status in ("refuse", "diverged"):
             steps.append(Step(it.component, "refused", it.note))
         elif it.status == "ahead" and not ctx.allow_rollback:

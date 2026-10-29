@@ -7319,6 +7319,29 @@ def _align_deploy_build(name: str, repo: Path, base) -> 'int | None':
         _align_repair_ownership(Path(base))
 
 
+def _align_build_missing_native(name, base):
+    """A missing checkout of one of smd's from-source native dependencies
+    (_native_build_pins): no catalog entry and no install.sh, so the catalog
+    path in _align_install_missing cannot install it.  The decoder sources
+    build the way an install builds them, through _build_decoders, which
+    clones each at its pin and falls back to the wsjtx build when UberSDR's
+    cannot build here.  onion builds only inside ka9q-web's install.
+
+    2026-10-28: AC0G-ND, installed before the UberSDR decoders existed, had
+    no ubersdr_wsprd checkout.  align raised "not in the catalog" for it and
+    stopped before wspr-recorder, restarting nothing."""
+    if name not in (_UBERSDR_SRC.name, _WSJTX_SRC.name):
+        raise RuntimeError(f'{name}: built by ka9q-web\'s install, not on its '
+                           f'own — run smd install ka9q-web')
+    print(f'  {name}: building the decoders …')
+    try:
+        if not _build_decoders():
+            raise RuntimeError(f'{name}: decoder build failed')
+    finally:
+        _align_repair_ownership(Path(base))
+    return f'decoders built; {_decoder_selected()} selected'
+
+
 def _align_install_missing(name, sha, *, base, catalog):
     """A component the release pins but this station has no checkout of at
     all: clone it at the pinned commit and run its installer. Never flips
@@ -7341,6 +7364,8 @@ def _align_install_missing(name, sha, *, base, catalog):
     """
     import shutil
     from sigmond import align_apply
+    if name in _native_build_pins():
+        return _align_build_missing_native(name, base)
     entry = catalog.get(name) if catalog else None
     if entry is None:
         raise RuntimeError(f'{name}: not in the catalog — cannot install')

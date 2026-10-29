@@ -484,6 +484,19 @@ class ApplyPlanTests(unittest.TestCase):
             self.assertEqual(steps[0].outcome, "installed")
             self.assertEqual(calls, [("sigmond", "2" * 40)])
 
+    def test_an_installer_note_becomes_the_step_detail(self):
+        # A missing decoder source builds through smd's decoder build, which
+        # may fall back to the other decoder; the step must say which.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            git = _MultiFakeGit()
+            ctx = _ctx(base, git, ["sigmond"],
+                       install_missing=lambda name, target: "decoders: wsjtx selected")
+            items = [align.Item("sigmond", "missing", None, "2" * 40, "no checkout on this station")]
+            steps = align_apply.apply_plan(rel(), items, ctx)
+            self.assertEqual(steps[0].outcome, "installed")
+            self.assertEqual(steps[0].detail, "decoders: wsjtx selected")
+
     def test_missing_without_installer_refuses(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
