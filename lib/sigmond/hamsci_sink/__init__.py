@@ -1,24 +1,27 @@
-"""HamSCI sink writer: sigmond's compatibility import (CONTRACT §17).
+"""HamSCI sink writer: sigmond's fallback import (CONTRACT §17).
 
 Since v3.70 the sink writer lives in hs-uploader as ``hs_uploader.sink``
-(tasks/plan-sink-control.md D14, §10.4 item 1).  Clients still import it from
-here, and this package hands each one a copy of the same code:
+(tasks/plan-sink-control.md D14, §10.4 item 1).  Clients import
+``hs_uploader.sink`` first and fall back to this package for one release.
+Every client that writes a sink declares hs-uploader: psk-recorder,
+meteor-scatter, wspr-recorder, codar-sounder, hf-tec and superdarn-sounder,
+beside the mag-recorder, hamsci-physics and hf-timestd that carried it already.
+This package hands each caller a copy of the same code:
 
-- ``hs_uploader.sink.writer`` when the client's venv can import it.  Six
-  clients carry hs-uploader as an editable sibling: psk-recorder,
-  meteor-scatter, wspr-recorder, mag-recorder, hamsci-physics and hf-timestd.
+- ``hs_uploader.sink.writer`` when the venv can import it.
 - ``sigmond.hamsci_sink._bundled`` otherwise, a verbatim copy that sigmond
-  ships.  codar-sounder, hf-tec and superdarn-sounder carry sigmond but no
-  hs-uploader.  ``smd update`` also pulls sigmond before hs-uploader, so a
-  recorder restarted between the two pulls meets an hs-uploader without
-  ``sink``.
+  ships for older client checkouts.  ``smd update`` also pulls sigmond before
+  hs-uploader, so a recorder restarted between the two pulls meets an
+  hs-uploader without ``sink``.
 
 ``SINK_IMPL`` names the copy in use: ``"hs_uploader"`` or ``"bundled"``.
 tests/test_hamsci_sink_compat.py fails when the two copies differ.
 
 ``sigmond.hamsci_sink.writer`` names the chosen module itself, not a
-re-export.  A global set through it, such as ``SINK_CONFIG`` in a
-test, changes what ``Writer.from_env`` reads.
+re-export.  Rebinding a global such as ``SINK_CONFIG`` on it does not change
+what ``Writer.from_env`` reads, because ``sink_path`` binds its defaults at
+definition.  A test passes ``config_file=``, ``legacy_path=`` or ``state_dir=``
+to ``sink_path``, or sets the env.
 
 Either copy picks the sink the same way, through ``sink_path()``.  The first
 match wins: ``HAMSCI_SINK_PATH``, then ``SIGMOND_SQLITE_PATH``, then ``path`` in

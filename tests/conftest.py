@@ -366,7 +366,10 @@ def _no_host_sink_files(tmp_path, monkeypatch):
             mod = importlib.import_module(modname)
         except ImportError:
             continue
-        kw = dict(mod.sink_path.__kwdefaults__)
-        kw["config_file"] = str(nowhere / "sink.toml")
-        kw["legacy_path"] = str(nowhere / "legacy" / "sink.db")
-        monkeypatch.setattr(mod.sink_path, "__kwdefaults__", kw)
+        # `sink_path` delegates to `_sink_choice`, and `Writer.from_env`
+        # calls both; re-point both.
+        for fn in (mod.sink_path, mod._sink_choice):
+            kw = dict(fn.__kwdefaults__)
+            kw["config_file"] = str(nowhere / "sink.toml")
+            kw["legacy_path"] = str(nowhere / "legacy" / "sink.db")
+            monkeypatch.setattr(fn, "__kwdefaults__", kw)

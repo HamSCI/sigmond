@@ -179,20 +179,23 @@ only required for tests and the TUI extras.
 ## Sink backend selection
 
 Since v3.70 the sink writer lives in hs-uploader as `hs_uploader.sink`
-(`tasks/plan-sink-control.md` D14).  Clients still import
-`sigmond.hamsci_sink`, a compatibility import that hands each one a copy of
-the same writer:
+(`tasks/plan-sink-control.md` D14).  Clients import `hs_uploader.sink` first
+and fall back to `sigmond.hamsci_sink` for one release.  Every client that
+writes a sink declares hs-uploader: psk-recorder, meteor-scatter,
+wspr-recorder, codar-sounder, hf-tec and superdarn-sounder, beside the
+mag-recorder, hamsci-physics and hf-timestd that carried it already.  `sigmond.hamsci_sink` hands a
+caller one of two copies of the same writer:
 
-- `hs_uploader.sink.writer` when the client's venv can import it, as the
-  venvs of the six clients that declare hs-uploader can (psk-recorder,
-  meteor-scatter, wspr-recorder, mag-recorder, hamsci-physics, hf-timestd).
-- `lib/sigmond/hamsci_sink/_bundled.py` otherwise.  codar-sounder, hf-tec and
-  superdarn-sounder carry no hs-uploader, and an hs-uploader older than v3.70
-  has no `sink` package.
+- `hs_uploader.sink.writer` when the venv can import it.
+- `lib/sigmond/hamsci_sink/_bundled.py` otherwise: older client checkouts that
+  hold no hs-uploader, and an hs-uploader older than v3.70 with no `sink`
+  package.
 
 `sigmond.hamsci_sink.SINK_IMPL` names the copy in use, `"hs_uploader"` or
-`"bundled"`.  `sigmond.hamsci_sink.writer` names the chosen module itself, so
-a global set through it reaches `Writer.from_env`.
+`"bundled"`.  `sigmond.hamsci_sink.writer` names the chosen module itself.
+Tests steer `sink_path` through its `config_file=`, `legacy_path=` and
+`state_dir=` arguments or the env; rebinding a module global does not reach
+`Writer.from_env`.
 
 **Never edit `_bundled.py` by hand.**  Change hs-uploader's
 `src/hs_uploader/sink/writer.py`, commit it there, then refresh the copy below
@@ -240,9 +243,8 @@ without a restart.  A check that fails stores the row.  The writer logs one
 INFO line when a producer's verdict changes, never one per row.
 
 The check imports `hs_uploader.sinkswitch` inside a guard.  The bundled copy
-runs in venvs without hs-uploader (codar-sounder, hf-tec, superdarn-sounder),
-where the import fails and nothing is enforced; those clients own no switch
-file.  A recorder loads the writer once, at start.  So before any switch
+runs in venvs without hs-uploader (older client checkouts), where the import
+fails and nothing is enforced.  A recorder loads the writer once, at start.  So before any switch
 first reads `off`, sigmond restarts each psk-recorder, meteor-scatter and
 wspr-recorder instance that started before the installed hs-uploader
 `sink/writer.py` last changed (`sink_levers.restart_stale_writers`).
