@@ -1,0 +1,24 @@
+# Clean Debian 13 with systemd as init, and nothing of sigmond.
+# No sigmond checkout, no /var/lib/sigmond, no /opt/git/sigmond/sigmond.
+# check.sh copies one client and its siblings in at run time.
+FROM docker.io/library/debian:trixie
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        systemd systemd-sysv git ca-certificates curl sudo python3 build-essential \
+        udev cron
+
+# udev and cron are not in the brief's list; installers write udev rules and
+# call udevadm, and hf-timestd drops a file into /etc/cron.d.  Real Debian
+# hosts have both.  The apt lists stay so that the
+# installers' own apt-get install calls work.
+#
+# systemd-udevd cannot run here (rootless: /sys is read-only, no devices), so
+# `udevadm control --reload-rules` and `udevadm trigger` would fail on every
+# installer that ships a udev rule.  Shim those two verbs to succeed.  This is
+# a limit of the container, not a finding about any client.
+RUN mv /usr/bin/udevadm /usr/bin/udevadm.real \
+ && printf '#!/bin/sh\ncase "$1" in control|trigger|settle) exit 0;; esac\nexec /usr/bin/udevadm.real "$@"\n' > /usr/bin/udevadm \
+ && chmod 755 /usr/bin/udevadm
+
+CMD ["/sbin/init"]
