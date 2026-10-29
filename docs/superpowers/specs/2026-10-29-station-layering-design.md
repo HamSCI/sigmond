@@ -291,13 +291,24 @@ This part deserves its own design once this one stands approved.
 
 ## 10. Open questions
 
-For Rob:
-1. How the host announces its offers to the VM: a pushed file, an endpoint on
-   10.99.0.1, or the guest agent.
-2. Whether a VM's own tunnel shares the host's gateway registration or
-   registers separately.
-3. Whether anyone, among wsprdaemon users for instance, wants stand-alone
-   clients now.  The answer changes priority, not the design.
+Answered by Rob's side on the claude-bus, 2026-10-29 22:42Z (a call between
+Rob and Michael outranks these if it settled otherwise):
+1. The host announces its offers in a file, and the file is the interface.  The
+   contract version lives inside the file, not in its path.  The guest agent,
+   9p, virtio-fs or a config drive may deliver it; none of them is the
+   contract.  No file means no offers, so sigmond runs its own tunnel, and bare
+   metal needs no code path of its own.  sigmond re-reads the file when it
+   changes, not only at start, so a host that gains remote access needs no VM
+   restart.  Not an endpoint on 10.99.0.1: that would make the VM depend on
+   the host at runtime.  Not the guest agent as the contract: it goes deaf on
+   a byte above 0x7F.
+2. A VM or bare-metal sigmond that runs its own tunnel registers separately
+   from the host.  The host tunnel exists to survive the VM, and a shared
+   registration would tie the VM's replacement to the host's recovery door.
+   Ports derive from a hash of the name, so separate names cannot collide.
+   Cost: two registrations and two port sets per station.
+3. Stand-alone clients: Rob decides, from demand among wsprdaemon users.  It
+   moves priority, not the design.
 
 Settled by Michael, 2026-10-29:
 4. Per-client library pins (§6.1) come after the first moves, with the
