@@ -21,6 +21,8 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -31,7 +33,9 @@ from typing import Callable, NamedTuple, Optional
 DEFAULT_OUT = Path("/var/lib/sigmond/cli-reference")
 DEFAULT_BASE = Path("/opt/git/sigmond")
 CLI_WALK = Path(__file__).with_name("cli_walk.py")
+SMD_CHECKOUT = Path(__file__).resolve().parents[2]
 TIMEOUT_S = 30
+VERSION_TIMEOUT_S = 5
 SCHEMA = 1
 
 _VERSION_CODE = (
@@ -84,31 +88,78 @@ def discover_programs(base: Path, catalog: dict) -> list:
     return programs
 
 
+def run_bounded(cmd: list, *, timeout: float, **kw) -> "subprocess.CompletedProcess":
+    """subprocess.run, except the child leads its own process group and a
+    timeout kills the whole group, so nothing the program forked outlives
+    the limit.  Raises TimeoutExpired after the group is dead and reaped."""
+    capture = kw.pop("capture_output", False)
+    if capture:
+        kw["stdout"] = kw["stderr"] = subprocess.PIPE
+    with subprocess.Popen(cmd, start_new_session=True, **kw) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.communicate()
+            raise
+        except BaseException:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _runuser() -> str:
+    for cand in ("/usr/sbin/runuser", "/sbin/runuser", "/usr/bin/runuser"):
+        if os.path.exists(cand):
+            return cand
+    return shutil.which("runuser") or "/usr/sbin/runuser"
+
+
 def _command(python: Path, tail: list) -> list:
     cmd = [str(python), "-I"] + tail
     if os.geteuid() == 0:
-        cmd = ["runuser", "-u", "nobody", "--"] + cmd
+        cmd = [_runuser(), "-u", "nobody", "--"] + cmd
     return cmd
 
 
-def _run_kwargs() -> dict:
+def _run_kwargs(timeout: float = TIMEOUT_S) -> dict:
     env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
            "PYTHONDONTWRITEBYTECODE": "1"}
     if os.environ.get("LANG"):
         env["LANG"] = os.environ["LANG"]
-    return dict(capture_output=True, text=True, timeout=TIMEOUT_S, cwd="/", env=env)
+    return dict(capture_output=True, text=True, timeout=timeout, cwd="/", env=env)
+
+
+def smd_version() -> str:
+    """smd's version: the short git HEAD of the checkout smd runs from, so a
+    pull marks the record stale.  The package version when git cannot say."""
+    from sigmond import __version__
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "safe.directory=*", "-C", str(SMD_CHECKOUT),
+             "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=VERSION_TIMEOUT_S, cwd="/")
+    except (subprocess.SubprocessError, OSError):
+        return __version__
+    sha = (proc.stdout or "").strip()
+    return sha if proc.returncode == 0 and sha else __version__
 
 
 def installed_version(python: Optional[Path], script: str, *,
-                      run: Callable = subprocess.run) -> Optional[str]:
+                      run: Callable = run_bounded) -> Optional[str]:
     """The version of the distribution that provides console script `script`,
     read in that program's own venv.  None when it cannot be read."""
     if python is None:
-        from sigmond import __version__
-        return __version__
+        return smd_version()
     cmd = _command(python, ["-c", _VERSION_CODE, script])
     try:
-        proc = run(cmd, **_run_kwargs())
+        proc = run(cmd, **_run_kwargs(VERSION_TIMEOUT_S))
     except (subprocess.SubprocessError, OSError):
         return None
     if getattr(proc, "returncode", 1) != 0:
@@ -164,9 +215,8 @@ def _smd_parser() -> "object":
 
 
 def _walk_smd(build_parser: Optional[Callable]) -> dict:
-    from sigmond import __version__
     from sigmond.cli_walk import walk_parser
-    result = {"schema": SCHEMA, "program": "smd", "version": __version__,
+    result = {"schema": SCHEMA, "program": "smd", "version": smd_version(),
               "entry": "smd:_build_parser", "commands": [], "error": None}
     try:
         result["commands"] = walk_parser((build_parser or _smd_parser)(), "smd")
@@ -201,7 +251,33 @@ def _is_own_record(path: Path) -> bool:
             and data.get("program") == path.stem)
 
 
-def build(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run,
+def _collapse_twins(walked: list) -> list:
+    """Programs of one component that walked to the same entry point are one
+    program under several names (hf-timestd and timestd).  Keep the name that
+    equals the component, else the first alphabetically; list the others as
+    `aliases`.  A failed walk has no entry, so it never collapses."""
+    groups: dict = {}
+    for prog, record in walked:
+        entry = record.get("entry")
+        if record.get("error") is None and entry:
+            groups.setdefault((prog.component, entry), []).append(prog.name)
+    keeper: dict = {}
+    for (component, _entry), names in groups.items():
+        names = sorted(names)
+        keep = component if component in names else names[0]
+        for n in names:
+            keeper[(component, n)] = (keep, [x for x in names if x != keep])
+    out = []
+    for prog, record in walked:
+        keep, aliases = keeper.get((prog.component, prog.name), (prog.name, []))
+        if keep != prog.name:
+            continue
+        record["aliases"] = aliases
+        out.append((prog, record))
+    return out
+
+
+def build(out_dir: Path = DEFAULT_OUT, *, run: Callable = run_bounded,
           now: Callable = time.time, base: Path = DEFAULT_BASE,
           catalog: Optional[dict] = None,
           smd_parser: Optional[Callable] = None) -> list:
@@ -220,7 +296,7 @@ def build(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run,
         os.chmod(out_dir, 0o755)
     built_at = datetime.datetime.fromtimestamp(
         now(), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    results = []
+    walked = []
     for prog in programs:
         if prog.python is None:
             record = _walk_smd(smd_parser)
@@ -229,6 +305,11 @@ def build(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run,
         record.update({"component": prog.component, "script": prog.script,
                        "python": str(prog.python) if prog.python else None,
                        "built_at": built_at})
+        walked.append((prog, record))
+    walked = _collapse_twins(walked)
+    programs = [prog for prog, _ in walked]
+    results = []
+    for prog, record in walked:
         error = record.get("error")
         try:
             _write_atomic(out_dir / f"{prog.name}.json", record)
@@ -245,7 +326,7 @@ def build(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run,
     return results
 
 
-def show(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run) -> dict:
+def show(out_dir: Path = DEFAULT_OUT, *, run: Callable = run_bounded) -> dict:
     """The stored files, each marked stale or not.  Runs no walk."""
     programs = []
     for path in sorted(Path(out_dir).glob("*.json")):

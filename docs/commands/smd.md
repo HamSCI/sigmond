@@ -1,5 +1,10 @@
 # smd command examples
 
+> **Audience:** operator, contributor
+> **Status:** current
+> **Verified against:** sigmond 24c4686 on 2026-10-29 — live b4
+> **Role:** read-only example output for the Commands page; one section per command
+
 These examples come from AC0G-B4, the project's test station, on 2026-10-29 between about 22:35 and 22:36 UTC. Every command here only reads. Run `smd` as your own user. It refuses sudo. The examples drop the colour codes that the terminal shows.
 
 ## smd check
@@ -98,7 +103,7 @@ System clock (chrony)
   reference  192.168.1.80   stratum 2   offset -1.4 us   rms 3.0 us   leap Normal
 ```
 
-Read the authority block first. The tier names the best timing source in use, and T6 is the best. The offset gives the correction the authority publishes. For T6 that offset registers the station's sample counter against UTC through the chain delay. It does not describe the system clock. B4 shows about -16 ms here and that is expected: the learned T6 chain delay there measures about -16 ms. Sigma gives the uncertainty. The governor names the radiod instance that supplies the timing the authority follows. The `published` age should stay in seconds.
+Read the authority block first. The tier names the best timing source in use, and T6 is the best. The offset gives the correction the authority publishes. For T6 that offset registers the station's sample counter against UTC through the chain delay. It does not describe the system clock. B4 shows about -16 ms here. That sits near the learned T6 chain delay, which hf-timestd reads at about -17.2 ms (`hf-timestd chain-delay show`); the two are not the same number. Sigma gives the uncertainty. The governor names the radiod instance that hf-timestd takes its samples from (`[ka9q].status`). The `published` age should stay in seconds.
 
 Then read the chrony block. It compares the system clock with its reference. A small offset and a small rms mean the clock follows its reference well. A large offset, a high stratum or a leap warning needs a closer look.
 

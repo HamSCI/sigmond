@@ -2011,6 +2011,7 @@ class AlignFinalReviewCliTests(unittest.TestCase):
                                dirty={"hf-timestd": ["uv.lock"]},
                                _align_chown=mock.Mock())
                 st.enter_context(mock.patch("subprocess.run", git))
+                st.enter_context(mock.patch.object(smd, "_refresh_cli_reference"))
                 st.enter_context(mock.patch.object(Path, "owner", return_value="sigmond"))
                 st.enter_context(contextlib.redirect_stdout(out))
                 rc = smd.cmd_align(_apply_args(base))

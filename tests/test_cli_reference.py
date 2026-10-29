@@ -22,7 +22,7 @@ from sigmond import cli_reference  # noqa: E402
 def _walker_json(name, version='1.0'):
     return json.dumps({
         'schema': 1, 'program': name, 'version': version,
-        'entry': 'x:main', 'commands': [
+        'entry': f'{name}:main', 'commands': [
             {'path': name, 'help': '', 'description': '', 'args': []}],
         'error': None})
 
@@ -92,6 +92,67 @@ class CliReferenceTests(unittest.TestCase):
             self.out, run=run or _Fake(), base=self.base, catalog=CATALOG,
             smd_parser=_smd_parser, **kw)
 
+    def _add_twins(self):
+        """component `delta` links two scripts, `delta` and `d`, to one entry."""
+        d = self.base / 'delta'
+        (d / 'venv' / 'bin').mkdir(parents=True)
+        (d / 'venv' / 'bin' / 'python').write_text('')
+        (d / 'deploy.toml').write_text(
+            '[[install.steps]]\nkind = "link"\n'
+            f'src = "{d}/venv/bin/d"\ndst = "/usr/local/bin/d"\n'
+            '[[install.steps]]\nkind = "link"\n'
+            f'src = "{d}/venv/bin/delta"\ndst = "/usr/local/bin/delta"\n')
+        return dict(CATALOG, delta=None)
+
+    def _twin_fake(self):
+        def reply(cmd, kw):
+            name = cmd[cmd.index('--program') + 1]
+            rec = json.loads(_walker_json(name))
+            if name in ('d', 'dd', 'delta'):
+                rec['entry'] = 'delta.cli:main'
+            return _Proc(json.dumps(rec))
+        return _Fake(reply)
+
+    def test_programs_sharing_an_entry_point_collapse_into_one_record(self):
+        catalog = self._add_twins()
+        results = cli_reference.build(
+            self.out, run=self._twin_fake(), base=self.base, catalog=catalog,
+            smd_parser=_smd_parser)
+        self.assertEqual([r['program'] for r in results],
+                         ['alpha', 'beta', 'delta', 'smd'])
+        data = json.loads((self.out / 'delta.json').read_text())
+        self.assertEqual(data['aliases'], ['d'])
+        self.assertFalse((self.out / 'd.json').exists())
+        self.assertEqual(json.loads((self.out / 'alpha.json').read_text())
+                         ['aliases'], [])
+
+    def test_collapse_keeps_the_first_name_when_none_matches_the_component(self):
+        catalog = self._add_twins()
+        (self.base / 'delta' / 'deploy.toml').write_text(
+            (self.base / 'delta' / 'deploy.toml').read_text().replace(
+                '/usr/local/bin/delta', '/usr/local/bin/dd'))
+        cli_reference.build(self.out, run=self._twin_fake(), base=self.base,
+                            catalog=catalog, smd_parser=_smd_parser)
+        data = json.loads((self.out / 'd.json').read_text())
+        self.assertEqual(data['aliases'], ['dd'])
+        self.assertFalse((self.out / 'dd.json').exists())
+
+    def test_a_stale_alias_file_is_removed(self):
+        catalog = self._add_twins()
+        self.out.mkdir()
+        (self.out / 'd.json').write_text(json.dumps(
+            {'schema': 1, 'program': 'd', 'commands': []}))
+        cli_reference.build(self.out, run=self._twin_fake(), base=self.base,
+                            catalog=catalog, smd_parser=_smd_parser)
+        self.assertFalse((self.out / 'd.json').exists())
+
+    def test_failed_walks_do_not_collapse(self):
+        catalog = self._add_twins()
+        results = cli_reference.build(
+            self.out, run=_Fake(lambda c, k: _Proc('oops', 1)), base=self.base,
+            catalog=catalog, smd_parser=_smd_parser)
+        self.assertIn('d', [r['program'] for r in results])
+
     def test_discovers_programs_from_deploy_links(self):
         progs = cli_reference.discover_programs(self.base, CATALOG)
         self.assertEqual(
@@ -143,14 +204,16 @@ class CliReferenceTests(unittest.TestCase):
         with mock.patch('os.geteuid', return_value=0):
             self._build(run=fake)
         cmd, kw = fake.calls[0]
-        self.assertEqual(cmd[:4], ['runuser', '-u', 'nobody', '--'])
+        self.assertTrue(cmd[0].endswith('/runuser'))
+        self.assertTrue(os.path.isabs(cmd[0]))
+        self.assertEqual(cmd[1:4], ['-u', 'nobody', '--'])
         self.assertEqual(kw['cwd'], '/')
         self.assertEqual(kw['timeout'], 30)
         self.assertEqual(set(kw['env']) - {'LANG'}, {'PATH', 'PYTHONDONTWRITEBYTECODE'})
         fake = _Fake()
         with mock.patch('os.geteuid', return_value=1000):
             self._build(run=fake)
-        self.assertNotEqual(fake.calls[0][0][0], 'runuser')
+        self.assertFalse(fake.calls[0][0][0].endswith('runuser'))
         self.assertIn('-I', fake.calls[0][0])
 
     def test_show_marks_stale_versions(self):
@@ -212,6 +275,22 @@ class CliReferenceTests(unittest.TestCase):
         self.assertIn('smd admin cli-reference build', paths)
         self.assertEqual(len(fake.calls), 2)  # alpha, beta; never smd
 
+    def test_smd_version_is_the_checkout_head(self):
+        sha = subprocess.run(
+            ['git', '-C', str(Path(cli_reference.__file__).resolve().parents[2]),
+             'rev-parse', '--short', 'HEAD'],
+            capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(cli_reference.smd_version(), sha)
+        self.assertEqual(cli_reference.installed_version(None, 'smd'), sha)
+        self._build()
+        data = json.loads((self.out / 'smd.json').read_text())
+        self.assertEqual(data['version'], sha)
+
+    def test_smd_version_falls_back_to_the_package_version(self):
+        from sigmond import __version__
+        with mock.patch.object(cli_reference, 'SMD_CHECKOUT', Path('/nonexistent')):
+            self.assertEqual(cli_reference.smd_version(), __version__)
+
     def test_real_smd_tree_has_the_verbs(self):
         data = cli_reference._walk_smd(None)
         self.assertIsNone(data['error'])
@@ -222,6 +301,42 @@ class CliReferenceTests(unittest.TestCase):
         from sigmond.snapshot import SNAPSHOT_COMMANDS
         self.assertEqual(SNAPSHOT_COMMANDS['cli-reference'],
                          ['admin', 'cli-reference', 'show', '--json'])
+
+
+class BoundedRunTests(unittest.TestCase):
+    """No process a walk starts may outlive its timeout (final review F1)."""
+
+    def test_timeout_kills_the_whole_process_group(self):
+        import time
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as d:
+            pidfile = Path(d) / 'grandchild.pid'
+            # The shell forks a sleeper (the "program") and waits on it,
+            # as runuser forks the real program.
+            script = f'sleep 8 & echo $! > {pidfile}; wait'
+            t0 = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                cli_reference.run_bounded(['sh', '-c', script], timeout=1.5,
+                                          capture_output=True, text=True)
+            self.assertLess(time.monotonic() - t0, 5)  # no wait on the sleeper
+            pid = int(pidfile.read_text())
+            for _ in range(20):
+                if not Path(f'/proc/{pid}').exists():
+                    break
+                time.sleep(0.1)
+            alive = Path(f'/proc/{pid}').exists()
+            if alive:
+                os.kill(pid, 9)
+            self.assertFalse(alive, 'grandchild survived the timeout')
+
+    def test_returns_completed_output(self):
+        proc = cli_reference.run_bounded(['echo', 'hi'], timeout=5,
+                                         capture_output=True, text=True)
+        self.assertEqual((proc.returncode, proc.stdout), (0, 'hi\n'))
+
+    def test_version_probe_timeout_is_short(self):
+        fake = _Fake(lambda c, k: _Proc('1.0\n'))
+        cli_reference.installed_version(Path('/x/python'), 's', run=fake)
+        self.assertEqual(fake.calls[0][1]['timeout'], 5)
 
 
 if __name__ == '__main__':

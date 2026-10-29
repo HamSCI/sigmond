@@ -5063,13 +5063,25 @@ def cmd_admin_docs_index(args) -> int:
 def _refresh_cli_reference() -> None:
     """Rebuild the per-program CLI reference after a successful install,
     update or align.  Never changes the caller's exit code: any failure is
-    one warning line."""
+    one warning line.
+
+    The build runs in a fresh process, the bin/smd of the checkout this smd
+    runs from: it loads the code a pull just brought (this process still
+    holds the old parser) and elevates itself through _need_root when the
+    caller is unprivileged (update --apply is)."""
     try:
-        from sigmond import cli_reference
-        results = cli_reference.build(smd_parser=_build_parser)
-        failed = sum(1 for r in results if not r['ok'])
-        print(f'  cli reference: {len(results)} programs ({failed} failed)',
-              file=_report_stream())
+        proc = subprocess.run(
+            [str(Path(__file__).resolve()), 'admin', 'cli-reference', 'build'],
+            capture_output=True, text=True, timeout=900)
+        if proc.returncode != 0:
+            tail = ((proc.stderr or proc.stdout or '').strip().splitlines()
+                    or [''])[-1]
+            raise RuntimeError(f'exit {proc.returncode}'
+                               + (f': {tail[:200]}' if tail else ''))
+        lines = (proc.stdout or '').strip().splitlines()
+        summary = lines[-1].strip() if lines else 'cli-reference: built'
+        summary = summary.replace('cli-reference:', 'cli reference:', 1)
+        print(f'  {summary}', file=_report_stream())
     except Exception as exc:
         _warn(f'cli reference not refreshed: {exc}')
 

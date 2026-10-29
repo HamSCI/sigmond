@@ -78,6 +78,7 @@ def _single_client_install(no_pull):
          mock.patch.object(smd, "_build_decoders", return_value=True), \
          mock.patch.object(smd, "_post_install_fixups"), \
          mock.patch.object(smd, "_enable_after_install"), \
+         mock.patch.object(smd, "_refresh_cli_reference"), \
          mock.patch.object(smd, "_do_install_client", install):
         rc = smd._install_single_client(_args(client=entry.name, no_pull=no_pull))
     assert rc == 0
@@ -112,6 +113,7 @@ def _components_install(no_pull):
          mock.patch.object(smd, "_host_has_local_radiod", return_value=False), \
          mock.patch.object(smd, "_ensure_sigmond_venv", return_value=True), \
          mock.patch.object(smd, "_post_install_fixups"), \
+         mock.patch.object(smd, "_refresh_cli_reference"), \
          mock.patch.object(smd, "_do_install_client", install):
         rc = smd._install_full_suite(_args(components=entry.name, no_pull=no_pull))
     assert rc == 0
@@ -146,6 +148,7 @@ def test_full_suite_threads_no_pull_to_every_native():
          mock.patch.object(smd, "_install_loopback_multicast_route"), \
          mock.patch.object(smd, "_host_has_local_radiod", return_value=True), \
          mock.patch.object(smd, "_ensure_sigmond_venv", return_value=True), \
+         mock.patch.object(smd, "_refresh_cli_reference"), \
          mock.patch.multiple(smd, **natives):
         rc = smd._install_full_suite(_args(
             components="ka9q-radio,ka9q-web,gmag-webui", no_pull=True))
@@ -229,6 +232,7 @@ def test_single_client_native_ka9q_web_threads_no_pull():
          mock.patch.object(smd, "_need_root", return_value=False), \
          mock.patch.object(smd, "_netdiag_auto_refresh"), \
          mock.patch.object(smd, "_enable_after_install"), \
+         mock.patch.object(smd, "_refresh_cli_reference"), \
          mock.patch.object(smd, "_install_ka9q_web_native", native):
         rc = smd._install_single_client(_args(client="ka9q-web", no_pull=True))
     assert rc == 0

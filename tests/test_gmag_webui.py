@@ -114,6 +114,7 @@ class InstallDispatchTests(unittest.TestCase):
                                      force=False, no_enable=False)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(smd, "load_catalog", return_value=load_catalog(REPO_CATALOG)), \
+             mock.patch.object(smd, "_refresh_cli_reference"), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = smd._install_single_client(args)
         text = out.getvalue() + err.getvalue()

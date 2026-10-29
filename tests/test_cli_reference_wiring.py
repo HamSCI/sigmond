@@ -22,7 +22,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / 'lib'))
 
-from sigmond import align_apply, cli_reference  # noqa: E402
+from sigmond import align_apply  # noqa: E402
 from sigmond.catalog import CatalogEntry  # noqa: E402
 from tests import test_align_cli as _tac  # noqa: E402
 
@@ -39,15 +39,21 @@ def _load_smd():
 
 smd = _load_smd()
 
-_OK = [{'program': 'a', 'ok': True, 'error': None},
-       {'program': 'b', 'ok': False, 'error': 'boom'},
-       {'program': 'c', 'ok': True, 'error': None}]
+_SUMMARY = ('  cli reference: 3 programs (1 failed)')
 
 
-def _build(raises=False):
+class _Done:
+    def __init__(self, rc=0, out='cli-reference: 2 of 3 programs recorded in /x\n',
+                 err=''):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+def _build(raises=False, rc=0):
+    """Patch the fresh `smd admin cli-reference build` child process.
+    Nothing here walks a program, writes /var/lib/sigmond or elevates."""
     if raises:
-        return mock.patch.object(cli_reference, 'build', side_effect=OSError('disk full'))
-    return mock.patch.object(cli_reference, 'build', return_value=list(_OK))
+        return mock.patch.object(smd.subprocess, 'run', side_effect=OSError('disk full'))
+    return mock.patch.object(smd.subprocess, 'run', return_value=_Done(rc))
 
 
 class HelperTests(unittest.TestCase):
@@ -57,8 +63,27 @@ class HelperTests(unittest.TestCase):
                 contextlib.redirect_stderr(out):
             smd._refresh_cli_reference()
         b.assert_called_once()
-        self.assertIs(b.call_args.kwargs.get('smd_parser'), smd._build_parser)
-        self.assertIn('cli reference: 3 programs (1 failed)', out.getvalue())
+        cmd = b.call_args.args[0]
+        self.assertEqual(cmd[1:], ['admin', 'cli-reference', 'build'])
+        # the checkout this smd runs from: it loads the code just pulled
+        self.assertEqual(Path(cmd[0]), REPO / 'bin' / 'smd')
+        self.assertIn('cli reference: 2 of 3 programs recorded', out.getvalue())
+
+    def test_a_failed_child_is_one_warning_and_no_raise(self):
+        out = io.StringIO()
+        with _build(rc=1) as b, contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(out):
+            smd._refresh_cli_reference()
+        lines = [l for l in out.getvalue().splitlines() if l.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('not refreshed', lines[0])
+
+    def test_a_timeout_is_one_warning(self):
+        out = io.StringIO()
+        with mock.patch.object(smd.subprocess, 'run', side_effect=smd.subprocess.TimeoutExpired('x', 1)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            smd._refresh_cli_reference()
+        self.assertEqual(len([l for l in out.getvalue().splitlines() if l.strip()]), 1)
 
     def test_an_exception_becomes_one_warning(self):
         out = io.StringIO()
@@ -109,7 +134,7 @@ class InstallTests(unittest.TestCase):
         rc, out, b = _install()
         self.assertEqual(rc, 0)
         b.assert_called_once()
-        self.assertIn('cli reference: 3 programs (1 failed)', out)
+        self.assertIn('cli reference: 2 of 3 programs recorded', out)
 
     def test_exception_keeps_exit_code_and_warns_once(self):
         rc, out, b = _install(raises=True)
@@ -215,17 +240,20 @@ class AlignTests(unittest.TestCase):
     _run = _tac.AlignMakeLiveApplyTests._run
 
     def _go(self, restart_outcome='restarted', raises=False, no_restart=False):
-        with _build(raises) as b:
-            rc, out, m = self._run(
-                restart_steps=[align_apply.Step('hf-timestd', restart_outcome)],
-                restarted_units=['hf-a.service'], no_restart=no_restart)
+        # _run already patches subprocess.run; ours goes in inside it.
+        b = mock.Mock(side_effect=OSError('disk full')) if raises \
+            else mock.Mock(return_value=_Done())
+        rc, out, m = self._run(
+            restart_steps=[align_apply.Step('hf-timestd', restart_outcome)],
+            restarted_units=['hf-a.service'], no_restart=no_restart,
+            extra_patches=(mock.patch.object(smd.subprocess, 'run', b),))
         return rc, out, b
 
     def test_success_refreshes_once_before_the_summary(self):
         rc, out, b = self._go()
         self.assertEqual(rc, 0)
         b.assert_called_once()
-        self.assertIn('cli reference: 3 programs', out)
+        self.assertIn('cli reference: 2 of 3 programs', out)
         self.assertLess(out.index('cli reference'), out.index('summary:'))
 
     def test_exception_keeps_exit_code_and_warns_once(self):

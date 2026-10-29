@@ -63,6 +63,11 @@ class _Rig(unittest.TestCase):
     COMP = "fakeclient"
 
     def setUp(self):
+        # update --apply refreshes the CLI reference in a child process;
+        # none of these tests may start it.
+        _p = mock.patch.object(smd, "_refresh_cli_reference")
+        _p.start()
+        self.addCleanup(_p.stop)
         self._tmp = tempfile.TemporaryDirectory()
         root = Path(self._tmp.name)
         self.origin = root / "origin.git"
