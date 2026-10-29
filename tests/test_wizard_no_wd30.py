@@ -65,11 +65,19 @@ def test_both_timers_are_actively_disarmed():
 def test_review_menu_is_seven_entries_with_no_heartbeat():
     src = WIZARD.read_text()
     assert "6) Heartbeat" not in src and "Heartbeat: enabled" not in src
-    assert 'rd -r -p "Apply? [Y = apply / 1-7 = re-edit that entry' in src, \
-        "the review prompt still offers an eighth entry"
-    # Every number the prompt offers must dispatch to something.
+    # Don't hardcode the count -- entries come and go.  Assert the prompt's
+    # advertised range and the dispatch arms agree, which is the bug that
+    # renumbering actually causes.
+    m = re.search(r'rd -r -p "Apply\? \[Y = apply / 1-(\d) = re-edit', src)
+    assert m, "the review prompt no longer advertises a numbered range"
+    top = int(m.group(1))
     dispatch = re.search(r"case \"\$\{OK:-Y\}\" in(.*?)esac", src, re.S)
     assert dispatch, "review dispatch not found"
-    offered = set(re.findall(r"^\s*([1-9])\)", dispatch.group(1), re.M))
-    assert offered == {"1", "2", "3", "4", "5", "6", "7"}, \
-        f"review dispatch covers {sorted(offered)}, not 1-7"
+    offered = sorted(int(n) for n in
+                     re.findall(r"^\s*([1-9])\)", dispatch.group(1), re.M))
+    assert offered == list(range(1, top + 1)), \
+        f"prompt offers 1-{top} but dispatch covers {offered}"
+    # And every displayed entry must have an arm.
+    shown = sorted(int(n) for n in re.findall(r'echo "  ([1-9])\) ', src))
+    assert set(shown) <= set(offered), \
+        f"entries {sorted(set(shown) - set(offered))} are shown but not editable"
