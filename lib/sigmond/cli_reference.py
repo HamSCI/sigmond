@@ -191,6 +191,16 @@ def _write_atomic(path: Path, data: dict) -> None:
         raise
 
 
+def _is_own_record(path: Path) -> bool:
+    """True for a file this tool wrote: schema 1 and a matching program."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return (isinstance(data, dict) and data.get("schema") == SCHEMA
+            and data.get("program") == path.stem)
+
+
 def build(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run,
           now: Callable = time.time, base: Path = DEFAULT_BASE,
           catalog: Optional[dict] = None,
@@ -204,8 +214,10 @@ def build(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run,
         except (OSError, ValueError):
             catalog = {}
     programs = discover_programs(base, catalog)
+    created = not out_dir.exists()
     out_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(out_dir, 0o755)
+    if created:
+        os.chmod(out_dir, 0o755)
     built_at = datetime.datetime.fromtimestamp(
         now(), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     results = []
@@ -225,7 +237,7 @@ def build(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run,
         results.append({"program": prog.name, "ok": error is None, "error": error})
     keep = {f"{p.name}.json" for p in programs}
     for old in out_dir.glob("*.json"):
-        if old.name not in keep:
+        if old.name not in keep and _is_own_record(old):
             try:
                 old.unlink()
             except OSError:
@@ -246,7 +258,12 @@ def show(out_dir: Path = DEFAULT_OUT, *, run: Callable = subprocess.run) -> dict
         python = record.pop("python", None)
         script = record.get("script") or record.get("program") or path.stem
         installed = installed_version(Path(python) if python else None, script, run=run)
-        record["stale"] = installed != record.get("version")
+        # Stale means built before the program moved; a failed walk has no
+        # version to compare, and a rebuild would not make it current.
+        record["stale"] = (record.get("error") is None
+                           and record.get("version") is not None
+                           and installed is not None
+                           and installed != record["version"])
         record.setdefault("component", "")
         record.setdefault("built_at", "")
         programs.append(record)

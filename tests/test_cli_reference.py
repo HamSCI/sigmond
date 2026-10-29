@@ -132,7 +132,8 @@ class CliReferenceTests(unittest.TestCase):
 
     def test_build_removes_files_of_vanished_programs(self):
         self.out.mkdir()
-        (self.out / 'ghost.json').write_text('{}')
+        (self.out / 'ghost.json').write_text(json.dumps(
+            {'schema': 1, 'program': 'ghost', 'commands': []}))
         self._build()
         self.assertFalse((self.out / 'ghost.json').exists())
         self.assertTrue((self.out / 'alpha.json').exists())
@@ -164,6 +165,37 @@ class CliReferenceTests(unittest.TestCase):
         self.assertIsInstance(by['alpha']['built_at'], str)
         self.assertEqual(by['alpha']['component'], 'alpha')
         self.assertNotIn('python', by['alpha'])
+
+    def test_build_leaves_foreign_files_and_existing_dir_mode(self):
+        self.out.mkdir()
+        os.chmod(self.out, 0o700)
+        (self.out / 'other.json').write_text('{"hello": 1}')
+        (self.out / 'notes.txt').write_text('keep')
+        (self.out / 'broken.json').write_text('not json')
+        (self.out / 'ghost.json').write_text(json.dumps(
+            {'schema': 1, 'program': 'ghost', 'commands': []}))
+        self._build()
+        self.assertTrue((self.out / 'other.json').exists())
+        self.assertTrue((self.out / 'notes.txt').exists())
+        self.assertTrue((self.out / 'broken.json').exists())
+        self.assertFalse((self.out / 'ghost.json').exists())
+        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o700)
+
+    def _show_one(self, record, installed):
+        self.out.mkdir(exist_ok=True)
+        (self.out / 'p.json').write_text(json.dumps(record))
+        with mock.patch.object(cli_reference, 'installed_version',
+                               return_value=installed):
+            return cli_reference.show(self.out)['programs'][0]['stale']
+
+    def test_stale_only_for_a_good_record_with_a_different_version(self):
+        good = {'schema': 1, 'program': 'p', 'version': '1.0', 'error': None,
+                'commands': [], 'python': '/x/python'}
+        self.assertTrue(self._show_one(good, '1.1'))
+        self.assertFalse(self._show_one(good, None))
+        self.assertFalse(self._show_one(good, '1.0'))
+        bad = dict(good, version=None, error='boom')
+        self.assertFalse(self._show_one(bad, '1.1'))
 
     def test_show_runs_no_walk(self):
         self._build()
