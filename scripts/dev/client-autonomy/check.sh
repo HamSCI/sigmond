@@ -114,6 +114,27 @@ trap cleanup EXIT
 
 cx() { pd exec "$CT" "$@"; }   # run in the container
 
+# probe_as <user|"">: run the writer probe in the client's venv as that user.
+probe_as() {
+    local who="$1" runner="bash -c"
+    [[ -n "$who" ]] && runner="runuser -u $who -- bash -c"
+    pd exec -i "$CT" $runner "cd / && $venv/bin/python -" 2>&1 <<'PY' | tr '\n' ';' | sed 's/;$//; s/|/\\|/g'
+try:
+    import hs_uploader
+except Exception as e:
+    print("hs_uploader import: NO (%s: %s)" % (type(e).__name__, e)); raise SystemExit
+print("hs_uploader import: yes")
+try:
+    from hs_uploader.sink import Writer, sink_path
+    w = Writer.from_env(table="probe", mode="probe")
+    noop = w.is_noop          # a property in hs-uploader; the brief wrote a call
+    noop = noop() if callable(noop) else noop
+    print("sink_path=%s noop=%s" % (sink_path(), noop))
+except Exception as e:
+    print("writer probe FAILED (%s: %s)" % (type(e).__name__, e))
+PY
+}
+
 check_one() {
     local c="$1" s inst args venv note
     s="$(spec "$c")"
@@ -149,11 +170,13 @@ check_one() {
     local rc tail="$LOGDIR/$c.install-tail.txt"
     if [[ "$inst" == DEPLOY_BUILD ]]; then
         # No installer: run the deploy.toml [build].steps, with the uv-managed
-        # CPython 3.11 they name provisioned first (sigmond would have done it), and
+        # CPython 3.11 they name provisioned first (sigmond would have done it; in
+        # pass 1, with no UV_PYTHON_INSTALL_DIR, uv installs it under /root and the
+        # /opt/uv/python path the steps name stays absent, as shipped), and
         # the apt build deps of systemd-python (nothing declares them).
         cx bash -c 'apt-get install -y --no-install-recommends pkg-config libsystemd-dev
                     curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh
-                    UV_PYTHON_INSTALL_DIR=/opt/uv/python /usr/local/bin/uv python install 3.11' \
+                    '"${PYDIR:+export UV_PYTHON_INSTALL_DIR=$PYDIR; install -d -m 0755 $PYDIR; }"'/usr/local/bin/uv python install 3.11' \
             >"$LOGDIR/$c.install.log" 2>&1
         python3 - "$REPOS/$c/deploy.toml" >"$LOGDIR/$c.steps.sh" <<'PY'
 import sys, tomllib
@@ -183,28 +206,21 @@ PY
     fi
     tail -n 30 "$LOGDIR/$c.install.log" >"$tail"
 
-    # probes inside the client's venv, as root, from /
-    local sig="n/a (no venv)" writer="n/a (no venv)" probe
-    if cx test -x "$venv/bin/python"; then
-        if cx bash -c "cd / && $venv/bin/python -c 'import sigmond' >/dev/null 2>&1"; then
-            sig="yes (UNEXPECTED)"; else sig="no"; fi
-        probe="$(pd exec -i "$CT" bash -c "cd / && $venv/bin/python -" 2>&1 <<'PY'
-try:
-    import hs_uploader
-except Exception as e:
-    print("hs_uploader import: NO (%s: %s)" % (type(e).__name__, e)); raise SystemExit
-print("hs_uploader import: yes")
-try:
-    from hs_uploader.sink import Writer, sink_path
-    w = Writer.from_env(table="probe", mode="probe")
-    noop = w.is_noop          # a property in hs-uploader; the brief wrote a call
-    noop = noop() if callable(noop) else noop
-    print("sink_path=%s noop=%s" % (sink_path(), noop))
-except Exception as e:
-    print("writer probe FAILED (%s: %s)" % (type(e).__name__, e))
-PY
-)"
-        writer="$(echo "$probe" | tr '\n' ';' | sed 's/;$//; s/|/\\|/g')"
+    # probes inside the client's venv, from /.  Once as root, once as the user
+    # that runs the service (the first User= in the client's unit files).
+    local sig="n/a (no venv)" writer="n/a (no venv)" pyt="" svc="" slib1
+    slib1="$(cx bash -c 'test ! -e /var/lib/sigmond && echo absent || echo PRESENT')"
+    svc="$(cx bash -c "grep -hs '^User=' /opt/git/sigmond/$c/systemd/*.service /opt/git/sigmond/$c/deploy/*.service | head -1 | cut -d= -f2")"
+    if cx test -x "$venv/bin/python" || cx test -L "$venv/bin/python"; then
+        pyt="$(cx readlink -f "$venv/bin/python" 2>/dev/null)"
+        cx bash -c "cd / && $venv/bin/python -c 'import sigmond' >/dev/null 2>&1" \
+            && sig="yes (UNEXPECTED)" || sig="no"
+        local root_w svc_w
+        root_w="$(probe_as "")"
+        if [[ -z "$svc" ]]; then svc_w="no service user (units run as root)"
+        elif ! cx id "$svc" >/dev/null 2>&1; then svc_w="service user $svc not created by install"
+        else svc_w="$(probe_as "$svc")"; fi
+        writer="root: $root_w<br>${svc:+$svc: }$svc_w"
     fi
 
     # units: enable --now each, wait, judge
@@ -242,6 +258,8 @@ PY
     ucell="${ucell%<br>}"
     [[ -n "$ucell" ]] || ucell="(none named)"
 
+    local slib2; slib2="$(cx bash -c 'test ! -e /var/lib/sigmond && echo absent || echo PRESENT')"
+    note="${note}${note:+. }/var/lib/sigmond: $slib1 after install, $slib2 after units${pyt:+. venv python -> $pyt}"
     [[ -n "$PYDIR" ]] && note="${note}${note:+. }UV_PYTHON_INSTALL_DIR=$PYDIR"
     local row="| $c | $rc | $sig | $writer | $ucell | ${note}${note:+.}${note2} |"
     echo "$row"
