@@ -2,8 +2,9 @@
 
 Two kinds run here: one ka9q-web per local radiod (spectrum and waterfall),
 and gmag-webui (magnetometer).  Each row carries the port and systemd unit so
-a front page can link to it.  Two viewers on one port show up as a conflict;
-today a second radiod's ka9q-web and gmag-webui both claim 8082.
+a front page can link to it.  Two viewers on one port show up as a conflict.
+smd skips the ports other viewers own when it numbers ka9q-web (the second
+radiod gets 8083, since gmag-webui holds 8082), so none is expected.
 """
 import subprocess
 from typing import Callable

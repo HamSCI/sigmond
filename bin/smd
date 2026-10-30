@@ -11531,13 +11531,32 @@ _KA9Q_WEB_UNIT = Path('/etc/systemd/system/ka9q-web.service')
 _KA9Q_WEB_TEMPLATE = Path('/etc/systemd/system/ka9q-web@.service')
 
 
+def _ka9q_web_port(index: int, reserved: frozenset) -> int:
+    """Port for the index-th local radiod's ka9q-web.
+
+    Index 0 is always 8081 (the RAC web proxy's localPort), whatever
+    ``reserved`` holds.  Each further radiod takes the next port counting up
+    from 8082 that no other viewer owns.
+    """
+    if index <= 0:
+        return 8081
+    port = 8081
+    for _ in range(index):
+        port += 1
+        while port in reserved:
+            port += 1
+    return port
+
+
 def _ka9q_web_targets() -> list:
     """[(unit_name, status_dns, port)] — one ka9q-web per LOCAL radiod.
 
     The first local radiod (by id) keeps the plain ``ka9q-web.service`` on
     port 8081, the RAC web proxy's localPort, so a single-radiod station is
     unchanged.  Each further local radiod gets ``ka9q-web@<id>.service`` on
-    8082, 8083, ...  AC0G-B1 (2026-09-30) runs two radiods, one per RX888;
+    the next free port counting up from 8082, skipping ports other viewers
+    own (gmag-webui's 8082, station-web's 8000), so the second is 8083.
+    AC0G-B1 (2026-09-30) runs two radiods, one per RX888;
     SIGMOND_RADIOD_STATUS is deliberately unset there (CLIENT-CONTRACT §14.2),
     so the old single-unit writer installed nothing at all.  With no local
     radiod declared, fall back to SIGMOND_RADIOD_STATUS as before.
@@ -11547,10 +11566,16 @@ def _ka9q_web_targets() -> list:
         local = sorted(load_coordination().local_radiods(), key=lambda r: r.id)
     except Exception:
         local = []
+    try:
+        from sigmond import gmag_webui as _gw
+        reserved = frozenset({_gw.PORT, 8000})
+    except Exception:
+        reserved = frozenset({8082, 8000})
     out = []
     for i, r in enumerate(x for x in local if x.effective_status_dns):
         unit = 'ka9q-web.service' if i == 0 else f'ka9q-web@{r.id}.service'
-        out.append((unit, r.effective_status_dns, 8081 + i))
+        out.append((unit, r.effective_status_dns,
+                    _ka9q_web_port(i, reserved)))
     if out:
         return out
     try:

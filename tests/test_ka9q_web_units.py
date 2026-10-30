@@ -54,8 +54,24 @@ def test_two_local_radiods_get_two_units(smd, monkeypatch):
     ])
     assert smd._ka9q_web_targets() == [
         ("ka9q-web.service", "ac0g-b1-a-status.local", 8081),
-        ("ka9q-web@ac0g-b1-b.service", "ac0g-b1-b-status.local", 8082),
+        ("ka9q-web@ac0g-b1-b.service", "ac0g-b1-b-status.local", 8083),
     ]
+
+
+def test_second_radiod_skips_gmag_webui_port(smd, monkeypatch):
+    _with(monkeypatch, [Radiod(id="a", host="localhost", status_dns="a-status.local"),
+                        Radiod(id="b", host="localhost", status_dns="b-status.local")])
+    assert smd._ka9q_web_targets() == [("ka9q-web.service", "a-status.local", 8081),
+                                      ("ka9q-web@b.service", "b-status.local", 8083)]
+
+
+def test_first_radiod_always_8081(smd):
+    assert smd._ka9q_web_port(0, frozenset({8081})) == 8081
+
+
+def test_ports_skip_reserved_and_count_up(smd):
+    assert smd._ka9q_web_port(1, frozenset({8082, 8000})) == 8083
+    assert smd._ka9q_web_port(2, frozenset({8082, 8000})) == 8084
 
 
 def test_remote_radiods_get_no_unit(smd, monkeypatch):

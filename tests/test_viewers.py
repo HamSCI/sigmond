@@ -29,7 +29,7 @@ def _load_smd():
 
 
 ONE = [("ka9q-web.service", "bee1-status.local", 8081)]
-TWO = ONE + [("ka9q-web@b.service", "bee2-status.local", 8082)]
+TWO = ONE + [("ka9q-web@b.service", "bee2-status.local", 8083)]
 
 
 def _active(unit):
@@ -74,8 +74,14 @@ class ListViewersTests(unittest.TestCase):
 
 class ConflictTests(unittest.TestCase):
 
-    def test_second_radiod_and_gmag_share_8082(self):
+    def test_port_conflicts_empty_with_two_radiods_and_gmag(self):
         rows = viewers.list_viewers(TWO, True, _active)
+        self.assertEqual(viewers.port_conflicts(rows), [])
+
+    def test_two_viewers_on_one_port_are_reported(self):
+        rows = viewers.list_viewers(
+            ONE + [("ka9q-web@b.service", "bee2-status.local", 8082)],
+            True, _active)
         self.assertEqual(viewers.port_conflicts(rows),
                          [{"port": 8082, "names": ["ka9q-web-2", "gmag-webui"]}])
 
@@ -120,8 +126,7 @@ class CliTests(unittest.TestCase):
         data = json.loads(out.getvalue())
         self.assertEqual([v["name"] for v in data["viewers"]],
                          ["ka9q-web", "ka9q-web-2", "gmag-webui"])
-        self.assertEqual(data["conflicts"],
-                         [{"port": 8082, "names": ["ka9q-web-2", "gmag-webui"]}])
+        self.assertEqual(data["conflicts"], [])
 
 
 if __name__ == "__main__":
