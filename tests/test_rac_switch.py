@@ -118,9 +118,16 @@ class Host:
         p = self.d / f"{name}.calls"
         return p.read_text().splitlines() if p.exists() else []
 
+    # Read-only verbs: asking systemd a question is not a change, and a
+    # sequence assertion that counts one is brittle against any new query.
+    # list-unit-files joined the list when switch_on began asking which
+    # sigmond-rac-host@ instances are enabled, so it can disable the ones
+    # whose config has gone (2026-10-30).
+    _READ_ONLY = ("is-active", "is-enabled", "list-unit-files", "show")
+
     def changes(self):
         """Every systemctl call that changes something."""
-        return [c for c in self.calls() if c.split()[0] not in ("is-active", "is-enabled")]
+        return [c for c in self.calls() if c.split()[0] not in self._READ_ONLY]
 
     def wish(self):
         p = self.d / "marks" / "rac-desired"

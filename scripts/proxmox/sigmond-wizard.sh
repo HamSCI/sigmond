@@ -512,7 +512,7 @@ rac_write_config(){
     # Turn one registration ($REG, from rac_ladder) into this host's tunnel
     # configuration and its marks.  It leaves RACN, SRV and the four gateway
     # ports set for the caller's summary line.
-    local RAC_TLS_BLOCK
+    local RAC_TLS_BLOCK _written="" _stale _sname
     RACN=""; P_VMSTN=""; P_VMGMAG=""
     eval "$REG"
     [ -n "$RACN" ] || { RAC_FAIL="the registration carried no RAC number"; return 1; }
@@ -625,9 +625,28 @@ TOMLEOF
         RAC_FAIL="could not write $_toml"
         return 1
     fi
+        _written="${_written:+$_written }$_gwname"
     done <<GWEOF
 $(rac_gateway_set "$SRV")
 GWEOF
+    # ⛔ PRUNE the gateways this tier does NOT use.  rac_units() enumerates
+    # units from the config files present, so a config left behind is a unit
+    # the switch enables on every run from now on -- and it keeps the admin
+    # port it was written with, so fixing the port table cannot reach it.
+    # AI6VN, 2026-10-30: a gw2 config from a mis-read fallback the night
+    # before was disabled during the repair and resurrected by the next
+    # reconfigure, crash-looping on 7500 against vpn1.
+    #
+    # ⛔ FILES ONLY.  Registration writes configuration and never touches
+    # systemd -- tests/test_wizard_rac_register asserts exactly that.  The
+    # unit left enabled behind a pruned config is the switch's to disable
+    # (rac_prune_orphan_units).
+    for _stale in "$(dirname "$RAC_TOML")"/frpc-host-*.toml; do
+        [ -e "$_stale" ] || continue
+        _sname=${_stale##*/frpc-host-}; _sname=${_sname%.toml}
+        case " $_written " in *" $_sname "*) continue ;; esac
+        rm -f "$_stale"
+    done
     # ⛔ ONE source of truth.  pm-align, identity and the switch all name
     # /etc/sigmond/frpc-host.toml; point it at the first gateway's file rather
     # than leaving a second real copy that can drift out of step with it.
@@ -923,6 +942,22 @@ UNIT=sigmond-rac-host.service
 # sessions is not redundant any more -- it just looks it.  rac_units() names
 # every session this station actually has: the per-gateway instances when its
 # configs exist, and the legacy single unit otherwise.
+rac_prune_orphan_units(){
+    # !! A unit whose config file has gone still carries its enable symlink,
+    # so systemd keeps starting an frpc that has nothing to read.  rac_units
+    # lists what SHOULD run; anything enabled beyond that is an orphan left
+    # by a gateway this station no longer uses.
+    local _want _u _n
+    _want=" $(rac_units) "
+    systemctl list-unit-files "sigmond-rac-host@*.service" 2>/dev/null \
+    | awk '/^sigmond-rac-host@/ && $2 ~ /enabled/ {print $1}' \
+    | while read -r _u; do
+        [ -n "$_u" ] || continue
+        case "$_want" in *" $_u "*) continue ;; esac
+        systemctl disable --now "$_u" >/dev/null 2>&1 || true
+    done
+}
+
 rac_units(){
     local _t _n out=""
     for _t in "$(dirname "$TOML")"/frpc-host-*.toml; do
@@ -1280,6 +1315,10 @@ switch_on(){
         # shellcheck disable=SC2086
         systemctl enable --now $SOCKETS >/dev/null 2>&1
         retire_legacy_unit
+        # !! Before enabling what should run, disable what should not: a
+        # gateway dropped from this station's tier leaves its unit enabled,
+        # and an frpc with no config burns a process every restart interval.
+        rac_prune_orphan_units
         for _u in $(rac_units); do systemctl enable --now "$_u" >/dev/null 2>&1; done
         echo "Waiting up to ${WAIT_S}s for the gateway to accept the channels."
         wait_for_channels
