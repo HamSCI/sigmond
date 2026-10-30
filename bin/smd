@@ -11982,7 +11982,9 @@ def cmd_apply(args) -> int:
                 if u.component == 'ka9q-radio' and u.kind == 'service'
             ]
             if radiod_units:
-                if _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity')):
+                if _ensure_radiod_affinity_drop_ins(
+                        radiod_units, topology.get('cpu_affinity'),
+                        allow_shared=getattr(args, 'allow_shared_radiod_cores', False)):
                     something_changed = True
                 # Persist the cpufreq governor on radiod cores via the
                 # smd-cpu-governor.service boot oneshot.  intel_pstate
@@ -12049,6 +12051,8 @@ def cmd_apply(args) -> int:
                     _warn('radiod not started — FFT wisdom not yet ready')
                     _warn('wd-decode, wd-post, wd-upload will have no data until '
                           'wisdom completes and you re-run: smd apply')
+        except RadiodCoreShortfall:
+            return 1
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
@@ -12774,8 +12778,13 @@ def _sdr_findings(*, path=None, sysfs=None, now=None) -> list:
     return [Finding('ka9q-radio', kind, detail)]
 
 
+class RadiodCoreShortfall(Exception):
+    """More radiod instances than eligible cores and sharing not allowed."""
+
+
 def _ensure_radiod_affinity_drop_ins(radiod_units: list,
-                                     topology_cpu_affinity=None) -> bool:
+                                     topology_cpu_affinity=None,
+                                     *, allow_shared: bool = False) -> bool:
     """Write smd-cpu-affinity.conf drop-ins for radiod service instances.
 
     Placement comes from sigmond.cpu.assign_radiod_cores — the same rule the
@@ -12792,7 +12801,7 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     """
     try:
         from sigmond.cpu import (get_physical_cores, parse_cpu_mask,
-                                 assign_radiod_cores)
+                                 assign_radiod_cores, radiod_core_shortfall)
     except ImportError:
         return False
 
@@ -12801,6 +12810,22 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         return False
 
     sorted_units = sorted(radiod_units, key=lambda u: u.instance or u.unit)
+    unit_names = [u.unit for u in sorted_units]
+    shortfall = radiod_core_shortfall(
+        unit_names, topology_cpu_affinity=topology_cpu_affinity, cores=cores)
+    if shortfall > 0 and not allow_shared:
+        placement = assign_radiod_cores(unit_names, topology_cpu_affinity,
+                                        cores=cores)
+        eligible_n = len(unit_names) - shortfall
+        sharing = unit_names[eligible_n - 1:] if eligible_n else unit_names
+        shared_core = placement.get(unit_names[-1], set())
+        msg = (f'{len(unit_names)} radiod instance(s) but only {eligible_n} '
+               f'eligible core(s): {", ".join(sharing)} would share core '
+               f'{_cpu_list_str(shared_core)}. Give the VM more cores '
+               f'(LOCAL_RADIOD_COUNT on the Proxmox host) or pass '
+               f'--allow-shared-radiod-cores.')
+        _err(msg)
+        raise RadiodCoreShortfall(msg)
     placement = assign_radiod_cores([u.unit for u in sorted_units],
                                     topology_cpu_affinity, cores=cores)
     valid_unit_names = {u.unit for u in sorted_units}
@@ -26306,6 +26331,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def _add_apply_args(p):
         p.add_argument('--dry-run', action='store_true')
+        p.add_argument('--allow-shared-radiod-cores', action='store_true',
+                       dest='allow_shared_radiod_cores',
+                       help='let two radiod instances share one CPU core '
+                            'instead of refusing')
 
     p_bringup = sub.add_parser(
         'bringup', help='guided station bring-up (default: the canonical `dasi2` station)')

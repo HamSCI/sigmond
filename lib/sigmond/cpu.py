@@ -306,6 +306,33 @@ def assign_radiod_cores(units: "list[str]",
     return out
 
 
+def radiod_core_shortfall(units: "list[str]",
+                          *,
+                          cores: Optional["list[set]"] = None,
+                          isolated_cpus: Optional[set] = None,
+                          topology_cpu_affinity: Optional[dict] = None) -> int:
+    """How many radiod instances ``assign_radiod_cores`` would have to
+    double up on a core: ``max(0, len(units) - len(eligible))``.
+
+    0 when there are no units or when ``[cpu_affinity].radiod_cpus`` is set
+    (the operator chose the shared mask deliberately).  When ``cores`` is
+    given the host is not read: ``isolated_cpus`` defaults to empty.
+    """
+    if not units:
+        return 0
+    ca = topology_cpu_affinity or {}
+    if parse_cpu_mask(str(ca.get('radiod_cpus', '') or '').strip()):
+        return 0
+    if cores is None:
+        cores = get_physical_cores()
+        if isolated_cpus is None:
+            isolated_cpus = get_isolated_cpus()
+    elif isolated_cpus is None:
+        isolated_cpus = set()
+    eligible = eligible_radiod_cores(cores, isolated_cpus)
+    return max(0, len(units) - len(eligible))
+
+
 def compute_host_cpu_layout(
     pairs: "list[list[int]]",
     *,

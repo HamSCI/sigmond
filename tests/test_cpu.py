@@ -37,6 +37,7 @@ from sigmond.cpu import (
     parse_cmdline_cpu_param,
     parse_cpu_mask,
     parse_ht_pairs,
+    radiod_core_shortfall,
     recommended_isolcpus,
 )
 from unittest import mock
@@ -749,3 +750,45 @@ class ClockPolicyTests(unittest.TestCase):
         from sigmond.cpu import sibling_set
         self.assertEqual(sibling_set(9, self.CORES), {9})
         self.assertEqual(sibling_set(3, self.CORES), {2, 3})
+
+
+class RadiodCoreShortfallTests(unittest.TestCase):
+    def test_shortfall_zero_when_cores_suffice(self):
+        self.assertEqual(radiod_core_shortfall(
+            ["a", "b"], cores=[{0, 1}, {2, 3}, {4, 5}], isolated_cpus=set()), 0)
+
+    def test_shortfall_counts_instances_beyond_eligible_cores(self):
+        # core {0,1} is the boot core, so only {2,3} is eligible
+        self.assertEqual(radiod_core_shortfall(
+            ["a", "b", "c"], cores=[{0, 1}, {2, 3}]), 2)
+
+    def test_shortfall_zero_with_override_mask(self):
+        self.assertEqual(radiod_core_shortfall(
+            ["a", "b", "c"], cores=[{0, 1}, {2, 3}],
+            topology_cpu_affinity={"radiod_cpus": "2-3"}), 0)
+
+    def test_shortfall_zero_for_no_units(self):
+        self.assertEqual(radiod_core_shortfall([], cores=[{0, 1}]), 0)
+
+
+class RadiodDropInRefusalTests(unittest.TestCase):
+    def test_three_units_two_cores_raises_without_writing(self):
+        os.environ.setdefault("SIGMOND_NO_VENV_REEXEC", "1")
+        import importlib.util
+        spec = importlib.util.spec_from_loader("smd_mod_cpu", loader=None)
+        smd = importlib.util.module_from_spec(spec)
+        smd.__dict__["__file__"] = "bin/smd"
+        src = Path(__file__).resolve().parent.parent / "bin" / "smd"
+        exec(compile(src.read_text(), str(src), "exec"), smd.__dict__)
+        units = [mock.Mock(unit=f"radiod@r{i}.service", instance=f"r{i}")
+                 for i in range(3)]
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0, 1}, {2, 3}]), \
+             mock.patch.object(smd, "_run") as run, \
+             mock.patch.object(smd, "_write_affinity_drop_in") as wr:
+            with self.assertRaises(smd.RadiodCoreShortfall) as cm:
+                smd._ensure_radiod_affinity_drop_ins(units)
+        self.assertIn("3 radiod instance(s) but only 1 eligible core(s)", str(cm.exception))
+        self.assertIn("--allow-shared-radiod-cores", str(cm.exception))
+        run.assert_not_called()
+        wr.assert_not_called()
