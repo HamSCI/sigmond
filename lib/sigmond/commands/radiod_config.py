@@ -214,7 +214,19 @@ def _print_detected(sdrs: list) -> None:
              f"{s.fields.get('bus')}/{s.fields.get('device')}  serial={sn}")
 
 
-def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
+def _programmed_serials(sdrs: list) -> set:
+    """Upper-cased, stripped serials of the non-DFU SDRs in ``sdrs``."""
+    return {(s.fields.get("serial") or "").strip().upper()
+            for s in sdrs
+            if not _is_dfu(s) and (s.fields.get("serial") or "").strip()}
+
+
+def _new_programmed_serials(before: set, now: list) -> set:
+    """Serials of programmed (non-DFU) SDRs in ``now`` that are not in ``before``."""
+    return _programmed_serials(now) - before
+
+
+def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> list:
     """Upload firmware to each DFU-mode SDR by briefly running radiod against it.
 
     Per device:
@@ -223,15 +235,17 @@ def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
          device on the bus.
       2. systemctl start radiod@bootstrap-fw-N.service — radiod reads the
          conf, opens the SDR, and uploads firmware.
-      3. Poll discovery until the DFU count drops (the device has
-         re-enumerated as non-DFU) or a timeout expires.
+      3. Poll discovery until exactly one new programmed (non-DFU) serial
+         appears, or a timeout expires.  A DFU count drop is not enough:
+         with two cards it cannot say which one came up.
       4. systemctl stop the service and remove the transient conf.
 
     Multiple DFU devices are bootstrapped sequentially — running two
     transient radiod processes simultaneously would race each other to
     grab whichever DFU SDR enumerates first.
 
-    Returns True if every input device successfully re-enumerated.
+    Returns the serials of the cards that came up programmed, in
+    bootstrap order.  A list shorter than ``dfu_sdrs`` means some failed.
     """
     import subprocess
     import time
@@ -239,7 +253,7 @@ def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
     BOOTSTRAP_TIMEOUT_S = 30
     POLL_INTERVAL_S     = 1
 
-    success = True
+    serials: list = []
     for i, sdr in enumerate(dfu_sdrs, start=1):
         stub_id   = f"bootstrap-fw-{i}"
         stub_path = RADIOD_CONFIG_DIR / f"radiod@{stub_id}.conf"
@@ -266,10 +280,9 @@ def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
             stub_path.write_text(_render(plan))
         except (OSError, PermissionError) as exc:
             err(f"          could not write {stub_path}: {exc}")
-            success = False
             continue
 
-        dfu_before = sum(1 for s in _discover_sdrs() if _is_dfu(s))
+        before = _programmed_serials(_discover_sdrs())
 
         r = subprocess.run(["systemctl", "start", unit],
                            capture_output=True, text=True)
@@ -277,7 +290,6 @@ def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
             err(f"          systemctl start {unit} failed: "
                 f"{(r.stderr or r.stdout).strip() or 'unknown error'}")
             stub_path.unlink(missing_ok=True)
-            success = False
             continue
         info(f"          started {unit}; waiting up to "
              f"{BOOTSTRAP_TIMEOUT_S}s for re-enumeration...")
@@ -286,15 +298,24 @@ def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
         deadline = time.monotonic() + BOOTSTRAP_TIMEOUT_S
         while time.monotonic() < deadline:
             time.sleep(POLL_INTERVAL_S)
-            if sum(1 for s in _discover_sdrs() if _is_dfu(s)) < dfu_before:
+            new = _new_programmed_serials(before, _discover_sdrs())
+            if len(new) == 1:
                 re_enumerated = True
-                ok(f"          firmware loaded — SDR re-enumerated")
+                serials.append(next(iter(new)))
+                ok(f"          firmware loaded — SDR came up as {serials[-1]}")
+                break
+            if len(new) > 1:
+                # Two cards appeared between polls; the order is unknowable.
+                # The init path re-discovers and pins each serial anyway.
+                re_enumerated = True
+                serials.extend(sorted(new))
+                warn(f"          several SDRs came up at once: "
+                     f"{', '.join(sorted(new))}")
                 break
 
         if not re_enumerated:
-            err(f"          timeout: SDR did not exit DFU mode within "
-                f"{BOOTSTRAP_TIMEOUT_S}s")
-            success = False
+            err(f"          timeout: SDR did not come up with a serial "
+                f"within {BOOTSTRAP_TIMEOUT_S}s")
 
         # Stop and clean up regardless of outcome — leftover transient
         # services confuse the next run.
@@ -302,7 +323,7 @@ def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
                        capture_output=True, text=True)
         stub_path.unlink(missing_ok=True)
 
-    return success
+    return serials
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +491,10 @@ def cmd_radiod_init(args) -> int:
         info(f"{len(dfu_sdrs)} SDR(s) in DFU mode — bootstrapping firmware "
              f"upload via a transient radiod@bootstrap-fw-N.service")
         bootstrap_iface = _suggest_iface()
-        _bootstrap_dfu_sdrs(dfu_sdrs, bootstrap_iface)
+        came_up = _bootstrap_dfu_sdrs(dfu_sdrs, bootstrap_iface)
+        if len(came_up) < len(dfu_sdrs):
+            warn(f"only {len(came_up)} of {len(dfu_sdrs)} DFU SDR(s) came "
+                 f"up with a serial")
         # Re-discover even if bootstrap reported errors — some devices
         # may have loaded firmware successfully.
         print()

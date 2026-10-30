@@ -388,3 +388,68 @@ class MultiCardSerialTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("smd admin sdr identify", out.getvalue())
             self.assertEqual(list(conf_dir.glob("radiod@*.conf")), [])
+
+
+class DfuBootstrapSerialTests(unittest.TestCase):
+    """The bootstrap waits for a NEW programmed serial, not a DFU count drop."""
+
+    @staticmethod
+    def _dfu(index=0):
+        return _sdr("RX-888 DFU", "", index=index, vid="04b4", pid="00f3")
+
+    @staticmethod
+    def _prog(serial, index=1):
+        return _sdr("RX-888", serial, index=index, vid="04b4", pid="00f1")
+
+    def _run(self, dfu_sdrs, script):
+        """Run the bootstrap with discovery scripted; the last state repeats."""
+        states = list(script)
+
+        def discover():
+            return states.pop(0) if len(states) > 1 else states[0]
+
+        clock = iter(range(0, 100000, 5))
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR", Path(td)), \
+             mock.patch.object(radiod_config, "_discover_sdrs", discover), \
+             mock.patch("subprocess.run",
+                        return_value=SimpleNamespace(returncode=0, stdout="",
+                                                     stderr="")), \
+             mock.patch("time.sleep"), \
+             mock.patch("time.monotonic", lambda: next(clock)), \
+             mock.patch.object(radiod_config, "err") as err_m:
+            got = radiod_config._bootstrap_dfu_sdrs(dfu_sdrs, "eth0")
+        return got, err_m
+
+    def test_waits_for_a_new_programmed_serial_not_a_count_drop(self):
+        a, x, y = self._dfu(), self._prog("0001"), self._prog("0002", 2)
+        got, _ = self._run([a], [[a, x], [a, x], [x, y]])
+        self.assertEqual(got, ["0002"])
+
+    def test_dfu_count_drop_alone_is_not_success(self):
+        a, x = self._dfu(), self._prog("0001")
+        # The DFU card vanishes but no new serial appears.
+        got, err_m = self._run([a], [[a, x], [x]])
+        self.assertEqual(got, [])
+        self.assertIn("did not come up with a serial", str(err_m.call_args_list))
+
+    def test_two_cards_bootstrap_in_order_and_report_both(self):
+        a, b = self._dfu(0), self._dfu(1)
+        x, y, z = (self._prog("0001"), self._prog("0002", 2),
+                   self._prog("0003", 3))
+        got, _ = self._run([a, b], [[a, b, x], [a, b, x, y], [b, x, y],
+                                    [b, x, y, z], [x, y, z]])
+        self.assertEqual(got, ["0002", "0003"])
+
+    def test_timeout_reports_the_cards_that_did_not_come_up(self):
+        a, x = self._dfu(), self._prog("0001")
+        got, err_m = self._run([a], [[a, x]])
+        self.assertEqual(got, [])
+        self.assertIn("did not come up with a serial", str(err_m.call_args_list))
+
+    def test_new_programmed_serials_is_case_and_space_insensitive(self):
+        now = [self._prog(" abc1 "), self._dfu(), self._prog("0001", 2)]
+        self.assertEqual(radiod_config._new_programmed_serials({"0001"}, now),
+                         {"ABC1"})
+        self.assertEqual(radiod_config._new_programmed_serials({"ABC1"}, now),
+                         {"0001"})
