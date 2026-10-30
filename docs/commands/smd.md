@@ -199,6 +199,43 @@ smd admin viewers
 
 Each row gives the page name, its port, the state of its service and a description. Open the port on the station's address to see the page. `active` is good. Any other state means the page does not answer.
 
+## smd admin sdr list
+
+Use this on a host with more than one RX888 to see which card each radiod opens, and whether any pairing is wrong or missing.
+
+```
+smd admin sdr list
+```
+
+The example below is what a two-card host shows. It is illustrative, not captured on B4, which has one RX888.
+
+```
+━━━ RX888 cards on the USB bus ━━━
+SERIAL    USB  SPEED  OPENED BY
+SN000123  1-2  5000   rx888-a
+SN000456  1-4  5000   rx888-b
+
+━━━ radiod instances ━━━
+INSTANCE  STATE   SERIAL    ON BUS  ANTENNA
+rx888-a   active  SN000123  yes     North dipole
+rx888-b   active  SN000456  yes     South dipole
+
+Every local radiod names its own RX888 and every RX888 is on the bus.
+```
+
+The first table lists each RX888 on the USB bus, its speed, and the radiod that opens it. The second lists each radiod, its state, the serial its conf names, whether that card is on the bus, and the antenna description from the conf. When all is well the last line is the all-clear sentence above and the command exits 0. Otherwise it prints `Needs attention:` and one line per problem, and exits 1. `--json` prints the same facts as JSON, with the same exit code.
+
+The problem lines:
+
+- `radiod@<id> has no 'serial =' line, so it opens whichever RX888 is free: a reboot can swap antennas`. The conf is not pinned to a card. Run `smd admin sdr identify`.
+- `radiod@<id> wants RX888 <serial>, which is not on the USB bus`. The card is unplugged, dead or on a bad cable. Check it, or re-run identify if the card was replaced.
+- `RX888 <serial> is named by more than one radiod: <ids>`. Two confs point at one card. Run `smd admin sdr identify` to pin each radiod to its own card.
+- `RX888 <serial> on <usb path> is not named by any radiod conf`. A card is present that no radiod opens. Run identify, or remove the card if it is not meant to be used.
+- `RX888 <serial> on <usb path> is at only <n> Mb/s, so radiod will not open it`. The card negotiated a slow USB link. Use a USB 3 port and a good cable.
+- `<n> RX888(s) still in the FX3 bootloader (no firmware yet, so no serial)`. The card has no firmware loaded yet, so it has no serial to pin.
+
+A station with one RX888 is left unpinned on purpose, so it shows no "no 'serial =' line" problem. If you do see problems on a two-card host, the identify walk is described in [Two RX888s, and the antennas may be swapped](../operator/troubleshooting.md#two-rx888s-and-the-antennas-may-be-swapped).
+
 ## smd admin cli-reference show
 
 Use this to see which programs have a generated command reference, how many commands each has, and whether the reference is current.

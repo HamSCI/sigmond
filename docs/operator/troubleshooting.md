@@ -6,6 +6,8 @@
 > **Amended 2026-09-02** (not re-walked): the SDR sentinel was retired, so a
 > re-seated RX888 is now brought back with `smd status` + `smd adopt`, not by
 > waiting two minutes.
+> **Amended 2026-10-30** (not re-walked): added the symptom "Two RX888s, and
+> the antennas may be swapped", the `smd admin sdr list` / `identify` walk.
 > **Canonical for:** symptom-first troubleshooting of an appliance station
 
 Start with the symptom you can actually see, not with a theory. Every section
@@ -1289,6 +1291,84 @@ Give the timing products about ten minutes afterwards before you judge them; see
 
 It fails again after one restart. One restart is your whole budget here; a
 second one just hides the evidence.
+
+---
+
+### Two RX888s, and the antennas may be swapped
+
+This applies only to a host with two or more RX888s, one radiod each. A host
+with one RX888 is left unpinned on purpose and never needs this.
+
+**Likely causes, most common first**
+
+1. **A radiod conf does not name its card.** With no `serial =` line a radiod
+   opens whichever RX888 is free, so after a reboot or a replug the two
+   antennas can swap.
+2. **Two confs name the same card, or a conf names a card that is gone.**
+3. **A card is at a slow USB speed or has no firmware yet**, so radiod cannot
+   open it.
+
+**What to check**
+
+`[VM]`:
+
+```bash
+smd admin sdr list
+```
+
+*Good:* the last line reads `Every local radiod names its own RX888 and every
+RX888 is on the bus.` and the exit code is 0. Otherwise it prints
+`Needs attention:` with one line per problem; each line is explained in
+[smd admin sdr list](../commands/smd.md#smd-admin-sdr-list).
+
+**What to do**
+
+Pin each radiod to its own card with the identify walk. Make sure every RX888
+is plugged in first, and run it as root `[VM]`:
+
+```bash
+sudo smd admin sdr identify
+```
+
+It refuses with one radiod, and refuses if there are fewer RX888s on the bus
+than radiod instances. While it runs it stops the radiod units and the radiod
+watchdog timer; it starts them again when it ends, whatever the outcome.
+
+For each radiod in turn:
+
+1. It prints `Unplug the RX888 on: <antenna description>  (radiod@<id>)`.
+   Unplug the card that serves that antenna.
+2. It sees one serial vanish and prints `RX888 <serial> went away.  Plug it
+   back in.` Plug it back in.
+3. It moves to the next radiod.
+
+If two serials vanish at once, it prints `More than one card dropped at once:
+<serials>` and `Plug them all back in; I will ask again.` Plug them in and
+unplug just the one it asked for. If the card you pulled was already matched
+to another radiod, it says so and asks again; pull a different one.
+
+When every radiod has a card, it prints a mapping table, then writes
+`serial = "..."` into the `[rx888]` section of each conf and `sdr_serial` into
+`coordination.toml`. Run `smd admin sdr list` again to confirm.
+
+To see the mapping without changing anything, add `--dry-run`. It still walks
+and still stops and restarts the units, but writes nothing.
+
+Each step waits up to 180 seconds (the environment variable
+`SIGMOND_SDR_IDENTIFY_WAIT_SECS` changes that). Exit codes:
+
+| Exit | Meaning |
+|---|---|
+| 0 | Done, pins written (or shown, with `--dry-run`). |
+| 1 | Refused before the walk: not root, only one radiod, or fewer cards than radiods. |
+| 3 | The walk timed out with no card change. Nothing was written. Run it again. |
+| 4 | The walk finished but the pins could not be computed or written. Read the error it printed, fix the file it names, run it again. |
+
+**When to stop and ask**
+
+Exit 4 again after you fixed what it named; a card that never shows a serial
+(it stays in the bootloader); or `smd admin sdr list` still shows problems
+after a clean walk.
 
 ---
 
