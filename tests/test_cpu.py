@@ -760,15 +760,35 @@ class RadiodCoreShortfallTests(unittest.TestCase):
     def test_shortfall_counts_instances_beyond_eligible_cores(self):
         # core {0,1} is the boot core, so only {2,3} is eligible
         self.assertEqual(radiod_core_shortfall(
-            ["a", "b", "c"], cores=[{0, 1}, {2, 3}]), 2)
+            ["a", "b", "c"], cores=[{0, 1}, {2, 3}], isolated_cpus=set()), 2)
 
     def test_shortfall_zero_with_override_mask(self):
         self.assertEqual(radiod_core_shortfall(
-            ["a", "b", "c"], cores=[{0, 1}, {2, 3}],
+            ["a", "b", "c"], cores=[{0, 1}, {2, 3}], isolated_cpus=set(),
             topology_cpu_affinity={"radiod_cpus": "2-3"}), 0)
 
     def test_shortfall_zero_for_no_units(self):
-        self.assertEqual(radiod_core_shortfall([], cores=[{0, 1}]), 0)
+        self.assertEqual(radiod_core_shortfall([], cores=[{0, 1}],
+                                               isolated_cpus=set()), 0)
+
+    CORES4 = [{0, 1}, {2, 3}, {4, 5}, {6, 7}]
+
+    def test_shortfall_counts_isolcpus(self):
+        # The reviewer's I2 reproduction: isolcpus admits only {2,3}, so two
+        # units would both land there.
+        self.assertEqual(radiod_core_shortfall(
+            ["a", "b"], cores=self.CORES4, isolated_cpus={2, 3}), 1)
+        from sigmond.cpu import assign_radiod_cores
+        placed = assign_radiod_cores(["a", "b"], cores=self.CORES4,
+                                     isolated_cpus={2, 3})
+        self.assertEqual(placed, {"a": {2, 3}, "b": {2, 3}})
+
+    def test_shortfall_reads_host_isolcpus_even_when_cores_given(self):
+        with mock.patch("sigmond.cpu.get_isolated_cpus",
+                        return_value={2, 3}) as iso:
+            self.assertEqual(radiod_core_shortfall(
+                ["a", "b"], cores=self.CORES4), 1)
+        iso.assert_called_once()
 
 
 class RadiodDropInRefusalTests(unittest.TestCase):
@@ -791,6 +811,7 @@ class RadiodDropInRefusalTests(unittest.TestCase):
         smd = self._load_smd()
         with mock.patch("sigmond.cpu.get_physical_cores",
                         return_value=[{0, 1}, {2, 3}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus", return_value=set()), \
              mock.patch.object(smd, "_err"), \
              mock.patch.object(smd, "_run") as run, \
              mock.patch.object(smd, "_write_affinity_drop_in") as wr:
@@ -798,13 +819,64 @@ class RadiodDropInRefusalTests(unittest.TestCase):
                 smd._ensure_radiod_affinity_drop_ins(self._units())
         self.assertIn("3 radiod instance(s) but only 1 eligible core(s)", str(cm.exception))
         self.assertIn("--allow-shared-radiod-cores", str(cm.exception))
+        self.assertIn("[cpu_affinity] allow_shared_radiod_cores = true in "
+                      "/etc/sigmond/topology.toml", str(cm.exception))
         run.assert_not_called()
         wr.assert_not_called()
+
+    def test_isolcpus_shortfall_raises_and_host_isolated_read_once(self):
+        smd = self._load_smd()
+        units = self._units()[:2]
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0, 1}, {2, 3}, {4, 5}, {6, 7}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus",
+                        return_value={2, 3}) as iso, \
+             mock.patch.object(smd, "_err"), \
+             mock.patch.object(smd, "_run"), \
+             mock.patch.object(smd, "_write_affinity_drop_in") as wr:
+            with self.assertRaises(smd.RadiodCoreShortfall):
+                smd._ensure_radiod_affinity_drop_ins(units)
+        self.assertEqual(iso.call_count, 1)
+        wr.assert_not_called()
+
+    def test_topology_allow_shared_proceeds_to_write(self):
+        smd = self._load_smd()
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0, 1}, {2, 3}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus", return_value=set()), \
+             mock.patch.object(smd, "_err"), \
+             mock.patch.object(smd, "_ok"), \
+             mock.patch.object(smd, "_run"), \
+             mock.patch.object(smd, "_write_affinity_drop_in",
+                               return_value="unchanged") as wr:
+            smd._ensure_radiod_affinity_drop_ins(
+                self._units(), {"allow_shared_radiod_cores": True})
+        self.assertEqual(wr.call_count, 3)
+
+    def test_topology_toml_allow_shared_reaches_the_writer(self):
+        import tempfile
+        smd = self._load_smd()
+        with tempfile.TemporaryDirectory() as td:
+            topo = Path(td) / "topology.toml"
+            topo.write_text("[cpu_affinity]\nallow_shared_radiod_cores = true\n")
+            ca = smd._load_topology(topo)["cpu_affinity"]
+        self.assertIs(ca.get("allow_shared_radiod_cores"), True)
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0, 1}, {2, 3}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus", return_value=set()), \
+             mock.patch.object(smd, "_err"), \
+             mock.patch.object(smd, "_ok"), \
+             mock.patch.object(smd, "_run"), \
+             mock.patch.object(smd, "_write_affinity_drop_in",
+                               return_value="unchanged") as wr:
+            smd._ensure_radiod_affinity_drop_ins(self._units(), ca)
+        self.assertEqual(wr.call_count, 3)
 
     def test_allow_shared_proceeds_to_write(self):
         smd = self._load_smd()
         with mock.patch("sigmond.cpu.get_physical_cores",
                         return_value=[{0, 1}, {2, 3}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus", return_value=set()), \
              mock.patch.object(smd, "_err"), \
              mock.patch.object(smd, "_ok"), \
              mock.patch.object(smd, "_run"), \

@@ -12825,34 +12825,46 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     Returns True if any drop-in was written, removed, or any unit restarted.
     """
     try:
-        from sigmond.cpu import (get_physical_cores, parse_cpu_mask,
-                                 assign_radiod_cores, radiod_core_shortfall)
+        from sigmond.cpu import (get_physical_cores, get_isolated_cpus,
+                                 parse_cpu_mask, assign_radiod_cores,
+                                 radiod_core_shortfall)
     except ImportError:
         return False
 
     cores = get_physical_cores()
     if not cores:
         return False
+    # Read once and hand to both calls, so the shortfall check and the
+    # placement see the same isolcpus set.
+    isolated = get_isolated_cpus()
 
     sorted_units = sorted(radiod_units, key=lambda u: u.instance or u.unit)
     unit_names = [u.unit for u in sorted_units]
     shortfall = radiod_core_shortfall(
-        unit_names, topology_cpu_affinity=topology_cpu_affinity, cores=cores)
+        unit_names, topology_cpu_affinity=topology_cpu_affinity, cores=cores,
+        isolated_cpus=isolated)
+    if (topology_cpu_affinity or {}).get('allow_shared_radiod_cores'):
+        allow_shared = True
     if shortfall > 0 and not allow_shared:
         placement = assign_radiod_cores(unit_names, topology_cpu_affinity,
-                                        cores=cores)
+                                        cores=cores, isolated_cpus=isolated)
         eligible_n = len(unit_names) - shortfall
         sharing = unit_names[eligible_n - 1:] if eligible_n else unit_names
         shared_core = placement.get(unit_names[-1], set())
         msg = (f'{len(unit_names)} radiod instance(s) but only {eligible_n} '
                f'eligible core(s): {", ".join(sharing)} would share core '
                f'{_cpu_list_str(shared_core)}. Give the VM more cores '
-               f'(LOCAL_RADIOD_COUNT on the Proxmox host) or pass '
-               f'--allow-shared-radiod-cores.')
+               f'(LOCAL_RADIOD_COUNT on the Proxmox host), or set '
+               f'[cpu_affinity] radiod_cpus in /etc/sigmond/topology.toml '
+               f'to choose the shared mask, or pass '
+               f'--allow-shared-radiod-cores, or set [cpu_affinity] '
+               f'allow_shared_radiod_cores = true in '
+               f'/etc/sigmond/topology.toml.')
         _err(msg)
         raise RadiodCoreShortfall(msg)
     placement = assign_radiod_cores([u.unit for u in sorted_units],
-                                    topology_cpu_affinity, cores=cores)
+                                    topology_cpu_affinity, cores=cores,
+                                    isolated_cpus=isolated)
     valid_unit_names = {u.unit for u in sorted_units}
     wrote_any = False
     units_to_restart: list[str] = []

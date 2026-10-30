@@ -315,8 +315,9 @@ def radiod_core_shortfall(units: "list[str]",
     double up on a core: ``max(0, len(units) - len(eligible))``.
 
     0 when there are no units or when ``[cpu_affinity].radiod_cpus`` is set
-    (the operator chose the shared mask deliberately).  When ``cores`` is
-    given the host is not read: ``isolated_cpus`` defaults to empty.
+    (the operator chose the shared mask deliberately).  Defaults mirror
+    ``assign_radiod_cores``: ``cores`` and ``isolated_cpus`` are each read
+    from the host when None, so the count matches the placement.
     """
     if not units:
         return 0
@@ -325,10 +326,8 @@ def radiod_core_shortfall(units: "list[str]",
         return 0
     if cores is None:
         cores = get_physical_cores()
-        if isolated_cpus is None:
-            isolated_cpus = get_isolated_cpus()
-    elif isolated_cpus is None:
-        isolated_cpus = set()
+    if isolated_cpus is None:
+        isolated_cpus = get_isolated_cpus()
     eligible = eligible_radiod_cores(cores, isolated_cpus)
     return max(0, len(units) - len(eligible))
 

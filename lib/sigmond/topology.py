@@ -152,6 +152,11 @@ def load_topology(path: Path = TOPOLOGY_PATH,
         cpu_affinity['other_cpus'] = str(ca['other_cpus'])
     if 'radiod_governor' in ca:
         cpu_affinity['radiod_governor'] = str(ca['radiod_governor'])
+    # Opt-in only: lets unattended applies place more radiods than there are
+    # eligible cores (bin/smd _ensure_radiod_affinity_drop_ins).
+    if 'allow_shared_radiod_cores' in ca:
+        cpu_affinity['allow_shared_radiod_cores'] = \
+            ca['allow_shared_radiod_cores'] is True
 
     timing = dict(_DEFAULT_TIMING)
     tm = raw.get('timing', {})
