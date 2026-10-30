@@ -1336,6 +1336,22 @@ def _select_card(serial: Optional[str]) -> Tuple[Optional[Located], Optional[str
     return cards[0], None
 
 
+def unit_for_serial(serial: Optional[str]) -> Optional[str]:
+    """`radiod@<id>.service` for the radiod whose conf (or coordination.toml)
+    names this card's serial; None when no map names it or it cannot be read.
+    On a multi-card host this outranks [radiod].unit: the designated unit is
+    one radiod, and the card being held may belong to another."""
+    if not serial:
+        return None
+    try:
+        from sigmond import sdr_map
+        inst = sdr_map.serial_to_instance(sdr_map.instance_serials()).get(
+            str(serial).strip().upper())
+    except Exception:
+        return None
+    return f"radiod@{inst}.service" if inst else None
+
+
 def manual_off(serial: Optional[str], cfg: dict) -> int:
     """Take one RX-888's port down and LEAVE it down, under a hold."""
     card, err = _select_card(serial)
@@ -1378,7 +1394,8 @@ def manual_off(serial: Optional[str], cfg: dict) -> int:
             + " — a power cut would drop it too")
         return 1
 
-    radiod_unit = cfg.get("unit") or detect_radiod_unit()
+    radiod_unit = (unit_for_serial(card.serial) or cfg.get("unit")
+                   or detect_radiod_unit())
     consumers, missing = expand_consumers_checked(cfg.get("consumers", []),
                                                   installed_units())
     if missing:
@@ -1563,7 +1580,8 @@ def manual_on(serial: Optional[str], cfg: dict,
     _log(f"card back: {card.devpath} 04b4:{card.product} at "
          f"{card.speed} Mb/s ({why})")
 
-    radiod_unit = hold.get("radiod_unit") or cfg.get("unit") or detect_radiod_unit()
+    radiod_unit = (hold.get("radiod_unit") or unit_for_serial(hold.get("serial"))
+                   or cfg.get("unit") or detect_radiod_unit())
     consumers = hold.get("consumers") or []
     restored = True
     if radiod_unit:

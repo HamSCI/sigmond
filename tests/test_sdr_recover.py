@@ -1620,3 +1620,71 @@ class DualityProbeTests(PortResetHarness):
         self.assertEqual(self.state()["power"], "usb2-only")
         self.assertEqual(self.cycles, [])
         self.assertEqual(self.kinds(), ["needs-replug"])
+
+
+class ManualHoldNamesTheCardsOwnRadiodTests(unittest.TestCase):
+    """I6: on a two-card host with [radiod].unit set, --off --serial <other>
+    must stop and record the radiod that opens THAT card, not the designated
+    one, or the watchdog's "unit wins over serial" rule protects the wrong
+    radiod."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.hold = Path(self.tmp.name) / "sdr-hold.json"
+        mock.patch.object(sdr, "HOLD_PATH", self.hold).start()
+        self.stop = mock.patch.object(sdr, "_stop_station").start()
+        mock.patch.object(sdr, "_uhubctl_set", return_value=True).start()
+        mock.patch.object(sdr, "detect_radiod_unit", return_value=None).start()
+        mock.patch.object(sdr, "installed_units", return_value=[]).start()
+        mock.patch.object(sdr, "time").start().time.return_value = 1000.0
+        from sigmond import sdr_map
+        mock.patch.object(sdr_map, "instance_serials",
+                          return_value={"north": "RX0001",
+                                        "south": "RX0002"}).start()
+        self.addCleanup(mock.patch.stopall)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _off(self, serial, cfg):
+        card = sdr.Located("4-1.4", "4-1", "4", serial, "5000",
+                           "3-1", "4", "00f1", "7")
+        other = sdr.Located("4-1.3", "4-1", "3", "RX0001", "5000",
+                            "3-1", "3", "00f1", "6")
+        with mock.patch.object(sdr, "all_rx888", return_value=[other, card]), \
+             mock.patch.object(sdr, "hub_switchable",
+                               return_value=(True, [("4-1", "4", True)])), \
+             mock.patch.object(sdr, "port_halves",
+                               return_value={"ss": True, "usb2": True}), \
+             mock.patch.object(sdr, "partition_targets",
+                               return_value=([("4-1", "4", True)], [])), \
+             mock.patch.object(sdr, "port_power",
+                               return_value=("unverified", "unverified")), \
+             mock.patch.object(sdr, "locate_rx888", return_value=None):
+            return sdr.manual_off(serial, cfg)
+
+    def test_off_records_the_radiod_mapped_to_the_serial(self):
+        rc = self._off("RX0002", {"unit": "radiod@north.service"})
+        self.assertEqual(rc, 0)
+        hold = json.loads(self.hold.read_text())["RX0002"]
+        self.assertEqual(hold["radiod_unit"], "radiod@south.service")
+        self.assertEqual(self.stop.call_args.args[0], "radiod@south.service")
+
+    def test_off_falls_back_to_cfg_unit_for_an_unmapped_serial(self):
+        rc = self._off("RX0009", {"unit": "radiod@north.service"})
+        self.assertEqual(rc, 0)
+        hold = json.loads(self.hold.read_text())["RX0009"]
+        self.assertEqual(hold["radiod_unit"], "radiod@north.service")
+
+    def test_on_without_a_recorded_unit_uses_the_serial_map(self):
+        self.hold.write_text(json.dumps({"RX0002": {
+            "serial": "RX0002", "devpath": "4-1.4",
+            "locations": [["4-1", "4", True]], "consumers": [],
+            "since": 1000.0}}))
+        card = sdr.Located("4-1.4", "4-1", "4", "RX0002", "5000",
+                           "3-1", "4", "00f1", "7")
+        with mock.patch.object(sdr, "wait_for_running_card",
+                               return_value=(card, "ready")), \
+             mock.patch.object(sdr, "restart_station",
+                               return_value=True) as restart:
+            rc = sdr.manual_on("RX0002", {"unit": "radiod@north.service"})
+        self.assertEqual(rc, 0)
+        restart.assert_called_once_with("radiod@south.service", [])
