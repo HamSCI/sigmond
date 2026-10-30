@@ -188,6 +188,20 @@ HT_PAIRS="${HT_PAIRS% }"
 # CPU vendor (for grub iommu flag).
 CPU_VENDOR="$(awk -F: '/^vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')"
 
+# ─── RX888 count ──────────────────────────────────────────────────────────────
+# One radiod per RX888 on this host's bus: 04b4:00f1 is a card with firmware
+# loaded, 04b4:00f3 one that has not been loaded yet.  A missing lsusb or no
+# cards seen counts as 0, but the answer is never below 1 (one-card default).
+rx888_count() {
+    local n=0 c id
+    for id in 04b4:00f1 04b4:00f3; do
+        c=$(lsusb -d "$id" 2>/dev/null | grep -c . || true)
+        n=$((n + ${c:-0}))
+    done
+    (( n >= 1 )) || n=1
+    printf '%s' "$n"
+}
+
 # ─── emit ─────────────────────────────────────────────────────────────────────
 emit DISCOVERY_RESULT "ok"
 emit VMID "$VMID"
@@ -199,3 +213,4 @@ emit HOST_CPU_COUNT "$HOST_CPU_COUNT"
 emit HT_PATTERN "$HT_PATTERN"
 emit HT_PAIRS "$HT_PAIRS"
 emit CPU_VENDOR "$CPU_VENDOR"
+emit RX888_COUNT "$(rx888_count)"

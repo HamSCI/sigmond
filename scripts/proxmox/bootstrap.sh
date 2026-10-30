@@ -201,7 +201,13 @@ phase_pre_host() {
     # Defaults to 1; set LOCAL_RADIOD_COUNT=N for a host with multiple local
     # RX888 triplets. Remote receivers' radiods run on other hosts and are not
     # counted here.
-    local radiod_count="${LOCAL_RADIOD_COUNT:-1}"
+    local radiod_count="${LOCAL_RADIOD_COUNT:-}"
+    if [[ -z "$radiod_count" ]]; then
+        radiod_count="${KV[RX888_COUNT]:-1}"
+        info "Found ${radiod_count} RX888(s); the VM will be laid out for ${radiod_count} radiod(s)"
+    else
+        info "Using ${radiod_count} radiod(s), the operator's value (host bus shows ${KV[RX888_COUNT]:-1} RX888(s))"
+    fi
 
     ok "VMID=${vmid} USB=${usb_vid_did} (addrs:${usb_addrs}) host_cpus=${host_cpu_count} HT=${ht_pattern} pairs='${ht_pairs}' local_radiods=${radiod_count} CPU=${cpu_vendor}"
 

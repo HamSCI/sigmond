@@ -31,7 +31,9 @@ err()  { echo -e "${RED}[ERR ]${NC} $*" >&2; }
 die()  { err "$*"; exit 1; }
 ok()   { echo -e "${GREEN}  ✓${NC} $*"; }
 
-RADIOD_COUNT="${LOCAL_RADIOD_COUNT:-1}"
+# Empty means "not given": the RX888 count found on the host bus fills it in
+# after discovery.
+RADIOD_COUNT="${LOCAL_RADIOD_COUNT:-}"
 DO_RAC=1
 DO_TUNING=1
 while [[ $# -gt 0 ]]; do
@@ -143,6 +145,13 @@ if [[ "$DO_TUNING" == 1 ]]; then
     [[ "${KV[DISCOVERY_RESULT]:-}" == "ok" ]] || die "host discovery failed"
     [[ "${KV[IOMMU_OK]:-0}" == "1" ]] || warn \
         "IOMMU groups not isolated yet (normal before the first reboot with IOMMU flags)"
+
+    if [[ -z "$RADIOD_COUNT" ]]; then
+        RADIOD_COUNT="${KV[RX888_COUNT]:-1}"
+        info "Found ${RADIOD_COUNT} RX888(s); the VM will be laid out for ${RADIOD_COUNT} radiod(s)"
+    else
+        info "Using ${RADIOD_COUNT} radiod(s), the operator's value (host bus shows ${KV[RX888_COUNT]:-1} RX888(s))"
+    fi
 
     info "USB=${KV[USB_VID_DID]} cpus=${KV[HOST_CPU_COUNT]} HT=${KV[HT_PATTERN]} pairs='${KV[HT_PAIRS]}' local_radiods=${RADIOD_COUNT}"
 
