@@ -60,7 +60,8 @@ def _table(headers, rows) -> list[str]:
 def cmd_sdr_list(args) -> int:
     cards = sdr_map.present_cards(SYSFS_ROOT)
     instances = sdr_map.instance_serials(CONFDIR, load_coord())
-    rep = sdr_map.report(cards, instances)
+    pinned = sdr_map.conf_pinned_serials(CONFDIR)
+    rep = sdr_map.report(cards, instances, pinned)
     opened = sdr_map.serial_to_instance(instances)
     rc = 1 if rep.problems else 0
 
@@ -70,6 +71,7 @@ def cmd_sdr_list(args) -> int:
                            opened_by=opened.get(c.serial, ''))
                       for c in cards],
             'instances': instances,
+            'conf_pinned': pinned,
             'problems': rep.problems,
         }, indent=2))
         return rc
@@ -83,7 +85,12 @@ def cmd_sdr_list(args) -> int:
         print(line)
     print()
     heading('radiod instances')
-    rows = [(inst, unit_state(inst), s or '-',
+
+    def _label(inst, s):
+        if s and not pinned.get(inst):
+            return f'{s} (coordination only, conf unpinned)'
+        return s or '-'
+    rows = [(inst, unit_state(inst), _label(inst, s),
              ('yes' if s in on_bus else 'no') if s else '-', _antenna(inst))
             for inst, s in sorted(instances.items())]
     for line in (_table(['INSTANCE', 'STATE', 'SERIAL', 'ON BUS', 'ANTENNA'], rows)
@@ -106,21 +113,36 @@ def _systemctl(*args) -> int:
         return 1
 
 
+def _is_active(unit: str) -> bool:
+    """True when `systemctl is-active <unit>` says active."""
+    try:
+        r = subprocess.run(['systemctl', 'is-active', unit],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.stdout.strip() == 'active'
+
+
 def present_serials() -> set[str]:
     return {c.serial for c in sdr_map.present_cards(SYSFS_ROOT)
             if c.programmed and c.serial}
 
 
-def _wait_secs() -> float:
+def _wait_secs(args=None) -> float:
+    """--wait-secs, else SIGMOND_SDR_IDENTIFY_WAIT_SECS, else 180."""
+    flag = getattr(args, 'wait_secs', None)
+    if flag is not None:
+        return float(flag)
     try:
         return float(os.environ.get('SIGMOND_SDR_IDENTIFY_WAIT_SECS', WAIT_SECS))
     except ValueError:
         return WAIT_SECS
 
 
-def _walk(instances: list[str]) -> dict[str, str] | None:
+def _walk(instances: list[str], wait: float | None = None) -> dict[str, str] | None:
     """Unplug each card in turn; {instance: serial}, or None if abandoned."""
-    wait = _wait_secs()
+    if wait is None:
+        wait = _wait_secs()
     found: dict[str, str] = {}
     for inst in instances:
         desc = _antenna(inst) or inst
@@ -208,6 +230,10 @@ def cmd_sdr_identify(args) -> int:
         err('identify writes /etc/radio and restarts radiod; run it as root')
         return 1
     instances = sorted(sdr_map.instance_serials(CONFDIR, load_coord()))
+    if not instances:
+        err(f'no radiod conf with an [rx888] section in {CONFDIR}; '
+            f'run `smd config init radiod` first')
+        return 1
     if len(instances) < 2:
         err('one radiod needs no identify; its conf is unbound by design')
         return 1
@@ -218,10 +244,13 @@ def cmd_sdr_identify(args) -> int:
 
     units = [f'radiod@{i}.service' for i in instances]
     timer = 'sigmond-radiod-watchdog.timer'
-    for u in (timer, *units):
+    # Restart afterwards only what was running before; a watchdog run in
+    # progress is stopped too so it cannot restart a radiod mid-walk.
+    was_active = [u for u in (*units, timer) if _is_active(u)]
+    for u in ('sigmond-radiod-watchdog.service', timer, *units):
         _systemctl('stop', u)
     try:
-        found = _walk(instances)
+        found = _walk(instances, _wait_secs(args))
         if found is None:
             print('Walk abandoned: no card change seen in time; nothing written.')
             return 3
@@ -229,11 +258,15 @@ def cmd_sdr_identify(args) -> int:
         rows = [(i, _antenna(i) or '-', found[i]) for i in instances]
         for line in _table(['INSTANCE', 'ANTENNA', 'SERIAL'], rows):
             print(line)
+        # A replug can bring a card back at a slower USB speed.
+        for p in sdr_map.report(sdr_map.present_cards(SYSFS_ROOT),
+                                found).problems:
+            warn(p)
         if dry:
             print('(dry run: nothing written)')
         elif not _write_pins(found):
             return 4
         return 0
     finally:
-        for u in (*units, timer):
+        for u in was_active:
             _systemctl('start', u)

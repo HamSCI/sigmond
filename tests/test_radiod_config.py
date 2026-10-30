@@ -381,13 +381,32 @@ class MultiCardSerialTests(unittest.TestCase):
                                    side_effect=FileNotFoundError), \
                  mock.patch.object(radiod_config, "_suggest_iface",
                                    return_value="eth0"), \
+                 mock.patch.object(radiod_config, "SYSFS_USB_ROOT",
+                                   Path(td) / "no-sysfs"), \
                  contextlib.redirect_stdout(out), \
                  contextlib.redirect_stderr(out):
                 rc = radiod_config.cmd_radiod_init(
                     _ns(non_interactive=True, force=False))
             self.assertEqual(rc, 1)
-            self.assertIn("smd admin sdr identify", out.getvalue())
+            self.assertIn("smd admin sdr list", out.getvalue())
+            self.assertNotIn("once that exists", out.getvalue())
             self.assertEqual(list(conf_dir.glob("radiod@*.conf")), [])
+
+    def test_sysfs_serial_fills_in_when_lsusb_gave_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            sysfs = Path(td) / "sys"
+            dev = sysfs / "1-2"
+            dev.mkdir(parents=True)
+            (dev / "busnum").write_text("1\n")
+            (dev / "devnum").write_text("5\n")
+            (dev / "serial").write_text("bbbb2222\n")
+            with mock.patch.object(radiod_config, "SYSFS_USB_ROOT", sysfs):
+                plan = radiod_config._collect_per_sdr_values(
+                    self._sdr("", bus="001", device="005"),
+                    _ns(non_interactive=True), "host", "eth0",
+                    known_ids=set(), sole=False)
+        self.assertEqual(plan["serial"], "BBBB2222")
+        self.assertEqual(plan["serial_line"], 'serial      = "BBBB2222"')
 
 
 class DfuBootstrapSerialTests(unittest.TestCase):
@@ -453,3 +472,83 @@ class DfuBootstrapSerialTests(unittest.TestCase):
                          {"ABC1"})
         self.assertEqual(radiod_config._new_programmed_serials({"ABC1"}, now),
                          {"0001"})
+
+
+class SecondCardArrivesTests(unittest.TestCase):
+    """C1: a host that grows from one RX888 to two pins the first conf too."""
+
+    OLD_CONF = ('[global]\nstatus = host-status.local\n\n[rx888]\n'
+                'device = "rx888"\n'
+                '# serial  = "AAA"   # sole SDR: unbound by design; uncomment to pin\n')
+
+    def _run(self, coord_serial, sdrs, extra_coord=""):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            radio_dir = Path(d) / "radio"
+            radio_dir.mkdir()
+            old = radio_dir / "radiod@host.conf"
+            old.write_text(self.OLD_CONF)
+            coord_path = Path(d) / "coordination.toml"
+            serial_line = (f'sdr_serial  = "{coord_serial}"\n'
+                           if coord_serial else "")
+            coord_path.write_text(
+                '[radiod."host"]\nhost        = "localhost"\n'
+                'status_dns  = "host-status.local"\n'
+                f'radio_conf  = "{old}"\n' + serial_line + extra_coord)
+            with mock.patch.object(radiod_config, "_discover_sdrs",
+                                   return_value=sdrs), \
+                 mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR",
+                                   radio_dir), \
+                 mock.patch.object(radiod_config, "COORDINATION_PATH",
+                                   coord_path), \
+                 mock.patch.object(radiod_config, "COORDINATION_ENV",
+                                   Path(d) / "coordination.env"), \
+                 mock.patch.object(radiod_config, "_suggest_iface",
+                                   return_value="eth0"), \
+                 mock.patch.object(radiod_config,
+                                   "_apply_fragments_for_new_instances"), \
+                 mock.patch("socket.gethostname", return_value="host"), \
+                 contextlib.redirect_stdout(out), \
+                 contextlib.redirect_stderr(out):
+                rc = radiod_config.cmd_radiod_init(_ns())
+            confs = {p.name: p.read_text() for p in radio_dir.glob("radiod@*.conf")}
+        return rc, out.getvalue(), confs
+
+    def test_second_card_pins_the_formerly_sole_conf(self):
+        rc, out, confs = self._run("AAA", [
+            _sdr("RX-888", serial="AAA", index=0, device="005"),
+            _sdr("RX-888", serial="BBB", index=1, device="006")])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('serial      = "AAA"', confs["radiod@host.conf"])
+        self.assertIn("radiod@host", out)
+        new = [t for n, t in confs.items() if n != "radiod@host.conf"]
+        self.assertEqual(len(new), 1)
+        self.assertIn('serial      = "BBB"', new[0])
+
+    def test_already_registered_second_card_still_repins(self):
+        # Both serials already in coordination, radiod@host still unpinned.
+        rc, out, confs = self._run("AAA", [
+            _sdr("RX-888", serial="AAA", index=0, device="005"),
+            _sdr("RX-888", serial="BBB", index=1, device="006")],
+            extra_coord='\n[radiod."host-rx888-bbb"]\nhost = "localhost"\n'
+                        'sdr_serial  = "BBB"\n')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('serial      = "AAA"', confs["radiod@host.conf"])
+        self.assertEqual(list(confs), ["radiod@host.conf"])
+
+    def test_refuses_when_formerly_sole_conf_has_no_serial_anywhere(self):
+        rc, out, confs = self._run("", [
+            _sdr("RX-888", serial="AAA", index=0, device="005"),
+            _sdr("RX-888", serial="BBB", index=1, device="006")])
+        self.assertEqual(rc, 1)
+        self.assertIn("smd admin sdr identify", out)
+        self.assertEqual(list(confs), ["radiod@host.conf"])
+        self.assertEqual(confs["radiod@host.conf"], self.OLD_CONF)
+
+    def test_sole_card_rerun_leaves_conf_unpinned(self):
+        rc, out, confs = self._run("AAA", [
+            _sdr("RX-888", serial="AAA", index=0, device="005")])
+        self.assertEqual(rc, 0)
+        self.assertEqual(confs["radiod@host.conf"], self.OLD_CONF)

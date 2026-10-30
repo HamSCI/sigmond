@@ -1330,9 +1330,11 @@ is plugged in first, and run it as root `[VM]`:
 sudo smd admin sdr identify
 ```
 
-It refuses with one radiod, and refuses if there are fewer RX888s on the bus
-than radiod instances. While it runs it stops the radiod units and the radiod
-watchdog timer; it starts them again when it ends, whatever the outcome.
+It refuses with no radiod conf yet (run `smd config init radiod` first), with
+one radiod, and if there are fewer RX888s on the bus than radiod instances.
+While it runs it stops the radiod units, the radiod watchdog timer and any
+watchdog run in progress; when it ends, whatever the outcome, it starts again
+the units and the timer that were running before it began.
 
 For each radiod in turn:
 
@@ -1347,20 +1349,24 @@ If two serials vanish at once, it prints `More than one card dropped at once:
 unplug just the one it asked for. If the card you pulled was already matched
 to another radiod, it says so and asks again; pull a different one.
 
-When every radiod has a card, it prints a mapping table, then writes
+When every radiod has a card, it prints a mapping table, warns about any card
+that came back at a slow USB speed or still in the bootloader, then writes
 `serial = "..."` into the `[rx888]` section of each conf and `sdr_serial` into
 `coordination.toml`. Run `smd admin sdr list` again to confirm.
 
-To see the mapping without changing anything, add `--dry-run`. It still walks
-and still stops and restarts the units, but writes nothing.
+To see the mapping without pinning anything, add `--dry-run`. It still walks
+and still stops and restarts the units, but writes no conf and no
+coordination.toml.
 
-Each step waits up to 180 seconds (the environment variable
-`SIGMOND_SDR_IDENTIFY_WAIT_SECS` changes that). Exit codes:
+Each step waits up to 180 seconds. `--wait-secs N` changes that; the
+environment variable `SIGMOND_SDR_IDENTIFY_WAIT_SECS` does too, but it does not
+survive the `sudo` that `smd` re-runs itself under, so prefer the flag.
+Exit codes:
 
 | Exit | Meaning |
 |---|---|
 | 0 | Done, pins written (or shown, with `--dry-run`). |
-| 1 | Refused before the walk: not root, only one radiod, or fewer cards than radiods. |
+| 1 | Refused before the walk: not root, no radiod conf, only one radiod, or fewer cards than radiods. |
 | 3 | The walk timed out with no card change. Nothing was written. Run it again. |
 | 4 | The walk finished but the pins could not be computed or written. Read the error it printed, fix the file it names, run it again. |
 

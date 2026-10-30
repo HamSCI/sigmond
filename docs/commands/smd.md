@@ -223,7 +223,7 @@ rx888-b   active  SN000456  yes     South dipole
 Every local radiod names its own RX888 and every RX888 is on the bus.
 ```
 
-The first table lists each RX888 on the USB bus, its speed, and the radiod that opens it. The second lists each radiod, its state, the serial its conf names, whether that card is on the bus, and the antenna description from the conf. When all is well the last line is the all-clear sentence above and the command exits 0. Otherwise it prints `Needs attention:` and one line per problem, and exits 1. `--json` prints the same facts as JSON, with the same exit code.
+The first table lists each RX888 on the USB bus, its speed, and the radiod that opens it. The second lists each radiod, its state, the serial its conf names (or, when the conf names none, the serial coordination.toml recorded, marked `(coordination only, conf unpinned)`), whether that card is on the bus, and the antenna description from the conf. When all is well the last line is the all-clear sentence above and the command exits 0. Otherwise it prints `Needs attention:` and one line per problem, and exits 1. `--json` prints the same facts as JSON, with the same exit code.
 
 The problem lines:
 

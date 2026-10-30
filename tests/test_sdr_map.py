@@ -234,11 +234,12 @@ CONF_B = '[rx888]\ndevice = "rx888"\ndescription = "south"\n'
 COORD = '[radiod.a]\nx = 1\n\n[radiod.b]\nx = 2\n'
 
 
-def _walk(monkeypatch, tmp_path, polls, confs=None):
+def _walk(monkeypatch, tmp_path, polls, confs=None, inactive=()):
     from sigmond.commands import sdr
     conf = tmp_path / "radio"
     conf.mkdir()
-    for inst, text in (confs or {"a": CONF_A, "b": CONF_B}).items():
+    for inst, text in (confs if confs is not None
+                       else {"a": CONF_A, "b": CONF_B}).items():
         (conf / f"radiod@{inst}.conf").write_text(text)
     coord = tmp_path / "coordination.toml"
     coord.write_text(COORD)
@@ -248,6 +249,8 @@ def _walk(monkeypatch, tmp_path, polls, confs=None):
     monkeypatch.setattr(sdr, "COORD_PATH", coord)
     monkeypatch.setattr(sdr, "load_coord", lambda: None)
     monkeypatch.setattr(sdr, "_systemctl", lambda *a: calls.append(a) or 0)
+    monkeypatch.setattr(sdr, "_is_active", lambda unit: unit not in inactive)
+    monkeypatch.setattr(sdr, "SYSFS_ROOT", tmp_path / "no-sysfs")
     monkeypatch.setattr(sdr, "present_serials", _seq(*polls))
     monkeypatch.setattr(sdr, "_clock", clock)
     monkeypatch.setattr(sdr, "_sleep", clock.sleep)
@@ -279,7 +282,8 @@ def test_identify_dry_run_writes_nothing(monkeypatch, capsys, tmp_path):
     assert (conf / "radiod@a.conf").read_text() == CONF_A
     assert (conf / "radiod@b.conf").read_text() == CONF_B
     assert coord.read_text() == COORD
-    stops = [("stop", "sigmond-radiod-watchdog.timer"),
+    stops = [("stop", "sigmond-radiod-watchdog.service"),
+             ("stop", "sigmond-radiod-watchdog.timer"),
              ("stop", "radiod@a.service"), ("stop", "radiod@b.service")]
     starts = [("start", "radiod@a.service"), ("start", "radiod@b.service"),
               ("start", "sigmond-radiod-watchdog.timer")]
@@ -373,3 +377,143 @@ def test_identify_reprompts_when_same_card_unplugged_twice(monkeypatch, capsys, 
     assert "already matched" in capsys.readouterr().out
     assert 'serial      = "S1"' in (conf / "radiod@a.conf").read_text()
     assert 'serial      = "S2"' in (conf / "radiod@b.conf").read_text()
+
+
+# ---- fix wave: conf-only pinning, quoted coordination headers, sysfs serial --
+
+from sigmond.sdr_map import conf_pinned_serials, sysfs_serial_for
+
+HOST_UNPINNED = '[rx888]\ndevice = "rx888"\n# serial  = "AAA"   # sole SDR: unbound by design; uncomment to pin\n'
+HOST_BBB = '[rx888]\ndevice = "rx888"\nserial      = "BBB"\n'
+
+
+def _grown_host(tmp_path):
+    """The reviewer's C1 reproduction: the first card was registered alone
+    (commented serial), the second card got its own pinned conf."""
+    (tmp_path / "radiod@host.conf").write_text(HOST_UNPINNED)
+    (tmp_path / "radiod@host-rx888-bbb.conf").write_text(HOST_BBB)
+    coord = SimpleNamespace(radiods={
+        "host": SimpleNamespace(sdr_serial="AAA"),
+        "host-rx888-bbb": SimpleNamespace(sdr_serial="BBB"),
+    })
+    cards = [PresentCard("AAA", "4-1", "5000", True),
+             PresentCard("BBB", "4-2", "5000", True)]
+    return coord, cards
+
+
+def test_conf_pinned_serials_reads_conf_only(tmp_path):
+    coord, _ = _grown_host(tmp_path)
+    (tmp_path / "radiod@air.conf").write_text('[airspy]\nserial = "X"\n')
+    assert conf_pinned_serials(tmp_path) == {"host": "", "host-rx888-bbb": "BBB"}
+    # instance_serials keeps the coordination fallback for the watchdog.
+    assert instance_serials(tmp_path, coord) == {"host": "AAA",
+                                                 "host-rx888-bbb": "BBB"}
+
+
+def test_report_flags_conf_unpinned_even_when_coordination_names_it(tmp_path):
+    coord, cards = _grown_host(tmp_path)
+    r = report(cards, instance_serials(tmp_path, coord),
+               conf_pinned_serials(tmp_path))
+    assert r.problems == [
+        "radiod@host has no 'serial =' line, so it opens whichever RX888 "
+        "is free: a reboot can swap antennas"]
+
+
+def test_cmd_sdr_list_labels_coordination_only_serial(monkeypatch, capsys, tmp_path):
+    from sigmond.commands import sdr
+    coord, _ = _grown_host(tmp_path)
+    sysfs = tmp_path / "sys"
+    sysfs.mkdir()
+    _dev(sysfs, "4-1", "00f1", serial="AAA")
+    _dev(sysfs, "4-2", "00f1", serial="BBB")
+    monkeypatch.setattr(sdr, "SYSFS_ROOT", sysfs)
+    monkeypatch.setattr(sdr, "CONFDIR", tmp_path)
+    monkeypatch.setattr(sdr, "load_coord", lambda: coord)
+    monkeypatch.setattr(sdr, "unit_state", lambda inst: "active")
+    assert sdr.cmd_sdr_list(SimpleNamespace(json=False)) == 1
+    out = capsys.readouterr().out
+    assert "AAA (coordination only, conf unpinned)" in out
+    assert "radiod@host has no 'serial =' line" in out
+
+
+def test_set_coord_serial_matches_quoted_header():
+    text = ('[radiod."ac0g-b1-rx888a"]\nhost = "localhost"\n\n'
+            "[radiod.'b']\nx = 2\n")
+    out = set_coord_serial(text, "ac0g-b1-rx888a", "bbb")
+    assert out.startswith('[radiod."ac0g-b1-rx888a"]\nsdr_serial  = "BBB"\n')
+    out = set_coord_serial(text, "b", "S2")
+    assert "[radiod.'b']\nsdr_serial  = \"S2\"\nx = 2\n" in out
+
+
+def test_pin_in_table_ends_only_at_a_real_header():
+    text = ('[radiod.a]\nlist = [\n  "x",\n[1, 2],\n]\nsdr_serial = "OLD"\n'
+            '\n[[radiod.fragment]]\nsdr_serial = "KEEP"\n')
+    out = set_coord_serial(text, "a", "NEW")
+    assert 'sdr_serial  = "NEW"' in out and '"OLD"' not in out
+    assert 'sdr_serial = "KEEP"' in out
+
+
+def test_round_trip_through_the_init_renderers(tmp_path):
+    from sigmond.commands import radiod_config
+    plan = {"instance_id": "ac0g-b1-rx888a", "status_dns": "x-status.local",
+            "description": "north", "frontend": "rx888",
+            "frontend_defaults": radiod_config._profile_for("RX-888")["defaults"].rstrip(),
+            "serial": "AAA",
+            "serial_line": '# serial  = "AAA"   # sole SDR: unbound by design; uncomment to pin',
+            "iface": "eth0", "target": tmp_path / "x.conf", "sdr_type": "RX-888"}
+    coord = sdr_map.set_coord_serial(radiod_config._coord_block(plan),
+                                     "ac0g-b1-rx888a", "bbb")
+    assert 'sdr_serial  = "BBB"' in coord and '"AAA"' not in coord
+    conf = sdr_map.set_conf_serial(radiod_config._render(plan), "bbb")
+    assert conf_serial(conf) == "BBB"
+
+
+def test_sysfs_serial_for_matches_bus_and_device(tmp_path):
+    _dev(tmp_path, "4-1", "00f1", serial="abc1", busnum="4")
+    (tmp_path / "4-1:1.0").mkdir()
+    assert sysfs_serial_for(4, 5, tmp_path) == "ABC1"
+    assert sysfs_serial_for("004", "005", tmp_path) == "ABC1"
+    assert sysfs_serial_for(4, 6, tmp_path) == ""
+    assert sysfs_serial_for(3, 5, tmp_path) == ""
+    assert sysfs_serial_for(4, 5, tmp_path / "nope") == ""
+
+
+def test_identify_zero_instances_says_run_init_first(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD, confs={})
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=True)) == 1
+    e = capsys.readouterr().err
+    assert "no radiod conf" in e and "smd config init radiod" in e
+    assert "one radiod needs no identify" not in e
+    assert calls == []
+
+
+def test_identify_restarts_only_what_was_running(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(
+        monkeypatch, tmp_path, _GOOD,
+        inactive={"radiod@b.service", "sigmond-radiod-watchdog.timer"})
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=True)) == 0
+    assert [c for c in calls if c[0] == "start"] == [("start", "radiod@a.service")]
+
+
+def test_identify_warns_about_a_slow_card_after_the_walk(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD)
+    sysfs = tmp_path / "sys"
+    sysfs.mkdir()
+    _dev(sysfs, "4-1", "00f1", serial="S1")
+    _dev(sysfs, "4-2", "00f1", serial="S2", speed="480")
+    monkeypatch.setattr(sdr, "SYSFS_ROOT", sysfs)
+    monkeypatch.setattr(sdr.os, "geteuid", lambda: 0)
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=False)) == 0
+    cap = capsys.readouterr()
+    assert "RX888 S2 on 4-2 is at only 480 Mb/s" in cap.out + cap.err
+    assert 'serial      = "S2"' in (conf / "radiod@b.conf").read_text()
+
+
+def test_identify_wait_secs_flag_beats_env(monkeypatch):
+    from sigmond.commands import sdr
+    monkeypatch.setenv("SIGMOND_SDR_IDENTIFY_WAIT_SECS", "30")
+    assert sdr._wait_secs(SimpleNamespace(wait_secs=7)) == 7
+    assert sdr._wait_secs(SimpleNamespace(wait_secs=None)) == 30
+    assert sdr._wait_secs(SimpleNamespace()) == 30
+    monkeypatch.delenv("SIGMOND_SDR_IDENTIFY_WAIT_SECS")
+    assert sdr._wait_secs(SimpleNamespace()) == 180

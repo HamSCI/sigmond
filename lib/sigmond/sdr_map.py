@@ -123,6 +123,37 @@ def instance_serials(confdir: Path = Path('/etc/radio'), coord=None) -> dict[str
     return out
 
 
+def conf_pinned_serials(confdir: Path = Path('/etc/radio')) -> dict[str, str]:
+    """{instance_id: serial} from the conf alone (what radiod reads): ""
+    when the [rx888] section has no live `serial =` line."""
+    return instance_serials(confdir, None)
+
+
+def sysfs_serial_for(bus, dev, root: Path = Path('/sys/bus/usb/devices')) -> str:
+    """The USB iSerial of the device at bus/dev, from the world-readable
+    sysfs tree, upper-cased; "" when there is none or no such device."""
+    try:
+        want = (int(bus), int(dev))
+    except (TypeError, ValueError):
+        return ''
+    try:
+        entries = sorted(Path(root).iterdir())
+    except OSError:
+        return ''
+    for d in entries:
+        try:
+            got = (int((d / 'busnum').read_text().strip()),
+                   int((d / 'devnum').read_text().strip()))
+        except (OSError, ValueError):
+            continue
+        if got == want:
+            try:
+                return _norm((d / 'serial').read_text())
+            except OSError:
+                return ''
+    return ''
+
+
 def serial_to_instance(instances: dict[str, str]) -> dict[str, str]:
     return {s: i for i, s in instances.items() if s}
 
@@ -134,13 +165,19 @@ class SdrReport:
     problems: list[str] = field(default_factory=list)
 
 
-def report(cards: list[PresentCard], instances: dict[str, str]) -> SdrReport:
+def report(cards: list[PresentCard], instances: dict[str, str],
+           pinned: dict[str, str] | None = None) -> SdrReport:
+    """`instances` may carry coordination labels; `pinned` (from
+    conf_pinned_serials) decides the swap risk from the conf alone, since
+    that is what radiod reads.  Without `pinned`, `instances` decides it."""
     problems = []
     multi = len(instances) > 1
     on_bus = {c.serial for c in cards if c.programmed and c.serial}
+    pins = instances if pinned is None else \
+        {i: pinned.get(i, '') for i in instances}
 
     if multi:
-        for inst in sorted(i for i, s in instances.items() if not s):
+        for inst in sorted(i for i, s in pins.items() if not s):
             problems.append(
                 f"radiod@{inst} has no 'serial =' line, so it opens whichever "
                 f"RX888 is free: a reboot can swap antennas")
@@ -229,6 +266,18 @@ def wait_for_return(serial: str, poll, deadline: float,
     return wait_for_present({serial}, poll, deadline, clock, sleep)
 
 
+# A table header at column 0: `[a.b]` or `[[a.b]]`, maybe a trailing comment.
+_HEADER = re.compile(r'^\[\[?[^\]]+\]\]?\s*(#.*)?$')
+_RADIOD_HEADER = re.compile(
+    r"""^\[\s*radiod\s*\.\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*\]$""")
+
+
+def _is_radiod_table(header: str, instance: str) -> bool:
+    """True for `[radiod.<id>]`, `[radiod."<id>"]` or `[radiod.'<id>']`."""
+    m = _RADIOD_HEADER.match(header)
+    return bool(m) and next(g for g in m.groups() if g is not None) == instance
+
+
 def _pin_in_table(text: str, in_table, key_re: str, new_line: str,
                   accept_commented: bool) -> str | None:
     """Replace the key line inside the table `in_table(header)` selects, or
@@ -237,13 +286,13 @@ def _pin_in_table(text: str, in_table, key_re: str, new_line: str,
     start = None
     end = len(lines)
     for i, raw in enumerate(lines):
-        line = raw.strip()
-        if line.startswith('['):
-            if start is not None:
-                end = i
-                break
-            if in_table(line.split('#', 1)[0].strip()):
-                start = i
+        if not _HEADER.match(raw.rstrip('\r\n')):
+            continue
+        if start is not None:
+            end = i
+            break
+        if in_table(raw.split('#', 1)[0].strip()):
+            start = i
     if start is None:
         return None
     live = re.compile(rf'^\s*{key_re}\s*=')
@@ -272,8 +321,9 @@ def set_conf_serial(text: str, serial: str) -> str:
 
 
 def set_coord_serial(text: str, instance: str, serial: str) -> str:
-    """Pin `sdr_serial` in the [radiod.<instance>] table of coordination.toml."""
-    out = _pin_in_table(text, lambda h: h == f'[radiod.{instance}]',
+    """Pin `sdr_serial` in the [radiod.<instance>] table of coordination.toml
+    (bare or quoted key, as `smd config init radiod` writes it)."""
+    out = _pin_in_table(text, lambda h: _is_radiod_table(h, instance),
                         'sdr_serial', f'sdr_serial  = "{_norm(serial)}"', False)
     if out is None:
         raise ValueError(f'no [radiod.{instance}] table')

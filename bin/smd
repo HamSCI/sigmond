@@ -26504,12 +26504,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help='show each RX888 on the bus, which radiod opened it, and what '
              'needs attention')
     p_sdr_list.add_argument('--json', action='store_true',
-                            help='print {"cards", "instances", "problems"}')
+                            help='print {"cards", "instances", "conf_pinned", '
+                                 '"problems"}')
     p_sdr_ident = sdr_sub.add_parser(
         'identify',
         help='identify which physical RX888 is which')
     p_sdr_ident.add_argument('--dry-run', action='store_true',
-                             help='show what would be done without doing it')
+                             help='walk and show the mapping but write no '
+                                  'conf or coordination.toml; radiod and '
+                                  'the watchdog timer are still stopped '
+                                  'and restarted')
+    p_sdr_ident.add_argument('--wait-secs', type=float, default=None,
+                             metavar='N',
+                             help='seconds each unplug/replug step waits '
+                                  '(default: $SIGMOND_SDR_IDENTIFY_WAIT_SECS, '
+                                  'else 180)')
 
     # instance — v2 per-reporter client instances
     # (MULTI-INSTANCE-ARCHITECTURE.md §6)

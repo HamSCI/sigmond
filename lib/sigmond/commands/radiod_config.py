@@ -57,6 +57,7 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
+from .. import sdr_map
 from ..coordination import load_coordination, render_env
 from ..discovery import usb_sdr
 from ..environment import Environment
@@ -524,6 +525,7 @@ def cmd_radiod_init(args) -> int:
     # SDR on every re-run, including the ones the operator named months ago.
     known_serial_to_id: dict[str, str] = {}
     known_ids: set[str] = set()
+    coord = None
     try:
         coord = load_coordination(COORDINATION_PATH)
         for r in coord.radiods.values():
@@ -533,9 +535,26 @@ def cmd_radiod_init(args) -> int:
     except (OSError, FileNotFoundError):
         pass
 
+    # A host that grew from one card to more: every conf already on disk
+    # must name its card too, or it opens whichever one is free.
+    for sdr in sdrs:
+        _fill_sysfs_serial(sdr)
+    repins: list[tuple[Path, str, str, str]] = []
+    if len(sdrs) > 1:
+        repins, refusal = _repins_for_multi_card(sdrs, coord)
+        if refusal:
+            err(refusal)
+            return 1
+
+    def _write_repins() -> None:
+        for path, text, inst, serial in repins:
+            path.write_text(text)
+            ok(f"pinned radiod@{inst} to RX888 {serial} "
+               f"(a second card is on the bus)")
+
     new_sdrs = []
     for sdr in sdrs:
-        serial = (sdr.fields.get("serial") or "").strip()
+        serial = _fill_sysfs_serial(sdr)
         if serial and serial in known_serial_to_id:
             ok(f"already registered: {sdr.fields.get('sdr_type')} "
                f"serial {serial} → radiod@{known_serial_to_id[serial]}  "
@@ -545,6 +564,7 @@ def cmd_radiod_init(args) -> int:
 
     if not new_sdrs:
         print()
+        _write_repins()
         ok(f"all {len(sdrs)} attached SDR(s) already registered — nothing to do")
         info("To change settings on an existing instance, run:  "
              "smd config edit radiod <id>")
@@ -575,10 +595,12 @@ def cmd_radiod_init(args) -> int:
                                            known_ids=known_ids, sole=sole)
         except UnpinnedMultiCard as exc:
             err(f"more than one RX888 on the bus and {exc.sdr_type} on bus "
-                f"{exc.bus}/{exc.device} has no readable serial; a conf "
-                f"without `serial =` would open whichever card is free and "
-                f"a reboot could swap antennas. Fix udev access and re-run, "
-                f"or run `smd admin sdr identify` once that exists.")
+                f"{exc.bus}/{exc.device} has no readable serial (neither "
+                f"lsusb nor sysfs shows one); a conf without `serial =` "
+                f"would open whichever card is free and a reboot could swap "
+                f"antennas. Check the card with `smd admin sdr list` (a card "
+                f"with no serial is usually still in the FX3 bootloader), "
+                f"then re-run.")
             return 1
         if plan is None:
             return 2  # operator aborted
@@ -590,6 +612,7 @@ def cmd_radiod_init(args) -> int:
         plans.append(plan)
 
     # Second pass: write.
+    _write_repins()
     for plan in plans:
         body = _render(plan)
         plan["target"].parent.mkdir(parents=True, exist_ok=True)
@@ -635,6 +658,41 @@ def cmd_radiod_init(args) -> int:
          "radiod@<id>.service")
     info("  2. Configure clients:  smd config init <client> [<instance>]")
     return 0
+
+
+def _repins_for_multi_card(sdrs: list, coord):
+    """For each [rx888] conf on disk with no live `serial =`, the pinned text
+    from its coordination `sdr_serial`.  Returns (repins, refusal): repins is
+    [(path, new_text, instance, serial)]; refusal is the error text when a
+    conf names no serial anywhere, else None."""
+    on_bus = {sdr_map._norm(s.fields.get("serial"))
+              for s in sdrs if s.fields.get("serial")}
+    radiods = getattr(coord, "radiods", {}) or {}
+    repins = []
+    for inst, pinned in sorted(sdr_map.conf_pinned_serials(
+            RADIOD_CONFIG_DIR).items()):
+        if pinned:
+            continue
+        rd = radiods.get(inst)
+        serial = sdr_map._norm(getattr(rd, "sdr_serial", "")) if rd else ""
+        if not serial:
+            return [], (f"radiod@{inst} has no `serial =` line and "
+                        f"coordination.toml records no sdr_serial for it; "
+                        f"with more than one RX888 on the bus it would open "
+                        f"whichever card is free.  Run `smd admin sdr "
+                        f"identify` to pin it, then re-run.")
+        if serial not in on_bus:
+            warn(f"radiod@{inst} is recorded as RX888 {serial}, which is "
+                 f"not on the bus; left unpinned.  Run `smd admin sdr "
+                 f"identify` once every card is plugged in.")
+            continue
+        path = RADIOD_CONFIG_DIR / f"radiod@{inst}.conf"
+        try:
+            text = sdr_map.set_conf_serial(path.read_text(), serial)
+        except (OSError, ValueError) as exc:
+            return [], f"cannot pin {path} ({exc}); nothing written"
+        repins.append((path, text, inst, serial))
+    return repins, None
 
 
 def _apply_fragments_for_new_instances(written: list[Path]) -> None:
@@ -731,13 +789,31 @@ def _suggest_iface() -> str:
     return "eth0"
 
 
+# World-readable sysfs USB tree; a module attribute so tests can move it.
+SYSFS_USB_ROOT = Path("/sys/bus/usb/devices")
+
+
+def _fill_sysfs_serial(sdr) -> str:
+    """The SDR's serial: lsusb's, else the sysfs one matched by bus/device
+    (stored back into sdr.fields); "" when neither has one."""
+    serial = (sdr.fields.get("serial") or "").strip()
+    if serial:
+        return serial
+    bus, dev = sdr.fields.get("bus"), sdr.fields.get("device")
+    if bus and dev:
+        serial = sdr_map.sysfs_serial_for(bus, dev, SYSFS_USB_ROOT)
+        if serial:
+            sdr.fields["serial"] = serial
+    return serial
+
+
 def _collect_per_sdr_values(sdr, args, hostname_short: str,
                             iface: str,
                             known_ids: Optional[set] = None,
                             sole: bool = True) -> Optional[dict]:
     sdr_type = sdr.fields.get("sdr_type", "")
     profile = _profile_for(sdr_type)
-    serial = sdr.fields.get("serial", "")
+    serial = _fill_sysfs_serial(sdr)
 
     suggested_id = _default_instance_id(hostname_short, sdr_type, sdr.fields,
                                         sole=sole)
