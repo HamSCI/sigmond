@@ -152,22 +152,54 @@ def _walk(instances: list[str]) -> dict[str, str] | None:
     return found
 
 
-def _write_pins(found: dict[str, str]) -> None:
-    for inst, serial in sorted(found.items()):
-        conf = CONFDIR / f'radiod@{inst}.conf'
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + '.sdr-identify.tmp')
+    try:
+        tmp.write_text(text)
         try:
-            conf.write_text(sdr_map.set_conf_serial(conf.read_text(), serial))
-        except (OSError, ValueError) as e:
-            err(f'{conf}: {e}')
-            continue
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except OSError:
         try:
-            COORD_PATH.write_text(sdr_map.set_coord_serial(
-                COORD_PATH.read_text(), inst, serial))
-        except ValueError:
-            warn(f'no [radiod.{inst}] table in {COORD_PATH}; conf pinned, '
-                 f'coordination left alone')
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _write_pins(found: dict[str, str]) -> bool:
+    """Pin every conf and coordination.toml, or none: all new texts are
+    computed first.  False if anything could not be computed or written."""
+    plan: list[tuple[Path, str]] = []
+    try:
+        for inst, serial in sorted(found.items()):
+            conf = CONFDIR / f'radiod@{inst}.conf'
+            plan.append((conf, sdr_map.set_conf_serial(conf.read_text(), serial)))
+        try:
+            coord_text = COORD_PATH.read_text()
         except OSError as e:
-            warn(f'{COORD_PATH}: {e}')
+            warn(f'{COORD_PATH}: {e}; coordination left alone')
+            coord_text = None
+        if coord_text is not None:
+            for inst, serial in sorted(found.items()):
+                try:
+                    coord_text = sdr_map.set_coord_serial(coord_text, inst, serial)
+                except ValueError:
+                    warn(f'no [radiod.{inst}] table in {COORD_PATH}; '
+                         f'coordination left alone for it')
+            plan.append((COORD_PATH, coord_text))
+    except (OSError, ValueError) as e:
+        err(f'cannot pin every conf ({e}); nothing written')
+        return False
+    for path, text in plan:
+        try:
+            _write_atomic(path, text)
+        except OSError as e:
+            err(f'{path}: {e}')
+            return False
+    return True
 
 
 def cmd_sdr_identify(args) -> int:
@@ -199,8 +231,8 @@ def cmd_sdr_identify(args) -> int:
             print(line)
         if dry:
             print('(dry run: nothing written)')
-        else:
-            _write_pins(found)
+        elif not _write_pins(found):
+            return 4
         return 0
     finally:
         for u in (*units, timer):

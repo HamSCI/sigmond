@@ -334,3 +334,42 @@ def test_identify_timeout_abandons_and_writes_nothing(monkeypatch, capsys, tmp_p
     assert (conf / "radiod@a.conf").read_text() == CONF_A
     assert coord.read_text() == COORD
     assert calls[-1] == ("start", "sigmond-radiod-watchdog.timer")
+
+
+def test_identify_pin_failure_writes_nothing_and_exits_4(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD)
+    monkeypatch.setattr(sdr.os, "geteuid", lambda: 0)
+    inner = sdr.present_serials
+    n = []
+
+    def poll():
+        n.append(1)
+        if len(n) == 7:  # mid-walk, radiod@b's conf loses its [rx888] section
+            (conf / "radiod@b.conf").write_text('[airspy]\nserial = "X"\n')
+        return inner()
+    monkeypatch.setattr(sdr, "present_serials", poll)
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=False)) == 4
+    assert "nothing written" in capsys.readouterr().err
+    assert (conf / "radiod@a.conf").read_text() == CONF_A
+    assert coord.read_text() == COORD
+    assert calls[-1] == ("start", "sigmond-radiod-watchdog.timer")
+
+
+def test_identify_refuses_when_fewer_cards_than_instances(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, [{"S1"}])
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=True)) == 1
+    assert "fewer RX888 cards" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_identify_reprompts_when_same_card_unplugged_twice(monkeypatch, capsys, tmp_path):
+    two = {"S1", "S2"}
+    polls = [two, two, {"S2"}, two,        # init, a baseline, S1 drops, returns
+             two, {"S2"}, two,             # b baseline, S1 again, returns
+             two, {"S1"}, two]             # b baseline, S2 drops, returns
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, polls)
+    monkeypatch.setattr(sdr.os, "geteuid", lambda: 0)
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=False)) == 0
+    assert "already matched" in capsys.readouterr().out
+    assert 'serial      = "S1"' in (conf / "radiod@a.conf").read_text()
+    assert 'serial      = "S2"' in (conf / "radiod@b.conf").read_text()
