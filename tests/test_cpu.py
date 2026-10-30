@@ -772,23 +772,43 @@ class RadiodCoreShortfallTests(unittest.TestCase):
 
 
 class RadiodDropInRefusalTests(unittest.TestCase):
-    def test_three_units_two_cores_raises_without_writing(self):
-        os.environ.setdefault("SIGMOND_NO_VENV_REEXEC", "1")
+    def _load_smd(self):
         import importlib.util
         spec = importlib.util.spec_from_loader("smd_mod_cpu", loader=None)
         smd = importlib.util.module_from_spec(spec)
         smd.__dict__["__file__"] = "bin/smd"
         src = Path(__file__).resolve().parent.parent / "bin" / "smd"
-        exec(compile(src.read_text(), str(src), "exec"), smd.__dict__)
-        units = [mock.Mock(unit=f"radiod@r{i}.service", instance=f"r{i}")
-                 for i in range(3)]
+        with mock.patch.dict(os.environ, {"SIGMOND_NO_VENV_REEXEC": "1"}):
+            exec(compile(src.read_text(), str(src), "exec"), smd.__dict__)
+        return smd
+
+    @staticmethod
+    def _units():
+        return [mock.Mock(unit=f"radiod@r{i}.service", instance=f"r{i}")
+                for i in range(3)]
+
+    def test_three_units_two_cores_raises_without_writing(self):
+        smd = self._load_smd()
         with mock.patch("sigmond.cpu.get_physical_cores",
                         return_value=[{0, 1}, {2, 3}]), \
+             mock.patch.object(smd, "_err"), \
              mock.patch.object(smd, "_run") as run, \
              mock.patch.object(smd, "_write_affinity_drop_in") as wr:
             with self.assertRaises(smd.RadiodCoreShortfall) as cm:
-                smd._ensure_radiod_affinity_drop_ins(units)
+                smd._ensure_radiod_affinity_drop_ins(self._units())
         self.assertIn("3 radiod instance(s) but only 1 eligible core(s)", str(cm.exception))
         self.assertIn("--allow-shared-radiod-cores", str(cm.exception))
         run.assert_not_called()
         wr.assert_not_called()
+
+    def test_allow_shared_proceeds_to_write(self):
+        smd = self._load_smd()
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0, 1}, {2, 3}]), \
+             mock.patch.object(smd, "_err"), \
+             mock.patch.object(smd, "_ok"), \
+             mock.patch.object(smd, "_run"), \
+             mock.patch.object(smd, "_write_affinity_drop_in",
+                               return_value="unchanged") as wr:
+            smd._ensure_radiod_affinity_drop_ins(self._units(), allow_shared=True)
+        self.assertEqual(wr.call_count, 3)

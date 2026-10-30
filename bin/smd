@@ -13115,7 +13115,12 @@ def cmd_start(args) -> int:
     radiod_services = [u for u in units
                        if u.component == 'ka9q-radio' and u.kind == 'service']
     if radiod_services:
-        _ensure_radiod_affinity_drop_ins(radiod_services, topology.get('cpu_affinity'))
+        try:
+            _ensure_radiod_affinity_drop_ins(
+                radiod_services, topology.get('cpu_affinity'),
+                allow_shared=getattr(args, 'allow_shared_radiod_cores', False))
+        except RadiodCoreShortfall:
+            return 1
 
     _heading('start')
     _netdiag_auto_refresh('start')
@@ -26616,6 +26621,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='component names, or "all" (default: all enabled)')
     p.add_argument('--components', metavar='C1,C2',
                    help='deprecated; same as positional names')
+    p.add_argument('--allow-shared-radiod-cores', action='store_true',
+                   dest='allow_shared_radiod_cores',
+                   help='let two radiod instances share one CPU core '
+                        'instead of refusing')
 
     # stop
     p = sub.add_parser('stop', help='stop managed services')
