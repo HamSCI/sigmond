@@ -198,15 +198,26 @@ phase_pre_host() {
     [[ "$iommu_ok" == "1" ]] || die "USB controllers share IOMMU group with non-USB devices. Manual config required — see docs/proxmox/wsprdaemon-proxmox-vm-setup.md Step 2."
 
     # Number of LOCAL radiod instances — one host HT sibling pair each.
-    # Defaults to 1; set LOCAL_RADIOD_COUNT=N for a host with multiple local
-    # RX888 triplets. Remote receivers' radiods run on other hosts and are not
-    # counted here.
-    local radiod_count="${LOCAL_RADIOD_COUNT:-}"
-    if [[ -z "$radiod_count" ]]; then
-        radiod_count="${KV[RX888_COUNT]:-1}"
-        info "Found ${radiod_count} RX888(s); the VM will be laid out for ${radiod_count} radiod(s)"
+    # LOCAL_RADIOD_COUNT=N wins when given.  Otherwise the largest of: the
+    # count phase 1 saved in the host's /etc/sigmond/host-layout.env, the
+    # RX888s on the host bus, and the RX888s already passed through to this
+    # guest (after phase 1 the host bus shows none).  Remote receivers'
+    # radiods run on other hosts and are not counted here.
+    local radiod_count="${LOCAL_RADIOD_COUNT:-}" count_src guest_n
+    if [[ "${KV[RX888_VISIBLE]:-0}" == "0" ]]; then
+        info "no RX888 visible on the host (controllers passed through?)"
     else
-        info "Using ${radiod_count} radiod(s), the operator's value (host bus shows ${KV[RX888_COUNT]:-1} RX888(s))"
+        info "Found ${KV[RX888_VISIBLE]} RX888(s) on the host bus"
+    fi
+    if [[ -z "$radiod_count" ]]; then
+        # shellcheck source=radiod-count.sh
+        . "$SCRIPT_DIR/radiod-count.sh"
+        guest_n="$(rx888_visible)"
+        IFS='|' read -r radiod_count count_src < <(choose_radiod_count \
+            "${KV[HOST_LAYOUT_RADIOD_COUNT]:-}" "${KV[RX888_COUNT]:-1}" "$guest_n")
+        info "The VM will be laid out for ${radiod_count} radiod(s), from ${count_src}"
+    else
+        info "Using ${radiod_count} radiod(s), the operator's value"
     fi
 
     ok "VMID=${vmid} USB=${usb_vid_did} (addrs:${usb_addrs}) host_cpus=${host_cpu_count} HT=${ht_pattern} pairs='${ht_pairs}' local_radiods=${radiod_count} CPU=${cpu_vendor}"

@@ -139,18 +139,28 @@ if [[ "$DO_TUNING" == 1 ]]; then
     info "discovering host topology (no VM yet)…"
     declare -A KV
     while IFS='=' read -r k v; do
-        [[ "$k" =~ ^[A-Z_]+$ ]] && KV[$k]=$(eval "printf '%s' $v")
+        [[ "$k" =~ ^[A-Z][A-Z0-9_]*$ ]] && KV[$k]=$(eval "printf '%s' $v")
     done < <(bash "$SCRIPT_DIR/host-discover.sh" --no-vm)
 
     [[ "${KV[DISCOVERY_RESULT]:-}" == "ok" ]] || die "host discovery failed"
     [[ "${KV[IOMMU_OK]:-0}" == "1" ]] || warn \
         "IOMMU groups not isolated yet (normal before the first reboot with IOMMU flags)"
 
-    if [[ -z "$RADIOD_COUNT" ]]; then
-        RADIOD_COUNT="${KV[RX888_COUNT]:-1}"
-        info "Found ${RADIOD_COUNT} RX888(s); the VM will be laid out for ${RADIOD_COUNT} radiod(s)"
+    if [[ "${KV[RX888_VISIBLE]:-0}" == "0" ]]; then
+        info "no RX888 visible on the host (controllers passed through?)"
     else
-        info "Using ${RADIOD_COUNT} radiod(s), the operator's value (host bus shows ${KV[RX888_COUNT]:-1} RX888(s))"
+        info "Found ${KV[RX888_VISIBLE]} RX888(s) on the host bus"
+    fi
+    if [[ -z "$RADIOD_COUNT" ]]; then
+        # A re-run after the phase-1 reboot sees no card on the host bus;
+        # the count saved in host-layout.env keeps the layout it chose.
+        # shellcheck source=radiod-count.sh
+        . "$SCRIPT_DIR/radiod-count.sh"
+        IFS='|' read -r RADIOD_COUNT count_src < <(choose_radiod_count \
+            "${KV[HOST_LAYOUT_RADIOD_COUNT]:-}" "${KV[RX888_COUNT]:-1}")
+        info "The VM will be laid out for ${RADIOD_COUNT} radiod(s), from ${count_src}"
+    else
+        info "Using ${RADIOD_COUNT} radiod(s), the operator's value"
     fi
 
     info "USB=${KV[USB_VID_DID]} cpus=${KV[HOST_CPU_COUNT]} HT=${KV[HT_PATTERN]} pairs='${KV[HT_PAIRS]}' local_radiods=${RADIOD_COUNT}"

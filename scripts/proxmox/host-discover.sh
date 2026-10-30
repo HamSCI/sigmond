@@ -190,17 +190,26 @@ CPU_VENDOR="$(awk -F: '/^vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')"
 
 # ─── RX888 count ──────────────────────────────────────────────────────────────
 # One radiod per RX888 on this host's bus: 04b4:00f1 is a card with firmware
-# loaded, 04b4:00f3 one that has not been loaded yet.  A missing lsusb or no
-# cards seen counts as 0, but the answer is never below 1 (one-card default).
-rx888_count() {
+# loaded, 04b4:00f3 one that has not been loaded yet.  RX888_VISIBLE is the
+# raw count (0 once the controllers are passed through to a VM, or with no
+# lsusb); RX888_COUNT is the same floored at 1 (one-card default).
+rx888_visible() {
     local n=0 c id
     for id in 04b4:00f1 04b4:00f3; do
         c=$(lsusb -d "$id" 2>/dev/null | grep -c . || true)
         n=$((n + ${c:-0}))
     done
-    (( n >= 1 )) || n=1
     printf '%s' "$n"
 }
+RX888_VISIBLE="$(rx888_visible)"
+RX888_COUNT="$RX888_VISIBLE"
+(( RX888_COUNT >= 1 )) || RX888_COUNT=1
+
+# The radiod count phase 1 (host-setup.sh) saved, read as text (never
+# sourced); empty when there is no file or no numeric value.
+HOST_LAYOUT_ENV="${SIGMOND_HOST_LAYOUT_ENV:-/etc/sigmond/host-layout.env}"
+HOST_LAYOUT_RADIOD_COUNT="$(sed -n 's/^LOCAL_RADIOD_COUNT=\([0-9][0-9]*\)[[:space:]]*$/\1/p' \
+    "$HOST_LAYOUT_ENV" 2>/dev/null | tail -n 1 || true)"
 
 # ─── emit ─────────────────────────────────────────────────────────────────────
 emit DISCOVERY_RESULT "ok"
@@ -213,4 +222,6 @@ emit HOST_CPU_COUNT "$HOST_CPU_COUNT"
 emit HT_PATTERN "$HT_PATTERN"
 emit HT_PAIRS "$HT_PAIRS"
 emit CPU_VENDOR "$CPU_VENDOR"
-emit RX888_COUNT "$(rx888_count)"
+emit RX888_COUNT "$RX888_COUNT"
+emit RX888_VISIBLE "$RX888_VISIBLE"
+emit HOST_LAYOUT_RADIOD_COUNT "$HOST_LAYOUT_RADIOD_COUNT"
