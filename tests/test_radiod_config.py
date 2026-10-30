@@ -343,3 +343,48 @@ class SoleSdrSerialBindingTests(unittest.TestCase):
         plan = radiod_config._collect_per_sdr_values(
             self._Sdr(), self._Args(), "bee1", "eth0", sole=False)
         self.assertTrue(plan["serial_line"].startswith("serial"))
+
+
+class MultiCardSerialTests(unittest.TestCase):
+    """A host with more than one RX888 must pin every conf to a serial."""
+
+    @staticmethod
+    def _sdr(serial, bus="001", device="004"):
+        return SimpleNamespace(fields={"sdr_type": "RX-888", "serial": serial,
+                                       "bus": bus, "device": device,
+                                       "index": 0})
+
+    def test_two_cards_one_without_serial_refuses(self):
+        with self.assertRaises(radiod_config.UnpinnedMultiCard):
+            radiod_config._collect_per_sdr_values(
+                self._sdr(""), _ns(non_interactive=True), "host", "eth0",
+                known_ids=set(), sole=False)
+
+    def test_sole_card_without_serial_still_renders_unpinned(self):
+        plan = radiod_config._collect_per_sdr_values(
+            self._sdr(""), _ns(non_interactive=True), "host", "eth0",
+            known_ids=set(), sole=True)
+        self.assertTrue(plan["serial_line"].startswith("# serial"))
+
+    def test_init_exits_1_and_names_identify_when_refused(self):
+        import contextlib
+        import io
+        sdrs = [self._sdr("AAAA1111", device="004"),
+                self._sdr("", bus="001", device="005")]
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            conf_dir = Path(td) / "radio"
+            with mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR", conf_dir), \
+                 mock.patch.object(radiod_config, "_discover_sdrs",
+                                   return_value=sdrs), \
+                 mock.patch.object(radiod_config, "load_coordination",
+                                   side_effect=FileNotFoundError), \
+                 mock.patch.object(radiod_config, "_suggest_iface",
+                                   return_value="eth0"), \
+                 contextlib.redirect_stdout(out), \
+                 contextlib.redirect_stderr(out):
+                rc = radiod_config.cmd_radiod_init(
+                    _ns(non_interactive=True, force=False))
+            self.assertEqual(rc, 1)
+            self.assertIn("smd admin sdr identify", out.getvalue())
+            self.assertEqual(list(conf_dir.glob("radiod@*.conf")), [])

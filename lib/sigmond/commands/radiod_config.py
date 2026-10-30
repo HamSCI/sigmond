@@ -432,6 +432,17 @@ def cmd_radiod_register(args) -> int:
     return 0
 
 
+class UnpinnedMultiCard(Exception):
+    """More than one SDR is attached and this one has no readable serial."""
+
+    def __init__(self, sdr_type, bus, device):
+        super().__init__(f"{sdr_type} on bus {bus}/{device} has no readable "
+                         f"serial on a multi-card host")
+        self.sdr_type = sdr_type
+        self.bus = bus
+        self.device = device
+
+
 def cmd_radiod_init(args) -> int:
     heading("config init radiod")
     if getattr(args, "siggen", False):
@@ -528,12 +539,23 @@ def cmd_radiod_init(args) -> int:
     # `<hostname>-status.local`); >1 SDR keeps the type-suffixed disambiguator.
     sole = len(sdrs) == 1
 
+    # First pass: collect every plan, so a refusal on a later card writes
+    # nothing for an earlier one.
+    plans: list[dict] = []
     for i, sdr in enumerate(new_sdrs):
         print()
         info(f"--- SDR {i + 1}/{len(new_sdrs)} "
              f"({sdr.fields.get('sdr_type')}) ---")
-        plan = _collect_per_sdr_values(sdr, args, hostname_short, iface,
-                                       known_ids=known_ids, sole=sole)
+        try:
+            plan = _collect_per_sdr_values(sdr, args, hostname_short, iface,
+                                           known_ids=known_ids, sole=sole)
+        except UnpinnedMultiCard as exc:
+            err(f"more than one RX888 on the bus and {exc.sdr_type} on bus "
+                f"{exc.bus}/{exc.device} has no readable serial; a conf "
+                f"without `serial =` would open whichever card is free and "
+                f"a reboot could swap antennas. Fix udev access and re-run, "
+                f"or run `smd admin sdr identify` once that exists.")
+            return 1
         if plan is None:
             return 2  # operator aborted
         # Each newly-named id joins known_ids so subsequent SDRs in the same
@@ -541,6 +563,10 @@ def cmd_radiod_init(args) -> int:
         known_ids.add(plan["instance_id"])
         if _refuse_overwrite(plan["target"], args):
             return 1
+        plans.append(plan)
+
+    # Second pass: write.
+    for plan in plans:
         body = _render(plan)
         plan["target"].parent.mkdir(parents=True, exist_ok=True)
         plan["target"].write_text(body)
@@ -727,6 +753,9 @@ def _collect_per_sdr_values(sdr, args, hostname_short: str,
                               f"[{profile['section']}].description)",
                               suggested_desc, required=True)
 
+    if not serial and not sole:
+        raise UnpinnedMultiCard(sdr_type, sdr.fields.get("bus"),
+                                sdr.fields.get("device"))
     if not serial:
         warn(f"no readable iSerial for this {sdr_type}; the rendered "
              f"config will omit `serial = ...` and radiod will pick the "
