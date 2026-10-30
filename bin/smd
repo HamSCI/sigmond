@@ -28415,6 +28415,8 @@ def main() -> int:
             p_sdr_list.parse_args([], namespace=args)
             sc = 'list'
         if sc == 'identify':
+            if not args.dry_run and _need_root('admin sdr identify'):
+                return 1
             return cmd_sdr_identify(args)
         return cmd_sdr_list(args)
 

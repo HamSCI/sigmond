@@ -6,15 +6,22 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 
 from sigmond import sdr_map
-from sigmond.ui import heading
+from sigmond.paths import COORDINATION_PATH
+from sigmond.ui import err, heading, warn
 
 # Module attributes so tests can point them elsewhere.
 SYSFS_ROOT = Path('/sys/bus/usb/devices')
 CONFDIR = Path('/etc/radio')
+COORD_PATH = COORDINATION_PATH
+_clock = time.monotonic
+_sleep = time.sleep
+WAIT_SECS = 180
 
 
 def load_coord():
@@ -92,6 +99,109 @@ def cmd_sdr_list(args) -> int:
     return rc
 
 
+def _systemctl(*args) -> int:
+    try:
+        return subprocess.run(['systemctl', *args], timeout=60).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 1
+
+
+def present_serials() -> set[str]:
+    return {c.serial for c in sdr_map.present_cards(SYSFS_ROOT)
+            if c.programmed and c.serial}
+
+
+def _wait_secs() -> float:
+    try:
+        return float(os.environ.get('SIGMOND_SDR_IDENTIFY_WAIT_SECS', WAIT_SECS))
+    except ValueError:
+        return WAIT_SECS
+
+
+def _walk(instances: list[str]) -> dict[str, str] | None:
+    """Unplug each card in turn; {instance: serial}, or None if abandoned."""
+    wait = _wait_secs()
+    found: dict[str, str] = {}
+    for inst in instances:
+        desc = _antenna(inst) or inst
+        while True:
+            before = present_serials()
+            print(f'Unplug the RX888 on: {desc}  (radiod@{inst})')
+            try:
+                serial = sdr_map.wait_for_drop(
+                    before, present_serials, _clock() + wait, _clock, _sleep)
+            except sdr_map.AmbiguousDrop as e:
+                print(f'More than one card dropped at once: {", ".join(e.serials)}')
+                print('Plug them all back in; I will ask again.')
+                if not sdr_map.wait_for_present(before, present_serials,
+                                                _clock() + wait, _clock, _sleep):
+                    return None
+                continue
+            if serial is None:
+                return None
+            print(f'  RX888 {serial} went away.  Plug it back in.')
+            if not sdr_map.wait_for_return(serial, present_serials,
+                                           _clock() + wait, _clock, _sleep):
+                return None
+            if serial in found.values():
+                print(f'  {serial} was already matched to another radiod; '
+                      f'unplug a different card.')
+                continue
+            found[inst] = serial
+            break
+    return found
+
+
+def _write_pins(found: dict[str, str]) -> None:
+    for inst, serial in sorted(found.items()):
+        conf = CONFDIR / f'radiod@{inst}.conf'
+        try:
+            conf.write_text(sdr_map.set_conf_serial(conf.read_text(), serial))
+        except (OSError, ValueError) as e:
+            err(f'{conf}: {e}')
+            continue
+        try:
+            COORD_PATH.write_text(sdr_map.set_coord_serial(
+                COORD_PATH.read_text(), inst, serial))
+        except ValueError:
+            warn(f'no [radiod.{inst}] table in {COORD_PATH}; conf pinned, '
+                 f'coordination left alone')
+        except OSError as e:
+            warn(f'{COORD_PATH}: {e}')
+
+
 def cmd_sdr_identify(args) -> int:
-    print('not implemented')
-    return 2
+    dry = getattr(args, 'dry_run', False)
+    if not dry and os.geteuid() != 0:
+        err('identify writes /etc/radio and restarts radiod; run it as root')
+        return 1
+    instances = sorted(sdr_map.instance_serials(CONFDIR, load_coord()))
+    if len(instances) < 2:
+        err('one radiod needs no identify; its conf is unbound by design')
+        return 1
+    if len(present_serials()) < len(instances):
+        err(f'{len(instances)} radiod instances but fewer RX888 cards on the '
+            f'bus; plug them all in first')
+        return 1
+
+    units = [f'radiod@{i}.service' for i in instances]
+    timer = 'sigmond-radiod-watchdog.timer'
+    for u in (timer, *units):
+        _systemctl('stop', u)
+    try:
+        found = _walk(instances)
+        if found is None:
+            print('Walk abandoned: no card change seen in time; nothing written.')
+            return 3
+        heading('Mapping')
+        rows = [(i, _antenna(i) or '-', found[i]) for i in instances]
+        for line in _table(['INSTANCE', 'ANTENNA', 'SERIAL'], rows):
+            print(line)
+        if dry:
+            print('(dry run: nothing written)')
+        else:
+            _write_pins(found)
+        return 0
+    finally:
+        for u in (*units, timer):
+            _systemctl('start', u)

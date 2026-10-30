@@ -142,3 +142,195 @@ def test_cmd_sdr_list_clean(monkeypatch, capsys, tmp_path):
     assert sdr.cmd_sdr_list(SimpleNamespace(json=False)) == 0
     assert ("Every local radiod names its own RX888 and every RX888 is on the bus."
             in capsys.readouterr().out)
+
+
+# ---- identify: pure helpers -------------------------------------------------
+
+import pytest
+from sigmond.sdr_map import (AmbiguousDrop, set_conf_serial, set_coord_serial,
+                             wait_for_drop, wait_for_return)
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+def _seq(*sets):
+    """A poll that yields each scripted set in turn, then repeats the last."""
+    items = [set(s) for s in sets]
+    def poll():
+        return set(items.pop(0)) if len(items) > 1 else set(items[0])
+    return poll
+
+
+def test_wait_for_drop_returns_the_one_missing_serial():
+    c = _Clock()
+    poll = _seq({"A", "B"}, {"A", "B"}, {"B"})
+    assert wait_for_drop({"A", "B"}, poll, 10, c, c.sleep) == "A"
+    assert c.t == 0.5  # two sleeps of 0.25 s
+
+
+def test_wait_for_drop_two_missing_raises_ambiguous():
+    c = _Clock()
+    with pytest.raises(AmbiguousDrop) as e:
+        wait_for_drop({"A", "B", "C"}, _seq({"C"}), 10, c, c.sleep)
+    assert e.value.serials == ["A", "B"]
+
+
+def test_wait_for_drop_times_out_to_none():
+    c = _Clock()
+    assert wait_for_drop({"A"}, _seq({"A"}), 2, c, c.sleep) is None
+    assert c.t >= 2
+
+
+def test_wait_for_return():
+    c = _Clock()
+    assert wait_for_return("A", _seq(set(), set(), {"A"}), 10, c, c.sleep)
+    c = _Clock()
+    assert not wait_for_return("A", _seq(set()), 1, c, c.sleep)
+
+
+def test_set_conf_serial_replaces_commented_line_in_rx888_section():
+    text = ('[airspy]\nserial = "AIR"\n[rx888]\ndevice = "rx888"\n'
+            '# serial  = "OLD"   # sole SDR\nsample = 1\n')
+    out = set_conf_serial(text, "NEW")
+    assert out == ('[airspy]\nserial = "AIR"\n[rx888]\ndevice = "rx888"\n'
+                   'serial      = "NEW"\nsample = 1\n')
+    assert set_conf_serial('[rx888]\nserial = "X"\n', "Y") == \
+        '[rx888]\nserial      = "Y"\n'
+
+
+def test_set_conf_serial_inserts_when_absent_and_refuses_without_section():
+    assert set_conf_serial('[rx888]\ndevice = "rx888"\n', "S") == \
+        '[rx888]\nserial      = "S"\ndevice = "rx888"\n'
+    with pytest.raises(ValueError):
+        set_conf_serial('[airspy]\nserial = "A"\n', "S")
+
+
+def test_set_coord_serial_replaces_inserts_and_refuses():
+    text = ('[radiod.a]\nsdr_serial = "OLD"\nx = 1\n\n'
+            '[radiod.b]\nx = 2\n')
+    out = set_coord_serial(text, "a", "NEW")
+    assert out.startswith('[radiod.a]\nsdr_serial  = "NEW"\nx = 1\n')
+    assert '"OLD"' not in out
+    out = set_coord_serial(text, "b", "S2")
+    assert out.endswith('[radiod.b]\nsdr_serial  = "S2"\nx = 2\n')
+    assert 'sdr_serial = "OLD"' in out
+    with pytest.raises(ValueError):
+        set_coord_serial(text, "c", "S")
+
+
+# ---- identify: the CLI walk ---------------------------------------------------
+
+CONF_A = '[rx888]\ndevice = "rx888"\ndescription = "north"\n'
+CONF_B = '[rx888]\ndevice = "rx888"\ndescription = "south"\n'
+COORD = '[radiod.a]\nx = 1\n\n[radiod.b]\nx = 2\n'
+
+
+def _walk(monkeypatch, tmp_path, polls, confs=None):
+    from sigmond.commands import sdr
+    conf = tmp_path / "radio"
+    conf.mkdir()
+    for inst, text in (confs or {"a": CONF_A, "b": CONF_B}).items():
+        (conf / f"radiod@{inst}.conf").write_text(text)
+    coord = tmp_path / "coordination.toml"
+    coord.write_text(COORD)
+    calls = []
+    clock = _Clock()
+    monkeypatch.setattr(sdr, "CONFDIR", conf)
+    monkeypatch.setattr(sdr, "COORD_PATH", coord)
+    monkeypatch.setattr(sdr, "load_coord", lambda: None)
+    monkeypatch.setattr(sdr, "_systemctl", lambda *a: calls.append(a) or 0)
+    monkeypatch.setattr(sdr, "present_serials", _seq(*polls))
+    monkeypatch.setattr(sdr, "_clock", clock)
+    monkeypatch.setattr(sdr, "_sleep", clock.sleep)
+    monkeypatch.setenv("SIGMOND_SDR_IDENTIFY_WAIT_SECS", "30")
+    return sdr, conf, coord, calls
+
+
+# initial check, step a drop, a returns, step b drop, b returns
+_GOOD = [{"S1", "S2"}, {"S1", "S2"}, {"S2"}, {"S2"}, {"S1", "S2"},
+         {"S1", "S2"}, {"S1"}, {"S1", "S2"}]
+
+
+def test_identify_refuses_single_instance(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD,
+                                    confs={"a": CONF_A})
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=True)) == 1
+    assert "one radiod needs no identify; its conf is unbound by design" \
+        in capsys.readouterr().err
+    assert calls == []
+
+
+def test_identify_dry_run_writes_nothing(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD)
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "Unplug the RX888 on: north  (radiod@a)" in out
+    assert "Plug it back in" in out
+    assert "INSTANCE" in out and "S1" in out and "S2" in out
+    assert (conf / "radiod@a.conf").read_text() == CONF_A
+    assert (conf / "radiod@b.conf").read_text() == CONF_B
+    assert coord.read_text() == COORD
+    stops = [("stop", "sigmond-radiod-watchdog.timer"),
+             ("stop", "radiod@a.service"), ("stop", "radiod@b.service")]
+    starts = [("start", "radiod@a.service"), ("start", "radiod@b.service"),
+              ("start", "sigmond-radiod-watchdog.timer")]
+    assert calls == stops + starts
+
+
+def test_identify_writes_conf_and_coordination(monkeypatch, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD)
+    monkeypatch.setattr(sdr.os, "geteuid", lambda: 0)
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=False)) == 0
+    assert 'serial      = "S1"' in (conf / "radiod@a.conf").read_text()
+    assert 'serial      = "S2"' in (conf / "radiod@b.conf").read_text()
+    t = coord.read_text()
+    assert '[radiod.a]\nsdr_serial  = "S1"' in t
+    assert '[radiod.b]\nsdr_serial  = "S2"' in t
+    assert calls[-1] == ("start", "sigmond-radiod-watchdog.timer")
+
+
+def test_identify_needs_root_to_write(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD)
+    monkeypatch.setattr(sdr.os, "geteuid", lambda: 1000)
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=False)) == 1
+    assert "run it as root" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_identify_two_dropped_at_once_reprompts_then_pins_the_one(
+        monkeypatch, capsys, tmp_path):
+    polls = [{"S1", "S2"},          # initial check
+             {"S1", "S2"},          # step a baseline
+             set(),                 # both vanish: ambiguous
+             {"S1"}, {"S1", "S2"},  # operator restores them
+             {"S1", "S2"},          # step a baseline again
+             {"S2"},                # now only S1 drops
+             {"S2"}, {"S1", "S2"},  # return
+             {"S1", "S2"}, {"S1"}, {"S1", "S2"}]  # step b
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, polls)
+    monkeypatch.setattr(sdr.os, "geteuid", lambda: 0)
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=False)) == 0
+    out = capsys.readouterr().out
+    assert "S1, S2" in out and "plug" in out.lower()
+    assert out.count("Unplug the RX888 on: north") == 2
+    assert 'serial      = "S1"' in (conf / "radiod@a.conf").read_text()
+    assert 'serial      = "S2"' in (conf / "radiod@b.conf").read_text()
+
+
+def test_identify_timeout_abandons_and_writes_nothing(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, [{"S1", "S2"}])
+    monkeypatch.setattr(sdr.os, "geteuid", lambda: 0)
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=False)) == 3
+    assert "abandoned" in capsys.readouterr().out
+    assert (conf / "radiod@a.conf").read_text() == CONF_A
+    assert coord.read_text() == COORD
+    assert calls[-1] == ("start", "sigmond-radiod-watchdog.timer")

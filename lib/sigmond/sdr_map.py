@@ -8,8 +8,10 @@ and stripped.  Port of wsprdaemon's `wd -X` report.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 _VID = '04b4'
 _PID_PROGRAMMED = '00f1'
@@ -179,3 +181,100 @@ def report(cards: list[PresentCard], instances: dict[str, str]) -> SdrReport:
             f"{n} RX888(s) still in the FX3 bootloader (no firmware yet, so "
             f"no serial)")
     return SdrReport(cards=cards, instances=instances, problems=problems)
+
+
+# ---- identify: unplug-walk helpers (injected clock/sleep, no I/O) ------------
+
+POLL_SECS = 0.25
+
+
+class AmbiguousDrop(Exception):
+    """More than one serial vanished in a single poll."""
+
+    def __init__(self, serials):
+        self.serials = sorted(serials)
+        super().__init__(', '.join(self.serials))
+
+
+def wait_for_drop(before: set[str], poll: Callable[[], set[str]],
+                  deadline: float, clock=time.monotonic,
+                  sleep=time.sleep) -> str | None:
+    """The one serial in `before` that `poll()` no longer shows; None at the
+    deadline; AmbiguousDrop when several vanish in the same poll."""
+    while True:
+        gone = set(before) - set(poll())
+        if len(gone) == 1:
+            return next(iter(gone))
+        if gone:
+            raise AmbiguousDrop(gone)
+        if clock() >= deadline:
+            return None
+        sleep(POLL_SECS)
+
+
+def wait_for_present(serials: set[str], poll: Callable[[], set[str]],
+                     deadline: float, clock=time.monotonic,
+                     sleep=time.sleep) -> bool:
+    """True once every serial in `serials` is in `poll()`."""
+    while True:
+        if set(serials) <= set(poll()):
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(POLL_SECS)
+
+
+def wait_for_return(serial: str, poll, deadline: float,
+                    clock=time.monotonic, sleep=time.sleep) -> bool:
+    return wait_for_present({serial}, poll, deadline, clock, sleep)
+
+
+def _pin_in_table(text: str, in_table, key_re: str, new_line: str,
+                  accept_commented: bool) -> str | None:
+    """Replace the key line inside the table `in_table(header)` selects, or
+    insert `new_line` right after its header.  None if no such table."""
+    lines = text.splitlines(keepends=True)
+    start = None
+    end = len(lines)
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if line.startswith('['):
+            if start is not None:
+                end = i
+                break
+            if in_table(line.split('#', 1)[0].strip()):
+                start = i
+    if start is None:
+        return None
+    live = re.compile(rf'^\s*{key_re}\s*=')
+    cmt = re.compile(rf'^\s*#\s*{key_re}\s*=')
+    hit = next((i for i in range(start + 1, end) if live.match(lines[i])), None)
+    if hit is None and accept_commented:
+        hit = next((i for i in range(start + 1, end) if cmt.match(lines[i])), None)
+    nl = '\n'
+    if hit is not None:
+        lines[hit] = new_line + nl
+    else:
+        if not lines[start].endswith(('\n', '\r')):
+            lines[start] += nl
+        lines.insert(start + 1, new_line + nl)
+    return ''.join(lines)
+
+
+def set_conf_serial(text: str, serial: str) -> str:
+    """Pin `serial = "<serial>"` in the [rx888] section (replacing a
+    commented or live line, else inserting it first)."""
+    out = _pin_in_table(text, lambda h: h == '[rx888]', 'serial',
+                        f'serial      = "{_norm(serial)}"', True)
+    if out is None:
+        raise ValueError('no [rx888] section')
+    return out
+
+
+def set_coord_serial(text: str, instance: str, serial: str) -> str:
+    """Pin `sdr_serial` in the [radiod.<instance>] table of coordination.toml."""
+    out = _pin_in_table(text, lambda h: h == f'[radiod.{instance}]',
+                        'sdr_serial', f'sdr_serial  = "{_norm(serial)}"', False)
+    if out is None:
+        raise ValueError(f'no [radiod.{instance}] table')
+    return out
