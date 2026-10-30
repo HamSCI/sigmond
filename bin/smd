@@ -26435,6 +26435,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help='disable component(s) and stop their units')
     p_c_disable.add_argument('names', nargs='+', help='one or more component names')
 
+    # sdr — which RX888 is which radiod (docs/superpowers/specs multi-receiver)
+    p_sdr = admin_sub.add_parser(
+        'sdr',
+        help='map USB-present RX888 cards to radiod instances (list / identify)')
+    sdr_sub = p_sdr.add_subparsers(dest='sdr_command')
+    p_sdr_list = sdr_sub.add_parser(
+        'list',
+        help='show each RX888 on the bus, which radiod opened it, and what '
+             'needs attention')
+    p_sdr_list.add_argument('--json', action='store_true',
+                            help='print {"cards", "instances", "problems"}')
+    p_sdr_ident = sdr_sub.add_parser(
+        'identify',
+        help='identify which physical RX888 is which')
+    p_sdr_ident.add_argument('--dry-run', action='store_true',
+                             help='show what would be done without doing it')
+
     # instance — v2 per-reporter client instances
     # (MULTI-INSTANCE-ARCHITECTURE.md §6)
     p_instance = admin_sub.add_parser(
@@ -27807,6 +27824,8 @@ def _build_parser() -> argparse.ArgumentParser:
         'p_manifest': p_manifest,
         'p_rac': p_rac,
         'p_radiod': p_radiod,
+        'p_sdr': p_sdr,
+        'p_sdr_list': p_sdr_list,
         'p_secrets': p_secrets,
         'p_snapshot': p_snapshot,
         'p_sources': p_sources,
@@ -27870,6 +27889,8 @@ def main() -> int:
     p_manifest = parser._smd_parts['p_manifest']
     p_rac = parser._smd_parts['p_rac']
     p_radiod = parser._smd_parts['p_radiod']
+    p_sdr = parser._smd_parts['p_sdr']
+    p_sdr_list = parser._smd_parts['p_sdr_list']
     p_secrets = parser._smd_parts['p_secrets']
     p_snapshot = parser._smd_parts['p_snapshot']
     p_sources = parser._smd_parts['p_sources']
@@ -28387,6 +28408,16 @@ def main() -> int:
     # `smd admin instance <verb>` — v2 per-reporter client instance lifecycle
     # (MULTI-INSTANCE-ARCHITECTURE.md §6).  All verbs handle their own
     # root-check via _need_root in the handler.
+    if args.command == 'sdr':
+        from sigmond.commands.sdr import cmd_sdr_list, cmd_sdr_identify
+        sc = getattr(args, 'sdr_command', None)
+        if sc is None:                      # bare `smd admin sdr` -> list
+            p_sdr_list.parse_args([], namespace=args)
+            sc = 'list'
+        if sc == 'identify':
+            return cmd_sdr_identify(args)
+        return cmd_sdr_list(args)
+
     if args.command == 'instance':
         ic = getattr(args, 'instance_command', None)
         if ic == 'help':
