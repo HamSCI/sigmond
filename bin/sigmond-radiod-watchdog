@@ -55,6 +55,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 GRACE_SEC = int(os.environ.get('RWD_GRACE_SEC', '120'))
 SILENCE_SEC = int(os.environ.get('RWD_SILENCE_SEC', '600'))
@@ -70,27 +71,46 @@ STATE_DIR = Path('/run/sigmond-radiod-watchdog')
 # fails exactly the way a wedge looks -- no samples, repeated exits -- and a
 # watchdog that "restarted" it would fight the operator and muddy the very
 # measurement they stopped the radio to make.  The hold names the radiod unit
-# it covers; a hold that names none covers every instance, because without a
-# serial -> instance map we cannot tell which radio lost its card.
+# it covers, or a serial that main() maps to one; a hold that names neither
+# covers every instance, because we cannot tell which radio lost its card.
 HOLD_PATH = Path('/var/lib/sigmond/sdr-hold.json')
 
 
-def _held_units() -> tuple:
-    """(held_unit_names, hold_covers_everything)."""
+def _held_units_detail(serial_map: Optional[dict] = None) -> tuple:
+    """(held_unit_names, hold_covers_everything, units_resolved_by_serial).
+
+    Per hold: its `radiod_unit` if it names one; else its `serial` looked up
+    in serial_map ({serial: instance}), giving radiod@<instance>.service;
+    else the hold covers everything -- a legacy hold, or a serial no radiod
+    config claims, because guessing narrow could leave the wrong card
+    unprotected."""
     try:
         holds = json.loads(HOLD_PATH.read_text())
     except Exception:              # noqa: BLE001 -- absent is the normal case
-        return (), False
+        return (), False, frozenset()
     if not isinstance(holds, dict) or not holds:
-        return (), False
-    units, blanket = [], False
+        return (), False, frozenset()
+    smap = {str(k).strip().upper(): v for k, v in (serial_map or {}).items()}
+    units, by_serial, blanket = [], set(), False
     for hold in holds.values():
-        unit = (hold or {}).get('radiod_unit') if isinstance(hold, dict) else None
+        hold = hold if isinstance(hold, dict) else {}
+        unit = hold.get('radiod_unit')
+        if not unit:
+            instance = smap.get(str(hold.get('serial') or '').strip().upper())
+            if instance:
+                unit = f'radiod@{instance}.service'
+                by_serial.add(unit)
         if unit:
             units.append(unit)
         else:
             blanket = True
-    return tuple(units), blanket
+    return tuple(units), blanket, frozenset(by_serial)
+
+
+def _held_units(serial_map: Optional[dict] = None) -> tuple:
+    """(held_unit_names, hold_covers_everything)."""
+    units, blanket, _ = _held_units_detail(serial_map)
+    return units, blanket
 
 # The station's record of losing its RX888 (v3.71, lib/sigmond/sdr_events.py),
 # which `smd doctor` reads.  None means the library's own path,
@@ -351,16 +371,26 @@ def main() -> int:
     # (AI6VN, 2026-10-26: the run was correct and said nothing).  A watchdog
     # that cannot say why it stayed its hand is as hard to trust as one that
     # cannot say why it acted.
+    serial_map: dict = {}
     try:
-        held, blanket = _held_units()
+        lib = Path(__file__).resolve().parent.parent / 'lib'
+        if str(lib) not in sys.path:
+            sys.path.insert(0, str(lib))
+        from sigmond.sdr_map import instance_serials, serial_to_instance
+        serial_map = serial_to_instance(instance_serials())
+    except Exception:               # noqa: BLE001 — no map means blanket holds
+        serial_map = {}
+    try:
+        held, blanket, by_serial = _held_units_detail(serial_map)
     except Exception as exc:        # noqa: BLE001 — watchdog must not die
         print(f'hold: check failed: {exc}', file=sys.stderr)
-        held, blanket = (), False
+        held, blanket, by_serial = (), False, frozenset()
     units = _active_radiod_units()
     if blanket or held:
         skipped = list(units) if blanket else [u for u in units if u in held]
-        named = ', '.join(skipped) if skipped else (
-            ', '.join(held) if held else 'every radiod instance')
+        tag = lambda u: f'{u} (resolved by serial)' if u in by_serial else u
+        named = ', '.join(tag(u) for u in skipped) if skipped else (
+            ', '.join(tag(u) for u in held) if held else 'every radiod instance')
         print(f'manual RX-888 hold in force ({HOLD_PATH}) — not touching '
               f'{named}; release with sigmond-sdr-recover --on')
         units = [u for u in units if u not in skipped]

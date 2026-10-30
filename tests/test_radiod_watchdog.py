@@ -239,5 +239,57 @@ class RestartNotesTheLoss(unittest.TestCase):
         self.assertEqual(len(out.getvalue().splitlines()), 1, out.getvalue())
 
 
+class HoldScopedBySerial(unittest.TestCase):
+    """A hold that names a serial covers only that card's radiod."""
+
+    def _held(self, holds, serial_map=None):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "sdr-hold.json"
+            path.write_text(json.dumps(holds))
+            old, wd.HOLD_PATH = wd.HOLD_PATH, path
+            try:
+                return wd._held_units(serial_map)
+            finally:
+                wd.HOLD_PATH = old
+
+    def test_hold_with_serial_but_no_unit_resolves_through_map(self):
+        got = self._held({"ABC": {"serial": "abc "}}, {"ABC": "kfs-se"})
+        self.assertEqual(got, (("radiod@kfs-se.service",), False))
+
+    def test_hold_with_unknown_serial_is_blanket(self):
+        got = self._held({"ABC": {"serial": "ABC"}}, {"XYZ": "kfs-se"})
+        self.assertEqual(got, ((), True))
+
+    def test_legacy_hold_without_serial_or_unit_is_blanket(self):
+        for holds in ({"ABC": {}}, {"ABC": "garbage"}, {"ABC": None}):
+            self.assertEqual(self._held(holds, {"ABC": "kfs-se"}),
+                             ((), True), holds)
+
+    def test_hold_with_unit_wins_over_serial(self):
+        hold = {"ABC": {"serial": "ABC", "radiod_unit": "radiod@other.service"}}
+        got = self._held(hold, {"ABC": "kfs-se"})
+        self.assertEqual(got, (("radiod@other.service",), False))
+
+    def test_no_map_behaves_as_before(self):
+        hold = {"ABC": {"serial": "ABC"}}
+        self.assertEqual(self._held(hold), ((), True))
+        self.assertEqual(self._held(hold, {}), ((), True))
+
+    def test_detail_reports_which_units_came_from_the_map(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "h.json"
+            path.write_text(json.dumps({
+                "A": {"serial": "A"},
+                "B": {"radiod_unit": "radiod@b.service"}}))
+            old, wd.HOLD_PATH = wd.HOLD_PATH, path
+            try:
+                units, blanket, by_serial = wd._held_units_detail({"A": "a"})
+            finally:
+                wd.HOLD_PATH = old
+        self.assertEqual(units, ("radiod@a.service", "radiod@b.service"))
+        self.assertFalse(blanket)
+        self.assertEqual(by_serial, {"radiod@a.service"})
+
+
 if __name__ == "__main__":
     unittest.main()
