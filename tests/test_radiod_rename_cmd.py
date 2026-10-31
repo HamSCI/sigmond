@@ -291,6 +291,28 @@ def test_unit_that_does_not_start_is_exit_5(station, capsys):
     assert h.released == h.locks
 
 
+def test_gated_ka9q_web_start_is_not_reported_as_started(station, capsys, monkeypatch):
+    root = station.root
+    _first_rename_done(root)
+    h = station(active={"radiod@AI6VN.service", "ka9q-web.service", *CLIENTS},
+                enabled={"radiod@AI6VN.service"})
+    real = h.systemctl
+
+    def systemctl(*args):
+        rc = real(*args)
+        if args[0] == "stop":
+            h.active.discard(args[1])
+        return rc          # a start returns 0 but changes nothing (gated)
+
+    monkeypatch.setattr(rr, "systemctl", systemctl)
+    assert rr.cmd_radiod_rename(_args("AI6VN", "omni")) == 0
+    assert ("start", "ka9q-web.service") in h.calls
+    out = capsys.readouterr().out
+    started = out.split("started again:")[1].split("\n", 1)[1]
+    started = started.split("history stays")[0]
+    assert "ka9q-web.service" not in started
+
+
 def test_failed_enable_of_new_radiod_is_exit_5(station, capsys):
     root = station.root
     _first_rename_done(root)

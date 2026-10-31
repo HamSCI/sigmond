@@ -332,10 +332,14 @@ def cmd_radiod_rename(args) -> int:
         failed: list[str] = []
         started: list[str] = []
 
-        def start(unit: str) -> None:
-            started.append(unit)
+        def start(unit: str, *, gated: bool = False) -> None:
+            # A ka9q-web start can be turned into a no-op by the dispatch's
+            # gate (rc 0, nothing started); report it only if it came up.
             if systemctl('start', unit) != 0:
+                started.append(unit)
                 failed.append(unit)
+            elif not gated or is_active(unit):
+                started.append(unit)
 
         if was_enabled[old_unit] and systemctl('enable', new_unit) != 0:
             failed.append(new_unit)
@@ -343,7 +347,7 @@ def cmd_radiod_rename(args) -> int:
             start(new_unit)
         for w in web:
             if was_active[w]:
-                start(_web_after(w, old, new))
+                start(_web_after(w, old, new), gated=True)
         for u in clients:
             if was_active[u]:
                 start(u)
