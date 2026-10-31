@@ -370,6 +370,10 @@ def cmd_radiod_rename(args) -> int:
         def start(unit: str, *, gated: bool = False) -> None:
             # A ka9q-web start can be turned into a no-op by the dispatch's
             # gate (rc 0, nothing started); report it only if it came up.
+            # Say what is being waited on: a recorder reports ready only
+            # once radiod data flows, so each start can take a minute and
+            # a silent run looks hung (AI6VN-PM, 2026-10-31).
+            print(f'starting {unit} ...', flush=True)
             if systemctl('start', unit) != 0:
                 failed.append(unit)
             elif not gated or is_active(unit):

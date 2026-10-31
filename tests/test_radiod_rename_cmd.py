@@ -155,6 +155,18 @@ def test_rename_running_ai6vn_to_omni_restarts_clients_in_order(station, capsys)
     out = capsys.readouterr().out
     assert "ka9q-web: rewrote AI6VN -> omni" in out
     assert "filed under receiver" in out and "receiver_override" in out
+    # Each start is announced before it blocks, so a minute-long recorder
+    # start does not look like a hang (AI6VN-PM, 2026-10-31).
+    starts = [l for l in out.splitlines() if l.startswith("starting ")]
+    assert starts == [
+        "starting radiod@omni.service ...",
+        "starting ka9q-web.service ...",
+        "starting psk-recorder@AI6VN.service ...",
+        "starting wspr-recorder@AI6VN.service ...",
+        "starting meteor-scatter@AI6VN.service ...",
+        "starting timestd-core-recorder.service ...",
+    ]
+    assert out.index(starts[0]) < out.index("started again:")
 
 
 def test_rename_keeps_mode_and_owner(station):
