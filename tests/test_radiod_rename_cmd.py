@@ -226,6 +226,11 @@ def test_refusal_on_hold_file(station, capsys):
     assert h.calls == []
 
 
+UNITS_LINE = ("units: radiod@AI6VN.service stopped and disabled; "
+              "radiod@omni.service not enabled; finish by hand or re-run "
+              "after fixing")
+
+
 def test_write_failure_midway_exits_4_and_lists_written(station, capsys, monkeypatch):
     root = station.root
     _first_rename_done(root)
@@ -255,6 +260,7 @@ def test_write_failure_midway_exits_4_and_lists_written(station, capsys, monkeyp
         "/etc/systemd/system/radiod@AI6VN.service.d -> /etc/systemd/system/radiod@omni.service.d",
         "/etc/radio/radiod@omni.conf",
         "/etc/sigmond/coordination.toml",
+        UNITS_LINE,
     ]
     assert h.locks == ["admin radiod rename AI6VN omni"]
     assert h.released == h.locks
@@ -273,7 +279,67 @@ def test_failed_daemon_reload_exits_4_and_starts_nothing(station, capsys):
     tail = out[out.index("written:\n"):].splitlines()
     assert tail[1] == "/etc/radio/radiod@AI6VN.conf -> /etc/radio/radiod@omni.conf"
     assert "/etc/sigmond/coordination.env" in tail
+    assert tail[-1] == UNITS_LINE
     assert h.released == h.locks == ["admin radiod rename AI6VN omni"]
+
+
+def test_hook_failure_lists_ka9q_web_actions_taken(station, capsys, monkeypatch):
+    root = station.root
+    _first_rename_done(root)
+    h = station(active={"radiod@AI6VN.service", "ka9q-web.service", *CLIENTS},
+                enabled={"radiod@AI6VN.service"})
+
+    def hook(old, new):
+        e = RuntimeError("systemctl restart blew up")
+        e.lines = ["ka9q-web: stopped and disabled ka9q-web@omni.service",
+                   "ka9q-web: removed /etc/sigmond/ka9q-web/omni.env"]
+        raise e
+    monkeypatch.setattr(rr, "ka9q_web_rewrite", hook)
+    assert rr.cmd_radiod_rename(_args("AI6VN", "omni")) == 4
+    assert "start" not in _verbs(h.calls)
+    out = capsys.readouterr().out
+    tail = out[out.index("written:\n"):].splitlines()
+    assert "/etc/sigmond/coordination.env" in tail
+    i = tail.index(UNITS_LINE)
+    assert tail[i + 1:] == [
+        "ka9q-web actions already taken:",
+        "  ka9q-web: stopped and disabled ka9q-web@omni.service",
+        "  ka9q-web: removed /etc/sigmond/ka9q-web/omni.env",
+    ]
+
+
+def test_units_line_when_old_radiod_was_not_enabled(station, capsys):
+    root = station.root
+    _first_rename_done(root)
+    h = station(active={"radiod@AI6VN.service"})
+    h.fail = {("daemon-reload",)}
+    assert rr.cmd_radiod_rename(_args("AI6VN", "omni")) == 4
+    out = capsys.readouterr().out
+    assert ("units: radiod@AI6VN.service stopped; radiod@omni.service not "
+            "enabled; finish by hand or re-run after fixing\n") in out
+
+
+def test_web_units_for_is_the_handlers_rule(station):
+    root = station.root
+    _first_rename_done(root)
+    station()
+    p = plan("AI6VN", "omni", root=root, components=COMPONENTS)
+    assert rr.web_units_for(p) == ["ka9q-web.service", "ka9q-web@AI6VN.service"]
+    p.edits = [e for e in p.edits
+               if e.path != root / "etc/systemd/system/ka9q-web.service"]
+    assert rr.web_units_for(p) == ["ka9q-web@AI6VN.service"]
+
+
+def test_handler_publishes_its_web_units_before_the_hook(station, monkeypatch):
+    root = station.root
+    _first_rename_done(root)
+    h = station(active={"radiod@AI6VN.service", "ka9q-web.service"})
+    seen = []
+    monkeypatch.setattr(rr, "web_units_owned", None)
+    monkeypatch.setattr(rr, "ka9q_web_rewrite",
+                        lambda old, new: seen.append(rr.web_units_owned) or [])
+    assert rr.cmd_radiod_rename(_args("AI6VN", "omni")) == 0
+    assert seen == [["ka9q-web.service", "ka9q-web@AI6VN.service"]]
 
 
 def test_unit_that_does_not_start_is_exit_5(station, capsys):
@@ -288,6 +354,9 @@ def test_unit_that_does_not_start_is_exit_5(station, capsys):
     assert ("start", "timestd-core-recorder.service") in h.calls
     out = capsys.readouterr().out
     assert "renamed, but these units did not start: wspr-recorder@AI6VN.service\n" in out
+    started = out.split("started again:")[1].split("history stays")[0]
+    assert "wspr-recorder@AI6VN.service" not in started
+    assert "meteor-scatter@AI6VN.service" in started
     assert h.released == h.locks
 
 

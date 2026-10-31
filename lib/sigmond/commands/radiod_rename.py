@@ -67,8 +67,16 @@ def is_enabled(unit: str) -> bool:
 
 def ka9q_web_rewrite(old: str, new: str) -> list[str]:
     """Regenerate the ka9q-web units after the rename; bin/smd replaces
-    this with the real writer.  Returns lines to print."""
+    this with the real writer.  Returns lines to print.  An exception it
+    raises may carry ``lines``: the ka9q-web actions it had already taken,
+    printed with the exit-4 report."""
     return []
+
+
+#: The ka9q-web units this rename's handler stops and starts again
+#: (web_units_for of its plan), set before ka9q_web_rewrite runs so the
+#: bin/smd hook applies the same ownership rule.
+web_units_owned: list[str] | None = None
 
 
 def ka9q_web_port_map(old: str, new: str):
@@ -136,6 +144,9 @@ def _coord_path() -> Path:
     return ROOT / 'etc/sigmond/coordination.toml'
 
 
+# TODO(multi-receiver Phase 3): this restarts every instance of an affected
+# component; on a four-radiod station that bounces instances bound to the
+# other radiods too.  Narrow it to the instances bound to the renamed one.
 def _default_resolve_client_units(components: list[str]) -> list[str]:
     """Service units of `components`, in lifecycle start order."""
     enabled = enabled_components()
@@ -179,14 +190,20 @@ def _load_hold():
     return data if isinstance(data, dict) else None
 
 
-def _web_units(p) -> list[str]:
-    """The ka9q-web unit(s) serving the old status."""
+def web_units_for(p) -> list[str]:
+    """The ka9q-web unit(s) the rename handler owns: it stops each one that
+    was running and starts it again (under its new name) afterwards.  The
+    plain unit is owned only when the planner edited its file (a symlinked
+    unit file is skipped, so the bin/smd hook restarts it instead)."""
     units = []
     plain = ROOT / 'etc/systemd/system/ka9q-web.service'
     if any(e.path == plain for e in p.edits):
         units.append('ka9q-web.service')
     units.append(f'ka9q-web@{p.old}.service')
     return units
+
+
+_web_units = web_units_for
 
 
 def _web_after(unit: str, old: str, new: str) -> str:
@@ -246,6 +263,21 @@ def _print_written(written: list[str]) -> None:
         print(w)
 
 
+def _print_stopped_part_way(written, old, new, old_was_enabled,
+                            web_taken=None) -> None:
+    """The exit-4 report: what was written, the state the radiod units were
+    left in, and any ka9q-web actions the hook had already taken."""
+    _print_written(written)
+    print(f'units: radiod@{old}.service stopped'
+          + (' and disabled' if old_was_enabled else '')
+          + f'; radiod@{new}.service not enabled; finish by hand or re-run '
+          f'after fixing')
+    if web_taken:
+        print('ka9q-web actions already taken:')
+        for line in web_taken:
+            print(f'  {line}')
+
+
 def _move(src: Path, dst: Path) -> None:
     if os.path.lexists(dst):
         # os.replace would silently swap out an empty directory.
@@ -286,8 +318,10 @@ def cmd_radiod_rename(args) -> int:
         print('declined; nothing written.')
         return 2
 
+    global web_units_owned
     old_unit = f'radiod@{old}.service'
-    web = _web_units(p)
+    web = web_units_for(p)
+    web_units_owned = list(web)
     with lock(f'admin radiod rename {old} {new}'):
         watched = [old_unit, *web, *clients]
         was_active = {u: is_active(u) for u in watched}
@@ -318,7 +352,8 @@ def cmd_radiod_rename(args) -> int:
         except (Exception, KeyboardInterrupt) as e:
             err(f'rename stopped part way: {e!r}')
             err('nothing was started; finish by hand from this list:')
-            _print_written(written)
+            _print_stopped_part_way(written, old, new, was_enabled[old_unit],
+                                    getattr(e, 'lines', None))
             return 4
         for line in web_lines:
             print(line)
@@ -326,7 +361,7 @@ def cmd_radiod_rename(args) -> int:
             err('systemctl daemon-reload failed; nothing was started, so no '
                 'unit runs from a stale definition.  Finish by hand from '
                 'this list:')
-            _print_written(written)
+            _print_stopped_part_way(written, old, new, was_enabled[old_unit])
             return 4
 
         failed: list[str] = []
@@ -336,7 +371,6 @@ def cmd_radiod_rename(args) -> int:
             # A ka9q-web start can be turned into a no-op by the dispatch's
             # gate (rc 0, nothing started); report it only if it came up.
             if systemctl('start', unit) != 0:
-                started.append(unit)
                 failed.append(unit)
             elif not gated or is_active(unit):
                 started.append(unit)
