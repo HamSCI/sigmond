@@ -91,3 +91,130 @@ def test_template_reads_its_env_file(smd):
 def test_template_is_cpu_fenced():
     from sigmond.cpu import AFFINITY_UNITS
     assert "ka9q-web@.service" in AFFINITY_UNITS
+
+
+# ---------------------------------------------------- radiod rename (spec §10.2)
+
+def _loc(rid):
+    return Radiod(id=rid, host="localhost", status_dns=f"{rid}-status.local")
+
+
+def test_targets_for_is_pure_and_sorted(smd, monkeypatch):
+    monkeypatch.setattr(coordination, "load_coordination",
+                        lambda *a, **k: pytest.fail("targets_for must not load"))
+    before = smd._ka9q_web_targets_for([_loc("omni"), _loc("AI6VN")])
+    assert before == [("ka9q-web.service", "AI6VN-status.local", 8081),
+                      ("ka9q-web@omni.service", "omni-status.local", 8083)]
+    after = smd._ka9q_web_targets_for([_loc("se"), _loc("omni")])
+    assert after == [("ka9q-web.service", "omni-status.local", 8081),
+                     ("ka9q-web@se.service", "se-status.local", 8083)]
+
+
+def test_targets_still_reads_coordination(smd, monkeypatch):
+    _with(monkeypatch, [_loc("omni"), _loc("AI6VN")])
+    assert smd._ka9q_web_targets() == smd._ka9q_web_targets_for(
+        [_loc("AI6VN"), _loc("omni")])
+
+
+def test_port_map_lines(smd):
+    assert smd._ka9q_web_port_map([("ka9q-web.service", "a-status.local", 8081)]) \
+        == ["ka9q-web: ka9q-web.service  a-status.local  :8081"]
+
+
+def test_port_map_marks_a_changed_8081_holder(smd, monkeypatch):
+    # AI6VN renamed to zz: omni now sorts first and takes 8081.
+    _with(monkeypatch, [_loc("AI6VN"), _loc("omni")])
+    before, after = smd._ka9q_web_port_map_for_rename("AI6VN", "zz")
+    assert before == ["ka9q-web: ka9q-web.service  AI6VN-status.local  :8081",
+                      "ka9q-web: ka9q-web@omni.service  omni-status.local  :8083"]
+    assert after == ["ka9q-web: ka9q-web.service  omni-status.local  :8081"
+                     "  <- 8081 holder changes",
+                     "ka9q-web: ka9q-web@zz.service  zz-status.local  :8083"]
+
+
+def test_port_map_keeps_8081_holder_unmarked(smd, monkeypatch):
+    # omni -> se: AI6VN still sorts first; only the templated unit moves.
+    _with(monkeypatch, [_loc("AI6VN"), _loc("omni")])
+    _, after = smd._ka9q_web_port_map_for_rename("omni", "se")
+    assert after == ["ka9q-web: ka9q-web.service  AI6VN-status.local  :8081",
+                     "ka9q-web: ka9q-web@se.service  se-status.local  :8083"]
+    # Renaming the 8081 holder itself, keeping it first, is no holder change.
+    _, after = smd._ka9q_web_port_map_for_rename("AI6VN", "AA")
+    assert "holder" not in after[0]
+
+
+def test_rewrite_for_rename_retires_stale_templated_unit(smd, monkeypatch, tmp_path):
+    # AI6VN -> zz flips the 8081 holder: ka9q-web@omni vanishes and the
+    # plain unit changes status.
+    calls, wrote = [], []
+
+    class _R:
+        returncode = 0
+        stdout = stderr = ""
+
+    monkeypatch.setattr(smd, "_run", lambda cmd, **k: (calls.append((cmd, k)), _R())[1])
+    monkeypatch.setattr(smd, "_write_ka9q_web_unit", lambda: wrote.append(1) or True)
+    import os as _os
+    from pathlib import Path as _P
+    monkeypatch.setattr(_P, "unlink", lambda *a, **k: pytest.fail("no direct unlink"))
+    monkeypatch.setattr(_os, "remove", lambda *a, **k: pytest.fail("no direct remove"))
+    before = smd._ka9q_web_targets_for([_loc("AI6VN"), _loc("omni")])
+    _with(monkeypatch, [_loc("zz"), _loc("omni")])     # the handler's writes
+    lines = smd._ka9q_web_rewrite_for_rename("AI6VN", "zz", before=before)
+
+    assert wrote == [1]
+    cmds = [c for c, _ in calls]
+    assert ["systemctl", "stop", "ka9q-web@omni.service"] in cmds
+    assert ["systemctl", "disable", "ka9q-web@omni.service"] in cmds
+    assert ["rm", "-f", "/etc/sigmond/ka9q-web/omni.env"] in cmds
+    assert ["systemctl", "restart", "ka9q-web.service"] in cmds
+    assert all(k.get("sudo") for _, k in calls)
+    # Nothing else is stopped or restarted (ka9q-web@zz is new: the handler
+    # starts it).
+    assert len([c for c in cmds if c[:2] == ["systemctl", "restart"]]) == 1
+    assert not any("ka9q-web@zz" in " ".join(c) for c in cmds)
+    text = "\n".join(lines)
+    assert "ka9q-web: ka9q-web@omni.service  omni-status.local  :8083" in text
+    assert "ka9q-web: ka9q-web@zz.service  zz-status.local  :8083" in text
+    assert "stopped and disabled ka9q-web@omni.service" in text
+    assert "restarted ka9q-web.service" in text
+
+
+def test_rewrite_for_rename_plain_unit_env_untouched(smd, monkeypatch):
+    calls = []
+
+    class _R:
+        returncode = 0
+        stdout = stderr = ""
+
+    monkeypatch.setattr(smd, "_run", lambda cmd, **k: (calls.append(cmd), _R())[1])
+    monkeypatch.setattr(smd, "_write_ka9q_web_unit", lambda: True)
+    before = smd._ka9q_web_targets_for([_loc("AI6VN"), _loc("omni")])
+    _with(monkeypatch, [_loc("AI6VN"), _loc("se")])
+    smd._ka9q_web_rewrite_for_rename("omni", "se", before=before)
+    assert ["systemctl", "stop", "ka9q-web@omni.service"] in calls
+    assert ["rm", "-f", "/etc/sigmond/ka9q-web/omni.env"] in calls
+    assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
+
+
+def test_dispatch_dry_run_reaches_handler_with_hooks(smd, monkeypatch):
+    from sigmond.commands import radiod_rename as rr
+    seen = {}
+
+    def fake(args):
+        seen["args"] = (args.old, args.new, args.dry_run)
+        seen["rewrite"] = rr.ka9q_web_rewrite
+        seen["port_map"] = rr.ka9q_web_port_map
+        return 7
+
+    monkeypatch.setattr(rr, "cmd_radiod_rename", fake)
+    monkeypatch.setattr(rr, "ka9q_web_rewrite", rr.ka9q_web_rewrite)
+    monkeypatch.setattr(rr, "ka9q_web_port_map", rr.ka9q_web_port_map)
+    monkeypatch.setattr(smd, "_need_root", lambda name: pytest.fail("dry run elevates"))
+    _with(monkeypatch, [_loc("a")])
+    import sys as _sys
+    monkeypatch.setattr(_sys, "argv", ["smd", "admin", "radiod", "rename", "a", "b", "--dry-run"])
+    assert smd.main() == 7
+    assert seen["args"] == ("a", "b", True)
+    assert seen["port_map"] is smd._ka9q_web_port_map_for_rename
+    assert seen["rewrite"] is not None and seen["rewrite"].__name__ != "ka9q_web_rewrite"

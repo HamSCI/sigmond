@@ -11548,6 +11548,38 @@ def _ka9q_web_port(index: int, reserved: frozenset) -> int:
     return port
 
 
+def _ka9q_web_local_radiods() -> list:
+    """This host's local radiods from coordination.toml ([] when unreadable)."""
+    try:
+        from sigmond.coordination import load_coordination
+        return list(load_coordination().local_radiods())
+    except Exception:
+        return []
+
+
+def _ka9q_web_targets_for(radiods: list) -> list:
+    """[(unit_name, status_dns, port)] for these local radiods; pure.
+
+    Anything with ``.id`` and ``.effective_status_dns`` will do.  Sorted by
+    id: the first gets the plain ``ka9q-web.service`` on 8081, each further
+    one ``ka9q-web@<id>.service`` on the next free port (see
+    _ka9q_web_targets).  `smd admin radiod rename` calls it on the radiod
+    list as it will be after the rename to show the port map in its plan.
+    """
+    try:
+        from sigmond import gmag_webui as _gw
+        reserved = frozenset({_gw.PORT, 8000})
+    except Exception:
+        reserved = frozenset({8082, 8000})
+    local = sorted(radiods, key=lambda r: r.id)
+    out = []
+    for i, r in enumerate(x for x in local if x.effective_status_dns):
+        unit = 'ka9q-web.service' if i == 0 else f'ka9q-web@{r.id}.service'
+        out.append((unit, r.effective_status_dns,
+                    _ka9q_web_port(i, reserved)))
+    return out
+
+
 def _ka9q_web_targets() -> list:
     """[(unit_name, status_dns, port)] — one ka9q-web per LOCAL radiod.
 
@@ -11561,21 +11593,7 @@ def _ka9q_web_targets() -> list:
     so the old single-unit writer installed nothing at all.  With no local
     radiod declared, fall back to SIGMOND_RADIOD_STATUS as before.
     """
-    try:
-        from sigmond.coordination import load_coordination
-        local = sorted(load_coordination().local_radiods(), key=lambda r: r.id)
-    except Exception:
-        local = []
-    try:
-        from sigmond import gmag_webui as _gw
-        reserved = frozenset({_gw.PORT, 8000})
-    except Exception:
-        reserved = frozenset({8082, 8000})
-    out = []
-    for i, r in enumerate(x for x in local if x.effective_status_dns):
-        unit = 'ka9q-web.service' if i == 0 else f'ka9q-web@{r.id}.service'
-        out.append((unit, r.effective_status_dns,
-                    _ka9q_web_port(i, reserved)))
+    out = _ka9q_web_targets_for(_ka9q_web_local_radiods())
     if out:
         return out
     try:
@@ -11695,6 +11713,104 @@ def _write_ka9q_web_unit() -> bool:
         _run(['systemctl', 'daemon-reload'], sudo=True)
     _run(['systemctl', 'enable', *enable], sudo=True)
     return True
+
+
+def _ka9q_web_port_map(targets, *, holder_changed: bool = False) -> list:
+    """`ka9q-web: <unit>  <status>  :<port>` per target.  With
+    ``holder_changed`` the 8081 line says the radiod behind it changed."""
+    out = []
+    for unit, status, port in targets:
+        line = f'ka9q-web: {unit}  {status}  :{port}'
+        if holder_changed and port == 8081:
+            line += '  <- 8081 holder changes'
+        out.append(line)
+    return out
+
+
+def _radiod_conf_status(instance: str) -> str:
+    """radiod@<instance>'s [global] status, as the rename planner reads it."""
+    from sigmond.radiod_rename import default_status, status_of
+    try:
+        text = Path(f'/etc/radio/radiod@{instance}.conf').read_text()
+    except OSError:
+        text = ''
+    return (status_of(text) if text else '') or default_status(instance)
+
+
+def _radiods_renamed(radiods: list, old: str, new: str) -> list:
+    """Copies of ``radiods`` as they will read after `old` -> `new`: the
+    renamed one (keyed by id, or by its status DNS as bring-up writes it)
+    takes the new id and the new default status."""
+    import dataclasses as _dc
+    from sigmond.radiod_rename import default_status
+    old_status, new_status = _radiod_conf_status(old), default_status(new)
+    out = []
+    for r in radiods:
+        if r.id == old:
+            r = _dc.replace(r, id=new, status_dns=new_status)
+        elif r.id == old_status:
+            r = _dc.replace(r, id=new_status, status_dns=new_status)
+        out.append(r)
+    return out
+
+
+def _ka9q_web_holder(radiods: list):
+    """The id of the radiod the plain unit (port 8081) serves, or None."""
+    local = sorted((r for r in radiods if r.effective_status_dns),
+                   key=lambda r: r.id)
+    return local[0].id if local else None
+
+
+def _ka9q_web_port_map_for_rename(old: str, new: str):
+    """(before lines, after lines) of the ka9q-web port map for a rename,
+    computed in memory; the after map marks a changed 8081 holder (spec
+    §10.2: shown in the plan, not discovered)."""
+    from sigmond.radiod_rename import default_status
+    local = _ka9q_web_local_radiods()
+    before = _ka9q_web_targets_for(local)
+    if not before:
+        return None
+    renamed = _radiods_renamed(local, old, new)
+    after = _ka9q_web_targets_for(renamed)
+    was = _ka9q_web_holder(local)
+    rename = {old: new, _radiod_conf_status(old): default_status(new)}
+    changed = rename.get(was, was) != _ka9q_web_holder(renamed)
+    return (_ka9q_web_port_map(before),
+            _ka9q_web_port_map(after, holder_changed=changed))
+
+
+def _ka9q_web_rewrite_for_rename(old: str, new: str, *, before: list) -> list:
+    """After a rename's writes: regenerate the ka9q-web units, then retire
+    every unit no longer a target and restart one whose status or port
+    changed.  ``before`` is _ka9q_web_targets() taken before the rename
+    touched anything.  Returns lines for the handler to print.
+
+    The unit that served the renamed radiod is stopped by the handler and
+    its successor started by it; a unit new in ``after`` is left to it.
+    """
+    after = _ka9q_web_targets()
+    lines = ['ka9q-web port map before:',
+             *(f'  {x}' for x in _ka9q_web_port_map(before)),
+             'ka9q-web port map after:',
+             *(f'  {x}' for x in _ka9q_web_port_map(after))]
+    if not _write_ka9q_web_unit():
+        raise RuntimeError('ka9q-web unit writer failed')
+    now = {unit: (status, port) for unit, status, port in after}
+    for unit, status, port in before:
+        if unit not in now:
+            _run(['systemctl', 'stop', unit], sudo=True)
+            _run(['systemctl', 'disable', unit], sudo=True)
+            lines.append(f'ka9q-web: stopped and disabled {unit}')
+            if unit.startswith('ka9q-web@'):
+                inst = unit[len('ka9q-web@'):-len('.service')]
+                env = f'/etc/sigmond/ka9q-web/{inst}.env'
+                _run(['rm', '-f', env], sudo=True)
+                lines.append(f'ka9q-web: removed {env}')
+        elif now[unit] != (status, port):
+            r = _run(['systemctl', 'restart', unit], sudo=True)
+            lines.append(f'ka9q-web: restarted {unit}'
+                         + ('' if r.returncode == 0 else '  (FAILED)'))
+    return lines
 
 
 def _ensure_radiod_running() -> None:
@@ -26640,6 +26756,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help='actually rewrite the files (requires root); '
              'without this, only the per-file diff is printed')
 
+    p_r_rename = radiod_sub.add_parser(
+        'rename',
+        help='rename radiod@<old> to radiod@<new> on this host: conf, '
+             'status, coordination, client configs and units, then start '
+             'again what was running')
+    p_r_rename.add_argument('old', help='the instance now, e.g. omni')
+    p_r_rename.add_argument('new', help='the instance after, e.g. se')
+    p_r_rename.add_argument(
+        '--description', default=None, metavar='TEXT',
+        help='also set the [global] description in the renamed conf')
+    p_r_rename.add_argument(
+        '--dry-run', action='store_true',
+        help='print the plan (files, moves, units, ka9q-web port map); '
+             'change nothing')
+    p_r_rename.add_argument(
+        '--yes', action='store_true',
+        help='skip the confirmation prompt (for scripts)')
+
+    p_r_describe = radiod_sub.add_parser(
+        'describe',
+        help="set a radiod instance's [global] description (restarts it "
+             "if running)")
+    p_r_describe.add_argument('instance', help='the radiod instance, e.g. se')
+    p_r_describe.add_argument('text', help='the new description')
+    p_r_describe.add_argument(
+        '--dry-run', action='store_true',
+        help='print the change; write nothing')
+    p_r_describe.add_argument(
+        '--yes', action='store_true',
+        help='skip the confirmation prompt (for scripts)')
+
     p_r_rsc = radiod_sub.add_parser(
         'restart-stale-consumers',
         help="restart the radiod consumers still running from before "
@@ -28543,6 +28690,20 @@ def main() -> int:
             if not args.dry_run and _need_root('admin radiod restart-stale-consumers'):
                 return 1
             return cmd_radiod_restart_stale_consumers(args)
+        if rc in ('rename', 'describe'):
+            if not args.dry_run and _need_root(f'admin radiod {rc}'):
+                return 1
+            from sigmond.commands import radiod_rename as _rr
+            if rc == 'describe':
+                return _rr.cmd_radiod_describe(args)
+            web_before = _ka9q_web_targets()
+
+            def _rewrite(old, new, _before=web_before):
+                return _ka9q_web_rewrite_for_rename(old, new, before=_before)
+
+            _rr.ka9q_web_rewrite = _rewrite
+            _rr.ka9q_web_port_map = _ka9q_web_port_map_for_rename
+            return _rr.cmd_radiod_rename(args)
         p_radiod.print_help()
         return 0
 
