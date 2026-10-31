@@ -1350,6 +1350,14 @@ RX888 is on the bus.` and the exit code is 0. Otherwise it prints
    apply` refuses with `only N eligible core(s)`; give the VM more cores or
    pass `--allow-shared-radiod-cores` to let the radiods share.
 
+   `smd apply` also lifts the kernel's cap on in-flight USB transfer memory
+   (`usbcore.usbfs_memory_mb`, 16 MiB by default, shared by every USB user
+   on the host). Each radiod wants 32 MiB, so under the default the second
+   radiod to start gets no samples at all and quits with `No rx888 data for
+   5 seconds` while the first keeps running. Two RX888s on separate USB
+   controllers fail the same way; the cap is host-wide. The setting lands
+   in `/etc/tmpfiles.d/sigmond-usbfs.conf` and takes effect at once.
+
 Pin each radiod to its own card with the identify walk. Make sure every RX888
 is plugged in first, and run it as root `[VM]`:
 

@@ -12069,6 +12069,68 @@ def _ensure_multicast_rcvbuf(dry_run: bool = False) -> bool:
     return True
 
 
+USBFS_MEMORY_PARAM = Path('/sys/module/usbcore/parameters/usbfs_memory_mb')
+USBFS_MEMORY_TMPFILES = Path('/etc/tmpfiles.d/sigmond-usbfs.conf')
+USBFS_MEMORY_MB = 0          # 0 = no cap; radiod is the only usbfs user here
+
+
+def _ensure_usbfs_memory(dry_run: bool = False) -> bool:
+    """Lift the kernel's cap on in-flight usbfs transfer memory.
+
+    usbcore.usbfs_memory_mb (default 16) caps the URB buffers of EVERY usbfs
+    user on the host together.  radiod's rx888 driver queues 64 transfers of
+    512 KiB, 32 MiB per card, and a submit the cap refuses is silently dropped
+    (rx888.c counts only the transfers it did submit).  One card therefore
+    runs on whatever the cap allows; a second card gets no transfer at all,
+    sees no USB error, and radiod quits with "No rx888 data for 5 seconds"
+    while the first keeps running.  Whichever radiod starts second loses,
+    on any USB controller (AI6VN-PM, two RX888s, 2026-10-31).
+
+    Written as a tmpfiles.d line so it survives a reboot on a built-in
+    usbcore (no modprobe.d), and applied live.  Idempotent.
+    """
+    desired = (
+        "# Managed by sigmond (smd apply).  usbcore.usbfs_memory_mb caps the\n"
+        "# in-flight USB transfer memory of every usbfs user together; two\n"
+        "# RX888s at 32 MiB each starve the second under the 16 MiB default.\n"
+        f"w {USBFS_MEMORY_PARAM} - - - - {USBFS_MEMORY_MB}\n"
+    )
+    try:
+        live = int(USBFS_MEMORY_PARAM.read_text().strip())
+    except Exception:
+        return False                       # no usbcore here: nothing to tune
+    have_conf = USBFS_MEMORY_TMPFILES.exists() and USBFS_MEMORY_TMPFILES.read_text() == desired
+    live_ok = live == USBFS_MEMORY_MB
+    if have_conf and live_ok:
+        return False
+    if dry_run:
+        if not have_conf:
+            _info(f'(dry-run) would write {USBFS_MEMORY_TMPFILES} '
+                  f'(usbfs_memory_mb={USBFS_MEMORY_MB})')
+        if not live_ok:
+            _info(f'(dry-run) would set usbfs_memory_mb={USBFS_MEMORY_MB} (live: {live})')
+        return False
+    changed = False
+    if not have_conf:
+        try:
+            USBFS_MEMORY_TMPFILES.parent.mkdir(parents=True, exist_ok=True)
+            USBFS_MEMORY_TMPFILES.write_text(desired)
+            _ok(f'usb tuning: wrote {USBFS_MEMORY_TMPFILES.name} '
+                f'(usbfs_memory_mb={USBFS_MEMORY_MB}, was {live})')
+            changed = True
+        except OSError as exc:
+            _warn(f'usb tuning: could not write {USBFS_MEMORY_TMPFILES}: {exc}')
+    if not live_ok:
+        try:
+            USBFS_MEMORY_PARAM.write_text(f'{USBFS_MEMORY_MB}\n')
+            _ok(f'usb tuning: usbfs_memory_mb {live} -> {USBFS_MEMORY_MB} '
+                f'(a radiod already running keeps its transfers; the next start gets the full set)')
+            changed = True
+        except OSError as exc:
+            _warn(f'usb tuning: could not set usbfs_memory_mb: {exc}')
+    return changed
+
+
 def _apply_uploader_manifest() -> bool:
     """`smd apply`'s uploader manifest step (`--write --enable`).  Returns
     False, after saying so, when the step exits non-zero: a failed probe
@@ -12113,6 +12175,7 @@ def cmd_apply(args) -> int:
     # every subscriber).  Runs before recorders start on a greenfield apply
     # so they bind against the raised ceiling; harmonize.py checks it.
     something_changed |= _ensure_multicast_rcvbuf(dry_run=dry_run)
+    something_changed |= _ensure_usbfs_memory(dry_run=dry_run)
 
     # Reconcile Proxmox VM `onboot` flag — silent no-op on bare-metal
     # hosts.  Catches the "host rebooted, VM didn't come back" failure
