@@ -11781,7 +11781,8 @@ def _ka9q_web_port_map_for_rename(old: str, new: str):
 
 def _ka9q_web_rewrite_for_rename(old: str, new: str, *, before: list,
                                  was_active: dict, old_status: str,
-                                 allowed: set, is_active=None) -> list:
+                                 allowed: set, handler_web=None,
+                                 is_active=None) -> list:
     """After a rename's writes: regenerate the ka9q-web units and leave each
     radiod's page up exactly when it was up before.  Returns lines to print.
 
@@ -11795,11 +11796,18 @@ def _ka9q_web_rewrite_for_rename(old: str, new: str, *, before: list,
     The handler has already rewritten the plain unit file and runs its own
     daemon-reload only after this hook, so the writer may see nothing to
     change; reload here before any restart or a unit comes back with its
-    old ``-m``.  The handler later starts ``ka9q-web.service`` (when it
-    served the old radiod) and ``ka9q-web@<new>``; those starts are
-    deferred to it so they follow radiod@<new>.  ``allowed`` is filled with
-    the ka9q-web units the handler may start; the dispatch gates the
-    handler's other ka9q-web starts on it (_ka9q_web_start_gate).
+    old ``-m``.  ``handler_web`` is the handler's own list of the
+    ka9q-web units it stops and starts again (radiod_rename.web_units_for,
+    published as ``web_units_owned``); the starts of those that were up are
+    deferred to the handler so they follow radiod@<new>, unless the unit is
+    still active here (the handler did not stop it), when it is restarted
+    now.  ``allowed`` is filled with the ka9q-web units the handler may
+    start; the dispatch gates the handler's other ka9q-web starts on it
+    (_ka9q_web_start_gate).  A page that was not up before is disabled
+    again after the writer (which enables every target).
+
+    On a failure after the writer ran, the exception raised carries
+    ``lines``: the actions already taken, for the handler's exit-4 report.
     """
     from sigmond.radiod_rename import default_status
     if is_active is None:
@@ -11817,6 +11825,26 @@ def _ka9q_web_rewrite_for_rename(old: str, new: str, *, before: list,
              *(f'  {x}' for x in _ka9q_web_port_map(after))]
     if not _write_ka9q_web_unit():
         raise RuntimeError('ka9q-web unit writer failed')
+    taken = ['ka9q-web: units regenerated (writer ran)']
+    try:
+        _ka9q_web_settle_after_rename(
+            old, new, before=before, after=after, was_active=was_active,
+            old_status=old_status, new_status=new_status, allowed=allowed,
+            handler_web=handler_web, is_active=is_active, taken=taken)
+    except Exception as e:
+        try:
+            e.lines = list(taken)
+        except AttributeError:
+            raise RuntimeError(str(e)) from e
+        raise
+    return lines + taken[1:]
+
+
+def _ka9q_web_settle_after_rename(old, new, *, before, after, was_active,
+                                  old_status, new_status, allowed,
+                                  handler_web, is_active, taken) -> None:
+    """The body of _ka9q_web_rewrite_for_rename after the writer: append
+    each action to ``taken`` as it is done."""
     r = _run(['systemctl', 'daemon-reload'], sudo=True)
     if r.returncode != 0:
         raise RuntimeError('systemctl daemon-reload failed after the '
@@ -11827,15 +11855,15 @@ def _ka9q_web_rewrite_for_rename(old: str, new: str, *, before: list,
     for unit, status, _port in before:
         key = new_status if status == old_status else status
         page_was_up[key] = page_was_up.get(key, False) or bool(was_active.get(unit))
-    # What the handler will start after radiod@<new> (radiod_rename._web_units).
+    # What the handler will start after radiod@<new>: its own list
+    # (radiod_rename.web_units_for), each under its new name, if it was up.
+    if handler_web is None:
+        handler_web = [f'ka9q-web@{old}.service']
     handler_starts = set()
-    for unit, status, _port in before:
-        if unit == 'ka9q-web.service' and status == old_status:
-            handler_starts.add(unit)
-    if was_active.get(f'ka9q-web@{old}.service'):
-        handler_starts.add(f'ka9q-web@{new}.service')
-    handler_starts = {u for u in handler_starts
-                      if u == f'ka9q-web@{new}.service' or was_active.get(u)}
+    for w in handler_web:
+        if was_active.get(w):
+            handler_starts.add(f'ka9q-web@{new}.service'
+                               if w == f'ka9q-web@{old}.service' else w)
 
     then = {unit: (status, port) for unit, status, port in before}
     now = {unit: (status, port) for unit, status, port in after}
@@ -11843,28 +11871,30 @@ def _ka9q_web_rewrite_for_rename(old: str, new: str, *, before: list,
         if unit not in now:
             _run(['systemctl', 'stop', unit], sudo=True)
             _run(['systemctl', 'disable', unit], sudo=True)
-            lines.append(f'ka9q-web: stopped and disabled {unit}')
+            taken.append(f'ka9q-web: stopped and disabled {unit}')
             if unit.startswith('ka9q-web@'):
                 inst = unit[len('ka9q-web@'):-len('.service')]
                 env = f'/etc/sigmond/ka9q-web/{inst}.env'
                 _run(['rm', '-f', env], sudo=True)
-                lines.append(f'ka9q-web: removed {env}')
+                taken.append(f'ka9q-web: removed {env}')
     for unit, status, port in after:
         if page_was_up.get(status, False):
-            if unit in handler_starts:
+            if unit in handler_starts and not is_active(unit):
                 allowed.add(unit)
                 continue
-            if then.get(unit) == (status, port) and is_active(unit):
+            if (unit not in handler_starts and then.get(unit) == (status, port)
+                    and is_active(unit)):
                 continue
             r = _run(['systemctl', 'restart', unit], sudo=True)
-            lines.append(f'ka9q-web: restarted {unit} ({status} :{port})'
+            taken.append(f'ka9q-web: restarted {unit} ({status} :{port})'
                          + ('' if r.returncode == 0 else '  (FAILED)'))
         else:
             if is_active(unit):
                 _run(['systemctl', 'stop', unit], sudo=True)
-            lines.append(f'ka9q-web: {unit} serves {status}, whose page was '
-                         f'not running: left stopped')
-    return lines
+            # The writer enables every target; this page was not up.
+            _run(['systemctl', 'disable', unit], sudo=True)
+            taken.append(f'ka9q-web: {unit} serves {status}, whose page was '
+                         f'not running: left stopped and disabled')
 
 
 def _ka9q_web_start_gate(systemctl, allowed: set):
@@ -28772,9 +28802,12 @@ def main() -> int:
             web_allowed: set = set()
 
             def _rewrite(old, new):
+                # web_units_owned: the handler's own ownership rule, set
+                # from its plan before it calls this hook.
                 return _ka9q_web_rewrite_for_rename(
                     old, new, before=web_before, was_active=web_active,
-                    old_status=web_old_status, allowed=web_allowed)
+                    old_status=web_old_status, allowed=web_allowed,
+                    handler_web=_rr.web_units_owned)
 
             _rr.ka9q_web_rewrite = _rewrite
             _rr.systemctl = _ka9q_web_start_gate(_rr.systemctl, web_allowed)

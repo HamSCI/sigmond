@@ -182,20 +182,25 @@ class _Exists:
         return True
 
 
-def _rename(smd, monkeypatch, host, old, new, before_ids, after_ids, active):
+def _rename(smd, monkeypatch, host, old, new, before_ids, after_ids, active,
+            handler_web=None):
     """Run the hook as the dispatch would: before taken first, then the
-    handler stops what served the old radiod, then the hook."""
+    handler stops the ka9q-web units it owns (web_units_for: the plain unit
+    when the planner edited it, plus ka9q-web@<old>), then the hook."""
     before = smd._ka9q_web_targets_for([_loc(i) for i in before_ids])
     was = {u: u in active for u, _s, _p in before}
-    served_old = [u for u, s, _p in before if s == f"{old}-status.local"]
-    for u in served_old:                 # radiod_rename stops these first
+    if handler_web is None:
+        handler_web = [u for u, s, _p in before
+                       if u == "ka9q-web.service" and s == f"{old}-status.local"]
+        handler_web.append(f"ka9q-web@{old}.service")
+    for u in handler_web:                # radiod_rename stops these first
         host.active.discard(u)
     _with(monkeypatch, [_loc(i) for i in after_ids])
     allowed = set()
     lines = smd._ka9q_web_rewrite_for_rename(
         old, new, before=before, was_active=was,
         old_status=f"{old}-status.local", allowed=allowed,
-        is_active=host.is_active)
+        handler_web=handler_web, is_active=host.is_active)
     return lines, allowed
 
 
@@ -317,3 +322,115 @@ def test_dispatch_dry_run_reaches_handler_with_hooks(smd, monkeypatch):
     assert seen["port_map"] is smd._ka9q_web_port_map_for_rename
     assert seen["rewrite"] is not None and seen["rewrite"].__name__ != "ka9q_web_rewrite"
     assert rr.systemctl.__name__ == "gated"
+
+
+def test_symlinked_plain_unit_is_restarted_by_the_hook(smd, monkeypatch):
+    # /etc/systemd/system/ka9q-web.service is a symlink: the planner skips
+    # it, so the handler neither stops nor starts it (web_units_for leaves
+    # it out).  The hook must restart it after the reload, or the page keeps
+    # the old -m and serves a dead status on 8081.
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service", "ka9q-web@se.service"})
+    lines, allowed = _rename(smd, monkeypatch, host, "AI6VN", "omni",
+                             ["AI6VN", "se"], ["omni", "se"],
+                             active={"ka9q-web.service", "ka9q-web@se.service"},
+                             handler_web=["ka9q-web@AI6VN.service"])
+    reload_at = host.calls.index(["systemctl", "daemon-reload"])
+    restart = host.calls.index(["systemctl", "restart", "ka9q-web.service"])
+    assert reload_at < restart
+    assert "ka9q-web.service" not in allowed
+    assert "ka9q-web@se.service" not in host.did("restart")
+
+
+def test_handler_owned_unit_still_active_is_restarted_not_deferred(smd, monkeypatch):
+    # The handler's list names the plain unit, yet it is still running at
+    # hook time (the handler's stop did not take): restart it here.
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service"})
+    before = smd._ka9q_web_targets_for([_loc("AI6VN")])
+    _with(monkeypatch, [_loc("omni")])
+    allowed = set()
+    smd._ka9q_web_rewrite_for_rename(
+        "AI6VN", "omni", before=before, was_active={"ka9q-web.service": True},
+        old_status="AI6VN-status.local", allowed=allowed,
+        handler_web=["ka9q-web.service", "ka9q-web@AI6VN.service"],
+        is_active=host.is_active)
+    assert host.did("restart") == ["ka9q-web.service"]
+    assert host.calls.index(["systemctl", "daemon-reload"]) < \
+        host.calls.index(["systemctl", "restart", "ka9q-web.service"])
+    assert allowed == set()
+
+
+def test_page_that_was_not_up_is_disabled_after_the_writer(smd, monkeypatch):
+    # The writer enables every target; a page that was down before stays
+    # down at the next boot too.
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service"})
+    lines, allowed = _rename(smd, monkeypatch, host, "omni", "se",
+                             ["AI6VN", "omni"], ["AI6VN", "se"],
+                             active={"ka9q-web.service"})
+    writer = host.calls.index(["WRITER"])
+    disable = host.calls.index(["systemctl", "disable", "ka9q-web@se.service"])
+    assert writer < disable
+    assert "ka9q-web.service" not in host.did("disable")
+    assert any("ka9q-web@se.service" in x and "disabled" in x for x in lines)
+
+
+def test_hook_failure_carries_the_actions_taken(smd, monkeypatch):
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service", "ka9q-web@omni.service"})
+    real = host.run
+
+    def run(cmd, **k):
+        if cmd[:2] == ["systemctl", "restart"]:
+            raise OSError("sudo went away")
+        return real(cmd, **k)
+    monkeypatch.setattr(smd, "_run", run)
+    with pytest.raises(Exception) as ei:
+        _rename(smd, monkeypatch, host, "AI6VN", "zz", ["AI6VN", "omni"], ["zz", "omni"],
+                active={"ka9q-web.service", "ka9q-web@omni.service"})
+    lines = ei.value.lines
+    assert "ka9q-web: stopped and disabled ka9q-web@omni.service" in lines
+    assert "ka9q-web: removed /etc/sigmond/ka9q-web/omni.env" in lines
+    assert not any(x.startswith("  ") for x in lines)     # no port map
+
+
+def test_hook_reload_failure_carries_the_writer(smd, monkeypatch):
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service"})
+    real = host.run
+
+    class _Bad:
+        returncode = 1
+        stdout = stderr = ""
+
+    monkeypatch.setattr(smd, "_run", lambda cmd, **k: _Bad() if cmd == [
+        "systemctl", "daemon-reload"] else real(cmd, **k))
+    with pytest.raises(Exception) as ei:
+        _rename(smd, monkeypatch, host, "AI6VN", "omni", ["AI6VN"], ["omni"],
+                active={"ka9q-web.service"})
+    assert ei.value.lines == ["ka9q-web: units regenerated (writer ran)"]
+
+
+def test_dispatch_passes_the_handlers_web_units_to_the_hook(smd, monkeypatch):
+    from sigmond.commands import radiod_rename as rr
+    seen = {}
+
+    def fake(args):
+        rr.web_units_owned = ["ka9q-web@a.service"]
+        seen["lines"] = rr.ka9q_web_rewrite("a", "b")
+        return 0
+
+    def hook(old, new, **k):
+        seen["kw"] = k
+        return []
+
+    monkeypatch.setattr(rr, "cmd_radiod_rename", fake)
+    monkeypatch.setattr(rr, "ka9q_web_rewrite", rr.ka9q_web_rewrite)
+    monkeypatch.setattr(rr, "ka9q_web_port_map", rr.ka9q_web_port_map)
+    monkeypatch.setattr(rr, "systemctl", rr.systemctl)
+    monkeypatch.setattr(rr, "is_active", lambda u: False)
+    monkeypatch.setattr(rr, "web_units_owned", None)
+    monkeypatch.setattr(smd, "_need_root", lambda name: False)
+    monkeypatch.setattr(smd, "_ka9q_web_rewrite_for_rename", hook)
+    monkeypatch.setattr(smd, "_radiod_conf_status", lambda i: f"{i}-status.local")
+    _with(monkeypatch, [_loc("a")])
+    import sys as _sys
+    monkeypatch.setattr(_sys, "argv", ["smd", "admin", "radiod", "rename", "a", "b", "--yes"])
+    assert smd.main() == 0
+    assert seen["kw"]["handler_web"] == ["ka9q-web@a.service"]
