@@ -160,7 +160,75 @@ def test_backup_is_written_outside_the_config_directory(tmp_path):
 def test_both_planes_get_the_same_text():
     """The PM is where most of the public NTP traffic came from.  A VM-only
     change would leave every one of those destinations in place."""
-    src = WIZARD.read_text()
-    m = re.search(r"sh /tmp/sigmond-ntp-apply\.sh.*?gexec \d+ \"\$\(cat /tmp/sigmond-ntp-apply\.sh\)\"",
-                  src, re.S)
+    src = shell_func("ntp_apply_both_planes")
+    m = re.search(r'sh "\$f".*?gexec \d+ "\$\(cat "\$f"\)"', src, re.S)
     assert m, "the host and the VM no longer apply the same generated script"
+    # The wizard body and `--ntp` both go through it.
+    assert WIZARD.read_text().count("ntp_apply_both_planes") >= 3
+
+
+# ── `sigmond-setup --ntp` (2026-10-31) ─────────────────────────────────────
+# A station installed before v3.84 never saw the question, and a full wizard
+# rerun on a station in service is out of the question.  `--ntp <host|none>`
+# sets the same drop-in on both planes and reruns sigmond-site-timing in the
+# VM, which declares a vetted LAN stratum-1 server to hf-timestd as T4.
+
+def _first_line(pattern: str) -> int:
+    for i, ln in enumerate(WIZARD.read_text().splitlines(), 1):
+        if re.match(pattern, ln):
+            return i
+    raise AssertionError(f"{pattern!r} not in the wizard")
+
+
+def test_ntp_helpers_are_defined_before_the_option_block():
+    # The option block runs and exits before the wizard's body; a helper
+    # defined below it does not exist yet when `--ntp` runs.
+    block = _first_line(r'^case "\$\{1:-\}" in')
+    for fn in ("ntp_from_dhcp", "ntp_dropin_body", "ntp_apply_script",
+               "ntp_normalize", "ntp_apply_both_planes"):
+        assert _first_line(rf"^{fn}\(\) \{{") < block, fn
+
+
+def normalize(arg: str) -> str:
+    return run(textwrap.dedent(f"""
+        {shell_func("ntp_normalize")}
+        ntp_normalize '{arg}'; echo "[$?]"
+    """)).strip()
+
+
+def test_normalize_names_none_and_strips_junk():
+    assert normalize("192.168.8.144") == "192.168.8.144[0]"
+    assert normalize("ntp.southpole.usap.gov") == "ntp.southpole.usap.gov[0]"
+    assert normalize("none") == "[0]"
+    assert normalize("NONE") == "[0]"
+    # Refused, not stripped: "10.0.0.1rm-rf" is no server anyone named.
+    assert normalize("10.0.0.1; rm -rf /") == "[1]"
+    assert normalize("") == "[1]", "an empty answer must not mean 'none'"
+
+
+def test_apply_both_planes_writes_host_then_vm(tmp_path):
+    log = tmp_path / "calls"
+    script = textwrap.dedent(f"""
+        NTP_LOCAL="192.168.8.144"; NTP_PUBLIC_POOL="pool.ntp.org"; NTP_MAXSOURCES=4
+        LOG={tmp_path}/wiz.log
+        say() {{ echo "say: $*" >> {log}; }}
+        sh() {{ echo "host-sh: $(grep -c 'server 192.168.8.144 iburst' "$1")" >> {log}; }}
+        gexec() {{ shift; echo "gexec: $(printf '%s' "$*" | grep -c 'server 192.168.8.144 iburst')" >> {log}; }}
+        {shell_func("ntp_dropin_body")}
+        {shell_func("ntp_apply_script")}
+        {shell_func("ntp_apply_both_planes")}
+        TMPDIR={tmp_path} ntp_apply_both_planes; echo "rc=$?" >> {log}
+    """)
+    run(script)
+    calls = log.read_text()
+    assert "host-sh: 1" in calls, calls
+    assert "gexec: 1" in calls, calls
+    assert "rc=0" in calls, calls
+
+
+def test_ntp_option_reruns_site_timing_in_the_vm():
+    text = WIZARD.read_text()
+    case = text[text.index("    --ntp)"):]
+    case = case[:case.index(";;")]
+    assert "ntp_normalize" in case and "ntp_apply_both_planes" in case
+    assert "/usr/local/sbin/sigmond-site-timing" in case

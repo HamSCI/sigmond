@@ -40,6 +40,11 @@
 #                              which the console panel reads
 #              --rac-upgrade   climb to a more secure gateway tier if one
 #                              has since come up (see the RAC ladder below)
+#              --ntp HOST|none name the site's time source on both planes
+#                              (a LAN timeserver, or none = capped public
+#                              pool), then rerun sigmond-site-timing in the
+#                              VM, which makes a vetted LAN stratum-1 server
+#                              hf-timestd's T4; no argument shows the setting
 set -u
 
 # ── which VM are we configuring? ────────────────────────────────────────────
@@ -1802,6 +1807,140 @@ rac_pair_locked(){
     return 0
 }
 
+# ── time source ────────────────────────────────────────────────────────────
+# Measured on AI6VN during the v3.83 bring-up (2026-10-29), on the odroid
+# NAT64 gateway: the station reached ~30 distinct public NTP servers, from
+# three pools at once -- pool.ntp.org, 2.debian.pool.ntp.org (the distro
+# default, never touched by anything of ours), plus Google, Cloudflare and
+# five NIST hosts.  Nothing in sigmond or the appliance had ever written an
+# NTP line; that set is simply what Debian ships.
+#
+# Thirty destinations is thirty firewall exceptions at a site that grants them
+# one at a time, and at South Pole the link may not carry public NTP at all.
+# So: a local server when there is one, and otherwise a POOL CAPPED to four
+# sources -- chrony's own `maxsources`, which is exactly this knob.
+#
+# ⚠ This is the PRE-FUSION clock only.  On a station with hf-timestd, chrony
+# is disciplined from the fusion registration and these sources stop
+# mattering (docs/design/MEASUREMENT_MODEL.md).  They still matter on the PM,
+# which has no fusion, and in the VM before hf-timestd is up.
+NTP_LOCAL=""
+NTP_PUBLIC_POOL="pool.ntp.org"
+NTP_MAXSOURCES=4
+
+# DHCP option 42, as dhclient and systemd-networkd each record it.  Detection
+# only -- the operator always sees it and can override.
+ntp_from_dhcp() {
+    local s=""
+    s=$(sed -n 's/.*option ntp-servers \([^;]*\);.*/\1/p' \
+        /var/lib/dhcp/dhclient*.leases 2>/dev/null | tail -1 | tr -d ' ')
+    [ -n "$s" ] || s=$(sed -n 's/^NTP=//p' /run/systemd/netif/leases/* 2>/dev/null \
+        | tail -1 | tr -d ' ')
+    printf '%s' "$s" | cut -d, -f1
+}
+
+ask_ntp() {
+    local detected
+    detected=$(ntp_from_dhcp)
+    echo ""
+    echo "  Time source, before this station's own timing comes up."
+    echo "  A site with its own NTP server should use it and nothing else:"
+    echo "  every public server is one more firewall exception, and on a"
+    echo "  constrained link (South Pole) public NTP may not be reachable."
+    if [ -n "$detected" ]; then
+        echo "  DHCP on this network offers: $detected"
+    else
+        echo "  DHCP on this network offers no NTP server."
+    fi
+    rd -r -p "Local NTP server (host or IP; Enter for none) [${detected:-none}]: " NTP_LOCAL
+    NTP_LOCAL="${NTP_LOCAL:-$detected}"
+    case "$NTP_LOCAL" in none|None|NONE) NTP_LOCAL="" ;; esac
+    NTP_LOCAL=$(printf '%s' "$NTP_LOCAL" | tr -cd 'A-Za-z0-9.:_-')
+    if [ -n "$NTP_LOCAL" ]; then
+        echo "  → $NTP_LOCAL only. No public NTP."
+    else
+        echo "  → $NTP_PUBLIC_POOL, capped at $NTP_MAXSOURCES sources (not the ~30 a"
+        echo "    stock install reaches)."
+    fi
+}
+
+# The drop-in both planes get.  One place, so the PM and the VM cannot drift.
+ntp_dropin_body() {
+    echo "# Written by the Sigmond first-boot wizard -- do not edit by hand."
+    echo "# Change it with: sigmond-setup --ntp <host-or-IP|none>"
+    if [ -n "$NTP_LOCAL" ]; then
+        echo "server $NTP_LOCAL iburst"
+    else
+        echo "pool $NTP_PUBLIC_POOL iburst maxsources $NTP_MAXSOURCES"
+    fi
+}
+
+# Shell for "silence the distro's own pool/server lines, then drop ours in".
+# Emitted as a script so the identical text can run here and inside the VM.
+ntp_apply_script() {
+    cat <<'NTPAPPLYEOF'
+set -u
+CONF=/etc/chrony/chrony.conf
+DIR=/etc/chrony/conf.d
+DROPIN=$DIR/10-sigmond-ntp.conf
+MARK='# sigmond: superseded by conf.d/10-sigmond-ntp.conf'
+BACKUPS=/root/chrony-backups
+[ -f "$CONF" ] || { echo "no $CONF"; exit 0; }
+mkdir -p "$DIR" "$BACKUPS"
+# ⛔ The backup goes OUTSIDE the config directory.  chrony reads every *.conf
+# in conf.d, so a .bak left there would be LOADED -- the same mistake that
+# broke dnsmasq on this appliance on 2026-10-28.
+if ! grep -q "^$MARK" "$CONF"; then
+    cp -a "$CONF" "$BACKUPS/chrony.conf.$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+# Comment out the distro's own time sources, once, reversibly.
+# ⛔ delimiter is @, not | -- the alternation below contains a pipe.
+sed -i -E "s@^([[:space:]]*(pool|server)[[:space:]]+.*)\$@$MARK\n#\1@" "$CONF"
+# Idempotent: a second run must not re-comment what it already commented.
+awk -v m="$MARK" '
+  $0==m { if (seen[NR-1]) next; }
+  { print }
+' "$CONF" > "$CONF.new" && mv "$CONF.new" "$CONF"
+# chrony must actually read conf.d; older configs have no confdir line.
+grep -qE "^[[:space:]]*confdir[[:space:]]+$DIR" "$CONF" || echo "confdir $DIR" >> "$CONF"
+NTPAPPLYEOF
+}
+
+# ntp_normalize <answer> -> the server to use ("" = none); 1 when unusable.
+# An answer carrying anything but a host name's or an address's characters is
+# refused, not stripped: "10.0.0.1; rm -rf /" names no server anyone typed.
+ntp_normalize() {
+    [ -n "${1:-}" ] || return 1
+    case "$1" in none|None|NONE) return 0 ;; esac
+    [ "$(printf '%s' "$1" | tr -cd 'A-Za-z0-9.:_-')" = "$1" ] || return 1
+    printf '%s' "$1"
+}
+
+# Both planes, from one generated script, so the PM and the VM cannot drift.
+# The PM is where most of the public NTP traffic came from (it has no fusion
+# and runs stock Debian chrony), so a VM-only change would leave every one of
+# those destinations in place.
+ntp_apply_both_planes() {
+    local f rc=0
+    f=$(mktemp) || return 1
+    {
+        ntp_apply_script
+        echo "mkdir -p /etc/chrony/conf.d"
+        echo "cat > /etc/chrony/conf.d/10-sigmond-ntp.conf <<'SIGNTPEOF'"
+        ntp_dropin_body
+        echo "SIGNTPEOF"
+        echo "systemctl try-restart chrony chronyd 2>/dev/null; true"
+    } > "$f"
+    sh "$f" >>"$LOG" 2>&1 \
+        && say "host time source set" \
+        || { say "WARN: could not set the host time source (see $LOG)"; rc=1; }
+    gexec 60 "$(cat "$f")" \
+        && say "VM time source set" \
+        || { say "WARN: could not set the VM time source -- rerun in the VM"; rc=1; }
+    rm -f "$f"
+    return $rc
+}
+
 # ── RAC on/off switches (no wizard rerun needed) ────────────────────────────
 case "${1:-}" in
     --rac-register)
@@ -1815,6 +1954,32 @@ case "${1:-}" in
         exit 1;;
     --rac-retry)
         rac_retry
+        exit 0;;
+    --ntp)
+        # Name the site's time source after install (2026-10-31).  A station
+        # installed before v3.84 never saw the question, and a full wizard
+        # rerun on a station in service is out of the question.  Same
+        # drop-in on both planes as the wizard writes; then
+        # sigmond-site-timing in the VM, which declares a LAN stratum-1
+        # server to hf-timestd as T4 once chrony itself vouches for it.
+        if [ -z "${2:-}" ]; then
+            echo "usage: sigmond-setup --ntp <host-or-IP|none>"
+            echo "now:   $(grep -hE '^(server|pool)[[:space:]]' /etc/chrony/conf.d/10-sigmond-ntp.conf 2>/dev/null || echo 'not set by sigmond (distro default)')"
+            _d=$(ntp_from_dhcp); echo "DHCP offers: ${_d:-nothing}"
+            exit 0
+        fi
+        if ! NTP_LOCAL=$(ntp_normalize "$2"); then
+            say "refused: '$2' is not a host name or address (or: none)"
+            exit 2
+        fi
+        say "setting the time source (${NTP_LOCAL:-$NTP_PUBLIC_POOL, max $NTP_MAXSOURCES})..."
+        ntp_apply_both_planes || exit 1
+        if gexec 300 "[ -x /usr/local/sbin/sigmond-site-timing ] && /usr/local/sbin/sigmond-site-timing; true"; then
+            say "site timing rerun in the VM"
+        else
+            say "WARN: site timing rerun failed -- check journal -t sigmond-site-timing in the VM"
+        fi
+        [ -n "$NTP_LOCAL" ] && say "a LAN stratum-1 server becomes T4 once chrony selects it; chrony needs minutes, and the next smd align retries"
         exit 0;;
     --pair-vm)
         # Pair the decoder VM with this host, or re-assert the pairing.  A
@@ -3047,105 +3212,6 @@ ask_psws() {
 # lib/sigmond/heartbeat.py and the units stay, so a station already configured
 # keeps working until Phase 3 lands.  Nothing NEW is pointed at wd30.
 
-# ── time source ────────────────────────────────────────────────────────────
-# Measured on AI6VN during the v3.83 bring-up (2026-10-29), on the odroid
-# NAT64 gateway: the station reached ~30 distinct public NTP servers, from
-# three pools at once -- pool.ntp.org, 2.debian.pool.ntp.org (the distro
-# default, never touched by anything of ours), plus Google, Cloudflare and
-# five NIST hosts.  Nothing in sigmond or the appliance had ever written an
-# NTP line; that set is simply what Debian ships.
-#
-# Thirty destinations is thirty firewall exceptions at a site that grants them
-# one at a time, and at South Pole the link may not carry public NTP at all.
-# So: a local server when there is one, and otherwise a POOL CAPPED to four
-# sources -- chrony's own `maxsources`, which is exactly this knob.
-#
-# ⚠ This is the PRE-FUSION clock only.  On a station with hf-timestd, chrony
-# is disciplined from the fusion registration and these sources stop
-# mattering (docs/design/MEASUREMENT_MODEL.md).  They still matter on the PM,
-# which has no fusion, and in the VM before hf-timestd is up.
-NTP_LOCAL=""
-NTP_PUBLIC_POOL="pool.ntp.org"
-NTP_MAXSOURCES=4
-
-# DHCP option 42, as dhclient and systemd-networkd each record it.  Detection
-# only -- the operator always sees it and can override.
-ntp_from_dhcp() {
-    local s=""
-    s=$(sed -n 's/.*option ntp-servers \([^;]*\);.*/\1/p' \
-        /var/lib/dhcp/dhclient*.leases 2>/dev/null | tail -1 | tr -d ' ')
-    [ -n "$s" ] || s=$(sed -n 's/^NTP=//p' /run/systemd/netif/leases/* 2>/dev/null \
-        | tail -1 | tr -d ' ')
-    printf '%s' "$s" | cut -d, -f1
-}
-
-ask_ntp() {
-    local detected
-    detected=$(ntp_from_dhcp)
-    echo ""
-    echo "  Time source, before this station's own timing comes up."
-    echo "  A site with its own NTP server should use it and nothing else:"
-    echo "  every public server is one more firewall exception, and on a"
-    echo "  constrained link (South Pole) public NTP may not be reachable."
-    if [ -n "$detected" ]; then
-        echo "  DHCP on this network offers: $detected"
-    else
-        echo "  DHCP on this network offers no NTP server."
-    fi
-    rd -r -p "Local NTP server (host or IP; Enter for none) [${detected:-none}]: " NTP_LOCAL
-    NTP_LOCAL="${NTP_LOCAL:-$detected}"
-    case "$NTP_LOCAL" in none|None|NONE) NTP_LOCAL="" ;; esac
-    NTP_LOCAL=$(printf '%s' "$NTP_LOCAL" | tr -cd 'A-Za-z0-9.:_-')
-    if [ -n "$NTP_LOCAL" ]; then
-        echo "  → $NTP_LOCAL only. No public NTP."
-    else
-        echo "  → $NTP_PUBLIC_POOL, capped at $NTP_MAXSOURCES sources (not the ~30 a"
-        echo "    stock install reaches)."
-    fi
-}
-
-# The drop-in both planes get.  One place, so the PM and the VM cannot drift.
-ntp_dropin_body() {
-    echo "# Written by the Sigmond first-boot wizard -- do not edit by hand."
-    echo "# Re-run sigmond-setup to change it."
-    if [ -n "$NTP_LOCAL" ]; then
-        echo "server $NTP_LOCAL iburst"
-    else
-        echo "pool $NTP_PUBLIC_POOL iburst maxsources $NTP_MAXSOURCES"
-    fi
-}
-
-# Shell for "silence the distro's own pool/server lines, then drop ours in".
-# Emitted as a script so the identical text can run here and inside the VM.
-ntp_apply_script() {
-    cat <<'NTPAPPLYEOF'
-set -u
-CONF=/etc/chrony/chrony.conf
-DIR=/etc/chrony/conf.d
-DROPIN=$DIR/10-sigmond-ntp.conf
-MARK='# sigmond: superseded by conf.d/10-sigmond-ntp.conf'
-BACKUPS=/root/chrony-backups
-[ -f "$CONF" ] || { echo "no $CONF"; exit 0; }
-mkdir -p "$DIR" "$BACKUPS"
-# ⛔ The backup goes OUTSIDE the config directory.  chrony reads every *.conf
-# in conf.d, so a .bak left there would be LOADED -- the same mistake that
-# broke dnsmasq on this appliance on 2026-10-28.
-if ! grep -q "^$MARK" "$CONF"; then
-    cp -a "$CONF" "$BACKUPS/chrony.conf.$(date -u +%Y%m%dT%H%M%SZ)"
-fi
-# Comment out the distro's own time sources, once, reversibly.
-# ⛔ delimiter is @, not | -- the alternation below contains a pipe.
-sed -i -E "s@^([[:space:]]*(pool|server)[[:space:]]+.*)\$@$MARK\n#\1@" "$CONF"
-# Idempotent: a second run must not re-comment what it already commented.
-awk -v m="$MARK" '
-  $0==m { if (seen[NR-1]) next; }
-  { print }
-' "$CONF" > "$CONF.new" && mv "$CONF.new" "$CONF"
-# chrony must actually read conf.d; older configs have no confdir line.
-grep -qE "^[[:space:]]*confdir[[:space:]]+$DIR" "$CONF" || echo "confdir $DIR" >> "$CONF"
-NTPAPPLYEOF
-}
-
 ask_names() {
     # Station naming convention (rob 2026-07-29): the decoder VM carries the
     # station designator, the Proxmox host carries designator-PM. Default
@@ -3425,26 +3491,9 @@ gexec_unit 600 render "smd config render" \
 # answer survives a wizard that no longer has a question for it.
 gexec 30 "systemctl disable --now sigmond-heartbeat.timer 2>/dev/null; true"
 
-# ── time source: apply to BOTH planes ──────────────────────────────────────
-# The PM is where most of the public NTP traffic came from (it has no fusion
-# and runs stock Debian chrony), so a VM-only change would leave every one of
-# those destinations in place.
+# ── time source: apply to BOTH planes (ntp_apply_both_planes) ─────────────
 say "setting the time source (${NTP_LOCAL:-$NTP_PUBLIC_POOL, max $NTP_MAXSOURCES})..."
-{
-    ntp_apply_script
-    echo "mkdir -p /etc/chrony/conf.d"
-    echo "cat > /etc/chrony/conf.d/10-sigmond-ntp.conf <<'SIGNTPEOF'"
-    ntp_dropin_body
-    echo "SIGNTPEOF"
-    echo "systemctl try-restart chrony chronyd 2>/dev/null; true"
-} > /tmp/sigmond-ntp-apply.sh
-sh /tmp/sigmond-ntp-apply.sh >>"$LOG" 2>&1 \
-    && say "host time source set" \
-    || say "WARN: could not set the host time source (see $LOG)"
-gexec 60 "$(cat /tmp/sigmond-ntp-apply.sh)" \
-    && say "VM time source set" \
-    || say "WARN: could not set the VM time source — rerun in the VM"
-rm -f /tmp/sigmond-ntp-apply.sh
+ntp_apply_both_planes || true
 
 # The PM shipped its own heartbeat emitter to the same destination.  It is no
 # longer set up here, and an existing one is taken down, for the same reason as
