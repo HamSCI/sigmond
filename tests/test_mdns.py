@@ -78,3 +78,32 @@ class TestDecision(unittest.TestCase):
     def test_avahi_down(self):
         d = m.decide(False, None, ["a-status.local"], True, True, None)
         self.assertTrue(d.repair); self.assertIn("not running", d.reason)
+
+
+class TestExpectedNames(unittest.TestCase):
+    """AI6VN-PM 2026-10-31: a second RX888 registered to a stopped instance
+    (`omni`, later `se`) made every tick expect `omni-status.local` to resolve
+    while only radiod@AI6VN ran, so the watchdog restarted the running radiod
+    every 20 minutes.  Only names a *running* radiod publishes may count."""
+
+    CONFS = {"AI6VN": "[global]\nstatus = AI6VN-status.local\n",
+             "se": "[global]\nstatus = se-status.local\n"}
+
+    def test_unit_instance(self):
+        self.assertEqual(m.unit_instance("radiod@AI6VN.service"), "AI6VN")
+        self.assertEqual(m.unit_instance("ka9q-radio@se.service"), "se")
+
+    def test_only_names_of_active_units_are_expected(self):
+        names = m.expected_names(["radiod@AI6VN.service"], self.CONFS.get)
+        self.assertEqual(names, ["AI6VN-status.local"])
+
+    def test_two_active_units_expect_both_names(self):
+        names = m.expected_names(["radiod@AI6VN.service", "radiod@se.service"], self.CONFS.get)
+        self.assertEqual(names, ["AI6VN-status.local", "se-status.local"])
+
+    def test_unreadable_conf_falls_back_to_id_status_local(self):
+        names = m.expected_names(["radiod@omni.service"], lambda _inst: None)
+        self.assertEqual(names, ["omni-status.local"])
+
+    def test_no_active_units_expects_nothing(self):
+        self.assertEqual(m.expected_names([], self.CONFS.get), [])

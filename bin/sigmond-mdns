@@ -12,16 +12,21 @@ unattended-upgrades too, and nothing here checked any of this.
 
 So, on a timer:
   1. avahi-daemon must be active and its D-Bus server state RUNNING (2);
-  2. every radiod status name this host declares must resolve.
+  2. every status name a radiod *running on this host* publishes must resolve.
+A registered-but-stopped instance publishes nothing, so its name must not be
+expected: on AI6VN-PM (2026-10-31) a second RX888 pinned to a stopped instance
+made this watchdog restart the running radiod every 20 minutes.
 Repair, when allowed: restart avahi-daemon, wait for RUNNING, then bring the
 station back in the only order that works — radiod first, then the declared
 consumers (sigmond-sdr-recover's restart_station, so the two helpers cannot
 disagree about that order).  Repairs are rate-limited so a broken avahi cannot
 turn into a restart loop, and every decision is logged with its reason.
 
-Names come from /etc/sigmond/coordination.toml ``[radiod."<name>"]`` blocks
-and from ``status =`` lines in /etc/radio/radiod@*.conf (anchored — a
-commented example line must never count; see wsprdaemon 6d0101f).
+Each active radiod@<id>.service is expected to publish the ``status =`` name
+in /etc/radio/radiod@<id>.conf (anchored — a commented example line must never
+count; see wsprdaemon 6d0101f), or ``<id>-status.local`` when that conf cannot
+be read.  Names declared in coordination.toml or other confs are only used to
+tell "nothing declared" from "nothing running".
 
   sigmond-mdns            check, repair if needed (the timer's mode)
   sigmond-mdns --report   check and report only; never repairs
@@ -161,6 +166,34 @@ def active_radiod_units() -> List[str]:
     return [l.split()[0] for l in out.splitlines() if l.strip()]
 
 
+def unit_instance(unit: str) -> str:
+    """``radiod@AI6VN.service`` -> ``AI6VN``."""
+    return unit.split("@", 1)[1].rsplit(".service", 1)[0] if "@" in unit else unit
+
+
+def expected_names(units: Sequence[str], conf_text_for) -> List[str]:
+    """Status names the radiods in ``units`` (all active) publish: the ``status =``
+    line of /etc/radio/radiod@<id>.conf via ``conf_text_for(id)`` (None when
+    unreadable), else ``<id>-status.local``.  A stopped instance's name is not
+    expected — it publishes nothing (AI6VN-PM 2026-10-31)."""
+    names: List[str] = []
+    for unit in units:
+        inst = unit_instance(unit)
+        text = conf_text_for(inst)
+        found = status_names_from_radiod_conf(text) if text else []
+        for n in found or [f"{inst}-status.local"]:
+            if n not in names:
+                names.append(n)
+    return names
+
+
+def _conf_text(inst: str) -> Optional[str]:
+    try:
+        return Path(f"/etc/radio/radiod@{inst}.conf").read_text()
+    except OSError:
+        return None
+
+
 def load_state() -> dict:
     try:
         return json.loads(STATE_PATH.read_text())
@@ -229,11 +262,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="report what a repair would do")
     args = ap.parse_args(argv)
 
-    names = declared_names()
-    if not names:
+    if not declared_names():
         _log("no radiod status names declared on this host — nothing to check")
         return 0
     units = active_radiod_units()
+    names = expected_names(units, _conf_text)
+    if not names:
+        if args.report or args.dry_run:
+            _log("no radiod is running on this host — nothing publishes a status name to check")
+        return 0
     st = load_state()
     now = time.time()
     last = st.get("last_repair_at")
