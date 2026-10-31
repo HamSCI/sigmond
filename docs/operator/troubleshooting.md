@@ -1323,6 +1323,21 @@ RX888 is on the bus.` and the exit code is 0. Otherwise it prints
 
 **What to do**
 
+0. **If you just plugged in a second card** (the list says `RX888(s) on the
+   bus but only 1 radiod conf(s)`), register it first, as root `[VM]`:
+
+   ```bash
+   sudo smd config init radiod
+   ```
+
+   Sigmond pins the first radiod to the card it already has open, records that
+   serial in `coordination.toml`, and writes a new conf for the new card only.
+   If it cannot see which card the first radiod has open (radiod is stopped),
+   it refuses and tells you to add `serial = "<SERIAL>"` to the `[rx888]`
+   section of that conf by hand, using a serial from `smd admin sdr list`.
+   Then run the identify walk below only if you need to confirm which antenna
+   is on which card.
+
 Pin each radiod to its own card with the identify walk. Make sure every RX888
 is plugged in first, and run it as root `[VM]`:
 
@@ -1331,7 +1346,8 @@ sudo smd admin sdr identify
 ```
 
 It refuses with no radiod conf yet (run `smd config init radiod` first), with
-one radiod, and if there are fewer RX888s on the bus than radiod instances.
+more RX888s on the bus than radiod confs (step 0), with one radiod, and if
+there are fewer RX888s on the bus than radiod instances.
 While it runs it stops the radiod units, the radiod watchdog timer and any
 watchdog run in progress; when it ends, whatever the outcome, it starts again
 the units and the timer that were running before it began.
@@ -1366,7 +1382,7 @@ Exit codes:
 | Exit | Meaning |
 |---|---|
 | 0 | Done, pins written (or shown, with `--dry-run`). |
-| 1 | Refused before the walk: not root, no radiod conf, only one radiod, or fewer cards than radiods. |
+| 1 | Refused before the walk: not root, no radiod conf, more cards than radiod confs, only one radiod, or fewer cards than radiods. |
 | 3 | The walk timed out with no card change. Nothing was written. Run it again. |
 | 4 | The walk finished but the pins could not be computed or written. Read the error it printed, fix the file it names, run it again. |
 

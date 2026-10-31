@@ -231,10 +231,11 @@ The problem lines:
 - `radiod@<id> wants RX888 <serial>, which is not on the USB bus`. The card is unplugged, dead or on a bad cable. Check it, or re-run identify if the card was replaced.
 - `RX888 <serial> is named by more than one radiod: <ids>`. Two confs point at one card. Run `smd admin sdr identify` to pin each radiod to its own card.
 - `RX888 <serial> on <usb path> is not named by any radiod conf`. A card is present that no radiod opens. Run identify, or remove the card if it is not meant to be used.
+- `<n> RX888(s) on the bus but only <m> radiod conf(s): run `smd config init radiod` to register the rest`. A card was plugged in after the station was set up, so no conf exists for it yet; run `smd config init radiod` as root, which also pins the first radiod to the card it already has open.
 - `RX888 <serial> on <usb path> is at only <n> Mb/s, so radiod will not open it`. The card negotiated a slow USB link. Use a USB 3 port and a good cable.
 - `<n> RX888(s) still in the FX3 bootloader (no firmware yet, so no serial)`. The card has no firmware loaded yet, so it has no serial to pin.
 
-A station with one RX888 is left unpinned on purpose, so it shows no "no 'serial =' line" problem. If you do see problems on a two-card host, the identify walk is described in [Two RX888s, and the antennas may be swapped](../operator/troubleshooting.md#two-rx888s-and-the-antennas-may-be-swapped).
+A station with one RX888 and one radiod is left unpinned on purpose, so it shows no "no 'serial =' line" problem. Once a second card is on the bus the unpinned conf is reported, even before a second conf exists. If you do see problems on a two-card host, the identify walk is described in [Two RX888s, and the antennas may be swapped](../operator/troubleshooting.md#two-rx888s-and-the-antennas-may-be-swapped).
 
 ## smd admin cli-reference show
 
