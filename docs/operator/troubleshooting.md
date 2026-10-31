@@ -1424,7 +1424,9 @@ plan also shows the ka9q-web port map before and after.
 What restarts: radiod itself, the clients attached to that radiod and its
 ka9q-web page. Only what was running before comes back. A radiod you had
 parked stays parked, and its clients stay stopped. A page that was down stays
-down. Run `smd apply` to start a parked instance when you want it.
+down and is disabled. Run `smd apply` to start a parked instance when you
+want it, then `smd start ka9q-web` to bring its page up; `smd apply` starts
+radiods, not pages.
 
 To change only the text that describes an antenna:
 

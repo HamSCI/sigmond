@@ -159,12 +159,13 @@ def _resolve_component_units(component: str) -> list[UnitRef]:
         )
 
     conf_dir = systemd_config.get('conf_dir', '')
+    env_dir = systemd_config.get('env_dir', '')
 
     # Process templated units: expand per instance
     for template in templated_units:
         kind = _unit_kind(template)
         expanded = _expand_template(component, template, source, kind,
-                                    conf_dir=conf_dir)
+                                    conf_dir=conf_dir, env_dir=env_dir)
         units.extend(expanded)
 
     # Host-local singletons: only where enabled on this host.
@@ -180,8 +181,15 @@ def _expand_template(
     source: str,
     kind: str,
     conf_dir: str = "",
+    env_dir: str = "",
 ) -> list[UnitRef]:
     """Expand a templated unit (e.g., 'psk-recorder@.service') into per-instance UnitRefs.
+
+    ``env_dir`` names a second directory of ``<instance>.env`` files to
+    discover instances from, for a component whose unit writer keeps them
+    outside ``/etc/<component>/env`` (ka9q-web@<id> reads
+    ``/etc/sigmond/ka9q-web/<id>.env``; without this the lifecycle verbs
+    never saw a second radiod's page, AI6VN-PM 2026-10-31).
 
     Returns:
         List of UnitRef for configured instances, with orphaned instances marked.
@@ -204,19 +212,22 @@ def _expand_template(
     # start launched a second daemon for the same reporter.
     from .instance import systemd_escape, unescape_systemd_instance
 
-    env_dir = Path(f"/etc/{component}/env")
     configured = set()
-    try:
-        env_exists = env_dir.exists()
-    except PermissionError:
-        env_exists = False
-    if env_exists:
+    env_dirs = [Path(f"/etc/{component}/env")]
+    if env_dir:
+        env_dirs.append(Path(env_dir))
+    for env_path in env_dirs:
         try:
-            for env_file in env_dir.glob("*.env"):
-                instance_name = unescape_systemd_instance(env_file.stem)
-                configured.add(instance_name)
+            env_exists = env_path.exists()
         except PermissionError:
-            pass
+            env_exists = False
+        if env_exists:
+            try:
+                for env_file in env_path.glob("*.env"):
+                    instance_name = unescape_systemd_instance(env_file.stem)
+                    configured.add(instance_name)
+            except PermissionError:
+                pass
 
     # Discover configured instances from a conf_dir (e.g. /etc/radio for radiod@)
     # Matches files like "radiod@<instance>.conf" and extracts <instance>.
@@ -411,11 +422,12 @@ def _load_fallback_shim(component: str) -> list[UnitRef]:
         )
 
     conf_dir = systemd_config.get('conf_dir', '')
+    env_dir = systemd_config.get('env_dir', '')
 
     for template in templated_units:
         kind = _unit_kind(template)
         expanded = _expand_template(component, template, source, kind,
-                                    conf_dir=conf_dir)
+                                    conf_dir=conf_dir, env_dir=env_dir)
         units.extend(expanded)
 
     # Host-local singletons: only where enabled on this host.

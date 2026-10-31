@@ -10,3 +10,10 @@
 
 [systemd]
 units = ["ka9q-web.service"]
+# A station with more than one local radiod gets one ka9q-web@<id>.service
+# per further radiod (bin/smd _ka9q_web_targets); the writer keeps each
+# instance's env at /etc/sigmond/ka9q-web/<id>.env, so instance discovery
+# must look there.  Without this, `smd start ka9q-web` and `smd status` never
+# saw the second page (AI6VN-PM, 2026-10-31).
+templated_units = ["ka9q-web@.service"]
+env_dir = "/etc/sigmond/ka9q-web"

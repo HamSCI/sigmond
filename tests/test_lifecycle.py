@@ -112,6 +112,28 @@ units = ["psk-recorder@.service"]
         assert len(units) == 1
         assert units[0].unit == 'psk-recorder@default.service'
 
+    def test_env_dir_discovers_instances_outside_etc_component(self, tmp_path, monkeypatch):
+        """ka9q-web's shim: ka9q-web.service plus one ka9q-web@<id> per env
+        file in the writer's own directory (AI6VN-PM 2026-10-31)."""
+        component = 'ka9q-web'
+        deploy_toml = tmp_path / 'deploy.toml'
+        env_dir = tmp_path / 'ka9q-web'
+        env_dir.mkdir()
+        (env_dir / 'se.env').write_text('KA9Q_WEB_STATUS=se-status.local\nKA9Q_WEB_PORT=8083\n')
+        deploy_toml.write_text(f"""
+[systemd]
+units = ["ka9q-web.service"]
+templated_units = ["ka9q-web@.service"]
+env_dir = "{env_dir}"
+""")
+        monkeypatch.setattr('sigmond.lifecycle._find_deploy_toml',
+                           lambda comp: deploy_toml if comp == component else None)
+        with mock.patch('sigmond.lifecycle.subprocess.run') as mock_run:
+            mock_run.return_value = mock.Mock(returncode=1, stdout='')
+            units = resolve_units([component], [component])
+        assert {u.unit for u in units} == {'ka9q-web.service', 'ka9q-web@se.service'}
+        assert all(not u.orphaned for u in units)
+
     def test_unknown_component_fails(self):
         """Test that unknown components raise ValueError."""
         with pytest.raises(ValueError, match='not found'):
