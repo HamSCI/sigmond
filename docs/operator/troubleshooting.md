@@ -9,7 +9,8 @@
 > **Amended 2026-10-30** (not re-walked): added the symptom "Two RX888s, and
 > the antennas may be swapped", the `smd admin sdr list` / `identify` walk.
 > **Amended 2026-10-31** (not re-walked): added the step "Renaming a radiod
-> instance" to that symptom, `smd admin radiod rename` and `describe`.
+> instance" to that symptom, `smd admin radiod rename` and `describe`; its
+> port-map, history and exit-code sentences rechecked against the handler.
 > **Canonical for:** symptom-first troubleshooting of an appliance station
 
 Start with the symptom you can actually see, not with a theory. Every section
@@ -1408,8 +1409,8 @@ the question.
 The plan lists the files it will move and edit (the radiod conf, the status
 name, `coordination.toml`, the client configs, the units and the ka9q-web
 units), any file it found but will not edit, what stays under the old name,
-what it stops and what it starts. If a ka9q-web page changes port, the plan
-shows the port map before and after.
+what it stops and what it starts. When the station has a local radiod, the
+plan also shows the ka9q-web port map before and after.
 
 What restarts: radiod itself, the clients attached to that radiod and its
 ka9q-web page. Only what was running before comes back. A radiod you had
@@ -1431,13 +1432,13 @@ Exit codes:
 | 0 | Done. |
 | 1 | Refused, nothing written. The line it printed says why, for example the new name is taken. |
 | 2 | You answered no at the question. Nothing written. |
-| 4 | It stopped part way through the writes, or `systemctl daemon-reload` failed. It prints a `written:` list and starts nothing. Finish by hand from that list. |
-| 5 | Renamed, but a unit did not start. It prints `renamed, but these units did not start: <units>`. Check `systemctl status <unit>` and start it by hand. |
+| 4 | It stopped part way through the writes, or `systemctl daemon-reload` failed. It prints a `written:` list, a `units:` line saying the old radiod is stopped and the new one not enabled, and any ka9q-web actions already taken; it starts nothing. Finish by hand from that list. |
+| 5 | Renamed, but a unit did not start. It prints `renamed, but these units did not start: <units>` (for `describe`: `description set, but these units did not start: <unit>`). Check `systemctl status <unit>` and start it by hand. |
 
 History stays under the old name: psk-recorder state and logs, meteor-scatter
-logs, wspr-recorder shared-memory directories and the rows already in
-`sink.db`. The plan lists them. Nothing is lost; the old files are just not
-renamed.
+logs and wspr-recorder shared-memory directories; the plan lists those. The
+rows already in `sink.db` stay as they are. Nothing is lost; the old files are
+just not renamed.
 
 Uploader note: spots decoded after the rename are filed under receiver
 `<new>` on wsprdaemon. To keep the old name, set `receiver_override` in
