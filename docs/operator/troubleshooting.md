@@ -8,6 +8,8 @@
 > waiting two minutes.
 > **Amended 2026-10-30** (not re-walked): added the symptom "Two RX888s, and
 > the antennas may be swapped", the `smd admin sdr list` / `identify` walk.
+> **Amended 2026-10-31** (not re-walked): added the step "Renaming a radiod
+> instance" to that symptom, `smd admin radiod rename` and `describe`.
 > **Canonical for:** symptom-first troubleshooting of an appliance station
 
 Start with the symptom you can actually see, not with a theory. Every section
@@ -1385,6 +1387,61 @@ Exit codes:
 | 1 | Refused before the walk: not root, no radiod conf, more cards than radiod confs, only one radiod, or fewer cards than radiods. |
 | 3 | The walk timed out with no card change. Nothing was written. Run it again. |
 | 4 | The walk finished but the pins could not be computed or written. Read the error it printed, fix the file it names, run it again. |
+
+#### Renaming a radiod instance
+
+Do this when you want a radiod to carry a different name, for example `omni`
+instead of `AI6VN`. Ids are case-sensitive. Run it as yourself `[VM]`, not
+under `sudo`; `smd` elevates itself. Look first with `--dry-run`, which writes
+and stops nothing:
+
+```bash
+smd admin radiod rename omni se --description "southeast antenna" --dry-run
+smd admin radiod rename omni se --description "southeast antenna"
+smd admin radiod rename AI6VN omni --description "TCI-530 Omni"
+```
+
+Rename the instance that is in the way first. Here `omni` becomes `se`, which
+frees the name `omni` for `AI6VN`. `--description` is optional. `--yes` skips
+the question.
+
+The plan lists the files it will move and edit (the radiod conf, the status
+name, `coordination.toml`, the client configs, the units and the ka9q-web
+units), any file it found but will not edit, what stays under the old name,
+what it stops and what it starts. If a ka9q-web page changes port, the plan
+shows the port map before and after.
+
+What restarts: radiod itself, the clients attached to that radiod and its
+ka9q-web page. Only what was running before comes back. A radiod you had
+parked stays parked, and its clients stay stopped. A page that was down stays
+down. Run `smd apply` to start a parked instance when you want it.
+
+To change only the text that describes an antenna:
+
+```bash
+smd admin radiod describe omni "TCI-530 Omni"
+```
+
+This edits the description line and restarts that radiod if it is running.
+
+Exit codes:
+
+| Exit | Meaning |
+|---|---|
+| 0 | Done. |
+| 1 | Refused, nothing written. The line it printed says why, for example the new name is taken. |
+| 2 | You answered no at the question. Nothing written. |
+| 4 | It stopped part way through the writes, or `systemctl daemon-reload` failed. It prints a `written:` list and starts nothing. Finish by hand from that list. |
+| 5 | Renamed, but a unit did not start. It prints `renamed, but these units did not start: <units>`. Check `systemctl status <unit>` and start it by hand. |
+
+History stays under the old name: psk-recorder state and logs, meteor-scatter
+logs, wspr-recorder shared-memory directories and the rows already in
+`sink.db`. The plan lists them. Nothing is lost; the old files are just not
+renamed.
+
+Uploader note: spots decoded after the rename are filed under receiver
+`<new>` on wsprdaemon. To keep the old name, set `receiver_override` in
+`pipelines.toml`.
 
 **When to stop and ask**
 

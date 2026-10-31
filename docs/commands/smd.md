@@ -237,6 +237,8 @@ The problem lines:
 
 A station with one RX888 and one radiod is left unpinned on purpose, so it shows no "no 'serial =' line" problem. Once a second card is on the bus the unpinned conf is reported, even before a second conf exists. If you do see problems on a two-card host, the identify walk is described in [Two RX888s, and the antennas may be swapped](../operator/troubleshooting.md#two-rx888s-and-the-antennas-may-be-swapped).
 
+To rename an instance, use `smd admin radiod rename`, described in [Renaming a radiod instance](../operator/troubleshooting.md#renaming-a-radiod-instance).
+
 ## smd admin cli-reference show
 
 Use this to see which programs have a generated command reference, how many commands each has, and whether the reference is current.
