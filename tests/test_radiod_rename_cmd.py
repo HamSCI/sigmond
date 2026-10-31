@@ -28,10 +28,12 @@ class Host:
         self.web = []
         self.sdr_lists = 0
         self.locks = []
+        self.released = []
+        self.fail = set()          # call tuples that return 1
 
     def systemctl(self, *args):
         self.calls.append(args)
-        return 0
+        return 1 if args in self.fail else 0
 
     def ka9q_web_rewrite(self, old, new):
         self.web.append((old, new))
@@ -44,7 +46,10 @@ class Host:
     @contextlib.contextmanager
     def lock(self, reason):
         self.locks.append(reason)
-        yield
+        try:
+            yield
+        finally:
+            self.released.append(reason)
 
 
 def _no_passthrough(client_type):
@@ -252,6 +257,48 @@ def test_write_failure_midway_exits_4_and_lists_written(station, capsys, monkeyp
         "/etc/sigmond/coordination.toml",
     ]
     assert h.locks == ["admin radiod rename AI6VN omni"]
+    assert h.released == h.locks
+
+
+def test_failed_daemon_reload_exits_4_and_starts_nothing(station, capsys):
+    root = station.root
+    _first_rename_done(root)
+    h = station(active={"radiod@AI6VN.service", "ka9q-web.service", *CLIENTS},
+                enabled={"radiod@AI6VN.service"})
+    h.fail = {("daemon-reload",)}
+    assert rr.cmd_radiod_rename(_args("AI6VN", "omni")) == 4
+    assert _verbs(h.calls)[-1] == "daemon-reload"
+    assert "start" not in _verbs(h.calls) and "enable" not in _verbs(h.calls)
+    out = capsys.readouterr().out
+    tail = out[out.index("written:\n"):].splitlines()
+    assert tail[1] == "/etc/radio/radiod@AI6VN.conf -> /etc/radio/radiod@omni.conf"
+    assert "/etc/sigmond/coordination.env" in tail
+    assert h.released == h.locks == ["admin radiod rename AI6VN omni"]
+
+
+def test_unit_that_does_not_start_is_exit_5(station, capsys):
+    root = station.root
+    _first_rename_done(root)
+    h = station(active={"radiod@AI6VN.service", "ka9q-web.service", *CLIENTS},
+                enabled={"radiod@AI6VN.service"})
+    h.fail = {("start", "wspr-recorder@AI6VN.service")}
+    assert rr.cmd_radiod_rename(_args("AI6VN", "omni")) == 5
+    # the remaining clients were still started after the failure
+    assert ("start", "meteor-scatter@AI6VN.service") in h.calls
+    assert ("start", "timestd-core-recorder.service") in h.calls
+    out = capsys.readouterr().out
+    assert "renamed, but these units did not start: wspr-recorder@AI6VN.service\n" in out
+    assert h.released == h.locks
+
+
+def test_failed_enable_of_new_radiod_is_exit_5(station, capsys):
+    root = station.root
+    _first_rename_done(root)
+    h = station(active={"radiod@AI6VN.service"}, enabled={"radiod@AI6VN.service"})
+    h.fail = {("enable", "radiod@omni.service"), ("start", "radiod@omni.service")}
+    assert rr.cmd_radiod_rename(_args("AI6VN", "omni")) == 5
+    assert ("renamed, but these units did not start: radiod@omni.service\n"
+            in capsys.readouterr().out)
 
 
 def test_default_resolve_client_units_orders_services(station, monkeypatch):
@@ -299,6 +346,15 @@ def test_describe_restarts_only_radiod(station):
     assert rr.cmd_radiod_describe(_dargs("omni", "TCI-530")) == 0
     assert h.calls == []
     assert 'description = "TCI-530"' in (root / "etc/radio/radiod@omni.conf").read_text()
+
+
+def test_describe_failed_restart_is_exit_5(station, capsys):
+    h = station(active={"radiod@AI6VN.service"})
+    h.fail = {("restart", "radiod@AI6VN.service")}
+    assert rr.cmd_radiod_describe(_dargs("AI6VN", "TCI-530 Omni")) == 5
+    assert ("description set, but these units did not start: radiod@AI6VN.service\n"
+            in capsys.readouterr().out)
+    assert h.released == h.locks == ["admin radiod describe AI6VN"]
 
 
 def test_describe_dry_run_refusal_and_decline(station):

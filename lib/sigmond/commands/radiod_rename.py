@@ -12,6 +12,11 @@ ka9q_web_port_map, write_atomic, confirm, lock, sdr_list,
 enabled_components, catalog_components, resolve_client_units and
 passthrough_lookup.
 
+Exit codes: 0 done; 1 refused (nothing written); 2 declined at the prompt;
+4 stopped part way through the writes or the regenerate step (the written
+list is printed and nothing is started); 5 everything was written but a
+unit that had been running (or enabled) did not come back.
+
 Design: docs/superpowers/specs/2026-10-31-radiod-rename-design.md.
 """
 from __future__ import annotations
@@ -317,7 +322,12 @@ def cmd_radiod_rename(args) -> int:
             return 4
         for line in web_lines:
             print(line)
-        systemctl('daemon-reload')
+        if systemctl('daemon-reload') != 0:
+            err('systemctl daemon-reload failed; nothing was started, so no '
+                'unit runs from a stale definition.  Finish by hand from '
+                'this list:')
+            _print_written(written)
+            return 4
 
         failed: list[str] = []
         started: list[str] = []
@@ -328,7 +338,7 @@ def cmd_radiod_rename(args) -> int:
                 failed.append(unit)
 
         if was_enabled[old_unit] and systemctl('enable', new_unit) != 0:
-            failed.append(f'enable {new_unit}')
+            failed.append(new_unit)
         if was_active[old_unit]:
             start(new_unit)
         for w in web:
@@ -339,7 +349,15 @@ def cmd_radiod_rename(args) -> int:
                 start(u)
 
     _report(p, written, started, failed, was_active[old_unit])
+    if failed:
+        _did_not_start(failed)
+        return 5
     return 0
+
+
+def _did_not_start(units: list[str]) -> None:
+    seen = list(dict.fromkeys(units))
+    print(f'renamed, but these units did not start: {" ".join(seen)}')
 
 
 def _report(p, written, started, failed, radiod_was_active) -> None:
@@ -360,7 +378,8 @@ def _report(p, written, started, failed, radiod_was_active) -> None:
         print(f'radiod@{p.new}.service was not running before the rename and '
               f'was left stopped; `smd apply` starts it.')
     for f in failed:
-        warn(f'failed: {f}; check `systemctl status` and start it by hand.')
+        warn(f'{f} did not come back; check `systemctl status {f}` and '
+             f'start it by hand.')
     if p.history:
         print('history stays under the old name:')
         for x in p.history:
@@ -400,8 +419,10 @@ def cmd_radiod_describe(args) -> int:
             err(f'describe failed: {e}')
             _print_written([])
             return 4
-        if active and systemctl('restart', unit) != 0:
-            warn(f'restart of {unit} failed; check `systemctl status {unit}`.')
+        restart_failed = active and systemctl('restart', unit) != 0
+    if restart_failed:
+        print(f'description set, but these units did not start: {unit}')
+        return 5
     print(f'radiod@{inst}: description set'
           + ('; restarted.' if active else '; not running, left stopped.'))
     return 0
