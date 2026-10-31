@@ -1324,10 +1324,10 @@ RX888 is on the bus.` and the exit code is 0. Otherwise it prints
 **What to do**
 
 0. **If you just plugged in a second card** (the list says `RX888(s) on the
-   bus but only 1 radiod conf(s)`), register it first, as root `[VM]`:
+   bus but only 1 radiod conf(s)`), register it first `[VM]` (as yourself; `smd` elevates itself):
 
    ```bash
-   sudo smd config init radiod
+   smd config init radiod
    ```
 
    Sigmond pins the first radiod to the card it already has open, records that
@@ -1342,7 +1342,7 @@ Pin each radiod to its own card with the identify walk. Make sure every RX888
 is plugged in first, and run it as root `[VM]`:
 
 ```bash
-sudo smd admin sdr identify
+smd admin sdr identify
 ```
 
 It refuses with no radiod conf yet (run `smd config init radiod` first), with
