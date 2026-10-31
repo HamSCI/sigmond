@@ -587,6 +587,22 @@ class EligibleRadiodCoresTests(unittest.TestCase):
     def test_never_returns_empty_on_a_single_core_host(self):
         self.assertEqual(eligible_radiod_cores([{0, 1}], set()), [{0, 1}])
 
+    def test_grows_past_isolation_when_more_instances_than_isolated_cores(self):
+        """AI6VN-PM 2026-10-31: isolcpus=8-9 was written by smd for one
+        radiod; a second card must get the next core, not share the pair."""
+        five = [{0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}]
+        self.assertEqual(eligible_radiod_cores(five, {8, 9}), [{8, 9}])
+        self.assertEqual(eligible_radiod_cores(five, {8, 9}, need=2), [{8, 9}, {6, 7}])
+        self.assertEqual(eligible_radiod_cores(five, {8, 9}, need=3),
+                         [{8, 9}, {6, 7}, {4, 5}])
+
+    def test_growth_stops_at_the_boot_core(self):
+        self.assertEqual(eligible_radiod_cores([{0, 1}, {2, 3}], {2, 3}, need=3), [{2, 3}])
+
+    def test_no_growth_when_isolation_already_suffices(self):
+        self.assertEqual(eligible_radiod_cores(_EIGHT_CORES, set(range(8)), need=2),
+                         [{2, 3}, {4, 5}, {6, 7}])
+
 
 class AssignRadiodCoresTests(unittest.TestCase):
     """The single placement rule shared by compute_affinity_plan and the
@@ -773,21 +789,25 @@ class RadiodCoreShortfallTests(unittest.TestCase):
 
     CORES4 = [{0, 1}, {2, 3}, {4, 5}, {6, 7}]
 
-    def test_shortfall_counts_isolcpus(self):
-        # The reviewer's I2 reproduction: isolcpus admits only {2,3}, so two
-        # units would both land there.
+    def test_second_instance_grows_past_isolcpus_instead_of_sharing(self):
+        # isolcpus admits only {2,3}; the second unit takes the highest free
+        # off-boot core and the first stays where it is (AI6VN-PM 2026-10-31).
         self.assertEqual(radiod_core_shortfall(
-            ["a", "b"], cores=self.CORES4, isolated_cpus={2, 3}), 1)
+            ["a", "b"], cores=self.CORES4, isolated_cpus={2, 3}), 0)
         from sigmond.cpu import assign_radiod_cores
         placed = assign_radiod_cores(["a", "b"], cores=self.CORES4,
                                      isolated_cpus={2, 3})
-        self.assertEqual(placed, {"a": {2, 3}, "b": {2, 3}})
+        self.assertEqual(placed, {"a": {2, 3}, "b": {6, 7}})
+
+    def test_shortfall_when_isolcpus_and_the_rest_of_the_host_run_out(self):
+        self.assertEqual(radiod_core_shortfall(
+            ["a", "b", "c"], cores=[{0, 1}, {2, 3}], isolated_cpus={2, 3}), 2)
 
     def test_shortfall_reads_host_isolcpus_even_when_cores_given(self):
         with mock.patch("sigmond.cpu.get_isolated_cpus",
                         return_value={2, 3}) as iso:
             self.assertEqual(radiod_core_shortfall(
-                ["a", "b"], cores=self.CORES4), 1)
+                ["a", "b", "c", "d"], cores=self.CORES4), 1)
         iso.assert_called_once()
 
 
@@ -825,10 +845,12 @@ class RadiodDropInRefusalTests(unittest.TestCase):
         wr.assert_not_called()
 
     def test_isolcpus_shortfall_raises_and_host_isolated_read_once(self):
+        # isolcpus admits {2,3} and the only other core is the boot core, so
+        # the second unit has nowhere of its own to go.
         smd = self._load_smd()
         units = self._units()[:2]
         with mock.patch("sigmond.cpu.get_physical_cores",
-                        return_value=[{0, 1}, {2, 3}, {4, 5}, {6, 7}]), \
+                        return_value=[{0, 1}, {2, 3}]), \
              mock.patch("sigmond.cpu.get_isolated_cpus",
                         return_value={2, 3}) as iso, \
              mock.patch.object(smd, "_err"), \
@@ -838,6 +860,23 @@ class RadiodDropInRefusalTests(unittest.TestCase):
                 smd._ensure_radiod_affinity_drop_ins(units)
         self.assertEqual(iso.call_count, 1)
         wr.assert_not_called()
+
+    def test_second_instance_gets_a_core_outside_isolcpus(self):
+        """AI6VN-PM 2026-10-31: isolcpus=8-9 served one radiod; the second
+        card must get the next free pair, not a refusal and not a shared pair."""
+        smd = self._load_smd()
+        units = self._units()[:2]
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus", return_value={8, 9}), \
+             mock.patch.object(smd, "_err"), \
+             mock.patch.object(smd, "_ok"), \
+             mock.patch.object(smd, "_run"), \
+             mock.patch.object(smd, "_write_affinity_drop_in",
+                               return_value="unchanged") as wr:
+            smd._ensure_radiod_affinity_drop_ins(units)
+        placed = {c.args[0]: c.args[1] for c in wr.call_args_list}
+        self.assertEqual(sorted(placed.values(), key=min), [{6, 7}, {8, 9}])
 
     def test_topology_allow_shared_proceeds_to_write(self):
         smd = self._load_smd()

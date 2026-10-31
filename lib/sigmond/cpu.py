@@ -229,7 +229,8 @@ def parse_ht_pairs(s: str) -> "list[list[int]]":
 
 
 def eligible_radiod_cores(cores: "list[set]",
-                          isolated_cpus: Optional[set] = None) -> "list[set]":
+                          isolated_cpus: Optional[set] = None,
+                          need: int = 1) -> "list[set]":
     """Physical cores radiod may be placed on, lowest-numbered first.
 
     Two filters, applied in order:
@@ -252,6 +253,17 @@ def eligible_radiod_cores(cores: "list[set]",
     that admits no whole core falls back to "anything but core 0", and a
     single-core host falls back to that one core.  Callers always get a
     non-empty list as long as ``cores`` is non-empty.
+
+    ``need`` is how many radiod instances want a core of their own.  When
+    the isolated set admits fewer whole cores than that, the list grows
+    past it: the isolated cores first (so an instance already placed there
+    stays put), then the highest-numbered unisolated off-boot cores until
+    ``need`` is met.  On a sigmond guest the isolated set is itself written
+    by smd from this placement (``render_guest_isolation``), so confining
+    the placement to it could never admit a second card: AI6VN-PM
+    (2026-10-31) booted ``isolcpus=8-9`` for one radiod and `smd apply`
+    refused the second with "only 1 eligible core".  Growing the list
+    lets apply stage the wider isolcpus and ask for a reboot instead.
     """
     if not cores:
         return []
@@ -261,7 +273,12 @@ def eligible_radiod_cores(cores: "list[set]",
     if isolated_cpus:
         confined = [c for c in off_boot if c <= set(isolated_cpus)]
         if confined:
-            return confined
+            short = max(0, need - len(confined))
+            if not short:
+                return confined
+            spare = sorted((c for c in off_boot if c not in confined),
+                           key=min, reverse=True)
+            return confined + spare[:short]
     return off_boot
 
 
@@ -279,9 +296,11 @@ def assign_radiod_cores(units: "list[str]",
 
     ``[cpu_affinity].radiod_cpus`` in topology.toml overrides everything
     and is shared by every instance.  Otherwise instances take the top
-    eligible cores (see ``eligible_radiod_cores``) in ascending order, so
-    a second instance sits beside the first; if there are more instances
-    than cores they share the last one.
+    eligible cores (``eligible_radiod_cores``, asked for one core per
+    instance, so a second instance grows past the isolated set rather
+    than sharing) in ascending order, so a second instance sits beside
+    the first; if there are more instances than cores they share the
+    last one.
     """
     if not units:
         return {}
@@ -295,7 +314,7 @@ def assign_radiod_cores(units: "list[str]",
     if isolated_cpus is None:
         isolated_cpus = get_isolated_cpus()
 
-    eligible = eligible_radiod_cores(cores, isolated_cpus)
+    eligible = eligible_radiod_cores(cores, isolated_cpus, need=len(units))
     chosen = eligible[-len(units):] if eligible else []
     out: dict = {}
     for i, unit in enumerate(units):
@@ -328,7 +347,7 @@ def radiod_core_shortfall(units: "list[str]",
         cores = get_physical_cores()
     if isolated_cpus is None:
         isolated_cpus = get_isolated_cpus()
-    eligible = eligible_radiod_cores(cores, isolated_cpus)
+    eligible = eligible_radiod_cores(cores, isolated_cpus, need=len(units))
     return max(0, len(units) - len(eligible))
 
 

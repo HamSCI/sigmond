@@ -1341,6 +1341,15 @@ RX888 is on the bus.` and the exit code is 0. Otherwise it prints
    Then run the identify walk below only if you need to confirm which antenna
    is on which card.
 
+   Then `smd apply` starts the new radiod. Each radiod gets a core pair of
+   its own: the one already running keeps its pair, the new one takes the
+   next free pair, and `smd apply` widens the kernel's isolated set to cover
+   both and says `reboot to apply`. Until that reboot the new radiod runs on
+   cores the kernel has not fenced off yet, which works but is not quiet.
+   Reboot the VM when convenient. If the VM has no free pair left, `smd
+   apply` refuses with `only N eligible core(s)`; give the VM more cores or
+   pass `--allow-shared-radiod-cores` to let the radiods share.
+
 Pin each radiod to its own card with the identify walk. Make sure every RX888
 is plugged in first, and run it as root `[VM]`:
 
