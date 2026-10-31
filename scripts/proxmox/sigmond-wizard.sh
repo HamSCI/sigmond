@@ -308,6 +308,49 @@ RAC_TIER_LABEL=""
 MARK_DIR=/etc/sigmond-appliance
 CONF_MARK="$MARK_DIR/.configured"
 LOG=/var/log/sigmond-wizard.log
+
+# ── console colour, same contract as sigmond-issue's panel ────────────────
+# The post-reboot panel has had colour since v3.82; the wizard an operator
+# stares at for twenty minutes before that panel ever appears was entirely
+# monochrome, so the one line that matters -- the password to change -- read
+# exactly like the twenty lines that do not (Chris Callie, v3.82 report,
+# 2026-10-28).  Same keys and same codes as firstboot's _hl, so the two
+# screens agree: addresses cyan, logins green, the default password yellow.
+#
+# SIGMOND_PANEL_COLOUR=0 turns it off, as it does for the panel.
+#
+# ⛔ DECIDE THIS ONCE, HERE -- NOT WITH `[ -t 1 ]` INSIDE _hl.  The summary is
+# assembled in a command substitution, so inside it stdout is a pipe and a
+# per-call tty test is false every time: the colour would be computed away
+# before it ever reached the screen, and the whole helper would look like it
+# worked while doing nothing.  Test the wizard's OWN console once, at start,
+# and let the writers strip colour for the copies that go to disk.
+if [ "${SIGMOND_PANEL_COLOUR:-1}" != 0 ] && [ -t 1 ]; then _COLOUR_OK=1; else _COLOUR_OK=0; fi
+_hl(){
+    local _k="$1"; shift
+    local _c=''
+    case "$_k" in
+        addr)  _c='1;36' ;;
+        login) _c='1;32' ;;
+        pw)    _c='1;33' ;;
+    esac
+    if [ -z "$_c" ] || [ "$_COLOUR_OK" = 0 ]; then
+        printf '%s' "$*"
+    else
+        printf '\033[%sm%s\033[0m' "$_c" "$*"
+    fi
+}
+# Strip colour for the copies that get written to disk.
+_plain(){ sed 's/\x1b\[[0-9;]*m//g'; }
+
+# ⛔ `https://2001:db8::1:8006` IS NOT A URL.  An IPv6 literal needs square
+# brackets in a URL; without them a browser reads the last colon group as the
+# port and refuses the address.  The host summary below printed the bare
+# address, so on an IPv6-only site -- Jenny Jump, v3.82 -- the one line
+# telling the operator how to reach Proxmox was unusable.  firstboot-v3.sh
+# carries the same helper for the same reason; keep them identical.
+ipurl(){ case "${1:-}" in *:*) printf '[%s]\n' "$1";; *) printf '%s\n' "${1:-}";; esac; }
+
 say(){ echo "[wizard] $*" | tee -a "$LOG"; }
 
 mkdir -p "$MARK_DIR"
@@ -4719,7 +4762,20 @@ HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 |
 # the management /30 -- an address reachable only from the VM -- as the
 # station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
 # need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
-[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.)' | head -1)
+# ⛔ THE v4-ONLY PROBE ABOVE RETURNS NOTHING ON AN IPv6-ONLY SITE, and this
+# fallback then had to carry the whole job with two exclusions.  That is not
+# enough.  `hostname -I` also lists the CLAT's own 192.0.0.0/29 translation
+# endpoint (RFC 7335), present on every v6-only station and reachable from
+# nowhere but itself, and IPv6 link-local, which is not an address anyone can
+# connect to without a scope id.  firstboot-v3.sh excludes both; this summary
+# did not, so a v6-only station could be told to ssh to 192.0.0.1.
+# Order matches sigmond-net.sh: a real global IPv6 beats a leftover, and v4
+# still wins outright when the site has both.
+[ -n "$HOSTIP" ] || HOSTIP=$(ip -6 -o addr show scope global 2>/dev/null \
+    | grep -v -e temporary -e deprecated -e ' lo ' \
+    | awk '{print $4}' | cut -d/ -f1 | head -1)
+[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' \
+    | grep -vE '^(10\.99\.0\.|127\.|192\.0\.0\.|fe80:)' | head -1)
 SINK_NOTE=""
 [ -n "${UPLOADS_TOML:-}" ] && SINK_NOTE=" Site sink switch: off — the station records and decodes but sends
             no data; only its heartbeat goes out.  Check reception and
@@ -4728,10 +4784,10 @@ SUMMARY=$(cat <<SEOF
 ──────────────────────────────────────────────────────
  Sigmond station configured: $REPORTER @ $GRID
  Host (Proxmox):
-   login:   root — password set at install (image default:
-            hamsci-sigmond — CHANGE IT: run 'passwd')
-   ssh:     ssh root@${HOSTIP:-<host-ip>}
-   web GUI: https://${HOSTIP:-<host-ip>}:8006
+   login:   $(_hl login root) — password set at install (image default:
+            $(_hl pw hamsci-sigmond) — CHANGE IT: run 'passwd')
+   ssh:     ssh $(_hl login root)@$(_hl addr "${HOSTIP:-<host-ip>}")
+   web GUI: $(_hl addr "https://$(ipurl "${HOSTIP:-<host-ip>}"):8006")
  Decoder VM $VMID:
    IP:      ${VMIP:-none yet — check: qm guest exec $VMID -- ip -4 -br addr}
    login:   sigmond or hamsci — SAME password as this host's root
@@ -4751,8 +4807,11 @@ $SINK_NOTE
 ──────────────────────────────────────────────────────
 SEOF
 )
-echo "$SUMMARY" | tee -a "$LOG"
-echo "$SUMMARY" > /root/sigmond-setup-summary.txt
+# The console gets the colour; the log and the saved copy get plain text, so
+# that anything grepping either is unaffected by the highlighting above.
+echo "$SUMMARY"
+echo "$SUMMARY" | _plain >> "$LOG"
+echo "$SUMMARY" | _plain > /root/sigmond-setup-summary.txt
 # The persistent, boot-surviving login panel is sigmond-issue's job
 # (pvebanner rewrites /etc/issue every boot and DHCP addresses go stale —
 # it regenerates with live IPs).  Fall back to the old one-shot append on
