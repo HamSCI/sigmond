@@ -17998,8 +17998,17 @@ def cmd_wisdom_plan(args) -> int:
               f'estimate; adding them to this run:')
         print(f'      {" ".join(extra)}')
 
+    # fftwf-wisdom imports /etc/fftw/wisdomf before planning and keeps every
+    # plan it already holds, so a run on a host seeded from a bundle only
+    # measures the sizes the bundle lacked.  --fresh passes -n: measure every
+    # size on THIS machine, in this cache and clock environment (rob,
+    # 2026-10-31: the first 5560U plan made inside the Proxmox VM).
+    fresh = bool(getattr(args, 'fresh', False))
+    if fresh:
+        _info('fresh: ignoring the installed wisdom; every transform is measured here')
     cmd = ['taskset', '-c', plan_cpus,
            'stdbuf', '-oL', fftwf, '-v', '-T', '1',
+           *(['-n'] if fresh else []),
            '-o', str(WISDOM_TMP), *profiles]
 
     # Stage the pCPU running vCPU 0 at its hardware-max frequency for the
@@ -18640,8 +18649,9 @@ def _apply_single_radiod_to_instance(client: str, rid: str, selected: list,
     "Can't stat /var/lib/psk-recorder/omni-status").  Returns
     (changed, message)."""
     label = f'{client}@{_display_rid(rid)}'
-    radiods = [k.split(':', 1)[1] for k in selected if k.startswith('radiod:')]
-    others = [k for k in selected if not k.startswith('radiod:')]
+    keys = [str(k) for k in selected]            # SourceKey or plain string
+    radiods = [k.split(':', 1)[1] for k in keys if k.startswith('radiod:')]
+    others = [k for k in keys if not k.startswith('radiod:')]
     if others or len(radiods) != 1:
         return False, (f'  ⊘ {label}: {len(selected)} source(s) selected but '
                        f'{client} takes exactly one radiod (deferred)')
@@ -27151,6 +27161,9 @@ def _build_parser() -> argparse.ArgumentParser:
                               help='run fftwf-wisdom for every radiod transform; install /etc/fftw/wisdomf')
     p.add_argument('--no-install', action='store_true',
                    help='leave the result at /etc/fftw/wisdomf.new without renaming over wisdomf')
+    p.add_argument('--fresh', action='store_true',
+                   help='measure every transform on this machine instead of keeping the '
+                        'plans already in /etc/fftw/wisdomf (hours; the full replan)')
 
     p = wisdom_sub.add_parser('status',
                               help='show whether /etc/fftw/wisdomf exists and how old it is '

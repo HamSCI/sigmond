@@ -109,6 +109,16 @@ class ApplySingleRadiodTests(unittest.TestCase):
             self.assertIn("deferred", msg)
         self.assertIn("omni-status.local", self.cfg.read_text())
 
+    def test_accepts_sourcekey_objects_as_sources_apply_passes_them(self):
+        """The real caller hands SourceKey dataclasses, not strings; the first
+        run on AI6VN-PM raised AttributeError on .startswith."""
+        from sigmond.sources import SourceKey
+        changed, msg = self.smd._apply_single_radiod_to_instance(
+            "psk-recorder", "AI6VN-SE", [SourceKey("radiod", "se-status.local")],
+            etc_root=self.etc)
+        self.assertTrue(changed)
+        self.assertIn('status = "se-status.local"', self.cfg.read_text())
+
     def test_missing_config_says_run_instance_add(self):
         changed, msg = self.smd._apply_single_radiod_to_instance(
             "psk-recorder", "NOPE", ["radiod:se-status.local"], etc_root=self.etc)
