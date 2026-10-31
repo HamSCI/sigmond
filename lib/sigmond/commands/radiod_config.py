@@ -63,6 +63,8 @@ from ..discovery import usb_sdr
 from ..environment import Environment
 from ..paths import COORDINATION_ENV, COORDINATION_PATH, SIGMOND_CONF
 from ..ui import err, heading, info, ok, warn
+# {instance: serial} each running radiod has open; patchable in tests.
+from .sdr import held_serials as _held_serials
 
 
 RADIOD_CONFIG_DIR = Path("/etc/radio")
@@ -539,18 +541,28 @@ def cmd_radiod_init(args) -> int:
     # must name its card too, or it opens whichever one is free.
     for sdr in sdrs:
         _fill_sysfs_serial(sdr)
-    repins: list[tuple[Path, str, str, str]] = []
+    # The card each running radiod has open: on a formerly one-card host
+    # that is the only record of which card the unpinned conf serves.
+    held = {inst: sdr_map._norm(s) for inst, s in _held_serials(
+        sorted(sdr_map.conf_pinned_serials(RADIOD_CONFIG_DIR))).items() if s}
+    held_by = {s: inst for inst, s in held.items()}
+    repins: list[tuple[Path, str, str, str, str]] = []
     if len(sdrs) > 1:
-        repins, refusal = _repins_for_multi_card(sdrs, coord)
+        repins, refusal = _repins_for_multi_card(sdrs, coord, held)
         if refusal:
             err(refusal)
             return 1
 
     def _write_repins() -> None:
-        for path, text, inst, serial in repins:
+        for path, text, inst, serial, source in repins:
             path.write_text(text)
-            ok(f"pinned radiod@{inst} to RX888 {serial} "
-               f"(a second card is on the bus)")
+            if source == "held":
+                ok(f"pinned radiod@{inst} to RX888 {serial} "
+                   f"(pinned from the card radiod@{inst} has open)")
+                _pin_coordination(inst, serial)
+            else:
+                ok(f"pinned radiod@{inst} to RX888 {serial} "
+                   f"(a second card is on the bus)")
 
     new_sdrs = []
     for sdr in sdrs:
@@ -559,6 +571,11 @@ def cmd_radiod_init(args) -> int:
             ok(f"already registered: {sdr.fields.get('sdr_type')} "
                f"serial {serial} → radiod@{known_serial_to_id[serial]}  "
                f"(skipping)")
+            continue
+        if serial and sdr_map._norm(serial) in held_by:
+            ok(f"already in use: {sdr.fields.get('sdr_type')} "
+               f"serial {serial} is open in "
+               f"radiod@{held_by[sdr_map._norm(serial)]}  (skipping)")
             continue
         new_sdrs.append(sdr)
 
@@ -660,27 +677,55 @@ def cmd_radiod_init(args) -> int:
     return 0
 
 
-def _repins_for_multi_card(sdrs: list, coord):
+def _pin_coordination(inst: str, serial: str) -> None:
+    """Record `sdr_serial` for radiod@<inst> in coordination.toml, so it
+    agrees with the conf just pinned.  Warns and carries on when there is no
+    table for it or the file cannot be written."""
+    path = COORDINATION_PATH
+    try:
+        text = sdr_map.set_coord_serial(path.read_text(), inst, serial)
+        path.write_text(text)
+    except ValueError:
+        warn(f"no [radiod] table for radiod@{inst} in {path}; "
+             f"its sdr_serial is not recorded there")
+        return
+    except OSError as exc:
+        warn(f"could not record sdr_serial for radiod@{inst} in {path}: {exc}")
+        return
+    ok(f"recorded sdr_serial {serial} for radiod@{inst} in {path}")
+
+
+def _repins_for_multi_card(sdrs: list, coord, held: dict | None = None):
     """For each [rx888] conf on disk with no live `serial =`, the pinned text
-    from its coordination `sdr_serial`.  Returns (repins, refusal): repins is
-    [(path, new_text, instance, serial)]; refusal is the error text when a
-    conf names no serial anywhere, else None."""
+    from its coordination `sdr_serial`, else from the card its running radiod
+    has open (`held`).  Returns (repins, refusal): repins is
+    [(path, new_text, instance, serial, source)] with source "coord" or
+    "held"; refusal is the error text when a conf's card is known nowhere,
+    else None."""
     on_bus = {sdr_map._norm(s.fields.get("serial"))
               for s in sdrs if s.fields.get("serial")}
-    radiods = getattr(coord, "radiods", {}) or {}
+    held = held or {}
     repins = []
     for inst, pinned in sorted(sdr_map.conf_pinned_serials(
             RADIOD_CONFIG_DIR).items()):
         if pinned:
             continue
-        rd = radiods.get(inst)
+        rd = sdr_map.coord_radiod_for(coord, inst)
         serial = sdr_map._norm(getattr(rd, "sdr_serial", "")) if rd else ""
+        source = "coord"
         if not serial:
-            return [], (f"radiod@{inst} has no `serial =` line and "
-                        f"coordination.toml records no sdr_serial for it; "
-                        f"with more than one RX888 on the bus it would open "
-                        f"whichever card is free.  Run `smd admin sdr "
-                        f"identify` to pin it, then re-run.")
+            serial, source = sdr_map._norm(held.get(inst, "")), "held"
+        if not serial:
+            conf = RADIOD_CONFIG_DIR / f"radiod@{inst}.conf"
+            return [], (f"radiod@{inst} has no `serial =` line, "
+                        f"coordination.toml records no sdr_serial for it, "
+                        f"and no running radiod@{inst} shows which card it "
+                        f"has open; with more than one RX888 on the bus it "
+                        f"would open whichever card is free.  Pin it by "
+                        f"hand: add `serial = \"<SERIAL>\"` to the [rx888] "
+                        f"section of {conf}, taking the serial of the card "
+                        f"that serves its antenna from `smd admin sdr list`, "
+                        f"then re-run.")
         if serial not in on_bus:
             warn(f"radiod@{inst} is recorded as RX888 {serial}, which is "
                  f"not on the bus; left unpinned.  Run `smd admin sdr "
@@ -691,7 +736,7 @@ def _repins_for_multi_card(sdrs: list, coord):
             text = sdr_map.set_conf_serial(path.read_text(), serial)
         except (OSError, ValueError) as exc:
             return [], f"cannot pin {path} ({exc}); nothing written"
-        repins.append((path, text, inst, serial))
+        repins.append((path, text, inst, serial, source))
     return repins, None
 
 

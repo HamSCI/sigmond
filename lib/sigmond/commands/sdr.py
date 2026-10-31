@@ -19,6 +19,7 @@ from sigmond.ui import err, heading, warn
 SYSFS_ROOT = Path('/sys/bus/usb/devices')
 CONFDIR = Path('/etc/radio')
 COORD_PATH = COORDINATION_PATH
+PROC_ROOT = Path('/proc')
 _clock = time.monotonic
 _sleep = time.sleep
 WAIT_SECS = 180
@@ -42,6 +43,32 @@ def unit_state(inst: str) -> str:
     return r.stdout.strip() or 'unknown'
 
 
+def main_pid(instance: str) -> int:
+    """radiod@<instance>'s MainPID from systemd; 0 when not running or
+    systemctl cannot say."""
+    try:
+        r = subprocess.run(['systemctl', 'show', '-p', 'MainPID', '--value',
+                            f'radiod@{instance}.service'],
+                           capture_output=True, text=True, timeout=10)
+        return int(r.stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0
+
+
+def held_serials(instances) -> dict[str, str]:
+    """{instance: serial} of the RX888 each running radiod has open, read
+    from /proc/<pid>/fd.  radiod runs as another user, so without root this
+    is usually empty; instances with nothing readable are left out."""
+    out = {}
+    for inst in instances:
+        pid = main_pid(inst)
+        if pid > 0:
+            serial = sdr_map.held_serial(PROC_ROOT / str(pid) / 'fd', SYSFS_ROOT)
+            if serial:
+                out[inst] = serial
+    return out
+
+
 def _antenna(inst: str) -> str:
     try:
         return sdr_map.conf_description(
@@ -61,8 +88,12 @@ def cmd_sdr_list(args) -> int:
     cards = sdr_map.present_cards(SYSFS_ROOT)
     instances = sdr_map.instance_serials(CONFDIR, load_coord())
     pinned = sdr_map.conf_pinned_serials(CONFDIR)
-    rep = sdr_map.report(cards, instances, pinned)
+    held = held_serials(sorted(instances))
+    rep = sdr_map.report(cards, instances, pinned, held=held)
+    # OPENED BY: the radiod that holds the card when we can see it, else
+    # the one whose conf (or coordination) names it.
     opened = sdr_map.serial_to_instance(instances)
+    opened.update(sdr_map.serial_to_instance(held))
     rc = 1 if rep.problems else 0
 
     if getattr(args, 'json', False):
@@ -72,6 +103,7 @@ def cmd_sdr_list(args) -> int:
                       for c in cards],
             'instances': instances,
             'conf_pinned': pinned,
+            'held': held,
             'problems': rep.problems,
         }, indent=2))
         return rc
@@ -234,10 +266,16 @@ def cmd_sdr_identify(args) -> int:
         err(f'no radiod conf with an [rx888] section in {CONFDIR}; '
             f'run `smd config init radiod` first')
         return 1
+    n_cards = len(present_serials())
+    if n_cards > len(instances):
+        err(f'{n_cards} RX888s on the bus but {len(instances)} radiod '
+            f'conf(s): run `smd config init radiod` to register the rest, '
+            f'then identify')
+        return 1
     if len(instances) < 2:
         err('one radiod needs no identify; its conf is unbound by design')
         return 1
-    if len(present_serials()) < len(instances):
+    if n_cards < len(instances):
         err(f'{len(instances)} radiod instances but fewer RX888 cards on the '
             f'bus; plug them all in first')
         return 1

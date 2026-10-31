@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 import tempfile
@@ -481,7 +482,8 @@ class SecondCardArrivesTests(unittest.TestCase):
                 'device = "rx888"\n'
                 '# serial  = "AAA"   # sole SDR: unbound by design; uncomment to pin\n')
 
-    def _run(self, coord_serial, sdrs, extra_coord=""):
+    def _run(self, coord_serial, sdrs, extra_coord="", held=None,
+             coord_text=None):
         import contextlib
         import io
         out = io.StringIO()
@@ -493,10 +495,12 @@ class SecondCardArrivesTests(unittest.TestCase):
             coord_path = Path(d) / "coordination.toml"
             serial_line = (f'sdr_serial  = "{coord_serial}"\n'
                            if coord_serial else "")
-            coord_path.write_text(
-                '[radiod."host"]\nhost        = "localhost"\n'
-                'status_dns  = "host-status.local"\n'
-                f'radio_conf  = "{old}"\n' + serial_line + extra_coord)
+            if coord_text is None:
+                coord_text = (
+                    '[radiod."host"]\nhost        = "localhost"\n'
+                    'status_dns  = "host-status.local"\n'
+                    f'radio_conf  = "{old}"\n' + serial_line + extra_coord)
+            coord_path.write_text(coord_text)
             with mock.patch.object(radiod_config, "_discover_sdrs",
                                    return_value=sdrs), \
                  mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR",
@@ -509,11 +513,14 @@ class SecondCardArrivesTests(unittest.TestCase):
                                    return_value="eth0"), \
                  mock.patch.object(radiod_config,
                                    "_apply_fragments_for_new_instances"), \
+                 mock.patch.object(radiod_config, "_held_serials",
+                                   return_value=dict(held or {})), \
                  mock.patch("socket.gethostname", return_value="host"), \
                  contextlib.redirect_stdout(out), \
                  contextlib.redirect_stderr(out):
                 rc = radiod_config.cmd_radiod_init(_ns())
             confs = {p.name: p.read_text() for p in radio_dir.glob("radiod@*.conf")}
+            self.coord_after = coord_path.read_text()
         return rc, out.getvalue(), confs
 
     def test_second_card_pins_the_formerly_sole_conf(self):
@@ -543,7 +550,10 @@ class SecondCardArrivesTests(unittest.TestCase):
             _sdr("RX-888", serial="AAA", index=0, device="005"),
             _sdr("RX-888", serial="BBB", index=1, device="006")])
         self.assertEqual(rc, 1)
-        self.assertIn("smd admin sdr identify", out)
+        self.assertIn('serial = "<SERIAL>"', out)
+        self.assertIn("radiod@host.conf", out)
+        self.assertIn("smd admin sdr list", out)
+        self.assertNotIn("identify", out)
         self.assertEqual(list(confs), ["radiod@host.conf"])
         self.assertEqual(confs["radiod@host.conf"], self.OLD_CONF)
 
@@ -552,3 +562,73 @@ class SecondCardArrivesTests(unittest.TestCase):
             _sdr("RX-888", serial="AAA", index=0, device="005")])
         self.assertEqual(rc, 0)
         self.assertEqual(confs["radiod@host.conf"], self.OLD_CONF)
+
+
+class SecondCardOnRobsStationTests(unittest.TestCase):
+    """fix2: coordination keyed by the status name, no sdr_serial; the
+    running radiod holds the first card."""
+
+    OLD_CONF = ('[global]\nstatus = AI6VN-status.local\n\n[rx888]\n'
+                'device = "rx888"\n'
+                '# serial  = "0009002807411037"   # sole SDR: unbound by design; '
+                'uncomment to pin\n')
+    CARDS = [_sdr("RX-888", serial="0009002807411037", index=0, device="016"),
+             _sdr("RX-888", serial="0009061C028B352B", index=1, device="017")]
+    COORD = ('[radiod."AI6VN-status.local"]\nhost = "localhost"\n'
+             'radio_conf = "/etc/radio/radiod@AI6VN.conf"\n')
+
+    def _rob(self, held):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            radio_dir = Path(d) / "radio"
+            radio_dir.mkdir()
+            (radio_dir / "radiod@AI6VN.conf").write_text(self.OLD_CONF)
+            coord_path = Path(d) / "coordination.toml"
+            coord_path.write_text(self.COORD)
+            with mock.patch.object(radiod_config, "_discover_sdrs",
+                                   return_value=[copy.deepcopy(s) for s in self.CARDS]), \
+                 mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR", radio_dir), \
+                 mock.patch.object(radiod_config, "COORDINATION_PATH", coord_path), \
+                 mock.patch.object(radiod_config, "COORDINATION_ENV",
+                                   Path(d) / "coordination.env"), \
+                 mock.patch.object(radiod_config, "_suggest_iface",
+                                   return_value="eth0"), \
+                 mock.patch.object(radiod_config,
+                                   "_apply_fragments_for_new_instances"), \
+                 mock.patch.object(radiod_config, "_held_serials",
+                                   return_value=dict(held)), \
+                 mock.patch("socket.gethostname", return_value="AI6VN"), \
+                 contextlib.redirect_stdout(out), \
+                 contextlib.redirect_stderr(out):
+                rc = radiod_config.cmd_radiod_init(_ns())
+            confs = {p.name: p.read_text() for p in radio_dir.glob("radiod@*.conf")}
+            coord_after = coord_path.read_text()
+        return rc, out.getvalue(), confs, coord_after
+
+    def test_pins_from_the_held_card_and_registers_only_the_new_one(self):
+        rc, out, confs, coord = self._rob({"AI6VN": "0009002807411037"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn('serial      = "0009002807411037"',
+                      confs["radiod@AI6VN.conf"])
+        self.assertIn("pinned from the card radiod@AI6VN has open", out)
+        self.assertTrue(coord.startswith(
+            '[radiod."AI6VN-status.local"]\n'
+            'sdr_serial  = "0009002807411037"\n'), coord)
+        new = [t for n, t in confs.items() if n != "radiod@AI6VN.conf"]
+        self.assertEqual(len(new), 1, list(confs))
+        self.assertIn('serial      = "0009061C028B352B"', new[0])
+        self.assertNotIn("0009002807411037", new[0])
+        self.assertEqual(coord.count("[radiod."), 2, coord)
+
+    def test_refuses_with_hand_pin_remedy_when_nothing_known(self):
+        rc, out, confs, coord = self._rob({})
+        self.assertEqual(rc, 1, out)
+        self.assertIn('serial = "<SERIAL>"', out)
+        self.assertIn("radiod@AI6VN.conf", out)
+        self.assertIn("smd admin sdr list", out)
+        self.assertNotIn("identify", out)
+        self.assertEqual(list(confs), ["radiod@AI6VN.conf"])
+        self.assertEqual(confs["radiod@AI6VN.conf"], self.OLD_CONF)
+        self.assertEqual(coord, self.COORD)

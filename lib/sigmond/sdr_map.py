@@ -7,6 +7,7 @@ and stripped.  Port of wsprdaemon's `wd -X` report.
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -117,10 +118,27 @@ def instance_serials(confdir: Path = Path('/etc/radio'), coord=None) -> dict[str
             continue
         serial = conf_serial(text)
         if not serial and coord is not None:
-            rd = getattr(coord, 'radiods', {}).get(inst)
+            rd = coord_radiod_for(coord, inst)
             serial = _norm(getattr(rd, 'sdr_serial', '')) if rd else ''
         out[inst] = serial
     return out
+
+
+def coord_radiod_for(coord, instance: str):
+    """The coordination radiod for radiod@<instance>.conf: the one whose
+    `radio_conf` names that file, else the one keyed or id'd `instance`,
+    else None.  Coordination keys a radiod by its id or by its status DNS
+    name, so the conf path is the reliable link."""
+    radiods = getattr(coord, 'radiods', None) or {}
+    name = f'radiod@{instance}.conf'
+    for rd in radiods.values():
+        rc = str(getattr(rd, 'radio_conf', '') or '').strip()
+        if rc == name or rc.endswith('/' + name):
+            return rd
+    for key, rd in radiods.items():
+        if key == instance or getattr(rd, 'id', None) == instance:
+            return rd
+    return None
 
 
 def conf_pinned_serials(confdir: Path = Path('/etc/radio')) -> dict[str, str]:
@@ -154,6 +172,30 @@ def sysfs_serial_for(bus, dev, root: Path = Path('/sys/bus/usb/devices')) -> str
     return ''
 
 
+_USB_FD = re.compile(r'^/dev/bus/usb/(\d{3})/(\d{3})$')
+
+
+def held_serial(fd_dir: Path, sysfs_root: Path = Path('/sys/bus/usb/devices')) -> str:
+    """The serial of the USB device a process holds open, from its
+    /proc/<pid>/fd links; "" when unreadable (another user's process
+    without root) or none is a /dev/bus/usb node."""
+    try:
+        fds = sorted(Path(fd_dir).iterdir())
+    except OSError:
+        return ''
+    for fd in fds:
+        try:
+            m = _USB_FD.match(os.readlink(fd))
+        except OSError:
+            continue
+        if m:
+            serial = sysfs_serial_for(int(m.group(1)), int(m.group(2)),
+                                      sysfs_root)
+            if serial:
+                return serial
+    return ''
+
+
 def serial_to_instance(instances: dict[str, str]) -> dict[str, str]:
     return {s: i for i, s in instances.items() if s}
 
@@ -166,12 +208,18 @@ class SdrReport:
 
 
 def report(cards: list[PresentCard], instances: dict[str, str],
-           pinned: dict[str, str] | None = None) -> SdrReport:
+           pinned: dict[str, str] | None = None, *,
+           held: dict[str, str] | None = None) -> SdrReport:
     """`instances` may carry coordination labels; `pinned` (from
     conf_pinned_serials) decides the swap risk from the conf alone, since
-    that is what radiod reads.  Without `pinned`, `instances` decides it."""
+    that is what radiod reads.  Without `pinned`, `instances` decides it.
+    `held` ({instance: serial} a running radiod has open) counts a card as
+    claimed even when its conf does not name it.  More than one conf, or
+    more than one programmed card, makes it a multi-card host."""
     problems = []
-    multi = len(instances) > 1
+    n_programmed = sum(1 for c in cards if c.programmed)
+    multi = len(instances) > 1 or n_programmed > 1
+    held_serials = {_norm(s) for s in (held or {}).values() if s}
     on_bus = {c.serial for c in cards if c.programmed and c.serial}
     pins = instances if pinned is None else \
         {i: pinned.get(i, '') for i in instances}
@@ -199,10 +247,14 @@ def report(cards: list[PresentCard], instances: dict[str, str],
                         key=lambda c: c.serial)
     if multi:
         for c in programmed:
-            if c.serial not in by_serial:
+            if c.serial not in by_serial and c.serial not in held_serials:
                 problems.append(
                     f"RX888 {c.serial} on {c.devpath} is not named by any "
                     f"radiod conf")
+    if n_programmed > len(instances):
+        problems.append(
+            f"{n_programmed} RX888(s) on the bus but only {len(instances)} "
+            f"radiod conf(s): run `smd config init radiod` to register the rest")
     for c in programmed:
         try:
             slow = int(c.speed) < _MIN_SPEED_MBPS
@@ -320,11 +372,42 @@ def set_conf_serial(text: str, serial: str) -> str:
     return out
 
 
+_RADIO_CONF_LINE = re.compile(
+    r"""^\s*radio_conf\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+
+
+def _radiod_header_by_conf(text: str, instance: str) -> str | None:
+    """The header of the first [radiod.*] table whose `radio_conf` names
+    radiod@<instance>.conf, else None."""
+    name = f'radiod@{instance}.conf'
+    header = None
+    for raw in text.splitlines():
+        line = raw.rstrip('\r\n')
+        if _HEADER.match(line):
+            h = line.split('#', 1)[0].strip()
+            header = h if _RADIOD_HEADER.match(h) else None
+            continue
+        m = _RADIO_CONF_LINE.match(line)
+        if header and m:
+            value = (m.group(1) if m.group(1) is not None else m.group(2)).strip()
+            if value == name or value.endswith('/' + name):
+                return header
+    return None
+
+
 def set_coord_serial(text: str, instance: str, serial: str) -> str:
     """Pin `sdr_serial` in the [radiod.<instance>] table of coordination.toml
-    (bare or quoted key, as `smd config init radiod` writes it)."""
+    (bare or quoted key, as `smd config init radiod` writes it), else in the
+    [radiod.*] table whose `radio_conf` names radiod@<instance>.conf (the
+    bring-up path keys the table by the status DNS name)."""
+    line = f'sdr_serial  = "{_norm(serial)}"'
     out = _pin_in_table(text, lambda h: _is_radiod_table(h, instance),
-                        'sdr_serial', f'sdr_serial  = "{_norm(serial)}"', False)
+                        'sdr_serial', line, False)
+    if out is None:
+        header = _radiod_header_by_conf(text, instance)
+        if header is not None:
+            out = _pin_in_table(text, lambda h: h == header,
+                                'sdr_serial', line, False)
     if out is None:
         raise ValueError(f'no [radiod.{instance}] table')
     return out

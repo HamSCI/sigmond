@@ -110,6 +110,7 @@ def _patch(monkeypatch, tmp_path, instances, cards, states="active"):
     monkeypatch.setattr(sdr, "CONFDIR", conf)
     monkeypatch.setattr(sdr, "load_coord", lambda: None)
     monkeypatch.setattr(sdr, "unit_state", lambda inst: states)
+    monkeypatch.setattr(sdr, "held_serials", lambda insts: {})
     return sdr
 
 
@@ -264,7 +265,7 @@ _GOOD = [{"S1", "S2"}, {"S1", "S2"}, {"S2"}, {"S2"}, {"S1", "S2"},
 
 
 def test_identify_refuses_single_instance(monkeypatch, capsys, tmp_path):
-    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD,
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, [{"S1"}],
                                     confs={"a": CONF_A})
     assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=True)) == 1
     assert "one radiod needs no identify; its conf is unbound by design" \
@@ -517,3 +518,141 @@ def test_identify_wait_secs_flag_beats_env(monkeypatch):
     assert sdr._wait_secs(SimpleNamespace()) == 30
     monkeypatch.delenv("SIGMOND_SDR_IDENTIFY_WAIT_SECS")
     assert sdr._wait_secs(SimpleNamespace()) == 180
+
+
+# ---- fix2: a second card on a formerly one-card station ----------------------
+
+ROB_COORD = ('[radiod."AI6VN-status.local"]\nhost = "localhost"\n'
+             'radio_conf = "/etc/radio/radiod@AI6VN.conf"\n\n'
+             '[radiod.other]\nhost = "localhost"\n')
+
+
+def test_coord_radiod_for_matches_radio_conf_then_id():
+    rob = SimpleNamespace(id="AI6VN-status.local", sdr_serial="S1",
+                          radio_conf="/etc/radio/radiod@AI6VN.conf")
+    plain = SimpleNamespace(id="b", sdr_serial="S2", radio_conf="")
+    coord = SimpleNamespace(radiods={"AI6VN-status.local": rob, "b": plain})
+    assert sdr_map.coord_radiod_for(coord, "AI6VN") is rob
+    assert sdr_map.coord_radiod_for(coord, "b") is plain
+    assert sdr_map.coord_radiod_for(coord, "c") is None
+    assert sdr_map.coord_radiod_for(None, "b") is None
+
+
+def test_instance_serials_finds_coordination_keyed_by_status_name(tmp_path):
+    (tmp_path / "radiod@AI6VN.conf").write_text('[rx888]\n# serial = "X"\n')
+    rob = SimpleNamespace(id="AI6VN-status.local", sdr_serial=" s1 ",
+                          radio_conf="/etc/radio/radiod@AI6VN.conf")
+    coord = SimpleNamespace(radiods={"AI6VN-status.local": rob})
+    assert instance_serials(tmp_path, coord) == {"AI6VN": "S1"}
+
+
+def test_set_coord_serial_finds_table_by_radio_conf():
+    out = set_coord_serial(ROB_COORD, "AI6VN", "0009002807411037")
+    assert out.startswith('[radiod."AI6VN-status.local"]\n'
+                          'sdr_serial  = "0009002807411037"\n')
+    assert out.endswith('[radiod.other]\nhost = "localhost"\n')
+    with pytest.raises(ValueError):
+        set_coord_serial(ROB_COORD, "nope", "S")
+
+
+def _usb_tree(tmp_path):
+    sysfs = tmp_path / "sys"
+    sysfs.mkdir()
+    d = sysfs / "4-1.4"
+    d.mkdir()
+    (d / "busnum").write_text("4\n")
+    (d / "devnum").write_text("16\n")
+    (d / "serial").write_text("0009002807411037\n")
+    fd = tmp_path / "fd"
+    fd.mkdir()
+    (fd / "0").symlink_to("/dev/null")
+    (fd / "3").symlink_to("socket:[1234]")
+    (fd / "9").symlink_to("/dev/bus/usb/004/016")
+    return fd, sysfs
+
+
+def test_held_serial_reads_the_usb_fd(tmp_path):
+    fd, sysfs = _usb_tree(tmp_path)
+    assert sdr_map.held_serial(fd, sysfs) == "0009002807411037"
+
+
+def test_held_serial_blank_without_usb_fd_or_dir(tmp_path):
+    fd, sysfs = _usb_tree(tmp_path)
+    (fd / "9").unlink()
+    assert sdr_map.held_serial(fd, sysfs) == ""
+    assert sdr_map.held_serial(tmp_path / "nope", sysfs) == ""
+
+
+def test_held_serial_blank_when_permission_denied(monkeypatch, tmp_path):
+    from pathlib import Path
+    fd, sysfs = _usb_tree(tmp_path)
+    real = Path.iterdir
+
+    def deny(self):
+        if self == fd:
+            raise PermissionError(13, "Permission denied")
+        return real(self)
+    monkeypatch.setattr(Path, "iterdir", deny)
+    assert sdr_map.held_serial(fd, sysfs) == ""
+
+
+ROB_CARDS = [PresentCard("0009002807411037", "4-1.4", "5000", True),
+             PresentCard("0009061C028B352B", "4-2", "5000", True)]
+
+
+def test_report_more_cards_than_confs_robs_station():
+    r = report(ROB_CARDS, {"AI6VN": ""}, {"AI6VN": ""},
+               held={"AI6VN": "0009002807411037"})
+    assert r.problems == [
+        "radiod@AI6VN has no 'serial =' line, so it opens whichever RX888 is free: a reboot can swap antennas",
+        "RX888 0009061C028B352B on 4-2 is not named by any radiod conf",
+        "2 RX888(s) on the bus but only 1 radiod conf(s): run `smd config init radiod` to register the rest",
+    ]
+
+
+def test_report_one_card_one_unpinned_conf_is_clear():
+    assert report(ROB_CARDS[:1], {"AI6VN": ""}, {"AI6VN": ""}).problems == []
+
+
+def test_cmd_sdr_list_robs_station(monkeypatch, capsys, tmp_path):
+    sdr = _patch(monkeypatch, tmp_path,
+                 {"AI6VN": '[rx888]\n# serial  = "0009002807411037"\n'},
+                 [("4-1.4", "00f1", "0009002807411037"),
+                  ("4-2", "00f1", "0009061C028B352B")])
+    monkeypatch.setattr(sdr, "held_serials",
+                        lambda insts: {"AI6VN": "0009002807411037"})
+    rc = sdr.cmd_sdr_list(SimpleNamespace(json=False))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Every local radiod" not in out
+    assert ("2 RX888(s) on the bus but only 1 radiod conf(s): run "
+            "`smd config init radiod` to register the rest") in out
+    assert "RX888 0009061C028B352B on 4-2 is not named" in out
+    assert "RX888 0009002807411037 on 4-1.4 is not named" not in out
+    line = next(l for l in out.splitlines() if l.startswith("0009002807411037"))
+    assert line.split()[-1] == "AI6VN"
+    line = next(l for l in out.splitlines() if l.startswith("0009061C028B352B"))
+    assert line.split()[-1] == "-"
+
+
+def test_held_serials_uses_main_pid_and_proc(monkeypatch, tmp_path):
+    from sigmond.commands import sdr
+    fd, sysfs = _usb_tree(tmp_path)
+    proc = tmp_path / "proc"
+    (proc / "77").mkdir(parents=True)
+    fd.rename(proc / "77" / "fd")
+    monkeypatch.setattr(sdr, "PROC_ROOT", proc)
+    monkeypatch.setattr(sdr, "SYSFS_ROOT", sysfs)
+    monkeypatch.setattr(sdr, "main_pid",
+                        lambda inst: 77 if inst == "AI6VN" else 0)
+    assert sdr.held_serials(["AI6VN", "b"]) == {"AI6VN": "0009002807411037"}
+
+
+def test_identify_refuses_more_cards_than_confs(monkeypatch, capsys, tmp_path):
+    sdr, conf, coord, calls = _walk(monkeypatch, tmp_path, _GOOD,
+                                    confs={"a": CONF_A})
+    assert sdr.cmd_sdr_identify(SimpleNamespace(dry_run=True)) == 1
+    assert ("2 RX888s on the bus but 1 radiod conf(s): run `smd config init "
+            "radiod` to register the rest, then identify"
+            in capsys.readouterr().err)
+    assert calls == []
