@@ -143,58 +143,155 @@ def test_port_map_keeps_8081_holder_unmarked(smd, monkeypatch):
     assert "holder" not in after[0]
 
 
-def test_rewrite_for_rename_retires_stale_templated_unit(smd, monkeypatch, tmp_path):
-    # AI6VN -> zz flips the 8081 holder: ka9q-web@omni vanishes and the
-    # plain unit changes status.
-    calls, wrote = [], []
+class _Host:
+    """Fakes _run / the writer / is_active for the rename hook."""
 
     class _R:
         returncode = 0
         stdout = stderr = ""
 
-    monkeypatch.setattr(smd, "_run", lambda cmd, **k: (calls.append((cmd, k)), _R())[1])
-    monkeypatch.setattr(smd, "_write_ka9q_web_unit", lambda: wrote.append(1) or True)
-    import os as _os
-    from pathlib import Path as _P
-    monkeypatch.setattr(_P, "unlink", lambda *a, **k: pytest.fail("no direct unlink"))
-    monkeypatch.setattr(_os, "remove", lambda *a, **k: pytest.fail("no direct remove"))
-    before = smd._ka9q_web_targets_for([_loc("AI6VN"), _loc("omni")])
-    _with(monkeypatch, [_loc("zz"), _loc("omni")])     # the handler's writes
-    lines = smd._ka9q_web_rewrite_for_rename("AI6VN", "zz", before=before)
+    def __init__(self, smd, monkeypatch, active=()):
+        self.calls, self.active = [], set(active)
+        monkeypatch.setattr(smd, "_run", self.run)
+        monkeypatch.setattr(smd, "_write_ka9q_web_unit",
+                            lambda: self.calls.append(["WRITER"]) or True)
+        monkeypatch.setattr(smd, "_KA9Q_WEB_UNIT", _Exists())
+        import os as _os
+        from pathlib import Path as _P
+        monkeypatch.setattr(_P, "unlink", lambda *a, **k: pytest.fail("no direct unlink"))
+        monkeypatch.setattr(_os, "remove", lambda *a, **k: pytest.fail("no direct remove"))
 
-    assert wrote == [1]
-    cmds = [c for c, _ in calls]
-    assert ["systemctl", "stop", "ka9q-web@omni.service"] in cmds
-    assert ["systemctl", "disable", "ka9q-web@omni.service"] in cmds
-    assert ["rm", "-f", "/etc/sigmond/ka9q-web/omni.env"] in cmds
-    assert ["systemctl", "restart", "ka9q-web.service"] in cmds
-    assert all(k.get("sudo") for _, k in calls)
-    # Nothing else is stopped or restarted (ka9q-web@zz is new: the handler
-    # starts it).
-    assert len([c for c in cmds if c[:2] == ["systemctl", "restart"]]) == 1
-    assert not any("ka9q-web@zz" in " ".join(c) for c in cmds)
+    def run(self, cmd, **k):
+        assert k.get("sudo")
+        self.calls.append(cmd)
+        if cmd[:2] == ["systemctl", "stop"]:
+            self.active.discard(cmd[2])
+        if cmd[:2] == ["systemctl", "restart"]:
+            self.active.add(cmd[2])
+        return self._R()
+
+    def is_active(self, unit):
+        return unit in self.active
+
+    def did(self, verb):
+        return [c[2] for c in self.calls if c[:2] == ["systemctl", verb]]
+
+
+class _Exists:
+    def exists(self):
+        return True
+
+
+def _rename(smd, monkeypatch, host, old, new, before_ids, after_ids, active):
+    """Run the hook as the dispatch would: before taken first, then the
+    handler stops what served the old radiod, then the hook."""
+    before = smd._ka9q_web_targets_for([_loc(i) for i in before_ids])
+    was = {u: u in active for u, _s, _p in before}
+    served_old = [u for u, s, _p in before if s == f"{old}-status.local"]
+    for u in served_old:                 # radiod_rename stops these first
+        host.active.discard(u)
+    _with(monkeypatch, [_loc(i) for i in after_ids])
+    allowed = set()
+    lines = smd._ka9q_web_rewrite_for_rename(
+        old, new, before=before, was_active=was,
+        old_status=f"{old}-status.local", allowed=allowed,
+        is_active=host.is_active)
+    return lines, allowed
+
+
+def test_rewrite_reloads_before_any_restart(smd, monkeypatch):
+    # Rob's AI6VN -> omni (beside se): AI6VN's plain unit keeps 8081 as
+    # omni.  The handler rewrote the plain unit file already, so the writer
+    # sees no change and would not reload on its own.
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service", "ka9q-web@se.service"})
+    lines, allowed = _rename(smd, monkeypatch, host, "AI6VN", "omni",
+                             ["AI6VN", "se"], ["omni", "se"],
+                             active={"ka9q-web.service", "ka9q-web@se.service"})
+    reload_at = host.calls.index(["systemctl", "daemon-reload"])
+    assert host.calls.index(["WRITER"]) < reload_at
+    restarts = [i for i, c in enumerate(host.calls) if c[:2] == ["systemctl", "restart"]]
+    assert all(i > reload_at for i in restarts)
+    # The plain unit served the old radiod: the handler starts it after
+    # radiod@omni; the bystander @se is untouched.
+    assert allowed == {"ka9q-web.service"}
+    assert host.did("restart") == [] and host.did("stop") == []
+
+
+def test_rewrite_restart_of_changed_bystander_follows_reload(smd, monkeypatch):
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service", "ka9q-web@omni.service"})
+    _rename(smd, monkeypatch, host, "AI6VN", "zz", ["AI6VN", "omni"], ["zz", "omni"],
+            active={"ka9q-web.service", "ka9q-web@omni.service"})
+    reload_at = host.calls.index(["systemctl", "daemon-reload"])
+    first_restart = next(i for i, c in enumerate(host.calls)
+                         if c[:2] == ["systemctl", "restart"])
+    assert reload_at < first_restart
+
+
+def test_rewrite_for_rename_retires_stale_templated_unit(smd, monkeypatch):
+    # AI6VN -> zz beside omni flips the 8081 holder: @omni vanishes, the
+    # plain unit now serves omni and zz's page moves to @zz.
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service", "ka9q-web@omni.service"})
+    lines, allowed = _rename(smd, monkeypatch, host, "AI6VN", "zz",
+                             ["AI6VN", "omni"], ["zz", "omni"],
+                             active={"ka9q-web.service", "ka9q-web@omni.service"})
+    assert ["systemctl", "stop", "ka9q-web@omni.service"] in host.calls
+    assert ["systemctl", "disable", "ka9q-web@omni.service"] in host.calls
+    assert ["rm", "-f", "/etc/sigmond/ka9q-web/omni.env"] in host.calls
+    # zz's page was up (on the plain unit): it comes up on @zz.
+    assert "ka9q-web@zz.service" in host.did("restart")
+    # omni's page was up: the plain unit, which the handler stopped, is
+    # started by the handler after radiod (allowed), not here.
+    assert allowed == {"ka9q-web.service"}
     text = "\n".join(lines)
     assert "ka9q-web: ka9q-web@omni.service  omni-status.local  :8083" in text
     assert "ka9q-web: ka9q-web@zz.service  zz-status.local  :8083" in text
     assert "stopped and disabled ka9q-web@omni.service" in text
-    assert "restarted ka9q-web.service" in text
+    assert "restarted ka9q-web@zz.service" in text
+
+
+def test_flip_with_parked_bystander_keeps_it_parked(smd, monkeypatch):
+    # omni's page was parked: the plain unit (now omni's) must not be
+    # started by the handler, and zz's page still comes up.
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service"})
+    lines, allowed = _rename(smd, monkeypatch, host, "AI6VN", "zz",
+                             ["AI6VN", "omni"], ["zz", "omni"],
+                             active={"ka9q-web.service"})
+    assert "ka9q-web.service" not in allowed
+    assert "ka9q-web.service" not in host.did("restart")
+    assert "ka9q-web@zz.service" in host.did("restart")
+    assert any("left stopped" in x and "ka9q-web.service" in x for x in lines)
+
+
+def test_flip_with_parked_renamed_page_starts_nothing_for_it(smd, monkeypatch):
+    host = _Host(smd, monkeypatch, active={"ka9q-web@omni.service"})
+    lines, allowed = _rename(smd, monkeypatch, host, "AI6VN", "zz",
+                             ["AI6VN", "omni"], ["zz", "omni"],
+                             active={"ka9q-web@omni.service"})
+    assert host.did("restart") == ["ka9q-web.service"]   # omni's page, new def
+    assert allowed == set()
 
 
 def test_rewrite_for_rename_plain_unit_env_untouched(smd, monkeypatch):
-    calls = []
+    host = _Host(smd, monkeypatch, active={"ka9q-web.service", "ka9q-web@omni.service"})
+    lines, allowed = _rename(smd, monkeypatch, host, "omni", "se",
+                             ["AI6VN", "omni"], ["AI6VN", "se"],
+                             active={"ka9q-web.service", "ka9q-web@omni.service"})
+    assert ["systemctl", "stop", "ka9q-web@omni.service"] in host.calls
+    assert ["rm", "-f", "/etc/sigmond/ka9q-web/omni.env"] in host.calls
+    assert host.did("restart") == []
+    assert allowed == {"ka9q-web@se.service"}
 
-    class _R:
-        returncode = 0
-        stdout = stderr = ""
 
-    monkeypatch.setattr(smd, "_run", lambda cmd, **k: (calls.append(cmd), _R())[1])
-    monkeypatch.setattr(smd, "_write_ka9q_web_unit", lambda: True)
-    before = smd._ka9q_web_targets_for([_loc("AI6VN"), _loc("omni")])
-    _with(monkeypatch, [_loc("AI6VN"), _loc("se")])
-    smd._ka9q_web_rewrite_for_rename("omni", "se", before=before)
-    assert ["systemctl", "stop", "ka9q-web@omni.service"] in calls
-    assert ["rm", "-f", "/etc/sigmond/ka9q-web/omni.env"] in calls
-    assert not any(c[:2] == ["systemctl", "restart"] for c in calls)
+def test_start_gate_passes_only_allowed_ka9q_web_starts(smd):
+    seen = []
+    allowed = {"ka9q-web@se.service"}
+    gated = smd._ka9q_web_start_gate(lambda *a: seen.append(a) or 0, allowed)
+    assert gated("start", "ka9q-web.service") == 0
+    gated("start", "ka9q-web@se.service")
+    gated("start", "radiod@se.service")
+    gated("stop", "ka9q-web.service")
+    assert seen == [("start", "ka9q-web@se.service"), ("start", "radiod@se.service"),
+                    ("stop", "ka9q-web.service")]
 
 
 def test_dispatch_dry_run_reaches_handler_with_hooks(smd, monkeypatch):
@@ -210,6 +307,7 @@ def test_dispatch_dry_run_reaches_handler_with_hooks(smd, monkeypatch):
     monkeypatch.setattr(rr, "cmd_radiod_rename", fake)
     monkeypatch.setattr(rr, "ka9q_web_rewrite", rr.ka9q_web_rewrite)
     monkeypatch.setattr(rr, "ka9q_web_port_map", rr.ka9q_web_port_map)
+    monkeypatch.setattr(rr, "systemctl", rr.systemctl)
     monkeypatch.setattr(smd, "_need_root", lambda name: pytest.fail("dry run elevates"))
     _with(monkeypatch, [_loc("a")])
     import sys as _sys
@@ -218,3 +316,4 @@ def test_dispatch_dry_run_reaches_handler_with_hooks(smd, monkeypatch):
     assert seen["args"] == ("a", "b", True)
     assert seen["port_map"] is smd._ka9q_web_port_map_for_rename
     assert seen["rewrite"] is not None and seen["rewrite"].__name__ != "ka9q_web_rewrite"
+    assert rr.systemctl.__name__ == "gated"
