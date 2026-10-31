@@ -13084,6 +13084,28 @@ class RadiodCoreShortfall(Exception):
     """More radiod instances than eligible cores and sharing not allowed."""
 
 
+def _current_radiod_pins(units: list, sys_dir: Path = Path('/etc/systemd/system')) -> dict:
+    """{unit: CPUs} from each unit's existing smd-cpu-affinity.conf, so the
+    placement rule can leave a correctly pinned radiod where it is."""
+    try:
+        from sigmond.cpu import parse_cpu_mask
+    except ImportError:
+        return {}
+    out: dict = {}
+    for unit in units:
+        try:
+            text = (sys_dir / f'{unit}.d' / _SMD_AFFINITY_DROP_IN).read_text()
+        except OSError:
+            continue
+        cpus = None
+        for line in text.splitlines():
+            if line.startswith('CPUAffinity='):
+                cpus = parse_cpu_mask(line.split('=', 1)[1].strip())
+        if cpus:
+            out[unit] = set(cpus)
+    return out
+
+
 def _ensure_radiod_affinity_drop_ins(radiod_units: list,
                                      topology_cpu_affinity=None,
                                      *, allow_shared: bool = False) -> bool:
@@ -13141,7 +13163,9 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         raise RadiodCoreShortfall(msg)
     placement = assign_radiod_cores([u.unit for u in sorted_units],
                                     topology_cpu_affinity, cores=cores,
-                                    isolated_cpus=isolated)
+                                    isolated_cpus=isolated,
+                                    current=_current_radiod_pins(
+                                        [u.unit for u in sorted_units]))
     valid_unit_names = {u.unit for u in sorted_units}
     wrote_any = False
     units_to_restart: list[str] = []

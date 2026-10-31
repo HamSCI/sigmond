@@ -286,7 +286,8 @@ def assign_radiod_cores(units: "list[str]",
                         topology_cpu_affinity: Optional[dict] = None,
                         *,
                         cores: Optional["list[set]"] = None,
-                        isolated_cpus: Optional[set] = None) -> dict:
+                        isolated_cpus: Optional[set] = None,
+                        current: Optional[dict] = None) -> dict:
     """Map each radiod unit name to the CPU set it should be pinned to.
 
     THE single placement rule.  ``compute_affinity_plan`` and bin/smd's
@@ -301,6 +302,14 @@ def assign_radiod_cores(units: "list[str]",
     than sharing) in ascending order, so a second instance sits beside
     the first; if there are more instances than cores they share the
     last one.
+
+    ``current`` is {unit: CPUs it is pinned to now}.  An instance whose
+    current pin is one of the chosen cores keeps it, and only the others
+    are (re)placed, so a change in what is eligible never swaps two
+    running radiods.  AI6VN-PM (2026-10-31): before the reboot only {8,9}
+    was isolated, so omni kept {8,9} and the new se grew onto {6,7}; after
+    the reboot isolated both, ascending order gave omni {6,7} and se {8,9},
+    and `smd apply` restarted both radiods to swap them for no gain.
     """
     if not units:
         return {}
@@ -315,11 +324,19 @@ def assign_radiod_cores(units: "list[str]",
         isolated_cpus = get_isolated_cpus()
 
     eligible = eligible_radiod_cores(cores, isolated_cpus, need=len(units))
-    chosen = eligible[-len(units):] if eligible else []
+    chosen = [set(c) for c in eligible[-len(units):]] if eligible else []
     out: dict = {}
-    for i, unit in enumerate(units):
-        if i < len(chosen):
-            out[unit] = set(chosen[i])
+    free = list(chosen)
+    for unit in units:                      # keep what is already right
+        have = set((current or {}).get(unit) or ())
+        if have in free:
+            out[unit] = have
+            free.remove(have)
+    for unit in units:                      # place the rest, ascending
+        if unit in out:
+            continue
+        if free:
+            out[unit] = free.pop(0)
         else:
             out[unit] = set(chosen[-1]) if chosen else set()
     return out
@@ -819,8 +836,13 @@ def compute_affinity_plan(
     # the same pool — multi-instance deployments that need per-instance
     # carving should leave this empty and let auto-compute distribute
     # one physical core per instance.
+    try:
+        current = get_radiod_cpus_by_unit()
+    except Exception:
+        current = {}
     radiod_plan = assign_radiod_cores(instances, ca, cores=cores,
-                                      isolated_cpus=isolated_cpus)
+                                      isolated_cpus=isolated_cpus,
+                                      current=current)
 
     radiod_all: set = set()
     for cpus in radiod_plan.values():

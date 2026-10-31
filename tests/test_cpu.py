@@ -642,6 +642,29 @@ class AssignRadiodCoresTests(unittest.TestCase):
         self.assertEqual(
             assign_radiod_cores([], cores=_EIGHT_CORES, isolated_cpus=set()), {})
 
+    FIVE = [{0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}]
+
+    def test_current_pins_are_kept_when_still_eligible(self):
+        """AI6VN-PM 2026-10-31: after the reboot isolated both pairs; the
+        ascending rule swapped omni and se and apply restarted both."""
+        out = assign_radiod_cores(['radiod@omni.service', 'radiod@se.service'],
+                                  cores=self.FIVE, isolated_cpus={6, 7, 8, 9},
+                                  current={'radiod@omni.service': {8, 9},
+                                           'radiod@se.service': {6, 7}})
+        self.assertEqual(out, {'radiod@omni.service': {8, 9}, 'radiod@se.service': {6, 7}})
+
+    def test_new_unit_takes_the_core_the_kept_one_left(self):
+        out = assign_radiod_cores(['radiod@omni.service', 'radiod@se.service'],
+                                  cores=self.FIVE, isolated_cpus={8, 9},
+                                  current={'radiod@omni.service': {8, 9}})
+        self.assertEqual(out, {'radiod@omni.service': {8, 9}, 'radiod@se.service': {6, 7}})
+
+    def test_current_pin_outside_the_chosen_cores_is_replaced(self):
+        out = assign_radiod_cores(['radiod@a.service'], cores=self.FIVE,
+                                  isolated_cpus={8, 9},
+                                  current={'radiod@a.service': {0, 1}})
+        self.assertEqual(out, {'radiod@a.service': {8, 9}})
+
 
 class RadiodDefaultPlacementTests(unittest.TestCase):
     """compute_affinity_plan's default placement (no topology override)."""
@@ -877,6 +900,31 @@ class RadiodDropInRefusalTests(unittest.TestCase):
             smd._ensure_radiod_affinity_drop_ins(units)
         placed = {c.args[0]: c.args[1] for c in wr.call_args_list}
         self.assertEqual(sorted(placed.values(), key=min), [{6, 7}, {8, 9}])
+
+    def test_existing_drop_ins_keep_their_cores_after_isolation_widens(self):
+        """Post-reboot on AI6VN-PM: omni pinned 8,9 and se 6,7 by drop-in;
+        isolcpus now 6-9.  Nothing may move."""
+        import tempfile
+        smd = self._load_smd()
+        units = [mock.Mock(unit="radiod@omni.service", instance="omni"),
+                 mock.Mock(unit="radiod@se.service", instance="se")]
+        sysd = Path(tempfile.mkdtemp())
+        for u, cpus in (("radiod@omni.service", "8 9"), ("radiod@se.service", "6 7")):
+            d = sysd / f"{u}.d"; d.mkdir()
+            (d / smd._SMD_AFFINITY_DROP_IN).write_text(f"[Service]\nCPUAffinity=\nCPUAffinity={cpus}\n")
+        pins = smd._current_radiod_pins([u.unit for u in units], sys_dir=sysd)
+        self.assertEqual(pins, {"radiod@omni.service": {8, 9}, "radiod@se.service": {6, 7}})
+        with mock.patch("sigmond.cpu.get_physical_cores",
+                        return_value=[{0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}]), \
+             mock.patch("sigmond.cpu.get_isolated_cpus", return_value={6, 7, 8, 9}), \
+             mock.patch.object(smd, "_current_radiod_pins", return_value=pins), \
+             mock.patch.object(smd, "_err"), mock.patch.object(smd, "_ok"), \
+             mock.patch.object(smd, "_run"), \
+             mock.patch.object(smd, "_write_affinity_drop_in",
+                               return_value="unchanged") as wr:
+            smd._ensure_radiod_affinity_drop_ins(units)
+        placed = {c.args[0]: c.args[1] for c in wr.call_args_list}
+        self.assertEqual(placed, {"radiod@omni.service": {8, 9}, "radiod@se.service": {6, 7}})
 
     def test_topology_allow_shared_proceeds_to_write(self):
         smd = self._load_smd()
