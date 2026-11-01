@@ -4484,6 +4484,47 @@ def _remove_loopback_multicast_route() -> None:
             _info(f'loopback-multicast: {" ".join(cmd[:2])} failed ({err})')
 
 
+def _declared_remote_radiod() -> Optional[str]:
+    """The first radiod coordination.toml declares on ANOTHER host (its
+    ``host`` is neither empty, localhost, a loopback address nor this
+    hostname), or None.  An absent or unreadable file reads as None."""
+    coord = Path('/etc/sigmond/coordination.toml')
+    if not coord.exists():
+        return None
+    try:
+        import tomllib as _toml
+        import socket as _sock
+        with open(coord, 'rb') as f:
+            data = _toml.load(f)
+        host_short = _sock.gethostname().split('.')[0]
+        local_hosts = {'', 'localhost', '127.0.0.1', '::1',
+                       _sock.gethostname(), host_short}
+        for inst, cfg in (data.get('radiod') or {}).items():
+            if str((cfg or {}).get('host', '')).strip() not in local_hosts:
+                return inst
+    except Exception:
+        pass                          # unreadable coordination → treat as local
+    return None
+
+
+def _drop_loopback_route_for_remote_radiod(dry_run: bool = False) -> bool:
+    """`smd apply`'s half of the loopback-route rule: when coordination
+    declares a radiod on another host, remove the 239/8→lo route (it would
+    swallow that radiod's multicast: AI6VN-PM VM 100, 2026-11-01).  Never
+    installs the route; that stays with `smd install`.  True when it acted."""
+    remote = _declared_remote_radiod()
+    if remote is None:
+        return False
+    if dry_run:
+        _info(f'loopback-multicast: coordination declares remote radiod '
+              f'{remote!r} — would remove the 239/8→lo route')
+        return False
+    _info(f'loopback-multicast: coordination declares remote radiod '
+          f'{remote!r} — removing the 239/8→lo route (multi-host topology)')
+    _remove_loopback_multicast_route()
+    return True
+
+
 def _install_loopback_multicast_route(sigmond_dir: Path,
                                       local_radiod: bool = True) -> bool:
     """Route 239.0.0.0/8 via loopback on single-host stations.
@@ -4522,23 +4563,7 @@ def _install_loopback_multicast_route(sigmond_dir: Path,
         _info('loopback-multicast: this VM is on a site radio network — '
               'skipping the 239/8→lo route (smd radionet status)')
         return True
-    coord = Path('/etc/sigmond/coordination.toml')
-    remote_radiod = None
-    if coord.exists():
-        try:
-            import tomllib as _toml
-            import socket as _sock
-            with open(coord, 'rb') as f:
-                data = _toml.load(f)
-            host_short = _sock.gethostname().split('.')[0]
-            local_hosts = {'', 'localhost', '127.0.0.1', '::1',
-                           _sock.gethostname(), host_short}
-            for inst, cfg in (data.get('radiod') or {}).items():
-                if str((cfg or {}).get('host', '')).strip() not in local_hosts:
-                    remote_radiod = inst
-                    break
-        except Exception:
-            pass                      # unreadable coordination → treat as local
+    remote_radiod = _declared_remote_radiod()
     if remote_radiod is not None:
         _info('loopback-multicast: coordination declares remote '
               f'radiod {remote_radiod!r} — removing the 239/8→lo route '
@@ -14618,6 +14643,10 @@ def cmd_apply(args) -> int:
     # so they bind against the raised ceiling; harmonize.py checks it.
     something_changed |= _ensure_multicast_rcvbuf(dry_run=dry_run)
     something_changed |= _ensure_usbfs_memory(dry_run=dry_run)
+    # A radiod declared on another host: the 239/8→lo route must go, or this
+    # host hears nothing from it.  `smd install` did this alone before, so a
+    # decoder host that gained a remote radiod kept the route (2026-11-01).
+    _drop_loopback_route_for_remote_radiod(dry_run=dry_run)
 
     # Reconcile Proxmox VM `onboot` flag — silent no-op on bare-metal
     # hosts.  Catches the "host rebooted, VM didn't come back" failure

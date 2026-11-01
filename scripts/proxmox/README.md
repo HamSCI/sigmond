@@ -29,8 +29,11 @@ radiod-only role (`/etc/sigmond-appliance/station-role`), else 1.  Only a
 chosen value is saved, never the bare default.  Phase 1 normally runs
 before the setup wizard records the role, so on a radiod-only host re-run
 the layout after the wizard: `bash scripts/proxmox/host-setup.sh
---skip-rac` on the host (reboot when it asks), then `bootstrap.sh` in the
-VM to bind it.  See `docs/operator/radiod-only.md`.
+--skip-rac` on the host.  It recomputes the layout and the kernel's
+isolcpus only; it does not re-bind the VM, and `bootstrap.sh` cannot either
+(a no-op once its state is DONE, a full install on an appliance VM).  Until a
+supported re-bind exists, the manual host steps (hookscript render, `qm set`,
+herding units) are in `docs/operator/radiod-only.md`.
 
 `bootstrap.sh` also still works standalone on a legacy single-phase
 install (fresh Debian VM, host never prepared): it applies the host base

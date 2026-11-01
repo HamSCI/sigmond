@@ -103,10 +103,13 @@ this shapes the CPU strategy in ways not visible from inside the guest:
   radiod-only role (`/etc/sigmond-appliance/station-role`), else 1
   (`choose_host_reserve_pairs` in `scripts/proxmox/radiod-count.sh`).
   The layout is first computed before the wizard records the role, so on
-  a radiod-only host re-run it afterwards:
-  `bash scripts/proxmox/host-setup.sh --skip-rac` on the host, then
-  `scripts/proxmox/bootstrap.sh` in the VM to bind it
-  (`docs/operator/radiod-only.md`).
+  a radiod-only host re-run it afterwards with
+  `bash scripts/proxmox/host-setup.sh --skip-rac` on the host.  That
+  recomputes the layout and grub's isolcpus but does NOT re-bind the VM
+  (host-apply runs with `VMID=''`), and `bootstrap.sh` is no re-bind either
+  (a no-op once DONE, a full install on an appliance VM).  Until a supported
+  re-bind exists the hookscript, `qm set` and herding units are redone by
+  hand: `docs/operator/radiod-only.md`.
 
 Verify on a host: `cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list`
 (the real pairing), `qm config <VMID> | grep hookscript`, and the live
