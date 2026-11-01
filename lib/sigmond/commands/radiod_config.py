@@ -1008,10 +1008,37 @@ def _discover_sdrs():
     return usb_sdr.probe(env, extract_serial=True)
 
 
-def _suggest_iface() -> str:
-    """Pick a default network iface — first non-loopback, non-virtual."""
+# Module attributes so tests can point _suggest_iface at fixtures.
+PROC_NET_DEV = "/proc/net/dev"
+PROC_NET_ROUTE = "/proc/net/route"
+
+
+def _default_route_iface() -> str:
+    """The iface carrying the IPv4 default route, "" if none is found."""
     try:
-        with open("/proc/net/dev") as f:
+        with open(PROC_NET_ROUTE) as f:
+            for line in f.readlines()[1:]:
+                fields = line.split()
+                if len(fields) >= 2 and fields[1] == "00000000":
+                    return fields[0]
+    except OSError:
+        pass
+    return ""
+
+
+def _suggest_iface() -> str:
+    """Pick a default network iface: the one carrying the IPv4 default route,
+    else the first non-loopback, non-virtual one.
+
+    The default route matters on a bare-metal host with wifi: /proc/net/dev
+    can list `wlp*` before the wired LAN, and with ttl=1 radiod sends its
+    streams out of whatever iface it names.
+    """
+    routed = _default_route_iface()
+    if routed:
+        return routed
+    try:
+        with open(PROC_NET_DEV) as f:
             for line in f.readlines()[2:]:
                 name = line.split(":", 1)[0].strip()
                 if not name or name == "lo":

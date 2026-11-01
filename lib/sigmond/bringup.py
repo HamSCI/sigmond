@@ -301,6 +301,14 @@ def build_plan(profile, *, local_radiod: bool,
     # AC0G-B2 (spec 4.4, Michael 2026-11-05): with several radiods and none
     # named for timing, hf-timestd installs but stays idle, and says so.
     timing_idle = bool(timing_pool) and not timing_dns
+    # A profile with no clients brings up a radiod-only host: radiod for its
+    # SDRs, published on the LAN (ttl=1) for a decoder host elsewhere.  It
+    # gets Stage 1 and the radiod starts, and ends on a hard check that each
+    # radiod is running and its status name resolves.  No sink, no clients,
+    # no uploader, no site-profile render, no cpu-affinity: nothing here
+    # decodes or uploads.  Keyed on the profile's shape, not its name, so an
+    # operator's own clientless profile behaves the same.
+    radiod_only = not profile.clients
     steps: list = []
 
     # Pre-create the shared SQLite sink with group-writable perms BEFORE any
@@ -310,15 +318,16 @@ def build_plan(profile, *, local_radiod: bool,
     # silently while all health checks stay green (sigmond#42; hit live on
     # the B4 appliance bring-up 2026-07-27).  chmod/chgrp run unconditionally
     # so a previously-raced file is repaired too.  Idempotent.
-    steps.append(Step(STAGE1, 'provision shared sink.db (group-writable, '
-                              'pre-empts writer race — sigmond#42)', 'tune',
-                      argv=['bash', '-c',
-                            'install -d -m 2775 -o root -g sigmond /var/lib/sigmond'
-                            ' && { [ -f /var/lib/sigmond/sink.db ] || '
-                            'install -m 664 -o root -g sigmond /dev/null '
-                            '/var/lib/sigmond/sink.db; }'
-                            ' && chgrp sigmond /var/lib/sigmond/sink.db'
-                            ' && chmod 664 /var/lib/sigmond/sink.db']))
+    if not radiod_only:
+        steps.append(Step(STAGE1, 'provision shared sink.db (group-writable, '
+                                  'pre-empts writer race — sigmond#42)', 'tune',
+                          argv=['bash', '-c',
+                                'install -d -m 2775 -o root -g sigmond /var/lib/sigmond'
+                                ' && { [ -f /var/lib/sigmond/sink.db ] || '
+                                'install -m 664 -o root -g sigmond /dev/null '
+                                '/var/lib/sigmond/sink.db; }'
+                                ' && chgrp sigmond /var/lib/sigmond/sink.db'
+                                ' && chmod 664 /var/lib/sigmond/sink.db']))
 
     activated: list = []    # components this plan enables (start-eligible)
     deferred: list = []     # radio half installed --no-enable (no SDR)
@@ -382,6 +391,9 @@ def build_plan(profile, *, local_radiod: bool,
             argv.append('--non-interactive')
         if non_interactive:
             label += ' (non-interactive)'
+        if client == 'radiod' and radiod_only:
+            # Published on the LAN: the decoder host is another machine.
+            argv += ['--ttl', '1']
         steps.append(Step(stage, label, 'config', argv=argv))
 
     def checkpoint(stage: str, label: str, check: str, hard: bool = False) -> None:
@@ -479,7 +491,10 @@ def build_plan(profile, *, local_radiod: bool,
             steps.append(Step(STAGE1, 'bind receivers to local radiods',
                               'config',
                               argv=_receiver_apply_argv(smd, profile, skip)))
-        if 'ka9q-web' in profile.local_radiod_infra and 'ka9q-web' not in skip:
+        web_here = ('ka9q-web' in profile.local_radiod_infra
+                    or (radiod_only and with_optional
+                        and 'ka9q-web' in profile.optional))
+        if web_here and 'ka9q-web' not in skip:
             # ka9q-web builds with the Stage-1 infra above, but its unit-writer
             # refuses to install ka9q-web.service until coordination.env carries
             # SIGMOND_RADIOD_STATUS — which `configure radiod` only just wrote.
@@ -619,9 +634,11 @@ def build_plan(profile, *, local_radiod: bool,
     # moving the independents earlier moved them above this, and mag-recorder
     # would have hit 226/NAMESPACE on a directory nothing had created yet.
     # Cheap enough to be unconditional: it is one idempotent `install -d`.
-    steps.append(Step(STAGE3B, 'provision shared hs-uploader watermark dir', 'tune',
-                      argv=['install', '-d', '-m', '2775', '-o', 'root',
-                            '-g', 'sigmond', '/var/lib/hs-uploader']))
+    if not radiod_only:
+        steps.append(Step(STAGE3B, 'provision shared hs-uploader watermark dir',
+                          'tune',
+                          argv=['install', '-d', '-m', '2775', '-o', 'root',
+                                '-g', 'sigmond', '/var/lib/hs-uploader']))
 
     # --- Stage 3b: independent clients (no radiod, no wisdom wait) ---
     for client in profile.clients:
@@ -661,6 +678,12 @@ def build_plan(profile, *, local_radiod: bool,
             steps.append(Step(STAGE3B, f'start {client} (independent — no radiod)',
                               'start',
                               argv=[smd, 'start', '--components', client]))
+
+    if radiod_only:
+        return _radiod_only_stage4(profile, steps, local_radiod=local_radiod,
+                                   deferring=deferring, skip=skip,
+                                   with_optional=with_optional, smd=smd,
+                                   remote_radiods=remote_radiods)
 
     # Re-render the site profile now that stages 1-3 created every client's
     # config: this pushes the PSWS station/instrument ids from
@@ -813,3 +836,36 @@ def build_plan(profile, *, local_radiod: bool,
     return Plan(profile=profile.name, local_radiod=local_radiod,
                 remote_radiods=remote_radiods, steps=steps,
                 sdr_absent=deferring, hold_uploads=hold_uploads)
+
+
+def _radiod_only_stage4(profile, steps: list, *, local_radiod: bool,
+                        deferring: bool, skip, with_optional: bool, smd: str,
+                        remote_radiods: tuple) -> Plan:
+    """Stage 4 of a clientless (radiod-only) plan: start radiod, prove it is
+    published on the LAN, validate.  See build_plan."""
+    if local_radiod and not deferring:
+        steps.append(Step(STAGE4, 'wait for FFT wisdom before starting radiod',
+                          'wait-wisdom'))
+        # No catch-all `smd start` follows, so the chosen optional infra
+        # (igmp-querier, ka9q-web) starts here with radiod.
+        radiod_stack = ['ka9q-radio'] + [i for i in profile.local_radiod_infra
+                                         if i not in skip]
+        if with_optional:
+            radiod_stack += [o for o in profile.optional
+                             if o not in skip and o not in radiod_stack]
+        steps.append(Step(STAGE4, 'start radiod + local-radiod infra', 'start',
+                          argv=[smd, 'start', '--components', ','.join(radiod_stack)]))
+        steps.append(Step(STAGE4,
+                          'wait for radiod streaming (rx888 running) + settle',
+                          'wait-streaming'))
+        steps.append(Step(STAGE4, 'checkpoint: radiod published on the LAN',
+                          'checkpoint', check='radiod-published', hard=True))
+    steps.append(Step(STAGE4, 'checkpoint: final validate', 'checkpoint',
+                      check='validate'))
+    if deferring:
+        steps.append(Step(STAGE4, 'PARTIAL — the radio half waits for the SDR; '
+                                  'bring-up completes when it is plugged in '
+                                  '(or run `smd bringup` again)', 'note'))
+    return Plan(profile=profile.name, local_radiod=local_radiod,
+                remote_radiods=remote_radiods, steps=steps,
+                sdr_absent=deferring)

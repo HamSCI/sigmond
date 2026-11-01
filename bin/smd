@@ -11597,6 +11597,18 @@ def _bringup_probe(check: str, smd_bin: str):
         d = Path('/etc/radio')
         confs = list(d.glob('radiod@*.conf')) if d.is_dir() else []
         return (bool(confs), f"/etc/radio: {len(confs)} radiod conf(s)", False)
+    if check == 'radiod-published':
+        # Every radiod on this host running, its status name resolving from
+        # the host itself: what a decoder host on the LAN needs to find it.
+        from sigmond import radiod_publish
+        pub = radiod_publish.published()
+        if not pub:
+            return (False, '/etc/radio: no radiod conf to publish', False)
+        bad = sorted(rid for rid, ok in pub.items() if not ok)
+        if bad:
+            return (False, 'not published (unit down or status name does not '
+                           'resolve): ' + ', '.join(f'radiod@{r}' for r in bad), False)
+        return (True, 'published: ' + ', '.join(f'radiod@{r}' for r in sorted(pub)), False)
     if check.startswith('configured:'):
         name = check.split(':', 1)[1]
         # Prefer the client's own self-describe (CONTRACT §3): ask
@@ -11908,6 +11920,26 @@ def cmd_bringup(args) -> int:
         _err(f"unknown profile '{args.profile}' — available: {avail}")
         return 1
 
+    # A profile with no clients brings up a radiod-only host (the catalog's
+    # `radiod-only`, or an operator's own clientless profile).  Refuse it while
+    # anything a radiod-only host does not run is enabled here -- before
+    # anything is installed or written, and under --dry-run too, so the
+    # preview never shows a plan the real run would refuse.
+    radiod_only = not prof.clients
+    if radiod_only:
+        _enabled_here = _enabled_components(_load_topology(TOPOLOGY_PATH))
+        _barred = [c for c in _enabled_here
+                   if c not in station_role.ALLOWED_ON_RADIOD_ONLY]
+        if _barred:
+            _err(f"bringup {prof.name}: a radiod-only host runs only "
+                 f"{', '.join(sorted(station_role.ALLOWED_ON_RADIOD_ONLY))}, "
+                 f"and this host has enabled: {', '.join(_barred)}")
+            for _c in _barred:
+                _info(f'  smd disable {_c}')
+            _err('disable them (above), then re-run: '
+                 f'smd bringup {prof.name}')
+            return 1
+
     # --remote-radiod may repeat; each names a radiod outright (spec 4.4).
     remote_named = [n.strip() for n in (getattr(args, 'remote_radiod', None) or [])
                     if n and n.strip()]
@@ -11915,7 +11947,7 @@ def cmd_bringup(args) -> int:
     sdr_absent = False      # set below when a local-radiod profile finds no SDR
     if remote_named:
         local = False                     # explicit remote override
-    elif prof.local_radiod_infra:
+    elif prof.local_radiod_infra or radiod_only:
         # Local-radiod profile: the upfront check is the SDR HARDWARE on the USB
         # bus, NOT whether ka9q-radio is built yet (bringup builds it).
         if not _detect_local_sdr():
@@ -12444,6 +12476,13 @@ def cmd_bringup(args) -> int:
         if _run_smd('config', 'render', '--if-present') != 0:
             _warn('site-profile render failed — client wizards will fall '
                   'back to prompts/placeholders')
+
+    # Declare the role before the plan runs, so every smd step it spawns
+    # (enable, install, apply, start) already acts as a radiod-only host.
+    if radiod_only and station_role.set_role(station_role.RADIOD_ONLY,
+                                             station_role.ROLE_PATH):
+        _ok(f'station role: {station_role.RADIOD_ONLY} '
+            f'({station_role.ROLE_PATH})')
 
     failed_steps: list = []     # every step that exited non-zero (not may_fail)
     for st in plan.steps:
