@@ -132,6 +132,7 @@ try:
     from sigmond.catalog           import load_catalog, CatalogEntry, get_entry, resolve_name, find_client_binary
     from sigmond.installer         import install_client as _do_install_client, clone_repo as _clone_repo, git_head_ref as _git_head_ref
     from sigmond.paths             import SIGMOND_VENV
+    from sigmond import station_role
     from sigmond.radiod_ready       import READY_SETTLE_S
     from sigmond.log_cmd           import (
         follow_journal, follow_files, flatten_log_paths,
@@ -889,6 +890,21 @@ def _act_declared_services(verb: str, args, *, bare_pass: bool = False) -> int:
     return rc
 
 
+def _role_refuses(name: str) -> bool:
+    """True (after printing why) when this host's station role bars `name`.
+
+    The role is read at call time so a change to the role file, or a test's
+    patch of ``station_role.ROLE_PATH``, takes effect at once.
+    """
+    if not _HAS_SIGMOND_LIB:
+        return False
+    why = station_role.refusal(name, station_role.role(station_role.ROLE_PATH))
+    if why is None:
+        return False
+    _err(why)
+    return True
+
+
 def _autoenable_named_on_start(args, topology_path) -> bool:
     """`smd start <name>` on an installed-but-disabled component enables it.
 
@@ -938,6 +954,8 @@ def _autoenable_named_on_start(args, topology_path) -> bool:
             continue
         if not getattr(st, 'installed', False):
             continue  # let the start gate report "not installed"
+        if _role_refuses(name):
+            continue
         if set_component_enabled(name, True, topology_path,
                                  description=entry.description):
             _ok(f'{name}: enabled (start)')
@@ -4450,6 +4468,17 @@ def _host_has_local_radiod(radiod_needed: bool = False) -> bool:
                for p in Path('/etc/radio').glob('radiod@*.conf'))
 
 
+def _remove_loopback_multicast_route() -> None:
+    """Undo the 239/8→lo route; failures (route already absent) are not errors."""
+    for cmd in (['systemctl', 'disable', '--now',
+                 'sigmond-loopback-multicast.service'],
+                ['ip', 'route', 'del', '239.0.0.0/8', 'dev', 'lo']):
+        r = _run(cmd, sudo=True)
+        if r.returncode != 0:
+            _info(f'loopback-multicast: {" ".join(cmd[:2])} did not apply '
+                  f'({(r.stderr or "").strip() or "already absent"})')
+
+
 def _install_loopback_multicast_route(sigmond_dir: Path,
                                       local_radiod: bool = True) -> bool:
     """Route 239.0.0.0/8 via loopback on single-host stations.
@@ -4462,10 +4491,9 @@ def _install_loopback_multicast_route(sigmond_dir: Path,
     Installs + enables sigmond-loopback-multicast.service (idempotent
     `ip route replace`), and applies the route immediately.
 
-    Skipped when coordination declares any NON-local radiod: sends to a
-    remote radiod's control group would be swallowed by a blanket
-    239/8→lo route, so multi-host topologies must manage multicast
-    routing per-site instead.
+    When coordination declares any NON-local radiod the route is removed, not
+    merely skipped: sends to a remote radiod's control group would be
+    swallowed by a blanket 239/8→lo route.  A radiod-only host never gets it.
 
     Skipped, too, when this host has no local radiod at all
     (``local_radiod`` False).  There is nothing on-host to keep on loopback,
@@ -4473,6 +4501,11 @@ def _install_loopback_multicast_route(sigmond_dir: Path,
     ``lo``: a client-only host would then hear nothing.  It must not depend on
     coordination naming the remote radiods -- clients find them by mDNS.
     """
+    if _HAS_SIGMOND_LIB and (station_role.role(station_role.ROLE_PATH)
+                             == station_role.RADIOD_ONLY):
+        _info('loopback-multicast: radiod-only host — not routing 239/8→lo '
+              '(its multicast must reach the LAN)')
+        return True
     if not local_radiod:
         _info('loopback-multicast: no local radiod on this host — skipping '
               'the 239/8→lo route (radiods are found on the LAN by mDNS)')
@@ -4497,8 +4530,9 @@ def _install_loopback_multicast_route(sigmond_dir: Path,
             for inst, cfg in (data.get('radiod') or {}).items():
                 if str((cfg or {}).get('host', '')).strip() not in local_hosts:
                     _info('loopback-multicast: coordination declares remote '
-                          f'radiod {inst!r} — skipping the 239/8→lo route '
+                          f'radiod {inst!r} — removing the 239/8→lo route '
                           '(multi-host topology)')
+                    _remove_loopback_multicast_route()
                     return True
         except Exception:
             pass                      # unreadable coordination → treat as local
@@ -10837,6 +10871,9 @@ def cmd_enable(args) -> int:
             _err(f'{name}: not in catalog (clone it first with: smd add <url>)')
             rc = 1
             continue
+        if _role_refuses(entry.name):
+            rc = 1
+            continue
         changed = set_component_enabled(entry.name, True, TOPOLOGY_PATH,
                                         description=entry.description)
         if changed:
@@ -12831,6 +12868,8 @@ def _install_profile(args) -> int:
             if entry is None:
                 _warn(f'{comp}: not in catalog — skipping enable')
                 continue
+            if _role_refuses(entry.name):
+                continue
             if set_component_enabled(entry.name, True, TOPOLOGY_PATH,
                                      description=entry.description):
                 _ok(f'{entry.name}: enabled in topology')
@@ -12930,6 +12969,8 @@ def _enable_after_install(entry, args) -> None:
     if getattr(args, 'no_enable', False):
         _info(f'--no-enable: leaving {entry.name} disabled in topology '
               f'(enable later: smd enable {entry.name})')
+        return
+    if _role_refuses(entry.name):
         return
     try:
         from sigmond.topology import set_component_enabled
@@ -14437,6 +14478,20 @@ def _ensure_usbfs_memory(dry_run: bool = False) -> bool:
     return changed
 
 
+def _apply_uploads_step(dry_run: bool) -> bool:
+    """The uploads step of `smd apply`; True when skipped or successful.
+
+    A radiod-only host has no decoder and so nothing to upload; it must not
+    gain an enabled hs-uploader.
+    """
+    if dry_run or not _HAS_SIGMOND_LIB:
+        return True
+    if station_role.role(station_role.ROLE_PATH) == station_role.RADIOD_ONLY:
+        _info('uploads: radiod-only host — nothing to upload')
+        return True
+    return bool(_apply_uploader_manifest())
+
+
 def _apply_uploader_manifest() -> bool:
     """`smd apply`'s uploader manifest step (`--write --enable`).  Returns
     False, after saying so, when the step exits non-zero: a failed probe
@@ -14730,9 +14785,8 @@ def cmd_apply(args) -> int:
     # deploy.toml [[hs_uploader.pipeline]] declarations and refresh the daemon
     # if it drifted.  A step that fails fails the apply, but only after the
     # rest of it has run: the upload-service restarts below still happen.
-    if not dry_run and _HAS_SIGMOND_LIB:
-        if not _apply_uploader_manifest():
-            ok = False
+    if not _apply_uploads_step(dry_run):
+        ok = False
 
     # Restart wd-upload-* services AFTER everything else — they depend on
     # decoders being active and fail with "unavailable resources" if started
