@@ -3,7 +3,7 @@
 **Authors:** Michael Hauan (AC0G) + Claude
 **Date:** 2026-11-01
 **Status:** draft for Rob's review. No code yet. Michael settled the four open questions on 2026-11-01
-("Decisions", at the end); one reading of decision 4 awaits his confirmation.
+("Decisions", at the end); the storm-day rule in decision 4 awaits his word.
 **Verified against:** sigmond c737638 (`bin/smd` `admin storage`, `docs/operator/day-2.md` §3), hf-timestd
 3814c6f (`scripts/prune-old-data.sh`, `paths.py`, `scripts/install.sh`), hs-uploader 2026-10-31; disk and raw
 buffer measurements on AC0G-B4 and AC0G-ND, 2026-10-31
@@ -117,9 +117,10 @@ two-hour windows per terabyte); past that, the oldest window goes first.
 Which flares (decision 4, Michael: "do not record flares that will not strike earth"):
 
 - A flare's X-rays reach the Earth in about eight minutes and fall only on the sunlit half. A station whose
-  paths lie in darkness sees nothing of it. So the archiver keeps a window only when the station stood in
-  daylight at the flare's peak. GOES sees only flares on the Earth-facing side of the Sun, so the list
-  already leaves out the far side.
+  paths lie in darkness sees nothing of it. So the archiver keeps a window only when, at the flare's peak,
+  the station stood in daylight **and** its signals stood exposed: the Sun above the horizon at the
+  midpoint of at least one monitored path (WWV, WWVH, BPM), where the signal crosses the D region. GOES
+  sees only flares on the Earth-facing side of the Sun, so the list already leaves out the far side.
 - The threshold stays at class M1 and above. The window runs from 30 minutes before the flare's start to
   90 minutes after its end: about 7 GB over six channels.
 - A coronal mass ejection strikes the Earth one to three days later, if it strikes at all, as a geomagnetic
@@ -188,6 +189,7 @@ Each of these needs Michael's hands at the station, and an announcement on the b
    database, a different thing, so the feature takes its own noun: `smd archive`.
 2. **What to keep.** All channels, rolling, with a kept window queued per flare.
 3. **Formatting.** Always format the drive to ext4.
-4. **Which flares.** "Do not record flares that will not strike earth." Read here as: keep a flare's window
-   only when the station stood in daylight at its peak, and keep a storm day only when a CME's storm
-   actually arrived (Kp 5 and above). ⚠ Awaits Michael's confirmation of that reading.
+4. **Which flares.** "Do not record flares that will not strike earth", then: "keep a flare's peak only
+   when station in daylight and exposed." So a flare's window stays only when the station stood in daylight
+   at the peak and at least one monitored path's midpoint lay sunlit. ⚠ The storm-day rule (Kp 5 and above)
+   awaits Michael's word.
