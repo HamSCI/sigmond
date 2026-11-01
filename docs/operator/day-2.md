@@ -474,6 +474,45 @@ two days of recording. The ~2.7× disagreement is
 [docs-gap ledger row 20](../contributor/docs-gap-ledger.md); neither upstream
 number has been corrected yet.
 
+#### Keeping more days: a rule of thumb for an external drive
+
+The raw IQ holds everything the station heard, at full 24 kHz bandwidth. When a
+solar flare, an eruption or a travelling disturbance comes along, that record
+lets you go back and look. The station keeps it only briefly, though. A daily
+timer (`timestd-prune.timer`, about 03:25 UTC) runs
+`hf-timestd/scripts/prune-old-data.sh`, and in practice B4 and ND each held only
+yesterday and today (measured 2026-10-31). The 10-08 and 10-10 M6 flares showed
+up plainly in every product, but by the time anyone looked, their IQ had gone.
+Only the 10 Hz GRAPE copy survived, on PSWS.
+
+The internal disk cannot hold much more: on 2026-10-31 B4 and ND each ran 62 to
+73 % full on about 251 GB, with 117 to 131 GB of that in the raw buffer. An
+operator who wants weeks of look-back needs an external drive. Size it with
+these figures (measured 2026-10-31 on B4 and ND; ten-minute files, complex64,
+zstd):
+
+| What you keep | Per day | 1 TB holds | 2 TB | 4 TB | 8 TB |
+|---|---|---|---|---|---|
+| Six channels (2.5 to 25 MHz) | ~90 GB | ~10 days | ~20 days | ~40 days | ~80 days |
+| One channel (say WWV 10 MHz) | ~15 GB | ~60 days | ~120 days | ~240 days | ~480 days |
+| Event windows only, 2 h × six channels | ~7 GB per event | ~130 events | | | |
+| 10 Hz GRAPE product, six channels | ~42 MB | years | | | |
+
+The day counts leave about 10 % headroom. zstd saves only 10 to 20 % (B4 about
+103 MB per ten-minute file, ND about 92 MB, against 115 MB uncompressed),
+because noise does not compress. So plan on 15 GB per channel per day whatever
+the station.
+
+The GRAPE product needs no drive of its own: PSWS keeps every day a station
+uploads, and anyone can download it from the station's observation list without
+a login.
+
+⚠ The station has no switch yet that sends the raw buffer, or a copy of event
+windows, to an external drive. hf-timestd writes it under its data root
+(`/var/lib/timestd/raw_buffer/`). Plugging in a drive therefore takes your
+fleet admin; do not move or link that folder yourself
+(→ [do-not-touch.md](do-not-touch.md)).
+
 ### 4. `smd doctor` — only when something looks off
 
 `smd doctor` reports damage to the station's software checkouts: files with the
