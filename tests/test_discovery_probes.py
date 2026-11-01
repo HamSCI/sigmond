@@ -43,7 +43,7 @@ def _env(**kw) -> Environment:
 
 class MdnsProbeTests(unittest.TestCase):
     AVAHI_OUTPUT = """\
-=;eth0;IPv4;bee1-hf;_ka9q-ctl._udp;local;bee1.local;192.168.1.10;5006;""
+=;eth0;IPv4;bee1-hf;_ka9q-ctl._udp;local;bee1.local;192.168.1.10;5006;"source=bee1" "pid=4242" "TTL=0"
 =;eth0;IPv4;kiwi-east;_kiwisdr._tcp;local;kiwi1.local;192.168.1.20;8073;"v1.752"
 =;eth0;IPv4;chrony;_ntp._udp;local;time.local;192.168.1.1;123;""
 +;eth0;IPv4;junk;_other;local;;;
@@ -60,6 +60,8 @@ class MdnsProbeTests(unittest.TestCase):
         kiwi = next(o for o in obs if o.kind == "kiwisdr")
         self.assertEqual(kiwi.endpoint, "kiwi1.local:8073")
         self.assertEqual(kiwi.fields["address"], "192.168.1.20")
+        radiod = next(o for o in obs if o.kind == "radiod")
+        self.assertEqual(radiod.fields["source_host"], "bee1")
 
     def test_missing_avahi_is_soft_failure(self):
         def _raise(services, timeout):

@@ -284,6 +284,26 @@ def _radiod_key_from_observation(obs) -> SourceKey | None:
     return None
 
 
+def where(row: "InventoryRow", local_host: str) -> str:
+    """Where a discovered source runs, for the operator's eye: ``local``
+    when a radiod's TXT ``source=`` names this machine, else that host
+    name; a Kiwi is its address.  ``?`` when the producer said nothing.
+    The station can mix local and remote radiods (KFS: two local RX888s
+    plus a Beelink's two), so the list must say which is which (rob,
+    2026-11-01)."""
+    f = row.fields or {}
+    if row.key.type == "radiod":
+        host = (f.get("source_host") or "").strip()
+        if not host:
+            return "?"
+        a = host.split(".")[0].lower()
+        b = (local_host or "").split(".")[0].lower()
+        return "local" if a and a == b else host
+    if row.key.type == "kiwisdr":
+        return f.get("address") or row.key.identifier
+    return "?"
+
+
 def inventory(observations: Iterable) -> list[InventoryRow]:
     """Project a list of discovery ``Observation``s into operator-facing
     inventory rows.

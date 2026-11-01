@@ -18371,11 +18371,18 @@ def cmd_sources_list(args) -> int:
             _info('  none — check that avahi-daemon is running and '
                   'producers publish mDNS')
             return 0
-        # Header
-        print(f'  {"KEY":<48}  LABEL')
-        print(f'  {"-" * 48}  {"-" * 40}')
+        # Header.  WHERE: "local" for a radiod on this machine (its TXT
+        # `source=` names us), else the host it runs on — every radiod on
+        # the LAN is listed, and the station may consume a mix of both.
+        import socket as _socket
+        from sigmond.sources import where as _where
+        local_host = _socket.gethostname()
+        print(f'  {"KEY":<40}  {"WHERE":<16}  LABEL')
+        print(f'  {"-" * 40}  {"-" * 16}  {"-" * 36}')
         for r in rows:
-            print(f'  {str(r.key):<48}  {r.label}')
+            print(f'  {str(r.key):<40}  {_where(r, local_host):<16}  {r.label}')
+        _info('select one for an instance with:  smd admin sources add '
+              '<client>@<reporter> radiod:<name>   then: smd admin sources apply')
     return 0
 
 

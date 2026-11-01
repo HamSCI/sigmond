@@ -15,6 +15,8 @@ report despite the LAN being full of radiods.
 
 from __future__ import annotations
 
+import re
+
 import shutil
 import subprocess
 import time
@@ -115,6 +117,17 @@ def _decode_avahi_escapes(s: str) -> str:
     return _re.sub(r"\\(\d{3})", _sub, s)
 
 
+def _txt_tokens(txt: str) -> list[str]:
+    """avahi -p prints TXT as ``"k=v" "k2=v2"``; return the bare tokens."""
+    out = []
+    for tok in re.findall(r'"([^"]*)"', txt or ""):
+        if tok:
+            out.append(tok)
+    if not out and txt and txt.strip():
+        out = txt.split()
+    return out
+
+
 def _parse(stdout: str, now: float) -> list[Observation]:
     """Parse avahi-browse -pt output.  Resolved lines start with '='.
 
@@ -153,6 +166,15 @@ def _parse(stdout: str, now: float) -> list[Observation]:
             "address":      address,
             "txt":          txt.strip('"'),
         }
+        # radiod publishes `source=<hostname of the machine running it>` in
+        # its TXT record (avahi-publish-service ... source=AI6VN).  That is
+        # the only field that says WHERE a radiod runs: its mDNS host is
+        # the status name and its address is a multicast group, which are
+        # the same shape for a local and a remote radiod.
+        for tok in _txt_tokens(txt):
+            k, eq, v = tok.partition("=")
+            if eq and k == "source" and v:
+                fields["source_host"] = v
         # For NTP we want to differentiate from hf-timestd specifically.
         if svc_type == "_hftimestd._tcp":
             fields["time_kind"] = "hf-timestd"

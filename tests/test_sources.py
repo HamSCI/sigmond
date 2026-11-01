@@ -213,3 +213,32 @@ class InventoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WhereTests(unittest.TestCase):
+    """`smd admin sources list` says where each radiod runs: the station may
+    consume a mix of local and remote radiods (KFS, rob 2026-11-01)."""
+
+    def _row(self, typ, ident, **fields):
+        return InventoryRow(key=SourceKey(type=typ, identifier=ident),
+                            label=ident, reachability="ok", fields=fields)
+
+    def test_local_radiod_by_txt_source(self):
+        from sigmond.sources import where
+        r = self._row("radiod", "omni-status.local", source_host="AI6VN")
+        self.assertEqual(where(r, "AI6VN"), "local")
+        self.assertEqual(where(r, "ai6vn.lan"), "local")
+
+    def test_remote_radiod_names_its_host(self):
+        from sigmond.sources import where
+        r = self._row("radiod", "bee1-status.local", source_host="bee1")
+        self.assertEqual(where(r, "AI6VN"), "bee1")
+
+    def test_unknown_when_no_txt_source(self):
+        from sigmond.sources import where
+        self.assertEqual(where(self._row("radiod", "x-status.local"), "AI6VN"), "?")
+
+    def test_kiwi_is_its_address(self):
+        from sigmond.sources import where
+        r = self._row("kiwisdr", "kiwi1.local:8073", address="192.168.1.20")
+        self.assertEqual(where(r, "AI6VN"), "192.168.1.20")
