@@ -19,6 +19,7 @@ half-installed with every unit green.  These tests pin four things:
 import importlib.machinery
 import importlib.util
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -138,7 +139,12 @@ class OperatorChoice(unittest.TestCase):
             built.append(kw)
             raise SystemExit('stop before executing anything')
 
-        with mock.patch.object(smd, '_detect_local_sdr', lambda: False), \
+        # Never read or write this host's topology or station role.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.object(smd, 'TOPOLOGY_PATH', tmp / 'topology.toml'), \
+             mock.patch('sigmond.station_role.ROLE_PATH', tmp / 'station-role'), \
+             mock.patch.object(smd, '_detect_local_sdr', lambda: False), \
              mock.patch('sigmond.catalog.load_profiles', lambda: {'t': prof}), \
              mock.patch('sigmond.bringup.build_plan', fake_build_plan), \
              mock.patch.object(smd, '_need_root', lambda *_: False), \

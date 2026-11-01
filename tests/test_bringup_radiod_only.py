@@ -171,14 +171,35 @@ def smd():
     return _load_smd()
 
 
-@pytest.mark.parametrize("result,ok", [({"a": True, "b": True}, True),
-                                       ({"a": True, "b": False}, False),
-                                       ({}, False)])
+AVAHI = "is avahi-daemon running and libnss-mdns installed?"
+
+
+@pytest.mark.parametrize("result,ok", [
+    ({"a": "", "b": ""}, True),
+    ({"a": "", "b": radiod_publish.UNIT_DOWN}, False),
+    ({}, False)])
 def test_published_probe(smd, result, ok):
-    with mock.patch("sigmond.radiod_publish.published", return_value=result):
+    with mock.patch("sigmond.radiod_publish.diagnose", return_value=result):
         got, detail, _reconf = smd._bringup_probe("radiod-published", "smd")
     assert got is ok
     assert detail
+    assert AVAHI not in detail
+
+
+def test_published_probe_points_at_mdns_when_a_name_does_not_resolve(smd):
+    with mock.patch("sigmond.radiod_publish.diagnose",
+                    return_value={"a": radiod_publish.UNRESOLVED}):
+        got, detail, _reconf = smd._bringup_probe("radiod-published", "smd")
+    assert got is False
+    assert "radiod@a" in detail and AVAHI in detail
+
+
+def test_diagnose_names_the_reason(tmp_path):
+    d = _confs(tmp_path, a="a.local", b="b.local", c="c.local")
+    run = _runner(active={"radiod@b.service", "radiod@c.service"},
+                  resolves={"c.local"})
+    assert radiod_publish.diagnose(d, run=run) == {
+        "a": radiod_publish.UNIT_DOWN, "b": radiod_publish.UNRESOLVED, "c": ""}
 
 
 @pytest.fixture
@@ -195,19 +216,24 @@ def _topology(tmp_path, **enabled):
     return p
 
 
-def _bringup(smd, prof, topo, *, dry_run, plan=None, probe=None):
+def _bringup(smd, prof, topo, *, dry_run, plan=None, probe=None,
+             remote=None, site_profile=None, run_smd=None):
     built = []
 
     def fake_build_plan(*a, **kw):
         built.append(kw)
         return plan or Plan(profile=prof.name, local_radiod=True, steps=[])
 
-    args = Namespace(profile=prof.name, dry_run=dry_run, non_interactive=True)
+    args = Namespace(profile=prof.name, dry_run=dry_run, non_interactive=True,
+                     remote_radiod=remote)
     out = io.StringIO()
     with mock.patch.object(smd, "TOPOLOGY_PATH", topo), \
          mock.patch("sigmond.catalog.load_profiles", lambda: {prof.name: prof}), \
          mock.patch("sigmond.bringup.build_plan", fake_build_plan), \
-         mock.patch("sigmond.site_profile.load_site_profile", lambda: None), \
+         mock.patch("sigmond.site_profile.load_site_profile",
+                    lambda: site_profile), \
+         mock.patch.object(smd, "_run_smd",
+                           run_smd or (lambda *a: pytest.fail(f"ran smd {a}"))), \
          mock.patch.object(smd, "_need_root", lambda *_: False), \
          mock.patch.object(smd, "_detect_local_sdr", lambda: True), \
          mock.patch.object(smd, "_bringup_hardware_gate", lambda *a, **k: True), \
@@ -267,6 +293,44 @@ def test_bringup_radiod_only_dry_run_writes_no_role(
     assert not tmp_role.exists()
 
 
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_bringup_radiod_only_refuses_a_remote_radiod(
+        smd, tmp_path, tmp_role, prof_radiod_only, dry_run):
+    topo = _topology(tmp_path, **{"ka9q-radio": True})
+    rc, built, out = _bringup(smd, prof_radiod_only, topo, dry_run=dry_run,
+                              remote=["bee3-status.local"])
+    assert rc == 1
+    assert built == []
+    assert "runs its own radiod" in out
+    assert not tmp_role.exists()
+
+
+def test_bringup_radiod_only_skips_the_site_profile_render(
+        smd, tmp_path, tmp_role, prof_radiod_only):
+    topo = _topology(tmp_path, **{"ka9q-radio": True})
+    sp = Namespace(effective_reporter_id="", grid="", call="",
+                   psws_station_id="", source_path="/x/site-profile.toml")
+    ran = []
+    rc, _, _ = _bringup(smd, prof_radiod_only, topo, dry_run=False,
+                        site_profile=sp, run_smd=lambda *a: ran.append(a) or 0)
+    assert rc == 0
+    assert ran == []
+
+
+def test_bringup_with_clients_still_renders_the_site_profile(
+        smd, tmp_path, tmp_role):
+    prof = Profile(name="t", clients=("codar-sounder",),
+                   local_radiod_infra=("igmp-querier",), optional=())
+    topo = _topology(tmp_path, **{"codar-sounder": True})
+    sp = Namespace(effective_reporter_id="", grid="", call="",
+                   psws_station_id="", source_path="/x/site-profile.toml")
+    ran = []
+    rc, _, _ = _bringup(smd, prof, topo, dry_run=False,
+                        site_profile=sp, run_smd=lambda *a: ran.append(a) or 0)
+    assert rc == 0
+    assert ran == [("config", "render", "--if-present")]
+
+
 def test_bringup_with_clients_writes_no_role(smd, tmp_path, tmp_role):
     prof = Profile(name="t", clients=("codar-sounder",),
                    local_radiod_infra=("igmp-querier",), optional=())
@@ -311,3 +375,16 @@ def test_suggest_iface_falls_back_without_default_route(tmp_path, monkeypatch):
 
 def test_suggest_iface_falls_back_without_route_file(tmp_path, monkeypatch):
     assert _iface(tmp_path, monkeypatch, None) == "wlp2s0"
+
+
+def test_suggest_iface_takes_the_lowest_metric_default(tmp_path, monkeypatch):
+    route = ("wlp2s0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\n"
+             "enp1s0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n")
+    assert _iface(tmp_path, monkeypatch, route) == "enp1s0"
+
+
+def test_suggest_iface_ignores_a_default_route_that_is_not_up(
+        tmp_path, monkeypatch):
+    route = ("enp1s0\t00000000\t0101A8C0\t0002\t0\t0\t100\t00000000\n"
+             "wlp2s0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\n")
+    assert _iface(tmp_path, monkeypatch, route) == "wlp2s0"

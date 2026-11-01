@@ -11601,14 +11601,17 @@ def _bringup_probe(check: str, smd_bin: str):
         # Every radiod on this host running, its status name resolving from
         # the host itself: what a decoder host on the LAN needs to find it.
         from sigmond import radiod_publish
-        pub = radiod_publish.published()
-        if not pub:
+        why = radiod_publish.diagnose()
+        if not why:
             return (False, '/etc/radio: no radiod conf to publish', False)
-        bad = sorted(rid for rid, ok in pub.items() if not ok)
+        bad = sorted(rid for rid, reason in why.items() if reason)
         if bad:
-            return (False, 'not published (unit down or status name does not '
-                           'resolve): ' + ', '.join(f'radiod@{r}' for r in bad), False)
-        return (True, 'published: ' + ', '.join(f'radiod@{r}' for r in sorted(pub)), False)
+            detail = 'not published: ' + '; '.join(
+                f'radiod@{r} ({why[r]})' for r in bad)
+            if any(why[r] == radiod_publish.UNRESOLVED for r in bad):
+                detail += ' — is avahi-daemon running and libnss-mdns installed?'
+            return (False, detail, False)
+        return (True, 'published: ' + ', '.join(f'radiod@{r}' for r in sorted(why)), False)
     if check.startswith('configured:'):
         name = check.split(':', 1)[1]
         # Prefer the client's own self-describe (CONTRACT §3): ask
@@ -11944,6 +11947,10 @@ def cmd_bringup(args) -> int:
     remote_named = [n.strip() for n in (getattr(args, 'remote_radiod', None) or [])
                     if n and n.strip()]
     timing_named = (getattr(args, 'timing_radiod', None) or '').strip()
+    if radiod_only and remote_named:
+        _err(f'bringup {prof.name}: --remote-radiod does not apply — a '
+             f'radiod-only host runs its own radiod')
+        return 1
     sdr_absent = False      # set below when a local-radiod profile finds no SDR
     if remote_named:
         local = False                     # explicit remote override
@@ -12472,7 +12479,9 @@ def cmd_bringup(args) -> int:
     # bag Stage 3 wizards read as defaults) and the station SSH key.  The
     # Stage 4 plan step re-renders after client configs exist, pushing the
     # PSWS ids through into each recorder's own file.
-    if _site_profile is not None and not psws_rendered:
+    # Not on a radiod-only host: its plan renders nothing either -- there are
+    # no client configs or uploads for the profile to reach.
+    if _site_profile is not None and not psws_rendered and not radiod_only:
         if _run_smd('config', 'render', '--if-present') != 0:
             _warn('site-profile render failed — client wizards will fall '
                   'back to prompts/placeholders')

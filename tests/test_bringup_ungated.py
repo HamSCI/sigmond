@@ -49,7 +49,7 @@ def _minimal_local_radiod_profile():
                    optional=())
 
 
-def test_missing_sdr_installs_dormant_instead_of_aborting(capsys):
+def test_missing_sdr_installs_dormant_instead_of_aborting(capsys, tmp_path):
     """Drive the real decision in `cmd_bringup`'s local-radiod branch: with
     no SDR detected, bring-up must not fail, and the operator-facing warning
     must actually print.  Narrowest real callable that carries the decision
@@ -66,7 +66,10 @@ def test_missing_sdr_installs_dormant_instead_of_aborting(capsys):
     args = Namespace(profile="ungated-test", dry_run=True,
                       non_interactive=True)
 
-    with mock.patch.object(smd, "_detect_local_sdr", lambda: False), \
+    # Never read or write this host's topology or station role.
+    with mock.patch.object(smd, "TOPOLOGY_PATH", tmp_path / "topology.toml"), \
+         mock.patch("sigmond.station_role.ROLE_PATH", tmp_path / "station-role"), \
+         mock.patch.object(smd, "_detect_local_sdr", lambda: False), \
          mock.patch("sigmond.catalog.load_profiles",
                      lambda: {"ungated-test": prof}):
         rc = smd.cmd_bringup(args)

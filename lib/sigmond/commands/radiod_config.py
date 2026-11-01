@@ -1014,16 +1014,27 @@ PROC_NET_ROUTE = "/proc/net/route"
 
 
 def _default_route_iface() -> str:
-    """The iface carrying the IPv4 default route, "" if none is found."""
+    """The iface of the up IPv4 default route with the lowest metric (the
+    one the kernel uses), "" if none is found."""
+    best = None
     try:
         with open(PROC_NET_ROUTE) as f:
             for line in f.readlines()[1:]:
                 fields = line.split()
-                if len(fields) >= 2 and fields[1] == "00000000":
-                    return fields[0]
+                if len(fields) < 7 or fields[1] != "00000000":
+                    continue
+                try:
+                    flags = int(fields[3], 16)
+                    metric = int(fields[6])
+                except ValueError:
+                    continue
+                if not flags & 0x1:         # RTF_UP
+                    continue
+                if best is None or metric < best[0]:
+                    best = (metric, fields[0])
     except OSError:
         pass
-    return ""
+    return best[1] if best else ""
 
 
 def _suggest_iface() -> str:
