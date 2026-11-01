@@ -2676,33 +2676,54 @@ ntp_apply_both_planes() {
 # --role X (or --role=X) answers the question, as SIGMOND_ROLE does for an
 # unattended run; the flag wins.  With neither, the question is asked, and its
 # default is the role this host recorded last, so --reconfigure keeps it (the
-# rac-profile pattern).  The other arguments are left in WIZ_ARGS.  Returns 2
-# on an unknown role.
+# rac-profile pattern); a host with no record asks the VM
+# (station_role_vm_default, once the guest agent answers).
+#
+# station_role_init only takes --role out of the arguments (the rest are left
+# in WIZ_ARGS) and runs for every subcommand.  station_role_check validates,
+# and runs on the configure flow alone: a stray SIGMOND_ROLE must never stop
+# --rac-retry or --rac-register.  It returns 2 on an unknown role.
 station_role_init() {
-    local _given="" _from=""
+    STATION_ROLE_GIVEN=""; STATION_ROLE_FROM=""
     WIZ_ARGS=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --role)   _given="${2:-}"; _from="--role"; shift; [ $# -gt 0 ] && shift ;;
-            --role=*) _given="${1#--role=}"; _from="--role"; shift ;;
+            --role)   STATION_ROLE_GIVEN="${2:-}"; STATION_ROLE_FROM="--role"; shift; [ $# -gt 0 ] && shift ;;
+            --role=*) STATION_ROLE_GIVEN="${1#--role=}"; STATION_ROLE_FROM="--role"; shift ;;
             *)        WIZ_ARGS+=("$1"); shift ;;
         esac
     done
-    if [ -z "$_from" ] && [ -n "${SIGMOND_ROLE:-}" ]; then
-        _given="$SIGMOND_ROLE"; _from="SIGMOND_ROLE"
+    if [ -z "$STATION_ROLE_FROM" ] && [ -n "${SIGMOND_ROLE:-}" ]; then
+        STATION_ROLE_GIVEN="$SIGMOND_ROLE"; STATION_ROLE_FROM="SIGMOND_ROLE"
     fi
-    if [ -n "$_from" ]; then
-        case "$_given" in
-            full|radiod-only) STATION_ROLE="$_given"; STATION_ROLE_ASK=0; return 0 ;;
+    return 0
+}
+station_role_check() {
+    STATION_ROLE_HOST_RECORD=0
+    if [ -n "$STATION_ROLE_FROM" ]; then
+        case "$STATION_ROLE_GIVEN" in
+            full|radiod-only) STATION_ROLE="$STATION_ROLE_GIVEN"; STATION_ROLE_ASK=0; return 0 ;;
         esac
-        say "refused: $_from '$_given' is not a station role (full or radiod-only)"
+        say "refused: $STATION_ROLE_FROM '$STATION_ROLE_GIVEN' is not a station role (full or radiod-only)"
         return 2
     fi
+    STATION_ROLE_ASK=1
+    [ -e "$MARK_DIR/station-role" ] && STATION_ROLE_HOST_RECORD=1
     STATION_ROLE=$(cat "$MARK_DIR/station-role" 2>/dev/null)
     [ "$STATION_ROLE" = radiod-only ] || STATION_ROLE=full
-    STATION_ROLE_ASK=1
+    return 0
 }
-station_role_init "$@" || exit 2
+# A host with no record of its own (a station set up before the role existed,
+# or made radiod-only by hand in the VM) takes the VM's own
+# /etc/sigmond/station-role as the default.  Anything but radiod-only is full.
+station_role_vm_default() {
+    [ "$STATION_ROLE_ASK" = 1 ] && [ "$STATION_ROLE_HOST_RECORD" = 0 ] || return 0
+    local _vm
+    _vm=$(guest_out 15 "cat /etc/sigmond/station-role 2>/dev/null" | tr -d '[:space:]')
+    [ "$_vm" = radiod-only ] && STATION_ROLE=radiod-only
+    return 0
+}
+station_role_init "$@"
 set -- ${WIZ_ARGS[@]+"${WIZ_ARGS[@]}"}
 
 # ── RAC on/off switches (no wizard rerun needed) ────────────────────────────
@@ -2827,6 +2848,7 @@ if [ -e "$CONF_MARK" ] && [ "${1:-}" != "--reconfigure" ]; then
     say "already configured ($(cat "$CONF_MARK")). Run 'sigmond-setup --reconfigure' to redo."
     exit 0
 fi
+station_role_check || exit 2
 
 # Ctrl-C is the observed trigger for the stale-channel fault below, so leave
 # the operator knowing both that nothing was applied and that the next run may
@@ -2908,6 +2930,8 @@ fi
 # forever when piped stdin runs dry (nested-test hang, 2026-08-11).  On a
 # live tty read only fails on EOF (Ctrl-D), where aborting is also right.
 rd(){ read "$@" || { echo; say "stdin closed (EOF) — aborting wizard; nothing applied. Rerun: sigmond-setup"; exit 1; }; }
+
+station_role_vm_default
 
 
 # uploads_toml — the [uploads] block a FRESH install writes: the site sink
@@ -4062,6 +4086,57 @@ ask_psws_for_role() {
     fi
 }
 
+# ⛔ A STATION WITH DECODERS ENABLED IS NOT MADE RADIOD-ONLY HERE.  The
+# radiod-only profile drops [reporters], so once `smd config render` ran, the
+# decoders still running would fall back to the bare callsign as their
+# reporter id and silently move the station's wsprnet / PSKReporter credit
+# (CLAUDE.md, "NO IDENTITY IS SENT").  So before anything is written, read
+# what the VM has enabled and refuse while anything a radiod-only host does
+# not run is on (the same set as sigmond.station_role.ALLOWED_ON_RADIOD_ONLY).
+# The probe prints TOPOLOGY-OK first: a silent agent or a topology.toml that
+# does not parse refuses too, rather than passing as "nothing enabled".  An
+# absent file is a fresh VM, where nothing is enabled.
+radiod_only_probe_cmd() {
+    cat <<'PROBEEOF'
+python3 - <<'PYEOF'
+import tomllib
+try:
+    d = tomllib.load(open("/etc/sigmond/topology.toml", "rb"))
+except FileNotFoundError:
+    d = {}
+print("TOPOLOGY-OK")
+for n, c in (d.get("component") or {}).items():
+    if isinstance(c, dict) and c.get("enabled") is True:
+        print({"radiod": "ka9q-radio"}.get(n, n))
+PYEOF
+PROBEEOF
+}
+radiod_only_vm_gate() {
+    station_is_radiod_only || return 0
+    local _out _n _barred=""
+    _out=$(guest_out 30 "$(radiod_only_probe_cmd)")
+    if ! printf '%s\n' "$_out" | grep -qx TOPOLOGY-OK; then
+        say "ERROR: could not read what the decoder VM has enabled (/etc/sigmond/topology.toml),"
+        say "       so it cannot be made radiod-only safely.  Nothing was written."
+        say "       Check the VM (sigmond-vm smd status), then rerun: sigmond-setup --reconfigure"
+        return 1
+    fi
+    for _n in $(printf '%s\n' "$_out" | grep -vx TOPOLOGY-OK); do
+        case "$_n" in
+            ka9q-radio|igmp-querier|ka9q-web) ;;
+            *) _barred="$_barred $_n" ;;
+        esac
+    done
+    [ -z "$_barred" ] && return 0
+    say "ERROR: a radiod-only station runs only ka9q-radio, igmp-querier and ka9q-web,"
+    say "       and the decoder VM has enabled:$_barred"
+    say "       Disable them in the VM (log in with sigmond-vm), then rerun"
+    say "       sigmond-setup --reconfigure:"
+    say "         smd disable$_barred"
+    say "       Nothing was written."
+    return 1
+}
+
 # ── take the console cleanly ────────────────────────────────────────────
 # sigmond-wizard.service has Conflicts=getty@tty1, but systemd stops getty
 # ASYNCHRONOUSLY: getty routinely gets "login:" onto the screen just before
@@ -4098,6 +4173,7 @@ echo ""
 
 preflight_devices
 ask_role
+radiod_only_vm_gate || exit 1
 ask_station_id
 ask_grid
 ask_antenna
@@ -4334,9 +4410,13 @@ if [[ "$VMKEY" == ssh-ed25519\ * ]]; then
 else
     say "WARN: could not read the VM's host key — PM -> VM ssh will refuse until pinned"
 fi
+# Not on a radiod-only station: it has no client configs or uploads for the
+# profile to reach (smd bringup radiod-only skips render the same way).
+if ! station_is_radiod_only; then
 say "rendering site config in VM..."
 gexec_unit 600 render "smd config render" \
     || say "WARN: smd config render reported issues (continuing; rerun inside VM)"
+fi
 
 # ⛔ Both heartbeat timers are DISARMED, in the VM and on this host, and this
 # wizard no longer offers to arm either (rob, 2026-10-29).  Status moves onto

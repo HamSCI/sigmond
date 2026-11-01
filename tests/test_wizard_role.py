@@ -168,7 +168,7 @@ def question_sequence() -> str:
 
 
 def asked(role: str) -> list[str]:
-    stubs = "".join(f'{n}(){{ echo {n}; }}\n' for n in LEAVES)
+    stubs = "".join(f'{n}(){{ echo {n}; }}\n' for n in LEAVES + ("radiod_only_vm_gate",))
     script = ("set -u\n" + stubs
               + shell_func("station_is_radiod_only") + shell_func("ask_station_id")
               + shell_func("ask_psws_for_role")
@@ -181,7 +181,7 @@ def asked(role: str) -> list[str]:
 
 def test_a_full_station_asks_todays_questions_after_the_role():
     assert asked("full")[:-1] == [
-        "preflight_devices", "ask_role", "ask_reporter", "ask_grid", "ask_antenna",
+        "preflight_devices", "ask_role", "radiod_only_vm_gate", "ask_reporter", "ask_grid", "ask_antenna",
         "ask_wifi", "require_uplink", "ask_rac", "ask_psws", "ask_ntp", "ask_names"]
 
 
@@ -218,8 +218,8 @@ def role_init(tmp_path, *args, env_role=None, persisted=None):
         env["SIGMOND_ROLE"] = env_role
     quoted = " ".join(f"'{a}'" for a in args)
     r = bash(f"set -u\nMARK_DIR={mark}\nsay(){{ echo \"[wizard] $*\"; }}\n"
-             + shell_func("station_role_init")
-             + f"station_role_init {quoted}; rc=$?\n"
+             + shell_func("station_role_init") + shell_func("station_role_check")
+             + f"station_role_init {quoted} && station_role_check; rc=$?\n"
              + 'echo "rc=$rc role=${STATION_ROLE:-} ask=${STATION_ROLE_ASK:-}"\n'
              + 'printf "arg=%s\\n" ${WIZ_ARGS[@]+"${WIZ_ARGS[@]}"}\n', env=env)
     assert r.returncode == 0, r.stderr
@@ -330,3 +330,135 @@ def test_the_older_template_fallback_brings_up_the_chosen_profile():
 
 def test_the_wizard_parses():
     assert subprocess.run(["bash", "-n", str(WIZARD)], timeout=30).returncode == 0
+
+
+# -- fix round 1 ---------------------------------------------------------------
+
+def gate(role: str, vm_out: str | None):
+    """Run radiod_only_vm_gate with guest_out answering `vm_out` (None: the
+    agent is never expected to be asked)."""
+    calls = "guest_out(){ echo CALLED >&2; printf '%s' \"$VM_OUT\"; }\n"
+    env = dict(os.environ, VM_OUT=vm_out or "")
+    r = bash("set -u\nsay(){ echo \"[wizard] $*\"; }\n" + calls
+             + shell_func("station_is_radiod_only") + shell_func("radiod_only_probe_cmd")
+             + shell_func("radiod_only_vm_gate")
+             + f"STATION_ROLE={role}\nradiod_only_vm_gate\n", env=env)
+    return r
+
+
+def test_switching_to_radiod_only_is_refused_while_decoders_are_enabled():
+    r = gate("radiod-only", "TOPOLOGY-OK\nka9q-radio\nwspr-recorder\nka9q-web\npsk-recorder\n")
+    assert r.returncode != 0
+    assert "wspr-recorder" in r.stdout and "psk-recorder" in r.stdout
+    assert "smd disable wspr-recorder psk-recorder" in r.stdout
+    assert "Nothing was written" in r.stdout
+
+
+@pytest.mark.parametrize("vm", ["TOPOLOGY-OK\n",
+                                "TOPOLOGY-OK\nka9q-radio\nigmp-querier\nka9q-web\n"],
+                         ids=["fresh-vm", "radiod-only-set"])
+def test_radiod_only_is_allowed_when_nothing_else_is_enabled(vm):
+    r = gate("radiod-only", vm)
+    assert r.returncode == 0, r.stdout
+
+
+def test_an_unreadable_vm_topology_refuses_rather_than_guesses():
+    r = gate("radiod-only", "")
+    assert r.returncode != 0
+    assert "Nothing was written" in r.stdout
+
+
+def test_a_full_station_never_asks_the_vm():
+    r = gate("full", None)
+    assert r.returncode == 0
+    assert "CALLED" not in r.stderr
+
+
+def probe_cmd() -> str:
+    r = bash(shell_func("radiod_only_probe_cmd") + "radiod_only_probe_cmd")
+    assert r.returncode == 0 and "TOPOLOGY-OK" in r.stdout, r.stderr
+    return r.stdout
+
+
+def test_the_probe_reads_enabled_components_from_the_topology(tmp_path):
+    topo = tmp_path / "topology.toml"
+    cmd = probe_cmd().replace("/etc/sigmond/topology.toml", str(topo))
+    assert probe_cmd().isascii()
+    # Absent file: a fresh VM, nothing enabled.
+    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30).stdout
+    assert out.split() == ["TOPOLOGY-OK"]
+    topo.write_text('[component.radiod]\nenabled = true\n\n[component.wspr-recorder]\n'
+                    'enabled = true\n\n[component.psk-recorder]\nenabled = false\n')
+    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30).stdout
+    assert out.split() == ["TOPOLOGY-OK", "ka9q-radio", "wspr-recorder"]
+    topo.write_text("[component.radiod\n")          # broken: no OK line
+    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30).stdout
+    assert "TOPOLOGY-OK" not in out
+
+
+def test_the_gate_runs_right_after_the_role_and_before_any_vm_write():
+    seq = question_sequence()
+    assert "ask_role\nradiod_only_vm_gate || exit 1\n" in seq
+    text = WIZARD.read_text()
+    assert text.index("radiod_only_vm_gate || exit 1") < text.index("> /etc/sigmond/site-profile.toml.new")
+    gate_src = shell_func("radiod_only_vm_gate")
+    assert "guest_out" in gate_src and "qm guest exec" not in gate_src
+
+
+def test_render_is_skipped_on_a_radiod_only_station():
+    lines = [l for l in logical_lines()]
+    i = next(n for n, l in enumerate(lines) if 'gexec_unit 600 render "smd config render"' in l)
+    assert "if ! station_is_radiod_only; then" in lines[i - 2:i], lines[i - 2:i]
+
+
+def vm_default(tmp_path, vm_out, host=None):
+    mark = tmp_path / "m"
+    mark.mkdir(exist_ok=True)
+    if host is not None:
+        (mark / "station-role").write_text(host + "\n")
+    env = dict(os.environ, VM_OUT=vm_out)
+    env.pop("SIGMOND_ROLE", None)
+    r = bash(f"set -u\nMARK_DIR={mark}\nsay(){{ :; }}\n"
+             "guest_out(){ echo CALLED >&2; printf '%s\\n' \"$VM_OUT\"; }\n"
+             + shell_func("station_role_init") + shell_func("station_role_check")
+             + shell_func("station_role_vm_default")
+             + "station_role_init --reconfigure; station_role_check; station_role_vm_default\n"
+             + 'echo "role=$STATION_ROLE ask=$STATION_ROLE_ASK"', env=env)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip().splitlines()[-1], "CALLED" in r.stderr
+
+
+def test_without_a_host_record_the_default_comes_from_the_vm(tmp_path):
+    assert vm_default(tmp_path, "radiod-only") == ("role=radiod-only ask=1", True)
+
+
+@pytest.mark.parametrize("vm", ["garbage", "", "full"])
+def test_a_vm_role_that_is_not_radiod_only_defaults_to_full(tmp_path, vm):
+    assert vm_default(tmp_path, vm)[0] == "role=full ask=1"
+
+
+def test_a_host_record_wins_and_the_vm_is_not_asked(tmp_path):
+    assert vm_default(tmp_path, "radiod-only", host="full") == ("role=full ask=1", False)
+
+
+def test_the_vm_default_is_read_only_after_the_agent_answers():
+    text = WIZARD.read_text()
+    assert text.index("# <<< agent_wait") < text.index("\nstation_role_vm_default\n")
+    assert text.index("\nstation_role_vm_default\n") < text.index("\nask_role\n")
+
+
+def test_a_garbage_sigmond_role_does_not_stop_rac_retry(tmp_path):
+    # The top-level argument handling runs for every subcommand; only the
+    # configure flow validates the role.
+    i = next(n for n, l in enumerate(LINES) if l.startswith('station_role_init "$@"'))
+    top = "".join(LINES[i:i + 2])
+    env = dict(os.environ, SIGMOND_ROLE="bogus")
+    r = bash(f"set -u\nMARK_DIR={tmp_path}\nsay(){{ echo \"[wizard] $*\"; }}\n"
+             + shell_func("station_role_init") + "set -- --rac-retry\n" + top
+             + 'case "${1:-}" in --rac-retry) echo RETRY; exit 0;; esac\nexit 9\n', env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "RETRY" in r.stdout and "refused" not in r.stdout
+    text = WIZARD.read_text()
+    check = text.index("station_role_check || exit 2")
+    assert check > text.index("    --rac-retry)")
+    assert check > text.index("already configured (")
