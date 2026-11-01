@@ -42,6 +42,13 @@
 #                              which the console panel reads
 #              --rac-upgrade   climb to a more secure gateway tier if one
 #                              has since come up (see the RAC ladder below)
+#              --role full|radiod-only
+#                              answer the station-role question up front
+#                              (SIGMOND_ROLE does the same for an unattended
+#                              run).  radiod-only: radiod publishes on the LAN
+#                              for a decoder host elsewhere; no reporter, PSWS
+#                              or upload questions.  Combines with the
+#                              others, e.g. --reconfigure --role full
 #              --ntp HOST|none name the site's time source on both planes
 #                              (a LAN timeserver, or none = capped public
 #                              pool), then rerun sigmond-site-timing in the
@@ -2659,6 +2666,45 @@ ntp_apply_both_planes() {
     return $rc
 }
 
+# ── station role: full, or radiod-only ──────────────────────────────────────
+# A radiod-only station runs radiod and nothing else: it publishes the SDR's
+# streams on the LAN, and a decoder host elsewhere decodes them.  The wizard
+# records the role (site-profile `profile = "radiod-only"`, the VM's
+# /etc/sigmond/station-role, and $MARK_DIR/station-role on this host) and
+# skips every question only a decoder needs.
+#
+# --role X (or --role=X) answers the question, as SIGMOND_ROLE does for an
+# unattended run; the flag wins.  With neither, the question is asked, and its
+# default is the role this host recorded last, so --reconfigure keeps it (the
+# rac-profile pattern).  The other arguments are left in WIZ_ARGS.  Returns 2
+# on an unknown role.
+station_role_init() {
+    local _given="" _from=""
+    WIZ_ARGS=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --role)   _given="${2:-}"; _from="--role"; shift; [ $# -gt 0 ] && shift ;;
+            --role=*) _given="${1#--role=}"; _from="--role"; shift ;;
+            *)        WIZ_ARGS+=("$1"); shift ;;
+        esac
+    done
+    if [ -z "$_from" ] && [ -n "${SIGMOND_ROLE:-}" ]; then
+        _given="$SIGMOND_ROLE"; _from="SIGMOND_ROLE"
+    fi
+    if [ -n "$_from" ]; then
+        case "$_given" in
+            full|radiod-only) STATION_ROLE="$_given"; STATION_ROLE_ASK=0; return 0 ;;
+        esac
+        say "refused: $_from '$_given' is not a station role (full or radiod-only)"
+        return 2
+    fi
+    STATION_ROLE=$(cat "$MARK_DIR/station-role" 2>/dev/null)
+    [ "$STATION_ROLE" = radiod-only ] || STATION_ROLE=full
+    STATION_ROLE_ASK=1
+}
+station_role_init "$@" || exit 2
+set -- ${WIZ_ARGS[@]+"${WIZ_ARGS[@]}"}
+
 # ── RAC on/off switches (no wizard rerun needed) ────────────────────────────
 # Library mode: a caller that sources this file for its functions stops here.
 [ "${SIGMOND_WIZARD_AS_LIB:-0}" = 1 ] && return 0
@@ -3957,6 +4003,65 @@ ask_names() {
     derive_dasi_num
 }
 
+# ── station role questions ─────────────────────────────────────────────
+ask_role() {
+    if [ "$STATION_ROLE_ASK" = 0 ]; then
+        echo ""
+        echo "  Station role: $STATION_ROLE (given by --role or SIGMOND_ROLE)"
+        return 0
+    fi
+    local _def=1 _r
+    [ "$STATION_ROLE" = radiod-only ] && _def=2
+    echo ""
+    echo "  What does this station run?"
+    echo "    1) full: radiod AND the decoders (WSPR, FT8, GRAPE timing,"
+    echo "       magnetometer), which upload what they decode"
+    echo "    2) radiod only: radiod publishes the SDR's streams on the LAN for a"
+    echo "       decoder host elsewhere; nothing is decoded or uploaded here"
+    while :; do
+        rd -r -p "Station role, 1 or 2 [$_def]: " _r
+        case "${_r:-$_def}" in
+            1|[Ff]ull) STATION_ROLE=full; break ;;
+            2|radiod-only|radiod|"radiod only") STATION_ROLE=radiod-only; break ;;
+            *) echo "  ✗ 1 (full) or 2 (radiod only)" ;;
+        esac
+    done
+}
+
+ask_station_call() {
+    # A radiod-only station uploads nothing, so it has no reporter id to ask
+    # for.  It still has a callsign: the site profile, the remote-access name
+    # and the station designator below are all built from it.
+    REPORTER=""
+    echo ""
+    echo "  The station's callsign. It identifies this station; the station"
+    echo "  designator asked for later is built from it."
+    while [ -z "$REPORTER" ]; do
+        rd -r -p "Station callsign, optionally /suffix (e.g. AC0G/B4 — required): " REPORTER
+        REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+        if [ -z "$REPORTER" ]; then echo "  ✗ required — please enter your callsign"; continue; fi
+        echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; continue; }
+    done
+    CALLSIGN="${REPORTER%%/*}"
+}
+
+station_is_radiod_only() {
+    [ "${STATION_ROLE:-full}" = radiod-only ]
+}
+
+ask_station_id() {
+    if station_is_radiod_only; then ask_station_call; else ask_reporter; fi
+}
+
+ask_psws_for_role() {
+    # PSWS ids are for the decoders' uploads; a radiod-only station has none.
+    if station_is_radiod_only; then
+        PSWS_ID=""; PSWS_GRAPE=""; PSWS_MAG=""
+    else
+        ask_psws
+    fi
+}
+
 # ── take the console cleanly ────────────────────────────────────────────
 # sigmond-wizard.service has Conflicts=getty@tty1, but systemd stops getty
 # ASYNCHRONOUSLY: getty routinely gets "login:" onto the screen just before
@@ -3992,7 +4097,8 @@ if [ -t 0 ]; then rd -r -p "  Press Enter to begin: " _; fi
 echo ""
 
 preflight_devices
-ask_reporter
+ask_role
+ask_station_id
 ask_grid
 ask_antenna
 # Before ask_rac on purpose: remote access is only meaningful over a link that
@@ -4003,7 +4109,7 @@ ask_wifi
 # about to be fine.
 require_uplink
 ask_rac
-ask_psws
+ask_psws_for_role
 ask_ntp
 ask_names
 
@@ -4011,7 +4117,12 @@ ask_names
 while :; do
     echo ""
     echo "  ── Review — nothing is applied yet ──────────────────"
-    echo "  1) Reporter:  $REPORTER"
+    if station_is_radiod_only; then
+        echo "     Role:      radiod only (to change it, answer n and rerun)"
+        echo "  1) Callsign:  $REPORTER"
+    else
+        echo "  1) Reporter:  $REPORTER"
+    fi
     echo "  2) Grid:      $GRID"
     echo "  3) Antenna:   ${ANTENNA:-(none)}"
     _rgw="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
@@ -4022,7 +4133,9 @@ while :; do
     fi
     echo "  4) Remote:    via ${_rgw} ($_rwhich)"
     echo "                (comes up by itself; switch it in the decoder VM: smd remote off / on)"
-    if [ -n "$PSWS_ID" ]; then
+    if station_is_radiod_only; then
+        echo "  5) PSWS:      (not used on a radiod-only station)"
+    elif [ -n "$PSWS_ID" ]; then
         echo "  5) PSWS:      station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}  (key registered after install)"
     else
         echo "  5) PSWS:      (skipped)"
@@ -4043,11 +4156,11 @@ while :; do
     echo "  ─────────────────────────────────────────────────────"
     rd -r -p "Apply? [Y = apply / 1-8 = re-edit that entry / n = abort] " OK
     case "${OK:-Y}" in
-        1) ask_reporter;;
+        1) ask_station_id;;
         2) ask_grid ask;;
         3) ask_antenna;;
         4) ask_rac;;
-        5) ask_psws;;
+        5) ask_psws_for_role;;
         6) ask_names;;
         7) ask_wifi;;
         8) ask_ntp;;
@@ -4133,16 +4246,29 @@ station_id = \"$PSWS_ID\"
     PSWS_TOML="$PSWS_TOML
 "
 fi
+# A radiod-only station names its profile, which bin/sigmond-firstrun-bringup
+# brings up, and carries nothing only a decoder reads: no reporter id, no PSWS
+# ids.  The [uploads] block stays, so a station later switched to full starts
+# with its sink switch off like any fresh one.  A full station's file is
+# unchanged byte for byte (tests/test_wizard_role.py).
+ROLE_TOML=""
+REPORTERS_TOML="[reporters]
+reporter_id = \"$REPORTER\""
+if [ "$STATION_ROLE" = radiod-only ]; then
+    ROLE_TOML="
+profile     = \"radiod-only\""
+    REPORTERS_TOML=""
+    PSWS_TOML=""
+fi
 UPLOADS_TOML=$(uploads_toml)
 PROFILE=$(cat <<PEOF
 # Written by the Sigmond appliance first-boot wizard $(date -u +%Y-%m-%dT%H:%MZ)
 [station]
 callsign    = "$CALLSIGN"
 grid_square = "$GRID"
-description = "$ANTENNA"
+description = "$ANTENNA"$ROLE_TOML
 $PSWS_TOML
-[reporters]
-reporter_id = "$REPORTER"
+$REPORTERS_TOML
 $UPLOADS_TOML
 
 [host]
@@ -4180,6 +4306,12 @@ else
     say "       The live site profile is unchanged."
     exit 1
 fi
+
+# The role where smd reads it in the VM (sigmond.station_role).  Written for
+# both roles: a --reconfigure from radiod-only back to full must lift the
+# refusal that keeps decoders off a radiod-only host.  ASCII, through gexec.
+gexec 15 "mkdir -p /etc/sigmond && echo $STATION_ROLE > /etc/sigmond/station-role" \
+    || say "WARN: could not record the station role ($STATION_ROLE) in the VM"
 
 say "personalizing VM (new machine-id, SSH host keys, hostname)..."
 gexec_unit 600 personalize "smd admin personalize --reset-identity --yes" \
@@ -4418,6 +4550,8 @@ if [ -f /root/sigmond-appliance/site-keys.tar.gz ]; then
 fi
 
 RADIOD_STATE="unknown"
+BRINGUP_PROFILE=dasi2
+station_is_radiod_only && BRINGUP_PROFILE=radiod-only
 # On a FIRST install the VM owns no USB controllers yet — firstboot binds them
 # after this wizard and reboots — so asking the guest for an RX888 is a test
 # that cannot pass, and every first install fell into the FX3-latch branch
@@ -4474,7 +4608,7 @@ elif gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
     else
         say "  (older template: no first-run unit — running bring-up directly)"
         gexec 30 "systemd-run --unit=sigmond-wizard-bringup --collect \
-            smd bringup dasi2 --non-interactive" || true
+            smd bringup $BRINGUP_PROFILE --non-interactive" || true
     fi
     RADIOD_STATE="bringup launched — still settling; check later with: sigmond-vm smd admin validate"
     # ⛔ Say something WHILE waiting.  This printed one line and then nothing
@@ -4487,6 +4621,7 @@ elif gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
     for i in $(seq 1 30); do
         if gexec 15 "systemctl list-units --state=active 'radiod@*' --no-legend 2>/dev/null | grep -q radiod@"; then
             RADIOD_STATE="radiod ACTIVE ✓ (decoding starts within ~2 min cycles)"
+            station_is_radiod_only && RADIOD_STATE="radiod ACTIVE ✓ (publishing on the LAN)"
             say "  radiod is active after $(( i * 10 ))s"
             break
         fi
@@ -5409,6 +5544,7 @@ if [ -n "$RAC_PAIR_WARN" ]; then
 fi
 
 PSWS_STATE="skipped — add later: sigmond-setup --reconfigure"
+station_is_radiod_only && PSWS_STATE="not used on a radiod-only station"
 if [ -n "$PSWS_ID" ] && [ -n "$KEYS_RESTORED" ]; then
     if gexec_unit 90 psws-verify "smd psws verify"; then
         PSWS_STATE="station $PSWS_ID — registered key RESTORED from the stick, verify PASSED ✓"
@@ -5427,6 +5563,10 @@ echo "$REPORTER $GRID $(date -u +%F)" > "$CONF_MARK"
 # Station class + DASI number stick across --reconfigure / --rac-upgrade.
 printf '%s\n' "$RAC_PROFILE" > "$MARK_DIR/rac-profile"
 [ -n "$DASI_NUM" ] && printf '%s\n' "$DASI_NUM" > "$MARK_DIR/dasi-number"
+# The station role sticks the same way: station_role_init offers it as the
+# default on --reconfigure, and a host-side reader (the CPU layout) finds it
+# here without asking the VM.
+printf '%s\n' "$STATION_ROLE" > "$MARK_DIR/station-role"
 
 # The wizard unit must NOT stay enabled once configured: its
 # Conflicts=getty@tty1 stop job fires even when the Condition check fails
@@ -5470,6 +5610,13 @@ SINK_NOTE=""
 [ -n "${UPLOADS_TOML:-}" ] && SINK_NOTE=" Site sink switch: off — the station records and decodes but sends
             no data.  Check reception and
             identity, then run in the VM: smd sink upload"
+# A radiod-only station uploads nothing, so the sink note does not apply.
+ROLE_NOTE=""
+if [ "${STATION_ROLE:-full}" = radiod-only ]; then
+    SINK_NOTE=""
+    ROLE_NOTE="
+ Radiod-only: radiod publishes on the LAN; decode it from your decoder host"
+fi
 SUMMARY=$(cat <<SEOF
 ──────────────────────────────────────────────────────
  Sigmond station configured: $REPORTER @ $GRID
@@ -5487,7 +5634,7 @@ SUMMARY=$(cat <<SEOF
    ssh:     ssh sigmond@${VMIP:-<vm-ip>}   (from other machines;
             sigmond-vm --ip prints the current address)
    console: qm terminal $VMID  (Ctrl+O exits; sigmond or root)
- SDR/radiod: $RADIOD_STATE
+ SDR/radiod: $RADIOD_STATE$ROLE_NOTE
  RAC:       $RAC_STATE
  Switch:    $PAIR_STATE
  PSWS:      $PSWS_STATE
