@@ -17,7 +17,7 @@ def role(path: Path = ROLE_PATH) -> str:
     """Return the station role; anything missing or unrecognised is `full`."""
     try:
         text = Path(path).read_text().strip()
-    except OSError:
+    except (OSError, ValueError):
         return FULL
     return RADIOD_ONLY if text == RADIOD_ONLY else FULL
 
@@ -31,7 +31,7 @@ def set_role(name: str, path: Path = ROLE_PATH) -> bool:
     try:
         if path.read_text().strip() == name:
             return False
-    except OSError:
+    except (OSError, ValueError):
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.station-role.')
@@ -55,4 +55,4 @@ def refusal(component: str, current: str) -> Optional[str]:
         return None
     return (f"{component} is not run on a radiod-only host "
             f"(this host's role is {current}); "
-            f"to decode here, change the role first.")
+            f"to run it here, set {ROLE_PATH} to {FULL}.")

@@ -38,6 +38,17 @@ def test_refusal():
     assert refusal("wspr-recorder", "full") is None
     msg = refusal("wspr-recorder", "radiod-only")
     assert "wspr-recorder" in msg and "radiod-only" in msg
+    assert "/etc/sigmond/station-role" in msg and "full" in msg
+    assert refusal("igmp-querier", "radiod-only") is None
+    assert refusal("ka9q-web", "radiod-only") is None
+
+
+def test_non_utf8_file_is_full_and_replaceable(tmp_path):
+    p = tmp_path / "station-role"
+    p.write_bytes(b"\xff\xfe")
+    assert role(p) == "full"
+    assert set_role("radiod-only", p) is True
+    assert role(p) == "radiod-only"
 
 
 def test_catalog_profile():
