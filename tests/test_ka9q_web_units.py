@@ -74,12 +74,18 @@ def test_ports_skip_reserved_and_count_up(smd):
     assert smd._ka9q_web_port(2, frozenset({8082, 8000})) == 8084
 
 
-def test_remote_radiods_get_no_unit(smd, monkeypatch):
+def test_remote_radiods_get_units_after_the_local_ones(smd, monkeypatch):
+    """The decoder host serves every page, including one for a radiod on
+    another host (AI6VN-PM VM 101, 2026-11-01); the first LOCAL radiod keeps
+    8081 even when a remote id sorts before it."""
     _with(monkeypatch, [
-        Radiod(id="here", host="localhost", status_dns="here-status.local"),
-        Radiod(id="there", host="192.0.2.9", status_dns="there-status.local"),
+        Radiod(id="zz-here", host="localhost", status_dns="zz-here-status.local"),
+        Radiod(id="aa-there", host="AI6VN-R1", status_dns="aa-there-status.local"),
     ])
-    assert smd._ka9q_web_targets() == [("ka9q-web.service", "here-status.local", 8081)]
+    assert smd._ka9q_web_targets() == [
+        ("ka9q-web.service", "zz-here-status.local", 8081),
+        ("ka9q-web@aa-there.service", "aa-there-status.local", 8083),
+    ]
 
 
 def test_template_reads_its_env_file(smd):

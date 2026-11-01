@@ -11549,16 +11549,21 @@ def _ka9q_web_port(index: int, reserved: frozenset) -> int:
 
 
 def _ka9q_web_local_radiods() -> list:
-    """This host's local radiods from coordination.toml ([] when unreadable)."""
+    """Every radiod coordination.toml declares, local or remote ([] when
+    unreadable).  The decoder host serves the web page for each radiod it
+    consumes, including one running on another host (rob, 2026-11-01: the
+    radiod-only VM runs radiod and nothing else; every ka9q-web page lives
+    on the main VM).  ka9q-web only needs the status multicast group, which
+    a remote radiod sends with ttl=1.  The name is historical."""
     try:
         from sigmond.coordination import load_coordination
-        return list(load_coordination().local_radiods())
+        return list(load_coordination().radiods.values())
     except Exception:
         return []
 
 
 def _ka9q_web_targets_for(radiods: list) -> list:
-    """[(unit_name, status_dns, port)] for these local radiods; pure.
+    """[(unit_name, status_dns, port)] for these radiods, local or remote; pure.
 
     Anything with ``.id`` and ``.effective_status_dns`` will do.  Sorted by
     id: the first gets the plain ``ka9q-web.service`` on 8081, each further
@@ -11571,7 +11576,9 @@ def _ka9q_web_targets_for(radiods: list) -> list:
         reserved = frozenset({_gw.PORT, 8000})
     except Exception:
         reserved = frozenset({8082, 8000})
-    local = sorted(radiods, key=lambda r: r.id)
+    # Local radiods first, each group by id: the first LOCAL radiod keeps
+    # 8081 (the RAC proxy's port) however many remote ones are declared.
+    local = sorted(radiods, key=lambda r: (not getattr(r, 'is_local', True), r.id))
     out = []
     for i, r in enumerate(x for x in local if x.effective_status_dns):
         unit = 'ka9q-web.service' if i == 0 else f'ka9q-web@{r.id}.service'
@@ -11581,7 +11588,7 @@ def _ka9q_web_targets_for(radiods: list) -> list:
 
 
 def _ka9q_web_targets() -> list:
-    """[(unit_name, status_dns, port)] — one ka9q-web per LOCAL radiod.
+    """[(unit_name, status_dns, port)] — one ka9q-web per radiod in coordination.
 
     The first local radiod (by id) keeps the plain ``ka9q-web.service`` on
     port 8081, the RAC web proxy's localPort, so a single-radiod station is
