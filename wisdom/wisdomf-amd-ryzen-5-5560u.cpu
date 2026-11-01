@@ -4,28 +4,29 @@ l3_ways=16
 mem_total_kb=13313688
 radiod_l3_bytes=unknown-from-guest (resctrl is host-only)
 samprate=129600000
-codelets=248
-bytes=37220
+codelets=249
+bytes=37415
 # Planned ON a 5560U INSIDE the Sigmond Proxmox VM (AI6VN-PM, VM 100:
 # 10 vCPUs pinned 1:1 to host CPUs 0-9, 13 GiB), on radiod's own core
-# (vCPU 6, isolcpus=6-9, nohz_full) at the host hookscript's production
-# 3.2 GHz pin, with `smd admin wisdom plan --fresh` (fftwf-wisdom -n):
-# every one of the 65 profiles measured here, nothing imported from an
-# earlier bundle.  The guest cannot see the host's resctrl partition, so
-# radiod_l3_bytes is unknown; the plan was measured under whatever share
-# the host gives vCPU 6 in production, which is the point.
+# (vCPU 6 = host pCPU 6) with the host laid out for TWO radiods: pCPUs
+# 6-9 pinned at the production 3.2 GHz, in the resctrl "radiod" group
+# (L3:0=3ff, 10 of 16 ways = 5 MiB), workers 0-5 at 1.4 GHz.  Made with
+# `smd admin wisdom plan --fresh` (fftwf-wisdom -n): all 65 profiles
+# measured here, nothing imported.  Run time 1 h 59 m (2026-10-31
+# 23:04Z - 2026-11-01 01:03Z), station stopped throughout.
+#
+# Supersedes two earlier attempts the same day: a non-fresh run that
+# imported the WB6CXC-7 bundle, and a fresh run measured while pCPU 6
+# was still a 1.4 GHz worker core (the host layout had not been updated
+# for the second radiod).  Only this file was measured in the
+# environment radiod runs in.
 #
 # Covers BOTH RX888 front-end rates: rof1620000 (64.8 Msps) and
-# rof3240000 (129.6 Msps), plus the demod channel sizes and the 23
-# ka9q-web zoom levels.  Run time 3 h 10 m (2026-10-31 17:45-20:55Z),
-# station stopped throughout.
+# rof3240000 (129.6 Msps), the demod channel sizes and the 23 ka9q-web
+# zoom levels.  Converged: /var/lib/ka9q-radio/fft.log stayed EMPTY
+# across the restart that followed.
 #
-# Replaces the 2026-10-02 WB6CXC-7 bundle (302 codelets, bare-metal
-# resctrl 5 MiB partition).  Measured right after install on AI6VN-PM:
-#   omni  129.6 Msps, 43 channels   fft 96% of its core (was 94-99%)
-#   se    129.6 Msps, 34 channels   fft 59%
-# so at 129.6 Msps a 5560U vCPU is near saturation with either plan;
-# the lever there is 64.8 Msps where the channel set allows it.
-#
-# Converged: /var/lib/ka9q-radio/fft.log stayed EMPTY across the restart
-# that followed the plan.  Harvested from AI6VN-PM 2026-10-31.
+# At 129.6 Msps with 36-45 channels per radiod the fft thread sits at
+# 85-100 % of a 3.2 GHz 5560U core with no sample loss; the plan does not
+# buy headroom there, 64.8 Msps does.  Harvested from AI6VN-PM
+# 2026-11-01.
