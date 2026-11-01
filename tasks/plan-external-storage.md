@@ -3,7 +3,7 @@
 **Authors:** Michael Hauan (AC0G) + Claude
 **Date:** 2026-11-01
 **Status:** draft for Rob's review. No code yet. Michael settled the four open questions on 2026-11-01
-("Decisions", at the end); the storm-day rule in decision 4 awaits his word.
+("Decisions", at the end).
 **Verified against:** sigmond c737638 (`bin/smd` `admin storage`, `docs/operator/day-2.md` §3), hf-timestd
 3814c6f (`scripts/prune-old-data.sh`, `paths.py`, `scripts/install.sh`), hs-uploader 2026-10-31; disk and raw
 buffer measurements on AC0G-B4 and AC0G-ND, 2026-10-31
@@ -191,5 +191,5 @@ Each of these needs Michael's hands at the station, and an announcement on the b
 3. **Formatting.** Always format the drive to ext4.
 4. **Which flares.** "Do not record flares that will not strike earth", then: "keep a flare's peak only
    when station in daylight and exposed." So a flare's window stays only when the station stood in daylight
-   at the peak and at least one monitored path's midpoint lay sunlit. ⚠ The storm-day rule (Kp 5 and above)
-   awaits Michael's word.
+   at the peak and at least one monitored path's midpoint lay sunlit. The archive also keeps the whole UTC day of every
+   storm that arrived (observed Kp 5 and above); Michael confirmed this.
