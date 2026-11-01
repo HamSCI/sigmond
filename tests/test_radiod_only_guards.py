@@ -126,7 +126,7 @@ def _service_dir(tmp_path):
 
 def test_loopback_route_never_installed_on_radiod_only(smd, radiod_only, runs, tmp_path):
     assert smd._install_loopback_multicast_route(_service_dir(tmp_path), local_radiod=True)
-    assert not any("enable" in c for c in runs.calls)
+    assert runs.calls == []
 
 
 def _coord_with(smd, monkeypatch, tmp_path, text):
@@ -157,9 +157,51 @@ def test_remote_radiod_removal_is_nonfatal(smd, full_role, tmp_path, monkeypatch
     _coord_with(smd, monkeypatch, tmp_path,
                 '[radiod.r1]\nhost = "radiod-box.example"\n')
 
+    calls = []
+
     class Bad(_R):
         returncode = 1
         stderr = "RTNETLINK answers: No such process"
 
-    monkeypatch.setattr(smd, "_run", lambda *a, **k: Bad())
+    def fake_run(argv, sudo=False, **kw):
+        calls.append(list(argv))
+        return Bad()
+
+    monkeypatch.setattr(smd, "_run", fake_run)
     assert smd._install_loopback_multicast_route(_service_dir(tmp_path), local_radiod=True) is True
+    assert calls == [
+        ["systemctl", "disable", "--now", "sigmond-loopback-multicast.service"],
+        ["ip", "route", "del", "239.0.0.0/8", "dev", "lo"],
+    ]
+
+
+def test_remote_radiod_removal_oserror_never_installs_route(
+        smd, full_role, tmp_path, monkeypatch):
+    _coord_with(smd, monkeypatch, tmp_path,
+                '[radiod.r1]\nhost = "radiod-box.example"\n')
+    calls = []
+
+    def fake_run(argv, sudo=False, **kw):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            raise FileNotFoundError("systemctl")
+        return _R()
+
+    monkeypatch.setattr(smd, "_run", fake_run)
+    assert smd._install_loopback_multicast_route(_service_dir(tmp_path), local_radiod=True) is True
+    assert not any(c[:2] == ["ln", "-sf"] or "enable" in c for c in calls)
+    assert ["ip", "route", "del", "239.0.0.0/8", "dev", "lo"] in calls
+
+
+def test_profile_install_on_radiod_only_drops_refused_components(
+        smd, radiod_only, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(smd, "_install_full_suite",
+                        lambda a: seen.setdefault("components", a.components) and 0)
+    args = Namespace(profile="dasi2", dry_run=False)
+    smd._install_profile(args)
+    comps = seen["components"].split(",")
+    assert "ka9q-radio" in comps
+    assert "wspr-recorder" not in comps
+    assert set(comps) <= {"ka9q-radio", "igmp-querier", "ka9q-web"}
+    assert not _enabled(smd, "wspr-recorder")

@@ -4470,13 +4470,18 @@ def _host_has_local_radiod(radiod_needed: bool = False) -> bool:
 
 def _remove_loopback_multicast_route() -> None:
     """Undo the 239/8→lo route; failures (route already absent) are not errors."""
+    absent = ('does not exist', 'not loaded', 'no such', 'not found')
     for cmd in (['systemctl', 'disable', '--now',
                  'sigmond-loopback-multicast.service'],
                 ['ip', 'route', 'del', '239.0.0.0/8', 'dev', 'lo']):
-        r = _run(cmd, sudo=True)
-        if r.returncode != 0:
-            _info(f'loopback-multicast: {" ".join(cmd[:2])} did not apply '
-                  f'({(r.stderr or "").strip() or "already absent"})')
+        try:
+            r = _run(cmd, sudo=True)
+        except OSError as exc:
+            _info(f'loopback-multicast: {cmd[0]} could not run ({exc})')
+            continue
+        err = (r.stderr or '').strip()
+        if r.returncode != 0 and not any(a in err.lower() for a in absent):
+            _info(f'loopback-multicast: {" ".join(cmd[:2])} failed ({err})')
 
 
 def _install_loopback_multicast_route(sigmond_dir: Path,
@@ -4518,6 +4523,7 @@ def _install_loopback_multicast_route(sigmond_dir: Path,
               'skipping the 239/8→lo route (smd radionet status)')
         return True
     coord = Path('/etc/sigmond/coordination.toml')
+    remote_radiod = None
     if coord.exists():
         try:
             import tomllib as _toml
@@ -4529,13 +4535,16 @@ def _install_loopback_multicast_route(sigmond_dir: Path,
                            _sock.gethostname(), host_short}
             for inst, cfg in (data.get('radiod') or {}).items():
                 if str((cfg or {}).get('host', '')).strip() not in local_hosts:
-                    _info('loopback-multicast: coordination declares remote '
-                          f'radiod {inst!r} — removing the 239/8→lo route '
-                          '(multi-host topology)')
-                    _remove_loopback_multicast_route()
-                    return True
+                    remote_radiod = inst
+                    break
         except Exception:
             pass                      # unreadable coordination → treat as local
+    if remote_radiod is not None:
+        _info('loopback-multicast: coordination declares remote '
+              f'radiod {remote_radiod!r} — removing the 239/8→lo route '
+              '(multi-host topology)')
+        _remove_loopback_multicast_route()
+        return True
     src = sigmond_dir / 'systemd' / 'sigmond-loopback-multicast.service'
     if not src.exists():
         return True
@@ -12843,6 +12852,10 @@ def _install_profile(args) -> int:
             seen.add(c)
             ordered.append(c)
 
+    # A radiod-only host installs only what its role allows; each refused
+    # component prints its refusal once and is dropped from the install.
+    ordered = [c for c in ordered if not _role_refuses(c)]
+
     _heading(f'install profile: {name}')
     if prof.description:
         _info(prof.description)
@@ -12867,8 +12880,6 @@ def _install_profile(args) -> int:
             entry = get_entry(comp, catalog)
             if entry is None:
                 _warn(f'{comp}: not in catalog — skipping enable')
-                continue
-            if _role_refuses(entry.name):
                 continue
             if set_component_enabled(entry.name, True, TOPOLOGY_PATH,
                                      description=entry.description):
