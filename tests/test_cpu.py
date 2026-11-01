@@ -1100,3 +1100,44 @@ class RadiodDropInRefusalTests(unittest.TestCase):
                                return_value="unchanged") as wr:
             smd._ensure_radiod_affinity_drop_ins(self._units(), allow_shared=True)
         self.assertEqual(wr.call_count, 3)
+
+
+class GuestIsolationSmallVmTests(unittest.TestCase):
+    """AI6VN-PM VM 101, 2026-11-01: 2 vCPUs got isolcpus=0-1, fencing every CPU."""
+
+    _load_smd = RadiodDropInRefusalTests._load_smd
+
+    def _run(self, ncpu, want, tmp):
+        smd = self._load_smd()
+        path = Path(tmp) / "iso.cfg"
+        with mock.patch("sigmond.cpu.is_hypervisor_host", return_value=False), \
+             mock.patch("sigmond.cpu.compute_affinity_plan"), \
+             mock.patch("sigmond.cpu.recommended_isolcpus", return_value=want), \
+             mock.patch("sigmond.cpu.GUEST_ISOLATION_PATH", path), \
+             mock.patch("sigmond.provenance.is_appliance_install",
+                        return_value=True), \
+             mock.patch("os.cpu_count", return_value=ncpu), \
+             mock.patch.object(smd, "_warn") as warn, \
+             mock.patch.object(smd, "_info"), \
+             mock.patch.object(smd.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stderr="")
+            changed = smd._ensure_guest_cpu_isolation()
+        return changed, path, warn
+
+    def test_never_fences_every_cpu(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            changed, path, warn = self._run(2, {0, 1}, tmp)
+            self.assertFalse(changed)
+            self.assertFalse(path.exists())
+            self.assertEqual(warn.call_count, 1)
+            msg = warn.call_args[0][0]
+            self.assertIn("every CPU", msg)
+            self.assertIn("2 cores", msg)
+
+    def test_partial_set_still_written(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            changed, path, _ = self._run(4, {2, 3}, tmp)
+            self.assertTrue(changed)
+            self.assertTrue(path.exists())

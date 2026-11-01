@@ -15722,6 +15722,17 @@ def _ensure_guest_cpu_isolation(topology_cpu_affinity=None) -> bool:
     if not want:
         return False                      # no local radiod: nothing to fence
 
+    # Fencing every online CPU leaves the general scheduler nowhere to run
+    # (AI6VN-PM VM 101, 2026-11-01: 2 vCPUs -> isolcpus=0-1).  Refuse, and
+    # say what to do.  A stale drop-in is left alone; removal is out of scope.
+    ncpu = os.cpu_count() or 0
+    if ncpu and set(want) >= set(range(ncpu)):
+        _warn(f'cpu isolation skipped: radiod\'s cores {sorted(want)} would '
+              f'fence every CPU ({ncpu}) off from the general scheduler. '
+              f'Give this VM at least 2 cores (4 vCPUs with hyperthreads) '
+              f'so some stay free for the OS')
+        return False
+
     desired = _render_isol(want)
     try:
         current = _ISOL_PATH.read_text()
