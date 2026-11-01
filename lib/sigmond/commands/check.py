@@ -163,6 +163,13 @@ class Env:
     drift: Callable[[], Any] = None                                    # topology drift
     # the decoder build the operator holds (decoder_choice.override_note)
     decoder_note: Callable[[], Optional[str]] = None                   # WWV-2 override
+    # radiod-only host (Task 6): {radiod id: reason it is not published, ''
+    # when it is}, {radiod id: card serial}, the serials on the USB bus, and
+    # {radiod id: status name}
+    radiod_diagnose: Callable[[], dict] = None
+    radiod_serials: Callable[[], dict] = None
+    present_serials: Callable[[], set] = None
+    radiod_status: Callable[[], dict] = None
 
 
 def _installed(name: str) -> bool:
@@ -184,12 +191,40 @@ def default_env() -> Env:
                coordination=_coordination, coordination_age_s=_switch_age_s,
                backlog=read_backlog, http=http_status, bringup=bringup_state,
                mag_psws_id=lambda: read_mag_psws_id(reader), drift=_drift,
-               decoder_note=_decoder_note)
+               decoder_note=_decoder_note,
+               radiod_diagnose=_radiod_diagnose, radiod_serials=_radiod_serials,
+               present_serials=_present_serials, radiod_status=_radiod_status)
 
 
 def _decoder_note() -> Optional[str]:
     from ..decoder_choice import override_note
     return override_note()
+
+
+def _radiod_diagnose() -> dict:
+    from .. import radiod_publish
+    return radiod_publish.diagnose()
+
+
+def _radiod_serials() -> dict:
+    from .. import sdr_map
+    return sdr_map.instance_serials()
+
+
+def _present_serials() -> set:
+    from .. import sdr_map
+    return {c.serial for c in sdr_map.present_cards() if c.serial}
+
+
+def _radiod_status() -> dict:
+    from ..radiod_rename import status_of
+    out = {}
+    for conf in sorted(Path('/etc/radio').glob('radiod@*.conf')):
+        try:
+            out[conf.name[len('radiod@'):-len('.conf')]] = status_of(conf.read_text())
+        except (OSError, UnicodeDecodeError):
+            pass
+    return out
 
 
 def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Optional[Line]:
@@ -205,8 +240,46 @@ def guarded(label: str, fn: Callable[[Env], Optional[Line]], env: Env) -> Option
 
 def run_checks(env: Env, checks=None) -> List[Line]:
     out = []
-    for label, fn in (CHECKS if checks is None else checks):
+    if checks is None:
+        from .. import station_role
+        if station_role.role(station_role.ROLE_PATH) == station_role.RADIOD_ONLY:
+            return radiod_only_lines(env)
+        checks = CHECKS
+    for label, fn in checks:
         line = guarded(label, fn, env)
+        if line is not None:
+            out.append(line)
+    return out
+
+
+_LOSS = ('SAMPLE LOSS', 'No rx888 data')
+_MDNS_HINT = ('install avahi-daemon and libnss-mdns so the status name resolves '
+              'on this host')
+
+
+def radiod_line(env: Env, rid: str, why: str) -> Line:
+    """One radiod's health: the first failing part, else the OK sentence."""
+    label = f'radiod {rid}'
+    serial = (env.radiod_serials() or {}).get(rid, '')
+    if serial and serial.upper() not in {s.upper() for s in env.present_serials()}:
+        return Line(FAIL, label, f'card {serial} is not on the USB bus')
+    if why == 'unit not active':
+        return Line(FAIL, label, f'unit radiod@{rid} is not active')
+    if why == 'status name does not resolve':
+        return Line(WAIT, label, f'status name does not resolve; {_MDNS_HINT}')
+    if why:
+        return Line(FAIL, label, why)
+    if any(m in ln for ln in env.journal([f'radiod@{rid}.service'], 5) for m in _LOSS):
+        return Line(WAIT, label, 'not streaming: radiod reports sample loss / no rx888 data')
+    status = (env.radiod_status() or {}).get(rid, '')
+    card = f'card {serial} present' if serial else 'card present'
+    return Line(OK, label, f'{card}, unit active, streaming, {status} published')
+
+
+def radiod_only_lines(env: Env) -> List[Line]:
+    out = []
+    for rid, why in sorted((env.radiod_diagnose() or {}).items()):
+        line = guarded(f'radiod {rid}', lambda e, r=rid, w=why: radiod_line(e, r, w), env)
         if line is not None:
             out.append(line)
     return out
