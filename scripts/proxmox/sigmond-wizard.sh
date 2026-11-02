@@ -130,6 +130,16 @@ RAC_BASE_HSSH=50800;  RAC_BASE_HUI=55800
 # reusing those would mislabel these as ka9q-web instances.  Both sit inside
 # 35800-59999, which is what makes them shareable rather than mesh-only.
 RAC_BASE_VMSTN=48800; RAC_BASE_VMGMAG=49800
+# The login each ssh proxy advertises to the gateway, as per-proxy metadata
+# (`user`).  The RAC dashboard on the gateway builds its ssh command from it,
+# so nobody types the account name into the dashboard per station (Rob,
+# 2026-11-02).  The decoder VM's operator account is hamsci (firstboot makes
+# hamsci and sigmond with root's password); the host's is root.
+RAC_VM_LOGIN="${SIGMOND_RAC_VM_LOGIN:-hamsci}"
+RAC_HOST_LOGIN="${SIGMOND_RAC_HOST_LOGIN:-root}"
+# Each lands inside a TOML string, so only a plain account name is taken.
+[[ "$RAC_VM_LOGIN" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || RAC_VM_LOGIN=hamsci
+[[ "$RAC_HOST_LOGIN" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || RAC_HOST_LOGIN=root
 # Profile + DASI number stick across --reconfigure via /etc/sigmond-appliance.
 RAC_PROFILE="${SIGMOND_RAC_PROFILE:-$(cat /etc/sigmond-appliance/rac-profile 2>/dev/null || echo dasi)}"
 DASI_NUM="${SIGMOND_DASI_NUMBER:-$(cat /etc/sigmond-appliance/dasi-number 2>/dev/null)}"
@@ -467,6 +477,10 @@ rac_ladder(){
                              "vm-station:12224:$_pst" "vm-gmag:12225:$_pgm"; do
                     IFS=: read -r _n _lp _rp <<<"$_spec"
                     printf '[[proxies]]\nname = "%s-%s"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = %s\nremotePort = %s\n' "$SITE" "$_n" "$_lp" "$_rp"
+                    case "$_n" in
+                        vm-ssh)   printf '[proxies.metadatas]\nuser = "%s"\n' "${RAC_VM_LOGIN:-hamsci}" ;;
+                        host-ssh) printf '[proxies.metadatas]\nuser = "%s"\n' "${RAC_HOST_LOGIN:-root}" ;;
+                    esac
                 done
             } > "$_tf"
             "$RAC_FRPC" -c "$_tf" >>"$LOG" 2>&1 &
@@ -632,6 +646,8 @@ type = "tcp"
 localIP = "127.0.0.1"
 localPort = 12222
 remotePort = $P_VMSSH
+[proxies.metadatas]
+user = "${RAC_VM_LOGIN:-hamsci}"
 
 [[proxies]]
 name = "$SITE-vm-web"
@@ -660,6 +676,8 @@ type = "tcp"
 localIP = "127.0.0.1"
 localPort = 22
 remotePort = $P_HSSH
+[proxies.metadatas]
+user = "${RAC_HOST_LOGIN:-root}"
 
 [[proxies]]
 name = "$SITE-host-ui"

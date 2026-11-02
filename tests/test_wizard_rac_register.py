@@ -455,3 +455,18 @@ def test_the_relay_templates_keep_the_shape_pm_align_reads():
                   'cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay.socket" <<SOCKEOF',
                   'cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay@.service" <<SVCEOF'):
         assert TEXT.count(start) == 1, start
+
+
+def test_the_ssh_proxies_advertise_their_login_to_the_gateway(tmp_path, registrar):
+    # The RAC dashboard on the gateway builds its ssh command from each
+    # proxy's `user` metadata (Rob, 2026-11-02): the decoder VM's account is
+    # hamsci, the host's is root.  No other proxy carries a login.
+    import tomllib
+    pre = host(tmp_path, tiers=tier(registrar.port))
+    r = run(pre + "rac_register ensure\n", tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    doc = tomllib.loads((tmp_path / "frpc-host.toml").read_text())
+    users = {p["name"].split("-", 1)[1]: p.get("metadatas", {}).get("user") for p in doc["proxies"]}
+    assert users == {"vm-ssh": "hamsci", "vm-web": None, "vm-station": None,
+                     "vm-gmag": None, "host-ssh": "root", "host-ui": None}
+    assert doc["metadatas"]["site"] == "AC0G_B4"      # the login-level table is unchanged
