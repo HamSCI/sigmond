@@ -231,6 +231,9 @@ def _add(args) -> int:
     dev = f"/dev/{disk.name}"
     part = f"/dev/{ar.partition_name(disk.name)}"
     info(("Would run" if dry else "Formatting") + f" {dev}:")
+    if not dry:
+        info("mkfs writes the ext4 journal (about 1 GB): seconds on a hard drive, "
+             "minutes on a slow USB stick.  Let it finish.")
     steps = [
         (["wipefs", "-a", dev], None),
         (["sfdisk", "--quiet", dev], "label: gpt\n,,L\n"),

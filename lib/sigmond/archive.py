@@ -82,6 +82,8 @@ def list_disks(sys_block: Path = SYS_BLOCK) -> Dict[str, Disk]:
             continue
         sectors = _read(dev / "size")
         size = int(sectors) * 512 if sectors.isdigit() else 0
+        if size == 0:
+            continue        # an empty slot: nbd, a card reader with no card
         try:
             resolved = (dev / "device").resolve(strict=True)
         except OSError:

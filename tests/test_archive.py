@@ -62,6 +62,9 @@ def station(tmp_path):
     _usb_dev(root, PCI_A, 2, "2-1", vid="2109", pid="0817")        # the hub
     _usb_dev(root, PCI_A, 2, "2-1.4", vid="04b4", pid="00f1")      # the RX-888
     (root / "block" / "loop0").mkdir(parents=True)
+    nbd = root / "block" / "nbd0"           # an empty network block device
+    nbd.mkdir(parents=True)
+    (nbd / "size").write_text("0\n")
     return root
 
 
