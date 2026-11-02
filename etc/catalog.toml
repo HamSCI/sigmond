@@ -188,8 +188,8 @@ repo            = "https://github.com/HamSCI/callhash"
 kind            = "client"
 description     = "HFDL (High Frequency Data Link) recorder — one dumphfdl subprocess per band"
 repo            = "https://github.com/HamSCI/hfdl-recorder"
-uses            = ["ka9q-python"]
-requires        = ["ka9q-python", "ka9q-radio"]
+uses            = ["ka9q-python", "hamsci-dsp"]
+requires        = ["ka9q-python", "ka9q-radio", "hamsci-dsp"]  # hamsci-dsp: sibling pkg for uv editable install (squitter timing)
 contract        = "0.8"
 install_script  = "/opt/git/sigmond/hfdl-recorder/scripts/install.sh"
 # dumphfdl is bundled inside hfdl-recorder (scripts/build-dumphfdl.sh) — same
