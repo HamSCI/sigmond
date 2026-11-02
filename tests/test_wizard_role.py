@@ -1,11 +1,17 @@
-"""The wizard offers a "radiod only" station role.
+"""The wizard's station role question, and its refusal of "radiod only".
 
 A radiod-only station runs radiod and nothing else: it publishes the SDR's
-streams on the LAN for a decoder host elsewhere.  So the wizard asks no
-wsprnet reporter id and no PSWS ids, writes `profile = "radiod-only"` under
-[station] in site-profile.toml (bin/sigmond-firstrun-bringup brings that
-profile up), records the role in the VM's /etc/sigmond/station-role and on
-the host beside rac-profile, and its summary says where decoding happens.
+streams on the LAN for a decoder host elsewhere.  On the appliance that is
+REFUSED for now: the decoder VM has only the host-only link, so its radiod
+cannot publish to a decoder on another machine.  Chosen at the question, by
+--role or by SIGMOND_ROLE, "radiod only" ends the wizard non-zero, pointing at
+docs/operator/radiod-only.md's bare-metal path, before anything is written.
+
+The role plumbing stays in the wizard, unreachable past that refusal, for when
+the VM can publish: no wsprnet reporter id or PSWS ids, `profile =
+"radiod-only"` under [station] in site-profile.toml, the VM gate, the role
+records, the summary line.  The unit tests of those pieces below keep them
+from rotting; the flow tests are refusal tests.
 
 A full-role run must be byte-identical to the wizard before the role existed:
 the GOLDEN_* strings below were captured from that wizard.
@@ -167,15 +173,28 @@ def question_sequence() -> str:
     return "".join(LINES[i:j + 1])
 
 
-def asked(role: str) -> list[str]:
-    stubs = "".join(f'{n}(){{ echo {n}; }}\n' for n in LEAVES + ("radiod_only_vm_gate",))
-    script = ("set -u\n" + stubs
+REFUSAL_WORDS = ("not available on the appliance", "host-only link",
+                 "docs/operator/radiod-only.md", "Bare metal", "Nothing was written")
+
+
+def run_questions(role: str) -> subprocess.CompletedProcess:
+    """The question sequence with every leaf stubbed; ask_role answers
+    `role`.  The appliance refusal is the real one."""
+    leaves = tuple(n for n in LEAVES if n != "ask_role")
+    stubs = "".join(f'{n}(){{ echo {n}; }}\n' for n in leaves + ("radiod_only_vm_gate",))
+    stubs += f'ask_role(){{ echo ask_role; STATION_ROLE={role}; }}\n'
+    script = ("set -u\nsay(){ echo \"[wizard] $*\"; }\n" + stubs
               + shell_func("station_is_radiod_only") + shell_func("ask_station_id")
               + shell_func("ask_psws_for_role")
-              + f"STATION_ROLE={role}\n" + question_sequence()
+              + shell_func("radiod_only_appliance_refusal")
+              + "STATION_ROLE=full\n" + question_sequence()
               + 'echo "PSWS=[${PSWS_ID-unset}|${PSWS_GRAPE-unset}|${PSWS_MAG-unset}]"\n')
-    r = bash(script)
-    assert r.returncode == 0, r.stderr
+    return bash(script)
+
+
+def asked(role: str) -> list[str]:
+    r = run_questions(role)
+    assert r.returncode == 0, r.stdout + r.stderr
     return r.stdout.split()
 
 
@@ -185,17 +204,15 @@ def test_a_full_station_asks_todays_questions_after_the_role():
         "ask_wifi", "require_uplink", "ask_rac", "ask_psws", "ask_ntp", "ask_names"]
 
 
-def test_a_radiod_only_station_asks_no_reporter_psws_or_upload_question():
-    got = asked("radiod-only")
-    assert "ask_reporter" not in got
-    assert "ask_psws" not in got
-    assert not any("upload" in q or "wsprnet" in q for q in got)
-    # It still names the station: callsign, grid, antenna, host name.
-    for q in ("ask_station_call", "ask_grid", "ask_antenna", "ask_names",
-              "ask_rac", "ask_ntp"):
-        assert q in got, q
-    # Skipping PSWS clears its ids, so set -u never trips on them later.
-    assert got[-1] == "PSWS=[||]"
+def test_choosing_radiod_only_at_the_question_is_refused_on_the_appliance():
+    r = run_questions("radiod-only")
+    assert r.returncode != 0
+    words = [w for w in r.stdout.split() if not w.startswith("[")]
+    # Nothing after the role question runs: no VM gate, no further question.
+    asked_here = [w for w in words if w in LEAVES + ("radiod_only_vm_gate",)]
+    assert asked_here == ["preflight_devices", "ask_role"], r.stdout
+    for w in REFUSAL_WORDS:
+        assert w in r.stdout, (w, r.stdout)
 
 
 def test_the_station_call_question_names_no_wsprnet_and_sets_the_callsign():
@@ -208,6 +225,17 @@ def test_the_station_call_question_names_no_wsprnet_and_sets_the_callsign():
 
 # -- choosing the role ---------------------------------------------------------
 
+def _top_refusal() -> str:
+    """The wizard's line right after `station_role_check || exit 2`."""
+    i = next(n for n, l in enumerate(LINES) if l == "station_role_check || exit 2\n")
+    j = next(n for n in range(i + 1, len(LINES))
+             if "radiod_only_appliance_refusal" in LINES[n])
+    return LINES[j]
+
+
+TOP_REFUSAL = _top_refusal()
+
+
 def role_init(tmp_path, *args, env_role=None, persisted=None):
     mark = tmp_path / "mark"
     mark.mkdir(exist_ok=True)
@@ -217,10 +245,17 @@ def role_init(tmp_path, *args, env_role=None, persisted=None):
     if env_role is not None:
         env["SIGMOND_ROLE"] = env_role
     quoted = " ".join(f"'{a}'" for a in args)
+    # The configure flow's own top-level lines: check, then refuse a
+    # radiod-only role given up front.
     r = bash(f"set -u\nMARK_DIR={mark}\nsay(){{ echo \"[wizard] $*\"; }}\n"
              + shell_func("station_role_init") + shell_func("station_role_check")
-             + f"station_role_init {quoted} && station_role_check; rc=$?\n"
-             + 'echo "rc=$rc role=${STATION_ROLE:-} ask=${STATION_ROLE_ASK:-}"\n'
+             + shell_func("radiod_only_appliance_refusal")
+             + f"station_role_init {quoted}\n"
+             + "( station_role_check || exit 2\n" + TOP_REFUSAL
+             + 'echo "rc=0 role=${STATION_ROLE:-} ask=${STATION_ROLE_ASK:-}" )\n'
+             + "rc=$?\n"
+             + '[ "$rc" = 0 ] || { station_role_check >/dev/null; '
+             + 'echo "rc=$rc role=${STATION_ROLE:-} ask=${STATION_ROLE_ASK:-}"; }\n'
              + 'printf "arg=%s\\n" ${WIZ_ARGS[@]+"${WIZ_ARGS[@]}"}\n', env=env)
     assert r.returncode == 0, r.stderr
     lines = r.stdout.splitlines()
@@ -236,24 +271,56 @@ def test_no_choice_anywhere_defaults_to_full_and_asks(tmp_path):
 
 @pytest.mark.parametrize("argv", [("--role", "radiod-only", "--reconfigure"),
                                   ("--reconfigure", "--role=radiod-only")])
-def test_the_role_flag_answers_the_question_and_leaves_the_other_args(tmp_path, argv):
-    state, args, _ = role_init(tmp_path, *argv)
-    assert state == "rc=0 role=radiod-only ask=0"
+def test_the_role_flag_radiod_only_is_refused_and_leaves_the_other_args(tmp_path, argv):
+    state, args, out = role_init(tmp_path, *argv)
+    assert state == "rc=1 role=radiod-only ask=0"
     assert args == ["--reconfigure"]
+    for w in REFUSAL_WORDS:
+        assert w in out, (w, out)
 
 
-def test_the_env_answers_for_an_unattended_run_and_the_flag_beats_it(tmp_path):
-    state, _, _ = role_init(tmp_path, env_role="radiod-only")
-    assert state == "rc=0 role=radiod-only ask=0"
+def test_the_role_flag_full_answers_the_question(tmp_path):
+    state, args, out = role_init(tmp_path, "--role", "full", "--reconfigure")
+    assert state == "rc=0 role=full ask=0"
+    assert args == ["--reconfigure"]
+    assert "refused" not in out
+
+
+def test_sigmond_role_radiod_only_is_refused_and_the_flag_beats_it(tmp_path):
+    state, _, out = role_init(tmp_path, env_role="radiod-only")
+    assert state == "rc=1 role=radiod-only ask=0"
+    assert "Nothing was written" in out
     state, _, _ = role_init(tmp_path, "--role", "full", env_role="radiod-only")
     assert state == "rc=0 role=full ask=0"
 
 
 def test_reconfigure_keeps_the_role_chosen_last_time_as_the_default(tmp_path):
+    # Only the default: nothing is refused until the question is answered.
     state, _, _ = role_init(tmp_path, "--reconfigure", persisted="radiod-only")
     assert state == "rc=0 role=radiod-only ask=1"
     state, _, _ = role_init(tmp_path, "--reconfigure", persisted="garbage")
     assert state == "rc=0 role=full ask=1"
+
+
+def test_the_refusal_comes_before_anything_is_written_or_the_vm_is_touched():
+    text = WIZARD.read_text()
+    top = text.index("radiod_only_appliance_refusal || exit 1")
+    asked_ = text.index("ask_role\nradiod_only_appliance_refusal || exit 1\n")
+    assert text.index("station_role_check || exit 2") < top
+    # The up-front refusal precedes the VM wait (which may `qm start` it).
+    assert top < text.index("# >>> agent_wait")
+    for write in ("> /etc/sigmond/site-profile.toml.new", "> /etc/sigmond/station-role",
+                  '> "$MARK_DIR/station-role"', '> "$CONF_MARK"'):
+        assert asked_ < text.index(write), write
+    # And it precedes the VM gate, which would otherwise ask the VM.
+    assert asked_ < text.index("\nradiod_only_vm_gate || exit 1\n")
+
+
+def test_the_refusal_passes_a_full_station_silently():
+    r = bash("set -u\nsay(){ echo \"[wizard] $*\"; }\n"
+             + shell_func("radiod_only_appliance_refusal")
+             + "STATION_ROLE=full; radiod_only_appliance_refusal; echo rc=$?")
+    assert r.stdout == "rc=0\n"
 
 
 @pytest.mark.parametrize("argv,env_role", [(("--role", "decoder"), None),
@@ -398,7 +465,8 @@ def test_the_probe_reads_enabled_components_from_the_topology(tmp_path):
 
 def test_the_gate_runs_right_after_the_role_and_before_any_vm_write():
     seq = question_sequence()
-    assert "ask_role\nradiod_only_vm_gate || exit 1\n" in seq
+    assert ("ask_role\nradiod_only_appliance_refusal || exit 1\n"
+            "radiod_only_vm_gate || exit 1\n") in seq
     text = WIZARD.read_text()
     assert text.index("radiod_only_vm_gate || exit 1") < text.index("> /etc/sigmond/site-profile.toml.new")
     gate_src = shell_func("radiod_only_vm_gate")

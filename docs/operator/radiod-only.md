@@ -76,6 +76,60 @@ FFT cores; at 64.8 Msps one ran at about 25 %.
 `<id>` is the radiod's name as `smd check` prints it. Keep `--ttl 1`. With 0
 the channels never leave the machine.
 
+> ⚠ **On a machine with more than one card, `--reconfig` rewrites every
+> card's conf.** The `<id>` does not pick one card: `smd config init radiod`
+> renders a fresh conf for each card on the bus, and any hand edit in any of
+> them (channels you added, a description, a gain) is lost. To change one
+> card's rate, edit `samprate` under `[rx888]` in its
+> `/etc/radio/radiod@<id>.conf` instead, then `smd restart all`.
+
+If `smd check` says `ttl 0: streams never leave this host` or `iface lo`,
+publish the confs without re-rendering them:
+
+```bash
+[radiod] smd admin radiod publish
+```
+
+It sets `ttl = 1` and, where `iface` is `lo` or missing, the LAN interface,
+changes no other line, and restarts each running radiod it changed.
+`smd bringup radiod-only` runs it too.
+
+## Changing a radiod-only machine back to a full station
+
+Turning a radiod-only machine into a decoder host again is not automatic.
+Setting the role back leaves two things behind:
+
+- Each radiod conf still says `ttl = 1`, so the channels keep going out on
+  the LAN. On a full station they should stay on the machine.
+- The `239.0.0.0/8` route on `lo` is not put back.
+
+So, on that machine:
+
+```bash
+[radiod] echo full | sudo tee /etc/sigmond/station-role
+[radiod] smd config init radiod --ttl 0 --reconfig
+[radiod] smd install
+```
+
+`--reconfig` re-renders every card's conf (see the warning above); to keep
+hand edits, set `ttl = 0` in each `/etc/radio/radiod@<id>.conf` yourself
+instead. `smd install` puts the loopback route back (check with
+`ip route show 239.0.0.0/8`: it must say `dev lo`). Then run
+`smd restart all`, and `smd bringup` to bring up the decoders.
+
+## The setup wizard on a Proxmox appliance
+
+The appliance's setup wizard (`sigmond-setup`) asks what the station runs.
+**"radiod only" is refused on the appliance for now.** Chosen at that
+question, or given as `--role radiod-only` or `SIGMOND_ROLE=radiod-only`,
+the wizard stops with an error and writes nothing. The reason is the network:
+the appliance's decoder VM has only the host-only link to the Proxmox host,
+so a radiod in it cannot publish to a decoder on another machine.
+
+Build a radiod-only station [on bare metal](#bare-metal) instead, or as a
+separate VM built by hand (next section). Answer "full" to run the appliance
+as a decoder host.
+
 ## A VM on Proxmox
 
 Build the radiod-only VM **from the Debian 13 cloud image**, as a new VM.
@@ -163,12 +217,14 @@ keeps. The layout takes it from, in order:
    the layout,
 2. the value saved in `/etc/sigmond/host-layout.env`,
 3. `0` when the host records the radiod-only role
-   (`/etc/sigmond-appliance/station-role`, written by the setup wizard),
+   (`/etc/sigmond-appliance/station-role` reads `radiod-only`). The setup
+   wizard does not write it while it refuses the role (see [the setup
+   wizard](#the-setup-wizard-on-a-proxmox-appliance)), so your fleet admin
+   writes that one word there by hand, or uses `HOST_RESERVE_PAIRS=0`,
 4. otherwise `1`.
 
-⚠ **Re-run the layout after the wizard has recorded radiod-only.** The layout
-is first computed before the wizard asks the question, so it was computed
-with the default of `1`. On the host, after the wizard has finished:
+⚠ **Re-run the layout after recording radiod-only.** The layout was first
+computed with the default of `1`. On the host, after recording the role:
 
 ```bash
 [host] bash /root/sigmond-appliance/sigmond/scripts/proxmox/host-setup.sh --skip-rac

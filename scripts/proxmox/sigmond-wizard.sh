@@ -2729,6 +2729,24 @@ station_role_vm_default() {
     [ "$_vm" = radiod-only ] && STATION_ROLE=radiod-only
     return 0
 }
+# ⛔ RADIOD-ONLY IS REFUSED ON THE APPLIANCE, FOR NOW.  The appliance's
+# decoder VM reaches the LAN only through the host-only link (vmbr1), so a
+# radiod in it cannot publish to a decoder on another machine.  Whichever way
+# the role was chosen (the question, --role, SIGMOND_ROLE), the wizard says so
+# and exits non-zero before it writes anything.  The role plumbing below (no
+# reporter or PSWS question, the radiod-only site profile, the VM gate, the
+# role records) stays, unreachable past this refusal, for when the VM can
+# publish.
+radiod_only_appliance_refusal() {
+    [ "${STATION_ROLE:-full}" = radiod-only ] || return 0
+    say "refused: \"radiod only\" is not available on the appliance yet."
+    say "  The appliance's decoder VM has only the host-only link to the host, so"
+    say "  its radiod cannot publish to a decoder on another machine."
+    say "  To build a radiod-only station, install Sigmond on plain Debian (bare"
+    say "  metal) and run: smd bringup radiod-only"
+    say "  See docs/operator/radiod-only.md, \"Bare metal\".  Nothing was written."
+    return 1
+}
 station_role_init "$@"
 set -- ${WIZ_ARGS[@]+"${WIZ_ARGS[@]}"}
 
@@ -2855,6 +2873,9 @@ if [ -e "$CONF_MARK" ] && [ "${1:-}" != "--reconfigure" ]; then
     exit 0
 fi
 station_role_check || exit 2
+# A role given up front (--role, SIGMOND_ROLE) is refused here, before the VM
+# is waited for; one chosen at the question is refused right after it.
+[ "$STATION_ROLE_ASK" = 1 ] || radiod_only_appliance_refusal || exit 1
 
 # Ctrl-C is the observed trigger for the stale-channel fault below, so leave
 # the operator knowing both that nothing was applied and that the next run may
@@ -4048,6 +4069,7 @@ ask_role() {
     echo "       magnetometer), which upload what they decode"
     echo "    2) radiod only: radiod publishes the SDR's streams on the LAN for a"
     echo "       decoder host elsewhere; nothing is decoded or uploaded here"
+    echo "       (not available on the appliance yet: see docs/operator/radiod-only.md)"
     while :; do
         rd -r -p "Station role, 1 or 2 [$_def]: " _r
         case "${_r:-$_def}" in
@@ -4179,6 +4201,7 @@ echo ""
 
 preflight_devices
 ask_role
+radiod_only_appliance_refusal || exit 1
 radiod_only_vm_gate || exit 1
 ask_station_id
 ask_grid
