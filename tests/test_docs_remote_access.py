@@ -273,10 +273,14 @@ def test_the_panel_figures_the_page_names_are_the_panels():
     word = {1: "one", 2: "two", 3: "three", 5: "five", 10: "ten", 15: "fifteen"}[int(m.group(1))]
     assert f"`STATE NOT READ` {word} minutes later" in flat(PAGE)
     # The ssh command the panel prints for the VM is the one the page gives.
-    panel_ports = set(re.findall(r"ssh -p (\d+) sigmond@\$\{HOSTIP", PANEL_TEXT))
-    # ... and the main panel's own line, "via this host  ssh -p 2222 ${_LSIG}@${_HIP}",
+    # The panel prints ${_VMSSH} in its ssh commands: "-p 2222 " unless this
+    # host passes the LAN's IPv4 22 to the VM (`sigmond-vm4relay ssh22 on`).
+    panel_ports = set(re.findall(r"_VMSSH='-p (\d+) '", PANEL_TEXT))
+    assert re.search(r"ssh \$\{_VMSSH\}sigmond@\$\{HOSTIP", PANEL_TEXT), \
+        "the panel no longer prints the VM ssh command"
+    # ... and the main panel's own line, "via this host  ssh ${_VMSSH}${_LSIG}@${_HIP}",
     # which only the plain rendering shows in this form.
-    assert re.search(r"via this host\s+ssh -p 2222 sigmond@\$\{HOSTIP", PANEL_TEXT), \
+    assert re.search(r"via this host\s+ssh \$\{_VMSSH\}sigmond@\$\{HOSTIP", PANEL_TEXT), \
         "the main panel no longer prints the VM ssh command"
     assert panel_ports == set(re.findall(r"ssh -p (\d+) sigmond@<host address>", PAGE)) != set()
     # Beside the host login the panel says which password to use.
@@ -458,13 +462,16 @@ def test_the_instruction_the_page_gives_for_an_unpaired_station_is_the_panels():
     # The panel names the decoder VM's command only where the wizard's pairing
     # recorded `paired`; everywhere else it prints the host's own switch as a
     # whole command.  The page quotes that line for both words.
-    m = re.search(r"""printf "(type on another computer:  ssh root@%s 'sigmond-setup --rac-%s')" """, FIRSTBOOT_TEXT)
+    m = re.search(r"""printf "(type on another computer:  ssh %sroot@%s 'sigmond-setup --rac-%s')" "\$\{_HSSH\}" """, FIRSTBOOT_TEXT)
     assert m, "the panel no longer prints the host's own switch in this form"
+    # ${_HSSH} is empty unless the host runs `sigmond-vm4relay ssh22 on`.
+    assert "_VMSSH='-p 2222 '; _HSSH=''" in FIRSTBOOT_TEXT
     for word in ("on", "off"):
-        line = m.group(1).replace("%s", "<host address>", 1).replace("%s", word, 1)
+        line = (m.group(1).replace("%s", "", 1)
+                .replace("%s", "<host address>", 1).replace("%s", word, 1))
         assert line in PAGE, line
     # The paired form, which the page already gives.
-    assert "log in to the decoder VM (ssh -p 2222 sigmond@" in FIRSTBOOT_TEXT
+    assert "log in to the decoder VM (ssh ${_VMSSH}sigmond@" in FIRSTBOOT_TEXT
     assert "log in to the decoder VM (ssh -p 2222 sigmond@<host address>) and type:  smd remote on" in PAGE
     # One file decides, and the page says which outcome earns which line.
     assert '"${RAC_PAIRING:-$RAC_MARKS/rac-pairing}"' in FIRSTBOOT_TEXT
