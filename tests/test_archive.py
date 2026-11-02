@@ -184,3 +184,32 @@ def test_days_fit_at_fifteen_gb_per_channel_day():
     assert ar.days_fit(2 * 10**12) == pytest.approx(22.2, abs=0.1)
     assert ar.days_fit(90 * 10**9, channels=1) == pytest.approx(6.0)
     assert ar.days_fit(10**12, channels=0) == 0.0
+
+
+def test_a_drive_cannot_add_keys_to_the_config():
+    import tomllib
+    evil = ar.Disk("sdb", 1, 'x"\nmode = "none', 'S1"\x00\x1b[2J', "4-2", None)
+    cfg = tomllib.loads(ar.config_text("u", evil, "t"))
+    assert cfg["mode"] == "all"
+    assert cfg["model"] == 'x"mode = "none'
+    assert "\x00" not in cfg["serial"] and "\x1b" not in cfg["serial"]
+
+
+def test_mount_point_must_be_a_real_root_directory(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    link = tmp_path / "archive"
+    link.symlink_to(target)
+    assert "symlink" in ar.mount_point_problem(link)
+    assert "does not exist" in ar.mount_point_problem(tmp_path / "nope")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    if os.geteuid() != 0:
+        assert "not owned by root" in ar.mount_point_problem(plain)
+    f = tmp_path / "file"
+    f.write_text("")
+    assert "not a directory" in ar.mount_point_problem(f)
+
+
+def test_the_root_directory_passes_the_mount_point_check():
+    assert ar.mount_point_problem(Path("/")) is None

@@ -175,7 +175,14 @@ def _add(args) -> int:
         info("dry run: nothing changed")
         return 0
 
-    ar.MOUNT.mkdir(parents=True, exist_ok=True)
+    if not os.path.lexists(ar.MOUNT):
+        ar.MOUNT.parent.mkdir(parents=True, exist_ok=True)
+        os.mkdir(ar.MOUNT, 0o755)
+    problem = ar.mount_point_problem()
+    if problem:
+        err(f"refusing to mount: {problem}.  The drive is formatted; run add again "
+            "once the mount point is a plain root-owned directory")
+        return 1
     backup = ar.FSTAB.with_name(f"fstab.pre-archive-{now.replace(':', '')}")
     if fstab_old:
         backup.write_text(fstab_old)
@@ -240,6 +247,10 @@ def _remove(args) -> int:
     forget = bool(getattr(args, 'forget', False))
     mounted = {m for m in ar.mounted_sources().values()}
     if str(ar.MOUNT) in mounted:
+        problem = ar.mount_point_problem()
+        if problem:
+            err(f"refusing to unmount: {problem}")
+            return 1
         if _run(["umount", str(ar.MOUNT)], False) != 0:
             err("the drive is busy; `fuser -vm " + str(ar.MOUNT) + "` names who holds it")
             return 1

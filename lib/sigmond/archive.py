@@ -8,7 +8,10 @@ runs nothing; `sigmond.commands.archive` does the formatting and mounting.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -47,6 +50,11 @@ def _read(p: Path) -> str:
         return ""
 
 
+def _printable(text: str) -> str:
+    """A drive names its own model and serial; keep only printable text."""
+    return "".join(c for c in text if c.isprintable()).strip()
+
+
 def _usb_parts(resolved: Path):
     """The USB device path and the controller above it, from a resolved
     sysfs device path such as
@@ -79,14 +87,14 @@ def list_disks(sys_block: Path = SYS_BLOCK) -> Dict[str, Disk]:
         except OSError:
             resolved = None
         devpath, controller = _usb_parts(resolved) if resolved else (None, None)
-        model = " ".join(x for x in (_read(dev / "device" / "vendor"),
-                                     _read(dev / "device" / "model")) if x)
+        model = _printable(" ".join(x for x in (_read(dev / "device" / "vendor"),
+                                                _read(dev / "device" / "model")) if x))
         serial = _read(dev / "device" / "serial")
         if not serial and devpath and resolved:
             # USB mass storage keeps the serial on the USB device, not the SCSI one.
             parts = resolved.parts
             serial = _read(Path(*parts[:len(parts) - parts[::-1].index(devpath)]) / "serial")
-        disks[dev.name] = Disk(dev.name, size, model, serial, devpath, controller)
+        disks[dev.name] = Disk(dev.name, size, model, _printable(serial), devpath, controller)
     return disks
 
 
@@ -195,19 +203,25 @@ def fstab_without_archive(text: str, mount: Optional[Path] = None) -> str:
     return "\n".join(kept) + ("\n" if kept else "")
 
 
+def _toml_str(value: str) -> str:
+    """A TOML basic string.  JSON's escaping is a valid subset of TOML's, so
+    a drive that names itself with quotes or newlines cannot add keys."""
+    return json.dumps(_printable(str(value)), ensure_ascii=True)
+
+
 def config_text(uuid: str, disk: Disk, when_utc: str) -> str:
     """/etc/sigmond/archive.toml.  `mode` and the retention keys are read by
     the archiver (hf-timestd, phase 2); their values here are the plan's
     defaults (decisions 2 and 4)."""
     return (
         "# The archive drive (smd archive add).  tasks/plan-external-storage.md\n"
-        f'uuid = "{uuid}"\n'
-        f'label = "{LABEL}"\n'
-        f'mount = "{MOUNT}"\n'
-        f'added_utc = "{when_utc}"\n'
-        f'model = "{disk.model}"\n'
-        f'serial = "{disk.serial}"\n'
-        f'size_bytes = {disk.size_bytes}\n'
+        f"uuid = {_toml_str(uuid)}\n"
+        f"label = {_toml_str(LABEL)}\n"
+        f"mount = {_toml_str(str(MOUNT))}\n"
+        f"added_utc = {_toml_str(when_utc)}\n"
+        f"model = {_toml_str(disk.model)}\n"
+        f"serial = {_toml_str(disk.serial)}\n"
+        f"size_bytes = {int(disk.size_bytes)}\n"
         "\n"
         "# Read by the archiver (hf-timestd, phase 2): every channel, rolling, with a\n"
         "# kept window per flare that reached the station.\n"
@@ -215,6 +229,27 @@ def config_text(uuid: str, disk: Disk, when_utc: str) -> str:
         "high_water_pct = 90\n"
         "kept_ceiling_pct = 25\n"
     )
+
+
+def mount_point_problem(mount: Optional[Path] = None) -> Optional[str]:
+    """Why root must not mount or unmount here, or None.  /var/lib/sigmond can
+    be writable by the sigmond group, so a symlink planted at the mount point
+    would steer root's mount (or umount) somewhere else.  The mount point must
+    be a real directory, owned by root, that resolves to itself."""
+    mount = MOUNT if mount is None else mount
+    try:
+        st = os.lstat(mount)
+    except FileNotFoundError:
+        return f"{mount} does not exist"
+    if stat.S_ISLNK(st.st_mode):
+        return f"{mount} is a symlink; remove it, and `add` makes a real directory"
+    if not stat.S_ISDIR(st.st_mode):
+        return f"{mount} is not a directory"
+    if st.st_uid != 0:
+        return f"{mount} is not owned by root"
+    if os.path.realpath(mount) != str(mount):
+        return f"{mount} resolves to {os.path.realpath(mount)} through a symlink above it"
+    return None
 
 
 def days_fit(free_bytes: int, channels: int = DEFAULT_CHANNELS) -> float:

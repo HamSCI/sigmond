@@ -39,6 +39,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(cmd.shutil, "which", lambda t: f"/usr/sbin/{t}")
     monkeypatch.setattr(cmd.shutil, "disk_usage", lambda p: Usage(2 * 10**12, 10**9, 2 * 10**12 - 10**9))
     monkeypatch.setattr(cmd, "_channels_in_buffer", lambda: 6)
+    state.mount_problem = None
+    monkeypatch.setattr(cmd.ar, "mount_point_problem", lambda *a, **k: state.mount_problem)
 
     def fake_run(argv, input=None, text=None, capture_output=None):
         ran.append(argv)
@@ -115,3 +117,10 @@ def test_remove_forget_drops_the_line_and_config(env):
 def test_status_without_a_drive(env, capsys):
     assert cmd.cmd_archive(_args(archive_command="status")) == 0
     assert "no archive drive" in capsys.readouterr().err
+
+
+def test_a_mount_point_that_fails_the_check_is_not_mounted(env):
+    env.mount_problem = "/var/lib/sigmond/archive is a symlink"
+    assert cmd.cmd_archive(_args()) == 1
+    assert "mount" not in [a[0] for a in env.ran]
+    assert "systemctl" not in [a[0] for a in env.ran]
