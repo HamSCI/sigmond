@@ -7,8 +7,10 @@
 # through wsprdaemon's own RAC tunnel (wd-rac-client: frpc processes,
 # wd-remote-access@<gw>.service, /etc/wd-remote-access).  Replacing that frpc
 # would strand the box.  So install.sh skips the whole RAC step, saying why,
-# when an frpc it did not start is running, a foreign frpc/RAC unit is active,
-# or frp config it did not write exists.  sigmond-rac's own pieces
+# when an frpc it did not start is running, a foreign frpc/RAC unit is
+# active, activating or failed, a wd-rac.service on disk is not sigmond-rac's,
+# /usr/local/sbin/frpc stands with no /etc/sigmond/frpc*.toml, or frp config
+# it did not write exists; and always under SIGMOND_SKIP_RAC=1.  sigmond-rac's own pieces
 # (/etc/sigmond/frpc*.toml, wd-rac.service running /etc/sigmond/frpc.toml,
 # sigmond-rac-*.service) do not count.
 #
@@ -47,7 +49,7 @@ EOF
 cat > "$TMP/bin/systemctl" <<'EOF'
 #!/bin/bash
 case "$1" in
-  list-units) cat "$T/units" 2>/dev/null ;;
+  list-units) echo "$*" > "$T/listargs"; cat "$T/units" 2>/dev/null ;;
   cat)        cat "$T/unitfile.$2" 2>/dev/null || exit 1 ;;
 esac
 EOF
@@ -58,7 +60,7 @@ mkdir -p "$SIGMOND_ETC_ROOT/etc/frp"; echo "sigmond wrote this" > "$SIGMOND_ETC_
 EOF
 chmod +x "$TMP/bin/"* "$TMP/fake-rac-install.sh"
 
-reset(){ rm -rf "$TMP/root" "$TMP/procs" "$TMP/units" "$TMP/unitfile."* "$TMP/rac-ran"; mkdir -p "$TMP/root/etc/sigmond"; }
+reset(){ rm -rf "$TMP/root" "$TMP/procs" "$TMP/units" "$TMP/unitfile."* "$TMP/rac-ran" "$TMP/listargs"; mkdir -p "$TMP/root/etc/sigmond"; }
 run(){ ( export T="$TMP" PATH="$TMP/bin:$PATH" SIGMOND_ETC_ROOT="$TMP/root" SIGMOND_RAC_INSTALL="$TMP/fake-rac-install.sh"
          SUDO=""; info(){ echo "[sigmond] $*"; }; ok(){ echo "[  ok  ] $*"; }; warn(){ echo "[ warn ] $*"; }
          . "$TMP/rac.sh" ) > "$TMP/out" 2>&1; }
@@ -97,6 +99,41 @@ reset; touch "$TMP/root/etc/frpc.ini"; run
 skipped "/etc/frpc.ini alone"
 reset; mkdir -p "$TMP/root/etc/wd-remote-access"; run
 skipped "/etc/wd-remote-access alone"
+
+echo "── fix round: wd-rac.service on disk, a bare frpc, unit states ───"
+reset; mkdir -p "$TMP/root/etc/systemd/system"
+printf '[Service]\nExecStart=/opt/wd/frpc -c /opt/wd/frpc.toml\n' > "$TMP/root/etc/systemd/system/wd-rac.service"
+run
+skipped "an INACTIVE /etc/systemd/system/wd-rac.service that is not sigmond-rac's"
+grep -q "wd-rac.service exists" "$TMP/out" && ok "  ...and the line names it" || bad "no wd-rac reason" "$(cat "$TMP/out")"
+reset; mkdir -p "$TMP/root/etc/systemd/system"
+printf '[Service]\n# was: ExecStart=/etc/sigmond/frpc\nExecStart=/opt/wd/frpc -c x\n' > "$TMP/root/etc/systemd/system/wd-rac.service"
+run
+skipped "a wd-rac.service naming /etc/sigmond/frpc only in a comment"
+reset; mkdir -p "$TMP/root/etc/systemd/system"
+printf '[Service]\nExecStart=/usr/local/sbin/frpc -c /etc/sigmond/frpc.toml\n' > "$TMP/root/etc/systemd/system/wd-rac.service"
+touch "$TMP/root/etc/sigmond/frpc.toml"
+run
+[ -e "$TMP/rac-ran" ] && ok "sigmond-rac's own wd-rac.service on disk: RAC installed" || bad "blocked by its own unit file" "$(cat "$TMP/out")"
+reset; mkdir -p "$TMP/root/usr/local/sbin"; touch "$TMP/root/usr/local/sbin/frpc"; run
+skipped "/usr/local/sbin/frpc with no /etc/sigmond/frpc*.toml"
+reset; mkdir -p "$TMP/root/usr/local/sbin"; touch "$TMP/root/usr/local/sbin/frpc" "$TMP/root/etc/sigmond/frpc.toml"; run
+[ -e "$TMP/rac-ran" ] && ok "/usr/local/sbin/frpc beside /etc/sigmond/frpc.toml: RAC installed" || bad "blocked by its own frpc binary" "$(cat "$TMP/out")"
+reset; echo "wd-remote-access@gw1.service loaded failed failed WD RAC" > "$TMP/units"; run
+skipped "a FAILED wd-remote-access@gw1.service"
+grep -q "is failed" "$TMP/out" && ok "  ...and the line says failed" || bad "state not named" "$(cat "$TMP/out")"
+reset; echo "frpc.service loaded activating auto-restart x" > "$TMP/units"; run
+skipped "an ACTIVATING frpc.service"
+reset; run
+grep -q -- "--state=active,activating,failed" "$TMP/listargs" && ok "units listed in active, activating and failed states" \
+    || bad "list-units states" "$(cat "$TMP/listargs" 2>/dev/null)"
+reset; echo "ssh.service loaded active running x" > "$TMP/units"
+( export SIGMOND_SKIP_RAC=1; run )
+if [ ! -e "$TMP/rac-ran" ] && grep -q "SIGMOND_SKIP_RAC=1" "$TMP/out"; then ok "SIGMOND_SKIP_RAC=1 on a clean box: skipped, with an info line"
+else bad "SIGMOND_SKIP_RAC=1 ignored" "$(cat "$TMP/out")"; fi
+reset; echo "ssh.service loaded active running x" > "$TMP/units"
+( export SIGMOND_SKIP_RAC=0; run )
+[ -e "$TMP/rac-ran" ] && ok "SIGMOND_SKIP_RAC=0: RAC installed" || bad "SIGMOND_SKIP_RAC=0 skipped" "$(cat "$TMP/out")"
 
 echo "── sigmond-rac's own pieces do not block a re-install ─────────────"
 reset
