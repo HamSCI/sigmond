@@ -13,6 +13,7 @@ _spec = importlib.util.spec_from_file_location(
 _g = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_g)
 smd, full_role, runs, _coord_with = _g.smd, _g.full_role, _g.runs, _g._coord_with
+radiod_only = _g.radiod_only
 
 DISABLE = ["systemctl", "disable", "--now", "sigmond-loopback-multicast.service"]
 ROUTE_DEL = ["ip", "route", "del", "239.0.0.0/8", "dev", "lo"]
@@ -64,5 +65,20 @@ def test_apply_without_coordination_does_neither(smd, full_role, runs, tmp_path,
 
 def test_apply_dry_run_touches_nothing(smd, full_role, runs, tmp_path, monkeypatch):
     _coord_with(smd, monkeypatch, tmp_path, '[radiod.r1]\nhost = "radiod-box"\n')
+    _apply_until_the_route_step(smd, monkeypatch, dry_run=True)
+    assert runs.calls == []
+
+
+# Final fix round, item 4: a radiod-only host's apply removes the route too.
+
+def test_apply_on_a_radiod_only_host_removes_the_route(smd, radiod_only, runs, tmp_path, monkeypatch):
+    _coord_with(smd, monkeypatch, tmp_path, '[radiod.a]\nhost = "localhost"\n')
+    _apply_until_the_route_step(smd, monkeypatch)
+    assert runs.calls == [DISABLE, ROUTE_DEL]
+
+
+def test_apply_dry_run_on_a_radiod_only_host_touches_nothing(
+        smd, radiod_only, runs, tmp_path, monkeypatch):
+    _coord_with(smd, monkeypatch, tmp_path, "")
     _apply_until_the_route_step(smd, monkeypatch, dry_run=True)
     assert runs.calls == []

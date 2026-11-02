@@ -34,6 +34,9 @@ LOG="${SIGMOND_FIRSTRUN_LOG:-/var/log/sigmond/firstrun-bringup.log}"
 SMD="${SIGMOND_FIRSTRUN_SMD:-/usr/local/bin/smd}"
 ST="${SIGMOND_FIRSTRUN_SITE_TIMING:-/usr/local/sbin/sigmond-site-timing}"
 IR="${SIGMOND_FIRSTRUN_ISOLATION:-/usr/local/sbin/sigmond-isolation-reboot}"
+# The station role (sigmond.station_role): a radiod-only station measures
+# nothing here, so it is not warned that it has no metrology channels.
+ROLE_FILE="${SIGMOND_FIRSTRUN_ROLE_FILE:-/etc/sigmond/station-role}"
 
 SYSTEMCTL="${SIGMOND_FIRSTRUN_SYSTEMCTL:-systemctl}"
 SYSTEMD_RUN="${SIGMOND_FIRSTRUN_SYSTEMD_RUN:-systemd-run}"
@@ -251,12 +254,15 @@ if [ -x "$ST" ]; then
     else
         say "site wiring exited $? — see $LOG; re-run by hand with: sudo $ST"
     fi
-    _mc=$(systemctl list-units 'timestd-metrology@*' --no-legend --plain 2>/dev/null | wc -l)
+    _mc=$("$SYSTEMCTL" list-units 'timestd-metrology@*' --no-legend --plain 2>/dev/null | wc -l)
     # Say the NUMBER.  "site wiring complete" with zero channels is the exact
     # shape of the failure this block exists to end -- and it is what
     # WB6CXC-7 reported for 16 h while timestd-metrology.target read "active".
+    _role=$(tr -d '[:space:]' < "$ROLE_FILE" 2>/dev/null)
     if [ "${_mc:-0}" -gt 0 ]; then
         say "metrology channels running: $_mc"
+    elif [ "$_role" = radiod-only ]; then
+        say "metrology channels: none (radiod-only station; its decoder host measures)"
     else
         say "⚠ NO metrology channels are running — this station measures nothing."
         say "  check: journalctl -t sigmond-site-timing ; ls /etc/hf-timestd/metrology-channels/"

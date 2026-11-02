@@ -388,3 +388,163 @@ def test_suggest_iface_ignores_a_default_route_that_is_not_up(
     route = ("enp1s0\t00000000\t0101A8C0\t0002\t0\t0\t100\t00000000\n"
              "wlp2s0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\n")
     assert _iface(tmp_path, monkeypatch, route) == "wlp2s0"
+
+
+# --------------------------------------------------------------------------
+# Final fix round, item 1: a radiod that never leaves its host is not
+# published; the radiod-only bring-up publishes an existing conf in place.
+# --------------------------------------------------------------------------
+
+def _conf_text(status, ttl=None, iface=None, extra=""):
+    lines = ["# hand note: keep me", "[global]", "hardware = rx888",
+             f"status = {status}"]
+    if ttl is not None:
+        lines.append(f"ttl       = {ttl}             # 0 = loopback-only")
+    if iface is not None:
+        lines.append(f"iface     = {iface}           # publish iface")
+    return "\n".join(lines) + "\n\n[rx888]\nsamprate = 64800000 # mine\n" + extra
+
+
+def test_diagnose_ttl_zero_and_iface_lo_are_not_published(tmp_path):
+    (tmp_path / "radiod@a.conf").write_text(_conf_text("a.local", ttl=0, iface="eth0"))
+    (tmp_path / "radiod@b.conf").write_text(_conf_text("b.local", ttl=1, iface="lo"))
+    (tmp_path / "radiod@c.conf").write_text(_conf_text("c.local", ttl=1, iface="eth0"))
+    run = _runner(active={"radiod@a.service", "radiod@b.service", "radiod@c.service"},
+                  resolves={"a.local", "b.local", "c.local"})
+    assert radiod_publish.diagnose(tmp_path, run=run) == {
+        "a": "ttl 0: streams never leave this host", "b": "iface lo", "c": ""}
+    assert radiod_publish.published(tmp_path, run=run) == {
+        "a": False, "b": False, "c": True}
+
+
+def test_published_probe_names_ttl_zero(smd):
+    with mock.patch("sigmond.radiod_publish.diagnose",
+                    return_value={"a": radiod_publish.TTL_ZERO}):
+        got, detail, _reconf = smd._bringup_probe("radiod-published", "smd")
+    assert got is False and "radiod@a (ttl 0" in detail
+
+
+def test_publish_text_is_a_minimal_line_edit():
+    before = _conf_text("a.local", ttl=0, iface="lo")
+    after, changes = radiod_publish.publish_text(before, "enp1s0")
+    assert changes == ["ttl: 0 -> 1", "iface: lo -> enp1s0"]
+    want = (before.replace("ttl       = 0 ", "ttl       = 1 ")
+                  .replace("iface     = lo ", "iface     = enp1s0 "))
+    assert after == want
+    # Idempotent.
+    assert radiod_publish.publish_text(after, "enp1s0") == (after, [])
+
+
+def test_publish_text_adds_absent_ttl_and_iface_inside_global():
+    before = _conf_text("a.local")
+    after, changes = radiod_publish.publish_text(before, "eth1")
+    assert changes == ["ttl: (absent) -> 1", "iface: (absent) -> eth1"]
+    assert after == before.replace(
+        "status = a.local\n",
+        "status = a.local\nttl       = 1\niface     = eth1\n")
+
+
+def test_publish_text_keeps_a_real_iface_and_a_conf_without_global():
+    before = _conf_text("a.local", ttl=0, iface="eth0")
+    after, changes = radiod_publish.publish_text(before, "enp1s0")
+    assert changes == ["ttl: 0 -> 1"] and "iface     = eth0" in after
+    assert radiod_publish.publish_text("[rx888]\nx = 1\n", "eth0") == ("[rx888]\nx = 1\n", [])
+
+
+def test_publish_confs_edits_each_conf_but_bootstrap(tmp_path):
+    (tmp_path / "radiod@a.conf").write_text(_conf_text("a.local", ttl=0, iface="lo"))
+    (tmp_path / "radiod@b.conf").write_text(_conf_text("b.local", ttl=1, iface="eth0"))
+    boot = _conf_text("x.local", ttl=0, iface="lo")
+    (tmp_path / "radiod@bootstrap-fw-1.conf").write_text(boot)
+    assert radiod_publish.publish_confs(tmp_path, "eth0", write=False) == {
+        "a": ["ttl: 0 -> 1", "iface: lo -> eth0"]}
+    assert "ttl       = 0" in (tmp_path / "radiod@a.conf").read_text()
+    radiod_publish.publish_confs(tmp_path, "eth0")
+    assert radiod_publish.publish_confs(tmp_path, "eth0") == {}
+    assert (tmp_path / "radiod@bootstrap-fw-1.conf").read_text() == boot
+
+
+def test_cmd_radiod_publish_restarts_only_a_running_changed_radiod(smd, tmp_path):
+    (tmp_path / "radiod@a.conf").write_text(_conf_text("a.local", ttl=0, iface="eth0"))
+    (tmp_path / "radiod@b.conf").write_text(_conf_text("b.local", ttl=0, iface="eth0"))
+    (tmp_path / "radiod@c.conf").write_text(_conf_text("c.local", ttl=1, iface="eth0"))
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        rc = 0 if argv[:2] != ["systemctl", "is-active"] or "radiod@a" in argv[-1] else 3
+        return type("R", (), {"returncode": rc, "stdout": "", "stderr": ""})()
+
+    out = io.StringIO()
+    with mock.patch.object(smd, "_run", fake_run), \
+         mock.patch.object(radiod_config, "_suggest_iface", return_value="eth0"), \
+         contextlib.redirect_stdout(out):
+        assert smd.cmd_radiod_publish(Namespace(dry_run=True), conf_dir=tmp_path) == 0
+        assert calls == []
+        assert "ttl       = 0" in (tmp_path / "radiod@a.conf").read_text()
+        assert smd.cmd_radiod_publish(Namespace(dry_run=False), conf_dir=tmp_path) == 0
+    assert ["systemctl", "restart", "radiod@a.service"] in calls
+    assert ["systemctl", "restart", "radiod@b.service"] not in calls
+    assert not any("radiod@c" in " ".join(c) for c in calls)
+    assert "ttl       = 1" in (tmp_path / "radiod@b.conf").read_text()
+
+
+def test_radiod_only_plan_publishes_existing_confs_before_apply(prof_radiod_only):
+    steps = build_plan(prof_radiod_only, local_radiod=True).steps
+    argvs = [s.argv for s in steps]
+    pub = argvs.index(["smd", "admin", "radiod", "publish"])
+    cfg = next(i for i, s in enumerate(steps) if s.label.startswith("configure radiod"))
+    assert cfg < pub < argvs.index(["smd", "apply"])
+    # Deferred (no SDR): nothing to publish yet.
+    deferred = build_plan(prof_radiod_only, local_radiod=True, sdr_absent=True)
+    assert ["smd", "admin", "radiod", "publish"] not in [s.argv for s in deferred.steps]
+
+
+def test_a_profile_with_clients_never_publishes():
+    prof = Profile(name="dasi2", clients=("wspr-recorder",),
+                   local_radiod_infra=("igmp-querier",), optional=())
+    assert not any("publish" in s.argv for s in build_plan(prof, local_radiod=True).steps)
+
+
+# --------------------------------------------------------------------------
+# Item 6: a profile with clients on a radiod-only host is refused up front.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_bringup_with_clients_on_a_radiod_only_host_refuses_up_front(
+        smd, tmp_path, tmp_role, dry_run):
+    tmp_role.write_text("radiod-only\n")
+    prof = Profile(name="dasi2", clients=("wspr-recorder",),
+                   local_radiod_infra=("igmp-querier",), optional=())
+    topo = _topology(tmp_path, **{"ka9q-radio": True})
+    rc, built, out = _bringup(smd, prof, topo, dry_run=dry_run)
+    assert rc == 1
+    assert built == []
+    errs = [l for l in out.splitlines() if "dasi2" in l]
+    assert len(errs) == 1, out
+    assert "radiod-only" in errs[0] and str(tmp_role) in errs[0] and "full" in errs[0]
+    assert tmp_role.read_text() == "radiod-only\n"
+
+
+# Final fix round, item 11: a tunnel or virtual default route is skipped.
+
+def test_suggest_iface_skips_a_wg0_default_route(tmp_path, monkeypatch):
+    route = ("wg0\t00000000\t00000000\t0001\t0\t0\t50\t00000000\n"
+             "enp1s0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\n")
+    assert _iface(tmp_path, monkeypatch, route) == "enp1s0"
+
+
+@pytest.mark.parametrize("dev", ["wg0", "tun0", "ppp0", "clat", "tap1", "docker0",
+                                 "veth12ab", "br-1a2b", "virbr0", "lo"])
+def test_suggest_iface_falls_back_when_only_a_virtual_device_has_a_default(
+        tmp_path, monkeypatch, dev):
+    route = f"{dev}\t00000000\t00000000\t0001\t0\t0\t0\t00000000\n"
+    assert _iface(tmp_path, monkeypatch, route) == "wlp2s0"
+
+
+def test_suggest_iface_dev_scan_skips_tunnels_too(tmp_path, monkeypatch):
+    dev = tmp_path / "dev"
+    dev.write_text("Inter-|\n face |\n    lo: 0\n   wg0: 0\n  clat: 0\nenp3s0: 0\n")
+    monkeypatch.setattr(radiod_config, "PROC_NET_DEV", str(dev))
+    monkeypatch.setattr(radiod_config, "PROC_NET_ROUTE", str(tmp_path / "absent"))
+    assert radiod_config._suggest_iface() == "enp3s0"

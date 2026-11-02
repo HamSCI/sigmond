@@ -1036,6 +1036,28 @@ class TtlSamprateTests(unittest.TestCase):
         self.assertIn("samprate    = 64800000", confs[0])
         self.assertNotIn("129600000", confs[0])
 
+    def test_samprate_64_8_rewrites_the_trailing_comment(self):
+        # The "RX888" profile's samprate line carries a comment, continued on
+        # four more lines, about 129.6 Msps: all of it gives way.
+        rc, confs = self._init(sdrs=[_sdr("RX888", "AAA")], samprate=64800000)
+        self.assertEqual(rc, 0)
+        line = next(l for l in confs[0].splitlines() if l.startswith("samprate    ="))
+        self.assertEqual(line, "samprate    = 64800000     # 64.8 Msps — HF only, "
+                               "up to 32.4 MHz")
+        rx888 = confs[0].split("[rx888]", 1)[1]
+        self.assertNotIn("129.6", rx888)
+        self.assertNotIn("rof3240000", rx888)
+        self.assertIn("queuedepth  = 64", confs[0])
+
+    def test_samprate_64_8_comment_on_a_profile_without_one(self):
+        rc, confs = self._init(samprate=64800000)
+        self.assertIn("samprate    = 64800000     # 64.8 Msps — HF only, up to "
+                      "32.4 MHz\n", confs[0])
+
+    def test_samprate_default_text_is_unchanged_when_chosen_explicitly(self):
+        d = radiod_config._FRONTEND_PROFILES["RX888"]["defaults"].rstrip()
+        self.assertEqual(radiod_config._set_samprate(d, 129600000), d)
+
     def test_samprate_rejects_other_values(self):
         rc, confs = self._init(samprate=100)
         self.assertEqual(rc, 2)

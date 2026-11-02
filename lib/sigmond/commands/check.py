@@ -253,6 +253,7 @@ def run_checks(env: Env, checks=None) -> List[Line]:
 
 
 _LOSS = ('SAMPLE LOSS', 'No rx888 data')
+from ..radiod_publish import IFACE_LO as _IFACE_LO, TTL_ZERO as _TTL_ZERO  # noqa: E402
 _MDNS_HINT = ('install avahi-daemon and libnss-mdns so the status name resolves '
               'on this host')
 
@@ -267,6 +268,10 @@ def radiod_line(env: Env, rid: str, why: str) -> Line:
         return Line(FAIL, label, f'unit radiod@{rid} is not active')
     if why == 'status name does not resolve':
         return Line(WAIT, label, f'status name does not resolve; {_MDNS_HINT}')
+    if why in (_TTL_ZERO, _IFACE_LO):
+        return Line(FAIL, label, f'{why}: not published on the LAN; run '
+                                 f'`smd admin radiod publish` (sets ttl = 1 and '
+                                 f'the LAN iface in /etc/radio/radiod@{rid}.conf)')
     if why:
         return Line(FAIL, label, why)
     if any(m in ln for ln in env.journal([f'radiod@{rid}.service'], 5) for m in _LOSS):
@@ -278,7 +283,14 @@ def radiod_line(env: Env, rid: str, why: str) -> Line:
 
 def radiod_only_lines(env: Env) -> List[Line]:
     out = []
-    for rid, why in sorted((env.radiod_diagnose() or {}).items()):
+    try:
+        diag = env.radiod_diagnose() or {}
+    except Exception as exc:  # noqa: BLE001 -- a FAIL line, never a crash
+        return [Line(FAIL, 'radiod', f'the check itself failed: '
+                                     f'{type(exc).__name__}: {exc}')]
+    if not diag:
+        return [Line(FAIL, 'radiod', 'no radiod configured (/etc/radio)')]
+    for rid, why in sorted(diag.items()):
         line = guarded(f'radiod {rid}', lambda e, r=rid, w=why: radiod_line(e, r, w), env)
         if line is not None:
             out.append(line)

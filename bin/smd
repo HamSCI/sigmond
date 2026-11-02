@@ -4484,34 +4484,94 @@ def _remove_loopback_multicast_route() -> None:
             _info(f'loopback-multicast: {" ".join(cmd[:2])} failed ({err})')
 
 
+def _host_own_addresses() -> set:
+    """Every IPv4/IPv6 address on this host's interfaces (`ip -o addr`),
+    without prefix length or zone; empty when `ip` cannot be asked."""
+    try:
+        r = subprocess.run(['ip', '-o', 'addr', 'show'], capture_output=True,
+                           text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    out = set()
+    for line in (r.stdout or '').splitlines():
+        f = line.split()
+        for i, tok in enumerate(f[:-1]):
+            if tok in ('inet', 'inet6'):
+                out.add(f[i + 1].split('/')[0].split('%')[0])
+    return out
+
+
+def _local_host_names() -> set:
+    """Every spelling of THIS host a coordination `host` may use, lower
+    case: empty, localhost, loopback, the hostname short and long, its
+    `.local` mDNS names, the FQDN, and the host's own addresses."""
+    import ipaddress as _ip
+    import socket as _sock
+    names = {'', 'localhost', '127.0.0.1', '::1'}
+    host = _sock.gethostname()
+    short = host.split('.')[0]
+    names |= {host, short, f'{host}.local', f'{short}.local'}
+    try:
+        names.add(_sock.getfqdn())
+    except OSError:
+        pass
+    for a in _host_own_addresses():
+        names.add(a)
+        try:
+            names.add(str(_ip.ip_address(a)))
+        except ValueError:
+            pass
+    return {n.lower() for n in names}
+
+
 def _declared_remote_radiod() -> Optional[str]:
     """The first radiod coordination.toml declares on ANOTHER host (its
-    ``host`` is neither empty, localhost, a loopback address nor this
-    hostname), or None.  An absent or unreadable file reads as None."""
+    ``host`` is none of this host's names, see _local_host_names), or None.
+    An absent or unreadable file reads as None."""
     coord = Path('/etc/sigmond/coordination.toml')
     if not coord.exists():
         return None
     try:
+        import ipaddress as _ip
         import tomllib as _toml
-        import socket as _sock
         with open(coord, 'rb') as f:
             data = _toml.load(f)
-        host_short = _sock.gethostname().split('.')[0]
-        local_hosts = {'', 'localhost', '127.0.0.1', '::1',
-                       _sock.gethostname(), host_short}
+        local_hosts = _local_host_names()
         for inst, cfg in (data.get('radiod') or {}).items():
-            if str((cfg or {}).get('host', '')).strip() not in local_hosts:
+            host = str((cfg or {}).get('host', '')).strip().lower()
+            try:
+                host = str(_ip.ip_address(host.strip('[]')))
+            except ValueError:
+                pass
+            if host not in local_hosts:
                 return inst
     except Exception:
         pass                          # unreadable coordination → treat as local
     return None
 
 
+def _is_radiod_only_host() -> bool:
+    return bool(_HAS_SIGMOND_LIB and station_role.role(station_role.ROLE_PATH)
+                == station_role.RADIOD_ONLY)
+
+
 def _drop_loopback_route_for_remote_radiod(dry_run: bool = False) -> bool:
     """`smd apply`'s half of the loopback-route rule: when coordination
     declares a radiod on another host, remove the 239/8→lo route (it would
-    swallow that radiod's multicast: AI6VN-PM VM 100, 2026-11-01).  Never
-    installs the route; that stays with `smd install`.  True when it acted."""
+    swallow that radiod's multicast: AI6VN-PM VM 100, 2026-11-01).  A
+    radiod-only host removes it too: its multicast must reach the LAN, and a
+    host turned radiod-only may still carry the route from its full days.
+    Never installs the route; that stays with `smd install`.  True when it
+    acted."""
+    if _is_radiod_only_host():
+        if dry_run:
+            _info('loopback-multicast: radiod-only host — would remove the '
+                  '239/8→lo route')
+            return False
+        _info('loopback-multicast: radiod-only host — removing the 239/8→lo '
+              'route (its multicast must reach the LAN)')
+        _remove_loopback_multicast_route()
+        return True
     remote = _declared_remote_radiod()
     if remote is None:
         return False
@@ -4547,10 +4607,10 @@ def _install_loopback_multicast_route(sigmond_dir: Path,
     ``lo``: a client-only host would then hear nothing.  It must not depend on
     coordination naming the remote radiods -- clients find them by mDNS.
     """
-    if _HAS_SIGMOND_LIB and (station_role.role(station_role.ROLE_PATH)
-                             == station_role.RADIOD_ONLY):
-        _info('loopback-multicast: radiod-only host — not routing 239/8→lo '
-              '(its multicast must reach the LAN)')
+    if _is_radiod_only_host():
+        _info('loopback-multicast: radiod-only host — removing the 239/8→lo '
+              'route (its multicast must reach the LAN)')
+        _remove_loopback_multicast_route()
         return True
     if not local_radiod:
         _info('loopback-multicast: no local radiod on this host — skipping '
@@ -11600,6 +11660,41 @@ def _instances_bound(pairs: str, etc_root=None) -> tuple:
     return True, f'{n} instance(s) each name their own radiod'
 
 
+def cmd_radiod_publish(args, conf_dir: Optional[Path] = None) -> int:
+    """`smd admin radiod publish`: each radiod conf on this host gets
+    `ttl = 1` and, where `iface` is `lo` or absent, the LAN iface
+    (radiod_config._suggest_iface).  A minimal line edit, never a re-render:
+    every other line, hand edits included, stays.  A running radiod whose
+    conf changed is restarted so the change takes effect."""
+    from sigmond import radiod_publish
+    from sigmond.commands.radiod_config import _suggest_iface
+    conf_dir = Path(conf_dir or radiod_publish.RADIO_CONF_DIR)
+    dry_run = getattr(args, 'dry_run', False)
+    iface = _suggest_iface()
+    changed = radiod_publish.publish_confs(conf_dir, iface, write=not dry_run)
+    if not changed:
+        _ok(f'radiod publish: every radiod conf in {conf_dir} already '
+            f'publishes on the LAN (ttl = 1, iface not lo)')
+        return 0
+    rc = 0
+    for rid, changes in sorted(changed.items()):
+        verb = 'would set' if dry_run else 'set'
+        _ok(f'radiod publish: radiod@{rid}: {verb} ' + '; '.join(changes))
+        if dry_run:
+            continue
+        unit = f'radiod@{rid}.service'
+        active = _run(['systemctl', 'is-active', '--quiet', unit])
+        if getattr(active, 'returncode', 1) == 0:
+            r = _run(['systemctl', 'restart', unit], sudo=True)
+            if getattr(r, 'returncode', 1) != 0:
+                _err(f'radiod publish: restart {unit} failed: '
+                     f'{(r.stderr or "").strip()}')
+                rc = 1
+            else:
+                _info(f'radiod publish: restarted {unit}')
+    return rc
+
+
 def _bringup_probe(check: str, smd_bin: str):
     """Run a lightweight checkpoint probe.  Returns (ok, detail, reconfigure).
 
@@ -11954,6 +12049,15 @@ def cmd_bringup(args) -> int:
     # anything is installed or written, and under --dry-run too, so the
     # preview never shows a plan the real run would refuse.
     radiod_only = not prof.clients
+    # The other way round: a profile with clients on a host whose role is
+    # radiod-only.  Every client step would be refused one by one; say it
+    # once, up front, before anything is installed (and under --dry-run).
+    if not radiod_only and _is_radiod_only_host():
+        _err(f'bringup {prof.name}: this host\'s role is '
+             f'{station_role.RADIOD_ONLY} ({station_role.ROLE_PATH}), which '
+             f'runs no clients; to bring up {prof.name} here, set '
+             f'{station_role.ROLE_PATH} to {station_role.FULL} first')
+        return 1
     if radiod_only:
         _enabled_here = _enabled_components(_load_topology(TOPOLOGY_PATH))
         _barred = [c for c in _enabled_here
@@ -31241,6 +31345,16 @@ def _build_parser() -> argparse.ArgumentParser:
         '--yes', action='store_true',
         help='skip the confirmation prompt (for scripts)')
 
+    p_r_publish = radiod_sub.add_parser(
+        'publish',
+        help="publish this host's radiods on the LAN: set ttl = 1 in each "
+             "/etc/radio/radiod@<id>.conf, and the LAN iface where iface is "
+             "lo or absent (a line edit; restarts a running radiod it "
+             "changed).  Run by `smd bringup radiod-only`")
+    p_r_publish.add_argument(
+        '--dry-run', action='store_true',
+        help='print the changes; write nothing')
+
     p_r_rsc = radiod_sub.add_parser(
         'restart-stale-consumers',
         help="restart the radiod consumers still running from before "
@@ -33547,6 +33661,10 @@ def main() -> int:
             if not args.dry_run and _need_root('admin radiod restart-stale-consumers'):
                 return 1
             return cmd_radiod_restart_stale_consumers(args)
+        if rc == 'publish':
+            if not args.dry_run and _need_root('admin radiod publish'):
+                return 1
+            return cmd_radiod_publish(args)
         if rc in ('rename', 'describe'):
             if not args.dry_run and _need_root(f'admin radiod {rc}'):
                 return 1

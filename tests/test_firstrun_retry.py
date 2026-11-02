@@ -44,12 +44,15 @@ class FirstrunRetry(unittest.TestCase):
         return p
 
     def run_script(self, *, smd_rc=0, site_rc=0, marker=None,
-                   site_timing=True, isolation=True):
+                   site_timing=True, isolation=True, extra_env=None):
         marker_p = self.d / 'marker'
         if marker is not None:
             marker_p.write_text(marker)
         env = dict(
             os.environ,
+            # Never the host's own role file (tests/conftest.py sets this
+            # too; a direct unittest run gets it here).
+            SIGMOND_FIRSTRUN_ROLE_FILE=str(self.d / 'station-role'),
             SIGMOND_FIRSTRUN_MARKER=str(marker_p),
             SIGMOND_FIRSTRUN_SENTINEL=str(self.d / 'personalized'),
             SIGMOND_FIRSTRUN_PROFILE_FILE=str(self.d / 'profile.toml'),
@@ -64,11 +67,36 @@ class FirstrunRetry(unittest.TestCase):
                 str(self._stub('isolation', 0, 'isolation'))
                 if isolation else str(self.d / 'absent')),
         )
+        env.update(extra_env or {})
         r = subprocess.run(['bash', str(SCRIPT)], env=env,
                            capture_output=True, text=True, timeout=120)
         calls = (self.d / 'calls').read_text().split() if (self.d / 'calls').exists() else []
         txt = marker_p.read_text() if marker_p.exists() else ''
         return r, calls, txt
+
+    # --- the metrology count, by station role (final fix round, item 13) ----
+
+    def _no_metrology(self, role):
+        """Run with a systemctl that lists no timestd-metrology@ unit."""
+        sc = self.d / 'systemctl'
+        sc.write_text('#!/bin/bash\ncase "$1" in list-units) exit 0;; *) exit 3;; esac\n')
+        sc.chmod(0o755)
+        if role is not None:
+            (self.d / 'station-role').write_text(role + '\n')
+        r, _, _ = self.run_script(smd_rc=0,
+                                  extra_env={'SIGMOND_FIRSTRUN_SYSTEMCTL': str(sc)})
+        return r.stdout + (self.d / 'log').read_text()
+
+    def test_a_full_station_with_no_metrology_is_warned(self):
+        for role in (None, 'full', 'garbage'):
+            with self.subTest(role=role):
+                out = self._no_metrology(role)
+                self.assertIn('NO metrology channels are running', out)
+
+    def test_a_radiod_only_station_is_not_warned_about_metrology(self):
+        out = self._no_metrology('radiod-only')
+        self.assertNotIn('NO metrology channels are running', out)
+        self.assertIn('radiod-only station', out)
 
     # --- the WB6CXC-7 case -------------------------------------------------
 

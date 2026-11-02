@@ -28,6 +28,9 @@ def smd(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_need_root", lambda *_a, **_k: False)
     # cmd_enable also enables the component's units for boot (systemctl).
     monkeypatch.setattr(mod, "_enable_units_for_boot", lambda *_a, **_k: None)
+    # The host's own addresses are asked of `ip`; keep the suite off it.
+    mod._real_host_own_addresses = mod._host_own_addresses
+    monkeypatch.setattr(mod, "_host_own_addresses", lambda: set())
     return mod
 
 
@@ -124,9 +127,15 @@ def _service_dir(tmp_path):
     return tmp_path
 
 
-def test_loopback_route_never_installed_on_radiod_only(smd, radiod_only, runs, tmp_path):
+def test_loopback_route_never_installed_and_removed_on_radiod_only(
+        smd, radiod_only, runs, tmp_path):
+    # A host turned radiod-only may carry the route from its full days: it
+    # is removed, never merely skipped (final fix round, item 4).
     assert smd._install_loopback_multicast_route(_service_dir(tmp_path), local_radiod=True)
-    assert runs.calls == []
+    assert runs.calls == [
+        ["systemctl", "disable", "--now", "sigmond-loopback-multicast.service"],
+        ["ip", "route", "del", "239.0.0.0/8", "dev", "lo"],
+    ]
 
 
 def _coord_with(smd, monkeypatch, tmp_path, text):
@@ -205,3 +214,43 @@ def test_profile_install_on_radiod_only_drops_refused_components(
     assert "wspr-recorder" not in comps
     assert set(comps) <= {"ka9q-radio", "igmp-querier", "ka9q-web"}
     assert not _enabled(smd, "wspr-recorder")
+
+
+# -- final fix round, item 12: every spelling of this host is local ----------
+
+@pytest.fixture
+def this_host(smd, monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "gethostname", lambda: "bee2")
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: "bee2.kfs.example.org")
+    monkeypatch.setattr(smd, "_host_own_addresses",
+                        lambda: {"192.168.7.20", "2001:db8::20", "fe80::1"})
+
+
+@pytest.mark.parametrize("host", [
+    "bee2", "BEE2", "bee2.local", "bee2.kfs.example.org", "192.168.7.20",
+    "2001:db8::20", "2001:DB8:0::20", "[2001:db8::20]", "localhost", "::1", ""])
+def test_this_hosts_own_names_and_addresses_are_local(
+        smd, this_host, tmp_path, monkeypatch, host):
+    _coord_with(smd, monkeypatch, tmp_path, f'[radiod.r1]\nhost = "{host}"\n')
+    assert smd._declared_remote_radiod() is None
+
+
+@pytest.mark.parametrize("host", ["bee3", "bee3.local", "192.168.7.21", "2001:db8::21",
+                                  "bee2.other.example.org"])
+def test_another_hosts_names_are_remote(smd, this_host, tmp_path, monkeypatch, host):
+    _coord_with(smd, monkeypatch, tmp_path, f'[radiod.r1]\nhost = "{host}"\n')
+    assert smd._declared_remote_radiod() == "r1"
+
+
+def test_host_own_addresses_parses_ip_o_addr(smd, monkeypatch):
+    out = ("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n"
+           "2: enp1s0    inet 192.168.7.20/24 brd 192.168.7.255 scope global enp1s0\n"
+           "2: enp1s0    inet6 fe80::1%enp1s0/64 scope link \\       valid_lft forever\n")
+
+    def fake(argv, **kw):
+        assert argv == ["ip", "-o", "addr", "show"]
+        return type("R", (), {"stdout": out, "returncode": 0})()
+
+    monkeypatch.setattr(smd.subprocess, "run", fake)
+    assert smd._real_host_own_addresses() == {"127.0.0.1", "192.168.7.20", "fe80::1"}

@@ -471,6 +471,15 @@ def build_plan(profile, *, local_radiod: bool,
                                 '--wait-seconds', str(RX888_FIRSTBOOT_WAIT_S)],
                           may_fail=True))
         configure(STAGE1, 'radiod')
+        if radiod_only:
+            # A conf already on disk (a host turned radiod-only, or one
+            # configured before) keeps its ttl and iface: `configure radiod`
+            # skips a configured host.  Edit them in place, every other line
+            # untouched: ttl = 1, and the LAN iface where iface is lo or
+            # absent.  A no-op on the conf `configure radiod` just wrote.
+            steps.append(Step(STAGE1, 'publish radiod on the LAN (ttl = 1, '
+                                      'LAN iface) in each existing conf',
+                              'tune', argv=[smd, 'admin', 'radiod', 'publish']))
         # Tune AFTER `configure radiod`, never before: `smd apply` writes
         # per-INSTANCE affinity drop-ins and enables + starts any radiod
         # instance it finds, so running it pre-config acts on a stale or

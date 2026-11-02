@@ -1014,8 +1014,10 @@ PROC_NET_ROUTE = "/proc/net/route"
 
 
 def _default_route_iface() -> str:
-    """The iface of the up IPv4 default route with the lowest metric (the
-    one the kernel uses), "" if none is found."""
+    """The iface of the up IPv4 default route with the lowest metric among
+    those not on a tunnel or virtual device (_is_virtual_iface), "" if none
+    is found.  A VPN default (wg0, tun0) is never the LAN radiod publishes
+    on, so the LAN's own default behind it is taken instead."""
     best = None
     try:
         with open(PROC_NET_ROUTE) as f:
@@ -1030,6 +1032,8 @@ def _default_route_iface() -> str:
                     continue
                 if not flags & 0x1:         # RTF_UP
                     continue
+                if _is_virtual_iface(fields[0]):
+                    continue
                 if best is None or metric < best[0]:
                     best = (metric, fields[0])
     except OSError:
@@ -1037,9 +1041,22 @@ def _default_route_iface() -> str:
     return best[1] if best else ""
 
 
+# Tunnels and virtual devices: never the LAN radiod publishes on, even when
+# one carries the default route (a WireGuard or VPN default, the appliance's
+# CLAT translator).
+_VIRTUAL_IFACE_PREFIXES = ("tun", "wg", "ppp", "tap", "docker", "veth",
+                           "br-", "virbr")
+_VIRTUAL_IFACES = frozenset({"lo", "clat"})
+
+
+def _is_virtual_iface(name: str) -> bool:
+    return name in _VIRTUAL_IFACES or name.startswith(_VIRTUAL_IFACE_PREFIXES)
+
+
 def _suggest_iface() -> str:
-    """Pick a default network iface: the one carrying the IPv4 default route,
-    else the first non-loopback, non-virtual one.
+    """Pick a default network iface: the one carrying the IPv4 default route
+    unless it is a tunnel or virtual device (_is_virtual_iface), else the
+    first non-loopback, non-virtual one.
 
     The default route matters on a bare-metal host with wifi: /proc/net/dev
     can list `wlp*` before the wired LAN, and with ttl=1 radiod sends its
@@ -1052,9 +1069,7 @@ def _suggest_iface() -> str:
         with open(PROC_NET_DEV) as f:
             for line in f.readlines()[2:]:
                 name = line.split(":", 1)[0].strip()
-                if not name or name == "lo":
-                    continue
-                if name.startswith(("docker", "br-", "veth", "virbr")):
+                if not name or _is_virtual_iface(name):
                     continue
                 return name
     except OSError:
@@ -1157,9 +1172,7 @@ def _collect_per_sdr_values(sdr, args, hostname_short: str,
             err(f"--samprate applies only to rx888 instances; "
                 f"{sdr_type or 'this SDR'} is not one")
             return None
-        frontend_defaults = re.sub(r"samprate    = \d+",
-                                   f"samprate    = {samprate}",
-                                   frontend_defaults, count=1)
+        frontend_defaults = _set_samprate(frontend_defaults, samprate)
 
     return {
         "instance_id": instance_id,
@@ -1281,6 +1294,28 @@ def _pick_target(targets: list[Path]) -> Optional[Path]:
 # ---------------------------------------------------------------------------
 
 _RX888_SAMPRATES = (64800000, 129600000)
+
+# The comment each operator-chosen rate carries in the rendered conf.
+_SAMPRATE_COMMENTS = {
+    64800000: "64.8 Msps — HF only, up to 32.4 MHz",
+    129600000: "129.6 Msps — covers HF + 6m, up to 64.8 MHz",
+}
+
+
+def _set_samprate(frontend_defaults: str, samprate: int) -> str:
+    """`samprate = <samprate>` with its own trailing comment, in place of
+    the profile's line AND the comment lines continuing it (they describe
+    the default rate).  The profile's text is kept as is for its own rate."""
+    m = re.search(r"^samprate    = (\d+)", frontend_defaults, re.M)
+    if m is None or int(m.group(1)) == samprate:
+        return frontend_defaults
+    comment = _SAMPRATE_COMMENTS.get(samprate, "")
+    line = f"samprate    = {samprate}"
+    if comment:
+        line = f"{line:<26} # {comment}"
+    # The line and any following lines that are only an indented comment.
+    return re.sub(r"^samprate    = \d+[^\n]*(?:\n[ \t]+#[^\n]*)*",
+                  lambda _m: line, frontend_defaults, count=1, flags=re.M)
 
 
 def _resolve_ttl(args) -> int:

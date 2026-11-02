@@ -76,3 +76,48 @@ def test_explicit_checks_win(monkeypatch, tmp_path):
     _only(monkeypatch, tmp_path)
     ln = check.Line(check.OK, 'x', 'y')
     assert check.run_checks(_env({}), [('x', lambda e: ln)]) == [ln]
+
+
+# Final fix round.
+
+def test_ttl_zero_fails_naming_the_fix(monkeypatch, tmp_path):
+    _only(monkeypatch, tmp_path)
+    (ln,) = _lines(_env({'bee': rp.TTL_ZERO}))
+    assert ln.mark == check.FAIL
+    assert 'ttl 0' in ln.text and 'smd admin radiod publish' in ln.text
+    assert '/etc/radio/radiod@bee.conf' in ln.text
+
+
+def test_iface_lo_fails_naming_the_fix(monkeypatch, tmp_path):
+    _only(monkeypatch, tmp_path)
+    (ln,) = _lines(_env({'bee': rp.IFACE_LO}))
+    assert ln.mark == check.FAIL
+    assert 'iface lo' in ln.text and 'smd admin radiod publish' in ln.text
+
+
+def test_no_radiod_conf_is_one_fail_line(monkeypatch, tmp_path):
+    _only(monkeypatch, tmp_path)
+    lines = _lines(_env({}))
+    assert [(ln.mark, ln.label, ln.text) for ln in lines] == [
+        (check.FAIL, 'radiod', 'no radiod configured (/etc/radio)')]
+    assert check.verdict(lines) != check.verdict([])
+
+
+def test_a_diagnose_that_raises_is_a_fail_line_not_a_crash(monkeypatch, tmp_path):
+    _only(monkeypatch, tmp_path)
+
+    def boom():
+        raise OSError('nope')
+    (ln,) = _lines(make_env(radiod_diagnose=boom))
+    assert ln.mark == check.FAIL and 'nope' in ln.text
+
+
+def test_the_real_diagnose_reads_ttl_zero(monkeypatch, tmp_path):
+    # radiod_publish.diagnose -> check: the reason string the check matches
+    # is the one diagnose returns.
+    (tmp_path / 'radiod@bee.conf').write_text(
+        '[global]\nstatus = se-status.local\nttl = 0\niface = eth0\n')
+    why = rp.diagnose(tmp_path, run=lambda *a, **k: type('R', (), {'returncode': 0})())
+    _only(monkeypatch, tmp_path)
+    (ln,) = _lines(_env(why))
+    assert ln.mark == check.FAIL and 'smd admin radiod publish' in ln.text
