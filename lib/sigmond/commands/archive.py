@@ -20,6 +20,9 @@ from typing import Dict, List, Optional
 from .. import archive as ar
 from ..ui import err, info, ok, warn
 
+# Who must own the mount point.  Root, always; the tests point it at themselves.
+_MOUNT_OWNER_UID = 0
+
 
 def cmd_archive(args) -> int:
     verb = getattr(args, 'archive_command', None) or 'status'
@@ -56,6 +59,50 @@ def _wait_for_new_disk(before: Dict[str, ar.Disk], timeout_s: float = 30.0) -> L
         if new or time.monotonic() >= end:
             return new
         time.sleep(1.0)
+
+
+def _mount_verified(part: str) -> int:
+    """Mount ``part`` on the mount point through a handle checked first.
+
+    /var/lib/sigmond is writable by the sigmond group, so the path could be
+    swapped for a symlink between a check and a mount by name.  Open it
+    without following a symlink, check what the handle holds, and call
+    mount(2) on /proc/self/fd/N: the kernel resolves that to the opened
+    directory itself.  util-linux's mount cannot take that target (its
+    move_mount() path refuses it, seen on the build rig 2026-11-02), so the
+    call goes through libc."""
+    try:
+        fd = os.open(ar.MOUNT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        err(f"refusing to mount: cannot open {ar.MOUNT} without following a link ({e})")
+        return 1
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != _MOUNT_OWNER_UID:
+            err(f"refusing to mount: {ar.MOUNT} is not owned by root")
+            return 1
+        target = f"/proc/self/fd/{fd}"
+        print(f"    $ mount(2) {part} on {ar.MOUNT} (via {target}), ext4, noatime")
+        rc = _libc_mount(part, target)
+        if rc != 0:
+            err(f"mount {part} on {ar.MOUNT}: {os.strerror(rc)}")
+        return rc
+    finally:
+        os.close(fd)
+
+
+MS_NOATIME = 1024
+
+
+def _libc_mount(source: str, target: str) -> int:
+    """mount(2), ext4, noatime.  Returns 0 or the errno."""
+    import ctypes
+    import ctypes.util
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    if libc.mount(source.encode(), target.encode(), b"ext4",
+                  ctypes.c_ulong(MS_NOATIME), None) != 0:
+        return ctypes.get_errno() or 1
+    return 0
 
 
 def _blkid_uuid(node: str) -> str:
@@ -171,7 +218,8 @@ def _add(args) -> int:
         print(f"    would mkdir {ar.MOUNT}")
         print(f"    would set /etc/fstab's archive line to: {ar.fstab_line(uuid)}")
         print(f"    would write {ar.CONFIG}")
-        print("    would run: systemctl daemon-reload; mount " + str(ar.MOUNT))
+        print(f"    would run: systemctl daemon-reload; mount(2) {part} on {ar.MOUNT}, "
+              "ext4, noatime, through a handle opened without following links")
         info("dry run: nothing changed")
         return 0
 
@@ -193,7 +241,7 @@ def _add(args) -> int:
     ar.CONFIG.write_text(ar.config_text(uuid, disk, now))
     if _run(["systemctl", "daemon-reload"], False) != 0:
         return 1
-    if _run(["mount", str(ar.MOUNT)], False) != 0:
+    if _mount_verified(part) != 0:
         err(f"the fstab line stands (backup {backup}); mount {ar.MOUNT} by hand to see why")
         return 1
     st = shutil.disk_usage(ar.MOUNT)
@@ -246,6 +294,9 @@ def _status() -> int:
 def _remove(args) -> int:
     forget = bool(getattr(args, 'forget', False))
     mounted = {m for m in ar.mounted_sources().values()}
+    # Unmount by name only what /proc/mounts lists as mounted there: a mount
+    # point in use cannot be renamed or replaced (EBUSY), so the name cannot
+    # be swapped under us between this check and the umount.
     if str(ar.MOUNT) in mounted:
         problem = ar.mount_point_problem()
         if problem:

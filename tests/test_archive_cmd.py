@@ -5,6 +5,7 @@ confirmed one gets wipe, partition, format, in that order, then one fstab
 line and the config."""
 from __future__ import annotations
 
+import os
 import subprocess
 import types
 from collections import namedtuple
@@ -42,11 +43,21 @@ def env(tmp_path, monkeypatch):
     state.mount_problem = None
     monkeypatch.setattr(cmd.ar, "mount_point_problem", lambda *a, **k: state.mount_problem)
 
-    def fake_run(argv, input=None, text=None, capture_output=None):
+    monkeypatch.setattr(cmd, "_MOUNT_OWNER_UID", os.getuid())
+
+    def fake_run(argv, input=None, text=None, capture_output=None, pass_fds=()):
         ran.append(argv)
         out = "abcd-1234\n" if argv[0] == "blkid" else ""
         return subprocess.CompletedProcess(argv, 0, out, "")
     monkeypatch.setattr(cmd.subprocess, "run", fake_run)
+
+    def fake_mount(source, target):
+        # The mount goes through the handle add opened on the mount point.
+        assert target.startswith("/proc/self/fd/")
+        assert os.path.samefile(target, ar.MOUNT)
+        ran.append(["mount", source, target])
+        return 0
+    monkeypatch.setattr(cmd, "_libc_mount", fake_mount)
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("add asked a question"))
     return state
 
@@ -124,3 +135,11 @@ def test_a_mount_point_that_fails_the_check_is_not_mounted(env):
     assert cmd.cmd_archive(_args()) == 1
     assert "mount" not in [a[0] for a in env.ran]
     assert "systemctl" not in [a[0] for a in env.ran]
+
+
+def test_a_mount_point_swapped_for_a_symlink_is_not_mounted(env, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    ar.MOUNT.symlink_to(elsewhere)
+    assert cmd.cmd_archive(_args()) == 1
+    assert "mount" not in [a[0] for a in env.ran]
