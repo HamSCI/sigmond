@@ -507,10 +507,32 @@ The GRAPE product needs no drive of its own: PSWS keeps every day a station
 uploads, and anyone can download it from the station's observation list without
 a login.
 
-⚠ The station has no switch yet that sends the raw buffer, or a copy of event
-windows, to an external drive. hf-timestd writes it under its data root
-(`/var/lib/timestd/raw_buffer/`). Plugging in a drive therefore takes your
-fleet admin; do not move or link that folder yourself
+##### Attaching the drive: `smd archive add`
+
+Plug the drive into a port **away from the RX-888's hub**, then, in the decoder
+VM (both USB controllers pass through, so the drive shows up there):
+
+```
+smd archive add            # waits for you to plug the drive in, then asks
+smd archive status         # the drive, how full, how many days fit
+smd archive remove         # unmount it before you unplug it
+```
+
+`add` lists the disks, waits while you plug the drive in, and finds the new
+one.  It refuses a drive on the RX-888's hub, because the RX-888's recovery
+resets that hub's ports, and it warns when the drive shares the RX-888's USB
+controller.  Then it asks you to type the drive's name, formats it ext4 with
+the label `SIGMOND-ARCHIVE` (this **erases the drive**), and mounts it at
+`/var/lib/sigmond/archive`.  The fstab line carries `nofail`, so a station
+with its drive unplugged still boots as fast as one without.
+`/etc/sigmond/archive.toml` records which drive it is.  From a script, name the
+drive and the answer: `smd archive add --device sdb --confirm sdb`.
+`--dry-run` shows what `add` would run and changes nothing.
+
+⚠ The archiver that copies the raw buffer onto the drive has not shipped yet
+(hf-timestd, `tasks/plan-external-storage.md` phase 2).  Until it does, the
+drive stands ready and empty, and the raw buffer stays where it is.  Do not
+move or link `/var/lib/timestd/raw_buffer/` yourself
 (→ [do-not-touch.md](do-not-touch.md)).
 
 ### 4. `smd doctor` — only when something looks off

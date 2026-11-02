@@ -35,6 +35,7 @@ Operate (run things now, may need sudo):
     smd timing            [--json]                               timing authority + accuracy
     smd sink        status | off --reason R | upload                 the site sink switch (sudo)
     smd remote      status | off | on                                remote access for the fleet admin (sudo)
+    smd archive     status | add [--device sdX] | remove             the archive drive for raw IQ (sudo)
     smd upload      status | on | hold | off | discard [--reason R]  legacy words for the same switch (sudo)
     smd tui                                                      launch interactive TUI
 
@@ -17102,7 +17103,7 @@ _smd_complete() {
     # verbs had accumulated here unoffered (adopt, align, check, doctor,
     # fleet, notify, psws, remote, sink, timing, update, upload, version),
     # which tells an operator a subcommand does not exist.
-    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin adopt align check doctor fleet notify psws remote sink timing update upload version"
+    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin adopt align archive check doctor fleet notify psws remote sink timing update upload version"
     local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing uploader radiod instance uninstall completion"
     local components="ka9q-radio radiod ka9q-web hf-timestd wspr-recorder psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter gpsdo-monitor igmp-querier rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter"
@@ -28231,6 +28232,26 @@ def _build_parser() -> argparse.ArgumentParser:
     s_fill.add_argument('--reason',
                         help='why (on the fleetboard), e.g. "no HF antenna"')
 
+    # archive -- the archive drive (tasks/plan-external-storage.md, phase 1)
+    p_archive = sub.add_parser('archive',
+        help='the archive drive for raw IQ: status | add (format and mount a USB '
+             'drive) | remove (unmount it to unplug)')
+    archive_sub = p_archive.add_subparsers(dest='archive_command')
+    archive_sub.add_parser('status', help='the drive, how full, how many days fit')
+    a_add = archive_sub.add_parser('add',
+        help='attach a USB drive: refuses the RX-888\'s hub, formats it ext4 '
+             '(ERASES it), mounts it at /var/lib/sigmond/archive')
+    a_add.add_argument('--device', metavar='sdX',
+        help='the drive, instead of plugging it in while add waits')
+    a_add.add_argument('--confirm', metavar='sdX',
+        help='format without the typed question (for scripts); must name the drive')
+    a_add.add_argument('--dry-run', action='store_true',
+        help='find and judge the drive, print what add would run, change nothing')
+    a_rm = archive_sub.add_parser('remove',
+        help='unmount the drive so it can be unplugged')
+    a_rm.add_argument('--forget', action='store_true',
+        help='also drop its fstab line and /etc/sigmond/archive.toml')
+
     # check -- read-only: does this station work?  (tasks/spec-smd-check-v372.md)
     p_check = sub.add_parser('check',
         help='does this station work?  One line per item and a verdict: PASS, WAIT '
@@ -28498,6 +28519,14 @@ def main() -> int:
         # Read-only by design: never _need_root, never the timing judge.
         from sigmond.commands.check import cmd_check
         return cmd_check(args)
+
+    if args.command == 'archive':
+        verb = getattr(args, 'archive_command', None) or 'status'
+        if verb in ('add', 'remove') and not getattr(args, 'dry_run', False) \
+                and _need_root(f'archive {verb}'):
+            return 1
+        from sigmond.commands.archive import cmd_archive
+        return cmd_archive(args)
 
     if args.command == 'sink':
         verb = getattr(args, 'sink_command', None) or 'status'

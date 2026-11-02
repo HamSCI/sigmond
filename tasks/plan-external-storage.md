@@ -2,8 +2,9 @@
 
 **Authors:** Michael Hauan (AC0G) + Claude
 **Date:** 2026-11-01
-**Status:** draft for Rob's review. No code yet. Michael settled the four open questions on 2026-11-01
-("Decisions", at the end).
+**Status:** phase 1 in part, 2026-11-02: `smd archive add|status|remove`, `archive.toml` and the fstab
+line shipped (for KFS).  `keep`, `platform.archive` in `smd check`, and phases 2-3 wait.  Michael settled
+the four open questions on 2026-11-01 ("Decisions", at the end).
 **Verified against:** sigmond c737638 (`bin/smd` `admin storage`, `docs/operator/day-2.md` §3), hf-timestd
 3814c6f (`scripts/prune-old-data.sh`, `paths.py`, `scripts/install.sh`), hs-uploader 2026-10-31; disk and raw
 buffer measurements on AC0G-B4 and AC0G-ND, 2026-10-31
