@@ -806,11 +806,28 @@ class ApplyTests(unittest.TestCase):
 
     def test_apply_folds_the_step_into_its_result(self):
         # cmd_apply is too wide to drive whole; this pins the one line that
-        # turns the helper's answer into apply's exit.
+        # turns the uploads step's answer into apply's exit.  The step is
+        # _apply_uploads_step(dry_run) since the radiod-only role (it skips
+        # the manifest on a radiod-only host and under --dry-run).
         import inspect
         src = inspect.getsource(_load_smd().cmd_apply)
-        self.assertIn("if not _apply_uploader_manifest():\n            ok = False",
+        self.assertIn("if not _apply_uploads_step(dry_run):\n        ok = False",
                       src)
+        self.assertNotIn("_apply_uploader_manifest()", src)
+
+    def test_a_full_role_uploads_step_fails_when_the_manifest_step_does(self):
+        # Behaviour, not source: on a full host (the suite's role file is
+        # absent: tests/conftest.py) the uploads step returns what the
+        # manifest step returned.
+        smd = _load_smd()
+        from sigmond import station_role
+        self.assertEqual(station_role.role(station_role.ROLE_PATH), "full")
+        for manifest_ok in (False, True):
+            with self.subTest(manifest_ok=manifest_ok):
+                with mock.patch.object(smd, "_apply_uploader_manifest",
+                                       return_value=manifest_ok) as m:
+                    self.assertIs(smd._apply_uploads_step(False), manifest_ok)
+                m.assert_called_once_with()
 
     def test_bringup_never_starts_a_daemon_the_step_left_stopped(self):
         argvs = [s.argv for s in _bringup_plan().steps]

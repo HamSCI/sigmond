@@ -7,14 +7,19 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-ROLE_PATH = Path('/etc/sigmond/station-role')
+# SIGMOND_STATION_ROLE_PATH moves it for the test suite (tests/conftest.py),
+# so a test, or an smd it starts, never reads the host's real role file.
+ROLE_PATH = Path(os.environ.get('SIGMOND_STATION_ROLE_PATH')
+                 or '/etc/sigmond/station-role')
 RADIOD_ONLY = 'radiod-only'
 FULL = 'full'
 ALLOWED_ON_RADIOD_ONLY = frozenset({'ka9q-radio', 'igmp-querier', 'ka9q-web'})
 
 
-def role(path: Path = ROLE_PATH) -> str:
-    """Return the station role; anything missing or unrecognised is `full`."""
+def role(path: Optional[Path] = None) -> str:
+    """Return the station role; anything missing or unrecognised is `full`.
+    `path` defaults to ROLE_PATH as it stands at call time."""
+    path = ROLE_PATH if path is None else path
     try:
         text = Path(path).read_text().strip()
     except (OSError, ValueError):
@@ -22,12 +27,13 @@ def role(path: Path = ROLE_PATH) -> str:
     return RADIOD_ONLY if text == RADIOD_ONLY else FULL
 
 
-def set_role(name: str, path: Path = ROLE_PATH) -> bool:
-    """Persist the role atomically. True when the file changed."""
+def set_role(name: str, path: Optional[Path] = None) -> bool:
+    """Persist the role atomically. True when the file changed.  `path`
+    defaults to ROLE_PATH as it stands at call time."""
     if name not in (RADIOD_ONLY, FULL):
         raise ValueError(f"unknown station role {name!r}; "
                          f"expected {FULL!r} or {RADIOD_ONLY!r}")
-    path = Path(path)
+    path = Path(ROLE_PATH if path is None else path)
     try:
         if path.read_text().strip() == name:
             return False

@@ -1,0 +1,11466 @@
+{
+ "base|local=False|sdr_absent=False|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "base|local=False|sdr_absent=False|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "base|local=False|sdr_absent=True|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "base|local=False|sdr_absent=True|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "base|local=True|sdr_absent=False|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "enable igmp-querier",
+   [
+    "smd",
+    "enable",
+    "igmp-querier"
+   ],
+   ""
+  ],
+  [
+   "install igmp-querier",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-web",
+   [
+    "smd",
+    "enable",
+    "ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-radio",
+   [
+    "smd",
+    "enable",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod installed",
+   [],
+   "radiod-installed"
+  ],
+  [
+   "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+   [
+    "/usr/local/sbin/sigmond-sdr-recover",
+    "--ensure-present",
+    "--wait-seconds",
+    "240"
+   ],
+   ""
+  ],
+  [
+   "configure radiod",
+   [
+    "smd",
+    "config",
+    "init",
+    "radiod",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "apply host tuning (affinity / governor / rmem)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "launch FFT wisdom planner",
+   [
+    "systemctl",
+    "start",
+    "--no-block",
+    "sigmond-wisdom.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod configured",
+   [],
+   "radiod-configured"
+  ],
+  [
+   "install ka9q-web unit (post-radiod-config)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "wait for FFT wisdom before starting radiod",
+   [],
+   ""
+  ],
+  [
+   "start radiod + local-radiod infra",
+   [
+    "smd",
+    "start",
+    "--components",
+    "ka9q-radio,igmp-querier,ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "wait for radiod streaming (rx888 running) + settle",
+   [],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "reserve radiod cores (apply cache-pair CPU exclusion)",
+   [
+    "smd",
+    "admin",
+    "diag",
+    "cpu-affinity",
+    "--apply"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "base|local=True|sdr_absent=False|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "enable igmp-querier",
+   [
+    "smd",
+    "enable",
+    "igmp-querier"
+   ],
+   ""
+  ],
+  [
+   "install igmp-querier",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-web",
+   [
+    "smd",
+    "enable",
+    "ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-radio",
+   [
+    "smd",
+    "enable",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod installed",
+   [],
+   "radiod-installed"
+  ],
+  [
+   "enable gpsdo-monitor",
+   [
+    "smd",
+    "enable",
+    "gpsdo-monitor"
+   ],
+   ""
+  ],
+  [
+   "install gpsdo-monitor",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gpsdo-monitor",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+   [
+    "/usr/local/sbin/sigmond-sdr-recover",
+    "--ensure-present",
+    "--wait-seconds",
+    "240"
+   ],
+   ""
+  ],
+  [
+   "configure radiod",
+   [
+    "smd",
+    "config",
+    "init",
+    "radiod",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "apply host tuning (affinity / governor / rmem)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "launch FFT wisdom planner",
+   [
+    "systemctl",
+    "start",
+    "--no-block",
+    "sigmond-wisdom.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod configured",
+   [],
+   "radiod-configured"
+  ],
+  [
+   "install ka9q-web unit (post-radiod-config)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "wait for FFT wisdom before starting radiod",
+   [],
+   ""
+  ],
+  [
+   "start radiod + local-radiod infra",
+   [
+    "smd",
+    "start",
+    "--components",
+    "ka9q-radio,igmp-querier,ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "wait for radiod streaming (rx888 running) + settle",
+   [],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "reserve radiod cores (apply cache-pair CPU exclusion)",
+   [
+    "smd",
+    "admin",
+    "diag",
+    "cpu-affinity",
+    "--apply"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "base|local=True|sdr_absent=True|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "NO SDR on the USB bus — installing the radiod stack but deferring its configuration, host tuning, FFT wisdom and every radiod-bound client until the SDR appears",
+   [],
+   ""
+  ],
+  [
+   "install igmp-querier (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start the components this plan activated (radio half deferred)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ],
+  [
+   "PARTIAL — the radio half waits for the SDR; bring-up completes when it is plugged in (or run `smd bringup` again)",
+   [],
+   ""
+  ]
+ ],
+ "base|local=True|sdr_absent=True|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "NO SDR on the USB bus — installing the radiod stack but deferring its configuration, host tuning, FFT wisdom and every radiod-bound client until the SDR appears",
+   [],
+   ""
+  ],
+  [
+   "install igmp-querier (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install gpsdo-monitor (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gpsdo-monitor",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start the components this plan activated (radio half deferred)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ],
+  [
+   "PARTIAL — the radio half waits for the SDR; bring-up completes when it is plugged in (or run `smd bringup` again)",
+   [],
+   ""
+  ]
+ ],
+ "client|local=False|sdr_absent=False|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "client|local=False|sdr_absent=False|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "client|local=False|sdr_absent=True|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "client|local=False|sdr_absent=True|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "client|local=True|sdr_absent=False|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-radio",
+   [
+    "smd",
+    "enable",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod installed",
+   [],
+   "radiod-installed"
+  ],
+  [
+   "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+   [
+    "/usr/local/sbin/sigmond-sdr-recover",
+    "--ensure-present",
+    "--wait-seconds",
+    "240"
+   ],
+   ""
+  ],
+  [
+   "configure radiod",
+   [
+    "smd",
+    "config",
+    "init",
+    "radiod",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "apply host tuning (affinity / governor / rmem)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "launch FFT wisdom planner",
+   [
+    "systemctl",
+    "start",
+    "--no-block",
+    "sigmond-wisdom.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod configured",
+   [],
+   "radiod-configured"
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "wait for FFT wisdom before starting radiod",
+   [],
+   ""
+  ],
+  [
+   "start radiod + local-radiod infra",
+   [
+    "smd",
+    "start",
+    "--components",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "wait for radiod streaming (rx888 running) + settle",
+   [],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "reserve radiod cores (apply cache-pair CPU exclusion)",
+   [
+    "smd",
+    "admin",
+    "diag",
+    "cpu-affinity",
+    "--apply"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "client|local=True|sdr_absent=False|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-radio",
+   [
+    "smd",
+    "enable",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod installed",
+   [],
+   "radiod-installed"
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable hf-tec",
+   [
+    "smd",
+    "enable",
+    "hf-tec"
+   ],
+   ""
+  ],
+  [
+   "install hf-tec",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-tec",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable superdarn-sounder",
+   [
+    "smd",
+    "enable",
+    "superdarn-sounder"
+   ],
+   ""
+  ],
+  [
+   "install superdarn-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "superdarn-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+   [
+    "/usr/local/sbin/sigmond-sdr-recover",
+    "--ensure-present",
+    "--wait-seconds",
+    "240"
+   ],
+   ""
+  ],
+  [
+   "configure radiod",
+   [
+    "smd",
+    "config",
+    "init",
+    "radiod",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "apply host tuning (affinity / governor / rmem)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "launch FFT wisdom planner",
+   [
+    "systemctl",
+    "start",
+    "--no-block",
+    "sigmond-wisdom.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod configured",
+   [],
+   "radiod-configured"
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "wait for FFT wisdom before starting radiod",
+   [],
+   ""
+  ],
+  [
+   "start radiod + local-radiod infra",
+   [
+    "smd",
+    "start",
+    "--components",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "wait for radiod streaming (rx888 running) + settle",
+   [],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "reserve radiod cores (apply cache-pair CPU exclusion)",
+   [
+    "smd",
+    "admin",
+    "diag",
+    "cpu-affinity",
+    "--apply"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "client|local=True|sdr_absent=True|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "NO SDR on the USB bus — installing the radiod stack but deferring its configuration, host tuning, FFT wisdom and every radiod-bound client until the SDR appears",
+   [],
+   ""
+  ],
+  [
+   "install ka9q-radio (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start the components this plan activated (radio half deferred)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ],
+  [
+   "PARTIAL — the radio half waits for the SDR; bring-up completes when it is plugged in (or run `smd bringup` again)",
+   [],
+   ""
+  ]
+ ],
+ "client|local=True|sdr_absent=True|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "NO SDR on the USB bus — installing the radiod stack but deferring its configuration, host tuning, FFT wisdom and every radiod-bound client until the SDR appears",
+   [],
+   ""
+  ],
+  [
+   "install ka9q-radio (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-tec (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-tec",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install superdarn-sounder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "superdarn-sounder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start the components this plan activated (radio half deferred)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ],
+  [
+   "PARTIAL — the radio half waits for the SDR; bring-up completes when it is plugged in (or run `smd bringup` again)",
+   [],
+   ""
+  ]
+ ],
+ "dasi2|local=False|sdr_absent=False|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable meteor-scatter",
+   [
+    "smd",
+    "enable",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "install meteor-scatter",
+   [
+    "smd",
+    "install",
+    "--components",
+    "meteor-scatter",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure meteor-scatter",
+   [
+    "smd",
+    "config",
+    "init",
+    "meteor-scatter",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: meteor-scatter configured",
+   [],
+   "configured:meteor-scatter"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure mag-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "mag-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: mag-recorder configured",
+   [],
+   "configured:mag-recorder"
+  ],
+  [
+   "start mag-recorder (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "enable gmag-webui",
+   [
+    "smd",
+    "enable",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "install gmag-webui",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gmag-webui",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure gmag-webui",
+   [
+    "smd",
+    "config",
+    "init",
+    "gmag-webui",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: gmag-webui configured",
+   [],
+   "configured:gmag-webui"
+  ],
+  [
+   "start gmag-webui (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "enable hamsci-physics",
+   [
+    "smd",
+    "enable",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "install hamsci-physics",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hamsci-physics",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hamsci-physics",
+   [
+    "smd",
+    "config",
+    "init",
+    "hamsci-physics",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hamsci-physics configured",
+   [],
+   "configured:hamsci-physics"
+  ],
+  [
+   "start hamsci-physics (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start meteor-scatter (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "dasi2|local=False|sdr_absent=False|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable meteor-scatter",
+   [
+    "smd",
+    "enable",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "install meteor-scatter",
+   [
+    "smd",
+    "install",
+    "--components",
+    "meteor-scatter",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure meteor-scatter",
+   [
+    "smd",
+    "config",
+    "init",
+    "meteor-scatter",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: meteor-scatter configured",
+   [],
+   "configured:meteor-scatter"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure mag-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "mag-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: mag-recorder configured",
+   [],
+   "configured:mag-recorder"
+  ],
+  [
+   "start mag-recorder (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "enable gmag-webui",
+   [
+    "smd",
+    "enable",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "install gmag-webui",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gmag-webui",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure gmag-webui",
+   [
+    "smd",
+    "config",
+    "init",
+    "gmag-webui",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: gmag-webui configured",
+   [],
+   "configured:gmag-webui"
+  ],
+  [
+   "start gmag-webui (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "enable hamsci-physics",
+   [
+    "smd",
+    "enable",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "install hamsci-physics",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hamsci-physics",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hamsci-physics",
+   [
+    "smd",
+    "config",
+    "init",
+    "hamsci-physics",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hamsci-physics configured",
+   [],
+   "configured:hamsci-physics"
+  ],
+  [
+   "start hamsci-physics (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start meteor-scatter (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "dasi2|local=False|sdr_absent=True|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable meteor-scatter",
+   [
+    "smd",
+    "enable",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "install meteor-scatter",
+   [
+    "smd",
+    "install",
+    "--components",
+    "meteor-scatter",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure meteor-scatter",
+   [
+    "smd",
+    "config",
+    "init",
+    "meteor-scatter",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: meteor-scatter configured",
+   [],
+   "configured:meteor-scatter"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure mag-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "mag-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: mag-recorder configured",
+   [],
+   "configured:mag-recorder"
+  ],
+  [
+   "start mag-recorder (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "enable gmag-webui",
+   [
+    "smd",
+    "enable",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "install gmag-webui",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gmag-webui",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure gmag-webui",
+   [
+    "smd",
+    "config",
+    "init",
+    "gmag-webui",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: gmag-webui configured",
+   [],
+   "configured:gmag-webui"
+  ],
+  [
+   "start gmag-webui (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "enable hamsci-physics",
+   [
+    "smd",
+    "enable",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "install hamsci-physics",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hamsci-physics",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hamsci-physics",
+   [
+    "smd",
+    "config",
+    "init",
+    "hamsci-physics",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hamsci-physics configured",
+   [],
+   "configured:hamsci-physics"
+  ],
+  [
+   "start hamsci-physics (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start meteor-scatter (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "dasi2|local=False|sdr_absent=True|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable meteor-scatter",
+   [
+    "smd",
+    "enable",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "install meteor-scatter",
+   [
+    "smd",
+    "install",
+    "--components",
+    "meteor-scatter",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure meteor-scatter",
+   [
+    "smd",
+    "config",
+    "init",
+    "meteor-scatter",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: meteor-scatter configured",
+   [],
+   "configured:meteor-scatter"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure mag-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "mag-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: mag-recorder configured",
+   [],
+   "configured:mag-recorder"
+  ],
+  [
+   "start mag-recorder (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "enable gmag-webui",
+   [
+    "smd",
+    "enable",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "install gmag-webui",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gmag-webui",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure gmag-webui",
+   [
+    "smd",
+    "config",
+    "init",
+    "gmag-webui",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: gmag-webui configured",
+   [],
+   "configured:gmag-webui"
+  ],
+  [
+   "start gmag-webui (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "enable hamsci-physics",
+   [
+    "smd",
+    "enable",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "install hamsci-physics",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hamsci-physics",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hamsci-physics",
+   [
+    "smd",
+    "config",
+    "init",
+    "hamsci-physics",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hamsci-physics configured",
+   [],
+   "configured:hamsci-physics"
+  ],
+  [
+   "start hamsci-physics (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start meteor-scatter (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "dasi2|local=True|sdr_absent=False|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "enable igmp-querier",
+   [
+    "smd",
+    "enable",
+    "igmp-querier"
+   ],
+   ""
+  ],
+  [
+   "install igmp-querier",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable gpsdo-monitor",
+   [
+    "smd",
+    "enable",
+    "gpsdo-monitor"
+   ],
+   ""
+  ],
+  [
+   "install gpsdo-monitor",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gpsdo-monitor",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-web",
+   [
+    "smd",
+    "enable",
+    "ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-radio",
+   [
+    "smd",
+    "enable",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod installed",
+   [],
+   "radiod-installed"
+  ],
+  [
+   "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+   [
+    "/usr/local/sbin/sigmond-sdr-recover",
+    "--ensure-present",
+    "--wait-seconds",
+    "240"
+   ],
+   ""
+  ],
+  [
+   "configure radiod",
+   [
+    "smd",
+    "config",
+    "init",
+    "radiod",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "apply host tuning (affinity / governor / rmem)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "launch FFT wisdom planner",
+   [
+    "systemctl",
+    "start",
+    "--no-block",
+    "sigmond-wisdom.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod configured",
+   [],
+   "radiod-configured"
+  ],
+  [
+   "install ka9q-web unit (post-radiod-config)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable meteor-scatter",
+   [
+    "smd",
+    "enable",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "install meteor-scatter",
+   [
+    "smd",
+    "install",
+    "--components",
+    "meteor-scatter",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure meteor-scatter",
+   [
+    "smd",
+    "config",
+    "init",
+    "meteor-scatter",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: meteor-scatter configured",
+   [],
+   "configured:meteor-scatter"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure mag-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "mag-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: mag-recorder configured",
+   [],
+   "configured:mag-recorder"
+  ],
+  [
+   "start mag-recorder (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "enable gmag-webui",
+   [
+    "smd",
+    "enable",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "install gmag-webui",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gmag-webui",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure gmag-webui",
+   [
+    "smd",
+    "config",
+    "init",
+    "gmag-webui",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: gmag-webui configured",
+   [],
+   "configured:gmag-webui"
+  ],
+  [
+   "start gmag-webui (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "enable hamsci-physics",
+   [
+    "smd",
+    "enable",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "install hamsci-physics",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hamsci-physics",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hamsci-physics",
+   [
+    "smd",
+    "config",
+    "init",
+    "hamsci-physics",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hamsci-physics configured",
+   [],
+   "configured:hamsci-physics"
+  ],
+  [
+   "start hamsci-physics (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "wait for FFT wisdom before starting radiod",
+   [],
+   ""
+  ],
+  [
+   "start radiod + local-radiod infra",
+   [
+    "smd",
+    "start",
+    "--components",
+    "ka9q-radio,igmp-querier,gpsdo-monitor,ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "wait for radiod streaming (rx888 running) + settle",
+   [],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start meteor-scatter (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "reserve radiod cores (apply cache-pair CPU exclusion)",
+   [
+    "smd",
+    "admin",
+    "diag",
+    "cpu-affinity",
+    "--apply"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "dasi2|local=True|sdr_absent=False|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "enable igmp-querier",
+   [
+    "smd",
+    "enable",
+    "igmp-querier"
+   ],
+   ""
+  ],
+  [
+   "install igmp-querier",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable gpsdo-monitor",
+   [
+    "smd",
+    "enable",
+    "gpsdo-monitor"
+   ],
+   ""
+  ],
+  [
+   "install gpsdo-monitor",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gpsdo-monitor",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-web",
+   [
+    "smd",
+    "enable",
+    "ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-radio",
+   [
+    "smd",
+    "enable",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod installed",
+   [],
+   "radiod-installed"
+  ],
+  [
+   "enable hf-tec",
+   [
+    "smd",
+    "enable",
+    "hf-tec"
+   ],
+   ""
+  ],
+  [
+   "install hf-tec",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-tec",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable superdarn-sounder",
+   [
+    "smd",
+    "enable",
+    "superdarn-sounder"
+   ],
+   ""
+  ],
+  [
+   "install superdarn-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "superdarn-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+   [
+    "/usr/local/sbin/sigmond-sdr-recover",
+    "--ensure-present",
+    "--wait-seconds",
+    "240"
+   ],
+   ""
+  ],
+  [
+   "configure radiod",
+   [
+    "smd",
+    "config",
+    "init",
+    "radiod",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "apply host tuning (affinity / governor / rmem)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "launch FFT wisdom planner",
+   [
+    "systemctl",
+    "start",
+    "--no-block",
+    "sigmond-wisdom.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod configured",
+   [],
+   "radiod-configured"
+  ],
+  [
+   "install ka9q-web unit (post-radiod-config)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hf-timestd",
+   [
+    "smd",
+    "config",
+    "init",
+    "hf-timestd",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hf-timestd configured",
+   [],
+   "configured:hf-timestd"
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "enable meteor-scatter",
+   [
+    "smd",
+    "enable",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "install meteor-scatter",
+   [
+    "smd",
+    "install",
+    "--components",
+    "meteor-scatter",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure meteor-scatter",
+   [
+    "smd",
+    "config",
+    "init",
+    "meteor-scatter",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: meteor-scatter configured",
+   [],
+   "configured:meteor-scatter"
+  ],
+  [
+   "enable hfdl-recorder",
+   [
+    "smd",
+    "enable",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hfdl-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "hfdl-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hfdl-recorder configured",
+   [],
+   "configured:hfdl-recorder"
+  ],
+  [
+   "enable codar-sounder",
+   [
+    "smd",
+    "enable",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure codar-sounder",
+   [
+    "smd",
+    "config",
+    "init",
+    "codar-sounder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: codar-sounder configured",
+   [],
+   "configured:codar-sounder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure mag-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "mag-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: mag-recorder configured",
+   [],
+   "configured:mag-recorder"
+  ],
+  [
+   "start mag-recorder (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "enable gmag-webui",
+   [
+    "smd",
+    "enable",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "install gmag-webui",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gmag-webui",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure gmag-webui",
+   [
+    "smd",
+    "config",
+    "init",
+    "gmag-webui",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: gmag-webui configured",
+   [],
+   "configured:gmag-webui"
+  ],
+  [
+   "start gmag-webui (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "enable hamsci-physics",
+   [
+    "smd",
+    "enable",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "install hamsci-physics",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hamsci-physics",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hamsci-physics",
+   [
+    "smd",
+    "config",
+    "init",
+    "hamsci-physics",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hamsci-physics configured",
+   [],
+   "configured:hamsci-physics"
+  ],
+  [
+   "start hamsci-physics (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "wait for FFT wisdom before starting radiod",
+   [],
+   ""
+  ],
+  [
+   "start radiod + local-radiod infra",
+   [
+    "smd",
+    "start",
+    "--components",
+    "ka9q-radio,igmp-querier,gpsdo-monitor,ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "wait for radiod streaming (rx888 running) + settle",
+   [],
+   ""
+  ],
+  [
+   "start hf-timestd (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start meteor-scatter (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "meteor-scatter"
+   ],
+   ""
+  ],
+  [
+   "start hfdl-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hfdl-recorder"
+   ],
+   ""
+  ],
+  [
+   "start codar-sounder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "codar-sounder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "reserve radiod cores (apply cache-pair CPU exclusion)",
+   [
+    "smd",
+    "admin",
+    "diag",
+    "cpu-affinity",
+    "--apply"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "dasi2|local=True|sdr_absent=True|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "NO SDR on the USB bus — installing the radiod stack but deferring its configuration, host tuning, FFT wisdom and every radiod-bound client until the SDR appears",
+   [],
+   ""
+  ],
+  [
+   "install igmp-querier (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install gpsdo-monitor (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gpsdo-monitor",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install meteor-scatter (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "meteor-scatter",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure mag-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "mag-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: mag-recorder configured",
+   [],
+   "configured:mag-recorder"
+  ],
+  [
+   "start mag-recorder (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "enable gmag-webui",
+   [
+    "smd",
+    "enable",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "install gmag-webui",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gmag-webui",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure gmag-webui",
+   [
+    "smd",
+    "config",
+    "init",
+    "gmag-webui",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: gmag-webui configured",
+   [],
+   "configured:gmag-webui"
+  ],
+  [
+   "start gmag-webui (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "enable hamsci-physics",
+   [
+    "smd",
+    "enable",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "install hamsci-physics",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hamsci-physics",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hamsci-physics",
+   [
+    "smd",
+    "config",
+    "init",
+    "hamsci-physics",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hamsci-physics configured",
+   [],
+   "configured:hamsci-physics"
+  ],
+  [
+   "start hamsci-physics (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start the components this plan activated (radio half deferred)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder,gmag-webui,hamsci-physics,station-web"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ],
+  [
+   "PARTIAL — the radio half waits for the SDR; bring-up completes when it is plugged in (or run `smd bringup` again)",
+   [],
+   ""
+  ]
+ ],
+ "dasi2|local=True|sdr_absent=True|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "NO SDR on the USB bus — installing the radiod stack but deferring its configuration, host tuning, FFT wisdom and every radiod-bound client until the SDR appears",
+   [],
+   ""
+  ],
+  [
+   "install igmp-querier (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install gpsdo-monitor (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gpsdo-monitor",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-tec (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-tec",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install superdarn-sounder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "superdarn-sounder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install meteor-scatter (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "meteor-scatter",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hfdl-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hfdl-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install codar-sounder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "codar-sounder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "enable mag-recorder",
+   [
+    "smd",
+    "enable",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "install mag-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "mag-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure mag-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "mag-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: mag-recorder configured",
+   [],
+   "configured:mag-recorder"
+  ],
+  [
+   "start mag-recorder (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder"
+   ],
+   ""
+  ],
+  [
+   "enable gmag-webui",
+   [
+    "smd",
+    "enable",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "install gmag-webui",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gmag-webui",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure gmag-webui",
+   [
+    "smd",
+    "config",
+    "init",
+    "gmag-webui",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: gmag-webui configured",
+   [],
+   "configured:gmag-webui"
+  ],
+  [
+   "start gmag-webui (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "gmag-webui"
+   ],
+   ""
+  ],
+  [
+   "enable hamsci-physics",
+   [
+    "smd",
+    "enable",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "install hamsci-physics",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hamsci-physics",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure hamsci-physics",
+   [
+    "smd",
+    "config",
+    "init",
+    "hamsci-physics",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: hamsci-physics configured",
+   [],
+   "configured:hamsci-physics"
+  ],
+  [
+   "start hamsci-physics (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "hamsci-physics"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure station-web",
+   [
+    "smd",
+    "config",
+    "init",
+    "station-web",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: station-web configured",
+   [],
+   "configured:station-web"
+  ],
+  [
+   "start station-web (independent — no radiod)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start the components this plan activated (radio half deferred)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "mag-recorder,gmag-webui,hamsci-physics,station-web"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ],
+  [
+   "PARTIAL — the radio half waits for the SDR; bring-up completes when it is plugged in (or run `smd bringup` again)",
+   [],
+   ""
+  ]
+ ],
+ "wd|local=False|sdr_absent=False|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "wd|local=False|sdr_absent=False|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "wd|local=False|sdr_absent=True|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "wd|local=False|sdr_absent=True|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "using remote radiod (auto-discover) — skipping radiod stack, gpsdo-monitor, and FFT wisdom",
+   [],
+   ""
+  ],
+  [
+   "apply host tuning (rmem / usbfs)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "wd|local=True|sdr_absent=False|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-web",
+   [
+    "smd",
+    "enable",
+    "ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-radio",
+   [
+    "smd",
+    "enable",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod installed",
+   [],
+   "radiod-installed"
+  ],
+  [
+   "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+   [
+    "/usr/local/sbin/sigmond-sdr-recover",
+    "--ensure-present",
+    "--wait-seconds",
+    "240"
+   ],
+   ""
+  ],
+  [
+   "configure radiod",
+   [
+    "smd",
+    "config",
+    "init",
+    "radiod",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "apply host tuning (affinity / governor / rmem)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "launch FFT wisdom planner",
+   [
+    "systemctl",
+    "start",
+    "--no-block",
+    "sigmond-wisdom.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod configured",
+   [],
+   "radiod-configured"
+  ],
+  [
+   "install ka9q-web unit (post-radiod-config)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "wait for FFT wisdom before starting radiod",
+   [],
+   ""
+  ],
+  [
+   "start radiod + local-radiod infra",
+   [
+    "smd",
+    "start",
+    "--components",
+    "ka9q-radio,ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "wait for radiod streaming (rx888 running) + settle",
+   [],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "reserve radiod cores (apply cache-pair CPU exclusion)",
+   [
+    "smd",
+    "admin",
+    "diag",
+    "cpu-affinity",
+    "--apply"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "wd|local=True|sdr_absent=False|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-web",
+   [
+    "smd",
+    "enable",
+    "ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable ka9q-radio",
+   [
+    "smd",
+    "enable",
+    "ka9q-radio"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod installed",
+   [],
+   "radiod-installed"
+  ],
+  [
+   "enable hf-timestd",
+   [
+    "smd",
+    "enable",
+    "hf-timestd"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable igmp-querier",
+   [
+    "smd",
+    "enable",
+    "igmp-querier"
+   ],
+   ""
+  ],
+  [
+   "install igmp-querier",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable gpsdo-monitor",
+   [
+    "smd",
+    "enable",
+    "gpsdo-monitor"
+   ],
+   ""
+  ],
+  [
+   "install gpsdo-monitor",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gpsdo-monitor",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable station-web",
+   [
+    "smd",
+    "enable",
+    "station-web"
+   ],
+   ""
+  ],
+  [
+   "install station-web",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+   [
+    "/usr/local/sbin/sigmond-sdr-recover",
+    "--ensure-present",
+    "--wait-seconds",
+    "240"
+   ],
+   ""
+  ],
+  [
+   "configure radiod",
+   [
+    "smd",
+    "config",
+    "init",
+    "radiod",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "apply host tuning (affinity / governor / rmem)",
+   [
+    "smd",
+    "apply"
+   ],
+   ""
+  ],
+  [
+   "launch FFT wisdom planner",
+   [
+    "systemctl",
+    "start",
+    "--no-block",
+    "sigmond-wisdom.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: radiod configured",
+   [],
+   "radiod-configured"
+  ],
+  [
+   "install ka9q-web unit (post-radiod-config)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "enable wspr-recorder",
+   [
+    "smd",
+    "enable",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure wspr-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "wspr-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: wspr-recorder configured",
+   [],
+   "configured:wspr-recorder"
+  ],
+  [
+   "enable psk-recorder",
+   [
+    "smd",
+    "enable",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "configure psk-recorder",
+   [
+    "smd",
+    "config",
+    "init",
+    "psk-recorder",
+    "--non-interactive"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: psk-recorder configured",
+   [],
+   "configured:psk-recorder"
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "wait for FFT wisdom before starting radiod",
+   [],
+   ""
+  ],
+  [
+   "start radiod + local-radiod infra",
+   [
+    "smd",
+    "start",
+    "--components",
+    "ka9q-radio,ka9q-web"
+   ],
+   ""
+  ],
+  [
+   "wait for radiod streaming (rx888 running) + settle",
+   [],
+   ""
+  ],
+  [
+   "start wspr-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "wspr-recorder"
+   ],
+   ""
+  ],
+  [
+   "start psk-recorder (staggered)",
+   [
+    "smd",
+    "start",
+    "--components",
+    "psk-recorder"
+   ],
+   ""
+  ],
+  [
+   "start any remaining enabled components",
+   [
+    "smd",
+    "start"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "reserve radiod cores (apply cache-pair CPU exclusion)",
+   [
+    "smd",
+    "admin",
+    "diag",
+    "cpu-affinity",
+    "--apply"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ]
+ ],
+ "wd|local=True|sdr_absent=True|with_optional=False": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "NO SDR on the USB bus — installing the radiod stack but deferring its configuration, host tuning, FFT wisdom and every radiod-bound client until the SDR appears",
+   [],
+   ""
+  ],
+  [
+   "install ka9q-web (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ],
+  [
+   "PARTIAL — the radio half waits for the SDR; bring-up completes when it is plugged in (or run `smd bringup` again)",
+   [],
+   ""
+  ]
+ ],
+ "wd|local=True|sdr_absent=True|with_optional=True": [
+  [
+   "provision shared sink.db (group-writable, pre-empts writer race — sigmond#42)",
+   [
+    "bash",
+    "-c",
+    "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+   ],
+   ""
+  ],
+  [
+   "NO SDR on the USB bus — installing the radiod stack but deferring its configuration, host tuning, FFT wisdom and every radiod-bound client until the SDR appears",
+   [],
+   ""
+  ],
+  [
+   "install ka9q-web (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-web",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install ka9q-radio (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "ka9q-radio",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install hf-timestd (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "hf-timestd",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install igmp-querier (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "igmp-querier",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install gpsdo-monitor (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "gpsdo-monitor",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install station-web (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "station-web",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install wspr-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "wspr-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "install psk-recorder (not enabled — radio deferred)",
+   [
+    "smd",
+    "install",
+    "--components",
+    "psk-recorder",
+    "--yes",
+    "--no-enable",
+    "--no-pull"
+   ],
+   ""
+  ],
+  [
+   "provision shared hs-uploader watermark dir",
+   [
+    "install",
+    "-d",
+    "-m",
+    "2775",
+    "-o",
+    "root",
+    "-g",
+    "sigmond",
+    "/var/lib/hs-uploader"
+   ],
+   ""
+  ],
+  [
+   "render site profile (PSWS ids into client configs)",
+   [
+    "smd",
+    "config",
+    "render",
+    "--if-present"
+   ],
+   ""
+  ],
+  [
+   "generate hs-uploader manifest + enable daemon",
+   [
+    "smd",
+    "admin",
+    "uploader",
+    "manifest",
+    "--write",
+    "--enable"
+   ],
+   ""
+  ],
+  [
+   "migrate any legacy config to the canonical radiod schema",
+   [
+    "smd",
+    "admin",
+    "radiod",
+    "migrate",
+    "--yes"
+   ],
+   ""
+  ],
+  [
+   "clear hs-uploader start-limit (pre-manifest crash-loop)",
+   [
+    "systemctl",
+    "reset-failed",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "restart hs-uploader on the final manifest",
+   [
+    "systemctl",
+    "try-restart",
+    "hs-uploader.service"
+   ],
+   ""
+  ],
+  [
+   "checkpoint: final validate",
+   [],
+   "validate"
+  ],
+  [
+   "PARTIAL — the radio half waits for the SDR; bring-up completes when it is plugged in (or run `smd bringup` again)",
+   [],
+   ""
+  ]
+ ]
+}

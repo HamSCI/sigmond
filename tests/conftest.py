@@ -410,3 +410,17 @@ def _cpu_freq_defaults_not_from_this_host(tmp_path, monkeypatch):
     except ImportError:
         return
     monkeypatch.setattr(topology, "CPUINFO", tmp_path / "no-such-cpuinfo")
+
+
+@pytest.fixture(autouse=True)
+def _station_role_in_tmp(tmp_path, monkeypatch):
+    """No test reads the host's real /etc/sigmond/station-role.  Every test
+    sees a role file under its tmp_path that does not exist (role `full`);
+    a test that needs radiod-only writes it, or points ROLE_PATH elsewhere
+    itself.  SIGMOND_STATION_ROLE_PATH carries the same path to any smd or
+    python the test starts (sigmond.station_role reads it at import), and
+    SIGMOND_FIRSTRUN_ROLE_FILE to bin/sigmond-firstrun-bringup."""
+    p = tmp_path / "sigmond-test-station-role"
+    monkeypatch.setattr("sigmond.station_role.ROLE_PATH", p)
+    monkeypatch.setenv("SIGMOND_STATION_ROLE_PATH", str(p))
+    monkeypatch.setenv("SIGMOND_FIRSTRUN_ROLE_FILE", str(p))
