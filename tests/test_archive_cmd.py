@@ -58,6 +58,10 @@ def env(tmp_path, monkeypatch):
         ran.append(["mount", source, target])
         return 0
     monkeypatch.setattr(cmd, "_libc_mount", fake_mount)
+    state.landed = None       # None: the drive lands at the mount point
+    monkeypatch.setattr(cmd, "_mount_points_of",
+                        lambda part: [str(ar.MOUNT)] if state.landed is None else state.landed)
+    monkeypatch.setattr(cmd, "_libc_umount_detach", lambda where: ran.append(["umount2", where]))
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("add asked a question"))
     return state
 
@@ -143,3 +147,9 @@ def test_a_mount_point_swapped_for_a_symlink_is_not_mounted(env, tmp_path):
     ar.MOUNT.symlink_to(elsewhere)
     assert cmd.cmd_archive(_args()) == 1
     assert "mount" not in [a[0] for a in env.ran]
+
+
+def test_a_mount_that_lands_elsewhere_is_detached_and_fails(env):
+    env.landed = ["/var/lib/sigmond/moved"]
+    assert cmd.cmd_archive(_args()) == 1
+    assert ["umount2", "/var/lib/sigmond/moved"] in env.ran

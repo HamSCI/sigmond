@@ -86,9 +86,44 @@ def _mount_verified(part: str) -> int:
         rc = _libc_mount(part, target)
         if rc != 0:
             err(f"mount {part} on {ar.MOUNT}: {os.strerror(rc)}")
-        return rc
+            return rc
+        # The directory could still have been renamed between the check and
+        # the mount.  Confirm the drive landed at exactly the mount point;
+        # if not, detach it wherever it went and fail.
+        landed = _mount_points_of(part)
+        if str(ar.MOUNT) not in landed:
+            for where in landed:
+                _libc_umount_detach(where)
+            err(f"refusing: {part} mounted at {', '.join(landed) or 'nowhere'}, not "
+                f"{ar.MOUNT} (the directory moved during the mount); detached it")
+            return 1
+        return 0
     finally:
         os.close(fd)
+
+
+def _mount_points_of(part: str) -> List[str]:
+    """Where /proc/self/mountinfo shows ``part`` mounted.  Field 5 is the
+    mount point; the source follows the " - " separator."""
+    out = []
+    try:
+        lines = open("/proc/self/mountinfo").read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        head, _, tail = line.partition(" - ")
+        f, t = head.split(), tail.split()
+        if len(f) >= 5 and len(t) >= 2 and t[1] == part:
+            out.append(f[4].replace("\\040", " "))
+    return out
+
+
+def _libc_umount_detach(where: str) -> None:
+    import ctypes
+    import ctypes.util
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    MNT_DETACH, UMOUNT_NOFOLLOW = 2, 8
+    libc.umount2(where.encode(), MNT_DETACH | UMOUNT_NOFOLLOW)
 
 
 MS_NOATIME = 1024
