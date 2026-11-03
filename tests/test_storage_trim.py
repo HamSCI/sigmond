@@ -412,6 +412,8 @@ class TestPolicyFromEnv(unittest.TestCase):
         self.assertEqual(
             by_target[("superdarn", "detections")].max_age_seconds,
             30 * 24 * 60 * 60)                # default 30 days
+        self.assertEqual(by_target[("hfdl", "spots")].max_age_seconds,
+                         7 * 24 * 60 * 60)    # default 7 days
         for p in policies:
             self.assertEqual(p.source, "default")
 
@@ -450,6 +452,13 @@ class TestPolicyFromEnv(unittest.TestCase):
               == ("superdarn", "detections")][0]
         self.assertEqual(sd.max_age_seconds, 1440 * 60)
         self.assertEqual(sd.source, "env:SUPERDARN_RETENTION_MIN")
+
+    def test_hfdl_env_override_applies(self):
+        policies = policy_from_env(env={"HFDL_RETENTION_MIN": "1440"})
+        hf = [p for p in policies if (p.target_db, p.target_table)
+              == ("hfdl", "spots")][0]
+        self.assertEqual(hf.max_age_seconds, 1440 * 60)
+        self.assertEqual(hf.source, "env:HFDL_RETENTION_MIN")
 
     def test_garbage_env_falls_back_to_default(self):
         policies = policy_from_env(env={"PSK_RETENTION_MIN": "tomorrow"})

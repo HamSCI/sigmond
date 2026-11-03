@@ -10,6 +10,8 @@
 # systemd Environment= lines):
 #   PSK_RETENTION_MIN  = 60   (1 h)
 #   WSPR_RETENTION_MIN = 1440 (24 h)
+#   SUPERDARN_RETENTION_MIN = 43200 (30 d)
+#   HFDL_RETENTION_MIN = 10080 (7 d)
 #   TRIM_MIN_FLOOR_SECONDS unset → 1800 s (30 min) floor enforced
 #
 [Unit]
