@@ -432,6 +432,20 @@ upload path on AC0G/B4 — 66,000 rows growing steadily with the oldest pinned a
 precisely 24 hours, while the upstream collector had that station's spots
 current to the minute (observed 2026-08-18).
 
+Each table keeps rows for a fixed time (`lib/sigmond/storage_trim.py`), and an
+environment variable on the trim unit overrides it:
+
+| Table | Keeps | Override |
+|---|---|---|
+| `psk.spots` | 1 hour | `PSK_RETENTION_MIN` |
+| `wspr.spots`, `wspr.noise` | 24 hours | `WSPR_RETENTION_MIN` |
+| `superdarn.detections` | 30 days | `SUPERDARN_RETENTION_MIN` |
+| `hfdl.spots` | 7 days | `HFDL_RETENTION_MIN` |
+
+`hfdl.spots` goes nowhere: hfdl-recorder writes its decodes there for local use,
+and no uploader reads them, so the trim alone bounds that table. At AC0G-ND,
+about 14,000 rows a day arrive there.
+
 **So: queue depth is not a delivery measure. Check the destination instead.**
 (There is no one command that answers "are my uploads being accepted?" across
 all four destinations — that gap is row 8 of the
