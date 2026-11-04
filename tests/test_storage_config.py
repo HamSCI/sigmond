@@ -129,3 +129,10 @@ def test_a_far_future_hands_off_clamps_to_14_days(tmp_path):
     assert not c.hands_off_unknown
     assert any("14 days" in m for m in c.problems)
 
+
+
+def test_non_finite_shares_drop(tmp_path):
+    p = tmp_path / "s.toml"; p.write_text("[shares]\na = inf\nb = nan\nc = 2\n")
+    c = load_storage_config(p)
+    assert c.shares == {"c": 2.0}
+    assert any("shares.a" in m for m in c.problems) and any("shares.b" in m for m in c.problems)

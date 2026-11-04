@@ -8,6 +8,7 @@ parse, sets `hands_off_unknown`, and the tick then stops no client.  A
 hands-off running past 14 days from now clamps to 14 days.
 """
 
+import math
 import re
 import tomllib
 from dataclasses import dataclass, field, replace
@@ -48,9 +49,12 @@ class StorageConfig:
 
 
 def _num(v) -> Optional[float]:
+    """A finite number, or None.  TOML allows inf and nan; neither means
+    anything as a level, a horizon or a share."""
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    return float(v)
+    n = float(v)
+    return n if math.isfinite(n) else None
 
 
 def _parse_levels(tbl, problems: list) -> Levels:
@@ -127,7 +131,7 @@ def load_storage_config(path: Path = CONFIG_PATH,
     for k, v in table("shares").items():
         n = _num(v)
         if n is None or n <= 0:
-            problems.append(f"shares.{k}: {v!r} is not a positive number; dropped")
+            problems.append(f"shares.{k}: {v!r} is not a positive finite number; dropped")
         else:
             shares[k] = n
 
