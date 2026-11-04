@@ -40,14 +40,20 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "sigmond-rx888-irq-affinity"
 
 
-def _fake_world(tmp: Path, *, cores: list[tuple[int, int]], irqs: list[int]) -> dict:
-    """Build a fake sysfs/proc.  `cores` is a list of (cpu_a, cpu_b) SMT pairs."""
+def _fake_world(tmp: Path, *, cores: list[tuple[int, int]], irqs: list[int],
+                l3: dict[int, int] | None = None) -> dict:
+    """Build a fake sysfs/proc.  `cores` is a list of (cpu_a, cpu_b) SMT pairs;
+    `l3`, when given, maps each cpu to its L3 cache id."""
     cpu_root = tmp / "cpu"
     for a, b in cores:
         for cpu in (a, b):
             d = cpu_root / f"cpu{cpu}" / "topology"
             d.mkdir(parents=True, exist_ok=True)
             (d / "thread_siblings_list").write_text(f"{a},{b}\n")
+            if l3 is not None:
+                c = cpu_root / f"cpu{cpu}" / "cache" / "index3"
+                c.mkdir(parents=True, exist_ok=True)
+                (c / "id").write_text(f"{l3[cpu]}\n")
     interrupts = tmp / "interrupts"
     lines = ["           CPU0       CPU1\n"]
     for irq in irqs:
@@ -59,15 +65,40 @@ def _fake_world(tmp: Path, *, cores: list[tuple[int, int]], irqs: list[int]) -> 
         d = irq_root / str(irq)
         d.mkdir(parents=True, exist_ok=True)
         (d / "smp_affinity_list").write_text("0-15\n")
+    # Empty by default, so the host's own /sys and /etc/radio never leak in.
+    for sub in ("pci", "usb", "radio", "units"):
+        (tmp / sub).mkdir(exist_ok=True)
     return {
         "SIGMOND_CPU_ROOT": str(cpu_root),
         "SIGMOND_PROC_INTERRUPTS": str(interrupts),
         "SIGMOND_IRQ_ROOT": str(irq_root),
+        "SIGMOND_PCI_ROOT": str(tmp / "pci"),
+        "SIGMOND_USB_ROOT": str(tmp / "usb"),
+        "SIGMOND_RADIO_CONF_DIR": str(tmp / "radio"),
+        "SIGMOND_UNIT_ROOT": str(tmp / "units"),
     }
 
 
+def _attach_rx888(tmp: Path, *, ctrl: str, irqs: list[int], bus: int,
+                  serial: str, instance: str) -> None:
+    """Hang an RX888 off a fake xhci controller and pin a radiod to it."""
+    dev = tmp / "devices" / ctrl
+    (dev / "msi_irqs").mkdir(parents=True, exist_ok=True)
+    for irq in irqs:
+        (dev / "msi_irqs" / str(irq)).write_text("msix\n")
+    (dev / "irq").write_text("0\n")
+    (tmp / "pci" / ctrl).symlink_to(dev)
+    port = dev / f"usb{bus}" / f"{bus}-1"
+    port.mkdir(parents=True)
+    (port / "serial").write_text(serial + "\n")
+    (tmp / "usb" / f"{bus}-1").symlink_to(port)
+    (tmp / "radio" / f"radiod@{instance}.conf").write_text(
+        f'[rx888]\nserial      = "{serial}"\n')
+
+
 def _run(tmp: Path, env_extra: dict, *, fence: str | None,
-         override: str | None = None) -> tuple[str, dict]:
+         override: str | None = None,
+         radiods: dict[str, str] | None = None) -> tuple[str, dict]:
     """Run the script with a faked world.  Returns (stdout, {irq: affinity})."""
     env = dict(os.environ)
     env.update(env_extra)
@@ -76,7 +107,16 @@ def _run(tmp: Path, env_extra: dict, *, fence: str | None,
     # The script reads the fence from systemctl; stub systemctl on PATH.
     bin_dir = tmp / "bin"
     bin_dir.mkdir(exist_ok=True)
-    if fence is None:
+    if radiods:
+        # several running radiods: {instance: fence}
+        units = "\n".join(f"radiod@{i}.service loaded active running x"
+                          for i in radiods)
+        cases = "".join(f'  *"radiod@{i}.service"*"CPUAffinity"*) echo "{f}" ;;\n'
+                        for i, f in radiods.items())
+        body = ('#!/bin/bash\ncase "$*" in\n'
+                f'  *"list-units"*) printf "%s\\n" "{units}" ;;\n'
+                + cases + '  *) exit 0 ;;\nesac\n')
+    elif fence is None:
         body = '#!/bin/bash\nexit 0\n'
     else:
         body = (
@@ -171,6 +211,49 @@ class OsPairDerivationTest(unittest.TestCase):
             out, aff = _run(tmp, env, fence="12 13", override="12-13")
         self.assertEqual(aff["50"], "12-13", f"override ignored\n{out}")
         self.assertIn("override", out)
+
+    def test_two_radiods_on_a_split_l3_each_keep_their_irqs_at_home(self):
+        # ⛔ AC0G-B1, 2026-11-04.  A Ryzen 5700U splits its L3: CPUs 0-7 and
+        # 8-15.  One radiod per half, each RX888 on its own controller.  The
+        # single global OS pair put BOTH controllers' interrupts on 0-1, so
+        # radiod-b's USB service crossed the cache boundary on every URB.
+        cores = [(n, n + 1) for n in range(0, 16, 2)]
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            env = _fake_world(tmp, cores=cores, irqs=[45, 54],
+                              l3={c: c // 8 for c in range(16)})
+            _attach_rx888(tmp, ctrl="0000:04:00.3", irqs=[45, 46], bus=2,
+                          serial="0009002B03C4142E", instance="ac0g-b1-b")
+            _attach_rx888(tmp, ctrl="0000:04:00.4", irqs=[54, 55], bus=4,
+                          serial="000900250A54361D", instance="ac0g-b1-a")
+            out, aff = _run(tmp, env, fence=None,
+                            radiods={"ac0g-b1-a": "2-3", "ac0g-b1-b": "10-11"})
+        self.assertEqual(aff, {"45": "8,9", "54": "0,1"}, f"{aff}\n{out}")
+        self.assertIn("radiod@ac0g-b1-b", out)
+
+    def test_a_second_fence_is_never_a_landing_spot(self):
+        # Two radiods, no L3 ids (a VM): the one OS pair must clear BOTH
+        # fences, not just the first radiod's.
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            env = _fake_world(tmp, cores=self.CORES, irqs=[50])
+            out, aff = _run(tmp, env, fence=None,
+                            radiods={"x": "2 3", "y": "0 1"})
+        self.assertEqual(aff["50"], "4,5", f"{aff}\n{out}")
+
+    def test_an_unmapped_controller_still_gets_the_os_pair(self):
+        # A controller with no pinned RX888 behind it (keyboard, hub) keeps
+        # the old model rather than being left to the balancer.
+        cores = [(n, n + 1) for n in range(0, 16, 2)]
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            env = _fake_world(tmp, cores=cores, irqs=[45, 70],
+                              l3={c: c // 8 for c in range(16)})
+            _attach_rx888(tmp, ctrl="0000:04:00.3", irqs=[45], bus=2,
+                          serial="0009002B03C4142E", instance="b")
+            out, aff = _run(tmp, env, fence=None,
+                            radiods={"a": "2-3", "b": "10-11"})
+        self.assertEqual(aff, {"45": "8,9", "70": "0,1"}, f"{aff}\n{out}")
 
     def test_only_xhci_irqs_are_touched(self):
         with TemporaryDirectory() as td:

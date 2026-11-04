@@ -24,6 +24,10 @@ set -u
 CPU_ROOT=${SIGMOND_CPU_ROOT:-/sys/devices/system/cpu}
 PROC_INTERRUPTS=${SIGMOND_PROC_INTERRUPTS:-/proc/interrupts}
 IRQ_ROOT=${SIGMOND_IRQ_ROOT:-/proc/irq}
+PCI_ROOT=${SIGMOND_PCI_ROOT:-/sys/bus/pci/devices}
+USB_ROOT=${SIGMOND_USB_ROOT:-/sys/bus/usb/devices}
+RADIO_CONF_DIR=${SIGMOND_RADIO_CONF_DIR:-/etc/radio}
+UNIT_ROOT=${SIGMOND_UNIT_ROOT:-/etc/systemd/system}
 
 # CPUAffinity values are SPACE-separated ("8 9") in both systemctl output and
 # the smd drop-ins, but /proc/irq/*/smp_affinity_list wants a comma list.
@@ -82,29 +86,31 @@ if [ -s /etc/sigmond/rx888-irq-cpus ]; then
     echo "sigmond-rx888-irq-affinity: pinned $pinned xhci IRQ(s) to CPUs $cpus (override: /etc/sigmond/rx888-irq-cpus)"
     exit 0
 fi
-cpus=""
-for u in $(systemctl list-units --type=service --state=running --no-legend "radiod@*" 2>/dev/null | awk '{print $1}'); do
-    cpus=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr ' ' ',')
-    [ -n "$cpus" ] && break
+# ── every local radiod: its instance, its fence ─────────────────────────────
+# A station may run more than one radiod, one per RX888 (AC0G-B1: two, one per
+# L3 half of a Ryzen 5700U).  Every fence counts: an IRQ moved off one
+# radiod's cores must not land on another's.
+insts=()
+fences=()
+for u in $(systemctl list-units --type=service --state=running --no-legend --plain "radiod@*" 2>/dev/null | awk '{print $1}'); do
+    f=$(systemctl show "$u" -p CPUAffinity --value 2>/dev/null | tr ' ' ',')
+    [ -n "$f" ] || continue
+    i=${u#radiod@}; insts+=("${i%.service}"); fences+=("$f")
 done
-if [ -z "${cpus}" ]; then
-    # Fall back to an enabled-but-not-yet-started radiod (boot ordering).
-    for f in /etc/systemd/system/radiod@*.service.d/*.conf; do
+if [ ${#fences[@]} -eq 0 ]; then
+    # Fall back to enabled-but-not-yet-started radiods (boot ordering).
+    for f in "$UNIT_ROOT"/radiod@*.service.d/*.conf; do
         [ -f "$f" ] || continue
-        cpus=$(sed -n 's/^CPUAffinity=\(.\+\)/\1/p' "$f" | tail -1 | tr ' ' ',')
-        [ -n "$cpus" ] && break
+        c=$(sed -n 's/^CPUAffinity=\(.\+\)/\1/p' "$f" | tail -1 | tr ' ' ',')
+        [ -n "$c" ] || continue
+        d=$(basename "$(dirname "$f")"); d=${d#radiod@}
+        insts+=("${d%.service.d}"); fences+=("$c")
     done
 fi
 # No fence at all: leave the kernel's own IRQ balancing alone.
-[ -z "${cpus}" ] && exit 0
+[ ${#fences[@]} -eq 0 ] && exit 0
+cpus=$(IFS=,; echo "${fences[*]}")     # the union of every fence
 
-# ── derive the OS pair ──────────────────────────────────────────────────────
-# The lowest-numbered physical core whose SMT siblings all sit OUTSIDE
-# radiod's fence.  Derived, never hardcoded: "0-1" happens to be the answer on
-# both current stations, and would silently be the wrong answer on a machine
-# whose fence starts at 0.  If radiod owns every core there is nowhere else to
-# put them, so co-locate and say so — pinning into a fence is still better
-# than leaving the IRQs wherever the balancer drifts them.
 _in_fence() {   # $1 = cpu number; is it inside "$cpus" (comma list, may hold a-b ranges)?
     local c want=$1 lo hi
     for c in ${cpus//,/ }; do
@@ -116,42 +122,115 @@ _in_fence() {   # $1 = cpu number; is it inside "$cpus" (comma list, may hold a-
     done
     return 1
 }
-os_pair=""
-for core_dir in $(ls -d "$CPU_ROOT"/cpu[0-9]* 2>/dev/null | sort -V); do
-    sib_file="$core_dir/topology/thread_siblings_list"
-    [ -r "$sib_file" ] || sib_file="$core_dir/topology/core_cpus_list"
-    [ -r "$sib_file" ] || continue
-    sibs=$(tr -d ' \n' < "$sib_file")
-    # expand "4-5" / "4,5" into a plain list
-    expanded=""
-    for tok in ${sibs//,/ }; do
-        case "$tok" in
-            *-*) for n in $(seq "${tok%%-*}" "${tok##*-}"); do expanded="$expanded $n"; done ;;
-            *)   expanded="$expanded $tok" ;;
-        esac
+_l3_of() {      # $1 = cpu number; its L3 cache id, empty where sysfs has none (most VMs)
+    cat "$CPU_ROOT/cpu$1/cache/index3/id" 2>/dev/null
+}
+
+# ── derive an OS pair ───────────────────────────────────────────────────────
+# The lowest-numbered physical core whose SMT siblings all sit OUTSIDE every
+# radiod fence.  Derived, never hardcoded: "0-1" happens to be the answer on
+# most stations, and would silently be the wrong answer on a machine whose
+# fence starts at 0.  $1, when given, restricts the search to one L3 domain.
+_os_pair() {
+    local want_l3=${1:-} core_dir sib_file sibs expanded tok n clear
+    for core_dir in $(ls -d "$CPU_ROOT"/cpu[0-9]* 2>/dev/null | sort -V); do
+        sib_file="$core_dir/topology/thread_siblings_list"
+        [ -r "$sib_file" ] || sib_file="$core_dir/topology/core_cpus_list"
+        [ -r "$sib_file" ] || continue
+        sibs=$(tr -d ' \n' < "$sib_file")
+        # expand "4-5" / "4,5" into a plain list
+        expanded=""
+        for tok in ${sibs//,/ }; do
+            case "$tok" in
+                *-*) for n in $(seq "${tok%%-*}" "${tok##*-}"); do expanded="$expanded $n"; done ;;
+                *)   expanded="$expanded $tok" ;;
+            esac
+        done
+        clear=1
+        for n in $expanded; do
+            _in_fence "$n" && { clear=0; break; }
+        done
+        [ "$clear" = 1 ] || continue
+        if [ -n "$want_l3" ]; then
+            set -- $expanded
+            [ "$(_l3_of "$1")" = "$want_l3" ] || continue
+        fi
+        echo $expanded | tr ' ' ','
+        return 0
     done
-    clear=1
-    for n in $expanded; do
-        _in_fence "$n" && { clear=0; break; }
+    return 1
+}
+
+# ── which radiod sits behind which controller ───────────────────────────────
+# Each RX888 hangs off one xhci controller, and each controller raises its own
+# IRQs.  Follow radiod's `serial =` to the USB device, the device to its
+# controller, and the controller to its IRQs.  Then put each controller's IRQs
+# on an OS pair in the SAME L3 domain as the radiod it feeds, since the
+# interrupt handler and radiod's reader touch the same URB buffers.  On a
+# split-L3 part (5700U: CPUs 0-7 and 8-15), the single global pair 0-1 sent
+# the second radiod's interrupts across the cache boundary (AC0G-B1,
+# 2026-11-04).  Where the topology gives no L3 ids, or no serial pins a
+# radiod to a card, this reduces to the single OS pair it always was.
+_ctrl_of_irq() {  # $1 = irq; prints the PCI address of the controller raising it
+    local d
+    for d in "$PCI_ROOT"/*; do
+        if [ -e "$d/msi_irqs/$1" ] || [ "$(cat "$d/irq" 2>/dev/null)" = "$1" ]; then
+            basename "$d"; return 0
+        fi
     done
-    if [ "$clear" = 1 ]; then
-        os_pair=$(echo $expanded | tr ' ' ',')
-        break
-    fi
+    return 1
+}
+_ctrl_of_serial() {  # $1 = RX888 serial; prints the PCI address of its controller
+    local u p want
+    want=$(echo "$1" | tr 'a-f' 'A-F')
+    for u in "$USB_ROOT"/*; do
+        [ -r "$u/serial" ] || continue
+        [ "$(tr 'a-f' 'A-F' < "$u/serial")" = "$want" ] || continue
+        p=$(readlink -f "$u")
+        p=${p%/usb[0-9]*}
+        basename "$p"; return 0
+    done
+    return 1
+}
+ctrls=()
+for i in "${insts[@]}"; do
+    s=$(sed -n 's/^[[:space:]]*serial[[:space:]]*=[[:space:]]*"\{0,1\}\([0-9A-Fa-f]\+\)"\{0,1\}.*/\1/p' \
+        "$RADIO_CONF_DIR/radiod@$i.conf" 2>/dev/null | head -1)
+    c=""
+    [ -n "$s" ] && c=$(_ctrl_of_serial "$s")
+    ctrls+=("$c")
 done
-if [ -n "$os_pair" ]; then
-    target=$os_pair
-    model="OS pair (radiod fence $cpus left clear)"
-else
-    target=$cpus
-    model="co-located: radiod owns every core, nowhere else to put them"
-fi
-cpus=$target
+
+global=$(_os_pair)
 pinned=0
+report=""
 for irq in $(grep -i xhci_hcd "$PROC_INTERRUPTS" | cut -d: -f1 | tr -d ' '); do
-    if echo "$cpus" > "$IRQ_ROOT/$irq/smp_affinity_list" 2>/dev/null; then
+    target=""; model=""
+    ctrl=$(_ctrl_of_irq "$irq")
+    for k in "${!insts[@]}"; do
+        [ -n "$ctrl" ] && [ "${ctrls[$k]}" = "$ctrl" ] || continue
+        l3=$(_l3_of "${fences[$k]%%[,-]*}")
+        if [ -n "$l3" ] && target=$(_os_pair "$l3"); then
+            model="OS pair beside radiod@${insts[$k]} (L3 $l3, fence ${fences[$k]})"
+        fi
+        break
+    done
+    if [ -z "$target" ]; then
+        if [ -n "$global" ]; then
+            target=$global
+            model="OS pair (radiod fence $cpus left clear)"
+        else
+            # radiod owns every core: there is nowhere else to put them, so
+            # co-locate and say so — pinning into a fence still beats leaving
+            # the IRQs wherever the balancer drifts them.
+            target=${fences[0]}
+            model="co-located: radiod owns every core, nowhere else to put them"
+        fi
+    fi
+    if echo "$target" > "$IRQ_ROOT/$irq/smp_affinity_list" 2>/dev/null; then
         pinned=$((pinned+1))
+        report="$report; IRQ $irq -> $target, $model"
     fi
 done
-echo "sigmond-rx888-irq-affinity: pinned $pinned xhci IRQ(s) to CPUs $cpus — $model"
+echo "sigmond-rx888-irq-affinity: pinned $pinned xhci IRQ(s)${report}"
 exit 0

@@ -8503,11 +8503,13 @@ def _rx888_irq_findings(read_fence=None, read_xhci_affinity=None) -> list:
 
     if read_fence is None:
         def read_fence():
-            # `systemctl show` takes no glob, so resolve the instance first —
-            # the same order the ExecStartPost script uses: a RUNNING radiod,
-            # else whatever an enabled drop-in declares (boot ordering).
+            # `systemctl show` takes no glob, so resolve the instances first —
+            # the same order the ExecStartPost script uses: RUNNING radiods,
+            # else whatever enabled drop-ins declare (boot ordering).  Every
+            # radiod's fence counts: a station may run one per RX888 (B1).
+            vals = []
             r = _run(['systemctl', 'list-units', '--type=service',
-                      '--state=running', '--no-legend', 'radiod@*'])
+                      '--state=running', '--no-legend', '--plain', 'radiod@*'])
             for line in ((getattr(r, 'stdout', '') or '').splitlines()):
                 unit = line.split()[0] if line.split() else ''
                 if not unit:
@@ -8516,7 +8518,9 @@ def _rx888_irq_findings(read_fence=None, read_xhci_affinity=None) -> list:
                               '--value', unit])
                 val = (getattr(shown, 'stdout', '') or '').strip()
                 if val:
-                    return val
+                    vals.append(val)
+            if vals:
+                return ' '.join(vals)
             import glob as _glob
             for f in sorted(_glob.glob(
                     '/etc/systemd/system/radiod@*.service.d/*.conf')):
@@ -8525,10 +8529,10 @@ def _rx888_irq_findings(read_fence=None, read_xhci_affinity=None) -> list:
                         if line.startswith('CPUAffinity='):
                             val = line.split('=', 1)[1].strip()
                             if val:
-                                return val
+                                vals.append(val)
                 except OSError:
                     continue
-            return ''
+            return ' '.join(vals)
     if read_xhci_affinity is None:
         def read_xhci_affinity():
             pairs = {}
