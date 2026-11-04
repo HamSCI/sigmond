@@ -92,3 +92,20 @@ def test_cleanup_refuses_symlinked_tmp_root(tmp_path):
     run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
     res = run_cleanup(run=run, now=10 * 86400, tmp_root=link)
     assert not res[2].ok and "symlink" in res[2].detail and f.exists()
+
+
+def test_env_file_keeps_its_mode(tmp_path):
+    env = tmp_path / "coordination.env"
+    env.write_text("HF_TIMESTD_LOG_LEVEL=INFO\n")
+    os.chmod(env, 0o640)
+    now = datetime(2026, 11, 4, tzinfo=timezone.utc)
+    set_log_level("hf-timestd", "DEBUG", env_path=env, until=now + timedelta(hours=1))
+    assert (env.stat().st_mode & 0o7777) == 0o640
+    expire_log_levels(env, now + timedelta(hours=2))
+    assert (env.stat().st_mode & 0o7777) == 0o640
+
+
+def test_new_env_file_is_world_readable(tmp_path):
+    env = tmp_path / "new.env"
+    set_log_level("hf-timestd", "INFO", env_path=env)
+    assert (env.stat().st_mode & 0o7777) == 0o644

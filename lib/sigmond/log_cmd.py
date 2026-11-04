@@ -221,6 +221,18 @@ def _atomic_write(env_path: Path, text: str) -> None:
     try:
         with os.fdopen(tmp_fd, 'w') as f:
             f.write(text)
+        # mkstemp makes 0600 files; keep the target's mode and owner so
+        # clients running as other service users can still read it.
+        try:
+            st = os.stat(env_path)
+        except FileNotFoundError:
+            os.chmod(tmp_path, 0o644)
+        else:
+            os.chmod(tmp_path, st.st_mode & 0o7777)
+            try:
+                os.chown(tmp_path, st.st_uid, st.st_gid)
+            except PermissionError:
+                pass
         os.replace(tmp_path, env_path)
     except BaseException:
         os.unlink(tmp_path)
