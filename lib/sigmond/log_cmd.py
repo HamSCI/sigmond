@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -99,8 +100,13 @@ def set_log_level(
     client_name: Optional[str],
     level: str,
     env_path: Path = COORDINATION_ENV,
+    until: Optional[datetime] = None,
 ) -> str:
     """Write a log-level entry into coordination.env.
+
+    With `until`, also write <KEY>_UNTIL (ISO, Z) and, if none is recorded
+    yet, <KEY>_ROUTINE holding the previous value (empty if none), so
+    expire_log_levels can restore it.
 
     If client_name is None, writes CLIENT_LOG_LEVEL (generic fallback).
     Returns the key that was written.
@@ -110,8 +116,71 @@ def set_log_level(
         raise ValueError(f"invalid log level: {level}")
 
     key = client_env_key(client_name) if client_name else 'CLIENT_LOG_LEVEL'
+    if until is not None:
+        current = _read_env(env_path)
+        if f'{key}_ROUTINE' not in current:
+            _upsert_env_line(env_path, f'{key}_ROUTINE', current.get(key, ''))
+        until = until.astimezone(timezone.utc)
+        _upsert_env_line(env_path, f'{key}_UNTIL',
+                         until.strftime('%Y-%m-%dT%H:%M:%SZ'))
     _upsert_env_line(env_path, key, level)
     return key
+
+
+def _read_env(env_path: Path) -> dict:
+    out: dict = {}
+    try:
+        for line in env_path.read_text().splitlines():
+            if '=' in line and not line.lstrip().startswith('#'):
+                k, _, v = line.partition('=')
+                out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def expire_log_levels(env_path: Path, now: datetime) -> list[str]:
+    """Restore every raised level whose <KEY>_UNTIL has passed.
+
+    Writes back <KEY>_ROUTINE, or removes KEY when that is empty, and drops
+    _UNTIL and _ROUTINE.  Returns the keys restored."""
+    env = _read_env(env_path)
+    restored: list[str] = []
+    drop: set[str] = set()
+    sets: dict[str, str] = {}
+    for name, value in env.items():
+        if not name.endswith('_LOG_LEVEL_UNTIL'):
+            continue
+        key = name[:-len('_UNTIL')]
+        try:
+            when = datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if when > now:
+            continue
+        routine = env.get(f'{key}_ROUTINE', '')
+        if routine:
+            sets[key] = routine
+        else:
+            drop.add(key)
+        drop.update((name, f'{key}_ROUTINE'))
+        restored.append(key)
+    if not restored:
+        return []
+    lines = env_path.read_text().splitlines()
+    out = []
+    for line in lines:
+        k = line.partition('=')[0].strip()
+        if k in drop:
+            continue
+        if k in sets:
+            line = f'{k}={sets[k]}'
+        out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    env_path.write_text('\n'.join(out) + '\n' if out else '')
+    return sorted(restored)
 
 
 def _upsert_env_line(env_path: Path, key: str, value: str) -> None:
