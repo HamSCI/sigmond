@@ -196,13 +196,18 @@ large and unclaimed gets reported, by path and size, for an operator to decide.
   routine level when it passes, as network gear does with timed debugging. The ledger counts
   log volume like any other consumer.
 - **Snapshots carry a lifetime.** An align or upgrade snapshot gets removed once the change
-  checks out, or after a set age *(designer's call: 48 h)*, and sigmond refuses to take one
+  checks out, or after a set age, and sigmond refuses to take one
   without enough pool headroom to carry it. The `pristine` first-boot snapshot costs little,
   since it pins only the small original image, and may stay.
   **Who deletes** (Michael): a host-side component deletes, by itself, only the snapshots
   sigmond's own tools took and labelled as theirs, once past their lifetime. A snapshot an
   operator took never gets deleted automatically; sigmond alarms about its age and its cost
   in the pool, and an operator decides.
+  **How long a snapshot lives** (Michael, 2026-11-04): half the pool's projected time to full,
+  measured from the pool's own growth, and never more than 48 h. When the pool reaches the
+  Demand stage, the host deletes sigmond's snapshots at once, whatever their age. On 11-03 the
+  pools went from the `pre-v385` snapshot to full in about 29 hours, so a fixed 48 h would have
+  come too late; the measured rule would have given that snapshot about 16 hours.
 - **Space freed in the guest returns to the pool.** VM disks get `discard=on`, and the guest
   runs a scheduled `fstrim`. On thin pools fstrim can stall I/O (Rob saw a radiod lose 17 s on
   KFS-SE), so it runs with the radiods stopped, or not at all on a busy station.

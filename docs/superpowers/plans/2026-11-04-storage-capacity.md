@@ -21,7 +21,7 @@
 - sigmond never deletes a client's files. Its clean-up covers only the journal, the apt cache, and files under `/var/lib/sigmond/tmp`.
 - Stop lever: only at Final; only against a client that failed to answer a trim request (an error, a timeout or non-JSON); or against an unmanaged client still over its target 900 s after Final began for it. Never on a station marked hands-off; there it alarms only. Never against `radiod`/`ka9q-radio`. Stopping deletes nothing, and sigmond never restarts the client itself.
 - A stale (> 900 s) or missing host report counts as a fault and raises an alarm, never "unknown". The report is expected only when `systemd-detect-virt` names a VM and `[pool] expect_report` is not `false`.
-- Snapshots: the host deletes automatically only those whose description carries `sigmond-snapshot expires=<ISO-8601 UTC>`, once past expiry. It never deletes `pristine`, nor any operator snapshot; it alarms about operator snapshots instead. The default lifetime is 48 h. Taking a snapshot is refused when pool data ≥ 70 %.
+- Snapshots: the host deletes automatically only those whose description carries `sigmond-snapshot expires=<ISO-8601 UTC>`, once past expiry, or at once when the pool reaches the Demand stage (90 %). It never deletes `pristine`, nor any operator snapshot; it alarms about operator snapshots instead. A snapshot's lifetime is half the pool's projected time to full (free ÷ measured churn), capped at 48 h (Michael, 2026-11-04: the 11-03 pools filled in ~29 h). Taking a snapshot is refused when pool data ≥ 70 %.
 - Alarms follow the persistent-condition rule: one line when an episode starts, one when it clears, and a reminder every 6 h while it lasts. Never a line per tick.
 - Hands-off defaults to 24 h, with a maximum of 14 days. A raised log level expires after 24 h unless `--for` says otherwise; sigmond restores the routine level and sends SIGHUP.
 - No byte above 0x7F in anything sent through the guest agent (`json.dumps(..., ensure_ascii=True)`).
@@ -665,17 +665,19 @@ Mapping. A status file older than 600 s, or missing → the storage part reads I
 **Interfaces:**
 - Produces, inside `pm-storage.py`:
   - `LEVELS = {"watch": 80.0, "tighten": 85.0, "demand": 90.0, "final": 95.0}`, duplicated from `sigmond.storage.model.Levels` on purpose, with a drift-guard test.
-  - `SNAP_TAG = "sigmond-snapshot expires="`; `SNAP_LIFE_H = 48`; `SNAP_REFUSE_PCT = 70.0`; `NEVER_REAP = frozenset({"pristine"})`; `GUEST_REPORT_PATH = "/run/sigmond/host-pool.json"`; `LOCAL_STATE = "/run/sigmond/pm-storage.json"`
+  - `SNAP_TAG = "sigmond-snapshot expires="`; `SNAP_LIFE_H = 48` (the cap); `SNAP_EARLY_REAP_PCT = 90.0`; `CHURN_WINDOW_S = 6 * 3600`; `SNAP_REFUSE_PCT = 70.0`; `NEVER_REAP = frozenset({"pristine"})`; `GUEST_REPORT_PATH = "/run/sigmond/host-pool.json"`; `LOCAL_STATE = "/run/sigmond/pm-storage.json"`
   - `parse_storage_cfg(text: str) -> dict[str, tuple[str, str]]` maps a storage id to (vgname, thinpool) for `lvmthin:` blocks in `/etc/pve/storage.cfg`.
   - `pool_for_vm(qm_config_text: str, storage_map) -> Optional[tuple[str, str]]` reads `scsi0`/`virtio0`/`sata0` → storage id → pool.
   - `read_pool(lvs_json: str, vg: str, pool: str) -> dict` returns `{"name": "vg/pool", "size_bytes", "data_pct", "metadata_pct"}`, from `lvs --reportformat json --units b --nosuffix -o lv_name,vg_name,lv_size,data_percent,metadata_percent,lv_attr`.
   - `parse_snapshots(pvesh_json: str, vmid: int) -> list[dict]` reads `pvesh get /nodes/<node>/qemu/<vmid>/snapshot --output-format json`, drops `current`, and fills `sigmond`/`expires` from the description tag.
-  - `expired(snaps: list[dict], now: datetime) -> list[dict]` returns the labelled snapshots past expiry, never a name in `NEVER_REAP`.
+  - `expired(snaps: list[dict], now: datetime, pool_pct: float = 0.0) -> list[dict]` returns the labelled snapshots past expiry — or every labelled one when `pool_pct >= SNAP_EARLY_REAP_PCT` — never a name in `NEVER_REAP`.
+  - `churn_bytes_per_h(history: list[tuple[float, float]]) -> Optional[float]` takes (epoch, used_bytes) samples of the pool, kept in `LOCAL_STATE` over the last `CHURN_WINDOW_S`, and returns the growth rate by least squares; None with fewer than 2 samples an hour apart. Shrinking counts as 0.
+  - `snapshot_life_h(free_bytes: int, churn: Optional[float]) -> float` returns min(`SNAP_LIFE_H`, 0.5 × free_bytes / churn hours); `SNAP_LIFE_H` when churn is None or 0. Floor 1 h; below 2 h of projected room the snapshot is refused instead.
   - `host_alarms(pool: dict, snaps: list[dict], now: datetime) -> list[str]`. It gives the pool stage when ≥ watch, using max(data_pct, metadata_pct). It also names each unlabelled snapshot other than `pristine` older than `SNAP_LIFE_H`, with its age. `pristine` gets named only when the pool sits at or above watch.
   - `guest_report(vmid, pool, vms_on_pool, snaps, alarms, now) -> str`. JSON per Task 4's schema, `ensure_ascii=True`.
   - `main(argv) -> int`, with subcommands:
     - `report` (the timer): for each VM on this host, find its pool, then reap expired labelled snapshots (`qm delsnapshot`). Write each running guest's report via `pvesh create /nodes/<node>/qemu/<vmid>/agent/file-write --file /run/sigmond/host-pool.json --content <json>`. Write `LOCAL_STATE`. Log alarms to the journal with `<N>` priority prefixes, once per episode, with the episode state kept in `LOCAL_STATE`. A guest that fails the file-write gets a host alarm, "guest <vmid> unreachable", and the run goes on.
-    - `snapshot <vmid> <name> [--hours 48]`: refuse (exit 3, saying why) when the VM's pool sits at ≥ 70 %. Otherwise `qm snapshot <vmid> <name> --description "sigmond-snapshot expires=<ISO Z>"`.
+    - `snapshot <vmid> <name> [--hours N]`: refuse (exit 3, saying why) when the VM's pool sits at ≥ 70 %, or when the projected time to full is under 2 h. Otherwise the lifetime is `snapshot_life_h(...)` (an explicit `--hours` may shorten it, never lengthen it past that), and it runs `qm snapshot <vmid> <name> --description "sigmond-snapshot expires=<ISO Z>"`, printing the lifetime and why.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -714,6 +716,26 @@ def test_guest_report_is_ascii_and_matches_the_guest_reader(tmp_path):
     p = tmp_path / "h.json"; p.write_text(text)
     rep, fault = read_host_report(str(p), NOW)
     assert fault is None and rep.vms_on_pool == (100, 101)
+
+def test_lifetime_follows_the_pools_time_to_full():
+    GB = 10**9
+    # 11-03: ~120 GB free, ~3.7 GB/h churn -> ~32 h to full -> ~16 h life
+    assert pm.snapshot_life_h(120 * GB, 3.7 * GB) == pytest.approx(16.2, abs=0.2)
+    assert pm.snapshot_life_h(500 * GB, 1 * GB) == 48          # the cap
+    assert pm.snapshot_life_h(120 * GB, None) == 48             # no churn measured yet
+
+def test_churn_from_pool_history():
+    h = [(0, 100e9), (3600, 103.7e9), (7200, 107.4e9)]
+    assert pm.churn_bytes_per_h(h) == pytest.approx(3.7e9, rel=0.01)
+    assert pm.churn_bytes_per_h([(0, 1e9)]) is None
+    assert pm.churn_bytes_per_h([(0, 5e9), (3600, 4e9)]) == 0
+
+def test_pressure_reaps_labelled_snapshots_early_but_never_operators():
+    snaps = [{"vmid": 100, "name": "align-2", "sigmond": True, "expires": "2026-12-01T00:00:00Z"},
+             {"vmid": 100, "name": "pre-v385", "sigmond": False, "expires": None},
+             {"vmid": 100, "name": "pristine", "sigmond": False, "expires": None}]
+    assert pm.expired(snaps, NOW, pool_pct=89.9) == []
+    assert [s["name"] for s in pm.expired(snaps, NOW, pool_pct=90.0)] == ["align-2"]
 
 def test_snapshot_refused_on_a_full_pool():
     assert pm.main(["snapshot", "100", "x"], _fake_host(pool_pct=72)) == 3
