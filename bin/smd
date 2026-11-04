@@ -15603,10 +15603,9 @@ def cmd_log(args) -> int:
         topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
         until = None
         _for = getattr(args, 'for_duration', None)
-        _verbose = level.upper() == 'DEBUG'
-        if _for is None and _verbose:
+        if _for is None and level.upper() == 'DEBUG':
             _for = '24h'
-        if _for is not None and level.upper() not in ('INFO', 'WARNING', 'ERROR', 'CRITICAL'):
+        if _for is not None:
             from datetime import datetime as _dt, timedelta as _td, timezone as _tz
             from sigmond.storage_trim import parse_duration as _pd
             try:
@@ -27182,8 +27181,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--level', metavar='LEVEL',
                    help='set log level (DEBUG/INFO/WARNING/ERROR/CRITICAL) in coordination.env + SIGHUP')
     p.add_argument('--for', dest='for_duration', metavar='DURATION', default=None,
-                   help='how long a level above INFO lasts before sigmond restores '
-                        'the routine level (e.g. 2h, 1d; default 24h)')
+                   help='how long the level lasts before sigmond restores the routine '
+                        'level (e.g. 2h, 1d); default 24h for DEBUG, none otherwise')
 
     # wisdom — FFTW3 wisdom-file planner
     p_wisdom = admin_sub.add_parser('wisdom',

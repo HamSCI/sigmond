@@ -39,6 +39,8 @@ def _run_step(step: str, argv: list, run) -> CleanupResult:
 
 def _trim_tmp(tmp_root: Path, now: float) -> CleanupResult:
     removed = freed = 0
+    if os.path.islink(tmp_root):
+        return CleanupResult("tmp", False, f"{tmp_root} is a symlink; not trimmed")
     try:
         for dirpath, _dirs, files in os.walk(tmp_root, followlinks=False):
             for name in files:

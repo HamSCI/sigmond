@@ -116,7 +116,10 @@ def set_log_level(
         raise ValueError(f"invalid log level: {level}")
 
     key = client_env_key(client_name) if client_name else 'CLIENT_LOG_LEVEL'
-    if until is not None:
+    if until is None:
+        # A newer plain write supersedes any pending expiry.
+        _drop_env_keys(env_path, {f'{key}_UNTIL', f'{key}_ROUTINE'})
+    else:
         current = _read_env(env_path)
         if f'{key}_ROUTINE' not in current:
             _upsert_env_line(env_path, f'{key}_ROUTINE', current.get(key, ''))
@@ -168,9 +171,13 @@ def expire_log_levels(env_path: Path, now: datetime) -> list[str]:
         restored.append(key)
     if not restored:
         return []
-    lines = env_path.read_text().splitlines()
+    _rewrite_env(env_path, drop, sets)
+    return sorted(restored)
+
+
+def _rewrite_env(env_path: Path, drop: set, sets: dict) -> None:
     out = []
-    for line in lines:
+    for line in env_path.read_text().splitlines():
         k = line.partition('=')[0].strip()
         if k in drop:
             continue
@@ -179,8 +186,12 @@ def expire_log_levels(env_path: Path, now: datetime) -> list[str]:
         out.append(line)
     while out and not out[-1].strip():
         out.pop()
-    env_path.write_text('\n'.join(out) + '\n' if out else '')
-    return sorted(restored)
+    _atomic_write(env_path, '\n'.join(out) + '\n' if out else '')
+
+
+def _drop_env_keys(env_path: Path, keys: set) -> None:
+    if keys & set(_read_env(env_path)):
+        _rewrite_env(env_path, keys, {})
 
 
 def _upsert_env_line(env_path: Path, key: str, value: str) -> None:
@@ -201,11 +212,15 @@ def _upsert_env_line(env_path: Path, key: str, value: str) -> None:
             lines.append('')
         lines.append(f'{key}={value}')
 
+    _atomic_write(env_path, '\n'.join(lines) + '\n')
+
+
+def _atomic_write(env_path: Path, text: str) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(dir=env_path.parent, suffix='.env.tmp')
     try:
         with os.fdopen(tmp_fd, 'w') as f:
-            f.write('\n'.join(lines) + '\n')
+            f.write(text)
         os.replace(tmp_path, env_path)
     except BaseException:
         os.unlink(tmp_path)

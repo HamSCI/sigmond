@@ -73,3 +73,22 @@ def test_second_raise_keeps_first_routine(tmp_path):
     set_log_level("hf-timestd", "DEBUG", env_path=env, until=now + timedelta(hours=5))
     expire_log_levels(env, now + timedelta(hours=6))
     assert env.read_text() == "HF_TIMESTD_LOG_LEVEL=WARNING\n"
+
+
+def test_plain_write_cancels_pending_expiry(tmp_path):
+    env = tmp_path / "coordination.env"
+    env.write_text("HF_TIMESTD_LOG_LEVEL=INFO\n")
+    now = datetime(2026, 11, 4, tzinfo=timezone.utc)
+    set_log_level("hf-timestd", "DEBUG", env_path=env, until=now + timedelta(hours=2))
+    set_log_level("hf-timestd", "WARNING", env_path=env)
+    assert expire_log_levels(env, now + timedelta(hours=3)) == []
+    assert env.read_text() == "HF_TIMESTD_LOG_LEVEL=WARNING\n"
+
+
+def test_cleanup_refuses_symlinked_tmp_root(tmp_path):
+    real = tmp_path / "real"; real.mkdir()
+    f = real / "old"; f.write_text("x"); os.utime(f, (0, 0))
+    link = tmp_path / "link"; link.symlink_to(real)
+    run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+    res = run_cleanup(run=run, now=10 * 86400, tmp_root=link)
+    assert not res[2].ok and "symlink" in res[2].detail and f.exists()
