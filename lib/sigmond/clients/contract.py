@@ -25,10 +25,19 @@ from .base import ClientAdapter, ClientView, DataSink, DiskWrite, InstanceView
 
 # Tracks the CLIENT-CONTRACT.md version this sigmond build ships (see
 # the doc header).  Keep in lockstep with that header.  A client whose
-# inventory reports a different version stays operational: minor-version
-# skew is reported as a warn-level issue, never a hard fail — the
-# contract is designed for minor-version forward/backward compatibility.
-SUPPORTED_CONTRACT_VERSION = "0.8"
+# inventory reports a different version stays operational.  A client
+# newer than sigmond draws a warn-level issue, never a hard fail.  An
+# older client draws none: the contract is backward-compatible by design.
+SUPPORTED_CONTRACT_VERSION = "0.9"
+
+
+def _version_tuple(text):
+    """(major, minor) from "0.9"; None when the text does not parse."""
+    try:
+        parts = str(text).strip().split(".")
+        return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except (ValueError, IndexError):
+        return None
 
 # Threshold above which a quality-snapshot's age is reported as a
 # warn-level validate issue.  6× the snapshot writer's 5 s cadence —
@@ -94,7 +103,8 @@ class ContractAdapter(ClientAdapter):
         version = data.get('contract_version')
         if version:
             view.contract_version = str(version)
-            if view.contract_version != SUPPORTED_CONTRACT_VERSION:
+            got = _version_tuple(view.contract_version)
+            if got is None or got > _version_tuple(SUPPORTED_CONTRACT_VERSION):
                 view.issues.append(
                     f"contract_version mismatch: client reports "
                     f"{view.contract_version}, sigmond supports "
