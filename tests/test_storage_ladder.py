@@ -266,3 +266,15 @@ def test_tightened_targets_reduction_sums_exactly():
     t = tightened_targets(s, Levels(), {"a": 30 * GiB, "b": 30 * GiB, "c": 30 * GiB},
                           {"a": 0, "b": 0, "c": 0}, {c: 50 * GiB for c in "abc"})
     assert 90 * GiB - sum(t.values()) == 7 * GiB
+
+
+def test_a_managed_client_within_target_is_never_stopped_even_with_a_failed_streak():
+    # Controller ruling: a stop at FINAL also needs the client over its target now.
+    # Holding 10 GiB at a 10 GiB floor: the target cannot drop below 10 GiB.
+    rec = {"a": TrimRecord(requested_at=0.0, answered_at=30.0, ok=False)}
+    d = _decide(used_pct=96, managed=True, trims=rec, now=10_000, holding_gib=10, floor=10 * GiB)
+    assert d.targets["root"]["a"] == 10 * GiB
+    assert not _stops(d)
+    held = _decide(used_pct=96, managed=True, trims=rec, now=10_000, holding_gib=10,
+                   floor=10 * GiB, hands_off=True)
+    assert "hands-off-held:a" not in held.alarms

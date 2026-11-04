@@ -221,8 +221,10 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
             if is_managed and over:
                 actions.append(Action("final", name, c, fit_bytes=tgt[c],
                                       policy=directives.get(c)))
+            # A stop needs the client over its target now, whatever its
+            # trim record says: a client within target is not the cause.
             if is_managed:
-                fails = _failed_to_answer(rec, now)
+                fails = over and _failed_to_answer(rec, now)
                 why = f"failed to answer a trim request within {DEMAND_DEADLINE_S} s"
             else:
                 fails = (over and rec is not None and rec.final_since is not None
