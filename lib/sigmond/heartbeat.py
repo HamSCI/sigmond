@@ -990,7 +990,8 @@ def _read_resources() -> dict:
 
 
 def _read_storage_status(path=None, now=None) -> Optional[dict]:
-    """The storage ledger's worst stage as the heartbeat block carries it,
+    """The storage ledger's worst stage, and each store's stage and days of
+    coverage, as the heartbeat block carries them,
     or None when the status file is missing, unreadable, unparseable or
     older than STORAGE_STATUS_MAX_AGE_S.  Reads without following links."""
     if path is None:
@@ -1012,7 +1013,7 @@ def _read_storage_status(path=None, now=None) -> Optional[dict]:
         if stage not in _STORAGE_VERDICT:
             return None
         stores = [{"name": st.get("name"), "used_pct": st.get("used_pct"),
-                   "stage": st.get("stage")}
+                   "stage": st.get("stage"), "days": st.get("days")}
                   for st in doc.get("stores") or [] if isinstance(st, dict)]
         return {"worst_stage": stage, "stores": stores,
                 "alarms": len(doc.get("alarms") or [])}

@@ -75,6 +75,15 @@ def _gib(n) -> str:
     return "-" if n is None else f"{n / _GiB:.1f} GiB"
 
 
+def _days(d) -> str:
+    """Days of coverage; '-' when no write rate gives a number."""
+    return "- days" if d is None else f"{d:.1f} days"
+
+
+def _churn(n) -> str:
+    return "" if not n else f", growing {n / _GiB:.1f} GiB/h"
+
+
 def _status(args) -> int:
     from ..safe_write import read_nofollow
     path = _status_path(args)
@@ -100,12 +109,16 @@ def _status(args) -> int:
     if st.get("fault"):
         _say(f"  FAULT  {st['fault']}")
     for s in st.get("stores", []):
-        _say(f"  store  {s['name']} ({s['kind']}): {s['used_pct']:.1f}% {s['stage']}, "
-             f"{_gib(s['used'])} of {_gib(s['capacity'])}, allottable {_gib(s.get('allottable'))}")
+        _say(f"  store  {s['name']} ({s['kind']}): holds {_days(s.get('days'))}, "
+             f"{s['used_pct']:.1f}% {s['stage']}, "
+             f"{_gib(s['used'])} of {_gib(s['capacity'])}, allottable {_gib(s.get('allottable'))}"
+             + _churn(s.get("churn_bytes_per_h")))
     for c in st.get("clients", []):
         how = "managed" if c.get("managed") else "unmanaged"
         stop = ", STOPPED by the storage ledger" if c.get("stopped_by_storage") else ""
-        _say(f"  client {c['client']} on {c['store']}: holds {_gib(c.get('held'))}, "
+        _say(f"  client {c['client']} on {c['store']}: holds {_days(c.get('days_held'))} "
+             f"({_gib(c.get('held'))}) at {_gib(c.get('rate_bytes_per_day'))}/day "
+             f"({c.get('rate_source') or 'none'}), "
              f"target {_gib(c.get('target'))}, allotment {_gib(c.get('allotment'))}, "
              f"floor {_gib(c.get('floor'))}, {how}{stop}")
     for al in st.get("alarms", []):

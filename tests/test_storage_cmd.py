@@ -14,12 +14,14 @@ REPO = Path(__file__).resolve().parent.parent
 STATUS = {
     "schema": 1, "generated_at": "2026-11-04T12:00:00Z", "worst_stage": "TIGHTEN",
     "stores": [{"name": "root", "kind": "guest", "capacity": 100 << 30, "used": 86 << 30,
-                "used_pct": 86.0, "stage": "TIGHTEN", "allottable": 48 << 30},
+                "used_pct": 86.0, "stage": "TIGHTEN", "allottable": 48 << 30, "days": 2.4},
                {"name": "pve/data", "kind": "pool", "capacity": 1000 << 30,
-                "used": 500 << 30, "used_pct": 50.0, "stage": "OK", "allottable": None}],
+                "used": 500 << 30, "used_pct": 50.0, "stage": "OK", "allottable": None,
+                "days": None}],
     "clients": [{"client": "hf-timestd", "store": "root", "held": 40 << 30,
                  "allotment": 48 << 30, "target": 34 << 30, "floor": 1 << 30,
-                 "managed": True, "stopped_by_storage": False}],
+                 "managed": True, "stopped_by_storage": False,
+                 "rate_bytes_per_day": 20 << 30, "rate_source": "reported", "days_held": 2.0}],
     "host_report": {"expected": True, "fault": None, "age_s": 30},
     "hands_off": None,
     "alarms": [{"key": "store:root", "severity": "WARNING",
@@ -184,3 +186,19 @@ def test_install_sh_each_ok_follows_its_own_command():
     i = text.index("$SUDO systemctl enable --now sigmond-storage-trim-all.timer")
     j = text.index('ok "sigmond-storage-trim-all.timer enabled')
     assert "sigmond-storage.timer" not in text[i:j]
+
+
+def test_status_plain_leads_each_store_with_its_days(tmp_path, capsys):
+    (tmp_path / "status.json").write_text(json.dumps(STATUS))
+    assert cmd_storage(_args(tmp_path, storage_command="status")) == 0
+    stores = [l.strip() for l in capsys.readouterr().out.splitlines()
+              if l.lstrip().startswith("store ")]
+    assert stores[0].startswith("store  root (guest): holds 2.4 days")
+    assert stores[1].startswith("store  pve/data (pool): holds - days")
+
+
+def test_status_plain_shows_each_clients_rate_and_days(tmp_path, capsys):
+    (tmp_path / "status.json").write_text(json.dumps(STATUS))
+    cmd_storage(_args(tmp_path, storage_command="status"))
+    (line,) = [l for l in capsys.readouterr().out.splitlines() if "client hf-timestd" in l]
+    assert "holds 2.0 days" in line and "20.0 GiB/day (reported)" in line

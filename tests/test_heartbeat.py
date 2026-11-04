@@ -1606,7 +1606,16 @@ def test_read_storage_status_shapes_the_block(tmp_path):
     got = _read_storage_status(p, NOW.timestamp())
     assert got == {"worst_stage": "WATCH", "alarms": 2,
                    "stores": [{"name": "iq", "used_pct": 81.2,
-                               "stage": "WATCH"}]}
+                               "stage": "WATCH", "days": None}]}
+
+
+def test_read_storage_status_carries_each_stores_days(tmp_path):
+    from sigmond.heartbeat import _read_storage_status
+    p = _write_status(tmp_path, "OK", "2026-08-20T14:00:00Z",
+                      stores=[{"name": "root", "used_pct": 40.0, "stage": "OK",
+                               "days": 6.5}])
+    got = _read_storage_status(p, NOW.timestamp())
+    assert got["stores"] == [{"name": "root", "used_pct": 40.0, "stage": "OK", "days": 6.5}]
 
 
 def test_stale_storage_status_is_indeterminate(tmp_path):

@@ -38,10 +38,11 @@ def _view(name, path, managed=True, floor=0):
 def _fake_runners(used_pct, *, trim_ok=True, virt=False,
                   host_report=(None, "missing"), held=40 * GiB,
                   views=None, active=False, stop_result=(True, "stopped a.service"),
-                  expired=(), capacity=100 * GiB):
+                  expired=(), capacity=100 * GiB, recent=10 * GiB, reported=None):
     calls = Counter()
     lines = []
-    state = {"used": int(capacity * used_pct / 100), "held": held, "active": active}
+    state = {"used": int(capacity * used_pct / 100), "held": held, "active": active,
+             "recent": recent}
 
     def counted(name, fn):
         def wrapper(*a, **k):
@@ -49,9 +50,10 @@ def _fake_runners(used_pct, *, trim_ok=True, virt=False,
             return fn(*a, **k)
         return wrapper
 
-    def answer(ok):
+    def answer(ok, written=None):
         if ok:
-            return ClientAnswer(True, state["held"], {"raw": state["held"]})
+            return ClientAnswer(True, state["held"], {"raw": state["held"]},
+                                bytes_written_per_day=written)
         return ClientAnswer(False, None, {}, False, "exit 1")
 
     r = Runners(
@@ -62,7 +64,7 @@ def _fake_runners(used_pct, *, trim_ok=True, virt=False,
         path_bytes=counted("path_bytes", lambda paths: state["held"]),
         read_host_report=counted("read_host_report", lambda now: host_report),
         host_report_expected=counted("host_report_expected", lambda cfg: virt),
-        call_holdings=counted("call_holdings", lambda b: answer(True)),
+        call_holdings=counted("call_holdings", lambda b: answer(True, reported)),
         call_trim=counted("call_trim", lambda b, n: answer(trim_ok)),
         call_final=counted("call_final", lambda b, n, p: answer(trim_ok)),
         stop_client=counted("stop_client", lambda c: stop_result),
@@ -73,6 +75,8 @@ def _fake_runners(used_pct, *, trim_ok=True, virt=False,
         journal=lines.append,
         binary_for=lambda c: f"/usr/bin/{c}",
         client_active=lambda c: state["active"],
+        recent_bytes=counted("recent_bytes", lambda paths, now: (
+            state["recent"](paths) if callable(state["recent"]) else state["recent"])),
     )
     r.calls = calls
     r.journal_lines = lines
@@ -571,3 +575,89 @@ def test_an_ok_answer_this_pass_spares_the_stop(tmp_path):
     r.call_final = lambda b, n, pol: ClientAnswer(True, 20 * GiB, {"raw": 20 * GiB})
     run_tick(T0 + timedelta(seconds=601), r, **p)
     assert r.calls["stop_client"] == 0
+
+
+# ---- days of coverage (Task 13) ---------------------------------------------
+
+def test_status_reports_days_and_each_clients_days_held(tmp_path):
+    p = _paths(tmp_path)
+    run_tick(T0, _fake_runners(used_pct=50), **p)          # a holds 40 GiB, writes 10 GiB/day
+    st = _status(p)
+    (store,) = st["stores"]
+    (c,) = st["clients"]
+    # allottable 100 - 1 reserve - 5 headroom - 10 unregistered = 84 GiB, over 10 GiB/day
+    assert store["days"] == 8.4
+    assert c["rate_bytes_per_day"] == 10 * GiB and c["rate_source"] == "measured"
+    assert c["days_held"] == 4.0
+
+
+def test_a_reported_rate_beats_the_measured_one(tmp_path):
+    p = _paths(tmp_path)
+    run_tick(T0, _fake_runners(used_pct=50, reported=20 * GiB), **p)
+    (c,) = _status(p)["clients"]
+    assert c["rate_source"] == "reported" and c["days_held"] == 2.0
+
+
+def test_no_rate_shows_none_and_floor_only(tmp_path):
+    p = _paths(tmp_path)
+    r = _fake_runners(used_pct=50, views={"a": _view("a", "/data/a", floor=2 * GiB)})
+    r.recent_bytes = None
+    run_tick(T0, r, **p)
+    st = _status(p)
+    (c,) = st["clients"]
+    assert c["rate_source"] == "none" and c["rate_bytes_per_day"] == 0
+    assert c["days_held"] is None and c["allotment"] == 2 * GiB
+    assert st["stores"][0]["days"] is None
+
+
+def test_two_clients_split_in_days_not_bytes(tmp_path):
+    p = _paths(tmp_path)
+    views = {"a": _view("a", "/data/a"), "b": _view("b", "/data/b")}
+    rates = {"/data/a": 20 * GiB, "/data/b": 4 * GiB}
+    r = _fake_runners(used_pct=50, views=views, held=10 * GiB,
+                      recent=lambda paths: rates[paths[0]])
+    run_tick(T0, r, **p)
+    st = _status(p)
+    allot = {c["client"]: c["allotment"] for c in st["clients"]}
+    # used 50, held 20 -> 30 unregistered; allottable 100 - 1 - 5 - 30 = 64 GiB over 24 GiB/day
+    assert st["stores"][0]["days"] == round(64 / 24, 3)
+    assert allot["a"] == 5 * allot["b"] or abs(allot["a"] - 5 * allot["b"]) <= 5
+
+
+def test_recent_bytes_cached_for_half_an_hour(tmp_path):
+    r = _fake_runners(used_pct=10); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    run_tick(T0 + timedelta(minutes=2), r, **p)
+    assert r.calls["recent_bytes"] == 1
+    run_tick(T0 + timedelta(minutes=31), r, **p)
+    assert r.calls["recent_bytes"] == 2
+
+
+def test_a_reported_rate_needs_no_walk(tmp_path):
+    r = _fake_runners(used_pct=10, reported=GiB); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    assert r.calls["recent_bytes"] == 0
+
+
+def test_fast_churn_raises_watch_early_and_the_horizon_is_configurable(tmp_path):
+    p = _paths(tmp_path)
+    r = _fake_runners(used_pct=40)
+    for k in range(13):                         # 2 hours, 4 GiB/h: 54 GiB free -> ~13 h
+        r.state["used"] = int(40 * GiB + k * GiB * 4 / 6)
+        run_tick(T0 + timedelta(minutes=10 * k), r, **p)
+    st = _status(p)
+    assert st["stores"][0]["stage"] == "WATCH" and st["stores"][0]["used_pct"] < 80
+    assert st["stores"][0]["churn_bytes_per_h"] == round(4 * GiB, -3) or \
+        abs(st["stores"][0]["churn_bytes_per_h"] - 4 * GiB) < 1e6
+    p["config_path"].write_text("[levels]\nhorizon_h = 6\n")
+    run_tick(T0 + timedelta(minutes=130), r, **p)
+    assert _status(p)["stores"][0]["stage"] == "OK"
+
+
+def test_churn_waits_for_an_hour_of_history(tmp_path):
+    p = _paths(tmp_path)
+    r = _fake_runners(used_pct=40)
+    for k in range(5):                          # 40 minutes only
+        r.state["used"] = int(40 * GiB + k * 5 * GiB)
+        run_tick(T0 + timedelta(minutes=10 * k), r, **p)
+    assert _status(p)["stores"][0]["stage"] == "OK"

@@ -2234,9 +2234,23 @@ JSON object on stdout and exits 0.
 
 `estimated` is `true` when the client counted from a cache or a model
 rather than from the files.  A client SHOULD add `bytes_written_per_day`,
-an integer: the bytes it wrote in the last 24 hours, which sigmond uses
-to forecast when a store fills.  A ring buffer at steady state still
-writes, so this counts bytes of files modified in that window.
+an integer: the bytes it wrote in the last 24 hours.  A ring buffer at
+steady state still writes, so this counts bytes of files modified in that
+window, not the growth of the holdings.
+
+**Days of coverage.**  Sigmond divides each store in days, not bytes.  A
+client's allotment equals its `floor_bytes`, plus its write rate times one
+number of days D, times the operator's share for it (1 by default).
+Sigmond picks D so the allotments fill the space the clients share, and
+reports that the store holds D days.  It takes a client's rate from
+`bytes_written_per_day` when the client reports one.  Otherwise it
+measures the bytes of the client's files modified over the last 24 hours.
+When that measures nothing, it falls back to the sum of the sinks'
+declared `mb_per_day` (MB = 10^6 bytes).  A client with no rate from any
+source gets its floor only.  The smallest `retention_days` above 0 among a
+client's sinks on a store caps that client's days there; the days it gives
+up go to the other clients.  Under pressure D shrinks for every client
+alike, and no target falls below a floor.
 
 `trim` and `final` answer in one shape:
 

@@ -57,3 +57,20 @@ def test_with_directive_rejects_bad_policy_and_none_clears(tmp_path):
     c = with_directive(c, "x", "give-up-oldest:raw")
     assert with_directive(c, "x", None).directives == {}
     assert with_share(with_share(c, "a", 1.0), "a", None).shares == {}
+
+
+def test_horizon_defaults_parses_and_round_trips(tmp_path):
+    assert load_storage_config(tmp_path / "none.toml").horizon_h == 24.0
+    p = tmp_path / "s.toml"; p.write_text("[levels]\nwatch = 70\nhorizon_h = 48\n")
+    c = load_storage_config(p)
+    assert c.horizon_h == 48.0 and c.levels.watch == 70.0 and c.problems == ()
+    p.write_text(render_storage_toml(c))
+    assert load_storage_config(p) == c
+
+
+def test_a_bad_horizon_drops_alone(tmp_path):
+    for bad in ("0", "-5", '"soon"', "true"):
+        p = tmp_path / "s.toml"; p.write_text(f"[levels]\nwatch = 70\nhorizon_h = {bad}\n")
+        c = load_storage_config(p)
+        assert c.horizon_h == 24.0 and c.levels.watch == 70.0
+        assert any("horizon_h" in m for m in c.problems)

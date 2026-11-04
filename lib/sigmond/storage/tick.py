@@ -32,7 +32,7 @@ import json
 import os
 import re
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -41,14 +41,16 @@ from .alarms import AlarmBook, journal_line
 from .clientcall import ClientAnswer
 from .config import CONFIG_PATH, hands_off_active, load_storage_config
 from .ladder import Severity, TrimRecord, decide
-from .model import (STATE_RESERVE_BYTES, Holding, Registration, Stage,
-                    allot, allottable_bytes, apply_pool_limit, pool_room_bytes)
+from .model import (STATE_RESERVE_BYTES, Demand, Holding, Stage,
+                    allot_days, allottable_bytes, apply_pool_limit, pool_room_bytes)
+from .rates import CHURN_WINDOW_S, churn_bytes_per_h, rate_for
 from .registry import registrations_from_views
 
 STATE_PATH = Path("/var/lib/sigmond/storage/state.json")
 STATUS_PATH = Path("/run/sigmond/storage-status.json")
 LOCK_PATH = Path("/run/sigmond/storage.lock")
 DU_CACHE_S = 1800
+RECENT_CACHE_S = 1800      # recent-bytes walks, cached per client like du
 STALE_TRIM_S = 3600
 UNCLAIMED_EVERY_S = 6 * 3600
 CLEANUP_EVERY_S = 3600
@@ -74,6 +76,7 @@ class Runners:
     journal: Callable               # (line) -> None
     binary_for: Callable            # (client) -> str | None
     client_active: Callable         # (client) -> bool: any of its services active
+    recent_bytes: Optional[Callable] = None   # (paths, now) -> bytes modified in 24 h
 
 
 # ---------------------------------------------------------------- real runners
@@ -139,7 +142,7 @@ def default_runners() -> Runners:
     from .. import archive, log_cmd
     from ..paths import COORDINATION_ENV
     from ..sysview import build_system_view
-    from . import cleanup, clientcall, measure
+    from . import cleanup, clientcall, measure, rates
     return Runners(
         load_views=lambda: build_system_view().client_views,
         discover_stores=lambda paths: measure.discover_stores(paths, str(archive.MOUNT)),
@@ -157,6 +160,7 @@ def default_runners() -> Runners:
         journal=_journal,
         binary_for=_binary_for,
         client_active=_client_active,
+        recent_bytes=lambda paths, now: rates.recent_bytes(paths, now),
     )
 
 
@@ -306,6 +310,47 @@ def _measure(regs, path_bytes, du: dict, used: set, now: float, c, store,
     return n
 
 
+def _recent(regs, recent_bytes, cache: dict, used: set, now: float, c, store) -> Optional[int]:
+    """Bytes the client wrote on `store` in the last 24 h, cached for
+    RECENT_CACHE_S; None when the tick has no way to measure."""
+    if recent_bytes is None:
+        return None
+    paths = sorted(p for r in regs if r.client == c and r.store == store for p in r.paths)
+    key = f"{c}|{store}"
+    used.add(key)
+    hit = cache.get(key)
+    if (isinstance(hit, dict) and hit.get("paths") == paths
+            and _num(hit.get("at")) is not None and 0 <= now - hit["at"] < RECENT_CACHE_S
+            and isinstance(hit.get("bytes"), int)):
+        return hit["bytes"]
+    n = int(recent_bytes(paths, now))
+    cache[key] = {"at": now, "bytes": n, "paths": paths}
+    return n
+
+
+def _history(state: dict, stores, now: float) -> dict:
+    """Each store's (time, used) samples over the last CHURN_WINDOW_S,
+    this pass's sample appended."""
+    old = state.get("history") if isinstance(state.get("history"), dict) else {}
+    out = {}
+    for name, store in stores.items():
+        pts = []
+        for item in old.get(name) or []:
+            try:
+                t, u = float(item[0]), float(item[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if now - CHURN_WINDOW_S <= t < now:
+                pts.append([t, u])
+        pts.append([now, store.used])
+        out[name] = pts
+    return out
+
+
+def _round(x: Optional[float], nd: int = 3) -> Optional[float]:
+    return None if x is None else round(x, nd)
+
+
 def _record_answer(trims: dict, touched: dict, c: str, ans: ClientAnswer, now: float) -> None:
     rec = trims.get(c)
     if rec is None or rec.ok:
@@ -360,6 +405,7 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
     du = state.get("du") if isinstance(state.get("du"), dict) else {}
     du_used: set = set()
     holdings: dict = {}
+    reported: dict = {}       # (client, store) -> bytes_written_per_day from `holdings`
     by_client: dict = {}
     for reg in regs:
         by_client.setdefault(reg.client, []).append(reg)
@@ -371,22 +417,38 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
             binary = r.binary_for(c)
             ans = r.call_holdings(binary) if binary else _fail("binary not found")
             if ans.unsupported:
-                cregs = [Registration(x.client, x.store, x.paths, 0, None, False) for x in cregs]
+                cregs = [replace(x, floor_bytes=0, policy=None, managed=False) for x in cregs]
                 ans = None
         final_regs.extend(cregs)
         single = len(cregs) == 1
         for x in cregs:
             if ans is not None and ans.ok and single:
                 holdings[(c, x.store)] = Holding(c, x.store, dict(ans.bytes_by_class), False)
+                if ans.bytes_written_per_day is not None:
+                    reported[(c, x.store)] = ans.bytes_written_per_day
             else:
                 n = _measure(cregs, r.path_bytes, du, du_used, t, c, x.store)
                 holdings[(c, x.store)] = Holding(c, x.store, {"unclassified": n}, True)
     regs = final_regs
     du = {k: v for k, v in du.items() if k in du_used}
 
+    # Write rates: reported > measured (files modified in 24 h) > declared.
+    recent = state.get("recent") if isinstance(state.get("recent"), dict) else {}
+    recent_used: set = set()
+    rates: dict = {}          # (client, store) -> (bytes/day, source)
+    for x in regs:
+        key = (x.client, x.store)
+        rep_rate = reported.get(key)
+        measured = (None if rep_rate is not None else
+                    _recent(regs, r.recent_bytes, recent, recent_used, t, x.client, x.store))
+        rates[key] = rate_for(x.client, reported=rep_rate, recent_bytes=measured,
+                              declared_mb_per_day=x.mb_per_day)
+    recent = {k: v for k, v in recent.items() if k in recent_used}
+
     # Allotments, per guest store; a filling pool caps their growth.
     stores = {s.name: s for s in stores_list}
     allotments: dict = {}
+    demands: dict = {}
     for s in stores_list:
         registered = sum(h.total for (c, sn), h in holdings.items() if sn == s.name)
         reserve = STATE_RESERVE_BYTES if s.mount == "/" else 0
@@ -398,10 +460,14 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
                 share = 1.0 / len(report.vms_on_pool) if report.vms_on_pool else 1.0
             allottable = apply_pool_limit(allottable, registered,
                                           pool_room_bytes(pool, levels, share))
-        allotments[s.name] = allot([x for x in regs if x.store == s.name],
-                                   allottable, cfg.shares)
+        demands[s.name] = [Demand(x.client, x.floor_bytes, rates[(x.client, x.store)][0],
+                                  cfg.shares.get(x.client, 1.0), x.max_days)
+                           for x in regs if x.store == s.name]
+        allotments[s.name] = allot_days(demands[s.name], allottable)
     if pool is not None:
         stores[pool.name] = pool
+    history = _history(state, stores, t)
+    churn = {name: churn_bytes_per_h(pts) for name, pts in history.items()}
 
     trims, touched = _load_trims(state.get("trims"), t)
     for c in restarted:                 # an operator's start earns a fresh deadline
@@ -411,7 +477,8 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
     decision = decide(stores=stores, allotments=allotments, holdings=holdings,
                       registrations=regs, levels=levels, trims=trims,
                       directives=cfg.directives, hands_off=hands_off,
-                      host_fault=host_fault, now=t)
+                      host_fault=host_fault, now=t, demands=demands, churn=churn,
+                      horizon_h=cfg.horizon_h)
     active.update(decision.alarms)
 
     # Who sits over its target on a store under pressure.
@@ -504,6 +571,8 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
                   for c, x in sorted(trims.items())},
         "stopped": stopped,
         "du": du,
+        "recent": recent,
+        "history": history,
         "last_cleanup": last_cleanup,
         "last_unclaimed": last_unclaimed,
         "unclaimed": unclaimed,
@@ -516,7 +585,9 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
         "stores": [
             {"name": s.name, "kind": s.kind, "capacity": s.capacity, "used": s.used,
              "used_pct": round(s.used_pct, 2), "stage": decision.stages[s.name].name,
-             "allottable": allotments[s.name].allottable if s.name in allotments else None}
+             "allottable": allotments[s.name].allottable if s.name in allotments else None,
+             "days": _round(allotments[s.name].days) if s.name in allotments else None,
+             "churn_bytes_per_h": _round(churn.get(s.name), 0)}
             for s in sorted(stores.values(), key=lambda s: s.name)],
         "clients": [
             {"client": x.client, "store": x.store,
@@ -525,6 +596,11 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
              "allotment": allotments[x.store].per_client.get(x.client),
              "target": decision.targets.get(x.store, {}).get(x.client),
              "floor": x.floor_bytes, "managed": x.managed,
+             "rate_bytes_per_day": _round(rates[(x.client, x.store)][0], 0),
+             "rate_source": rates[(x.client, x.store)][1],
+             "days_held": (_round(holdings[(x.client, x.store)].total
+                                  / rates[(x.client, x.store)][0])
+                           if rates[(x.client, x.store)][0] > 0 else None),
              "stopped_by_storage": x.client in stopped,
              "trim": _trim_row(trims.get(x.client))}
             for x in sorted(regs, key=lambda x: (x.client, x.store))],

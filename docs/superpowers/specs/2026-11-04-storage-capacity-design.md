@@ -296,7 +296,10 @@ during migration, as a last-resort net only. Once hf-timestd takes allotments, t
 ## Operator surface and rollout *(designer's calls)*
 
 - Shares, directives and stage levels live in `/etc/sigmond/storage.toml`; `smd storage
-  status|share|directive` reads and sets them, and the TUI shows the same.
+  status|share|directive` reads and sets them, and the TUI shows the same. The time-to-full
+  horizon lives there too, as `[levels] horizon_h` (24 h by default). `smd storage status`
+  leads each store with the days it holds, and shows each client's rate, its rate's source
+  and the days it holds.
 - The hands-off mark lives there too (`smd storage directive hands-off`), with an expiry like a
   raised log level, so a finished experiment can't leave a station unprotected for good.
 - Pins come from `smd archive keep` (already planned): a pin names a time window and,

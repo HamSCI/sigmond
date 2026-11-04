@@ -1,4 +1,5 @@
-"""storage.toml: level overrides, shares, directives, hands-off window.
+"""storage.toml: level overrides, the time-to-full horizon, shares,
+directives, hands-off window.
 
 Loading never raises.  A bad key drops alone and leaves one problem line;
 a bad [levels] table falls back whole.
@@ -17,6 +18,8 @@ CONFIG_PATH = Path("/etc/sigmond/storage.toml")
 POLICY_RE = r"^(give-up-oldest:(pinned|raw|derived|sent)|stop-writing|refuse-new-rows|custom:[a-z0-9-]+)$"
 MAX_HANDS_OFF = timedelta(days=14)
 _LEVEL_KEYS = ("watch", "tighten", "demand", "final", "client_watch")
+DEFAULT_HORIZON_H = 24.0
+MAX_HORIZON_H = 24.0 * 365
 _BARE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -30,6 +33,7 @@ class StorageConfig:
     pool_share: Optional[float] = None
     expect_host_report: Optional[bool] = None
     problems: tuple = ()
+    horizon_h: float = 24.0     # [levels] horizon_h: time to full under this -> WATCH
 
 
 def _num(v) -> Optional[float]:
@@ -93,7 +97,16 @@ def load_storage_config(path: Path = CONFIG_PATH) -> StorageConfig:
             return {}
         return t
 
-    levels = _parse_levels(table("levels"), problems) if table("levels") else Levels()
+    lv_tbl = dict(table("levels"))
+    horizon_h = DEFAULT_HORIZON_H
+    if "horizon_h" in lv_tbl:
+        n = _num(lv_tbl.pop("horizon_h"))
+        if n is None or not (0 < n <= MAX_HORIZON_H):
+            problems.append(f"levels.horizon_h: not a number of hours within 0..{MAX_HORIZON_H:g}; "
+                            f"using {DEFAULT_HORIZON_H:g}")
+        else:
+            horizon_h = n
+    levels = _parse_levels(lv_tbl, problems) if lv_tbl else Levels()
 
     shares = {}
     for k, v in table("shares").items():
@@ -136,7 +149,7 @@ def load_storage_config(path: Path = CONFIG_PATH) -> StorageConfig:
             problems.append("pool.expect_report: not a boolean; dropped")
 
     return StorageConfig(levels, shares, directives, until, reason,
-                         pool_share, expect, tuple(problems))
+                         pool_share, expect, tuple(problems), horizon_h)
 
 
 def hands_off_active(cfg: StorageConfig, now: datetime) -> bool:
@@ -157,6 +170,7 @@ def render_storage_toml(cfg: StorageConfig) -> str:
     lv = cfg.levels
     out = ["[levels]"]
     out += [f"{k} = {getattr(lv, k)!r}" for k in _LEVEL_KEYS]
+    out.append(f"horizon_h = {float(cfg.horizon_h)!r}")
     if cfg.shares:
         out += ["", "[shares]"] + [f"{_key(k)} = {float(v)!r}" for k, v in sorted(cfg.shares.items())]
     if cfg.directives:
