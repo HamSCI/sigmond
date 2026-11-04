@@ -136,3 +136,21 @@ def test_non_finite_shares_drop(tmp_path):
     c = load_storage_config(p)
     assert c.shares == {"c": 2.0}
     assert any("shares.a" in m for m in c.problems) and any("shares.b" in m for m in c.problems)
+
+
+def test_render_writes_only_levels_that_differ_from_the_defaults(tmp_path):
+    """So a later change to a default reaches a station whose file the CLI
+    wrote: the file never pins a value nobody chose."""
+    c = with_share(load_storage_config(tmp_path / "n"), "a", 2.0)
+    text = render_storage_toml(c)
+    for key in ("watch", "tighten", "demand", "final", "client_watch", "horizon_h"):
+        assert f"{key} =" not in text
+    p = tmp_path / "s.toml"; p.write_text(text)
+    assert load_storage_config(p) == c
+    p.write_text("[levels]\nwatch = 70\nhorizon_h = 48\n")
+    c = load_storage_config(p)
+    text = render_storage_toml(c)
+    assert "watch = 70.0" in text and "horizon_h = 48.0" in text
+    assert "tighten =" not in text and "final =" not in text
+    p.write_text(text)
+    assert load_storage_config(p) == c

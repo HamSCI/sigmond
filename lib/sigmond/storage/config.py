@@ -212,10 +212,14 @@ def _str(s: str) -> str:
 
 
 def render_storage_toml(cfg: StorageConfig) -> str:
-    lv = cfg.levels
-    out = ["[levels]"]
-    out += [f"{k} = {getattr(lv, k)!r}" for k in _LEVEL_KEYS]
-    out.append(f"horizon_h = {float(cfg.horizon_h)!r}")
+    # Only what differs from the defaults: a key the file never pinned
+    # follows a later change to its default.
+    lv, dflt = cfg.levels, Levels()
+    lines = [f"{k} = {float(getattr(lv, k))!r}" for k in _LEVEL_KEYS
+             if getattr(lv, k) != getattr(dflt, k)]
+    if cfg.horizon_h != DEFAULT_HORIZON_H:
+        lines.append(f"horizon_h = {float(cfg.horizon_h)!r}")
+    out = ["[levels]"] + lines if lines else []
     if cfg.shares:
         out += ["", "[shares]"] + [f"{_key(k)} = {float(v)!r}" for k, v in sorted(cfg.shares.items())]
     if cfg.directives:
@@ -231,7 +235,7 @@ def render_storage_toml(cfg: StorageConfig) -> str:
             out.append(f"expect_report = {'true' if cfg.expect_host_report else 'false'}")
     if cfg.stop_enabled:
         out += ["", "[stop]", "enabled = true"]
-    return "\n".join(out) + "\n"
+    return "\n".join(out).lstrip("\n") + "\n"
 
 
 def with_share(cfg: StorageConfig, client: str, weight: Optional[float]) -> StorageConfig:
