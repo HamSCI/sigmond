@@ -91,12 +91,22 @@ def stop_client(component: str, resolve=_default_resolve,
     """
     if component in NEVER_STOP:
         return False, f"{component} is never stopped by the storage ledger"
+    try:
+        refs = list(resolve(component))
+    except (ValueError, OSError) as exc:
+        return False, f"cannot resolve units of {component}: {exc}"
     stopped = []
-    for ref in resolve(component):
+    for ref in refs:
         if ref.kind not in ("service", "timer"):
             continue
-        proc = run(["systemctl", "stop", ref.unit], capture_output=True, text=True, timeout=60)
+        try:
+            proc = run(["systemctl", "stop", ref.unit], capture_output=True,
+                       text=True, timeout=60)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return False, (f"systemctl stop {ref.unit} failed: {exc}"
+                           + (f"; already stopped: {', '.join(stopped)}" if stopped else ""))
         if proc.returncode != 0:
-            return False, f"systemctl stop {ref.unit} failed (exit {proc.returncode})"
+            return False, (f"systemctl stop {ref.unit} failed (exit {proc.returncode})"
+                           + (f"; already stopped: {', '.join(stopped)}" if stopped else ""))
         stopped.append(ref.unit)
-    return True, "stopped " + ", ".join(stopped) if stopped else "no units to stop"
+    return True, ("stopped " + ", ".join(stopped) if stopped else "no units to stop")

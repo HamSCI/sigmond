@@ -67,3 +67,34 @@ def test_stop_reports_failure():
     units = [SimpleNamespace(unit="a.service", kind="service")]
     ok, why = stop_client("a", resolve=lambda c: units, run=_run(rc=1))
     assert not ok and "a.service" in why
+
+
+def test_stop_timeout_is_a_failed_answer_naming_units():
+    units = [SimpleNamespace(unit="a1.service", kind="service"),
+             SimpleNamespace(unit="a2.service", kind="service")]
+    n = []
+
+    def run(argv, **kw):
+        n.append(argv)
+        if len(n) == 2:
+            raise subprocess.TimeoutExpired("systemctl", 60)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    ok, why = stop_client("a", resolve=lambda c: units, run=run)
+    assert not ok and "a2.service" in why and "a1.service" in why
+
+
+def test_stop_oserror_is_a_failed_answer():
+    units = [SimpleNamespace(unit="a.service", kind="service")]
+    ok, why = stop_client("a", resolve=lambda c: units, run=_run(exc=FileNotFoundError("systemctl")))
+    assert not ok and "a.service" in why
+
+
+def test_stop_unknown_component_is_a_failed_answer():
+    def resolve(c):
+        raise ValueError("unknown component")
+    ok, why = stop_client("nope", resolve=resolve, run=_run())
+    assert not ok and "nope" in why
+
+
+def test_stop_with_no_units_succeeds_and_says_so():
+    assert stop_client("a", resolve=lambda c: [], run=_run()) == (True, "no units to stop")
