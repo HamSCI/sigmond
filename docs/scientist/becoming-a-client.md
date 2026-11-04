@@ -50,9 +50,9 @@ client — because `validate` is exactly the question "what does unhealthy look
 like?", and a client that cannot answer it adds a green tick to the operator's
 screen that means nothing.
 
-## The seven things you must ship
+## The eight things you must ship
 
-This is [ADD-A-CLIENT.md's TL;DR](../ADD-A-CLIENT.md#tldr--the-seven-things-you-must-ship)
+This is [ADD-A-CLIENT.md's TL;DR](../ADD-A-CLIENT.md#tldr--the-eight-things-you-must-ship)
 with a scientist's gloss on each. That page is the checklist; keep it open.
 
 | # | Thing | What it actually means |
@@ -64,6 +64,7 @@ with a scientist's gloss on each. That page is the checklist; keep it open.
 | 5 | **A config template and a render step** in `deploy.toml` | so the station gets a working config at install time, and re-running the installer never overwrites an operator's edits (`if_absent = true`) |
 | 6 | **`[client_features]` blocks**, one per TUI screen you want | pure registration ([ADD-A-CLIENT §5](../ADD-A-CLIENT.md#5-client_features--tui-registration-drop-in)). Omit a block and you are simply absent from that screen; nothing breaks |
 | 7 | **A catalog entry** in sigmond, *when ready* | only needed so hosts that have **not** cloned your repo can find it. A cloned repo is auto-discovered ([ADD-A-CLIENT §6](../ADD-A-CLIENT.md#6-catalog-entry-often-optional)) |
+| 8 | **Storage declarations and verbs** | tell sigmond what you hold and how you trim, so a full disk does not catch you by surprise ([ADD-A-CLIENT §9](../ADD-A-CLIENT.md#9-storage-tell-sigmond-what-you-hold-client-contractmd-177)) |
 
 Alongside (4), the wizard surface: `config init` / `config edit` (interactive),
 `config show --json [--defaults]` and `config apply --json -` (machine-readable)

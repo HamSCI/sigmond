@@ -267,6 +267,7 @@ means post-hoc analysis of the *run* is a `grep` away, not an archaeology projec
 
 **An explicit retention policy.** State what happens to data after upload or analysis —
 kept, pruned, archived. Silence here is how disks fill during the next event.
+Declare the floor, classes and final policy for your data in `data_sinks`, and answer the `storage` verbs ([ADD-A-CLIENT.md](ADD-A-CLIENT.md) §9).
 
 ### Nice to have
 
@@ -298,6 +299,7 @@ contains nothing.
 - [ ] Multicast group verified unique among those joined on the host
 - [ ] `inventory --json` and `validate --json` emit pure JSON and see the live job
 - [ ] Disk pre-flight for the whole window, with margin
+- [ ] `data_sinks` declares floor, classes and final policy; `storage holdings` answers
 - [ ] Timing anchor present and reading `anchored` on a live segment
 - [ ] Signal-level heartbeat logging, so a dead antenna is distinguishable from a live one
 - [ ] External watchdog installed **and tested by killing the capture**

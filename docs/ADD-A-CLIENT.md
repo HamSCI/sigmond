@@ -20,7 +20,7 @@ If you're _operating_ sigmond rather than authoring a client, you want
 
 ---
 
-## TL;DR — the seven things you must ship
+## TL;DR — the eight things you must ship
 
 | # | What                                                                                   | Where                                                |
 |---|----------------------------------------------------------------------------------------|------------------------------------------------------|
@@ -31,6 +31,7 @@ If you're _operating_ sigmond rather than authoring a client, you want
 | 5 | A config template + default-config render step in `deploy.toml`                        | `<repo>/config/` + `[[install.steps]] kind=render`   |
 | 6 | A `[client_features.{watch,verifier,receiver_channels}]` block per TUI surface you want | same file (+ matching parser module — see §5.1)      |
 | 7 | (When ready) a catalog entry in sigmond's `etc/catalog.toml` or per-host override     | sigmond repo                                          |
+| 8 | Storage: `data_sinks` floor/policy/classes, and the `storage` verbs                    | your CLI entry point + `data_sinks` (§9)             |
 
 After (1)–(6), `smd install <your-client>` and `smd tui` work.  After
 (7), `smd list` shows you in the catalog and other hosts can pull you
@@ -397,6 +398,63 @@ smd tui   # Installation → ⚙ Configuration → Edit selected
 
 `feedback-config-invariants` in the auto-memory store records the
 principle and why it matters.
+
+---
+
+## 9. Storage: tell sigmond what you hold (CLIENT-CONTRACT.md §17.7)
+
+Sigmond keeps a ledger of the bytes each client holds.  When a disk
+fills, sigmond asks clients to trim.  You join the ledger in two steps.
+
+First, add three fields to each `file` entry in `data_sinks`:
+`floor_bytes` (the least you need to keep working), `final_policy`
+(what you do at the last stage) and `classes` (any of `pinned`, `raw`,
+`derived`, `sent`).  Then answer three verbs: `storage holdings`,
+`storage trim` and `storage final`.
+
+You write one function.  It lists your files with a class for each.
+The kit in `sigmond.storage.client_kit` does the rest: it sums bytes,
+picks what to delete (`sent` first, then `derived`, then `raw`, oldest
+first, never `pinned`), and prints the JSON the contract specifies.
+
+Clients load sigmond lazily with a fallback.  The kit imports only the
+standard library, so import it inside `try`:
+
+```python
+import os
+from sigmond.storage.client_kit import Item, add_storage_verbs
+
+DATA = "/var/lib/my-client"
+
+def list_items():
+    out = []
+    for name in os.listdir(DATA):
+        p = os.path.join(DATA, name)
+        st = os.stat(p)
+        cls = "sent" if name.endswith(".uploaded") else "raw"
+        out.append(Item(p, st.st_size, cls, st.st_mtime))
+    return out
+
+def build_parser(sub):            # `sub` is your argparse subparsers
+    add_storage_verbs(sub, list_items=list_items,
+                      delete=lambda it: os.remove(it.path),
+                      floor_bytes=50_000_000,
+                      final_policy="give-up-oldest:raw")
+```
+
+Then call `args.func(args)` and exit with its return value.  The kit
+returns 0 for every answer, including a refusal.  A refusal sets
+`refused` to `true` in the JSON.
+
+Mark a file `pinned` when the client cannot rebuild it and the operator
+must decide its fate.  Sigmond never asks you to delete it.  If your
+`final_policy` is `stop-writing` or a `custom:` name, pass
+`apply_policy=` so the client carries it out.  Without it, the kit
+refuses those policies and says so.
+
+The `holdings` verb also reports `bytes_written_per_day`.  Sigmond uses
+it to forecast when a disk fills.  A ring buffer at steady state still
+writes, so the kit counts bytes of files modified in the last 24 hours.
 
 ---
 

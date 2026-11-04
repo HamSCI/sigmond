@@ -26,7 +26,7 @@ to hunt for the next one.
 | | **Tier 0 — capture only** | **Tier 1 — sigmond client** |
 |---|---|---|
 | What you get | one dynamic `radiod` channel with a `lifetime`, via `event-recorder` or your own script; your own files, your own upload | a repo sigmond installs, supervises with systemd, and can ship through `hs-uploader`; visible in `smd status` |
-| What you owe | nothing to the fleet — no contract, no unit | the seven things: a repo, `deploy.toml`, a templated unit, the four contract subcommands, a config template, `[client_features]` blocks, a catalog entry ([becoming-a-client.md §The seven things](becoming-a-client.md#the-seven-things-you-must-ship)) |
+| What you owe | nothing to the fleet — no contract, no unit | the eight things: a repo, `deploy.toml`, a templated unit, the four contract subcommands, a config template, `[client_features]` blocks, a catalog entry, storage verbs ([becoming-a-client.md §The eight things](becoming-a-client.md#the-eight-things-you-must-ship)) |
 | When to upgrade | the experiment is one-shot, or the analysis is still changing daily | it recurs or runs indefinitely, someone else needs to see it is healthy, you want the fleet update/heartbeat lifecycle, or output should leave the station ([becoming-a-client.md §When to graduate](becoming-a-client.md#when-to-graduate--and-when-not-to)) |
 
 The [2026-08-12 eclipse listener](costas-14110-worked-example.md) stayed

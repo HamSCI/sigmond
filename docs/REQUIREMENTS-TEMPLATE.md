@@ -129,7 +129,8 @@ DERIVE from deploy.toml + `inventory --json` so it can't drift.*
 targets, logs, status/inventory. Also derive what you can.*
 *8.3 Contracts/APIs — contract conformance level (which version, which
 optional sections), control sockets, the sigmond seam. REFERENCE
-CLIENT-CONTRACT.md; do not restate it.*
+CLIENT-CONTRACT.md; do not restate it. State the storage floor, data
+classes and final policy (§17.7) here.*
 
 ## 9. Data requirements
 *Schemas, retention, volume (mb_per_day), provenance/timing labels.*

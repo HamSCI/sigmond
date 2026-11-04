@@ -2233,7 +2233,10 @@ JSON object on stdout and exits 0.
 ```
 
 `estimated` is `true` when the client counted from a cache or a model
-rather than from the files.
+rather than from the files.  A client SHOULD add `bytes_written_per_day`,
+an integer: the bytes it wrote in the last 24 hours, which sigmond uses
+to forecast when a store fills.  A ring buffer at steady state still
+writes, so this counts bytes of files modified in that window.
 
 `trim` and `final` answer in one shape:
 
