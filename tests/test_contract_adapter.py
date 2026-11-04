@@ -128,6 +128,31 @@ class ReadViewTests(unittest.TestCase):
             f"unexpected mismatch issue for v0.2 client, got {view.issues}",
         )
 
+    def test_bad_data_sink_numbers_record_an_issue_and_never_raise(self):
+        """Final review item 10: a non-numeric mb_per_day or floor_bytes
+        drops that field, records an issue on the view, and never raises."""
+        raw = json.loads(self.inventory_json)
+        raw['instances'][0]['data_sinks'] = [
+            {'kind': 'file', 'path': '/var/lib/a', 'mb_per_day': 'lots',
+             'floor_bytes': 7, 'classes': ['raw']},
+            {'kind': 'file', 'path': '/var/lib/b', 'mb_per_day': 3,
+             'floor_bytes': 'a few', 'retention_days': [1]},
+            {'kind': 'file', 'path': '/var/lib/c', 'floor_bytes': 1e400},
+        ]
+        view = self._run(stdout=json.dumps(raw).replace('1e+400', '1e400'))
+        self.assertTrue(view.installed)
+        sinks = {s.path: s for s in view.instances[0].data_sinks}
+        self.assertEqual(sinks['/var/lib/a'].mb_per_day, 0.0)
+        self.assertEqual(sinks['/var/lib/a'].floor_bytes, 7)
+        self.assertEqual(sinks['/var/lib/b'].mb_per_day, 3.0)
+        self.assertEqual(sinks['/var/lib/b'].floor_bytes, 0)
+        self.assertEqual(sinks['/var/lib/b'].retention_days, 0.0)
+        self.assertEqual(sinks['/var/lib/c'].floor_bytes, 0)
+        joined = ' | '.join(view.issues)
+        for word in ('mb_per_day', "'lots'", 'floor_bytes', "'a few'", 'retention_days',
+                     '/var/lib/a', '/var/lib/b', '/var/lib/c'):
+            self.assertIn(word, joined)
+
     def test_v03_client_is_silent(self):
         raw = json.loads(self.inventory_json)
         raw['contract_version'] = '0.3'

@@ -15,6 +15,7 @@ Phase 2 retrofits.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -122,7 +123,7 @@ class ContractAdapter(ClientAdapter):
             view.deploy_toml_path = Path(deploy_path)
 
         for raw in (data.get('instances') or []):
-            view.instances.append(_instance_from_contract(raw))
+            view.instances.append(_instance_from_contract(raw, view.issues))
 
         for issue in (data.get('issues') or []):
             sev = issue.get('severity', 'warn')
@@ -211,8 +212,32 @@ class ContractAdapter(ClientAdapter):
         return payload if isinstance(payload, dict) else None
 
 
-def _instance_from_contract(raw: dict) -> InstanceView:
-    """Translate a contract inventory instance dict into an InstanceView."""
+def _sink_number(ds: dict, key: str, kind, where: str, issues) -> object:
+    """ds[key] as `kind` (int or float), 0 when absent.  A value that does
+    not convert to a finite number drops alone: 0, and one issue line."""
+    v = ds.get(key)
+    if v is None or v == "":
+        return kind(0)
+    try:
+        if isinstance(v, bool):
+            raise TypeError("a boolean")
+        if isinstance(v, int):
+            return kind(v)              # exact, however large
+        n = float(v)
+        if not math.isfinite(n):
+            raise ValueError("not finite")
+        return kind(n) if kind is float else int(n)
+    except (TypeError, ValueError, OverflowError):
+        if issues is not None:
+            issues.append(f"[warn] data_sinks {where}: {key} {v!r} is not a number; "
+                          f"ignored (0)")
+        return kind(0)
+
+
+def _instance_from_contract(raw: dict, issues: Optional[list] = None) -> InstanceView:
+    """Translate a contract inventory instance dict into an InstanceView.
+    A data_sinks number that does not convert lands in `issues` (the
+    view's) and drops alone; it never raises."""
     iv = InstanceView(
         instance=raw.get('instance', 'default'),
         radiod_id=raw.get('radiod_id'),
@@ -232,12 +257,14 @@ def _instance_from_contract(raw: dict) -> InstanceView:
     for ds in (raw.get('data_sinks') or []):
         if not isinstance(ds, dict):
             continue
+        path = str(ds.get('path') or ds.get('target') or '')
+        where = path or str(ds.get('kind') or '?')
         iv.data_sinks.append(DataSink(
             kind=str(ds.get('kind') or ''),
-            path=str(ds.get('path') or ds.get('target') or ''),
-            mb_per_day=float(ds.get('mb_per_day') or 0.0),
-            retention_days=float(ds.get('retention_days') or 0.0),
-            floor_bytes=int(ds.get('floor_bytes') or 0),
+            path=path,
+            mb_per_day=_sink_number(ds, 'mb_per_day', float, where, issues),
+            retention_days=_sink_number(ds, 'retention_days', float, where, issues),
+            floor_bytes=_sink_number(ds, 'floor_bytes', int, where, issues),
             final_policy=(str(ds['final_policy'])
                           if ds.get('final_policy') is not None else None),
             classes=tuple(str(c) for c in (ds.get('classes') or ())),
