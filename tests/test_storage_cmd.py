@@ -177,3 +177,10 @@ def test_install_sh_ships_and_enables_the_timer():
     assert '"$REPO_DIR/systemd/sigmond-storage.conf" /etc/tmpfiles.d/' in text
     assert "systemd-tmpfiles --create /etc/tmpfiles.d/sigmond-storage.conf" in text
     assert re.search(r"systemctl enable --now [^\n]*\bsigmond-storage\.timer", text)
+
+
+def test_install_sh_each_ok_follows_its_own_command():
+    text = (REPO / "install.sh").read_text()
+    i = text.index("$SUDO systemctl enable --now sigmond-storage-trim-all.timer")
+    j = text.index('ok "sigmond-storage-trim-all.timer enabled')
+    assert "sigmond-storage.timer" not in text[i:j]

@@ -1247,6 +1247,7 @@ $SUDO systemctl enable --now sigmond-timing-reconcile.timer 2>/dev/null || true
 $SUDO systemctl enable --now sigmond-snapshot.timer 2>/dev/null || true
 $SUDO systemctl enable --now sigmond-snapshot-request.path 2>/dev/null || true
 $SUDO systemctl enable --now sigmond-component-fetch.timer 2>/dev/null || true
+ok "sigmond-storage-trim-all.timer enabled + started (15-min cadence)"
 # The storage capacity ledger (docs/superpowers/specs/2026-11-04-storage-capacity-design.md):
 # a 2-minute pass that alarms on filling stores, asks clients to trim, and
 # at FINAL may stop a client that fails to answer.  Safe on greenfield: with
@@ -1254,7 +1255,6 @@ $SUDO systemctl enable --now sigmond-component-fetch.timer 2>/dev/null || true
 $SUDO systemctl enable --now sigmond-storage.timer 2>/dev/null \
     && ok "sigmond-storage.timer enabled + started (2-min cadence)" \
     || warn "could not enable sigmond-storage.timer"
-ok "sigmond-storage-trim-all.timer enabled + started (15-min cadence)"
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────
 info "Installing smd → $INSTALL_SMD"
