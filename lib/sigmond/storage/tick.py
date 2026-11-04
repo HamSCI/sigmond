@@ -9,6 +9,12 @@ and never touch /etc, /run, /var or systemctl.
 Exit codes: 0 the pass ran; 75 (EX_TEMPFAIL) another pass held the lock;
 1 a ledger fault, raised as the `ledger-fault` alarm.
 
+The stop lever spares a client that wrote nothing in 24 h (its recent
+bytes, measured fresh just before the stop): stopping it frees nothing.
+It gets the WARNING `idle-over:<client>` instead, and an operator decides.
+A client whose recent bytes were never measured (it reports its own rate,
+or no walker runs) gets the stop as before.
+
 TrimRecord upkeep (the ladder only reads the records; this module keeps
 them, as ladder.TrimRecord's docstring asks):
 
@@ -310,16 +316,18 @@ def _measure(regs, path_bytes, du: dict, used: set, now: float, c, store,
     return n
 
 
-def _recent(regs, recent_bytes, cache: dict, used: set, now: float, c, store) -> Optional[int]:
+def _recent(regs, recent_bytes, cache: dict, used: set, now: float, c, store,
+            fresh: bool = False) -> Optional[int]:
     """Bytes the client wrote on `store` in the last 24 h, cached for
-    RECENT_CACHE_S; None when the tick has no way to measure."""
+    RECENT_CACHE_S (`fresh` skips the cache); None when the tick has no way
+    to measure."""
     if recent_bytes is None:
         return None
     paths = sorted(p for r in regs if r.client == c and r.store == store for p in r.paths)
     key = f"{c}|{store}"
     used.add(key)
     hit = cache.get(key)
-    if (isinstance(hit, dict) and hit.get("paths") == paths
+    if (not fresh and isinstance(hit, dict) and hit.get("paths") == paths
             and _num(hit.get("at")) is not None and 0 <= now - hit["at"] < RECENT_CACHE_S
             and isinstance(hit.get("bytes"), int)):
         return hit["bytes"]
@@ -510,6 +518,20 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
             if target is not None and fresh <= target:
                 journal(f"<6>storage: {c} on {a.store} measured within its target "
                         f"({fresh} <= {target} bytes) just before the stop; not stopped")
+                continue
+        # A client that wrote nothing in 24 h is not the growth: stopping it
+        # frees nothing.  Measured fresh, like du above; never measured
+        # (a reported rate, no walker) keeps the stop.
+        if f"{c}|{a.store}" in recent and r.recent_bytes is not None:
+            wrote = _recent(regs, r.recent_bytes, recent, set(), t, c, a.store, fresh=True)
+            if wrote == 0:
+                h = holdings.get((c, a.store))
+                held = h.total if h is not None else 0
+                active[f"idle-over:{c}"] = (
+                    Severity.WARNING,
+                    f"store {a.store}: {c} holds {held} B, over its target at FINAL, "
+                    f"and wrote nothing in 24 h; stopping it would free nothing, so "
+                    f"it was not stopped; an operator decides")
                 continue
         ok, why = r.stop_client(c)
         if ok:

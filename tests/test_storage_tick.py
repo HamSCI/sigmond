@@ -661,3 +661,58 @@ def test_churn_waits_for_an_hour_of_history(tmp_path):
         r.state["used"] = int(40 * GiB + k * 5 * GiB)
         run_tick(T0 + timedelta(minutes=10 * k), r, **p)
     assert _status(p)["stores"][0]["stage"] == "OK"
+
+
+# ---- the stop lever spares an idle client (controller ruling on concern 1) --
+
+def _alarm_keys(p):
+    return {a["key"]: a for a in _status(p)["alarms"]}
+
+
+def test_an_idle_unmanaged_client_over_target_at_final_is_not_stopped(tmp_path):
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views, recent=0); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    before = r.calls["recent_bytes"]
+    run_tick(T0 + timedelta(seconds=1000), r, **p)
+    assert r.calls["stop_client"] == 0
+    assert r.calls["recent_bytes"] > before          # measured fresh just before the stop
+    al = _alarm_keys(p)["idle-over:u"]
+    assert al["severity"] == "WARNING"
+    assert "wrote nothing in 24 h" in al["message"] and str(40 * GiB) in al["message"]
+    assert "stopped:u" not in _alarm_keys(p)
+
+
+def test_an_idle_client_that_writes_again_is_stopped_as_before(tmp_path):
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views, recent=0); p = _paths(tmp_path)
+    run_tick(T0, r, **p)                              # cached recent = 0
+    r.state["recent"] = GiB                           # it writes again; the fresh walk sees it
+    run_tick(T0 + timedelta(seconds=1000), r, **p)
+    assert r.calls["stop_client"] == 1 and "idle-over:u" not in _alarm_keys(p)
+
+
+def test_a_writing_unmanaged_client_is_stopped_as_before(tmp_path):
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views, recent=GiB); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    run_tick(T0 + timedelta(seconds=1000), r, **p)
+    assert r.calls["stop_client"] == 1
+
+
+def test_an_idle_managed_client_still_gets_trim_and_final_but_no_stop(tmp_path):
+    r = _fake_runners(used_pct=96, trim_ok=False, recent=0); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["call_trim"] == 2 and r.calls["call_final"] == 2
+    assert r.calls["stop_client"] == 0 and "idle-over:a" in _alarm_keys(p)
+
+
+def test_never_measured_recent_bytes_keeps_todays_stop(tmp_path):
+    # A reported rate skips the walk: no measurement, so the stop proceeds.
+    r = _fake_runners(used_pct=96, trim_ok=False, recent=0, reported=0); p = _paths(tmp_path)
+    r.call_trim = lambda b, n: ClientAnswer(False, None, {}, False, "exit 1")
+    r.call_final = lambda b, n, pol: ClientAnswer(False, None, {}, False, "exit 1")
+    run_tick(T0, r, **p)
+    run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["recent_bytes"] == 0 and r.calls["stop_client"] == 1

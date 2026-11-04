@@ -28,7 +28,14 @@ MB = 10 ** 6
 
 def rate_for(client: str, *, reported: Optional[int], recent_bytes: Optional[int],
              declared_mb_per_day: Optional[float]) -> tuple:
-    """(bytes per day, source) for one client on one store."""
+    """(bytes per day, source) for one client on one store.
+
+    A measured zero falls back to a declared `mb_per_day` for the allotment
+    (controller ruling, 2026-11-04): a client stopped or idle for a day
+    writes nothing, and its declaration describes it better than silence.
+    A reported zero stays authoritative.  (The stop lever reads the measured
+    bytes themselves, not this rate: tick.py spares a client that wrote
+    nothing in 24 h.)"""
     if reported is not None and reported >= 0:
         return float(reported), "reported"
     declared = (float(declared_mb_per_day) * MB
