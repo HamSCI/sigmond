@@ -18,7 +18,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..storage.config import (CONFIG_PATH, POLICY_RE, load_storage_config, render_storage_toml,
-                              with_directive, with_hands_off, with_share)
+                              with_directive, with_hands_off, with_share,
+                              with_stop_lever)
 
 ALLOWED_POLICIES = ("give-up-oldest:pinned", "give-up-oldest:raw",
                     "give-up-oldest:derived", "give-up-oldest:sent",
@@ -131,6 +132,10 @@ def _status(args) -> int:
             _say(f"  host   pool report {hr['fault']}")
         else:
             _say(f"  host   pool report {hr.get('age_s')} s old")
+    lever = st.get("stop_lever")
+    if lever in ("on", "off"):
+        _say(f"  stop lever {lever}" + ("" if lever == "on" else
+             " (the ledger alarms would-stop and stops no client)"))
     ho = st.get("hands_off")
     if ho:
         _say(f"  hands-off until {ho['until']}: {ho.get('reason') or '(no reason given)'}")
@@ -198,6 +203,8 @@ def _directive(args) -> int:
         return 2
     if target == "hands-off":
         return _hands_off(args)
+    if target == "stop-lever":
+        return _stop_lever(args)
     policy = None
     if not args.clear:
         policy = getattr(args, "value", None)
@@ -215,6 +222,28 @@ def _directive(args) -> int:
     if rc == 0:
         _say(f"{target}: directive cleared (its own final policy applies)" if policy is None
              else f"{target}: final-stage directive {policy} written to {path}")
+    return rc
+
+
+def _stop_lever(args) -> int:
+    value = (getattr(args, "value", None) or "").strip().lower()
+    if args.clear:
+        value = "off"
+    if value not in ("on", "off"):
+        _complain("directive stop-lever needs on or off")
+        return 2
+    path = _config_path(args)
+    cfg = _load_for_edit(path)
+    if cfg is None:
+        return 1
+    rc = _save(path, with_stop_lever(cfg, value == "on"))
+    if rc == 0:
+        if value == "on":
+            _say(f"stop lever on, written to {path}: at FINAL the ledger may stop a client "
+                 f"that fails to answer (never while hands-off)")
+        else:
+            _say(f"stop lever off, written to {path}: the ledger alarms would-stop "
+                 f"and stops no client")
     return rc
 
 

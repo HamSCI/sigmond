@@ -9,6 +9,11 @@ and never touch /etc, /run, /var or systemctl.
 Exit codes: 0 the pass ran; 75 (EX_TEMPFAIL) another pass held the lock;
 1 a ledger fault, raised as the `ledger-fault` alarm.
 
+The stop lever has a switch, storage.toml `[stop] enabled`, off by
+default.  While it is off, every stop the pass would make becomes the
+CRITICAL alarm `would-stop:<client>`, naming the client, the store, its
+stage, holding and target, and the reason; stop_client is never called.
+
 The stop lever spares a client that wrote nothing in 24 h: no file under
 its paths changed (st_ctime) in that window, measured fresh just before the
 stop, and its du, also fresh, has not grown past the du it showed before
@@ -49,7 +54,8 @@ from typing import Callable, Optional
 from .alarms import AlarmBook, journal_line
 from .clientcall import ClientAnswer
 from .config import CONFIG_PATH, hands_off_active, load_storage_config
-from .ladder import Severity, TrimRecord, decide
+from .ladder import (DEMAND_DEADLINE_S, UNMANAGED_FINAL_GRACE_S, Severity, TrimRecord,
+                     decide)
 from .model import (STATE_RESERVE_BYTES, Demand, Holding, Stage,
                     allot_days, allottable_bytes, apply_pool_limit, pool_room_bytes)
 from .rates import CHURN_WINDOW_S, churn_bytes_per_h, rate_for
@@ -558,10 +564,26 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
                     f"and wrote nothing in 24 h; stopping it would free nothing, so "
                     f"it was not stopped; an operator decides")
                 continue
+        reason = (f"it failed to answer a trim request" if c in managed
+                  else "it is unmanaged and sat over its target at FINAL")
+        if not cfg.stop_enabled:
+            # The lever is off (storage.toml [stop] enabled = false, the
+            # default): say loudly who would have been stopped, and why.
+            h = holdings.get((c, a.store))
+            target = decision.targets.get(a.store, {}).get(c)
+            why = (f"it failed to answer a trim request within {DEMAND_DEADLINE_S} s"
+                   if c in managed else
+                   f"it is unmanaged and sat over its target at FINAL for more than "
+                   f"{UNMANAGED_FINAL_GRACE_S} s")
+            active[f"would-stop:{c}"] = (
+                Severity.CRITICAL,
+                f"store {a.store} at {decision.stages[a.store].name}: the storage ledger "
+                f"would stop {c} now: {c} holds {h.total if h is not None else 0} B "
+                f"against a target of {target} B, and {why}.  The stop lever is off "
+                f"(smd storage directive stop-lever on), so {c} still runs")
+            continue
         ok, why = r.stop_client(c)
         if ok:
-            reason = (f"it failed to answer a trim request" if c in managed
-                      else "it is unmanaged and sat over its target at FINAL")
             stopped[c] = {"at": t, "store": a.store, "reason": reason, "detail": why}
         else:
             active[f"stop-failed:{c}"] = (
@@ -657,6 +679,7 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
                        "reason": cfg.hands_off_reason} if hands_off else None),
         "unclaimed": unclaimed,
         "config_problems": list(cfg.problems),
+        "stop_lever": "on" if cfg.stop_enabled else "off",
     }
     return new_state, status, active
 

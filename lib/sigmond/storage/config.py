@@ -1,5 +1,5 @@
 """storage.toml: level overrides, the time-to-full horizon, shares,
-directives, hands-off window.
+directives, hands-off window, and the stop lever's switch.
 
 Loading never raises.  A bad key drops alone and leaves one problem line;
 a bad [levels] table falls back whole.
@@ -34,6 +34,9 @@ class StorageConfig:
     expect_host_report: Optional[bool] = None
     problems: tuple = ()
     horizon_h: float = 24.0     # [levels] horizon_h: time to full under this -> WATCH
+    # [stop] enabled: may the tick stop a client at FINAL?  Off by default:
+    # the tick then raises `would-stop:<client>` and stops nothing.
+    stop_enabled: bool = False
 
 
 def _num(v) -> Optional[float]:
@@ -148,8 +151,16 @@ def load_storage_config(path: Path = CONFIG_PATH) -> StorageConfig:
         else:
             problems.append("pool.expect_report: not a boolean; dropped")
 
+    stop_enabled = False
+    stop = table("stop")
+    if "enabled" in stop:
+        if isinstance(stop["enabled"], bool):
+            stop_enabled = stop["enabled"]
+        else:
+            problems.append("stop.enabled: not a boolean; the stop lever stays off")
+
     return StorageConfig(levels, shares, directives, until, reason,
-                         pool_share, expect, tuple(problems), horizon_h)
+                         pool_share, expect, tuple(problems), horizon_h, stop_enabled)
 
 
 def hands_off_active(cfg: StorageConfig, now: datetime) -> bool:
@@ -184,6 +195,8 @@ def render_storage_toml(cfg: StorageConfig) -> str:
             out.append(f"share = {float(cfg.pool_share)!r}")
         if cfg.expect_host_report is not None:
             out.append(f"expect_report = {'true' if cfg.expect_host_report else 'false'}")
+    if cfg.stop_enabled:
+        out += ["", "[stop]", "enabled = true"]
     return "\n".join(out) + "\n"
 
 
@@ -205,6 +218,10 @@ def with_directive(cfg: StorageConfig, client: str, policy: Optional[str]) -> St
             raise ValueError(f"unknown policy {policy!r}")
         d[client] = policy
     return replace(cfg, directives=d)
+
+
+def with_stop_lever(cfg: StorageConfig, enabled: bool) -> StorageConfig:
+    return replace(cfg, stop_enabled=bool(enabled))
 
 
 def with_hands_off(cfg: StorageConfig, until: Optional[datetime], reason: str,

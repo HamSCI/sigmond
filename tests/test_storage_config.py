@@ -74,3 +74,15 @@ def test_a_bad_horizon_drops_alone(tmp_path):
         c = load_storage_config(p)
         assert c.horizon_h == 24.0 and c.levels.watch == 70.0
         assert any("horizon_h" in m for m in c.problems)
+
+
+def test_the_stop_lever_is_off_by_default_and_parses(tmp_path):
+    assert load_storage_config(tmp_path / "none.toml").stop_enabled is False
+    p = tmp_path / "s.toml"; p.write_text("[stop]\nenabled = true\n")
+    c = load_storage_config(p)
+    assert c.stop_enabled is True and c.problems == ()
+    p.write_text(render_storage_toml(c))
+    assert load_storage_config(p) == c
+    p.write_text('[stop]\nenabled = "yes"\n')
+    c = load_storage_config(p)
+    assert c.stop_enabled is False and any("stop.enabled" in m for m in c.problems)

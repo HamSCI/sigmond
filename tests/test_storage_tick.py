@@ -17,13 +17,21 @@ GiB = 1 << 30
 T0 = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 
 
-def _paths(tmp_path):
-    return {
+STOP_ON = "[stop]\nenabled = true\n"
+
+
+def _paths(tmp_path, stop=True):
+    """The tick's files.  `stop=True` writes a storage.toml that switches
+    the stop lever on, as these tests judged it before the lever existed."""
+    p = {
         "config_path": tmp_path / "storage.toml",
         "state_path": tmp_path / "state.json",
         "status_path": tmp_path / "status.json",
         "lock_path": tmp_path / "storage.lock",
     }
+    if stop:
+        p["config_path"].write_text(STOP_ON)
+    return p
 
 
 def _view(name, path, managed=True, floor=0):
@@ -251,7 +259,7 @@ def test_a_failed_stop_says_so_and_never_says_stopped(tmp_path):
 def test_hands_off_never_stops(tmp_path):
     p = _paths(tmp_path)
     until = (T0 + timedelta(hours=5)).isoformat().replace("+00:00", "Z")
-    p["config_path"].write_text(f'[hands_off]\nuntil = "{until}"\nreason = "test"\n')
+    p["config_path"].write_text(STOP_ON + f'[hands_off]\nuntil = "{until}"\nreason = "test"\n')
     r = _fake_runners(used_pct=96, trim_ok=False)
     run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=601), r, **p)
     st = _status(p)
@@ -290,7 +298,7 @@ def test_unmanaged_holdings_cached_for_half_an_hour(tmp_path):
 
 def test_config_problems_become_warnings(tmp_path):
     p = _paths(tmp_path)
-    p["config_path"].write_text('[shares]\na = -1\n')
+    p["config_path"].write_text(STOP_ON + '[shares]\na = -1\n')
     r = _fake_runners(used_pct=10)
     run_tick(T0, r, **p)
     st = _status(p)
@@ -365,7 +373,7 @@ def test_an_untouched_by_calls_record_stays_fresh_while_the_tick_keeps_it(tmp_pa
     restart its grace while the pressure lasts (hands-off: no stop)."""
     p = _paths(tmp_path)
     until = (T0 + timedelta(hours=5)).isoformat().replace("+00:00", "Z")
-    p["config_path"].write_text(f'[hands_off]\nuntil = "{until}"\n')
+    p["config_path"].write_text(STOP_ON + f'[hands_off]\nuntil = "{until}"\n')
     r = _fake_runners(used_pct=96, views={"u": _view("u", "/data/u", managed=False)})
     for k in range(40):
         run_tick(T0 + timedelta(minutes=2 * k), r, **p)
@@ -654,7 +662,7 @@ def test_fast_churn_raises_watch_early_and_the_horizon_is_configurable(tmp_path)
     assert st["stores"][0]["stage"] == "WATCH" and st["stores"][0]["used_pct"] < 80
     assert st["stores"][0]["churn_bytes_per_h"] == round(4 * GiB, -3) or \
         abs(st["stores"][0]["churn_bytes_per_h"] - 4 * GiB) < 1e6
-    p["config_path"].write_text("[levels]\nhorizon_h = 6\n")
+    p["config_path"].write_text(STOP_ON + "[levels]\nhorizon_h = 6\n")
     run_tick(T0 + timedelta(minutes=130), r, **p)
     assert _status(p)["stores"][0]["stage"] == "OK"
 
@@ -780,3 +788,36 @@ def test_a_clock_stepped_back_expires_both_caches(tmp_path):
     run_tick(T0, r, **p)
     run_tick(T0 - timedelta(minutes=10), r, **p)
     assert r.calls["path_bytes"] == 2 and r.calls["recent_bytes"] == 2
+
+
+# ---- the stop lever's switch (ruling: [stop] enabled, off by default) -------
+
+def test_the_lever_off_by_default_stops_nothing_and_says_who_it_would_stop(tmp_path):
+    r = _fake_runners(used_pct=96, trim_ok=False); p = _paths(tmp_path, stop=False)
+    run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["stop_client"] == 0
+    al = _alarm_keys(p)
+    assert "stopped:a" not in al
+    w = al["would-stop:a"]
+    assert w["severity"] == "CRITICAL"
+    for word in ("a ", "root", "FINAL", str(40 * GiB), "target", "failed to answer",
+                 "stop lever is off"):
+        assert word in w["message"], (word, w["message"])
+    assert not _status(p)["clients"][0]["stopped_by_storage"]
+    assert _status(p)["stop_lever"] == "off"
+
+
+def test_the_lever_off_names_the_unmanaged_grace(tmp_path):
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views); p = _paths(tmp_path, stop=False)
+    run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=1000), r, **p)
+    assert r.calls["stop_client"] == 0
+    assert "unmanaged" in _alarm_keys(p)["would-stop:u"]["message"]
+
+
+def test_the_lever_on_stops_as_before(tmp_path):
+    r = _fake_runners(used_pct=96, trim_ok=False); p = _paths(tmp_path, stop=True)
+    run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["stop_client"] == 1
+    assert "would-stop:a" not in _alarm_keys(p) and "stopped:a" in _alarm_keys(p)
+    assert _status(p)["stop_lever"] == "on"

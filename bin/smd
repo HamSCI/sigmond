@@ -28284,11 +28284,13 @@ def _build_parser() -> argparse.ArgumentParser:
     st_share.add_argument('value', metavar='weight', nargs='?')
     st_share.add_argument('--clear', action='store_true', help="drop the client's weight")
     st_dir = storage_sub.add_parser('directive',
-        help="override a client's final-stage policy, or mark the station hands-off "
-             "(the ledger then alarms but stops no client)")
-    st_dir.add_argument('target', metavar='client|hands-off')
+        help="override a client's final-stage policy, mark the station hands-off "
+             "(the ledger then alarms but stops no client), or switch the stop "
+             "lever: stop-lever on|off (off by default)")
+    st_dir.add_argument('target', metavar='client|hands-off|stop-lever')
     st_dir.add_argument('value', metavar='policy', nargs='?',
-        help='give-up-oldest:<class> | stop-writing | refuse-new-rows | custom:<name>')
+        help='give-up-oldest:<class> | stop-writing | refuse-new-rows | custom:<name>; '
+             'for stop-lever: on | off')
     st_dir.add_argument('--clear', action='store_true',
         help='drop the directive (or end hands-off)')
     st_dir.add_argument('--for', dest='for_duration', metavar='DUR',

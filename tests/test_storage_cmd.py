@@ -202,3 +202,29 @@ def test_status_plain_shows_each_clients_rate_and_days(tmp_path, capsys):
     cmd_storage(_args(tmp_path, storage_command="status"))
     (line,) = [l for l in capsys.readouterr().out.splitlines() if "client hf-timestd" in l]
     assert "holds 2.0 days" in line and "20.0 GiB/day (reported)" in line
+
+
+# ---- the stop lever's switch -------------------------------------------------
+
+def test_stop_lever_on_and_off(tmp_path, capsys):
+    a = _args(tmp_path, storage_command="directive", target="stop-lever", value="on")
+    assert cmd_storage(a) == 0
+    assert load_storage_config(a.config_path).stop_enabled is True
+    assert cmd_storage(_args(tmp_path, storage_command="directive", target="stop-lever",
+                             value="off")) == 0
+    assert load_storage_config(a.config_path).stop_enabled is False
+    assert "stop lever off" in capsys.readouterr().out
+
+
+def test_stop_lever_needs_on_or_off(tmp_path):
+    for bad in (None, "maybe"):
+        a = _args(tmp_path, storage_command="directive", target="stop-lever", value=bad)
+        assert cmd_storage(a) == 2
+        assert not a.config_path.exists()
+
+
+def test_status_shows_the_stop_lever(tmp_path, capsys):
+    (tmp_path / "status.json").write_text(json.dumps(dict(STATUS, stop_lever="off")))
+    cmd_storage(_args(tmp_path, storage_command="status"))
+    out = capsys.readouterr().out
+    assert "stop lever off" in out
