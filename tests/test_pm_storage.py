@@ -736,3 +736,74 @@ def test_reap_failures_and_unreadable_lists_reach_the_guest(tmp_path):
     assert fault is None
     assert "could not delete snapshot align-1" in rep.host_alarm
     assert "snapshots of VM 101 unreadable" in rep.host_alarm
+
+
+# ---------------------------------------------------------------------------
+# a run that does not measure a scope carries its episodes forward
+# ---------------------------------------------------------------------------
+
+def _op_snap():
+    return {100: [_snap("before-test", "an operator's", hours_ago=60)]}
+
+
+def _raised(host, needle):
+    return [l for l in host.logged if needle in l and not l.startswith("<5>cleared")]
+
+
+def _cleared(host):
+    return [l for l in host.logged if l.startswith("<5>cleared")]
+
+
+def test_unreadable_host_storage_carries_every_episode_forward():
+    host = _fake_host(pool_pct=86, snaps=_op_snap())
+    pm.main(["report"], host)
+    before = dict(host.state["alarms"])
+    assert {"pool:pve/data", "snap:100:before-test"} <= set(before)
+    host.storage_text = OSError("gone")
+    host._now = NOW + timedelta(minutes=5)
+    pm.main(["report"], host)
+    assert _cleared(host) == []
+    for k, v in before.items():
+        assert host.state["alarms"][k] == v
+    host.storage_text = STORAGE_CFG
+    host._now = NOW + timedelta(minutes=10)
+    pm.main(["report"], host)
+    assert len(_raised(host, "pool pve/data at")) == 1         # no reopen
+    assert len(_raised(host, "snapshot before-test")) == 1
+    assert _cleared(host) == ["<5>cleared: host-storage"]
+
+
+def test_an_unreadable_pool_carries_its_episodes_forward():
+    host = _fake_host(pool_pct=86, snaps=_op_snap(), fail_write={100})
+    pm.main(["report"], host)
+    before = dict(host.state["alarms"])
+    assert {"pool:pve/data", "snap:100:before-test", "guest:100"} <= set(before)
+    real = host.lvs
+    host.lvs = lambda: _lvs(86, pool="other")
+    host._now = NOW + timedelta(minutes=5)
+    assert pm.main(["report"], host) == 1
+    assert _cleared(host) == []
+    for k, v in before.items():
+        assert host.state["alarms"][k] == v
+    host.lvs = real
+    host._now = NOW + timedelta(minutes=10)
+    pm.main(["report"], host)
+    assert len(_raised(host, "pool pve/data at")) == 1
+    assert len(_raised(host, "guest 100 unreachable")) == 1
+    assert _cleared(host) == ["<5>cleared: pool-unreadable:pve/data"]
+
+
+def test_a_stop_before_the_guest_writes_carries_the_guest_episodes_forward():
+    host = _fake_host(fail_write={100})
+    pm.main(["report"], host)
+    assert "guest:100" in host.state["alarms"]
+    before = host.state["alarms"]["guest:100"]
+    host.stop_after_reaps = 0                   # a stop request stands from the start
+    host._now = NOW + timedelta(minutes=5)
+    pm.main(["report"], host)
+    assert _cleared(host) == []
+    assert host.state["alarms"]["guest:100"] == before
+    host.stop_after_reaps = None
+    host._now = NOW + timedelta(minutes=10)
+    pm.main(["report"], host)
+    assert len(_raised(host, "guest 100 unreachable")) == 1

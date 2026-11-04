@@ -53,7 +53,10 @@ Every delete on every pool runs before any guest write, with no timeout:
 a killed ``qm delsnapshot`` leaves the VM locked.  The guest writes keep
 their own deadline (``GUEST_WRITE_BUDGET_S``); a failed write gets one
 agent parser reset and one retry before the guest counts as unreachable.
-The state file gets written however the run ends.
+The state file gets written however the run ends.  A run that did not
+measure something (host storage unreadable, a pool unreadable, a stop
+request before the guest writes) carries that scope's alarm episodes
+forward unchanged: it logs no "cleared" for them and opens none anew.
 
 Guest agent: no byte above 0x7F in anything sent through it.  The agent
 goes deaf on a short-written request (sigmond CLAUDE.md).  The report goes
@@ -371,8 +374,36 @@ def _history(state: dict, name: str, now: datetime) -> list:
     return out
 
 
-def _episodes(prior: dict, items: list, now: datetime, log) -> dict:
-    """Log each alarm once per episode, a reminder every REMIND_S, and a line on clearing."""
+def _vm_keys(vmid) -> tuple:
+    """(exact keys, key prefixes) of the alarms that belong to one VM."""
+    return ({f"guest:{vmid}", f"snaplist:{vmid}", f"config:{vmid}"},
+            (f"snap:{vmid}:", f"reap:{vmid}:"))
+
+
+class Unmeasured:
+    """The alarm keys a run did not measure.  Their prior episodes carry
+    forward unchanged: no "cleared" line, no new episode.  A run that cannot
+    see a thing says nothing about it."""
+
+    def __init__(self):
+        self.everything = False
+        self.exact: set = set()
+        self.prefixes: list = []
+
+    def add_vm(self, vmid) -> None:
+        exact, prefixes = _vm_keys(vmid)
+        self.exact |= exact
+        self.prefixes.extend(prefixes)
+
+    def __contains__(self, key) -> bool:
+        return (self.everything or key in self.exact
+                or any(key.startswith(p) for p in self.prefixes))
+
+
+def _episodes(prior: dict, items: list, now: datetime, log, unmeasured=()) -> dict:
+    """Log each alarm once per episode, a reminder every REMIND_S, and a line
+    on clearing.  A prior key in `unmeasured` that this run raised nothing
+    for keeps its episode as it stood."""
     out = {}
     stamp = now.timestamp()
     prior = prior if isinstance(prior, dict) else {}
@@ -387,8 +418,12 @@ def _episodes(prior: dict, items: list, now: datetime, log) -> dict:
         else:
             out[key] = old
     for key in prior:
-        if key not in out:
-            log(f"<5>cleared: {key}")
+        if key in out:
+            continue
+        if key in unmeasured and isinstance(prior.get(key), dict):
+            out[key] = prior[key]
+            continue
+        log(f"<5>cleared: {key}")
     return out
 
 
@@ -402,10 +437,11 @@ def _report(host) -> int:
     now = host.now()
     state = host.read_state() or {}
     items, pools_state = [], {}
+    unmeasured = Unmeasured()
     try:
-        return _report_body(host, now, state, items, pools_state)
+        return _report_body(host, now, state, items, pools_state, unmeasured)
     finally:
-        alarms = _episodes(state.get("alarms"), items, now, host.log)
+        alarms = _episodes(state.get("alarms"), items, now, host.log, unmeasured)
         fills = [p["pool_pct"] for p in pools_state.values() if "pool_pct" in p]
         host.write_state({"schema": 1, "generated_at": _iso(now),
                           "pool_pct": max(fills) if fills else None,
@@ -428,7 +464,7 @@ def _write_guest(host, vmid, content) -> bool:
     return attempt()
 
 
-def _report_body(host, now, state, items, pools_state) -> int:
+def _report_body(host, now, state, items, pools_state, unmeasured) -> int:
     rc = 0
     try:
         smap = parse_storage_cfg(host.storage_cfg())
@@ -436,6 +472,7 @@ def _report_body(host, now, state, items, pools_state) -> int:
         vms = sorted(json.loads(host.list_vms()), key=lambda v: int(v["vmid"]))
     except Exception as exc:                        # noqa: BLE001
         items.append(("host-storage", "x", 3, f"pm-storage: cannot read the host's storage: {exc}"))
+        unmeasured.everything = True                # nothing measured: every episode stands
         prior = state.get("pools") if isinstance(state.get("pools"), dict) else {}
         for name in prior:                          # keep the churn history; no fill claimed
             pools_state[name] = {"history": _history(state, name, now)}
@@ -450,6 +487,7 @@ def _report_body(host, now, state, items, pools_state) -> int:
             where = pool_for_vm(host.qm_config(vmid), smap)
         except Exception:                           # noqa: BLE001
             items.append((f"config:{vmid}", "x", 4, f"config of VM {vmid} unreadable"))
+            unmeasured.add_vm(vmid)                 # its snapshots and guest went unseen
             continue
         if where:
             by_pool.setdefault(where, []).append(vmid)
@@ -463,6 +501,11 @@ def _report_body(host, now, state, items, pools_state) -> int:
         except Exception as exc:                    # noqa: BLE001
             items.append((f"pool-unreadable:{name}", "x", 3, f"pool {name} unreadable: {exc}"))
             rc = 1
+            unmeasured.exact.add(f"pool:{name}")    # the pool and its VMs went unseen
+            for vmid in members:
+                unmeasured.add_vm(vmid)
+            if name in (state.get("pools") or {}):  # keep the churn history; no fill claimed
+                pools_state[name] = {"history": _history(state, name, now)}
             continue
         fill = _fill(pool)
         history = _history(state, name, now)
@@ -476,6 +519,7 @@ def _report_body(host, now, state, items, pools_state) -> int:
                 snaps += parse_snapshots(host.list_snapshots(vmid), vmid)
             except Exception:                       # noqa: BLE001
                 local.append((f"snaplist:{vmid}", "x", 4, f"snapshots of VM {vmid} unreadable"))
+                unmeasured.prefixes.append(f"snap:{vmid}:")     # its snapshots went unseen
         measured.append([name, pool, members, snaps, churn, local])
 
     # Phase 1: every reap on every pool, before any guest write.  A delete
@@ -509,6 +553,9 @@ def _report_body(host, now, state, items, pools_state) -> int:
         m[5] = local + _alarm_items(pool, snaps, now, churn)
         items.extend(m[5])
 
+    # A guest whose write this run never tried keeps its episode.
+    unwritten = {f"guest:{v}" for _, _, members, _, _, _ in measured for v in members}
+    unmeasured.exact |= unwritten
     if stopped or host.stop_requested():
         host.log("<4>pm-storage: stop requested; reaping ended between deletes, "
                  "guest reports skipped")
@@ -520,9 +567,11 @@ def _report_body(host, now, state, items, pools_state) -> int:
         texts = [t for _, _, _, t in local]
         for vmid in members:
             if vmid not in running:
+                unmeasured.exact.discard(f"guest:{vmid}")
                 continue
             if host.stop_requested():
                 return rc
+            unmeasured.exact.discard(f"guest:{vmid}")
             if host.monotonic() - start >= GUEST_WRITE_BUDGET_S:
                 items.append((f"guest:{vmid}", "deadline", 4,
                               f"guest {vmid} report skipped: the guest-write phase passed its "
