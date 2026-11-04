@@ -23,6 +23,13 @@ ADMIN_VERBS = {
     "uninstall", "completion",
 }
 
+# A few names live in both places: `smd storage` (the capacity ledger) is a
+# top-level verb with its own subverbs, beside `smd admin storage trim|...`.
+# A bare call is right only with one of the top-level verb's own subverbs.
+TOP_LEVEL_SUBVERBS = {
+    "storage": {"status", "share", "directive", "tick"},
+}
+
 # Exec*=...  /usr/local/bin/smd <verb> ...   (optionally already `admin <verb>`)
 _EXEC_SMD = re.compile(
     r'^\s*Exec\w+\s*=\s*-?\S*\bsmd\s+(?P<rest>.+)$')
@@ -49,6 +56,8 @@ class TestUnitTemplatesAdminPrefix(unittest.TestCase):
                     continue
                 first = toks[0]
                 # `smd admin <verb>` is correct; a bare admin verb is the bug.
+                if len(toks) > 1 and toks[1] in TOP_LEVEL_SUBVERBS.get(first, ()):
+                    continue
                 if first in ADMIN_VERBS and first != "admin":
                     offenders.append(f"{f.relative_to(REPO)}:{i}: {line.strip()}")
         self.assertEqual(
