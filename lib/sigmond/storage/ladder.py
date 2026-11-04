@@ -210,11 +210,20 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
         early = (stage == Stage.WATCH and store.used_pct < levels.watch
                  and h_full is not None and h_full < horizon_h)
         if allot is not None and not allot.floors_fit:
-            stage = Stage.FINAL
-            alarms[f"floors:{name}"] = (
-                Severity.CRITICAL,
-                f"store {name}: the registered floors no longer fit "
-                f"({_fmt_bytes(allot.allottable)} allottable); stage FINAL")
+            if allot.pool_caused:
+                # Ruling: the pool limit, not this store, ran short.  Alarm;
+                # only the store's own fill sets its stage.
+                alarms[f"floors:{name}"] = (
+                    Severity.CRITICAL,
+                    f"store {name}: the registered floors no longer fit the "
+                    f"{_fmt_bytes(allot.allottable)} the host pool leaves this guest; "
+                    f"the store itself sits at {store.used_pct:.1f}% ({stage.name})")
+            else:
+                stage = Stage.FINAL
+                alarms[f"floors:{name}"] = (
+                    Severity.CRITICAL,
+                    f"store {name}: the registered floors no longer fit "
+                    f"({_fmt_bytes(allot.allottable)} allottable); stage FINAL")
         stages[name] = stage
 
         regs = [r for r in registrations if r.store == name]

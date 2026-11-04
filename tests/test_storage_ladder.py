@@ -11,13 +11,14 @@ GiB = 1 << 30
 
 def _decide(*, used_pct, managed, trims=None, directives=None, now=0.0,
             hands_off=False, floors_fit=True, host_fault=None,
-            allotment=40 * GiB, floor=0, holding_gib=None):
+            allotment=40 * GiB, floor=0, holding_gib=None, pool_caused=False):
     """One store `root` of 100 GiB; client `a` holds all but 1 GiB of the used space."""
     used = used_pct * GiB
     held = (used_pct - 1) * GiB if holding_gib is None else holding_gib * GiB
     return decide(
         stores={"root": Store("root", "/", "guest", 100 * GiB, used)},
-        allotments={"root": Allotments({"a": allotment}, floors_fit, 90 * GiB)},
+        allotments={"root": Allotments({"a": allotment}, floors_fit, 90 * GiB,
+                                       pool_caused=pool_caused)},
         holdings={("a", "root"): Holding("a", "root", {"raw": held}, False)},
         registrations=[Registration("a", "root", ("/var/a",), floor, None, managed)],
         levels=Levels(),
@@ -372,3 +373,17 @@ def test_store_stage_rises_at_once_and_descends_two_points_below():
     assert at(92.9, Stage.FINAL) == Stage.DEMAND
     assert at(70.0, Stage.FINAL) == Stage.OK
     assert at(79.9, None) == Stage.OK
+
+
+def test_a_pool_caused_floor_shortfall_alarms_but_does_not_force_final():
+    """Ruling: only the store's own fill sets its stage.  A shortfall the
+    pool limit caused raises floors:<store> and nothing more."""
+    rec = {"a": TrimRecord(requested_at=0.0, ok=False)}
+    d = _decide(used_pct=50, managed=True, floors_fit=False, pool_caused=True,
+                trims=rec, now=10_000, floor=45 * GiB)
+    assert d.stages["root"] == Stage.OK
+    assert d.alarms["floors:root"][0] == Severity.CRITICAL
+    assert "pool" in d.alarms["floors:root"][1]
+    assert not any(a.kind in ("stop", "final", "trim") for a in d.actions)
+    # The guest's own shortfall still forces FINAL.
+    assert _decide(used_pct=50, managed=True, floors_fit=False).stages["root"] == Stage.FINAL

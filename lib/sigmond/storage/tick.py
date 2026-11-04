@@ -488,6 +488,7 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
         registered = sum(h.total for (c, sn), h in holdings.items() if sn == s.name)
         reserve = STATE_RESERVE_BYTES if s.mount == "/" else 0
         allottable = allottable_bytes(s, levels, registered, reserve)
+        own = allottable                # before the pool limit
         if pool is not None and s.name != ARCHIVE_STORE:
             if cfg.pool_share is not None:
                 share = cfg.pool_share
@@ -498,7 +499,11 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
         demands[s.name] = [Demand(x.client, x.floor_bytes, rates[(x.client, x.store)][0],
                                   cfg.shares.get(x.client, 1.0), x.max_days)
                            for x in regs if x.store == s.name]
-        allotments[s.name] = allot_days(demands[s.name], allottable)
+        allot = allot_days(demands[s.name], allottable)
+        if not allot.floors_fit and allottable < own and \
+                allot_days(demands[s.name], own).floors_fit:
+            allot = replace(allot, pool_caused=True)
+        allotments[s.name] = allot
     if pool is not None:
         stores[pool.name] = pool
     history = _history(state, stores, t)

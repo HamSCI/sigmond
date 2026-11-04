@@ -880,3 +880,21 @@ def test_an_unparseable_storage_toml_holds_the_lever(tmp_path):
     run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=601), r, **p)
     assert r.calls["stop_client"] == 0
     assert _alarm_keys(p)["hands-off-unknown"]["severity"] == "ERROR"
+
+
+# ---- a floors shortfall the pool caused (ruling) ------------------------------
+
+def test_a_pool_caused_floor_shortfall_on_a_half_empty_guest_stops_nothing(tmp_path):
+    from sigmond.storage.measure import HostReport
+    pool = Store("pve/data", "pve/data", "pool", 1000 * GiB, 960 * GiB)
+    rep = HostReport(T0 - timedelta(seconds=30), pool, (100,), (), "")
+    views = {"a": _view("a", "/data/a", floor=45 * GiB)}
+    r = _fake_runners(used_pct=50, virt=True, host_report=(rep, None), views=views,
+                      trim_ok=False); p = _paths(tmp_path)
+    run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=1000), r, **p)
+    st = _status(p)
+    stores = {s["name"]: s for s in st["stores"]}
+    assert stores["root"]["stage"] == "OK"
+    assert "floors:root" in _alarm_keys(p)
+    assert r.calls["stop_client"] == 0 and r.calls["call_final"] == 0
+    assert "would-stop:a" not in _alarm_keys(p)

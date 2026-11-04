@@ -79,6 +79,10 @@ class Allotments:
     floors_fit: bool
     allottable: int
     days: Optional[float] = None        # D; None when no client has a write rate
+    # True when the floors fit the store's own allottable space and only the
+    # pool limit (apply_pool_limit) pushed it below them.  The ladder then
+    # alarms but leaves the stage to the store's own fill.
+    pool_caused: bool = False
 
 
 @dataclass(frozen=True)
