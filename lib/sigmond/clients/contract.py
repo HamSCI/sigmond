@@ -31,13 +31,14 @@ from .base import ClientAdapter, ClientView, DataSink, DiskWrite, InstanceView
 SUPPORTED_CONTRACT_VERSION = "0.9"
 
 
-def _version_tuple(text):
+def version_tuple(text):
     """(major, minor) from "0.9"; None when the text does not parse."""
     try:
         parts = str(text).strip().split(".")
         return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
     except (ValueError, IndexError):
         return None
+
 
 # Threshold above which a quality-snapshot's age is reported as a
 # warn-level validate issue.  6× the snapshot writer's 5 s cadence —
@@ -103,8 +104,8 @@ class ContractAdapter(ClientAdapter):
         version = data.get('contract_version')
         if version:
             view.contract_version = str(version)
-            got = _version_tuple(view.contract_version)
-            if got is None or got > _version_tuple(SUPPORTED_CONTRACT_VERSION):
+            got = version_tuple(view.contract_version)
+            if got is None or got > version_tuple(SUPPORTED_CONTRACT_VERSION):
                 view.issues.append(
                     f"contract_version mismatch: client reports "
                     f"{view.contract_version}, sigmond supports "

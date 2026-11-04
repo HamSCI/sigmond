@@ -106,14 +106,20 @@ def _check_contract_version(deploy: dict, supported: str) -> Check:
             "missing from [package] block",
             f"add `contract_version = \"{supported}\"` to [package]",
         )
+    from .clients.contract import version_tuple
     cv = str(cv)
     if cv == supported:
         return Check("[package].contract_version", "ok",
                      f"{cv} (matches sigmond)")
+    got, want = version_tuple(cv), version_tuple(supported)
+    if got is not None and want is not None and got <= want:
+        return Check("[package].contract_version", "ok",
+                     f"{cv} (older than sigmond's {supported}; compatible)")
     return Check(
         "[package].contract_version", "warn",
         f"client reports {cv}, sigmond supports {supported}",
-        "skew is tolerated within the same major; bump when you adopt new fields",
+        "the client declares a newer or unreadable version; "
+        "update sigmond or fix the declaration",
     )
 
 

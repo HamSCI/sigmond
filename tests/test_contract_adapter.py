@@ -149,11 +149,9 @@ class ReadViewTests(unittest.TestCase):
         )
 
     def test_v05_client_on_current_sigmond_is_silent(self):
-        """A v0.5 client on the current sigmond stays operational but
-        emits a warn-level mismatch issue — CLIENT-CONTRACT.md
-        §changelog: minor-version skew is compatible, never a hard fail.
-        The exact warning text just names the two versions; the
-        assertion checks only that a mismatch issue surfaces."""
+        """A v0.5 client on the current sigmond stays operational and
+        draws no mismatch issue: an older minor is compatible by
+        design (CLIENT-CONTRACT.md, "Migration and versioning")."""
         raw = json.loads(self.inventory_json)
         raw['contract_version'] = '0.5'
         view = self._run(stdout=json.dumps(raw))
@@ -163,12 +161,10 @@ class ReadViewTests(unittest.TestCase):
             f"unexpected mismatch issue for v0.5 client, got {view.issues}",
         )
 
-    def test_v06_client_on_v07_sigmond_warns(self):
-        """v0.6 → v0.7 minor-version skew is the latest forward-compat
-        path the contract supports.  A v0.6 client (full data_sinks
-        per §17, no §18 timing_authority_applied) on a v0.7 sigmond
-        stays operational with a warn-level mismatch — the v0.7
-        migration entry promises this explicitly."""
+    def test_v06_client_on_current_sigmond_is_silent(self):
+        """A v0.6 client (data_sinks per §17, no §18
+        timing_authority_applied) on the current sigmond stays
+        operational and draws no mismatch issue."""
         raw = json.loads(self.inventory_json)
         raw['contract_version'] = '0.6'
         view = self._run(stdout=json.dumps(raw))
@@ -191,7 +187,7 @@ class ReadViewTests(unittest.TestCase):
             f"unexpected mismatch issue for current-version client: {view.issues}",
         )
 
-    def test_contract_version_mismatch_raises_issue(self):
+    def test_v01_client_is_silent(self):
         raw = json.loads(self.inventory_json)
         raw['contract_version'] = '0.1'
         view = self._run(stdout=json.dumps(raw))

@@ -88,9 +88,19 @@ class ContractVersionTests(unittest.TestCase):
             {"package": {"contract_version": "0.8"}}, "0.8")
         self.assertEqual(c.status, "ok")
 
-    def test_warn_on_skew(self):
+    def test_older_version_is_ok(self):
         c = ddi._check_contract_version(
-            {"package": {"contract_version": "0.6"}}, "0.8")
+            {"package": {"contract_version": "0.8"}}, "0.9")
+        self.assertEqual(c.status, "ok")
+
+    def test_newer_version_warns(self):
+        c = ddi._check_contract_version(
+            {"package": {"contract_version": "0.10"}}, "0.9")
+        self.assertEqual(c.status, "warn")
+
+    def test_unparseable_version_warns(self):
+        c = ddi._check_contract_version(
+            {"package": {"contract_version": "x.y"}}, "0.9")
         self.assertEqual(c.status, "warn")
 
     def test_fail_when_missing(self):
