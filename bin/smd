@@ -36,6 +36,7 @@ Operate (run things now, may need sudo):
     smd sink        status | off --reason R | upload                 the site sink switch (sudo)
     smd remote      status | off | on                                remote access for the fleet admin (sudo)
     smd archive     status | add [--device sdX] | remove             the archive drive for raw IQ (sudo)
+    smd storage     status [--json] | share | directive | tick       the storage capacity ledger (sudo to change)
     smd upload      status | on | hold | off | discard [--reason R]  legacy words for the same switch (sudo)
     smd tui                                                      launch interactive TUI
 
@@ -17117,7 +17118,7 @@ _smd_complete() {
     # verbs had accumulated here unoffered (adopt, align, check, doctor,
     # fleet, notify, psws, remote, sink, timing, update, upload, version),
     # which tells an operator a subcommand does not exist.
-    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin adopt align archive check doctor fleet notify psws remote sink timing update upload version"
+    local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin adopt align archive check doctor fleet notify psws remote sink storage timing update upload version"
     local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing uploader radiod instance uninstall completion"
     local components="ka9q-radio radiod ka9q-web hf-timestd wspr-recorder psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter gpsdo-monitor igmp-querier rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter"
@@ -28269,6 +28270,33 @@ def _build_parser() -> argparse.ArgumentParser:
     a_rm.add_argument('--forget', action='store_true',
         help='also drop its fstab line and /etc/sigmond/archive.toml')
 
+    # storage -- the capacity ledger (docs/superpowers/specs/2026-11-04-storage-capacity-design.md)
+    p_storage = sub.add_parser('storage',
+        help='the storage capacity ledger: status | share | directive | tick')
+    storage_sub = p_storage.add_subparsers(dest='storage_command')
+    st_status = storage_sub.add_parser('status',
+        help="each store's fill and stage, each client's holding and target, the alarms")
+    st_status.add_argument('--json', action='store_true',
+        help='print the status file the ledger tick wrote, unchanged')
+    st_share = storage_sub.add_parser('share',
+        help="set a client's share weight (default 1; shares split evenly), or --clear it")
+    st_share.add_argument('target', metavar='client')
+    st_share.add_argument('value', metavar='weight', nargs='?')
+    st_share.add_argument('--clear', action='store_true', help="drop the client's weight")
+    st_dir = storage_sub.add_parser('directive',
+        help="override a client's final-stage policy, or mark the station hands-off "
+             "(the ledger then alarms but stops no client)")
+    st_dir.add_argument('target', metavar='client|hands-off')
+    st_dir.add_argument('value', metavar='policy', nargs='?',
+        help='give-up-oldest:<class> | stop-writing | refuse-new-rows | custom:<name>')
+    st_dir.add_argument('--clear', action='store_true',
+        help='drop the directive (or end hands-off)')
+    st_dir.add_argument('--for', dest='for_duration', metavar='DUR',
+        help='hands-off only: how long, e.g. 6h or 3d (default 24h, at most 14d)')
+    st_dir.add_argument('--reason', help='hands-off only: why, shown in status')
+    storage_sub.add_parser('tick',
+        help='run one ledger pass now (the 2-minute timer runs it as root)')
+
     # check -- read-only: does this station work?  (tasks/spec-smd-check-v372.md)
     p_check = sub.add_parser('check',
         help='does this station work?  One line per item and a verdict: PASS, WAIT '
@@ -28544,6 +28572,13 @@ def main() -> int:
             return 1
         from sigmond.commands.archive import cmd_archive
         return cmd_archive(args)
+
+    if args.command == 'storage':
+        verb = getattr(args, 'storage_command', None) or 'status'
+        if verb != 'status' and _need_root(f'storage {verb}'):
+            return 1
+        from sigmond.commands.storage import cmd_storage
+        return cmd_storage(args)
 
     if args.command == 'sink':
         verb = getattr(args, 'sink_command', None) or 'status'
