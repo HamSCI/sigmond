@@ -128,6 +128,30 @@ shorten that, never lengthen it.
 `pm-heartbeat.py` carries the fullest pool's percent as `pool_pct` in its
 `resources` block, which turns INVALID at 95 %.
 
+### Rollout order: set up the PM before the guest's ledger
+
+The guest's storage ledger (`sigmond-storage.timer`) expects a host report
+whenever `systemd-detect-virt` names a VM. A missing report, or one older
+than 900 s, raises the `host-report` alarm at ERROR on every tick, and the
+ledger then counts nothing from the pool. So on a VM station:
+
+1. On the PM, run `pm-heartbeat-setup.sh`, which installs and enables
+   `pm-storage.timer`. Check that `/run/sigmond/host-pool.json` appears in
+   the guest within five minutes.
+2. Only then let the guest's ledger run.
+
+If the PM cannot get `pm-storage` yet, write this in the guest's
+`/etc/sigmond/storage.toml` meanwhile:
+
+```toml
+[pool]
+expect_report = false
+```
+
+The ledger then expects no host report and raises no alarm for its
+absence, but it also cannot see the pool fill. Remove the line once the
+PM reports. A bare-metal station needs neither step: it expects no report.
+
 ## Prerequisites
 
 **Step 0 (manual, before phase 1)** — these scripts assume a working
