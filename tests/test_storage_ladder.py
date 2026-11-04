@@ -190,11 +190,15 @@ def test_floors_alarm_is_critical():
     assert _decide(used_pct=50, managed=True, floors_fit=False).alarms["floors:root"][0] == Severity.CRITICAL
 
 
-def test_client_watch_fires_at_every_stage():
-    # 37 of 40 GiB = 92.5 % > 90 %, store at 10 %.
-    d = _decide(used_pct=10, managed=True, holding_gib=37)
+def test_client_watch_waits_for_the_store_to_reach_watch():
+    """Ruling: client-watch is judged only on a store at WATCH or above.  A
+    low-rate, long-retention client fills its allotment by design; on a
+    half-empty store that is no news."""
+    # 37 of 40 GiB = 92.5 % > 90 %.
+    assert "client-watch:a" not in _decide(used_pct=50, managed=True, holding_gib=37).alarms
+    d = _decide(used_pct=81, managed=True, holding_gib=37)
     assert d.alarms["client-watch:a"][0] == Severity.WARNING
-    assert "client-watch:a" not in _decide(used_pct=10, managed=True, holding_gib=35).alarms
+    assert "client-watch:a" not in _decide(used_pct=81, managed=True, holding_gib=35).alarms
 
 
 def test_trim_carries_the_target_as_fit_bytes():

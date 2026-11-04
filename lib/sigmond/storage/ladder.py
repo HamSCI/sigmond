@@ -7,7 +7,8 @@ then clients, sorted by name) so tests and alarms stay stable.
 
 Stages climb per store (spec "The ladder"):
 
-- WATCH    warn, naming the biggest holders.  A store whose projected time
+- WATCH    warn, naming the biggest holders, and any client holding more
+           than client_watch % of its allotment.  A store whose projected time
            to full (from its measured churn) falls under the horizon
            reaches WATCH early, whatever its percentage.
 - TIGHTEN  lower targets toward floors; ask managed clients to trim; clean up.
@@ -256,7 +257,10 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
             # shrank their allotments.  Stages and alarms only.
             continue
 
-        for c in clients:
+        # A client near its allotment is news only while the store itself
+        # is under pressure (ruling): a low-rate, long-retention client
+        # fills its allotment by design.
+        for c in (clients if stage >= Stage.WATCH else ()):
             if hold[c] > per_client[c] * levels.client_watch / 100.0:
                 client_watch.setdefault(c, []).append(
                     f"{c} holds {_fmt_bytes(hold[c])} of its "
