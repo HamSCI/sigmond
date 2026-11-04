@@ -4,6 +4,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from sigmond.log_cmd import expire_log_levels, set_log_level
 from sigmond.storage.cleanup import report_unclaimed, run_cleanup
 
@@ -17,7 +19,7 @@ def test_cleanup_runs_every_step_even_after_a_failure(tmp_path):
                                stdout="", stderr="x")
     old = tmp_path / "old"; old.write_text("x"); os.utime(old, (0, 0))
     new = tmp_path / "new"; new.write_text("x")
-    res = run_cleanup(run=run, now=10 * 86400, tmp_root=tmp_path)
+    res = run_cleanup(run=run, now=10 * 86400, tmp_root=tmp_path, tmp_uid=os.getuid())
     assert calls == ["journalctl", "apt-get"] and not res[0].ok and res[1].ok
     assert not old.exists() and new.exists()
 
@@ -29,7 +31,7 @@ def test_cleanup_spares_symlinks_and_directories(tmp_path):
     link = d / "ln"; link.symlink_to(target)
     os.utime(link, (0, 0), follow_symlinks=False)
     os.utime(target, (0, 0))
-    run_cleanup(run=run, now=10 * 86400, tmp_root=d)
+    run_cleanup(run=run, now=10 * 86400, tmp_root=d, tmp_uid=os.getuid())
     assert link.is_symlink() and target.exists()
 
 
@@ -90,7 +92,7 @@ def test_cleanup_refuses_symlinked_tmp_root(tmp_path):
     f = real / "old"; f.write_text("x"); os.utime(f, (0, 0))
     link = tmp_path / "link"; link.symlink_to(real)
     run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
-    res = run_cleanup(run=run, now=10 * 86400, tmp_root=link)
+    res = run_cleanup(run=run, now=10 * 86400, tmp_root=link, tmp_uid=os.getuid())
     assert not res[2].ok and "symlink" in res[2].detail and f.exists()
 
 
@@ -109,3 +111,56 @@ def test_new_env_file_is_world_readable(tmp_path):
     env = tmp_path / "new.env"
     set_log_level("hf-timestd", "INFO", env_path=env)
     assert (env.stat().st_mode & 0o7777) == 0o644
+
+
+# ---- the root tmp trim trusts only a root-owned, closed directory ------------
+
+def _ok_run(argv, **kw):
+    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
+def _tmp_with_old_file(tmp_path, mode=0o755):
+    d = tmp_path / "tmp"; d.mkdir(); os.chmod(d, mode)
+    f = d / "old"; f.write_text("x"); os.utime(f, (0, 0))
+    return d, f
+
+
+def test_tmp_trim_refuses_a_root_owned_by_someone_else(tmp_path):
+    d, f = _tmp_with_old_file(tmp_path)
+    res = run_cleanup(run=_ok_run, now=10 * 86400, tmp_root=d, tmp_uid=os.getuid() + 1)
+    assert not res[2].ok and "owned by" in res[2].detail and f.exists()
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o757, 0o777, 0o1777])
+def test_tmp_trim_refuses_a_root_others_may_write(tmp_path, mode):
+    d, f = _tmp_with_old_file(tmp_path, mode)
+    res = run_cleanup(run=_ok_run, now=10 * 86400, tmp_root=d, tmp_uid=os.getuid())
+    assert not res[2].ok and "writable" in res[2].detail and f.exists()
+
+
+def test_tmp_trim_unlinks_relative_to_a_directory_descriptor(tmp_path, monkeypatch):
+    d, f = _tmp_with_old_file(tmp_path)
+    sub = d / "sub"; sub.mkdir()
+    g = sub / "older"; g.write_text("y"); os.utime(g, (0, 0))
+    outside = tmp_path / "outside"; outside.mkdir()
+    h = outside / "victim"; h.write_text("z"); os.utime(h, (0, 0))
+    (d / "link").symlink_to(outside)
+    seen = []
+    real = os.unlink
+
+    def unlink(path, *, dir_fd=None):
+        seen.append((path, dir_fd))
+        return real(path, dir_fd=dir_fd)
+    monkeypatch.setattr(os, "unlink", unlink)
+    res = run_cleanup(run=_ok_run, now=10 * 86400, tmp_root=d, tmp_uid=os.getuid())
+    assert res[2].ok and not f.exists() and not g.exists() and h.exists()
+    assert sorted(p for p, _ in seen) == ["old", "older"]
+    assert all(fd is not None for _, fd in seen)
+
+
+def test_tmpfiles_creates_the_tmp_root_as_root_0755():
+    from pathlib import Path
+    conf = Path(__file__).resolve().parent.parent / "systemd" / "sigmond-storage.conf"
+    lines = [l.split() for l in conf.read_text().splitlines()
+             if l.strip() and not l.lstrip().startswith("#")]
+    assert ["d", "/var/lib/sigmond/tmp", "0755", "root", "root", "-"] in lines
