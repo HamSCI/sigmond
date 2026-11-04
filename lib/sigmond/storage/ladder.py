@@ -50,6 +50,9 @@ class TrimRecord:
       failed (unparseable, timed out, error); it counts as a failed answer.
     - `final_since` marks when an unmanaged client first sat over its target
       at FINAL; it starts the unmanaged grace period.
+    - The keeper (storage/tick.py) clears a client's record entirely when
+      every store it sits on drops below TIGHTEN or the client fits its
+      target, so a failure in one episode never counts against the next.
     """
     requested_at: float
     answered_at: Optional[float] = None
