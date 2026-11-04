@@ -1641,3 +1641,43 @@ def test_storage_status_path_matches_the_ledger():
     from sigmond.heartbeat import STORAGE_STATUS_PATH
     from sigmond.storage.tick import STATUS_PATH
     assert STORAGE_STATUS_PATH == STATUS_PATH
+
+
+# The storage key only where the ledger's timer runs (final review item 8)
+
+def test_no_storage_key_where_the_ledger_timer_is_absent():
+    from sigmond.heartbeat import _add_storage, _map_resources
+    fields = {"load1": 0.1}
+    _add_storage(fields, timer_enabled=lambda: False,
+                 read=lambda: {"worst_stage": "OK", "stores": [], "alarms": 0})
+    assert "storage" not in fields
+    raw = _res_raw()
+    raw.pop("storage", None)
+    assert _map_resources(raw)["verdict"] == "VALID"      # the old verdict stands
+
+
+def test_the_storage_key_where_the_ledger_timer_runs():
+    from sigmond.heartbeat import _add_storage
+    fields = {}
+    _add_storage(fields, timer_enabled=lambda: True, read=lambda: None)
+    assert "storage" in fields and fields["storage"] is None    # stale: INDETERMINATE
+    fields = {}
+    _add_storage(fields, timer_enabled=lambda: True, read=lambda: _storage("OK"))
+    assert fields["storage"]["worst_stage"] == "OK"
+
+
+def test_the_timer_check_asks_systemctl_and_fails_to_absent():
+    from types import SimpleNamespace
+    from sigmond.heartbeat import _storage_timer_enabled
+    seen = []
+
+    def run(argv, **kw):
+        seen.append(argv)
+        return SimpleNamespace(returncode=0)
+    assert _storage_timer_enabled(run=run) is True
+    assert seen == [["systemctl", "is-enabled", "--quiet", "sigmond-storage.timer"]]
+    assert _storage_timer_enabled(run=lambda a, **k: SimpleNamespace(returncode=1)) is False
+
+    def boom(argv, **kw):
+        raise OSError("no systemctl")
+    assert _storage_timer_enabled(run=boom) is False

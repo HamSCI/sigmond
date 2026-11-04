@@ -985,8 +985,33 @@ def _read_resources() -> dict:
     if not observations:
         raise ReaderUnavailable("local_resources probe returned nothing")
     fields = dict(observations[0].fields)
-    fields["storage"] = _read_storage_status()
+    _add_storage(fields)
     return fields
+
+
+STORAGE_TIMER = "sigmond-storage.timer"
+
+
+def _storage_timer_enabled(run=subprocess.run) -> bool:
+    """sigmond-storage.timer installed and enabled.  Any failure to ask
+    counts as absent."""
+    try:
+        r = run(["systemctl", "is-enabled", "--quiet", STORAGE_TIMER],
+                capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def _add_storage(fields: dict, timer_enabled=None, read=None) -> None:
+    """Set fields["storage"] only on a station whose ledger timer runs.
+    Where the timer is absent the key stays out entirely, so the station
+    keeps the verdict it had before the ledger existed; a missing status
+    file there is no fault."""
+    timer_enabled = _storage_timer_enabled if timer_enabled is None else timer_enabled
+    read = _read_storage_status if read is None else read
+    if timer_enabled():
+        fields["storage"] = read()
 
 
 def _read_storage_status(path=None, now=None) -> Optional[dict]:
