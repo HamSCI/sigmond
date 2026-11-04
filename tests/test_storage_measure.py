@@ -104,3 +104,12 @@ def test_future_and_naive_timestamps_are_faults(tmp_path):
     rep["generated_at"] = "2026-11-04T12:00:00"
     p.write_text(json.dumps(rep))
     assert read_host_report(str(p), now) == (None, "unreadable")
+
+
+def test_a_symlinked_host_report_is_unreadable_not_followed(tmp_path):
+    now = datetime(2026, 11, 4, 12, tzinfo=timezone.utc)
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps(_report(now)))
+    p = tmp_path / "h.json"
+    p.symlink_to(real)
+    assert read_host_report(str(p), now) == (None, "unreadable")

@@ -76,15 +76,18 @@ def _gib(n) -> str:
 
 
 def _status(args) -> int:
+    from ..safe_write import read_nofollow
     path = _status_path(args)
     try:
-        text = path.read_text()
+        text = read_nofollow(path)      # no symlink, regular file, at most 1 MiB
     except FileNotFoundError:
+        text = None                     # /run/sigmond itself is absent
+    except OSError as exc:
+        _complain(f"cannot read {path}: {exc.strerror or exc}")
+        return 1
+    if text is None:
         _say(f"no ledger tick yet ({path} does not exist)")
         return 0
-    except OSError as exc:
-        _complain(f"cannot read {path}: {exc}")
-        return 1
     if getattr(args, "json", False):
         sys.stdout.write(text)
         return 0

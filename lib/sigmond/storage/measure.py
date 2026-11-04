@@ -110,12 +110,18 @@ def _parse_time(text: str) -> datetime:
 
 def read_host_report(path: str, now: datetime):
     """Return (report, fault); fault is "missing", "stale", "unreadable" or None."""
+    from ..safe_write import read_nofollow
     try:
-        with open(path) as fh:
-            raw = json.load(fh)
+        text = read_nofollow(path)      # no symlink, regular file, at most 1 MiB
     except FileNotFoundError:
-        return None, "missing"
+        return None, "missing"          # the directory itself is absent
     except (OSError, ValueError):
+        return None, "unreadable"
+    if text is None:
+        return None, "missing"
+    try:
+        raw = json.loads(text)
+    except ValueError:
         return None, "unreadable"
     try:
         if raw.get("schema") != 1:

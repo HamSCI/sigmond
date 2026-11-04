@@ -128,3 +128,11 @@ def test_smd_storage_status_from_the_dev_tree(tmp_path):
                        capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stderr
     assert "no ledger tick yet" in r.stdout
+
+
+def test_status_does_not_follow_a_symlink(tmp_path, capsys):
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps(STATUS))
+    (tmp_path / "status.json").symlink_to(real)
+    assert cmd_storage(_args(tmp_path, storage_command="status", json=True)) == 1
+    assert capsys.readouterr().out == ""

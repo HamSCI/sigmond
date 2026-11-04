@@ -362,3 +362,103 @@ def test_an_untouched_by_calls_record_stays_fresh_while_the_tick_keeps_it(tmp_pa
         run_tick(T0 + timedelta(minutes=2 * k), r, **p)
     assert _trims(p)["u"]["final_since"] == T0.timestamp()
     assert sum("raise" in l and "hands-off" in l for l in r.journal_lines) == 1
+
+
+# ---- the files the root tick trusts (security review of a29689b) ------------
+
+import os
+
+
+def test_a_symlinked_state_file_is_not_followed(tmp_path):
+    p = _paths(tmp_path)
+    secret = tmp_path / "elsewhere.json"
+    forged = {"trims": {"a": {"requested_at": T0.timestamp() - 700, "ok": False,
+                              "touched": T0.timestamp()}}}
+    secret.write_text(json.dumps(forged))
+    p["state_path"].symlink_to(secret)
+    r = _fake_runners(used_pct=96, trim_ok=False)
+    assert run_tick(T0, r, **p) == 0
+    assert r.calls["stop_client"] == 0                  # the forged streak was not read
+    a = {x["key"]: x for x in _status(p)["alarms"]}
+    assert a["state-untrusted"]["severity"] == "ERROR"
+    assert json.loads(secret.read_text()) == forged     # the link's target is untouched
+    assert not p["state_path"].is_symlink()             # replaced, never written through
+
+
+def test_a_state_file_owned_by_another_uid_is_not_trusted(tmp_path):
+    p = _paths(tmp_path)
+    p["state_path"].write_text(json.dumps({"trims": {"a": {
+        "requested_at": T0.timestamp() - 700, "ok": False, "touched": T0.timestamp()}}}))
+    from sigmond.storage import tick
+    real = tick._state_owner_ok
+    tick._state_owner_ok = lambda st, uid: real(st, uid + 1)    # as if another uid wrote it
+    try:
+        r = _fake_runners(used_pct=96, trim_ok=False)
+        assert run_tick(T0, r, **p) == 0
+    finally:
+        tick._state_owner_ok = real
+    assert r.calls["stop_client"] == 0
+    assert "state-untrusted" in {x["key"] for x in _status(p)["alarms"]}
+
+
+def test_the_same_state_owned_by_the_expected_uid_is_trusted(tmp_path):
+    """The control for the test above: the forged streak does stop when trusted."""
+    p = _paths(tmp_path)
+    p["state_path"].write_text(json.dumps({"trims": {"a": {
+        "requested_at": T0.timestamp() - 700, "ok": False, "touched": T0.timestamp()}}}))
+    r = _fake_runners(used_pct=96, trim_ok=False)
+    assert run_tick(T0, r, **p) == 0
+    assert r.calls["stop_client"] == 1
+    assert "state-untrusted" not in {x["key"] for x in _status(p)["alarms"]}
+
+
+def test_an_oversized_state_file_is_not_trusted(tmp_path):
+    p = _paths(tmp_path)
+    p["state_path"].write_text(json.dumps({"pad": "x" * (2 << 20)}))
+    r = _fake_runners(used_pct=10)
+    run_tick(T0, r, **p)
+    assert "state-untrusted" in {x["key"] for x in _status(p)["alarms"]}
+
+
+def test_state_is_written_0600_and_status_0644(tmp_path):
+    p = _paths(tmp_path)
+    run_tick(T0, _fake_runners(used_pct=10), **p)
+    assert (p["state_path"].stat().st_mode & 0o777) == 0o600
+    assert (p["status_path"].stat().st_mode & 0o777) == 0o644
+
+
+def test_a_symlinked_lock_is_refused_loudly(tmp_path):
+    p = _paths(tmp_path)
+    (tmp_path / "target").write_text("")
+    p["lock_path"].symlink_to(tmp_path / "target")
+    r = _fake_runners(used_pct=10)
+    assert run_tick(T0, r, **p) == 1
+    assert any(l.startswith("<2>") for l in r.journal_lines)
+    assert r.calls["load_views"] == 0
+
+
+def test_a_state_dir_owned_by_another_uid_is_refused(tmp_path):
+    d = tmp_path / "storage"
+    d.mkdir()
+    p = _paths(tmp_path)
+    p["state_path"] = d / "state.json"
+    # the lock/status dir (tmp_path) and the state dir share our uid; pretend
+    # only the state dir is foreign by checking it against another uid.
+    from sigmond.storage import tick
+    real = tick._trusted_dir
+    calls = []
+
+    def fake(path, uid):
+        calls.append(path)
+        return real(path, uid + 1 if Path(path) == d else uid)
+    tick._trusted_dir = fake
+    try:
+        r = _fake_runners(used_pct=10)
+        run_tick(T0, r, **p)
+    finally:
+        tick._trusted_dir = real
+    assert "state-untrusted" in {x["key"] for x in _status(p)["alarms"]}
+    assert not p["state_path"].exists()
+
+
+from pathlib import Path  # noqa: E402

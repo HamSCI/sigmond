@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
 import traceback
 from dataclasses import dataclass
@@ -166,15 +167,63 @@ def _num(v) -> Optional[float]:
     return float(v)
 
 
-def _load_state(path: Path, journal) -> dict:
+class Untrusted(Exception):
+    """A file or directory the root tick must not trust; one line."""
+
+
+def _trusted_dir(d: Path, uid: int) -> int:
+    """`d`, created root:root 0755 when absent, opened without following a
+    link and checked by install_lock's rules: a real directory, owned by
+    `uid`, writable by no group or other.  Returns the descriptor."""
+    from ..install_lock import InstallLockError, _check_dir, _open_dir
+    d = Path(d)
     try:
-        raw = json.loads(Path(path).read_text())
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError) as exc:
-        journal(f"<4>storage: state file {path} unreadable ({exc}); starting fresh")
-        return {}
-    return raw if isinstance(raw, dict) else {}
+        os.mkdir(d, 0o755)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise Untrusted(f"cannot create {d}: {exc.strerror or exc}") from None
+    try:
+        return _open_dir(d, uid)        # lstat check, O_NOFOLLOW open, fstat check
+    except InstallLockError as exc:
+        raise Untrusted(str(exc)) from None
+
+
+def _state_owner_ok(st: os.stat_result, uid: int) -> bool:
+    return st.st_uid == uid
+
+
+def _read_state(dfd: int, path: Path, uid: int) -> tuple:
+    """(state, problem).  The read goes through safe_write's _read_at on the
+    checked directory: no symlink, no hard link, no non-regular file, at
+    most READ_CAP (1 MiB).  The file must also belong to `uid` (root)."""
+    from ..safe_write import _read_at
+    try:
+        got = _read_at(dfd, os.fstat(dfd), path.name, path)
+    except OSError as exc:
+        return {}, str(exc.strerror or exc)
+    if got is None:
+        return {}, None
+    text, st = got
+    if not _state_owner_ok(st, uid):
+        return {}, f"{path}: owned by uid {st.st_uid}, not uid {uid}"
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        return {}, f"{path}: not JSON ({exc})"
+    if not isinstance(raw, dict):
+        return {}, f"{path}: not a JSON object"
+    return raw, None
+
+
+def _write_at_dir(dfd: int, path: Path, obj, mode: int, uid: int) -> None:
+    """Atomic write through safe_write's _write_at on the already-checked
+    directory descriptor, so a directory swapped after the check cannot
+    redirect it.  As root the file goes to root:root explicitly."""
+    from ..safe_write import _write_at
+    data = (json.dumps(obj, indent=1, sort_keys=True) + "\n").encode("utf-8")
+    _write_at(dfd, os.fstat(dfd), path.name, path, data, mode,
+              (0, 0) if uid == 0 else None)
 
 
 def _load_trims(raw, now: float) -> tuple:
@@ -192,18 +241,11 @@ def _load_trims(raw, now: float) -> tuple:
         fin = _num(d.get("final_since"))
         last = _num(d.get("touched"))
         last = max(x for x in (req, ans, last) if x is not None)
-        if now - last > STALE_TRIM_S:
+        if now - last > STALE_TRIM_S or last > now + 300:     # stale, or from the future
             continue
         trims[str(client)] = TrimRecord(req, ans, bool(d.get("ok", False)), fin)
         touched[str(client)] = last
     return trims, touched
-
-
-def _write_json(path: Path, obj) -> None:
-    from ..safe_write import write_owned
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_owned(path, json.dumps(obj, indent=1, sort_keys=True) + "\n", mode=0o644)
 
 
 def _since(state: dict, active: dict, now: float) -> dict:
@@ -535,33 +577,87 @@ def _restore_levels(restored, views, r: Runners) -> None:
 
 # ---------------------------------------------------------------- entry point
 
+def _open_lock(lock_path: Path, uid: int) -> int:
+    """The lock file, opened the way install_lock opens its own: relative to
+    a checked directory, O_NOFOLLOW, regular, one name, owned by `uid`."""
+    from ..install_lock import InstallLockError, _open_checked
+    try:
+        os.mkdir(lock_path.parent, 0o755)
+    except FileExistsError:
+        pass
+    try:
+        return _open_checked(lock_path, uid)
+    except InstallLockError as exc:
+        raise Untrusted(str(exc)) from None
+
+
 def run_tick(now: datetime, runners: Runners, *, config_path=CONFIG_PATH,
              state_path=STATE_PATH, status_path=STATUS_PATH,
-             lock_path=LOCK_PATH) -> int:
+             lock_path=LOCK_PATH, expected_uid: Optional[int] = None) -> int:
+    """One ledger pass.  `expected_uid` names the owner every file and
+    directory the pass trusts must have; None means the effective uid
+    (root under the timer)."""
     if now.tzinfo is None:
         raise ValueError("run_tick needs an aware UTC time")
-    lock_path = Path(lock_path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "a")
+    uid = os.geteuid() if expected_uid is None else expected_uid
+    try:
+        fd = _open_lock(Path(lock_path), uid)
+    except (Untrusted, OSError) as exc:
+        runners.journal(f"<2>storage: refusing the ledger lock: {exc}; no pass ran")
+        return 1
     try:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return EX_TEMPFAIL
-        return _locked(now, runners, config_path, Path(state_path), Path(status_path))
+        return _locked(now, runners, config_path, Path(state_path), Path(status_path), uid)
     finally:
-        fh.close()
+        os.close(fd)
 
 
-def _locked(now, r, config_path, state_path, status_path) -> int:
+def _open_dirs(state_path: Path, status_path: Path, uid: int) -> tuple:
+    """(state dfd | None, status dfd | None, problems)."""
+    problems = []
+    sdfd = tdfd = None
+    try:
+        sdfd = _trusted_dir(state_path.parent, uid)
+    except (Untrusted, OSError) as exc:
+        problems.append(f"state directory: {exc}")
+    try:
+        tdfd = _trusted_dir(status_path.parent, uid)
+    except (Untrusted, OSError) as exc:
+        problems.append(f"status directory: {exc}")
+    return sdfd, tdfd, problems
+
+
+def _locked(now, r, config_path, state_path, status_path, uid) -> int:
     t = now.timestamp()
     stamp = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sdfd, tdfd, problems = _open_dirs(state_path, status_path, uid)
+    try:
+        return _locked_dirs(now, t, stamp, r, config_path, state_path, status_path,
+                            uid, sdfd, tdfd, problems)
+    finally:
+        for fd in (sdfd, tdfd):
+            if fd is not None:
+                os.close(fd)
+
+
+def _locked_dirs(now, t, stamp, r, config_path, state_path, status_path,
+                 uid, sdfd, tdfd, problems) -> int:
     state: dict = {}
     book = AlarmBook()
     try:
-        state = _load_state(state_path, r.journal)
+        if sdfd is not None:
+            state, problem = _read_state(sdfd, state_path, uid)
+            if problem:
+                problems.append(f"state file: {problem}")
         book = AlarmBook.from_dict(state.get("alarms", {}) if isinstance(state.get("alarms"), dict) else {})
         new_state, status, active = _pass(now, r, config_path, json.loads(json.dumps(state)))
+        if problems:
+            active["state-untrusted"] = (
+                Severity.ERROR,
+                "storage ledger state not trusted, started fresh: " + "; ".join(problems))
         for e in book.update(active, t):
             r.journal(journal_line(e))
         since = _since(state, active, t)
@@ -569,15 +665,18 @@ def _locked(now, r, config_path, state_path, status_path) -> int:
         new_state["since"] = since
         status["generated_at"] = stamp
         status["alarms"] = _alarm_rows(active, since)
-        _write_json(state_path, new_state)
-        _write_json(status_path, status)
+        if sdfd is not None:
+            _write_at_dir(sdfd, state_path, new_state, 0o600, uid)
+        if tdfd is None:
+            raise Untrusted("cannot write the status file: " + "; ".join(problems))
+        _write_at_dir(tdfd, status_path, status, 0o644, uid)
         return 0
     except Exception as exc:
-        _fault(now, stamp, exc, r, state, book, state_path, status_path)
+        _fault(now, stamp, exc, r, state, book, state_path, status_path, uid, sdfd, tdfd)
         return 1
 
 
-def _fault(now, stamp, exc, r, state, book, state_path, status_path) -> None:
+def _fault(now, stamp, exc, r, state, book, state_path, status_path, uid, sdfd, tdfd) -> None:
     """Raise `ledger-fault` and hold every other alarm as it stood."""
     t = now.timestamp()
     msg = f"storage ledger fault: {type(exc).__name__}: {exc}"
@@ -595,20 +694,22 @@ def _fault(now, stamp, exc, r, state, book, state_path, status_path) -> None:
     except Exception:
         pass
     since = _since(state, held, t)
-    try:
-        kept = dict(state)
-        kept["alarms"] = book.to_dict()
-        kept["since"] = since
-        _write_json(state_path, kept)
-    except Exception:
-        pass
-    try:
-        _write_json(status_path, {
-            "schema": 1, "generated_at": stamp, "worst_stage": "FAULT",
-            "stores": [], "clients": [],
-            "host_report": None, "hands_off": None,
-            "alarms": _alarm_rows(held, since),
-            "unclaimed": state.get("unclaimed", []) if isinstance(state.get("unclaimed"), list) else [],
-            "config_problems": [], "fault": msg})
-    except Exception:
-        pass
+    if sdfd is not None:
+        try:
+            kept = dict(state)
+            kept["alarms"] = book.to_dict()
+            kept["since"] = since
+            _write_at_dir(sdfd, state_path, kept, 0o600, uid)
+        except Exception:
+            pass
+    if tdfd is not None:
+        try:
+            _write_at_dir(tdfd, status_path, {
+                "schema": 1, "generated_at": stamp, "worst_stage": "FAULT",
+                "stores": [], "clients": [],
+                "host_report": None, "hands_off": None,
+                "alarms": _alarm_rows(held, since),
+                "unclaimed": state.get("unclaimed", []) if isinstance(state.get("unclaimed"), list) else [],
+                "config_problems": [], "fault": msg}, 0o644, uid)
+        except Exception:
+            pass
