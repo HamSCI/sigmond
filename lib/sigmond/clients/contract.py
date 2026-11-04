@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
+from .base import ClientAdapter, ClientView, DataSink, DiskWrite, InstanceView
 
 
 # Tracks the CLIENT-CONTRACT.md version this sigmond build ships (see
@@ -217,6 +217,19 @@ def _instance_from_contract(raw: dict) -> InstanceView:
             path=dw.get('path', ''),
             mb_per_day=float(dw.get('mb_per_day') or 0.0),
             retention_days=int(dw.get('retention_days') or 0),
+        ))
+    for ds in (raw.get('data_sinks') or []):
+        if not isinstance(ds, dict):
+            continue
+        iv.data_sinks.append(DataSink(
+            kind=str(ds.get('kind') or ''),
+            path=str(ds.get('path') or ds.get('target') or ''),
+            mb_per_day=float(ds.get('mb_per_day') or 0.0),
+            retention_days=float(ds.get('retention_days') or 0.0),
+            floor_bytes=int(ds.get('floor_bytes') or 0),
+            final_policy=(str(ds['final_policy'])
+                          if ds.get('final_policy') is not None else None),
+            classes=tuple(str(c) for c in (ds.get('classes') or ())),
         ))
     if raw.get('data_destination') is not None:
         iv.data_destination = str(raw['data_destination'])

@@ -227,11 +227,11 @@ This goes into `docs/CLIENT-CONTRACT.md` as the next version. In outline:
   new rows; or a client-specific named policy it describes).
 - **A trim call.** Each client answers "fit in N bytes" for a sink: it trims in its own order
   and reports the bytes it now holds, by class. It may refuse below its floor, and says so.
-  *(Designer's call: the same surface as §13's control surface, so no new transport.)*
+  *(Designer's call: CLI verbs beside `inventory`, because no client serves a §13 socket yet.)*
 - **A holdings report.** Each client reports its bytes per class per sink on request, and
   sigmond also reads them from the self-describe inventory.
-- **§11, extended.** A runtime log level carries an expiry time. The client restores its
-  routine level when it passes.
+- **§11, extended.** A runtime log level carries an expiry time. Sigmond restores the
+  routine level and sends SIGHUP.
 - **Backward compatibility.** A client that hasn't adopted the revision still appears in
   the ledger: sigmond measures its paths from its existing `disk_writes` or `data_sinks`
   declaration and counts them against its allotment. It can't be asked to trim, so it gets

@@ -8,7 +8,7 @@
 > contract for its *integration* surface rather than restating it. Method,
 > provenance/status tags, and IDs: [REQUIREMENTS-TEMPLATE.md](REQUIREMENTS-TEMPLATE.md).
 
-**Version:** 0.8
+**Version:** 0.9
 **Status:** Adopted. First full v0.2 implementation is `hf-timestd`
 v7.0.0 — see §9.  First greenfield v0.3 implementation is
 `psk-recorder` v0.1.0, which also surfaced the v0.4 hardening items in
@@ -23,6 +23,10 @@ time.
 §19 (per-reporter instance + reporter_id row tag) added 2026-05-25,
 formalising the multi-instance architecture shipped in sigmond
 docs/MULTI-INSTANCE-ARCHITECTURE.md Phases 3-6 and 8.
+
+v0.9 adds §17.7 (storage capacity: floors, classes, final policies and
+three `storage` verbs) and an expiry on the §11 runtime log level.
+Details sit under "Migration and versioning".
 
 v0.8 adds:
 
@@ -1026,6 +1030,12 @@ CLIENT_LOG_LEVEL=WARNING
 
 **Values.**  Standard Python `logging` level names: `DEBUG`, `INFO`,
 `WARNING`, `ERROR`, `CRITICAL`.  Case-insensitive.
+
+**Expiry (v0.9).**  Sigmond MAY publish a level together with an expiry
+time, in `<CLIENT_NAME>_LOG_LEVEL_UNTIL` (UTC, ISO 8601).  Sigmond, not
+the client, restores the routine level once that time passes: it rewrites
+`coordination.env` and sends SIGHUP.  A client that sees no expiry
+variable behaves as before.
 
 **Client-side requirement.**  Every client MUST resolve its log level
 on startup using this precedence (highest-priority first):
@@ -2174,6 +2184,79 @@ Sigmond MUST NOT enforce that any particular client opt into
 `service` sinks; the file path is always sufficient for v0.6
 conformance.
 
+#### 17.7 Storage capacity (v0.9)
+
+Sigmond keeps a ledger of how much each client holds on each store.
+When a store fills, sigmond asks clients to trim, in stages.  A client
+that declares what it holds and how it trims joins that ledger as a
+*managed* client.  A client that declares nothing still appears, as an
+*unmanaged* one: sigmond measures its paths and asks nothing of it.
+
+**Extra fields on `file` sinks.**  A v0.9 client SHOULD add these to
+each `file` entry in `data_sinks` (§17.3).  Sigmond reads `path` as a
+synonym of `target`.
+
+| field          | type             | meaning                                                          |
+|----------------|------------------|------------------------------------------------------------------|
+| `floor_bytes`  | integer          | The least the client needs to keep working.  Trim never goes below it. |
+| `final_policy` | string           | What the client does at the last stage (below).                  |
+| `classes`      | array of strings | The data classes the sink holds: any of `pinned`, `raw`, `derived`, `sent`. |
+
+`final_policy` takes one of these values:
+
+- `give-up-oldest:<class>`, where `<class>` is one of the four classes.
+  The client deletes the oldest data of that class.
+- `stop-writing`.  The client stops writing new files.
+- `refuse-new-rows`.  The client stops accepting new rows.
+- `custom:<name>`.  The client names its own policy, in lowercase letters,
+  digits and hyphens, and documents it.
+
+A client is *managed* when its `contract_version` is 0.9 or later and at
+least one file sink declares `classes`.  Sigmond registers every other
+file path as unmanaged, with floor 0 and no policy.  This includes each
+`disk_writes` entry (§17.4).  A file sink on no known store drops out of
+the ledger, and sigmond notes it in the client's issues.
+
+**Verbs.**  A managed client SHOULD answer three verbs.  Each prints one
+JSON object on stdout and exits 0.
+
+```
+<client> storage holdings --json
+<client> storage trim  --fit-bytes N --json
+<client> storage final --fit-bytes N [--policy P] --json
+```
+
+`holdings` reports the bytes the client holds, summed over its sinks:
+
+```json
+{"bytes_by_class": {"raw": 123, "derived": 45}, "estimated": false}
+```
+
+`estimated` is `true` when the client counted from a cache or a model
+rather than from the files.
+
+`trim` and `final` answer in one shape:
+
+```json
+{"held_bytes": 168, "bytes_by_class": {"raw": 123, "derived": 45},
+ "refused": false, "reason": ""}
+```
+
+- `trim` asks the client to fit in `N` bytes.  The client trims in its
+  own order, from `sent` upward, and never goes below its `floor_bytes`.
+  When `N` lies below the floor, the client sets `refused` to `true`,
+  gives a `reason`, and keeps the floor.
+- `final` asks the same at the last stage.  The client applies `P` when
+  sigmond passes one, and its declared `final_policy` otherwise.  It
+  MAY go below its floor.
+
+An unknown verb exits 2.  Sigmond reads that as an older client and
+leaves it unmanaged.  `holdings` answers within 10 seconds.  `trim` and
+`final` answer within 120 seconds.
+
+**Rollout.**  In v0.9 these verbs and fields are SHOULD.  One release
+later they become MUST.
+
 ### 18. Timing authority and the RTP-default fallback (v0.7)
 
 #### 18.1 Scope
@@ -2619,6 +2702,13 @@ Sigmond:
   - All other clients remain in default mode (RTP-default for
     radiod, host-clock-default for non-radiod) and are conformant
     unchanged.
+
+- **v0.8 → v0.9** adds §17.7 (storage capacity) and an expiry on the
+  §11 log level.  File sinks gain `floor_bytes`, `final_policy` and
+  `classes`.  A managed client answers `storage holdings`, `storage trim`
+  and `storage final`.  The verbs and fields start as SHOULD in v0.9 and
+  become MUST one release later.  v0.8 clients pass validation on a v0.9
+  sigmond unchanged: sigmond registers their paths as unmanaged.
 
 ---
 

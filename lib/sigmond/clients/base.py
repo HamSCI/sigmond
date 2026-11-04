@@ -20,6 +20,18 @@ class DiskWrite:
 
 
 @dataclass
+class DataSink:
+    """One output sink from inventory `data_sinks` (§17.3, §17.7)."""
+    kind:           str
+    path:           str
+    mb_per_day:     float = 0.0
+    retention_days: float = 0.0
+    floor_bytes:    int = 0                                           # v0.9 §17.7
+    final_policy:   Optional[str] = None                              # v0.9 §17.7
+    classes:        tuple = ()                                        # v0.9 §17.7
+
+
+@dataclass
 class InstanceView:
     instance:                   str
     radiod_id:                  Optional[str] = None
@@ -28,6 +40,7 @@ class InstanceView:
     frequencies_hz:             list = field(default_factory=list)
     ka9q_channels:              int = 0
     disk_writes:                list = field(default_factory=list)    # list[DiskWrite]
+    data_sinks:                 list = field(default_factory=list)    # list[DataSink]
     uses_timing_calibration:    bool = False
     provides_timing_calibration: bool = False
     data_destination:           Optional[str] = None                  # v0.2 §7
