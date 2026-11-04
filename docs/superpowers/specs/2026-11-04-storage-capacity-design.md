@@ -99,7 +99,24 @@ declaration that the client contract already carries in §17.
 
 sigmond divides each store's allottable space into **allotments**, one per registered client
 on that store. Michael's default: **split evenly** among the clients until an operator sets
-other shares. An operator may set shares per client. *(Designer's call: the client is the unit
+other shares.
+
+**Even means equal days of coverage, not equal bytes** (Michael, 2026-11-04). Clients write at
+rates that differ by orders of magnitude: hf-timestd's 24 kHz I/Q from six WWV/WWVH channels
+runs to tens of GB a day, the magnetometer to megabytes. Equal bytes would hand the
+magnetometer space it never uses while the I/Q starves. So sigmond finds the one number of days
+D that fits: each client's allotment equals its floor plus its write rate times D (times its
+operator share, 1 by default), and the allotments sum to the allottable space. A client with a
+retention cap of its own (`retention_days`) takes no more than that, and the days it gives up go
+to the others. The station as a whole then reports that it holds D days of data, and each client
+reports its own coverage, its holdings divided by its rate.
+
+A client's rate means bytes written per day, not the growth of its holdings: a ring buffer at
+steady state writes gigabytes an hour and grows by nothing. sigmond takes the rate the client
+reports, else measures the bytes in its files modified over the last 24 hours, else uses the
+`mb_per_day` it declares. Pressure that shrinks the allottable space shrinks D for every client
+alike. A store whose projected time to full falls below a set horizon reaches Watch early,
+whatever its percentage. An operator may set shares per client. *(Designer's call: the client is the unit
 of division, not the sink or the instance, so a client with six sinks gets one share, and it
 divides that share among its own sinks and instances.)*
 

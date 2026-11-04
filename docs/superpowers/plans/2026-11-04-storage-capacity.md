@@ -761,6 +761,7 @@ Every client that writes local data has to adopt v0.9. This task keeps that smal
 - Produces:
   - `@dataclass(frozen=True) class Item: path: str; bytes: int; cls: str; mtime: float`
   - `holdings(items: Sequence[Item]) -> dict[str, int]`
+  - `written_per_day(items: Sequence[Item], now: float) -> int`: the bytes of items whose mtime falls in the last 24 h. The `holdings` verb reports it as `bytes_written_per_day` (Task 13 reads it).
   - `choose_trim(items: Sequence[Item], fit_bytes: int, floor_bytes: int, *, final: bool = False) -> list[Item]`. It takes from `sent`, then `derived`, then `raw`, oldest first within each class, and never takes `pinned`. It stops once the remainder fits `fit_bytes`. Without `final` it stops at `floor_bytes`; with `final` it may go below the floor, but still never takes `pinned`.
   - `add_storage_verbs(subparsers, *, list_items: Callable[[], list[Item]], delete: Callable[[Item], None], floor_bytes: int, final_policy: str, apply_policy: Optional[Callable[[str, int], dict]] = None) -> None`. It wires `storage holdings|trim|final` onto a client's argparse, with JSON output exactly as §17.6 specifies. With no `apply_policy`, `final` handles `give-up-oldest:<class>` through `choose_trim` restricted to that class and refuses every other policy with a reason. A `delete` that raises leaves that item counted as held, and the answer reports it.
 
@@ -793,6 +794,70 @@ def test_verbs_print_the_contract_shape(capsys):
 
 - [ ] **Step 2: Run them; expect FAIL.**  **Step 3: Implement, then write the doc changes.**  **Step 4: Run them; expect PASS.**
 - [ ] **Step 5: Commit** `storage: client kit; ADD-A-CLIENT step 8`
+
+---
+
+### Task 13: Days of coverage (Michael, 2026-11-04)
+
+Allotments become equal days of coverage instead of equal bytes. Spec: "Registration and allotments", the paragraphs on days of coverage and on rates.
+
+**Files:**
+- Modify: `lib/sigmond/storage/model.py`: replace `allot`'s byte split.
+- Create: `lib/sigmond/storage/rates.py`
+- Modify: `lib/sigmond/storage/ladder.py`: `tightened_targets` takes days, and a time-to-full Watch trigger.
+- Modify: `lib/sigmond/storage/tick.py`, `lib/sigmond/commands/storage.py`, `lib/sigmond/heartbeat.py`: status, CLI and heartbeat carry D and per-client days.
+- Modify: `docs/CLIENT-CONTRACT.md` §17.7: `holdings` gains optional `bytes_written_per_day`; `retention_days` caps a client's days.
+- Test: `tests/test_storage_model.py`, `tests/test_storage_rates.py`, `tests/test_storage_ladder.py`, `tests/test_storage_tick.py`, and the CLI and heartbeat tests.
+
+**Interfaces:**
+- `@dataclass(frozen=True) class Demand: client: str; floor_bytes: int; rate_bytes_per_day: float; weight: float = 1.0; max_days: Optional[float] = None`
+- `@dataclass(frozen=True) class Allotments: per_client: Mapping[str, int]; floors_fit: bool; allottable: int; days: Optional[float]`. `days` is None when no client has a rate.
+- `allot_days(demands: Sequence[Demand], allottable: int) -> Allotments`. Floors first. Then it finds D by water-filling, so that Σ min(rate·weight·D, rate·weight·max_days) = allottable − Σ floors. A client with zero rate gets its floor only. If every client hits max_days, the leftover stays unallotted. Results are integer bytes, with the remainder going to the first client in sorted order.
+- `rates.rate_for(client, *, reported: Optional[int], recent_bytes: Optional[int], declared_mb_per_day: Optional[float]) -> tuple[float, str]` returns bytes/day and its source ("reported" | "measured" | "declared" | "none").
+- `rates.recent_bytes(paths, now, window_s=86400, stat=os.lstat) -> int`: the st_blocks·512 of regular files with mtime in the window, each inode once, no symlinks. It is cached per client for 30 min, like the du cache.
+- `ladder.tightened_targets(...)` becomes allotments recomputed with `allot_days` for the space that brings the store to the Watch level, so every client loses days alike and keeps its floor.
+- `ladder.store_stage(store, levels, churn_bytes_per_h=None, horizon_h=24.0)` gives at least WATCH when `churn > 0` and the projected time to full is under `horizon_h`.
+- Status JSON: top level `"days": D` per store. Each client gains `"rate_bytes_per_day"`, `"rate_source"`, `"days_held"`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+GiB = 1 << 30
+def test_equal_days_not_equal_bytes():
+    # I/Q writes 80 GiB/day, the magnetometer 0.01 GiB/day, 100 GiB to share, no floors
+    a = allot_days([Demand("hf-timestd", 0, 80 * GiB), Demand("mag", 0, 0.01 * GiB)], 100 * GiB)
+    assert a.days == pytest.approx(100 / 80.01, rel=1e-6)
+    assert a.per_client["mag"] < 0.02 * GiB and sum(a.per_client.values()) == 100 * GiB
+
+def test_retention_cap_gives_days_to_others():
+    a = allot_days([Demand("iq", 0, 10 * GiB), Demand("spots", 0, 10 * GiB, max_days=1.0)], 100 * GiB)
+    assert a.per_client["spots"] == 10 * GiB and a.per_client["iq"] == 90 * GiB
+
+def test_floors_first_then_days():
+    a = allot_days([Demand("a", 5 * GiB, 10 * GiB), Demand("b", 0, 10 * GiB)], 25 * GiB)
+    assert a.days == pytest.approx(1.0) and a.per_client["a"] == 15 * GiB
+
+def test_operator_weight_doubles_days():
+    a = allot_days([Demand("a", 0, 10 * GiB, weight=2.0), Demand("b", 0, 10 * GiB)], 30 * GiB)
+    assert a.per_client["a"] == 20 * GiB
+
+def test_a_ring_at_steady_state_still_has_a_rate(tmp_path):
+    # holdings flat, but files keep being rewritten: recent_bytes sees them
+    f = tmp_path / "x"; f.write_bytes(b"x" * 8192)
+    assert rates.recent_bytes([str(tmp_path)], now=os.stat(f).st_mtime + 10) >= 8192
+    assert rates.rate_for("c", reported=None, recent_bytes=5, declared_mb_per_day=1.0) == (5.0, "measured")
+    assert rates.rate_for("c", reported=7, recent_bytes=5, declared_mb_per_day=1.0) == (7.0, "reported")
+
+def test_fast_growth_reaches_watch_before_its_percentage():
+    s = Store("pool", "p", "pool", 365 * 10**9, int(0.67 * 365 * 10**9))
+    assert store_stage(s, Levels()) == Stage.OK
+    assert store_stage(s, Levels(), churn_bytes_per_h=3.7e9, horizon_h=48) == Stage.WATCH
+```
+
+Also: the tick test shows status `days` and per-client `days_held`; the `smd storage status` plain output leads with "holds D days"; the heartbeat `data["storage"]` gains `days`.
+
+- [ ] **Step 2: Run them; expect FAIL.**  **Step 3: Implement.** Keep `allot` as a thin wrapper, or remove it and update its callers; don't leave two division rules.  **Step 4: Run the storage, CLI and heartbeat tests, then the full suite; expect PASS.**
+- [ ] **Step 5: Commit** `storage: allot equal days of coverage, not equal bytes`
 
 ---
 
