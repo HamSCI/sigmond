@@ -24,7 +24,13 @@ def test_round_trip_and_garbage():
 
 
 def test_from_dict_tolerates_bad_entries():
-    for d in ({"active": "x"}, {"active": {"k": 5}}, {"active": {"k": {"severity": 99}}},
+    inf, nan = float("inf"), float("nan")
+    assert AlarmBook.from_dict(json.loads('{"active":{"k":{"severity":Infinity,"last_emit":1}}}')).update({}, 0) == []
+    for d in ({"active": {"k": {"severity": inf, "last_emit": 1}}},
+              {"active": {"k": {"severity": nan, "last_emit": 1}}},
+              {"active": {"k": {"severity": 4, "last_emit": nan}}},
+              {"active": {"k": {"severity": 4, "last_emit": inf}}},
+              {"active": "x"}, {"active": {"k": 5}}, {"active": {"k": {"severity": 99}}},
               {"active": {"k": {"severity": "a", "last_emit": "b"}}}, None, []):
         assert AlarmBook.from_dict(d).update({}, 0) == []
 

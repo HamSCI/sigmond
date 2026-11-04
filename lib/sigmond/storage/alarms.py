@@ -5,6 +5,7 @@ it lasts, and ends with a `clear`.  A change of severity under the same key
 starts a new episode with a fresh `raise`.  The book persists as plain JSON.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -63,13 +64,16 @@ class AlarmBook:
             for key, v in items:
                 try:
                     sev = Severity(int(v["severity"]))
+                    last = float(v["last_emit"])
+                    if not math.isfinite(last):
+                        continue
                     book._active[str(key)] = {
                         "severity": int(sev),
-                        "last_emit": float(v["last_emit"]),
+                        "last_emit": last,
                         "message": str(v.get("message", "")),
                     }
-                except (KeyError, TypeError, ValueError, AttributeError):
+                except Exception:
                     continue
-        except (AttributeError, TypeError):
+        except Exception:
             return cls()
         return book
