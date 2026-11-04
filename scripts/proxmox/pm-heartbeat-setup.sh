@@ -10,8 +10,9 @@
 # server/heartbeat/setup-wd30.sh for the same idiom on the server side).
 #
 # A PM runs no sigmond, no venv, no pip — this script only ever touches
-# /etc/pm-heartbeat/, /usr/local/sbin/pm-heartbeat.py and two systemd
-# units. It never echoes the PRIVATE half of the ed25519 keypair it
+# /etc/pm-heartbeat/, /usr/local/sbin/pm-heartbeat.py,
+# /usr/local/sbin/pm-storage.py and four systemd units (pm-storage watches
+# the thin pool; see README.md "Thin-pool watch"). It never echoes the PRIVATE half of the ed25519 keypair it
 # generates; only the PUBLIC key is printed, for the operator to hand to
 # server/heartbeat/authorize-stations.sh.
 set -euo pipefail
@@ -178,8 +179,14 @@ install -o root -g root -m 755 "$SELF_DIR/pm-heartbeat.py" \
     "$INSTALL_DIR/pm-heartbeat.py"
 say "installed $INSTALL_DIR/pm-heartbeat.py"
 
+step "pm-storage.py"
+install -o root -g root -m 755 "$SELF_DIR/pm-storage.py" \
+    "$INSTALL_DIR/pm-storage.py"
+say "installed $INSTALL_DIR/pm-storage.py"
+
 step "systemd units"
-for unit in pm-heartbeat.service pm-heartbeat.timer; do
+for unit in pm-heartbeat.service pm-heartbeat.timer \
+            pm-storage.service pm-storage.timer; do
     if [[ ! -f "$SELF_DIR/$unit" ]]; then
         echo "missing unit source $SELF_DIR/$unit" >&2
         exit 1
@@ -197,6 +204,12 @@ say "daemon-reload done"
 step "Enabling pm-heartbeat.timer"
 systemctl enable --now pm-heartbeat.timer
 say "enabled + started (first tick within one interval + up to 45s jitter)"
+
+# pm-storage needs no config: it finds the thin pools from
+# /etc/pve/storage.cfg and each VM's `qm config`.
+step "Enabling pm-storage.timer"
+systemctl enable --now pm-storage.timer
+say "enabled + started (pool report, snapshot reaper, host alarm every 5 min)"
 
 step "Done"
 say "Pubkey to authorize on the fleetboard server (roster name '$STATION'):"

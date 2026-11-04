@@ -80,6 +80,48 @@ new VM. First boot of a clone: `smd admin personalize --reset-identity
 --yes`, fill `/etc/sigmond/site-profile.toml`, `smd config render`, then
 run `bootstrap.sh`. Gate everything with `smd admin readiness`.
 
+## Thin-pool watch (`pm-storage.py`)
+
+On 2026-11-03 four stations' thin pools filled from about 67 % to 100 % in
+about 29 hours. An operator's snapshot pinned the old blocks while the
+guests kept rewriting their data, and the host journal's warnings at 80, 85,
+90 and 95 % went unseen. `pm-storage.py` watches the pool from the host.
+It runs as root, stdlib only, from `pm-storage.timer` every five minutes;
+`pm-heartbeat-setup.sh` installs and enables it beside the heartbeat.
+
+`pm-storage.py report`, each tick:
+
+- measures each VM's lvmthin pool (`/etc/pve/storage.cfg`, `qm config`,
+  `lvs`) and keeps six hours of its use in `/run/sigmond/pm-storage.json`;
+- deletes the snapshots sigmond's tools took, once past expiry, and all of
+  them at once when the pool reaches 90 %;
+- writes each running guest `/run/sigmond/host-pool.json` through the guest
+  agent (ASCII only), which the guest's storage ledger reads;
+- logs alarms to the journal (`journalctl -t pm-storage`), one line when an
+  episode starts, a reminder every 6 h, one when it clears.
+
+The reaper deletes a snapshot only when its description carries
+`sigmond-snapshot expires=<ISO-8601 time with offset>`. It never deletes
+`pristine`: the first-boot snapshot carries no label, and the reaper skips
+it by name besides. It never deletes an operator's snapshot either. It
+names one in an alarm once it reaches 48 h, and names `pristine` only while
+the pool sits at 80 % or more. A label it cannot parse makes the snapshot
+an operator's: kept, and named in an alarm at once.
+
+To take a snapshot the reaper will clean up:
+
+```bash
+pm-storage.py snapshot <vmid> <name> [--hours N]
+```
+
+It refuses (exit 3) when the pool sits at 70 % or more, or when the pool's
+measured growth would fill it within 2 h. Otherwise the snapshot lives half
+the pool's projected time to full, never more than 48 h; `--hours` may
+shorten that, never lengthen it.
+
+`pm-heartbeat.py` carries the fullest pool's percent as `pool_pct` in its
+`resources` block, which turns INVALID at 95 %.
+
 ## Prerequisites
 
 **Step 0 (manual, before phase 1)** — these scripts assume a working

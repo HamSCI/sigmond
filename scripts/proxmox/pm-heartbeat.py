@@ -145,6 +145,13 @@ _FILENAME_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 
 RESCTRL_PATH = "/sys/fs/resctrl/radiod"
 
+#: pm-storage.py writes the pool's fill here every five minutes.  Both values
+#: are duplicated from pm-storage.py (LOCAL_STATE, LEVELS["final"]); the
+#: drift guard lives in tests/test_pm_storage.py.
+POOL_STATE_PATH = "/run/sigmond/pm-storage.json"
+POOL_INVALID_PCT = 95.0
+POOL_STATE_MAX_AGE_SEC = 900
+
 #: A subprocess result, real or fake — tests build these directly with
 #: RunResult(rc, stdout, stderr) so no unit test ever spawns a real
 #: process.
@@ -527,7 +534,7 @@ def _map_doctor(raw) -> dict:
 # ---------------------------------------------------------------------------
 
 def build_resources_raw(read_loadavg, read_disk_used_pct, read_uptime,
-                        read_temperature) -> dict:
+                        read_temperature, read_pool_pct=None) -> dict:
     """Loadavg, per-path disk usage, uptime, best-effort temperature.
 
     ``read_loadavg`` is the spine and is allowed to raise (propagates to
@@ -553,8 +560,13 @@ def build_resources_raw(read_loadavg, read_disk_used_pct, read_uptime,
         temperature = read_temperature()
     except Exception:                              # noqa: BLE001
         temperature = None
+    pool_pct = None
+    try:
+        pool_pct = read_pool_pct() if read_pool_pct else None
+    except Exception:                              # noqa: BLE001
+        pool_pct = None
     return {"loadavg": loadavg, "disk": disk, "uptime_s": uptime_s,
-            "temperature": temperature}
+            "temperature": temperature, "pool_pct": pool_pct}
 
 
 def _map_resources(raw) -> dict:
@@ -564,10 +576,17 @@ def _map_resources(raw) -> dict:
         "disk_used_pct": raw.get("disk"),
         "uptime_s": raw.get("uptime_s"),
         "temperature_c": raw.get("temperature"),
+        "pool_pct": raw.get("pool_pct"),
     }
-    # No thresholds in v1: resources are context for the `doctor` verdict,
-    # not a verdict in their own right. Reaching this point means the
-    # probe did not raise, which is the only thing this block asserts.
+    # One threshold: a thin pool at the final stage (95 %) stops every VM on
+    # it within hours (2026-11-03), so it turns the block INVALID.  The rest
+    # stays context for the `doctor` verdict.  A missing or stale pool
+    # reading stays null and leaves the verdict alone; pm-storage alarms on
+    # the host itself.
+    pool_pct = data["pool_pct"]
+    if isinstance(pool_pct, (int, float)) and pool_pct >= POOL_INVALID_PCT:
+        return _block("INVALID", f"host thin pool at {pool_pct:.1f} % "
+                      f"(final stage, {POOL_INVALID_PCT:.0f} %)", data)
     return _block("VALID", "host resource counters read", data)
 
 
@@ -844,6 +863,25 @@ def _read_temperature():
     return None
 
 
+def _read_pool_pct(path: str = POOL_STATE_PATH, now=None):
+    """The fullest pool's percent from pm-storage's state, or None when the
+    file is missing, unreadable or older than POOL_STATE_MAX_AGE_SEC."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+        generated = datetime.fromisoformat(
+            str(state["generated_at"]).replace("Z", "+00:00"))
+        pct = state.get("pool_pct")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    if generated.tzinfo is None or not isinstance(pct, (int, float)):
+        return None
+    age = (_as_utc(now or datetime.now(timezone.utc)) - generated).total_seconds()
+    if abs(age) > POOL_STATE_MAX_AGE_SEC:
+        return None
+    return float(pct)
+
+
 def _rac_switch_present() -> bool:
     return os.access(RAC_SWITCH, os.X_OK)
 
@@ -873,7 +911,7 @@ def build_production_checks(config: dict) -> dict:
             note_reset=_note_reset, take_reset_note=_take_reset_note),
         "resources": lambda: build_resources_raw(
             _read_loadavg, _read_disk_used_pct, read_uptime,
-            _read_temperature),
+            _read_temperature, _read_pool_pct),
         "rac": lambda: build_rac_raw(
             _rac_switch_present, _run_rac_switch_status, _read_rac_state),
     }
