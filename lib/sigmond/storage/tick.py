@@ -9,11 +9,13 @@ and never touch /etc, /run, /var or systemctl.
 Exit codes: 0 the pass ran; 75 (EX_TEMPFAIL) another pass held the lock;
 1 a ledger fault, raised as the `ledger-fault` alarm.
 
-The stop lever spares a client that wrote nothing in 24 h (its recent
-bytes, measured fresh just before the stop): stopping it frees nothing.
-It gets the WARNING `idle-over:<client>` instead, and an operator decides.
-A client whose recent bytes were never measured (it reports its own rate,
-or no walker runs) gets the stop as before.
+The stop lever spares a client that wrote nothing in 24 h: no file under
+its paths changed (st_ctime) in that window, measured fresh just before the
+stop, and its du, also fresh, has not grown past the last cached du.
+Stopping such a client frees nothing.  It gets the WARNING
+`idle-over:<client>` instead, and an operator decides.  A client with no
+measurement to judge by (it reports its own rate, no walker runs, or no
+earlier du exists) gets the stop as before.
 
 TrimRecord upkeep (the ladder only reads the records; this module keeps
 them, as ladder.TrimRecord's docstring asks):
@@ -512,6 +514,10 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
         rec = trims.get(c)
         if c in managed and rec is not None and rec.ok:
             continue                    # it answered this pass; decide judged older news
+        prev_du = du.get(f"{c}|{a.store}")
+        prev_du = (prev_du.get("bytes") if isinstance(prev_du, dict)
+                   and isinstance(prev_du.get("bytes"), int) else None)
+        fresh = None
         if c not in managed:
             fresh = _measure(regs, r.path_bytes, du, set(), t, c, a.store, fresh=True)
             target = decision.targets.get(a.store, {}).get(c)
@@ -520,11 +526,16 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
                         f"({fresh} <= {target} bytes) just before the stop; not stopped")
                 continue
         # A client that wrote nothing in 24 h is not the growth: stopping it
-        # frees nothing.  Measured fresh, like du above; never measured
-        # (a reported rate, no walker) keeps the stop.
-        if f"{c}|{a.store}" in recent and r.recent_bytes is not None:
+        # frees nothing.  Two measures must agree: no file changed (ctime)
+        # in 24 h, measured fresh, and its du has not grown since the last
+        # cached du.  Never measured (a reported rate, no walker, no earlier
+        # du) keeps the stop.
+        if (f"{c}|{a.store}" in recent and r.recent_bytes is not None
+                and prev_du is not None):
             wrote = _recent(regs, r.recent_bytes, recent, set(), t, c, a.store, fresh=True)
-            if wrote == 0:
+            if wrote == 0 and fresh is None:
+                fresh = _measure(regs, r.path_bytes, du, set(), t, c, a.store, fresh=True)
+            if wrote == 0 and fresh <= prev_du:
                 h = holdings.get((c, a.store))
                 held = h.total if h is not None else 0
                 active[f"idle-over:{c}"] = (

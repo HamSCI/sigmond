@@ -700,12 +700,34 @@ def test_a_writing_unmanaged_client_is_stopped_as_before(tmp_path):
     assert r.calls["stop_client"] == 1
 
 
-def test_an_idle_managed_client_still_gets_trim_and_final_but_no_stop(tmp_path):
+def test_an_idle_managed_client_with_no_earlier_du_keeps_the_stop(tmp_path):
+    # It reports its own holdings, so no du stands to show it has not grown:
+    # the guard has nothing to judge by, and the stop proceeds as before.
     r = _fake_runners(used_pct=96, trim_ok=False, recent=0); p = _paths(tmp_path)
     run_tick(T0, r, **p)
     run_tick(T0 + timedelta(seconds=601), r, **p)
     assert r.calls["call_trim"] == 2 and r.calls["call_final"] == 2
+    assert r.calls["stop_client"] == 1 and "idle-over:a" not in _alarm_keys(p)
+
+
+def test_an_idle_managed_client_whose_du_holds_still_is_spared(tmp_path):
+    # Its holdings verb fails, so the tick measures it with du (cached).
+    r = _fake_runners(used_pct=96, trim_ok=False, recent=0); p = _paths(tmp_path)
+    r.call_holdings = lambda b: ClientAnswer(False, None, {}, False, "exit 1")
+    run_tick(T0, r, **p)
+    run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["call_trim"] == 2 and r.calls["call_final"] == 2
     assert r.calls["stop_client"] == 0 and "idle-over:a" in _alarm_keys(p)
+
+
+def test_no_recent_writes_but_growing_du_is_stopped(tmp_path):
+    # Zero files changed by the walk's count, yet the du grew: not idle.
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views, recent=0); p = _paths(tmp_path)
+    run_tick(T0, r, **p)                              # du cached at 40 GiB
+    r.state["held"] = 45 * GiB
+    run_tick(T0 + timedelta(seconds=1000), r, **p)
+    assert r.calls["stop_client"] == 1 and "idle-over:u" not in _alarm_keys(p)
 
 
 def test_never_measured_recent_bytes_keeps_todays_stop(tmp_path):

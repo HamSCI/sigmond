@@ -5,7 +5,8 @@ holdings: a ring buffer at steady state writes gigabytes an hour and grows
 by nothing.  Sources, best first:
 
 1. `reported`: `bytes_written_per_day` from the client's `holdings` answer.
-2. `measured`: the allocated bytes of its files modified in the last 24 h
+2. `measured`: the allocated bytes of its files changed in the last 24 h
+   (by st_ctime, which every write moves and no user-space call can set back)
    (`recent_bytes`; the tick caches it per client for 30 minutes).
 3. `declared`: the `mb_per_day` its inventory declares (MB = 10**6 bytes).
 4. `none`: rate 0.  The client then gets its floor only, and the status
@@ -52,15 +53,18 @@ def rate_for(client: str, *, reported: Optional[int], recent_bytes: Optional[int
 def recent_bytes(paths: Iterable[str], now: float, window_s: float = DAY_S,
                  stat: Callable = os.lstat) -> int:
     """Allocated bytes (st_blocks * 512) of regular files under `paths`
-    modified within `window_s` before `now`.  Symlinks are never followed,
-    each inode counts once, and files that vanish mid-walk are skipped."""
+    changed within `window_s` before `now`.  It reads st_ctime, not
+    st_mtime: a writer that preserves or backdates mtimes (tar -x,
+    rsync -t, os.utime) still moves ctime, so it cannot pass for idle.
+    Symlinks are never followed, each inode counts once, and files that
+    vanish mid-walk are skipped."""
     seen = set()
     total = 0
     since = now - window_s
 
     def count(st) -> None:
         nonlocal total
-        if not stat_mod.S_ISREG(st.st_mode) or st.st_mtime < since:
+        if not stat_mod.S_ISREG(st.st_mode) or st.st_ctime < since:
             return
         key = (st.st_dev, st.st_ino)
         if key not in seen:

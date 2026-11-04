@@ -29,17 +29,28 @@ def test_a_measured_zero_yields_to_a_declaration():
     assert rates.rate_for("c", reported=0, recent_bytes=9, declared_mb_per_day=1.0) == (0.0, "reported")
 
 
+def _aged(names, ctime):
+    """os.lstat, with st_ctime set back for `names` (user space cannot)."""
+    def stat(path):
+        st = os.lstat(path)
+        if str(path) not in names:
+            return st
+        fields = list(st)
+        fields[9] = int(ctime)                 # st_ctime's tuple slot
+        return os.stat_result(fields, {"st_ctime": float(ctime)})
+    return stat
+
+
 def test_recent_bytes_skips_old_files_symlinks_and_counts_each_inode_once(tmp_path):
     new = tmp_path / "new"; new.write_bytes(b"x" * 8192)
     old = tmp_path / "old"; old.write_bytes(b"y" * 8192)
-    now = os.stat(new).st_mtime + 10
-    os.utime(old, (now - 2 * 86400, now - 2 * 86400))
+    now = os.stat(new).st_ctime + 10
     os.link(new, tmp_path / "hard")
     outside = tmp_path.parent / (tmp_path.name + "-outside")
     outside.mkdir(); (outside / "big").write_bytes(b"z" * 65536)
     (tmp_path / "ln").symlink_to(outside, target_is_directory=True)
     (tmp_path / "lnf").symlink_to(outside / "big")
-    got = rates.recent_bytes([str(tmp_path)], now=now)
+    got = rates.recent_bytes([str(tmp_path)], now=now, stat=_aged({str(old)}, now - 2 * 86400))
     assert got == os.stat(new).st_blocks * 512
 
 
@@ -51,3 +62,11 @@ def test_churn_by_least_squares_needs_an_hour():
     assert rates.churn_bytes_per_h([(0, 0), (1800, 10)]) is None
     assert rates.churn_bytes_per_h([(0, 0), (3600, GiB), (7200, 2 * GiB)]) == pytest.approx(GiB)
     assert rates.churn_bytes_per_h([(0, GiB), (3600, 0)]) == 0.0
+
+
+def test_backdated_mtimes_do_not_pass_for_idle(tmp_path):
+    # tar -x, rsync -t and os.utime set mtime back; ctime still moves.
+    f = tmp_path / "restored"; f.write_bytes(b"x" * 8192)
+    now = os.stat(f).st_ctime + 10
+    os.utime(f, (now - 30 * 86400, now - 30 * 86400))
+    assert rates.recent_bytes([str(tmp_path)], now=now) >= 8192
