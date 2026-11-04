@@ -26,6 +26,7 @@ def _decide(*, used_pct, managed, trims=None, directives=None, now=0.0,
         hands_off=hands_off,
         host_fault=host_fault,
         now=now,
+        demands={"root": [Demand("a", floor, 0.0)]},     # rate 0: targets fall to floors
     )
 
 
@@ -218,6 +219,7 @@ def test_pool_store_gets_stages_and_alarms_but_no_actions():
         holdings={("a", "pool"): Holding("a", "pool", {"raw": 90 * GiB}, False)},
         registrations=[Registration("a", "pool", ("/x",), 0, None, True)],
         levels=Levels(), trims=rec, directives={}, hands_off=False, host_fault=None, now=10_000,
+        demands={"pool": [Demand("a", 0, 0.0)]},
     )
     assert d.stages["pool"] == Stage.FINAL
     assert d.alarms["store:pool"][0] == Severity.CRITICAL
@@ -231,7 +233,8 @@ def test_actions_come_out_in_a_stable_order():
     hold = {(c, n): Holding(c, n, {"raw": 40 * GiB}, False) for n in stores for c in ("b", "a")}
     regs = [Registration(c, n, ("/x",), 0, None, True) for n in ("zeta", "alpha") for c in ("b", "a")]
     d = decide(stores=stores, allotments=allot, holdings=hold, registrations=regs, levels=Levels(),
-               trims={}, directives={}, hands_off=False, host_fault=None, now=0.0)
+               trims={}, directives={}, hands_off=False, host_fault=None, now=0.0,
+               demands={n: [Demand(c, 0, 0.0) for c in "ab"] for n in stores})
     assert [(a.store, a.kind, a.client) for a in d.actions] == [
         ("alpha", "cleanup", None),
         ("alpha", "trim", "a"), ("alpha", "final", "a"),
@@ -250,7 +253,7 @@ def test_a_client_on_two_final_stores_is_stopped_once():
     regs = [Registration("a", n, ("/x",), 0, None, True) for n in stores]
     d = decide(stores=stores, allotments=allot, holdings=hold, registrations=regs, levels=Levels(),
                trims={"a": TrimRecord(requested_at=0.0)}, directives={}, hands_off=False,
-               host_fault=None, now=700)
+               host_fault=None, now=700, demands={n: [Demand("a", 0, 0.0)] for n in stores})
     assert [(a.store, a.client) for a in _stops(d)] == [("s1", "a")]
 
 
@@ -334,7 +337,18 @@ def test_decide_divides_watch_space_in_days_when_given_demands():
 def test_decide_raises_watch_from_churn_and_says_why():
     stores = {"root": Store("root", "/", "guest", 100 * GiB, 50 * GiB)}
     d = decide(stores=stores, allotments={}, holdings={}, registrations=[], levels=Levels(),
-               trims={}, directives={}, hands_off=False, host_fault=None, now=0.0,
+               trims={}, directives={}, hands_off=False, host_fault=None, now=0.0, demands={},
                churn={"root": 5 * GiB}, horizon_h=24.0)
     assert d.stages["root"] == Stage.WATCH
     assert d.alarms["store:root"][0] == Severity.WARNING and "full in 10.0 h" in d.alarms["store:root"][1]
+
+
+def test_decide_refuses_to_guess_missing_rates():
+    stores = {"root": Store("root", "/", "guest", 100 * GiB, 90 * GiB)}
+    kw = dict(stores=stores, allotments={"root": Allotments({"a": GiB}, True, 50 * GiB)},
+              holdings={}, registrations=[Registration("a", "root", ("/x",), 0, None, True)],
+              levels=Levels(), trims={}, directives={}, hands_off=False, host_fault=None, now=0.0)
+    with pytest.raises(ValueError):
+        decide(**kw)
+    with pytest.raises(ValueError):
+        decide(**kw, demands={})

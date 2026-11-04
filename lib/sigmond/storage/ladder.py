@@ -161,10 +161,12 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
            demands: Optional[Mapping[str, Sequence[Demand]]] = None,
            churn: Optional[Mapping[str, Optional[float]]] = None,
            horizon_h: float = 24.0) -> Decision:
-    """`demands` gives each store's client rates for the days division under
-    pressure (absent: every client at rate 0, so targets fall to floors);
-    `churn` gives each store's growth in bytes per hour."""
-    demands = demands or {}
+    """`demands` gives, for each store with allotments, its clients' rates
+    for the days division under pressure; it is required, because a missing
+    rate would quietly drop every target to its floor.  `churn` gives each
+    store's growth in bytes per hour."""
+    if demands is None:
+        raise ValueError("decide needs demands: each allotted store's client rates")
     churn = churn or {}
     stages: dict = {}
     actions: list = []
@@ -216,7 +218,7 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
         if stage >= Stage.TIGHTEN:
             dem = demands.get(name)
             if dem is None:
-                dem = [Demand(c, floors.get(c, 0), 0.0) for c in clients]
+                raise ValueError(f"decide: no demands for store {name}, which has allotments")
             tgt = tightened_targets(store, levels, hold, dem, per_client)
         else:
             tgt = dict(per_client)
