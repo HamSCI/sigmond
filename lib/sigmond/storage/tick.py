@@ -11,7 +11,8 @@ Exit codes: 0 the pass ran; 75 (EX_TEMPFAIL) another pass held the lock;
 
 The stop lever spares a client that wrote nothing in 24 h: no file under
 its paths changed (st_ctime) in that window, measured fresh just before the
-stop, and its du, also fresh, has not grown past the last cached du.
+stop, and its du, also fresh, has not grown past the du it showed before
+this pass.
 Stopping such a client frees nothing.  It gets the WARNING
 `idle-over:<client>` instead, and an operator decides.  A client with no
 measurement to judge by (it reports its own rate, no walker runs, or no
@@ -58,7 +59,7 @@ STATE_PATH = Path("/var/lib/sigmond/storage/state.json")
 STATUS_PATH = Path("/run/sigmond/storage-status.json")
 LOCK_PATH = Path("/run/sigmond/storage.lock")
 DU_CACHE_S = 1800
-RECENT_CACHE_S = 1800      # recent-bytes walks, cached per client like du
+RECENT_CACHE_S = 1800      # recent-writes walks, cached per client like du
 STALE_TRIM_S = 3600
 UNCLAIMED_EVERY_S = 6 * 3600
 CLEANUP_EVERY_S = 3600
@@ -84,7 +85,7 @@ class Runners:
     journal: Callable               # (line) -> None
     binary_for: Callable            # (client) -> str | None
     client_active: Callable         # (client) -> bool: any of its services active
-    recent_bytes: Optional[Callable] = None   # (paths, now) -> bytes modified in 24 h
+    recent_writes: Optional[Callable] = None  # (paths, now) -> (bytes by mtime, by ctime) in 24 h
 
 
 # ---------------------------------------------------------------- real runners
@@ -168,7 +169,7 @@ def default_runners() -> Runners:
         journal=_journal,
         binary_for=_binary_for,
         client_active=_client_active,
-        recent_bytes=lambda paths, now: rates.recent_bytes(paths, now),
+        recent_writes=lambda paths, now: rates.recent_sums(paths, now),
     )
 
 
@@ -303,6 +304,13 @@ def _view_paths(views) -> list:
     return out
 
 
+def _fresh(at, now: float, max_age: float) -> bool:
+    """A cache entry stamped `at` still serves at `now`.  A negative age
+    (the clock stepped back) counts as expired."""
+    a = _num(at)
+    return a is not None and 0 <= now - a < max_age
+
+
 def _measure(regs, path_bytes, du: dict, used: set, now: float, c, store,
              fresh: bool = False) -> int:
     paths = sorted(p for r in regs if r.client == c and r.store == store for p in r.paths)
@@ -310,7 +318,7 @@ def _measure(regs, path_bytes, du: dict, used: set, now: float, c, store,
     used.add(key)
     hit = du.get(key)
     if (not fresh and isinstance(hit, dict) and hit.get("paths") == paths
-            and _num(hit.get("at")) is not None and now - hit["at"] < DU_CACHE_S
+            and _fresh(hit.get("at"), now, DU_CACHE_S)
             and isinstance(hit.get("bytes"), int)):
         return hit["bytes"]
     n = int(path_bytes(paths))
@@ -318,24 +326,24 @@ def _measure(regs, path_bytes, du: dict, used: set, now: float, c, store,
     return n
 
 
-def _recent(regs, recent_bytes, cache: dict, used: set, now: float, c, store,
-            fresh: bool = False) -> Optional[int]:
-    """Bytes the client wrote on `store` in the last 24 h, cached for
-    RECENT_CACHE_S (`fresh` skips the cache); None when the tick has no way
-    to measure."""
-    if recent_bytes is None:
+def _recent(regs, recent_writes, cache: dict, used: set, now: float, c, store,
+            fresh: bool = False) -> Optional[tuple]:
+    """(bytes by mtime, bytes by ctime) the client wrote on `store` in the
+    last 24 h, cached for RECENT_CACHE_S (`fresh` skips the cache); None
+    when the tick has no way to measure."""
+    if recent_writes is None:
         return None
     paths = sorted(p for r in regs if r.client == c and r.store == store for p in r.paths)
     key = f"{c}|{store}"
     used.add(key)
     hit = cache.get(key)
     if (not fresh and isinstance(hit, dict) and hit.get("paths") == paths
-            and _num(hit.get("at")) is not None and 0 <= now - hit["at"] < RECENT_CACHE_S
-            and isinstance(hit.get("bytes"), int)):
-        return hit["bytes"]
-    n = int(recent_bytes(paths, now))
-    cache[key] = {"at": now, "bytes": n, "paths": paths}
-    return n
+            and _fresh(hit.get("at"), now, RECENT_CACHE_S)
+            and isinstance(hit.get("mtime"), int) and isinstance(hit.get("ctime"), int)):
+        return hit["mtime"], hit["ctime"]
+    m, ch = recent_writes(paths, now)
+    cache[key] = {"at": now, "mtime": int(m), "ctime": int(ch), "paths": paths}
+    return int(m), int(ch)
 
 
 def _history(state: dict, stores, now: float) -> dict:
@@ -413,6 +421,9 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
     # client whose `holdings` verb is unknown is unmanaged (§17.7); every
     # other figure comes from the filesystem, cached for DU_CACHE_S.
     du = state.get("du") if isinstance(state.get("du"), dict) else {}
+    # The du each client showed before this pass, for the idle check: a du
+    # re-measured this pass must not stand in for the earlier one.
+    du_before = {k: dict(v) for k, v in du.items() if isinstance(v, dict)}
     du_used: set = set()
     holdings: dict = {}
     reported: dict = {}       # (client, store) -> bytes_written_per_day from `holdings`
@@ -449,9 +460,10 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
     for x in regs:
         key = (x.client, x.store)
         rep_rate = reported.get(key)
-        measured = (None if rep_rate is not None else
-                    _recent(regs, r.recent_bytes, recent, recent_used, t, x.client, x.store))
-        rates[key] = rate_for(x.client, reported=rep_rate, recent_bytes=measured,
+        sums = (None if rep_rate is not None else
+                _recent(regs, r.recent_writes, recent, recent_used, t, x.client, x.store))
+        rates[key] = rate_for(x.client, reported=rep_rate,
+                              recent_bytes=None if sums is None else sums[0],
                               declared_mb_per_day=x.mb_per_day)
     recent = {k: v for k, v in recent.items() if k in recent_used}
 
@@ -514,9 +526,11 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
         rec = trims.get(c)
         if c in managed and rec is not None and rec.ok:
             continue                    # it answered this pass; decide judged older news
-        prev_du = du.get(f"{c}|{a.store}")
-        prev_du = (prev_du.get("bytes") if isinstance(prev_du, dict)
-                   and isinstance(prev_du.get("bytes"), int) else None)
+        prev = du_before.get(f"{c}|{a.store}")
+        cur_paths = sorted(p for x in regs if x.client == c and x.store == a.store
+                           for p in x.paths)
+        prev_du = (prev["bytes"] if prev and prev.get("paths") == cur_paths
+                   and isinstance(prev.get("bytes"), int) else None)
         fresh = None
         if c not in managed:
             fresh = _measure(regs, r.path_bytes, du, set(), t, c, a.store, fresh=True)
@@ -527,12 +541,12 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
                 continue
         # A client that wrote nothing in 24 h is not the growth: stopping it
         # frees nothing.  Two measures must agree: no file changed (ctime)
-        # in 24 h, measured fresh, and its du has not grown since the last
-        # cached du.  Never measured (a reported rate, no walker, no earlier
-        # du) keeps the stop.
-        if (f"{c}|{a.store}" in recent and r.recent_bytes is not None
+        # in 24 h, measured fresh, and its du has not grown past the du from
+        # before this pass.  Never measured (a reported rate, no walker, no
+        # earlier du) keeps the stop.
+        if (f"{c}|{a.store}" in recent and r.recent_writes is not None
                 and prev_du is not None):
-            wrote = _recent(regs, r.recent_bytes, recent, set(), t, c, a.store, fresh=True)
+            wrote = _recent(regs, r.recent_writes, recent, set(), t, c, a.store, fresh=True)[1]
             if wrote == 0 and fresh is None:
                 fresh = _measure(regs, r.path_bytes, du, set(), t, c, a.store, fresh=True)
             if wrote == 0 and fresh <= prev_du:

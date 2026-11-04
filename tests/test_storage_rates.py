@@ -45,13 +45,15 @@ def test_recent_bytes_skips_old_files_symlinks_and_counts_each_inode_once(tmp_pa
     new = tmp_path / "new"; new.write_bytes(b"x" * 8192)
     old = tmp_path / "old"; old.write_bytes(b"y" * 8192)
     now = os.stat(new).st_ctime + 10
+    os.utime(old, (now - 2 * 86400, now - 2 * 86400))
     os.link(new, tmp_path / "hard")
     outside = tmp_path.parent / (tmp_path.name + "-outside")
     outside.mkdir(); (outside / "big").write_bytes(b"z" * 65536)
     (tmp_path / "ln").symlink_to(outside, target_is_directory=True)
     (tmp_path / "lnf").symlink_to(outside / "big")
-    got = rates.recent_bytes([str(tmp_path)], now=now, stat=_aged({str(old)}, now - 2 * 86400))
-    assert got == os.stat(new).st_blocks * 512
+    got = rates.recent_sums([str(tmp_path)], now=now, stat=_aged({str(old)}, now - 2 * 86400))
+    assert got == (os.stat(new).st_blocks * 512,) * 2
+    assert rates.recent_bytes([str(tmp_path)], now=now) == got[0]
 
 
 def test_recent_bytes_of_a_missing_path_is_zero(tmp_path):
@@ -64,9 +66,22 @@ def test_churn_by_least_squares_needs_an_hour():
     assert rates.churn_bytes_per_h([(0, GiB), (3600, 0)]) == 0.0
 
 
-def test_backdated_mtimes_do_not_pass_for_idle(tmp_path):
-    # tar -x, rsync -t and os.utime set mtime back; ctime still moves.
+def test_backdated_mtimes_count_by_ctime_not_in_the_rate(tmp_path):
+    # tar -x, rsync -t and os.utime set mtime back; ctime still moves, so the
+    # idle check sees the write.  The rate counts by mtime, as declared.
     f = tmp_path / "restored"; f.write_bytes(b"x" * 8192)
     now = os.stat(f).st_ctime + 10
     os.utime(f, (now - 30 * 86400, now - 30 * 86400))
-    assert rates.recent_bytes([str(tmp_path)], now=now) >= 8192
+    by_mtime, by_ctime = rates.recent_sums([str(tmp_path)], now=now)
+    assert by_mtime == 0 and by_ctime >= 8192
+
+
+def test_a_renamed_old_file_raises_the_ctime_sum_but_not_the_rate(tmp_path):
+    f = tmp_path / "old"; f.write_bytes(b"x" * 8192)
+    then = os.stat(f).st_mtime - 10 * 86400
+    os.utime(f, (then, then))
+    f.rename(tmp_path / "renamed")                  # moves ctime, not mtime
+    now = os.stat(tmp_path / "renamed").st_ctime + 10
+    by_mtime, by_ctime = rates.recent_sums([str(tmp_path)], now=now)
+    assert by_mtime == 0 and by_ctime >= 8192
+    assert rates.recent_bytes([str(tmp_path)], now=now) == 0

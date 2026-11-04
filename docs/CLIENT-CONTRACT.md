@@ -2245,6 +2245,10 @@ Sigmond picks D so the allotments fill the space the clients share, and
 reports that the store holds D days.  It takes a client's rate from
 `bytes_written_per_day` when the client reports one.  Otherwise it
 measures the bytes of the client's files modified over the last 24 hours.
+(Sigmond's idle check, which spares a client that writes nothing from
+being stopped at the final stage, counts by change time instead, so a
+writer that preserves or backdates modification times still counts as
+writing.)
 When that measures nothing, it falls back to the sum of the sinks'
 declared `mb_per_day` (MB = 10^6 bytes).  A client with no rate from any
 source gets its floor only.  The smallest `retention_days` above 0 among a

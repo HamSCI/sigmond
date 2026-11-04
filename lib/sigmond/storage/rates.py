@@ -5,8 +5,8 @@ holdings: a ring buffer at steady state writes gigabytes an hour and grows
 by nothing.  Sources, best first:
 
 1. `reported`: `bytes_written_per_day` from the client's `holdings` answer.
-2. `measured`: the allocated bytes of its files changed in the last 24 h
-   (by st_ctime, which every write moves and no user-space call can set back)
+2. `measured`: the allocated bytes of its files modified (st_mtime) in the
+   last 24 h
    (`recent_bytes`; the tick caches it per client for 30 minutes).
 3. `declared`: the `mb_per_day` its inventory declares (MB = 10**6 bytes).
 4. `none`: rate 0.  The client then gets its floor only, and the status
@@ -14,6 +14,13 @@ by nothing.  Sources, best first:
 
 A measured zero yields to a declaration: a client stopped or idle for a day
 writes nothing, and its own declaration describes it better than silence.
+
+One walk gives two sums (`recent_sums`).  The rate takes the bytes by
+modification time.  The tick's idle check, which spares a client from the
+stop lever, takes the bytes by change time (st_ctime): a writer that
+preserves or backdates mtimes (tar -x, rsync -t, os.utime) still moves
+ctime, and no user-space call sets it back.  A rename or chown moves ctime
+too, which is why the rate does not use it.
 
 A store's churn comes from its own used-bytes history, by least squares,
 the way pm-storage measures a thin pool's.
@@ -50,26 +57,28 @@ def rate_for(client: str, *, reported: Optional[int], recent_bytes: Optional[int
     return 0.0, "none"
 
 
-def recent_bytes(paths: Iterable[str], now: float, window_s: float = DAY_S,
-                 stat: Callable = os.lstat) -> int:
-    """Allocated bytes (st_blocks * 512) of regular files under `paths`
-    changed within `window_s` before `now`.  It reads st_ctime, not
-    st_mtime: a writer that preserves or backdates mtimes (tar -x,
-    rsync -t, os.utime) still moves ctime, so it cannot pass for idle.
-    Symlinks are never followed, each inode counts once, and files that
-    vanish mid-walk are skipped."""
+def recent_sums(paths: Iterable[str], now: float, window_s: float = DAY_S,
+                stat: Callable = os.lstat) -> tuple:
+    """(bytes by mtime, bytes by ctime): the allocated bytes (st_blocks *
+    512) of regular files under `paths` modified, and changed, within
+    `window_s` before `now`.  Symlinks are never followed, each inode counts
+    once, and files that vanish mid-walk are skipped."""
     seen = set()
-    total = 0
+    by_mtime = by_ctime = 0
     since = now - window_s
 
     def count(st) -> None:
-        nonlocal total
-        if not stat_mod.S_ISREG(st.st_mode) or st.st_ctime < since:
+        nonlocal by_mtime, by_ctime
+        if not stat_mod.S_ISREG(st.st_mode):
             return
         key = (st.st_dev, st.st_ino)
-        if key not in seen:
-            seen.add(key)
-            total += st.st_blocks * 512
+        if key in seen:
+            return
+        seen.add(key)
+        if st.st_mtime >= since:
+            by_mtime += st.st_blocks * 512
+        if st.st_ctime >= since:
+            by_ctime += st.st_blocks * 512
 
     for root in paths:
         try:
@@ -85,7 +94,14 @@ def recent_bytes(paths: Iterable[str], now: float, window_s: float = DAY_S,
                     count(stat(os.path.join(dirpath, n)))
                 except OSError:
                     pass
-    return total
+    return by_mtime, by_ctime
+
+
+def recent_bytes(paths: Iterable[str], now: float, window_s: float = DAY_S,
+                 stat: Callable = os.lstat) -> int:
+    """Bytes of regular files under `paths` modified (st_mtime) within
+    `window_s` before `now`: the measured write rate."""
+    return recent_sums(paths, now, window_s, stat)[0]
 
 
 CHURN_WINDOW_S = 6 * 3600

@@ -75,13 +75,18 @@ def _fake_runners(used_pct, *, trim_ok=True, virt=False,
         journal=lines.append,
         binary_for=lambda c: f"/usr/bin/{c}",
         client_active=lambda c: state["active"],
-        recent_bytes=counted("recent_bytes", lambda paths, now: (
+        recent_writes=counted("recent_bytes", lambda paths, now: _pair(
             state["recent"](paths) if callable(state["recent"]) else state["recent"])),
     )
     r.calls = calls
     r.journal_lines = lines
     r.state = state
     return r
+
+
+def _pair(v):
+    """A fake walk's (bytes by mtime, bytes by ctime); a bare number is both."""
+    return tuple(v) if isinstance(v, tuple) else (v, v)
 
 
 def _status(p):
@@ -601,7 +606,7 @@ def test_a_reported_rate_beats_the_measured_one(tmp_path):
 def test_no_rate_shows_none_and_floor_only(tmp_path):
     p = _paths(tmp_path)
     r = _fake_runners(used_pct=50, views={"a": _view("a", "/data/a", floor=2 * GiB)})
-    r.recent_bytes = None
+    r.recent_writes = None
     run_tick(T0, r, **p)
     st = _status(p)
     (c,) = st["clients"]
@@ -738,3 +743,40 @@ def test_never_measured_recent_bytes_keeps_todays_stop(tmp_path):
     run_tick(T0, r, **p)
     run_tick(T0 + timedelta(seconds=601), r, **p)
     assert r.calls["recent_bytes"] == 0 and r.calls["stop_client"] == 1
+
+
+# ---- fix round 1: mtime for the rate, ctime for the idle check ------------
+
+def test_backdated_mtimes_with_fresh_ctimes_are_not_idle(tmp_path):
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views, recent=(0, GiB)); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    run_tick(T0 + timedelta(seconds=1000), r, **p)
+    assert r.calls["stop_client"] == 1 and "idle-over:u" not in _alarm_keys(p)
+
+
+def test_ctime_only_changes_never_raise_the_allotment_rate(tmp_path):
+    # A rename or chown moves ctime: the idle check sees it, the rate does not.
+    p = _paths(tmp_path)
+    run_tick(T0, _fake_runners(used_pct=50, recent=(0, 5 * GiB)), **p)
+    (c,) = _status(p)["clients"]
+    assert c["rate_bytes_per_day"] == 0 and c["rate_source"] == "measured"
+
+
+def test_the_idle_check_compares_with_the_du_from_before_this_pass(tmp_path):
+    # The du cache expires on the stop tick, so holdings re-measure 45 GiB this
+    # pass; the earlier 40 GiB is the one to compare: it grew, so it is stopped.
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views, recent=0); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    r.state["held"] = 45 * GiB
+    run_tick(T0 + timedelta(seconds=1900), r, **p)
+    assert r.calls["stop_client"] == 1 and "idle-over:u" not in _alarm_keys(p)
+
+
+def test_a_clock_stepped_back_expires_both_caches(tmp_path):
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=10, views=views); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    run_tick(T0 - timedelta(minutes=10), r, **p)
+    assert r.calls["path_bytes"] == 2 and r.calls["recent_bytes"] == 2
