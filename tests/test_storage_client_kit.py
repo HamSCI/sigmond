@@ -121,3 +121,24 @@ def test_failed_delete_stays_held_and_is_reported(capsys):
     assert args.func(args) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["held_bytes"] == 10 and "busy" in out["reason"]
+
+
+def test_the_add_a_client_example_lists_regular_files_only(tmp_path):
+    """Clients copy docs/ADD-A-CLIENT.md §9's list_items.  It must walk the
+    tree and never hand the kit a directory or a link to delete."""
+    import os
+    import re
+    from pathlib import Path
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "ADD-A-CLIENT.md").read_text()
+    sec = doc[doc.index("## 9. Storage"):]
+    code = re.search(r"```python\n(.*?)```", sec, re.S).group(1)
+    code = code.split("def build_parser")[0]
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.uploaded").write_text("x")
+    (tmp_path / "sub" / "b").write_text("yy")
+    (tmp_path / "link").symlink_to(tmp_path / "sub" / "b")
+    ns = {}
+    exec(code, ns)
+    ns["DATA"] = str(tmp_path)
+    got = sorted((os.path.relpath(it.path, tmp_path), it.cls) for it in ns["list_items"]())
+    assert got == [("a.uploaded", "sent"), ("sub/b", "raw")]

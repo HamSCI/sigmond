@@ -413,6 +413,8 @@ First, add three fields to each `file` entry in `data_sinks`:
 `storage trim` and `storage final`.
 
 You write one function.  It lists your files with a class for each.
+Walk the whole tree and list regular files only: the kit deletes what you
+list, and a directory or a link must never reach it.
 The kit in `sigmond.storage.client_kit` does the rest: it sums bytes,
 picks what to delete (`sent` first, then `derived`, then `raw`, oldest
 first, never `pinned`), and prints the JSON the contract specifies.
@@ -422,17 +424,21 @@ standard library, so import it inside `try`:
 
 ```python
 import os
+import stat
 from sigmond.storage.client_kit import Item, add_storage_verbs
 
 DATA = "/var/lib/my-client"
 
 def list_items():
     out = []
-    for name in os.listdir(DATA):
-        p = os.path.join(DATA, name)
-        st = os.stat(p)
-        cls = "sent" if name.endswith(".uploaded") else "raw"
-        out.append(Item(p, st.st_size, cls, st.st_mtime))
+    for dirpath, _dirs, files in os.walk(DATA):     # never follows a link
+        for name in files:
+            p = os.path.join(dirpath, name)
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode):
+                continue        # a directory, link or socket is no data to trim
+            cls = "sent" if name.endswith(".uploaded") else "raw"
+            out.append(Item(p, st.st_size, cls, st.st_mtime))
     return out
 
 def build_parser(sub):            # `sub` is your argparse subparsers
