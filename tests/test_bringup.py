@@ -91,6 +91,7 @@ def test_config_checkpoints_are_hard_but_final_validate_is_not():
     p = build_plan(_dasi2(), local_radiod=True)
     hard = {s.check for s in p.steps if s.hard}
     assert 'radiod-configured' in hard
+    assert 'radiod-installed' in hard
     assert 'configured:hf-timestd' in hard
     assert 'configured:wspr-recorder' in hard
     assert 'configured:psk-recorder' in hard
@@ -541,3 +542,24 @@ def test_ka9q_web_unit_reinstall_passes_no_pull():
     p = build_plan(prof, local_radiod=True)
     assert 'install ka9q-web unit (post-radiod-config)' in _labels(p, 'install')
     _assert_every_install_passes_no_pull(p)
+
+
+def test_a_failed_radiod_install_stops_before_anything_needs_radiod():
+    # sigma, 2026-11-04: the ka9q-radio install failed and bring-up spent 20
+    # minutes starting clients against a radiod that did not exist.  The
+    # hard 'radiod installed' checkpoint must sit right after the install and
+    # before radiod is configured or any client is touched.
+    p = build_plan(_dasi2(), local_radiod=True)
+    idx = {s.check: i for i, s in enumerate(p.steps) if s.kind == 'checkpoint'}
+    inst = next(i for i, s in enumerate(p.steps)
+                if s.kind == 'install' and 'ka9q-radio' in s.label)
+    assert inst < idx['radiod-installed'] < idx['radiod-configured']
+    first_client = next(i for i, s in enumerate(p.steps)
+                        if 'wspr-recorder' in s.label)
+    assert idx['radiod-installed'] < first_client
+
+
+def test_a_remote_radiod_plan_has_no_install_checkpoint():
+    p = build_plan(_dasi2(), local_radiod=False,
+                   remote_status_dns='x-status.local')
+    assert not any(s.check == 'radiod-installed' for s in p.steps)

@@ -254,6 +254,14 @@ def build_plan(profile, *, local_radiod: bool,
                 continue
             install(STAGE1, infra)
         install(STAGE1, 'ka9q-radio')
+        # ⛔ A failed radiod install ends the run HERE.  Everything after it
+        # (radiod config, wisdom, every radiod-bound client) presumes a radiod
+        # binary.  sigma, the first bare-metal repo install (2026-11-04): the
+        # ka9q-radio pin was missing from a shallow clone, the install step
+        # retried and gave up, and bring-up ran another 20 minutes starting
+        # clients against a radiod that did not exist, reporting each failure
+        # one at a time.  The cause was one line near the top of the log.
+        checkpoint(STAGE1, 'radiod installed', check='radiod-installed', hard=True)
         if with_optional:
             for opt in profile.optional:
                 install(STAGE1, opt)

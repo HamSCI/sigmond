@@ -91,7 +91,44 @@ sources as yourself, sets up `/opt/git/sigmond/sigmond/venv`, and symlinks `smd`
 > automatic resume. See [`docs/installation-guide.md`](docs/installation-guide.md)
 > "Running under Proxmox VE? Read this first."
 
-### 2. See what's available
+### 2. Bring up the station
+
+One command installs, configures and starts a whole station on this
+machine.  It works the same on bare metal and inside a VM:
+
+```bash
+smd bringup dasi2 --callsign AC0G --grid EM38ww --reporter AC0G/S \
+                  --psws-station-id <S0000NN>
+```
+
+Use your own callsign, grid square, reporter ID and PSWS station ID;
+`--psws-station-id` matters only if you upload to PSWS.
+`dasi2`, the default profile, gives you a local radiod, hf-timestd (GRAPE),
+WSPR, FT4/FT8, meteor scatter and the magnetometer.  `base` stops at radiod
+and timing; `client` decodes from a radiod on another machine, named with
+`--remote-radiod <status-dns>`.  Bring-up skips, with a warning, anything
+whose hardware it cannot find on the USB bus.
+
+Add `--dry-run` to see every step first.  Add `--non-interactive` to accept
+radiod's defaults instead of answering its questions.
+
+If the station uploads to PSWS, put each instrument's ID in
+`/etc/sigmond/site-profile.toml` and render it into the client configs:
+
+```toml
+[psws.instruments]
+"hf-timestd"   = "<GRAPE instrument id>"
+"mag-recorder" = "<magnetometer instrument id>"
+```
+
+```bash
+smd config render
+```
+
+The steps below build the same station a piece at a time, for when you
+want to choose each part yourself.
+
+### 3. See what's available
 
 ```bash
 smd component list --catalog
@@ -125,24 +162,27 @@ smd component list --catalog
 > full ordered walkthrough (identity → radiod → wisdom → tuning →
 > clients → validate).
 
-### 3. Install clients
+### 4. Install clients
 
 Install whichever clients you need.  Each client's installer handles
 everything: creates a service user, Python venv, config template, and
 systemd units.
 
 ```bash
-sudo smd install hf-timestd
-sudo smd install psk-recorder
+smd install hf-timestd
+smd install psk-recorder
 ```
+
+Run `smd` as yourself, never under `sudo`.  It asks for root itself when a
+step needs it, and it refuses to run under `sudo`.
 
 Use `--dry-run` to preview what would happen without making changes:
 
 ```bash
-sudo smd install wspr-recorder --dry-run
+smd install wspr-recorder --dry-run
 ```
 
-### 4. Configure
+### 5. Configure
 
 Each client owns its own config file.  After installation, edit the config
 for your station:
@@ -163,7 +203,7 @@ Sigmond's own coordination config lives at `/etc/sigmond/topology.toml`.
 Copy the example to get started:
 
 ```bash
-sudo cp /opt/git/sigmond/etc/topology.example.toml /etc/sigmond/topology.toml
+sudo cp /opt/git/sigmond/sigmond/etc/topology.example.toml /etc/sigmond/topology.toml
 sudo vi /etc/sigmond/topology.toml
 ```
 
@@ -174,7 +214,7 @@ Enable or disable components by setting `enabled = true` or `false`.
 Instead of editing config files manually, you can use the interactive TUI:
 
 ```bash
-sudo smd tui
+smd tui
 ```
 
 The TUI provides:
@@ -196,10 +236,10 @@ The TUI provides:
 
 Keybindings: `t` = topology, `i` = install, `v` = validate, `q` = quit
 
-### 5. Start services
+### 6. Start services
 
 ```bash
-sudo smd start
+smd start
 ```
 
 This starts all enabled components in the topology.  To start a single
@@ -207,10 +247,10 @@ component (the component name is now a positional argument; an optional
 second positional selects a single instance):
 
 ```bash
-sudo smd start psk-recorder
+smd start psk-recorder
 ```
 
-### 6. Check health
+### 7. Check health
 
 ```bash
 smd status
@@ -306,7 +346,7 @@ smd admin log psk-recorder --files
 Change a client's verbosity without restarting:
 
 ```bash
-sudo smd admin log psk-recorder --level DEBUG
+smd admin log psk-recorder --level DEBUG
 ```
 
 This writes `PSK_RECORDER_LOG_LEVEL=DEBUG` to `/etc/sigmond/coordination.env`
@@ -317,7 +357,7 @@ To set a default level for all clients (no SIGHUP — restart or SIGHUP each
 client to apply):
 
 ```bash
-sudo smd admin log --level WARNING
+smd admin log --level WARNING
 ```
 
 ## Debugging
@@ -338,7 +378,7 @@ Checks:
 
 ```bash
 smd admin diag net        # unprivileged; uses /proc/net/igmp state
-sudo smd admin diag net   # adds passive raw-socket listen for queriers
+smd admin diag net   # adds passive raw-socket listen for queriers
 ```
 
 Classifies your network for multi-host radiod safety and tells you
@@ -367,13 +407,13 @@ no separate enable step:
 smd component list --catalog
 
 # Install it — this also enables it in topology
-sudo smd install hfdl-recorder
+smd install hfdl-recorder
 
 # Configure it for your station (first-run wizard, or $EDITOR fallback)
-sudo smd config init hfdl-recorder
+smd config init hfdl-recorder
 
 # Start it
-sudo smd start hfdl-recorder
+smd start hfdl-recorder
 
 # Verify
 smd status

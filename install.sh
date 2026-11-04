@@ -1321,10 +1321,17 @@ fi
 # Download is universal; install is selective.  Clone every catalog
 # entry's repo under /opt/git/sigmond/<name>/ so the operator can
 # enable/disable components freely from the TUI later without waiting
-# on a network round-trip every time they change their mind.  Clones
-# are shallow (--depth 1) — full history is a `git fetch --unshallow`
-# away when needed.  Non-fatal: any failure here just defers the
-# clone to `smd install <name>`.
+# on a network round-trip every time they change their mind.
+#
+# ⛔ FULL clones, not --depth 1.  Bring-up installs with --no-pull, which
+# builds only what sits on disk and never fetches (the appliance image ships
+# each checkout at its pin).  A shallow clone holds only the newest commit, so
+# any component pinned behind its upstream HEAD cannot be built: sigma, the
+# first bare-metal repo install (2026-11-04), never got a radiod, because
+# ka9q-radio's compat pin 401992cd sat behind Phil's newer commit.  Every
+# client after it then failed against a radiod that did not exist.  Full
+# history costs a few hundred MB once.  Non-fatal: any failure here just
+# defers the clone to `smd install <name>`.
 info "Pre-cloning catalog repos under /opt/git/sigmond/ (fast switch-on later)…"
 to_clone=$(/usr/bin/env python3 - <<'PY' 2>/dev/null
 import sys
@@ -1347,7 +1354,7 @@ if [[ -n "$to_clone" ]]; then
         # session, so an unprivileged clone into the setgid, sigmond-owned
         # /opt/git/sigmond fails with EACCES.  Clone as root (mirrors the
         # ka9q-python clone above); the $SUDO chown below restores ownership.
-        if $SUDO git clone --quiet --depth 1 "$url" "/opt/git/sigmond/$name" 2>/dev/null; then
+        if $SUDO git clone --quiet "$url" "/opt/git/sigmond/$name" 2>/dev/null; then
             ok "  cloned $name"
         else
             warn "  $name: git clone $url failed (non-fatal)"
@@ -1388,7 +1395,7 @@ if [[ -x /opt/git/sigmond/sigmond-rac/install.sh ]]; then
         warn "  RAC install failed (non-fatal)"
     fi
 else
-    info "RAC not cloned (catalog repo unreachable) — skipping; add it later with 'smd install rac'"
+    info "RAC not cloned (catalog repo unreachable) — skipping; add it later with 'smd install sigmond-rac'"
 fi
 
 # ─── done ─────────────────────────────────────────────────────────────────────
@@ -1416,7 +1423,8 @@ echo -e "                            this host is running radiod)."
 echo -e "    7. ${BOLD}CPU frequency${NC}   — same — cap non-radiod cores to save power."
 echo
 echo -e "  ${BOLD}CLI shortcuts${NC} (power users):"
+echo -e "    smd bringup --dry-run        a whole station in one command (see README)"
 echo -e "    smd install                  install everything topology-enabled"
 echo -e "    smd install <component>      install one"
-echo -e "    smd list --catalog           browse the catalog"
+echo -e "    smd component list --catalog browse the catalog"
 echo

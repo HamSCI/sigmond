@@ -9776,6 +9776,16 @@ def _read_text_safe(p) -> str:
 
 def _bringup_probe(check: str, smd_bin: str):
     """Run a lightweight checkpoint probe.  Returns (ok, detail)."""
+    if check == 'radiod-installed':
+        # Check the artifacts, not the install step's exit code: radiod is
+        # useless to every station we run without its dlopen'd RX888 driver.
+        missing = [str(p) for p in (Path('/usr/local/sbin/radiod'),
+                                    Path('/usr/local/lib/ka9q-radio/rx888.so'))
+                   if not p.exists()]
+        if missing:
+            return (False, f"{', '.join(missing)} MISSING -- the ka9q-radio "
+                           f"install failed; its error is above")
+        return (True, '/usr/local/sbin/radiod + rx888.so present')
     if check == 'radiod-configured':
         d = Path('/etc/radio')
         confs = list(d.glob('radiod@*.conf')) if d.is_dir() else []
