@@ -858,3 +858,25 @@ def test_a_store_descends_once_two_points_below_the_level_it_crossed(tmp_path):
     run_tick(T0 + timedelta(minutes=10), r, **p)
     assert _status(p)["stores"][0]["stage"] == "OK"
     assert len(_store_lines(r, "clear")) == 1
+
+
+# ---- hands-off fails closed (ruling) ----------------------------------------
+
+def test_a_hands_off_that_does_not_parse_holds_the_lever(tmp_path):
+    p = _paths(tmp_path)
+    p["config_path"].write_text(STOP_ON + '[hands_off]\nuntil = "2026-11-05T12:00:00"\n')
+    r = _fake_runners(used_pct=96, trim_ok=False)
+    run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["stop_client"] == 0
+    al = _alarm_keys(p)
+    assert al["hands-off-unknown"]["severity"] == "ERROR"
+    assert "hands-off-held:a" in al and "stopped:a" not in al
+
+
+def test_an_unparseable_storage_toml_holds_the_lever(tmp_path):
+    p = _paths(tmp_path)
+    p["config_path"].write_text("[stop\nenabled = true\n")
+    r = _fake_runners(used_pct=96, trim_ok=False)
+    run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["stop_client"] == 0
+    assert _alarm_keys(p)["hands-off-unknown"]["severity"] == "ERROR"

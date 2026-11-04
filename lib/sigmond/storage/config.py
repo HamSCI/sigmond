@@ -2,7 +2,10 @@
 directives, hands-off window, and the stop lever's switch.
 
 Loading never raises.  A bad key drops alone and leaves one problem line;
-a bad [levels] table falls back whole.
+a bad [levels] table falls back whole.  The hands-off mark fails closed: a
+file that will not read or parse, or a [hands_off] table that does not
+parse, sets `hands_off_unknown`, and the tick then stops no client.  A
+hands-off running past 14 days from now clamps to 14 days.
 """
 
 import re
@@ -37,6 +40,11 @@ class StorageConfig:
     # [stop] enabled: may the tick stop a client at FINAL?  Off by default:
     # the tick then raises `would-stop:<client>` and stops nothing.
     stop_enabled: bool = False
+    # Non-empty when the hands-off mark could not be read: the file would
+    # not read or parse, or a [hands_off] table exists and does not parse.
+    # The tick then holds the stop lever, as if hands-off were set (fails
+    # closed), and raises `hands-off-unknown`.
+    hands_off_unknown: str = ""
 
 
 def _num(v) -> Optional[float]:
@@ -79,18 +87,22 @@ def _parse_when(v) -> Optional[datetime]:
     return d.astimezone(timezone.utc)
 
 
-def load_storage_config(path: Path = CONFIG_PATH) -> StorageConfig:
+def load_storage_config(path: Path = CONFIG_PATH,
+                        now: Optional[datetime] = None) -> StorageConfig:
     path = Path(path)
+    now = datetime.now(timezone.utc) if now is None else now
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
         return StorageConfig()
     except OSError as e:
-        return StorageConfig(problems=(f"{path}: cannot read: {e}",))
+        msg = f"{path}: cannot read: {e}"
+        return StorageConfig(problems=(msg,), hands_off_unknown=msg)
     try:
         data = tomllib.loads(raw.decode("utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
-        return StorageConfig(problems=(f"{path}: cannot parse, using defaults: {e}",))
+        msg = f"{path}: cannot parse, using defaults: {e}"
+        return StorageConfig(problems=(msg,), hands_off_unknown=msg)
 
     problems: list = []
     def table(name):
@@ -126,15 +138,27 @@ def load_storage_config(path: Path = CONFIG_PATH) -> StorageConfig:
         else:
             problems.append(f"directives.{k}: {v!r} is not a known policy; dropped")
 
-    until, reason = None, ""
-    ho = table("hands_off")
-    if "until" in ho:
-        until = _parse_when(ho["until"])
-        if until is None:
-            problems.append(f"hands_off.until: {ho['until']!r} is not an ISO-8601 time with zone; dropped")
+    until, reason, unknown = None, "", ""
+    if "hands_off" in data:
+        ho = data["hands_off"]
+        if not isinstance(ho, dict):
+            unknown = "hands_off: not a table"
+        elif "until" not in ho:
+            unknown = "hands_off: no until"
         else:
-            r = ho.get("reason", "")
-            reason = r if isinstance(r, str) else ""
+            until = _parse_when(ho["until"])
+            if until is None:
+                unknown = (f"hands_off.until: {ho['until']!r} is not an ISO-8601 time "
+                           f"with zone")
+            else:
+                r = ho.get("reason", "")
+                reason = r if isinstance(r, str) else ""
+                if until - now > MAX_HANDS_OFF:
+                    until = (now + MAX_HANDS_OFF).astimezone(timezone.utc)
+                    problems.append(f"hands_off.until: runs past 14 days from now; "
+                                    f"clamped to {until:%Y-%m-%dT%H:%M:%SZ}")
+        if unknown:
+            problems.append(f"{unknown}; hands-off unknown, so the ledger stops no client")
 
     pool = table("pool")
     pool_share = None
@@ -160,11 +184,17 @@ def load_storage_config(path: Path = CONFIG_PATH) -> StorageConfig:
             problems.append("stop.enabled: not a boolean; the stop lever stays off")
 
     return StorageConfig(levels, shares, directives, until, reason,
-                         pool_share, expect, tuple(problems), horizon_h, stop_enabled)
+                         pool_share, expect, tuple(problems), horizon_h, stop_enabled,
+                         unknown)
 
 
 def hands_off_active(cfg: StorageConfig, now: datetime) -> bool:
     return cfg.hands_off_until is not None and now < cfg.hands_off_until
+
+
+def hands_off_held(cfg: StorageConfig, now: datetime) -> bool:
+    """Hands-off in force, or unknown (fails closed): the lever holds."""
+    return bool(cfg.hands_off_unknown) or hands_off_active(cfg, now)
 
 
 def _key(k: str) -> str:

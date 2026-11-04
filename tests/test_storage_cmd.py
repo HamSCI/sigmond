@@ -228,3 +228,16 @@ def test_status_shows_the_stop_lever(tmp_path, capsys):
     cmd_storage(_args(tmp_path, storage_command="status"))
     out = capsys.readouterr().out
     assert "stop lever off" in out
+
+
+def test_share_and_directive_refuse_while_hands_off_does_not_parse(tmp_path, capsys):
+    bad = '[hands_off]\nuntil = "next tuesday"\n'
+    for kw in (dict(storage_command="share", target="x", value="2"),
+               dict(storage_command="directive", target="x", value="stop-writing"),
+               dict(storage_command="directive", target="stop-lever", value="on"),
+               dict(storage_command="directive", target="hands-off", clear=True)):
+        a = _args(tmp_path, **kw)
+        a.config_path.write_text(bad)
+        assert cmd_storage(a) == 2, kw
+        assert a.config_path.read_text() == bad
+        assert "hands_off" in capsys.readouterr().err

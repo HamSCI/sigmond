@@ -53,7 +53,7 @@ from typing import Callable, Optional
 
 from .alarms import AlarmBook, journal_line
 from .clientcall import ClientAnswer
-from .config import CONFIG_PATH, hands_off_active, load_storage_config
+from .config import CONFIG_PATH, hands_off_active, hands_off_held, load_storage_config
 from .ladder import (DEMAND_DEADLINE_S, UNMANAGED_FINAL_GRACE_S, Severity, TrimRecord,
                      decide)
 from .model import (STATE_RESERVE_BYTES, Demand, Holding, Stage,
@@ -390,11 +390,18 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
     """One pass.  Returns (state, status, active alarms)."""
     t = now.timestamp()
     journal = r.journal
-    cfg = load_storage_config(config_path)
+    cfg = load_storage_config(config_path, now=now)
     levels = cfg.levels
     active: dict = {}
     for i, prob in enumerate(cfg.problems):
         active[f"config:{i}"] = (Severity.WARNING, f"storage.toml: {prob}")
+    if cfg.hands_off_unknown:
+        # Fails closed: a hands-off mark the ledger cannot read holds the lever.
+        active["hands-off-unknown"] = (
+            Severity.ERROR,
+            f"storage.toml: the hands-off mark cannot be read ({cfg.hands_off_unknown}); "
+            f"the ledger treats the station as hands-off and stops no client until "
+            f"an operator fixes {config_path}")
 
     restored = r.expire_log_levels(now)
     views = r.load_views()
@@ -501,7 +508,7 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
     for c in restarted:                 # an operator's start earns a fresh deadline
         trims.pop(c, None)
         touched.pop(c, None)
-    hands_off = hands_off_active(cfg, now)
+    hands_off = hands_off_held(cfg, now)
     prev_raw = state.get("stages") if isinstance(state.get("stages"), dict) else {}
     previous = {n: Stage[v] for n, v in prev_raw.items()
                 if isinstance(v, str) and v in Stage.__members__}
@@ -679,8 +686,11 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
             for x in sorted(regs, key=lambda x: (x.client, x.store))],
         "host_report": {"expected": expected, "fault": fault if (expected or report) else None,
                         "age_s": age_s},
-        "hands_off": ({"until": cfg.hands_off_until.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                       "reason": cfg.hands_off_reason} if hands_off else None),
+        "hands_off": ({"until": None, "reason": f"unknown: {cfg.hands_off_unknown}"}
+                      if cfg.hands_off_unknown else
+                      {"until": cfg.hands_off_until.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                       "reason": cfg.hands_off_reason} if hands_off_active(cfg, now)
+                      else None),
         "unclaimed": unclaimed,
         "config_problems": list(cfg.problems),
         "stop_lever": "on" if cfg.stop_enabled else "off",

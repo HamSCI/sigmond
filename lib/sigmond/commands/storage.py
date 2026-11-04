@@ -138,7 +138,10 @@ def _status(args) -> int:
              " (the ledger alarms would-stop and stops no client)"))
     ho = st.get("hands_off")
     if ho:
-        _say(f"  hands-off until {ho['until']}: {ho.get('reason') or '(no reason given)'}")
+        if ho.get("until") is None:
+            _say(f"  hands-off UNKNOWN, so the ledger stops no client: {ho.get('reason')}")
+        else:
+            _say(f"  hands-off until {ho['until']}: {ho.get('reason') or '(no reason given)'}")
     for p, b in st.get("unclaimed", []):
         _say(f"  unclaimed {p}: {_gib(b)}")
     for prob in st.get("config_problems", []):
@@ -149,11 +152,19 @@ def _status(args) -> int:
 # ---------------------------------------------------------------- writers
 
 def _load_for_edit(path: Path):
+    """The config to edit, or an exit code: 1 when the file will not read
+    or parse, 2 when its [hands_off] table does not parse (a rewrite would
+    drop the mark, and an operator must say what it meant)."""
     cfg = load_storage_config(path)
     fatal = [p for p in cfg.problems if p.startswith(f"{path}:")]
     if fatal:
         _complain(f"refusing to rewrite {path}: {fatal[0]}")
-        return None
+        return 1
+    if cfg.hands_off_unknown:
+        _complain(f"refusing to rewrite {path}: its [hands_off] table does not parse "
+                  f"({cfg.hands_off_unknown}); a rewrite would drop the mark.  Fix or "
+                  f"remove the [hands_off] table by hand, then run this again")
+        return 2
     for p in cfg.problems:
         _complain(f"note: {p} (it will not be written back)")
     return cfg
@@ -187,8 +198,8 @@ def _share(args) -> int:
             return 2
     path = _config_path(args)
     cfg = _load_for_edit(path)
-    if cfg is None:
-        return 1
+    if isinstance(cfg, int):
+        return cfg
     rc = _save(path, with_share(cfg, client, weight))
     if rc == 0:
         _say(f"{client}: share cleared (back to an even split)" if weight is None
@@ -216,8 +227,8 @@ def _directive(args) -> int:
             return 2
     path = _config_path(args)
     cfg = _load_for_edit(path)
-    if cfg is None:
-        return 1
+    if isinstance(cfg, int):
+        return cfg
     rc = _save(path, with_directive(cfg, target, policy))
     if rc == 0:
         _say(f"{target}: directive cleared (its own final policy applies)" if policy is None
@@ -234,8 +245,8 @@ def _stop_lever(args) -> int:
         return 2
     path = _config_path(args)
     cfg = _load_for_edit(path)
-    if cfg is None:
-        return 1
+    if isinstance(cfg, int):
+        return cfg
     rc = _save(path, with_stop_lever(cfg, value == "on"))
     if rc == 0:
         if value == "on":
@@ -260,8 +271,8 @@ def _hands_off(args) -> int:
             return 2
     path = _config_path(args)
     cfg = _load_for_edit(path)
-    if cfg is None:
-        return 1
+    if isinstance(cfg, int):
+        return cfg
     try:
         new = with_hands_off(cfg, until, getattr(args, "reason", None) or "", now)
     except ValueError as exc:
