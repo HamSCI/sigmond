@@ -42,6 +42,7 @@ from typing import Any, Callable, Dict, Optional
 
 from .doctor import SOFT_FINDING_KINDS
 from .heartbeat_schema import BLOCK_NAMES, KIND, PRECEDENCE, SCHEMA_VERSION
+from .safe_write import read_nofollow
 
 log = logging.getLogger(__name__)
 
@@ -579,21 +580,51 @@ def _map_resources(raw) -> dict:
     disks = [d for d in (raw.get("disk") or []) if isinstance(d, dict)]
     data["disk"] = disks
     disk_verdict, disk_note = _judge_disk(disks)
-    if disk_verdict == "INVALID":
-        return _block("INVALID", disk_note, data)
     errors = list(raw.get("errors") or [])
-    if errors:
-        return _block("INCONCLUSIVE",
-                      f"resource probe incomplete: {'; '.join(errors)}", data)
-    if disk_verdict == "INCONCLUSIVE":
-        return _block("INCONCLUSIVE", disk_note, data)
-    return _block(
-        "VALID",
-        f"host resource counters read (llc "
-        f"{'available' if llc['available'] else 'unavailable'}, irq delta "
-        f"{'available' if irq_delta else 'unavailable'}"
-        + (f"; {disk_note}" if disk_note else "") + ")",
-        data)
+    if disk_verdict == "INVALID":
+        verdict, reason = "INVALID", disk_note
+    elif errors:
+        verdict, reason = ("INCONCLUSIVE",
+                           f"resource probe incomplete: {'; '.join(errors)}")
+    elif disk_verdict == "INCONCLUSIVE":
+        verdict, reason = "INCONCLUSIVE", disk_note
+    else:
+        verdict = "VALID"
+        reason = (
+            f"host resource counters read (llc "
+            f"{'available' if llc['available'] else 'unavailable'}, irq delta "
+            f"{'available' if irq_delta else 'unavailable'}"
+            + (f"; {disk_note}" if disk_note else "") + ")")
+
+    # The storage ledger's worst stage.  A reader that ran sets the key:
+    # a dict when the status file was fresh, None when it was missing,
+    # unreadable or stale (INDETERMINATE, never VALID).  An absent key
+    # means no reader asked, and the ledger adds nothing.
+    if "storage" in raw:
+        storage = raw["storage"]
+        if isinstance(storage, dict) and storage.get("worst_stage") in _STORAGE_VERDICT:
+            data["storage"] = storage
+            s_verdict = _STORAGE_VERDICT[storage["worst_stage"]]
+            s_note = f"storage ledger {storage['worst_stage']}"
+        else:
+            s_verdict = "INDETERMINATE"
+            s_note = "storage ledger status missing, unreadable or stale"
+        if PRECEDENCE[s_verdict] > PRECEDENCE[verdict]:
+            verdict, reason = s_verdict, s_note
+        elif s_verdict != "VALID" and s_verdict == verdict:
+            reason = f"{reason}; {s_note}"
+    return _block(verdict, reason, data)
+
+
+_STORAGE_VERDICT = {
+    "OK": "VALID",
+    "WATCH": "INCONCLUSIVE", "TIGHTEN": "INCONCLUSIVE", "DEMAND": "INCONCLUSIVE",
+    "FINAL": "INVALID", "FAULT": "INVALID",
+}
+STORAGE_STATUS_MAX_AGE_S = 600
+# Same file as sigmond.storage.tick.STATUS_PATH (a test pins the match).
+# Not imported: that module's closure would join smd's preload lists.
+STORAGE_STATUS_PATH = Path("/run/sigmond/storage-status.json")
 
 
 # Thresholds — percent OR absolute headroom, whichever is worse.
@@ -953,7 +984,40 @@ def _read_resources() -> dict:
     observations = local_resources.probe(load_environment())
     if not observations:
         raise ReaderUnavailable("local_resources probe returned nothing")
-    return observations[0].fields
+    fields = dict(observations[0].fields)
+    fields["storage"] = _read_storage_status()
+    return fields
+
+
+def _read_storage_status(path=None, now=None) -> Optional[dict]:
+    """The storage ledger's worst stage as the heartbeat block carries it,
+    or None when the status file is missing, unreadable, unparseable or
+    older than STORAGE_STATUS_MAX_AGE_S.  Reads without following links."""
+    if path is None:
+        path = STORAGE_STATUS_PATH
+    now = time.time() if now is None else now
+    try:
+        text = read_nofollow(path)
+        if text is None:
+            return None
+        doc = json.loads(text)
+        stamp = datetime.fromisoformat(
+            str(doc["generated_at"]).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            return None
+        age = now - stamp.timestamp()
+        if age > STORAGE_STATUS_MAX_AGE_S or age < -STORAGE_STATUS_MAX_AGE_S:
+            return None
+        stage = doc["worst_stage"]
+        if stage not in _STORAGE_VERDICT:
+            return None
+        stores = [{"name": st.get("name"), "used_pct": st.get("used_pct"),
+                   "stage": st.get("stage")}
+                  for st in doc.get("stores") or [] if isinstance(st, dict)]
+        return {"worst_stage": stage, "stores": stores,
+                "alarms": len(doc.get("alarms") or [])}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def read_uptime(path: str = "/proc/uptime") -> Optional[float]:

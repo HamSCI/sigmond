@@ -1541,3 +1541,94 @@ def test_the_wire_contract_stands():
 def test_only_sdr_recovered_counts_as_soft():
     from sigmond.doctor import SOFT_FINDING_KINDS
     assert SOFT_FINDING_KINDS == frozenset({"sdr-recovered"})
+
+
+# ---------------------------------------------------------------------------
+# resources carries the storage ledger's worst stage
+# ---------------------------------------------------------------------------
+
+def _storage(stage, stores=None, alarms=0):
+    return {"worst_stage": stage, "stores": stores or [], "alarms": alarms}
+
+
+def _res_raw(**kw):
+    return {"llc": {"available": True}, "irqs": {}, **kw}
+
+
+def test_storage_final_makes_resources_invalid():
+    from sigmond.heartbeat import _map_resources
+    raw = _res_raw(storage=_storage("FINAL"))
+    assert _map_resources(raw)["verdict"] == "INVALID"
+
+
+def test_storage_watch_is_inconclusive():
+    from sigmond.heartbeat import _map_resources
+    for stage in ("WATCH", "TIGHTEN", "DEMAND"):
+        raw = _res_raw(storage=_storage(stage))
+        assert _map_resources(raw)["verdict"] == "INCONCLUSIVE", stage
+    block = _map_resources(_res_raw(storage=_storage("OK")))
+    assert block["verdict"] == "VALID"
+
+
+def test_missing_ledger_status_is_indeterminate_not_valid():
+    from sigmond.heartbeat import _map_resources
+    raw = _res_raw(storage=None)
+    assert _map_resources(raw)["verdict"] == "INDETERMINATE"
+
+
+def test_disk_invalid_beats_storage_valid():
+    from sigmond.heartbeat import _map_resources
+    raw = _res_raw(storage=_storage("OK"),
+                   disk=[{"path": "/", "pct_used": 99.0,
+                          "avail_bytes": 10 * 2**20}])
+    assert _map_resources(raw)["verdict"] == "INVALID"
+
+
+def test_storage_fault_makes_resources_invalid():
+    from sigmond.heartbeat import _map_resources
+    assert _map_resources(_res_raw(storage=_storage("FAULT")))["verdict"] == "INVALID"
+
+
+def _write_status(tmp_path, stage, generated_at, stores=None, alarms=None):
+    p = tmp_path / "storage-status.json"
+    p.write_text(json.dumps({
+        "schema": 1, "generated_at": generated_at, "worst_stage": stage,
+        "stores": stores or [], "alarms": alarms or []}))
+    return p
+
+
+def test_read_storage_status_shapes_the_block(tmp_path):
+    from sigmond.heartbeat import _read_storage_status
+    p = _write_status(tmp_path, "WATCH", "2026-08-20T14:00:00Z",
+                      stores=[{"name": "iq", "used_pct": 81.2,
+                               "stage": "WATCH", "extra": 1}],
+                      alarms=["a", "b"])
+    got = _read_storage_status(p, NOW.timestamp())
+    assert got == {"worst_stage": "WATCH", "alarms": 2,
+                   "stores": [{"name": "iq", "used_pct": 81.2,
+                               "stage": "WATCH"}]}
+
+
+def test_stale_storage_status_is_indeterminate(tmp_path):
+    from sigmond.heartbeat import _read_storage_status, _map_resources
+    p = _write_status(tmp_path, "OK", "2026-08-20T13:50:00Z")  # 906 s old
+    got = _read_storage_status(p, NOW.timestamp())
+    assert got is None
+    assert _map_resources(_res_raw(storage=got))["verdict"] == "INDETERMINATE"
+
+
+def test_unreadable_storage_status_is_none(tmp_path):
+    from sigmond.heartbeat import _read_storage_status
+    assert _read_storage_status(tmp_path / "nope.json", NOW.timestamp()) is None
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert _read_storage_status(bad, NOW.timestamp()) is None
+    link = tmp_path / "link.json"
+    link.symlink_to(_write_status(tmp_path, "OK", "2026-08-20T14:05:00Z"))
+    assert _read_storage_status(link, NOW.timestamp()) is None
+
+
+def test_storage_status_path_matches_the_ledger():
+    from sigmond.heartbeat import STORAGE_STATUS_PATH
+    from sigmond.storage.tick import STATUS_PATH
+    assert STORAGE_STATUS_PATH == STATUS_PATH
