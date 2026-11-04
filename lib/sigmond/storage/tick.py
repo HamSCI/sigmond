@@ -105,14 +105,19 @@ def _units_of(client: str) -> list:
         return []
 
 
-def _client_active(client: str) -> bool:
+def _client_active(client: str, units_of=None, run=None) -> bool:
+    """Any of the client's service or timer units active.  stop_client stops
+    both kinds, and a timer-driven oneshot's service reads inactive between
+    runs, so its active timer counts as running again."""
     import subprocess
-    for ref in _units_of(client):
-        if ref.kind != "service":
+    units_of = units_of or _units_of
+    run = run or subprocess.run
+    for ref in units_of(client):
+        if ref.kind not in ("service", "timer"):
             continue
         try:
-            r = subprocess.run(["systemctl", "is-active", "--quiet", ref.unit],
-                               capture_output=True, timeout=10)
+            r = run(["systemctl", "is-active", "--quiet", ref.unit],
+                    capture_output=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
             continue
         if r.returncode == 0:
@@ -286,12 +291,13 @@ def _view_paths(views) -> list:
     return out
 
 
-def _measure(regs, path_bytes, du: dict, used: set, now: float, c, store) -> int:
+def _measure(regs, path_bytes, du: dict, used: set, now: float, c, store,
+             fresh: bool = False) -> int:
     paths = sorted(p for r in regs if r.client == c and r.store == store for p in r.paths)
     key = f"{c}|{store}"
     used.add(key)
     hit = du.get(key)
-    if (isinstance(hit, dict) and hit.get("paths") == paths
+    if (not fresh and isinstance(hit, dict) and hit.get("paths") == paths
             and _num(hit.get("at")) is not None and now - hit["at"] < DU_CACHE_S
             and isinstance(hit.get("bytes"), int)):
         return hit["bytes"]
@@ -310,7 +316,8 @@ def _record_answer(trims: dict, touched: dict, c: str, ans: ClientAnswer, now: f
     touched[c] = now
 
 
-def _pass(now: datetime, r: Runners, config_path, state: dict) -> tuple:
+def _pass(now: datetime, r: Runners, config_path, state: dict,
+          carry: Optional[dict] = None) -> tuple:
     """One pass.  Returns (state, status, active alarms)."""
     t = now.timestamp()
     journal = r.journal
@@ -325,10 +332,14 @@ def _pass(now: datetime, r: Runners, config_path, state: dict) -> tuple:
     _restore_levels(restored, views, r)
 
     stopped = state.get("stopped") if isinstance(state.get("stopped"), dict) else {}
+    if carry is not None:
+        carry["stopped"] = stopped      # a fault later in the pass keeps the stops
+    restarted = set()
     for c in sorted(stopped):
         if r.client_active(c):
             journal(f"<6>storage: {c} runs again; the ledger's stop no longer holds it")
             del stopped[c]
+            restarted.add(c)
 
     stores_list, faults = r.discover_stores(_view_paths(views))
     for f in faults:
@@ -393,6 +404,9 @@ def _pass(now: datetime, r: Runners, config_path, state: dict) -> tuple:
         stores[pool.name] = pool
 
     trims, touched = _load_trims(state.get("trims"), t)
+    for c in restarted:                 # an operator's start earns a fresh deadline
+        trims.pop(c, None)
+        touched.pop(c, None)
     hands_off = hands_off_active(cfg, now)
     decision = decide(stores=stores, allotments=allotments, holdings=holdings,
                       registrations=regs, levels=levels, trims=trims,
@@ -420,6 +434,16 @@ def _pass(now: datetime, r: Runners, config_path, state: dict) -> tuple:
         c = a.client
         if c in stopped:
             continue
+        rec = trims.get(c)
+        if c in managed and rec is not None and rec.ok:
+            continue                    # it answered this pass; decide judged older news
+        if c not in managed:
+            fresh = _measure(regs, r.path_bytes, du, set(), t, c, a.store, fresh=True)
+            target = decision.targets.get(a.store, {}).get(c)
+            if target is not None and fresh <= target:
+                journal(f"<6>storage: {c} on {a.store} measured within its target "
+                        f"({fresh} <= {target} bytes) just before the stop; not stopped")
+                continue
         ok, why = r.stop_client(c)
         if ok:
             reason = (f"it failed to answer a trim request" if c in managed
@@ -646,6 +670,7 @@ def _locked(now, r, config_path, state_path, status_path, uid) -> int:
 def _locked_dirs(now, t, stamp, r, config_path, state_path, status_path,
                  uid, sdfd, tdfd, problems) -> int:
     state: dict = {}
+    carry: dict = {}
     book = AlarmBook()
     try:
         if sdfd is not None:
@@ -653,7 +678,8 @@ def _locked_dirs(now, t, stamp, r, config_path, state_path, status_path,
             if problem:
                 problems.append(f"state file: {problem}")
         book = AlarmBook.from_dict(state.get("alarms", {}) if isinstance(state.get("alarms"), dict) else {})
-        new_state, status, active = _pass(now, r, config_path, json.loads(json.dumps(state)))
+        new_state, status, active = _pass(now, r, config_path,
+                                          json.loads(json.dumps(state)), carry)
         if problems:
             active["state-untrusted"] = (
                 Severity.ERROR,
@@ -672,18 +698,32 @@ def _locked_dirs(now, t, stamp, r, config_path, state_path, status_path,
         _write_at_dir(tdfd, status_path, status, 0o644, uid)
         return 0
     except Exception as exc:
-        _fault(now, stamp, exc, r, state, book, state_path, status_path, uid, sdfd, tdfd)
+        _fault(now, stamp, exc, r, state, book, state_path, status_path, uid, sdfd, tdfd,
+               carry)
         return 1
 
 
-def _fault(now, stamp, exc, r, state, book, state_path, status_path, uid, sdfd, tdfd) -> None:
-    """Raise `ledger-fault` and hold every other alarm as it stood."""
+def _fault(now, stamp, exc, r, state, book, state_path, status_path, uid, sdfd, tdfd,
+           carry=None) -> None:
+    """Raise `ledger-fault` and hold every other alarm as it stood.  Stops
+    the pass made before the fault stay recorded and alarmed."""
     t = now.timestamp()
     msg = f"storage ledger fault: {type(exc).__name__}: {exc}"
     held = {}
     for k, v in book.to_dict().get("active", {}).items():
         held[k] = (Severity(v["severity"]), v.get("message", ""))
     held["ledger-fault"] = (Severity.CRITICAL, msg)
+    stopped = (carry or {}).get("stopped")
+    if isinstance(stopped, dict):
+        for k in [k for k in held if k.startswith("stopped:")]:
+            if k[len("stopped:"):] not in stopped:
+                del held[k]
+        for c, s in sorted(stopped.items()):
+            held[f"stopped:{c}"] = (
+                Severity.CRITICAL,
+                f"storage ledger stopped {c} at {_iso(s.get('at', t))} on store "
+                f"{s.get('store')}: {s.get('reason')}.  It stays down until an "
+                f"operator starts it (smd start {c})")
     try:
         for e in book.update(held, t):
             r.journal(journal_line(e))
@@ -697,6 +737,8 @@ def _fault(now, stamp, exc, r, state, book, state_path, status_path, uid, sdfd, 
     if sdfd is not None:
         try:
             kept = dict(state)
+            if isinstance(stopped, dict):
+                kept["stopped"] = stopped
             kept["alarms"] = book.to_dict()
             kept["since"] = since
             _write_at_dir(sdfd, state_path, kept, 0o600, uid)

@@ -462,3 +462,112 @@ def test_a_state_dir_owned_by_another_uid_is_refused(tmp_path):
 
 
 from pathlib import Path  # noqa: E402
+
+
+# ---- fix round 1 (review of 19915e6..7c0ce45) --------------------------------
+
+def test_operator_restart_at_final_and_client_answers_ok(tmp_path):
+    """The reviewer's probe: a restarted client that now answers ok, with the
+    store still at FINAL, is not stopped again."""
+    r = _fake_runners(used_pct=96, trim_ok=False); p = _paths(tmp_path)
+    run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["stop_client"] == 1
+    r.state["active"] = True
+    r.call_trim = lambda b, n: ClientAnswer(True, 0, {"raw": 0})
+    r.call_final = lambda b, n, pol: ClientAnswer(True, 0, {"raw": 0})
+    run_tick(T0 + timedelta(seconds=721), r, **p)
+    assert r.calls["stop_client"] == 1, "re-stopped a client that just answered ok"
+
+
+def test_a_restarted_client_gets_a_fresh_deadline(tmp_path):
+    """Its old failed streak does not survive the operator's start: still
+    failing, it is not re-stopped until a new 600 s pass."""
+    r = _fake_runners(used_pct=96, trim_ok=False); p = _paths(tmp_path)
+    run_tick(T0, r, **p); run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["stop_client"] == 1
+    r.state["active"] = True
+    run_tick(T0 + timedelta(seconds=721), r, **p)
+    assert r.calls["stop_client"] == 1
+    assert _trims(p)["a"]["requested_at"] == (T0 + timedelta(seconds=721)).timestamp()
+    r.state["active"] = False
+    run_tick(T0 + timedelta(seconds=721 + 601), r, **p)
+    assert r.calls["stop_client"] == 2
+
+
+def test_a_fault_after_a_stop_keeps_the_stop(tmp_path):
+    r = _fake_runners(used_pct=96, trim_ok=False); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    boom = {"armed": False}
+    real_stop, real_journal = r.stop_client, r.journal
+
+    def stop(c):
+        boom["armed"] = True
+        return real_stop(c)
+
+    def journal(line):
+        if boom["armed"]:
+            boom["armed"] = False
+            raise RuntimeError("journal down")
+        real_journal(line)
+    r.stop_client, r.journal = stop, journal
+    assert run_tick(T0 + timedelta(seconds=601), r, **p) == 1
+    st = _status(p)
+    assert st["worst_stage"] == "FAULT"
+    assert "stopped:a" in {a["key"] for a in st["alarms"]}
+    assert "a" in json.loads(p["state_path"].read_text())["stopped"]
+    r.journal = real_journal
+    run_tick(T0 + timedelta(seconds=721), r, **p)    # still down: held, not re-stopped
+    assert r.calls["stop_client"] == 1
+    assert _status(p)["clients"][0]["stopped_by_storage"]
+
+
+def test_unmanaged_stop_waits_on_a_fresh_measurement(tmp_path):
+    """A cached du may be 30 min old; a client that already freed space is
+    re-measured before the stop and spared."""
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    r.state["held"] = 1 * GiB                           # freed, but the cache says 40 GiB
+    run_tick(T0 + timedelta(seconds=1000), r, **p)
+    assert r.calls["stop_client"] == 0
+    assert r.calls["path_bytes"] == 2
+
+
+def test_unmanaged_stop_proceeds_when_still_over(tmp_path):
+    views = {"u": _view("u", "/data/u", managed=False)}
+    r = _fake_runners(used_pct=96, views=views); p = _paths(tmp_path)
+    run_tick(T0, r, **p)
+    run_tick(T0 + timedelta(seconds=1000), r, **p)
+    assert r.calls["stop_client"] == 1
+
+
+def test_client_active_counts_a_timer(monkeypatch):
+    """A timer-driven oneshot reads inactive between runs; its active timer
+    means an operator started it again."""
+    from types import SimpleNamespace
+    from sigmond.storage import tick
+    units = [SimpleNamespace(unit="x.service", kind="service", orphaned=False),
+             SimpleNamespace(unit="x.timer", kind="timer", orphaned=False),
+             SimpleNamespace(unit="x.target", kind="target", orphaned=False)]
+    asked = []
+
+    def run(argv, **kw):
+        asked.append(argv[-1])
+        return SimpleNamespace(returncode=0 if argv[-1] == "x.timer" else 3)
+    assert tick._client_active("x", units_of=lambda c: units, run=run) is True
+    assert "x.target" not in asked
+
+    def none(argv, **kw):
+        return SimpleNamespace(returncode=3)
+    assert tick._client_active("x", units_of=lambda c: units, run=none) is False
+
+
+def test_an_ok_answer_this_pass_spares_the_stop(tmp_path):
+    """decide judged the stop from the records at pass start; a client that
+    answers ok in this very pass is not stopped on that older news."""
+    r = _fake_runners(used_pct=96, trim_ok=False); p = _paths(tmp_path)
+    run_tick(T0, r, **p)                                    # fails; streak opens
+    r.call_trim = lambda b, n: ClientAnswer(True, 30 * GiB, {"raw": 30 * GiB})
+    r.call_final = lambda b, n, pol: ClientAnswer(True, 20 * GiB, {"raw": 20 * GiB})
+    run_tick(T0 + timedelta(seconds=601), r, **p)
+    assert r.calls["stop_client"] == 0
