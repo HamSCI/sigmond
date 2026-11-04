@@ -4,8 +4,9 @@ Description=Storage capacity ledger -- one pass: measure, decide, act, alarm
 Documentation=https://github.com/HamSCI/sigmond
 # docs/superpowers/specs/2026-11-04-storage-capacity-design.md.  The pass
 # asks clients to trim, clears sigmond's own clutter, and at FINAL may stop
-# a client that fails to answer (never on a station marked hands-off:
-# `smd storage directive hands-off`).
+# a client that fails to answer, only once an operator switches the lever on
+# (`smd storage directive stop-lever on`) and never on a station marked
+# hands-off (`smd storage directive hands-off`).
 
 [Service]
 Type=oneshot
@@ -14,6 +15,9 @@ Group=root
 # Below the clients in CPU, so a pass never competes with radiod or a
 # decoder; its trim calls run as the clients' own CLIs.
 Nice=10
+# Its du and recent-writes walks read whole data trees; the idle I/O class
+# lets them take the disk only when nothing else wants it.
+IOSchedulingClass=idle
 ExecStart=/usr/local/bin/smd storage tick
 # 75 (EX_TEMPFAIL): the previous pass still holds the lock.  Not a failure.
 SuccessExitStatus=75

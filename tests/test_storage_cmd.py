@@ -159,6 +159,7 @@ def test_storage_service_runs_the_tick_as_root():
     assert s["ExecStart"] == "/usr/local/bin/smd storage tick"
     assert "75" in s["SuccessExitStatus"].split()       # a held lock is not a failure
     assert s["SyslogIdentifier"] == "sigmond-storage"
+    assert s["Nice"] == "10" and s["IOSchedulingClass"] == "idle"   # its du walks yield
 
 
 def test_storage_timer_fires_every_two_minutes():
