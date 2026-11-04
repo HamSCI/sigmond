@@ -43,9 +43,17 @@ when ALL of these hold:
     snapshot, carries no label and stays out by name besides);
   * the expiry has passed, or the pool sits at or above
     ``SNAP_EARLY_REAP_PCT``.
-A tag that fails to parse makes the snapshot an operator's: kept, and
-named in an alarm at once.  An operator's snapshot is never deleted; the
-host names it in an alarm once it reaches ``SNAP_LIFE_H``.
+The tag must start a word.  A tag that fails to parse makes the snapshot
+an operator's: kept, and named in an alarm at once.  An operator's
+snapshot is never deleted; the host names it in an alarm once it outlives
+the lifetime a sigmond snapshot would get on its pool now, or at any age
+once the pool reaches watch.
+
+Every delete on every pool runs before any guest write, with no timeout:
+a killed ``qm delsnapshot`` leaves the VM locked.  The guest writes keep
+their own deadline (``GUEST_WRITE_BUDGET_S``); a failed write gets one
+agent parser reset and one retry before the guest counts as unreachable.
+The state file gets written however the run ends.
 
 Guest agent: no byte above 0x7F in anything sent through it.  The agent
 goes deaf on a short-written request (sigmond CLAUDE.md).  The report goes
@@ -70,9 +78,11 @@ import argparse
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
+import time
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -95,10 +105,22 @@ NEVER_REAP = frozenset({"pristine"})
 GUEST_REPORT_PATH = "/run/sigmond/host-pool.json"
 LOCAL_STATE = "/run/sigmond/pm-storage.json"
 REMIND_S = 6 * 3600              # an open episode's reminder interval
+#: The guest-write phase's own deadline.  A deaf agent costs up to two 30 s
+#: file-writes and a 4 s reset; past this budget the remaining guests are
+#: skipped with an alarm rather than overrunning the timer's period.
+GUEST_WRITE_BUDGET_S = 180
+
+# Guest-agent parser reset, duplicated from pm-heartbeat.py (and pm-align.py)
+# on purpose: a PM runs each script alone.  tests/test_qga_reset.py holds the
+# copies to the same bytes and the same behaviour.
+QGA_DIR = "/var/run/qemu-server"
+QGA_RESET = b"\xff" + b'{"execute":"guest-sync-delimited","arguments":{"id":4242}}\n'
+QGA_NOTE = "/run/sigmond/qga-reset"
 DISK_KEYS = ("scsi0", "virtio0", "sata0")
 
 _TS = "%Y-%m-%dT%H:%M:%SZ"
-_TAG_RE = re.compile(re.escape(SNAP_TAG) + r"(\S*)")
+# The tag must start a word: "foosigmond-snapshot expires=..." is no label.
+_TAG_RE = re.compile(r"(?<!\S)" + re.escape(SNAP_TAG) + r"(\S*)")
 _STAGE_PRIO = {"watch": 4, "tighten": 4, "demand": 3, "final": 2}
 
 RunResult = namedtuple("RunResult", "rc stdout stderr")
@@ -192,9 +214,9 @@ def read_pool(lvs_json: str, vg: str, pool: str) -> dict:
 
 def _parse_tag(description: str):
     """(sigmond, expires_iso, label_fault) for one snapshot description."""
-    if SNAP_TAG not in description:
-        return False, None, None
     found = _TAG_RE.findall(description)
+    if not found:
+        return False, None, None
     if len(found) != 1:
         return False, None, f"{len(found)} sigmond labels"
     when = _parse_aware(found[0])
@@ -265,11 +287,17 @@ def _age_h(snap: dict, now: datetime) -> Optional[float]:
     return None if taken is None else (now - taken).total_seconds() / 3600
 
 
-def _alarm_items(pool: dict, snaps: list, now: datetime) -> list:
+def _alarm_items(pool: dict, snaps: list, now: datetime, churn: Optional[float] = None) -> list:
     """(key, signature, priority, text) per alarm; the signature changes
-    when the alarm's kind changes, which opens a new episode."""
+    when the alarm's kind changes, which opens a new episode.
+
+    An operator's snapshot alarms once its age passes the lifetime a
+    sigmond snapshot would get on this pool now (half the projected time to
+    full, cap 48 h), at any age once the pool sits at or above watch, and
+    at once when its age is unknown.  It is never deleted."""
     items = []
     fill = _fill(pool)
+    life = snapshot_life_h(pool["size_bytes"] * (100 - fill) / 100, churn)
     stage = _stage(fill)
     name = pool["name"]
     if stage:
@@ -293,16 +321,23 @@ def _alarm_items(pool: dict, snaps: list, now: datetime) -> list:
                               f"snapshot {s['name']} of VM {s['vmid']} ({age_txt}) pins space "
                               f"while pool {name} sits at {fill:.1f} %"))
             continue
-        if age is None or age >= SNAP_LIFE_H:
-            items.append((key, "old", 4,
-                          f"snapshot {s['name']} of VM {s['vmid']} is {age_txt} and carries no "
-                          f"sigmond label; an operator decides"))
+        if stage:
+            why = f"pool {name} sits at {fill:.1f} %"
+        elif age is None:
+            why = "its age cannot be read"
+        elif age >= life:
+            why = f"a sigmond snapshot would live {life:.1f} h on this pool"
+        else:
+            continue
+        items.append((key, "old", 4,
+                      f"snapshot {s['name']} of VM {s['vmid']} is {age_txt} and carries no "
+                      f"sigmond label ({why}); an operator decides"))
     return items
 
 
-def host_alarms(pool: dict, snaps: list, now: datetime) -> list:
+def host_alarms(pool: dict, snaps: list, now: datetime, churn: Optional[float] = None) -> list:
     """The pool's stage at or above watch, and the snapshots an operator should see."""
-    return [text for _, _, _, text in _alarm_items(pool, snaps, now)]
+    return [text for _, _, _, text in _alarm_items(pool, snaps, now, churn)]
 
 
 def guest_report(vmid, pool, vms_on_pool, snaps, alarms, now) -> str:
@@ -362,15 +397,48 @@ def _episodes(prior: dict, items: list, now: datetime, log) -> dict:
 # ---------------------------------------------------------------------------
 
 def _report(host) -> int:
+    """Measure, reap, report into each guest, alarm.  The state file gets
+    written however the run ends, cut short or not."""
     now = host.now()
     state = host.read_state() or {}
-    items, rc = [], 0
+    items, pools_state = [], {}
+    try:
+        return _report_body(host, now, state, items, pools_state)
+    finally:
+        alarms = _episodes(state.get("alarms"), items, now, host.log)
+        fills = [p["pool_pct"] for p in pools_state.values() if "pool_pct" in p]
+        host.write_state({"schema": 1, "generated_at": _iso(now),
+                          "pool_pct": max(fills) if fills else None,
+                          "pools": pools_state, "alarms": alarms})
+
+
+def _write_guest(host, vmid, content) -> bool:
+    """One file-write; on failure one parser reset and one retry."""
+    def attempt():
+        try:
+            return host.file_write(vmid, GUEST_REPORT_PATH, content).rc == 0
+        except Exception:                           # noqa: BLE001
+            return False
+    if attempt():
+        return True
+    try:
+        host.reset_agent(vmid)
+    except Exception:                               # noqa: BLE001
+        pass
+    return attempt()
+
+
+def _report_body(host, now, state, items, pools_state) -> int:
+    rc = 0
     try:
         smap = parse_storage_cfg(host.storage_cfg())
         lvs = host.lvs()
         vms = sorted(json.loads(host.list_vms()), key=lambda v: int(v["vmid"]))
     except Exception as exc:                        # noqa: BLE001
-        host.log(f"<3>pm-storage: cannot read the host's storage: {exc}")
+        items.append(("host-storage", "x", 3, f"pm-storage: cannot read the host's storage: {exc}"))
+        prior = state.get("pools") if isinstance(state.get("pools"), dict) else {}
+        for name in prior:                          # keep the churn history; no fill claimed
+            pools_state[name] = {"history": _history(state, name, now)}
         return 1
 
     by_pool, running = {}, set()
@@ -386,7 +454,8 @@ def _report(host) -> int:
         if where:
             by_pool.setdefault(where, []).append(vmid)
 
-    pools_state, fills = {}, []
+    # Measure every pool and list its snapshots.
+    measured = []      # [name, pool, members, snaps, churn, local_items]
     for (vg, lv), members in sorted(by_pool.items()):
         name = f"{vg}/{lv}"
         try:
@@ -396,19 +465,28 @@ def _report(host) -> int:
             rc = 1
             continue
         fill = _fill(pool)
-        fills.append(fill)
         history = _history(state, name, now)
         history.append([now.timestamp(), pool["size_bytes"] * pool["data_pct"] / 100])
         churn = churn_bytes_per_h(history)
-
-        snaps = []
+        pools_state[name] = {**pool, "pool_pct": fill, "vms": members, "history": history,
+                             "churn_bytes_per_h": churn}
+        snaps, local = [], []
         for vmid in members:
             try:
                 snaps += parse_snapshots(host.list_snapshots(vmid), vmid)
             except Exception:                       # noqa: BLE001
-                items.append((f"snaplist:{vmid}", "x", 4, f"snapshots of VM {vmid} unreadable"))
+                local.append((f"snaplist:{vmid}", "x", 4, f"snapshots of VM {vmid} unreadable"))
+        measured.append([name, pool, members, snaps, churn, local])
 
+    # Phase 1: every reap on every pool, before any guest write.  A delete
+    # is never interrupted; a stop request ends the phase between deletes.
+    stopped = False
+    for name, pool, members, snaps, churn, local in measured:
+        fill = _fill(pool)
         for s in expired(snaps, now, fill):
+            if host.stop_requested():
+                stopped = True
+                break
             why = (f"pool at {fill:.1f} %" if fill >= SNAP_EARLY_REAP_PCT
                    else f"expired {s['expires']}")
             try:
@@ -421,30 +499,38 @@ def _report(host) -> int:
                 host.log(f"<5>reaped snapshot {s['name']} of VM {s['vmid']} ({why})")
                 snaps.remove(s)
             else:
-                items.append((f"reap:{s['vmid']}:{s['name']}", "x", 3,
+                local.append((f"reap:{s['vmid']}:{s['name']}", "x", 3,
                               f"could not delete snapshot {s['name']} of VM {s['vmid']}: {detail}"))
+        if stopped:
+            break
 
-        pool_items = _alarm_items(pool, snaps, now)
-        items += pool_items
-        texts = [t for _, _, _, t in pool_items]
+    for m in measured:
+        name, pool, members, snaps, churn, local = m
+        m[5] = local + _alarm_items(pool, snaps, now, churn)
+        items.extend(m[5])
+
+    if stopped or host.stop_requested():
+        host.log("<4>pm-storage: stop requested; reaping ended between deletes, "
+                 "guest reports skipped")
+        return rc
+
+    # Phase 2: the guest reports, under their own deadline.
+    start = host.monotonic()
+    for name, pool, members, snaps, churn, local in measured:
+        texts = [t for _, _, _, t in local]
         for vmid in members:
             if vmid not in running:
                 continue
-            content = guest_report(vmid, pool, members, [s for s in snaps], texts, now)
-            try:
-                ok = host.file_write(vmid, GUEST_REPORT_PATH, content).rc == 0
-            except Exception:                       # noqa: BLE001
-                ok = False
-            if not ok:
-                items.append((f"guest:{vmid}", "x", 3, f"guest {vmid} unreachable"))
-
-        pools_state[name] = {**pool, "pool_pct": fill, "vms": members, "history": history,
-                             "churn_bytes_per_h": churn}
-
-    alarms = _episodes(state.get("alarms"), items, now, host.log)
-    host.write_state({"schema": 1, "generated_at": _iso(now),
-                      "pool_pct": max(fills) if fills else None,
-                      "pools": pools_state, "alarms": alarms})
+            if host.stop_requested():
+                return rc
+            if host.monotonic() - start >= GUEST_WRITE_BUDGET_S:
+                items.append((f"guest:{vmid}", "deadline", 4,
+                              f"guest {vmid} report skipped: the guest-write phase passed its "
+                              f"{GUEST_WRITE_BUDGET_S} s deadline"))
+                continue
+            content = guest_report(vmid, pool, members, snaps, texts, now)
+            if not _write_guest(host, vmid, content):
+                items.append((f"guest:{vmid}", "unreachable", 3, f"guest {vmid} unreachable"))
     return rc
 
 
@@ -520,6 +606,50 @@ def _out(argv, timeout=60) -> str:
     return r.stdout
 
 
+def _qga_reset(vmid) -> bool:
+    """One parser reset for the VM's guest agent; True when it answered.
+    Copied from pm-heartbeat.py; tests/test_qga_reset.py guards the copy."""
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(4)
+            s.connect(f"{QGA_DIR}/{vmid}.qga")
+            s.sendall(QGA_RESET)
+            end, got = time.monotonic() + 4, b""
+            while b"4242" not in got:
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                s.settimeout(left)
+                data = s.recv(4096)
+                if not data:
+                    return False
+                got += data
+            return True
+    except OSError:
+        return False
+
+
+def _note_reset(who: str) -> None:
+    """Leave the one line a reset that worked leaves (pm-heartbeat reports
+    it).  Never raises."""
+    try:
+        os.makedirs(os.path.dirname(QGA_NOTE), exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime(_TS)
+        with open(QGA_NOTE, "w", encoding="ascii") as fh:
+            fh.write(f"{stamp} {who}\n")
+    except OSError:
+        pass
+
+
+_STOP = {"requested": False}
+
+
+def _on_sigterm(signum, frame):
+    """systemd's stop (KillMode=mixed reaches only this process): finish the
+    delete under way, then end between steps.  Never kill a delsnapshot."""
+    _STOP["requested"] = True
+
+
 def _file_write_real(node, vmid, path, content) -> RunResult:
     """Write one file in the guest through the agent.  Pure ASCII or nothing."""
     argv = ["pvesh", "create", f"/nodes/{node}/qemu/{int(vmid)}/agent/file-write",
@@ -557,12 +687,27 @@ class RealHost:
         return _out(["pvesh", "get", f"/nodes/{self._node}/qemu/{int(vmid)}/snapshot",
                      "--output-format", "json"])
 
+    # No timeout on either: a killed snapshot create or delete leaves the VM
+    # locked ("snapshot-delete"), which blocks start, backup and snapshots
+    # until someone runs `qm unlock`.
     def delsnapshot(self, vmid, name):
-        return _run(["qm", "delsnapshot", str(int(vmid)), name], timeout=600)
+        return _run(["qm", "delsnapshot", str(int(vmid)), name], timeout=None)
 
     def snapshot(self, vmid, name, description):
         return _run(["qm", "snapshot", str(int(vmid)), name, "--description", description],
-                    timeout=600)
+                    timeout=None)
+
+    def monotonic(self):
+        return time.monotonic()
+
+    def reset_agent(self, vmid):
+        ok = _qga_reset(vmid)
+        if ok:
+            _note_reset("pm-storage")
+        return ok
+
+    def stop_requested(self):
+        return _STOP["requested"]
 
     def file_write(self, vmid, path, content):
         return _file_write_real(self._node, vmid, path, content)
@@ -602,7 +747,9 @@ def main(argv=None, host=None) -> int:
     sp.add_argument("name")
     sp.add_argument("--hours", type=float, default=None)
     args = ap.parse_args(argv)
-    host = host or RealHost()
+    if host is None:
+        host = RealHost()
+        signal.signal(signal.SIGTERM, _on_sigterm)
     if args.cmd == "report":
         return _report(host)
     return _snapshot(host, args.vmid, args.name, args.hours)

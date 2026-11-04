@@ -43,6 +43,7 @@ def load(name, filename):
 
 hb = load("pm_heartbeat_qga", "pm-heartbeat.py")
 pa = load("pm_align_qga", "pm-align.py")
+ps = load("pm_storage_qga", "pm-storage.py")
 
 #: The bytes every reset sends: the byte that resets the agent's parser, then
 #: one sync request that the agent must answer.
@@ -63,6 +64,7 @@ RUNNING = rr(0, "status: running")
 def test_the_heartbeat_and_pm_align_hold_the_reset_bytes():
     assert hb.QGA_RESET == RESET
     assert pa.QGA_RESET == RESET
+    assert ps.QGA_RESET == RESET
     assert hb.QGA_NOTE == pa.QGA_NOTE == "/run/sigmond/qga-reset"
 
 
@@ -136,7 +138,7 @@ class Agent:
         c.close()
 
 
-@pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])
+@pytest.mark.parametrize("mod", [hb, pa, ps], ids=["pm-heartbeat", "pm-align", "pm-storage"])
 def test_a_reset_that_the_agent_answers_reads_true(tmp_path, monkeypatch, mod):
     monkeypatch.setattr(mod, "QGA_DIR", str(tmp_path))
     agent = Agent(tmp_path)
@@ -145,7 +147,7 @@ def test_a_reset_that_the_agent_answers_reads_true(tmp_path, monkeypatch, mod):
     assert agent.got == RESET
 
 
-@pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])
+@pytest.mark.parametrize("mod", [hb, pa, ps], ids=["pm-heartbeat", "pm-align", "pm-storage"])
 @pytest.mark.parametrize("mode", ["wrong", "hangup"])
 def test_a_reset_without_its_own_answer_reads_false(tmp_path, monkeypatch, mod, mode):
     monkeypatch.setattr(mod, "QGA_DIR", str(tmp_path))
@@ -166,14 +168,14 @@ def test_a_reset_that_gets_no_word_gives_up_within_seconds(tmp_path, monkeypatch
     assert 3.0 < took < 8.0, took
 
 
-@pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])
+@pytest.mark.parametrize("mod", [hb, pa, ps], ids=["pm-heartbeat", "pm-align", "pm-storage"])
 def test_an_answer_that_comes_in_pieces_reads_true(tmp_path, monkeypatch, mod):
     monkeypatch.setattr(mod, "QGA_DIR", str(tmp_path))
     Agent(tmp_path, "pieces")
     assert mod._qga_reset(100) is True
 
 
-@pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])
+@pytest.mark.parametrize("mod", [hb, pa, ps], ids=["pm-heartbeat", "pm-align", "pm-storage"])
 def test_an_error_object_alone_fails_within_the_one_deadline(tmp_path, monkeypatch, mod):
     monkeypatch.setattr(mod, "QGA_DIR", str(tmp_path))
     agent = Agent(tmp_path, "error_only")
@@ -220,7 +222,7 @@ def test_the_bash_reset_fails_within_the_deadline_on_an_error_alone(tmp_path, sr
     assert took < 6.5, took
 
 
-@pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])
+@pytest.mark.parametrize("mod", [hb, pa, ps], ids=["pm-heartbeat", "pm-align", "pm-storage"])
 def test_a_reset_with_no_socket_reads_false(tmp_path, monkeypatch, mod):
     monkeypatch.setattr(mod, "QGA_DIR", str(tmp_path / "absent"))
     assert mod._qga_reset(100) is False
@@ -228,7 +230,7 @@ def test_a_reset_with_no_socket_reads_false(tmp_path, monkeypatch, mod):
 
 # -- the record one reset leaves ----------------------------------------------------------
 
-@pytest.mark.parametrize("mod,who", [(hb, "heartbeat"), (pa, "pm-align")])
+@pytest.mark.parametrize("mod,who", [(hb, "heartbeat"), (pa, "pm-align"), (ps, "pm-storage")])
 def test_a_reset_that_worked_leaves_one_line(tmp_path, monkeypatch, mod, who):
     note = tmp_path / "run" / "qga-reset"
     monkeypatch.setattr(mod, "QGA_NOTE", str(note))
@@ -237,7 +239,7 @@ def test_a_reset_that_worked_leaves_one_line(tmp_path, monkeypatch, mod, who):
     assert re.fullmatch(rf"{STAMP} {re.escape(who)}\n", note.read_text())
 
 
-@pytest.mark.parametrize("mod", [hb, pa], ids=["pm-heartbeat", "pm-align"])
+@pytest.mark.parametrize("mod", [hb, pa, ps], ids=["pm-heartbeat", "pm-align", "pm-storage"])
 def test_a_record_that_cannot_be_written_raises_nothing(tmp_path, monkeypatch, mod):
     blocker = tmp_path / "file"
     blocker.write_text("not a directory")

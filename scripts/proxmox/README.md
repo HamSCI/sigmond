@@ -94,9 +94,13 @@ It runs as root, stdlib only, from `pm-storage.timer` every five minutes;
 - measures each VM's lvmthin pool (`/etc/pve/storage.cfg`, `qm config`,
   `lvs`) and keeps six hours of its use in `/run/sigmond/pm-storage.json`;
 - deletes the snapshots sigmond's tools took, once past expiry, and all of
-  them at once when the pool reaches 90 %;
+  them at once when the pool reaches 90 %. Every delete runs before any
+  guest write, and no timeout cuts one short: a killed `qm delsnapshot`
+  leaves the VM locked until `qm unlock`;
 - writes each running guest `/run/sigmond/host-pool.json` through the guest
-  agent (ASCII only), which the guest's storage ledger reads;
+  agent (ASCII only), which the guest's storage ledger reads. A failed write
+  gets one agent parser reset and one retry. The writes share a 180 s
+  deadline, and a guest past it gets skipped with an alarm;
 - logs alarms to the journal (`journalctl -t pm-storage`), one line when an
   episode starts, a reminder every 6 h, one when it clears.
 
@@ -104,9 +108,11 @@ The reaper deletes a snapshot only when its description carries
 `sigmond-snapshot expires=<ISO-8601 time with offset>`. It never deletes
 `pristine`: the first-boot snapshot carries no label, and the reaper skips
 it by name besides. It never deletes an operator's snapshot either. It
-names one in an alarm once it reaches 48 h, and names `pristine` only while
-the pool sits at 80 % or more. A label it cannot parse makes the snapshot
-an operator's: kept, and named in an alarm at once.
+names one in an alarm once the snapshot outlives the lifetime a sigmond
+snapshot would get on that pool now (see below), or at any age once the
+pool reaches 80 %. It names `pristine` only while the pool sits at 80 % or
+more. A label it cannot parse makes the snapshot an operator's: kept, and
+named in an alarm at once.
 
 To take a snapshot the reaper will clean up:
 

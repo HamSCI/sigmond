@@ -10,10 +10,17 @@ Group=root
 # root: lvs, `qm delsnapshot` and `pvesh ... agent/file-write` are host-admin
 # operations on Proxmox; there is no unprivileged path to them.
 ExecStart=/usr/local/sbin/pm-storage.py report
-# A deaf guest agent costs one 30 s file-write timeout per VM; a snapshot
-# delete on a thin pool takes seconds.  Bound the whole run below the
-# timer's 5-minute period.
-TimeoutStartSec=240
+# Never kill a snapshot delete: a killed `qm delsnapshot` leaves the VM
+# locked (snapshot-delete) until someone runs `qm unlock`.  So the deletes
+# run with no timeout of their own, and these limits only catch a run that
+# truly hangs.  The guest writes, which come after every delete, keep
+# their own 180 s deadline inside the script.  A timer tick that finds
+# the last run still going simply waits for it.
+TimeoutStartSec=1800
+TimeoutStopSec=1800
+# On stop, SIGTERM reaches the script alone, never qm; the script finishes
+# the delete under way, writes its state and exits.
+KillMode=mixed
 
 # Lines carry <N> priority prefixes; one per alarm episode.
 StandardOutput=journal
