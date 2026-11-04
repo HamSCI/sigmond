@@ -1,0 +1,25 @@
+# /etc/systemd/system/sigmond-storage.service
+[Unit]
+Description=Storage capacity ledger -- one pass: measure, decide, act, alarm
+Documentation=https://github.com/HamSCI/sigmond
+# docs/superpowers/specs/2026-11-04-storage-capacity-design.md.  The pass
+# asks clients to trim, clears sigmond's own clutter, and at FINAL may stop
+# a client that fails to answer (never on a station marked hands-off:
+# `smd storage directive hands-off`).
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+# Below the clients in CPU, so a pass never competes with radiod or a
+# decoder; its trim calls run as the clients' own CLIs.
+Nice=10
+ExecStart=/usr/local/bin/smd storage tick
+# 75 (EX_TEMPFAIL): the previous pass still holds the lock.  Not a failure.
+SuccessExitStatus=75
+# A pass may wait on several clients' trim calls (120 s each at most).
+TimeoutStartSec=20min
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-storage

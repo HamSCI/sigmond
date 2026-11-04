@@ -136,3 +136,44 @@ def test_status_does_not_follow_a_symlink(tmp_path, capsys):
     (tmp_path / "status.json").symlink_to(real)
     assert cmd_storage(_args(tmp_path, storage_command="status", json=True)) == 1
     assert capsys.readouterr().out == ""
+
+
+# ---- the timer, its service, the tmpfiles line, install.sh -------------------
+
+import configparser
+import re
+
+
+def _unit(name):
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    cp.optionxform = str
+    cp.read_string((REPO / "systemd" / name).read_text())
+    return cp
+
+
+def test_storage_service_runs_the_tick_as_root():
+    s = _unit("sigmond-storage.service")["Service"]
+    assert s["Type"] == "oneshot" and s["User"] == "root"
+    assert s["ExecStart"] == "/usr/local/bin/smd storage tick"
+    assert "75" in s["SuccessExitStatus"].split()       # a held lock is not a failure
+    assert s["SyslogIdentifier"] == "sigmond-storage"
+
+
+def test_storage_timer_fires_every_two_minutes():
+    cp = _unit("sigmond-storage.timer")
+    assert cp["Timer"]["OnCalendar"] == "*:0/2"
+    assert cp["Timer"]["RandomizedDelaySec"] == "20"
+    assert cp["Install"]["WantedBy"] == "timers.target"
+
+
+def test_tmpfiles_creates_run_sigmond():
+    lines = [l.split() for l in (REPO / "systemd" / "sigmond-storage.conf").read_text().splitlines()
+             if l.strip() and not l.lstrip().startswith("#")]
+    assert ["d", "/run/sigmond", "0755", "root", "root", "-"] in lines
+
+
+def test_install_sh_ships_and_enables_the_timer():
+    text = (REPO / "install.sh").read_text()
+    assert '"$REPO_DIR/systemd/sigmond-storage.conf" /etc/tmpfiles.d/' in text
+    assert "systemd-tmpfiles --create /etc/tmpfiles.d/sigmond-storage.conf" in text
+    assert re.search(r"systemctl enable --now [^\n]*\bsigmond-storage\.timer", text)

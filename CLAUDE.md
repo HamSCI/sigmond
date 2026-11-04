@@ -319,6 +319,10 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
     ka9q-watch screen. Operator-triggered; no scheduler installed —
     rerun manually before deploying a new ka9q-radio build.
 
+14. **Storage capacity ledger** (`lib/sigmond/storage/`, `smd storage`,
+    `sigmond-storage.timer`) — design and rationale in
+    `docs/superpowers/specs/2026-11-04-storage-capacity-design.md`.
+
 ## Proxied uploads (`[station] wsprnet_proxy`)
 
 A station can hand an upstream to the WsprDaemon servers instead of posting to
