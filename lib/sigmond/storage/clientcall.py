@@ -109,4 +109,6 @@ def stop_client(component: str, resolve=_default_resolve,
             return False, (f"systemctl stop {ref.unit} failed (exit {proc.returncode})"
                            + (f"; already stopped: {', '.join(stopped)}" if stopped else ""))
         stopped.append(ref.unit)
-    return True, ("stopped " + ", ".join(stopped) if stopped else "no units to stop")
+    if not stopped:
+        return False, "no units to stop"
+    return True, "stopped " + ", ".join(stopped)

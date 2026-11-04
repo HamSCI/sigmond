@@ -96,5 +96,5 @@ def test_stop_unknown_component_is_a_failed_answer():
     assert not ok and "nope" in why
 
 
-def test_stop_with_no_units_succeeds_and_says_so():
-    assert stop_client("a", resolve=lambda c: [], run=_run()) == (True, "no units to stop")
+def test_stop_with_no_units_is_not_a_success():
+    assert stop_client("a", resolve=lambda c: [], run=_run()) == (False, "no units to stop")
