@@ -95,3 +95,27 @@ def test_rounding_remainder_goes_to_first_sorted_client():
     a = allot_days([Demand(n, 0, 1.0) for n in ("c", "a", "b")], 10)
     assert a.per_client == {"a": 4, "b": 3, "c": 3}
     assert sum(a.per_client.values()) == 10
+
+
+def test_days_equal_the_largest_cap_when_every_client_caps_with_odd_weights():
+    a = allot_days([Demand("a", 0, 3 * GiB, weight=0.7, max_days=1.5),
+                    Demand("b", 0, 5 * GiB, weight=1.5, max_days=2.5),
+                    Demand("c", 0, 0.3 * GiB, weight=0.7, max_days=0.9)], 1000 * GiB)
+    assert a.days == pytest.approx(2.5)
+
+
+def test_days_never_exceed_the_largest_cap_and_allotments_fit_property():
+    import random
+    rnd = random.Random(20261104)
+    for _ in range(5000):
+        n = rnd.randint(1, 6)
+        dem = [Demand(f"c{i}", rnd.randint(0, 3) * GiB, rnd.uniform(1e3, 50 * GiB),
+                      weight=rnd.choice([0.3, 0.7, 1.0, 1.5, 2.0, 3.3]),
+                      max_days=rnd.choice([None, rnd.uniform(0.1, 30.0)]))
+               for i in range(n)]
+        room = rnd.randint(0, 2000) * GiB
+        a = allot_days(dem, room)
+        assert sum(a.per_client.values()) <= room or not a.floors_fit
+        caps = [d.max_days for d in dem]
+        if a.floors_fit and all(c is not None for c in caps):
+            assert a.days <= max(caps) * (1 + 1e-9)

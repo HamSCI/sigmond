@@ -150,19 +150,21 @@ def _merge(demands: Sequence[Demand]) -> dict:
 def _water_fill(slopes: Mapping[str, float], caps: Mapping[str, Optional[float]],
                 room: float) -> float:
     """The D at which sum(min(slope*D, slope*cap)) reaches `room`; when every
-    client caps out first, the largest cap."""
-    capped = sorted((caps[c], c) for c in slopes if caps[c] is not None)
+    client caps out first, the largest cap.
+
+    The open clients are a set, and their slope a fresh sum over it, so no
+    float residue survives the last client capping."""
+    open_clients = set(slopes)
     used = 0.0                          # bytes taken by clients already capped
-    open_slope = sum(slopes.values())
-    for cap, c in capped:
-        d = (room - used) / open_slope
+    for cap, c in sorted((caps[c], c) for c in slopes if caps[c] is not None):
+        d = (room - used) / sum(slopes[x] for x in open_clients)
         if d <= cap:
             return d
         used += slopes[c] * cap
-        open_slope -= slopes[c]
-        if open_slope <= 0:
+        open_clients.discard(c)
+        if not open_clients:
             return cap
-    return (room - used) / open_slope
+    return (room - used) / sum(slopes[x] for x in open_clients)
 
 
 def allot_days(demands: Sequence[Demand], allottable: int) -> Allotments:
