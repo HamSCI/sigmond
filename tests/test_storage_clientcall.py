@@ -98,3 +98,14 @@ def test_stop_unknown_component_is_a_failed_answer():
 
 def test_stop_with_no_units_is_not_a_success():
     assert stop_client("a", resolve=lambda c: [], run=_run()) == (False, "no units to stop")
+
+
+def test_holdings_carries_bytes_written_per_day_when_given():
+    a = call_holdings("x", run=_run(json.dumps({"bytes_by_class": {"raw": 3},
+                                                "bytes_written_per_day": 1000})))
+    assert a.ok and a.bytes_written_per_day == 1000
+    assert call_holdings("x", run=_run(json.dumps({"bytes_by_class": {"raw": 3}}))).bytes_written_per_day is None
+    # A malformed rate drops alone; the holdings still count.
+    bad = call_holdings("x", run=_run(json.dumps({"bytes_by_class": {"raw": 3},
+                                                  "bytes_written_per_day": "lots"})))
+    assert bad.ok and bad.bytes_written_per_day is None

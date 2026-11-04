@@ -26,6 +26,7 @@ class ClientAnswer:
     refused: bool = False
     reason: str = ""
     unsupported: bool = False
+    bytes_written_per_day: Optional[int] = None    # `holdings` only, optional
 
 
 def _fail(reason: str, unsupported: bool = False) -> ClientAnswer:
@@ -58,8 +59,11 @@ def _invoke(argv: list, timeout: int, run) -> ClientAnswer:
         held = sum(by_class.values())      # `holdings` carries no held_bytes
     if not isinstance(held, int) or isinstance(held, bool):
         return _fail("held_bytes malformed")
+    written = data.get("bytes_written_per_day")
+    if not isinstance(written, int) or isinstance(written, bool) or written < 0:
+        written = None                     # optional; a malformed rate drops alone
     return ClientAnswer(True, held, dict(by_class), bool(data.get("refused", False)),
-                        str(data.get("reason", "")), False)
+                        str(data.get("reason", "")), False, written)
 
 
 def call_holdings(binary: str, run=subprocess.run) -> ClientAnswer:

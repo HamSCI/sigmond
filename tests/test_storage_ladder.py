@@ -4,7 +4,7 @@ from sigmond.storage.ladder import (
     DEMAND_DEADLINE_S, UNMANAGED_FINAL_GRACE_S, Action, Severity, TrimRecord,
     decide, store_stage, tightened_targets,
 )
-from sigmond.storage.model import Allotments, Holding, Levels, Registration, Stage, Store
+from sigmond.storage.model import Allotments, Demand, Holding, Levels, Registration, Stage, Store
 
 GiB = 1 << 30
 
@@ -48,10 +48,16 @@ def test_stage_thresholds():
 
 def test_tightened_targets_reach_the_watch_level_and_respect_floors():
     s = Store("root", "/", "guest", 100 * GiB, 86 * GiB)          # R = 6 GiB
-    t = tightened_targets(s, Levels(), {"a": 40 * GiB, "b": 20 * GiB}, {"a": 30 * GiB, "b": 0}, {"a": 50 * GiB, "b": 50 * GiB})
-    # The brief wrote sum(60 GiB - v for v in targets), which counts 60 GiB twice
-    # (66 GiB, unreachable); the intent is total holdings minus total targets.
-    assert t["a"] >= 30 * GiB and (40 * GiB + 20 * GiB) - (t["a"] + t["b"]) == pytest.approx(6 * GiB, abs=2)
+    t = tightened_targets(s, Levels(), {"a": 40 * GiB, "b": 20 * GiB},
+                          [Demand("a", 30 * GiB, 10 * GiB), Demand("b", 0, 10 * GiB)],
+                          {"a": 50 * GiB, "b": 50 * GiB})
+    # Task 13: the targets divide the space at WATCH (60 - 6 = 54 GiB) in equal
+    # days: 24 GiB above floors over 20 GiB/day -> D = 1.2 -> a 42, b 12 GiB.
+    # a already holds fewer days than D, so b alone trims, by 8 GiB (>= R).
+    assert t["a"] >= 30 * GiB and t["a"] + t["b"] == 54 * GiB
+    assert t == {"a": 42 * GiB, "b": 12 * GiB}
+    after = min(40 * GiB, t["a"]) + min(20 * GiB, t["b"])
+    assert (40 * GiB + 20 * GiB) - after >= 6 * GiB
 
 
 def test_tighten_asks_managed_clients_to_trim_and_clears_clutter():
@@ -250,21 +256,22 @@ def test_a_client_on_two_final_stores_is_stopped_once():
 
 def test_tightened_targets_never_go_below_floor_when_reduction_exceeds_excess():
     s = Store("root", "/", "guest", 100 * GiB, 99 * GiB)          # R = 19 GiB
-    t = tightened_targets(s, Levels(), {"a": 40 * GiB, "b": 20 * GiB}, {"a": 35 * GiB, "b": 15 * GiB},
+    t = tightened_targets(s, Levels(), {"a": 40 * GiB, "b": 20 * GiB},
+                          [Demand("a", 35 * GiB, GiB), Demand("b", 15 * GiB, GiB)],
                           {"a": 50 * GiB, "b": 50 * GiB})
     assert t == {"a": 35 * GiB, "b": 15 * GiB}
 
 
 def test_tightened_targets_are_capped_by_the_allotment():
     s = Store("root", "/", "guest", 100 * GiB, 81 * GiB)          # R = 1 GiB
-    t = tightened_targets(s, Levels(), {"a": 40 * GiB}, {"a": 0}, {"a": 20 * GiB})
+    t = tightened_targets(s, Levels(), {"a": 40 * GiB}, [Demand("a", 0, GiB)], {"a": 20 * GiB})
     assert t == {"a": 20 * GiB}
 
 
 def test_tightened_targets_reduction_sums_exactly():
     s = Store("root", "/", "guest", 100 * GiB, 87 * GiB)          # R = 7 GiB
     t = tightened_targets(s, Levels(), {"a": 30 * GiB, "b": 30 * GiB, "c": 30 * GiB},
-                          {"a": 0, "b": 0, "c": 0}, {c: 50 * GiB for c in "abc"})
+                          [Demand(c, 0, GiB) for c in "abc"], {c: 50 * GiB for c in "abc"})
     assert 90 * GiB - sum(t.values()) == 7 * GiB
 
 
@@ -278,3 +285,56 @@ def test_a_managed_client_within_target_is_never_stopped_even_with_a_failed_stre
     held = _decide(used_pct=96, managed=True, trims=rec, now=10_000, holding_gib=10,
                    floor=10 * GiB, hands_off=True)
     assert "hands-off-held:a" not in held.alarms
+
+
+# --- days of coverage and time to full (Task 13) -------------------------------
+
+def test_fast_growth_reaches_watch_before_its_percentage():
+    s = Store("pool", "p", "pool", 365 * 10**9, int(0.67 * 365 * 10**9))
+    assert store_stage(s, Levels()) == Stage.OK
+    assert store_stage(s, Levels(), churn_bytes_per_h=3.7e9, horizon_h=48) == Stage.WATCH
+
+
+def test_slow_growth_and_shrinking_stay_ok():
+    s = Store("pool", "p", "pool", 365 * 10**9, int(0.67 * 365 * 10**9))
+    assert store_stage(s, Levels(), churn_bytes_per_h=1e9, horizon_h=48) == Stage.OK
+    assert store_stage(s, Levels(), churn_bytes_per_h=0.0, horizon_h=48) == Stage.OK
+    # time to full never lowers a stage
+    hi = Store("r", "/", "guest", 100, 96)
+    assert store_stage(hi, Levels(), churn_bytes_per_h=1.0, horizon_h=48) == Stage.FINAL
+
+
+def test_tightened_targets_cut_equal_days_and_keep_floors():
+    # 100 GiB, 86 used, all registered: R = 6 GiB, space at Watch = 80 GiB.
+    s = Store("root", "/", "guest", 100 * GiB, 86 * GiB)
+    dem = [Demand("iq", 2 * GiB, 10 * GiB), Demand("mag", 0, 0.1 * GiB)]
+    t = tightened_targets(s, Levels(), {"iq": 80 * GiB, "mag": 6 * GiB}, dem,
+                          {"iq": 90 * GiB, "mag": 90 * GiB})
+    # D_watch = 78 / 10.1 days; each client keeps floor + rate * D_watch
+    d = 78 / 10.1
+    assert t["iq"] == pytest.approx(2 * GiB + 10 * GiB * d, abs=2)
+    assert t["mag"] == pytest.approx(0.1 * GiB * d, abs=2)
+    assert t["iq"] + t["mag"] == 80 * GiB
+
+
+def test_decide_divides_watch_space_in_days_when_given_demands():
+    stores = {"root": Store("root", "/", "guest", 100 * GiB, 90 * GiB)}
+    allot = {"root": Allotments({"a": 60 * GiB, "b": 30 * GiB}, True, 90 * GiB, 3.0)}
+    hold = {("a", "root"): Holding("a", "root", {"raw": 60 * GiB}, False),
+            ("b", "root"): Holding("b", "root", {"raw": 30 * GiB}, False)}
+    regs = [Registration(c, "root", ("/x",), 0, None, True) for c in "ab"]
+    dem = {"root": [Demand("a", 0, 20 * GiB), Demand("b", 0, 10 * GiB)]}
+    d = decide(stores=stores, allotments=allot, holdings=hold, registrations=regs, levels=Levels(),
+               trims={}, directives={}, hands_off=False, host_fault=None, now=0.0, demands=dem)
+    # Watch space 80 GiB over 30 GiB/day: D = 8/3 days
+    assert d.targets["root"]["a"] == pytest.approx(160 / 3 * GiB, abs=2)
+    assert d.targets["root"]["b"] == pytest.approx(80 / 3 * GiB, abs=2)
+
+
+def test_decide_raises_watch_from_churn_and_says_why():
+    stores = {"root": Store("root", "/", "guest", 100 * GiB, 50 * GiB)}
+    d = decide(stores=stores, allotments={}, holdings={}, registrations=[], levels=Levels(),
+               trims={}, directives={}, hands_off=False, host_fault=None, now=0.0,
+               churn={"root": 5 * GiB}, horizon_h=24.0)
+    assert d.stages["root"] == Stage.WATCH
+    assert d.alarms["store:root"][0] == Severity.WARNING and "full in 10.0 h" in d.alarms["store:root"][1]

@@ -7,7 +7,9 @@ then clients, sorted by name) so tests and alarms stay stable.
 
 Stages climb per store (spec "The ladder"):
 
-- WATCH    warn, naming the biggest holders.
+- WATCH    warn, naming the biggest holders.  A store whose projected time
+           to full (from its measured churn) falls under the horizon
+           reaches WATCH early, whatever its percentage.
 - TIGHTEN  lower targets toward floors; ask managed clients to trim; clean up.
 - DEMAND   a managed client that has not answered in time gets a loud alarm.
 - FINAL    clients apply their final-stage policy; sigmond stops the service
@@ -19,7 +21,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Mapping, Optional, Sequence
 
-from .model import Allotments, Holding, Levels, Registration, Stage, Store
+from .model import (Allotments, Demand, Holding, Levels, Registration, Stage, Store,
+                    allot_days)
 
 DEMAND_DEADLINE_S = 600
 UNMANAGED_FINAL_GRACE_S = 900
@@ -77,8 +80,18 @@ class Decision:
     targets: dict  # store -> {client: bytes}
 
 
-def store_stage(store: Store, levels: Levels) -> Stage:
-    """The stage a store's fill percentage alone puts it in."""
+def hours_to_full(store: Store, churn_bytes_per_h: Optional[float]) -> Optional[float]:
+    """Hours until the store is full at its measured churn; None when it
+    does not grow."""
+    if churn_bytes_per_h is None or not churn_bytes_per_h > 0:
+        return None
+    return max(0, store.capacity - store.used) / churn_bytes_per_h
+
+
+def store_stage(store: Store, levels: Levels, churn_bytes_per_h: Optional[float] = None,
+                horizon_h: float = 24.0) -> Stage:
+    """The stage a store's fill percentage puts it in, raised to WATCH when
+    its projected time to full falls under `horizon_h`."""
     pct = store.used_pct
     if pct >= levels.final:
         return Stage.FINAL
@@ -88,37 +101,36 @@ def store_stage(store: Store, levels: Levels) -> Stage:
         return Stage.TIGHTEN
     if pct >= levels.watch:
         return Stage.WATCH
+    h = hours_to_full(store, churn_bytes_per_h)
+    if h is not None and h < horizon_h:
+        return Stage.WATCH
     return Stage.OK
 
 
 def tightened_targets(store: Store, levels: Levels, holdings: Mapping[str, int],
-                      floors: Mapping[str, int],
+                      demands: Sequence[Demand],
                       allotments: Mapping[str, int]) -> dict:
-    """Targets that bring the store back to the WATCH level.
+    """Targets that bring the store back to the WATCH level, in equal days.
 
-    The reduction R (used less the WATCH level's bytes, never negative) gets
-    shared among clients in proportion to what each holds above its floor.
-    Each target is min(allotment, holding - portion), never below the floor.
-    The portions sum to exactly min(R, total excess).
+    The space at WATCH is the clients' holdings less the reduction R (used
+    less the WATCH level's bytes, never negative).  `allot_days` divides
+    that space, so every client drops to the same days of coverage and
+    keeps its floor.  Each target is the smaller of that and the client's
+    allotment, never below its floor.
     """
-    clients = sorted(set(holdings) | set(floors) | set(allotments))
-    reduction = max(0, math.ceil(store.used - store.capacity * levels.watch / 100.0))
+    floor: dict = {}
+    for d in demands:
+        floor[d.client] = floor.get(d.client, 0) + d.floor_bytes
+    clients = sorted(set(holdings) | set(floor) | set(allotments))
     held = {c: holdings.get(c, 0) for c in clients}
-    floor = {c: floors.get(c, 0) for c in clients}
-    excess = {c: max(0, held[c] - floor[c]) for c in clients}
-    total = sum(excess.values())
-    portion = {c: 0 for c in clients}
-    if total > 0 and reduction > 0:
-        for c in clients:
-            portion[c] = min(excess[c], reduction * excess[c] // total)
-        leftover = min(reduction, total) - sum(portion.values())
-        for c in clients:
-            if leftover <= 0:
-                break
-            if portion[c] < excess[c]:
-                portion[c] += 1
-                leftover -= 1
-    return {c: max(floor[c], min(allotments.get(c, held[c]), held[c] - portion[c]))
+    reduction = max(0, math.ceil(store.used - store.capacity * levels.watch / 100.0))
+    if reduction == 0:
+        return {c: max(floor.get(c, 0), allotments.get(c, held[c])) for c in clients}
+    space = max(0, sum(held.values()) - reduction)
+    known = {d.client for d in demands}
+    at_watch = allot_days(list(demands) + [Demand(c, 0, 0.0) for c in clients
+                                           if c not in known], space).per_client
+    return {c: max(floor.get(c, 0), min(allotments.get(c, held[c]), at_watch.get(c, 0)))
             for c in clients}
 
 
@@ -145,7 +157,15 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
            holdings: Mapping[tuple, Holding], registrations: Sequence[Registration],
            levels: Levels, trims: Mapping[str, TrimRecord],
            directives: Mapping[str, str], hands_off: bool,
-           host_fault: Optional[str], now: float) -> Decision:
+           host_fault: Optional[str], now: float,
+           demands: Optional[Mapping[str, Sequence[Demand]]] = None,
+           churn: Optional[Mapping[str, Optional[float]]] = None,
+           horizon_h: float = 24.0) -> Decision:
+    """`demands` gives each store's client rates for the days division under
+    pressure (absent: every client at rate 0, so targets fall to floors);
+    `churn` gives each store's growth in bytes per hour."""
+    demands = demands or {}
+    churn = churn or {}
     stages: dict = {}
     actions: list = []
     alarms: dict = {}
@@ -156,7 +176,9 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
     for name in sorted(stores):
         store = stores[name]
         allot = allotments.get(name)
-        stage = store_stage(store, levels)
+        growth = churn.get(name)
+        stage = store_stage(store, levels, growth, horizon_h)
+        early = stage == Stage.WATCH and store.used_pct < levels.watch
         if allot is not None and not allot.floors_fit:
             stage = Stage.FINAL
             alarms[f"floors:{name}"] = (
@@ -181,7 +203,10 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
             alarms[f"store:{name}"] = (
                 _STORE_SEVERITY[stage],
                 f"store {name} at {store.used_pct:.1f}% ({stage.name}); "
-                f"largest holders: {who}")
+                f"largest holders: {who}"
+                + (f"; full in {hours_to_full(store, growth):.1f} h at "
+                   f"{growth / _GiB:.1f} GiB/h, under the {horizon_h:g} h horizon"
+                   if early else ""))
 
         if allot is None:
             continue
@@ -189,7 +214,10 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
         per_client = {c: allot.per_client.get(c, floors.get(c, 0)) for c in clients}
         hold = {c: held.get(c, 0) for c in clients}
         if stage >= Stage.TIGHTEN:
-            tgt = tightened_targets(store, levels, hold, floors, per_client)
+            dem = demands.get(name)
+            if dem is None:
+                dem = [Demand(c, floors.get(c, 0), 0.0) for c in clients]
+            tgt = tightened_targets(store, levels, hold, dem, per_client)
         else:
             tgt = dict(per_client)
         targets[name] = tgt

@@ -75,3 +75,18 @@ def test_target_key_serves_as_path_and_service_sinks_skip():
     view = ClientView("x", True, contract_version="0.9", instances=[iv])
     (r,) = registrations_from_views({"x": view}, [ROOT])
     assert r.paths == ("/t",)
+
+
+def test_declared_rates_add_and_the_tightest_retention_caps_days():
+    view = _view("x", "0.9", sinks=[
+        DataSink("file", "/a", mb_per_day=10.0, retention_days=7, classes=("raw",)),
+        DataSink("file", "/b", mb_per_day=5.0, retention_days=0, classes=("raw",))],
+        disk_writes=[DiskWrite(path="/c", mb_per_day=1.0, retention_days=3)])
+    (r,) = registrations_from_views({"x": view}, [ROOT])
+    assert r.mb_per_day == 16.0 and r.max_days == 3.0
+
+
+def test_no_retention_means_no_cap():
+    view = _view("x", "0.9", sinks=[DataSink("file", "/a", mb_per_day=2.0, classes=("raw",))])
+    (r,) = registrations_from_views({"x": view}, [ROOT])
+    assert r.mb_per_day == 2.0 and r.max_days is None
