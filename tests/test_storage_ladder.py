@@ -352,3 +352,19 @@ def test_decide_refuses_to_guess_missing_rates():
         decide(**kw)
     with pytest.raises(ValueError):
         decide(**kw, demands={})
+
+
+def test_store_stage_rises_at_once_and_descends_two_points_below():
+    from sigmond.storage.ladder import store_stage
+    from sigmond.storage.model import Levels, Stage, Store
+
+    def at(pct, prev):
+        return store_stage(Store("root", "/", "guest", 1000, int(round(10 * pct))),
+                           Levels(), previous=prev)
+    assert at(80.1, Stage.OK) == Stage.WATCH
+    assert at(79.9, Stage.WATCH) == Stage.WATCH
+    assert at(77.9, Stage.WATCH) == Stage.OK
+    assert at(93.5, Stage.FINAL) == Stage.FINAL
+    assert at(92.9, Stage.FINAL) == Stage.DEMAND
+    assert at(70.0, Stage.FINAL) == Stage.OK
+    assert at(79.9, None) == Stage.OK

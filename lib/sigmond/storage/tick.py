@@ -502,11 +502,14 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
         trims.pop(c, None)
         touched.pop(c, None)
     hands_off = hands_off_active(cfg, now)
+    prev_raw = state.get("stages") if isinstance(state.get("stages"), dict) else {}
+    previous = {n: Stage[v] for n, v in prev_raw.items()
+                if isinstance(v, str) and v in Stage.__members__}
     decision = decide(stores=stores, allotments=allotments, holdings=holdings,
                       registrations=regs, levels=levels, trims=trims,
                       directives=cfg.directives, hands_off=hands_off,
                       host_fault=host_fault, now=t, demands=demands, churn=churn,
-                      horizon_h=cfg.horizon_h)
+                      horizon_h=cfg.horizon_h, previous=previous)
     active.update(decision.alarms)
 
     # Who sits over its target on a store under pressure.
@@ -642,6 +645,7 @@ def _pass(now: datetime, r: Runners, config_path, state: dict,
         "du": du,
         "recent": recent,
         "history": history,
+        "stages": {n: Stage(v).name for n, v in sorted(decision.fill_stages.items())},
         "last_cleanup": last_cleanup,
         "last_unclaimed": last_unclaimed,
         "unclaimed": unclaimed,

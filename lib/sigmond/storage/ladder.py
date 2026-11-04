@@ -17,7 +17,7 @@ Stages climb per store (spec "The ladder"):
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Mapping, Optional, Sequence
 
@@ -25,6 +25,7 @@ from .model import (Allotments, Demand, Holding, Levels, Registration, Stage, St
                     allot_days)
 
 DEMAND_DEADLINE_S = 600
+HYSTERESIS_PCT = 2.0        # a stage descends only this far below its level
 UNMANAGED_FINAL_GRACE_S = 900
 
 _GiB = 1 << 30
@@ -78,6 +79,10 @@ class Decision:
     actions: list  # [Action]
     alarms: dict  # key -> (Severity, message)
     targets: dict  # store -> {client: bytes}
+    # store -> the stage its own fill sets (hysteresis included, before a
+    # floors shortfall forces FINAL); the keeper persists it as the next
+    # pass's `previous`.
+    fill_stages: dict = field(default_factory=dict)
 
 
 def hours_to_full(store: Store, churn_bytes_per_h: Optional[float]) -> Optional[float]:
@@ -88,23 +93,38 @@ def hours_to_full(store: Store, churn_bytes_per_h: Optional[float]) -> Optional[
     return max(0, store.capacity - store.used) / churn_bytes_per_h
 
 
+def _level_of(stage: Stage, levels: Levels) -> float:
+    return {Stage.WATCH: levels.watch, Stage.TIGHTEN: levels.tighten,
+            Stage.DEMAND: levels.demand, Stage.FINAL: levels.final}[stage]
+
+
 def store_stage(store: Store, levels: Levels, churn_bytes_per_h: Optional[float] = None,
-                horizon_h: float = 24.0) -> Stage:
+                horizon_h: float = 24.0, previous: Optional[Stage] = None) -> Stage:
     """The stage a store's fill percentage puts it in, raised to WATCH when
-    its projected time to full falls under `horizon_h`."""
+    its projected time to full falls under `horizon_h`.
+
+    Hysteresis: a stage rises the moment the fill crosses its level, but a
+    store at `previous` descends from it only once the fill falls
+    HYSTERESIS_PCT below the level it crossed, so a store hovering at a
+    level holds one stage (and one alarm severity) instead of flapping."""
     pct = store.used_pct
     if pct >= levels.final:
-        return Stage.FINAL
-    if pct >= levels.demand:
-        return Stage.DEMAND
-    if pct >= levels.tighten:
-        return Stage.TIGHTEN
-    if pct >= levels.watch:
-        return Stage.WATCH
-    h = hours_to_full(store, churn_bytes_per_h)
-    if h is not None and h < horizon_h:
-        return Stage.WATCH
-    return Stage.OK
+        raw = Stage.FINAL
+    elif pct >= levels.demand:
+        raw = Stage.DEMAND
+    elif pct >= levels.tighten:
+        raw = Stage.TIGHTEN
+    elif pct >= levels.watch:
+        raw = Stage.WATCH
+    else:
+        h = hours_to_full(store, churn_bytes_per_h)
+        raw = Stage.WATCH if h is not None and h < horizon_h else Stage.OK
+    if previous is None or previous <= raw:
+        return raw
+    for s in range(int(previous), int(raw), -1):
+        if pct >= _level_of(Stage(s), levels) - HYSTERESIS_PCT:
+            return Stage(s)
+    return raw
 
 
 def tightened_targets(store: Store, levels: Levels, holdings: Mapping[str, int],
@@ -160,14 +180,18 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
            host_fault: Optional[str], now: float,
            demands: Optional[Mapping[str, Sequence[Demand]]] = None,
            churn: Optional[Mapping[str, Optional[float]]] = None,
-           horizon_h: float = 24.0) -> Decision:
+           horizon_h: float = 24.0,
+           previous: Optional[Mapping[str, Stage]] = None) -> Decision:
     """`demands` gives, for each store with allotments, its clients' rates
     for the days division under pressure; it is required, because a missing
     rate would quietly drop every target to its floor.  `churn` gives each
-    store's growth in bytes per hour."""
+    store's growth in bytes per hour.  `previous` gives each store's fill
+    stage from the last pass, for hysteresis (store_stage)."""
     if demands is None:
         raise ValueError("decide needs demands: each allotted store's client rates")
     churn = churn or {}
+    previous = previous or {}
+    fill_stages: dict = {}
     stages: dict = {}
     actions: list = []
     alarms: dict = {}
@@ -179,8 +203,11 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
         store = stores[name]
         allot = allotments.get(name)
         growth = churn.get(name)
-        stage = store_stage(store, levels, growth, horizon_h)
-        early = stage == Stage.WATCH and store.used_pct < levels.watch
+        stage = store_stage(store, levels, growth, horizon_h, previous.get(name))
+        fill_stages[name] = stage
+        h_full = hours_to_full(store, growth)
+        early = (stage == Stage.WATCH and store.used_pct < levels.watch
+                 and h_full is not None and h_full < horizon_h)
         if allot is not None and not allot.floors_fit:
             stage = Stage.FINAL
             alarms[f"floors:{name}"] = (
@@ -280,4 +307,4 @@ def decide(*, stores: Mapping[str, Store], allotments: Mapping[str, Allotments],
     if host_fault:
         alarms[f"host-report:{host_fault}"] = (
             Severity.ERROR, f"host pool report: {host_fault}")
-    return Decision(stages, actions, alarms, targets)
+    return Decision(stages, actions, alarms, targets, fill_stages)

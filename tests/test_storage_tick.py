@@ -821,3 +821,40 @@ def test_the_lever_on_stops_as_before(tmp_path):
     assert r.calls["stop_client"] == 1
     assert "would-stop:a" not in _alarm_keys(p) and "stopped:a" in _alarm_keys(p)
     assert _status(p)["stop_lever"] == "on"
+
+
+# ---- hysteresis (ruling: rise at a level, descend 2 points below it) ---------
+
+def _store_lines(r, kind):
+    return [l for l in r.journal_lines if f"storage {kind}:" in l and "store root at" in l]
+
+
+def _seesaw(tmp_path, pcts):
+    r = _fake_runners(used_pct=pcts[0], capacity=1000, held=500); p = _paths(tmp_path)
+    for k, pct in enumerate(pcts):
+        r.state["used"] = int(round(10 * pct))
+        run_tick(T0 + timedelta(minutes=2 * k), r, **p)
+    return r, p
+
+
+def test_a_store_seesawing_across_watch_raises_once_and_never_clears(tmp_path):
+    r, _ = _seesaw(tmp_path, [79.9, 80.1, 79.9, 80.1, 79.9])
+    assert len(_store_lines(r, "raise")) == 1
+    assert _store_lines(r, "clear") == []
+
+
+def test_a_store_seesawing_across_demand_keeps_one_severity(tmp_path):
+    r, p = _seesaw(tmp_path, [90.5, 89.5, 90.5, 89.5, 90.5, 89.5])
+    raises = _store_lines(r, "raise")
+    assert len(raises) == 1 and raises[0].startswith("<3>")
+    assert _store_lines(r, "clear") == []
+    assert _status(p)["stores"][0]["stage"] == "DEMAND"
+
+
+def test_a_store_descends_once_two_points_below_the_level_it_crossed(tmp_path):
+    r, p = _seesaw(tmp_path, [80.1, 78.1])
+    assert _status(p)["stores"][0]["stage"] == "WATCH"
+    r.state["used"] = 779                      # 77.9 %: 2 points below watch
+    run_tick(T0 + timedelta(minutes=10), r, **p)
+    assert _status(p)["stores"][0]["stage"] == "OK"
+    assert len(_store_lines(r, "clear")) == 1
