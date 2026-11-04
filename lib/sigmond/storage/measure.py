@@ -102,7 +102,10 @@ class HostReport:
 
 
 def _parse_time(text: str) -> datetime:
-    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp carries no offset")
+    return parsed.astimezone(timezone.utc)
 
 
 def read_host_report(path: str, now: datetime):
@@ -131,7 +134,7 @@ def read_host_report(path: str, now: datetime):
         )
     except (KeyError, TypeError, ValueError, AttributeError):
         return None, "unreadable"
-    if (now - generated).total_seconds() > HOST_REPORT_MAX_AGE_S:
+    if abs((now - generated).total_seconds()) > HOST_REPORT_MAX_AGE_S:
         return None, "stale"
     return report, None
 

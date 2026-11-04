@@ -61,7 +61,8 @@ def test_path_bytes_counts_hardlinks_once(tmp_path):
     f = tmp_path / "a"
     f.write_bytes(b"x" * 10000)
     os.link(f, tmp_path / "b")
-    assert path_bytes([str(tmp_path)]) == os.stat(f).st_blocks * 512
+    assert path_bytes([str(tmp_path)]) == (
+        os.stat(f).st_blocks + os.stat(tmp_path).st_blocks) * 512
 
 
 def test_host_report_faults(tmp_path):
@@ -90,3 +91,16 @@ def test_bare_metal_expects_no_host_report():
     assert host_report_expected(None, detect_virt=lambda: "kvm")
     assert not host_report_expected(False, detect_virt=lambda: "kvm")
     assert host_report_expected(True, detect_virt=lambda: "none")
+
+
+def test_future_and_naive_timestamps_are_faults(tmp_path):
+    now = datetime(2026, 11, 4, 12, tzinfo=timezone.utc)
+    p = tmp_path / "h.json"
+    p.write_text(json.dumps(_report(now + timedelta(seconds=901))))
+    assert read_host_report(str(p), now)[1] == "stale"
+    p.write_text(json.dumps(_report(now + timedelta(seconds=60))))
+    assert read_host_report(str(p), now)[1] is None
+    rep = _report(now)
+    rep["generated_at"] = "2026-11-04T12:00:00"
+    p.write_text(json.dumps(rep))
+    assert read_host_report(str(p), now) == (None, "unreadable")
