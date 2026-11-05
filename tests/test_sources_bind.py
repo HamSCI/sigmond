@@ -651,3 +651,53 @@ def test_render_env_skips_quotes_and_backslashes(tmp_path, capsys):
     err = capsys.readouterr().err
     for r in ('X', 'Y', 'Z'):
         assert f'RADIOD_{r}_LOCAL_HOST' in err
+
+
+# --- final review M2, 2026-11-05 ----------------------------------------------
+# A Unicode format character (category Cf, e.g. U+202E RIGHT-TO-LEFT OVERRIDE)
+# reorders what the terminal shows without being a control character, and
+# `sources list` / `sources add` printed inventory labels raw.
+
+def test_discovery_drops_a_label_with_a_format_character(monkeypatch, caplog):
+    import sigmond.sources as sources
+    import sigmond.discovery.mdns as mdns
+    rlo = 'AC0G ‮x-1b'
+    rows = _crafted_rows([(A, 'AC0G @EM38ww B1-a longwire'), (B, rlo)])
+    monkeypatch.setattr(mdns, 'probe', lambda env, timeout=5.0: [])
+    monkeypatch.setattr(sources, 'inventory', lambda obs: rows)
+    with caplog.at_level('WARNING'):
+        found = sources.discover_radiods()
+    assert [r.status_dns for r in found] == [A]
+    assert repr(rlo) in caplog.text
+
+
+def test_sources_list_prints_labels_quoted(monkeypatch, capsys):
+    smd = _load_smd()
+    evil = 'AC0G x\x1b[2K‮'
+    monkeypatch.setattr(smd, '_sources_inventory',
+                        lambda: (_crafted_rows([(A, evil)]), None))
+    args = types.SimpleNamespace(keys=False, inventory=True, clients_only=False)
+    assert smd.cmd_sources_list(args) == 0
+    out = capsys.readouterr().out
+    assert evil not in out and repr(evil) in out
+
+
+def test_sources_add_prints_the_resolved_key_quoted(monkeypatch, capsys):
+    import sigmond.sources as sources
+    smd = _load_smd()
+    evil_dns = 'b1\u202e-status.local'
+    monkeypatch.setattr(smd, '_need_root', lambda verb: False)
+    monkeypatch.setattr(smd, '_sources_inventory',
+                        lambda: (_crafted_rows([(evil_dns, 'AC0G only')]), None))
+
+    class _CS:
+        selected = []
+        @classmethod
+        def load(cls, client): return cls()
+        def add(self, key): self.selected.append(key); return True
+        def save(self): pass
+    monkeypatch.setattr(sources, 'ClientSources', _CS)
+    args = types.SimpleNamespace(client='psk-recorder', source='only')
+    assert smd.cmd_sources_add(args) == 0
+    out = capsys.readouterr().out
+    assert evil_dns not in out and repr(f'radiod:{evil_dns}') in out

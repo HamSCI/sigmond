@@ -380,8 +380,14 @@ def valid_mdns_hostname(name) -> bool:
 
 def has_control_chars(text: str) -> bool:
     """True when ``text`` holds a C0 or C1 control character
-    (U+0000-U+001F, U+007F-U+009F)."""
-    return any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in text)
+    (U+0000-U+001F, U+007F-U+009F) or a Unicode format character
+    (category Cf, e.g. U+202E RIGHT-TO-LEFT OVERRIDE).
+
+    A format character reorders or hides what the terminal shows without
+    being a control character (final review M2, 2026-11-05)."""
+    import unicodedata
+    return any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f
+               or unicodedata.category(ch) == 'Cf' for ch in text)
 
 
 _REFUSED_ADVERTS: set = set()

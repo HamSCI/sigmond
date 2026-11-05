@@ -10085,7 +10085,7 @@ def _bringup_print_radiods(found, kept, callsign: str) -> None:
         _info('  (none answered)')
     for r in found:
         mark = 'keep' if r.status_dns in kept_dns else '    '
-        _info(f'  {mark}  {r.status_dns:<36}  {r.label}')
+        _info(f'  {mark}  {r.status_dns:<36}  {r.label!r}')
 
 
 def cmd_bringup(args) -> int:
@@ -18863,6 +18863,14 @@ def _sources_inventory():
     return _sources_mod.inventory(observations), None
 
 
+def _shown(text: str) -> str:
+    """``text`` as is when every character prints, else its repr().
+
+    Source keys and labels come from the LAN; a control or format character
+    (U+202E) printed raw could forge or hide what the operator reads."""
+    return text if text.isprintable() else repr(text)
+
+
 def _sources_resolve_key(token: str, inventory_rows):
     """Resolve a user-supplied token to a SourceKey.
 
@@ -18967,8 +18975,11 @@ def cmd_sources_list(args) -> int:
         local_host = _socket.gethostname()
         print(f'  {"KEY":<40}  {"WHERE":<16}  LABEL')
         print(f'  {"-" * 40}  {"-" * 16}  {"-" * 36}')
+        # A LAN device chooses its label and name; a control or format
+        # character there could forge or hide a row (final review M2,
+        # 2026-11-05), so the label prints quoted and an odd key escaped.
         for r in rows:
-            print(f'  {str(r.key):<40}  {_where(r, local_host):<16}  {r.label}')
+            print(f'  {_shown(str(r.key)):<40}  {_where(r, local_host):<16}  {r.label!r}')
         _info('select one for an instance with:  smd admin sources add '
               '<client>@<reporter> radiod:<name>   then: smd admin sources apply')
     return 0
@@ -19012,10 +19023,10 @@ def cmd_sources_add(args) -> int:
 
     cs = ClientSources.load(client)
     if not cs.add(key):
-        _info(f'{client}: already has {key} (no change)')
+        _info(f'{client}: already has {_shown(str(key))} (no change)')
         return 0
     cs.save()
-    print(f'{client}: added {key} ({len(cs.selected)} source(s) total)')
+    print(f'{client}: added {_shown(str(key))} ({len(cs.selected)} source(s) total)')
     _info('  run `smd admin sources apply` to render the change into the client config')
     return 0
 
