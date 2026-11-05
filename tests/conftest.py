@@ -21,6 +21,11 @@ os.environ.setdefault("SIGMOND_NO_VENV_REEXEC", "1")
 # so a test of `smd bringup` cannot touch the marker of the host running it.
 os.environ.setdefault("SIGMOND_FIRSTRUN_MARKER", "/nonexistent/sigmond-test/.firstrun-bringup-done")
 
+# A complete bring-up registers this machine with the RAC gateway
+# (bin/smd _bringup_activate_rac).  Skip it for every test; tests of the
+# call itself delete this variable.
+os.environ.setdefault("SIGMOND_NO_RAC", "1")
+
 # No elevation from the suite (Task 20 incident, 2026-10-23: a test ran the
 # real `bin/smd sink fill`; `_need_root` re-executed it through passwordless
 # sudo and it wrote this host's /etc).  Unless SIGMOND_TEST_ALLOW_SUDO=1,

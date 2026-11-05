@@ -183,9 +183,8 @@ class Verdict(unittest.TestCase):
 
     def test_a_full_run_still_ends_complete_rc0(self):
         smd = _load_smd()
-        with mock.patch.object(smd, '_bringup_activate_rac'):
-            self.assertEqual(smd._bringup_finish(
-                build_plan(_dasi2(), local_radiod=True), 'dasi2'), 0)
+        self.assertEqual(smd._bringup_finish(
+            build_plan(_dasi2(), local_radiod=True), 'dasi2'), 0)
 
     def test_a_failed_step_is_never_complete(self):
         # AC0G-ND v3.67: three steps exited 1 and the run still said complete.

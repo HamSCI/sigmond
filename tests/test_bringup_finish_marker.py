@@ -85,7 +85,6 @@ class FinishSettlesMarker(unittest.TestCase):
     def finish(self, failed=(), sdr_absent=False, run=None):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \
-             mock.patch.object(self.smd, '_bringup_activate_rac'), \
              mock.patch.object(self.smd.subprocess, 'run', run or _unsudo(self.calls)):
             rc = self.smd._bringup_finish(build_plan(_dasi2(), local_radiod=True,
                                                      sdr_absent=sdr_absent), 'dasi2', failed)

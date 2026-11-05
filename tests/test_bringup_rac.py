@@ -27,6 +27,14 @@ def _plan(**kw):
     return build_plan(prof, local_radiod=True, **kw)
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _rac_on(monkeypatch):
+    monkeypatch.delenv('SIGMOND_NO_RAC', raising=False)
+
+
 def _finish(smd, tmp_path, run_result=None, run_exc=None, appliance=False,
             failed=(), plan=None):
     ver = tmp_path / 'version'
@@ -104,3 +112,25 @@ def test_incomplete_bringup_does_not_activate(tmp_path):
     rc, run, _ = _finish(smd, tmp_path, failed=['x (exit 1)'])
     assert rc == 1
     run.assert_not_called()
+
+
+def test_env_switch_skips_the_run(tmp_path, monkeypatch):
+    monkeypatch.setenv('SIGMOND_NO_RAC', '1')
+    smd = _load_smd()
+    rc, run, out = _finish(smd, tmp_path)
+    assert rc == 0
+    run.assert_not_called()
+    assert 'remote access' not in out
+
+
+def test_exit_5_names_the_proxmox_host_without_retry_clause(tmp_path):
+    smd = _load_smd()
+    _, _, out = _finish(smd, tmp_path, run_result=mock.Mock(returncode=5))
+    assert 'carried by the Proxmox host' in out
+    assert 'retry timer' not in out
+
+
+def test_announces_the_wait(tmp_path):
+    smd = _load_smd()
+    _, _, out = _finish(smd, tmp_path)
+    assert 'bringing up remote access (up to 15 min)' in out
