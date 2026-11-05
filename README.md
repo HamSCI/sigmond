@@ -215,9 +215,21 @@ smd admin receiver list
 smd admin receiver apply
 ```
 
-`apply` binds every declared receiver and sets its upload flag.  It adds and
-updates.  It never removes an instance, a sources file or recorded data.
-To add one receiver from the command line, run:
+`apply` binds every declared receiver.  It adds and updates.  It never
+removes an instance, a sources file or recorded data.  It sets an instance's
+upload flag only when the receiver decides it, through `upload =` or
+`same_antenna_as`, and only once the client has a config.  Otherwise the flag
+stays as `smd config upload` left it.
+
+A receiver with no `clients` key runs one instance of each per-reporter
+recorder (wspr-recorder, psk-recorder, meteor-scatter) that this host enables
+or has installed.  `clients = ["psk-recorder"]` narrows it to the ones you
+name.  `apply --clients a,b` sets that default set for one run; bring-up
+passes its profile's recorders this way.
+
+Two commands write the list for you.  `smd admin sources bind <status>
+--reporter <ID>` records the receiver, then binds it.  To add one receiver
+for one client, run:
 
 ```bash
 smd admin instance add <client> <reporter> --radiod <status>
@@ -231,13 +243,23 @@ and at most one on the whole host, because hf-timestd binds to that
 receiver's radiod.
 
 With a list declared, bring-up plans from it.  It needs no `--remote-radiod`
-and refuses the option, because the list already names every radiod.
+or `--reporter`, because the list already names every radiod and reporter ID.
+Bring-up accepts flags that match the list, so you can re-run the same
+command after a failure.  It refuses flags that disagree with the list; edit
+the list instead.
+
+Several receivers put several instances of each recorder on one host.  Before
+it installs anything, bring-up adds up their cost against the CPUs left over
+after radiod.  When the host falls short, bring-up stops and says by how much.
+Narrow a receiver's `clients = [...]`, or pass `--ignore-capacity`.  Under
+`--dry-run` the shortfall prints as a warning and the plan still shows.
 
 On a station that already runs instances, `smd config render --init` builds
 the list from them.  It reads each instance's sources file and makes one
 receiver per reporter ID.  It prints what it wrote, and it names every
-instance it left out and why: an empty sources file, a key that is not a
-radiod, or a reporter whose instances point at two radiods.  If the adopted
+instance it left out and why: an empty or unreadable sources file, a key that
+is not a radiod, a client that takes no per-reporter instance, or a reporter
+whose instances point at two radiods.  If the adopted
 list fails validation, it writes nothing and says what to fix.  A profile
 that already declares receivers stays as it is.  `--dry-run` prints the
 result and writes nothing.
