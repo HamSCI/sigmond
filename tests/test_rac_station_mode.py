@@ -234,3 +234,46 @@ def test_payload_found_in_opt_checkout(tmp_path):
         'rac_payload_ready; echo rc=$?\n'
     r = sh(script, tmp_path, {"SIGMOND_RAC_PAYLOAD_DIRS": f"{tmp_path}/none:{d}"})
     assert ran.exists(), r.stdout + r.stderr
+
+
+# -- installer and units ---------------------------------------------------------
+
+def install(tmp_path, mode):
+    """Run rac_install_host_files with its absolute paths moved under tmp_path."""
+    sbin, units, mark = tmp_path / "sbin", tmp_path / "units", tmp_path / "mark"
+    for d in (sbin, units, mark, tmp_path / "bin"):
+        d.mkdir(exist_ok=True)
+    (tmp_path / "bin" / "systemctl").write_text("#!/bin/sh\nexit 0\n")
+    (tmp_path / "bin" / "systemctl").chmod(0o755)
+    script = textwrap.dedent(f"""
+        SIGMOND_WIZARD_AS_LIB=1 source {WIZARD} 2>/dev/null
+        RAC_MODE={mode}
+        MARK_DIR={mark}
+        RAC_SWITCH={sbin}/sigmond-rac-switch
+        body=$(declare -f rac_install_host_files \\
+               | sed -e 's|/usr/local/sbin|{sbin}|g' -e 's|/etc/systemd/system|{units}|g')
+        eval "$body"
+        rac_install_host_files
+    """)
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env={"PATH": f"{tmp_path}/bin:{os.environ['PATH']}", "HOME": str(tmp_path)})
+    return r, units, mark
+
+
+def test_install_station_units(tmp_path):
+    r, units, mark = install(tmp_path, "station")
+    assert r.returncode == 0, r.stderr
+    svc = (units / "sigmond-rac-register.service").read_text()
+    assert "ExecStart=/usr/local/sbin/sigmond-rac retry\n" in svc.replace(str(tmp_path / "sbin"), "/usr/local/sbin")
+    assert list(units.glob("sigmond-rac-pair.*")) == []
+    assert (mark / "rac-mode").read_text().strip() == "station"
+
+
+def test_install_host_units_unchanged(tmp_path):
+    r, units, mark = install(tmp_path, "host")
+    assert r.returncode == 0, r.stderr
+    svc = (units / "sigmond-rac-register.service").read_text()
+    assert "--rac-retry" in svc
+    assert sorted(p.name for p in units.glob("sigmond-rac-pair.*")) == [
+        "sigmond-rac-pair.path", "sigmond-rac-pair.service", "sigmond-rac-pair.timer"]
+    assert (mark / "rac-mode").read_text().strip() == "host"

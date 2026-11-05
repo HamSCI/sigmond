@@ -73,17 +73,26 @@ cp "$HOSTDIR/toml.reply" "$HOSTDIR/frpc-host.toml"
 echo 507 > "$HOSTDIR/marks/rac-number"
 echo "[wizard] registered: RAC #507"
 """
+STATION_RAC = r"""#!/bin/bash
+# stub: sigmond-rac register (the station's entry point)
+echo "$*" >> "$HOSTDIR/station-rac.calls"
+[ "$1" = "register" ] || exit 9
+[ -e "$HOSTDIR/gateway-answers" ] || { echo "not registered: no gateway tier answered"; exit 1; }
+cp "$HOSTDIR/toml.reply" "$HOSTDIR/frpc-host.toml"
+echo 507 > "$HOSTDIR/marks/rac-number"
+echo "registered: RAC #507"
+"""
 
 
 class Host:
     def __init__(self, tmp_path, *, registered=True, enabled=False, active=False,
-                 channels=6, wish=None):
+                 channels=6, wish=None, mode=None):
         self.d = tmp_path
         (tmp_path / "bin").mkdir()
         (tmp_path / "marks").mkdir()
         (tmp_path / "run").mkdir()
         for name, body in (("systemctl", SYSTEMCTL), ("curl", CURL), ("sigmond-setup", SETUP),
-                           ("logger", "#!/bin/sh\nexit 0\n"), ("sleep", "#!/bin/sh\nexit 0\n")):
+                           ("sigmond-rac", STATION_RAC), ("logger", "#!/bin/sh\nexit 0\n"), ("sleep", "#!/bin/sh\nexit 0\n")):
             p = tmp_path / "bin" / name
             p.write_text(body)
             p.chmod(0o755)
@@ -102,6 +111,8 @@ class Host:
             (tmp_path / "active").touch()
         if wish:
             (tmp_path / "marks" / "rac-desired").write_text(wish + "\n")
+        if mode:
+            (tmp_path / "marks" / "rac-mode").write_text(mode + "\n")
 
     def run(self, *args, env=None, **kw):
         e = {"PATH": f"{self.d}/bin:{os.environ['PATH']}", "HOSTDIR": str(self.d),
@@ -109,6 +120,7 @@ class Host:
              "SIGMOND_RAC_TOML": f"{self.d}/frpc-host.toml",
              "SIGMOND_RAC_RUN_DIR": f"{self.d}/run",
              "SIGMOND_RAC_SETUP": f"{self.d}/bin/sigmond-setup",
+             "SIGMOND_RAC_STATION_ENTRY": f"{self.d}/bin/sigmond-rac",
              "SIGMOND_RAC_WAIT_S": "10", "SIGMOND_RAC_WAIT_STEP": "5"}
         e.update(env or {})
         return subprocess.run([str(self.script), *args], capture_output=True, text=True,
@@ -1094,3 +1106,72 @@ def test_a_single_gateway_station_keeps_its_legacy_unit(tmp_path):
     h.run("on")
     assert f"enable --now {UNIT}" in h.changes()
     assert f"disable --now {UNIT}" not in h.changes()
+
+
+# -- station mode ---------------------------------------------------------------
+
+def _relay_calls(h):
+    return [c for c in h.calls() if "relay.socket" in c]
+
+
+def test_switch_station_on_enables_no_sockets(tmp_path):
+    h = Host(tmp_path, mode="station", wish="on")
+    r = h.run("on")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert _relay_calls(h) == []
+    assert any(c.startswith("enable") and UNIT in c for c in h.changes())
+
+
+def test_switch_station_off_disables_no_sockets(tmp_path):
+    h = Host(tmp_path, mode="station", enabled=True, active=True, wish="on")
+    r = h.run("off")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert _relay_calls(h) == []
+    assert any(c.startswith("disable") and UNIT in c for c in h.changes())
+    assert r.stdout.splitlines()[0] == OFF
+
+
+def test_switch_station_registers_via_sigmond_rac(tmp_path):
+    h = Host(tmp_path, mode="station", registered=False)
+    (tmp_path / "gateway-answers").touch()
+    r = h.run("on")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert h.calls("station-rac") == ["register"]
+    assert h.calls("setup") == []
+
+
+def test_switch_station_status_first_line(tmp_path):
+    first = {ON: dict(enabled=True, active=True, wish="on"),
+             OFF: dict(wish="off"),
+             DOWN: dict(enabled=True, active=True, wish="on", channels=0)}
+    for want, kw in first.items():
+        d = tmp_path / want.split()[-1]
+        d.mkdir()
+        h = Host(d, mode="station", **kw)
+        r = h.run("status")
+        assert r.stdout.splitlines()[0] == want, (r.stdout, r.stderr)
+        assert "Proxmox" not in r.stdout and "decoder VM" not in r.stdout
+
+
+def test_switch_station_prose_says_this_machine(tmp_path):
+    h = Host(tmp_path, mode="station", enabled=True, active=True, wish="on")
+    out = h.run("status").stdout
+    assert "smd remote off   (on this machine)" in out
+
+
+def test_switch_station_skips_repaint_without_issue_unit(tmp_path):
+    h = Host(tmp_path, mode="station", wish="on")
+    h.run("on")
+    assert not any("sigmond-issue" in c for c in h.changes())
+
+
+def test_switch_absent_mode_is_host(tmp_path):
+    h = Host(tmp_path, registered=False)
+    (tmp_path / "gateway-answers").touch()
+    r = h.run("on")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert h.calls("setup") == ["--rac-register"]
+    assert h.calls("station-rac") == []
+    assert any(s in c for c in h.changes() for s in SOCKETS)
+    assert any("sigmond-issue" in c for c in h.changes())
+    assert "(in the decoder VM)" in h.run("status").stdout

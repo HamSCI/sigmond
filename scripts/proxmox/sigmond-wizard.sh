@@ -1055,6 +1055,15 @@ rac_install_host_files(){
     # Unlink before writing: a copy that runs at this moment keeps its file.
     # The working copy waits under a second name, a hard link to the same file,
     # until the new one proves whole (rac_switch_settle, below).
+    # The switch reads its mode from this file; no file reads as host.
+    # A station must write it (without it the switch would act as a host); a
+    # host reads the same with the file absent, so its write may fail.
+    _rm_dir="${MARK_DIR:-/etc/sigmond-appliance}"
+    mkdir -p "$_rm_dir" 2>/dev/null
+    if ! { printf '%s\n' "${RAC_MODE:-host}" > "$_rm_dir/rac-mode"; } 2>/dev/null \
+            && [ "${RAC_MODE:-host}" = station ]; then
+        return 1
+    fi
     ln -f /usr/local/sbin/sigmond-rac-switch /usr/local/sbin/sigmond-rac-switch.old 2>/dev/null
     rm -f /usr/local/sbin/sigmond-rac-switch
     cat > /usr/local/sbin/sigmond-rac-switch <<'RACSWEOF'
@@ -1123,6 +1132,11 @@ MARK_DIR="${SIGMOND_RAC_MARK_DIR:-/etc/sigmond-appliance}"
 TOML="${SIGMOND_RAC_TOML:-/etc/sigmond/frpc-host.toml}"
 RUN_DIR="${SIGMOND_RAC_RUN_DIR:-/run/sigmond}"
 SETUP="${SIGMOND_RAC_SETUP:-/usr/local/sbin/sigmond-setup}"
+# The mode: "station" is a bare-metal machine, with no VM and no relays.  An
+# absent or unreadable file reads host, the Proxmox behaviour.
+MODE=$(head -1 "$MARK_DIR/rac-mode" 2>/dev/null)
+[ "$MODE" = station ] || MODE=host
+STATION_RAC="${SIGMOND_RAC_STATION_ENTRY:-/usr/local/sbin/sigmond-rac}"
 API="${SIGMOND_RAC_API:-http://127.0.0.1:7500/api/status}"
 WAIT_S="${SIGMOND_RAC_WAIT_S:-60}"
 WAIT_STEP="${SIGMOND_RAC_WAIT_STEP:-5}"
@@ -1169,6 +1183,16 @@ retire_legacy_unit(){
     [ "$(rac_units)" = "$UNIT" ] || systemctl disable --now "$UNIT" >/dev/null 2>&1
 }
 SOCKETS="sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket sigmond-vm-station-relay.socket sigmond-vm-gmag-relay.socket"
+# Words that name where the operator stands.  A station has one machine.
+IN_VM="(in the decoder VM)"
+ON_HOST="(on the Proxmox host)"
+HOST_NOUN="This host"
+if [ "$MODE" = station ]; then
+    SOCKETS=""
+    IN_VM="(on this machine)"
+    ON_HOST="(on this machine)"
+    HOST_NOUN="This machine"
+fi
 RETRY_TIMER=sigmond-rac-register.timer
 PAIR_USER=sigmond-remote
 
@@ -1348,6 +1372,13 @@ who_when(){
         timer)   who="by the host's retry timer" ;;
         *)       who="on the Proxmox host" ;;
     esac
+    if [ "$MODE" = station ]; then
+        case "$CHANGED_BY" in
+            timer) who="by this machine's retry timer" ;;
+            install) who="by the installer" ;;
+            *) who="on this machine" ;;
+        esac
+    fi
     echo "  Set to $W at $CHANGED_AT (UTC) $who."
 }
 print_state(){
@@ -1357,7 +1388,7 @@ print_state(){
             echo "Remote access: on"
             echo "  The gateway accepted $UP of $DECL channels ($where)."
             who_when
-            echo "  Turn it off:  smd remote off   (in the decoder VM)" ;;
+            echo "  Turn it off:  smd remote off   $IN_VM" ;;
         off)
             echo "Remote access: off"
             if [ "$REGD" = yes ]; then
@@ -1370,21 +1401,21 @@ print_state(){
             fi
             [ "$RUNS" = running ] && echo "  NOTE: the tunnel service runs all the same. Someone started it outside this switch; 'off' again stops it."
             who_when
-            echo "  Turn it on:   smd remote on    (in the decoder VM)" ;;
+            echo "  Turn it on:   smd remote on    $IN_VM" ;;
         *)
             echo "Remote access: wanted on, not up"
             if [ "$REGD" = no ]; then
                 echo "  The station has not registered yet: no gateway has answered."
-                echo "  This host tries again every 10 minutes and brings the tunnel up when one does."
+                echo "  $HOST_NOUN tries again every 10 minutes and brings the tunnel up when one does."
             elif [ "$RUNS" = running ]; then
                 echo "  The tunnel service runs, and the gateway has accepted none of its $DECL channels ($where)."
-                echo "  It keeps trying every 30 seconds. Look at:  journalctl -u $UNIT -n 50   (on the Proxmox host)"
+                echo "  It keeps trying every 30 seconds. Look at:  journalctl -u $UNIT -n 50   $ON_HOST"
             else
                 echo "  The tunnel service does not run ($where)."
-                echo "  Look at:  journalctl -u $UNIT -n 50   (on the Proxmox host)"
+                echo "  Look at:  journalctl -u $UNIT -n 50   $ON_HOST"
             fi
             who_when
-            echo "  Turn it off:  smd remote off   (in the decoder VM)" ;;
+            echo "  Turn it off:  smd remote off   $IN_VM" ;;
     esac
 }
 wait_for_channels(){
@@ -1399,7 +1430,14 @@ wait_for_channels(){
         waited=$((waited + WAIT_STEP))
     done
 }
-repaint_panel(){ systemctl start --no-block sigmond-issue.service >/dev/null 2>&1; return 0; }
+repaint_panel(){
+    # A station has no console panel unless sigmond-issue.service exists.
+    if [ "$MODE" = station ] \
+            && ! systemctl list-unit-files sigmond-issue.service 2>/dev/null | grep -q '^sigmond-issue.service'; then
+        return 0
+    fi
+    systemctl start --no-block sigmond-issue.service >/dev/null 2>&1; return 0
+}
 
 # -- status ------------------------------------------------------------------
 if [ "$WORD" = status ]; then
@@ -1441,7 +1479,7 @@ switch_off(){
     # The relays first and the tunnel last: stopping the tunnel may end the
     # caller's own session.
     # shellcheck disable=SC2086
-    systemctl disable --now $SOCKETS >/dev/null 2>&1
+    [ -z "$SOCKETS" ] || systemctl disable --now $SOCKETS >/dev/null 2>&1
     for _u in $(rac_units); do systemctl disable --now "$_u" >/dev/null 2>&1; done
     retire_legacy_unit
     # With no `off` on file, nothing tells a later run of the retry timer that
@@ -1500,12 +1538,16 @@ switch_on(){
     set_wish on || { echo "sigmond-rac-switch: could not record the wish; nothing changed." >&2; return 1; }
     if ! registered; then
         echo "This station has not registered for remote access yet. Registering now."
-        "$SETUP" --rac-register
+        if [ "$MODE" = station ]; then
+            "$STATION_RAC" register
+        else
+            "$SETUP" --rac-register
+        fi
     fi
     if registered; then
         systemctl disable --now "$RETRY_TIMER" >/dev/null 2>&1
         # shellcheck disable=SC2086
-        systemctl enable --now $SOCKETS >/dev/null 2>&1
+        [ -z "$SOCKETS" ] || systemctl enable --now $SOCKETS >/dev/null 2>&1
         retire_legacy_unit
         # !! Before enabling what should run, disable what should not: a
         # gateway dropped from this station's tier leaves its unit enabled,
@@ -1559,6 +1601,10 @@ SyslogLevel=notice
 ExecStart=/usr/local/sbin/sigmond-setup --rac-retry
 RACREGSVCEOF
     [ $? -eq 0 ] || return 1
+    if [ "${RAC_MODE:-host}" = station ]; then
+        sed -i 's|^ExecStart=.*|ExecStart=/usr/local/sbin/sigmond-rac retry|' \
+            /etc/systemd/system/sigmond-rac-register.service || return 1
+    fi
     cat > /etc/systemd/system/sigmond-rac-register.timer <<'RACREGTMREOF'
 [Unit]
 Description=Sigmond remote access: retry the gateway registration until it succeeds
@@ -1572,6 +1618,7 @@ RACREGTMREOF
     [ $? -eq 0 ] || return 1
     # The pairing's re-assertion: after every boot, four times a day, and
     # whenever this host's sshd key changes (an identity restore does that).
+    if [ "${RAC_MODE:-host}" != station ]; then
     cat > /etc/systemd/system/sigmond-rac-pair.service <<'RACPAIRSVCEOF'
 [Unit]
 Description=Sigmond remote access: re-assert the pairing between this host and its decoder VM
@@ -1602,6 +1649,7 @@ Unit=sigmond-rac-pair.service
 WantedBy=paths.target
 RACPAIRPATHEOF
     [ $? -eq 0 ] || return 1
+    fi
     # A reload that fails costs nothing: `systemctl enable` reloads by itself.
     # The switch stands, so say so and return 0.  Plain echo: `say` belongs to
     # the wizard, and rac_retry replaces it.
@@ -1642,7 +1690,11 @@ rac_retry(){
         on|off) ;;
         *)
             systemctl disable --now sigmond-rac-register.timer >/dev/null 2>&1
-            echo "remote access: this station has recorded no wish for remote access, so nothing registers it. To turn it on, in the decoder VM: smd remote on"
+            if [ "${RAC_MODE:-host}" = station ]; then
+                echo "remote access: this station has recorded no wish for remote access, so nothing registers it. To turn it on, on this machine: smd remote on"
+            else
+                echo "remote access: this station has recorded no wish for remote access, so nothing registers it. To turn it on, in the decoder VM: smd remote on"
+            fi
             return 0 ;;
     esac
     if ! rac_register ensure; then
@@ -1650,7 +1702,11 @@ rac_retry(){
         if [ "$RAC_FAIL" != "$last" ]; then
             mkdir -p "$(dirname "$RAC_RETRY_NOTE")" 2>/dev/null
             printf '%s\n' "$RAC_FAIL" > "$RAC_RETRY_NOTE" 2>/dev/null
-            echo "remote access: not registered yet: $RAC_FAIL. This host tries again every 10 minutes; this line returns only when the reason changes."
+            if [ "${RAC_MODE:-host}" = station ]; then
+                echo "remote access: not registered yet: $RAC_FAIL. This machine tries again every 10 minutes (sigmond-rac retry); this line returns only when the reason changes."
+            else
+                echo "remote access: not registered yet: $RAC_FAIL. This host tries again every 10 minutes; this line returns only when the reason changes."
+            fi
         fi
         return 0
     fi
