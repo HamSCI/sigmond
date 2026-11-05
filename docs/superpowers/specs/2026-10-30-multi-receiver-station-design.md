@@ -1,7 +1,7 @@
 # Multi-receiver stations: local and remote RX888s under one Sigmond host
 
 > **Audience:** contributor
-> **Status:** APPROVED by Rob 2026-10-30 ("go forward with implementation"); plans follow per phase in ../plans/
+> **Status:** APPROVED by Rob 2026-10-30 ("go forward with implementation"); plans follow per phase in ../plans/; Phase 3 is delivered on main, 2026-11-05, with the switchboard design's §4.1 amendment
 > **Written:** 2026-10-30 against sigmond `wizard-v384`
 > **Target station:** KFS (first deployment); the design is general
 > **Companions:** [MULTI-INSTANCE-ARCHITECTURE.md](../../MULTI-INSTANCE-ARCHITECTURE.md),
@@ -192,6 +192,7 @@ Rules:
   (§6). Bring-up refuses a receiver whose radiod is neither.
 - A radiod may serve at most one receiver. Two receivers on one radiod is
   a configuration error, not a feature.
+  *(Amended 2026-11-05 by the switchboard design §4.1, pending Rob: several receivers may share a radiod when each later one declares `same_antenna_as`; at most one carries `injector`.)*
 - The per-reporter client set defaults to **every** radiod-bound client
   the profile enables (wspr-recorder, psk-recorder, meteor-scatter,
   hf-timestd where `injector = true`), on every receiver. Rob: "all, if
@@ -626,7 +627,7 @@ stations:
 | 1 | §5: refuse an unpinned conf on a multi-card host, `smd admin sdr identify/list`, DFU waits for the real serial, watchdog uses the serial map, CPU placement refuses to share, `LOCAL_RADIOD_COUNT` on the Proxmox side, ka9q-web port allocation that avoids gmag-webui — **delivered 2026-10-30** on branch wizard-v384 (commits 8bf4d10..f7c0c52); §5 item 7 (Stage 1 looping over N local radiods) lands with Phase 3's receiver-driven build_plan | AI6VN-PM: one RX888 radiod + one sig_gen radiod; two-card parts unit-tested, first run for real at KFS |
 | 2 | §6: `radiod-only` profile, Stage-1-only bring-up, `smd check` for it, control-plane discovery verified | a radiod-only VM on AI6VN-PM with the RX888 passed through, consumed by the full-profile VM |
 | 2b | §6b: conf ownership rule, `dev-checkout`, `maintenance`, and the ka9q-radio development document, reviewed by Phil | AI6VN-PM with Phil restarting radiod by hand |
-| 3 | §4 + §7: `[[receiver]]`, receiver-driven `build_plan`, the capacity gate, `instance add --radiod`, `smd check` per receiver | AI6VN-PM: one local + one remote receiver |
+| 3 | §4 + §7: `[[receiver]]`, receiver-driven `build_plan`, the capacity gate, `instance add --radiod`, `smd check` per receiver — **delivered 2026-11-05** on main | AI6VN-PM: one local + one remote receiver |
 | 3b | §7 timing: `hf-timestd@<reporter>` per-instance (hf-timestd repo), sigmond `timing` commands and station-web timing pages learn N instances, bring-up accepts `injector = true` on all of them | AI6VN-PM with the lab TS-1 split two ways |
 | 4 | §8 station side: tar identity from `[station].reporter_id`, `pskreporter_proxy` with its two halves (server-merge + drop the daemon pipeline), `WD_MERGE_REPORTERS` render error on merged groups | same rig, tars inspected on wd30 |
 | 4b | §7c: `merge_into` in the receiver list, the either/or rule, render into hs-uploader, `smd admin merge`, the `receivers` and `merge` snapshots, the command-request path unit, and the Status and Command tabs in station-web (with Michael) | same rig as AI6VN-* merging to AI6VN; command seen in the tar on wd30 |

@@ -190,6 +190,58 @@ smd admin instance remove psk-recorder AC0G/B1A
 
 The old name's entry stays in coordination.toml until you delete it by hand.
 
+#### Receivers
+
+The `[[receiver]]` list in `/etc/sigmond/site-profile.toml` is the one record
+of which radiod each reporter ID listens to.  Bring-up, `smd check` and
+`smd admin instance list` all read it.
+
+```toml
+[[receiver]]
+reporter_id = "AC0G/B1A"
+radiod = "ac0g-b1-a-status.local"
+injector = true
+antenna = "20 m longwire"
+
+[[receiver]]
+reporter_id = "AC0G/B1B"
+radiod = "ac0g-b1-b-status.local"
+```
+
+Read the list back, then apply it:
+
+```bash
+smd admin receiver list
+smd admin receiver apply
+```
+
+`apply` binds every declared receiver and sets its upload flag.  It adds and
+updates.  It never removes an instance, a sources file or recorded data.
+To add one receiver from the command line, run:
+
+```bash
+smd admin instance add <client> <reporter> --radiod <status>
+```
+
+Several receivers may share one radiod.  Each receiver after the first on a
+radiod must name `same_antenna_as`, the reporter ID of a receiver on that
+radiod.  Such a receiver keeps its spots local unless you set
+`upload = true`.  At most one receiver per radiod carries `injector = true`,
+and at most one on the whole host, because hf-timestd binds to that
+receiver's radiod.
+
+With a list declared, bring-up plans from it.  It needs no `--remote-radiod`
+and refuses the option, because the list already names every radiod.
+
+On a station that already runs instances, `smd config render --init` builds
+the list from them.  It reads each instance's sources file and makes one
+receiver per reporter ID.  It prints what it wrote, and it names every
+instance it left out and why: an empty sources file, a key that is not a
+radiod, or a reporter whose instances point at two radiods.  If the adopted
+list fails validation, it writes nothing and says what to fix.  A profile
+that already declares receivers stays as it is.  `--dry-run` prints the
+result and writes nothing.
+
 The steps below build the same station a piece at a time, for when you
 want to choose each part yourself.
 
