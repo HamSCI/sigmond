@@ -27,7 +27,9 @@ RemainAfterExit=no
 TimeoutStartSec=infinity
 # Stop services so FFTW benchmarks on an idle CPU; restart them after.
 ExecStartPre=-/usr/local/bin/smd admin wisdom suspend
-ExecStart=/usr/local/bin/smd admin wisdom plan
+# --auto: top up wisdom made here; plan fresh, discarding the old plans, when
+# it was made on another CPU, core type or L3 (final review, 2026-11-05).
+ExecStart=/usr/local/bin/smd admin wisdom plan --auto
 # ExecStopPost, not ExecStartPost: systemd skips ExecStartPost when the
 # planner fails or refuses, which would leave the station stopped every boot.
 # But ExecStopPost also runs when ExecCondition skipped the unit (sigma,

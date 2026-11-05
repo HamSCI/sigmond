@@ -323,39 +323,63 @@ def write_sidecar(path: Path, model: str, planned_profiles, placement=None,
     tmp.replace(path)
 
 
-def wisdom_is_current(wisdom_file: Path = WISDOM_FILE,
-                      sidecar: Path = WISDOM_SIDECAR,
-                      miss_log: Path = FFT_MISS_LOG,
-                      cpuinfo: Path = CPUINFO,
-                      placement: dict | None = None) -> bool:
-    """True only when the wisdom was made for this CPU and covers what radiod missed.
+def wisdom_verdict(wisdom_file: Path = WISDOM_FILE,
+                   sidecar: Path = WISDOM_SIDECAR,
+                   miss_log: Path = FFT_MISS_LOG,
+                   cpuinfo: Path = CPUINFO,
+                   placement: dict | None = None) -> str:
+    """'current', 'top-up' or 'fresh': what the planner should do.
 
-    All must hold: the file exists; the sidecar's model is this CPU's; every
-    transform in fft.log appears in the sidecar's planned_profiles.  With
-    ``placement`` (radiod_placement()'s dict), a core type or L3 size the
-    sidecar recorded must also match.  A sidecar that records no placement
-    (a bundled one: its radiod_l3_bytes reads "unknown-from-guest") cannot
-    be compared and does not block.
+    fresh: no file; no trustworthy sidecar; a sidecar for another CPU; or,
+    with ``placement`` (radiod_placement()'s dict), another core type or L3
+    size.  Plans timed elsewhere are worth nothing here, so the planner
+    discards them (fftwf-wisdom -n).
+    top-up: wisdom made here (planned, bundle-seeded or adopted from an
+    image) that lacks a size radiod logged in fft.log.  The planner keeps
+    its plans and measures only what is missing.
+    current: neither.
+
+    A sidecar that records no placement (a bundled one: its radiod_l3_bytes
+    reads "unknown-from-guest") cannot be compared and does not block.  An
+    image's adopted sidecar (adopted=legacy-image) keeps the image's old
+    behaviour: no fft.log check, no placement check, and an empty model on
+    either side never counts as another CPU.
     """
     if not Path(wisdom_file).is_file():
-        return False
+        return 'fresh'
     side = read_sidecar(sidecar)
     model = cpu_model(cpuinfo)
+    adopted = side.get('adopted') == 'legacy-image'
+    if adopted:
+        # A host whose /proc/cpuinfo gave no model at adoption wrote `model=`;
+        # reading that as another CPU replanned the image for hours (final
+        # review M5, 2026-11-05).
+        was = side.get('model', '')
+        if was and model and was != model:
+            return 'fresh'
+        return 'current'
     if not model or side.get('model') != model:
-        return False
-    planned = {p for p in side.get('planned_profiles', '').split(',') if p}
-    # An image's baked wisdom, adopted by adopt_legacy_wisdom(), keeps the
-    # image's old behaviour: no fft.log miss check.
-    if side.get('adopted') != 'legacy-image' and \
-            any(p not in planned for p in plans_from_fft_log(miss_log)):
-        return False
+        return 'fresh'
     for key, now in (placement or {}).items():
         was = side.get(key)
         if was is None or was.startswith('unknown'):
             continue
         if str(was) != str(now):
-            return False
-    return True
+            return 'fresh'
+    planned = {p for p in side.get('planned_profiles', '').split(',') if p}
+    if any(p not in planned for p in plans_from_fft_log(miss_log)):
+        return 'top-up'
+    return 'current'
+
+
+def wisdom_is_current(wisdom_file: Path = WISDOM_FILE,
+                      sidecar: Path = WISDOM_SIDECAR,
+                      miss_log: Path = FFT_MISS_LOG,
+                      cpuinfo: Path = CPUINFO,
+                      placement: dict | None = None) -> bool:
+    """True only when wisdom_verdict() finds nothing to plan."""
+    return wisdom_verdict(wisdom_file, sidecar, miss_log, cpuinfo,
+                          placement) == 'current'
 
 
 def xhci_irqs_on(cpus, proc_interrupts: Path = Path('/proc/interrupts'),
@@ -382,13 +406,15 @@ def xhci_irqs_on(cpus, proc_interrupts: Path = Path('/proc/interrupts'),
 
 
 def adopt_legacy_wisdom(wisdom_file: Path, sidecar: Path, cpuinfo: Path,
-                        bundle_dirs, appliance: bool,
-                        placement: dict | None = None) -> bool:
+                        bundle_dirs, appliance: bool) -> bool:
     """Judge a wisdom file that has no sidecar (the image bakes one; every
     station that predates the sidecar has one).  True means current.
 
     Image install: current as before, and a sidecar (adopted=legacy-image) is
-    written so later checks have one.  Repo install: current only when the
+    written so later checks have one.  ``placement`` stays out of that
+    sidecar: recorded there, a later layout change made an image station
+    "not current", so apply refused to start radiod and the next boot
+    planned for hours (final review I4, 2026-11-05).  Repo install: current only when the
     file is byte-identical to this CPU's bundle, whose sidecar is then
     installed beside it; sigma's June file is not, so it replans.  Writing
     needs root; a failed write still reports the verdict.
@@ -398,7 +424,7 @@ def adopt_legacy_wisdom(wisdom_file: Path, sidecar: Path, cpuinfo: Path,
     model = cpu_model(cpuinfo)
     if appliance:
         try:
-            write_sidecar(sidecar, model, [], placement,
+            write_sidecar(sidecar, model, [],
                           extra={'adopted': 'legacy-image'})
         except OSError:
             pass

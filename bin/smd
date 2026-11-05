@@ -18299,22 +18299,30 @@ def _wisdom_placement():
     return _w.radiod_placement(cpus, get_performance_cpus())
 
 
-def _wisdom_current(wisdom_file=None) -> bool:
-    """wisdom_is_current() for this host's present radiod placement."""
+def _wisdom_verdict(wisdom_file=None) -> str:
+    """wisdom_verdict() for this host's present radiod placement:
+    'current', 'top-up' or 'fresh'."""
     from sigmond import wisdom as _w
     from sigmond.provenance import is_appliance_install
     wf = Path(wisdom_file or _w.WISDOM_FILE)
     # A wisdomf with no sidecar: the image bakes one, and every station that
-    # predates the sidecar has one.  Judge it as legacy, not as stale.
+    # predates the sidecar has one.  Judge it as legacy, not as stale.  Not
+    # adopted (sigma's June file): its plans were timed somewhere else.
     if wf.is_file() and not _w.read_sidecar(_w.WISDOM_SIDECAR):
-        return _w.adopt_legacy_wisdom(
+        adopted = _w.adopt_legacy_wisdom(
             wf, _w.WISDOM_SIDECAR, _w.CPUINFO, _WISDOM_BUNDLE_DIRS,
-            is_appliance_install(), _wisdom_placement())
-    # Read the module attributes at call time (not wisdom_is_current's
-    # bound defaults), so one seam moves every path.
-    return _w.wisdom_is_current(
-        wisdom_file or _w.WISDOM_FILE, _w.WISDOM_SIDECAR, _w.FFT_MISS_LOG,
-        _w.CPUINFO, placement=_wisdom_placement())
+            is_appliance_install())
+        return 'current' if adopted else 'fresh'
+    # Read the module attributes at call time (not wisdom_verdict's bound
+    # defaults), so one seam moves every path.
+    return _w.wisdom_verdict(
+        wf, _w.WISDOM_SIDECAR, _w.FFT_MISS_LOG, _w.CPUINFO,
+        placement=_wisdom_placement())
+
+
+def _wisdom_current(wisdom_file=None) -> bool:
+    """True when this host's wisdom needs no planning (see _wisdom_verdict)."""
+    return _wisdom_verdict(wisdom_file) == 'current'
 
 
 # systemd runs ExecStopPost after an ExecCondition skip too (verified on sigma,
@@ -18399,6 +18407,15 @@ def cmd_wisdom_plan(args) -> int:
         _err('fftwf-wisdom not on PATH; install it with: '
              'sudo apt-get install -y libfftw3-bin')
         return 1
+
+    # Judge before anything moves: the verdict reads the sidecar, and a
+    # current one means the unit has nothing to do.
+    auto_verdict = None
+    if getattr(args, 'auto', False) and not getattr(args, 'fresh', False):
+        auto_verdict = _wisdom_verdict()
+        if auto_verdict == 'current':
+            _info('auto: FFT wisdom is current; nothing to plan')
+            return 0
 
     # Refuse to plan if anything is running.
     r = subprocess.run(
@@ -18527,7 +18544,17 @@ def cmd_wisdom_plan(args) -> int:
     # measures the sizes the bundle lacked.  --fresh passes -n: measure every
     # size on THIS machine, in this cache and clock environment (rob,
     # 2026-10-31: the first 5560U plan made inside the Proxmox VM).
+    #
+    # --auto (sigmond-wisdom.service) chooses: wisdom made here that lacks a
+    # size tops up; wisdom from another CPU, core type or L3, or with no
+    # trustworthy sidecar, is measured afresh.  Topping that up kept every
+    # foreign plan and restamped the whole file as made here (final review
+    # I2, 2026-11-05).
     fresh = bool(getattr(args, 'fresh', False))
+    if getattr(args, 'auto', False) and not fresh:
+        fresh = auto_verdict == 'fresh'
+        _info(f'auto: the installed wisdom calls for '
+              f'{"a fresh plan" if fresh else "a top-up"}')
     if fresh:
         _info('fresh: ignoring the installed wisdom; every transform is measured here')
     cmd = ['taskset', '-c', plan_cpus,
@@ -27858,6 +27885,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--fresh', action='store_true',
                    help='measure every transform on this machine instead of keeping the '
                         'plans already in /etc/fftw/wisdomf (hours; the full replan)')
+    p.add_argument('--auto', action='store_true',
+                   help='choose for itself: top up wisdom made on this machine, plan '
+                        'fresh when it was made elsewhere; nothing when current '
+                        '(sigmond-wisdom.service)')
 
     wisdom_sub.add_parser('needed',
                           help='exit 0 when the planner should run (wisdom missing, '

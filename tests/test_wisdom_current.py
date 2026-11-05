@@ -385,3 +385,140 @@ def test_a_non_utf8_fft_log_means_no_misses(tmp_path):
     log = tmp_path / 'fft.log'
     log.write_bytes(b'cob15 \xff\xfe\n')
     assert wisdom.plans_from_fft_log(log) == []
+
+
+# ── final review fixes, 2026-11-05 ─────────────────────────────────────
+
+PLACED = {'radiod_core_type': 'uniform', 'radiod_l3_bytes': 16777216}
+
+
+def test_verdict_no_file_plans_fresh(tmp_path):
+    assert wisdom.wisdom_verdict(**_host(tmp_path, wisdom_text=None)) == 'fresh'
+
+
+def test_verdict_another_cpu_plans_fresh(tmp_path):
+    kw = _host(tmp_path, sidecar=f'model={CXC}\nplanned_profiles=cob15\n')
+    assert wisdom.wisdom_verdict(**kw) == 'fresh'
+
+
+def test_verdict_an_unreadable_sidecar_plans_fresh(tmp_path):
+    kw = _host(tmp_path)
+    kw['sidecar'].write_bytes(b'\xff\xfe')
+    assert wisdom.wisdom_verdict(**kw) == 'fresh'
+
+
+def test_verdict_another_l3_plans_fresh(tmp_path):
+    kw = _host(tmp_path, sidecar=f'model={B4}\nplanned_profiles=cob15\n'
+                                 'radiod_core_type=uniform\nradiod_l3_bytes=8388608\n')
+    assert wisdom.wisdom_verdict(**kw, placement=PLACED) == 'fresh'
+
+
+def test_verdict_a_missing_size_on_wisdom_made_here_tops_up(tmp_path):
+    kw = _host(tmp_path, sidecar=f'model={B4}\nplanned_profiles=cob15\n',
+               miss='cob9999\n')
+    assert wisdom.wisdom_verdict(**kw) == 'top-up'
+
+
+def test_verdict_bundle_seeded_wisdom_counts_as_made_here(tmp_path):
+    # A v1 bundle sidecar: a model line and nothing else.
+    kw = _host(tmp_path, sidecar=f'{B4}\n', miss='cob9999\n')
+    assert wisdom.wisdom_verdict(**kw) == 'top-up'
+
+
+def test_verdict_current(tmp_path):
+    kw = _host(tmp_path, sidecar=f'model={B4}\nplanned_profiles=cob15\n',
+               miss='cob15\n')
+    assert wisdom.wisdom_verdict(**kw) == 'current'
+
+
+def _verdict_env(plan_env, monkeypatch, verdict):
+    monkeypatch.setattr(smd, '_wisdom_verdict', lambda *a, **k: verdict)
+
+
+class _Auto(_Args):
+    auto = True
+
+
+def _planner_cmd(plan_env):
+    return [c[1] for c in plan_env['calls'] if c[0] == 'planner']
+
+
+def test_plan_auto_tops_up_wisdom_made_here(plan_env, monkeypatch):
+    _verdict_env(plan_env, monkeypatch, 'top-up')
+    assert smd.cmd_wisdom_plan(_Auto()) == 0
+    (cmd,) = _planner_cmd(plan_env)
+    assert '-n' not in cmd
+
+
+def test_plan_auto_discards_wisdom_made_elsewhere(plan_env, monkeypatch):
+    _verdict_env(plan_env, monkeypatch, 'fresh')
+    assert smd.cmd_wisdom_plan(_Auto()) == 0
+    (cmd,) = _planner_cmd(plan_env)
+    assert '-n' in cmd
+
+
+def test_plan_auto_on_current_wisdom_plans_nothing(plan_env, monkeypatch):
+    _verdict_env(plan_env, monkeypatch, 'current')
+    assert smd.cmd_wisdom_plan(_Auto()) == 0
+    assert _planner_cmd(plan_env) == []
+
+
+def test_sigmas_june_file_gets_a_fresh_verdict(tmp_path, monkeypatch):
+    _legacy_env(tmp_path, monkeypatch, appliance=False, content='(sigma june)')
+    assert smd._wisdom_verdict() == 'fresh'
+
+
+def test_the_unit_plans_with_auto():
+    lines = [l.strip() for l in
+             (REPO / 'systemd' / 'sigmond-wisdom.service').read_text().splitlines()
+             if not l.strip().startswith('#')]
+    assert 'ExecStart=/usr/local/bin/smd admin wisdom plan --auto' in lines
+
+
+def test_adopted_image_sidecar_records_no_placement(tmp_path):
+    # I4: placement recorded at adoption made a later layout change read
+    # "not current" on an image station: radiod refused, the boot replanned.
+    kw = _host(tmp_path)
+    assert wisdom.adopt_legacy_wisdom(kw['wisdom_file'], kw['sidecar'],
+                                      kw['cpuinfo'], [], True)
+    side = wisdom.read_sidecar(kw['sidecar'])
+    assert 'radiod_core_type' not in side and 'radiod_l3_bytes' not in side
+    assert wisdom_is_current(**kw, placement={**PLACED, 'radiod_l3_bytes': 1})
+
+
+def test_an_older_adopted_sidecar_with_placement_still_reads_current(tmp_path):
+    kw = _host(tmp_path, sidecar=f'model={B4}\nplanned_profiles=\nadopted=legacy-image\n'
+                                 'radiod_core_type=uniform\nradiod_l3_bytes=8388608\n')
+    assert wisdom_is_current(**kw, placement=PLACED)
+
+
+def test_adopted_wisdom_with_no_cpu_model_stays_current(tmp_path):
+    # M5: an empty cpu_model() wrote `model=`; the next check read a mismatch.
+    kw = _host(tmp_path)
+    kw['cpuinfo'].write_text('processor\t: 0\n')
+    assert wisdom.adopt_legacy_wisdom(kw['wisdom_file'], kw['sidecar'],
+                                      kw['cpuinfo'], [], True)
+    assert wisdom_is_current(**kw)
+    # And a model that appears later does not undo the adoption.
+    kw['cpuinfo'] = _cpuinfo(tmp_path, B4)
+    assert wisdom_is_current(**kw)
+
+
+def test_image_host_with_sidecarless_wisdom_passes_the_gates(tmp_path, monkeypatch, capsys):
+    # I5: the real marker files, not a stubbed is_appliance_install.  Apply's
+    # radiod gate reads _wisdom_current(); the unit's ExecCondition runs
+    # `smd admin wisdom needed`, where 1 skips the planner.
+    import sigmond.provenance as prov
+    kw = _host(tmp_path, wisdom_text='(baked)')
+    monkeypatch.setattr(wisdom, 'WISDOM_FILE', kw['wisdom_file'])
+    monkeypatch.setattr(wisdom, 'WISDOM_SIDECAR', kw['sidecar'])
+    monkeypatch.setattr(wisdom, 'FFT_MISS_LOG', kw['miss_log'])
+    monkeypatch.setattr(wisdom, 'CPUINFO', kw['cpuinfo'])
+    monkeypatch.setattr(smd, '_wisdom_placement', lambda: PLACED)
+    monkeypatch.setattr(prov, 'IMAGE_VERSION_FILE', str(tmp_path / 'no-version'))
+    marker = tmp_path / 'golden-image'
+    monkeypatch.setattr(prov, 'GOLDEN_IMAGE_MARKER', str(marker))
+    marker.write_text('built\n')
+    assert smd._wisdom_current()
+    assert wisdom.read_sidecar(kw['sidecar'])['adopted'] == 'legacy-image'
+    assert smd.cmd_wisdom_needed(_Args()) == 1
