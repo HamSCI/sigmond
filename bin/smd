@@ -25333,17 +25333,29 @@ def cmd_instance_show(args) -> int:
     return 0
 
 
-def _instance_add_receiver(client, display_rid, radiod, dry_run) -> int:
-    """Record ``display_rid`` on ``radiod`` with ``client`` among its clients,
-    then bind that receiver.  The candidate list validates before any write."""
+def _instance_add_plan(client, display_rid, radiod):
+    """Build and validate the receiver list that `instance add --radiod`
+    would write, in memory.  Returns (radiod, candidate, stored) or None
+    after printing why it refuses; touches nothing."""
     from sigmond import site_profile as _sp
     from sigmond.receivers import (Receiver, ReceiverError, load_receivers,
-                                   merged_receivers, validate_receivers,
-                                   write_receivers)
+                                   merged_receivers, validate_receivers)
+    from sigmond.sources import valid_mdns_hostname
+    if not valid_mdns_hostname(radiod):
+        _err(f'instance add: --radiod {radiod!r} is not a valid mDNS '
+             f'status name')
+        return None
     try:
         current = load_receivers(_sp.SITE_PROFILE_PATH)
         key = _receiver_key(Receiver(reporter_id=display_rid, radiod=radiod))
         old = next((r for r in current if _receiver_key(r) == key), None)
+        if old is not None:
+            was = old.radiod or old.kiwisdr
+            if was.lower() != radiod.lower():
+                _err(f'instance add: {display_rid} listens to {was}; move it '
+                     f'with the switchboard, or pick another reporter ID')
+                return None
+            radiod = old.radiod        # keep the stored spelling
         clients = tuple(old.clients) if old else ()
         if client not in clients:
             clients += (client,)
@@ -25355,14 +25367,27 @@ def _instance_add_receiver(client, display_rid, radiod, dry_run) -> int:
         if msgs:
             for m in msgs:
                 _err(f'instance add: {m}')
-            return 1
-        stored = [r for r in candidate if _receiver_key(r) == key]
-        if dry_run:
-            _info(f'(dry-run) would record {display_rid} -> {radiod} '
-                  f'({", ".join(clients)}) and bind it')
-            return 0
-        write_receivers(_sp.SITE_PROFILE_PATH, candidate)
+            return None
     except (ReceiverError, ValueError) as exc:
+        _err(f'instance add: {exc}')
+        return None
+    stored = [r for r in candidate if _receiver_key(r) == key]
+    return radiod, candidate, stored
+
+
+def _instance_add_receiver(plan, dry_run) -> int:
+    """Write the validated list from `_instance_add_plan`, then bind."""
+    from sigmond import site_profile as _sp
+    from sigmond.receivers import ReceiverError, write_receivers
+    radiod, candidate, stored = plan
+    if dry_run:
+        r = stored[0]
+        _info(f'(dry-run) would record {r.reporter_id} -> {radiod} '
+              f'({", ".join(r.clients)}) and bind it')
+        return 0
+    try:
+        write_receivers(_sp.SITE_PROFILE_PATH, candidate)
+    except (ReceiverError, ValueError, OSError) as exc:
         _err(f'instance add: {exc}')
         return 1
     rows, _msg = _sources_inventory()
@@ -25393,27 +25418,11 @@ def cmd_instance_add(args) -> int:
               f'`smd admin instance enable` will fail until it is')
         _info(f'  install with: smd component install {client}')
     radiod = (getattr(args, 'radiod', None) or '').strip() or None
-    existing = None
+    plan = None
     if radiod:
-        # Refuse before create_instance, so a refusal touches nothing.
-        from sigmond import site_profile as _sp
-        from sigmond.receivers import ReceiverError, load_receivers
-        from sigmond.sources import valid_mdns_hostname
-        if not valid_mdns_hostname(radiod):
-            _err(f'instance add: --radiod {radiod!r} is not a valid mDNS '
-                 f'status name')
-            return 1
-        try:
-            for r in load_receivers(_sp.SITE_PROFILE_PATH):
-                if _receiver_key(r) == reporter_id:
-                    existing = r
-        except (ReceiverError, ValueError) as exc:
-            _err(f'instance add: {exc}')
-            return 1
-        old = (existing.radiod or existing.kiwisdr) if existing else ''
-        if existing and old.lower() != radiod.lower():
-            _err(f'instance add: {display_rid} listens to {old}; move it '
-                 f'with the switchboard, or pick another reporter ID')
+        # Validate everything before create_instance: a refusal touches nothing.
+        plan = _instance_add_plan(client, display_rid, radiod)
+        if plan is None:
             return 1
     try:
         paths = inst.create_instance(client, reporter_id,
@@ -25430,8 +25439,8 @@ def cmd_instance_add(args) -> int:
     _info(f'  config:   {paths.config}')
     _info(f'  env:      {paths.env}')
     _info(f'  sources:  {paths.sources}')
-    if radiod:
-        rc = _instance_add_receiver(client, display_rid, radiod, dry_run)
+    if plan:
+        rc = _instance_add_receiver(plan, dry_run)
         if rc:
             return rc
     if not getattr(args, 'dry_run', False):

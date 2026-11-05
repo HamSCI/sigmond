@@ -43,9 +43,12 @@ def _add(smd, box, client='psk-recorder', reporter='AC0G/B1A', radiod=A,
     real = smd._receiver_apply
 
     def wrapped(*a, **k):
+        box.apply_calls.append(a)
         k.update(etc_root=box.etc, coord_path=box.coord,
                  profile_path=box.profile, inventory_rows=[])
         return real(*a, **k)
+    box.bind = mock.Mock(return_value=0)
+    box.apply_calls = []
     created = mock.Mock(return_value=types.SimpleNamespace(
         config='c', env='e', sources='s'))
     with mock.patch.object(sp, 'SITE_PROFILE_PATH', box.profile), \
@@ -54,7 +57,7 @@ def _add(smd, box, client='psk-recorder', reporter='AC0G/B1A', radiod=A,
             mock.patch.object(smd, '_check_systemd_template', return_value=True), \
             mock.patch.object(inst, 'create_instance', created), \
             mock.patch.object(smd, '_sources_inventory', return_value=([], '')), \
-            mock.patch.object(smd, '_sources_bind', return_value=0), \
+            mock.patch.object(smd, '_sources_bind', box.bind), \
             mock.patch('sigmond.upload.apply_enable'), \
             mock.patch.object(smd, '_receiver_apply', wrapped):
         rc = smd.cmd_instance_add(args)
@@ -69,6 +72,10 @@ def test_radiod_records_a_receiver_and_binds_it(box):
     (r,) = load_receivers(box.profile)
     assert (r.reporter_id, r.radiod, r.clients) == (
         'AC0G/B1A', A, ('psk-recorder',))
+    box.bind.assert_called_once()
+    assert box.bind.call_args.args[0] == A
+    assert box.bind.call_args.args[1] == 'AC0G/B1A'
+    assert box.bind.call_args.args[2] == ['psk-recorder']
 
 
 def test_a_second_client_joins_the_same_receiver(box):
@@ -110,6 +117,21 @@ def test_without_radiod_nothing_changes(box):
 
 def test_dry_run_writes_nothing(box):
     smd = _load_smd()
-    rc, _ = _add(smd, box, dry_run=True)
+    rc, created = _add(smd, box, dry_run=True)
     assert rc == 0
-    assert not box.profile.exists()
+    assert created.call_args.kwargs['dry_run'] is True
+    assert not box.profile.exists() and not box.coord.exists()
+    assert box.apply_calls == []
+    box.bind.assert_not_called()
+
+
+def test_an_invalid_candidate_list_is_refused_before_create(box, capsys):
+    smd = _load_smd()
+    assert _add(smd, box)[0] == 0
+    before = box.profile.read_bytes()
+    # a second reporter on the same radiod needs same_antenna_as
+    rc, created = _add(smd, box, reporter='AC0G/B1S')
+    assert rc == 1
+    created.assert_not_called()
+    assert box.profile.read_bytes() == before
+    assert 'same_antenna_as' in capsys.readouterr().out
