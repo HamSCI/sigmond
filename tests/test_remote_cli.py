@@ -45,8 +45,11 @@ class RemoteCliTests(unittest.TestCase):
         self.known = self.d / "rac-switch.known_hosts"
         self.cache = self.d / "state" / "remote-access.json"
         self.mark = self.d / "appliance-version"
+        self.switch = self.d / "sigmond-rac-switch"
+        self.mode = self.d / "rac-mode"
         for name, val in (("KEY", self.key), ("KNOWN_HOSTS", self.known),
-                          ("CACHE", self.cache), ("APPLIANCE_MARK", self.mark)):
+                          ("CACHE", self.cache), ("APPLIANCE_MARK", self.mark),
+                          ("LOCAL_SWITCH", self.switch), ("RAC_MODE", self.mode)):
             p = mock.patch.object(remote, name, val); p.start(); self.addCleanup(p.stop)
         self.calls = []
 
@@ -157,8 +160,67 @@ class RemoteCliTests(unittest.TestCase):
     def test_a_station_without_a_proxmox_host_is_pointed_at_its_own_tunnel(self):
         code, _, errs = self._run("status")
         self.assertEqual(code, remote.EXIT_NOT_PAIRED)
-        self.assertIn("smd admin rac status", errs)
+        self.assertIn("sigmond-rac activate", errs)
+        self.assertNotIn("smd admin rac status", errs)
         self.assertNotIn("--pair-vm", errs)
+
+    # -- a bare-metal station: the switch runs here -------------------------
+
+    def _station(self, mode="station", executable=True):
+        self.switch.write_text("#!/bin/sh\n")
+        self.switch.chmod(0o755 if executable else 0o644)
+        self.mode.write_text(mode + "\n")
+
+    def test_station_local_switch_on(self):
+        self._station()
+        code, out, errs = self._run("on", rc=0, stdout=ON)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, ON)
+        argv, kw = self.calls[0]
+        self.assertEqual(argv, [str(self.switch), "on"])
+        self.assertEqual(kw["timeout"], 600)
+        self.assertEqual(kw["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kw["env"]["SIGMOND_RAC_BY"], "host")   # an operator's change
+        self.assertNotIn("Proxmox", errs)
+        self.assertEqual(json.loads(self.cache.read_text())["state"], "on")
+
+    def test_station_local_switch_status_parses_down(self):
+        self._station()
+        code, out, _ = self._run("status", rc=3, stdout=DOWN)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.calls[0][0], [str(self.switch), "status"])
+        self.assertEqual(self.calls[0][1]["timeout"], 60)
+        self.assertEqual(json.loads(self.cache.read_text())["state"], "down")
+
+    def test_station_switch_with_no_state_returns_its_exit_code(self):
+        self._station()
+        code, _, errs = self._run("off", rc=2, stdout="", stderr="refused\n")
+        self.assertEqual(code, 2)
+        self.assertIn("gave no state", errs)
+        self.assertFalse(self.cache.exists())
+
+    def test_station_only_when_mode_reads_station_and_switch_runs(self):
+        self._station(mode="host")
+        self.assertIsNone(remote.local_switch())
+        self._station(executable=False)
+        self.assertIsNone(remote.local_switch())
+        self.assertEqual(self._run("status")[0], remote.EXIT_NOT_PAIRED)
+        self.assertEqual(self.calls, [])
+
+    def test_paired_host_still_uses_ssh(self):
+        self._station()
+        self._pair()
+        self._run("status", stdout=OFF)
+        self.assertEqual(self.calls[0][0][0], "ssh")
+        self.assertIsNone(remote.local_switch())
+
+    def test_motd_reads_the_cache_on_a_station(self):
+        self._station()
+        remote._remember("on", now=NOW)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            remote.cmd_motd(now=NOW + timedelta(hours=1))
+        self.assertIn("Remote access: on", out.getvalue())
 
     def test_a_key_without_a_usable_known_hosts_line_counts_as_not_paired(self):
         self._pair()

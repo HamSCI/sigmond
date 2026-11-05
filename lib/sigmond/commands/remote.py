@@ -28,6 +28,9 @@ KNOWN_HOSTS = Path('/etc/sigmond/rac-switch.known_hosts')
 CACHE = Path('/var/lib/sigmond/remote-access.json')
 APPLIANCE_MARK = Path('/etc/sigmond-appliance/version')
 HOST_ACCOUNT = 'sigmond-remote'
+# On a bare-metal station the switch is installed here, and the mode file says so.
+LOCAL_SWITCH = Path('/usr/local/sbin/sigmond-rac-switch')
+RAC_MODE = Path('/etc/sigmond-appliance/rac-mode')
 
 WORDS = ('on', 'off', 'status')
 # The switch script prints exactly one of these as a line of its answer.
@@ -74,6 +77,24 @@ def paired_host(known_hosts: Path | None = None) -> str | None:
     except ValueError:
         return None
     return parts[0]
+
+
+def local_switch() -> str | None:
+    """The switch to run on this machine, or None.
+
+    A pairing wins: with the key present, the Proxmox host holds the switch.
+    Without it, the local switch counts when it is executable and the mode
+    file reads `station`.
+    """
+    if KEY.exists():
+        return None
+    try:
+        mode = RAC_MODE.read_text(encoding='utf-8').splitlines()[:1]
+    except (OSError, UnicodeDecodeError):
+        return None
+    if mode != ['station'] or not os.access(LOCAL_SWITCH, os.X_OK) or not LOCAL_SWITCH.is_file():
+        return None
+    return str(LOCAL_SWITCH)
 
 
 def ssh_argv(host: str, word: str) -> list:
@@ -147,7 +168,7 @@ def _not_paired() -> int:
     else:
         err('smd remote switches the tunnel of an appliance station through its '
             'Proxmox host, and this machine has none')
-        info('A station without a Proxmox host runs its tunnel here:  smd admin rac status')
+        info('A station without a Proxmox host runs its tunnel here:  sigmond-rac activate')
     return EXIT_NOT_PAIRED
 
 
@@ -195,7 +216,7 @@ def cmd_motd(now: datetime | None = None) -> int:
     read as a JSON true: off, with the tunnel service still running.  An
     answer more than FRESH_FOR old, or dated ahead of the clock, says so.
     """
-    if not KEY.exists():
+    if not KEY.exists() and local_switch() is None:
         return 0
     try:
         doc = json.loads(CACHE.read_text(encoding='utf-8'))
@@ -240,26 +261,42 @@ def cmd_remote(args, *, run=subprocess.run) -> int:
     if word not in WORDS:
         err('smd remote takes one word: on, off or status')
         return 2
-    host = paired_host() if KEY.exists() else None
-    if host is None:
+    local = local_switch()
+    host = None if local else (paired_host() if KEY.exists() else None)
+    if local is None and host is None:
         return _not_paired()
-    if word == 'on':
-        info('asking the Proxmox host; this can take a minute while the tunnel comes up')
+    if local:
+        argv, where = [local, word], 'the local switch'
+        # An operator's change: the switch records `host` for anything but
+        # install or timer, so name it and drop what the shell passed on.
+        env = dict(os.environ, SIGMOND_RAC_BY='host')
+        if word == 'on':
+            info('running the local switch; this can take a minute while the tunnel comes up')
+    else:
+        argv, where, env = ssh_argv(host, word), f'the Proxmox host at {host}', None
+        if word == 'on':
+            info('asking the Proxmox host; this can take a minute while the tunnel comes up')
+    kw = {'env': env} if env is not None else {}
     try:
-        r = run(ssh_argv(host, word), capture_output=True, text=True, errors='replace',
-                stdin=subprocess.DEVNULL, timeout=TIMEOUT_S[word])
+        r = run(argv, capture_output=True, text=True, errors='replace',
+                stdin=subprocess.DEVNULL, timeout=TIMEOUT_S[word], **kw)
     except subprocess.TimeoutExpired:
-        err(f'the Proxmox host at {host} gave no answer within {TIMEOUT_S[word]} s')
+        err(f'{where} gave no answer within {TIMEOUT_S[word]} s')
         info('Ask again for the state:  smd remote status')
         return EXIT_UNREACHABLE
     except OSError as exc:
-        err(f'could not run ssh: {exc}')
+        err(f'could not run {"the switch" if local else "ssh"}: {exc}')
         return EXIT_UNREACHABLE
     answer = r.stdout or ''
     if answer:
         print(answer, end='' if answer.endswith('\n') else '\n')
     state = state_of(answer)
     if state is None:
+        if local:
+            tail = (r.stderr or '').strip().splitlines()[-1:]
+            err(f'the local switch gave no state (exit {r.returncode})'
+                + (f': {tail[0]}' if tail else ''))
+            return r.returncode or 1
         if r.returncode == 255:
             return _unreachable(host, r.stderr)
         tail = (r.stderr or '').strip().splitlines()[-1:]
