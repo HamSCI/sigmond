@@ -31,6 +31,7 @@ from sigmond.cpu import (
     eligible_radiod_cores,
     expand_template_instances,
     gather_capabilities,
+    get_performance_cpus,
     is_split_l3,
     l3_island_cpus_for,
     layout_shell_vars,
@@ -598,6 +599,64 @@ class EligibleRadiodCoresTests(unittest.TestCase):
 
     def test_growth_stops_at_the_boot_core(self):
         self.assertEqual(eligible_radiod_cores([{0, 1}, {2, 3}], {2, 3}, need=3), [{2, 3}])
+
+
+# sigma: Intel i5-1340P.  Four performance cores with two threads each
+# (CPUs 0-7), eight single-thread efficiency cores (8-15).
+_HYBRID_CORES = [{0, 1}, {2, 3}, {4, 5}, {6, 7},
+                 {8}, {9}, {10}, {11}, {12}, {13}, {14}, {15}]
+_HYBRID_P = set(range(8))
+
+
+class HybridCpuPlacementTests(unittest.TestCase):
+    """⛔ sigma, 2026-11-04: the top-core rule put radiod on efficiency core 15
+    alone.  It lost a full second of samples every second with no USB error
+    and quit after 5 s, 64 times over.  radiod belongs on a performance core."""
+
+    def test_efficiency_cores_are_never_eligible_on_a_hybrid_part(self):
+        out = eligible_radiod_cores(_HYBRID_CORES, set(),
+                                    performance_cpus=_HYBRID_P)
+        self.assertEqual(out, [{2, 3}, {4, 5}, {6, 7}])
+
+    def test_radiod_lands_on_the_top_performance_core(self):
+        got = assign_radiod_cores(['radiod@sigma.service'], {},
+                                  cores=_HYBRID_CORES, isolated_cpus=set(),
+                                  performance_cpus=_HYBRID_P)
+        self.assertEqual(got, {'radiod@sigma.service': {6, 7}})
+
+    def test_a_stale_isolcpus_on_an_efficiency_core_does_not_pull_radiod_there(self):
+        # bring-up had staged isolcpus=15 before this fix; after a reboot the
+        # isolated set would name only an E-core.  The performance filter
+        # runs first, so isolation admits no core and the rule degrades to
+        # "any performance core but the boot core".
+        got = assign_radiod_cores(['radiod@sigma.service'], {},
+                                  cores=_HYBRID_CORES, isolated_cpus={15},
+                                  performance_cpus=_HYBRID_P)
+        self.assertEqual(got, {'radiod@sigma.service': {6, 7}})
+
+    def test_no_hybrid_split_changes_nothing(self):
+        self.assertEqual(
+            eligible_radiod_cores(_EIGHT_CORES, set(), performance_cpus=set()),
+            eligible_radiod_cores(_EIGHT_CORES, set()))
+
+    def test_shortfall_counts_only_performance_cores(self):
+        units = [f'radiod@r{i}.service' for i in range(4)]
+        self.assertEqual(radiod_core_shortfall(
+            units, cores=_HYBRID_CORES, isolated_cpus=set(),
+            performance_cpus=_HYBRID_P), 1)
+
+    def test_the_kernel_core_type_files_are_read(self):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            self.assertEqual(get_performance_cpus(str(root)), set())
+            (root / 'cpu_core').mkdir()
+            (root / 'cpu_core' / 'cpus').write_text('0-7\n')
+            # Only cpu_atom beside cpu_core marks a hybrid split.
+            self.assertEqual(get_performance_cpus(str(root)), set())
+            (root / 'cpu_atom').mkdir()
+            (root / 'cpu_atom' / 'cpus').write_text('8-15\n')
+            self.assertEqual(get_performance_cpus(str(root)), set(range(8)))
 
     def test_no_growth_when_isolation_already_suffices(self):
         self.assertEqual(eligible_radiod_cores(_EIGHT_CORES, set(range(8)), need=2),

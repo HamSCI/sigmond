@@ -204,6 +204,25 @@ def get_physical_cores() -> list[set]:
     return cores
 
 
+def get_performance_cpus(root: str = '/sys/devices') -> set:
+    """The performance cores' CPUs on a hybrid (P-core + E-core) Intel part.
+
+    The kernel exposes one PMU per core type there: ``cpu_core`` for the
+    performance cores and ``cpu_atom`` for the efficiency cores, each with a
+    ``cpus`` list.  Both exist only on a hybrid part, so their presence is the
+    signal.  Returns an empty set everywhere else (AMD, older Intel, most VMs),
+    meaning every core counts as a performance core.
+    """
+    core = Path(root) / 'cpu_core' / 'cpus'
+    atom = Path(root) / 'cpu_atom' / 'cpus'
+    try:
+        if not atom.exists():
+            return set()
+        return parse_cpu_mask(core.read_text().strip())
+    except OSError:
+        return set()
+
+
 def parse_ht_pairs(s: str) -> "list[list[int]]":
     """Parse the HT_PAIRS string emitted by host-discover.sh.
 
@@ -230,10 +249,20 @@ def parse_ht_pairs(s: str) -> "list[list[int]]":
 
 def eligible_radiod_cores(cores: "list[set]",
                           isolated_cpus: Optional[set] = None,
-                          need: int = 1) -> "list[set]":
+                          need: int = 1,
+                          performance_cpus: Optional[set] = None) -> "list[set]":
     """Physical cores radiod may be placed on, lowest-numbered first.
 
-    Two filters, applied in order:
+    0. **Performance cores only, on a hybrid part.**  ``performance_cpus``
+       (``get_performance_cpus``) names them; a core counts only when all
+       its CPUs are in it.  An efficiency core has one thread, a smaller
+       shared L2 and a lower clock, and radiod's USB drain and FFT do not
+       keep up there.  sigma (i5-1340P, P-cores 0-7, E-cores 8-15,
+       2026-11-04): the top-core rule below put radiod on E-core 15 alone,
+       and it lost a full second of samples every second, "USB xfer
+       failures +0", until it quit.  Empty means no hybrid split: no filter.
+
+    Two more filters follow, in order:
 
     1. **Never the boot CPU's core.**  The kernel refuses to tick-isolate
        CPU 0 — ``nohz_full=0-13`` on the cmdline comes back as ``1-13``
@@ -267,6 +296,10 @@ def eligible_radiod_cores(cores: "list[set]",
     """
     if not cores:
         return []
+    if performance_cpus:
+        fast = [c for c in cores if set(c) <= set(performance_cpus)]
+        if fast:
+            cores = fast
     off_boot = [c for c in cores if 0 not in c]
     if not off_boot:
         return list(cores)
@@ -287,7 +320,8 @@ def assign_radiod_cores(units: "list[str]",
                         *,
                         cores: Optional["list[set]"] = None,
                         isolated_cpus: Optional[set] = None,
-                        current: Optional[dict] = None) -> dict:
+                        current: Optional[dict] = None,
+                        performance_cpus: Optional[set] = None) -> dict:
     """Map each radiod unit name to the CPU set it should be pinned to.
 
     THE single placement rule.  ``compute_affinity_plan`` and bin/smd's
@@ -322,8 +356,11 @@ def assign_radiod_cores(units: "list[str]",
         cores = get_physical_cores()
     if isolated_cpus is None:
         isolated_cpus = get_isolated_cpus()
+    if performance_cpus is None:
+        performance_cpus = get_performance_cpus()
 
-    eligible = eligible_radiod_cores(cores, isolated_cpus, need=len(units))
+    eligible = eligible_radiod_cores(cores, isolated_cpus, need=len(units),
+                                     performance_cpus=performance_cpus)
     chosen = [set(c) for c in eligible[-len(units):]] if eligible else []
     out: dict = {}
     free = list(chosen)
@@ -346,7 +383,8 @@ def radiod_core_shortfall(units: "list[str]",
                           *,
                           cores: Optional["list[set]"] = None,
                           isolated_cpus: Optional[set] = None,
-                          topology_cpu_affinity: Optional[dict] = None) -> int:
+                          topology_cpu_affinity: Optional[dict] = None,
+                          performance_cpus: Optional[set] = None) -> int:
     """How many radiod instances ``assign_radiod_cores`` would have to
     double up on a core: ``max(0, len(units) - len(eligible))``.
 
@@ -364,7 +402,10 @@ def radiod_core_shortfall(units: "list[str]",
         cores = get_physical_cores()
     if isolated_cpus is None:
         isolated_cpus = get_isolated_cpus()
-    eligible = eligible_radiod_cores(cores, isolated_cpus, need=len(units))
+    if performance_cpus is None:
+        performance_cpus = get_performance_cpus()
+    eligible = eligible_radiod_cores(cores, isolated_cpus, need=len(units),
+                                     performance_cpus=performance_cpus)
     return max(0, len(units) - len(eligible))
 
 
