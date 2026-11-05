@@ -522,3 +522,55 @@ def test_image_host_with_sidecarless_wisdom_passes_the_gates(tmp_path, monkeypat
     assert smd._wisdom_current()
     assert wisdom.read_sidecar(kw['sidecar'])['adopted'] == 'legacy-image'
     assert smd.cmd_wisdom_needed(_Args()) == 1
+
+
+# M3: a planner that refuses must not be relaunched every poll.  Each launch
+# runs suspend and resume, so a refusal loop bounced every service about
+# every 15 s for up to an hour (final review, 2026-11-05).
+
+def _wait_env(tmp_path, monkeypatch, status):
+    import time as _time
+    kw = _host(tmp_path, sidecar=f'model={CXC}\n')     # not current
+    monkeypatch.setattr(wisdom, 'WISDOM_FILE', kw['wisdom_file'])
+    monkeypatch.setattr(wisdom, 'WISDOM_SIDECAR', kw['sidecar'])
+    monkeypatch.setattr(wisdom, 'FFT_MISS_LOG', kw['miss_log'])
+    monkeypatch.setattr(wisdom, 'CPUINFO', kw['cpuinfo'])
+    monkeypatch.setattr(smd, '_wisdom_placement', lambda: None)
+    monkeypatch.setattr(wisdom, 'identify_cpu', lambda *a, **k: {
+        'model': B4, 'slug': 'x', 'bundle': None, 'have_wisdom': False,
+        'known_bundles': []})
+    monkeypatch.setattr(_time, 'sleep', lambda s: None)
+    starts = []
+
+    def fake_run(cmd, **k):
+        if cmd[:2] == ['systemctl', 'start']:
+            starts.append(cmd)
+            out = ''
+        elif 'is-active' in cmd:
+            out = 'failed\n'
+        elif 'ExecMainStatus' in ' '.join(cmd):
+            out = f'{status}\n'
+        else:
+            out = ''
+        return subprocess.CompletedProcess(cmd, 0, out, '')
+    monkeypatch.setattr(smd, '_run', fake_run)
+    return kw, starts
+
+
+def test_a_refusing_planner_is_launched_once(tmp_path, monkeypatch, capsys):
+    kw, starts = _wait_env(tmp_path, monkeypatch, smd._WISDOM_PLAN_REFUSED)
+    assert not smd._bringup_wait_wisdom(kw['wisdom_file'], timeout_s=600, poll_s=15)
+    assert len(starts) == 1
+    out = capsys.readouterr()
+    assert (out.out + out.err).count('refused') == 1
+
+
+def test_a_failing_planner_is_relaunched_at_most_once(tmp_path, monkeypatch):
+    kw, starts = _wait_env(tmp_path, monkeypatch, 1)
+    assert not smd._bringup_wait_wisdom(kw['wisdom_file'], timeout_s=600, poll_s=15)
+    assert len(starts) == 2
+
+
+def test_the_xhci_refusal_exits_with_the_refusal_status(plan_env):
+    plan_env['irq'].write_text('6-7\n')
+    assert smd.cmd_wisdom_plan(_Args()) == smd._WISDOM_PLAN_REFUSED

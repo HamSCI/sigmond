@@ -9603,6 +9603,12 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
               f'model skips the wait:  smd admin wisdom harvest')
 
     _info(f'waiting for FFT wisdom ({wisdom_file}) — this can take ~30 min...')
+    # Launch the planner once, and relaunch it once after a failure that was
+    # not a refusal.  Every launch runs suspend and resume, so relaunching on
+    # each poll turned a refusing planner (xhci IRQ on radiod's cores, no
+    # override) into stop-all / start-all about every 15 s for up to an hour
+    # (final review M3, 2026-11-05).
+    launches = 0
     waited = 0
     while waited < timeout_s:
         if _wisdom_current(wisdom_file):
@@ -9610,8 +9616,21 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
         state = _run(['systemctl', 'is-active', 'sigmond-wisdom.service'],
                      capture=True).stdout.strip()
         if state in ('failed', 'inactive'):
-            _run(['systemctl', 'start', '--no-block', 'sigmond-wisdom.service'],
-                 sudo=True)
+            status = _run(['systemctl', 'show', '-p', 'ExecMainStatus', '--value',
+                           'sigmond-wisdom.service'], capture=True).stdout.strip()
+            refused = state == 'failed' and status == str(_WISDOM_PLAN_REFUSED)
+            if launches == 0 or (launches == 1 and not refused):
+                _run(['systemctl', 'start', '--no-block', 'sigmond-wisdom.service'],
+                     sudo=True)
+                launches += 1
+            else:
+                why = ('refused to plan' if refused
+                       else f'stopped without wisdom ({state}, exit {status or "?"})')
+                _err(f'FFT wisdom: sigmond-wisdom.service {why}; not relaunching it, '
+                     f'because each launch stops and restarts every service.')
+                _info('  See why:  journalctl -u sigmond-wisdom.service -b')
+                _info('  Fix it, then run:  sudo systemctl start sigmond-wisdom.service')
+                return _wisdom_current(wisdom_file)
         time.sleep(poll_s)
         waited += poll_s
         if waited % 60 == 0:
@@ -18325,6 +18344,12 @@ def _wisdom_current(wisdom_file=None) -> bool:
     return _wisdom_verdict(wisdom_file) == 'current'
 
 
+# cmd_wisdom_plan's exit status when it declines to plan under conditions
+# radiod will not run in (services still active, an xhci IRQ on radiod's
+# cores).  _bringup_wait_wisdom reads it from the unit and stops relaunching.
+_WISDOM_PLAN_REFUSED = 3
+
+
 # systemd runs ExecStopPost after an ExecCondition skip too (verified on sigma,
 # systemd 257.13, 2026-11-05), so a bare `smd start` there would have no stop to
 # pair with.  suspend writes this marker after it stops services; resume
@@ -18434,7 +18459,7 @@ def cmd_wisdom_plan(args) -> int:
             print(f'      … and {len(busy) - 6} more')
         _info('Run:  smd stop')
         _info('Then re-run:  smd admin wisdom plan')
-        return 1
+        return _WISDOM_PLAN_REFUSED
 
     WISDOM_TMP.parent.mkdir(parents=True, exist_ok=True)
 
@@ -18480,7 +18505,7 @@ def cmd_wisdom_plan(args) -> int:
             for irq, aff in stuck:
                 print(f'      irq {irq} -> cpus {aff}')
             _info(f'Check {_IRQ_AFFINITY_SCRIPT} and radiod\'s CPUAffinity drop-in.')
-            return 1
+            return _WISDOM_PLAN_REFUSED
         os.sched_setaffinity(0, pin)
         _info(f'planning pinned to CPUs {sorted(pin)} '
               f'(radiod: {", ".join(sorted(radiod_cores))})')
