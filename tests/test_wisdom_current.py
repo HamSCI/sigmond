@@ -574,3 +574,43 @@ def test_a_failing_planner_is_relaunched_at_most_once(tmp_path, monkeypatch):
 def test_the_xhci_refusal_exits_with_the_refusal_status(plan_env):
     plan_env['irq'].write_text('6-7\n')
     assert smd.cmd_wisdom_plan(_Args()) == smd._WISDOM_PLAN_REFUSED
+
+
+
+# sigma, 2026-11-05: bring-up's `smd start hamsci-physics` walked the requires
+# chain and started radiod two minutes into planning, beside the planner on
+# CPU 6's sibling.  While the marker stands, start leaves radiod down.
+
+class _Unit:
+    def __init__(self, component, unit, kind='service'):
+        self.component, self.unit, self.kind = component, unit, kind
+
+
+def test_start_holds_radiod_while_the_planner_has_it_suspended(pairing, capsys):
+    calls, marker = pairing
+    units = [_Unit('ka9q-radio', 'radiod@sigma.service'),
+             _Unit('ka9q-radio', 'radiod-park@sigma.timer', kind='timer'),
+             _Unit('hf-timestd', 'timestd-core-recorder.service')]
+    assert smd._hold_radiod_for_planner(units) == units
+    marker.parent.mkdir(parents=True)
+    marker.write_text('suspended\n')
+    kept = smd._hold_radiod_for_planner(units)
+    assert [u.unit for u in kept] == ['radiod-park@sigma.timer',
+                                      'timestd-core-recorder.service']
+    cap = capsys.readouterr()
+    assert 'radiod@sigma.service' in cap.out + cap.err
+
+
+def test_resume_clears_the_marker_before_it_starts(pairing, monkeypatch):
+    calls, marker = pairing
+    seen = []
+    monkeypatch.setattr(smd, 'cmd_start', lambda a: seen.append(marker.exists()) or 0)
+    smd.cmd_wisdom_suspend(_Args())
+    assert smd.cmd_wisdom_resume(_Args()) == 0
+    assert seen == [False]
+
+
+def test_cmd_start_passes_its_units_through_the_hold():
+    src = (Path(smd.__file__).read_text())
+    body = src[src.index('def cmd_start(args)'):src.index('\ndef ', src.index('def cmd_start(args)') + 10)]
+    assert 'units = _hold_radiod_for_planner(units)' in body

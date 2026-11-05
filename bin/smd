@@ -13794,6 +13794,7 @@ def cmd_start(args) -> int:
     if _HAS_SIGMOND_LIB:
         coord = load_coordination()
         units = order_units(units, coordination=coord)
+    units = _hold_radiod_for_planner(units)
 
     # Write CPU affinity drop-ins for radiod instances before starting them.
     radiod_services = [u for u in units
@@ -18381,13 +18382,30 @@ def cmd_wisdom_suspend(args) -> int:
     return rc
 
 
+def _hold_radiod_for_planner(units):
+    """Drop radiod's services from a start while the planner has it suspended.
+
+    sigma, 2026-11-05: bring-up's `smd start hamsci-physics` walked the
+    requires chain and started radiod two minutes into planning.  FFTW then
+    timed its plans beside a running radiod, on the planner's sibling CPU.
+    The planner's resume clears the marker and starts radiod itself.
+    """
+    if not _WISDOM_SUSPEND_MARKER.exists():
+        return units
+    held = [u for u in units if u.component == 'ka9q-radio' and u.kind == 'service']
+    for u in held:
+        _warn(f'{_display_unit(u.unit)}: not started — the FFT wisdom planner is running '
+              f'(sigmond-wisdom.service); it starts radiod when it finishes')
+    return [u for u in units if u not in held]
+
+
 def cmd_wisdom_resume(args) -> int:
     """Start the services suspend stopped; do nothing when it never ran."""
     if not _WISDOM_SUSPEND_MARKER.exists():
         return 0
-    rc = cmd_start(_wisdom_stop_start_args())
+    # Clear the marker first: while it stands, cmd_start holds radiod back.
     _WISDOM_SUSPEND_MARKER.unlink(missing_ok=True)
-    return rc
+    return cmd_start(_wisdom_stop_start_args())
 
 
 def cmd_wisdom_needed(args) -> int:
