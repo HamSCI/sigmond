@@ -423,6 +423,17 @@ adding the guard to `hf-timestd` in commit `339dec4`.
 - Sigmond writes CPU affinity only as drop-ins at
   `/etc/systemd/system/<client>@<instance>.service.d/10-sigmond-cpu-affinity.conf`.
   The client must not write its own drop-ins under that path.
+- A client bound to a radiod **must not exit** when that radiod is
+  absent or unresolvable at start.  It reports ready (`READY=1`) with
+  a waiting status (`STATUS=waiting for radiod <status>`), retries with
+  backoff (5, 10, 20, 40, then 60 s, without end), and sends
+  `STATUS=running` once it connects.  It logs one WARNING when the wait
+  begins and one INFO when it ends, and nothing per try.  A placeholder
+  status address stays the exception: exit 78, so systemd stops
+  cleanly.  Why: on AC0G-B2 (a client-only host), wspr-recorder and
+  psk-recorder died on 2026-10-15 and again on 2026-11-04.  Each tried
+  its radiod's mDNS name once, quit with exit status 0, and systemd
+  locked the unit out after 10 starts in 300 s.
 
 ### 5. Deploy manifest: `<repo>/deploy.toml`
 
