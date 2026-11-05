@@ -701,3 +701,25 @@ def test_sources_add_prints_the_resolved_key_quoted(monkeypatch, capsys):
     assert smd.cmd_sources_add(args) == 0
     out = capsys.readouterr().out
     assert evil_dns not in out and repr(f'radiod:{evil_dns}') in out
+
+
+def test_bind_writes_coordination_env_atomically(tmp_path, monkeypatch):
+    # Final review M4, 2026-11-05: coordination.env is the EnvironmentFile of
+    # root services; a plain write_text left a window with a torn file.  It
+    # now goes through the writer coordination.toml uses.
+    import sigmond.coordination as coordination
+    smd = _load_smd()
+    etc = tmp_path / 'etc'
+    coord = etc / 'sigmond' / 'coordination.toml'
+    real = coordination._write_coordination
+    wrote = []
+
+    def spy(path, text):
+        wrote.append(Path(path).name)
+        real(path, text)
+    monkeypatch.setattr(coordination, '_write_coordination', spy)
+    assert smd._sources_bind(B, 'AC0G/B1B', ['psk-recorder'], host='ac0g-b1',
+                             timing=True, etc_root=etc, coord_path=coord,
+                             inventory_rows=[]) == 0
+    assert 'coordination.env' in wrote
+    assert 'HF_TIMESTD_RADIOD=' + B in (etc / 'sigmond' / 'coordination.env').read_text()

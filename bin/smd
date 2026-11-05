@@ -19519,8 +19519,10 @@ def _sources_bind(status_dns: str, reporter: str, clients, *,
     env_path = coord_path.with_name('coordination.env')
     env_text = render_env(load_coordination(coord_path))
     if not env_path.exists() or env_path.read_text() != env_text:
-        env_path.parent.mkdir(parents=True, exist_ok=True)
-        env_path.write_text(env_text)
+        # Root services read this as their EnvironmentFile; replace it in one
+        # rename, as coordination.toml is (final review M4, 2026-11-05).
+        from sigmond import coordination as _coordination
+        _coordination._write_coordination(env_path, env_text)
         _ok(f'rendered {env_path}')
     return rc
 
