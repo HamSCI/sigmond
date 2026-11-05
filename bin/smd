@@ -10108,13 +10108,17 @@ def _bringup_declared_receivers(site_profile):
 
 
 def _bringup_plan_receivers(receivers, *, profile_clients: frozenset,
-                            callsign: str = ''):
+                            host_radiod: bool, callsign: str = ''):
     """Split a declared receiver list for `build_plan` (spec §7).
 
-    A receiver is local when coordination.toml declares a radiod on this
-    host whose status name matches the receiver's radiod; otherwise it is
-    remote, and must answer on the LAN now, before anything is planned.
-    The list is the operator's choice: no callsign selection runs and
+    On a host that installs radiod (``host_radiod``, ruling R8), a receiver
+    is local when coordination.toml declares a radiod on this host whose
+    status name matches the receiver's, or when its radiod does not answer
+    on the LAN: this bring-up's Stage 1 creates that radiod, and its
+    `receiver apply` runs after radiod is configured.  A receiver whose
+    radiod answers and matches no local block is remote.  On a decode-only
+    host every receiver is remote and must answer on the LAN now, before
+    anything is planned, whatever coordination says.  The list is the operator's choice: no callsign selection runs and
     nothing is asked.  Returns ``(remote_pairs, local_receivers,
     local_only, injector_dns)``, or ``None`` after printing every
     problem."""
@@ -10126,28 +10130,37 @@ def _bringup_plan_receivers(receivers, *, profile_clients: frozenset,
         _err('bringup: fix the [[receiver]] list in site-profile.toml — '
              'nothing installed')
         return None
-    try:
-        from sigmond.coordination import load_coordination as _lc
-        coord = _lc()
-    except Exception as exc:                                    # noqa: BLE001
-        _warn(f'bringup: could not read coordination.toml ({exc}); every '
-              f'declared receiver counts as remote')
-        coord = None
     own = set()
-    if coord is not None:
-        own = {r.effective_status_dns.lower()
-               for r in coord.radiods.values()
-               if r.is_local and r.effective_status_dns}
-    local, remote = [], []
-    for r in receivers:
-        entry = (r.radiod, r.reporter_id,
-                 effective_clients(r, profile_clients))
-        (local if r.radiod.lower() in own else remote).append(entry)
-    if remote:
+    if host_radiod:
+        try:
+            from sigmond.coordination import load_coordination as _lc
+            coord = _lc()
+        except Exception as exc:                                # noqa: BLE001
+            _warn(f'bringup: could not read coordination.toml ({exc}); a '
+                  f'declared receiver is local only if its radiod is silent')
+            coord = None
+        if coord is not None:
+            own = {r.effective_status_dns.lower()
+                   for r in coord.radiods.values()
+                   if r.is_local and r.effective_status_dns}
+    entries = [(r.radiod, r.reporter_id, effective_clients(r, profile_clients))
+               for r in receivers]
+    local = [e for e in entries if e[0].lower() in own]
+    rest = [e for e in entries if e[0].lower() not in own]
+    remote = []
+    if rest:
         from sigmond.sources import discover_radiods
         found = discover_radiods()
         answering = {d.status_dns.lower() for d in found}
-        silent = [d for d, _, _ in remote if d.lower() not in answering]
+        silent = [d for d, _, _ in rest if d.lower() not in answering]
+        if host_radiod:
+            # A silent radiod on a radiod host is one this run creates.
+            remote = [e for e in rest if e[0].lower() in answering]
+            local += [e for e in rest if e[0].lower() not in answering]
+            local.sort(key=entries.index)
+            silent = []
+        else:
+            remote = rest
         if silent:
             _bringup_print_radiods(found, [], callsign)
             for d in dict.fromkeys(silent):
@@ -10376,10 +10389,14 @@ def cmd_bringup(args) -> int:
             _err('bringup: the receiver list in site-profile.toml already '
                  'names the radiods; edit it or drop --remote-radiod')
             return 1
+        if cli_reporter:
+            _err('bringup: the receiver list in site-profile.toml already '
+                 'names the reporter IDs; edit it or drop --reporter')
+            return 1
         planned = _bringup_plan_receivers(
             declared, profile_clients=frozenset(
                 c for c in prof.clients if c not in skip),
-            callsign=callsign)
+            host_radiod=local, callsign=callsign)
         if planned is None:
             return 1
         receivers_declared = True
@@ -10392,6 +10409,9 @@ def cmd_bringup(args) -> int:
             reporter = local_receivers[0][1]
         elif len(remote_pairs) == 1 and not local:
             reporter = remote_pairs[0][1]
+        remote_dns = list(dict.fromkeys(d.lower() for d, _, _ in remote_pairs))
+        if not local and len(remote_dns) == 1:
+            # One radiod (perhaps under several receivers) gets hf-timestd.
             timing_named = timing_named or remote_pairs[0][0]
     elif not local:
         if not callsign and _HAS_SIGMOND_LIB:

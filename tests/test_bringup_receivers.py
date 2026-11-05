@@ -79,6 +79,14 @@ def test_one_local_receiver_keeps_the_reporter_path():
     assert len(_argv_steps(p, 'admin', 'receiver', 'apply')) == 1
     adds = [s.argv[-2:] for s in _argv_steps(p, 'admin', 'instance', 'add')]
     assert sorted(adds) == sorted([c, 'AC0G/B1A'] for c in WP)
+    # R7: the hard checkpoint covers the declared pair, after sources apply.
+    ckpt = next(s for s in p.steps
+                if (s.check or '').startswith('instances-bound:'))
+    assert ckpt.hard
+    assert sorted(ckpt.check.split(':', 1)[1].split(',')) == sorted(
+        f'{c}@AC0G/B1A' for c in WP)
+    sa = _argv_steps(p, 'admin', 'sources', 'apply')
+    assert len(sa) == 1 and p.steps.index(sa[0]) < p.steps.index(ckpt)
 
 
 def test_a_receiver_that_narrows_its_clients_gets_only_those_instances():
@@ -276,3 +284,88 @@ def test_a_declared_list_adds_no_instance_for_the_bare_reporter():
                    receivers_declared=True, remote_radiods=remote)
     adds = sorted(s.argv[-2:] for s in _argv_steps(p, 'admin', 'instance', 'add'))
     assert adds == sorted([c, 'AC0G/B1A'] for c in WP)
+
+
+def test_two_receivers_on_one_remote_radiod_still_get_hf_timestd():
+    remote = ((A, 'AC0G/B1A', WP), (A, 'AC0G/B1C', WP))
+    p = build_plan(_client(), local_radiod=False, remote_radiods=remote,
+                   receivers_declared=True)
+    labels = [s.label for s in p.steps]
+    assert 'configure hf-timestd' in labels
+    assert not any('idle' in l for l in labels)
+
+
+def _radiod_host(monkeypatch, smd):
+    monkeypatch.setattr(smd, '_detect_local_sdr', lambda: True)
+    monkeypatch.setattr(smd, '_detect_magnetometer', lambda: True)
+    monkeypatch.setattr(smd, '_detect_gpsdo', lambda: True)
+
+
+def test_a_greenfield_radiod_host_plans_its_silent_receivers_as_local(
+        tmp_path, monkeypatch):
+    # R8: no coordination block yet, and the radiods are not on the LAN:
+    # this bring-up's Stage 1 creates them.
+    smd = _load_smd()
+    calls = _bringup_env(monkeypatch, smd, [])
+    _profile_with(tmp_path, monkeypatch, TWO_REMOTE)
+    _no_coordination(monkeypatch)
+    _radiod_host(monkeypatch, smd)
+    assert smd.cmd_bringup(_bringup_args(profile='dasi2')) == 0
+    k = calls[0]
+    assert [x[:2] for x in k['local_receivers']] == [
+        (A, 'AC0G/B1A'), (B, 'AC0G/B1B')]
+    assert tuple(k['remote_radiods']) == ()
+
+
+def test_a_decode_only_host_ignores_a_stale_local_block(
+        tmp_path, monkeypatch, capsys):
+    # R8: on a host without radiod every receiver must answer, even one a
+    # stale coordination block calls local.
+    smd = _load_smd()
+    calls = _bringup_env(monkeypatch, smd, _found(B))
+    _profile_with(tmp_path, monkeypatch, TWO_REMOTE)
+    _no_coordination(monkeypatch, {A: 'localhost'})
+    assert smd.cmd_bringup(_bringup_args()) == 1
+    assert calls == []
+    cap = capsys.readouterr()
+    assert f'radiod {A} did not answer' in cap.out + cap.err
+
+
+def test_reporter_flag_and_a_declared_list_conflict(
+        tmp_path, monkeypatch, capsys):
+    smd = _load_smd()
+    calls = _bringup_env(monkeypatch, smd, _found(A, B))
+    _profile_with(tmp_path, monkeypatch, TWO_REMOTE)
+    _no_coordination(monkeypatch)
+    assert smd.cmd_bringup(_bringup_args(reporter='AC0G/X')) == 1
+    assert calls == []
+    cap = capsys.readouterr()
+    assert ('the receiver list in site-profile.toml already names the '
+            'reporter IDs; edit it or drop --reporter') in cap.out + cap.err
+
+
+def test_a_radiod_host_with_one_local_and_one_remote_receiver(
+        tmp_path, monkeypatch):
+    smd = _load_smd()
+    calls = _bringup_env(monkeypatch, smd, _found(B))
+    _profile_with(tmp_path, monkeypatch, TWO_REMOTE)
+    _no_coordination(monkeypatch, {A: 'localhost'})
+    _radiod_host(monkeypatch, smd)
+    assert smd.cmd_bringup(_bringup_args(profile='dasi2')) == 0
+    k = calls[0]
+    assert [x[:2] for x in k['local_receivers']] == [(A, 'AC0G/B1A')]
+    assert [tuple(x[:2]) for x in k['remote_radiods']] == [(B, 'AC0G/B1B')]
+    assert k['reporter'] == 'AC0G/B1A'
+    # The plan makes and checks an instance pair for each receiver.
+    p = build_plan(_local(), local_radiod=True, reporter=k['reporter'],
+                   receivers_declared=True,
+                   local_receivers=k['local_receivers'],
+                   remote_radiods=k['remote_radiods'])
+    want = sorted([c, r] for c in WP for r in ('AC0G/B1A', 'AC0G/B1B'))
+    adds = sorted(s.argv[-2:] for s in _argv_steps(p, 'admin', 'instance', 'add'))
+    assert adds == want
+    ckpt = next(s for s in p.steps
+                if (s.check or '').startswith('instances-bound:'))
+    assert sorted(ckpt.check.split(':', 1)[1].split(',')) == sorted(
+        f'{c}@{r}' for c, r in want)
+    assert len(_argv_steps(p, 'admin', 'receiver', 'apply')) == 1

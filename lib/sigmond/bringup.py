@@ -262,7 +262,11 @@ def build_plan(profile, *, local_radiod: bool,
 
     off_keys = {_reporter_key(r) for r in local_only}
     # Timing follows the remote radiods only on a host with none of its own.
-    timing_pool = remote_radiods if not local_radiod else ()
+    # One radiod counts once, however many receivers listen to it.
+    by_dns: dict = {}
+    for d, r in (remote_radiods if not local_radiod else ()):
+        by_dns.setdefault(d.lower(), (d, r))
+    timing_pool = tuple(by_dns.values())
     if len(timing_pool) == 1:
         timing_dns = timing_pool[0][0]
     else:
