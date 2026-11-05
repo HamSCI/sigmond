@@ -707,7 +707,8 @@ def test_the_switch_installs_from_the_wizard_as_an_ascii_script():
     fn = WIZARD[i:WIZARD.index("\nRACSWEOF\n", i) + 400]
     assert "rm -f /usr/local/sbin/sigmond-rac-switch\n" in fn
     assert "chmod 755 /usr/local/sbin/sigmond-rac-switch" in fn
-    assert WIZARD.index("rac_install_host_files(){") < WIZARD.index('case "${1:-}" in')
+    # The dispatch starts a line; ipurl() (2026-10-31) carries the same words inline.
+    assert WIZARD.index("rac_install_host_files(){") < WIZARD.index('\ncase "${1:-}" in\n')
 
 
 # -- the installer keeps the working switch until the new one proves whole -----------
