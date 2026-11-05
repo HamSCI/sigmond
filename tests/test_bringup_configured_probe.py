@@ -102,3 +102,47 @@ def test_validate_timing_out_changes_no_verdict(tmp_path, monkeypatch):
 
 def test_sentinel_always_unconfigured_with_no_env():
     assert smd._config_is_placeholder('a = "<configure-via-config-init>"\n')
+
+
+HF_TEMPLATE_PSWS_LEFT = ('[station]\nid = "<YOUR_STATION_ID>"\n'
+                         'callsign = "AI6VN"\ngrid_square = "CM87"\n')
+
+
+def test_enrolled_mag_station_is_configured_no_reconfig(tmp_path, monkeypatch):
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(UNENROLLED)
+    _fake(monkeypatch, cfg, {"STATION_CALLSIGN": "AC0G", "STATION_GRID": "EM38ww",
+                             "STATION_PSWS_STATION_ID": "S000082"})
+    ok, _, reconf = smd._bringup_probe("configured:mag-recorder", "smd")
+    assert (ok, reconf) == (True, False)
+
+
+def test_hf_timestd_with_psws_token_left_and_id_in_env_is_configured(
+        tmp_path, monkeypatch):
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(HF_TEMPLATE_PSWS_LEFT)
+    _fake(monkeypatch, cfg, {"STATION_CALL": "AI6VN", "STATION_GRID": "CM87",
+                             "STATION_PSWS_STATION_ID": "S000111"})
+    ok, _, reconf = smd._bringup_probe("configured:hf-timestd", "smd")
+    assert (ok, reconf) == (True, False)
+
+
+def test_your_callsign_with_callsign_in_env_is_unconfigured(tmp_path, monkeypatch):
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('[station]\ncallsign = "<YOUR_CALLSIGN>"\n')
+    _fake(monkeypatch, cfg, {"STATION_CALLSIGN": "AI6VN"})
+    ok, _, reconf = smd._bringup_probe("configured:hf-timestd", "smd")
+    assert (ok, reconf) == (False, True)
+
+
+def test_env_builder_raising_warns_and_judges_by_sentinel(monkeypatch, capsys):
+    import sys
+    mod = types.ModuleType("sigmond.commands.client_config")
+
+    def boom(**kw):
+        raise RuntimeError("coordination unreadable")
+    mod._build_env_bag = boom
+    monkeypatch.setitem(sys.modules, "sigmond.commands.client_config", mod)
+    assert smd._probe_config_env("mag-recorder") == {}
+    err = capsys.readouterr()
+    assert "coordination unreadable" in err.out + err.err

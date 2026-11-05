@@ -9739,20 +9739,24 @@ def _bringup_wait_lock_free(timeout_s: int = 180) -> None:
 # `config init` replaces it.  A config that still contains it is unconfigured.
 _CONFIG_PLACEHOLDER = '<configure-via-config-init>'
 
-# Which env key fills which template token.  Built from what
-# `client_config._build_env_bag` exports to `smd config init <client>`
-# (station_identity_env in coordination.py, plus SIGMOND_RADIOD_STATUS).
-# A token missing here is one sigmond cannot fill.
+# Which env key fills which template token, for the tokens a client's own
+# non-interactive `config init` fills from sigmond's env.  Checked 2026-11-05:
+#   mag-recorder  configurator._ENV_SUBSTITUTIONS: <YOUR_CALL>=STATION_CALLSIGN,
+#                 <YOUR_GRID>=STATION_GRID
+#   hf-timestd    scripts/setup-station.sh: callsign=STATION_CALL,
+#                 grid=STATION_GRID, radiod status=SIGMOND_RADIOD_STATUS
+# PSWS station and instrument ids stay OUT, on purpose.  mag-recorder fills
+# its id from MAG_RECORDER_STATION_ID, which sigmond never sets, so
+# --reconfig would rewrite an enrolled station's file and leave the token;
+# the hard checkpoint would then abort every run.  hf-timestd's --reconfig
+# regenerates its whole config and loses hand edits.  Bring-up's site-profile
+# step writes those ids without regenerating the file: bring-up is bring-up,
+# not reconfigure (sigma, 2026-11-05).
 _TEMPLATE_TOKEN_ENV = {
     '<YOUR_CALL>': ('STATION_CALLSIGN', 'STATION_CALL'),
+    '<YOUR_CALLSIGN>': ('STATION_CALL', 'STATION_CALLSIGN'),
     '<YOUR_GRID>': ('STATION_GRID',),
-    '<YOUR_LAT>': ('STATION_LAT',),
-    '<YOUR_LON>': ('STATION_LON',),
     '<YOUR_RADIOD_STATUS>': ('SIGMOND_RADIOD_STATUS',),
-    '<YOUR_PSWS_STATION_ID>': ('STATION_PSWS_STATION_ID',),
-    '<YOUR_STATION_ID>': ('STATION_PSWS_STATION_ID',),
-    '<YOUR_PSWS_INSTRUMENT_ID>': ('STATION_PSWS_INSTRUMENT_ID',),
-    '<YOUR_INSTRUMENT_ID>': ('STATION_PSWS_INSTRUMENT_ID',),
 }
 _TEMPLATE_TOKEN_RE = re.compile(r'[\x22\x27](<[A-Z][A-Z0-9_-]*>)[\x22\x27]')
 
@@ -9794,7 +9798,11 @@ def _probe_config_env(client: str) -> dict:
     try:
         from sigmond.commands.client_config import _build_env_bag
         return _build_env_bag(client=client) or {}
-    except Exception:
+    except Exception as e:
+        # Without the env only the sentinel counts, which is how sigma's
+        # mag-recorder template slipped through; say so once.
+        _warn(f'could not build the config-init env for {client} ({e}); '
+              f'judging its config by the sentinel only')
         return {}
 
 
