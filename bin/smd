@@ -10877,11 +10877,45 @@ def _bringup_finish(plan, name: str, failed_steps=(), smd: str = 'smd',
              f"smd bringup {name}")
         return BRINGUP_INCOMPLETE_RC
     _ok(f"bringup '{name}' complete")
+    _bringup_activate_rac(Path(__file__).resolve().parent.parent)
     if held:
         _bringup_offer_upload_release(smd, ask=ask)
     _settle_firstrun_marker()
     _info('verify anytime with: smd admin validate')
     return 0
+
+
+_RAC_APPLIANCE_VERSION = Path('/etc/sigmond-appliance/version')
+_RAC_SWITCH_KEY = Path('/etc/sigmond/rac-switch.key')
+_RAC_REASONS = {
+    1: 'could not start or register',
+    3: 'waiting on the gateway',
+    4: 'no site name: set [station] callsign in /etc/sigmond/site-profile.toml',
+    5: 'a Proxmox host carries this machine\'s remote access',
+    6: 'a different site name is already recorded',
+}
+
+
+def _bringup_activate_rac(smd_root: Path) -> None:
+    """Bring up remote access on a bare-metal machine.  Never raises and
+    never changes the bring-up verdict: the retry timer finishes the job.
+    Appliance VMs skip silently; their Proxmox host carries the RAC."""
+    if _RAC_APPLIANCE_VERSION.exists() or _RAC_SWITCH_KEY.exists():
+        return
+    reason = None
+    try:
+        r = subprocess.run([str(smd_root / 'scripts' / 'rac' / 'sigmond-rac'),
+                            'activate'],
+                           stdin=subprocess.DEVNULL, timeout=900)
+        if r.returncode != 0:
+            reason = _RAC_REASONS.get(r.returncode, f'exit {r.returncode}')
+    except subprocess.TimeoutExpired:
+        reason = 'timed out after 900 s'
+    except Exception as e:  # noqa: BLE001 - must never break bring-up
+        reason = f'{type(e).__name__}: {e}'
+    if reason:
+        _info(f'remote access not up yet: {reason}; '
+              'the retry timer keeps trying; smd remote status')
 
 
 def _bringup_first_install_hold(plan) -> bool:

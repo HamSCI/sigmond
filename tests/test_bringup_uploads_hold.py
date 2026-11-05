@@ -84,6 +84,7 @@ def _finish(smd, hold, answer):
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \
             mock.patch.object(smd, '_ask_optional_yes_no', return_value=answer) as ask, \
             mock.patch.object(smd, '_run', return_value=mock.Mock(returncode=0)) as run, \
+            mock.patch.object(smd, '_bringup_activate_rac'), \
             mock.patch.object(smd, '_settle_firstrun_marker'):
         rc = smd._bringup_finish(plan, 'dasi2', [], smd='/x/smd')
     return rc, ask, run, out.getvalue()
@@ -195,6 +196,7 @@ def test_a_non_interactive_run_never_asks_to_release(capsys):
             mock.patch.object(smd, '_ask_optional_yes_no',
                               side_effect=AssertionError('asked')) as ask, \
             mock.patch.object(smd, '_run', return_value=mock.Mock(returncode=0)) as run, \
+            mock.patch.object(smd, '_bringup_activate_rac'), \
             mock.patch.object(smd, '_settle_firstrun_marker'):
         rc = smd._bringup_finish(plan, 'dasi2', [], smd='/x/smd', ask=False)
     assert rc == 0
