@@ -13288,6 +13288,24 @@ def _ensure_guest_cpu_isolation(topology_cpu_affinity=None) -> bool:
         current = _ISOL_PATH.read_text()
     except OSError:
         current = None
+
+    # A machine sigmond does not own boots the way its owner set it up.  On a
+    # repo install, GRUB changes only with the operator's say-so: the topology
+    # opt-in, or a drop-in sigmond wrote earlier (AC0G-B1, a repo install whose
+    # isolation sigmond wrote; deleting it would undo that tuning, so an
+    # existing drop-in counts as the earlier opt-in and is kept current).
+    from sigmond.cpu import _cpus_to_range_str
+    from sigmond.provenance import is_appliance_install as _is_appliance
+    opted_in = bool((topology_cpu_affinity or {}).get('write_kernel_isolation'))
+    if not (_is_appliance() or opted_in or current is not None):
+        cpu_str = _cpus_to_range_str(sorted(want))
+        _info(f'cpu isolation (not applied): this host was installed from the '
+              f'repos, so smd leaves GRUB alone.  It would add '
+              f'isolcpus={cpu_str} nohz_full={cpu_str} rcu_nocbs={cpu_str} '
+              f'to {_ISOL_PATH}.  To let smd write it, set '
+              f'`[cpu_affinity] write_kernel_isolation = true` in topology.toml.')
+        return False
+
     if current == desired:
         # Already staged.  Still say so if the running kernel predates it --
         # otherwise a box sits "configured" and unisolated indefinitely, which

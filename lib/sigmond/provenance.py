@@ -57,6 +57,17 @@ def image_lineage(path=IMAGE_VERSION_FILE) -> dict:
             'means': _LINEAGE_MEANS if text else _LINEAGE_UNKNOWN}
 
 
+def is_appliance_install(root: str = '/') -> bool:
+    """True on a host the USB image laid down, False on a repo install.
+
+    The image's firstboot writes /etc/sigmond-appliance/version; nothing else
+    does.  Whatever differs for a ham's own machine keys on this one test, so
+    the kernel command line stays the operator's unless sigmond owns the box.
+    """
+    rel = IMAGE_VERSION_FILE.lstrip('/')
+    return (Path(root) / rel).exists()
+
+
 def _git_head(path, *args) -> Optional[str]:
     # --no-optional-locks for the same reason doctor.py uses it: run as
     # root, a plain git command rewrites .git/index and leaves it
