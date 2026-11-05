@@ -426,7 +426,8 @@ adding the guard to `hf-timestd` in commit `339dec4`.
 - A client bound to a radiod **must not exit** when that radiod is
   absent or unresolvable at start.  It reports ready (`READY=1`) with
   a waiting status (`STATUS=waiting for radiod <status>`), retries with
-  backoff (5, 10, 20, 40, then 60 s, without end), and sends
+  backoff (5, 10, 20, 40, then 60 s, without end), keeps petting its
+  watchdog (`WATCHDOG=1`) while it waits, and sends
   `STATUS=running` once it connects.  It logs one WARNING when the wait
   begins and one INFO when it ends, and nothing per try.  A placeholder
   status address stays the exception: exit 78, so systemd stops
