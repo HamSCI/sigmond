@@ -202,3 +202,14 @@ def test_a_syntax_error_is_a_receiver_error(tmp_path):
 def test_a_receiver_that_is_not_a_table_is_a_receiver_error(tmp_path):
     with pytest.raises(ReceiverError):
         load_receivers(_f(tmp_path, 'receiver = [1]\n'))
+
+
+def test_an_indented_receiver_header_is_replaced_not_copied(tmp_path):
+    from sigmond.receivers import Receiver, load_receivers, write_receivers
+    p = tmp_path / 'site-profile.toml'
+    p.write_text('[station]\ncall = "AC0G"\n\n'
+                 '  [[receiver]]\n  reporter_id = "AC0G/B1A"\n'
+                 '  radiod = "a-status.local"\n')
+    write_receivers(p, load_receivers(p))
+    assert p.read_text().count('[[receiver]]') == 1
+    assert len(load_receivers(p)) == 1

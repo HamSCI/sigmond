@@ -19573,6 +19573,149 @@ def _sources_bind(status_dns: str, reporter: str, clients, *,
     return rc
 
 
+def _receiver_key(r) -> str:
+    from sigmond import instance as _inst
+    return _inst.parse_user_reporter_id(r.reporter_id)
+
+
+def _receiver_profile_clients() -> frozenset:
+    """The client set receivers default from.  bin/smd keeps no record of
+    which catalog profile this host runs, so every reporter-keyed client
+    counts; a receiver that names its ``clients`` narrows it."""
+    from sigmond.bringup import _REPORTER_KEYED
+    return frozenset(_REPORTER_KEYED)
+
+
+def _receiver_apply(receivers, *, profile_clients,
+                    etc_root: Path = Path('/etc'), coord_path=None,
+                    profile_path=None, dry_run: bool = False,
+                    inventory_rows=None, hosts=None, only_these: bool = False,
+                    validate_all: bool = True) -> int:
+    """Bind every receiver in ``receivers`` (the declared list).
+
+    Validates first: on any problem it prints every message, touches
+    nothing and returns 1.  Then, per receiver, `_sources_bind` with the
+    receiver's radiod, reporter ID, effective clients and ``injector`` as
+    ``timing``, and sets each instance's upload flag from ``uploads``.
+    Only adds and updates: no instance, sources file or coordination block
+    is ever removed.  ``hosts`` maps a status name to the machine its radiod
+    runs on; a radiod already in coordination keeps the host it has, and a
+    blank one lets `_sources_bind` look in the inventory.
+
+    ``only_these`` / ``validate_all=False`` serve `sources bind`: it applies
+    one receiver, but validates the whole stored list so that a bind cannot
+    leave an invalid record behind unreported."""
+    from sigmond import upload as _upload
+    from sigmond.receivers import (effective_clients, load_receivers,
+                                   validate_receivers)
+    from sigmond import site_profile as _sp
+    receivers = list(receivers)
+    profile_path = profile_path or _sp.SITE_PROFILE_PATH
+    judged = receivers
+    if not validate_all:
+        try:
+            judged = load_receivers(profile_path)
+        except ValueError:
+            judged = receivers
+    msgs = validate_receivers(judged, profile_clients=profile_clients)
+    if msgs:
+        for m in msgs:
+            _err(f'receiver apply: {m}')
+        return 1
+    etc_root = Path(etc_root)
+    rc = 0
+    for r in receivers:
+        clients = effective_clients(r, profile_clients)
+        label = f'{r.reporter_id} -> {r.radiod}'
+        if dry_run:
+            _info(f'{label}: bind {", ".join(clients) or "no clients"}'
+                  + (' + hf-timestd' if r.injector else '')
+                  + f'; upload {"on" if r.uploads else "off"}')
+            continue
+        if _sources_bind(r.radiod, r.reporter_id, list(clients),
+                         host=(hosts or {}).get(r.radiod, ''),
+                         timing=r.injector, etc_root=etc_root,
+                         coord_path=coord_path,
+                         inventory_rows=inventory_rows) != 0:
+            rc = 1
+        rid = _receiver_key(r)
+        for client in clients:
+            if client not in _upload.UPLOAD_ENABLE:
+                continue
+            want = '1' if r.uploads else '0'
+            env = _upload.env_path_for(client, rid, base=str(etc_root))
+            if _upload.read_flag(env, _upload.UPLOAD_ENABLE[client][0]) == want:
+                continue          # already so; do not reset a chosen pipeline
+            _upload.apply_enable(client, rid, r.uploads, base=str(etc_root))
+            _ok(f'{client}@{r.reporter_id}: upload '
+                f'{"on" if r.uploads else "off"}')
+    return rc
+
+
+def cmd_receiver_list(args) -> int:
+    """`smd admin receiver list [--json]`: the declared [[receiver]] list."""
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    from sigmond import site_profile as _sp
+    from sigmond.receivers import ReceiverError, load_receivers
+    path = getattr(args, 'profile_path', None) or _sp.SITE_PROFILE_PATH
+    try:
+        receivers = load_receivers(path)
+    except ReceiverError as exc:
+        _err(f'receiver list: {exc}')
+        return 1
+    if getattr(args, 'json', False):
+        import json
+        print(json.dumps({'receivers': [
+            {'reporter_id': r.reporter_id, 'radiod': r.radiod,
+             'antenna': r.antenna, 'clients': list(r.clients),
+             'injector': r.injector, 'same_antenna_as': r.same_antenna_as,
+             'uploads': r.uploads} for r in receivers]}, indent=2))
+        return 0
+    if not receivers:
+        _info(f'no [[receiver]] entries in {path}')
+        return 0
+    for r in receivers:
+        extra = []
+        if r.injector:
+            extra.append('injector')
+        if r.same_antenna_as:
+            extra.append(f'same antenna as {r.same_antenna_as}')
+        extra.append('uploads' if r.uploads else 'no upload')
+        print(f'{r.reporter_id:<14} {r.radiod or r.kiwisdr:<32} '
+              f'{",".join(r.clients) or "(profile clients)":<30} '
+              f'{"; ".join(extra)}')
+    return 0
+
+
+def cmd_receiver_apply(args) -> int:
+    """`smd admin receiver apply [--dry-run]`: make the declared list real."""
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    dry = bool(getattr(args, 'dry_run', False))
+    if not dry and _need_root('receiver apply'):
+        return 1
+    from sigmond import site_profile as _sp
+    from sigmond.receivers import ReceiverError, load_receivers
+    try:
+        receivers = load_receivers(_sp.SITE_PROFILE_PATH)
+    except ReceiverError as exc:
+        _err(f'receiver apply: {exc}')
+        return 1
+    if not receivers:
+        _info(f'no [[receiver]] entries in {_sp.SITE_PROFILE_PATH}; '
+              f'nothing to apply')
+        return 0
+    rows, _msg = _sources_inventory()
+    _heading('receiver apply')
+    return _receiver_apply(receivers,
+                           profile_clients=_receiver_profile_clients(),
+                           profile_path=_sp.SITE_PROFILE_PATH, dry_run=dry,
+                           inventory_rows=rows or [])
+
+
 def cmd_sources_bind(args) -> int:
     """`smd admin sources bind <status_dns> --reporter <ID>` (spec 4.4)."""
     if not _HAS_SIGMOND_LIB:
@@ -19605,9 +19748,27 @@ def cmd_sources_bind(args) -> int:
             return 1
     rows, _msg = _sources_inventory()
     _heading(f'sources bind {args.status_dns}')
-    return _sources_bind(args.status_dns, args.reporter, clients,
-                         host=(getattr(args, 'host', None) or '').strip(),
-                         timing=bool(args.timing), inventory_rows=rows or [])
+    # The site profile's [[receiver]] list is the one record: bind writes its
+    # receiver there, then applies that one receiver.  A bind that names the
+    # same reporter again replaces its entry.
+    from sigmond import site_profile as _sp
+    from sigmond.receivers import (Receiver, ReceiverError, load_receivers,
+                                   upsert_receiver)
+    try:
+        rec = Receiver(reporter_id=args.reporter, radiod=args.status_dns,
+                       clients=tuple(clients), injector=bool(args.timing))
+        upsert_receiver(_sp.SITE_PROFILE_PATH, rec)
+        stored = [r for r in load_receivers(_sp.SITE_PROFILE_PATH)
+                  if _receiver_key(r) == _receiver_key(rec)]
+    except (ReceiverError, ValueError) as exc:
+        _err(f'sources bind: {exc}')
+        return 1
+    host = (getattr(args, 'host', None) or '').strip()
+    return _receiver_apply(
+        stored, profile_clients=_receiver_profile_clients(),
+        profile_path=_sp.SITE_PROFILE_PATH, inventory_rows=rows or [],
+        hosts={args.status_dns: host} if host else None,
+        only_these=True, validate_all=False)
 
 
 def cmd_public_ip(args) -> int:
@@ -28163,6 +28324,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help='show what would change without writing',
     )
 
+    # receiver — the [[receiver]] list in site-profile.toml
+    p_receiver = admin_sub.add_parser(
+        'receiver',
+        help='show or apply the receivers (reporter ID -> radiod) declared '
+             'in site-profile.toml',
+        description=(
+            'site-profile.toml\'s [[receiver]] list records which radiod each '
+            'reporter ID listens to.  `apply` binds every declared receiver '
+            '(local and remote) and sets its upload flag; it adds and '
+            'updates, and removes nothing.'),
+    )
+    receiver_sub = p_receiver.add_subparsers(dest='receiver_command')
+    receiver_sub.add_parser('help', help='show this help')
+    p_rcv_list = receiver_sub.add_parser(
+        'list', help='print the declared receivers')
+    p_rcv_list.add_argument('--json', action='store_true',
+                            help='print {"receivers": [...]} as JSON')
+    p_rcv_apply = receiver_sub.add_parser(
+        'apply', help='bind every declared receiver')
+    p_rcv_apply.add_argument('--dry-run', action='store_true', dest='dry_run',
+                             help='validate and show the plan; write nothing')
+
     # completion
     p_decoders = admin_sub.add_parser(
         'decoders',
@@ -29229,6 +29412,7 @@ def _build_parser() -> argparse.ArgumentParser:
         'p_manifest': p_manifest,
         'p_rac': p_rac,
         'p_radiod': p_radiod,
+        'p_receiver': p_receiver,
         'p_sdr': p_sdr,
         'p_sdr_list': p_sdr_list,
         'p_secrets': p_secrets,
@@ -29294,6 +29478,7 @@ def main() -> int:
     p_manifest = parser._smd_parts['p_manifest']
     p_rac = parser._smd_parts['p_rac']
     p_radiod = parser._smd_parts['p_radiod']
+    p_receiver = parser._smd_parts['p_receiver']
     p_sdr = parser._smd_parts['p_sdr']
     p_sdr_list = parser._smd_parts['p_sdr_list']
     p_secrets = parser._smd_parts['p_secrets']
@@ -29517,6 +29702,15 @@ def main() -> int:
 
     if args.command == 'capture-prep':
         return cmd_capture_prep(args)
+
+    if args.command == 'receiver':
+        sub_cmd = getattr(args, 'receiver_command', None)
+        if sub_cmd == 'list':
+            return cmd_receiver_list(args)
+        if sub_cmd == 'apply':
+            return cmd_receiver_apply(args)
+        p_receiver.print_help()
+        return 0
 
     if args.command == 'sources':
         sub_cmd = getattr(args, 'sources_command', None)

@@ -232,7 +232,7 @@ def _without_receivers(text: str) -> str:
     for line in text.splitlines(keepends=True):
         s = line.strip()
         if s.startswith('['):
-            inside = bool(_HEADER_RE.match(line.rstrip('\r\n')))
+            inside = bool(_HEADER_RE.match(s))
         if not inside:
             keep.append(line)
     out = ''.join(keep)
