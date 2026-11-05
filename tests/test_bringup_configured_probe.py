@@ -1,10 +1,13 @@
-"""Bring-up asks each client whether it is configured (spec 4.3, F8).
+"""Bring-up decides "configured" by asking whether config init would change
+the file (spec 4.3, F8).
 
 sigma, 2026-11-05: bring-up skipped mag-recorder as "already configured".
-The client's install had just laid down its template, whose placeholders
-read `<YOUR_PSWS_STATION_ID>`, `<YOUR_CALL>` and `<YOUR_GRID>`.  The probe
-knew one sentinel, `<configure-via-config-init>`, so the magnetometer never
-started.  The probe now runs the client's own `validate --json`.
+Its template held <YOUR_CALL>, <YOUR_GRID> and <YOUR_PSWS_STATION_ID>, and
+the probe knew one sentinel.  A token counts when the env handed to
+`smd config init` can fill it.  An unissued PSWS id never counts, and the
+client's own `validate --json` only supplies the message: mag-recorder
+raises "fail" for blocked delivery too, and an unenrolled station would
+otherwise be reconfigured on every bring-up.
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import types
 from pathlib import Path
 
@@ -31,63 +35,70 @@ def _load_smd():
 
 smd = _load_smd()
 
-MAG_TEMPLATE = '[station]\npsws_station_id = "<YOUR_PSWS_STATION_ID>"\n' \
-               'callsign = "<YOUR_CALL>"\ngrid_square = "<YOUR_GRID>"\n'
+SIGMA_TEMPLATE = ('[station]\npsws_station_id = "<YOUR_PSWS_STATION_ID>"\n'
+                  'callsign = "<YOUR_CALL>"\ngrid_square = "<YOUR_GRID>"\n')
+UNENROLLED = ('[station]\npsws_station_id = "<YOUR_PSWS_STATION_ID>"\n'
+              'callsign = "AC0G"\ngrid_square = "EM38ww"\n')
+FAIL_MSG = "station.psws_station_id unset: uploads blocked"
 
 
-def _fake(monkeypatch, cfg, validate_out, validate_rc=1):
-    """Pretend `mag-recorder` is on PATH; return the commands it was asked."""
-    calls = []
+def _fake(monkeypatch, cfg, env, validate="ok"):
     monkeypatch.setattr(shutil, "which", lambda n: f"/usr/bin/{n}")
+    monkeypatch.setattr(smd, "_probe_config_env", lambda client: env)
+    calls = []
 
     def run(cmd, **kw):
         calls.append((cmd, kw))
         if cmd[1] == "inventory":
-            out, rc = json.dumps({"config_path": str(cfg)}), 0
-        else:
-            out, rc = validate_out, validate_rc
-        return types.SimpleNamespace(returncode=rc, stdout=out, stderr="")
+            return types.SimpleNamespace(
+                returncode=0, stdout=json.dumps({"config_path": str(cfg)}))
+        if validate == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 30)
+        out = json.dumps({"ok": False, "issues": [
+            {"severity": "fail", "instance": "all", "message": FAIL_MSG}]})
+        return types.SimpleNamespace(returncode=1, stdout=out)
     monkeypatch.setattr(smd, "_run", run)
     return calls
 
 
-def test_mag_recorders_fresh_template_is_unconfigured(tmp_path, monkeypatch):
-    cfg = tmp_path / "mag.toml"
-    cfg.write_text(MAG_TEMPLATE)
-    payload = {"ok": False, "config_path": str(cfg), "issues": [
-        {"severity": "fail", "instance": "all", "message": "template"}]}
-    calls = _fake(monkeypatch, cfg, json.dumps(payload), validate_rc=1)
-    ok, detail = smd._bringup_probe("configured:mag-recorder", "smd")
-    assert ok is False and "UNCONFIGURED" in detail
-    vcmd, kw = [c for c in calls if c[0][1] == "validate"][0]
-    assert vcmd[2] == "--json" and kw.get("timeout") == 30
-
-
-def test_a_client_whose_validate_passes_is_configured(tmp_path, monkeypatch):
-    # Optional placeholders left alone (AI6VN hf-timestd, 2026-09-21) must
-    # not count against a client that says it is fine.
+def test_fillable_token_is_unconfigured_and_flags_reconfig(tmp_path, monkeypatch):
     cfg = tmp_path / "c.toml"
-    cfg.write_text(MAG_TEMPLATE)
-    payload = {"ok": True, "config_path": str(cfg), "issues": [
-        {"severity": "warn", "instance": "all", "message": "optional"}]}
-    _fake(monkeypatch, cfg, json.dumps(payload), validate_rc=0)
-    ok, _ = smd._bringup_probe("configured:mag-recorder", "smd")
-    assert ok is True
+    cfg.write_text(SIGMA_TEMPLATE)
+    _fake(monkeypatch, cfg, {"STATION_CALLSIGN": "AC0G"})
+    ok, detail, reconf = smd._bringup_probe("configured:mag-recorder", "smd")
+    assert (ok, reconf) == (False, True) and "UNCONFIGURED" in detail
 
 
-def test_unusable_validate_reply_falls_back_to_placeholder_check(
+def test_unfillable_psws_token_only_is_configured(tmp_path, monkeypatch):
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(UNENROLLED)
+    _fake(monkeypatch, cfg, {"STATION_CALLSIGN": "AC0G", "STATION_GRID": "EM38ww"})
+    ok, _, reconf = smd._bringup_probe("configured:mag-recorder", "smd")
+    assert (ok, reconf) == (True, False)
+
+
+def test_unenrolled_station_stays_configured_and_detail_quotes_the_fail(
         tmp_path, monkeypatch):
     cfg = tmp_path / "c.toml"
-    cfg.write_text(MAG_TEMPLATE)
-    _fake(monkeypatch, cfg, "usage: error, no --json", validate_rc=2)
-    assert smd._bringup_probe("configured:mag-recorder", "smd")[0] is False
-    cfg.write_text('[station]\ncallsign = "AC0G"\n')
-    assert smd._bringup_probe("configured:mag-recorder", "smd")[0] is True
+    cfg.write_text(UNENROLLED)
+    calls = _fake(monkeypatch, cfg, {"STATION_CALLSIGN": "AC0G"})
+    ok, detail, reconf = smd._bringup_probe("configured:mag-recorder", "smd")
+    assert (ok, reconf) == (True, False) and FAIL_MSG in detail
+    vcmd, kw = [c for c in calls if c[0][1] == "validate"][0]
+    assert vcmd[2:] == ["--json", "--config", str(cfg)]
+    assert kw.get("timeout") == 30
 
 
-def test_without_a_validate_cli_any_angle_bracket_token_counts_as_template():
-    for text in ('a = "<YOUR_PSWS_STATION_ID>"\n',
-                 'a = "<configure-via-config-init>"\n',
-                 MAG_TEMPLATE):
-        assert smd._config_is_placeholder(text), text
-    assert not smd._config_is_placeholder('a = "see <docs>"\nb = "a < b > c"\n')
+def test_validate_timing_out_changes_no_verdict(tmp_path, monkeypatch):
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(UNENROLLED)
+    _fake(monkeypatch, cfg, {}, validate="timeout")
+    assert smd._bringup_probe("configured:mag-recorder", "smd") == (
+        True, f"mag-recorder: {cfg} present", False)
+    cfg.write_text(SIGMA_TEMPLATE)
+    _fake(monkeypatch, cfg, {"STATION_CALLSIGN": "AC0G"}, validate="timeout")
+    assert smd._bringup_probe("configured:mag-recorder", "smd")[::2] == (False, True)
+
+
+def test_sentinel_always_unconfigured_with_no_env():
+    assert smd._config_is_placeholder('a = "<configure-via-config-init>"\n')
