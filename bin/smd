@@ -28693,8 +28693,8 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             'site-profile.toml\'s [[receiver]] list records which radiod each '
             'reporter ID listens to.  `apply` binds every declared receiver '
-            '(local and remote) and sets its upload flag; it adds and '
-            'updates, and removes nothing.'),
+            '(local and remote) and, where the receiver decides it, sets its '
+            'upload flag; it adds and updates, and removes nothing.'),
     )
     receiver_sub = p_receiver.add_subparsers(dest='receiver_command')
     receiver_sub.add_parser('help', help='show this help')
