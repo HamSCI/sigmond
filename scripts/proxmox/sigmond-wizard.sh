@@ -383,14 +383,23 @@ RAC_FAIL=""
 
 # RAC_MODE: "host" is the Proxmox host (the default, and the only behaviour
 # before bare-metal support).  "station" is a bare-metal machine.
-RAC_MODE="${RAC_MODE:-host}"
+# Only a script that sources this file as a library (SIGMOND_WIZARD_AS_LIB=1)
+# may choose station; anywhere else a stray RAC_MODE in the environment must
+# not flip root-run host code.
+if [ "${SIGMOND_WIZARD_AS_LIB:-}" = 1 ]; then
+    RAC_MODE="${RAC_MODE:-host}"
+else
+    RAC_MODE=host
+fi
 
 rac_station_site_default(){
     # <CALL>-<HOST>, upper case, for a bare-metal station.  CALL comes from
     # [station] callsign in the site profile.  A hostname that already starts
-    # with <CALL>- stands alone.  No callsign: print nothing.
+    # with <CALL>- stands alone.  No callsign: print nothing.  An empty or
+    # `localhost` hostname, or one equal to the callsign, prints nothing too:
+    # the operator then passes --site.
     local prof="${SIGMOND_SITE_PROFILE:-/etc/sigmond/site-profile.toml}"
-    local host="${SIGMOND_RAC_HOSTNAME:-$(hostname -s 2>/dev/null)}"
+    local host="${SIGMOND_RAC_HOSTNAME-$(hostname -s 2>/dev/null)}"
     local call
     call=$(awk '
         /^[[:space:]]*\[/ { sec = ($0 ~ /^[[:space:]]*\[station\][[:space:]]*(#.*)?$/) }
@@ -402,8 +411,8 @@ rac_station_site_default(){
     [ -n "$call" ] || return 0
     host=$(printf '%s' "$host" | tr '[:lower:]' '[:upper:]')
     case "$host" in
+        ""|LOCALHOST|LOCALHOST.LOCALDOMAIN|"$call") return 0 ;;
         "$call"-*) printf '%s' "$host" ;;
-        "")        printf '%s' "$call" ;;
         *)         printf '%s-%s' "$call" "$host" ;;
     esac
 }
@@ -681,7 +690,7 @@ rac_write_config(){
         # them in the same columns as a Proxmox station.
         # Braces in ${SITE}-vm-* keep the host's six-channel test from counting these.
         ( umask 077; cat > "$_toml.new" <<STNTOMLEOF
-# Written by sigmond-setup $(date -u +%F) — RAC #$RACN, site $SITE (station mode).
+# Written by sigmond-rac $(date -u +%F) — RAC #$RACN, site $SITE (station mode).
 # ONE frpc on this machine carries four channels, straight to its own services.
 serverAddr = "$_gwhost"
 serverPort = $_gwport
@@ -859,11 +868,19 @@ rac_register_locked(){
     fi
     SITE=$(rac_site_name)
     if [ -z "$SITE" ]; then
-        RAC_FAIL="this host records no station name yet; run: sigmond-setup --reconfigure"
+        if [ "${RAC_MODE:-host}" = station ]; then
+            RAC_FAIL="this machine has no station name yet; run: sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate --site NAME"
+        else
+            RAC_FAIL="this host records no station name yet; run: sigmond-setup --reconfigure"
+        fi
         return 1
     fi
     if ! rac_payload_ready; then
-        RAC_FAIL="sigmond-rac payload missing (frpc/CA); run install-host.sh, then sigmond-setup --reconfigure"
+        if [ "${RAC_MODE:-host}" = station ]; then
+            RAC_FAIL="the sigmond-rac payload (frpc and the CA) is missing; run: sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate, which clones it"
+        else
+            RAC_FAIL="sigmond-rac payload missing (frpc/CA); run install-host.sh, then sigmond-setup --reconfigure"
+        fi
         return 1
     fi
     if [ "${RAC_MODE:-host}" != station ] && [ ! -f "$RAC_RELAY_UNIT" ]; then
@@ -1053,9 +1070,7 @@ except Exception: pass' 2>/dev/null || true
 RAC_SWITCH=/usr/local/sbin/sigmond-rac-switch
 RAC_STATE_FILE=/run/sigmond/rac-state
 rac_install_host_files(){
-    # Unlink before writing: a copy that runs at this moment keeps its file.
-    # The working copy waits under a second name, a hard link to the same file,
-    # until the new one proves whole (rac_switch_settle, below).
+    local _rm_dir
     # The switch reads its mode from this file; no file reads as host.
     # A station must write it (without it the switch would act as a host); a
     # host reads the same with the file absent, so its write may fail.
@@ -1065,6 +1080,9 @@ rac_install_host_files(){
             && [ "${RAC_MODE:-host}" = station ]; then
         return 1
     fi
+    # Unlink before writing: a copy that runs at this moment keeps its file.
+    # The working copy waits under a second name, a hard link to the same file,
+    # until the new one proves whole (rac_switch_settle, below).
     ln -f /usr/local/sbin/sigmond-rac-switch /usr/local/sbin/sigmond-rac-switch.old 2>/dev/null
     rm -f /usr/local/sbin/sigmond-rac-switch
     cat > /usr/local/sbin/sigmond-rac-switch <<'RACSWEOF'

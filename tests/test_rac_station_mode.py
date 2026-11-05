@@ -277,3 +277,82 @@ def test_install_host_units_unchanged(tmp_path):
     assert sorted(p.name for p in units.glob("sigmond-rac-pair.*")) == [
         "sigmond-rac-pair.path", "sigmond-rac-pair.service", "sigmond-rac-pair.timer"]
     assert (mark / "rac-mode").read_text().strip() == "host"
+
+
+# -- final review fixes ---------------------------------------------------------
+
+ACTIVATE = "sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate"
+
+
+def fail_of(tmp_path, *, station, frpc=True, env=None):
+    s = rr.host(tmp_path, tiers=rr.tier(1), relays=False, frpc=frpc, configured=None)
+    if station:
+        s += "RAC_MODE=station\n"
+    e = {"SIGMOND_RAC_PAYLOAD_DIRS": "/nonexistent",
+         "SIGMOND_SITE_PROFILE": str(tmp_path / "absent.toml"),
+         "SIGMOND_RAC_HOSTNAME": "sigma"}
+    e.update(env or {})
+    r = rr.run(s + "rac_register fresh; echo \"rc=$? fail=$RAC_FAIL\"\n", tmp_path, e)
+    return r.stdout
+
+
+def test_station_missing_payload_names_station_commands(tmp_path):
+    out = fail_of(tmp_path, station=True, frpc=False, env={"SIGMOND_RAC_SITE": "AC0G-X"})
+    assert "rc=1" in out and "payload" in out and "is missing" in out, out
+    assert ACTIVATE in out
+    assert "sigmond-setup" not in out and "pm-align" not in out and "install-host.sh" not in out
+
+
+def test_station_no_name_names_station_commands(tmp_path):
+    out = fail_of(tmp_path, station=True)
+    assert "rc=1" in out and "no station name" in out, out
+    assert ACTIVATE in out and "--site" in out
+    assert "sigmond-setup" not in out
+
+
+def test_host_failure_messages_unchanged(tmp_path):
+    out = fail_of(tmp_path, station=False)
+    assert ("fail=this host records no station name yet; run: sigmond-setup --reconfigure"
+            in out), out
+    h = tmp_path / "h"
+    h.mkdir()
+    out = fail_of(h, station=False, frpc=False, env={"SIGMOND_RAC_SITE": "X"})
+    out2 = rr.run(rr.host(h, tiers=rr.tier(1), relays=False, frpc=False,
+                          configured="AC0G/B4 EM38ww 2026-10-09")
+                  + "rac_register fresh; echo \"fail=$RAC_FAIL\"\n", h,
+                  {"SIGMOND_RAC_PAYLOAD_DIRS": "/nonexistent"}).stdout
+    assert ("fail=sigmond-rac payload missing (frpc/CA); run install-host.sh, "
+            "then sigmond-setup --reconfigure") in out2, out2
+
+
+def test_stray_rac_mode_cannot_flip_the_wizard_outside_library_mode(tmp_path):
+    text = WIZARD.read_text()
+    block = text[text.index("# RAC_MODE:"):text.index("rac_station_site_default(){")]
+    for lib, want in (("1", "station"), ("0", "host"), ("", "host")):
+        r = subprocess.run(["bash", "-c", f'SIGMOND_WIZARD_AS_LIB={lib}\n{block}\necho "$RAC_MODE"'],
+                           capture_output=True, text=True, env={"PATH": os.environ["PATH"], "RAC_MODE": "station"})
+        assert r.stdout.strip() == want, (lib, r.stdout, r.stderr)
+    r = subprocess.run(["bash", "-c", f'SIGMOND_WIZARD_AS_LIB=1\n{block}\necho "$RAC_MODE"'],
+                       capture_output=True, text=True, env={"PATH": os.environ["PATH"]})
+    assert r.stdout.strip() == "host"
+
+
+def test_station_default_empty_for_bad_hostnames(tmp_path):
+    prof = profile(tmp_path, '[station]\ncallsign = "AC0G"\n')
+    for host in ("", "localhost", "LocalHost.localdomain", "ac0g", "AC0G"):
+        r = run(tmp_path, "RAC_MODE=station; rac_site_name",
+                {"SIGMOND_SITE_PROFILE": prof, "SIGMOND_RAC_HOSTNAME": host})
+        assert r.stdout == "", (host, r.stdout, r.stderr)
+    r = run(tmp_path, "RAC_MODE=station; rac_site_name",
+            {"SIGMOND_SITE_PROFILE": prof, "SIGMOND_RAC_HOSTNAME": "sigma"})
+    assert r.stdout == "AC0G-SIGMA"
+
+
+def test_station_toml_header_names_sigmond_rac(tmp_path):
+    reg = rr.Registrar(reply=STATION_REPLY)
+    try:
+        sh(pre(tmp_path, reg.port, station=True) + "rac_register fresh\n", tmp_path)
+    finally:
+        reg.close()
+    first = (tmp_path / "frpc-host-gw2.toml").read_text().splitlines()[0]
+    assert first.startswith("# Written by sigmond-rac ") and "station mode" in first
