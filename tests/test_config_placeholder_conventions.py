@@ -97,27 +97,35 @@ description      = "RM3100 magnetometer via Pololu USB-I2C"
 
 class PlaceholderConventionTests(unittest.TestCase):
 
-    def test_optional_placeholders_do_NOT_make_a_config_a_template(self):
-        """⛔ The regression that killed a station.
+    def test_optional_placeholders_do_NOT_make_a_configured_client_a_template(
+            self):
+        """⛔ The regression that killed a station, now guarded by the client.
 
         hf-timestd ships three OPTIONAL <YOUR_...> values (PSWS station id,
-        instrument id, GNSS host).  A station with no PSWS enrolment and no
-        external GNSS leaves them alone, and hf-timestd runs fine.  Matching
-        them made its HARD checkpoint fail and aborted first-run bring-up on
-        AI6VN's v3.47 install; ka9q-web and station-web never started.
+        instrument id, GNSS host).  Matching them made its HARD checkpoint
+        fail and aborted first-run bring-up on AI6VN's v3.47 install
+        (2026-09-21).  Since 2026-11-05 the text match is only the fallback;
+        the probe asks the client, and hf-timestd's validate passes.
         """
+        import json, shutil, tempfile, types
+        from unittest import mock
         hf_timestd_real = (
-            '[station]\n'
-            'id = "<YOUR_STATION_ID>"               # e.g., S000001\n'
-            'instrument_id = "<YOUR_INSTRUMENT_ID>" # e.g., 172\n'
-            'callsign = "AI6VN"\n'
-            'grid = "CM87"\n\n'
-            '[gnss]\n'
-            'host = "<YOUR_GNSS_HOST>"              # optional\n')
-        self.assertFalse(
-            smd._config_is_placeholder(hf_timestd_real),
-            "a configured hf-timestd with optional fields unset read as an "
-            "unfilled TEMPLATE -- its hard checkpoint then aborts bring-up")
+            '[station]\nid = "<YOUR_STATION_ID>"\n'
+            'instrument_id = "<YOUR_INSTRUMENT_ID>"\ncallsign = "AI6VN"\n'
+            '[gnss]\nhost = "<YOUR_GNSS_HOST>"\n')
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "c.toml"
+            cfg.write_text(hf_timestd_real)
+
+            def run(cmd, **kw):
+                out = (json.dumps({"config_path": str(cfg)})
+                       if cmd[1] == "inventory"
+                       else json.dumps({"ok": True, "issues": []}))
+                return types.SimpleNamespace(returncode=0, stdout=out)
+            with mock.patch.object(shutil, "which", lambda n: "/x/" + n), \
+                    mock.patch.object(smd, "_run", run):
+                ok, _ = smd._bringup_probe("configured:hf-timestd", "smd")
+        self.assertTrue(ok)
 
     def test_counting_placeholders_cannot_separate_the_cases(self):
         """Why this is not fixable by a threshold.
@@ -157,14 +165,10 @@ class PlaceholderConventionTests(unittest.TestCase):
                     smd._config_is_placeholder(f"[x]\n{line}\n"),
                     f"false positive on: {line}")
 
-    def test_a_bracketed_token_alone_is_NOT_enough(self):
-        """The narrowing, stated as a rule.
-
-        `<YOUR_CALL>` on its own does not make a config a template -- see
-        test_optional_placeholders_do_NOT_make_a_config_a_template for the
-        station this cost.  Only the explicit sentinel does.
-        """
-        self.assertFalse(smd._config_is_placeholder(
+    def test_a_bracketed_token_is_a_template_in_the_text_fallback(self):
+        """Widened 2026-11-05 (sigma, mag-recorder).  Only the fallback, used
+        when no client answers `validate --json`, reads it this way."""
+        self.assertTrue(smd._config_is_placeholder(
             '[station]\ncallsign = "<YOUR_CALL>"   # e.g. "AC0G"\n'))
 
 

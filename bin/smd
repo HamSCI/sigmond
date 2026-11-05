@@ -226,7 +226,7 @@ BANNER = r"""
 # ---------------------------------------------------------------------------
 
 def _run(cmd: list, *, cwd=None, capture=True, sudo=False, env=None,
-         interactive=False) -> subprocess.CompletedProcess:
+         interactive=False, timeout=None) -> subprocess.CompletedProcess:
     if sudo and os.geteuid() != 0:
         cmd = ['sudo'] + cmd
     # When not capturing output we normally redirect stdin from /dev/null so a
@@ -239,7 +239,7 @@ def _run(cmd: list, *, cwd=None, capture=True, sudo=False, env=None,
         stdin_arg = subprocess.DEVNULL
     return subprocess.run(cmd, cwd=cwd,
                           capture_output=capture, text=True,
-                          stdin=stdin_arg, env=env)
+                          stdin=stdin_arg, env=env, timeout=timeout)
 
 
 def _repo_is_dirty(repo_dir: Path) -> tuple[bool, str | None]:
@@ -9739,33 +9739,55 @@ def _bringup_wait_lock_free(timeout_s: int = 180) -> None:
 # `config init` replaces it.  A config that still contains it is unconfigured.
 _CONFIG_PLACEHOLDER = '<configure-via-config-init>'
 
-# ⛔ A config is a TEMPLATE only if it carries the explicit sentinel.
+# What counts as a template, and who decides.
 #
-# This briefly matched ANY TOML value that was entirely an angle-bracketed
-# token, to catch mag-recorder's "<YOUR_CALL>" spelling.  That is too broad,
-# and it took down a station: hf-timestd's config legitimately carries three
-# OPTIONAL placeholders -- PSWS station id, instrument id, and a GNSS host --
-# which a station without PSWS enrolment or an external GNSS receiver simply
-# leaves alone.  The generic match declared that whole config unconfigured,
-# its HARD checkpoint failed, and first-run bring-up aborted outright on
-# AI6VN's v3.47 install (2026-09-21):
+# sigma, 2026-11-05: bring-up skipped mag-recorder as "already configured".
+# Its install had laid down a template whose values read
+# "<YOUR_PSWS_STATION_ID>", "<YOUR_CALL>" and "<YOUR_GRID>"; the probe knew
+# only the sentinel above, so the magnetometer never started.  The same
+# spelling gap hit W3USR-019 on 2026-09-18.
 #
-#     checkpoint: hf-timestd configured FAILED -- present but UNCONFIGURED
-#     aborting (hard checkpoint)
+# A generic match cannot judge a config alone.  A blanket angle-bracket
+# match once declared hf-timestd unconfigured, because that client ships
+# three OPTIONAL placeholders (PSWS station id, instrument id, GNSS host)
+# that a station without PSWS enrolment leaves alone.  First-run bring-up
+# aborted on AI6VN's v3.47 install (2026-09-21) and ka9q-web never started.
+# Which fields matter depends on the client.
 #
-# ka9q-web and station-web never started, and the marker was written so it
-# would not retry.  A cosmetic skip for one client is not worth a dead
-# station.
-#
-# Counting does not separate the two cases either: mag-recorder had 2
-# placeholders out of ~20 settings, hf-timestd has 3.  The distinction is
-# SEMANTIC -- which fields that client needs -- so the generic probe cannot
-# make it.  The right answer is to ask the client through its own
-# `validate --json` severity, which mag-recorder already reports correctly.
-# Tracked separately; until then this stays narrow.
+# So the probe asks the client: `<client> validate --json` returns
+# {"ok", "config_path", "issues": [{"severity": "fail"|"warn", ...}]}, and
+# `ok: false` with a "fail" issue means unconfigured (see
+# `_client_validate_unconfigured`).  Only when no client answers (no CLI on
+# PATH, no JSON back) does the probe fall back to this text match, which
+# treats any quoted value that is entirely an angle-bracketed upper-case
+# token as a template, alongside the sentinel.
+_TEMPLATE_TOKEN_RE = re.compile(r'[\x22\x27]<[A-Z][A-Z0-9_-]*>[\x22\x27]')
+
+
 def _config_is_placeholder(text: str) -> bool:
-    """True when a client config is still an unfilled template."""
-    return bool(text) and _CONFIG_PLACEHOLDER in text
+    """True when a client config is still an unfilled template (text match)."""
+    return bool(text) and (_CONFIG_PLACEHOLDER in text
+                           or bool(_TEMPLATE_TOKEN_RE.search(text)))
+
+
+def _client_validate_unconfigured(exe: str):
+    """Ask `<exe> validate --json`.  True: the client reports a failure;
+    False: it answered and has none; None: no usable reply.
+
+    The clients exit 1 when validation fails, so the JSON on stdout counts
+    whatever the exit code says."""
+    import json as _json
+    try:
+        r = _run([exe, 'validate', '--json'], capture=True, timeout=30)
+        data = _json.loads(r.stdout)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get('ok'), bool):
+        return None
+    issues = data.get('issues') or []
+    has_fail = any(isinstance(i, dict) and i.get('severity') == 'fail'
+                   for i in issues)
+    return (not data['ok']) and has_fail
 
 def _read_text_safe(p) -> str:
     try:
@@ -9815,9 +9837,16 @@ def _bringup_probe(check: str, smd_bin: str):
                 # config-init (with --reconfig) instead of skipping — else the
                 # radiod status stays the sentinel and the recorder can't resolve
                 # radiod (sigmond#15; greenfield: wspr came up with a placeholder).
-                if present and _config_is_placeholder(_read_text_safe(p)):
-                    return (False,
-                            f"{name}: {cfgp} present but UNCONFIGURED (placeholder)")
+                if present:
+                    # The client's own verdict first; the text match only
+                    # when it gives none (sigma, 2026-11-05).
+                    verdict = _client_validate_unconfigured(exe)
+                    if verdict is None:
+                        verdict = _config_is_placeholder(_read_text_safe(p))
+                    if verdict:
+                        return (False,
+                                f"{name}: {cfgp} present but UNCONFIGURED "
+                                f"(client validate / placeholder)")
                 return (present, f"{name}: {cfgp} {'present' if present else 'MISSING'}")
         etc = Path(f'/etc/{name}')
         ok = etc.is_dir()
