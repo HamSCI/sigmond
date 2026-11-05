@@ -777,6 +777,15 @@ class ApplyTests(unittest.TestCase):
 
     def test_apply_reports_manifest_step_failure(self):
         smd = _load_smd()
+        # apply skips the step until hs-uploader exists (sigma, 2026-11-05),
+        # so stand one up for this test.
+        with tempfile.TemporaryDirectory() as td:
+            py = Path(td) / "python"
+            py.write_text("")
+            with mock.patch.object(um, "HS_UPLOADER_PYTHON", py):
+                self._reports_failure(smd)
+
+    def _reports_failure(self, smd):
         for rc, want in [(1, False), (0, True)]:
             with self.subTest(rc=rc):
                 out = io.StringIO()

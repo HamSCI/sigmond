@@ -333,6 +333,11 @@ def build_plan(profile, *, local_radiod: bool,
         dns = remote_status_dns or 'auto-discover'
         steps.append(Step(STAGE1, f'using remote radiod ({dns}) — skipping radiod '
                           'stack, gpsdo-monitor, and FFT wisdom', 'note'))
+        # AC0G-B2, 2026-11-05: a client-only host never ran `smd apply`, so
+        # net.core.rmem_max stayed 208 KB against a 16 MB multicast floor.
+        # Apply writes the rmem/usbfs tuning whatever radiod lives elsewhere.
+        steps.append(Step(STAGE1, 'apply host tuning (rmem / usbfs)',
+                          'tune', argv=[smd, 'apply'], may_fail=False))
 
     # --- Stage 2: hf-timestd (timing authority; radiod-bound) ---
     if _TIMING_AUTHORITY in profile.clients and _TIMING_AUTHORITY not in skip:

@@ -563,3 +563,28 @@ def test_a_remote_radiod_plan_has_no_install_checkpoint():
     p = build_plan(_dasi2(), local_radiod=False,
                    remote_status_dns='x-status.local')
     assert not any(s.check == 'radiod-installed' for s in p.steps)
+
+
+def _client():
+    # etc/catalog.toml [profile.client]: decode-only, no local radiod infra.
+    return Profile(
+        name='client',
+        clients=('hf-timestd', 'wspr-recorder', 'psk-recorder', 'station-web'),
+        local_radiod_infra=(),
+        optional=('mag-recorder',),
+    )
+
+
+def test_a_client_plan_tunes_the_host_before_any_client_starts():
+    # AC0G-B2, 2026-11-05: bring-up never ran `smd apply` on a client-only
+    # host, so net.core.rmem_max stayed 208 KB against a 16 MB floor.
+    p = build_plan(_client(), local_radiod=False,
+                   remote_status_dns='ac0g-b1-a-status.local')
+    tune = [i for i, s in enumerate(p.steps)
+            if s.kind == 'tune' and s.argv == ['smd', 'apply']]
+    assert len(tune) == 1
+    assert p.steps[tune[0]].may_fail is False
+    first_client = next(i for i, s in enumerate(p.steps)
+                        if s.kind in ('install', 'configure')
+                        and s.label.split()[-1] in _client().clients)
+    assert tune[0] < first_client
