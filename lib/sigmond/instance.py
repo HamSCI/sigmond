@@ -597,7 +597,9 @@ def _sources_stub(client: str, reporter_id: str) -> str:
         "# `sources = [...]` list.  Don't hand-edit; use\n"
         f"#   smd admin sources add {client}@{display_reporter_id(reporter_id)} <kind>:<id>\n"
         f"#   smd admin sources remove {client}@{display_reporter_id(reporter_id)} <kind>:<id>\n"
-        "selections = []\n"
+        # Key is `selected`: ClientSources.load reads that.  The stub wrote
+        # `selections` until 2026-11-05, a key nothing read.
+        "selected = []\n"
     )
 
 

@@ -348,6 +348,91 @@ def inventory(observations: Iterable) -> list[InventoryRow]:
 
 
 # ---------------------------------------------------------------------------
+# Radiod discovery, selection and naming (spec 4.4)
+# ---------------------------------------------------------------------------
+
+class SourceSelectionError(ValueError):
+    """A radiod the operator named is absent, or two derive one reporter ID."""
+
+
+@dataclass(frozen=True)
+class DiscoveredRadiod:
+    status_dns: str   # "ac0g-b1-a-status.local"
+    label: str        # advertised name, "AC0G @EM38ww B1-a longwire"
+    host: str         # TXT source_host, else the mDNS hostname
+
+
+def discover_radiods(timeout: float = 5.0) -> list[DiscoveredRadiod]:
+    """Browse mDNS through the same path `smd admin sources` uses."""
+    from sigmond.environment import Environment
+    from sigmond.discovery import mdns
+    rows = inventory(mdns.probe(Environment(), timeout=timeout))
+    out = []
+    for r in rows:
+        if r.key.type != "radiod":
+            continue
+        host = ((r.fields or {}).get("source_host") or "").strip()
+        out.append(DiscoveredRadiod(
+            status_dns=r.key.identifier, label=r.label,
+            host=host or r.key.identifier))
+    return out
+
+
+def advertised_call(label: str) -> str:
+    """First token of the advertised name, upper-cased, `/suffix` removed.
+
+    sigma (2026-11-05) advertises "AC0G/S RX-888 Mk2": its first token is
+    a reporter ID, and the station's call is the part before the slash.
+    """
+    toks = (label or "").split()
+    return toks[0].split("/")[0].upper() if toks else ""
+
+
+def reporter_id_for(callsign: str, status_dns: str) -> str:
+    """`ac0g-b1-a-status.local` under AC0G gives `AC0G/B1A`."""
+    call = callsign.upper()
+    name = status_dns.lower()
+    if name.endswith("-status.local"):
+        name = name[: -len("-status.local")]
+    elif name.endswith(".local"):
+        name = name[: -len(".local")]
+    if name.startswith(call.lower() + "-"):
+        name = name[len(call) + 1:]
+    return f"{call}/" + re.sub(r"[^A-Za-z0-9]", "", name).upper()
+
+
+def select_radiods(found: list[DiscoveredRadiod], callsign: str,
+                   named: list[str]) -> list[DiscoveredRadiod]:
+    """Keep the radiods that belong to this station.
+
+    `named` (--remote-radiod) names radiods outright and overrides the
+    callsign rule; a name that did not answer is an error.  With none
+    named, keep radiods advertising the station's own callsign.  Two
+    kept radiods that derive one reporter ID would share an instance
+    (ac0g-b1-a and ac0g-b1a both give AC0G/B1A), so that is an error.
+    """
+    if named:
+        by_dns = {r.status_dns.lower(): r for r in found}
+        keep = []
+        for n in named:
+            r = by_dns.get(n.lower())
+            if r is None:
+                raise SourceSelectionError(n)
+            keep.append(r)
+    else:
+        keep = [r for r in found if advertised_call(r.label) == callsign.upper()]
+    seen: dict[str, DiscoveredRadiod] = {}
+    for r in keep:
+        rid = reporter_id_for(callsign, r.status_dns)
+        if rid in seen:
+            raise SourceSelectionError(
+                f"{seen[rid].status_dns} and {r.status_dns} both give "
+                f"reporter ID {rid}")
+        seen[rid] = r
+    return keep
+
+
+# ---------------------------------------------------------------------------
 # Top-level convenience for the CLI
 # ---------------------------------------------------------------------------
 
