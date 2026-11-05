@@ -638,3 +638,19 @@ def test_resume_stands_aside_while_the_system_shuts_down(pairing, monkeypatch):
     monkeypatch.setattr(smd, '_system_stopping', lambda: False)
     assert smd.cmd_wisdom_resume(_Args()) == 0
     assert calls == ['stop', 'start'] and not marker.exists()
+
+
+# GitHub's runner (AMD EPYC), 2026-11-05: identify_cpu's default argument froze
+# /proc/cpuinfo at import, so patching wisdom.CPUINFO missed every caller that
+# leaves the argument out.  Three tests passed only on a 5825U.
+
+def test_the_module_paths_are_read_at_call_time(tmp_path, monkeypatch):
+    fake = tmp_path / 'cpuinfo'
+    fake.write_text('model name\t: Imaginary CPU 9000\n')
+    side = tmp_path / 'wisdomf.cpu'
+    monkeypatch.setattr(wisdom, 'CPUINFO', fake)
+    monkeypatch.setattr(wisdom, 'WISDOM_SIDECAR', side)
+    monkeypatch.setattr(wisdom, 'WISDOM_FILE', tmp_path / 'wisdomf')
+    assert wisdom.cpu_model() == 'Imaginary CPU 9000'
+    assert wisdom.identify_cpu([tmp_path])['model'] == 'Imaginary CPU 9000'
+    assert wisdom.wisdom_is_current() is False          # no file at the patched path

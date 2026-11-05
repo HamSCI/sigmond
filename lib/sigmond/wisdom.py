@@ -163,8 +163,9 @@ def profiles_for_planning(log: Path = FFT_MISS_LOG) -> list[str]:
 CPUINFO = Path('/proc/cpuinfo')
 
 
-def cpu_model(cpuinfo: Path = CPUINFO) -> str:
+def cpu_model(cpuinfo: Path | None = None) -> str:
     """The /proc/cpuinfo 'model name' string, or '' if unreadable."""
+    cpuinfo = CPUINFO if cpuinfo is None else cpuinfo
     try:
         for line in cpuinfo.read_text().splitlines():
             if line.startswith('model name'):
@@ -230,12 +231,13 @@ def find_bundle(dirs, model: str) -> Path | None:
     return None
 
 
-def identify_cpu(dirs, cpuinfo: Path = CPUINFO) -> dict:
+def identify_cpu(dirs, cpuinfo: Path | None = None) -> dict:
     """What this host is, and whether we have wisdom for it.
 
     Returns a verdict dict the caller prints verbatim — never None, never
     a bare bool, so a miss cannot be mistaken for "nothing to report".
     """
+    cpuinfo = CPUINFO if cpuinfo is None else cpuinfo
     model = cpu_model(cpuinfo)
     bundle = find_bundle(dirs, model)
     return {
@@ -251,13 +253,15 @@ def identify_cpu(dirs, cpuinfo: Path = CPUINFO) -> dict:
     }
 
 
-def install_wisdom(tmp: Path = WISDOM_TMP, dst: Path = WISDOM_FILE) -> None:
+def install_wisdom(tmp: Path | None = None, dst: Path | None = None) -> None:
     """Atomically replace ``dst`` with ``tmp`` after a successful plan run.
 
     Uses rename rather than copy so the swap is atomic — radiod readers
     never see a half-written file.  Both paths are on /etc/fftw so this
     is a same-filesystem rename.
     """
+    tmp = WISDOM_TMP if tmp is None else tmp
+    dst = WISDOM_FILE if dst is None else dst
     if not tmp.is_file():
         raise FileNotFoundError(f'{tmp} not present — planning did not finish')
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -323,10 +327,10 @@ def write_sidecar(path: Path, model: str, planned_profiles, placement=None,
     tmp.replace(path)
 
 
-def wisdom_verdict(wisdom_file: Path = WISDOM_FILE,
-                   sidecar: Path = WISDOM_SIDECAR,
-                   miss_log: Path = FFT_MISS_LOG,
-                   cpuinfo: Path = CPUINFO,
+def wisdom_verdict(wisdom_file: Path | None = None,
+                   sidecar: Path | None = None,
+                   miss_log: Path | None = None,
+                   cpuinfo: Path | None = None,
                    placement: dict | None = None) -> str:
     """'current', 'top-up' or 'fresh': what the planner should do.
 
@@ -345,6 +349,10 @@ def wisdom_verdict(wisdom_file: Path = WISDOM_FILE,
     behaviour: no fft.log check, no placement check, and an empty model on
     either side never counts as another CPU.
     """
+    wisdom_file = WISDOM_FILE if wisdom_file is None else wisdom_file
+    sidecar = WISDOM_SIDECAR if sidecar is None else sidecar
+    miss_log = FFT_MISS_LOG if miss_log is None else miss_log
+    cpuinfo = CPUINFO if cpuinfo is None else cpuinfo
     if not Path(wisdom_file).is_file():
         return 'fresh'
     side = read_sidecar(sidecar)
@@ -372,10 +380,10 @@ def wisdom_verdict(wisdom_file: Path = WISDOM_FILE,
     return 'current'
 
 
-def wisdom_is_current(wisdom_file: Path = WISDOM_FILE,
-                      sidecar: Path = WISDOM_SIDECAR,
-                      miss_log: Path = FFT_MISS_LOG,
-                      cpuinfo: Path = CPUINFO,
+def wisdom_is_current(wisdom_file: Path | None = None,
+                      sidecar: Path | None = None,
+                      miss_log: Path | None = None,
+                      cpuinfo: Path | None = None,
                       placement: dict | None = None) -> bool:
     """True only when wisdom_verdict() finds nothing to plan."""
     return wisdom_verdict(wisdom_file, sidecar, miss_log, cpuinfo,
