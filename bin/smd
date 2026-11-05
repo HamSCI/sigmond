@@ -18040,6 +18040,40 @@ def _wisdom_current(wisdom_file=None) -> bool:
         _w.CPUINFO, placement=_wisdom_placement())
 
 
+# systemd runs ExecStopPost after an ExecCondition skip too (verified on sigma,
+# systemd 257.13, 2026-11-05), so a bare `smd start` there would have no stop to
+# pair with.  suspend writes this marker after it stops services; resume
+# starts them only when it finds the marker.
+_WISDOM_SUSPEND_MARKER = Path('/run/sigmond/wisdom-suspended')
+
+
+def _wisdom_stop_start_args():
+    return argparse.Namespace(names=[], components=None, topology=None,
+                              allow_shared_radiod_cores=False)
+
+
+def cmd_wisdom_suspend(args) -> int:
+    """Stop managed services for the planner and leave the marker resume reads."""
+    rc = cmd_stop(_wisdom_stop_start_args())
+    # Marker even after a partial stop: some services may be down, and
+    # resume must bring them back.
+    try:
+        _WISDOM_SUSPEND_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        _WISDOM_SUSPEND_MARKER.write_text('suspended\n')
+    except OSError as exc:
+        _warn(f'could not write {_WISDOM_SUSPEND_MARKER}: {exc}')
+    return rc
+
+
+def cmd_wisdom_resume(args) -> int:
+    """Start the services suspend stopped; do nothing when it never ran."""
+    if not _WISDOM_SUSPEND_MARKER.exists():
+        return 0
+    rc = cmd_start(_wisdom_stop_start_args())
+    _WISDOM_SUSPEND_MARKER.unlink(missing_ok=True)
+    return rc
+
+
 def cmd_wisdom_needed(args) -> int:
     """Exit 0 when the planner should run, 1 when the wisdom is current.
 
@@ -27400,6 +27434,13 @@ def _build_parser() -> argparse.ArgumentParser:
                                'for another CPU, or short of a size radiod asked for), '
                                '1 when current')
 
+    wisdom_sub.add_parser('suspend',
+                          help='stop managed services and mark them suspended '
+                               '(sigmond-wisdom.service ExecStartPre)')
+    wisdom_sub.add_parser('resume',
+                          help='start services again if `suspend` stopped them '
+                               '(sigmond-wisdom.service ExecStopPost)')
+
     p = wisdom_sub.add_parser('status',
                               help='show whether /etc/fftw/wisdomf exists and how old it is '
                                    '(default for bare `smd admin wisdom`)')
@@ -28941,6 +28982,10 @@ def main() -> int:
             return cmd_wisdom_plan(args)
         if wis_cmd == 'needed':
             return cmd_wisdom_needed(args)
+        if wis_cmd == 'suspend':
+            return cmd_wisdom_suspend(args)
+        if wis_cmd == 'resume':
+            return cmd_wisdom_resume(args)
         if wis_cmd == 'harvest':
             return cmd_wisdom_harvest(args)
         if wis_cmd == 'help':

@@ -26,11 +26,14 @@ RemainAfterExit=no
 # rof3240000 can take hours — never let systemd time it out.
 TimeoutStartSec=infinity
 # Stop services so FFTW benchmarks on an idle CPU; restart them after.
-ExecStartPre=-/usr/local/bin/smd stop
+ExecStartPre=-/usr/local/bin/smd admin wisdom suspend
 ExecStart=/usr/local/bin/smd admin wisdom plan
 # ExecStopPost, not ExecStartPost: systemd skips ExecStartPost when the
 # planner fails or refuses, which would leave the station stopped every boot.
-ExecStopPost=-/usr/local/bin/smd start
+# But ExecStopPost also runs when ExecCondition skipped the unit (sigma,
+# systemd 257.13), so resume starts services only if suspend marked them
+# stopped.
+ExecStopPost=-/usr/local/bin/smd admin wisdom resume
 
 [Install]
 WantedBy=multi-user.target

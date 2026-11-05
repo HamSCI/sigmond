@@ -318,12 +318,41 @@ def test_repo_wisdom_that_differs_from_the_bundle_is_not_current(tmp_path, monke
     assert not kw['sidecar'].exists()
 
 
-def test_the_unit_restarts_services_from_exec_stop_post():
+def test_the_unit_pairs_stop_and_start_through_suspend_and_resume():
     lines = [l.strip() for l in
              (REPO / 'systemd' / 'sigmond-wisdom.service').read_text().splitlines()
              if not l.strip().startswith('#')]
-    assert any(l.startswith('ExecStopPost=-') and l.endswith('smd start') for l in lines)
+    assert any(l.startswith('ExecStartPre=-') and l.endswith('smd admin wisdom suspend') for l in lines)
+    assert any(l.startswith('ExecStopPost=-') and l.endswith('smd admin wisdom resume') for l in lines)
     assert not any(l.startswith('ExecStartPost') for l in lines)
+    assert not any(l.endswith(('smd start', 'smd stop')) for l in lines)
+
+
+# ── fix round 2: systemd runs ExecStopPost even when ExecCondition skipped
+# the unit (sigma, systemd 257.13), so a bare `smd start` there has no stop
+# to pair with.  A marker pairs them.
+
+@pytest.fixture
+def pairing(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(smd, '_WISDOM_SUSPEND_MARKER', tmp_path / 'run' / 'wisdom-suspended')
+    monkeypatch.setattr(smd, 'cmd_stop', lambda a: calls.append('stop') or 0)
+    monkeypatch.setattr(smd, 'cmd_start', lambda a: calls.append('start') or 0)
+    return calls, smd._WISDOM_SUSPEND_MARKER
+
+
+def test_resume_with_no_marker_starts_nothing(pairing):
+    calls, marker = pairing
+    assert smd.cmd_wisdom_resume(_Args()) == 0
+    assert calls == []
+
+
+def test_suspend_then_resume_stops_then_starts_and_clears_the_marker(pairing):
+    calls, marker = pairing
+    assert smd.cmd_wisdom_suspend(_Args()) == 0
+    assert calls == ['stop'] and marker.exists()
+    assert smd.cmd_wisdom_resume(_Args()) == 0
+    assert calls == ['stop', 'start'] and not marker.exists()
 
 
 def test_an_operator_irq_override_makes_the_overlap_a_warning(plan_env, monkeypatch, capsys):
