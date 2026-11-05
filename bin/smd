@@ -13129,6 +13129,32 @@ def _current_radiod_pins(units: list, sys_dir: Path = Path('/etc/systemd/system'
     return out
 
 
+def _refuse_radiod_shortfall(unit_names: list, shortfall: int,
+                             topology_cpu_affinity, cores, isolated_cpus) -> None:
+    """Say why bring-up or diag --apply stops, then raise RadiodCoreShortfall.
+
+    Shared by `smd apply` (_ensure_radiod_affinity_drop_ins) and
+    `smd admin diag cpu-affinity --apply`, so both refuse with one message.
+    """
+    from sigmond.cpu import assign_radiod_cores
+    placement = assign_radiod_cores(unit_names, topology_cpu_affinity,
+                                    cores=cores, isolated_cpus=isolated_cpus)
+    eligible_n = len(unit_names) - shortfall
+    sharing = unit_names[eligible_n - 1:] if eligible_n else unit_names
+    shared_core = placement.get(unit_names[-1], set())
+    msg = (f'{len(unit_names)} radiod instance(s) but only {eligible_n} '
+           f'eligible core(s): {", ".join(sharing)} would share core '
+           f'{_cpu_list_str(shared_core)}. Give the VM more cores '
+           f'(LOCAL_RADIOD_COUNT on the Proxmox host), or set '
+           f'[cpu_affinity] radiod_cpus in /etc/sigmond/topology.toml '
+           f'to choose the shared mask, or pass '
+           f'--allow-shared-radiod-cores, or set [cpu_affinity] '
+           f'allow_shared_radiod_cores = true in '
+           f'/etc/sigmond/topology.toml.')
+    _err(msg)
+    raise RadiodCoreShortfall(msg)
+
+
 def _ensure_radiod_affinity_drop_ins(radiod_units: list,
                                      topology_cpu_affinity=None,
                                      *, allow_shared: bool = False) -> bool:
@@ -13168,22 +13194,8 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     if (topology_cpu_affinity or {}).get('allow_shared_radiod_cores'):
         allow_shared = True
     if shortfall > 0 and not allow_shared:
-        placement = assign_radiod_cores(unit_names, topology_cpu_affinity,
-                                        cores=cores, isolated_cpus=isolated)
-        eligible_n = len(unit_names) - shortfall
-        sharing = unit_names[eligible_n - 1:] if eligible_n else unit_names
-        shared_core = placement.get(unit_names[-1], set())
-        msg = (f'{len(unit_names)} radiod instance(s) but only {eligible_n} '
-               f'eligible core(s): {", ".join(sharing)} would share core '
-               f'{_cpu_list_str(shared_core)}. Give the VM more cores '
-               f'(LOCAL_RADIOD_COUNT on the Proxmox host), or set '
-               f'[cpu_affinity] radiod_cpus in /etc/sigmond/topology.toml '
-               f'to choose the shared mask, or pass '
-               f'--allow-shared-radiod-cores, or set [cpu_affinity] '
-               f'allow_shared_radiod_cores = true in '
-               f'/etc/sigmond/topology.toml.')
-        _err(msg)
-        raise RadiodCoreShortfall(msg)
+        _refuse_radiod_shortfall(unit_names, shortfall, topology_cpu_affinity,
+                                 cores, isolated)
     placement = assign_radiod_cores([u.unit for u in sorted_units],
                                     topology_cpu_affinity, cores=cores,
                                     isolated_cpus=isolated,
@@ -13887,6 +13899,25 @@ def cmd_diag_cpu_affinity(args) -> int:
         plan = _compute_affinity_plan(topology.get('cpu_affinity'))
         radiod_plan = plan.radiod
         other_cpus = plan.other_cpus
+
+        # Refuse before anything is written, as `smd apply` does.  With no
+        # eligible core the plan carries empty radiod sets and every CPU as
+        # the "other" pool: no fence at all.
+        ca = topology.get('cpu_affinity')
+        if radiod_plan and not (ca or {}).get('allow_shared_radiod_cores'):
+            from sigmond.cpu import (get_physical_cores as _gpc,
+                                     get_isolated_cpus as _gic,
+                                     radiod_core_shortfall as _rcs)
+            names = sorted(radiod_plan)
+            cores = _gpc()
+            isolated = _gic()
+            short = _rcs(names, topology_cpu_affinity=ca, cores=cores,
+                         isolated_cpus=isolated)
+            if short > 0:
+                try:
+                    _refuse_radiod_shortfall(names, short, ca, cores, isolated)
+                except RadiodCoreShortfall:
+                    return 1
 
         _heading('cpu-affinity apply')
         if radiod_plan:
