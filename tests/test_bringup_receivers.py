@@ -252,6 +252,7 @@ injector = true
 def test_local_receivers_come_from_this_hosts_own_radiods(
         tmp_path, monkeypatch):
     smd = _load_smd()
+    monkeypatch.setattr(smd.os, 'cpu_count', lambda: 16)  # the capacity gate reads it
     calls = _bringup_env(monkeypatch, smd, [])
     _profile_with(tmp_path, monkeypatch, TWO_REMOTE + f'''
 [[receiver]]
@@ -306,6 +307,7 @@ def test_a_greenfield_radiod_host_plans_its_silent_receivers_as_local(
     # R8: no coordination block yet, and the radiods are not on the LAN:
     # this bring-up's Stage 1 creates them.
     smd = _load_smd()
+    monkeypatch.setattr(smd.os, 'cpu_count', lambda: 16)  # the capacity gate reads it
     calls = _bringup_env(monkeypatch, smd, [])
     _profile_with(tmp_path, monkeypatch, TWO_REMOTE)
     _no_coordination(monkeypatch)

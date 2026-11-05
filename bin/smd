@@ -10529,6 +10529,51 @@ def cmd_bringup(args) -> int:
         _warn(f'could not read coordination [uploads] ({exc}); not holding')
         hold_uploads = False
 
+    # Capacity gate (spec §4): several receivers put several instances of
+    # every reporter-keyed client on this host, remote receivers' clients
+    # included.  A single-receiver host never refuses.
+    if _HAS_SIGMOND_LIB:
+        from sigmond.bringup import _REPORTER_KEYED, planned_instances
+        from sigmond.capacity import capacity_verdict
+        _entries = (tuple((str(e[0]), str(e[1]),
+                           tuple(e[2]) if len(e) > 2 else None)
+                          for e in remote_pairs)
+                    if (not local or receivers_declared) else ())
+        _inst = planned_instances(
+            local_radiod=local, remote_entries=_entries,
+            local_receivers=tuple((str(d), str(r), tuple(c))
+                                  for d, r, c in local_receivers),
+            reporter=reporter or None, receivers_declared=receivers_declared)
+        if len({r for r, _ in _inst}) >= 2:
+            _pairs = [(c, r) for c in prof.clients
+                      if c in _REPORTER_KEYED and c not in skip
+                      for r, cl in _inst if cl is None or c in cl]
+            _dns = {e[0].lower() for e in _entries}
+            _idle = (not local and len(_dns) > 1
+                     and (timing_named or '').lower() not in _dns)
+            if 'hf-timestd' in prof.clients and 'hf-timestd' not in skip \
+                    and not _idle:
+                _pairs.append(('hf-timestd', ''))
+            _rcpus, _est = 0, False
+            if local:
+                try:
+                    from sigmond.cpu import get_radiod_cpus
+                    _rcpus = len(get_radiod_cpus())
+                except Exception:                           # noqa: BLE001
+                    _rcpus = 0
+                if not _rcpus:
+                    _n = len({d.lower() for d, _, _ in local_receivers}) or 1
+                    _rcpus, _est = 2 * _n, True
+            _v = capacity_verdict(_pairs, online_cpus=os.cpu_count() or 1,
+                                  radiod_cpus=_rcpus, radiod_estimated=_est)
+            if _v.ok:
+                _info(_v.text())
+            elif getattr(args, 'ignore_capacity', False):
+                _warn(_v.text() + '\n  proceeding: --ignore-capacity')
+            else:
+                _err('bringup: ' + _v.text() + ' — nothing installed')
+                return 1
+
     plan = build_plan(prof, local_radiod=local, remote_radiods=remote_pairs,
                       hold_uploads=hold_uploads,
                       timing_radiod=timing_named,
@@ -27996,6 +28041,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_bringup.add_argument('--psws-station-id', metavar='ID', dest='psws_station_id',
                            help='PSWS station id for GRAPE/hf-timestd uploads (e.g. S000171; '
                                 'optional — leave unset to configure PSWS upload later)')
+    p_bringup.add_argument('--ignore-capacity', action='store_true',
+                           dest='ignore_capacity',
+                           help='proceed even when the capacity gate says the host '
+                                'is too small')
     p_bringup.add_argument('--dry-run', action='store_true',
                            help='print the staged plan without running it')
 

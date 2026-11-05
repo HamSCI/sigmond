@@ -163,6 +163,30 @@ def _same_reporter(a: str, b: str) -> bool:
     return _reporter_key(a) == _reporter_key(b)
 
 
+def planned_instances(*, local_radiod: bool, remote_entries,
+                      local_receivers, reporter, receivers_declared: bool) -> list:
+    """The (reporter, clients or None) instances bring-up will create.
+
+    One per kept radiod, one per declared local receiver when there are
+    several, else the single ``--reporter``.  ``None`` means every bound
+    client.  ``build_plan`` and the capacity gate both read this."""
+    if remote_entries and not local_radiod:
+        instances = [(r, c) for _, r, c in remote_entries]
+    else:
+        if len(local_receivers) >= 2:
+            instances = [(r, c) for _, r, c in local_receivers]
+        elif reporter and (local_receivers or not receivers_declared):
+            # A declared list names every instance; the bare --reporter
+            # adds none it does not list.
+            only = [c for _, r, c in local_receivers
+                    if _same_reporter(r, reporter)]
+            instances = [(reporter, only[0] if only else None)]
+        else:
+            instances = []
+        instances += [(r, c) for _, r, c in remote_entries]
+    return instances
+
+
 def build_plan(profile, *, local_radiod: bool,
                remote_radiods=(),
                timing_radiod: str = '',
@@ -238,23 +262,10 @@ def build_plan(profile, *, local_radiod: bool,
     remote_radiods = tuple((d, r) for d, r, _ in remote_entries)
     local_receivers = tuple((str(d), str(r), tuple(c))
                             for d, r, c in local_receivers)
-    # Instances to make: (reporter, clients or None) -- one per kept radiod,
-    # one per declared local receiver when there are several, else the
-    # single --reporter.
-    if remote_entries and not local_radiod:
-        instances = [(r, c) for _, r, c in remote_entries]
-    else:
-        if len(local_receivers) >= 2:
-            instances = [(r, c) for _, r, c in local_receivers]
-        elif reporter and (local_receivers or not receivers_declared):
-            # A declared list names every instance; the bare --reporter
-            # adds none it does not list.
-            only = [c for _, r, c in local_receivers
-                    if _same_reporter(r, reporter)]
-            instances = [(reporter, only[0] if only else None)]
-        else:
-            instances = []
-        instances += [(r, c) for _, r, c in remote_entries]
+    instances = planned_instances(
+        local_radiod=local_radiod, remote_entries=remote_entries,
+        local_receivers=local_receivers, reporter=reporter,
+        receivers_declared=receivers_declared)
     reporters = [r for r, _ in instances]
 
     def reporters_for(client: str) -> list:
