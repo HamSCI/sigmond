@@ -575,7 +575,7 @@ def _write_coordination(path: Path, text: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.',
                                suffix='.tmp')
     try:
-        with os.fdopen(fd, 'w') as f:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(text)
         try:
             st = os.stat(path)

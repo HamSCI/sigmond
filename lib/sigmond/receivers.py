@@ -101,10 +101,14 @@ def load_receivers(path: Path = SITE_PROFILE_PATH) -> list:
     path = Path(path)
     if not path.is_file():
         return []
-    with open(path, 'rb') as fh:
-        data = tomllib.load(fh)
+    try:
+        with open(path, 'rb') as fh:
+            data = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as e:
+        raise ReceiverError(f'{path}: {e}') from None
     arr = data.get('receiver', [])
-    if not isinstance(arr, list):
+    if (not isinstance(arr, list)
+            or not all(isinstance(t, dict) for t in arr)):
         raise ReceiverError('receiver must be an array of tables: [[receiver]]')
     return [_from_table(i, t) for i, t in enumerate(arr)]
 
@@ -187,6 +191,7 @@ def validate_receivers(receivers: list, *, profile_clients: frozenset) -> list:
 
 
 _HEADER = '[[receiver]]'
+_HEADER_RE = re.compile(r'^\[\[\s*receiver\s*\]\]\s*(#.*)?$')
 
 
 def _q(s: str) -> str:
@@ -227,7 +232,7 @@ def _without_receivers(text: str) -> str:
     for line in text.splitlines(keepends=True):
         s = line.strip()
         if s.startswith('['):
-            inside = s.startswith(_HEADER)
+            inside = bool(_HEADER_RE.match(line.rstrip('\r\n')))
         if not inside:
             keep.append(line)
     out = ''.join(keep)
@@ -243,7 +248,7 @@ def write_receivers(path: Path, receivers: list) -> None:
     Everything else stays as it was; an absent file is created."""
     from .coordination import _write_coordination
     path = Path(path)
-    text = path.read_text() if path.is_file() else ''
+    text = path.read_text(encoding='utf-8') if path.is_file() else ''
     rest = _without_receivers(text)
     if rest and not rest.endswith('\n'):
         rest += '\n'

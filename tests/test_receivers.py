@@ -162,3 +162,43 @@ def test_upsert_keeps_what_the_caller_did_not_set(tmp_path):
     assert (r.radiod, r.clients, r.injector) == (B1B, ('psk-recorder',), True)
     r, = upsert_receiver(p, new, keep_unset=False)
     assert (r.antenna, r.same_antenna_as) == ('', '')
+
+
+def test_a_spaced_or_commented_header_is_replaced_once(tmp_path):
+    p = _f(tmp_path, '[station]\ncallsign = "X"\n\n'
+                     '[[ receiver ]]\nreporter_id = "AC0G/B1A"\n'
+                     'radiod = "ac0g-b1-a-status.local"\n\n'
+                     '[[receiver]]  # note\nreporter_id = "AC0G/B1B"\n'
+                     'radiod = "ac0g-b1-b-status.local"\n')
+    rs = load_receivers(p)
+    assert len(rs) == 2
+    write_receivers(p, rs[:1])
+    text = p.read_text()
+    assert text.count('reporter_id') == 1
+    assert 'AC0G/B1B' not in text
+    assert len(load_receivers(p)) == 1
+
+
+def test_similar_headers_are_not_receiver_blocks():
+    from sigmond.receivers import _without_receivers
+    keep = '[[receiver.x]]\na = 1\n[[receiverX]]\nb = 2\n'
+    assert _without_receivers(keep) == keep
+
+
+def test_a_non_ascii_antenna_round_trips_as_utf8(tmp_path):
+    p = tmp_path / 'sp.toml'
+    r = Receiver(reporter_id='AC0G/B1A', radiod=B1A,
+                 antenna='15 dBi at 135°')
+    write_receivers(p, [r])
+    assert '135°'.encode('utf-8') in p.read_bytes()
+    assert load_receivers(p)[0].antenna == r.antenna
+
+
+def test_a_syntax_error_is_a_receiver_error(tmp_path):
+    with pytest.raises(ReceiverError):
+        load_receivers(_f(tmp_path, '[[receiver]\nx = '))
+
+
+def test_a_receiver_that_is_not_a_table_is_a_receiver_error(tmp_path):
+    with pytest.raises(ReceiverError):
+        load_receivers(_f(tmp_path, 'receiver = [1]\n'))
