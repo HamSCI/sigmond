@@ -262,3 +262,116 @@ def install_wisdom(tmp: Path = WISDOM_TMP, dst: Path = WISDOM_FILE) -> None:
         raise FileNotFoundError(f'{tmp} not present — planning did not finish')
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp.replace(dst)
+
+
+# ── Is the installed wisdom current? ─────────────────────────────────────
+#
+# sigma, 2026-11-05: a June /etc/fftw/wisdomf, planned for other sizes, kept
+# the planner from ever running.  The unit's ConditionPathExists=! and
+# bring-up's exists() both asked "is there a file?".  A file says nothing
+# about which CPU timed it, which sizes it holds, or what cache radiod had.
+# The sidecar beside it records those; wisdom_is_current() compares them.
+WISDOM_SIDECAR = Path('/etc/fftw/wisdomf.cpu')
+SYS_CPU = Path('/sys/devices/system/cpu')
+
+
+def _size_bytes(text: str) -> int:
+    """'16384K' / '8M' / '4096' from a sysfs cache `size` file -> bytes."""
+    text = text.strip().upper()
+    mult = {'K': 1024, 'M': 1024 * 1024, 'G': 1024 ** 3}.get(text[-1:], 1)
+    try:
+        return int(text.rstrip('KMG')) * mult
+    except ValueError:
+        return 0
+
+
+def radiod_placement(cpus, performance_cpus, cache_root: Path = SYS_CPU) -> dict:
+    """The conditions FFTW's timings depend on, for radiod on ``cpus``.
+
+    radiod_core_type: 'performance' on a hybrid part (performance_cpus
+    non-empty), else 'uniform'.  radiod_l3_bytes: the size of the L3 domain
+    the first of radiod's cores sits in (0 if sysfs does not say).
+    Which cores within a like set radiod holds does not matter, so this
+    records no CPU numbers.
+    """
+    l3 = 0
+    for cpu in sorted(cpus):
+        base = Path(cache_root) / f'cpu{cpu}' / 'cache'
+        for idx in sorted(base.glob('index*')):
+            try:
+                if (idx / 'level').read_text().strip() != '3':
+                    continue
+                l3 = _size_bytes((idx / 'size').read_text())
+            except OSError:
+                continue
+            break
+        if l3:
+            break
+    return {'radiod_core_type': 'performance' if performance_cpus else 'uniform',
+            'radiod_l3_bytes': l3}
+
+
+def write_sidecar(path: Path, model: str, planned_profiles, placement=None) -> None:
+    """Record, in the bundles' v2 format, what a wisdom file was made for."""
+    lines = [f'model={model}', f'planned_profiles={",".join(planned_profiles)}']
+    for k, v in (placement or {}).items():
+        lines.append(f'{k}={v}')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + '.new')
+    tmp.write_text('\n'.join(lines) + '\n')
+    tmp.replace(path)
+
+
+def wisdom_is_current(wisdom_file: Path = WISDOM_FILE,
+                      sidecar: Path = WISDOM_SIDECAR,
+                      miss_log: Path = FFT_MISS_LOG,
+                      cpuinfo: Path = CPUINFO,
+                      placement: dict | None = None) -> bool:
+    """True only when the wisdom was made for this CPU and covers what radiod missed.
+
+    All must hold: the file exists; the sidecar's model is this CPU's; every
+    transform in fft.log appears in the sidecar's planned_profiles.  With
+    ``placement`` (radiod_placement()'s dict), a core type or L3 size the
+    sidecar recorded must also match.  A sidecar that records no placement
+    (a bundled one: its radiod_l3_bytes reads "unknown-from-guest") cannot
+    be compared and does not block.
+    """
+    if not Path(wisdom_file).is_file():
+        return False
+    side = read_sidecar(sidecar)
+    model = cpu_model(cpuinfo)
+    if not model or side.get('model') != model:
+        return False
+    planned = {p for p in side.get('planned_profiles', '').split(',') if p}
+    if any(p not in planned for p in plans_from_fft_log(miss_log)):
+        return False
+    for key, now in (placement or {}).items():
+        was = side.get(key)
+        if was is None or was.startswith('unknown'):
+            continue
+        if str(was) != str(now):
+            return False
+    return True
+
+
+def xhci_irqs_on(cpus, proc_interrupts: Path = Path('/proc/interrupts'),
+                 irq_root: Path = Path('/proc/irq')) -> list:
+    """[(irq, affinity_list)] for each xhci_hcd IRQ whose affinity touches ``cpus``."""
+    from sigmond.cpu import parse_cpu_mask
+    cpus = set(cpus)
+    out = []
+    try:
+        lines = Path(proc_interrupts).read_text().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        head, _, _ = line.partition(':')
+        if 'xhci_hcd' not in line or not head.strip().isdigit():
+            continue
+        try:
+            aff = (Path(irq_root) / head.strip() / 'smp_affinity_list').read_text().strip()
+        except OSError:
+            continue
+        if parse_cpu_mask(aff) & cpus:
+            out.append((int(head), aff))
+    return out

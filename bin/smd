@@ -5458,7 +5458,7 @@ _PRELOAD_MODULES = {
                          'sigmond.catalog', 'sigmond.discover',
                          'sigmond.inprocess_senders', 'sigmond.instance',
                          'sigmond.lifecycle'),
-    'update': ('sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
+    'update': ('sigmond.cpu', 'sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
                'sigmond.installer_args', 'sigmond.sink_state',
                'sigmond.build_stamp', 'sigmond.gitowner',
@@ -9568,7 +9568,7 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     Returns True once present, False on timeout.  Re-launches the planner
     service if it died before producing the file."""
     import time
-    if wisdom_file.exists():
+    if _wisdom_current(wisdom_file):
         return True
 
     # ⛔ IDENTIFY THE CPU BEFORE WAITING, AND SAY WHAT YOU FOUND.
@@ -9586,7 +9586,7 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     _info(f'FFT wisdom: this host is {verdict["model"]}')
     if verdict['have_wisdom']:
         _seed_bundled_wisdom()
-        if wisdom_file.exists():
+        if _wisdom_current(wisdom_file):
             _ok(f'FFT wisdom: seeded from bundle {verdict["bundle"].name} — '
                 f'no planning pass needed')
             return True
@@ -9603,7 +9603,7 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     _info(f'waiting for FFT wisdom ({wisdom_file}) — this can take ~30 min...')
     waited = 0
     while waited < timeout_s:
-        if wisdom_file.exists():
+        if _wisdom_current(wisdom_file):
             return True
         state = _run(['systemctl', 'is-active', 'sigmond-wisdom.service'],
                      capture=True).stdout.strip()
@@ -9614,7 +9614,7 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
         waited += poll_s
         if waited % 60 == 0:
             _info(f'  ... still planning ({waited // 60} min elapsed)')
-    return wisdom_file.exists()
+    return _wisdom_current(wisdom_file)
 
 
 def _radiod_streaming(unit: str) -> bool:
@@ -12332,9 +12332,10 @@ def cmd_apply(args) -> int:
                 # Check wisdom file — generation is now a deliberate user
                 # action via 'smd tui → Operate → FFT Wisdom' (or the CLI
                 # equivalent).  We don't block apply to run it.
-                wisdom_ready = _WISDOM_FILE.exists()
+                wisdom_ready = _wisdom_current(_WISDOM_FILE)
                 if not wisdom_ready:
-                    _warn('FFT wisdom file missing — radiod cannot start cleanly')
+                    _warn('FFT wisdom missing or not made for this CPU/sizes '
+                          '— radiod cannot start cleanly')
                     _warn(f'  Run:  smd tui  → Operate → FFT Wisdom')
                 if wisdom_ready:
                     for u in radiod_units:
@@ -12543,35 +12544,25 @@ def _seed_bundled_wisdom() -> None:
     """
     if _WISDOM_FILE.exists() and _WISDOM_FILE.stat().st_size > 0:
         return
-    try:
-        model = next(
-            (ln.split(':', 1)[1].strip()
-             for ln in Path('/proc/cpuinfo').read_text().splitlines()
-             if ln.startswith('model name')), '')
-    except OSError:
+    from sigmond import wisdom as _w
+    model = _w.cpu_model()
+    # find_bundle reads v1 and v2 sidecars.  The raw-text compare this
+    # replaced never matched a v2 (key=value) sidecar, so a repo install
+    # seeded nothing (sigma, 2026-11-05).
+    bundle = _w.find_bundle(_WISDOM_BUNDLE_DIRS, model)
+    if bundle is None:
         return
-    if not model:
+    _WISDOM_FILE.parent.mkdir(parents=True, exist_ok=True)
+    r = _run(['install', '-m', '644', str(bundle), str(_WISDOM_FILE)], sudo=True)
+    if r.returncode != 0:
         return
-    for d in _WISDOM_BUNDLE_DIRS:
-        if not d.is_dir():
-            continue
-        for sidecar in sorted(d.glob('wisdomf-*.cpu')):
-            try:
-                if sidecar.read_text().strip() != model:
-                    continue
-            except OSError:
-                continue
-            bundle = sidecar.with_suffix('')   # wisdomf-<slug>
-            if not bundle.is_file() or bundle.stat().st_size == 0:
-                continue
-            _WISDOM_FILE.parent.mkdir(parents=True, exist_ok=True)
-            r = _run(['install', '-m', '644', str(bundle),
-                      str(_WISDOM_FILE)], sudo=True)
-            if r.returncode == 0:
-                _ok(f'FFT wisdom: seeded {_WISDOM_FILE} from fork bundle '
-                    f'{bundle.name} (CPU match: {model}) — planner will '
-                    f'verify instead of re-planning')
-            return
+    # The sidecar travels with the wisdom: it says which CPU timed it, so
+    # wisdom_is_current() can tell this file from sigma's stale June one.
+    _run(['install', '-m', '644', str(bundle) + '.cpu', str(_w.WISDOM_SIDECAR)],
+         sudo=True)
+    _ok(f'FFT wisdom: seeded {_WISDOM_FILE} from bundle '
+        f'{bundle.name} (CPU match: {model}) — planner will '
+        f'verify instead of re-planning')
 
 
 def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
@@ -17993,6 +17984,73 @@ def cmd_wisdom_harvest(args) -> int:
     return 0
 
 
+_IRQ_AFFINITY_SCRIPT = '/usr/local/sbin/sigmond-rx888-irq-affinity'
+
+
+def _wisdom_radiod_cores() -> dict:
+    """{unit: CPUs} radiod will run on, from the one placement rule; {} with no local radiod."""
+    from sigmond.cpu import (get_radiod_instances, assign_radiod_cores,
+                             get_physical_cores, get_isolated_cpus,
+                             get_performance_cpus)
+    units = get_radiod_instances()
+    if not units:
+        return {}
+    try:
+        topo = _load_topology(TOPOLOGY_PATH).get('cpu_affinity')
+    except Exception:
+        topo = None
+    return assign_radiod_cores(
+        units, topo, cores=get_physical_cores() or None,
+        isolated_cpus=get_isolated_cpus(),
+        current=_current_radiod_pins(units),
+        performance_cpus=get_performance_cpus())
+
+
+def _wisdom_placement():
+    """radiod_placement() for the cores radiod will hold now, or None with no local radiod."""
+    from sigmond import wisdom as _w
+    from sigmond.cpu import get_performance_cpus
+    try:
+        cores = _wisdom_radiod_cores()
+    except Exception:
+        return None
+    cpus = set().union(*cores.values()) if cores else set()
+    if not cpus:
+        return None
+    return _w.radiod_placement(cpus, get_performance_cpus())
+
+
+def _wisdom_current(wisdom_file=None) -> bool:
+    """wisdom_is_current() for this host's present radiod placement."""
+    from sigmond import wisdom as _w
+    # Read the module attributes at call time (not wisdom_is_current's
+    # bound defaults), so one seam moves every path.
+    return _w.wisdom_is_current(
+        wisdom_file or _w.WISDOM_FILE, _w.WISDOM_SIDECAR, _w.FFT_MISS_LOG,
+        _w.CPUINFO, placement=_wisdom_placement())
+
+
+def cmd_wisdom_needed(args) -> int:
+    """Exit 0 when the planner should run, 1 when the wisdom is current.
+
+    sigmond-wisdom.service's ExecCondition: a nonzero exit skips the unit
+    quietly.  Always prints the CPU verdict, so a bundle miss stays loud.
+    """
+    from sigmond.wisdom import identify_cpu
+    from sigmond import wisdom as _w
+    verdict = identify_cpu(_WISDOM_BUNDLE_DIRS, _w.CPUINFO)
+    if verdict['have_wisdom']:
+        _info(f'FFT wisdom: {verdict["model"]} has bundle {verdict["bundle"].name}')
+    else:
+        _warn(f'FFT wisdom: NO bundled wisdom for {verdict["model"]} '
+              f'(wisdomf-{verdict["slug"]} is absent)')
+    if _wisdom_current():
+        _info('FFT wisdom is current; nothing to plan')
+        return 1
+    _info('FFT wisdom is missing or not made for this CPU, sizes or placement')
+    return 0
+
+
 def cmd_wisdom_plan(args) -> int:
     """Run fftwf-wisdom for every transform radiod uses; install /etc/fftw/wisdomf.
 
@@ -18012,6 +18070,7 @@ def cmd_wisdom_plan(args) -> int:
     from sigmond.wisdom import (
         FFT_WISDOM_PROFILES, WISDOM_FILE, WISDOM_TMP, WISDOM_LOG,
         install_wisdom, profiles_for_planning,
+        WISDOM_SIDECAR, cpu_model, radiod_placement, write_sidecar,
     )
 
     fftwf = shutil.which('fftwf-wisdom')
@@ -18041,6 +18100,51 @@ def cmd_wisdom_plan(args) -> int:
 
     WISDOM_TMP.parent.mkdir(parents=True, exist_ok=True)
 
+    # ⛔ SET THE CONDITIONS RADIOD WILL RUN UNDER BEFORE TIMING ANYTHING.
+    # FFTW chooses plans by timing them, so xhci interrupts landing on
+    # radiod's cores, or a planner on some other core, bake a plan for a
+    # machine radiod never is.  (sigma, 2026-11-05: wisdom planned months
+    # earlier, under other conditions, was kept for good.)
+    #   1. lay the xhci IRQs out (radiod is stopped, so the script reads
+    #      the fence from radiod's drop-in);
+    #   2. refuse if any still overlaps radiod's cores;
+    #   3. pin this process to the union of radiod's cores.
+    # No local radiod: nothing to match, plan unpinned.
+    try:
+        radiod_cores = _wisdom_radiod_cores()
+    except Exception as exc:
+        _warn(f'could not work out radiod placement ({exc}); planning unpinned')
+        radiod_cores = {}
+    pin = set().union(*radiod_cores.values()) if radiod_cores else set()
+    if not pin:
+        _info('no local radiod unit: planning unpinned, IRQ layout untouched')
+    else:
+        from sigmond.wisdom import xhci_irqs_on
+        r = subprocess.run([_IRQ_AFFINITY_SCRIPT], capture_output=True, text=True)
+        if r.returncode != 0:
+            _warn(f'{_IRQ_AFFINITY_SCRIPT} exited {r.returncode}: '
+                  f'{(r.stderr or r.stdout).strip()}')
+        stuck = xhci_irqs_on(
+            pin,
+            Path(os.environ.get('SIGMOND_PROC_INTERRUPTS', '/proc/interrupts')),
+            Path(os.environ.get('SIGMOND_IRQ_ROOT', '/proc/irq')))
+        if stuck:
+            _err('refusing to plan: xhci_hcd interrupts still sit on radiod\'s '
+                 f'cores {sorted(pin)}; timings would include their load:')
+            for irq, aff in stuck:
+                print(f'      irq {irq} -> cpus {aff}')
+            _info(f'Check {_IRQ_AFFINITY_SCRIPT} and radiod\'s CPUAffinity drop-in.')
+            return 1
+        os.sched_setaffinity(0, pin)
+        _info(f'planning pinned to CPUs {sorted(pin)} '
+              f'(radiod: {", ".join(sorted(radiod_cores))})')
+        _layout = xhci_irqs_on(
+            set(range(os.cpu_count() or 1)),
+            Path(os.environ.get('SIGMOND_PROC_INTERRUPTS', '/proc/interrupts')),
+            Path(os.environ.get('SIGMOND_IRQ_ROOT', '/proc/irq')))
+        _info('xhci IRQ layout timed under: ' +
+              ('; '.join(f'irq {i} -> {a}' for i, a in _layout) or 'none found'))
+
     # Pin for the entire run.  FFTW's planner picks the fastest
     # implementation by literally benchmarking each candidate; if the kernel
     # migrates the process to a different core mid-plan, cache behaviour
@@ -18063,6 +18167,11 @@ def cmd_wisdom_plan(args) -> int:
     # Default is radiod's own AllowedCPUs when we can read them, CPU 0
     # otherwise (unchanged behaviour on a station with no partitioning).
     plan_cpus = os.environ.get('SIGMOND_WISDOM_CPUS') or _radiod_plan_cpus() or '0'
+    # taskset inside the pinned set: a core outside it is EINVAL.
+    if pin:
+        first = plan_cpus.split(',')[0].split('-')[0]
+        if not first.isdigit() or int(first) not in pin:
+            plan_cpus = str(min(pin))
 
     # ⛔ PLAN WHAT THIS STATION ACTUALLY MISSED, NOT JUST THE STATIC LIST.
     # radiod plans FFTW_WISDOM_ONLY|FFTW_PATIENT and, on a miss, silently
@@ -18234,6 +18343,13 @@ def cmd_wisdom_plan(args) -> int:
         _err(f'could not install: {exc}')
         return 1
     _ok(f'installed → {WISDOM_FILE}')
+    try:
+        from sigmond.cpu import get_performance_cpus
+        write_sidecar(
+            WISDOM_SIDECAR, cpu_model(), profiles,
+            radiod_placement(pin, get_performance_cpus()) if pin else None)
+    except OSError as exc:
+        _warn(f'could not write {WISDOM_SIDECAR}: {exc} — the next check will replan')
     _info('Now: smd start')
     return 0
 
@@ -27261,6 +27377,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='measure every transform on this machine instead of keeping the '
                         'plans already in /etc/fftw/wisdomf (hours; the full replan)')
 
+    wisdom_sub.add_parser('needed',
+                          help='exit 0 when the planner should run (wisdom missing, '
+                               'for another CPU, or short of a size radiod asked for), '
+                               '1 when current')
+
     p = wisdom_sub.add_parser('status',
                               help='show whether /etc/fftw/wisdomf exists and how old it is '
                                    '(default for bare `smd admin wisdom`)')
@@ -28800,6 +28921,8 @@ def main() -> int:
             if _need_root('wisdom plan'):
                 return 1
             return cmd_wisdom_plan(args)
+        if wis_cmd == 'needed':
+            return cmd_wisdom_needed(args)
         if wis_cmd == 'harvest':
             return cmd_wisdom_harvest(args)
         if wis_cmd == 'help':
