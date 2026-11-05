@@ -1,7 +1,7 @@
 # One remote-access implementation, on a Proxmox host or on bare metal
 
 > **Audience:** contributor
-> **Status:** design; Michael's questions answered 2026-11-05; Rob's (§8, 1-3) open; steps 1-4 built on branch `rac-bare-metal`, proof on bare metal pending
+> **Status:** design; Michael's questions answered 2026-11-05; Rob's (§8, 1-3) open; steps 2 and 3 built on branch `rac-bare-metal`; step 1 (moving the code) deferred until pm-align can deliver `scripts/rac/` (see §4); step 4, the proof on sigma, B2 and B1, pending
 > **Written:** 2026-11-05, at Michael's direction: "however the method works now should be shared
 > and available for use when installing sigmond in a Proxmox setting or bare metal, so it's one
 > code base."
@@ -129,6 +129,16 @@ payload (`install-host.sh` today), on both kinds of machine; `smd`'s GitHub down
 retires.  On bare metal, bring-up runs `sigmond-rac activate` at the end of a COMPLETE run, the
 point where the wizard runs `rac_activate`.  It asks nothing.  A failure never fails bring-up; the
 retry timer carries on, as on a host.
+
+`sigmond-rac activate` ends with one of these exit codes.
+
+- 0: the tunnel is up.
+- 1: it could not start, or registration failed.
+- 3: remote access is wanted on but not up yet; the retry timer keeps trying.
+- 4: no site name; set `[station] callsign` in `/etc/sigmond/site-profile.toml`, or pass `--site`.
+- 5: a Proxmox host carries this machine's remote access.
+- 6: a different name is already recorded; to rename on purpose, remove
+  `/etc/sigmond-appliance/rac-site` and rerun with `--site`.
 
 **The switch.**  On a host the VM reaches the switch over the paired ssh key, as today.  On bare
 metal `smd remote` finds no pairing but a local `/usr/local/sbin/sigmond-rac-switch`, and runs it
