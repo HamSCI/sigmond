@@ -338,6 +338,7 @@ def pairing(tmp_path, monkeypatch):
     monkeypatch.setattr(smd, '_WISDOM_SUSPEND_MARKER', tmp_path / 'run' / 'wisdom-suspended')
     monkeypatch.setattr(smd, 'cmd_stop', lambda a: calls.append('stop') or 0)
     monkeypatch.setattr(smd, 'cmd_start', lambda a: calls.append('start') or 0)
+    monkeypatch.setattr(smd, '_system_stopping', lambda: False)
     return calls, smd._WISDOM_SUSPEND_MARKER
 
 
@@ -614,3 +615,26 @@ def test_cmd_start_passes_its_units_through_the_hold():
     src = (Path(smd.__file__).read_text())
     body = src[src.index('def cmd_start(args)'):src.index('\ndef ', src.index('def cmd_start(args)') + 10)]
     assert 'units = _hold_radiod_for_planner(units)' in body
+
+
+# sigma, 2026-11-05 13:22Z: resume runs a full staggered `smd start` from the
+# unit's ExecStopPost, and systemd's default 90 s stop timeout killed it after
+# radiod, hs-uploader and the core recorder.  The rest of the station stayed down.
+
+def test_the_unit_gives_resume_time_for_a_staggered_start():
+    lines = [l.strip() for l in
+             (REPO / 'systemd' / 'sigmond-wisdom.service').read_text().splitlines()
+             if not l.strip().startswith('#')]
+    stop = [l for l in lines if l.startswith('TimeoutStopSec=')]
+    assert stop == ['TimeoutStopSec=30min']
+
+
+def test_resume_stands_aside_while_the_system_shuts_down(pairing, monkeypatch):
+    calls, marker = pairing
+    smd.cmd_wisdom_suspend(_Args())
+    monkeypatch.setattr(smd, '_system_stopping', lambda: True)
+    assert smd.cmd_wisdom_resume(_Args()) == 0
+    assert calls == ['stop']                        # nothing started
+    monkeypatch.setattr(smd, '_system_stopping', lambda: False)
+    assert smd.cmd_wisdom_resume(_Args()) == 0
+    assert calls == ['stop', 'start'] and not marker.exists()

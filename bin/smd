@@ -18413,9 +18413,22 @@ def _hold_radiod_for_planner(units):
     return [u for u in units if u not in held]
 
 
+def _system_stopping() -> bool:
+    """True while systemd shuts the machine down."""
+    r = _run(['systemctl', 'is-system-running'])
+    return (getattr(r, 'stdout', '') or '').strip() == 'stopping'
+
+
 def cmd_wisdom_resume(args) -> int:
-    """Start the services suspend stopped; do nothing when it never ran."""
+    """Start the services suspend stopped; do nothing when it never ran.
+
+    During shutdown it starts nothing: the marker lives in /run, so the
+    next boot starts clean and the planner runs again if it must.
+    """
     if not _WISDOM_SUSPEND_MARKER.exists():
+        return 0
+    if _system_stopping():
+        _info('wisdom resume: the system is shutting down; starting nothing')
         return 0
     # Clear the marker first: while it stands, cmd_start holds radiod back.
     _WISDOM_SUSPEND_MARKER.unlink(missing_ok=True)

@@ -36,6 +36,10 @@ ExecStart=/usr/local/bin/smd admin wisdom plan --auto
 # systemd 257.13), so resume starts services only if suspend marked them
 # stopped.
 ExecStopPost=-/usr/local/bin/smd admin wisdom resume
+# resume runs a full, staggered `smd start`, which takes minutes; systemd's
+# default 90 s stop timeout killed it on sigma (2026-11-05) after three
+# services.  resume stands aside during shutdown, so this never holds one up.
+TimeoutStopSec=30min
 
 [Install]
 WantedBy=multi-user.target
