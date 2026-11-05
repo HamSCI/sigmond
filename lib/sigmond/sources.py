@@ -398,7 +398,12 @@ def reporter_id_for(callsign: str, status_dns: str) -> str:
         name = name[: -len(".local")]
     if name.startswith(call.lower() + "-"):
         name = name[len(call) + 1:]
-    return f"{call}/" + re.sub(r"[^A-Za-z0-9]", "", name).upper()
+    tail = re.sub(r"[^A-Za-z0-9]", "", name).upper()
+    if not tail:
+        # Nothing left to name the instance: "AC0G/" is not a reporter ID.
+        raise SourceSelectionError(
+            f"{status_dns}: no usable name left for a reporter ID")
+    return f"{call}/{tail}"
 
 
 def select_radiods(found: list[DiscoveredRadiod], callsign: str,

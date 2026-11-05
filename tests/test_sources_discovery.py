@@ -76,3 +76,15 @@ def test_a_new_instances_source_file_uses_the_key_the_reader_reads(
     got = sources.ClientSources.load('psk-recorder@AC0G-B1A',
                                      root=tmp_path / 'clients')
     assert got.selected == []
+
+
+@pytest.mark.parametrize('dns', ['-status.local', '---status.local'])
+def test_an_empty_remainder_is_an_error(dns):
+    # A status name with nothing alphanumeric left once the suffix is
+    # stripped would give "AC0G/", a malformed reporter ID.
+    with pytest.raises(SourceSelectionError, match=dns):
+        reporter_id_for('AC0G', dns)
+    with pytest.raises(SourceSelectionError, match=dns):
+        select_radiods([R(dns, 'AC0G odd')], 'AC0G', [])
+    with pytest.raises(SourceSelectionError, match=dns):
+        select_radiods([R(dns, 'x')], 'AC0G', [dns])
