@@ -9,11 +9,18 @@
 # and calls the wizard's own registration functions.
 #
 # Exit codes: register/retry 0 done, 1 failed (the reason is printed).
-#   activate: the switch's own code, or 4 no station name, 5 this machine
-#   belongs to a Proxmox host's RAC, 6 --site differs from the recorded name.
+#   activate: the switch's own code, or 2 bad arguments, 4 no station name,
+#   5 this machine belongs to a Proxmox host's RAC, 6 --site differs from the
+#   recorded name, 7 the old wd-rac tunnel still runs here.
+#
+# Activate also clones the sigmond-rac payload (frpc and the CA) when the
+# machine holds none.  It clones as root, then chowns the checkout to the
+# owner of /opt/git/sigmond/sigmond.
 #
 # Test overrides: SIGMOND_WIZARD, SIGMOND_RAC_MARK_DIR, SIGMOND_RAC_LOG,
-#   SIGMOND_RAC_LINK, SIGMOND_RAC_APPLIANCE_VERSION, SIGMOND_RAC_PAIR_KEY.
+#   SIGMOND_RAC_LINK, SIGMOND_RAC_APPLIANCE_VERSION, SIGMOND_RAC_PAIR_KEY,
+#   SIGMOND_RAC_PAYLOAD_URL, SIGMOND_RAC_PAYLOAD_TARGET,
+#   SIGMOND_RAC_PAYLOAD_OWNER_REF, SIGMOND_RAC_PAYLOAD_DIRS.
 set -u
 
 verb="${1:-}"
@@ -75,9 +82,29 @@ activate)
         echo "sigmond-rac: a Proxmox host carries this machine's RAC; nothing to activate here." >&2
         exit 5
     fi
+    # The old tunnel (wd-rac) and this one must not run together: a second
+    # registration would give the machine a second RAC number.  Spec section 6.
+    old=$( { systemctl list-unit-files --no-legend --plain 'wd-rac.service' 'wd-rac@*.service' 2>/dev/null \
+                 | awk '$2 == "enabled" {print $1}'
+             systemctl list-units --no-legend --plain 'wd-rac.service' 'wd-rac@*.service' 2>/dev/null \
+                 | awk '$3 == "active" {print $1}'; } | grep -v '^wd-rac@\.service$' | sort -u | tr '\n' ' ')
+    if [ -n "${old// /}" ]; then
+        {
+            echo "sigmond-rac: this machine still runs the old wd-rac tunnel (${old% }), so activate stops here."
+            echo "A second tunnel would give it a second RAC number.  To move it to the new tunnel:"
+            echo "  1. sudo systemctl disable --now 'wd-rac@*' wd-rac.service"
+            echo "  2. sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate"
+            echo "The new tunnel gets a new RAC number and new ports."
+        } >&2
+        exit 7
+    fi
     site=$(rac_site_name)
     if [ -z "$site" ]; then
-        echo "sigmond-rac: no station name: set [station] callsign in /etc/sigmond/site-profile.toml or pass --site" >&2
+        if [ -n "$site_arg" ]; then
+            echo "sigmond-rac: the --site you gave ($site_arg) sanitises to nothing; use letters, digits, - or _" >&2
+        else
+            echo "sigmond-rac: no station name: set [station] callsign in /etc/sigmond/site-profile.toml or pass --site" >&2
+        fi
         exit 4
     fi
     if [ -n "$site_arg" ]; then
@@ -86,6 +113,30 @@ activate)
         if [ "$wanted" != "$site" ]; then
             echo "sigmond-rac: this machine is recorded as $site; --site names $wanted. To rename deliberately, remove $MARK_DIR/rac-site and rerun with --site" >&2
             exit 6
+        fi
+    fi
+    # Fetch the frpc payload when this machine holds none.  `smd install
+    # sigmond-rac` would run the guest installer, the wrong one.
+    if [ ! -x "$RAC_FRPC" ] || [ ! -f "$RAC_CA" ]; then
+        found=""
+        pdirs="${SIGMOND_RAC_PAYLOAD_DIRS:-${SIGMOND_RAC_PAYLOAD:+$SIGMOND_RAC_PAYLOAD:}/root/sigmond-appliance/sigmond-rac:/opt/git/sigmond/sigmond-rac}"
+        IFS=: read -ra pda <<< "$pdirs"
+        for pd in "${pda[@]}"; do
+            [ -n "$pd" ] && [ -x "$pd/install-host.sh" ] && { found=1; break; }
+        done
+        if [ -z "$found" ]; then
+            purl="${SIGMOND_RAC_PAYLOAD_URL:-https://github.com/HamSCI/sigmond-rac}"
+            ptarget="${SIGMOND_RAC_PAYLOAD_TARGET:-/opt/git/sigmond/sigmond-rac}"
+            pref="${SIGMOND_RAC_PAYLOAD_OWNER_REF:-/opt/git/sigmond/sigmond}"
+            say "fetching the sigmond-rac payload from $purl"
+            mkdir -p "$(dirname "$ptarget")" 2>/dev/null
+            if ! git clone --quiet "$purl" "$ptarget" >>"$LOG" 2>&1; then
+                echo "sigmond-rac: cannot clone the sigmond-rac payload from $purl into $ptarget (see $LOG)" >&2
+                exit 1
+            fi
+            # Own it like the other checkouts there.
+            chown -R "$(stat -c %U:%G "$pref" 2>/dev/null || echo root:root)" "$ptarget" 2>/dev/null
+            export SIGMOND_RAC_PAYLOAD="$ptarget"
         fi
     fi
     mkdir -p "$MARK_DIR" || exit 1

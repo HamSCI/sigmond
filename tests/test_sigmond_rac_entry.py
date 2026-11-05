@@ -16,9 +16,9 @@ ENTRY = REPO / "scripts" / "rac" / "sigmond-rac"
 WIZARD = REPO / "scripts" / "proxmox" / "sigmond-wizard.sh"
 
 
-def setup(tmp_path, tiers="", appliance=False, pairing=False):
+def setup(tmp_path, tiers="", appliance=False, pairing=False, frpc=True):
     prelude = rr.host(tmp_path, tiers=tiers or "x|127.0.0.1|http://127.0.0.1:1/register|on|1",
-                      relays=False, configured=None)
+                      relays=False, configured=None, frpc=frpc)
     stub = tmp_path / "switch-stub"
     stub.write_text(textwrap.dedent(f"""\
         #!/bin/bash
@@ -37,6 +37,9 @@ def setup(tmp_path, tiers="", appliance=False, pairing=False):
             printf '%s\\n' "$RAC_MODE" > "$MARK_DIR/rac-mode"
             cp {stub} "$RAC_SWITCH"
         }}
+        # What `systemctl list-units` / `list-unit-files` print: one line per
+        # unit, from a file a test fills.
+        systemctl(){{ cat {tmp_path}/systemctl.units 2>/dev/null; return 0; }}
         return 0
         """))
     av, pk = tmp_path / "appliance-version", tmp_path / "switch.key"
@@ -191,3 +194,106 @@ def test_register_failure_prints_reason(tmp_path):
 def test_bad_verb(tmp_path):
     env = setup(tmp_path)
     assert entry(tmp_path, env, "bogus").returncode == 2
+
+
+def old_tunnel(tmp_path, line):
+    (tmp_path / "systemctl.units").write_text(line + "\n")
+
+
+def test_activate_refuses_while_wd_rac_runs(tmp_path):
+    env = setup(tmp_path)
+    old_tunnel(tmp_path, "wd-rac@AC0G-B1.service loaded active running WD RAC")
+    r = entry(tmp_path, env, "activate", "--site", "AC0G-X")
+    assert r.returncode == 7, r.stdout + r.stderr
+    assert "wd-rac" in r.stderr and "systemctl disable --now" in r.stderr
+    assert "new RAC number" in r.stderr and "sigmond-rac activate" in r.stderr
+    assert not (mark(tmp_path) / "rac-site").exists()
+    assert not (tmp_path / "switch.calls").exists()
+
+
+def test_activate_refuses_for_an_enabled_wd_rac_unit(tmp_path):
+    env = setup(tmp_path)
+    old_tunnel(tmp_path, "wd-rac.service enabled enabled")
+    assert entry(tmp_path, env, "activate", "--site", "AC0G-X").returncode == 7
+
+
+def test_activate_ignores_the_wd_rac_template_and_other_units(tmp_path):
+    env = setup(tmp_path)
+    old_tunnel(tmp_path, "wd-rac@.service disabled enabled")
+    assert entry(tmp_path, env, "activate", "--site", "AC0G-X").returncode == 0
+
+
+def test_activate_site_that_sanitises_to_nothing(tmp_path):
+    env = setup(tmp_path)
+    r = entry(tmp_path, env, "activate", "--site", "!!!")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "sanitises to nothing" in r.stderr and "!!!" in r.stderr
+    assert "pass --site" not in r.stderr
+
+
+def git(*a, cwd):
+    subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True,
+                   env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
+                            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x"))
+
+
+def payload_repo(tmp_path):
+    work = tmp_path / "payload-work"
+    work.mkdir()
+    ih = work / "install-host.sh"
+    ih.write_text('#!/bin/sh\nprintf "#!/bin/sh\\nexit 0\\n" > "$TEST_FRPC"\n'
+                  'chmod 755 "$TEST_FRPC"\necho CA > "$TEST_CA"\n')
+    ih.chmod(0o755)
+    git("init", "-q", "-b", "main", cwd=work)
+    git("add", "-A", cwd=work)
+    git("commit", "-q", "-m", "payload", cwd=work)
+    bare = tmp_path / "payload.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
+    return bare
+
+
+def test_activate_clones_the_payload_when_none_exists(tmp_path):
+    env = setup(tmp_path, frpc=False)
+    (tmp_path / "ca.crt").unlink()
+    bare = payload_repo(tmp_path)
+    target = tmp_path / "opt" / "sigmond-rac"
+    r = entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={
+        "SIGMOND_RAC_PAYLOAD_DIRS": str(target),
+        "SIGMOND_RAC_PAYLOAD_URL": str(bare),
+        "SIGMOND_RAC_PAYLOAD_TARGET": str(target),
+        "SIGMOND_RAC_PAYLOAD_OWNER_REF": str(tmp_path),
+        "TEST_FRPC": str(tmp_path / "frpc"), "TEST_CA": str(tmp_path / "ca.crt")})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (target / "install-host.sh").exists()
+    assert (target / ".git").is_dir()
+    # the registration (the switch, here a stub) finds the payload it cloned
+    assert (target / "install-host.sh").stat().st_uid == os.getuid()
+
+
+def test_activate_leaves_an_existing_payload_alone(tmp_path):
+    env = setup(tmp_path, frpc=False)
+    (tmp_path / "ca.crt").unlink()
+    have = tmp_path / "have"
+    have.mkdir()
+    (have / "install-host.sh").write_text("#!/bin/sh\nexit 0\n")
+    (have / "install-host.sh").chmod(0o755)
+    target = tmp_path / "opt" / "sigmond-rac"
+    entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={
+        "SIGMOND_RAC_PAYLOAD_DIRS": str(have),
+        "SIGMOND_RAC_PAYLOAD_URL": str(tmp_path / "no-such.git"),
+        "SIGMOND_RAC_PAYLOAD_TARGET": str(target)})
+    assert not target.exists()
+
+
+def test_activate_clone_failure_exits_1_with_one_line(tmp_path):
+    env = setup(tmp_path, frpc=False)
+    (tmp_path / "ca.crt").unlink()
+    target = tmp_path / "opt" / "sigmond-rac"
+    r = entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={
+        "SIGMOND_RAC_PAYLOAD_DIRS": str(target),
+        "SIGMOND_RAC_PAYLOAD_URL": str(tmp_path / "no-such.git"),
+        "SIGMOND_RAC_PAYLOAD_TARGET": str(target)})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert len(r.stderr.strip().splitlines()) == 1
+    assert "cannot clone the sigmond-rac payload" in r.stderr
+    assert not (tmp_path / "switch.calls").exists()
