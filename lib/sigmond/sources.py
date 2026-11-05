@@ -378,6 +378,12 @@ def valid_mdns_hostname(name) -> bool:
             and _MDNS_HOSTNAME.fullmatch(name) is not None)
 
 
+def has_control_chars(text: str) -> bool:
+    """True when ``text`` holds a C0 or C1 control character
+    (U+0000-U+001F, U+007F-U+009F)."""
+    return any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in text)
+
+
 _REFUSED_ADVERTS: set = set()
 
 
@@ -397,13 +403,19 @@ def discover_radiods(timeout: float = 5.0) -> list[DiscoveredRadiod]:
         host = ((r.fields or {}).get("source_host") or "").strip()
         dns = r.key.identifier
         bad = [v for v in (dns, host or dns) if not valid_mdns_hostname(v)]
+        # The label reaches the operator's terminal in bring-up's bind list.
+        # mdns decodes avahi's `\\010` to a newline and `\\027` to ESC, so a
+        # crafted label could forge a "bind …" line or hide one (security
+        # review, 2026-11-05).
+        if has_control_chars(r.label or ""):
+            bad.append(r.label)
         if bad:
             for v in bad:
                 if v not in _REFUSED_ADVERTS:
                     _REFUSED_ADVERTS.add(v)
                     logging.getLogger(__name__).warning(
                         "ignoring radiod advertisement: %r is not a valid "
-                        "host name", v)
+                        "host name or carries a control character", v)
             continue
         out.append(DiscoveredRadiod(status_dns=dns, label=r.label,
                                     host=host or dns))

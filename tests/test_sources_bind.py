@@ -559,3 +559,95 @@ def test_instances_bound_probe_passes_and_fails(tmp_path, monkeypatch):
                         lambda p, etc_root=None: (False, 'x'))
     assert smd._bringup_probe('instances-bound:' + pairs, 'smd') == (
         False, 'x', False)
+
+
+# --- fix round 2: the advertised label is untrusted too -----------------------
+# mdns._decode_avahi_escapes turns `\010` into a newline and `\027` into ESC,
+# so a crafted label could forge "bind …" lines, or hide one, in the listing
+# the operator reads before "Bind these radiods? [Y/n]".
+
+def _crafted_rows(labels):
+    from sigmond.sources import InventoryRow, SourceKey
+    return [InventoryRow(key=SourceKey('radiod', dns), label=label,
+                         reachability='ok', observed_at=None,
+                         fields={'source_host': 'ac0g-b1'})
+            for dns, label in labels]
+
+
+def test_discovery_drops_a_label_with_control_characters(monkeypatch, caplog):
+    import sigmond.sources as sources
+    import sigmond.discovery.mdns as mdns
+    forged = 'AC0G x\n  bind evil-status.local  host evil'
+    hidden = 'AC0G \x1b[2Kx'
+    c1 = 'AC0G \x85x'
+    rows = _crafted_rows([(A, 'AC0G @EM38ww B1-a longwire'),
+                          (B, forged), ('c-status.local', hidden),
+                          ('d-status.local', c1)])
+    monkeypatch.setattr(mdns, 'probe', lambda env, timeout=5.0: [])
+    monkeypatch.setattr(sources, 'inventory', lambda obs: rows)
+    with caplog.at_level('WARNING'):
+        found = sources.discover_radiods()
+    assert [(r.status_dns, r.label) for r in found] == [
+        (A, 'AC0G @EM38ww B1-a longwire')]
+    for bad in (forged, hidden, c1):
+        assert repr(bad) in caplog.text
+
+
+def test_the_bind_line_prints_the_label_quoted(monkeypatch, capsys):
+    smd = _load_smd()
+    _bringup_env(monkeypatch, smd, _two_found())
+    assert smd.cmd_bringup(_bringup_args()) == 0
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if 'bind ' + A in l)
+    assert repr('AC0G @EM38ww B1-a longwire') in line
+
+
+def test_a_source_label_cannot_inject_toml(tmp_path):
+    import tomllib
+    smd = _load_smd()
+    from sigmond.sources import SourceKey
+    cfg = tmp_path / 'AC0G=B1A.toml'
+    cfg.write_text(WSPR_SHARED)
+    key = SourceKey('radiod', A)
+    evil = 'AC0G x\n[evil]\nk = "v"'
+    row = _crafted_rows([(A, evil)])[0]
+    smd._apply_sources_to_wspr_recorder([key], [row], cfg, dry_run=False)
+    data = tomllib.loads(cfg.read_text())
+    assert 'evil' not in data
+    assert len(data['source']) == 1
+    src = data['source'][0]
+    assert src['key'] == f'radiod:{A}' and src['status'] == A
+    assert set(src) <= {'key', 'status', 'label'}
+    assert src.get('label', evil) == evil          # refused, or kept whole
+
+    # A label with a quote and a backslash still round-trips.
+    row = _crafted_rows([(A, 'AC0G "q" \\ loop')])[0]
+    smd._apply_sources_to_wspr_recorder([key], [row], cfg, dry_run=False)
+    assert tomllib.loads(cfg.read_text())['source'][0]['label'] == \
+        'AC0G "q" \\ loop'
+
+
+def test_render_env_skips_quotes_and_backslashes(tmp_path, capsys):
+    from sigmond.coordination import render_env
+    coord = tmp_path / 'coordination.toml'
+    coord.write_text(
+        '[radiod."x.local"]\n'
+        'host = "trail\\\\"\n'
+        'status_dns = "x.local"\n'
+        '\n'
+        '[radiod."y.local"]\n'
+        'host = "open\\"quote"\n'
+        'status_dns = "y.local"\n'
+        '\n'
+        '[radiod."z.local"]\n'
+        'host = "it\'s"\n'
+        'status_dns = "z.local"\n')
+    env = render_env(load_coordination(coord), passthrough_lookup=lambda t: [])
+    keys = dict(ln.split('=', 1) for ln in env.splitlines()
+                if ln and not ln.startswith('#'))
+    for r in ('X', 'Y', 'Z'):
+        assert f'RADIOD_{r}_LOCAL_HOST' not in keys
+        assert keys[f'RADIOD_{r}_LOCAL_STATUS'] == f'{r.lower()}.local'
+    err = capsys.readouterr().err
+    for r in ('X', 'Y', 'Z'):
+        assert f'RADIOD_{r}_LOCAL_HOST' in err

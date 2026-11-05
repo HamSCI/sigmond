@@ -534,11 +534,11 @@ _CLIENTS_HEADER = re.compile(
     r'^\s*\[\[\s*clients\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*\]\]\s*(?:#.*)?$')
 
 
-def _toml_str(value: str) -> str:
-    """``value`` as a TOML basic string.  Refuses control characters, which
-    no name sigmond writes may carry, and escapes ``\\`` and ``"`` even
+def toml_str(value: str) -> str:
+    """``value`` as a TOML basic string.  Refuses (ValueError) C0 and C1
+    control characters, which no value sigmond writes may carry, and escapes ``\\`` and ``"`` even
     after the callers' validation (defence in depth)."""
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value):
+    if any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in value):
         raise ValueError(f'refusing to write {value!r}: control character')
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
@@ -619,9 +619,9 @@ def ensure_radiod_block(path: Path, status_dns: str, host: str) -> bool:
     if radiod_id_for_status(load_coordination(path), status_dns):
         return False
     existing = path.read_text() if path.exists() else ''
-    block = (f'[radiod.{_toml_str(status_dns)}]\n'
-             f'host       = {_toml_str(host or status_dns)}\n'
-             f'status_dns = {_toml_str(status_dns)}\n')
+    block = (f'[radiod.{toml_str(status_dns)}]\n'
+             f'host       = {toml_str(host or status_dns)}\n'
+             f'status_dns = {toml_str(status_dns)}\n')
     if existing and not existing.endswith('\n'):
         existing += '\n'
     text = existing + ('\n' if existing.strip() else '') + block
@@ -668,7 +668,7 @@ def ensure_client_binding(path: Path, client: str, instance: str,
                 rad_at = j
         if inst != instance:
             continue
-        new_line = f'radiod_id = {_toml_str(radiod_id)}\n'
+        new_line = f'radiod_id = {toml_str(radiod_id)}\n'
         if rad_at is not None:
             if rad_re.match(lines[rad_at]).group(2) == radiod_id:
                 return False
@@ -679,8 +679,8 @@ def ensure_client_binding(path: Path, client: str, instance: str,
         return True
 
     block = (f'[[clients.{client}]]\n'
-             f'instance  = {_toml_str(instance)}\n'
-             f'radiod_id = {_toml_str(radiod_id)}\n')
+             f'instance  = {toml_str(instance)}\n'
+             f'radiod_id = {toml_str(radiod_id)}\n')
     if existing and not existing.endswith('\n'):
         existing += '\n'
     text = existing + ('\n' if existing.strip() else '') + block
@@ -862,12 +862,18 @@ def render_env(coord: Coordination,
     # would start a variable of the sender's choosing.  Skip any line with a
     # control character and warn, rather than raise: a dozen callers write
     # this file, and none of them expects render_env to fail.
+    # Quotes and backslashes go too: systemd's EnvironmentFile reads a
+    # trailing `\\` as a continuation and an opening quote as the start of a
+    # value that may run over several lines.
     safe = []
     for ln in lines:
-        if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in ln):
+        value = ln.split('=', 1)[1] if ('=' in ln and not ln.startswith('#')) else ''
+        if (any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in ln)
+                or any(ch in value for ch in '\\"\'')):
             key = ln.split('=', 1)[0]
             print(f'sigmond: coordination.env: skipping {key}: its value '
-                  f'holds a control character ({ln!r})', file=sys.stderr)
+                  f'holds a control character, quote or backslash ({ln!r})',
+                  file=sys.stderr)
             continue
         safe.append(ln)
     return '\n'.join(safe).rstrip() + '\n'

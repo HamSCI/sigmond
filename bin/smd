@@ -10329,7 +10329,7 @@ def cmd_bringup(args) -> int:
         why = ('named with --remote-radiod' if remote_named
                else f'advertises {callsign.upper()}')
         for r, (dns, rid) in zip(kept, remote_pairs):
-            _info(f'  bind {dns}  host {r.host}  "{r.label}"  as {rid}  ({why})')
+            _info(f'  bind {dns}  host {r.host}  {r.label!r}  as {rid}  ({why})')
         if interactive:
             try:
                 ans = input('Bind these radiods? [Y/n] ').strip().lower()
@@ -18966,16 +18966,24 @@ def _render_source_block(key_str: str,
     and the recorder falls back to the legacy [radiod] section
     (observed on Shack2 2026-07-10).
     """
+    # Every value goes through the coordination writers' toml_str.  The
+    # label comes from mDNS, and mdns decodes avahi's `\\010` to a newline:
+    # escaping only `\\` and `"` let a crafted label write TOML lines into
+    # /etc/wspr-recorder/<rid>.toml (security review, 2026-11-05).
+    from sigmond.coordination import toml_str
     lines = [
         "[[source]]",
-        f'key = "{key_str}"',
-        f'status = "{status_address}"',
+        f'key = {toml_str(key_str)}',
+        f'status = {toml_str(status_address)}',
     ]
     if label:
-        # Escape any embedded double quotes so the operator-edited
-        # mDNS name "AC0G's RX" doesn't break TOML parsing.
-        safe_label = label.replace('\\', '\\\\').replace('"', '\\"')
-        lines.append(f'label = "{safe_label}"')
+        try:
+            lines.append(f'label = {toml_str(label)}')
+        except ValueError:
+            # The label serves display only; a control character in it
+            # costs the label, not the source.
+            _warn(f'  source {key_str}: label {label!r} holds a control '
+                  f'character; written without it')
     lines.append("")
     return "\n".join(lines)
 
