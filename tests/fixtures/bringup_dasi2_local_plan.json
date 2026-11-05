@@ -1,0 +1,526 @@
+[
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "tune",
+  "provision shared sink.db (group-writable, pre-empts writer race \u2014 sigmond#42)",
+  [
+   "bash",
+   "-c",
+   "install -d -m 2775 -o root -g sigmond /var/lib/sigmond && { [ -f /var/lib/sigmond/sink.db ] || install -m 664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db; } && chgrp sigmond /var/lib/sigmond/sink.db && chmod 664 /var/lib/sigmond/sink.db"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "enable",
+  "enable igmp-querier",
+  [
+   "smd",
+   "enable",
+   "igmp-querier"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "install",
+  "install igmp-querier",
+  [
+   "smd",
+   "install",
+   "--components",
+   "igmp-querier",
+   "--yes",
+   "--no-pull"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "enable",
+  "enable gpsdo-monitor",
+  [
+   "smd",
+   "enable",
+   "gpsdo-monitor"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "install",
+  "install gpsdo-monitor",
+  [
+   "smd",
+   "install",
+   "--components",
+   "gpsdo-monitor",
+   "--yes",
+   "--no-pull"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "enable",
+  "enable ka9q-radio",
+  [
+   "smd",
+   "enable",
+   "ka9q-radio"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "install",
+  "install ka9q-radio",
+  [
+   "smd",
+   "install",
+   "--components",
+   "ka9q-radio",
+   "--yes",
+   "--no-pull"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "checkpoint",
+  "checkpoint: radiod installed",
+  []
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "tune",
+  "ensure the RX-888 is on the bus (wait for a slow FX3, recover a latched card)",
+  [
+   "/usr/local/sbin/sigmond-sdr-recover",
+   "--ensure-present",
+   "--wait-seconds",
+   "240"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "config",
+  "configure radiod",
+  [
+   "smd",
+   "config",
+   "init",
+   "radiod",
+   "--non-interactive"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "tune",
+  "apply host tuning (affinity / governor / rmem)",
+  [
+   "smd",
+   "apply"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "wisdom",
+  "launch FFT wisdom planner",
+  [
+   "systemctl",
+   "start",
+   "--no-block",
+   "sigmond-wisdom.service"
+  ]
+ ],
+ [
+  "Stage 1 \u2014 radiod + host tuning",
+  "checkpoint",
+  "checkpoint: radiod configured",
+  []
+ ],
+ [
+  "Stage 2 \u2014 hf-timestd (timing authority)",
+  "enable",
+  "enable hf-timestd",
+  [
+   "smd",
+   "enable",
+   "hf-timestd"
+  ]
+ ],
+ [
+  "Stage 2 \u2014 hf-timestd (timing authority)",
+  "install",
+  "install hf-timestd",
+  [
+   "smd",
+   "install",
+   "--components",
+   "hf-timestd",
+   "--yes",
+   "--no-pull"
+  ]
+ ],
+ [
+  "Stage 2 \u2014 hf-timestd (timing authority)",
+  "config",
+  "configure hf-timestd",
+  [
+   "smd",
+   "config",
+   "init",
+   "hf-timestd",
+   "--non-interactive"
+  ]
+ ],
+ [
+  "Stage 2 \u2014 hf-timestd (timing authority)",
+  "checkpoint",
+  "checkpoint: hf-timestd configured",
+  []
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "enable",
+  "enable wspr-recorder",
+  [
+   "smd",
+   "enable",
+   "wspr-recorder"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "install",
+  "install wspr-recorder",
+  [
+   "smd",
+   "install",
+   "--components",
+   "wspr-recorder",
+   "--yes",
+   "--no-pull"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "config",
+  "configure wspr-recorder",
+  [
+   "smd",
+   "config",
+   "init",
+   "wspr-recorder",
+   "--non-interactive"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "checkpoint",
+  "checkpoint: wspr-recorder configured",
+  []
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "enable",
+  "create reporter instance wspr-recorder@AC0G/S",
+  [
+   "smd",
+   "admin",
+   "instance",
+   "add",
+   "--force",
+   "wspr-recorder",
+   "AC0G/S"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "config",
+  "enable upload wspr-recorder@AC0G/S",
+  [
+   "smd",
+   "config",
+   "upload",
+   "wspr-recorder",
+   "AC0G/S",
+   "--on"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "enable",
+  "enable psk-recorder",
+  [
+   "smd",
+   "enable",
+   "psk-recorder"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "install",
+  "install psk-recorder",
+  [
+   "smd",
+   "install",
+   "--components",
+   "psk-recorder",
+   "--yes",
+   "--no-pull"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "config",
+  "configure psk-recorder",
+  [
+   "smd",
+   "config",
+   "init",
+   "psk-recorder",
+   "--non-interactive"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "checkpoint",
+  "checkpoint: psk-recorder configured",
+  []
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "enable",
+  "create reporter instance psk-recorder@AC0G/S",
+  [
+   "smd",
+   "admin",
+   "instance",
+   "add",
+   "--force",
+   "psk-recorder",
+   "AC0G/S"
+  ]
+ ],
+ [
+  "Stage 3a \u2014 radiod-bound clients",
+  "config",
+  "enable upload psk-recorder@AC0G/S",
+  [
+   "smd",
+   "config",
+   "upload",
+   "psk-recorder",
+   "AC0G/S",
+   "--on",
+   "--via",
+   "server-raw"
+  ]
+ ],
+ [
+  "Stage 3b \u2014 independent clients",
+  "tune",
+  "provision shared hs-uploader watermark dir",
+  [
+   "install",
+   "-d",
+   "-m",
+   "2775",
+   "-o",
+   "root",
+   "-g",
+   "sigmond",
+   "/var/lib/hs-uploader"
+  ]
+ ],
+ [
+  "Stage 3b \u2014 independent clients",
+  "enable",
+  "enable mag-recorder",
+  [
+   "smd",
+   "enable",
+   "mag-recorder"
+  ]
+ ],
+ [
+  "Stage 3b \u2014 independent clients",
+  "install",
+  "install mag-recorder",
+  [
+   "smd",
+   "install",
+   "--components",
+   "mag-recorder",
+   "--yes",
+   "--no-pull"
+  ]
+ ],
+ [
+  "Stage 3b \u2014 independent clients",
+  "config",
+  "configure mag-recorder",
+  [
+   "smd",
+   "config",
+   "init",
+   "mag-recorder",
+   "--non-interactive"
+  ]
+ ],
+ [
+  "Stage 3b \u2014 independent clients",
+  "checkpoint",
+  "checkpoint: mag-recorder configured",
+  []
+ ],
+ [
+  "Stage 3b \u2014 independent clients",
+  "start",
+  "start mag-recorder (independent \u2014 no radiod)",
+  [
+   "smd",
+   "start",
+   "--components",
+   "mag-recorder"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "tune",
+  "render site profile (PSWS ids into client configs)",
+  [
+   "smd",
+   "config",
+   "render",
+   "--if-present"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "tune",
+  "generate hs-uploader manifest + enable daemon",
+  [
+   "smd",
+   "admin",
+   "uploader",
+   "manifest",
+   "--write",
+   "--enable"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "tune",
+  "migrate any legacy config to the canonical radiod schema",
+  [
+   "smd",
+   "admin",
+   "radiod",
+   "migrate",
+   "--yes"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "wait-wisdom",
+  "wait for FFT wisdom before starting radiod",
+  []
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "start",
+  "start radiod + local-radiod infra",
+  [
+   "smd",
+   "start",
+   "--components",
+   "ka9q-radio,igmp-querier,gpsdo-monitor"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "wait-streaming",
+  "wait for radiod streaming (rx888 running) + settle",
+  []
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "start",
+  "start hf-timestd (staggered)",
+  [
+   "smd",
+   "start",
+   "--components",
+   "hf-timestd"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "start",
+  "start wspr-recorder@AC0G/S (staggered)",
+  [
+   "smd",
+   "admin",
+   "instance",
+   "enable",
+   "wspr-recorder",
+   "AC0G/S"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "start",
+  "start psk-recorder@AC0G/S (staggered)",
+  [
+   "smd",
+   "admin",
+   "instance",
+   "enable",
+   "psk-recorder",
+   "AC0G/S"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "start",
+  "start any remaining enabled components",
+  [
+   "smd",
+   "start"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "start",
+  "clear hs-uploader start-limit (pre-manifest crash-loop)",
+  [
+   "systemctl",
+   "reset-failed",
+   "hs-uploader.service"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "start",
+  "restart hs-uploader on the final manifest",
+  [
+   "systemctl",
+   "try-restart",
+   "hs-uploader.service"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "tune",
+  "reserve radiod cores (apply cache-pair CPU exclusion)",
+  [
+   "smd",
+   "admin",
+   "diag",
+   "cpu-affinity",
+   "--apply"
+  ]
+ ],
+ [
+  "Stage 4 \u2014 start + verify",
+  "checkpoint",
+  "checkpoint: final validate",
+  []
+ ]
+]

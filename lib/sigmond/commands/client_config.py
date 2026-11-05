@@ -332,15 +332,16 @@ def _resolve_radiod_index(coord: Coordination,
     """Return the 1-based declaration-order position of this instance's
     radiod, or 0 when not resolvable.
 
-    1. If `<instance>` is given and a `[[clients.<client>]]` entry
-       matches with a known radiod_id, return that radiod's index.
+    1. If a `[[clients.<client>]]` entry matches `<instance>` (or, with
+       no instance, an entry with `instance = ""`) and names a known
+       radiod_id, return that radiod's index.
     2. Else if exactly one radiod is declared, return 1.
     3. Else 0 (caller omits the env var).
     """
     radiod_ids = list(coord.radiods.keys())
-    if client and instance:
+    if client:
         for c in coord.clients:
-            if c.client_type != client or c.instance != instance:
+            if c.client_type != client or c.instance != (instance or ''):
                 continue
             if c.radiod_id and c.radiod_id in coord.radiods:
                 return radiod_ids.index(c.radiod_id) + 1
@@ -359,11 +360,15 @@ def _resolve_radiod_status(coord: Coordination,
     2. Else if exactly one radiod is declared, use it.
     3. Else empty.
     """
-    if client and instance:
+    # No instance matches an instance-less entry (`instance = ""`): that is
+    # how `smd admin sources bind --timing` names hf-timestd's radiod, and
+    # `smd config init hf-timestd` passes no instance.  AC0G-B2, 2026-11-04:
+    # with no such match hf-timestd kept `<YOUR_RADIOD_STATUS>`.
+    if client:
         for c in coord.clients:
             if c.client_type != client:
                 continue
-            if c.instance != instance:
+            if c.instance != (instance or ''):
                 continue
             if c.radiod_id and c.radiod_id in coord.radiods:
                 return coord.radiods[c.radiod_id].effective_status_dns

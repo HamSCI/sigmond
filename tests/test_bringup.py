@@ -30,7 +30,7 @@ def test_local_plan_includes_radiod_stack_and_wisdom():
 
 
 def test_remote_plan_skips_radiod_stack_and_wisdom():
-    p = build_plan(_dasi2(), local_radiod=False, remote_status_dns='x-status.local')
+    p = build_plan(_dasi2(), local_radiod=False, remote_radiods=[('x-status.local', 'AC0G/X')])
     installs = _labels(p, 'install')
     assert 'install ka9q-radio' not in installs
     assert 'install gpsdo-monitor' not in installs
@@ -335,7 +335,7 @@ def test_radiod_bound_clients_still_stagger():
 
 def test_stage4_remote_has_no_streaming_gate_but_still_staggers():
     s4 = _stage4(build_plan(_dasi2(), local_radiod=False,
-                            remote_status_dns='x-status.local'))
+                            remote_radiods=[('x-status.local', 'AC0G/X')]))
     assert not any(s.kind == 'wait-streaming' for s in s4)
     assert not any('radiod' in s.label and s.kind == 'start' for s in s4)
     staggered = [s for s in s4 if '(staggered)' in s.label]
@@ -524,7 +524,7 @@ def test_every_bringup_install_passes_no_pull():
 
 def test_every_remote_radiod_install_passes_no_pull():
     _assert_every_install_passes_no_pull(
-        build_plan(_dasi2(), local_radiod=False, remote_status_dns='x'))
+        build_plan(_dasi2(), local_radiod=False, remote_radiods=[('x-status.local', 'AC0G/X')]))
 
 
 def test_every_deferred_radio_install_passes_no_pull():
@@ -561,7 +561,7 @@ def test_a_failed_radiod_install_stops_before_anything_needs_radiod():
 
 def test_a_remote_radiod_plan_has_no_install_checkpoint():
     p = build_plan(_dasi2(), local_radiod=False,
-                   remote_status_dns='x-status.local')
+                   remote_radiods=[('x-status.local', 'AC0G/X')])
     assert not any(s.check == 'radiod-installed' for s in p.steps)
 
 
@@ -579,7 +579,7 @@ def test_a_client_plan_tunes_the_host_before_any_client_starts():
     # AC0G-B2, 2026-11-05: bring-up never ran `smd apply` on a client-only
     # host, so net.core.rmem_max stayed 208 KB against a 16 MB floor.
     p = build_plan(_client(), local_radiod=False,
-                   remote_status_dns='ac0g-b1-a-status.local')
+                   remote_radiods=[('ac0g-b1-a-status.local', 'AC0G/B1A')])
     tune = [i for i, s in enumerate(p.steps)
             if s.kind == 'tune' and s.argv == ['smd', 'apply']]
     assert len(tune) == 1

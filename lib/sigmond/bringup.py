@@ -109,7 +109,8 @@ class Step:
 class Plan:
     profile: str
     local_radiod: bool
-    remote_status_dns: Optional[str]
+    # (status_dns, reporter_id) per kept remote radiod; empty on a local host.
+    remote_radiods: tuple = ()
     steps: list = field(default_factory=list)
     # True when the plan defers the radio half because no SDR was on the bus.
     # The executor then exits PARTIAL (rc 3), never "done" -- see build_plan.
@@ -117,7 +118,8 @@ class Plan:
 
 
 def build_plan(profile, *, local_radiod: bool,
-               remote_status_dns: Optional[str] = None,
+               remote_radiods=(),
+               timing_radiod: str = '',
                smd: str = 'smd', with_optional: bool = False,
                non_interactive: bool = False, skip=frozenset(),
                dormant=frozenset(), no_config=frozenset(),
@@ -157,8 +159,29 @@ def build_plan(profile, *, local_radiod: bool,
     catch-all ``smd start`` cannot start a recorder that has no config.  The
     plan is marked partial; re-running bring-up once the card is present
     (firstrun does that on its arrival) completes it.
+
+    ``remote_radiods`` (client host only) lists each kept radiod as
+    ``(status_dns, reporter_id)``, from discovery or ``--remote-radiod``
+    (spec 4.4).  Stage 1 binds each one (`smd admin sources bind`) before any
+    client is configured, and the reporter-keyed clients get one instance
+    per radiod, named by its reporter ID.  hf-timestd has no per-radiod
+    instance: with one radiod it binds to it; with several, to
+    ``timing_radiod`` alone, and with none named it installs but stays idle.
     """
     deferring = bool(sdr_absent and local_radiod)
+    remote_radiods = (tuple((str(d), str(r)) for d, r in remote_radiods)
+                      if not local_radiod else ())
+    # Instances to make: one per kept radiod, else the single --reporter.
+    reporters = ([r for _, r in remote_radiods] if remote_radiods
+                 else ([reporter] if reporter else []))
+    if len(remote_radiods) == 1:
+        timing_dns = remote_radiods[0][0]
+    else:
+        timing_dns = next((d for d, _ in remote_radiods
+                           if d.lower() == (timing_radiod or '').lower()), '')
+    # AC0G-B2 (spec 4.4, Michael 2026-11-05): with several radiods and none
+    # named for timing, hf-timestd installs but stays idle, and says so.
+    timing_idle = bool(remote_radiods) and not timing_dns
     steps: list = []
 
     # Pre-create the shared SQLite sink with group-writable perms BEFORE any
@@ -181,7 +204,8 @@ def build_plan(profile, *, local_radiod: bool,
     activated: list = []    # components this plan enables (start-eligible)
     deferred: list = []     # radio half installed --no-enable (no SDR)
 
-    def install(stage: str, comp: str, enable: bool = True) -> None:
+    def install(stage: str, comp: str, enable: bool = True,
+                why: str = 'radio deferred') -> None:
         # Enable in topology BEFORE installing.  `smd install --components` builds
         # the component but does NOT flip topology `enabled=true` (only
         # `smd install --profile` does, via set_component_enabled).  Without this
@@ -193,7 +217,7 @@ def build_plan(profile, *, local_radiod: bool,
             # Deferred radio half (no SDR): build it, leave it disabled, so no
             # catch-all start can launch it before it is configured.
             deferred.append(comp)
-            steps.append(Step(stage, f'install {comp} (not enabled — radio deferred)',
+            steps.append(Step(stage, f'install {comp} (not enabled — {why})',
                               'install',
                               argv=[smd, 'install', '--components', comp, '--yes',
                                     '--no-enable', '--no-pull']))
@@ -330,7 +354,7 @@ def build_plan(profile, *, local_radiod: bool,
                               argv=[smd, 'install', '--components', 'ka9q-web',
                                     '--yes', '--no-pull']))
     else:
-        dns = remote_status_dns or 'auto-discover'
+        dns = ', '.join(d for d, _ in remote_radiods) or 'auto-discover'
         steps.append(Step(STAGE1, f'using remote radiod ({dns}) — skipping radiod '
                           'stack, gpsdo-monitor, and FFT wisdom', 'note'))
         # AC0G-B2, 2026-11-05: a client-only host never ran `smd apply`, so
@@ -338,9 +362,29 @@ def build_plan(profile, *, local_radiod: bool,
         # Apply writes the rmem/usbfs tuning whatever radiod lives elsewhere.
         steps.append(Step(STAGE1, 'apply host tuning (rmem / usbfs)',
                           'tune', argv=[smd, 'apply'], may_fail=False))
+        # AC0G-B2, 2026-11-04: the radiod's name reached only the note above,
+        # so nothing recorded it and every client started on a template
+        # radiod.  Bind each kept radiod before any client is configured:
+        # `config init` then resolves its radiod from coordination.
+        bound = [c for c in profile.clients
+                 if c in _REPORTER_KEYED and c not in skip]
+        for status_dns, rid in remote_radiods:
+            argv = [smd, 'admin', 'sources', 'bind', status_dns,
+                    '--reporter', rid, '--clients', ','.join(bound)]
+            if status_dns == timing_dns:
+                argv.append('--timing')
+            steps.append(Step(STAGE1, f'bind radiod {status_dns} as {rid}',
+                              'config', argv=argv))
 
     # --- Stage 2: hf-timestd (timing authority; radiod-bound) ---
-    if _TIMING_AUTHORITY in profile.clients and _TIMING_AUTHORITY not in skip:
+    if (_TIMING_AUTHORITY in profile.clients and _TIMING_AUTHORITY not in skip
+            and timing_idle):
+        # Not enabled, so Stage 4's catch-all `smd start` leaves it alone.
+        install(STAGE2, _TIMING_AUTHORITY, enable=False,
+                why='no timing radiod named')
+        steps.append(Step(STAGE2, 'hf-timestd installed but idle: name its '
+                                  'radiod with --timing-radiod', 'note'))
+    elif _TIMING_AUTHORITY in profile.clients and _TIMING_AUTHORITY not in skip:
         install(STAGE2, _TIMING_AUTHORITY, enable=not deferring)
         if _TIMING_AUTHORITY not in no_config and not deferring:
             configure(STAGE2, _TIMING_AUTHORITY)
@@ -371,15 +415,15 @@ def build_plan(profile, *, local_radiod: bool,
         # the config step just wrote).  `instance add` only scaffolds the files;
         # Stage 4 enables/starts it (staggered).  Without a reporter id the
         # client falls back to its base-config start.
-        if reporter and client in _REPORTER_KEYED:
+        for rep_id in (reporters if client in _REPORTER_KEYED else []):
             # --force makes re-add idempotent (create only missing files, leave
             # existing ones) so re-running bring-up doesn't error on an instance
             # that's already scaffolded.
             steps.append(Step(STAGE3A,
-                              f'create reporter instance {client}@{reporter}',
+                              f'create reporter instance {client}@{rep_id}',
                               'enable',
                               argv=[smd, 'admin', 'instance', 'add', '--force',
-                                    client, reporter]))
+                                    client, rep_id]))
             # Enable the instance's upstream upload.  For psk-recorder, pass
             # --via server-raw: it starts no in-process sender and leaves
             # forward_to_pskreporter false, so the daemon's psk-pskreporter
@@ -387,13 +431,22 @@ def build_plan(profile, *, local_radiod: bool,
             # switch (tasks/plan-sink-control.md §10.2 step 1).  Without --via,
             # `--on` writes direct, and the in-process sender would post beside
             # the daemon.  Idempotent.
-            argv = [smd, 'config', 'upload', client, reporter, '--on']
+            argv = [smd, 'config', 'upload', client, rep_id, '--on']
             if client == 'psk-recorder':
                 argv += ['--via', 'server-raw']
             steps.append(Step(STAGE3A,
-                              f'enable upload {client}@{reporter}',
+                              f'enable upload {client}@{rep_id}',
                               'config',
                               argv=argv))
+
+    # The instances made just above were seeded from each client's shared
+    # config, whose radiod came from coordination, so on a host with several
+    # radiods none of them names its own yet.  Render each instance's source
+    # file (written by Stage 1's bind) into it before anything starts.
+    if remote_radiods and not deferring:
+        steps.append(Step(STAGE3A, 'render each instance\'s radiod into its '
+                                   'config', 'tune',
+                          argv=[smd, 'admin', 'sources', 'apply']))
 
     # Provision the shared hs-uploader watermark dir.  Recorder units list
     # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it
@@ -491,7 +544,8 @@ def build_plan(profile, *, local_radiod: bool,
     # aren't gated on radiod.  A final idempotent `smd start` sweeps up anything
     # enabled-but-unstarted (e.g. inert rac stays inert). ---
     radiod_bound = [c for c in profile.clients
-                    if c not in skip and c not in _INDEPENDENT]
+                    if c not in skip and c not in _INDEPENDENT
+                    and not (timing_idle and c == _TIMING_AUTHORITY)]
     independent = [c for c in profile.clients
                    if c not in skip and c in _INDEPENDENT]
 
@@ -513,12 +567,15 @@ def build_plan(profile, *, local_radiod: bool,
                           'wait-streaming'))
 
     for client in radiod_bound:
-        if reporter and client in _REPORTER_KEYED:
+        if reporters and client in _REPORTER_KEYED:
             # `instance enable` does systemctl enable --now on the per-reporter
             # unit (wspr-recorder@<reporter>), so it both declares and starts it.
-            steps.append(Step(STAGE4, f'start {client}@{reporter} (staggered)', 'start',
-                              argv=[smd, 'admin', 'instance', 'enable', client, reporter],
-                              settle_s=CLIENT_STAGGER_S))
+            for rep_id in reporters:
+                steps.append(Step(STAGE4, f'start {client}@{rep_id} (staggered)',
+                                  'start',
+                                  argv=[smd, 'admin', 'instance', 'enable',
+                                        client, rep_id],
+                                  settle_s=CLIENT_STAGGER_S))
         else:
             steps.append(Step(STAGE4, f'start {client} (staggered)', 'start',
                               argv=[smd, 'start', '--components', client],
@@ -588,5 +645,5 @@ def build_plan(profile, *, local_radiod: bool,
                                   '(or run `smd bringup` again)', 'note'))
 
     return Plan(profile=profile.name, local_radiod=local_radiod,
-                remote_status_dns=remote_status_dns, steps=steps,
+                remote_radiods=remote_radiods, steps=steps,
                 sdr_absent=deferring)

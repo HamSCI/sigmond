@@ -9998,6 +9998,19 @@ def _ask_optional_yes_no(prompt: str, *, default_yes: bool = True):
     return answer in ('y', 'yes')
 
 
+def _bringup_print_radiods(found, kept, callsign: str) -> None:
+    """List every radiod discovery saw, kept or not (spec 4.4): sigma's and
+    B4's radiods appear on B2's list but stay unused."""
+    kept_dns = {r.status_dns for r in kept}
+    _info(f'radiods on the LAN ({len(found)} found; this station: '
+          f'{callsign.upper()}):')
+    if not found:
+        _info('  (none answered)')
+    for r in found:
+        mark = 'keep' if r.status_dns in kept_dns else '    '
+        _info(f'  {mark}  {r.status_dns:<36}  {r.label}')
+
+
 def cmd_bringup(args) -> int:
     """Guided, contract-ordered station bring-up (install-orchestration Phase B).
 
@@ -10025,9 +10038,12 @@ def cmd_bringup(args) -> int:
         _err(f"unknown profile '{args.profile}' — available: {avail}")
         return 1
 
-    remote_dns = getattr(args, 'remote_radiod', None)
+    # --remote-radiod may repeat; each names a radiod outright (spec 4.4).
+    remote_named = [n.strip() for n in (getattr(args, 'remote_radiod', None) or [])
+                    if n and n.strip()]
+    timing_named = (getattr(args, 'timing_radiod', None) or '').strip()
     sdr_absent = False      # set below when a local-radiod profile finds no SDR
-    if remote_dns is not None:
+    if remote_named:
         local = False                     # explicit remote override
     elif prof.local_radiod_infra:
         # Local-radiod profile: the upfront check is the SDR HARDWARE on the USB
@@ -10065,16 +10081,11 @@ def cmd_bringup(args) -> int:
         # Local-radiod means radiod installs dormant on this host; nothing
         # starts on its own just because the hardware later shows up.
     else:
-        # Client-shaped profile (no local radiod infra) — runs against a remote.
+        # Client-shaped profile (no local radiod infra) — runs against the
+        # radiods discovery finds on the LAN (below, once the callsign is
+        # known).  It used to ask for one status name and record it nowhere
+        # (AC0G-B2, 2026-11-04).
         local = False
-        if (not getattr(args, 'non_interactive', False) and sys.stdin.isatty()):
-            entered = input(
-                'This profile is decode-only (no local radiod).  Remote radiod '
-                'status DNS (e.g. bee3-status.local), or blank to abort: ').strip()
-            if not entered:
-                _err('bringup: no radiod available (local or remote) — aborting')
-                return 1
-            remote_dns = entered
 
     # The hardware gate + GPS grid-derivation below probe root-only resources
     # (/run/gpsdo, the GPSDO/mag CDC ttys), so on a real run elevate UP FRONT —
@@ -10154,6 +10165,7 @@ def cmd_bringup(args) -> int:
     # all client configurators, and handed to build_plan so the reporter id names
     # the wspr/psk instances.
     reporter = (getattr(args, 'reporter', None) or '').strip()
+    cli_reporter = reporter
     grid = (getattr(args, 'grid', None) or '').strip()
     callsign = (getattr(args, 'callsign', None) or '').strip()
     psws_id = (getattr(args, 'psws_station_id', None) or '').strip()
@@ -10193,6 +10205,74 @@ def cmd_bringup(args) -> int:
         except EOFError:
             return ''
 
+    # --- Sources by discovery (spec 4.4) — a host with no local radiod -------
+    # Browse the LAN for radiods, keep the station's own (or those named with
+    # --remote-radiod) and name one instance pair after each.  This runs
+    # before anything installs: a named radiod that does not answer stops
+    # the run here, not as a client that fails later.
+    remote_pairs: list = []
+    if not local:
+        if not callsign and _HAS_SIGMOND_LIB:
+            try:
+                from sigmond.coordination import load_coordination as _lc
+                callsign = _lc().host.call or ''
+            except Exception:                                # noqa: BLE001
+                callsign = ''
+        callsign = _ask_identity('Callsign (picks this station\'s radiods)',
+                                 callsign)
+        if not callsign:
+            _err('bringup: a decode-only host needs the station callsign to '
+                 'pick its radiods — pass --callsign (or set it in '
+                 'site-profile.toml)')
+            return 1
+        from sigmond.sources import (SourceSelectionError, discover_radiods,
+                                     reporter_id_for, select_radiods)
+        found = discover_radiods()
+        try:
+            kept = select_radiods(found, callsign, remote_named)
+        except SourceSelectionError as exc:
+            _bringup_print_radiods(found, [], callsign)
+            if str(exc) in remote_named:
+                _err(f'bringup: radiod {exc} did not answer on the LAN — '
+                     f'nothing installed.  Check its name against the list '
+                     f'above (`smd admin sources list`).')
+            else:
+                _err(f'bringup: {exc} — nothing installed')
+            return 1
+        _bringup_print_radiods(found, kept, callsign)
+        if not kept:
+            _err(f'bringup: no radiod on the LAN advertises {callsign.upper()} '
+                 f'— name one with --remote-radiod <status name>')
+            return 1
+        if len(kept) > 1 and cli_reporter:
+            _err(f'bringup: --reporter {cli_reporter} names one instance, but '
+                 f'{len(kept)} radiods were kept; each takes a reporter ID '
+                 f'derived from its name.  Drop --reporter, or keep one radiod '
+                 f'with --remote-radiod.')
+            return 1
+        kept_dns = [r.status_dns for r in kept]
+        if timing_named and timing_named.lower() not in (d.lower() for d in kept_dns):
+            _err(f'bringup: --timing-radiod {timing_named} is not among the '
+                 f'kept radiods ({", ".join(kept_dns)})')
+            return 1
+        try:
+            if len(kept) == 1 and reporter:
+                # A single-radiod host keeps the reporter ID it was given.
+                remote_pairs = [(kept[0].status_dns, reporter)]
+            else:
+                remote_pairs = [(r.status_dns, reporter_id_for(callsign, r.status_dns))
+                                for r in kept]
+        except SourceSelectionError as exc:
+            _err(f'bringup: {exc} — nothing installed')
+            return 1
+        for dns, rid in remote_pairs:
+            _info(f'  instances for {dns}: {rid}')
+        # Each pair carries its own reporter ID; none is asked for.
+        needs_reporter = False
+        if len(remote_pairs) == 1:
+            reporter = reporter or remote_pairs[0][1]
+            timing_named = remote_pairs[0][0]
+
     if needs_reporter:
         reporter = _ask_identity('Reporter id for WSPR/PSK (e.g. AC0G/S)', reporter)
     if needs_grid:
@@ -10213,7 +10293,8 @@ def cmd_bringup(args) -> int:
             _info(f'grid auto-derived from GPSDO fix: {grid} '
                   '(no hand-entry — the GPS is the station location)')
 
-    plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
+    plan = build_plan(prof, local_radiod=local, remote_radiods=remote_pairs,
+                      timing_radiod=timing_named,
                       sdr_absent=sdr_absent,
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
                       non_interactive=getattr(args, 'non_interactive', False),
@@ -17287,7 +17368,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "$components --components --profile --client-dir --dry-run --yes --force --no-enable --no-pull --topology" -- "$cur"))
                     ;;
                 bringup)
-                    COMPREPLY=($(compgen -W "$profiles --remote-radiod --with-optional --non-interactive --dry-run" -- "$cur"))
+                    COMPREPLY=($(compgen -W "$profiles --remote-radiod --timing-radiod --with-optional --non-interactive --dry-run" -- "$cur"))
                     ;;
                 apply)
                     COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
@@ -17569,7 +17650,7 @@ _smd_complete() {
                                     COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
                                     ;;
                                 *)
-                                    COMPREPLY=($(compgen -W "list add remove apply help" -- "$cur"))
+                                    COMPREPLY=($(compgen -W "list add remove apply bind help" -- "$cur"))
                                     ;;
                             esac
                             ;;
@@ -19023,6 +19104,26 @@ def _write_text_preserving_mode(path: Path, text: str) -> None:
     _os.replace(tmp, path)
 
 
+def _apply_sources_to_instance(client: str, rid: str, selected: list,
+                               inventory_rows, *, dry_run: bool = False,
+                               etc_root: Path = Path('/etc')) -> tuple:
+    """Render one instance's selection into its own config,
+    ``<etc_root>/<client>/<rid>.toml``: ``[[source]]`` blocks for
+    wspr-recorder, the ``[radiod]``/``[[radiod]]`` status for every client
+    that reads a single radiod.  `sources apply` and `sources bind` share
+    it, so the two cannot render differently.  Returns (changed, message)."""
+    if client != 'wspr-recorder':
+        return _apply_single_radiod_to_instance(
+            client, rid, selected, dry_run=dry_run, etc_root=etc_root)
+    inst_config = etc_root / 'wspr-recorder' / f'{rid}.toml'
+    if not inst_config.exists():
+        return False, (f'  ⚠ {client}@{_display_rid(rid)}: no per-instance '
+                       f'config at {inst_config} — run `smd admin instance add '
+                       f'wspr-recorder {_display_rid(rid)}` first')
+    return _apply_sources_to_wspr_recorder(
+        selected, inventory_rows, inst_config, dry_run=dry_run)
+
+
 def cmd_sources_apply(args) -> int:
     """Render every client's source selection into its config.
 
@@ -19072,7 +19173,7 @@ def cmd_sources_apply(args) -> int:
             if cs.selected:
                 _info(
                     f'  ⊘ {client}: {len(cs.selected)} source(s) '
-                    'selected but {client} is not yet multi-source aware '
+                    f'selected but {client} is not yet multi-source aware '
                     '(deferred to a later phase)'
                 )
             continue
@@ -19102,28 +19203,14 @@ def cmd_sources_apply(args) -> int:
         stem = sel_file.name[: -len('.sources.toml')]   # <client>@<reporter>
         base, _at, rid = stem.partition('@')
         sel = _ClientSources.load(stem).selected
-        if base != 'wspr-recorder':
-            if not sel:
-                continue
-            changed, message = _apply_single_radiod_to_instance(
-                base, rid, sel, dry_run=dry_run)
-            print(message, flush=True)
-            if changed:
-                any_changed = True
-                restart_hints.append(_restart_hint(base, rid))
+        if base != 'wspr-recorder' and not sel:
             continue
-        inst_config = _IP('/etc/wspr-recorder') / f'{rid}.toml'
-        if not inst_config.exists():
-            _info(f'  ⚠ {base}@{_display_rid(rid)}: no per-instance config at '
-                  f'{inst_config} — run `smd admin instance add wspr-recorder '
-                  f'{_display_rid(rid)}` first')
-            continue
-        changed, message = _apply_sources_to_wspr_recorder(
-            sel, inventory_rows, inst_config, dry_run=dry_run)
+        changed, message = _apply_sources_to_instance(
+            base, rid, sel, inventory_rows, dry_run=dry_run)
         print(message, flush=True)
         if changed:
             any_changed = True
-            restart_hints.append(_restart_hint('wspr-recorder', rid))
+            restart_hints.append(_restart_hint(base, rid))
 
     if not any_changed:
         _info('  nothing to do; every client already in sync with its selection')
@@ -19140,6 +19227,128 @@ def cmd_sources_apply(args) -> int:
     _info('  the new [[source]] entries take effect on next start')
     return 0
     return 0
+
+
+def _sources_bind(status_dns: str, reporter: str, clients, *,
+                  host: str = '', timing: bool = False,
+                  etc_root: Path = Path('/etc'), coord_path=None,
+                  inventory_rows=None) -> int:
+    """Record one radiod and bind an instance of each client to it.
+
+    AC0G-B2, 2026-11-04: bring-up put a remote radiod's name only into a
+    note, so nothing recorded it and every client started against a
+    template radiod.  This writes, in order: the radiod into coordination;
+    for each client, its instance (when the client's shared config exists),
+    the instance's source file and its coordination binding, then renders
+    the source into the instance's config; with ``timing``, hf-timestd's
+    binding; and last coordination.env.  Every step is idempotent.
+
+    A client not yet installed has no shared config to seed an instance
+    from.  A stub written now would survive the later `instance add
+    --force` and never carry the client's tables, so bind records the
+    selection and binding and leaves the instance to bring-up's Stage 3a."""
+    from sigmond import instance as _inst
+    from sigmond.coordination import (ensure_client_binding,
+                                      ensure_radiod_block, load_coordination,
+                                      radiod_id_for_status, render_env)
+    from sigmond.sources import ClientSources, SourceKey
+
+    etc_root = Path(etc_root)
+    if coord_path is None:
+        from sigmond.paths import COORDINATION_PATH
+        coord_path = (COORDINATION_PATH if etc_root == Path('/etc')
+                      else etc_root / 'sigmond' / 'coordination.toml')
+    coord_path = Path(coord_path)
+    clients_root = (Path('/etc/sigmond/clients') if etc_root == Path('/etc')
+                    else etc_root / 'sigmond' / 'clients')
+    try:
+        rid = _inst.parse_user_reporter_id(reporter)
+        key = SourceKey('radiod', status_dns)
+    except ValueError as exc:
+        _err(f'sources bind: {exc}')
+        return 1
+    rows = list(inventory_rows or [])
+    if not host:
+        row = next((r for r in rows if str(r.key) == str(key)), None)
+        host = (((row.fields or {}).get('source_host') or '').strip()
+                if row is not None else '')
+
+    if ensure_radiod_block(coord_path, status_dns, host):
+        _ok(f'recorded radiod {status_dns} (host {host or status_dns}) '
+            f'in {coord_path}')
+    radiod_id = (radiod_id_for_status(load_coordination(coord_path), status_dns)
+                 or status_dns)
+
+    rc = 0
+    for client in clients:
+        label = f'{client}@{_display_rid(rid)}'
+        paths = _inst.instance_paths(client, rid, etc_root=etc_root)
+        shared = _inst.shared_config_path(client, etc_root=etc_root)
+        if paths.config.exists() or shared.exists():
+            _inst.create_instance(client, rid, force=True, etc_root=etc_root)
+        cs = ClientSources(client=f'{client}@{rid}', selected=[key])
+        if ClientSources.load(cs.client, root=clients_root).selected != [key]:
+            cs.save(root=clients_root)
+            _ok(f'{label}: source {key}')
+        if ensure_client_binding(coord_path, client, rid, radiod_id):
+            _ok(f'{label}: bound to {radiod_id} in coordination')
+        if not paths.config.exists():
+            _info(f'  … {label}: {client} has no config yet; its instance '
+                  f'is made when it installs, then `smd admin sources apply` '
+                  f'renders this source into it')
+            continue
+        changed, message = _apply_sources_to_instance(
+            client, rid, [key], rows, etc_root=etc_root)
+        print(message, flush=True)
+        if '⚠' in message or '⊘' in message:
+            rc = 1
+    if timing and ensure_client_binding(coord_path, 'hf-timestd', '', radiod_id):
+        _ok(f'hf-timestd: bound to {radiod_id} in coordination')
+
+    env_path = coord_path.with_name('coordination.env')
+    env_text = render_env(load_coordination(coord_path))
+    if not env_path.exists() or env_path.read_text() != env_text:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text(env_text)
+        _ok(f'rendered {env_path}')
+    return rc
+
+
+def cmd_sources_bind(args) -> int:
+    """`smd admin sources bind <status_dns> --reporter <ID>` (spec 4.4)."""
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    if _need_root('sources bind'):
+        return 1
+    from sigmond.bringup import _REPORTER_KEYED
+    raw = getattr(args, 'clients', None)
+    if raw is not None:
+        # Named, even as an empty list: bring-up names the profile's own.
+        clients = [c.strip() for c in raw.split(',') if c.strip()]
+        unknown = [c for c in clients if c not in _REPORTER_KEYED]
+        if unknown:
+            _err(f'sources bind: {", ".join(unknown)} take no per-radiod '
+                 f'instance (bindable: {", ".join(sorted(_REPORTER_KEYED))})')
+            return 1
+    else:
+        # Bring-up binds before it installs the clients, so it names them;
+        # by hand, bind every reporter-keyed client the topology enables.
+        try:
+            from sigmond.topology import load_topology
+            enabled = set(load_topology().enabled_components())
+        except Exception:                                    # noqa: BLE001
+            enabled = set()
+        clients = [c for c in sorted(_REPORTER_KEYED) if c in enabled]
+        if not clients and not args.timing:
+            _err('sources bind: no reporter-keyed client is enabled here; '
+                 'name them with --clients wspr-recorder,psk-recorder')
+            return 1
+    rows, _msg = _sources_inventory()
+    _heading(f'sources bind {args.status_dns}')
+    return _sources_bind(args.status_dns, args.reporter, clients,
+                         host=(getattr(args, 'host', None) or '').strip(),
+                         timing=bool(args.timing), inventory_rows=rows or [])
 
 
 def cmd_public_ip(args) -> int:
@@ -27111,8 +27320,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_bringup.add_argument('--profile', dest='profile_flag', metavar='NAME',
                            help=argparse.SUPPRESS)   # back-compat alias for the positional
     p_bringup.add_argument('--remote-radiod', metavar='STATUS_DNS', dest='remote_radiod',
+                           action='append',
                            help='bind a remote radiod by status DNS instead of installing '
-                                'one locally (skips the radiod stack + FFT wisdom)')
+                                'one locally (skips the radiod stack + FFT wisdom).  May '
+                                'repeat; names radiods outright, overriding discovery\'s '
+                                'callsign rule')
+    p_bringup.add_argument('--timing-radiod', metavar='STATUS_DNS', dest='timing_radiod',
+                           help='with several remote radiods, the one hf-timestd binds '
+                                'to (unnamed, hf-timestd installs but stays idle)')
     p_bringup.add_argument('--with-optional', action='store_true', dest='with_optional',
                            help='also install the profile optional add-ons (e.g. ka9q-web)')
     p_bringup.add_argument('--non-interactive', action='store_true', dest='non_interactive',
@@ -27654,6 +27869,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_src_remove.add_argument('client', help='client name (e.g. wspr-recorder)')
     p_src_remove.add_argument('source', metavar='SOURCE',
                               help='key to remove (full or unique substring)')
+    p_src_bind = sources_sub.add_parser(
+        'bind',
+        help='record a radiod and bind an instance of each recorder to it',
+        description=(
+            'Records the radiod in coordination.toml, makes one instance of '
+            'each reporter-keyed client (wspr-recorder, psk-recorder, '
+            'meteor-scatter) under --reporter, selects the radiod as its '
+            'source and renders it into the instance config.  Idempotent.'),
+    )
+    p_src_bind.add_argument('status_dns', metavar='STATUS_DNS',
+                            help='the radiod status name, e.g. ac0g-b1-a-status.local')
+    p_src_bind.add_argument('--reporter', required=True, metavar='ID',
+                            help='reporter ID for the instances, e.g. AC0G/B1A')
+    p_src_bind.add_argument('--host', metavar='HOST', default='',
+                            help='the machine the radiod runs on (default: '
+                                 'its advertised source host)')
+    p_src_bind.add_argument('--timing', action='store_true',
+                            help='also bind hf-timestd to this radiod')
+    p_src_bind.add_argument('--clients', metavar='A,B', default=None,
+                            help='clients to bind (default: the reporter-keyed '
+                                 'clients the topology enables)')
     p_src_apply = sources_sub.add_parser(
         'apply',
         help='render selections to each client\'s config (writes '
@@ -29035,6 +29271,8 @@ def main() -> int:
             return cmd_sources_remove(args)
         if sub_cmd == 'apply':
             return cmd_sources_apply(args)
+        if sub_cmd == 'bind':
+            return cmd_sources_bind(args)
         p_sources.print_help()
         return 0
 

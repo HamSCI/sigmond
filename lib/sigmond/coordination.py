@@ -13,6 +13,7 @@ via systemd `EnvironmentFile=-`.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -515,6 +516,141 @@ def write_station_identity(reporter_id: str = '',
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(new_text)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Binding writers — a radiod and the client instances that read it (spec 4.4)
+# ---------------------------------------------------------------------------
+#
+# AC0G-B2, 2026-11-04: `smd bringup client --remote-radiod <dns>` recorded
+# the radiod nowhere.  coordination.toml had no [radiod."…"] block and no
+# [[clients.X]] entry, so `config init` resolved no radiod status, hf-timestd
+# kept `<YOUR_RADIOD_STATUS>`, and every client failed at its first start.
+# These two writers give `smd admin sources bind` somewhere to put it.
+
+_CLIENTS_HEADER = re.compile(
+    r'^\s*\[\[\s*clients\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*\]\]\s*(?:#.*)?$')
+
+
+def _kv_line(key: str) -> 're.Pattern':
+    return re.compile(rf'^\s*{key}\s*=\s*(["\'])(.*?)\1')
+
+
+def _write_coordination(path: Path, text: str) -> None:
+    """Replace ``path`` atomically, keeping its owner and mode.
+
+    The same steps as log_cmd._atomic_write, kept here: importing log_cmd
+    would pull the catalog into every command that loads coordination, and
+    smd's preload lists (test_preload_modules) would have to follow."""
+    import os
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.',
+                               suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            os.chmod(tmp, 0o644)
+        else:
+            os.chmod(tmp, st.st_mode & 0o7777)
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except PermissionError:
+                pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def radiod_id_for_status(coord: 'Coordination', status_dns: str) -> Optional[str]:
+    """The id of the declared radiod whose status name is ``status_dns``.
+
+    `configure radiod` keys a block by instance id with a ``status_dns``
+    field; bind keys it by the status name.  Either form counts."""
+    want = (status_dns or '').lower()
+    for rid, r in coord.radiods.items():
+        if rid.lower() == want or (r.effective_status_dns or '').lower() == want:
+            return rid
+    return None
+
+
+def ensure_radiod_block(path: Path, status_dns: str, host: str) -> bool:
+    """Declare ``[radiod."<status_dns>"]`` in coordination.toml.
+
+    Returns True when it wrote.  A radiod already declared under that status
+    name, in either keying, leaves the file alone.  ``host`` names the
+    machine the radiod runs on; a blank one takes the status name, never
+    "localhost", which would mark a remote radiod local."""
+    path = Path(path)
+    if radiod_id_for_status(load_coordination(path), status_dns):
+        return False
+    existing = path.read_text() if path.exists() else ''
+    block = (f'[radiod."{status_dns}"]\n'
+             f'host       = "{host or status_dns}"\n'
+             f'status_dns = "{status_dns}"\n')
+    if existing and not existing.endswith('\n'):
+        existing += '\n'
+    text = existing + ('\n' if existing.strip() else '') + block
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_coordination(path, text)
+    return True
+
+
+def ensure_client_binding(path: Path, client: str, instance: str,
+                          radiod_id: str) -> bool:
+    """Bind ``client`` instance ``instance`` to ``radiod_id``.
+
+    Writes one ``[[clients.<client>]]`` entry per (client, instance).
+    ``instance`` takes the reporter ID's storage form (``AC0G=B1A``), or
+    ``""`` for a client with no per-radiod instances (hf-timestd).  An
+    entry that already names this radiod leaves the file alone; one that
+    names another radiod moves.  Returns True when it wrote."""
+    path = Path(path)
+    existing = path.read_text() if path.exists() else ''
+    lines = existing.splitlines(keepends=True)
+    inst_re, rad_re = _kv_line('instance'), _kv_line('radiod_id')
+    for i, ln in enumerate(lines):
+        m = _CLIENTS_HEADER.match(ln.rstrip('\r\n'))
+        if not m or (m.group(1) or m.group(2)) != client:
+            continue
+        end = next((j for j in range(i + 1, len(lines))
+                    if lines[j].lstrip().startswith('[')), len(lines))
+        inst, rad_at = 'default', None
+        for j in range(i + 1, end):
+            mi = inst_re.match(lines[j])
+            if mi:
+                inst = mi.group(2)
+            if rad_re.match(lines[j]):
+                rad_at = j
+        if inst != instance:
+            continue
+        new_line = f'radiod_id = "{radiod_id}"\n'
+        if rad_at is not None:
+            if rad_re.match(lines[rad_at]).group(2) == radiod_id:
+                return False
+            lines[rad_at] = new_line
+        else:
+            lines.insert(i + 1, new_line)
+        _write_coordination(path, ''.join(lines))
+        return True
+
+    key = client if re.fullmatch(r'[A-Za-z0-9_-]+', client) else f'"{client}"'
+    block = (f'[[clients.{key}]]\n'
+             f'instance  = "{instance}"\n'
+             f'radiod_id = "{radiod_id}"\n')
+    if existing and not existing.endswith('\n'):
+        existing += '\n'
+    text = existing + ('\n' if existing.strip() else '') + block
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_coordination(path, text)
     return True
 
 

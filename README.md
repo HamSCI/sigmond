@@ -105,8 +105,8 @@ Use your own callsign, grid square, reporter ID and PSWS station ID;
 `--psws-station-id` matters only if you upload to PSWS.
 `dasi2`, the default profile, gives you a local radiod, hf-timestd (GRAPE),
 WSPR, FT4/FT8, meteor scatter and the magnetometer.  `base` stops at radiod
-and timing; `client` decodes from a radiod on another machine, named with
-`--remote-radiod <status-dns>`.  Bring-up skips, with a warning, anything
+and timing; `client` decodes from radiods on other machines; see "Decode-only host"
+below.  Bring-up skips, with a warning, anything
 whose hardware it cannot find on the USB bus.
 
 Add `--dry-run` to see every step first.  Add `--non-interactive` to accept
@@ -124,6 +124,68 @@ If the station uploads to PSWS, put each instrument's ID in
 ```bash
 smd config render
 ```
+
+#### Decode-only host
+
+A decode-only host runs no radiod of its own.  It decodes from radiods on
+other machines on the LAN:
+
+```bash
+smd bringup client --callsign AC0G --grid EM38ww
+```
+
+Bring-up browses the LAN for radiods and prints every one it finds.  It
+keeps those whose advertised name starts with your callsign, so a radiod
+that advertises "AC0G @EM38ww B1-a longwire" belongs to AC0G.  A
+neighbour's radiod shows up in the list but stays unused.  Bring-up needs
+the callsign to make that choice, and stops without one.
+
+Each kept radiod gets one instance of each recorder (WSPR, FT4/FT8, meteor
+scatter).  Bring-up names the instances after the radiod:
+`ac0g-b1-a-status.local` gives the reporter ID AC0G/B1A.  With a single
+radiod, `--reporter` still sets the name.  With several, `--reporter`
+counts as an error, because one name cannot cover two instances.
+
+To choose the radiods yourself, name each one.  The option may repeat, and
+it overrides the callsign rule:
+
+```bash
+smd bringup client --callsign AC0G --grid EM38ww \
+    --remote-radiod ac0g-b1-a-status.local --remote-radiod ac0g-b1-b-status.local
+```
+
+A named radiod that does not answer stops bring-up before it installs
+anything.
+
+hf-timestd takes its timing from one radiod.  With one kept radiod it uses
+that one.  With several, name it with `--timing-radiod <status name>`.
+Without that, bring-up installs hf-timestd, leaves it idle and says so.
+
+Bring-up records each radiod with `smd admin sources bind`, and you can run
+it yourself:
+
+```bash
+smd admin sources bind ac0g-b1-a-status.local --reporter AC0G/B1A [--timing]
+```
+
+The verb writes the radiod into `/etc/sigmond/coordination.toml`.  For each
+recorder enabled here (or each one named with `--clients`), it makes the
+instance, selects the radiod as its source and points the instance's config
+at it.  `--timing` binds hf-timestd to the same radiod.  Running it twice
+changes nothing.
+
+No verb renames an instance yet.  To give one a new name, bind its radiod
+again under the new reporter ID, start the new instance, then retire the
+old one:
+
+```bash
+smd admin sources bind ac0g-b1-a-status.local --reporter AC0G/LOOP
+smd admin instance enable psk-recorder AC0G/LOOP
+smd admin instance disable psk-recorder AC0G/B1A
+smd admin instance remove psk-recorder AC0G/B1A
+```
+
+The old name's entry stays in coordination.toml until you delete it by hand.
 
 The steps below build the same station a piece at a time, for when you
 want to choose each part yourself.

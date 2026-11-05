@@ -110,7 +110,7 @@ class DeferredPlan(unittest.TestCase):
 
     def test_a_remote_radiod_host_is_never_deferred(self):
         p = build_plan(_dasi2(), local_radiod=False,
-                       remote_status_dns='x-status.local', sdr_absent=True)
+                       remote_radiods=[('x-status.local', 'AC0G/X')], sdr_absent=True)
         self.assertFalse(p.sdr_absent)
         self.assertIn('smd enable wspr-recorder', _argvs(p))
 

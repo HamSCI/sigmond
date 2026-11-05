@@ -251,22 +251,27 @@ class InstancePaths:
     unit_template: str  # <client>@.service (in client repo's systemd/ dir)
 
 
-def instance_paths(client: str, reporter_id: str) -> InstancePaths:
+def instance_paths(client: str, reporter_id: str, *,
+                   etc_root: Optional[Path] = None) -> InstancePaths:
     """Resolve all canonical paths for (client, reporter_id).
 
     Does NOT touch the filesystem; just returns the path objects.
     Reporter ID is validated; raises InvalidReporterId on a bad name.
+    ``etc_root`` re-roots the config, env and sources files (tests); the
+    default is the host's /etc.
     """
     validate_reporter_id(reporter_id)
     if not client or "/" in client or client.startswith("."):
         raise ValueError(f"bad client name: {client!r}")
-    etc_client = Path("/etc") / client
+    etc = Path("/etc") if etc_root is None else Path(etc_root)
+    conf = SIGMOND_CONF if etc_root is None else etc / "sigmond"
+    etc_client = etc / client
     return InstancePaths(
         client=client,
         reporter_id=reporter_id,
         config=etc_client / f"{reporter_id}.toml",
         env=etc_client / "env" / f"{reporter_id}.env",
-        sources=SIGMOND_CONF / "clients" / f"{client}@{reporter_id}.sources.toml",
+        sources=conf / "clients" / f"{client}@{reporter_id}.sources.toml",
         state_dir=Path("/var/lib") / client / reporter_id,
         log_dir=Path("/var/log") / client / reporter_id,
         run_dir=Path("/run") / client / reporter_id,
@@ -613,6 +618,7 @@ def create_instance(
     *,
     force: bool = False,
     dry_run: bool = False,
+    etc_root: Optional[Path] = None,
 ) -> InstancePaths:
     """Initialize the per-instance config/env/sources files.
 
@@ -628,7 +634,8 @@ def create_instance(
     With `dry_run=True`, returns the paths that WOULD be created
     without touching the filesystem.
     """
-    paths = instance_paths(client, reporter_id)
+    paths = (instance_paths(client, reporter_id) if etc_root is None
+             else instance_paths(client, reporter_id, etc_root=etc_root))
 
     existing = [
         p for p in (paths.config, paths.env, paths.sources)
@@ -659,7 +666,7 @@ def create_instance(
         # Resolve the shared path per client: it is NOT always config.toml
         # (psk/hfdl/codar use <client>-config.toml).  Falls back to the stub
         # when no shared config exists yet.
-        shared = _LEGACY_SHARED_CONFIG.get(client, Path("/etc") / client / "config.toml")
+        shared = shared_config_path(client, etc_root=etc_root)
         if shared.exists():
             paths.config.write_text(
                 _config_from_shared(client, reporter_id, shared.read_text()))
@@ -872,6 +879,16 @@ def detect_migration_candidates() -> list[MigrationCandidate]:
 # ---------------------------------------------------------------------------
 # Per-candidate migration
 # ---------------------------------------------------------------------------
+
+def shared_config_path(client: str, *, etc_root: Optional[Path] = None) -> Path:
+    """The client's shared (pre-instance) config, the seed for a new
+    instance.  Not always config.toml: psk/hfdl/codar use
+    <client>-config.toml."""
+    path = _LEGACY_SHARED_CONFIG.get(client, Path("/etc") / client / "config.toml")
+    if etc_root is None:
+        return path
+    return Path(etc_root) / path.relative_to("/etc")
+
 
 # Legacy shared config path per client (matches the resolve_config_path
 # DEFAULT_CONFIG_PATH in each client repo's config.py).
