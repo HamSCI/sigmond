@@ -19760,6 +19760,14 @@ def _receiver_profile_clients() -> frozenset:
     return frozenset(_REPORTER_KEYED)
 
 
+def _receiver_decides_upload(r) -> bool:
+    """A receiver owns its instances' upload flag only when it says
+    something about it: an explicit ``upload``, or ``same_antenna_as``
+    (default off).  Otherwise the operator's `config upload` owns it
+    (ruling R13)."""
+    return r.upload is not None or bool(r.same_antenna_as)
+
+
 def _receiver_apply(receivers, *, profile_clients,
                     etc_root: Path = Path('/etc'), coord_path=None,
                     profile_path=None, dry_run: bool = False,
@@ -19769,7 +19777,9 @@ def _receiver_apply(receivers, *, profile_clients,
     Validates first: on any problem it prints every message, touches
     nothing and returns 1.  Then, per receiver, `_sources_bind` with the
     receiver's radiod, reporter ID, effective clients and ``injector`` as
-    ``timing``, and sets each instance's upload flag from ``uploads``.
+    ``timing``.  When that bind succeeds and the receiver decides upload
+    (`_receiver_decides_upload`), it sets the flag from ``uploads`` in each
+    instance whose config exists; otherwise it leaves the flag alone.
     Only adds and updates: no instance, sources file or coordination block
     is ever removed.  ``hosts`` maps a status name to the machine its radiod
     runs on; a radiod already in coordination keeps the host it has, and a
@@ -19778,6 +19788,7 @@ def _receiver_apply(receivers, *, profile_clients,
     ``validate_all=False`` serves `sources bind`: it applies
     one receiver, but validates the whole stored list so that a bind cannot
     leave an invalid record behind unreported."""
+    from sigmond import instance as _inst
     from sigmond import upload as _upload
     from sigmond.receivers import (effective_clients, load_receivers,
                                    validate_receivers)
@@ -19803,7 +19814,9 @@ def _receiver_apply(receivers, *, profile_clients,
         if dry_run:
             _info(f'{label}: bind {", ".join(clients) or "no clients"}'
                   + (' + hf-timestd' if r.injector else '')
-                  + f'; upload {"on" if r.uploads else "off"}')
+                  + (f'; upload {"on" if r.uploads else "off"}'
+                     if _receiver_decides_upload(r) else
+                     '; upload left as it is'))
             continue
         if _sources_bind(r.radiod, r.reporter_id, list(clients),
                          host=(hosts or {}).get(r.radiod, ''),
@@ -19811,9 +19824,19 @@ def _receiver_apply(receivers, *, profile_clients,
                          coord_path=coord_path,
                          inventory_rows=inventory_rows) != 0:
             rc = 1
+            continue              # a failed bind sets no upload flag
+        if not _receiver_decides_upload(r):
+            continue              # Stage 3a / `config upload` owns the flag
         rid = _receiver_key(r)
         for client in clients:
             if client not in _upload.UPLOAD_ENABLE:
+                continue
+            # Only an instance whose config exists: an env file written
+            # before the client installs would make Stage 3a's `instance
+            # add --force` skip its env stub and the client's
+            # [contract.instance_env] defaults (final review C1).
+            if not _inst.instance_paths(client, rid,
+                                        etc_root=etc_root).config.exists():
                 continue
             want = '1' if r.uploads else '0'
             env = _upload.env_path_for(client, rid, base=str(etc_root))

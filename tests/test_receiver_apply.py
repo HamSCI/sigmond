@@ -109,11 +109,16 @@ def test_a_shared_radiod_receiver_does_not_upload(box):
     rs = [Receiver(reporter_id='AC0G/B1A', radiod=A, clients=('psk-recorder',)),
           Receiver(reporter_id='AC0G/B1S', radiod=A, clients=('psk-recorder',),
                    same_antenna_as='AC0G/B1A')]
+    # R13: both instances have configs; only the same_antenna_as receiver
+    # decides its flag, the other leaves it to the operator.
+    (box.etc / 'psk-recorder').mkdir()
+    for rid in ('AC0G=B1A', 'AC0G=B1S'):
+        (box.etc / 'psk-recorder' / f'{rid}.toml').write_text(PSK_SHARED)
     with mock.patch.object(smd, '_sources_bind', return_value=0), \
             mock.patch('sigmond.upload.apply_enable') as ae:
         assert _apply(smd, box, rs) == 0
     got = {c.args[1]: c.args[2] for c in ae.call_args_list}
-    assert got == {'AC0G=B1A': True, 'AC0G=B1S': False}
+    assert got == {'AC0G=B1S': False}
 
 
 def test_a_local_radiod_named_by_status_gets_no_second_block(box):
@@ -210,3 +215,93 @@ def test_a_refused_bind_leaves_the_profile_untouched(box):
     assert _run_bind(smd, box, _bind_args(
         status_dns='x"\nevil.local', reporter='AC0G/B1C')) == 1
     assert box.profile.read_bytes() == before
+
+
+# --- R13: the upload flag belongs to the receiver only when it decides it ---
+
+def _psk_installed(box):
+    (box.etc / 'psk-recorder').mkdir(exist_ok=True)
+    (box.etc / 'psk-recorder' / 'psk-recorder-config.toml').write_text(PSK_SHARED)
+
+
+def _env(box, rid='AC0G=B1A', client='psk-recorder'):
+    return box.etc / client / 'env' / f'{rid}.env'
+
+
+def test_apply_before_install_leaves_the_env_stub_to_instance_add(box):
+    """C1: Stage 1 applies before clients install; Stage 3a's
+    `instance add --force` must still seed the env from instance_env."""
+    from sigmond import instance as _inst
+    smd = _load_smd()
+    rs = [Receiver(reporter_id='AC0G/B1A', radiod=A, clients=('psk-recorder',),
+                   upload=True),
+          Receiver(reporter_id='AC0G/B1S', radiod=A, clients=('psk-recorder',),
+                   same_antenna_as='AC0G/B1A')]
+    assert _apply(smd, box, rs) == 0
+    assert not _env(box).exists() and not _env(box, 'AC0G=B1S').exists()
+    _psk_installed(box)
+    with mock.patch.object(_inst, '_instance_env_defaults',
+                           return_value={'STUB_KEY': '1'}):
+        _inst.create_instance('psk-recorder', 'AC0G=B1A', force=True,
+                              etc_root=box.etc)
+    assert 'STUB_KEY=1' in _env(box).read_text()
+
+
+def test_a_rebind_without_upload_leaves_the_operators_flag(box):
+    """I4: no explicit `upload` -> the operator's `config upload --off` stands."""
+    from sigmond import upload as _upload
+    smd = _load_smd()
+    _psk_installed(box)
+    r = [Receiver(reporter_id='AC0G/B1A', radiod=A, clients=('psk-recorder',))]
+    assert _apply(smd, box, r) == 0
+    _upload.set_env_flag(_env(box), 'PSK_USE_HS_UPLOADER', '0')
+    assert _apply(smd, box, r) == 0
+    assert _upload.read_flag(_env(box), 'PSK_USE_HS_UPLOADER') == '0'
+
+
+def test_a_same_antenna_receiver_with_a_config_gets_upload_off(box):
+    from sigmond import upload as _upload
+    smd = _load_smd()
+    _psk_installed(box)
+    rs = [Receiver(reporter_id='AC0G/B1A', radiod=A, clients=('psk-recorder',)),
+          Receiver(reporter_id='AC0G/B1S', radiod=A, clients=('psk-recorder',),
+                   same_antenna_as='AC0G/B1A')]
+    assert _apply(smd, box, rs) == 0
+    assert _upload.read_flag(_env(box, 'AC0G=B1S'), 'PSK_USE_HS_UPLOADER') == '0'
+    assert _upload.read_flag(_env(box), 'PSK_USE_HS_UPLOADER') is None
+
+
+def test_an_explicit_upload_with_a_config_sets_the_flag(box):
+    from sigmond import upload as _upload
+    smd = _load_smd()
+    _psk_installed(box)
+    r = [Receiver(reporter_id='AC0G/B1A', radiod=A, clients=('psk-recorder',),
+                  upload=False)]
+    assert _apply(smd, box, r) == 0
+    assert _upload.read_flag(_env(box), 'PSK_USE_HS_UPLOADER') == '0'
+
+
+def test_a_failed_bind_writes_no_upload_flag(box):
+    smd = _load_smd()
+    _psk_installed(box)
+    (box.etc / 'psk-recorder' / 'AC0G=B1A.toml').write_text(PSK_SHARED)
+    r = [Receiver(reporter_id='AC0G/B1A', radiod=A, clients=('psk-recorder',),
+                  upload=True)]
+    with mock.patch.object(smd, '_sources_bind', return_value=1), \
+            mock.patch('sigmond.upload.apply_enable') as ae:
+        assert _apply(smd, box, r) == 1
+    ae.assert_not_called()
+
+
+def test_apply_twice_with_a_client_config_changes_nothing(box):
+    smd = _load_smd()
+    _psk_installed(box)
+    rs = [Receiver(reporter_id='AC0G/B1A', radiod=A, clients=('psk-recorder',),
+                   upload=True),
+          Receiver(reporter_id='AC0G/B1S', radiod=A, clients=('psk-recorder',),
+                   same_antenna_as='AC0G/B1A')]
+    _apply(smd, box, rs)
+    first = _tree(box.etc)
+    assert _env(box).exists() and _env(box, 'AC0G=B1S').exists()
+    _apply(smd, box, rs)
+    assert _tree(box.etc) == first
