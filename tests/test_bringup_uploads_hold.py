@@ -183,3 +183,25 @@ def test_the_release_prompt_says_how_long_held_spots_last():
     assert 'sends none' not in out
     assert 'FT8 spots for one hour' in out
     assert 'WSPR spots for 24 hours' in out
+
+
+def test_a_non_interactive_run_never_asks_to_release(capsys):
+    # AC0G-B2, 2026-11-05: `smd bringup client --non-interactive` under a
+    # terminal (script(1)) waited on "Send uploads now?" until interrupted.
+    smd = _load_smd()
+    plan = build_plan(_profile(), local_radiod=True, hold_uploads=True)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \
+            mock.patch.object(smd, '_ask_optional_yes_no',
+                              side_effect=AssertionError('asked')) as ask, \
+            mock.patch.object(smd, '_run', return_value=mock.Mock(returncode=0)) as run, \
+            mock.patch.object(smd, '_settle_firstrun_marker'):
+        rc = smd._bringup_finish(plan, 'dasi2', [], smd='/x/smd', ask=False)
+    assert rc == 0
+    assert '/x/smd sink upload' in out.getvalue()
+    assert not any(c.args and c.args[0][:2] == ['/x/smd', 'sink'] for c in run.call_args_list)
+
+
+def test_cmd_bringup_passes_its_non_interactive_flag_to_the_finish():
+    src = (REPO / 'bin' / 'smd').read_text()
+    assert "smd=smd_bin, ask=interactive)" in src

@@ -10649,10 +10649,11 @@ def cmd_bringup(args) -> int:
               'until this is done)')
 
     print()
-    return _bringup_finish(plan, prof.name, failed_steps, smd=smd_bin)
+    return _bringup_finish(plan, prof.name, failed_steps, smd=smd_bin, ask=interactive)
 
 
-def _bringup_finish(plan, name: str, failed_steps=(), smd: str = 'smd') -> int:
+def _bringup_finish(plan, name: str, failed_steps=(), smd: str = 'smd',
+                    ask: bool = True) -> int:
     """The verdict of a bring-up that ran to its end.
 
     ⛔ NEVER "complete" when the radio half was deferred (mjh, 2026-10-04:
@@ -10689,7 +10690,7 @@ def _bringup_finish(plan, name: str, failed_steps=(), smd: str = 'smd') -> int:
         return BRINGUP_INCOMPLETE_RC
     _ok(f"bringup '{name}' complete")
     if held:
-        _bringup_offer_upload_release(smd)
+        _bringup_offer_upload_release(smd, ask=ask)
     _settle_firstrun_marker()
     _info('verify anytime with: smd admin validate')
     return 0
@@ -10711,11 +10712,13 @@ def _bringup_first_install_hold(plan) -> bool:
         return False
 
 
-def _bringup_offer_upload_release(smd: str) -> None:
+def _bringup_offer_upload_release(smd: str, ask: bool = True) -> None:
     """End of a COMPLETE first repo install: uploads are held; offer the release.
 
     On a terminal, ask.  Anywhere else (firstrun, ssh -T, a detached pane) print
     the command and leave the hold standing: nobody is there to say yes.
+    `ask=False` (a --non-interactive run) never asks, even on a terminal:
+    AC0G-B2's unattended run under script(1) waited here until interrupted.
     """
     cmd = [smd, 'sink', 'upload']
     # The legacy hold renders no data pipeline; the clients keep FT8 spots one
@@ -10724,7 +10727,7 @@ def _bringup_offer_upload_release(smd: str) -> None:
     _info('uploads are HELD: only the station heartbeat leaves this host.')
     _info('  Clients keep FT8 spots for one hour and WSPR spots for 24 hours;')
     _info('  release within that time, or the older spots never ship.')
-    yes = _ask_optional_yes_no('Send uploads now? [y/N] ', default_yes=False)
+    yes = _ask_optional_yes_no('Send uploads now? [y/N] ', default_yes=False) if ask else None
     if yes:
         r = _run(cmd, capture=False, sudo=False)
         if getattr(r, 'returncode', 0) == 0:
