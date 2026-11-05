@@ -10704,7 +10704,12 @@ def _bringup_offer_upload_release(smd: str) -> None:
     the command and leave the hold standing: nobody is there to say yes.
     """
     cmd = [smd, 'sink', 'upload']
-    _info('uploads are HELD: this install stores spots and sends none.')
+    # The legacy hold renders no data pipeline; the clients keep FT8 spots one
+    # hour and WSPR spots 24 hours (uploader_manifest.policy_banner).  "Stores
+    # spots and sends none" overstated it (final review M1, 2026-11-05).
+    _info('uploads are HELD: only the station heartbeat leaves this host.')
+    _info('  Clients keep FT8 spots for one hour and WSPR spots for 24 hours;')
+    _info('  release within that time, or the older spots never ship.')
     yes = _ask_optional_yes_no('Send uploads now? [y/N] ', default_yes=False)
     if yes:
         r = _run(cmd, capture=False, sudo=False)

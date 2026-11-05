@@ -161,3 +161,13 @@ def test_a_working_station_with_hs_uploader_and_no_uploads_block_is_not_held(tmp
     py.parent.mkdir(parents=True)
     py.write_text('')
     assert should_hold_uploads(_coord('[host]\ncall = "AC0G"\n'), root=str(root)) is False
+
+
+def test_the_release_prompt_says_how_long_held_spots_last():
+    # Final review M1, 2026-11-05: "stores spots and sends none" overstated
+    # the legacy hold.  Clients keep FT8 spots one hour, WSPR spots 24 hours.
+    smd = _load_smd()
+    rc, ask, run, out = _finish(smd, True, False)
+    assert 'sends none' not in out
+    assert 'FT8 spots for one hour' in out
+    assert 'WSPR spots for 24 hours' in out

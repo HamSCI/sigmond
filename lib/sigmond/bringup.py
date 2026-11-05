@@ -126,8 +126,9 @@ UPLOAD_HOLD_REASON = 'first install from the repos: held until checks pass'
 def should_hold_uploads(coordination_path=None, root: str = '/') -> bool:
     """A repo install's first bring-up holds uploads; nothing else does.
 
-    Michael, 2026-11-05: a first install stores spots and sends nothing until
-    the final validate passes and the operator lets uploads go, so no bench
+    Michael, 2026-11-05: a first install sends nothing but the heartbeat until
+    the final validate passes and the operator lets uploads go (meanwhile the
+    clients keep FT8 spots one hour, WSPR spots 24 hours), so no bench
     spots and no spots under a wrong call leave by surprise.  The appliance
     image arrives uploading and keeps that.  An existing [uploads] block means
     someone already decided (an operator's release, or the hold this very rule
