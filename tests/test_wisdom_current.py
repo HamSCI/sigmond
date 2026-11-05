@@ -263,3 +263,96 @@ def test_needed_exits_zero_only_when_not_current(tmp_path, monkeypatch, capsys):
     assert B4 in capsys.readouterr().out
     kw['sidecar'].write_text(f'model={CXC}\n')
     assert smd.cmd_wisdom_needed(_Args()) == 0
+
+
+# ── fix round 1 ────────────────────────────────────────────────────────
+
+def _legacy_env(tmp_path, monkeypatch, *, appliance, model=B4, content='(baked)'):
+    """A wisdomf with no sidecar, as the image bakes and old stations hold."""
+    import sigmond.provenance as prov
+    kw = _host(tmp_path, model=model, wisdom_text=content)
+    monkeypatch.setattr(wisdom, 'WISDOM_FILE', kw['wisdom_file'])
+    monkeypatch.setattr(wisdom, 'WISDOM_SIDECAR', kw['sidecar'])
+    monkeypatch.setattr(wisdom, 'FFT_MISS_LOG', kw['miss_log'])
+    monkeypatch.setattr(wisdom, 'CPUINFO', kw['cpuinfo'])
+    monkeypatch.setattr(prov, 'is_appliance_install', lambda *a, **k: appliance)
+    monkeypatch.setattr(smd, '_wisdom_placement', lambda: None)
+    return kw
+
+
+def test_image_wisdom_with_no_sidecar_is_current_and_gets_one(tmp_path, monkeypatch):
+    kw = _legacy_env(tmp_path, monkeypatch, appliance=True)
+    kw['miss_log'].write_text('cob9999\n')      # no miss check on the image
+    assert smd._wisdom_current()
+    assert wisdom.read_sidecar(kw['sidecar'])['adopted'] == 'legacy-image'
+    assert smd._wisdom_current()                # still, with the sidecar present
+
+
+def test_image_adoption_survives_an_unwritable_sidecar(tmp_path, monkeypatch):
+    kw = _legacy_env(tmp_path, monkeypatch, appliance=True)
+    monkeypatch.setattr(wisdom, 'WISDOM_SIDECAR', tmp_path / 'nodir' / 'x' / 'wisdomf.cpu')
+    monkeypatch.setattr(wisdom, 'write_sidecar',
+                        lambda *a, **k: (_ for _ in ()).throw(PermissionError()))
+    assert smd._wisdom_current()
+
+
+def test_the_bringup_wait_does_not_start_the_planner_on_image_wisdom(tmp_path, monkeypatch):
+    kw = _legacy_env(tmp_path, monkeypatch, appliance=True)
+    ran = []
+    monkeypatch.setattr(smd, '_run', lambda cmd, **k: ran.append(cmd))
+    assert smd._bringup_wait_wisdom(kw['wisdom_file'], timeout_s=1, poll_s=1)
+    assert ran == []
+
+
+def test_repo_wisdom_identical_to_the_bundle_is_current_and_gets_its_sidecar(tmp_path, monkeypatch):
+    bundle = REPO / 'wisdom' / 'wisdomf-amd-ryzen-7-5825u'
+    kw = _legacy_env(tmp_path, monkeypatch, appliance=False,
+                     content=bundle.read_text())
+    assert smd._wisdom_current()
+    assert wisdom.read_sidecar(kw['sidecar'])['model'] == B4
+
+
+def test_repo_wisdom_that_differs_from_the_bundle_is_not_current(tmp_path, monkeypatch):
+    kw = _legacy_env(tmp_path, monkeypatch, appliance=False, content='(sigma june)')
+    assert not smd._wisdom_current()
+    assert not kw['sidecar'].exists()
+
+
+def test_the_unit_restarts_services_from_exec_stop_post():
+    lines = [l.strip() for l in
+             (REPO / 'systemd' / 'sigmond-wisdom.service').read_text().splitlines()
+             if not l.strip().startswith('#')]
+    assert any(l.startswith('ExecStopPost=-') and l.endswith('smd start') for l in lines)
+    assert not any(l.startswith('ExecStartPost') for l in lines)
+
+
+def test_an_operator_irq_override_makes_the_overlap_a_warning(plan_env, monkeypatch, capsys):
+    plan_env['irq'].write_text('6-7\n')
+    ov = plan_env['tmp_path'] / 'rx888-irq-cpus'
+    ov.write_text('6,7\n')
+    monkeypatch.setattr(smd, '_RX888_IRQ_OVERRIDE', ov)
+    assert smd.cmd_wisdom_plan(_Args()) == 0
+    assert any(c[0] == 'planner' for c in plan_env['calls'])
+    assert str(ov) in capsys.readouterr().out
+
+
+def test_a_missing_irq_script_warns_and_planning_goes_on_to_the_check(plan_env, monkeypatch):
+    def boom(cmd, *a, **k):
+        if 'sigmond-rx888-irq-affinity' in str(cmd[0]):
+            raise FileNotFoundError(cmd[0])
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+    monkeypatch.setattr(smd.subprocess, 'run', boom)
+    assert smd.cmd_wisdom_plan(_Args()) == 0
+
+
+def test_a_non_utf8_sidecar_reads_as_empty_and_not_current(tmp_path):
+    kw = _host(tmp_path)
+    kw['sidecar'].write_bytes(b'model=\xff\xfe\n')
+    assert wisdom.read_sidecar(kw['sidecar']) == {}
+    assert not wisdom_is_current(**kw)
+
+
+def test_a_non_utf8_fft_log_means_no_misses(tmp_path):
+    log = tmp_path / 'fft.log'
+    log.write_bytes(b'cob15 \xff\xfe\n')
+    assert wisdom.plans_from_fft_log(log) == []

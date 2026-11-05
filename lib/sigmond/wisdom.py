@@ -114,7 +114,7 @@ def plans_from_fft_log(log: Path = FFT_MISS_LOG) -> list[str]:
     """
     try:
         raw = log.read_text().split()
-    except OSError:
+    except (OSError, ValueError):   # ValueError: not UTF-8
         return []
     seen, out = set(), []
     for tok in raw:
@@ -193,7 +193,7 @@ def read_sidecar(path: Path) -> dict:
     """
     try:
         text = path.read_text()
-    except OSError:
+    except (OSError, ValueError):   # ValueError: not UTF-8 reads as no sidecar
         return {}
     if '=' not in text:
         model = text.strip()
@@ -311,10 +311,11 @@ def radiod_placement(cpus, performance_cpus, cache_root: Path = SYS_CPU) -> dict
             'radiod_l3_bytes': l3}
 
 
-def write_sidecar(path: Path, model: str, planned_profiles, placement=None) -> None:
+def write_sidecar(path: Path, model: str, planned_profiles, placement=None,
+                  extra=None) -> None:
     """Record, in the bundles' v2 format, what a wisdom file was made for."""
     lines = [f'model={model}', f'planned_profiles={",".join(planned_profiles)}']
-    for k, v in (placement or {}).items():
+    for k, v in {**(extra or {}), **(placement or {})}.items():
         lines.append(f'{k}={v}')
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + '.new')
@@ -343,7 +344,10 @@ def wisdom_is_current(wisdom_file: Path = WISDOM_FILE,
     if not model or side.get('model') != model:
         return False
     planned = {p for p in side.get('planned_profiles', '').split(',') if p}
-    if any(p not in planned for p in plans_from_fft_log(miss_log)):
+    # An image's baked wisdom, adopted by adopt_legacy_wisdom(), keeps the
+    # image's old behaviour: no fft.log miss check.
+    if side.get('adopted') != 'legacy-image' and \
+            any(p not in planned for p in plans_from_fft_log(miss_log)):
         return False
     for key, now in (placement or {}).items():
         was = side.get(key)
@@ -375,3 +379,38 @@ def xhci_irqs_on(cpus, proc_interrupts: Path = Path('/proc/interrupts'),
         if parse_cpu_mask(aff) & cpus:
             out.append((int(head), aff))
     return out
+
+
+def adopt_legacy_wisdom(wisdom_file: Path, sidecar: Path, cpuinfo: Path,
+                        bundle_dirs, appliance: bool,
+                        placement: dict | None = None) -> bool:
+    """Judge a wisdom file that has no sidecar (the image bakes one; every
+    station that predates the sidecar has one).  True means current.
+
+    Image install: current as before, and a sidecar (adopted=legacy-image) is
+    written so later checks have one.  Repo install: current only when the
+    file is byte-identical to this CPU's bundle, whose sidecar is then
+    installed beside it; sigma's June file is not, so it replans.  Writing
+    needs root; a failed write still reports the verdict.
+    """
+    if not Path(wisdom_file).is_file():
+        return False
+    model = cpu_model(cpuinfo)
+    if appliance:
+        try:
+            write_sidecar(sidecar, model, [], placement,
+                          extra={'adopted': 'legacy-image'})
+        except OSError:
+            pass
+        return True
+    bundle = find_bundle(bundle_dirs, model)
+    if bundle is None:
+        return False
+    try:
+        if Path(wisdom_file).read_bytes() != bundle.read_bytes():
+            return False
+        import shutil
+        shutil.copyfile(str(bundle) + '.cpu', sidecar)
+    except OSError:
+        pass
+    return True

@@ -17985,6 +17985,8 @@ def cmd_wisdom_harvest(args) -> int:
 
 
 _IRQ_AFFINITY_SCRIPT = '/usr/local/sbin/sigmond-rx888-irq-affinity'
+# Operator override that may co-locate xhci IRQs with radiod's cores.
+_RX888_IRQ_OVERRIDE = Path('/etc/sigmond/rx888-irq-cpus')
 
 
 def _wisdom_radiod_cores() -> dict:
@@ -18023,6 +18025,14 @@ def _wisdom_placement():
 def _wisdom_current(wisdom_file=None) -> bool:
     """wisdom_is_current() for this host's present radiod placement."""
     from sigmond import wisdom as _w
+    from sigmond.provenance import is_appliance_install
+    wf = Path(wisdom_file or _w.WISDOM_FILE)
+    # A wisdomf with no sidecar: the image bakes one, and every station that
+    # predates the sidecar has one.  Judge it as legacy, not as stale.
+    if wf.is_file() and not _w.read_sidecar(_w.WISDOM_SIDECAR):
+        return _w.adopt_legacy_wisdom(
+            wf, _w.WISDOM_SIDECAR, _w.CPUINFO, _WISDOM_BUNDLE_DIRS,
+            is_appliance_install(), _wisdom_placement())
     # Read the module attributes at call time (not wisdom_is_current's
     # bound defaults), so one seam moves every path.
     return _w.wisdom_is_current(
@@ -18120,15 +18130,23 @@ def cmd_wisdom_plan(args) -> int:
         _info('no local radiod unit: planning unpinned, IRQ layout untouched')
     else:
         from sigmond.wisdom import xhci_irqs_on
-        r = subprocess.run([_IRQ_AFFINITY_SCRIPT], capture_output=True, text=True)
-        if r.returncode != 0:
-            _warn(f'{_IRQ_AFFINITY_SCRIPT} exited {r.returncode}: '
-                  f'{(r.stderr or r.stdout).strip()}')
+        try:
+            r = subprocess.run([_IRQ_AFFINITY_SCRIPT], capture_output=True, text=True)
+            if r.returncode != 0:
+                _warn(f'{_IRQ_AFFINITY_SCRIPT} exited {r.returncode}: '
+                      f'{(r.stderr or r.stdout).strip()}')
+        except OSError as exc:
+            _warn(f'could not run {_IRQ_AFFINITY_SCRIPT}: {exc}')
         stuck = xhci_irqs_on(
             pin,
             Path(os.environ.get('SIGMOND_PROC_INTERRUPTS', '/proc/interrupts')),
             Path(os.environ.get('SIGMOND_IRQ_ROOT', '/proc/irq')))
-        if stuck:
+        if stuck and _RX888_IRQ_OVERRIDE.exists() and _RX888_IRQ_OVERRIDE.stat().st_size:
+            # The operator chose this layout.  Refusing would loop every
+            # boot under the unit, leaving the station stopped.
+            _warn(f'xhci_hcd IRQs {stuck} sit on radiod\'s cores {sorted(pin)}; '
+                  f'planning anyway because {_RX888_IRQ_OVERRIDE} sets that layout')
+        elif stuck:
             _err('refusing to plan: xhci_hcd interrupts still sit on radiod\'s '
                  f'cores {sorted(pin)}; timings would include their load:')
             for irq, aff in stuck:

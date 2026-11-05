@@ -28,7 +28,9 @@ TimeoutStartSec=infinity
 # Stop services so FFTW benchmarks on an idle CPU; restart them after.
 ExecStartPre=-/usr/local/bin/smd stop
 ExecStart=/usr/local/bin/smd admin wisdom plan
-ExecStartPost=-/usr/local/bin/smd start
+# ExecStopPost, not ExecStartPost: systemd skips ExecStartPost when the
+# planner fails or refuses, which would leave the station stopped every boot.
+ExecStopPost=-/usr/local/bin/smd start
 
 [Install]
 WantedBy=multi-user.target
