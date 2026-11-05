@@ -45,7 +45,7 @@ class InstanceReportTests(unittest.TestCase):
         rows = instance_report.instance_rows([a, b], run=run)
         self.assertEqual(rows[0], {
             "client": "psk-recorder", "reporter_id": "AC0G=B4",
-            "display_id": "AC0G/B4", "unit": a.paths.unit_name,
+            "display_id": "AC0G/B4", "radiod": "", "unit": a.paths.unit_name,
             "has_config": True, "has_env": True, "has_sources": False,
             "enabled": "enabled", "active": "active"})
         self.assertEqual((rows[1]["enabled"], rows[1]["active"]),

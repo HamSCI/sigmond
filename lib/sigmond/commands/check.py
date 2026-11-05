@@ -52,7 +52,7 @@ class Line:
 
 # The web groups checks by stage and links each to its client.  The ids stay
 # stable when a label's wording changes.  label -> (id, stage, client).
-STAGES = ('platform', 'sensor', 'decode', 'sink', 'upload')
+STAGES = ('platform', 'run', 'sensor', 'decode', 'sink', 'upload')
 CHECK_META = {
     'bring-up':          ('platform.bringup', 'platform', None),
     'storage':           ('platform.storage', 'platform', None),
@@ -65,6 +65,7 @@ CHECK_META = {
     'receiver page':     ('platform.receiver-page', 'platform', 'ka9q-web'),
     'station pages':     ('platform.station-pages', 'platform', 'station-web'),
     'magnetometer page': ('platform.magnetometer-page', 'platform', 'gmag-webui'),
+    'receivers':         ('receivers.instances', 'run', None),
 }
 FIX_SEP = '  ' + FIX
 
@@ -1092,6 +1093,46 @@ def mag_page_line(env: Env, mag_dir: Path = MAG_DIR, device: str = MAG_DEVICE) -
     return page_check(MAG_PAGE, 8082, None)(env)
 
 
+def _status_name(host: str) -> str:
+    """`ac0g-b1-a-status.local` -> `ac0g-b1-a` (a short name for the text)."""
+    for tail in ('-status.local', '.local'):
+        if host.endswith(tail):
+            return host[:-len(tail)]
+    return host
+
+
+def receivers_line(env: Env) -> Line:
+    """One line for the [[receiver]] list: per receiver, how many of its
+    instances run.  FAIL when a receiver has none running, WAIT when some are
+    down.  An instance with no unit counts as down."""
+    from .. import instance, receivers
+    from ..bringup import _REPORTER_KEYED
+    label = 'receivers'
+    try:
+        recs = receivers.load_receivers()
+    except receivers.ReceiverError as exc:
+        return Line(FAIL, label, f'the [[receiver]] list does not load: {exc}')
+    if not recs:
+        return Line(ABSENT, label, 'no [[receiver]] list declared')
+    parts, worst = [], OK
+    for r in recs:
+        clients = receivers.effective_clients(r, _REPORTER_KEYED)
+        rid = instance.parse_user_reporter_id(r.reporter_id)
+        down = [c for c in clients
+                if env.service(instance.unit_name(c, rid)).state != 'active']
+        up = len(clients) - len(down)
+        part = (f'{receivers._display(r.reporter_id)} <- '
+                f'{_status_name(r.radiod or r.kiwisdr)}: {up}/{len(clients)} active')
+        if down:
+            part += f' ({", ".join(down)} down)'
+        parts.append(part)
+        if up == 0:
+            worst = FAIL
+        elif down and worst != FAIL:
+            worst = WAIT
+    return Line(worst, label, '; '.join(parts))
+
+
 # ---------------------------------------------------------------------------
 # The lines, in the order the installer reads them (spec §2).  Each entry is
 # (label, function); a function returns a Line, or None for a line that does
@@ -1102,6 +1143,7 @@ CHECKS: List[Tuple[str, Callable[[Env], Optional[Line]]]] = [
     ('bring-up', bringup_line),
     ('PSK', psk_line),
     ('WSPR', wspr_line),
+    ('receivers', receivers_line),
     ('magnetometer', mag_line),
     ('GRAPE', grape_line),
     ('storage', storage_line),

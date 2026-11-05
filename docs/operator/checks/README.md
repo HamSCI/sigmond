@@ -20,6 +20,7 @@ Run `smd check` in the VM. Commands on these pages run in the VM.
 | `sensor.magnetometer` | magnetometer | sensor.magnetometer.md |
 | `decode.psk` | PSK | decode.psk.md |
 | `decode.wspr` | WSPR | decode.wspr.md |
+| `receivers.instances` | receivers | receivers.instances.md |
 | `decode.meteor` | meteor scatter | decode.meteor.md |
 | `sink.grape` | GRAPE | sink.grape.md |
 | `upload.uploads` | uploads | upload.uploads.md |

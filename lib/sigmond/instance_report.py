@@ -28,6 +28,26 @@ def _unit_word(verb: str, unit: str, run: Callable) -> str:
     return lines[0].strip() if lines else UNKNOWN
 
 
+def _radiod(i) -> str:
+    """The radiod status name in the instance's sources file, else "".
+    A missing or unreadable file reads as no binding."""
+    from sigmond import sources
+    path = getattr(i.paths, "sources", None)
+    if path is None:
+        return ""
+    try:
+        import tomllib
+        with open(path, "rb") as fh:
+            raw = tomllib.load(fh).get("selected", [])
+        for s in raw:
+            key = sources.SourceKey.parse(s)
+            if key.type == "radiod":
+                return key.identifier
+    except (OSError, ValueError, TypeError):
+        pass
+    return ""
+
+
 def instance_rows(instances: list, run: Optional[Callable] = None) -> list:
     # Resolve subprocess.run at call time so a patched one takes effect.
     run = run or subprocess.run
@@ -38,6 +58,7 @@ def instance_rows(instances: list, run: Optional[Callable] = None) -> list:
             "client": i.client,
             "reporter_id": i.reporter_id,
             "display_id": _instance.display_reporter_id(i.reporter_id),
+            "radiod": _radiod(i),
             "unit": unit,
             "has_config": i.has_config,
             "has_env": i.has_env,

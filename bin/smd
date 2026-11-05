@@ -25447,14 +25447,15 @@ def cmd_instance_list(args) -> int:
                   '(see `smd admin instance add --help`)')
         return 0
     _heading('instances')
-    print(f'  {"CLIENT":<22} {"REPORTER ID":<18} '
+    from sigmond import instance_report
+    print(f'  {"CLIENT":<22} {"REPORTER ID":<18} {"RADIOD":<28} '
           f'{"CONFIG":>7} {"ENV":>5} {"SOURCES":>8}')
     for i in instances:
         c = '✓' if i.has_config else '-'
         e = '✓' if i.has_env else '-'
         s = '✓' if i.has_sources else '-'
         print(f'  {i.client:<22} {inst.display_reporter_id(i.reporter_id):<18} '
-              f'{c:>7} {e:>5} {s:>8}')
+              f'{instance_report._radiod(i) or "-":<28} {c:>7} {e:>5} {s:>8}')
     return 0
 
 
