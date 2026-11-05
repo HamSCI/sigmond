@@ -134,6 +134,10 @@ class Uploads:
     enabled: bool = True
     reason:  str  = ""
     mode:    str  = ""
+    # True when coordination.toml carried an [uploads] table.  bring-up reads
+    # it to tell a first install (no table) from a host whose operator, or an
+    # earlier run, already decided (AC0G-B2, 2026-11-05).
+    declared: bool = False
 
     def __post_init__(self):
         if self.mode not in UPLOAD_MODES:
@@ -345,6 +349,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
 
     up_raw = raw.get('uploads', {}) or {}
     uploads = Uploads(
+        declared='uploads' in raw,
         enabled=bool(up_raw.get('enabled', True)),
         reason=str(up_raw.get('reason', '') or ''),
         mode=str(up_raw.get('mode', '') or '').strip().lower(),

@@ -115,6 +115,31 @@ class Plan:
     # True when the plan defers the radio half because no SDR was on the bus.
     # The executor then exits PARTIAL (rc 3), never "done" -- see build_plan.
     sdr_absent: bool = False
+    # True when Stage 4 holds uploads before the manifest step; the executor
+    # then offers the release at the end of a COMPLETE run.
+    hold_uploads: bool = False
+
+
+UPLOAD_HOLD_REASON = 'first install from the repos: held until checks pass'
+
+
+def should_hold_uploads(coordination_path=None, root: str = '/') -> bool:
+    """A repo install's first bring-up holds uploads; nothing else does.
+
+    Michael, 2026-11-05: a first install stores spots and sends nothing until
+    the final validate passes and the operator lets uploads go, so no bench
+    spots and no spots under a wrong call leave by surprise.  The appliance
+    image arrives uploading and keeps that.  An existing [uploads] block means
+    someone already decided (an operator's release, or the hold this very rule
+    wrote on a first run), so a re-run never re-holds.
+    """
+    from .coordination import load_coordination
+    from .paths import COORDINATION_PATH
+    from .provenance import is_appliance_install
+    if is_appliance_install(root):
+        return False
+    coord = load_coordination(coordination_path or COORDINATION_PATH)
+    return not coord.uploads.declared
 
 
 def build_plan(profile, *, local_radiod: bool,
@@ -124,7 +149,8 @@ def build_plan(profile, *, local_radiod: bool,
                non_interactive: bool = False, skip=frozenset(),
                dormant=frozenset(), no_config=frozenset(),
                reporter: Optional[str] = None,
-               sdr_absent: bool = False) -> Plan:
+               sdr_absent: bool = False,
+               hold_uploads: bool = False) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
     ``local_radiod`` gates the entire radiod stack (infra, ka9q-radio, tuning,
@@ -525,6 +551,13 @@ def build_plan(profile, *, local_radiod: bool,
                               'configs)', 'tune',
                       argv=[smd, 'config', 'render', '--if-present']))
 
+    # First install from the repos: hold uploads BEFORE the manifest step, so
+    # the manifest renders heartbeat-only and nothing ships (spec 6.3).
+    if hold_uploads:
+        steps.append(Step(STAGE4, 'hold uploads until checks pass', 'tune',
+                          argv=[smd, 'config', 'uploads', 'disable',
+                                '--reason', UPLOAD_HOLD_REASON]))
+
     # Generate the single-host uploader manifest from each enabled client's
     # deploy.toml [[hs_uploader.pipeline]] declarations (identity substituted
     # from coordination + per-client configs), then enable + start the daemon.
@@ -656,4 +689,4 @@ def build_plan(profile, *, local_radiod: bool,
 
     return Plan(profile=profile.name, local_radiod=local_radiod,
                 remote_radiods=remote_radiods, steps=steps,
-                sdr_absent=deferring)
+                sdr_absent=deferring, hold_uploads=hold_uploads)

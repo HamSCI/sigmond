@@ -728,6 +728,31 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
     PIN = "d39fea8edbcb6214a2d5c63776f80134c679b24e"
     OTHER = "1234567890abcdef1234567890abcdef12345678"
 
+    @staticmethod
+    def _view(coord, ka9q_radio=True):
+        from sigmond.topology import Component
+        comps = {'ka9q-radio': Component(name='ka9q-radio', enabled=True)} if ka9q_radio else {}
+        return SystemView(coordination=coord,
+                          topology=Topology(client_dir=None, smd_bin=None, components=comps),
+                          client_views={})
+
+    def test_ka9q_python_compat_is_silent_when_ka9q_radio_is_not_enabled(self):
+        # AC0G-B2, 2026-11-05: a client host warned about a checkout it never builds.
+        from sigmond.harmonize import rule_ka9q_python_compat
+        import sigmond.harmonize as harm_mod
+        import tempfile
+        self._install_compat(self.PIN)
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._fake_repo(Path(td), self.OTHER)
+            original = harm_mod._ka9q_radio_source_dir
+            harm_mod._ka9q_radio_source_dir = lambda: repo
+            try:
+                r = rule_ka9q_python_compat(self._view(Coordination(), ka9q_radio=False))
+            finally:
+                harm_mod._ka9q_radio_source_dir = original
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("builds no ka9q-radio", r.message)
+
     def setUp(self):
         # Save and restore sys.modules so each test starts clean.
         self._saved = {k: sys.modules.get(k) for k in ('ka9q', 'ka9q.compat')}
@@ -767,7 +792,7 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
         # be importable — patch sys.modules to mask it.
         sys.modules['ka9q.compat'] = None  # forces ImportError on import
         try:
-            r = rule_ka9q_python_compat(_make_view(Coordination()))
+            r = rule_ka9q_python_compat(self._view(Coordination()))
         finally:
             sys.modules.pop('ka9q.compat', None)
         self.assertEqual(r.severity, "pass")
@@ -776,14 +801,14 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
     def test_skipped_when_pin_empty(self):
         from sigmond.harmonize import rule_ka9q_python_compat
         self._install_compat("")
-        r = rule_ka9q_python_compat(_make_view(Coordination()))
+        r = rule_ka9q_python_compat(self._view(Coordination()))
         self.assertEqual(r.severity, "pass")
         self.assertIn("empty", r.message)
 
     def test_skipped_when_pin_unknown(self):
         from sigmond.harmonize import rule_ka9q_python_compat
         self._install_compat("unknown")
-        r = rule_ka9q_python_compat(_make_view(Coordination()))
+        r = rule_ka9q_python_compat(self._view(Coordination()))
         self.assertEqual(r.severity, "pass")
         self.assertIn("empty", r.message)
 
@@ -794,7 +819,7 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
         original = harm_mod._ka9q_radio_source_dir
         harm_mod._ka9q_radio_source_dir = lambda: None
         try:
-            r = rule_ka9q_python_compat(_make_view(Coordination()))
+            r = rule_ka9q_python_compat(self._view(Coordination()))
         finally:
             harm_mod._ka9q_radio_source_dir = original
         self.assertEqual(r.severity, "pass")
@@ -810,7 +835,7 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
             original = harm_mod._ka9q_radio_source_dir
             harm_mod._ka9q_radio_source_dir = lambda: repo
             try:
-                r = rule_ka9q_python_compat(_make_view(Coordination()))
+                r = rule_ka9q_python_compat(self._view(Coordination()))
             finally:
                 harm_mod._ka9q_radio_source_dir = original
         self.assertEqual(r.severity, "pass")
@@ -831,7 +856,7 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
             original = harm_mod._ka9q_radio_source_dir
             harm_mod._ka9q_radio_source_dir = lambda: repo
             try:
-                r = rule_ka9q_python_compat(_make_view(coord))
+                r = rule_ka9q_python_compat(self._view(coord))
             finally:
                 harm_mod._ka9q_radio_source_dir = original
         self.assertEqual(r.severity, "warn")

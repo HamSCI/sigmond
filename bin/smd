@@ -10078,7 +10078,7 @@ def cmd_bringup(args) -> int:
     executor.  Remote-radiod hosts skip the radiod stack and the wisdom wait.
     """
     from sigmond.catalog import load_profiles, load_catalog
-    from sigmond.bringup import build_plan, WISDOM_FILE
+    from sigmond.bringup import build_plan, WISDOM_FILE, should_hold_uploads
 
     # Profile resolution: positional arg wins, then the back-compat --profile
     # alias, else the canonical `dasi2` station.  So `smd bringup` == dasi2.
@@ -10365,7 +10365,16 @@ def cmd_bringup(args) -> int:
             _info(f'grid auto-derived from GPSDO fix: {grid} '
                   '(no hand-entry — the GPS is the station location)')
 
+    # Decided once, before planning: a re-run finds the [uploads] block the
+    # first run wrote and does not hold again.
+    try:
+        hold_uploads = should_hold_uploads()
+    except Exception as exc:                          # noqa: BLE001
+        _warn(f'could not read coordination [uploads] ({exc}); not holding')
+        hold_uploads = False
+
     plan = build_plan(prof, local_radiod=local, remote_radiods=remote_pairs,
+                      hold_uploads=hold_uploads,
                       timing_radiod=timing_named,
                       sdr_absent=sdr_absent,
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
@@ -10607,10 +10616,10 @@ def cmd_bringup(args) -> int:
               'until this is done)')
 
     print()
-    return _bringup_finish(plan, prof.name, failed_steps)
+    return _bringup_finish(plan, prof.name, failed_steps, smd=smd_bin)
 
 
-def _bringup_finish(plan, name: str, failed_steps=()) -> int:
+def _bringup_finish(plan, name: str, failed_steps=(), smd: str = 'smd') -> int:
     """The verdict of a bring-up that ran to its end.
 
     ⛔ NEVER "complete" when the radio half was deferred (mjh, 2026-10-04:
@@ -10640,9 +10649,30 @@ def _bringup_finish(plan, name: str, failed_steps=()) -> int:
              f"smd bringup {name}")
         return BRINGUP_INCOMPLETE_RC
     _ok(f"bringup '{name}' complete")
+    if getattr(plan, 'hold_uploads', False):
+        _bringup_offer_upload_release(smd)
     _settle_firstrun_marker()
     _info('verify anytime with: smd admin validate')
     return 0
+
+
+def _bringup_offer_upload_release(smd: str) -> None:
+    """End of a COMPLETE first repo install: uploads are held; offer the release.
+
+    On a terminal, ask.  Anywhere else (firstrun, ssh -T, a detached pane) print
+    the command and leave the hold standing: nobody is there to say yes.
+    """
+    cmd = [smd, 'sink', 'upload']
+    _info('uploads are HELD: this install stores spots and sends none.')
+    yes = _ask_optional_yes_no('Send uploads now? [y/N] ', default_yes=False)
+    if yes:
+        r = _run(cmd, capture=False, sudo=False)
+        if getattr(r, 'returncode', 0) == 0:
+            _ok('uploads released')
+        else:
+            _warn(f'`{" ".join(cmd)}` exited {r.returncode}; uploads stay held')
+    else:
+        _info(f'when ready, send uploads with:  {" ".join(cmd)}')
 
 
 FIRSTRUN_MARKER_DEFAULT = '/var/lib/sigmond/.firstrun-bringup-done'

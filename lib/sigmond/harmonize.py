@@ -723,6 +723,14 @@ def rule_ka9q_python_compat(view: SystemView) -> RuleResult:
     rebuild yet, both produce drift.  Severity is ``warn`` rather than
     ``fail`` because operators are sometimes legitimately mid-upgrade.
     """
+    # AC0G-B2, 2026-11-05: a client host binds a remote radiod, builds no
+    # ka9q-radio, and still got the drift warning about a checkout it never
+    # compiles.  Only a host that enables ka9q-radio has that source in play.
+    if not view.topology.is_enabled('ka9q-radio'):
+        return RuleResult(
+            "ka9q_python_compat", "pass",
+            "skipped (this host builds no ka9q-radio)", [],
+        )
     try:
         from ka9q.compat import KA9Q_RADIO_COMMIT  # noqa: F401
     except ImportError:
