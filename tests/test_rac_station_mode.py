@@ -84,3 +84,153 @@ def test_station_no_call_prints_nothing(tmp_path):
            "SIGMOND_RAC_HOSTNAME": "sigma"}
     r = run(tmp_path, "RAC_MODE=station; rac_site_name", env)
     assert r.stdout == "", r.stderr
+
+
+# -- registration in station mode ---------------------------------------------
+
+import socket
+import threading
+
+import pytest
+
+from tests import test_wizard_rac_register as rr
+
+STATION_REPLY = {"user": "0123456789abcdef", "token": "tok3nTOKEN42", "rac": 17,
+                 "server_addr": "127.0.0.1", "server_port": 35735,
+                 "ports": {"vm_ssh": 35817, "vm_web": 45817}}
+HOST_REPLY = dict(STATION_REPLY, ports={"vm_ssh": 35817, "vm_web": 45817,
+                                        "host_ssh": 50817, "host_ui": 55817})
+
+
+def pre(tmp_path, port, *, station, relays=True, **kw):
+    s = rr.host(tmp_path, tiers=rr.tier(port), relays=relays,
+                configured=None if station else "AC0G/B4 EM38ww 2026-10-09", **kw)
+    if station:
+        s += "RAC_MODE=station\n"
+    return s
+
+
+def sh(script, tmp_path, env=None):
+    return rr.run(script, tmp_path, dict({"SIGMOND_RAC_SITE": "AC0G-SIGMA"}, **(env or {})))
+
+
+def proxies(toml):
+    out, cur = [], None
+    for ln in toml.splitlines():
+        if ln.startswith("name = "):
+            cur = {"name": ln.split('"')[1]}
+            out.append(cur)
+        elif cur is not None and ln.startswith("localPort"):
+            cur["local"] = int(ln.split("=")[1])
+        elif cur is not None and ln.startswith("remotePort"):
+            cur["remote"] = int(ln.split("=")[1])
+    return out
+
+
+def test_station_toml_four_proxies(tmp_path):
+    reg = rr.Registrar(reply=STATION_REPLY)
+    try:
+        r = sh(pre(tmp_path, reg.port, station=True) + "rac_register fresh; echo rc=$? fail=$RAC_FAIL\n", tmp_path)
+    finally:
+        reg.close()
+    assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
+    toml = (tmp_path / "frpc-host-gw2.toml").read_text()
+    assert proxies(toml) == [
+        {"name": "AC0G-SIGMA-vm-ssh", "local": 22, "remote": 35817},
+        {"name": "AC0G-SIGMA-vm-web", "local": 8081, "remote": 45817},
+        {"name": "AC0G-SIGMA-vm-station", "local": 8000, "remote": 48817},
+        {"name": "AC0G-SIGMA-vm-gmag", "local": 8082, "remote": 49817}]
+    assert "host-ssh" not in toml and "host-ui" not in toml
+    assert (tmp_path / "marks" / "rac-site").read_text() == "AC0G-SIGMA\n"
+
+
+def test_host_toml_unchanged(tmp_path):
+    reg = rr.Registrar(reply=HOST_REPLY)
+    try:
+        r = sh(pre(tmp_path, reg.port, station=False) + "rac_register fresh\n", tmp_path)
+    finally:
+        reg.close()
+    assert r.returncode == 0, r.stdout + r.stderr
+    got = proxies((tmp_path / "frpc-host-gw2.toml").read_text())
+    assert [p["name"].split("-", 1)[1] for p in got] == [
+        "vm-ssh", "vm-web", "vm-station", "vm-gmag", "host-ssh", "host-ui"]
+    assert [p["local"] for p in got] == [12222, 12223, 12224, 12225, 22, 8006]
+    assert [p["remote"] for p in got] == [35817, 45817, 48817, 49817, 50817, 55817]
+
+
+def test_station_registrar_ports_zero_when_omitted(tmp_path):
+    reg = rr.Registrar(reply=STATION_REPLY)
+    try:
+        r = sh(pre(tmp_path, reg.port, station=True) + "rac_register fresh; echo \"[$REG]\"\n", tmp_path)
+    finally:
+        reg.close()
+    assert "P_HSSH=0 P_HUI=0" in r.stdout, r.stdout + r.stderr
+
+
+def test_host_registrar_still_requires_host_ports(tmp_path):
+    reg = rr.Registrar(reply=STATION_REPLY)
+    try:
+        r = sh(pre(tmp_path, reg.port, station=False) + "rac_register fresh; echo \"rc=$? $RAC_FAIL\"\n", tmp_path)
+    finally:
+        reg.close()
+    assert "rc=1" in r.stdout and "no gateway tier answered" in r.stdout
+
+
+def test_station_skips_relay_precondition(tmp_path):
+    reg = rr.Registrar(reply=STATION_REPLY)
+    try:
+        r = sh(pre(tmp_path, reg.port, station=True, relays=False)
+               + "rac_register fresh; echo rc=$? fail=$RAC_FAIL\n", tmp_path)
+        assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
+        h = tmp_path / "h"
+        h.mkdir()
+        r = sh(pre(h, reg.port, station=False, relays=False)
+               + "rac_register fresh; echo rc=$? fail=$RAC_FAIL\n", h)
+    finally:
+        reg.close()
+    assert "rc=1 fail=the VM relays are not installed" in r.stdout, r.stdout + r.stderr
+
+
+def test_station_direct_probe_four_proxies(tmp_path):
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+    threading.Thread(target=lambda: [srv.accept() for _ in range(5)], daemon=True).start()
+    claim = tmp_path / "claim.toml"
+    fake = tmp_path / "frpc"
+    fake_src = (f'''#!/usr/bin/env python3
+import http.server, shutil, sys
+shutil.copy(sys.argv[2], "{claim}")
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = b'[' + b','.join([b'{{"status":"running"}}'] * 4) + b']'
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", 7502), H).serve_forever()
+''')
+    tiers = f"HamSCI|127.0.0.1|DIRECT|off|{port}"
+    pre_s = rr.host(tmp_path, tiers=tiers, configured=None, relays=False)
+    fake.write_text(fake_src)
+    fake.chmod(0o755)
+    script = pre_s + \
+        'RAC_MODE=station; DASI_NUM=19\nrac_register fresh; echo "rc=$? fail=$RAC_FAIL"; echo "[$REG]"\n'
+    r = sh(script, tmp_path)
+    srv.close()
+    assert "rc=0 fail=" in r.stdout, r.stdout + r.stderr
+    got = proxies(claim.read_text())
+    assert [(p["name"].split("-", 2)[2], p["local"]) for p in got] == [
+        ("vm-ssh", 22), ("vm-web", 8081), ("vm-station", 8000), ("vm-gmag", 8082)]
+    assert "P_HSSH=0 P_HUI=0" in r.stdout
+
+
+def test_payload_found_in_opt_checkout(tmp_path):
+    d = tmp_path / "opt" / "sigmond-rac"
+    d.mkdir(parents=True)
+    ran = tmp_path / "installed"
+    (d / "install-host.sh").write_text(f"#!/bin/sh\ntouch {ran}\n")
+    (d / "install-host.sh").chmod(0o755)
+    script = rr.host(tmp_path, tiers="", frpc=False) + \
+        'rac_payload_ready; echo rc=$?\n'
+    r = sh(script, tmp_path, {"SIGMOND_RAC_PAYLOAD_DIRS": f"{tmp_path}/none:{d}"})
+    assert ran.exists(), r.stdout + r.stderr

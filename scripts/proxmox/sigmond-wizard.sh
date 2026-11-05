@@ -429,8 +429,18 @@ rac_site_name(){
 
 rac_payload_ready(){
     # frpc, the pinned CA and the host unit come from the sigmond-rac payload.
-    if [ ! -x "$RAC_FRPC" ] && [ -x /root/sigmond-appliance/sigmond-rac/install-host.sh ]; then
-        (cd /root/sigmond-appliance/sigmond-rac && ./install-host.sh) >>"$LOG" 2>&1
+    # Lookup order: $SIGMOND_RAC_PAYLOAD, the appliance image's copy, then a
+    # sigmond checkout.  SIGMOND_RAC_PAYLOAD_DIRS (colon-separated) replaces
+    # the whole list; the tests use it.
+    if [ ! -x "$RAC_FRPC" ]; then
+        local _pd _pdirs
+        _pdirs="${SIGMOND_RAC_PAYLOAD_DIRS:-${SIGMOND_RAC_PAYLOAD:+$SIGMOND_RAC_PAYLOAD:}/root/sigmond-appliance/sigmond-rac:/opt/git/sigmond/sigmond-rac}"
+        local IFS=:
+        for _pd in $_pdirs; do
+            [ -n "$_pd" ] && [ -x "$_pd/install-host.sh" ] || continue
+            (cd "$_pd" && ./install-host.sh) >>"$LOG" 2>&1
+            break
+        done
     fi
     [ -x "$RAC_FRPC" ] && [ -f "$RAC_CA" ]
 }
@@ -483,6 +493,7 @@ rac_ladder(){
             _racn=$((220 + DASI_NUM))
             _pvs=$((RAC_BASE_VMSSH+_racn)); _pvw=$((RAC_BASE_VMWEB+_racn))
             _phs=$((RAC_BASE_HSSH+_racn)); _phu=$((RAC_BASE_HUI+_racn))
+            if [ "${RAC_MODE:-host}" = station ]; then _phs=0; _phu=0; fi
             _pst=$((RAC_BASE_VMSTN+_racn)); _pgm=$((RAC_BASE_VMGMAG+_racn))
             _duser="DASI-$(printf '%03d' "$DASI_NUM")"
             IFS='|' read -r _ _ _ _gwca_probe _gwsni_probe _ <<<"$(rac_gateway_set "$_cand" | head -1)"
@@ -508,8 +519,13 @@ rac_ladder(){
                     [ -n "$_gwsni_probe" ] && printf 'serverName = "%s"\n' "$_gwsni_probe"
                 fi
                 printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
-                for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu" \
-                             "vm-station:12224:$_pst" "vm-gmag:12225:$_pgm"; do
+                local _specs
+                if [ "${RAC_MODE:-host}" = station ]; then
+                    _specs="vm-ssh:22:$_pvs vm-web:8081:$_pvw vm-station:8000:$_pst vm-gmag:8082:$_pgm"
+                else
+                    _specs="vm-ssh:12222:$_pvs vm-web:12223:$_pvw host-ssh:22:$_phs host-ui:8006:$_phu vm-station:12224:$_pst vm-gmag:12225:$_pgm"
+                fi
+                for _spec in $_specs; do
                     IFS=: read -r _n _lp _rp <<<"$_spec"
                     printf '[[proxies]]\nname = "%s-%s"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = %s\nremotePort = %s\n' "$SITE" "$_n" "$_lp" "$_rp"
                     case "$_n" in
@@ -556,9 +572,10 @@ rac_ladder(){
                 say "  HamSCI direct attempt failed (${_derr:-login refused — check the token}); see $LOG"
             fi
         else
-            REG=$(python3 - "$SITE" "$(cat "$RAC_HOSTKEY.pub")" "$_cand_reg" "$RAC_CA" <<'PYEOF' 2>>"$LOG"
+            REG=$(python3 - "$SITE" "$(cat "$RAC_HOSTKEY.pub")" "$_cand_reg" "$RAC_CA" "${RAC_MODE:-host}" <<'PYEOF' 2>>"$LOG"
 import json, re, ssl, sys, urllib.error, urllib.request
 site, pub, registrar, cafile = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+station = len(sys.argv) > 5 and sys.argv[5] == "station"
 # The reply carries this station's token.  Over https, accept it only from a
 # registrar that proves itself against the CA the image pins.  Both gateways
 # serve their registrar over plain http today (see the ladder comment above),
@@ -581,7 +598,15 @@ ok = (re.fullmatch(r"[0-9a-f]{16}", str(r.get("user", "")))
       and re.fullmatch(r"[a-z0-9.-]+", str(r.get("server_addr", "")))
       and isinstance(r.get("rac"), int)
       and all(isinstance(r.get("ports", {}).get(k), int)
-              for k in ("vm_ssh", "vm_web", "host_ssh", "host_ui")))
+              for k in (("vm_ssh", "vm_web") if station
+                        else ("vm_ssh", "vm_web", "host_ssh", "host_ui"))))
+if station:
+    # A bare-metal machine has no host channels: take them when the registrar
+    # sends them, else 0.  A present but non-integer value is malformed.
+    for k in ("host_ssh", "host_ui"):
+        v = r.get("ports", {}).get(k, 0)
+        ok = ok and isinstance(v, int)
+        r.setdefault("ports", {})[k] = v if isinstance(v, int) else 0
 if not ok:
     sys.exit("gateway returned a malformed registration")
 print("RACN=%d RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%s SPORT=%d" % (
@@ -609,7 +634,7 @@ rac_write_config(){
     # Turn one registration ($REG, from rac_ladder) into this host's tunnel
     # configuration and its marks.  It leaves RACN, SRV and the four gateway
     # ports set for the caller's summary line.
-    local RAC_TLS_BLOCK _written="" _stale _sname
+    local RAC_TLS_BLOCK _written="" _stale _sname _stn_ok
     RACN=""; P_VMSTN=""; P_VMGMAG=""
     eval "$REG"
     [ -n "$RACN" ] || { RAC_FAIL="the registration carried no RAC number"; return 1; }
@@ -643,10 +668,76 @@ rac_write_config(){
         _toml="$(dirname "$RAC_TOML")/frpc-host-$_gwname.toml"
         [ -n "$_first" ] || _first="$_toml"
         RAC_UNITS="${RAC_UNITS:+$RAC_UNITS }sigmond-rac-host@$_gwname.service"
-        say "writing $_toml (6 channels, gateway $_gwname at $_gwhost:$_gwport)"
+        if [ "${RAC_MODE:-host}" = station ]; then
+            say "writing $_toml (4 channels, gateway $_gwname at $_gwhost:$_gwport)"
+        else
+            say "writing $_toml (6 channels, gateway $_gwname at $_gwhost:$_gwport)"
+        fi
     # Write beside the live file under a closed umask, then rename: the file
     # holds the station's token, and frpc must never read half of it.
-    if ! ( umask 077; cat > "$_toml.new" <<TOMLEOF
+    if [ "${RAC_MODE:-host}" = station ]; then
+        # Bare metal: frpc dials the machine's own services directly.  The
+        # proxy names keep the vm-* suffixes so the gateway dashboard shows
+        # them in the same columns as a Proxmox station.
+        ( umask 077; cat > "$_toml.new" <<STNTOMLEOF
+# Written by sigmond-setup $(date -u +%F) — RAC #$RACN, site $SITE (station mode).
+# ONE frpc on this machine carries four channels, straight to its own services.
+serverAddr = "$_gwhost"
+serverPort = $_gwport
+user = "$RUSER"
+
+[metadatas]
+pubkey = "$(cat "$RAC_HOSTKEY.pub")"
+site = "$SITE"
+dasi = "${DASI_NUM:+DASI-$(printf '%03d' "$DASI_NUM")}"
+
+[auth]
+method = "token"
+token = "$RTOKEN"
+
+$(rac_tls_block "$_gwca" "$_gwsni")
+
+[webServer]
+addr = "127.0.0.1"
+port = $_gwadmin
+
+[[proxies]]
+name = "${SITE}-vm-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = $P_VMSSH
+[proxies.metadatas]
+user = "${RAC_VM_LOGIN:-hamsci}"
+
+[[proxies]]
+name = "${SITE}-vm-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8081
+remotePort = $P_VMWEB
+
+[[proxies]]
+name = "${SITE}-vm-station"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8000
+remotePort = $P_VMSTN
+
+[[proxies]]
+name = "${SITE}-vm-gmag"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8082
+remotePort = $P_VMGMAG
+STNTOMLEOF
+        ) && mv -f "$_toml.new" "$_toml" && _stn_ok=1 || _stn_ok=0
+        if [ "$_stn_ok" != 1 ]; then
+            rm -f "$_toml.new"
+            RAC_FAIL="could not write $_toml"
+            return 1
+        fi
+    elif ! ( umask 077; cat > "$_toml.new" <<TOMLEOF
 # Written by sigmond-setup $(date -u +%F) — RAC #$RACN, site $SITE.
 # ONE frpc on the Proxmox host carries every channel; the vm-* channels
 # ride the local relays (12222-12225), so this file never needs the VM's
@@ -774,7 +865,7 @@ rac_register_locked(){
         RAC_FAIL="sigmond-rac payload missing (frpc/CA); run install-host.sh, then sigmond-setup --reconfigure"
         return 1
     fi
-    if [ ! -f "$RAC_RELAY_UNIT" ]; then
+    if [ "${RAC_MODE:-host}" != station ] && [ ! -f "$RAC_RELAY_UNIT" ]; then
         RAC_FAIL="the VM relays are not installed on this host; run: pm-align --apply (or sigmond-setup --reconfigure)"
         return 1
     fi
