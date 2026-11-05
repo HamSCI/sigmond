@@ -381,14 +381,49 @@ RAC_LOCK=/run/sigmond-rac-register.lock
 RAC_RELAY_UNIT=/etc/systemd/system/sigmond-vm-ssh-relay.socket
 RAC_FAIL=""
 
+# RAC_MODE: "host" is the Proxmox host (the default, and the only behaviour
+# before bare-metal support).  "station" is a bare-metal machine.
+RAC_MODE="${RAC_MODE:-host}"
+
+rac_station_site_default(){
+    # <CALL>-<HOST>, upper case, for a bare-metal station.  CALL comes from
+    # [station] callsign in the site profile.  A hostname that already starts
+    # with <CALL>- stands alone.  No callsign: print nothing.
+    local prof="${SIGMOND_SITE_PROFILE:-/etc/sigmond/site-profile.toml}"
+    local host="${SIGMOND_RAC_HOSTNAME:-$(hostname -s 2>/dev/null)}"
+    local call
+    call=$(awk '
+        /^[[:space:]]*\[/ { sec = ($0 ~ /^[[:space:]]*\[station\][[:space:]]*(#.*)?$/) }
+        sec && /^[[:space:]]*callsign[[:space:]]*=/ {
+            v = $0; sub(/^[^=]*=[[:space:]]*/, "", v)
+            if (match(v, /^"[^"]*"/)) { print substr(v, 2, RLENGTH - 2); exit }
+        }' "$prof" 2>/dev/null)
+    call=$(printf '%s' "$call" | tr '[:lower:]' '[:upper:]')
+    [ -n "$call" ] || return 0
+    host=$(printf '%s' "$host" | tr '[:lower:]' '[:upper:]')
+    case "$host" in
+        "$call"-*) printf '%s' "$host" ;;
+        "")        printf '%s' "$call" ;;
+        *)         printf '%s-%s' "$call" "$host" ;;
+    esac
+}
+
 rac_site_name(){
-    # The name the gateway files this station under: the reporter id in upper
-    # case, with / as _.  A running wizard knows $REPORTER.  A run without it
-    # reads the name the last registration recorded, then the reporter id the
-    # last wizard run left in the configured mark.
-    local r="${REPORTER:-}"
-    [ -n "$r" ] || r=$(cat "$MARK_DIR/rac-site" 2>/dev/null)
-    [ -n "$r" ] || r=$(awk 'NR==1{print $1}' "$CONF_MARK" 2>/dev/null)
+    # The name the gateway files this station under.  The name the last
+    # registration recorded wins, so it stays put.  Host mode then reads
+    # $REPORTER and the reporter id the last wizard run left in the configured
+    # mark.  Station mode reads SIGMOND_RAC_SITE, then <CALL>-<HOST>.
+    local r
+    r=$(cat "$MARK_DIR/rac-site" 2>/dev/null)
+    if [ -z "$r" ]; then
+        if [ "${RAC_MODE:-host}" = station ]; then
+            r="${SIGMOND_RAC_SITE:-}"
+            [ -n "$r" ] || r=$(rac_station_site_default)
+        else
+            r="${REPORTER:-}"
+            [ -n "$r" ] || r=$(awk 'NR==1{print $1}' "$CONF_MARK" 2>/dev/null)
+        fi
+    fi
     printf '%s' "$r" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-'
 }
 
@@ -2003,6 +2038,8 @@ ntp_apply_both_planes() {
 }
 
 # ── RAC on/off switches (no wizard rerun needed) ────────────────────────────
+# Library mode: a caller that sources this file for its functions stops here.
+[ "${SIGMOND_WIZARD_AS_LIB:-0}" = 1 ] && return 0
 case "${1:-}" in
     --rac-register)
         # Registration alone.  No question, no decoder VM, and no start:
