@@ -68,6 +68,22 @@ KEYS_DIR = Path("/etc/hs-uploader/keys")
 SINK_PATH = "/var/lib/sigmond/sink.db"
 # The interpreter hs-uploader.service runs (its unit's ExecStart venv).
 HS_UPLOADER_PYTHON = Path("/opt/hs-uploader/venv/bin/python")
+# hs-uploader's install creates this (tmpfiles); a venv alone can outlive it.
+HS_UPLOADER_STATE_DIR = Path("/var/lib/hs-uploader")
+
+
+def hs_uploader_installed(root: str = "/") -> bool:
+    """True when hs-uploader's venv and its state directory both stand.
+
+    sigma and AC0G-B2, 2026-11-05: a venv left from an earlier install
+    outlived /var/lib/hs-uploader.  Taken alone as proof of an install, it
+    sent apply into the manifest step before hs-uploader had a state
+    directory, and it cancelled the first-install upload hold.
+    """
+    base = Path(root)
+    py = base / str(HS_UPLOADER_PYTHON).lstrip("/")
+    state = base / str(HS_UPLOADER_STATE_DIR).lstrip("/")
+    return (py.exists() or py.is_symlink()) and state.is_dir()
 PUMP_INTERVAL_SEC = 30
 
 # Reporter-keyed clients whose per-instance reporter id is the host's upstream

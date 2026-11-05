@@ -12455,12 +12455,13 @@ def _apply_uploader_manifest() -> bool:
     uploader is optional on some hosts."""
     try:
         from sigmond.commands.uploader import cmd_uploader_manifest
-        from sigmond.uploader_manifest import HS_UPLOADER_PYTHON
+        from sigmond.uploader_manifest import hs_uploader_installed
         # sigma, 2026-11-05: bring-up runs apply in Stage 1, but hs-uploader
         # lands in Stage 4.  The manifest step then failed on a missing
         # /var/lib/hs-uploader and apply exited 1.  Stage 4 runs the
-        # manifest step itself, so skipping here loses nothing.
-        if not Path(HS_UPLOADER_PYTHON).exists():
+        # manifest step itself, so skipping here loses nothing.  A venv left
+        # from an earlier install does not count as hs-uploader installed.
+        if not hs_uploader_installed():
             _info('uploader manifest: hs-uploader not installed yet; '
                   "bring-up's stage 4 sets it up")
             return True

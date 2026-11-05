@@ -141,11 +141,10 @@ def should_hold_uploads(coordination_path=None, root: str = '/') -> bool:
     from .coordination import load_coordination
     from .paths import COORDINATION_PATH
     from .provenance import is_appliance_install
-    from .uploader_manifest import HS_UPLOADER_PYTHON
+    from .uploader_manifest import hs_uploader_installed
     if is_appliance_install(root):
         return False
-    uploader = Path(root) / str(HS_UPLOADER_PYTHON).lstrip('/')
-    if uploader.exists() or uploader.is_symlink():
+    if hs_uploader_installed(root):
         return False
     coord = load_coordination(coordination_path or COORDINATION_PATH)
     return not coord.uploads.declared

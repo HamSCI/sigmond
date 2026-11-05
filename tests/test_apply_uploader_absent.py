@@ -49,8 +49,27 @@ def test_apply_runs_the_uploader_step_once_hs_uploader_exists(
     py = tmp_path / 'python'
     py.write_text('')
     monkeypatch.setattr(um, 'HS_UPLOADER_PYTHON', py)
+    monkeypatch.setattr(um, 'HS_UPLOADER_STATE_DIR', tmp_path)
     called = []
     monkeypatch.setattr(up, 'cmd_uploader_manifest',
                         lambda a: called.append(a) or 0)
     assert smd._apply_uploader_manifest() is True
     assert len(called) == 1
+
+
+def test_a_venv_left_from_an_earlier_install_does_not_count(
+        monkeypatch, tmp_path):
+    # sigma and AC0G-B2, 2026-11-05: /opt/hs-uploader/venv survived from June,
+    # but /var/lib/hs-uploader did not.  apply took the venv as an install,
+    # ran the manifest step, and the carry-over marker had no directory.
+    from sigmond import uploader_manifest as um
+    from sigmond.commands import uploader as up
+    py = tmp_path / 'python'
+    py.write_text('')
+    monkeypatch.setattr(um, 'HS_UPLOADER_PYTHON', py)
+    monkeypatch.setattr(um, 'HS_UPLOADER_STATE_DIR', tmp_path / 'absent')
+    called = []
+    monkeypatch.setattr(up, 'cmd_uploader_manifest',
+                        lambda a: called.append(a) or 1)
+    assert smd._apply_uploader_manifest() is True
+    assert called == []

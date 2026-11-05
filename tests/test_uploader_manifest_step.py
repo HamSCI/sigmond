@@ -782,7 +782,8 @@ class ApplyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             py = Path(td) / "python"
             py.write_text("")
-            with mock.patch.object(um, "HS_UPLOADER_PYTHON", py):
+            with mock.patch.object(um, "HS_UPLOADER_PYTHON", py), \
+                 mock.patch.object(um, "HS_UPLOADER_STATE_DIR", Path(td)):
                 self._reports_failure(smd)
 
     def _reports_failure(self, smd):

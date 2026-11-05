@@ -67,6 +67,17 @@ def test_an_existing_uploads_block_is_respected(tmp_path):
         _coord('[uploads]\nenabled = false\nreason = "x"\n'), root=bare) is False
 
 
+
+def test_a_leftover_venv_does_not_cancel_the_hold(tmp_path):
+    # sigma, 2026-11-05: a June venv under /opt/hs-uploader made the first
+    # install look like a reinstall, and uploads were not held.
+    root = tmp_path / 'root'
+    (root / 'opt/hs-uploader/venv/bin').mkdir(parents=True)
+    (root / 'opt/hs-uploader/venv/bin/python').write_text('')
+    assert should_hold_uploads(_coord(None), root=str(root)) is True
+    (root / 'var/lib/hs-uploader').mkdir(parents=True)
+    assert should_hold_uploads(_coord(None), root=str(root)) is False
+
 def _finish(smd, hold, answer):
     plan = build_plan(_profile(), local_radiod=True, hold_uploads=hold)
     out = io.StringIO()
@@ -160,6 +171,7 @@ def test_a_working_station_with_hs_uploader_and_no_uploads_block_is_not_held(tmp
     py = root / 'opt/hs-uploader/venv/bin/python'
     py.parent.mkdir(parents=True)
     py.write_text('')
+    (root / 'var/lib/hs-uploader').mkdir(parents=True)
     assert should_hold_uploads(_coord('[host]\ncall = "AC0G"\n'), root=str(root)) is False
 
 
