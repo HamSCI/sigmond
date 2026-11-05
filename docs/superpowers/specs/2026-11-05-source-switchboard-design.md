@@ -155,9 +155,42 @@ The board edits that list and nothing else:
 | stop / start | the client's name added to or removed from that receiver's `paused` list; render and every start leave a paused instance down |
 | metadata | that receiver's `antenna` (and later fields, §6) |
 
-The multi-receiver rules carry over unchanged: a receiver has one radiod, and a
-radiod serves at most one receiver.  So the board refuses to patch a second
-reporter ID onto a radiod that already has one, and says why.
+A receiver has one radiod, as in the multi-receiver design.  That design also
+says a radiod serves at most one receiver; this note proposes changing that
+(§4.1).
+
+### 4.1 Several receivers on one radiod
+
+radiod serves whoever asks, and Michael can picture one radiod feeding two
+receivers to compare two decoders or two algorithms.  The multi-receiver design
+gives no reason for its one-receiver rule, and the plumbing does not need it:
+
+- ka9q-python names a channel by a hash of its settings and the radiod, not of
+  who asks.  Two instances that want the same channel share one radiod channel
+  and both read its multicast stream.  Instances that want different settings
+  get separate channels, which is ordinary work for radiod.
+- wspr-recorder, psk-recorder and meteor-scatter never remove a radiod channel
+  when they stop, so one instance stopping cannot cut the other off.
+- Several reporter IDs already write to one spot database on one host (B4 ran
+  three wspr-recorder instances).
+
+Two things do need a rule, and the rule goes there instead:
+
+1. **One timing instance per radiod.**  hf-timestd removes its channels when it
+   stops and publishes one chain-delay correction for the radiod it times.  Two
+   timing instances on one radiod would tear down each other's channels and
+   publish two corrections.  So at most one receiver on a radiod carries timing.
+2. **A shared antenna says so.**  Two reporter IDs on one radiod mean one
+   antenna reporting twice.  wsprnet and the server's merge would count them as
+   two independent receivers.  A receiver that shares its radiod with another
+   names it (`same_antenna_as = "<reporter ID>"`), and render keeps that
+   receiver's spots local (the sink's `local = 1` rows, never uploaded) unless
+   the operator turns its uploads on.
+
+On the board, patching a second reporter ID onto a radiod that already serves
+one asks whether this is a comparison receiver, records `same_antenna_as`, and
+offers to keep its spots local, the default.  Michael agreed to this change on
+2026-11-05; it changes Rob's Phase 3 rule, so it waits on him (§9).
 
 **What this replaces.**  The bare-metal work of 2026-11-05 records a remote
 radiod through `smd admin sources bind`, which writes a `[radiod."<dns>"]`
@@ -305,6 +338,9 @@ spare RX888.
    `merge_into` call alone, whichever station's tar a receiver arrives in?
 5. Retiring the station-side merge (§5.3): when, and in what order for the
    AC0G-B4 fleet?
+6. Several receivers on one radiod (§4.1): does the replacement rule (one
+   timing instance per radiod, a shared antenna declared and kept local by
+   default) cover what the one-receiver rule protected?
 
 ## 10. Calls I made after the builder check
 
