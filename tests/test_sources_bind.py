@@ -323,11 +323,37 @@ def test_bringup_keeps_the_stations_own_radiods(monkeypatch, capsys):
              DiscoveredRadiod(B, 'AC0G @EM38ww B1-b loop', 'ac0g-b1'),
              DiscoveredRadiod('sigma-status.local', 'W1XYZ sigma', 'sigma')]
     calls = _bringup_env(monkeypatch, smd, found)
-    rc = smd.cmd_bringup(_bringup_args())
+    # On a terminal the callsign rule proposes; the operator confirms.
+    monkeypatch.setattr(smd.sys, 'stdin', _Tty())
+    monkeypatch.setattr('builtins.input', lambda prompt='': '')
+    rc = smd.cmd_bringup(_bringup_args(non_interactive=False))
     assert rc == 0
     assert calls[0]['remote_radiods'] == TWO
     out = capsys.readouterr().out
     assert 'sigma-status.local' in out              # listed, not kept
+
+
+def test_an_unattended_bringup_binds_only_the_radiods_it_names(monkeypatch, capsys):
+    # AC0G-B2, 2026-11-05: the callsign rule also kept firebat's airspyhf,
+    # which advertises "AC0G" too.  Michael: an unattended install binds only
+    # the radiods the operator names.
+    from sigmond.sources import DiscoveredRadiod
+    smd = _load_smd()
+    found = [DiscoveredRadiod(A, 'AC0G @EM38ww B1-a longwire', 'ac0g-b1'),
+             DiscoveredRadiod('airspyhf-status.local', 'AC0G @EM38ww with airspyhf',
+                              'firebat')]
+    calls = _bringup_env(monkeypatch, smd, found)
+    monkeypatch.setattr('builtins.input',
+                        lambda prompt='': pytest.fail('asked while unattended'))
+    rc = smd.cmd_bringup(_bringup_args())
+    assert rc == 1
+    assert calls == []                              # nothing planned
+    cap = capsys.readouterr()
+    text = cap.out + cap.err
+    assert 'airspyhf-status.local' in text and A in text   # the list, to choose from
+    assert '--remote-radiod' in text
+    assert smd.cmd_bringup(_bringup_args(remote_radiod=[A])) == 0
+    assert calls[0]['remote_radiods'] == [(A, 'AC0G/B1A')]
 
 
 def test_bringup_on_a_client_profile_needs_a_callsign(monkeypatch, capsys):
@@ -489,14 +515,16 @@ def test_bringup_asks_before_binding_on_a_terminal(monkeypatch, capsys):
 def test_bringup_says_why_each_radiod_was_kept(monkeypatch, capsys):
     smd = _load_smd()
     _bringup_env(monkeypatch, smd, _two_found())
-    monkeypatch.setattr('builtins.input',
-                        lambda prompt='': pytest.fail('asked without a tty'))
-    assert smd.cmd_bringup(_bringup_args()) == 0
+    monkeypatch.setattr(smd.sys, 'stdin', _Tty())
+    monkeypatch.setattr('builtins.input', lambda prompt='': '')
+    assert smd.cmd_bringup(_bringup_args(non_interactive=False)) == 0
     out = capsys.readouterr().out
     line = next(l for l in out.splitlines() if 'bind ' + A in l)
     assert 'ac0g-b1' in line and 'B1-a longwire' in line
     assert 'advertises AC0G' in line
 
+    monkeypatch.setattr('builtins.input',
+                        lambda prompt='': pytest.fail('asked while unattended'))
     assert smd.cmd_bringup(_bringup_args(remote_radiod=[B])) == 0
     out = capsys.readouterr().out
     line = next(l for l in out.splitlines() if 'bind ' + B in l)
@@ -596,7 +624,7 @@ def test_discovery_drops_a_label_with_control_characters(monkeypatch, caplog):
 def test_the_bind_line_prints_the_label_quoted(monkeypatch, capsys):
     smd = _load_smd()
     _bringup_env(monkeypatch, smd, _two_found())
-    assert smd.cmd_bringup(_bringup_args()) == 0
+    assert smd.cmd_bringup(_bringup_args(remote_radiod=[A])) == 0
     out = capsys.readouterr().out
     line = next(l for l in out.splitlines() if 'bind ' + A in l)
     assert repr('AC0G @EM38ww B1-a longwire') in line

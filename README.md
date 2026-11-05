@@ -128,23 +128,29 @@ smd config render
 #### Decode-only host
 
 A decode-only host runs no radiod of its own.  It decodes from radiods on
-other machines on the LAN:
+other machines on the LAN.  Name each radiod it should use; the option may
+repeat:
 
 ```bash
-smd bringup client --callsign AC0G --grid EM38ww
+smd bringup client --callsign AC0G --grid EM38ww \
+    --remote-radiod ac0g-b1-a-status.local --remote-radiod ac0g-b1-b-status.local
 ```
 
-Bring-up browses the LAN for radiods and prints every one it finds.  It
-keeps those whose advertised name starts with your callsign, so a radiod
-that advertises "AC0G @EM38ww B1-a longwire" belongs to AC0G.  The first
-word must equal the callsign.  A radiod that advertises a reporter ID, a
-call with a `/suffix` such as "AC0G/S RX-888 Mk2", runs its own uploads
-under that ID, so bring-up binds it only when you name it with
-`--remote-radiod`.  A neighbour's radiod shows up in the list but stays
-unused.  Bring-up needs
-the callsign to make that choice, and stops without one.  It prints one
-line for each radiod it keeps, with the radiod's host, its advertised name
-and the reason it kept it.  On a terminal it then asks before it binds them.
+Bring-up browses the LAN for radiods and prints every one it finds, with
+its host and advertised name.  An unattended install (`--non-interactive`,
+or no terminal) binds only the radiods you name, and with none named it
+stops after printing the list, so you can choose from it.  A named radiod
+that does not answer stops bring-up before it installs anything.
+
+On a terminal with no radiods named, bring-up proposes the ones whose
+advertised name starts with your callsign, so a radiod that advertises
+"AC0G @EM38ww B1-a longwire" belongs to AC0G.  The first word must equal
+the callsign; a radiod that advertises a reporter ID such as "AC0G/S
+RX-888 Mk2" never gets proposed.  Check the proposal before you accept it:
+every radiod on your LAN that advertises your callsign gets proposed,
+whichever machine it runs on.  Bring-up prints one line for each radiod
+it would keep, with the radiod's host, its advertised name and the reason,
+then asks before it binds them.
 
 Each kept radiod gets one instance of each recorder the profile carries.
 The `client` profile carries two: wspr-recorder (WSPR) and psk-recorder
@@ -152,17 +158,6 @@ The `client` profile carries two: wspr-recorder (WSPR) and psk-recorder
 `ac0g-b1-a-status.local` gives the reporter ID AC0G/B1A.  With a single
 radiod, `--reporter` still sets the name.  With several, `--reporter`
 counts as an error, because one name cannot cover two instances.
-
-To choose the radiods yourself, name each one.  The option may repeat, and
-it overrides the callsign rule:
-
-```bash
-smd bringup client --callsign AC0G --grid EM38ww \
-    --remote-radiod ac0g-b1-a-status.local --remote-radiod ac0g-b1-b-status.local
-```
-
-A named radiod that does not answer stops bring-up before it installs
-anything.
 
 hf-timestd takes its timing from one radiod.  With one kept radiod it uses
 that one.  With several, name it with `--timing-radiod <status name>`.

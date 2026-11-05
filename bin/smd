@@ -10305,6 +10305,18 @@ def cmd_bringup(args) -> int:
         from sigmond.sources import (SourceSelectionError, discover_radiods,
                                      reporter_id_for, select_radiods)
         found = discover_radiods()
+        # An unattended install binds only the radiods the operator names
+        # (Michael, 2026-11-05).  The callsign rule kept firebat's airspyhf
+        # on AC0G-B2 beside the two B1 radiods, since all three advertise
+        # "AC0G".  On a terminal the rule still proposes, and the operator
+        # confirms below.
+        if not remote_named and not interactive:
+            _bringup_print_radiods(found, [], callsign)
+            _err('bringup: an unattended install binds only the radiods you '
+                 'name — add --remote-radiod <status name> for each one to '
+                 'use (the list above; `smd admin sources list` shows it '
+                 'again).  Nothing installed.')
+            return 1
         try:
             kept = select_radiods(found, callsign, remote_named)
         except SourceSelectionError as exc:

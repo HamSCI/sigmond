@@ -140,13 +140,15 @@ source the operator keeps, bring-up:
 3. writes the source into the instance and renders it into the client's config before the client
    first starts.
 
-Which radiods bring-up keeps when nobody names them (Michael, 2026-11-05): those whose
-advertisement carries this station's callsign.  B1's radiods advertise "AC0G @EM38ww B1-a
-longwire", so B2 keeps both, while sigma's and B4's radiods, or a friend's on a ham's LAN, appear
-in the list but stay unused.  sigmond never adopts, or uploads under, someone else's receiver by
-accident.  `--remote-radiod <name>` names radiods outright, may repeat, and overrides the callsign
-rule.  A name given that does not answer is an error before anything installs, not a client that
-fails later.
+Which radiods bring-up keeps: those the operator names with `--remote-radiod <name>`, which may
+repeat.  A name given that does not answer is an error before anything installs, not a client
+that fails later.  An unattended install with no names refuses, after printing the list to choose
+from (Michael, 2026-11-05, revising his earlier rule).  On a terminal with no names, bring-up
+proposes the radiods whose advertisement starts with exactly this station's callsign and asks
+before it binds them.  The callsign rule alone proved too broad: on B2 it kept firebat's airspyhf
+beside the two B1 radiods, since all three advertise "AC0G".  A friend's radiod on a ham's LAN
+appears in the list and stays unused unless named.  The switchboard design (2026-11-05) replaces
+the terminal proposal with a board the operator edits.
 
 Each kept radiod's instances take a reporter ID derived from the radiod (Michael, 2026-11-05):
 the callsign plus the radiod's short name from its status name, so `ac0g-b1-a-status.local`
