@@ -138,10 +138,13 @@ Bring-up browses the LAN for radiods and prints every one it finds.  It
 keeps those whose advertised name starts with your callsign, so a radiod
 that advertises "AC0G @EM38ww B1-a longwire" belongs to AC0G.  A
 neighbour's radiod shows up in the list but stays unused.  Bring-up needs
-the callsign to make that choice, and stops without one.
+the callsign to make that choice, and stops without one.  It prints one
+line for each radiod it keeps, with the radiod's host, its advertised name
+and the reason it kept it.  On a terminal it then asks before it binds them.
 
-Each kept radiod gets one instance of each recorder (WSPR, FT4/FT8, meteor
-scatter).  Bring-up names the instances after the radiod:
+Each kept radiod gets one instance of each recorder the profile carries.
+The `client` profile carries two: wspr-recorder (WSPR) and psk-recorder
+(FT4/FT8).  Bring-up names the instances after the radiod:
 `ac0g-b1-a-status.local` gives the reporter ID AC0G/B1A.  With a single
 radiod, `--reporter` still sets the name.  With several, `--reporter`
 counts as an error, because one name cannot cover two instances.
@@ -179,7 +182,8 @@ again under the new reporter ID, start the new instance, then retire the
 old one:
 
 ```bash
-smd admin sources bind ac0g-b1-a-status.local --reporter AC0G/LOOP
+smd admin sources bind ac0g-b1-a-status.local --reporter AC0G/LOOP \
+    --clients psk-recorder
 smd admin instance enable psk-recorder AC0G/LOOP
 smd admin instance disable psk-recorder AC0G/B1A
 smd admin instance remove psk-recorder AC0G/B1A

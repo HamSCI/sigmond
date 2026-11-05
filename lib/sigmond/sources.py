@@ -362,8 +362,31 @@ class DiscoveredRadiod:
     host: str         # TXT source_host, else the mDNS hostname
 
 
+_MDNS_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_MDNS_HOSTNAME = re.compile(rf"{_MDNS_LABEL}(?:\.{_MDNS_LABEL})*")
+
+
+def valid_mdns_hostname(name) -> bool:
+    """A DNS host name: dot-separated labels of letters, digits and inner
+    hyphens, each at most 63 characters, at most 253 in all.
+
+    Every radiod name and host that sigmond writes into coordination.toml
+    passes this first.  A LAN device chooses what it advertises, and a `"`,
+    `\\` or newline there would otherwise reach coordination.toml and,
+    through render_env, the EnvironmentFile of root services."""
+    return (isinstance(name, str) and 0 < len(name) <= 253
+            and _MDNS_HOSTNAME.fullmatch(name) is not None)
+
+
+_REFUSED_ADVERTS: set = set()
+
+
 def discover_radiods(timeout: float = 5.0) -> list[DiscoveredRadiod]:
-    """Browse mDNS through the same path `smd admin sources` uses."""
+    """Browse mDNS through the same path `smd admin sources` uses.
+
+    Drops, with one warning per value, any radiod whose status name or host
+    is not a valid host name (see valid_mdns_hostname)."""
+    import logging
     from sigmond.environment import Environment
     from sigmond.discovery import mdns
     rows = inventory(mdns.probe(Environment(), timeout=timeout))
@@ -372,9 +395,18 @@ def discover_radiods(timeout: float = 5.0) -> list[DiscoveredRadiod]:
         if r.key.type != "radiod":
             continue
         host = ((r.fields or {}).get("source_host") or "").strip()
-        out.append(DiscoveredRadiod(
-            status_dns=r.key.identifier, label=r.label,
-            host=host or r.key.identifier))
+        dns = r.key.identifier
+        bad = [v for v in (dns, host or dns) if not valid_mdns_hostname(v)]
+        if bad:
+            for v in bad:
+                if v not in _REFUSED_ADVERTS:
+                    _REFUSED_ADVERTS.add(v)
+                    logging.getLogger(__name__).warning(
+                        "ignoring radiod advertisement: %r is not a valid "
+                        "host name", v)
+            continue
+        out.append(DiscoveredRadiod(status_dns=dns, label=r.label,
+                                    host=host or dns))
     return out
 
 

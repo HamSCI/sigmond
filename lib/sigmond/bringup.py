@@ -447,6 +447,16 @@ def build_plan(profile, *, local_radiod: bool,
         steps.append(Step(STAGE3A, 'render each instance\'s radiod into its '
                                    'config', 'tune',
                           argv=[smd, 'admin', 'sources', 'apply']))
+        # ⛔ HARD, because the step above is not.  With several radiods
+        # answering, the clients' config init writes a fabricated
+        # rx888-status.local / my-rx888-status.local, and the "configured"
+        # checkpoint passes against it (task 7 review, 2026-11-05).  If
+        # `sources apply` failed, every instance would start on that name.
+        pairs = [f'{c}@{r}' for c in profile.clients
+                 if c in _REPORTER_KEYED and c not in skip for r in reporters]
+        if pairs:
+            checkpoint(STAGE3A, 'every instance names its own radiod',
+                       check='instances-bound:' + ','.join(pairs), hard=True)
 
     # Provision the shared hs-uploader watermark dir.  Recorder units list
     # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it

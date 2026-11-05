@@ -366,3 +366,196 @@ def test_a_local_radiod_plan_is_unchanged(monkeypatch):
     rc = smd.cmd_bringup(_bringup_args(profile='dasi2', reporter='AC0G/S'))
     assert rc == 0
     assert calls[0]['remote_radiods'] == []
+
+
+# --- fix round 1: mDNS data is untrusted --------------------------------------
+# A LAN device chooses its own advertised host and status name.  Unescaped,
+# a `"` or a newline in either would write TOML keys into coordination.toml
+# and, through render_env, variables into the EnvironmentFile of root
+# services.
+
+EVIL_HOST = 'evil"\nX=1'
+EVIL_DNS = 'ac0g-b1-a\n-status.local'
+
+
+def test_mdns_hostname_validator():
+    from sigmond.sources import valid_mdns_hostname
+    assert valid_mdns_hostname(A)
+    assert valid_mdns_hostname('ac0g-b1')
+    for bad in (EVIL_HOST, EVIL_DNS, '', '-x.local', 'a..b', 'a b',
+                'a"b', 'a\\b', 'x' * 64 + '.local', ('a.' * 127) + 'ab'):
+        assert not valid_mdns_hostname(bad), repr(bad)
+
+
+def test_discovery_drops_a_radiod_with_a_crafted_name(monkeypatch, caplog):
+    import sigmond.sources as sources
+    import sigmond.discovery.mdns as mdns
+    from sigmond.sources import InventoryRow, SourceKey
+
+    def row(ident, host):
+        # SourceKey refuses whitespace and quotes, so build the crafted
+        # identifier the way a parser that trusted the wire might.
+        key = object.__new__(SourceKey)
+        object.__setattr__(key, 'type', 'radiod')
+        object.__setattr__(key, 'identifier', ident)
+        return InventoryRow(key=key, label='AC0G x', reachability='ok',
+                            observed_at=None, fields={'source_host': host})
+    rows = [row(A, 'ac0g-b1'), row(B, EVIL_HOST), row(EVIL_DNS, 'ac0g-b1')]
+    monkeypatch.setattr(mdns, 'probe', lambda env, timeout=5.0: [])
+    monkeypatch.setattr(sources, 'inventory', lambda obs: rows)
+    with caplog.at_level('WARNING'):
+        found = sources.discover_radiods()
+    assert [r.status_dns for r in found] == [A]
+    assert repr(EVIL_HOST) in caplog.text
+    assert repr(EVIL_DNS) in caplog.text
+
+
+def test_coordination_writers_refuse_crafted_values(tmp_path):
+    coord = tmp_path / 'coordination.toml'
+    with pytest.raises(ValueError):
+        ensure_radiod_block(coord, A, EVIL_HOST)
+    with pytest.raises(ValueError):
+        ensure_radiod_block(coord, EVIL_DNS, 'ac0g-b1')
+    with pytest.raises(ValueError):
+        ensure_client_binding(coord, 'psk-recorder', 'AC0G=B1A', EVIL_DNS)
+    with pytest.raises(ValueError):
+        ensure_client_binding(coord, 'psk-recorder', 'AC0G"=B1A', A)
+    assert not coord.exists()
+    assert ensure_radiod_block(coord, A, 'ac0g-b1') is True
+
+
+def test_bind_refuses_crafted_values(tmp_path, capsys):
+    smd = _load_smd()
+    etc = tmp_path / 'etc'
+    coord = etc / 'sigmond' / 'coordination.toml'
+    for dns, host in ((A, EVIL_HOST), (EVIL_DNS, 'ac0g-b1')):
+        rc = smd._sources_bind(dns, 'AC0G/B1A', ['psk-recorder'], host=host,
+                               etc_root=etc, coord_path=coord,
+                               inventory_rows=[])
+        assert rc == 1
+    assert not coord.exists()
+    assert not (etc / 'sigmond' / 'coordination.env').exists()
+    cap = capsys.readouterr()
+    assert 'not a valid' in cap.out + cap.err
+
+
+def test_render_env_skips_a_value_with_a_control_character(capsys):
+    from sigmond.coordination import Coordination, Radiod, render_env
+    c = Coordination()
+    c.radiods = {A: Radiod(id=A, host='ac0g-b1', status_dns=A),
+                 'evil': Radiod(id='evil', host=EVIL_HOST, status_dns=B)}
+    env = render_env(c, passthrough_lookup=lambda t: [])
+    assert 'X=1' not in env.splitlines()
+    assert all('\r' not in ln for ln in env.splitlines())
+    assert f'RADIOD_{A.upper().replace("-", "_").replace(".", "_")}_STATUS={A}' in env
+    assert 'RADIOD_EVIL_STATUS=' + B in env           # the rest of it stays
+    assert 'RADIOD_EVIL_HOST' in capsys.readouterr().err
+
+
+# --- fix round 1: say what will be bound, and ask on a terminal ---------------
+
+class _Tty:
+    def isatty(self):
+        return True
+
+
+def _two_found():
+    from sigmond.sources import DiscoveredRadiod
+    return [DiscoveredRadiod(A, 'AC0G @EM38ww B1-a longwire', 'ac0g-b1'),
+            DiscoveredRadiod(B, 'AC0G @EM38ww B1-b loop', 'ac0g-b1')]
+
+
+def test_bringup_asks_before_binding_on_a_terminal(monkeypatch, capsys):
+    smd = _load_smd()
+    calls = _bringup_env(monkeypatch, smd, _two_found())
+    monkeypatch.setattr(smd.sys, 'stdin', _Tty())
+    asked = []
+
+    def answer(prompt=''):
+        asked.append(prompt)
+        return 'n'
+    monkeypatch.setattr('builtins.input', answer)
+    rc = smd.cmd_bringup(_bringup_args(non_interactive=False))
+    assert rc == 1
+    assert calls == []                              # nothing planned
+    assert any('Bind these radiods? [Y/n]' in p for p in asked)
+
+    monkeypatch.setattr('builtins.input', lambda prompt='': '')
+    rc = smd.cmd_bringup(_bringup_args(non_interactive=False))
+    assert rc == 0
+    assert calls[0]['remote_radiods'] == TWO
+
+
+def test_bringup_says_why_each_radiod_was_kept(monkeypatch, capsys):
+    smd = _load_smd()
+    _bringup_env(monkeypatch, smd, _two_found())
+    monkeypatch.setattr('builtins.input',
+                        lambda prompt='': pytest.fail('asked without a tty'))
+    assert smd.cmd_bringup(_bringup_args()) == 0
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if 'bind ' + A in l)
+    assert 'ac0g-b1' in line and 'B1-a longwire' in line
+    assert 'advertises AC0G' in line
+
+    assert smd.cmd_bringup(_bringup_args(remote_radiod=[B])) == 0
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if 'bind ' + B in l)
+    assert 'named with --remote-radiod' in line
+
+
+# --- fix round 1: a hard checkpoint that each instance names its radiod ------
+
+def test_client_plan_checks_every_instance_names_its_radiod():
+    p = build_plan(_client(), local_radiod=False, remote_radiods=TWO)
+    apply_i = next(i for i, s in enumerate(p.steps)
+                   if s.argv[1:4] == ['admin', 'sources', 'apply'])
+    chk = p.steps[apply_i + 1]
+    assert chk.kind == 'checkpoint' and chk.hard
+    name, _, pairs = chk.check.partition(':')
+    assert name == 'instances-bound'
+    assert sorted(pairs.split(',')) == sorted(
+        f'{c}@{r}' for c in ('wspr-recorder', 'psk-recorder')
+        for r in ('AC0G/B1A', 'AC0G/B1B'))
+
+
+def _bound_etc(tmp_path, psk_status, wspr_sources):
+    etc = tmp_path / 'etc'
+    clients = etc / 'sigmond' / 'clients'
+    clients.mkdir(parents=True)
+    (etc / 'psk-recorder').mkdir()
+    (etc / 'wspr-recorder').mkdir()
+    for c in ('psk-recorder', 'wspr-recorder'):
+        (clients / f'{c}@AC0G=B1B.sources.toml').write_text(
+            f'selected = ["radiod:{B}"]\n')
+    (etc / 'psk-recorder' / 'AC0G=B1B.toml').write_text(
+        f'[[radiod]]\nstatus = "{psk_status}"\n')
+    body = '[radiod]\nstatus = "my-rx888-status.local"\n'
+    for st in wspr_sources:
+        body += f'\n[[source]]\nkey = "radiod:{st}"\nstatus = "{st}"\n'
+    (etc / 'wspr-recorder' / 'AC0G=B1B.toml').write_text(body)
+    return etc
+
+
+def test_instances_bound_probe_passes_and_fails(tmp_path, monkeypatch):
+    smd = _load_smd()
+    pairs = 'psk-recorder@AC0G/B1B,wspr-recorder@AC0G/B1B'
+    etc = _bound_etc(tmp_path, B, [B])
+    ok, detail = smd._instances_bound(pairs, etc_root=etc)
+    assert ok, detail
+
+    # The fabricated name the clients' config init writes when several
+    # radiods answer, left in place because `sources apply` never ran.
+    etc = _bound_etc(tmp_path / 'f1', 'rx888-status.local', [B])
+    ok, detail = smd._instances_bound(pairs, etc_root=etc)
+    assert not ok and 'psk-recorder@AC0G/B1B' in detail
+    etc = _bound_etc(tmp_path / 'f2', B, [])
+    ok, detail = smd._instances_bound(pairs, etc_root=etc)
+    assert not ok and 'wspr-recorder@AC0G/B1B' in detail
+    etc = _bound_etc(tmp_path / 'f3', B, [B, A])
+    assert not smd._instances_bound(pairs, etc_root=etc)[0]
+
+    # _bringup_probe keeps its 3-tuple contract for the new check.
+    monkeypatch.setattr(smd, '_instances_bound',
+                        lambda p, etc_root=None: (False, 'x'))
+    assert smd._bringup_probe('instances-bound:' + pairs, 'smd') == (
+        False, 'x', False)

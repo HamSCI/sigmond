@@ -5473,6 +5473,8 @@ _PRELOAD_MODULES = {
               'sigmond.provenance', 'sigmond.catalog', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
               'sigmond.coordination', 'sigmond.installer_args',
+              # coordination's binding writers validate names with it
+              'sigmond.sources',
               # reached through _align_fast_checks and the bring-up
               # helpers align calls after the move
               'sigmond.heartbeat', 'sigmond.doctor', 'sigmond.lifecycle',
@@ -9828,6 +9830,59 @@ def _read_text_safe(p) -> str:
         return ''
 
 
+def _instances_bound(pairs: str, etc_root=None) -> tuple:
+    """Does each instance's config name exactly the radiod its selection
+    names?  ``pairs`` is "client@reporter,client@reporter".  wspr-recorder
+    must carry one ``[[source]]`` with that status; every other client the
+    status of its ``[radiod]``/``[[radiod]]`` table.  Returns (ok, detail).
+
+    Guards the B2 case (2026-11-05): with several radiods answering, config
+    init leaves a fabricated rx888-status.local that only `sources apply`
+    replaces."""
+    import tomllib
+    from sigmond import instance as _inst
+    from sigmond.sources import ClientSources
+    etc = Path('/etc') if etc_root is None else Path(etc_root)
+    clients_root = etc / 'sigmond' / 'clients'
+    wrong = []
+    n = 0
+    for pair in [p for p in pairs.split(',') if p]:
+        client, _, shown = pair.partition('@')
+        n += 1
+        try:
+            rid = _inst.parse_user_reporter_id(shown)
+            sel = ClientSources.load(f'{client}@{rid}', root=clients_root).selected
+        except (OSError, ValueError) as exc:
+            wrong.append(f'{pair} (selection unreadable: {exc})')
+            continue
+        want = [k.identifier for k in sel if k.type == 'radiod']
+        if len(want) != 1:
+            wrong.append(f'{pair} (selects {len(want)} radiods)')
+            continue
+        cfg = etc / client / f'{rid}.toml'
+        try:
+            data = tomllib.loads(cfg.read_text())
+        except (OSError, ValueError) as exc:
+            wrong.append(f'{pair} ({cfg} unreadable: {exc})')
+            continue
+        if client == 'wspr-recorder':
+            have = [b.get('status', '') for b in data.get('source') or []
+                    if isinstance(b, dict)]
+        else:
+            blocks = data.get('radiod')
+            blocks = [blocks] if isinstance(blocks, dict) else (blocks or [])
+            have = [(b.get('status') or b.get('radiod_status') or '')
+                    for b in blocks if isinstance(b, dict)]
+            have = [h for h in have if h]
+        if have != want:
+            wrong.append(f'{pair} (config names {have or "no radiod"}, '
+                         f'selection {want[0]})')
+    if wrong:
+        return False, ('instance config not on its radiod: ' + '; '.join(wrong)
+                       + ' -- run `smd admin sources apply`')
+    return True, f'{n} instance(s) each name their own radiod'
+
+
 def _bringup_probe(check: str, smd_bin: str):
     """Run a lightweight checkpoint probe.  Returns (ok, detail, reconfigure).
 
@@ -9843,6 +9898,9 @@ def _bringup_probe(check: str, smd_bin: str):
             return (False, f"{', '.join(missing)} MISSING -- the ka9q-radio "
                            f"install failed; its error is above", False)
         return (True, '/usr/local/sbin/radiod + rx888.so present', False)
+    if check.startswith('instances-bound:'):
+        ok, detail = _instances_bound(check.split(':', 1)[1])
+        return (ok, detail, False)
     if check == 'radiod-configured':
         d = Path('/etc/radio')
         confs = list(d.glob('radiod@*.conf')) if d.is_dir() else []
@@ -10265,8 +10323,22 @@ def cmd_bringup(args) -> int:
         except SourceSelectionError as exc:
             _err(f'bringup: {exc} — nothing installed')
             return 1
-        for dns, rid in remote_pairs:
-            _info(f'  instances for {dns}: {rid}')
+        # Say what will be bound and why, one line per radiod, so a
+        # non-interactive log shows which receivers this station adopted
+        # (security review, 2026-11-05).  On a terminal, ask first.
+        why = ('named with --remote-radiod' if remote_named
+               else f'advertises {callsign.upper()}')
+        for r, (dns, rid) in zip(kept, remote_pairs):
+            _info(f'  bind {dns}  host {r.host}  "{r.label}"  as {rid}  ({why})')
+        if interactive:
+            try:
+                ans = input('Bind these radiods? [Y/n] ').strip().lower()
+            except EOFError:
+                ans = ''
+            if ans.startswith('n'):
+                _err('bringup: stopped at the operator\'s answer — nothing '
+                     'installed.  Name the radiods to keep with --remote-radiod.')
+                return 1
         # Each pair carries its own reporter ID; none is asked for.
         needs_reporter = False
         if len(remote_pairs) == 1:
@@ -19261,6 +19333,14 @@ def _sources_bind(status_dns: str, reporter: str, clients, *,
     coord_path = Path(coord_path)
     clients_root = (Path('/etc/sigmond/clients') if etc_root == Path('/etc')
                     else etc_root / 'sigmond' / 'clients')
+    # Both names may come from mDNS, which any LAN device writes.  Refuse a
+    # value that is not a host name before it can reach coordination.toml or
+    # coordination.env (security review, 2026-11-05).
+    from sigmond.sources import valid_mdns_hostname
+    if not valid_mdns_hostname(status_dns):
+        _err(f'sources bind: radiod status name {status_dns!r} is not a '
+             f'valid host name')
+        return 1
     try:
         rid = _inst.parse_user_reporter_id(reporter)
         key = SourceKey('radiod', status_dns)
@@ -19272,6 +19352,9 @@ def _sources_bind(status_dns: str, reporter: str, clients, *,
         row = next((r for r in rows if str(r.key) == str(key)), None)
         host = (((row.fields or {}).get('source_host') or '').strip()
                 if row is not None else '')
+    if host and not valid_mdns_hostname(host):
+        _err(f'sources bind: radiod host {host!r} is not a valid host name')
+        return 1
 
     if ensure_radiod_block(coord_path, status_dns, host):
         _ok(f'recorded radiod {status_dns} (host {host or status_dns}) '

@@ -14,6 +14,7 @@ via systemd `EnvironmentFile=-`.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -533,6 +534,26 @@ _CLIENTS_HEADER = re.compile(
     r'^\s*\[\[\s*clients\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*\]\]\s*(?:#.*)?$')
 
 
+def _toml_str(value: str) -> str:
+    """``value`` as a TOML basic string.  Refuses control characters, which
+    no name sigmond writes may carry, and escapes ``\\`` and ``"`` even
+    after the callers' validation (defence in depth)."""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value):
+        raise ValueError(f'refusing to write {value!r}: control character')
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _require_hostname(what: str, value: str) -> None:
+    from .sources import valid_mdns_hostname
+    if not valid_mdns_hostname(value):
+        raise ValueError(f'{what} {value!r} is not a valid host name')
+
+
+_BARE_NAME = re.compile(r'[A-Za-z0-9_-]+')
+_RADIOD_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,252}')
+_INSTANCE_NAME = re.compile(r'[A-Za-z0-9=-]*')
+
+
 def _kv_line(key: str) -> 're.Pattern':
     return re.compile(rf'^\s*{key}\s*=\s*(["\'])(.*?)\1')
 
@@ -590,12 +611,17 @@ def ensure_radiod_block(path: Path, status_dns: str, host: str) -> bool:
     machine the radiod runs on; a blank one takes the status name, never
     "localhost", which would mark a remote radiod local."""
     path = Path(path)
+    # The status name and host come from mDNS: whatever a LAN device
+    # advertises.  Refuse anything that is not a host name before it can
+    # reach this file or, through render_env, coordination.env.
+    _require_hostname('radiod status name', status_dns)
+    _require_hostname('radiod host', host or status_dns)
     if radiod_id_for_status(load_coordination(path), status_dns):
         return False
     existing = path.read_text() if path.exists() else ''
-    block = (f'[radiod."{status_dns}"]\n'
-             f'host       = "{host or status_dns}"\n'
-             f'status_dns = "{status_dns}"\n')
+    block = (f'[radiod.{_toml_str(status_dns)}]\n'
+             f'host       = {_toml_str(host or status_dns)}\n'
+             f'status_dns = {_toml_str(status_dns)}\n')
     if existing and not existing.endswith('\n'):
         existing += '\n'
     text = existing + ('\n' if existing.strip() else '') + block
@@ -614,6 +640,16 @@ def ensure_client_binding(path: Path, client: str, instance: str,
     entry that already names this radiod leaves the file alone; one that
     names another radiod moves.  Returns True when it wrote."""
     path = Path(path)
+    # A radiod id is a status name (bind) or the instance id `configure
+    # radiod` chose, which may carry an underscore.  Either way: no quote,
+    # backslash, space or control character.
+    if not _RADIOD_ID.fullmatch(radiod_id or ''):
+        raise ValueError(f'radiod id {radiod_id!r} is not a valid name')
+    if not _BARE_NAME.fullmatch(client or ''):
+        raise ValueError(f'client name {client!r} is not a bare name')
+    if not _INSTANCE_NAME.fullmatch(instance):
+        raise ValueError(f'instance {instance!r} is not a reporter ID '
+                         f'in storage form')
     existing = path.read_text() if path.exists() else ''
     lines = existing.splitlines(keepends=True)
     inst_re, rad_re = _kv_line('instance'), _kv_line('radiod_id')
@@ -632,7 +668,7 @@ def ensure_client_binding(path: Path, client: str, instance: str,
                 rad_at = j
         if inst != instance:
             continue
-        new_line = f'radiod_id = "{radiod_id}"\n'
+        new_line = f'radiod_id = {_toml_str(radiod_id)}\n'
         if rad_at is not None:
             if rad_re.match(lines[rad_at]).group(2) == radiod_id:
                 return False
@@ -642,10 +678,9 @@ def ensure_client_binding(path: Path, client: str, instance: str,
         _write_coordination(path, ''.join(lines))
         return True
 
-    key = client if re.fullmatch(r'[A-Za-z0-9_-]+', client) else f'"{client}"'
-    block = (f'[[clients.{key}]]\n'
-             f'instance  = "{instance}"\n'
-             f'radiod_id = "{radiod_id}"\n')
+    block = (f'[[clients.{client}]]\n'
+             f'instance  = {_toml_str(instance)}\n'
+             f'radiod_id = {_toml_str(radiod_id)}\n')
     if existing and not existing.endswith('\n'):
         existing += '\n'
     text = existing + ('\n' if existing.strip() else '') + block
@@ -822,4 +857,17 @@ def render_env(coord: Coordination,
             prefix = _env_key('KA9Q_WEB', c.instance)
             lines.append(f'{prefix}_PORT={c.extras["port"]}')
 
-    return '\n'.join(lines).rstrip() + '\n'
+    # coordination.env feeds the EnvironmentFile of root services, and some
+    # values in it began as mDNS data a LAN device chose.  A newline there
+    # would start a variable of the sender's choosing.  Skip any line with a
+    # control character and warn, rather than raise: a dozen callers write
+    # this file, and none of them expects render_env to fail.
+    safe = []
+    for ln in lines:
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in ln):
+            key = ln.split('=', 1)[0]
+            print(f'sigmond: coordination.env: skipping {key}: its value '
+                  f'holds a control character ({ln!r})', file=sys.stderr)
+            continue
+        safe.append(ln)
+    return '\n'.join(safe).rstrip() + '\n'
