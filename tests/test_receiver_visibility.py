@@ -92,8 +92,32 @@ def _line(states, recs=TWO):
 class ReceiversLineTests(unittest.TestCase):
 
     def test_receivers_line_absent_list_is_skipped(self):
-        line = _line({}, recs=[])
-        self.assertEqual(line.mark, check.ABSENT)
+        self.assertIsNone(_line({}, recs=[]))
+        with mock.patch("sigmond.receivers.load_receivers", return_value=[]):
+            lines = check.run_checks(make_env(), [("receivers", check.receivers_line)])
+        self.assertEqual(lines, [])
+        self.assertEqual([check.json_line(l) for l in lines], [])
+
+    def test_default_clients_count_only_installed(self):
+        rec = [_recv("AC0G/B1A", "ac0g-b1-a-status.local")]
+        up = {_unit(c, "AC0G/B1A"): "active" for c in CLIENTS}
+        with mock.patch("sigmond.receivers.load_receivers", return_value=rec):
+            env = _env_for(up)
+            env.installed = lambda c: c != "meteor-scatter"
+            line = check.receivers_line(env)
+            self.assertEqual(line.mark, check.OK)
+            self.assertIn("2/2 active", line.text)
+            env.installed = lambda c: False
+            self.assertEqual(check.receivers_line(env).mark, check.ABSENT)
+
+    def test_explicit_client_not_running_is_down(self):
+        rec = [_recv("AC0G/B1A", "ac0g-b1-a-status.local", clients=("meteor-scatter",))]
+        with mock.patch("sigmond.receivers.load_receivers", return_value=rec):
+            env = _env_for({})
+            env.installed = lambda c: False
+            line = check.receivers_line(env)
+        self.assertEqual(line.mark, check.FAIL)
+        self.assertIn("0/1 active (meteor-scatter down)", line.text)
 
     def test_receivers_line_marks(self):
         up = {u: "active" for u in _all_units()}

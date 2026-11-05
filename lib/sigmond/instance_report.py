@@ -28,7 +28,7 @@ def _unit_word(verb: str, unit: str, run: Callable) -> str:
     return lines[0].strip() if lines else UNKNOWN
 
 
-def _radiod(i) -> str:
+def radiod_of(i) -> str:
     """The radiod status name in the instance's sources file, else "".
     A missing or unreadable file reads as no binding."""
     from sigmond import sources
@@ -58,7 +58,7 @@ def instance_rows(instances: list, run: Optional[Callable] = None) -> list:
             "client": i.client,
             "reporter_id": i.reporter_id,
             "display_id": _instance.display_reporter_id(i.reporter_id),
-            "radiod": _radiod(i),
+            "radiod": radiod_of(i),
             "unit": unit,
             "has_config": i.has_config,
             "has_env": i.has_env,

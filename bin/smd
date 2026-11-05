@@ -25455,7 +25455,7 @@ def cmd_instance_list(args) -> int:
         e = '✓' if i.has_env else '-'
         s = '✓' if i.has_sources else '-'
         print(f'  {i.client:<22} {inst.display_reporter_id(i.reporter_id):<18} '
-              f'{instance_report._radiod(i) or "-":<28} {c:>7} {e:>5} {s:>8}')
+              f'{instance_report.radiod_of(i) or "-":<28} {c:>7} {e:>5} {s:>8}')
     return 0
 
 

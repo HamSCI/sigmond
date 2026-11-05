@@ -1101,10 +1101,11 @@ def _status_name(host: str) -> str:
     return host
 
 
-def receivers_line(env: Env) -> Line:
+def receivers_line(env: Env) -> Optional[Line]:
     """One line for the [[receiver]] list: per receiver, how many of its
     instances run.  FAIL when a receiver has none running, WAIT when some are
-    down.  An instance with no unit counts as down."""
+    down.  An instance with no unit counts as down.  A default client set
+    counts only the clients installed here; no list means no line."""
     from .. import instance, receivers
     from ..bringup import _REPORTER_KEYED
     label = 'receivers'
@@ -1113,10 +1114,14 @@ def receivers_line(env: Env) -> Line:
     except receivers.ReceiverError as exc:
         return Line(FAIL, label, f'the [[receiver]] list does not load: {exc}')
     if not recs:
-        return Line(ABSENT, label, 'no [[receiver]] list declared')
+        return None         # no list: the host looks as it did before
     parts, worst = [], OK
     for r in recs:
         clients = receivers.effective_clients(r, _REPORTER_KEYED)
+        if not r.clients:   # the default set: only what this host installs
+            clients = tuple(c for c in clients if env.installed(c))
+        if not clients:
+            continue
         rid = instance.parse_user_reporter_id(r.reporter_id)
         down = [c for c in clients
                 if env.service(instance.unit_name(c, rid)).state != 'active']
@@ -1130,6 +1135,8 @@ def receivers_line(env: Env) -> Line:
             worst = FAIL
         elif down and worst != FAIL:
             worst = WAIT
+    if not parts:
+        return Line(ABSENT, label, 'no recorder installed for the listed receivers')
     return Line(worst, label, '; '.join(parts))
 
 

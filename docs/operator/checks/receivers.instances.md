@@ -11,7 +11,8 @@ Check id: `receivers.instances`
 
 A station can list several receivers in `/etc/sigmond/site-profile.toml`.
 Each `[[receiver]]` block names a reporter ID and the radiod it listens to.
-Each receiver runs one instance of each recorder. The check counts, per
+Each receiver runs one instance of each recorder it names, or of each
+reporter-keyed recorder installed here when it names none. The check counts, per
 receiver, how many of those instances run.
 
 ## What healthy looks like
@@ -22,8 +23,11 @@ ok    receivers  AC0G/B1A <- ac0g-b1-a: 2/2 active; AC0G/B1B <- ac0g-b1-b: 2/2 a
 
 ## What each message means
 
-**`--` no [[receiver]] list declared**
-This station lists no receivers. Nothing to do.
+**No line at all**
+This station lists no receivers, so the line does not appear.
+
+**`--` no recorder installed for the listed receivers**
+None of the recorders a receiver would run is installed. Nothing to do.
 
 **WAIT: `AC0G/B1B <- ac0g-b1-b: 1/2 active (psk-recorder down)`**
 Some instances of a receiver do not run. The line names them.
