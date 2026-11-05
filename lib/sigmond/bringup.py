@@ -132,11 +132,19 @@ def should_hold_uploads(coordination_path=None, root: str = '/') -> bool:
     image arrives uploading and keeps that.  An existing [uploads] block means
     someone already decided (an operator's release, or the hold this very rule
     wrote on a first run), so a re-run never re-holds.
+
+    A first install also has no hs-uploader yet.  A repo-install station that
+    uploads fine has no [uploads] block either, and keying on the block alone
+    held it on its next `smd bringup` (final review I3, 2026-11-05).
     """
     from .coordination import load_coordination
     from .paths import COORDINATION_PATH
     from .provenance import is_appliance_install
+    from .uploader_manifest import HS_UPLOADER_PYTHON
     if is_appliance_install(root):
+        return False
+    uploader = Path(root) / str(HS_UPLOADER_PYTHON).lstrip('/')
+    if uploader.exists() or uploader.is_symlink():
         return False
     coord = load_coordination(coordination_path or COORDINATION_PATH)
     return not coord.uploads.declared

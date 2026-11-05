@@ -150,3 +150,14 @@ def test_a_partial_run_with_the_hold_says_uploads_stay_held():
     assert rc == smd.BRINGUP_PARTIAL_RC
     assert 'uploads stay held until a complete run' in out.getvalue()
     assert '/x/smd sink upload' in out.getvalue()
+
+
+def test_a_working_station_with_hs_uploader_and_no_uploads_block_is_not_held(tmp_path):
+    # Final review I3, 2026-11-05: a repo-install station that uploads fine
+    # has no [uploads] block; keying on that alone held it on its next
+    # `smd bringup`.  hs-uploader already installed means not a first install.
+    root = tmp_path / 'root'
+    py = root / 'opt/hs-uploader/venv/bin/python'
+    py.parent.mkdir(parents=True)
+    py.write_text('')
+    assert should_hold_uploads(_coord('[host]\ncall = "AC0G"\n'), root=str(root)) is False
