@@ -130,6 +130,17 @@ class ApplianceSignal(unittest.TestCase):
             (d / 'version').write_text('v3.85\n')
             self.assertTrue(provenance.is_appliance_install(root))
 
+    def test_the_golden_vm_marker_counts_from_the_first_boot(self):
+        # Final review, 2026-11-05: sigmond-wisdom.service runs at the golden
+        # VM's first boot, before sigmond-wizard.sh stamps version, so the
+        # image's baked wisdom read as a repo install's.  provision-components.sh
+        # writes this marker at build time.
+        with tempfile.TemporaryDirectory() as root:
+            d = Path(root) / 'etc' / 'sigmond-appliance'
+            d.mkdir(parents=True)
+            (d / 'golden-image').write_text('built 2026-11-05\n')
+            self.assertTrue(provenance.is_appliance_install(root))
+
 
 if __name__ == '__main__':
     unittest.main()

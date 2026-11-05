@@ -36,6 +36,12 @@ from typing import Callable, Iterable, Optional
 # it would forge the lineage, which is the one thing it records well.
 IMAGE_VERSION_FILE = '/etc/sigmond-appliance/version'
 HISTORY_FILE = '/var/lib/sigmond/update-history.jsonl'
+# sigmond-appliance's provision-components.sh writes this into the golden VM
+# at build time.  The version file reaches the VM only when sigmond-wizard.sh
+# copies it, late in the first boot; sigmond-wisdom.service runs before that,
+# and on a fresh image (final review, 2026-11-05) it judged the baked wisdom
+# as a repo install's.
+GOLDEN_IMAGE_MARKER = '/etc/sigmond-appliance/golden-image'
 
 _LINEAGE_MEANS = ('image installed on this host — lineage only; '
                   'components may have moved since (see below)')
@@ -60,12 +66,13 @@ def image_lineage(path=IMAGE_VERSION_FILE) -> dict:
 def is_appliance_install(root: str = '/') -> bool:
     """True on a host the USB image laid down, False on a repo install.
 
-    The image's firstboot writes /etc/sigmond-appliance/version; nothing else
-    does.  Whatever differs for a ham's own machine keys on this one test, so
-    the kernel command line stays the operator's unless sigmond owns the box.
+    The image's firstboot writes /etc/sigmond-appliance/version, and the
+    golden VM's build writes GOLDEN_IMAGE_MARKER; nothing else writes either.
+    Whatever differs for a ham's own machine keys on this one test, so the
+    kernel command line stays the operator's unless sigmond owns the box.
     """
-    rel = IMAGE_VERSION_FILE.lstrip('/')
-    return (Path(root) / rel).exists()
+    return any((Path(root) / p.lstrip('/')).exists()
+               for p in (IMAGE_VERSION_FILE, GOLDEN_IMAGE_MARKER))
 
 
 def _git_head(path, *args) -> Optional[str]:

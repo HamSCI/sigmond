@@ -68,6 +68,10 @@ DATA_FILES = (
     '/etc/sigmond/.psws-verified',
     # FFT wisdom is per-CPU — a clone on different silicon must regenerate.
     '/etc/fftw/wisdomf',
+    # Its sidecar names the build host's CPU, sizes and placement.  Left in
+    # an image, it would vouch for wisdom the image bakes later (final
+    # review, 2026-11-05).
+    '/etc/fftw/wisdomf.cpu',
 )
 DATA_TREES = (
     '/var/lib/timestd',

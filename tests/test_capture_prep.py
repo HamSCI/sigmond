@@ -93,11 +93,15 @@ class TestBuildCapturePlan(unittest.TestCase):
             _touch(root, "/var/lib/sigmond/sink.db")
             _touch(root, "/var/lib/timestd/raw/x.bin")
             _touch(root, "/etc/fftw/wisdomf")
+            _touch(root, "/etc/fftw/wisdomf.cpu")
             plan = build_capture_plan(root=root, ssh_host_keys=[])
         removed = [a.payload for a in plan if a.kind == "remove"]
         cleared = [a.payload for a in plan if a.kind == "clear-tree"]
         self.assertIn("/var/lib/sigmond/sink.db", removed)
         self.assertIn("/etc/fftw/wisdomf", removed)  # per-CPU wisdom
+        # Its sidecar names the build host's CPU and placement; left behind,
+        # it would vouch for the image's baked wisdom (final review 2026-11-05).
+        self.assertIn("/etc/fftw/wisdomf.cpu", removed)
         self.assertIn("/var/lib/timestd", cleared)
 
     def test_empty_data_tree_not_cleared(self):
