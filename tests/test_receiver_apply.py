@@ -305,3 +305,67 @@ def test_apply_twice_with_a_client_config_changes_nothing(box):
     assert _env(box).exists() and _env(box, 'AC0G=B1S').exists()
     _apply(smd, box, rs)
     assert _tree(box.etc) == first
+
+
+# --- R14: one default client set; `receiver apply --clients` narrows it ---
+
+def _run_apply_cmd(smd, box, **kw):
+    seen = {}
+
+    def fake(receivers, **k):
+        seen.update(k, receivers=list(receivers))
+        return 0
+    args = types.SimpleNamespace(dry_run=False, **kw)
+    with mock.patch.object(sp, 'SITE_PROFILE_PATH', box.profile), \
+            mock.patch.object(smd, '_need_root', return_value=False), \
+            mock.patch.object(smd, '_sources_inventory', return_value=([], '')), \
+            mock.patch.object(smd, '_receiver_apply', fake):
+        rc = smd.cmd_receiver_apply(args)
+    return rc, seen
+
+
+def test_receiver_apply_clients_flag_narrows_the_default_set(box):
+    smd = _load_smd()
+    box.profile.write_text(f'[[receiver]]\nreporter_id = "AC0G/B1A"\n'
+                           f'radiod = "{A}"\n')
+    rc, seen = _run_apply_cmd(smd, box, clients='wspr-recorder,psk-recorder')
+    assert rc == 0
+    assert seen['profile_clients'] == frozenset({'wspr-recorder', 'psk-recorder'})
+    rc, seen = _run_apply_cmd(smd, box, clients='mag-recorder')
+    assert rc == 1 and not seen
+
+
+def test_receiver_apply_without_clients_uses_the_shared_default(box):
+    smd = _load_smd()
+    box.profile.write_text(f'[[receiver]]\nreporter_id = "AC0G/B1A"\n'
+                           f'radiod = "{A}"\n')
+    with mock.patch.object(smd, '_receiver_profile_clients',
+                           return_value=frozenset({'psk-recorder'})):
+        rc, seen = _run_apply_cmd(smd, box, clients=None)
+    assert rc == 0 and seen['profile_clients'] == frozenset({'psk-recorder'})
+
+
+def test_the_default_set_is_enabled_or_installed_reporter_keyed(box):
+    smd = _load_smd()
+    topo = types.SimpleNamespace(
+        enabled_components=lambda: ['wspr-recorder', 'mag-recorder'])
+    installed = {'psk-recorder', 'hf-timestd'}
+
+    def state(name, *a, **k):
+        return types.SimpleNamespace(installed=name in installed)
+    with mock.patch('sigmond.topology.load_topology', return_value=topo), \
+            mock.patch('sigmond.component_state.compute_state', state):
+        got = smd._receiver_profile_clients()
+    assert got == frozenset({'wspr-recorder', 'psk-recorder'})
+
+
+def test_apply_with_clients_binds_only_those(box):
+    smd = _load_smd()
+    r = [Receiver(reporter_id='AC0G/B1A', radiod=A)]
+    with mock.patch.object(smd, '_sources_bind', return_value=0) as sb:
+        with mock.patch.object(sp, 'SITE_PROFILE_PATH', box.profile):
+            assert smd._receiver_apply(
+                r, profile_clients=frozenset({'psk-recorder'}),
+                etc_root=box.etc, coord_path=box.coord,
+                profile_path=box.profile, inventory_rows=[]) == 0
+    assert list(sb.call_args.args[2]) == ['psk-recorder']

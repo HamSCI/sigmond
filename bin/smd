@@ -19772,11 +19772,42 @@ def _receiver_key(r) -> str:
 
 
 def _receiver_profile_clients() -> frozenset:
-    """The client set receivers default from.  bin/smd keeps no record of
-    which catalog profile this host runs, so every reporter-keyed client
-    counts; a receiver that names its ``clients`` narrows it."""
+    """The client set a receiver with no ``clients`` defaults to, for
+    `receiver apply` and `sources bind` alike (ruling R14): the
+    reporter-keyed clients the topology enables, plus those installed here.
+    bin/smd keeps no record of the catalog profile this host runs; bring-up
+    names its own set with `receiver apply --clients`."""
     from sigmond.bringup import _REPORTER_KEYED
-    return frozenset(_REPORTER_KEYED)
+    try:
+        from sigmond.topology import load_topology
+        enabled = set(load_topology().enabled_components())
+    except Exception:                                        # noqa: BLE001
+        enabled = set()
+    out = {c for c in _REPORTER_KEYED if c in enabled}
+    try:
+        from sigmond.component_state import compute_state
+        for c in _REPORTER_KEYED - out:
+            try:
+                if compute_state(c).installed:
+                    out.add(c)
+            except Exception:                                # noqa: BLE001
+                pass
+    except ImportError:
+        pass
+    return frozenset(out)
+
+
+def _receiver_clients_arg(raw, verb: str):
+    """``--clients a,b`` as a frozenset, or None after printing why it
+    refuses.  Named, even as an empty list: bring-up names the profile's."""
+    from sigmond.bringup import _REPORTER_KEYED
+    clients = [c.strip() for c in raw.split(',') if c.strip()]
+    unknown = [c for c in clients if c not in _REPORTER_KEYED]
+    if unknown:
+        _err(f'{verb}: {", ".join(unknown)} take no per-radiod '
+             f'instance (bindable: {", ".join(sorted(_REPORTER_KEYED))})')
+        return None
+    return frozenset(clients)
 
 
 def _receiver_decides_upload(r) -> bool:
@@ -19923,10 +19954,17 @@ def cmd_receiver_apply(args) -> int:
         _info(f'no [[receiver]] entries in {_sp.SITE_PROFILE_PATH}; '
               f'nothing to apply')
         return 0
+    raw = getattr(args, 'clients', None)
+    if raw is not None:
+        profile_clients = _receiver_clients_arg(raw, 'receiver apply')
+        if profile_clients is None:
+            return 1
+    else:
+        profile_clients = _receiver_profile_clients()
     rows, _msg = _sources_inventory()
     _heading('receiver apply')
     return _receiver_apply(receivers,
-                           profile_clients=_receiver_profile_clients(),
+                           profile_clients=profile_clients,
                            profile_path=_sp.SITE_PROFILE_PATH, dry_run=dry,
                            inventory_rows=rows or [])
 
@@ -19938,25 +19976,17 @@ def cmd_sources_bind(args) -> int:
         return 1
     if _need_root('sources bind'):
         return 1
-    from sigmond.bringup import _REPORTER_KEYED
     raw = getattr(args, 'clients', None)
     if raw is not None:
         # Named, even as an empty list: bring-up names the profile's own.
-        clients = [c.strip() for c in raw.split(',') if c.strip()]
-        unknown = [c for c in clients if c not in _REPORTER_KEYED]
-        if unknown:
-            _err(f'sources bind: {", ".join(unknown)} take no per-radiod '
-                 f'instance (bindable: {", ".join(sorted(_REPORTER_KEYED))})')
+        named = _receiver_clients_arg(raw, 'sources bind')
+        if named is None:
             return 1
+        clients = [c.strip() for c in raw.split(',') if c.strip()]
     else:
         # Bring-up binds before it installs the clients, so it names them;
-        # by hand, bind every reporter-keyed client the topology enables.
-        try:
-            from sigmond.topology import load_topology
-            enabled = set(load_topology().enabled_components())
-        except Exception:                                    # noqa: BLE001
-            enabled = set()
-        clients = [c for c in sorted(_REPORTER_KEYED) if c in enabled]
+        # by hand, bind the shared default set (enabled or installed).
+        clients = sorted(_receiver_profile_clients())
         if not clients and not args.timing:
             _err('sources bind: no reporter-keyed client is enabled here; '
                  'name them with --clients wspr-recorder,psk-recorder')
@@ -25570,14 +25600,20 @@ def _instance_add_plan(client, display_rid, radiod):
                      f'with the switchboard, or pick another reporter ID')
                 return None
             radiod = old.radiod        # keep the stored spelling
-        clients = tuple(old.clients) if old else ()
-        if client not in clients:
-            clients += (client,)
+        default = _receiver_profile_clients()
+        if old is not None and not old.clients:
+            # No `clients` means the default set; keep it so unless the
+            # new client lies outside it (final review I2).
+            clients = (() if client in default
+                       else tuple(sorted(default | {client})))
+        else:
+            clients = tuple(old.clients) if old else ()
+            if client not in clients:
+                clients += (client,)
         rec = Receiver(reporter_id=display_rid, radiod=radiod, clients=clients,
                        injector=bool(old.injector) if old else False)
         candidate = merged_receivers(current, rec)
-        msgs = validate_receivers(
-            candidate, profile_clients=_receiver_profile_clients())
+        msgs = validate_receivers(candidate, profile_clients=default)
         if msgs:
             for m in msgs:
                 _err(f'instance add: {m}')
@@ -28653,6 +28689,10 @@ def _build_parser() -> argparse.ArgumentParser:
         'apply', help='bind every declared receiver')
     p_rcv_apply.add_argument('--dry-run', action='store_true', dest='dry_run',
                              help='validate and show the plan; write nothing')
+    p_rcv_apply.add_argument(
+        '--clients', default=None, metavar='A,B',
+        help='the clients a receiver with no `clients` key binds (default: '
+             'the reporter-keyed clients enabled or installed here)')
 
     # completion
     p_decoders = admin_sub.add_parser(

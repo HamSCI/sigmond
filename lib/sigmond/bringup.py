@@ -187,6 +187,15 @@ def planned_instances(*, local_radiod: bool, remote_entries,
     return instances
 
 
+def _receiver_apply_argv(smd: str, profile, skip) -> list:
+    """Stage 1's `receiver apply`, naming the profile's reporter-keyed
+    clients minus ``skip`` so a receiver with no ``clients`` binds only
+    what this bring-up installs (ruling R14)."""
+    names = sorted(c for c in profile.clients
+                   if c in _REPORTER_KEYED and c not in skip)
+    return [smd, 'admin', 'receiver', 'apply', '--clients', ','.join(names)]
+
+
 def build_plan(profile, *, local_radiod: bool,
                remote_radiods=(),
                timing_radiod: str = '',
@@ -449,9 +458,10 @@ def build_plan(profile, *, local_radiod: bool,
         if receivers_declared:
             # The [[receiver]] list names each reporter's radiod; apply it
             # once the radiods exist and before any client is configured.
+            # It binds only this profile's clients (ruling R14).
             steps.append(Step(STAGE1, 'bind receivers to local radiods',
                               'config',
-                              argv=[smd, 'admin', 'receiver', 'apply']))
+                              argv=_receiver_apply_argv(smd, profile, skip)))
         if 'ka9q-web' in profile.local_radiod_infra and 'ka9q-web' not in skip:
             # ka9q-web builds with the Stage-1 infra above, but its unit-writer
             # refuses to install ka9q-web.service until coordination.env carries
@@ -481,7 +491,7 @@ def build_plan(profile, *, local_radiod: bool,
         if receivers_declared:
             # One writer: the declared list, applied as written (ruling R2).
             steps.append(Step(STAGE1, 'bind declared receivers', 'config',
-                              argv=[smd, 'admin', 'receiver', 'apply']))
+                              argv=_receiver_apply_argv(smd, profile, skip)))
         for status_dns, rid in (() if receivers_declared else remote_radiods):
             argv = [smd, 'admin', 'sources', 'bind', status_dns,
                     '--reporter', rid, '--clients', ','.join(bound)]

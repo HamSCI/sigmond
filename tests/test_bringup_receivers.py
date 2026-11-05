@@ -43,7 +43,8 @@ def test_two_local_receivers_bind_then_make_one_instance_pair_each():
                    receivers_declared=True, local_receivers=lr)
     applies = _argv_steps(p, 'admin', 'receiver', 'apply')
     assert len(applies) == 1
-    assert applies[0].argv == ['smd', 'admin', 'receiver', 'apply']
+    assert applies[0].argv == ['smd', 'admin', 'receiver', 'apply',
+                               '--clients', 'psk-recorder,wspr-recorder']
     assert applies[0].kind == 'config'
     assert applies[0].label == 'bind receivers to local radiods'
     # After the hard radiod-configured checkpoint, before any client config.
@@ -411,3 +412,22 @@ def test_flags_that_disagree_with_the_declared_list_refuse(
     cap = capsys.readouterr()
     assert 'drop --remote-radiod' in cap.out + cap.err
     assert 'drop --reporter' in cap.out + cap.err
+
+
+def test_the_apply_step_names_the_profiles_clients_minus_skip():
+    """R14: a profile without meteor-scatter must not have Stage 1 bind it."""
+    lr = ((A, 'AC0G/B1A', WP),)
+    p = build_plan(_local(), local_radiod=True, receivers_declared=True,
+                   local_receivers=lr)
+    (a,) = _argv_steps(p, 'admin', 'receiver', 'apply')
+    assert a.argv[-2:] == ['--clients', 'psk-recorder,wspr-recorder']
+    p = build_plan(_local(), local_radiod=True, receivers_declared=True,
+                   local_receivers=lr, skip=frozenset({'psk-recorder'}))
+    (a,) = _argv_steps(p, 'admin', 'receiver', 'apply')
+    assert a.argv[-2:] == ['--clients', 'wspr-recorder']
+    remote = ((A, 'AC0G/B1A', WP),)
+    p = build_plan(_client(), local_radiod=False, remote_radiods=remote,
+                   receivers_declared=True)
+    (a,) = _argv_steps(p, 'admin', 'receiver', 'apply')
+    assert a.argv[-2] == '--clients'
+    assert 'meteor-scatter' not in a.argv[-1]

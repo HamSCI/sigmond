@@ -135,3 +135,34 @@ def test_an_invalid_candidate_list_is_refused_before_create(box, capsys):
     created.assert_not_called()
     assert box.profile.read_bytes() == before
     assert 'same_antenna_as' in capsys.readouterr().out
+
+
+# --- I2: a stored receiver with no `clients` means the default set ---
+
+def _default_receiver(box):
+    box.profile.write_text(f'[[receiver]]\nreporter_id = "AC0G/B1A"\n'
+                           f'radiod = "{A}"\n')
+
+
+def test_a_default_set_receiver_stays_default_for_a_default_client(box):
+    smd = _load_smd()
+    _default_receiver(box)
+    with mock.patch.object(smd, '_receiver_profile_clients',
+                           return_value=frozenset({'psk-recorder',
+                                                   'wspr-recorder'})):
+        rc, _ = _add(smd, box, client='psk-recorder')
+    assert rc == 0
+    (r,) = load_receivers(box.profile)
+    assert r.clients == ()
+
+
+def test_a_default_set_receiver_widens_for_a_client_outside_it(box):
+    smd = _load_smd()
+    _default_receiver(box)
+    with mock.patch.object(smd, '_receiver_profile_clients',
+                           return_value=frozenset({'psk-recorder',
+                                                   'wspr-recorder'})):
+        rc, _ = _add(smd, box, client='meteor-scatter')
+    assert rc == 0
+    (r,) = load_receivers(box.profile)
+    assert r.clients == ('meteor-scatter', 'psk-recorder', 'wspr-recorder')
