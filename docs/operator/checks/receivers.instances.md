@@ -2,10 +2,11 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond 12ae65d on 2026-11-05 — code (lib/sigmond/commands/check.py)
+> **Verified against:** sigmond 29c4236 on 2026-11-05 — code (lib/sigmond/commands/check.py)
 > **Canonical for:** what the receivers check in `smd check` means
 
-Check id: `receivers.instances`
+Check id: `receivers.instances`. In `smd check --json` the line carries
+stage `decode`, so the station web page shows it with the recorders.
 
 ## What it looks at
 

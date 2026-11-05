@@ -148,7 +148,10 @@ class ReceiversLineTests(unittest.TestCase):
             lines = check.run_checks(_env_for({}), [("receivers", check.receivers_line)])
         meta = check.CHECK_META["receivers"]
         self.assertEqual(meta[0], "receivers.instances")
-        self.assertEqual(meta[1], "run")
+        # station-web knows five stages and drops any other (ruling R16).
+        self.assertEqual(meta[1], "decode")
+        self.assertEqual(check.STAGES, ("platform", "sensor", "decode",
+                                        "sink", "upload"))
         self.assertIn("receivers", [n for n, _ in check.CHECKS])
         self.assertEqual(lines[0].label, "receivers")
 

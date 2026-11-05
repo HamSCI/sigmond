@@ -52,7 +52,7 @@ class Line:
 
 # The web groups checks by stage and links each to its client.  The ids stay
 # stable when a label's wording changes.  label -> (id, stage, client).
-STAGES = ('platform', 'run', 'sensor', 'decode', 'sink', 'upload')
+STAGES = ('platform', 'sensor', 'decode', 'sink', 'upload')
 CHECK_META = {
     'bring-up':          ('platform.bringup', 'platform', None),
     'storage':           ('platform.storage', 'platform', None),
@@ -65,7 +65,7 @@ CHECK_META = {
     'receiver page':     ('platform.receiver-page', 'platform', 'ka9q-web'),
     'station pages':     ('platform.station-pages', 'platform', 'station-web'),
     'magnetometer page': ('platform.magnetometer-page', 'platform', 'gmag-webui'),
-    'receivers':         ('receivers.instances', 'run', None),
+    'receivers':         ('receivers.instances', 'decode', None),
 }
 FIX_SEP = '  ' + FIX
 
