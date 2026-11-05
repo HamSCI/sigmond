@@ -25333,6 +25333,45 @@ def cmd_instance_show(args) -> int:
     return 0
 
 
+def _instance_add_receiver(client, display_rid, radiod, dry_run) -> int:
+    """Record ``display_rid`` on ``radiod`` with ``client`` among its clients,
+    then bind that receiver.  The candidate list validates before any write."""
+    from sigmond import site_profile as _sp
+    from sigmond.receivers import (Receiver, ReceiverError, load_receivers,
+                                   merged_receivers, validate_receivers,
+                                   write_receivers)
+    try:
+        current = load_receivers(_sp.SITE_PROFILE_PATH)
+        key = _receiver_key(Receiver(reporter_id=display_rid, radiod=radiod))
+        old = next((r for r in current if _receiver_key(r) == key), None)
+        clients = tuple(old.clients) if old else ()
+        if client not in clients:
+            clients += (client,)
+        rec = Receiver(reporter_id=display_rid, radiod=radiod, clients=clients,
+                       injector=bool(old.injector) if old else False)
+        candidate = merged_receivers(current, rec)
+        msgs = validate_receivers(
+            candidate, profile_clients=_receiver_profile_clients())
+        if msgs:
+            for m in msgs:
+                _err(f'instance add: {m}')
+            return 1
+        stored = [r for r in candidate if _receiver_key(r) == key]
+        if dry_run:
+            _info(f'(dry-run) would record {display_rid} -> {radiod} '
+                  f'({", ".join(clients)}) and bind it')
+            return 0
+        write_receivers(_sp.SITE_PROFILE_PATH, candidate)
+    except (ReceiverError, ValueError) as exc:
+        _err(f'instance add: {exc}')
+        return 1
+    rows, _msg = _sources_inventory()
+    return _receiver_apply(
+        stored, profile_clients=_receiver_profile_clients(),
+        profile_path=_sp.SITE_PROFILE_PATH, inventory_rows=rows or [],
+        validate_all=False)
+
+
 def cmd_instance_add(args) -> int:
     dry_run = getattr(args, 'dry_run', False)
     if not dry_run and _need_root('instance add'):
@@ -25353,6 +25392,29 @@ def cmd_instance_add(args) -> int:
         _warn(f'{client}@.service systemd template is NOT installed; '
               f'`smd admin instance enable` will fail until it is')
         _info(f'  install with: smd component install {client}')
+    radiod = (getattr(args, 'radiod', None) or '').strip() or None
+    existing = None
+    if radiod:
+        # Refuse before create_instance, so a refusal touches nothing.
+        from sigmond import site_profile as _sp
+        from sigmond.receivers import ReceiverError, load_receivers
+        from sigmond.sources import valid_mdns_hostname
+        if not valid_mdns_hostname(radiod):
+            _err(f'instance add: --radiod {radiod!r} is not a valid mDNS '
+                 f'status name')
+            return 1
+        try:
+            for r in load_receivers(_sp.SITE_PROFILE_PATH):
+                if _receiver_key(r) == reporter_id:
+                    existing = r
+        except (ReceiverError, ValueError) as exc:
+            _err(f'instance add: {exc}')
+            return 1
+        old = (existing.radiod or existing.kiwisdr) if existing else ''
+        if existing and old.lower() != radiod.lower():
+            _err(f'instance add: {display_rid} listens to {old}; move it '
+                 f'with the switchboard, or pick another reporter ID')
+            return 1
     try:
         paths = inst.create_instance(client, reporter_id,
                                       force=getattr(args, 'force', False),
@@ -25368,6 +25430,10 @@ def cmd_instance_add(args) -> int:
     _info(f'  config:   {paths.config}')
     _info(f'  env:      {paths.env}')
     _info(f'  sources:  {paths.sources}')
+    if radiod:
+        rc = _instance_add_receiver(client, display_rid, radiod, dry_run)
+        if rc:
+            return rc
     if not getattr(args, 'dry_run', False):
         _info('')
         _info(f'next: wire sources and edit the config, then enable:')
@@ -27942,6 +28008,9 @@ def _build_parser() -> argparse.ArgumentParser:
                          help='create only missing files; leave existing ones in place')
     p_i_add.add_argument('--dry-run', action='store_true',
                          help='show what would be created without touching the filesystem')
+    p_i_add.add_argument('--radiod', metavar='STATUS_DNS', default=None,
+                         help='also record the reporter\'s receiver in the site '
+                              'profile\'s [[receiver]] list on this radiod, and bind it')
 
     p_i_remove = instance_sub.add_parser(
         'remove',
