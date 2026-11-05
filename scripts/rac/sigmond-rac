@@ -10,7 +10,7 @@
 #
 # Exit codes: register/retry 0 done, 1 failed (the reason is printed).
 #   activate: the switch's own code, or 4 no station name, 5 this machine
-#   belongs to a Proxmox host's RAC.
+#   belongs to a Proxmox host's RAC, 6 --site differs from the recorded name.
 #
 # Test overrides: SIGMOND_WIZARD, SIGMOND_RAC_MARK_DIR, SIGMOND_RAC_LOG,
 #   SIGMOND_RAC_LINK, SIGMOND_RAC_APPLIANCE_VERSION, SIGMOND_RAC_PAIR_KEY.
@@ -41,9 +41,15 @@ RAC_MODE=station
 export RAC_MODE
 set --
 SIGMOND_WIZARD_AS_LIB=1
+ERRLOG="${SIGMOND_RAC_LOG:-/var/log/sigmond-rac.log}"
+{ : >> "$ERRLOG"; } 2>/dev/null || ERRLOG=/dev/null
 # shellcheck disable=SC1090
-source "$WIZARD" 2>/dev/null
+source "$WIZARD" 2>>"$ERRLOG"
 RAC_MODE=station
+if ! declare -F rac_register >/dev/null || ! declare -F rac_install_host_files >/dev/null; then
+    echo "sigmond-rac: the wizard at $WIZARD did not load its RAC functions (see $ERRLOG)" >&2
+    exit 1
+fi
 
 # The wizard's setup fixed these for a Proxmox host; set ours after it.
 MARK_DIR="${SIGMOND_RAC_MARK_DIR:-$MARK_DIR}"
@@ -69,14 +75,18 @@ activate)
         echo "sigmond-rac: a Proxmox host carries this machine's RAC; nothing to activate here." >&2
         exit 5
     fi
-    if [ -n "$site_arg" ]; then
-        site=$(printf '%s' "$site_arg" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
-    else
-        site=$(rac_site_name)
-    fi
+    site=$(rac_site_name)
     if [ -z "$site" ]; then
         echo "sigmond-rac: no station name: set [station] callsign in /etc/sigmond/site-profile.toml or pass --site" >&2
         exit 4
+    fi
+    if [ -n "$site_arg" ]; then
+        # What --site means with no recorded name; a recorded name must match it.
+        wanted=$(MARK_DIR=/nonexistent/none rac_site_name)
+        if [ "$wanted" != "$site" ]; then
+            echo "sigmond-rac: this machine is recorded as $site; --site names $wanted. To rename deliberately, remove $MARK_DIR/rac-site and rerun with --site" >&2
+            exit 6
+        fi
     fi
     mkdir -p "$MARK_DIR" || exit 1
     printf '%s\n' "$site" > "$MARK_DIR/rac-site" || exit 1

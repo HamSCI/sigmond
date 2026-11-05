@@ -24,7 +24,7 @@ def setup(tmp_path, tiers="", appliance=False, pairing=False):
         #!/bin/bash
         echo "$1 by=${{SIGMOND_RAC_BY:-}} link=$(readlink {tmp_path}/sigmond-rac)" >> {tmp_path}/switch.calls
         echo "Remote access: on"
-        exit 0
+        exit ${{SWITCH_RC:-0}}
         """))
     stub.chmod(0o755)
     # drop the prelude's `set -u`/say/systemctl stubs only where harmless
@@ -107,11 +107,50 @@ def test_activate_records_site_and_wish(tmp_path):
     assert calls.startswith("on by=install link=") and str(ENTRY) in calls
 
 
-def test_activate_site_flag_wins(tmp_path):
+def test_activate_site_flag_names_machine(tmp_path):
     env = setup(tmp_path)
     r = entry(tmp_path, env, "activate", "--site", "ac0g/b9")
     assert r.returncode == 0, r.stderr
     assert (mark(tmp_path) / "rac-site").read_text().strip() == "AC0G_B9"
+
+
+def test_activate_refuses_differing_recorded_site(tmp_path):
+    env = setup(tmp_path)
+    m = mark(tmp_path)
+    m.mkdir(exist_ok=True)
+    (m / "rac-site").write_text("AC0G-OLD\n")
+    r = entry(tmp_path, env, "activate", "--site", "AC0G-NEW")
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert "AC0G-OLD" in r.stderr and "AC0G-NEW" in r.stderr
+    assert "remove" in r.stderr and "rac-site" in r.stderr
+    assert (m / "rac-site").read_text() == "AC0G-OLD\n"
+    assert not (tmp_path / "switch.calls").exists()
+    assert not (m / "rac-desired").exists()
+
+
+def test_activate_same_recorded_site_proceeds(tmp_path):
+    env = setup(tmp_path)
+    m = mark(tmp_path)
+    m.mkdir(exist_ok=True)
+    (m / "rac-site").write_text("AC0G-OLD\n")
+    r = entry(tmp_path, env, "activate", "--site", "ac0g-old")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (m / "rac-site").read_text().strip() == "AC0G-OLD"
+
+
+def test_activate_propagates_switch_exit_code(tmp_path):
+    env = setup(tmp_path)
+    r = entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={"SWITCH_RC": "3"})
+    assert r.returncode == 3, r.stdout + r.stderr
+
+
+def test_broken_wizard_is_an_error(tmp_path):
+    env = setup(tmp_path)
+    bad = tmp_path / "bad-wizard.sh"
+    bad.write_text("echo nothing here\nreturn 0\n")
+    r = entry(tmp_path, env, "register", extra={"SIGMOND_WIZARD": str(bad)})
+    assert r.returncode == 1
+    assert str(bad) in r.stderr
 
 
 def test_activate_keeps_operator_off(tmp_path):
