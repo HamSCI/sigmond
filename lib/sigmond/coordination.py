@@ -743,6 +743,15 @@ def station_identity_env(coord: 'Coordination') -> dict:
     return env
 
 
+def _unsafe_env_line(ln: str) -> bool:
+    """True for a coordination.env line systemd's EnvironmentFile could
+    misread: a control character anywhere, or a quote or backslash in the
+    value."""
+    value = ln.split('=', 1)[1] if ('=' in ln and not ln.startswith('#')) else ''
+    return (any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in ln)
+            or any(ch in value for ch in '\\"\''))
+
+
 def render_env(coord: Coordination,
                passthrough_lookup: Optional[Callable[[str], list]] = None,
                receivers: Optional[list] = None) -> str:
@@ -877,11 +886,22 @@ def render_env(coord: Coordination,
             prefix = _env_key('KA9Q_WEB', c.instance)
             lines.append(f'{prefix}_PORT={c.extras["port"]}')
 
-    # The [[receiver]] list: which radiod each reporter ID listens to.
-    if receivers:
+    # The [[receiver]] list: which radiod each reporter ID listens to.  A
+    # receiver whose value the guard below would drop goes as a whole, before
+    # numbering, so RECEIVER_COUNT counts the pairs the file holds.
+    kept = []
+    for r in receivers or ():
+        if _unsafe_env_line(f'R={r.reporter_id}') or _unsafe_env_line(
+                f'R={r.radiod}'):
+            print(f'sigmond: coordination.env: skipping receiver '
+                  f'{r.reporter_id!r} -> {r.radiod!r}: a value holds a '
+                  f'control character, quote or backslash', file=sys.stderr)
+            continue
+        kept.append(r)
+    if kept:
         lines.append('')
-        lines.append(f'RECEIVER_COUNT={len(receivers)}')
-        for n, r in enumerate(receivers, 1):
+        lines.append(f'RECEIVER_COUNT={len(kept)}')
+        for n, r in enumerate(kept, 1):
             lines.append(f'RECEIVER_{n}_REPORTER={r.reporter_id}')
             lines.append(f'RECEIVER_{n}_RADIOD={r.radiod}')
 
@@ -895,9 +915,7 @@ def render_env(coord: Coordination,
     # value that may run over several lines.
     safe = []
     for ln in lines:
-        value = ln.split('=', 1)[1] if ('=' in ln and not ln.startswith('#')) else ''
-        if (any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in ln)
-                or any(ch in value for ch in '\\"\'')):
+        if _unsafe_env_line(ln):
             key = ln.split('=', 1)[0]
             print(f'sigmond: coordination.env: skipping {key}: its value '
                   f'holds a control character, quote or backslash ({ln!r})',

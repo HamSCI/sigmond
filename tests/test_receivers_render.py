@@ -101,3 +101,18 @@ def test_render_fails_on_a_bad_receiver_list(tmp_path, capsys):
     assert rc == 1
     assert 'names no radiod' in cap.out + cap.err
     assert not env.exists()
+
+
+def test_a_receiver_the_guard_drops_is_not_counted(capsys):
+    """R17.5: RECEIVER_COUNT counts only the pairs that reach the file."""
+    rs = [Receiver(reporter_id='AC0G/B1A', radiod='bad"name.local'),
+          Receiver(reporter_id='AC0G/B1B', radiod=B1B)]
+    env = render_env(Coordination(), passthrough_lookup=lambda t: [],
+                     receivers=rs)
+    lines = [ln for ln in env.splitlines() if ln.startswith('RECEIVER_')]
+    assert lines == ['RECEIVER_COUNT=1', 'RECEIVER_1_REPORTER=AC0G/B1B',
+                     f'RECEIVER_1_RADIOD={B1B}']
+    assert 'AC0G/B1A' in capsys.readouterr().err
+    only_bad = render_env(Coordination(), passthrough_lookup=lambda t: [],
+                          receivers=rs[:1])
+    assert 'RECEIVER_' not in only_bad

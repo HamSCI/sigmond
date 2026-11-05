@@ -100,3 +100,28 @@ def test_init_dry_run_writes_nothing(tmp_path, capsys):
     assert rc == 0
     assert not prof.exists()
     assert 'AC0G/B1A' in out
+
+
+def test_init_skips_a_reporter_with_an_unreadable_sources_file(tmp_path, capsys):
+    c = _seed(tmp_path)
+    _src(c, 'wspr-recorder@AC0G=B1A', f'radiod:{B1A}')
+    (c / 'psk-recorder@AC0G=B1A.sources.toml').write_text('selected = [\n')
+    _src(c, 'wspr-recorder@AC0G=B1B', f'radiod:{B1B}')
+    rc, prof, _, out = _init(tmp_path, capsys)
+    assert rc == 0
+    assert [r.reporter_id for r in load_receivers(prof)] == ['AC0G/B1B']
+    assert 'left out: AC0G/B1A' in out
+    assert 'unreadable' in out
+
+
+def test_init_leaves_out_a_client_that_is_not_reporter_keyed(tmp_path, capsys):
+    c = _seed(tmp_path)
+    _src(c, 'wspr-recorder@AC0G=B1A', f'radiod:{B1A}')
+    _src(c, 'hfdl-recorder@AC0G=B1A', f'radiod:{B1A}')
+    _src(c, 'wspr-recorder@AC0G=B1B', f'radiod:{B1B}')
+    rc, prof, _, out = _init(tmp_path, capsys)
+    assert rc == 0
+    rs = load_receivers(prof)
+    assert [(r.reporter_id, r.clients) for r in rs] == [
+        ('AC0G/B1A', ('wspr-recorder',)), ('AC0G/B1B', ('wspr-recorder',))]
+    assert 'left out: hfdl-recorder@AC0G/B1A' in out

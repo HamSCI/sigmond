@@ -98,6 +98,26 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _no_host_site_profile(monkeypatch, tmp_path_factory):
+    """Point site-profile.toml at a path that does not exist, so a test
+    that renders coordination.env or loads the receiver list never reads
+    the host's real profile (final review R17.2).  `render_env`,
+    `load_receivers` and `load_site_profile` read the module global at call
+    time; sigmond.commands.config imported the name, so it gets the same
+    path.  A test that patches SITE_PROFILE_PATH itself runs after this and
+    wins."""
+    path = tmp_path_factory.mktemp('no-host-profile') / 'site-profile.toml'
+    import sigmond.site_profile as _sp
+    monkeypatch.setattr(_sp, 'SITE_PROFILE_PATH', path)
+    try:
+        import sigmond.commands.config as _cfg
+    except Exception:                                        # noqa: BLE001
+        _cfg = None
+    if _cfg is not None and hasattr(_cfg, 'SITE_PROFILE_PATH'):
+        monkeypatch.setattr(_cfg, 'SITE_PROFILE_PATH', path)
+
+
+@pytest.fixture(autouse=True)
 def _no_host_systemctl(monkeypatch):
     """Keep a test from asking the host's real `systemctl cat` by accident.
 

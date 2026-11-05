@@ -18,8 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .site_profile import SITE_PROFILE_PATH
-
 
 class ReceiverError(ValueError):
     """A [[receiver]] entry that cannot be read."""
@@ -96,8 +94,12 @@ def _from_table(i: int, t: dict) -> Receiver:
     return Receiver(**kw)
 
 
-def load_receivers(path: Path = SITE_PROFILE_PATH) -> list:
-    """The receivers in ``path``; ``[]`` when the file or the array is absent."""
+def load_receivers(path: Optional[Path] = None) -> list:
+    """The receivers in ``path`` (default: site_profile.SITE_PROFILE_PATH,
+    read at call time); ``[]`` when the file or the array is absent."""
+    if path is None:
+        from . import site_profile as _sp
+        path = _sp.SITE_PROFILE_PATH
     path = Path(path)
     if not path.is_file():
         return []
@@ -159,11 +161,12 @@ def validate_receivers(receivers: list, *, profile_clients: frozenset) -> list:
         except ValueError:
             return None
 
-    by_radiod: dict = {}
+    by_radiod: dict = {}     # status names compare case-insensitively
     for r in receivers:
         if r.radiod and not r.kiwisdr:
-            by_radiod.setdefault(r.radiod, []).append(r)
-    for radiod, group in by_radiod.items():
+            by_radiod.setdefault(r.radiod.lower(), []).append(r)
+    for group in by_radiod.values():
+        radiod = group[0].radiod
         for r in group[1:]:
             if not r.same_antenna_as:
                 msgs.append(
@@ -176,11 +179,15 @@ def validate_receivers(receivers: list, *, profile_clients: frozenset) -> list:
     for r in receivers:
         if not r.same_antenna_as:
             continue
-        other = keys.get(_key(r.same_antenna_as))
-        if other is None:
+        k = _key(r.same_antenna_as)
+        other = keys.get(k)
+        if k is not None and k == _key(r.reporter_id):
+            msgs.append(f'{r.reporter_id}: same_antenna_as names itself; '
+                        f'name the receiver whose antenna it shares')
+        elif other is None:
             msgs.append(f'{r.reporter_id}: same_antenna_as '
                         f'{r.same_antenna_as} names no receiver')
-        elif other.radiod != r.radiod:
+        elif other.radiod.lower() != r.radiod.lower():
             msgs.append(f'{r.reporter_id}: same_antenna_as '
                         f'{r.same_antenna_as} is on another radiod '
                         f'({other.radiod or "none"})')

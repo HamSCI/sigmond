@@ -20,6 +20,14 @@ B = 'ac0g-b1-b-status.local'
 WP = ('wspr-recorder', 'psk-recorder')
 
 
+@pytest.fixture(autouse=True)
+def _pinned_radiod_cpus(monkeypatch):
+    """A radiod-host bring-up with two receivers reaches the capacity gate,
+    which asks systemd for radiod's CPUs; pin the answer (R17.3)."""
+    import sigmond.cpu
+    monkeypatch.setattr(sigmond.cpu, 'get_radiod_cpus', lambda: {0, 1})
+
+
 def _local():
     # A local-radiod profile with two reporter-keyed clients (dasi2-shaped).
     return Profile(

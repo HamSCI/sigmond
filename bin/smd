@@ -10583,6 +10583,10 @@ def cmd_bringup(args) -> int:
                 _info(_v.text())
             elif getattr(args, 'ignore_capacity', False):
                 _warn(_v.text() + '\n  proceeding: --ignore-capacity')
+            elif getattr(args, 'dry_run', False):
+                # A dry run shows the whole plan; a real run refuses here.
+                _warn(_v.text() + '\n  proceeding: --dry-run (a real run '
+                      'refuses here)')
             else:
                 _err('bringup: ' + _v.text() + ' — nothing installed')
                 return 1
@@ -17677,7 +17681,7 @@ _smd_complete() {
     # fleet, notify, psws, remote, sink, timing, update, upload, version),
     # which tells an operator a subcommand does not exist.
     local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin adopt align archive check doctor fleet notify psws remote sink storage timing update upload version"
-    local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing uploader radiod instance uninstall completion"
+    local admin_cmds="diag validate verifier wisdom storage environment sources receiver public-ip log rac timing uploader radiod instance uninstall completion"
     local components="ka9q-radio radiod ka9q-web hf-timestd wspr-recorder psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter gpsdo-monitor igmp-querier rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter"
     local profiles="dasi2 base client"
@@ -17965,6 +17969,19 @@ _smd_complete() {
                                     ;;
                                 *)
                                     COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate help" -- "$cur"))
+                                    ;;
+                            esac
+                            ;;
+                        receiver)
+                            case "${words[3]}" in
+                                list)
+                                    COMPREPLY=($(compgen -W "--json" -- "$cur"))
+                                    ;;
+                                apply)
+                                    COMPREPLY=($(compgen -W "--dry-run --clients" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "list apply help" -- "$cur"))
                                     ;;
                             esac
                             ;;

@@ -213,3 +213,17 @@ def test_an_indented_receiver_header_is_replaced_not_copied(tmp_path):
     write_receivers(p, load_receivers(p))
     assert p.read_text().count('[[receiver]]') == 1
     assert len(load_receivers(p)) == 1
+
+
+def test_radiods_group_case_insensitively():
+    a = Receiver('AC0G/B1A', radiod=B1A)
+    msgs = _v([a, Receiver('AC0G/B1B', radiod=B1A.upper())])
+    assert any('same_antenna_as' in m for m in msgs)
+    # same_antenna_as across two spellings of one radiod is fine
+    assert _v([a, Receiver('AC0G/B1B', radiod=B1A.upper(),
+                           same_antenna_as='AC0G/B1A')]) == []
+
+
+def test_same_antenna_as_itself_is_refused():
+    msgs = _v([Receiver('AC0G/B1A', radiod=B1A, same_antenna_as='ac0g/b1a')])
+    assert any('names itself' in m for m in msgs)

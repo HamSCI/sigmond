@@ -201,8 +201,11 @@ def _f(v) -> float:
         return 0.0
 
 
-def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
-    """Parse the site profile, or return None if the file does not exist."""
+def load_site_profile(path: Optional[Path] = None) -> Optional[SiteProfile]:
+    """Parse the site profile, or return None if the file does not exist.
+    ``path`` defaults to SITE_PROFILE_PATH, read at call time."""
+    if path is None:
+        path = SITE_PROFILE_PATH
     if not path.is_file():
         return None
     with open(path, "rb") as fh:

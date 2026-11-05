@@ -640,20 +640,27 @@ def _adopt_instances(root: Path):
     Returns ``(receivers, left_out)``.  One receiver per reporter ID; its
     clients are those with an instance for that reporter whose sources file
     holds exactly one ``radiod:`` key.  A reporter whose instances name two
-    radiods, and an instance whose file is empty or holds another kind of
-    key, go to ``left_out`` as ``(label, reason)``; nothing is guessed.
+    radiods or one of whose sources files is unreadable, an instance whose
+    file is empty or holds another kind of key, and an instance of a client
+    that is not reporter-keyed go to ``left_out`` as ``(label, reason)``;
+    nothing is guessed.
     """
+    from ..bringup import _REPORTER_KEYED
     from ..instance import display_reporter_id
     from ..receivers import Receiver
     from ..sources import ClientSources
 
     by_rid: dict = {}        # display id -> {client: radiod}
     left_out: list = []
-    bad: set = set()
+    bad: set = set()         # reporters with an unreadable sources file
     for f in sorted(Path(root).glob('*@*.sources.toml')):
         client, _, rest = f.name[:-len('.sources.toml')].partition('@')
         rid = display_reporter_id(rest)
         label = f'{client}@{rid}'
+        if client not in _REPORTER_KEYED:
+            left_out.append((label, f'{client} takes no per-reporter '
+                             f'receiver'))
+            continue
         try:
             keys = ClientSources.load(f'{client}@{rest}', Path(root)).selected
         except (OSError, ValueError) as e:
@@ -671,7 +678,12 @@ def _adopt_instances(root: Path):
         by_rid.setdefault(rid, {})[client] = keys[0].identifier
 
     receivers = []
+    for rid in sorted(bad):
+        left_out.append((rid, 'one of its sources files is unreadable; '
+                         'nothing adopted for it'))
     for rid in sorted(by_rid):
+        if rid in bad:
+            continue
         names = by_rid[rid]
         radiods = {v.lower(): v for v in names.values()}
         if len(radiods) > 1:

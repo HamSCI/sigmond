@@ -9,6 +9,14 @@ from .test_bringup_receivers import (A, B, TWO_REMOTE, _found, _no_coordination,
                                      _profile_with)
 from .test_sources_bind import _bringup_args, _bringup_env, _load_smd
 
+@pytest.fixture(autouse=True)
+def _pinned_radiod_cpus(monkeypatch):
+    """The gate asks systemd for radiod's CPUs on a radiod host; pin the
+    answer so no test runs the host's systemctl (final review R17.3)."""
+    import sigmond.cpu
+    monkeypatch.setattr(sigmond.cpu, 'get_radiod_cpus', lambda: {0, 1, 2, 3})
+
+
 PAIRS = [('wspr-recorder', 'AC0G/B1A'), ('psk-recorder', 'AC0G/B1A'),
          ('wspr-recorder', 'AC0G/B1B'), ('psk-recorder', 'AC0G/B1B')]
 
@@ -63,7 +71,9 @@ def test_one_receiver_never_refuses(tmp_path, monkeypatch, capsys):
 def test_too_small_host_refuses_before_planning(tmp_path, monkeypatch, capsys):
     smd, calls = _declared(tmp_path, monkeypatch, TWO_REMOTE)
     monkeypatch.setattr(smd.os, 'cpu_count', lambda: 1)
-    assert smd.cmd_bringup(_bringup_args()) == 1
+    monkeypatch.setattr(smd, '_need_root', lambda *a, **k: False)
+    # A real run refuses; the gate returns before anything is planned.
+    assert smd.cmd_bringup(_bringup_args(dry_run=False)) == 1
     assert calls == []
     cap = capsys.readouterr()
     assert 'capacity:' in cap.out + cap.err
@@ -84,3 +94,27 @@ def test_ignore_capacity_warns_and_proceeds(tmp_path, monkeypatch, capsys):
     assert calls
     cap = capsys.readouterr()
     assert 'capacity:' in cap.out + cap.err
+
+
+def test_dry_run_warns_and_carries_on(tmp_path, monkeypatch, capsys):
+    """R17.6: --dry-run shows the whole plan; the verdict is a warning."""
+    smd, calls = _declared(tmp_path, monkeypatch, TWO_REMOTE)
+    monkeypatch.setattr(smd.os, 'cpu_count', lambda: 1)
+    assert smd.cmd_bringup(_bringup_args(dry_run=True)) == 0
+    assert calls
+    cap = capsys.readouterr()
+    assert 'short by' in cap.out + cap.err
+    assert 'proceeding: --dry-run' in cap.out + cap.err
+    assert 'nothing installed' not in cap.out + cap.err
+
+
+def test_a_radiod_host_reads_the_pinned_radiod_cpus(tmp_path, monkeypatch, capsys):
+    from .test_bringup_receivers import _radiod_host
+    smd, calls = _declared(tmp_path, monkeypatch, TWO_REMOTE)
+    monkeypatch.setattr(smd.os, 'cpu_count', lambda: 16)
+    _radiod_host(monkeypatch, smd)
+    import sigmond.sources as sources
+    monkeypatch.setattr(sources, 'discover_radiods', lambda timeout=5.0: [])
+    assert smd.cmd_bringup(_bringup_args(profile='dasi2')) == 0
+    out = capsys.readouterr().out
+    assert '4 for radiod,' in out and '(estimated)' not in out

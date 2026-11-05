@@ -153,3 +153,19 @@ def test_watch_usb_is_offered_with_its_flags():
                   script, flags=re.M)
     assert m, "no flag completion for `smd watch usb`"
     assert {"--once", "--seconds"} <= set(m.group(1).split())
+
+
+def test_admin_offers_receiver_and_its_subverbs():
+    """R17.8: `smd admin receiver` (list, apply, help) completes."""
+    script = _completion_script()
+    m = re.search(r'local admin_cmds="([^"]*)"', script)
+    assert m and "receiver" in m.group(1).split()
+    admin = script[script.index("\n                admin)\n                    # `smd admin <subverb>"):]
+    arm = re.search(r'^\s+receiver\)\s*\n(.*?)^\s+esac\s*$', admin,
+                    flags=re.M | re.S)
+    assert arm, "no receiver) arm under `smd admin`"
+    lists = [set(w.split()) for w in
+             re.findall(r'compgen -W "([^"]*)"', arm.group(1))]
+    assert {"list", "apply", "help"} in lists
+    assert {"list", "apply"} <= _help_verbs("admin", "receiver")
+    assert {"--dry-run", "--clients"} <= _help_flags("admin", "receiver", "apply")
