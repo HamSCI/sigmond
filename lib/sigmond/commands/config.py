@@ -631,6 +631,123 @@ def _patch_host_block(path: Path, host: Host) -> None:
 # smd config render  (site-profile.toml -> coordination.toml/.env)
 # ---------------------------------------------------------------------------
 
+CLIENTS_ROOT = Path('/etc/sigmond/clients')
+
+
+def _adopt_instances(root: Path):
+    """Map existing instances to receivers.
+
+    Returns ``(receivers, left_out)``.  One receiver per reporter ID; its
+    clients are those with an instance for that reporter whose sources file
+    holds exactly one ``radiod:`` key.  A reporter whose instances name two
+    radiods, and an instance whose file is empty or holds another kind of
+    key, go to ``left_out`` as ``(label, reason)``; nothing is guessed.
+    """
+    from ..instance import display_reporter_id
+    from ..receivers import Receiver
+    from ..sources import ClientSources
+
+    by_rid: dict = {}        # display id -> {client: radiod}
+    left_out: list = []
+    bad: set = set()
+    for f in sorted(Path(root).glob('*@*.sources.toml')):
+        client, _, rest = f.name[:-len('.sources.toml')].partition('@')
+        rid = display_reporter_id(rest)
+        label = f'{client}@{rid}'
+        try:
+            keys = ClientSources.load(f'{client}@{rest}', Path(root)).selected
+        except (OSError, ValueError) as e:
+            left_out.append((label, f'sources file unreadable ({e})'))
+            bad.add(rid)
+            continue
+        if not keys:
+            left_out.append((label, 'its sources file selects nothing'))
+            continue
+        if len(keys) != 1 or keys[0].type != 'radiod':
+            left_out.append((label, 'its sources file holds '
+                             + ', '.join(str(k) for k in keys)
+                             + ', not one radiod'))
+            continue
+        by_rid.setdefault(rid, {})[client] = keys[0].identifier
+
+    receivers = []
+    for rid in sorted(by_rid):
+        names = by_rid[rid]
+        radiods = {v.lower(): v for v in names.values()}
+        if len(radiods) > 1:
+            left_out.append((rid, 'its instances name two radiods: '
+                             + ', '.join(sorted(radiods.values()))))
+            continue
+        receivers.append(Receiver(reporter_id=rid,
+                                  radiod=next(iter(names.values())),
+                                  clients=tuple(sorted(names))))
+    return receivers, left_out
+
+
+def _render_init(args) -> int:
+    from ..bringup import _REPORTER_KEYED
+    from ..receivers import (ReceiverError, load_receivers,
+                             validate_receivers, write_receivers)
+    dry = getattr(args, 'dry_run', False)
+    exists = SITE_PROFILE_PATH.exists()
+    if exists:
+        try:
+            declared = load_receivers(SITE_PROFILE_PATH)
+        except ReceiverError as e:
+            err(f'{SITE_PROFILE_PATH}: {e}')
+            return 1
+        if declared:
+            n = len(declared)
+            info(f'{SITE_PROFILE_PATH} already declares {n} '
+                 f'receiver{"" if n == 1 else "s"} — left unchanged')
+            return 0
+
+    receivers, left_out = _adopt_instances(CLIENTS_ROOT)
+    for label, why in left_out:
+        warn(f'left out: {label} — {why}')
+    if receivers:
+        problems = validate_receivers(receivers,
+                                      profile_clients=_REPORTER_KEYED)
+        if problems:
+            for p in problems:
+                err(p)
+            err('nothing written. Write the [[receiver]] blocks by hand in '
+                f'{SITE_PROFILE_PATH} (a second receiver on one radiod '
+                'names same_antenna_as), then run: smd admin receiver apply')
+            return 1
+        for r in receivers:
+            info(f'receiver {r.reporter_id} on {r.radiod}: '
+                 + ', '.join(r.clients))
+
+    if dry:
+        if not exists:
+            info(f'--dry-run: would write {SITE_PROFILE_PATH} from the template')
+        if receivers:
+            info(f'--dry-run: would write {len(receivers)} receiver(s) to '
+                 f'{SITE_PROFILE_PATH}')
+        info('--dry-run: nothing written.')
+        return 0
+
+    if exists and not receivers:
+        info(f'{SITE_PROFILE_PATH} already exists — left unchanged')
+        return 0
+    try:
+        if not exists:
+            SITE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SITE_PROFILE_PATH.write_text(SITE_PROFILE_TEMPLATE)
+        if receivers:
+            write_receivers(SITE_PROFILE_PATH, receivers)
+    except PermissionError:
+        err(f'permission denied writing {SITE_PROFILE_PATH}; re-run smd as root')
+        return 1
+    if receivers:
+        ok(f'wrote {len(receivers)} receiver(s) to {SITE_PROFILE_PATH} — '
+           f'next: smd admin receiver list')
+    else:
+        ok(f'wrote {SITE_PROFILE_PATH} — edit it, then run: smd config render')
+    return 0
+
+
 def cmd_config_render(args) -> int:
     """Render coordination.toml/.env from /etc/sigmond/site-profile.toml.
 
@@ -640,17 +757,7 @@ def cmd_config_render(args) -> int:
     that all clients consume. Secrets are out of scope (see `smd admin secrets`).
     """
     if getattr(args, 'init', False):
-        if SITE_PROFILE_PATH.exists():
-            info(f'{SITE_PROFILE_PATH} already exists — left unchanged')
-            return 0
-        try:
-            SITE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            SITE_PROFILE_PATH.write_text(SITE_PROFILE_TEMPLATE)
-        except PermissionError:
-            err(f'permission denied writing {SITE_PROFILE_PATH}; re-run smd as root')
-            return 1
-        ok(f'wrote {SITE_PROFILE_PATH} — edit it, then run: smd config render')
-        return 0
+        return _render_init(args)
 
     profile = load_site_profile(SITE_PROFILE_PATH)
     if profile is None:
