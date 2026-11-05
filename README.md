@@ -120,8 +120,9 @@ in upper case, as in `AC0G-SIGMA` or `AC0G-B2`.  A hostname that already starts
 with `<CALL>-` stands alone.  Once the machine registers, the name sticks.
 
 `smd remote status` shows whether remote access is on, and `smd remote on` or
-`smd remote off` switches it.  The local switch changes system files, so these
-commands need root.
+`smd remote off` switches it.  Type these as yourself, never with `sudo`.  The
+switch changes system files, so `smd` asks for root through sudo on its own and
+may ask for your password.
 
 A machine that runs only radiod and ka9q-web never runs bring-up.  On such a
 machine, run this once:
