@@ -744,7 +744,8 @@ def station_identity_env(coord: 'Coordination') -> dict:
 
 
 def render_env(coord: Coordination,
-               passthrough_lookup: Optional[Callable[[str], list]] = None) -> str:
+               passthrough_lookup: Optional[Callable[[str], list]] = None,
+               receivers: Optional[list] = None) -> str:
     """Render the coordination as KEY=VALUE lines suitable for systemd
     EnvironmentFile=.
 
@@ -752,7 +753,21 @@ def render_env(coord: Coordination,
     returns the list of ``extras`` keys that client wants piped into
     coordination.env.  Defaults to reading the client's deploy.toml.
     Tests inject a fake lookup to avoid touching ``/opt/git/sigmond``.
+
+    ``receivers`` is the site profile's [[receiver]] list.  ``None`` loads it
+    from site-profile.toml, so every writer of coordination.env carries it.
+    An unreadable or invalid profile warns once and adds no RECEIVER_* lines.
     """
+    if receivers is None:
+        try:
+            from . import site_profile as _sp
+            from .receivers import ReceiverError, load_receivers
+            receivers = load_receivers(_sp.SITE_PROFILE_PATH)
+        except (ReceiverError, OSError, UnicodeError) as e:
+            print(f'sigmond: coordination.env: no RECEIVER_* lines: '
+                  f'site-profile.toml receiver list unreadable ({e})',
+                  file=sys.stderr)
+            receivers = []
     if passthrough_lookup is None:
         passthrough_lookup = _passthrough_extras_for
 
@@ -861,6 +876,14 @@ def render_env(coord: Coordination,
                 continue
             prefix = _env_key('KA9Q_WEB', c.instance)
             lines.append(f'{prefix}_PORT={c.extras["port"]}')
+
+    # The [[receiver]] list: which radiod each reporter ID listens to.
+    if receivers:
+        lines.append('')
+        lines.append(f'RECEIVER_COUNT={len(receivers)}')
+        for n, r in enumerate(receivers, 1):
+            lines.append(f'RECEIVER_{n}_REPORTER={r.reporter_id}')
+            lines.append(f'RECEIVER_{n}_RADIOD={r.radiod}')
 
     # coordination.env feeds the EnvironmentFile of root services, and some
     # values in it began as mDNS data a LAN device chose.  A newline there

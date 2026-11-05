@@ -5485,7 +5485,9 @@ _PRELOAD_MODULES = {
               'sigmond.build_stamp', 'sigmond.gitowner',
               # _refresh_cli_reference, after the restart stage
               'sigmond.cli_reference', 'sigmond.cli_walk', 'sigmond.psws',
-              'sigmond.site_profile', 'sigmond.snapshot'),
+              'sigmond.site_profile', 'sigmond.snapshot',
+              # render_env reads the [[receiver]] list
+              'sigmond.receivers', 'sigmond.bringup', 'sigmond.paths'),
 }
 
 

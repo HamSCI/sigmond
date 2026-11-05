@@ -664,10 +664,35 @@ def cmd_config_render(args) -> int:
         info('  scaffold one with:  smd config render --init')
         return 1
 
+    # A profile that holds only [[receiver]] entries (written by `receiver
+    # apply` or `sources bind` on a host with no site profile yet) has no
+    # identity to publish.  Leave coordination.toml's identity as it is.
+    import tomllib
+    try:
+        with open(SITE_PROFILE_PATH, 'rb') as fh:
+            has_station = 'station' in tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        has_station = True
+    if not has_station:
+        info(f'{SITE_PROFILE_PATH.name} has no [station] table; identity '
+             f'left as coordination.toml has it')
+
+    from ..bringup import _REPORTER_KEYED
+    from ..receivers import ReceiverError, load_receivers, validate_receivers
+    try:
+        rx_problems = validate_receivers(load_receivers(SITE_PROFILE_PATH),
+                                         profile_clients=_REPORTER_KEYED)
+    except ReceiverError as e:
+        rx_problems = [str(e)]
+    if rx_problems:
+        for p in rx_problems:
+            err(p)
+        return 1
+
     problems = []
-    if not profile.call:
+    if has_station and not profile.call:
         problems.append('station.callsign is empty')
-    if not profile.grid and not (profile.lat or profile.lon):
+    if has_station and not profile.grid and not (profile.lat or profile.lon):
         problems.append('need station.grid_square or latitude/longitude')
     if profile.psws_enabled and not profile.psws_station_id:
         problems.append('psws.enabled but station_id missing')
@@ -714,9 +739,10 @@ def cmd_config_render(args) -> int:
 
     if getattr(args, 'dry_run', False):
         coord = load_coordination(COORDINATION_PATH)
-        coord.host = Host(call=profile.call, grid=profile.grid,
-                          lat=profile.lat, lon=profile.lon)
-        coord.station = station
+        if has_station:
+            coord.host = Host(call=profile.call, grid=profile.grid,
+                              lat=profile.lat, lon=profile.lon)
+            coord.station = station
         if heartbeat is not None:
             coord.heartbeat = heartbeat
         if uploads is not None:
@@ -733,10 +759,11 @@ def cmd_config_render(args) -> int:
         return 0
 
     try:
-        write_host_identity(call=profile.call, grid=profile.grid,
-                            lat=profile.lat, lon=profile.lon,
-                            path=COORDINATION_PATH)
-        _patch_station_block(COORDINATION_PATH, station)
+        if has_station:
+            write_host_identity(call=profile.call, grid=profile.grid,
+                                lat=profile.lat, lon=profile.lon,
+                                path=COORDINATION_PATH)
+            _patch_station_block(COORDINATION_PATH, station)
         if heartbeat is not None:
             _patch_heartbeat_block(COORDINATION_PATH, heartbeat)
         if uploads is not None:
@@ -744,7 +771,7 @@ def cmd_config_render(args) -> int:
     except PermissionError:
         err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
         return 1
-    blocks = ('[host] + [station]'
+    blocks = (('[host] + [station]' if has_station else 'no identity')
               + (' + [heartbeat]' if heartbeat is not None else '')
               + (' + [uploads]' if uploads is not None else ''))
     ok(f'updated {COORDINATION_PATH} ({blocks}) from {SITE_PROFILE_PATH.name}')
