@@ -371,3 +371,43 @@ def test_a_radiod_host_with_one_local_and_one_remote_receiver(
     assert sorted(ckpt.check.split(':', 1)[1].split(',')) == sorted(
         f'{c}@{r}' for c, r in want)
     assert len(_argv_steps(p, 'admin', 'receiver', 'apply')) == 1
+
+
+ONE_REMOTE = f'''
+[[receiver]]
+reporter_id = "AC0G/B1A"
+radiod = "{A}"
+clients = ["psk-recorder", "wspr-recorder"]
+'''
+
+
+def test_flags_that_match_the_declared_list_plan(tmp_path, monkeypatch, capsys):
+    """R15: Stage 1's `sources bind` wrote the list; the TUI retries with the
+    same --remote-radiod/--reporter, which must plan, not refuse."""
+    smd = _load_smd()
+    calls = _bringup_env(monkeypatch, smd, _found(A, B))
+    _profile_with(tmp_path, monkeypatch, ONE_REMOTE)
+    _no_coordination(monkeypatch)
+    assert smd.cmd_bringup(_bringup_args(remote_radiod=[A.upper()],
+                                         reporter='ac0g/b1a')) == 0
+    assert [tuple(x[:2]) for x in calls[0]['remote_radiods']] == [
+        (A, 'AC0G/B1A')]
+    cap = capsys.readouterr()
+    assert ('--remote-radiod/--reporter match the receiver list; using the '
+            'list') in cap.out + cap.err
+
+
+def test_flags_that_disagree_with_the_declared_list_refuse(
+        tmp_path, monkeypatch, capsys):
+    smd = _load_smd()
+    calls = _bringup_env(monkeypatch, smd, _found(A, B))
+    _profile_with(tmp_path, monkeypatch, ONE_REMOTE)
+    _no_coordination(monkeypatch)
+    assert smd.cmd_bringup(_bringup_args(remote_radiod=[B],
+                                         reporter='AC0G/B1A')) == 1
+    assert smd.cmd_bringup(_bringup_args(remote_radiod=[A],
+                                         reporter='AC0G/B1B')) == 1
+    assert calls == []
+    cap = capsys.readouterr()
+    assert 'drop --remote-radiod' in cap.out + cap.err
+    assert 'drop --reporter' in cap.out + cap.err

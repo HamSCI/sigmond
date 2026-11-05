@@ -10385,14 +10385,27 @@ def cmd_bringup(args) -> int:
     if declared is None:
         return 1
     if declared:
-        if remote_named:
+        # Flags that repeat the list are a retry of the run that wrote it
+        # (the TUI passes both each time); only flags that disagree refuse
+        # (ruling R15).
+        if remote_named and ({d.lower() for d in remote_named}
+                             != {r.radiod.lower() for r in declared}):
             _err('bringup: the receiver list in site-profile.toml already '
                  'names the radiods; edit it or drop --remote-radiod')
             return 1
         if cli_reporter:
-            _err('bringup: the receiver list in site-profile.toml already '
-                 'names the reporter IDs; edit it or drop --reporter')
-            return 1
+            try:
+                same = (_inst_parse_rid(cli_reporter)
+                        in {_receiver_key(r) for r in declared})
+            except ValueError:
+                same = False
+            if not same:
+                _err('bringup: the receiver list in site-profile.toml already '
+                     'names the reporter IDs; edit it or drop --reporter')
+                return 1
+        if remote_named or cli_reporter:
+            _info('--remote-radiod/--reporter match the receiver list; using '
+                  'the list')
         planned = _bringup_plan_receivers(
             declared, profile_clients=frozenset(
                 c for c in prof.clients if c not in skip),
@@ -19745,6 +19758,12 @@ def _sources_bind(status_dns: str, reporter: str, clients, *,
         _coordination._write_coordination(env_path, env_text)
         _ok(f'rendered {env_path}')
     return rc
+
+
+def _inst_parse_rid(text: str) -> str:
+    """A reporter ID in storage form (raises ValueError)."""
+    from sigmond import instance as _inst
+    return _inst.parse_user_reporter_id(text)
 
 
 def _receiver_key(r) -> str:
