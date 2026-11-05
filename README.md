@@ -117,7 +117,9 @@ finishes, and a retry timer keeps trying.
 
 The machine's remote-access name puts the callsign and the hostname together
 in upper case, as in `AC0G-SIGMA` or `AC0G-B2`.  A hostname that already starts
-with `<CALL>-` stands alone.  Once the machine registers, the name sticks.
+with `<CALL>-` stands alone.  Once `sigmond-rac activate` records the name,
+the name sticks.  A hostname of `localhost`, or one equal to the callsign,
+gives no default; pass `--site`.
 
 `smd remote status` shows whether remote access is on, and `smd remote on` or
 `smd remote off` switches it.  Type these as yourself, never with `sudo`.  The

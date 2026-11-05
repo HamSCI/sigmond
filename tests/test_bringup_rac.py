@@ -134,3 +134,25 @@ def test_announces_the_wait(tmp_path):
     smd = _load_smd()
     _, _, out = _finish(smd, tmp_path)
     assert 'bringing up remote access (up to 15 min)' in out
+
+
+_RERUN = 'sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate'
+
+
+def test_exits_nothing_retries_say_rerun_not_retry_timer(tmp_path):
+    smd = _load_smd()
+    for rc_code, words in ((4, 'no site name'), (6, 'different site name'),
+                           (7, 'wd-rac')):
+        _, _, out = _finish(smd, tmp_path, run_result=mock.Mock(returncode=rc_code))
+        assert 'remote access not up yet' in out and words in out, out
+        assert _RERUN in out
+        assert 'retry timer' not in out
+        assert 'smd remote status' in out
+
+
+def test_exits_that_retry_keep_the_timer_clause(tmp_path):
+    smd = _load_smd()
+    for rc_code in (1, 3):
+        _, _, out = _finish(smd, tmp_path, run_result=mock.Mock(returncode=rc_code))
+        assert 'the retry timer keeps trying' in out
+        assert _RERUN not in out

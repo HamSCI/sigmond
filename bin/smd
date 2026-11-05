@@ -10892,7 +10892,11 @@ _RAC_REASONS = {
     3: 'waiting on the gateway',
     4: 'no site name: set [station] callsign in /etc/sigmond/site-profile.toml',
     6: 'a different site name is already recorded',
+    7: 'the old wd-rac tunnel still runs here (stop and disable wd-rac@*)',
 }
+# Activate leaves before it installs the switch or the timer on these, so
+# nothing retries until the operator fixes the cause and runs it again.
+_RAC_NO_RETRY = (4, 6, 7)
 
 
 def _bringup_activate_rac(smd_root: Path) -> None:
@@ -10905,6 +10909,7 @@ def _bringup_activate_rac(smd_root: Path) -> None:
         return
     _info('bringing up remote access (up to 15 min) ...')
     reason = None
+    no_retry = False
     try:
         r = subprocess.run([str(smd_root / 'scripts' / 'rac' / 'sigmond-rac'),
                             'activate'],
@@ -10913,11 +10918,17 @@ def _bringup_activate_rac(smd_root: Path) -> None:
             _info('remote access is carried by the Proxmox host')
         elif r.returncode != 0:
             reason = _RAC_REASONS.get(r.returncode, f'exit {r.returncode}')
+            no_retry = r.returncode in _RAC_NO_RETRY
     except subprocess.TimeoutExpired:
         reason = 'timed out after 900 s'
     except Exception as e:  # noqa: BLE001 - must never break bring-up
         reason = f'{type(e).__name__}: {e}'
-    if reason:
+    if reason and no_retry:
+        _info(f'remote access not up yet: {reason}.  Nothing retries until '
+              'you fix that and rerun: '
+              'sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate '
+              '(smd remote status shows where it stands)')
+    elif reason:
         _info(f'remote access not up yet: {reason}; '
               'the retry timer keeps trying; smd remote status')
 

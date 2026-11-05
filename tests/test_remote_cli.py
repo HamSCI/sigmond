@@ -160,7 +160,7 @@ class RemoteCliTests(unittest.TestCase):
     def test_a_station_without_a_proxmox_host_is_pointed_at_its_own_tunnel(self):
         code, _, errs = self._run("status")
         self.assertEqual(code, remote.EXIT_NOT_PAIRED)
-        self.assertIn("sigmond-rac activate", errs)
+        self.assertIn("sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate", errs)
         self.assertNotIn("smd admin rac status", errs)
         self.assertNotIn("--pair-vm", errs)
 

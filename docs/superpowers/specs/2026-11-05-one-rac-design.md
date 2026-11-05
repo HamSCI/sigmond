@@ -133,12 +133,24 @@ retry timer carries on, as on a host.
 `sigmond-rac activate` ends with one of these exit codes.
 
 - 0: the tunnel is up.
-- 1: it could not start, or registration failed.
+- 1: it could not start, registration failed, or the payload would not clone.
+- 2: bad arguments.
 - 3: remote access is wanted on but not up yet; the retry timer keeps trying.
 - 4: no site name; set `[station] callsign` in `/etc/sigmond/site-profile.toml`, or pass `--site`.
 - 5: a Proxmox host carries this machine's remote access.
 - 6: a different name is already recorded; to rename on purpose, remove
   `/etc/sigmond-appliance/rac-site` and rerun with `--site`.
+- 7: the old `wd-rac` tunnel still runs here.  Activate stops before it registers, so the machine
+  gets no second tunnel and no second RAC number.  Stop and disable `wd-rac@*`, rerun, and accept a
+  new number and new ports (§6).
+
+Exits 4, 6 and 7 leave before activate installs the switch or the retry timer, so nothing retries
+them.  Bring-up prints the remedy and tells the operator to rerun `sigmond-rac activate`.
+
+Before it registers, `activate` looks for the payload.  When none exists, it clones
+`https://github.com/HamSCI/sigmond-rac` into `/opt/git/sigmond/sigmond-rac` as root and chowns the
+checkout to the owner of `/opt/git/sigmond/sigmond`.  `smd install sigmond-rac` is the wrong tool
+here: its catalog script installs the guest `wd-rac` tunnel.
 
 **The switch.**  On a host the VM reaches the switch over the paired ssh key, as today.  On bare
 metal `smd remote` finds no pairing but a local `/usr/local/sbin/sigmond-rac-switch`, and runs it

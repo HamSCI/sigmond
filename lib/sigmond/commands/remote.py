@@ -168,7 +168,7 @@ def _not_paired() -> int:
     else:
         err('smd remote switches the tunnel of an appliance station through its '
             'Proxmox host, and this machine has none')
-        info('A station without a Proxmox host runs its tunnel here:  sigmond-rac activate')
+        info('A station without a Proxmox host runs its tunnel here:  sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate')
     return EXIT_NOT_PAIRED
 
 
