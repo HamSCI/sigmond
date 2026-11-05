@@ -618,6 +618,18 @@ class HybridCpuPlacementTests(unittest.TestCase):
                                     performance_cpus=_HYBRID_P)
         self.assertEqual(out, [{2, 3}, {4, 5}, {6, 7}])
 
+    def test_a_performance_set_matching_no_core_offers_nothing(self):
+        # No core lies wholly inside {1, 3}, so no performance core exists.
+        # The answer is nothing, never the efficiency cores: the shortfall
+        # then reports the full unit count and bring-up stops.
+        self.assertEqual(
+            eligible_radiod_cores(_HYBRID_CORES, set(), performance_cpus={1, 3}),
+            [])
+        self.assertEqual(
+            radiod_core_shortfall(['radiod@x.service'], cores=_HYBRID_CORES,
+                                  isolated_cpus=set(), performance_cpus={1, 3}),
+            1)
+
     def test_radiod_lands_on_the_top_performance_core(self):
         got = assign_radiod_cores(['radiod@sigma.service'], {},
                                   cores=_HYBRID_CORES, isolated_cpus=set(),

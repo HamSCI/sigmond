@@ -261,6 +261,10 @@ def eligible_radiod_cores(cores: "list[set]",
        2026-11-04): the top-core rule below put radiod on E-core 15 alone,
        and it lost a full second of samples every second, "USB xfer
        failures +0", until it quit.  Empty means no hybrid split: no filter.
+       When ``performance_cpus`` is set but no core lies wholly inside it,
+       the answer is ``[]``, never the efficiency cores: placement offers
+       radiod nothing, ``radiod_core_shortfall`` reports the full unit
+       count, and ``smd apply`` refuses.
 
     Two more filters follow, in order:
 
@@ -280,8 +284,9 @@ def eligible_radiod_cores(cores: "list[set]",
 
     Each filter degrades rather than returning nothing: an isolated set
     that admits no whole core falls back to "anything but core 0", and a
-    single-core host falls back to that one core.  Callers always get a
-    non-empty list as long as ``cores`` is non-empty.
+    single-core host falls back to that one core.  Callers get a non-empty
+    list as long as ``cores`` is non-empty, with one exception: a
+    performance set that matches no whole core (filter 0) returns ``[]``.
 
     ``need`` is how many radiod instances want a core of their own.  When
     the isolated set admits fewer whole cores than that, the list grows
@@ -298,8 +303,9 @@ def eligible_radiod_cores(cores: "list[set]",
         return []
     if performance_cpus:
         fast = [c for c in cores if set(c) <= set(performance_cpus)]
-        if fast:
-            cores = fast
+        if not fast:
+            return []
+        cores = fast
     off_boot = [c for c in cores if 0 not in c]
     if not off_boot:
         return list(cores)
