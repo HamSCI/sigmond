@@ -17,11 +17,30 @@ def test_reporter_id_from_the_status_name():
     assert reporter_id_for('AC0G', 'sigma-status.local') == 'AC0G/SIGMA'
 
 
-def test_advertised_call_drops_the_reporter_suffix():
-    # sigma advertises "AC0G/S RX-888 Mk2": the first token is a reporter ID.
-    assert advertised_call('AC0G/S RX-888 Mk2') == 'AC0G'
+def test_advertised_call_is_the_first_token_upper_cased():
     assert advertised_call('ac0g @EM38ww x') == 'AC0G'
     assert advertised_call('') == ''
+    # The token keeps its /suffix: "AC0G/S" is a reporter ID, not a call.
+    assert advertised_call('AC0G/S RX-888 Mk2') == 'AC0G/S'
+
+
+def test_a_radiod_advertising_a_reporter_id_is_not_kept():
+    # Michael's LAN, 2026-11-05.  sigma and B4 run their own uploads under
+    # AC0G/S and AC0G/B4 (sigmond's default description is
+    # "<reporter_id> RX-888 Mk2"); binding them on B2 would duplicate
+    # every spot they already send.
+    found = [R('ac0g-b1-a-status.local', 'AC0G @EM38ww B1-a longwire'),
+             R('ac0g-b1-b-status.local', 'AC0G @EM38ww B1-b T3FD'),
+             R('sigma-status.local', 'AC0G/S RX-888 Mk2'),
+             R('b4-status.local', 'AC0G/B4 RX-888 Mk2')]
+    assert [r.status_dns for r in select_radiods(found, 'AC0G', [])] == \
+        ['ac0g-b1-a-status.local', 'ac0g-b1-b-status.local']
+
+
+def test_a_reporter_id_radiod_is_bound_when_named():
+    found = [R('sigma-status.local', 'AC0G/S RX-888 Mk2')]
+    got = select_radiods(found, 'AC0G', ['sigma-status.local'])
+    assert [r.status_dns for r in got] == ['sigma-status.local']
 
 
 def test_own_callsign_radiods_are_kept_others_listed_only():

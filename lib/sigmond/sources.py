@@ -423,13 +423,18 @@ def discover_radiods(timeout: float = 5.0) -> list[DiscoveredRadiod]:
 
 
 def advertised_call(label: str) -> str:
-    """First token of the advertised name, upper-cased, `/suffix` removed.
+    """First whitespace token of the advertised name, upper-cased.
 
-    sigma (2026-11-05) advertises "AC0G/S RX-888 Mk2": its first token is
-    a reporter ID, and the station's call is the part before the slash.
+    The token stays whole: select_radiods keeps a radiod only when it
+    EQUALS the callsign.  A token with a `/` names a station that uploads
+    under its own reporter ID.  sigma (2026-11-05) advertises
+    "AC0G/S RX-888 Mk2" and B4 "AC0G/B4 RX-888 Mk2" (sigmond's default
+    description is "<reporter_id> RX-888 Mk2"); stripping the suffix kept
+    both on AC0G-B2 and would have sent every spot twice.  Such a radiod
+    is bound only when named with --remote-radiod.
     """
     toks = (label or "").split()
-    return toks[0].split("/")[0].upper() if toks else ""
+    return toks[0].upper() if toks else ""
 
 
 def reporter_id_for(callsign: str, status_dns: str) -> str:

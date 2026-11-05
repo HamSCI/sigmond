@@ -136,8 +136,12 @@ smd bringup client --callsign AC0G --grid EM38ww
 
 Bring-up browses the LAN for radiods and prints every one it finds.  It
 keeps those whose advertised name starts with your callsign, so a radiod
-that advertises "AC0G @EM38ww B1-a longwire" belongs to AC0G.  A
-neighbour's radiod shows up in the list but stays unused.  Bring-up needs
+that advertises "AC0G @EM38ww B1-a longwire" belongs to AC0G.  The first
+word must equal the callsign.  A radiod that advertises a reporter ID, a
+call with a `/suffix` such as "AC0G/S RX-888 Mk2", runs its own uploads
+under that ID, so bring-up binds it only when you name it with
+`--remote-radiod`.  A neighbour's radiod shows up in the list but stays
+unused.  Bring-up needs
 the callsign to make that choice, and stops without one.  It prints one
 line for each radiod it keeps, with the radiod's host, its advertised name
 and the reason it kept it.  On a terminal it then asks before it binds them.
