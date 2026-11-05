@@ -163,10 +163,11 @@ clients take their source from that record, not from the template.
 The source file gets one key, `selected`, written and read alike.
 
 One record holds each instance's binding: its source file under `/etc/sigmond/clients/`.
-Coordination's `[[clients.X]] radiod_id` and the env file derive from it.  Each radiod-bound
-client gets a renderer that writes its sources into that instance's own config.  Today only
-wspr-recorder has one, and it writes the shared `config.toml`, not the instance's file; psk-recorder
-and meteor-scatter need theirs.  `SIGMOND_RADIOD_STATUS` stays for hosts with exactly one radiod.
+Coordination's `[[clients.X]] radiod_id` and the env file derive from it.  `smd admin sources
+apply` already renders each instance's source into that instance's own config: `[[source]]` for
+wspr-recorder, the `[radiod]`/`[[radiod]]` status for psk-recorder and meteor-scatter.  What is
+missing is everything upstream of it: nothing writes the radiod into coordination or ties an
+instance to its radiod.  `SIGMOND_RADIOD_STATUS` stays for hosts with exactly one radiod.
 *(Builder's call, 2026-11-04.)*
 
 ### 4.5 Clients survive an outage (F13)
