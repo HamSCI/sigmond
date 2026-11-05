@@ -386,6 +386,15 @@ def test_the_page_lists_the_six_channels_the_tunnel_declares():
         assert re.search(rf"RAC_BASE_\w+={base}\b", WIZARD), base
 
 
+def test_the_station_heredoc_declares_exactly_four_channels():
+    # Station mode spells its names ${SITE}-vm-*, with braces, so the
+    # six-channel count above does not see them.
+    start = WIZARD.index("<<STNTOMLEOF")
+    block = WIZARD[start:WIZARD.index("\nSTNTOMLEOF", start)]
+    declared = re.findall(r'name = "\$\{SITE\}-([a-z-]+)"', block)
+    assert sorted(declared) == ["vm-gmag", "vm-ssh", "vm-station", "vm-web"]
+
+
 def test_the_pairing_checks_the_page_promises_are_the_hosts_units():
     # §8 says the host checks the pairing a few minutes after every boot, every
     # 6 hours and when its sshd key file changes.  The three lines below arm

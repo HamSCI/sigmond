@@ -678,7 +678,9 @@ rac_write_config(){
     if [ "${RAC_MODE:-host}" = station ]; then
         # Bare metal: frpc dials the machine's own services directly.  The
         # proxy names keep the vm-* suffixes so the gateway dashboard shows
-        # them in the same columns as a Proxmox station.
+        # them in the same columns as a Proxmox station.  The names below use
+        # ${SITE} with braces on purpose: tests/test_docs_remote_access.py counts
+        # the host's six channels by the form $SITE-... and must not see these.
         ( umask 077; cat > "$_toml.new" <<STNTOMLEOF
 # Written by sigmond-setup $(date -u +%F) — RAC #$RACN, site $SITE (station mode).
 # ONE frpc on this machine carries four channels, straight to its own services.

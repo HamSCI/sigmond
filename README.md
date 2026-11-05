@@ -109,6 +109,26 @@ and timing; `client` decodes from radiods on other machines; see "Decode-only ho
 below.  Bring-up skips, with a warning, anything
 whose hardware it cannot find on the USB bus.
 
+Bring-up also sets up remote access when it runs on bare metal.  It runs
+`sigmond-rac activate`, which registers the machine with the gateway and
+starts its tunnel.  A Proxmox appliance VM skips this step, because its host
+carries the machine's remote access.  If registration fails, bring-up still
+finishes, and a retry timer keeps trying.
+
+The machine's remote-access name joins the callsign and the hostname, upper
+case: `AC0G-SIGMA`, `AC0G-B2`.  A hostname that already starts with
+`<CALL>-` serves alone.  Once registered, the name sticks.  `smd remote status`
+shows whether remote access is on, and `smd remote on` or `smd remote off`
+switches it.  A machine that runs only radiod and ka9q-web never runs
+bring-up.  On such a machine, run this once:
+
+```bash
+sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate --site AC0G-B1
+```
+
+The [design](docs/superpowers/specs/2026-11-05-one-rac-design.md) explains the
+channels, the ports and the exit codes.
+
 Add `--dry-run` to see every step first.  Add `--non-interactive` to accept
 radiod's defaults instead of answering its questions.
 

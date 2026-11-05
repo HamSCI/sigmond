@@ -1,7 +1,7 @@
 # One remote-access implementation, on a Proxmox host or on bare metal
 
 > **Audience:** contributor
-> **Status:** design; Michael's questions answered 2026-11-05; Rob's (§8, 1-3) open; no plan yet
+> **Status:** design; Michael's questions answered 2026-11-05; Rob's (§8, 1-3) open; steps 1-4 built on branch `rac-bare-metal`, proof on bare metal pending
 > **Written:** 2026-11-05, at Michael's direction: "however the method works now should be shared
 > and available for use when installing sigmond in a Proxmox setting or bare metal, so it's one
 > code base."
@@ -77,6 +77,15 @@ wizard sources `rac-lib.sh` from its own checkout or payload and installs the sw
 point to `/usr/local/sbin`, as it installs the heredocs today.  The tests change only their source
 path.  *(My call: bash stays bash; the code runs on a Proxmox host with no Python venv, and a
 straight move is the cheapest proof of no regression.)*
+
+**Ruling 1, made while planning (2026-11-05): the code has not moved yet.**  pm-align delivers
+only `sigmond-wizard.sh` to a field Proxmox host and installs it as `sigmond-setup`.  It also
+extracts the switch and unit heredocs from that file's text.  Six tests read functions out of the
+wizard by line scan.  A move now would break every field host's next `pm-align --apply` and force
+a rewrite of those tests.  So the wizard gained a library mode, and `scripts/rac/sigmond-rac`
+sources it.  One code base serves both modes, as Michael asked.  The move into `scripts/rac/`
+waits until pm-align can deliver those files to a Proxmox host.  That change belongs to Rob's
+area.
 
 **One mode switch.**  `RAC_MODE=host|station`, set by whoever installs it:
 
