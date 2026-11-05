@@ -19592,8 +19592,7 @@ def _receiver_profile_clients() -> frozenset:
 def _receiver_apply(receivers, *, profile_clients,
                     etc_root: Path = Path('/etc'), coord_path=None,
                     profile_path=None, dry_run: bool = False,
-                    inventory_rows=None, hosts=None, only_these: bool = False,
-                    validate_all: bool = True) -> int:
+                    inventory_rows=None, hosts=None, validate_all: bool = True) -> int:
     """Bind every receiver in ``receivers`` (the declared list).
 
     Validates first: on any problem it prints every message, touches
@@ -19605,7 +19604,7 @@ def _receiver_apply(receivers, *, profile_clients,
     runs on; a radiod already in coordination keeps the host it has, and a
     blank one lets `_sources_bind` look in the inventory.
 
-    ``only_these`` / ``validate_all=False`` serve `sources bind`: it applies
+    ``validate_all=False`` serves `sources bind`: it applies
     one receiver, but validates the whole stored list so that a bind cannot
     leave an invalid record behind unreported."""
     from sigmond import upload as _upload
@@ -19756,12 +19755,22 @@ def cmd_sources_bind(args) -> int:
     # same reporter again replaces its entry.
     from sigmond import site_profile as _sp
     from sigmond.receivers import (Receiver, ReceiverError, load_receivers,
-                                   upsert_receiver)
+                                   merged_receivers, validate_receivers,
+                                   write_receivers)
     try:
         rec = Receiver(reporter_id=args.reporter, radiod=args.status_dns,
                        clients=tuple(clients), injector=bool(args.timing))
-        upsert_receiver(_sp.SITE_PROFILE_PATH, rec)
-        stored = [r for r in load_receivers(_sp.SITE_PROFILE_PATH)
+        # Build the candidate list in memory and write it only when it
+        # validates, so a refused bind leaves site-profile.toml as it was.
+        candidate = merged_receivers(load_receivers(_sp.SITE_PROFILE_PATH), rec)
+        msgs = validate_receivers(
+            candidate, profile_clients=_receiver_profile_clients())
+        if msgs:
+            for m in msgs:
+                _err(f'sources bind: {m}')
+            return 1
+        write_receivers(_sp.SITE_PROFILE_PATH, candidate)
+        stored = [r for r in candidate
                   if _receiver_key(r) == _receiver_key(rec)]
     except (ReceiverError, ValueError) as exc:
         _err(f'sources bind: {exc}')
@@ -19771,7 +19780,7 @@ def cmd_sources_bind(args) -> int:
         stored, profile_clients=_receiver_profile_clients(),
         profile_path=_sp.SITE_PROFILE_PATH, inventory_rows=rows or [],
         hosts={args.status_dns: host} if host else None,
-        only_these=True, validate_all=False)
+        validate_all=False)
 
 
 def cmd_public_ip(args) -> int:

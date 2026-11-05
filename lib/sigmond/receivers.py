@@ -258,12 +258,13 @@ def write_receivers(path: Path, receivers: list) -> None:
     _write_coordination(path, rest)
 
 
-def upsert_receiver(path: Path, r: Receiver, *, keep_unset: bool = True) -> list:
-    """Replace the receiver with ``r``'s reporter ID (storage form), else
+def merged_receivers(current: list, r: Receiver, *,
+                     keep_unset: bool = True) -> list:
+    """The list ``current`` with ``r`` upserted; nothing is written.
+    Replace the receiver with ``r``'s reporter ID (storage form), else
     append.  With ``keep_unset``, the fields ``r`` leaves at their defaults
     (antenna, same_antenna_as, upload, merge_into, merge_grid) carry over
     from the stored receiver."""
-    current = load_receivers(path)
     key = _storage(r.reporter_id)
     out, found = [], False
     for old in current:
@@ -283,5 +284,11 @@ def upsert_receiver(path: Path, r: Receiver, *, keep_unset: bool = True) -> list
         out.append(new)
     if not found:
         out.append(dataclasses.replace(r, reporter_id=_display(r.reporter_id)))
+    return out
+
+
+def upsert_receiver(path: Path, r: Receiver, *, keep_unset: bool = True) -> list:
+    """`merged_receivers` over the stored list, written back to ``path``."""
+    out = merged_receivers(load_receivers(path), r, keep_unset=keep_unset)
     write_receivers(path, out)
     return out

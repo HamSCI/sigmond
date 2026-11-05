@@ -197,3 +197,16 @@ def test_receiver_list_json(box, capsys):
     assert doc['receivers'][0]['uploads'] is True
     assert doc['receivers'][1]['uploads'] is False
     assert doc['receivers'][0]['clients'] == ['psk-recorder']
+
+
+def test_a_refused_bind_leaves_the_profile_untouched(box):
+    smd = _load_smd()
+    assert _run_bind(smd, box, _bind_args(timing=False)) == 0
+    before = box.profile.read_bytes()
+    # a second reporter on a radiod already in use, with no same_antenna_as
+    assert _run_bind(smd, box, _bind_args(reporter='AC0G/B1S')) == 1
+    assert box.profile.read_bytes() == before
+    # a crafted status name
+    assert _run_bind(smd, box, _bind_args(
+        status_dns='x"\nevil.local', reporter='AC0G/B1C')) == 1
+    assert box.profile.read_bytes() == before
