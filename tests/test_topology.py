@@ -25,6 +25,7 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual(t.cpu_affinity, {
             'radiod_cpus': '', 'other_cpus': '',
             'radiod_governor': 'performance',
+            'write_kernel_isolation': False,
         })
         self.assertEqual(t.cpu_freq,
                          {'radiod_max_mhz': 3200, 'other_max_mhz': 1400,

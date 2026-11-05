@@ -37,6 +37,9 @@ _DEFAULT_CPU_AFFINITY = {
     'radiod_governor': 'performance',  # cpufreq governor on radiod cores;
                                        # override to e.g. 'schedutil' on
                                        # thermally-constrained hosts.
+    # A repo install leaves GRUB alone (AC0G-B1, 2026-11-05); true lets smd
+    # write the isolcpus drop-in there, as the image does.
+    'write_kernel_isolation': False,
 }
 _DEFAULT_CPU_FREQ = {
     'radiod_max_mhz': 3200,
@@ -157,6 +160,9 @@ def load_topology(path: Path = TOPOLOGY_PATH,
     if 'allow_shared_radiod_cores' in ca:
         cpu_affinity['allow_shared_radiod_cores'] = \
             ca['allow_shared_radiod_cores'] is True
+    if 'write_kernel_isolation' in ca:
+        cpu_affinity['write_kernel_isolation'] = \
+            ca['write_kernel_isolation'] is True
 
     timing = dict(_DEFAULT_TIMING)
     tm = raw.get('timing', {})

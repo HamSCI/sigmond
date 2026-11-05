@@ -90,6 +90,27 @@ class RepoInstall(_Harness):
         self.assertEqual(len(self.grub_runs()), 1)
 
 
+class FromToml(_Harness):
+    """The opt-in must survive the real loader, not just a hand-built dict."""
+
+    def _topo(self, body):
+        from sigmond.topology import load_topology
+        f = Path(self.tmp.name) / 'topology.toml'
+        f.write_text(body)
+        return load_topology(f).cpu_affinity
+
+    def test_toml_opt_in_reaches_the_writer_on_a_repo_install(self):
+        topo = self._topo('[cpu_affinity]\nwrite_kernel_isolation = true\n')
+        self.assertTrue(self.run_ensure(appliance=False, topo=topo))
+        self.assertEqual(self.path.read_text(), render_guest_isolation({6, 7}))
+
+    def test_toml_without_the_key_defaults_to_false(self):
+        topo = self._topo('[cpu_affinity]\nradiod_cpus = "6-7"\n')
+        self.assertIs(topo['write_kernel_isolation'], False)
+        self.assertFalse(self.run_ensure(appliance=False, topo=topo))
+        self.assertFalse(self.path.exists())
+
+
 class ImageInstall(_Harness):
 
     def test_an_image_install_still_writes_the_drop_in(self):
