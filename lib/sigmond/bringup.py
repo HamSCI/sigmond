@@ -150,6 +150,19 @@ def should_hold_uploads(coordination_path=None, root: str = '/') -> bool:
     return not coord.uploads.declared
 
 
+def _reporter_key(rid: str) -> str:
+    """A reporter ID in storage form, for comparing spellings."""
+    from .instance import parse_user_reporter_id
+    try:
+        return parse_user_reporter_id(rid)
+    except ValueError:
+        return rid
+
+
+def _same_reporter(a: str, b: str) -> bool:
+    return _reporter_key(a) == _reporter_key(b)
+
+
 def build_plan(profile, *, local_radiod: bool,
                remote_radiods=(),
                timing_radiod: str = '',
@@ -158,7 +171,10 @@ def build_plan(profile, *, local_radiod: bool,
                dormant=frozenset(), no_config=frozenset(),
                reporter: Optional[str] = None,
                sdr_absent: bool = False,
-               hold_uploads: bool = False) -> Plan:
+               hold_uploads: bool = False,
+               receivers_declared: bool = False,
+               local_receivers=(),
+               local_only=frozenset()) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
     ``local_radiod`` gates the entire radiod stack (infra, ka9q-radio, tuning,
@@ -201,21 +217,60 @@ def build_plan(profile, *, local_radiod: bool,
     per radiod, named by its reporter ID.  hf-timestd has no per-radiod
     instance: with one radiod it binds to it; with several, to
     ``timing_radiod`` alone, and with none named it installs but stays idle.
+
+    ``receivers_declared`` says site-profile.toml carries a ``[[receiver]]``
+    list.  Stage 1 then binds every receiver with ONE ``smd admin receiver
+    apply`` (in place of the per-pair ``sources bind`` steps), and a hard
+    checkpoint holds every declared instance to its own radiod.  Entries of
+    ``remote_radiods`` may then carry a third item, the receiver's clients.
+    ``local_receivers`` holds ``(status_dns, reporter_id, clients)`` for the
+    receivers on this host's own radiods; with two or more, the instance
+    loops run over them instead of ``reporter``.  ``local_only`` names the
+    reporter IDs whose instances get ``config upload ... --off`` (receivers
+    that do not upload, such as one sharing another's antenna).
     """
     deferring = bool(sdr_absent and local_radiod)
-    remote_radiods = (tuple((str(d), str(r)) for d, r in remote_radiods)
-                      if not local_radiod else ())
-    # Instances to make: one per kept radiod, else the single --reporter.
-    reporters = ([r for _, r in remote_radiods] if remote_radiods
-                 else ([reporter] if reporter else []))
-    if len(remote_radiods) == 1:
-        timing_dns = remote_radiods[0][0]
+    # (status_dns, reporter_id, clients or None); None means every bound client.
+    remote_entries = (tuple((str(e[0]), str(e[1]),
+                             tuple(e[2]) if len(e) > 2 else None)
+                            for e in remote_radiods)
+                      if (not local_radiod or receivers_declared) else ())
+    remote_radiods = tuple((d, r) for d, r, _ in remote_entries)
+    local_receivers = tuple((str(d), str(r), tuple(c))
+                            for d, r, c in local_receivers)
+    # Instances to make: (reporter, clients or None) -- one per kept radiod,
+    # one per declared local receiver when there are several, else the
+    # single --reporter.
+    if remote_entries and not local_radiod:
+        instances = [(r, c) for _, r, c in remote_entries]
     else:
-        timing_dns = next((d for d, _ in remote_radiods
+        if len(local_receivers) >= 2:
+            instances = [(r, c) for _, r, c in local_receivers]
+        elif reporter and (local_receivers or not receivers_declared):
+            # A declared list names every instance; the bare --reporter
+            # adds none it does not list.
+            only = [c for _, r, c in local_receivers
+                    if _same_reporter(r, reporter)]
+            instances = [(reporter, only[0] if only else None)]
+        else:
+            instances = []
+        instances += [(r, c) for _, r, c in remote_entries]
+    reporters = [r for r, _ in instances]
+
+    def reporters_for(client: str) -> list:
+        return [r for r, c in instances if c is None or client in c]
+
+    off_keys = {_reporter_key(r) for r in local_only}
+    # Timing follows the remote radiods only on a host with none of its own.
+    timing_pool = remote_radiods if not local_radiod else ()
+    if len(timing_pool) == 1:
+        timing_dns = timing_pool[0][0]
+    else:
+        timing_dns = next((d for d, _ in timing_pool
                            if d.lower() == (timing_radiod or '').lower()), '')
     # AC0G-B2 (spec 4.4, Michael 2026-11-05): with several radiods and none
     # named for timing, hf-timestd installs but stays idle, and says so.
-    timing_idle = bool(remote_radiods) and not timing_dns
+    timing_idle = bool(timing_pool) and not timing_dns
     steps: list = []
 
     # Pre-create the shared SQLite sink with group-writable perms BEFORE any
@@ -376,6 +431,12 @@ def build_plan(profile, *, local_radiod: bool,
                           argv=['systemctl', 'start', '--no-block',
                                 'sigmond-wisdom.service'], background=True))
         checkpoint(STAGE1, 'radiod configured', check='radiod-configured', hard=True)
+        if receivers_declared:
+            # The [[receiver]] list names each reporter's radiod; apply it
+            # once the radiods exist and before any client is configured.
+            steps.append(Step(STAGE1, 'bind receivers to local radiods',
+                              'config',
+                              argv=[smd, 'admin', 'receiver', 'apply']))
         if 'ka9q-web' in profile.local_radiod_infra and 'ka9q-web' not in skip:
             # ka9q-web builds with the Stage-1 infra above, but its unit-writer
             # refuses to install ka9q-web.service until coordination.env carries
@@ -402,7 +463,11 @@ def build_plan(profile, *, local_radiod: bool,
         # `config init` then resolves its radiod from coordination.
         bound = [c for c in profile.clients
                  if c in _REPORTER_KEYED and c not in skip]
-        for status_dns, rid in remote_radiods:
+        if receivers_declared:
+            # One writer: the declared list, applied as written (ruling R2).
+            steps.append(Step(STAGE1, 'bind declared receivers', 'config',
+                              argv=[smd, 'admin', 'receiver', 'apply']))
+        for status_dns, rid in (() if receivers_declared else remote_radiods):
             argv = [smd, 'admin', 'sources', 'bind', status_dns,
                     '--reporter', rid, '--clients', ','.join(bound)]
             if status_dns == timing_dns:
@@ -449,7 +514,8 @@ def build_plan(profile, *, local_radiod: bool,
         # the config step just wrote).  `instance add` only scaffolds the files;
         # Stage 4 enables/starts it (staggered).  Without a reporter id the
         # client falls back to its base-config start.
-        for rep_id in (reporters if client in _REPORTER_KEYED else []):
+        for rep_id in (reporters_for(client) if client in _REPORTER_KEYED
+                       else []):
             # --force makes re-add idempotent (create only missing files, leave
             # existing ones) so re-running bring-up doesn't error on an instance
             # that's already scaffolded.
@@ -465,6 +531,15 @@ def build_plan(profile, *, local_radiod: bool,
             # switch (tasks/plan-sink-control.md §10.2 step 1).  Without --via,
             # `--on` writes direct, and the in-process sender would post beside
             # the daemon.  Idempotent.
+            # A receiver that does not upload (one sharing another's antenna)
+            # gets --off, which takes no --via.
+            if _reporter_key(rep_id) in off_keys:
+                steps.append(Step(STAGE3A,
+                                  f'keep {client}@{rep_id} local (no upload)',
+                                  'config',
+                                  argv=[smd, 'config', 'upload', client,
+                                        rep_id, '--off']))
+                continue
             argv = [smd, 'config', 'upload', client, rep_id, '--on']
             if client == 'psk-recorder':
                 argv += ['--via', 'server-raw']
@@ -477,7 +552,7 @@ def build_plan(profile, *, local_radiod: bool,
     # config, whose radiod came from coordination, so on a host with several
     # radiods none of them names its own yet.  Render each instance's source
     # file (written by Stage 1's bind) into it before anything starts.
-    if remote_radiods and not deferring:
+    if (remote_radiods or (receivers_declared and instances)) and not deferring:
         steps.append(Step(STAGE3A, 'render each instance\'s radiod into its '
                                    'config', 'tune',
                           argv=[smd, 'admin', 'sources', 'apply']))
@@ -487,7 +562,8 @@ def build_plan(profile, *, local_radiod: bool,
         # checkpoint passes against it (task 7 review, 2026-11-05).  If
         # `sources apply` failed, every instance would start on that name.
         pairs = [f'{c}@{r}' for c in profile.clients
-                 if c in _REPORTER_KEYED and c not in skip for r in reporters]
+                 if c in _REPORTER_KEYED and c not in skip
+                 for r in reporters_for(c)]
         if pairs:
             checkpoint(STAGE3A, 'every instance names its own radiod',
                        check='instances-bound:' + ','.join(pairs), hard=True)
@@ -621,7 +697,7 @@ def build_plan(profile, *, local_radiod: bool,
         if reporters and client in _REPORTER_KEYED:
             # `instance enable` does systemctl enable --now on the per-reporter
             # unit (wspr-recorder@<reporter>), so it both declares and starts it.
-            for rep_id in reporters:
+            for rep_id in reporters_for(client):
                 steps.append(Step(STAGE4, f'start {client}@{rep_id} (staggered)',
                                   'start',
                                   argv=[smd, 'admin', 'instance', 'enable',
