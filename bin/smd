@@ -10633,10 +10633,16 @@ def _bringup_finish(plan, name: str, failed_steps=(), smd: str = 'smd') -> int:
     firstrun then wrote result=ok, so nothing would ever retry.  A failed
     step makes the run INCOMPLETE: rc 1, which firstrun records as a failed
     attempt and retries on the next boot, a bounded number of times."""
+    held = _bringup_first_install_hold(plan)
     if failed_steps:
         _warn(f"{len(failed_steps)} bring-up step(s) FAILED:")
         for f in failed_steps:
             _warn(f'  ✗ {f}')
+    if held and (plan.sdr_absent or failed_steps):
+        # A hold written by this partial run would otherwise leave the rerun
+        # silent: the block exists, so nothing offers the release again.
+        _info(f'uploads stay held until a complete run; to release them by '
+              f'hand: {smd} sink upload')
     if plan.sdr_absent:
         _warn(f"bringup '{name}' PARTIAL — no SDR, so radiod and the "
               "radiod-bound clients are installed but not configured or started.")
@@ -10649,11 +10655,27 @@ def _bringup_finish(plan, name: str, failed_steps=(), smd: str = 'smd') -> int:
              f"smd bringup {name}")
         return BRINGUP_INCOMPLETE_RC
     _ok(f"bringup '{name}' complete")
-    if getattr(plan, 'hold_uploads', False):
+    if held:
         _bringup_offer_upload_release(smd)
     _settle_firstrun_marker()
     _info('verify anytime with: smd admin validate')
     return 0
+
+
+def _bringup_first_install_hold(plan) -> bool:
+    """True when the first-install hold stands: this run wrote it, or an
+    earlier partial/incomplete run did (the [uploads] block carries the
+    first-install reason).  An operator's own hold, with any other reason,
+    is never ours to offer a release for."""
+    if getattr(plan, 'hold_uploads', False):
+        return True
+    try:
+        from sigmond.bringup import UPLOAD_HOLD_REASON
+        from sigmond.coordination import load_coordination
+        up = load_coordination().uploads
+        return up.mode == 'hold' and up.reason == UPLOAD_HOLD_REASON
+    except Exception:                                  # noqa: BLE001
+        return False
 
 
 def _bringup_offer_upload_release(smd: str) -> None:

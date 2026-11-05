@@ -104,3 +104,49 @@ def test_no_prompt_without_a_hold_or_after_a_failed_step():
             mock.patch.object(smd, '_ask_optional_yes_no') as ask2:
         smd._bringup_finish(plan, 'dasi2', ['x (exit 1)'], smd='/x/smd')
     ask2.assert_not_called()
+
+
+# --- a rerun after a partial/incomplete first run (fix round 1) ---------------
+
+def _with_coord(smd, mode_text):
+    from sigmond.coordination import load_coordination
+    p = _coord(mode_text)
+    return mock.patch('sigmond.coordination.load_coordination',
+                      lambda *a, **k: load_coordination(p))
+
+
+def _held_block(reason):
+    return f'[uploads]\nenabled = false\nreason = "{reason}"\n'
+
+
+def test_a_complete_rerun_offers_the_release_when_the_first_install_hold_stands():
+    smd = _load_smd()
+    for answer in (True, False):
+        with _with_coord(smd, _held_block(UPLOAD_HOLD_REASON)):
+            rc, ask, run, out = _finish(smd, False, answer)
+        ask.assert_called_once()
+        if answer:
+            assert run.call_args.args[0] == ['/x/smd', 'sink', 'upload']
+        else:
+            run.assert_not_called()
+            assert '/x/smd sink upload' in out
+
+
+def test_an_operators_own_hold_is_never_offered():
+    smd = _load_smd()
+    with _with_coord(smd, _held_block('bench, do not send')):
+        rc, ask, run, out = _finish(smd, False, True)
+    ask.assert_not_called()
+    run.assert_not_called()
+
+
+def test_a_partial_run_with_the_hold_says_uploads_stay_held():
+    smd = _load_smd()
+    plan = build_plan(_profile(), local_radiod=True, hold_uploads=True,
+                      sdr_absent=True)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        rc = smd._bringup_finish(plan, 'dasi2', [], smd='/x/smd')
+    assert rc == smd.BRINGUP_PARTIAL_RC
+    assert 'uploads stay held until a complete run' in out.getvalue()
+    assert '/x/smd sink upload' in out.getvalue()
