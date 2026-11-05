@@ -1,0 +1,97 @@
+#!/bin/bash
+# sigmond-rac - the remote-access entry point for a bare-metal sigmond machine.
+#
+#   sigmond-rac register [--site NAME]   register with the RAC gateway now
+#   sigmond-rac retry                    one retry pass (the timer runs this)
+#   sigmond-rac activate [--site NAME]   set remote access up on this machine
+#
+# Run as root.  It sources the Proxmox wizard as a library, in station mode,
+# and calls the wizard's own registration functions.
+#
+# Exit codes: register/retry 0 done, 1 failed (the reason is printed).
+#   activate: the switch's own code, or 4 no station name, 5 this machine
+#   belongs to a Proxmox host's RAC.
+#
+# Test overrides: SIGMOND_WIZARD, SIGMOND_RAC_MARK_DIR, SIGMOND_RAC_LOG,
+#   SIGMOND_RAC_LINK, SIGMOND_RAC_APPLIANCE_VERSION, SIGMOND_RAC_PAIR_KEY.
+set -u
+
+verb="${1:-}"
+[ "$#" -gt 0 ] && shift
+site_arg=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --site) [ "$#" -ge 2 ] || { echo "sigmond-rac: --site needs a name" >&2; exit 2; }
+                site_arg="$2"; shift 2 ;;
+        --site=*) site_arg="${1#--site=}"; shift ;;
+        *) echo "sigmond-rac: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+case "$verb" in
+    register|retry|activate) ;;
+    *) echo "usage: sigmond-rac register|retry|activate [--site NAME]" >&2; exit 2 ;;
+esac
+
+SELF=$(readlink -f "$0")
+WIZARD="${SIGMOND_WIZARD:-$(dirname "$SELF")/../proxmox/sigmond-wizard.sh}"
+[ -r "$WIZARD" ] || { echo "sigmond-rac: cannot read the wizard at $WIZARD" >&2; exit 1; }
+
+RAC_MODE=station
+[ -n "$site_arg" ] && export SIGMOND_RAC_SITE="$site_arg"
+export RAC_MODE
+set --
+SIGMOND_WIZARD_AS_LIB=1
+# shellcheck disable=SC1090
+source "$WIZARD" 2>/dev/null
+RAC_MODE=station
+
+# The wizard's setup fixed these for a Proxmox host; set ours after it.
+MARK_DIR="${SIGMOND_RAC_MARK_DIR:-$MARK_DIR}"
+export SIGMOND_RAC_MARK_DIR="$MARK_DIR"
+LOG="${SIGMOND_RAC_LOG:-/var/log/sigmond-rac.log}"
+say(){ echo "[sigmond-rac] $*"; echo "[sigmond-rac] $*" >> "$LOG" 2>/dev/null; return 0; }
+
+case "$verb" in
+register)
+    if rac_register fresh; then
+        say "registered: RAC #$(cat "$MARK_DIR/rac-number" 2>/dev/null) via $(cat "$MARK_DIR/rac-tier" 2>/dev/null)"
+        exit 0
+    fi
+    say "not registered: $RAC_FAIL"
+    exit 1 ;;
+retry)
+    rac_retry
+    exit $? ;;
+activate)
+    APPL_VER="${SIGMOND_RAC_APPLIANCE_VERSION:-/etc/sigmond-appliance/version}"
+    PAIR_KEY="${SIGMOND_RAC_PAIR_KEY:-/etc/sigmond/rac-switch.key}"
+    if [ -e "$APPL_VER" ] || [ -e "$PAIR_KEY" ]; then
+        echo "sigmond-rac: a Proxmox host carries this machine's RAC; nothing to activate here." >&2
+        exit 5
+    fi
+    if [ -n "$site_arg" ]; then
+        site=$(printf '%s' "$site_arg" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
+    else
+        site=$(rac_site_name)
+    fi
+    if [ -z "$site" ]; then
+        echo "sigmond-rac: no station name: set [station] callsign in /etc/sigmond/site-profile.toml or pass --site" >&2
+        exit 4
+    fi
+    mkdir -p "$MARK_DIR" || exit 1
+    printf '%s\n' "$site" > "$MARK_DIR/rac-site" || exit 1
+    # The switch calls this path to register, so it must exist before `on`.
+    LINK="${SIGMOND_RAC_LINK:-/usr/local/sbin/sigmond-rac}"
+    mkdir -p "$(dirname "$LINK")" 2>/dev/null
+    ln -sf "$SELF" "$LINK" || { echo "sigmond-rac: cannot link $LINK" >&2; exit 1; }
+    rac_install_host_files || { echo "sigmond-rac: cannot install the switch and retry unit" >&2; exit 1; }
+    # Carry the operator's wish: write one only when none exists.
+    if [ ! -s "$MARK_DIR/rac-desired" ]; then
+        printf 'on\n' > "$MARK_DIR/rac-desired"
+        printf 'on %s install\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARK_DIR/rac-changed"
+    fi
+    if [ "$(tr -d '[:space:]' < "$MARK_DIR/rac-desired")" = off ]; then word=status; else word=on; fi
+    out=$(SIGMOND_RAC_BY=install "$RAC_SWITCH" "$word"); rc=$?
+    printf '%s\n' "$out"
+    exit $rc ;;
+esac
