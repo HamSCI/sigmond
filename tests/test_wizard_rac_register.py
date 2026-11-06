@@ -96,6 +96,7 @@ def host(tmp_path, *, tiers, relays=True, frpc=True, configured="AC0G/B4 EM38ww 
     (tmp_path / "id_ed25519.pub").write_text(PUBKEY + "\n")
     (tmp_path / "ca.crt").write_text("CA\n")
     if frpc:
+        (tmp_path / "ca-hamsci.crt").write_text("CA\n")   # an installed payload holds both
         f = tmp_path / "frpc"
         f.write_text("#!/bin/sh\nexit 0\n")
         f.chmod(0o755)

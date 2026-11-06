@@ -356,3 +356,52 @@ def test_station_toml_header_names_sigmond_rac(tmp_path):
         reg.close()
     first = (tmp_path / "frpc-host-gw2.toml").read_text().splitlines()[0]
     assert first.startswith("# Written by sigmond-rac ") and "station mode" in first
+
+
+# -- payload readiness: the per-gateway CAs -----------------------------------------
+
+def _payload_with_marker(tmp_path):
+    d = tmp_path / "opt" / "sigmond-rac"
+    d.mkdir(parents=True)
+    ran = tmp_path / "installed"
+    (d / "install-host.sh").write_text(
+        f"#!/bin/sh\ntouch {ran}\n"
+        f"[ -n \"$TEST_INSTALL_CAS\" ] && echo CA > {tmp_path}/ca-hamsci.crt\n"
+        "exit 0\n")
+    (d / "install-host.sh").chmod(0o755)
+    return d, ran
+
+
+def test_station_payload_not_ready_with_only_the_legacy_ca(tmp_path):
+    # sigma, B2 and B1 hold frpc and the legacy CA from the old install.  Ready
+    # needs the per-gateway CAs, so the installer runs.
+    d, ran = _payload_with_marker(tmp_path)
+    script = rr.host(tmp_path, tiers="", frpc=True) + \
+        f'rm -f {tmp_path}/ca-hamsci.crt\nRAC_MODE=station\nrac_payload_ready; echo rc=$?\n'
+    r = sh(script, tmp_path, {"SIGMOND_RAC_PAYLOAD_DIRS": str(d)})
+    assert ran.exists(), r.stdout + r.stderr
+    assert "rc=1" in r.stdout          # the installer left a CA out
+
+
+def test_station_payload_ready_once_the_installer_brings_both_cas(tmp_path):
+    d, ran = _payload_with_marker(tmp_path)
+    script = rr.host(tmp_path, tiers="", frpc=True) + \
+        f'rm -f {tmp_path}/ca-hamsci.crt\nRAC_MODE=station\nrac_payload_ready; echo rc=$?\n'
+    r = sh(script, tmp_path, {"SIGMOND_RAC_PAYLOAD_DIRS": str(d), "TEST_INSTALL_CAS": "1"})
+    assert ran.exists() and "rc=0" in r.stdout, r.stdout + r.stderr
+
+
+def test_station_payload_with_all_cas_does_not_rerun_the_installer(tmp_path):
+    d, ran = _payload_with_marker(tmp_path)
+    (tmp_path / "ca-hamsci.crt").write_text("CA\n")
+    script = rr.host(tmp_path, tiers="", frpc=True) + \
+        'RAC_MODE=station\nrac_payload_ready; echo rc=$?\n'
+    r = sh(script, tmp_path, {"SIGMOND_RAC_PAYLOAD_DIRS": str(d)})
+    assert not ran.exists() and "rc=0" in r.stdout, r.stdout + r.stderr
+
+
+def test_host_payload_with_frpc_and_legacy_ca_stays_ready_without_installer(tmp_path):
+    d, ran = _payload_with_marker(tmp_path)
+    script = rr.host(tmp_path, tiers="", frpc=True) + 'rac_payload_ready; echo rc=$?\n'
+    r = sh(script, tmp_path, {"SIGMOND_RAC_PAYLOAD_DIRS": str(d)})
+    assert not ran.exists() and "rc=0" in r.stdout, r.stdout + r.stderr

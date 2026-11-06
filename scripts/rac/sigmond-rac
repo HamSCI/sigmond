@@ -117,13 +117,26 @@ activate)
     fi
     # Fetch the frpc payload when this machine holds none.  `smd install
     # sigmond-rac` would run the guest installer, the wrong one.
-    if [ ! -x "$RAC_FRPC" ] || [ ! -f "$RAC_CA" ]; then
+    if [ ! -x "$RAC_FRPC" ] || [ ! -f "$RAC_CA" ] || [ ! -f "$RAC_CA_GW2" ] || [ ! -f "$RAC_CA_HAMSCI" ]; then
         found=""
         pdirs="${SIGMOND_RAC_PAYLOAD_DIRS:-${SIGMOND_RAC_PAYLOAD:+$SIGMOND_RAC_PAYLOAD:}/root/sigmond-appliance/sigmond-rac:/opt/git/sigmond/sigmond-rac}"
         IFS=: read -ra pda <<< "$pdirs"
         for pd in "${pda[@]}"; do
             [ -n "$pd" ] && [ -x "$pd/install-host.sh" ] && { found=1; break; }
         done
+        # An old checkout has install-host.sh but not the per-gateway CAs, so
+        # even running it leaves them out.  Bring it forward as its owner.
+        if [ -n "$found" ] && [ -d "$pd/.git" ] \
+           && { [ ! -f "$pd/frps-ca-gw2.crt" ] || [ ! -f "$pd/frps-ca-hamsci.crt" ]; }; then
+            powner=$(stat -c %U "$pd" 2>/dev/null || echo root)
+            say "updating the sigmond-rac payload in $pd"
+            if [ "$powner" = "$(id -un)" ]; then pull=(git -C "$pd" pull --quiet --ff-only)
+            else pull=(runuser -u "$powner" -- git -C "$pd" pull --quiet --ff-only); fi
+            if ! "${pull[@]}" >>"$LOG" 2>&1; then
+                echo "sigmond-rac: cannot update the sigmond-rac payload in $pd (git pull --ff-only failed; see $LOG)" >&2
+                exit 1
+            fi
+        fi
         if [ -z "$found" ]; then
             purl="${SIGMOND_RAC_PAYLOAD_URL:-https://github.com/HamSCI/sigmond-rac}"
             ptarget="${SIGMOND_RAC_PAYLOAD_TARGET:-/opt/git/sigmond/sigmond-rac}"

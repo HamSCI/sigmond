@@ -297,3 +297,64 @@ def test_activate_clone_failure_exits_1_with_one_line(tmp_path):
     assert len(r.stderr.strip().splitlines()) == 1
     assert "cannot clone the sigmond-rac payload" in r.stderr
     assert not (tmp_path / "switch.calls").exists()
+
+
+def _old_checkout(tmp_path):
+    """A payload checkout that predates the per-gateway CAs, and a bare origin
+    one commit ahead of it."""
+    work = tmp_path / "payload-work"
+    work.mkdir()
+    (work / "install-host.sh").write_text("#!/bin/sh\nexit 0\n")
+    (work / "install-host.sh").chmod(0o755)
+    git("init", "-q", "-b", "main", cwd=work)
+    git("add", "-A", cwd=work)
+    git("commit", "-q", "-m", "old", cwd=work)
+    bare = tmp_path / "payload.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
+    target = tmp_path / "opt" / "sigmond-rac"
+    target.parent.mkdir()
+    subprocess.run(["git", "clone", "-q", str(bare), str(target)], check=True)
+    (work / "frps-ca-gw2.crt").write_text("GW2\n")
+    (work / "frps-ca-hamsci.crt").write_text("HAMSCI\n")
+    git("add", "-A", cwd=work)
+    git("commit", "-q", "-m", "new", cwd=work)
+    git("push", "-q", str(bare), "main", cwd=work)
+    return bare, target
+
+
+def test_activate_updates_an_old_payload_checkout(tmp_path):
+    env = setup(tmp_path)
+    (tmp_path / "ca-hamsci.crt").unlink()      # the machine lacks the per-gateway CA
+    bare, target = _old_checkout(tmp_path)
+    assert not (target / "frps-ca-gw2.crt").exists()
+    r = entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={
+        "SIGMOND_RAC_PAYLOAD_DIRS": str(target)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (target / "frps-ca-gw2.crt").exists()
+    assert (target / "frps-ca-hamsci.crt").exists()
+
+
+def test_activate_old_payload_pull_failure_exits_1_with_one_line(tmp_path):
+    env = setup(tmp_path)
+    (tmp_path / "ca-hamsci.crt").unlink()      # the machine lacks the per-gateway CA
+    bare, target = _old_checkout(tmp_path)
+    subprocess.run(["git", "remote", "set-url", "origin", str(tmp_path / "gone.git")],
+                   cwd=target, check=True)
+    r = entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={
+        "SIGMOND_RAC_PAYLOAD_DIRS": str(target)})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert len(r.stderr.strip().splitlines()) == 1
+    assert "cannot update the sigmond-rac payload" in r.stderr
+    assert not (tmp_path / "switch.calls").exists()
+
+
+def test_activate_leaves_a_current_checkout_unpulled(tmp_path):
+    env = setup(tmp_path)
+    (tmp_path / "ca-hamsci.crt").unlink()      # the machine lacks the per-gateway CA
+    bare, target = _old_checkout(tmp_path)
+    subprocess.run(["git", "pull", "-q", "--ff-only"], cwd=target, check=True)
+    subprocess.run(["git", "remote", "set-url", "origin", str(tmp_path / "gone.git")],
+                   cwd=target, check=True)
+    r = entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={
+        "SIGMOND_RAC_PAYLOAD_DIRS": str(target)})
+    assert r.returncode == 0, r.stdout + r.stderr

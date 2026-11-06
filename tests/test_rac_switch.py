@@ -1175,3 +1175,22 @@ def test_switch_absent_mode_is_host(tmp_path):
     assert any(s in c for c in h.changes() for s in SOCKETS)
     assert any("sigmond-issue" in c for c in h.changes())
     assert "(in the decoder VM)" in h.run("status").stdout
+
+
+def test_station_advice_names_the_per_gateway_units_in_the_journal_line(tmp_path):
+    h = Host(tmp_path, mode="station", wish="off")
+    _two_gateways(h)
+    (tmp_path / "unit-refuses-to-start").touch()
+    r = h.run("on")
+    assert r.returncode == 3
+    assert ("journalctl -u sigmond-rac-host@vpn1.service "
+            "-u sigmond-rac-host@vpn2.service -n 50") in r.stdout
+    assert f"journalctl -u {UNIT} " not in r.stdout
+
+
+def test_host_advice_keeps_naming_the_legacy_unit_with_per_gateway_configs(tmp_path):
+    h = Host(tmp_path, wish="off")
+    _two_gateways(h)
+    (tmp_path / "unit-refuses-to-start").touch()
+    r = h.run("on")
+    assert f"journalctl -u {UNIT} -n 50" in r.stdout

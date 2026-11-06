@@ -441,7 +441,15 @@ rac_payload_ready(){
     # Lookup order: $SIGMOND_RAC_PAYLOAD, the appliance image's copy, then a
     # sigmond checkout.  SIGMOND_RAC_PAYLOAD_DIRS (colon-separated) replaces
     # the whole list; the tests use it.
-    if [ ! -x "$RAC_FRPC" ]; then
+    # !! A station needs the per-gateway CAs as well: a machine that took frpc
+    # and the legacy CA from the old `smd admin rac` install holds neither, and
+    # its frpc then fails every login on a missing trustedCaFile.
+    local _need=0
+    [ -x "$RAC_FRPC" ] || _need=1
+    if [ "${RAC_MODE:-host}" = station ]; then
+        [ -f "$RAC_CA_GW2" ] && [ -f "$RAC_CA_HAMSCI" ] || _need=1
+    fi
+    if [ "$_need" = 1 ]; then
         local _pd _pdirs
         _pdirs="${SIGMOND_RAC_PAYLOAD_DIRS:-${SIGMOND_RAC_PAYLOAD:+$SIGMOND_RAC_PAYLOAD:}/root/sigmond-appliance/sigmond-rac:/opt/git/sigmond/sigmond-rac}"
         local IFS=:
@@ -451,7 +459,8 @@ rac_payload_ready(){
             break
         done
     fi
-    [ -x "$RAC_FRPC" ] && [ -f "$RAC_CA" ]
+    [ -x "$RAC_FRPC" ] && [ -f "$RAC_CA" ] || return 1
+    [ "${RAC_MODE:-host}" != station ] || { [ -f "$RAC_CA_GW2" ] && [ -f "$RAC_CA_HAMSCI" ]; }
 }
 
 # Does THIS host already hold a live tunnel to the named gateway?
@@ -1198,6 +1207,17 @@ rac_units(){
 # ConditionPathExists.  Left enabled, it opens a second session to that gateway
 # under the same proxy names at every boot, and comes back even with the wish
 # off.  Both directions of the switch retire it.
+# What `journalctl` is told to read.  The host names the legacy unit; a station
+# names the per-gateway units it actually runs.
+journal_units(){
+    local _u _o=""
+    if [ "$MODE" = station ]; then
+        for _u in $(rac_units); do _o="${_o:+$_o }-u $_u"; done
+        printf '%s' "$_o"
+    else
+        printf '%s' "-u $UNIT"
+    fi
+}
 retire_legacy_unit(){
     [ "$(rac_units)" = "$UNIT" ] || systemctl disable --now "$UNIT" >/dev/null 2>&1
 }
@@ -1422,16 +1442,17 @@ print_state(){
             who_when
             echo "  Turn it on:   smd remote on    $IN_VM" ;;
         *)
+            JARGS=$(journal_units)
             echo "Remote access: wanted on, not up"
             if [ "$REGD" = no ]; then
                 echo "  The station has not registered yet: no gateway has answered."
                 echo "  $HOST_NOUN tries again every 10 minutes and brings the tunnel up when one does."
             elif [ "$RUNS" = running ]; then
                 echo "  The tunnel service runs, and the gateway has accepted none of its $DECL channels ($where)."
-                echo "  It keeps trying every 30 seconds. Look at:  journalctl -u $UNIT -n 50   $ON_HOST"
+                echo "  It keeps trying every 30 seconds. Look at:  journalctl $JARGS -n 50   $ON_HOST"
             else
                 echo "  The tunnel service does not run ($where)."
-                echo "  Look at:  journalctl -u $UNIT -n 50   $ON_HOST"
+                echo "  Look at:  journalctl $JARGS -n 50   $ON_HOST"
             fi
             who_when
             echo "  Turn it off:  smd remote off   $IN_VM" ;;
