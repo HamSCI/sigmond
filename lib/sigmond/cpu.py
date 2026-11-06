@@ -72,6 +72,7 @@ AFFINITY_UNITS = {
     'timestd-metrology@.service':        'other',
     'timestd-physics.service':           'other',
     'timestd-vtec.service':              'other',
+    'timestd-events.service':            'other',
     'timestd-iono-reanalysis.service':   'other',
     'timestd-radiod-monitor.service':    'other',
     'timestd-chrony-monitor.service':    'other',
