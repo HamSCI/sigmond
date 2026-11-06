@@ -632,3 +632,128 @@ class SecondCardOnRobsStationTests(unittest.TestCase):
         self.assertEqual(list(confs), ["radiod@AI6VN.conf"])
         self.assertEqual(confs["radiod@AI6VN.conf"], self.OLD_CONF)
         self.assertEqual(coord, self.COORD)
+
+
+# ---------------------------------------------------------------------------
+# Per-CPU RX888 sample rate (lib/sigmond/cpu_profiles.py)
+# ---------------------------------------------------------------------------
+
+class CpuProfileSamprateTests(unittest.TestCase):
+    """On a 5560U the first RX888 radiod runs 129.6 Msps and every other one
+    64.8 Msps (KFS-OMNI, 2026-11-06: two at 129.6 saturate both FFT
+    threads).  Unknown CPUs keep 129.6 everywhere."""
+
+    CEZANNE = "AMD Ryzen 5 5560U with Radeon Graphics"
+
+    def _run(self, model, sdrs, existing=None, coord_text="", **ns):
+        import contextlib
+        import io
+        from sigmond import cpu_profiles
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            radio_dir = Path(d) / "radio"
+            radio_dir.mkdir()
+            for name, text in (existing or {}).items():
+                (radio_dir / name).write_text(text)
+            coord_path = Path(d) / "coordination.toml"
+            if coord_text:
+                coord_path.write_text(coord_text.replace("@DIR@", str(radio_dir)))
+            with mock.patch.object(radiod_config, "_discover_sdrs",
+                                   return_value=sdrs), \
+                 mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR",
+                                   radio_dir), \
+                 mock.patch.object(radiod_config, "COORDINATION_PATH",
+                                   coord_path), \
+                 mock.patch.object(radiod_config, "COORDINATION_ENV",
+                                   Path(d) / "coordination.env"), \
+                 mock.patch.object(radiod_config, "_suggest_iface",
+                                   return_value="eth0"), \
+                 mock.patch.object(radiod_config,
+                                   "_apply_fragments_for_new_instances"), \
+                 mock.patch.object(radiod_config, "_held_serials",
+                                   return_value={}), \
+                 mock.patch.object(radiod_config, "_host_cpu_profile",
+                                   return_value=cpu_profiles.profile_for(model)), \
+                 mock.patch("socket.gethostname", return_value="omni"), \
+                 contextlib.redirect_stdout(out), \
+                 contextlib.redirect_stderr(out):
+                rc = radiod_config.cmd_radiod_init(_ns(**ns))
+            confs = {p.name: p.read_text()
+                     for p in radio_dir.glob("radiod@*.conf")}
+        return rc, out.getvalue(), confs
+
+    @staticmethod
+    def _rate(text):
+        from sigmond import sdr_map
+        return sdr_map.conf_samprate_hz(text)
+
+    def _two_cards(self):
+        return [_sdr("RX-888 Mk2", serial="AAA", index=0, device="005"),
+                _sdr("RX-888 Mk2", serial="BBB", index=1, device="006")]
+
+    def test_5560u_two_new_cards_first_full_second_reduced(self):
+        rc, out, confs = self._run(self.CEZANNE, self._two_cards())
+        self.assertEqual(rc, 0, out)
+        by_serial = {('AAA' if 'serial      = "AAA"' in t else 'BBB'): t
+                     for t in confs.values()}
+        self.assertEqual(self._rate(by_serial["AAA"]), 129_600_000)
+        self.assertEqual(self._rate(by_serial["BBB"]), 64_800_000)
+        self.assertIn("5560U", by_serial["BBB"])
+        # Exactly one samprate line in the [rx888] section.
+        rx = by_serial["BBB"].split("[rx888]", 1)[1]
+        self.assertEqual(
+            sum(1 for l in rx.splitlines() if l.startswith("samprate")), 1)
+
+    def test_unknown_cpu_keeps_129_6_for_both(self):
+        rc, out, confs = self._run("Some Unknown CPU", self._two_cards())
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(sorted(self._rate(t) for t in confs.values()),
+                         [129_600_000, 129_600_000])
+
+    def test_long_comment_rx888_profile_also_drops_to_64_8(self):
+        # The "RX888" profile's samprate line carries a multi-line comment;
+        # the reduced rate must replace all of it, not leave a stale tail.
+        sdrs = [_sdr("RX888", serial="AAA", index=0, device="005"),
+                _sdr("RX888", serial="BBB", index=1, device="006")]
+        rc, out, confs = self._run(self.CEZANNE, sdrs)
+        self.assertEqual(rc, 0, out)
+        bbb = next(t for t in confs.values() if 'serial      = "BBB"' in t)
+        self.assertEqual(self._rate(bbb), 64_800_000)
+        self.assertNotIn("Drop to", bbb)
+        self.assertIn("queuedepth  = 64", bbb)
+
+    def test_5560u_card_added_beside_existing_radiod_gets_reduced(self):
+        old = ('[global]\nstatus = omni-status.local\n\n[rx888]\n'
+               'device = "rx888"\nserial = "AAA"\nsamprate = 129600000\n')
+        rc, out, confs = self._run(
+            self.CEZANNE, self._two_cards(),
+            existing={"radiod@omni.conf": old},
+            coord_text=('[radiod."omni"]\nhost        = "localhost"\n'
+                        'status_dns  = "omni-status.local"\n'
+                        'radio_conf  = "@DIR@/radiod@omni.conf"\n'
+                        'sdr_serial  = "AAA"\n'))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(confs["radiod@omni.conf"], old)
+        new = [t for n, t in confs.items() if n != "radiod@omni.conf"]
+        self.assertEqual(len(new), 1)
+        self.assertEqual(self._rate(new[0]), 64_800_000)
+
+    def test_reconfig_keeps_the_operators_samprate(self):
+        # A hand-set rate survives --reconfig, even where the profile would
+        # choose another.
+        old = ('[global]\nstatus = omni-status.local\n\n[rx888]\n'
+               'device = "rx888"\nsamprate = 64800000  # hand-set\n')
+        rc, out, confs = self._run(
+            "Some Unknown CPU",
+            [_sdr("RX-888 Mk2", serial="AAA", index=0, device="005")],
+            existing={"radiod@omni.conf": old}, reconfig=True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._rate(confs["radiod@omni.conf"]), 64_800_000)
+
+    def test_sole_card_on_5560u_is_full_rate(self):
+        rc, out, confs = self._run(
+            self.CEZANNE,
+            [_sdr("RX-888 Mk2", serial="AAA", index=0, device="005")])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([self._rate(t) for t in confs.values()],
+                         [129_600_000])

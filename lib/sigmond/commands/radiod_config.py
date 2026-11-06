@@ -57,7 +57,7 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from .. import sdr_map
+from .. import cpu_profiles, sdr_map
 from ..coordination import load_coordination, render_env
 from ..discovery import usb_sdr
 from ..environment import Environment
@@ -185,6 +185,72 @@ _FRONTEND_PROFILES: dict[str, dict] = {
         ),
     },
 }
+
+
+def _host_cpu_profile():
+    """This host's cpu_profiles entry, or None (patchable in tests)."""
+    return cpu_profiles.host_profile()
+
+
+# The samprate line of an RX888 profile plus the comment-only continuation
+# lines under it (the "RX888" profile's comment runs to five lines).
+_SAMPRATE_BLOCK_RE = re.compile(r"^samprate\s*=.*\n(?:[ \t]+#.*\n)*", re.M)
+
+
+def _rx888_samprate_block(hz: int, comment: list[str]) -> str:
+    lines = [f"samprate    = {hz:<12d}   # {comment[0]}"]
+    lines += [f"{'':29s}# {c}" for c in comment[1:]]
+    return "\n".join(lines) + "\n"
+
+
+def _choose_rx888_samprates(plans: list[dict], profile) -> None:
+    """Set each new RX888 plan's ADC rate from the host's CPU profile.
+
+    The radiod's ordinal on the host decides it: RX888 confs already on
+    disk (other than ones this run replaces) come first, then this run's
+    plans in bus order, so the first card registered keeps 129.6 Msps.
+    An unknown CPU gets 129.6 Msps for every radiod, i.e. the profile text
+    unchanged.  A conf this run replaces (--reconfig) keeps the samprate it
+    had: an operator's hand-set rate is never rewritten.
+    """
+    targets = {plan["target"] for plan in plans}
+    ordinal = 0
+    for conf in sorted(RADIOD_CONFIG_DIR.glob("radiod@*.conf")):
+        if conf in targets:
+            continue
+        try:
+            if sdr_map.has_rx888_section(conf.read_text()):
+                ordinal += 1
+        except OSError:
+            continue
+    for plan in plans:
+        if plan["frontend"] != "rx888":
+            continue
+        kept = None
+        if plan["target"].exists():
+            try:
+                kept = sdr_map.conf_samprate_hz(plan["target"].read_text())
+            except OSError:
+                kept = None
+        if kept is not None:
+            hz = kept
+            comment = ["kept from the conf this one replaced"]
+        else:
+            hz = cpu_profiles.rx888_samprate_hz(ordinal, profile)
+            comment = [] if profile is None else [
+                f"{hz / 1e6:g} Msps, HF only (Nyquist {hz / 2e6:g} MHz).",
+                f"RX888 radiod #{ordinal + 1} on a {profile.name}, which",
+                f"runs {profile.full_rate_radiods} at 129.6 Msps: two at "
+                f"129.6 saturate",
+                "both FFT threads.  Measured: " + profile.source + ";",
+                "see sigmond lib/sigmond/cpu_profiles.py."]
+        ordinal += 1
+        if hz == cpu_profiles.FULL_SAMPRATE_HZ:
+            continue        # the profile's own 129.6 line, comment and all
+        block = _rx888_samprate_block(hz, comment)
+        plan["frontend_defaults"] = _SAMPRATE_BLOCK_RE.sub(
+            lambda _m: block, plan["frontend_defaults"] + "\n",
+            count=1).rstrip()
 
 
 def _profile_for(sdr_type: str) -> dict:
@@ -627,6 +693,8 @@ def cmd_radiod_init(args) -> int:
         if _refuse_overwrite(plan["target"], args):
             return 1
         plans.append(plan)
+
+    _choose_rx888_samprates(plans, _host_cpu_profile())
 
     # Second pass: write.
     _write_repins()

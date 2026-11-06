@@ -95,6 +95,24 @@ def conf_serial(text: str) -> str:
     return _norm(_section_value(text, 'serial'))
 
 
+def conf_samprate_hz(text: str) -> int | None:
+    """The [rx888] section's ADC `samprate` in Hz, None if absent or
+    unreadable.  `[global] samprate` (the channel output rate) is ignored.
+    Takes ka9q's own spellings too: `129m6` and `64m800000` read as
+    129.6 MHz and 64.8 MHz."""
+    raw = _section_value(text, 'samprate').lower().replace('_', '')
+    if not raw:
+        return None
+    try:
+        for suffix, scale in (('g', 1e9), ('m', 1e6), ('k', 1e3)):
+            if suffix in raw:
+                whole, _, frac = raw.partition(suffix)
+                return int(round(float(f'{whole or 0}.{frac or 0}') * scale))
+        return int(round(float(raw)))
+    except ValueError:
+        return None
+
+
 def conf_description(text: str) -> str:
     """The [rx888] section's `description =` value, "" if none."""
     return _section_value(text, 'description')

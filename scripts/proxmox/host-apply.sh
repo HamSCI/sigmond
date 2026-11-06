@@ -39,6 +39,11 @@ VMID="${VMID:-}"
 # (gap_hourly docstring) and the KX4AZ reference both use 13/3 on a 16 MB
 # part — pass RADIOD_L3_FRACTION=0.8125 for that split.
 : "${RADIOD_L3_FRACTION:=0.62}"
+# AMD MBA cap, in GB/s, for the pCPUs under the guest's WORKER_CPUS (the
+# decoders).  Empty = no cap.  bootstrap.sh fills it from the host CPU's
+# entry in lib/sigmond/cpu_profiles.py (5560U: 8, measured KFS-OMNI-SW-PM
+# 2026-11-06; see sigmond-host-resctrl.sh).
+: "${DECODER_MB_GBPS:=}"
 if [[ -n "$VMID" ]]; then
     : "${VM_VCPU_COUNT:?VM_VCPU_COUNT required (VM mode)}"
     : "${VM_CORES:?VM_CORES required (VM mode)}"
@@ -55,6 +60,14 @@ TEMPLATE="/tmp/cpu-pin-VMID.sh.template"
 SNIPPET="/var/lib/vz/snippets/cpu-pin-${VMID}.sh"
 
 log() { printf '[host-apply] %s\n' "$*"; }
+# vcpus_to_pcpus "<guest vCPUs, space-separated>" "<VCPU_TO_PCPU map>"
+# -> the host pCPUs under them, sorted, comma-separated.  A vCPU missing
+# from the map maps to itself (identity layout).
+vcpus_to_pcpus() {
+    local -a _map; local _g
+    read -r -a _map <<< "$2"
+    for _g in $1; do printf '%s\n' "${_map[$_g]:-$_g}"; done | sort -n | paste -sd, -
+}
 backup_once() {
     local src="$1"
     local dst="${BACKUP_DIR}/$(basename "$src").original"
@@ -389,15 +402,22 @@ fi
 #      no guest-side support.
 # Both are boot-volatile, hence oneshot units.
 if [ -n "${FENCE_CPUS:-}" ]; then
-    read -r -a _v2p <<< "${VCPU_TO_PCPU}"
-    _radiod_pcpus=()
-    for _g in ${RADIOD_CPUS}; do _radiod_pcpus+=("${_v2p[$_g]:-$_g}"); done
-    RADIOD_PCPUS="$(printf '%s\n' "${_radiod_pcpus[@]}" | sort -n | paste -sd, -)"
+    RADIOD_PCPUS="$(vcpus_to_pcpus "${RADIOD_CPUS}" "${VCPU_TO_PCPU}")"
+    # The decoders' pCPUs: a group of their own only when a cap is given
+    # (and the script finds AMD MBA); otherwise they stay in `others`.
+    DECODER_PCPUS=""
+    if [[ -n "${DECODER_MB_GBPS}" ]]; then
+        DECODER_PCPUS="$(vcpus_to_pcpus "${WORKER_CPUS}" "${VCPU_TO_PCPU}")"
+    fi
     _others=()
     for (( _c=0; _c<HOST_CPUS; _c++ )); do
         case ",${RADIOD_PCPUS}," in *",${_c},"*) ;; *) _others+=("$_c");; esac
     done
     OTHER_PCPUS="$(printf '%s\n' "${_others[@]}" | paste -sd, -)"
+    RESCTRL_ARGS="${RADIOD_PCPUS} ${OTHER_PCPUS} ${RADIOD_L3_FRACTION}"
+    if [[ -n "${DECODER_PCPUS}" ]]; then
+        RESCTRL_ARGS+=" ${DECODER_PCPUS} ${DECODER_MB_GBPS}"
+    fi
 
     for _s in sigmond-host-irq-affinity.sh sigmond-host-resctrl.sh; do
         install -m 755 "$(dirname "$0")/${_s}" "/usr/local/sbin/${_s}"
@@ -425,7 +445,7 @@ After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/sigmond-host-resctrl.sh ${RADIOD_PCPUS} ${OTHER_PCPUS} ${RADIOD_L3_FRACTION}
+ExecStart=/usr/local/sbin/sigmond-host-resctrl.sh ${RESCTRL_ARGS}
 
 [Install]
 WantedBy=multi-user.target
@@ -435,9 +455,21 @@ UNIT
     systemctl enable --now sigmond-host-irq-affinity.service >/dev/null 2>&1 \
         && log "host IRQs herded -> cpus ${FENCE_CPUS} (persistent)" \
         || log "WARNING: sigmond-host-irq-affinity failed to start"
-    systemctl enable --now sigmond-host-resctrl.service >/dev/null 2>&1 \
-        && log "L3 CAT: radiod pCPUs ${RADIOD_PCPUS} get an exclusive slice (persistent; no-op without cat_l3)" \
-        || log "WARNING: sigmond-host-resctrl failed to start"
+    # Never restart an active resctrl unit: on 2026-11-06 a live restart
+    # stepped both guests' clocks ~2 s and lost a WSPR cycle on every
+    # reporter (sigmond-host-resctrl.sh header).  `enable --now` would not
+    # restart it either, so say plainly that the new arguments wait.
+    if systemctl is-active --quiet sigmond-host-resctrl.service 2>/dev/null; then
+        systemctl enable sigmond-host-resctrl.service >/dev/null 2>&1 || true
+        log "L3 CAT: sigmond-host-resctrl already active; left running. The partition (${RESCTRL_ARGS}) applies at the next host boot -- a live restart steps the guests' clocks ~2 s"
+    else
+        systemctl enable --now sigmond-host-resctrl.service >/dev/null 2>&1 \
+            && log "L3 CAT: radiod pCPUs ${RADIOD_PCPUS} get an exclusive slice (persistent; no-op without cat_l3)" \
+            || log "WARNING: sigmond-host-resctrl failed to start"
+    fi
+    if [[ -n "${DECODER_PCPUS}" ]]; then
+        log "MBA: decoder pCPUs ${DECODER_PCPUS} -> ${DECODER_MB_GBPS} GB/s cap requested (applied on AMD MBA only; the unit's journal says which)"
+    fi
 else
     log "host IRQ/L3 tuning SKIPPED: no housekeeping CPUs outside VM affinity"
 fi

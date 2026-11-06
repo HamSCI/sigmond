@@ -875,7 +875,7 @@ Once the configuration is complete, the following observations are expected when
 
 Symptom: when something CPU-intensive runs on guest vCPUs 2-9, the radiod processes pinned to vCPUs 0-1 show modestly higher CPU utilization than when the rest of the system is idle.
 
-Cause: the Ryzen 5 5560U has a single 16 MB unified L3 cache shared across all 6 physical cores. When 8 stress workers run on cores 2-9, they evict radiod's working set from L3 more aggressively, increasing radiod's per-sample cycle cost. This is a hardware-level effect; it would happen on bare metal too. The vCPU pinning correctly maintains thread placement — the cache contention is unavoidable architecture.
+Cause: the Ryzen 5 5560U has a single 8 MB unified L3 cache shared across all 6 physical cores (`lscpu` on KFS-OMNI-SW-PM, 2026-11-06; this line said 16 MB until then, the fictional size QEMU reports without `host-cache-info=on`, Part 12a). When 8 stress workers run on cores 2-9, they evict radiod's working set from L3 more aggressively, increasing radiod's per-sample cycle cost. This is a hardware-level effect; it would happen on bare metal too. The vCPU pinning correctly maintains thread placement — the cache contention is unavoidable architecture.
 
 Validation that it's *only* cache contention and not a real problem:
 
@@ -1203,6 +1203,15 @@ After 12a–12d are all in place and a fresh wisdom is computed against the real
 On bare-metal Debian 13 with the same 5560U, the same 8 MB L3, three radiods all run at ~50%. The reason the VM can't match this: KVM's address translation (nested page tables, TLB structures) consumes some of the L1/L2 cache space, leaving less effective cache for the FFT working set. The shortfall is small per CPU but compounds when multiple radiods share the L3.
 
 **Practical recommendation:** for SDR appliances on the 5560U / 5825U / 5560U class of mini PC, plan for **one radiod per VM**. The 16 MB L3 parts (Ryzen 5600U non-Cezanne, desktop Ryzen) can handle more.
+
+**Update 2026-11-06 (KFS-OMNI, a VM on a 5560U): two radiods fit at 129.6 + 64.8 Msps.** The table above predates three changes: fresh wisdom, the two radiods on adjacent physical cores (vCPU 6,7 and 8,9) with both inside the 5 MB L3 CAT slice, and the decoder pCPUs capped at 8 GB/s by AMD MBA (`MB:0=64`). With all three:
+
+| Configuration | fft thread |
+|---|---|
+| OMNI @129.6 Msps + SW @64.8 Msps | OMNI 62-67 %, SW 25-28 % |
+| OMNI @129.6 Msps + SW @129.6 Msps | OMNI 101-104 %, SW 90-103 % (both saturated, decoders idle; reverted) |
+
+Two 129.6 Msps FFTs slow each other ~1.6x, so two full-rate radiods still do not fit; one full-rate plus one 64.8 Msps radiod does.  The MBA cap matters in the even-minute WSPR burst (decoders reach ~7 GB/s against radiod's steady 7.8-8.7 GB/s): it cut OMNI's burst plateau from 76-88 % (peaks 92-100 %) to 69-72 %, with decode time unchanged (~12 s).  A 4 GB/s cap doubled the decode burst.  sigmond produces this layout by default on a 5560U (`lib/sigmond/cpu_profiles.py`, `scripts/proxmox/sigmond-host-resctrl.sh`).
 
 ### 12f — The complete recommended `args:` line (5560U, one radiod)
 
