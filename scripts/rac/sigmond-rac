@@ -152,6 +152,13 @@ activate)
             export SIGMOND_RAC_PAYLOAD="$ptarget"
         fi
     fi
+    # Run the payload's installer on every activate: an already-registered
+    # machine never reaches rac_register, so frpc and the gateway CAs would
+    # stay missing.  rac_payload_ready runs install-host.sh only when needed.
+    if ! rac_payload_ready; then
+        echo "sigmond-rac: the payload install did not produce frpc and the gateway CAs (see $LOG)" >&2
+        exit 1
+    fi
     mkdir -p "$MARK_DIR" || exit 1
     printf '%s\n' "$site" > "$MARK_DIR/rac-site" || exit 1
     # The switch calls this path to register, so it must exist before `on`.

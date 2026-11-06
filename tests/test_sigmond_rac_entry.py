@@ -242,7 +242,8 @@ def payload_repo(tmp_path):
     work.mkdir()
     ih = work / "install-host.sh"
     ih.write_text('#!/bin/sh\nprintf "#!/bin/sh\\nexit 0\\n" > "$TEST_FRPC"\n'
-                  'chmod 755 "$TEST_FRPC"\necho CA > "$TEST_CA"\n')
+                  'chmod 755 "$TEST_FRPC"\necho CA > "$TEST_CA"\n'
+                  'echo CA > "$(dirname "$TEST_CA")/ca-hamsci.crt"\n')
     ih.chmod(0o755)
     git("init", "-q", "-b", "main", cwd=work)
     git("add", "-A", cwd=work)
@@ -304,7 +305,8 @@ def _old_checkout(tmp_path):
     one commit ahead of it."""
     work = tmp_path / "payload-work"
     work.mkdir()
-    (work / "install-host.sh").write_text("#!/bin/sh\nexit 0\n")
+    (work / "install-host.sh").write_text(
+        '#!/bin/sh\necho CA > "$TEST_HAMSCI_CA"\n')
     (work / "install-host.sh").chmod(0o755)
     git("init", "-q", "-b", "main", cwd=work)
     git("add", "-A", cwd=work)
@@ -328,7 +330,8 @@ def test_activate_updates_an_old_payload_checkout(tmp_path):
     bare, target = _old_checkout(tmp_path)
     assert not (target / "frps-ca-gw2.crt").exists()
     r = entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={
-        "SIGMOND_RAC_PAYLOAD_DIRS": str(target)})
+        "SIGMOND_RAC_PAYLOAD_DIRS": str(target),
+        "TEST_HAMSCI_CA": str(tmp_path / "ca-hamsci.crt")})
     assert r.returncode == 0, r.stdout + r.stderr
     assert (target / "frps-ca-gw2.crt").exists()
     assert (target / "frps-ca-hamsci.crt").exists()
@@ -356,5 +359,43 @@ def test_activate_leaves_a_current_checkout_unpulled(tmp_path):
     subprocess.run(["git", "remote", "set-url", "origin", str(tmp_path / "gone.git")],
                    cwd=target, check=True)
     r = entry(tmp_path, env, "activate", "--site", "AC0G-X", extra={
-        "SIGMOND_RAC_PAYLOAD_DIRS": str(target)})
+        "SIGMOND_RAC_PAYLOAD_DIRS": str(target),
+        "TEST_HAMSCI_CA": str(tmp_path / "ca-hamsci.crt")})
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _registered_missing_ca(tmp_path, script):
+    """Registered machine (frpc-host.toml, rac-site) whose per-gateway CA is gone."""
+    env = setup(tmp_path)
+    (tmp_path / "frpc-host.toml").write_text('user = "old"\n')
+    m = mark(tmp_path)
+    m.mkdir(exist_ok=True)
+    (m / "rac-site").write_text("AC0G-X\n")
+    (tmp_path / "ca-hamsci.crt").unlink(missing_ok=True)
+    pay = tmp_path / "pay"
+    pay.mkdir()
+    ih = pay / "install-host.sh"
+    ih.write_text("#!/bin/sh\n" + script)
+    ih.chmod(0o755)
+    return env, {"SIGMOND_RAC_PAYLOAD_DIRS": str(pay),
+                 "TEST_CA": str(tmp_path / "ca-hamsci.crt"),
+                 "TEST_RAN": str(tmp_path / "ih.ran")}
+
+
+def test_activate_runs_payload_install_when_registered_but_ca_missing(tmp_path):
+    env, extra = _registered_missing_ca(
+        tmp_path, 'echo ran > "$TEST_RAN"\necho CA > "$TEST_CA"\n')
+    r = entry(tmp_path, env, "activate", extra=extra)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "ih.ran").exists()
+    assert (tmp_path / "ca-hamsci.crt").exists()
+    assert (tmp_path / "switch.calls").exists()
+
+
+def test_activate_payload_install_failure_exits_1_without_switch(tmp_path):
+    env, extra = _registered_missing_ca(tmp_path, 'echo ran > "$TEST_RAN"\nexit 0\n')
+    r = entry(tmp_path, env, "activate", extra=extra)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert len(r.stderr.strip().splitlines()) == 1
+    assert "payload install" in r.stderr
+    assert not (tmp_path / "switch.calls").exists()
