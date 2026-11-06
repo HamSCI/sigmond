@@ -69,6 +69,7 @@ These are non-negotiable based on the working configuration. If a future change 
 - **`args: -cpu` should include `-svm`** to disable nested-virt overhead for SDR guests that never run their own VMs. See Part 12d.
 - **Hookscript must pin `scaling_min_freq == scaling_max_freq`** for VM-assigned pCPUs, not just set `scaling_max_freq`. `amd-pstate-epp` + `nohz_full` interaction parks the CPU at scaling_min_freq under sustained load (no scheduler tick → driver never sees load → never boosts), even with `governor=performance` and `EPP=performance`. See Part 12c and `cpu-pin-VMID.sh.example`.
 - **One radiod per VM on Cezanne U-series mini PCs.** 8 MB L3 is enough for one radiod's FFT pipeline plus the wsprdaemon decoder/uploader workload but cannot support 2 or 3 radiods concurrently (FFT threads peg at 99% from L3 contention). Bare-metal Debian 13 on the same 5560U fits 3 radiods because KVM's address-translation tables don't compete for L1/L2 cache. See Part 12e.
+  - **2026-11-06 update (KFS-OMNI, 5560U VM): two radiods fit at 129.6 + 64.8 Msps.** With fresh wisdom, the two radiods on adjacent physical cores (vCPU 6,7 and 8,9), both inside the 5 MB L3 CAT slice, and the decoder pCPUs capped at 8 GB/s by AMD MBA, OMNI @129.6 runs its fft thread at 62-67 % and SW @64.8 at 25-28 %. Raising SW to 129.6 saturated both (OMNI 101-104 %, SW 90-103 %, decoders idle), so two radiods at 129.6 still do not fit. sigmond now produces this layout by default on a 5560U: `lib/sigmond/cpu_profiles.py` (first RX888 radiod 129.6 Msps, every other 64.8), and the `decoders` MBA group in `sigmond-host-resctrl.sh`.
 
 ### Complete recommended `args:` line (5560U / one radiod / sequential HT pairs)
 ```
@@ -97,6 +98,13 @@ was assumed to cover them:
   radiod's pCPUs an exclusive slice (way split derived from the live
   cache geometry, default fraction 0.62). CLOS follows the physical CPU,
   so the guest needs no support. No-op on CPUs without `cat_l3`.
+  When the host CPU's `cpu_profiles.py` entry names a decoder cap (5560U:
+  8 GB/s), the guest's worker pCPUs also go in a `decoders` group with
+  AMD MBA `MB:0=<GB/s*8>`; skipped on Intel MBA (a percentage) and
+  without `mba`.  **Do not restart this unit on a running station**: on
+  2026-11-06 a live restart stepped both guests' clocks ~2 s ("RTP<->GPS
+  offset STEPPED") and lost a WSPR cycle.  host-apply leaves an active
+  unit running; new arguments apply at the next boot.
 
 Inside the guest, `install.sh` pairs the existing xhci pin with
 `sigmond-guest-irq-affinity.service` (movable non-xhci IRQs + the unbound
