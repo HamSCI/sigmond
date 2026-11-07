@@ -99,6 +99,12 @@ require = []                       # e.g. ["earthdata", "rac"]
 """
 
 
+#: The recorders that upload to the GRAPE (RX888) PSWS instrument.  Since the
+#: 2026-08-24 split hamsci-physics uploads GRAPE; hf-timestd's config keeps the
+#: field.  One instrument, two names: a lookup under either finds it.
+GRAPE_RECORDERS = ("hamsci-physics", "hf-timestd")
+
+
 @dataclass
 class SiteProfile:
     call: str = ""
@@ -175,7 +181,14 @@ class SiteProfile:
         v = str(self.psws_instruments.get(recorder, "") or "").strip()
         if v:
             return v
-        if recorder == "hf-timestd":
+        if recorder in GRAPE_RECORDERS:
+            # hamsci-physics took over the GRAPE uploads from hf-timestd
+            # (2026-08-24); both name the same PSWS instrument.  The wizard
+            # files that id under "hf-timestd", so either name finds it.
+            for other in GRAPE_RECORDERS:
+                v = str(self.psws_instruments.get(other, "") or "").strip()
+                if v:
+                    return v
             return self.psws_instrument_id
         return ""
 

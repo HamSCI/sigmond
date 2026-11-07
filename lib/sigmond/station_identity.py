@@ -106,6 +106,13 @@ class StationIdentity:
         for name, ident in self.psws_instruments:
             if name == recorder:
                 return ident
+        from .site_profile import GRAPE_RECORDERS
+        if recorder in GRAPE_RECORDERS:
+            # One GRAPE instrument under two recorder names (see
+            # site_profile.GRAPE_RECORDERS); the magnetometer never borrows it.
+            for name, ident in self.psws_instruments:
+                if name in GRAPE_RECORDERS and ident:
+                    return ident
         return ''
 
 

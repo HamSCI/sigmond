@@ -91,6 +91,62 @@ instrument_id = "172"
         # template default applies).
         self.assertEqual(sp.instrument_for("mag-recorder"), "")
 
+    def test_hamsci_physics_finds_the_grape_id_the_wizard_wrote(self):
+        # sigma, 2026-11-06: the wizard files the GRAPE id under
+        # "hf-timestd", but hamsci-physics uploads GRAPE since the 08-24
+        # split.  It must find that id, and render must push it through.
+        with TemporaryDirectory() as td:
+            sp = load_site_profile(_write_profile(td, """\
+[psws]
+enabled       = true
+station_id    = "S000418"
+
+[psws.instruments]
+"hf-timestd"   = "367"
+"mag-recorder" = "401"
+"""))
+        self.assertEqual(sp.instrument_for("hamsci-physics"), "367")
+        self.assertEqual(sp.instrument_for("hf-timestd"), "367")
+        self.assertEqual(sp.instrument_for("mag-recorder"), "401")
+        state = mock.Mock(station="S000418", instrument="")
+        self.assertIn(("station", "instrument_id", "367"),
+                      plan_psws_updates(sp, "hamsci-physics", state))
+
+    def test_grape_names_share_one_id_and_mag_never_borrows_it(self):
+        with TemporaryDirectory() as td:
+            sp = load_site_profile(_write_profile(td, """\
+[psws]
+enabled       = true
+station_id    = "S000418"
+instrument_id = "172"
+
+[psws.instruments]
+"hamsci-physics" = "367"
+"""))
+        self.assertEqual(sp.instrument_for("hf-timestd"), "367")
+        self.assertEqual(sp.instrument_for("hamsci-physics"), "367")
+        self.assertEqual(sp.instrument_for("mag-recorder"), "")
+        with TemporaryDirectory() as td:
+            sp = load_site_profile(_write_profile(td, """\
+[psws]
+enabled       = true
+station_id    = "S000418"
+instrument_id = "172"
+"""))
+        self.assertEqual(sp.instrument_for("hamsci-physics"), "172")
+        self.assertEqual(sp.instrument_for("mag-recorder"), "")
+
+    def test_station_identity_shares_the_grape_id(self):
+        from sigmond.station_identity import StationIdentity
+        ident = StationIdentity(hostname="sigma", dasi2_site=False,
+                                psws_station="S000418",
+                                psws_instruments=(("hf-timestd", "367"),
+                                                  ("mag-recorder", "401")))
+        self.assertEqual(ident.instrument_for("hamsci-physics"), "367")
+        self.assertEqual(ident.instrument_for("mag-recorder"), "401")
+        self.assertEqual(StationIdentity(hostname="x", dasi2_site=False)
+                         .instrument_for("hamsci-physics"), "")
+
     def test_instruments_map_wins_over_legacy(self):
         with TemporaryDirectory() as td:
             sp = load_site_profile(_write_profile(td, """\
