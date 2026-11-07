@@ -1016,6 +1016,14 @@ def _ka9q_radio_pin() -> Optional[str]:
 
 
 def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
+    # Every radiod build goes through here (install, component update, align,
+    # the TUI rebuild).  A ka9q-radio the site manages by hand (site-profile
+    # [components] locally_managed) is built by whoever manages it.
+    local = _locally_managed()
+    if 'ka9q-radio' in local:
+        _info(local.note('ka9q-radio', _checkout_short_head(src_dir))
+              + ' — not rebuilt')
+        return True
     binary = Path('/usr/local/sbin/radiod')
     built = src_dir / 'src' / 'radiod'
     if (not force and not _source_advanced_past_build(src_dir, 'ka9q-radio')
@@ -3924,7 +3932,10 @@ def cmd_add(args) -> int:
     name = _derive_component_name_from_url(url)
     repo_dir = Path('/opt/git/sigmond') / name
 
-    if repo_dir.exists():
+    local = _locally_managed()
+    if repo_dir.exists() and name in local:
+        _info(local.note(name, _checkout_short_head(repo_dir)) + ' — not pulled')
+    elif repo_dir.exists():
         _info(f'{name}: already cloned at {repo_dir} — pulling latest')
         r = _run(['git', '-C', str(repo_dir), 'pull', '--ff-only'])
         if r.returncode != 0:
@@ -4446,6 +4457,41 @@ def _run_update_build(repo: Path, log_target: str, *,
     return r.returncode
 
 
+def _locally_managed():
+    """The checkouts this site manages by hand (site-profile.toml
+    `[components] locally_managed`), as a `site_profile.LocallyManaged`.
+    Empty when the key is absent: then every command behaves as before."""
+    from sigmond.site_profile import locally_managed_components
+    return locally_managed_components()
+
+
+def _checkout_short_head(d) -> Optional[str]:
+    """A checkout's HEAD, abbreviated, by a read-only `git rev-parse`."""
+    import subprocess
+    try:
+        r = subprocess.run(['git', '--no-optional-locks', '-C', str(d),
+                            'rev-parse', '--short', 'HEAD'],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
+def _say_locally_managed(checkouts, local, say=None) -> list:
+    """``checkouts`` without the locally managed ones, after one line for
+    each of those: `<name>: locally managed (<by>) — left as is at <sha>`."""
+    say = say or _info
+    keep = []
+    for d in checkouts:
+        if Path(d).name in local:
+            say(local.note(Path(d).name, _checkout_short_head(d)))
+        else:
+            keep.append(d)
+    return keep
+
+
 def cmd_update(args) -> int:
     """Plan (and optionally apply) a component update.  Safe to re-run.
 
@@ -4473,7 +4519,11 @@ def cmd_update(args) -> int:
     _preload_sigmond_modules('update')
 
     base = Path(getattr(args, 'base', None) or '/opt/git/sigmond')
-    checkouts = component_checkouts(base)
+    # A checkout the site manages by hand (site-profile [components]
+    # locally_managed) is neither fetched, compared, pulled, installed nor
+    # rebuilt: one line says so, and the rest of the update never sees it.
+    local = _locally_managed()
+    checkouts = _say_locally_managed(component_checkouts(base), local)
     unpin = getattr(args, 'unpin', False)
 
     # Fetch by default so "nothing to do" means something. Without this
@@ -4620,7 +4670,8 @@ def cmd_update(args) -> int:
         pin = getattr(entry, 'pin', None) if entry else None
     except Exception:
         pin = None
-    if pin and Path('/usr/local/sbin/radiod').exists():
+    if (pin and 'ka9q-radio' not in local
+            and Path('/usr/local/sbin/radiod').exists()):
         # radiod may be absent (a client-only host, or a dev checkout).
         try:
             r = subprocess.run(['/usr/local/sbin/radiod', '--version'],
@@ -4650,6 +4701,7 @@ def cmd_update(args) -> int:
         'radiod': ({'running': running, 'pin': pin,
                     'contains_pin': contains_pin} if pin else {}),
         'wisdom_misses': plans_from_fft_log(),
+        'locally_managed': sorted(local.names),
     }
 
     plan = plan_update(state)
@@ -5464,7 +5516,10 @@ _PRELOAD_MODULES = {
                          'sigmond.bringup', 'sigmond.coordination',
                          'sigmond.discovery', 'sigmond.environment',
                          'sigmond.environment_kinds', 'sigmond.paths',
-                         'sigmond.sources'),
+                         'sigmond.sources',
+                         # site_profile's locally_managed name check reads
+                         # the checkouts on disk
+                         'sigmond.installer', 'sigmond.lan_order'),
     'update': ('sigmond.cpu', 'sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
                'sigmond.installer_args', 'sigmond.sink_state',
@@ -5475,7 +5530,9 @@ _PRELOAD_MODULES = {
                'sigmond.discovery', 'sigmond.environment_kinds',
                'sigmond.inprocess_senders', 'sigmond.instance',
                'sigmond.lifecycle', 'sigmond.psws', 'sigmond.site_profile',
-               'sigmond.snapshot', 'sigmond.uploader_manifest'),
+               'sigmond.snapshot', 'sigmond.uploader_manifest',
+               # site_profile's locally_managed name check
+               'sigmond.installer', 'sigmond.lan_order'),
     'align': ('sigmond.align', 'sigmond.align_apply', 'sigmond.align_live',
               'sigmond.provenance', 'sigmond.catalog', 'sigmond.discover',
               'sigmond.commands.uploader', 'sigmond.inprocess_senders',
@@ -5494,7 +5551,9 @@ _PRELOAD_MODULES = {
               'sigmond.cli_reference', 'sigmond.cli_walk', 'sigmond.psws',
               'sigmond.site_profile', 'sigmond.snapshot',
               # render_env reads the [[receiver]] list
-              'sigmond.receivers', 'sigmond.bringup', 'sigmond.paths'),
+              'sigmond.receivers', 'sigmond.bringup', 'sigmond.paths',
+              # site_profile's locally_managed name check
+              'sigmond.installer', 'sigmond.lan_order'),
 }
 
 
@@ -5897,6 +5956,8 @@ def cmd_manifest_restore(args) -> int:
     checkouts = component_checkouts(base)
     checkout_by_name = {d.name: d for d in checkouts}
     live = component_versions(checkouts)
+    # site-profile [components] locally_managed: neither fetched nor moved.
+    local = _locally_managed()
 
     # A loose PRE-pass (same _sha_equal comparison plan_restore itself
     # uses) to decide who might need a checkout move, so the fetch below
@@ -5905,6 +5966,7 @@ def cmd_manifest_restore(args) -> int:
     manifest_components = _parse_manifest_components(manifest_text) or {}
     candidates = sorted(
         name for name, msha in manifest_components.items()
+        if name not in local
         if name in checkout_by_name and live.get(name) is not None
         and not _sha_equal(live[name], msha))
 
@@ -5940,7 +6002,7 @@ def cmd_manifest_restore(args) -> int:
             return False
         return r.returncode == 0
 
-    plan = plan_restore(manifest_text, live, resolvable)
+    plan = plan_restore(manifest_text, live, resolvable, local=local)
 
     checkout_actions = [(n, f, t) for n, a, f, t in plan.actions
                         if a == 'checkout']
@@ -5981,6 +6043,9 @@ def cmd_manifest_restore(args) -> int:
 
     for n, f, t in keep_actions:
         _ok(f'{n}: keep ({t})')
+    for n, a, f, t in plan.actions:
+        if a == 'local':
+            _info(local.note(n, f))
     for n, f, t in checkout_actions:
         print(f'  → {n}: checkout {f} -> {t}')
     for s in plan.strays:
@@ -6119,8 +6184,10 @@ def cmd_manifest_restore(args) -> int:
     # this check exists to catch (reported as a refusal, naming the
     # component), not a case to paper over by resolving/fetching again.
     live_after = component_versions(component_checkouts(base))
-    reverify = plan_restore(manifest_text, live_after, lambda *a: False)
-    non_keep = [(n, a, f, t) for n, a, f, t in reverify.actions if a != 'keep']
+    reverify = plan_restore(manifest_text, live_after, lambda *a: False,
+                            local=local)
+    non_keep = [(n, a, f, t) for n, a, f, t in reverify.actions
+                if a not in ('keep', 'local')]
     if reverify.ok and not non_keep:
         print(f'admin manifest restore: restored to manifest — '
               f'{len(moved)} component(s) moved, re-plan verifies '
@@ -6748,7 +6815,8 @@ def _reads_radiod(component, catalog) -> bool:
     return align_live.RADIOD in (getattr(entry, 'requires', None) or ())
 
 
-def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) -> dict:
+def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run,
+                     local=None) -> dict:
     """What an alignment has left stale on this station right now — the
     inputs align_live needs, read from the station itself, so a run finds
     restarts an earlier run left undone.  Read-only: `systemctl show`,
@@ -6808,6 +6876,14 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
         if start is not None and (checkout is None or checkout <= start):
             built = None      # only the binary moved: a same-bytes rebuild
         moved_at[RADIOD] = built
+    # A checkout the site manages by hand (site-profile [components]
+    # locally_managed) restarts nothing: whoever moves or rebuilds it
+    # restarts what they choose.  Unknown, never stale (ruling 7's reading).
+    if local is None:
+        local = _locally_managed()
+    for n in list(moved_at):
+        if n in local:
+            moved_at[n] = None
 
     radiod_consumers = {c for c in running if c != RADIOD and _reads_radiod(c, catalog)}
     stale = align_live.stale_components(running, moved_at, started_at, consumes)
@@ -6817,7 +6893,7 @@ def _align_staleness(base, services: dict, catalog=None, *, run=subprocess.run) 
         for c in sorted(radiod_consumers):
             if started_at[c] < radiod_start:
                 stale[c] = f'{stale[c]}; {why}' if c in stale else why
-    if 'hs-uploader' not in services:
+    if 'hs-uploader' not in services and 'hs-uploader' not in local:
         from sigmond.commands.uploader import SERVICE
         up_start = _align_units_started_at([SERVICE], run=run)
         up_moved = _align_head_moved_at(Path(base) / 'hs-uploader')
@@ -7691,7 +7767,7 @@ def _align_apply(args) -> int:
             return 2
 
         live, dirty, origins, errors = _align_live_state(base)
-        items = align.plan_align(rel, live, dirty, errors)
+        items = align.plan_align(rel, live, dirty, errors, local=_locally_managed())
         prefetched: dict = {}
         skipped_budget: set = set()
         max_bytes = getattr(args, 'max_bytes', None)
@@ -8113,7 +8189,7 @@ def cmd_align(args) -> int:
         print(f'smd align: cannot establish the target — {exc}')
         return 2
     live, dirty, origins, errors = _align_live_state(base)
-    plan = align.plan_align(rel, live, dirty, errors)
+    plan = align.plan_align(rel, live, dirty, errors, local=_locally_managed())
     print(f'smd align — {socket.gethostname()} against blessed {rel.tag} '
           f'(dry run: nothing changes)')
     recorded = align.recorded_release()
@@ -8857,9 +8933,14 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
             findings.append(Finding(family, f'{family}-unassessed', str(exc)))
 
     repos = component_checkouts(base)
+    # A checkout the site manages by hand (site-profile [components]
+    # locally_managed): its owner, git state and manifest drift are its
+    # manager's business.  `smd doctor` reports it as locally managed.
+    local = _locally_managed()
+    ours = [d for d in repos if d.name not in local]
 
     def _ownership() -> None:
-        for d in repos:
+        for d in ours:
             name = d.name
             try:
                 owner_uid = d.stat().st_uid
@@ -8878,7 +8959,7 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
                     fixable=True))
 
     def _git() -> None:
-        for d in repos:
+        for d in ours:
             name = d.name
             st = git_state(d)
             if st['error']:
@@ -9010,7 +9091,7 @@ def collect_findings(base='/opt/git/sigmond', strict: bool = True) -> tuple:
             # version`'s pin line and the heartbeat manifest block.
             _anc = lambda n, m, l: sha_contained(n, m, l, base=str(base))
             for d in manifest_drift(live, str(MANIFEST_PATH), ancestry=_anc):
-                if d['status'] == 'superset':
+                if d['status'] == 'superset' or d['component'] in local:
                     continue
                 if d['status'] == 'moved':
                     detail = f'live {d["live"]} != manifest {d["manifest"]}'
@@ -9202,6 +9283,7 @@ def cmd_doctor(args) -> int:
     if not base.is_dir():
         _err(f'doctor: {base} not found')
         return 1
+    local = _locally_managed()
 
     if getattr(args, 'fix', False):
         # Repair pass only — read-only reporting (including ownership,
@@ -9213,6 +9295,8 @@ def cmd_doctor(args) -> int:
         # matches cmd_doctor's prior behaviour of bailing out before any
         # findings (from this or any other family) were reported.
         for d in component_checkouts(base):
+            if d.name in local:
+                continue          # site-profile [components]: not ours to chown
             try:
                 owner_uid = d.stat().st_uid
             except OSError:
@@ -9238,6 +9322,10 @@ def cmd_doctor(args) -> int:
             _ok(f'guest-agent drop-in: wrote {p}')
 
     _, findings = collect_findings(base)
+
+    # No ownership, git or drift findings for these (collect_findings skips
+    # them); say where each one stands instead.
+    _say_locally_managed(component_checkouts(base), local)
 
     ok, text = summarise(findings)
     if ok:
@@ -11864,8 +11952,14 @@ def _install_radiod_native(catalog, *, force: bool = False,
     # wire-protocol headers (rule_ka9q_python_compat then warns).  Advancing is
     # a deliberate sync_types.py step, never a side effect of install.
     pin = _ka9q_radio_pin()
+    local = _locally_managed()
     try:
-        if pin:
+        if 'ka9q-radio' in local:
+            # site-profile [components] locally_managed: no clone, pull or
+            # repin, and _build_ka9q_radio below builds nothing either.
+            # The rest (udev, wisdom service, drop-ins) is not the checkout.
+            src_dir = Path('/opt/git/sigmond') / 'ka9q-radio'
+        elif pin:
             _info(f'ka9q-radio: pinning to ka9q-python compat commit {pin[:12]}')
             src_dir = _clone_repo(entry, pull_if_exists=pull, ref=pin,
                                   fetch=pull)
@@ -17152,7 +17246,12 @@ def _rebuild_component(name: str, entry, repo_dir, catalog):
     `git pull` leaves compiled binaries (radiod, ka9q-web) stale and newly-added
     Python deps (e.g. hamsci-dsp) uninstalled, so the running code silently lags
     source.  Returns True (rebuilt), False (failed), None (nothing to build).
+    A locally managed component (site-profile [components]) builds nothing.
     """
+    local = _locally_managed()
+    if name in local:
+        _info(local.note(name, _checkout_short_head(repo_dir)) + ' — not rebuilt')
+        return None
     try:
         if name == 'ka9q-radio':
             # make + make install from the checked-out HEAD.  Deliberately NOT
@@ -17214,9 +17313,13 @@ def _apply_updates(args, rows: list[dict]) -> int:
     errors = 0
     pulled = 0  # count of repos whose HEAD actually advanced
     advanced: list = []  # (name, entry, repo_dir) that advanced → rebuild+reinstall
+    local = _locally_managed()
 
     # --- sigmond self-update: on a bare apply, or when explicitly named ---
-    if _wants_sigmond_self_update(components_filter):
+    if 'sigmond' in local and _wants_sigmond_self_update(components_filter):
+        _info(local.note('sigmond', _checkout_short_head(
+            Path(__file__).resolve().parent.parent)))
+    elif _wants_sigmond_self_update(components_filter):
         sigmond_dir = Path(__file__).resolve().parent.parent
         if (sigmond_dir / '.git').exists():
             dirty, reason = _repo_is_dirty(sigmond_dir)
@@ -17263,6 +17366,11 @@ def _apply_updates(args, rows: list[dict]) -> int:
         if repo_dir is None:
             if components_filter:
                 _warn(f'{name}: not installed — install first with: smd install {name}')
+            continue
+        if name in local:
+            # site-profile [components] locally_managed: not ours to pull,
+            # check out or rebuild, whatever --ref or the topology says.
+            _info(local.note(name, _checkout_short_head(repo_dir)))
             continue
 
         comp = _topo_obj.components.get(name)

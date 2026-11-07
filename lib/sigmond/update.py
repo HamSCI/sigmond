@@ -46,6 +46,13 @@ The traps, and how each is encoded:
   `--unpin` does not release them.  A pull would move the source off the
   commit the installed library was built from (onion, 2026-10-07).
 
+* **a locally managed checkout is not ours** — a site may list checkouts
+  it looks after by hand in site-profile.toml (`[components]
+  locally_managed`; Phil's ka9q-radio at KFS).  The caller passes them as
+  `state['locally_managed']`, and the plan neither pulls, installs, builds
+  nor rebuilds them, nor holds them: they are not in the plan at all.  The
+  wisdom step stays, since FFTW plans are not the checkout.
+
 * **a pull is not a build** — station-web and hamsci-physics have no
   install.sh; their deploy.toml `[build]` makes the venv.  Each successful
   build records the HEAD it built (sigmond.build_stamp), and the plan builds
@@ -138,8 +145,10 @@ def plan_update(state: dict) -> list:
     refusals: list = []
     needs_restart = False
 
-    repos = state.get('repos') or {}
-    skew = set(state.get('venv_skew') or [])
+    local = set(state.get('locally_managed') or ())
+    repos = {n: v for n, v in (state.get('repos') or {}).items()
+             if n not in local}
+    skew = set(state.get('venv_skew') or []) - local
     to_install = set()
 
     for name in sorted(repos):
@@ -236,7 +245,9 @@ def plan_update(state: dict) -> list:
                    'shared checkout, not the venv'))
         needs_restart = True
 
-    radiod = state.get('radiod') or {}
+    # A locally managed ka9q-radio is rebuilt by whoever manages it, and
+    # neither its rebuild nor a refusal to guess about one belongs here.
+    radiod = {} if 'ka9q-radio' in local else (state.get('radiod') or {})
     if radiod.get('pin') and radiod.get('running') is None:
         # A parse failure is not a finding.  B4 reported `running None`
         # because radiod prints its banner to STDERR, and that masqueraded

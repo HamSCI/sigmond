@@ -178,6 +178,18 @@ def _warn_offline(repo_dir: Path, r, action: str) -> None:
           file=sys.stderr)
 
 
+def _locally_managed():
+    """site-profile.toml's `[components] locally_managed`, read at call time."""
+    from .site_profile import locally_managed_components
+    return locally_managed_components()
+
+
+def _short_head(repo_dir: Path) -> Optional[str]:
+    """``repo_dir``'s HEAD, abbreviated; None when git cannot say."""
+    r = _git(repo_dir, 'rev-parse', '--short', 'HEAD')
+    return (r.stdout.strip() or None) if r.returncode == 0 else None
+
+
 def clone_repo(
     entry: CatalogEntry,
     *,
@@ -202,6 +214,18 @@ def clone_repo(
     missing checkout still clones -- there is nothing on disk to install.
     """
     repo_dir = base / entry.name
+    local = _locally_managed()
+    if entry.name in local:
+        # site-profile [components] locally_managed: whoever manages this
+        # checkout moves it; no fetch, pull, checkout -B or pinned ref here.
+        if repo_dir.exists():
+            print(f"  {local.note(entry.name, _short_head(repo_dir))}")
+            return repo_dir
+        raise RuntimeError(
+            f"{entry.name} is {local.label()}, and there is no checkout at "
+            f"{repo_dir}: sigmond does not clone it.  Put the checkout there, "
+            f"or drop {entry.name} from [components] locally_managed in "
+            f"site-profile.toml")
     if repo_dir.exists() and not fetch:
         if ref is not None:
             have = _git(repo_dir, 'rev-parse', '--verify', '--quiet',
@@ -746,6 +770,15 @@ def install_client(
     """
     if not entry.install_script and not entry.repo:
         return False
+
+    local = _locally_managed()
+    if entry.name in local:
+        # Its install.sh or [build] would rebuild a checkout the site
+        # manages by hand.  Nothing to do is the install asked for.
+        repo_dir = GIT_BASE / entry.name
+        sha = _short_head(repo_dir) if repo_dir.exists() else None
+        print(f"  {local.note(entry.name, sha)} — not installed by sigmond")
+        return True
 
     repo_dir = clone_repo(entry, pull_if_exists=pull, ref=entry.pin)
     _clone_source_only_deps(entry, catalog, dry_run=dry_run)

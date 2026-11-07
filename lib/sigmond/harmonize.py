@@ -769,6 +769,23 @@ def rule_ka9q_python_compat(view: SystemView) -> RuleResult:
             [],
         )
 
+    # site-profile [components] locally_managed: whoever manages the
+    # checkout decides where it sits, so off the pin is no finding and the
+    # remediation (re-pin via `smd install`) does not apply.  Say both
+    # commits, so a decode problem can still be traced to them.
+    try:
+        from .site_profile import locally_managed_components
+        local = locally_managed_components()
+    except Exception:                                   # noqa: BLE001
+        local = None
+    if local is not None and "ka9q-radio" in local:
+        return RuleResult(
+            "ka9q_python_compat", "pass",
+            f"ka9q-radio is {local.label()} at {actual[:12]}; ka9q-python's "
+            f"pin is {expected[:12]} (not judged)",
+            [],
+        )
+
     remediation = (
         "If ka9q-radio is the source of truth: rerun "
         "`smd install` (sigmond's in-tree builder checks out ka9q-radio at "

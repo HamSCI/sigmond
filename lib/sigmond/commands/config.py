@@ -1822,14 +1822,15 @@ def _site_change(mode: str, reason: str, coord, words, roots) -> int:
 
 def cmd_config_profile_install(args, chown=os.chown) -> int:
     """`smd config profile-install <path>`: install a new site-profile.toml
-    (the wizard writes it beside the old one) and keep any [uploads] block the
-    old profile declared (tasks/plan-sink-control.md §10.3 item 2).  The
+    (the wizard writes it beside the old one) and keep any [uploads] or
+    [components] block the old profile declared (tasks/plan-sink-control.md
+    §10.3 item 2; [components] holds the locally managed list).  The
     installed file keeps the old profile's mode, owner and group; a first
     install keeps the new file's mode.  ``chown`` is injectable so tests need
     no root."""
     import shutil
     import tomllib
-    from ..site_profile import carry_uploads_block
+    from ..site_profile import carry_operator_blocks
     new_path = Path(args.path)
     live = SITE_PROFILE_PATH.exists()
     # The command deletes `new_path` after the install.  Given the live profile
@@ -1855,7 +1856,7 @@ def cmd_config_profile_install(args, chown=os.chown) -> int:
         err(f'{new_path} is not valid TOML: {exc}; site-profile.toml unchanged')
         return 1
     old_text = SITE_PROFILE_PATH.read_text() if live else None
-    text = carry_uploads_block(new_text, old_text)
+    text = carry_operator_blocks(new_text, old_text)
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
