@@ -65,7 +65,8 @@ class RestorePlan:
 
     ``actions`` holds one 4-tuple ``(name, action, from_sha, to_sha)``
     per manifest component, where ``action`` is ``'keep'`` (already at
-    the manifest SHA — nothing to do) or ``'checkout'`` (needs to move;
+    the manifest SHA — nothing to do), ``'local'`` (locally managed — left
+    as is) or ``'checkout'`` (needs to move;
     ``from_sha`` is the live SHA today, ``to_sha`` is the manifest SHA
     to land on). Components that refuse never appear in ``actions``.
 
@@ -82,7 +83,8 @@ class RestorePlan:
 
 
 def plan_restore(manifest_text: str, live_components: dict,
-                 resolvable: Callable[[str, str], bool]) -> RestorePlan:
+                 resolvable: Callable[[str, str], bool],
+                 local=()) -> RestorePlan:
     """Fail-closed plan to roll live component checkouts BACK to a
     blessed manifest.
 
@@ -131,6 +133,10 @@ def plan_restore(manifest_text: str, live_components: dict,
     the first found — an operator planning a restore needs the whole
     picture to decide whether to fetch more, fix a dirty tree, or
     accept that a component genuinely cannot be rolled back here.
+
+    ``local`` names the components the site manages by hand (site-profile
+    ``[components] locally_managed``).  Each gets action ``'local'``
+    whatever its SHA, and never a refusal: restore leaves it as it stands.
     """
     manifest = _parse_manifest_components(manifest_text)
     if manifest is None:
@@ -144,7 +150,9 @@ def plan_restore(manifest_text: str, live_components: dict,
     for name in sorted(manifest):
         manifest_sha = manifest[name]
         live_sha = live_components.get(name)
-        if live_sha is None:
+        if name in local:
+            actions.append((name, 'local', live_sha, manifest_sha))
+        elif live_sha is None:
             refusals.append(
                 f'{name}: in the manifest but no checkout to restore')
         elif _sha_equal(live_sha, manifest_sha):

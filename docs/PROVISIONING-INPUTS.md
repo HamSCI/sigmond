@@ -222,6 +222,40 @@ gnss_vtec_host = ""               # optional ZED-F9P / ser2net host
 require = ["psws_key", "earthdata_netrc"]   # add "rac_token" if RAC enabled
 ```
 
+### `[components]` — checkouts the site manages by hand (optional)
+
+```toml
+[components]
+locally_managed    = ["ka9q-radio"]   # checkout names under /opt/git/sigmond
+locally_managed_by = "Phil"           # optional; named in every message
+```
+
+Absent (the default), sigmond manages every checkout as it always has.  A
+name in `locally_managed` is a checkout someone at the site changes himself —
+at KFS, Phil, the ka9q-radio author, keeps ka9q-radio.  sigmond then leaves
+that checkout exactly as it stands:
+
+- `smd update` neither fetches, compares, pulls, installs nor rebuilds it, and
+  plans no `rebuild-radiod` for a locally managed ka9q-radio.  There is no
+  "cannot compare against upstream" warning and no HELD/pin refusal for it;
+  one line says `ka9q-radio: locally managed (Phil) — left as is at <sha>`.
+  Missing FFTW wisdom is still reported: the plans are not the checkout.
+- `smd align` shows it as `local` with the same note, never moves it, writes
+  no `.pin` into it, never rebuilds it, and never restarts radiod (or anything
+  else) because it moved.  The other components align as before.
+- `smd doctor` reports no ownership, dirty, detached-HEAD, unpushed or
+  manifest-drift findings for it (and `--fix` never chowns it); it prints the
+  same one line instead.  The ka9q-python compat rule passes, naming both
+  commits, rather than warning that ka9q-radio sits off the pin.
+- `smd install`, `smd component update`, `smd add` and
+  `smd admin manifest restore` never clone over, pull, check out, reset or
+  build it.  `smd install` of a locally managed component with no checkout
+  refuses: put the checkout in place, or drop the name from the list.
+
+A name that matches no component is warned about, never an error.  The wizard
+rewrites the profile whole, and `smd config profile-install` carries
+`[components]` across that rewrite the way it carries `[uploads]`.
+
 **Rendering model (proposed):** `smd config render` reads `site-profile.toml`,
 writes/refreshes each client's `*-config.toml` from its template, and publishes
 `STATION_CALL` / `STATION_GRID` / `SIGMOND_RADIOD_*` into `coordination.env`.

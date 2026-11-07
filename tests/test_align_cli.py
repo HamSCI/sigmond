@@ -91,6 +91,20 @@ class AlignCliTests(unittest.TestCase):
         self.assertNotIn("--apply will not move it", out)
         self.assertIn("  host:", out)
 
+    def test_a_locally_managed_ka9q_radio_is_shown_local_and_never_moves(self):
+        # KFS, 2026-11-07: Phil keeps ka9q-radio (site-profile [components]).
+        import sigmond.site_profile as sp
+        sp.SITE_PROFILE_PATH.write_text(
+            '[components]\nlocally_managed = ["ka9q-radio"]\nlocally_managed_by = "Phil"\n')
+        rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "deb7bdd"},
+                      recorded="v3.53")
+        self.assertEqual(rc, 0, out)
+        line = next(ln for ln in out.splitlines() if ln.strip().startswith("ka9q-radio"))
+        self.assertIn("local", line)
+        self.assertIn("locally managed (Phil) — left as is", line)
+        self.assertNotIn("REBUILDS and RESTARTS radiod", out)
+        self.assertIn("0 to move", out)
+
     def test_differing_image_file_exits_1(self):
         rc, out = run({"sigmond": "daba1f6", "hf-timestd": "5c8196d", "ka9q-radio": "401992c"},
                       files=[{"path": "/usr/local/sbin/sigmond-site-timing",
@@ -3153,6 +3167,27 @@ class AlignStalenessTests(unittest.TestCase):
                            started={"radiod@a.service": 100.0}, built_at=200.0)
         self.assertIn(align_live.RADIOD, st["stale"])
         self.assertEqual(st["moved_at"][align_live.RADIOD], 200.0)
+
+    # --- site-profile [components] locally_managed (KFS, 2026-11-07): a
+    # ka9q-radio Phil rebuilt himself restarts nothing through align. ---
+
+    def test_a_locally_managed_radiod_rebuilt_by_hand_is_not_stale(self):
+        import sigmond.site_profile as sp
+        sp.SITE_PROFILE_PATH.write_text(
+            '[components]\nlocally_managed = ["ka9q-radio"]\nlocally_managed_by = "Phil"\n')
+        st, _ = self._read({align_live.RADIOD: ["radiod@a.service"], "psk-recorder": ["psk"]},
+                           {}, moved={align_live.RADIOD: 150.0},
+                           started={"radiod@a.service": 100.0, "psk": 120.0}, built_at=200.0)
+        self.assertNotIn(align_live.RADIOD, st["stale"])
+        self.assertIsNone(st["moved_at"][align_live.RADIOD])
+        self.assertEqual(st["stale"], {})
+
+    def test_a_consumer_of_a_locally_managed_library_is_not_stale_for_it(self):
+        import sigmond.site_profile as sp
+        sp.SITE_PROFILE_PATH.write_text('[components]\nlocally_managed = ["ka9q-python"]\n')
+        st, _ = self._read({"psk-recorder": ["psk"]}, {}, moved={"ka9q-python": 150.0},
+                           started={"psk": 100.0}, consumes={"psk-recorder": ["ka9q-python"]})
+        self.assertNotIn("psk-recorder", st["stale"])
 
     def test_radiod_checkout_new_binary_old_is_not_stale(self):
         st, _ = self._read({align_live.RADIOD: ["radiod@a.service"]}, {},

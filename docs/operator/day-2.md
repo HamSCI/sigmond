@@ -684,6 +684,20 @@ running now."
 - **Never `git pull`** in `/opt/git/sigmond/…`. That is exactly what
   `smd update` does, in the right order, with the right ownership.
 
+The one exception is a checkout your site has said it manages by hand, in
+`/etc/sigmond/site-profile.toml`:
+
+```toml
+[components]
+locally_managed    = ["ka9q-radio"]
+locally_managed_by = "Phil"
+```
+
+`smd update`, `smd align` and `smd doctor` then leave that checkout alone and
+say so in one line, `ka9q-radio: locally managed (Phil) — left as is at <sha>`;
+whoever manages it pulls, builds and restarts it. Details:
+[PROVISIONING-INPUTS.md §8](../PROVISIONING-INPUTS.md#8-single-per-site-profile-implemented).
+
 Full list and reasoning → [do-not-touch.md](do-not-touch.md).
 
 ---

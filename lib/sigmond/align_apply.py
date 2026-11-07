@@ -570,6 +570,12 @@ def apply_plan(rel: Release, items: list, ctx: Ctx) -> list:
                 stopped = f"stopped after {it.component} failed"
         elif it.status == "stray":
             steps.append(Step(it.component, "left"))
+        elif it.status == "local":
+            # site-profile [components] locally_managed: no checkout, .pin,
+            # install or build, at any HEAD.  "left" blocks nothing, and
+            # aligned.json records the note under "left".
+            at = f" at {it.live[:8]}" if it.live else ""
+            steps.append(Step(it.component, "left", f"{it.note}{at}"))
         elif it.status == "missing":
             if ctx.install_missing is None:
                 steps.append(Step(it.component, "refused", "no installer wired"))

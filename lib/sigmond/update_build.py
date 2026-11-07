@@ -44,6 +44,13 @@ def run(repo_dir: Path, *, runner=subprocess.run) -> tuple[bool, list[str]]:
     that succeeds records the checkout's HEAD (sigmond.build_stamp), so the
     next `smd update` or `smd align` plans no build for it.
     """
+    # site-profile [components] locally_managed: its manager builds it.
+    # `smd update` and `smd align` plan no build for it; this is the last
+    # line, for any other caller.
+    from sigmond.site_profile import locally_managed_components
+    local = locally_managed_components()
+    if Path(repo_dir).name in local:
+        return True, [f'  {local.note(Path(repo_dir).name)} — not built']
     ok, msgs = installer.run_deploy_build_steps(
         repo_dir, runner=runner, force=True)
     if not ok:

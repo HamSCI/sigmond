@@ -784,6 +784,30 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
         (repo / '.git' / 'refs' / 'heads' / 'main').write_text(sha + "\n")
         return repo
 
+    def test_a_locally_managed_ka9q_radio_off_the_pin_is_no_warning(self):
+        # KFS, 2026-11-07: Phil keeps ka9q-radio himself (site-profile
+        # [components] locally_managed), so off the pin is his call.
+        from sigmond.harmonize import rule_ka9q_python_compat
+        import sigmond.harmonize as harm_mod
+        import sigmond.site_profile as sp
+        import tempfile
+        sp.SITE_PROFILE_PATH.write_text(
+            '[components]\nlocally_managed = ["ka9q-radio"]\n'
+            'locally_managed_by = "Phil"\n')
+        self._install_compat(self.PIN)
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._fake_repo(Path(td), self.OTHER)
+            original = harm_mod._ka9q_radio_source_dir
+            harm_mod._ka9q_radio_source_dir = lambda: repo
+            try:
+                r = rule_ka9q_python_compat(self._view(Coordination()))
+            finally:
+                harm_mod._ka9q_radio_source_dir = original
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("locally managed (Phil)", r.message)
+        self.assertIn(self.OTHER[:12], r.message)
+        self.assertIn(self.PIN[:12], r.message)
+
     def test_skipped_when_ka9q_python_not_importable(self):
         from sigmond.harmonize import rule_ka9q_python_compat
         self._uninstall_compat()

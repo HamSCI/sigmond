@@ -168,20 +168,37 @@ def _dirt(value) -> tuple:
 @dataclass(frozen=True)
 class Item:
     component: str
-    status: str            # current | move | refuse | missing | stray
+    status: str            # current | move | refuse | missing | stray | local
     live: Optional[str]
     target: Optional[str]
     note: str = ""
 
 
-def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict] = None) -> list:
+def local_note(local) -> str:
+    """The note a locally managed item carries: `locally managed (<by>) —
+    left as is`."""
+    label = local.label() if hasattr(local, "label") else "locally managed"
+    return f"{label} — left as is"
+
+
+def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict] = None,
+               local=None) -> list:
     """What aligning to ``release`` would do, component by component. Pure.
 
     ``dirty`` maps a component to its dirty files (a list) or, in the
-    older form, a bool. Only dirt beyond a lone uv.lock refuses."""
+    older form, a bool. Only dirt beyond a lone uv.lock refuses.
+
+    ``local`` holds the components the site manages by hand (site-profile
+    ``[components] locally_managed``, a ``site_profile.LocallyManaged``).
+    Each one is a ``local`` item whatever its HEAD: never moved, installed,
+    pinned or rebuilt, and nothing restarts because of it."""
     errors = errors or {}
+    local = local or ()
     items = []
     for name, target in release.components.items():
+        if name in local:
+            items.append(Item(name, "local", live.get(name), target, local_note(local)))
+            continue
         if name not in live:
             items.append(Item(name, "missing", None, target, "no checkout on this station"))
             continue
@@ -199,7 +216,8 @@ def plan_align(release: Release, live: dict, dirty: dict, errors: Optional[dict]
             if _dirt(dirty.get(name))[1]:
                 notes.append(_UVLOCK_NOTE)
             items.append(Item(name, "move", head, target, "; ".join(notes)))
-    strays = [Item(n, "stray", h, None, "not in the release manifest; left alone")
+    strays = [Item(n, "local", h, None, local_note(local)) if n in local
+              else Item(n, "stray", h, None, "not in the release manifest; left alone")
               for n, h in live.items() if n not in release.components]
     items.sort(key=lambda i: _plan_order(i.component))
     return items + sorted(strays, key=lambda i: i.component)
