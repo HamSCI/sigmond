@@ -5457,7 +5457,14 @@ _PRELOAD_MODULES = {
                          # uploader_manifest's own lazy imports
                          'sigmond.catalog', 'sigmond.discover',
                          'sigmond.inprocess_senders', 'sigmond.instance',
-                         'sigmond.lifecycle'),
+                         'sigmond.lifecycle',
+                         # ...and its merge_into checks, which read the
+                         # [[receiver]] list
+                         'sigmond.site_profile', 'sigmond.receivers',
+                         'sigmond.bringup', 'sigmond.coordination',
+                         'sigmond.discovery', 'sigmond.environment',
+                         'sigmond.environment_kinds', 'sigmond.paths',
+                         'sigmond.sources'),
     'update': ('sigmond.cpu', 'sigmond.doctor', 'sigmond.wisdom', 'sigmond.update',
                'sigmond.catalog', 'sigmond.discover', 'sigmond.provenance',
                'sigmond.installer_args', 'sigmond.sink_state',
@@ -19952,6 +19959,105 @@ def cmd_receiver_list(args) -> int:
     return 0
 
 
+def _merge_site_grid() -> str:
+    """The grid a merge with no merge_grid takes: coordination.toml's
+    [host] grid, the one the manifest render reads."""
+    from sigmond.coordination import load_coordination
+    try:
+        return load_coordination().host.grid or ''
+    except Exception:                                      # noqa: BLE001
+        return ''
+
+
+def cmd_merge_show(args) -> int:
+    """`smd admin merge show [--json]`: each receiver's merge target and
+    grid, and what the rendered and installed manifests carry.  Read-only."""
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    from sigmond import site_profile as _sp
+    from sigmond import uploader_manifest as _um
+    from sigmond.receivers import ReceiverError, load_receivers
+    path = getattr(args, 'profile_path', None) or _sp.SITE_PROFILE_PATH
+    try:
+        receivers = load_receivers(path)
+    except ReceiverError as exc:
+        _err(f'merge: {exc}')
+        return 1
+    topology = getattr(args, 'topology', None)
+    if topology is None:
+        from sigmond.topology import load_topology
+        topology = load_topology()
+    rep = _um.merge_report(receivers, _merge_site_grid(), topology,
+                           getattr(args, 'manifest_path', None))
+    if getattr(args, 'json', False):
+        import json
+        print(json.dumps(rep, indent=2))
+        return 1 if rep['refused'] else 0
+    if not receivers:
+        _info(f'no [[receiver]] entries in {path}')
+    for r in rep['receivers']:
+        into = (f'-> {r["merge_into"]}/{r["grid"] or "no grid"}'
+                if r['merge_into'] else 'reports as itself')
+        print(f'{r["reporter_id"]:<14} {into:<28} '
+              f'{"uploads" if r["uploads"] else "no upload"}')
+    print()
+
+    def _carry(d):
+        return ', '.join(f'{k}={v!r}' for k, v in d.items()) or 'nothing'
+
+    if rep['refused']:
+        _err(f'render refuses: {rep["refused"]}')
+    else:
+        print(f'rendered  {_um.MERGE_CARRIER}: {_carry(rep["rendered"])}')
+    print(f'installed {_um.MERGE_CARRIER}: {_carry(rep["installed"])} '
+          f'({rep["manifest"]})')
+    if not rep['refused'] and rep['rendered'] != rep['installed']:
+        _warn('the installed manifest differs; next: smd config render, '
+              'then sudo smd admin uploader manifest --write')
+    for w in rep['warnings']:
+        _warn(w)
+    return 1 if rep['refused'] else 0
+
+
+def cmd_merge_set(args, *, clear: bool = False) -> int:
+    """`smd admin merge set <reporter>... --into CALL [--grid G]` and
+    `smd admin merge clear <reporter>...`: edit merge_into/merge_grid in
+    site-profile.toml's [[receiver]] list.  Writes nothing else."""
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    from sigmond import site_profile as _sp
+    from sigmond import uploader_manifest as _um
+    from sigmond.receivers import (ReceiverError, load_receivers, set_merge,
+                                   write_receivers)
+    path = getattr(args, 'profile_path', None) or _sp.SITE_PROFILE_PATH
+    into = '' if clear else (getattr(args, 'into', '') or '')
+    grid = '' if clear else (getattr(args, 'grid', '') or '')
+    try:
+        out = set_merge(load_receivers(path), list(args.reporters),
+                        into=into, grid=grid)
+        write_receivers(path, out)
+    except ReceiverError as exc:
+        _err(f'merge: {exc}')
+        return 1
+    except PermissionError:
+        _err(f'permission denied writing {path}; re-run smd as root')
+        return 1
+    for rid in args.reporters:
+        _ok(f'{rid}: ' + (f'merges into {into.strip().upper()}'
+                          + (f' grid {grid}' if grid else ' (site grid)')
+                          if into else 'reports as itself'))
+    # ⚠ Receivers are set one at a time, so the list may pass through a
+    # state the render refuses (merged beside unmerged).  Say so; the
+    # render keeps the installed manifest until it is fixed.
+    for p in _um.merge_problems(out, _merge_site_grid()):
+        _warn(f'the render refuses this list until fixed: {p}')
+    _info('next: smd config render, then sudo smd admin uploader manifest '
+          '--write (or smd apply)')
+    return 0
+
+
 def cmd_receiver_apply(args) -> int:
     """`smd admin receiver apply [--dry-run]`: make the declared list real."""
     if not _HAS_SIGMOND_LIB:
@@ -28711,6 +28817,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help='the clients a receiver with no `clients` key binds (default: '
              'the reporter-keyed clients enabled or installed here)')
 
+    # merge — merge_into in the [[receiver]] list (spec §7c)
+    p_merge = admin_sub.add_parser(
+        'merge',
+        help='show or set which call each receiver reports under, merged '
+             'on the WD servers (merge_into)',
+        description=(
+            'A receiver with merge_into reports under that call and grid; '
+            'the uploader manifest declares it in every tar and the WD '
+            'servers post under it.  One merge target per host.  `set` and '
+            '`clear` edit site-profile.toml only.'),
+    )
+    merge_sub = p_merge.add_subparsers(dest='merge_command')
+    merge_sub.add_parser('help', help='show this help')
+    p_merge_show = merge_sub.add_parser(
+        'show', help='each receiver\'s merge target, and what the manifest '
+                     'carries')
+    p_merge_show.add_argument('--json', action='store_true',
+                              help='print the report as JSON')
+    p_merge_set = merge_sub.add_parser(
+        'set', help='merge receivers into a call')
+    p_merge_set.add_argument('reporters', nargs='+', metavar='REPORTER')
+    p_merge_set.add_argument('--into', required=True, metavar='CALL',
+                             help='the call the receivers report as')
+    p_merge_set.add_argument('--grid', default='', metavar='GRID',
+                             help='the grid they report (default: the '
+                                  'site grid)')
+    p_merge_clear = merge_sub.add_parser(
+        'clear', help='make receivers report as themselves again')
+    p_merge_clear.add_argument('reporters', nargs='+', metavar='REPORTER')
+
     # completion
     p_decoders = admin_sub.add_parser(
         'decoders',
@@ -29777,6 +29913,7 @@ def _build_parser() -> argparse.ArgumentParser:
         'p_manifest': p_manifest,
         'p_rac': p_rac,
         'p_radiod': p_radiod,
+        'p_merge': p_merge,
         'p_receiver': p_receiver,
         'p_sdr': p_sdr,
         'p_sdr_list': p_sdr_list,
@@ -29843,6 +29980,7 @@ def main() -> int:
     p_manifest = parser._smd_parts['p_manifest']
     p_rac = parser._smd_parts['p_rac']
     p_radiod = parser._smd_parts['p_radiod']
+    p_merge = parser._smd_parts['p_merge']
     p_receiver = parser._smd_parts['p_receiver']
     p_sdr = parser._smd_parts['p_sdr']
     p_sdr_list = parser._smd_parts['p_sdr_list']
@@ -30075,6 +30213,17 @@ def main() -> int:
         if sub_cmd == 'apply':
             return cmd_receiver_apply(args)
         p_receiver.print_help()
+        return 0
+
+    if args.command == 'merge':
+        sub_cmd = getattr(args, 'merge_command', None)
+        if sub_cmd == 'show':
+            return cmd_merge_show(args)
+        if sub_cmd in ('set', 'clear'):
+            if _need_root(f'admin merge {sub_cmd}'):
+                return 1
+            return cmd_merge_set(args, clear=(sub_cmd == 'clear'))
+        p_merge.print_help()
         return 0
 
     if args.command == 'sources':

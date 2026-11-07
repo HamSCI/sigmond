@@ -760,6 +760,35 @@ def _render_init(args) -> int:
     return 0
 
 
+def _merge_checks(receivers: list, profile_grid: str) -> list:
+    """The receivers' merge_into problems (render errors), after warning
+    about each merged instance whose env does not deliver via the server.
+
+    ⛔ Errors: two merge targets on one host, merged beside unmerged, and
+    merge_into beside a station-side WD_MERGE_REPORTERS (spec §7c: a
+    station merges in one place, never both).  The site grid is the
+    profile's, else coordination.toml's (a receiver-only profile)."""
+    if not any(r.merge_into.strip() or r.merge_grid.strip()
+               for r in receivers):
+        return []
+    from ..topology import load_topology
+    grid = profile_grid or load_coordination(COORDINATION_PATH).host.grid
+    problems = um.merge_problems(receivers, grid)
+    if problems:
+        return problems
+    topology = load_topology()
+    problems = um.two_merges_problems(receivers, topology)
+    for m in um.delivery_mismatches(receivers, topology):
+        warn(m)
+    target = None if problems else um.merge_target(receivers, grid)
+    if target is not None:
+        call, mgrid = target
+        info(f'merge: receivers report as {call}/{mgrid}, merged on the WD '
+             f'servers; the uploader manifest carries it from its next '
+             f'render (smd apply, or smd admin uploader manifest --write)')
+    return problems
+
+
 def cmd_config_render(args) -> int:
     """Render coordination.toml/.env from /etc/sigmond/site-profile.toml.
 
@@ -798,11 +827,15 @@ def cmd_config_render(args) -> int:
 
     from ..bringup import _REPORTER_KEYED
     from ..receivers import ReceiverError, load_receivers, validate_receivers
+    receivers: list = []
     try:
-        rx_problems = validate_receivers(load_receivers(SITE_PROFILE_PATH),
+        receivers = load_receivers(SITE_PROFILE_PATH)
+        rx_problems = validate_receivers(receivers,
                                          profile_clients=_REPORTER_KEYED)
     except ReceiverError as e:
         rx_problems = [str(e)]
+    if not rx_problems:
+        rx_problems = _merge_checks(receivers, profile.grid)
     if rx_problems:
         for p in rx_problems:
             err(p)

@@ -362,9 +362,241 @@ def apply_proxying(pipelines: list, coord: Coordination) -> list:
     return out
 
 
+# --------------------------------------------------------------------------
+# merge_into: receivers reported under one call, merged on the server (§7c)
+# --------------------------------------------------------------------------
+
+# The pipeline whose transport carries the merge declaration, and the four
+# keys hs-uploader's pipeline_factory._wsprnet_proxy_kw reads from it.
+MERGE_CARRIER = "wspr-wsprdaemon"
+MERGE_KEYS = ("wsprnet_reporter_call", "wsprnet_reporter_grid",
+              "psk_reporter_call", "psk_reporter_grid")
+
+
+class MergeError(ValueError):
+    """A merge declaration the render refuses to carry."""
+
+
+def merge_target(receivers: list, site_grid: str) -> Optional[tuple]:
+    """``(call, grid)`` this host's uploading receivers merge into, or
+    ``None`` when none says ``merge_into``.
+
+    ⚠ One merge target per host for now: the manifest keys are one value
+    per pipeline, and this host's tar is one pipeline.  So a host whose
+    uploading receivers name different targets, or mix merged and
+    unmerged receivers, raises MergeError naming them.  A receiver that
+    does not upload sends no spots and is not counted.  The call is
+    upper-cased; ``merge_grid`` defaults to ``site_grid``."""
+    up = [r for r in receivers if r.uploads]
+    merged = [r for r in up if r.merge_into.strip()]
+    if not merged:
+        return None
+    unmerged = [r.reporter_id for r in up if not r.merge_into.strip()]
+    if unmerged:
+        raise MergeError(
+            f"merge_into: {', '.join(r.reporter_id for r in merged)} merge "
+            f"but {', '.join(unmerged)} upload as themselves on the same "
+            f"host; one merge target per host — give every uploading "
+            f"receiver the same merge_into, or none")
+    targets: dict = {}
+    for r in merged:
+        t = (r.merge_into.strip().upper(),
+             r.merge_grid.strip() or (site_grid or "").strip())
+        targets.setdefault(t, []).append(r.reporter_id)
+    if len(targets) > 1:
+        raise MergeError(
+            "merge_into: one merge target per host, found "
+            + "; ".join(f"{c}/{g or 'no grid'} ({', '.join(ids)})"
+                        for (c, g), ids in targets.items()))
+    (call, grid), ids = next(iter(targets.items()))
+    if not grid:
+        raise MergeError(
+            f"merge_into {call} ({', '.join(ids)}): no merge_grid and the "
+            f"site has no grid; set merge_grid or [station] grid_square")
+    return call, grid
+
+
+def merge_problems(receivers: list, site_grid: str) -> list:
+    """One message per merge declaration the render would refuse."""
+    msgs = [f"{r.reporter_id}: merge_grid {r.merge_grid!r} without "
+            f"merge_into does nothing; set merge_into or drop merge_grid"
+            for r in receivers if r.merge_grid.strip()
+            and not r.merge_into.strip()]
+    try:
+        merge_target(receivers, site_grid)
+    except MergeError as e:
+        msgs.append(str(e))
+    return msgs
+
+
+def apply_merge(pipelines: list, target: Optional[tuple]) -> list:
+    """Write ``target``'s call and grid into the tar pipeline's transport.
+
+    ⛔ NO TARGET WRITES NOTHING.  Absent is what hs-uploader reads as "this
+    receiver reports as itself" (``_wsprnet_proxy_kw``: an absent key stays
+    absent), so an unmerged station's manifest must not change by a byte.
+    One identity serves wsprnet and pskreporter (Rob, 2026-10-30): the same
+    call and grid go into both pairs of keys."""
+    if target is None:
+        return list(pipelines)
+    carrier = next((p for p in pipelines if p.get("name") == MERGE_CARRIER),
+                   None)
+    if carrier is None or not isinstance(carrier.get("transport"), dict):
+        # Nothing to carry the declaration; the receivers' spots do not
+        # travel in a tar from here either, so nothing is lost.
+        logger.error("uploader-manifest: merge_into %s is declared but the "
+                     "%s pipeline is not being rendered — no merge "
+                     "declaration leaves this host", target[0], MERGE_CARRIER)
+        return list(pipelines)
+    call, grid = target
+    transport = dict(carrier["transport"],
+                     wsprnet_reporter_call=call, wsprnet_reporter_grid=grid,
+                     psk_reporter_call=call, psk_reporter_grid=grid)
+    logger.info("uploader-manifest: receivers merge into %s/%s on the WD "
+                "servers", call, grid)
+    return [dict(p, transport=transport) if p is carrier else p
+            for p in pipelines]
+
+
+def _units_env(client: str, topology) -> list:
+    """``[(unit, env)]`` for the enabled client's instances.  Raises
+    OSError when they cannot be read."""
+    from . import inprocess_senders as ips
+    if client not in set(topology.enabled_components()):
+        return []
+    return [(u, ips._systemctl_show(u))
+            for u in ips._instance_units(client, topology)]
+
+
+def two_merges_problems(receivers: list, topology) -> list:
+    """⛔ A station merges in one place, never both (Rob: "either/or, not
+    both").  ``merge_into`` on any receiver beside a non-empty
+    ``WD_MERGE_REPORTERS`` (wspr-recorder's station-side merge) on this
+    host is an error.  An environment that cannot be read is a warning:
+    nothing here can tell."""
+    if not any(r.merge_into.strip() for r in receivers):
+        return []
+    try:
+        rows = _units_env("wspr-recorder", topology)
+    except OSError as exc:
+        logger.warning("uploader-manifest: cannot read wspr-recorder "
+                       "environment (%s) — cannot check WD_MERGE_REPORTERS "
+                       "against merge_into", exc)
+        return []
+    from .instance import display_unit_name
+    return [f"{display_unit_name(u)}: WD_MERGE_REPORTERS="
+            f"{env['WD_MERGE_REPORTERS'].strip()} merges on the station, and "
+            f"merge_into merges on the server; a station merges in one "
+            f"place — empty WD_MERGE_REPORTERS or drop merge_into"
+            for u, env in rows
+            if (env.get("WD_MERGE_REPORTERS") or "").strip()]
+
+
+def delivery_mismatches(receivers: list, topology) -> list:
+    """One message per merged receiver's psk-recorder or meteor-scatter
+    instance whose environment does not deliver via the server.
+
+    ⚠ Sigmond does not own these files at render time (``smd admin upload``
+    and the sink lever step write them), so this only reports.  A sink
+    switch below ``upload`` lowers them on purpose (``server-raw``,
+    ``off``); the message says so rather than call that wrong."""
+    from . import inprocess_senders as ips
+    from .instance import parse_user_reporter_id, unit_name
+    want = {
+        "psk-recorder": (
+            lambda env: ips._psk_delivery_pipelines(env) == ("server-merge",),
+            "PSK_DELIVERY_PIPELINES=server-merge"),
+        "meteor-scatter": (
+            lambda env: ips._ms_delivery_mode(env) == "deposit",
+            "METEOR_SCATTER_DELIVERY_MODE=deposit"),
+    }
+    merged = {}
+    for r in receivers:
+        if r.merge_into.strip():
+            try:
+                merged[parse_user_reporter_id(r.reporter_id)] = r
+            except ValueError:
+                continue
+    if not merged:
+        return []
+    msgs = []
+    for client, (ok, setting) in want.items():
+        try:
+            rows = dict(_units_env(client, topology))
+        except OSError as exc:
+            logger.warning("uploader-manifest: cannot read %s environment "
+                           "(%s) — cannot check its delivery", client, exc)
+            continue
+        for key, r in merged.items():
+            unit = unit_name(client, key)
+            if unit in rows and not ok(rows[unit]):
+                msgs.append(
+                    f"{client}@{r.reporter_id}: merges into "
+                    f"{r.merge_into.strip().upper()} but its env does not "
+                    f"say {setting} (unless a sink switch below upload "
+                    f"lowered it on purpose)")
+    return msgs
+
+
+def merge_report(receivers: list, site_grid: str, topology=None,
+                 manifest_path: Optional[Path] = None) -> dict:
+    """What `smd admin merge show` prints; reads, never writes.
+
+    ``rendered`` is what the next render puts on the tar pipeline
+    (``{}`` for nothing), ``installed`` what the installed manifest's tar
+    pipeline carries now, ``refused`` the render's refusal (``""`` when it
+    renders), and ``warnings`` the env checks.  ``topology`` ``None``
+    skips the checks that read the host's units."""
+    rows = [{"reporter_id": r.reporter_id,
+             "merge_into": r.merge_into.strip().upper(),
+             "merge_grid": r.merge_grid.strip(),
+             "grid": (r.merge_grid.strip() or site_grid or "")
+                     if r.merge_into.strip() else "",
+             "uploads": r.uploads} for r in receivers]
+    rendered: dict = {}
+    refused = "; ".join(merge_problems(receivers, site_grid))
+    warnings: list = []
+    if not refused:
+        target = merge_target(receivers, site_grid)
+        if target is not None:
+            rendered = dict(zip(MERGE_KEYS, (target[0], target[1]) * 2))
+            if topology is not None:
+                refused = "; ".join(two_merges_problems(receivers, topology))
+    if topology is not None:
+        warnings = delivery_mismatches(receivers, topology)
+    installed: dict = {}
+    path = manifest_path or MANIFEST_PATH
+    try:
+        doc = tomllib.loads(path.read_text(encoding="utf-8"))
+        tar = next((p for p in doc.get("pipeline", [])
+                    if isinstance(p, dict) and p.get("name") == MERGE_CARRIER),
+                   {})
+        t = tar.get("transport") if isinstance(tar, dict) else None
+        if isinstance(t, dict):
+            installed = {k: t[k] for k in MERGE_KEYS if k in t}
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return {"receivers": rows, "rendered": rendered, "installed": installed,
+            "refused": refused, "warnings": warnings,
+            "manifest": str(path)}
+
+
+def _load_merge_receivers() -> list:
+    from . import site_profile as _sp
+    from .receivers import ReceiverError, load_receivers
+    try:
+        return load_receivers(_sp.SITE_PROFILE_PATH)
+    except (ReceiverError, OSError, UnicodeError) as e:
+        # ⚠ Refuse rather than render without the declaration: dropping
+        # it would move a merged station's credit back to each receiver.
+        raise MergeError(f"site-profile.toml receiver list unreadable "
+                         f"({e}); cannot tell what merges") from None
+
+
 def collect_pipelines(topology: Optional[Topology] = None,
                       coord: Optional[Coordination] = None,
-                      *, store_version: int) -> list:
+                      *, store_version: int,
+                      receivers: Optional[list] = None) -> list:
     """Every enabled client's outbound pipeline(s), placeholders substituted.
 
     Returns a list of pipeline dicts ready for :func:`render_manifest`.  A
@@ -375,9 +607,21 @@ def collect_pipelines(topology: Optional[Topology] = None,
     (:func:`hs_uploader_store_version`).  From :data:`SPLIT_STORE_VERSION`
     on, a ``psk-pskreporter`` block becomes its declaring producer's own
     pipeline (spec §5.1).  Below it, the shared pipeline renders as before,
-    with one warning that hs-uploader lags sigmond."""
+    with one warning that hs-uploader lags sigmond.
+
+    ``receivers`` is the site profile's [[receiver]] list (``None`` loads
+    it).  Their ``merge_into`` goes onto the tar pipeline
+    (:func:`apply_merge`); a declaration the render refuses raises
+    :class:`MergeError`, so the caller keeps the manifest it has."""
     topology = topology or load_topology()
     coord = coord or load_coordination()
+    if receivers is None:
+        receivers = _load_merge_receivers()
+    target = merge_target(receivers, coord.host.grid)
+    if target is not None:
+        clash = two_merges_problems(receivers, topology)
+        if clash:
+            raise MergeError("; ".join(clash))
     call = reporter_call(coord)
     split = store_version >= SPLIT_STORE_VERSION
     warned_lag = False
@@ -430,7 +674,7 @@ def collect_pipelines(topology: Optional[Topology] = None,
                 continue
             by_name[name] = rendered
             pipelines.append(rendered)
-    return apply_proxying(pipelines, coord)
+    return apply_merge(apply_proxying(pipelines, coord), target)
 
 
 def heartbeat_pipeline(coord: Coordination) -> Optional[dict]:
