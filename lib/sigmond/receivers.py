@@ -33,7 +33,8 @@ class Receiver:
     injector: bool = False
     same_antenna_as: str = ''
     upload: Optional[bool] = None
-    # Parsed and kept; nothing acts on these yet.
+    # The server-side merge (spec §7c): uploader_manifest renders them into
+    # the tar pipeline; `smd admin merge` shows and sets them.
     merge_into: str = ''
     merge_grid: str = ''
 
@@ -291,6 +292,41 @@ def merged_receivers(current: list, r: Receiver, *,
         out.append(new)
     if not found:
         out.append(dataclasses.replace(r, reporter_id=_display(r.reporter_id)))
+    return out
+
+
+_CALL_RE = re.compile(r'^[A-Z0-9/]{1,16}$')
+_GRID_RE = re.compile(r'^[A-R]{2}[0-9]{2}([A-X]{2})?$', re.IGNORECASE)
+
+
+def set_merge(current: list, reporters: list, *, into: str,
+              grid: str = '') -> list:
+    """``current`` with each of ``reporters`` merged into ``into`` (and
+    ``grid``, empty for the site grid); nothing is written.  An empty
+    ``into`` clears both keys.  Goes through `merged_receivers` with every
+    other field kept.  Raises ReceiverError for an unknown reporter, a call
+    that is not one, or a grid that is not a Maidenhead locator."""
+    into = into.strip().upper()
+    grid = grid.strip()
+    if into and not _CALL_RE.match(into):
+        raise ReceiverError(f'merge_into {into!r} is not a call '
+                            f'(letters, digits and /)')
+    if not into and grid:
+        raise ReceiverError('a grid needs a merge_into call')
+    if grid and not _GRID_RE.match(grid):
+        raise ReceiverError(f'merge_grid {grid!r} is not a 4- or 6-character '
+                            f'Maidenhead locator')
+    by_key = {_storage(r.reporter_id): r for r in current}
+    out = list(current)
+    for rid in reporters:
+        try:
+            old = by_key.get(_storage(rid))
+        except ValueError as e:
+            raise ReceiverError(f'reporter {rid!r}: {e}') from None
+        if old is None:
+            raise ReceiverError(f'no receiver {rid} in the [[receiver]] list')
+        new = dataclasses.replace(old, merge_into=into, merge_grid=grid)
+        out = merged_receivers(out, new, keep_unset=False)
     return out
 
 
