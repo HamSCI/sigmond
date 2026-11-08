@@ -798,3 +798,50 @@ class BuildStepTests(_Rig):
         rc, text = self._update()
         self.assertNotIn("Traceback", text)
         self.assertFalse((host / "built.marker").exists(), text)
+
+
+class LocallyManagedTests(_Rig):
+    """site-profile `[components] locally_managed` (KFS, 2026-11-07): Phil
+    changes the ka9q-radio checkout himself, so `smd update` must neither
+    fetch, compare, pull, install nor rebuild it, and must say so in one
+    line.  The rig's checkout is one commit behind with an install.sh."""
+
+    def _manage_locally(self):
+        import sigmond.site_profile as sp
+        sp.SITE_PROFILE_PATH.write_text(
+            f'[components]\nlocally_managed = ["{self.COMP}"]\n'
+            f'locally_managed_by = "Phil"\n')
+
+    def _head(self, ref="HEAD"):
+        return _git("rev-parse", ref, cwd=self.host).stdout.strip()
+
+    def test_a_locally_managed_checkout_is_left_where_it_stands(self):
+        # Without the list this run would fetch, pull and run install.sh
+        # (ExecutorTests.test_success_path_pulls_then_installs).
+        self._manage_locally()
+        head, origin_ref = self._head(), self._head("origin/main")
+        short = _git("rev-parse", "--short", "HEAD", cwd=self.host).stdout.strip()
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertIn(f"{self.COMP}: locally managed (Phil) — left as is at {short}", text)
+        self.assertNotIn(f"[pull] {self.COMP}", text)
+        self.assertNotIn("HELD", text)
+        self.assertEqual(self._head(), head)
+        # Not even fetched: origin/main still names the commit it did.
+        self.assertEqual(self._head("origin/main"), origin_ref)
+        self.assertFalse((self.host / ".installed").exists(), text)
+
+    def test_no_upstream_warning_and_no_pin_hold_for_it(self):
+        head = self._head()
+        _git("checkout", "--detach", head, cwd=self.host)
+        rc, text = self._update()
+        self.assertIn("cannot compare against upstream", text)
+        (self.host / ".pin").write_text(head + "\n")
+        rc, text = self._update()
+        self.assertIn("pinned by smd align", text)
+        self._manage_locally()
+        rc, text = self._update()
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn("cannot compare against upstream", text)
+        self.assertNotIn("pinned by smd align", text)
+        self.assertIn("locally managed (Phil)", text)

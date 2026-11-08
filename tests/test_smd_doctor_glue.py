@@ -481,6 +481,64 @@ class CollectFindingsTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             smd.collect_findings(base=str(self.base))
 
+    # -- site-profile [components] locally_managed (KFS, 2026-11-07) ---------
+    #
+    # Phil keeps ka9q-radio himself, so where its checkout sits, who owns its
+    # files and whether it matches the image manifest are his business.
+
+    def _phils_ka9q_radio(self):
+        comp = self._make_component('ka9q-radio')
+        self._doctor_mod.git_state = lambda d: {
+            'error': None, 'dirty': ['src/main.c'], 'untracked': ['x.o'],
+            'ahead': 2, 'detached': True, 'pin': '', 'head': 'deb7bdd',
+            'at_pin': False}
+        self._doctor_mod.foreign_owned = lambda root, uid, **kw: [comp / 'src']
+        smd._manifest_usable = lambda text: True
+        self._doctor_mod.manifest_drift = lambda live, path, ancestry=None: [
+            {'component': 'ka9q-radio', 'status': 'moved',
+             'manifest': '401992c', 'live': 'deb7bdd'}]
+
+    def test_a_locally_managed_checkout_has_no_findings(self):
+        import sigmond.site_profile as sp
+        self._phils_ka9q_radio()
+        # Without the list, every family reports it.
+        _clean, findings = smd.collect_findings(base=str(self.base))
+        self.assertEqual({f.kind for f in findings if f.component == 'ka9q-radio'},
+                         {'ownership', 'dirty', 'untracked', 'unpushed', 'detached', 'drift'})
+        sp.SITE_PROFILE_PATH.write_text(
+            '[components]\nlocally_managed = ["ka9q-radio"]\nlocally_managed_by = "Phil"\n')
+        clean, findings = smd.collect_findings(base=str(self.base))
+        self.assertEqual(findings, [])
+        self.assertIs(clean, True)
+
+    def test_doctor_reports_it_as_locally_managed(self):
+        import sigmond.site_profile as sp
+        sp.SITE_PROFILE_PATH.write_text(
+            '[components]\nlocally_managed = ["ka9q-radio"]\nlocally_managed_by = "Phil"\n')
+        self._make_component('ka9q-radio')
+        out = io.StringIO()
+        with mock.patch.object(smd, 'collect_findings', return_value=(True, [])), \
+                mock.patch.object(smd, '_checkout_short_head', return_value='deb7bdd'), \
+                contextlib.redirect_stdout(out):
+            rc = smd.cmd_doctor(types.SimpleNamespace(base=str(self.base), fix=False))
+        self.assertEqual(rc, 0)
+        self.assertIn('ka9q-radio: locally managed (Phil) — left as is at deb7bdd',
+                      out.getvalue())
+
+    def test_doctor_fix_never_chowns_a_locally_managed_checkout(self):
+        import sigmond.site_profile as sp
+        sp.SITE_PROFILE_PATH.write_text('[components]\nlocally_managed = ["ka9q-radio"]\n')
+        comp = self._make_component('ka9q-radio')
+        self._doctor_mod.foreign_owned = lambda root, uid, **kw: [comp / 'src']
+        with mock.patch.object(smd, 'collect_findings', return_value=(True, [])), \
+                mock.patch.object(smd, '_repair_and_recheck', side_effect=AssertionError), \
+                mock.patch.object(smd, '_need_root', side_effect=AssertionError), \
+                mock.patch.object(smd, '_ensure_radiod_dropins', return_value=[]), \
+                mock.patch.object(smd, '_ensure_qga_dropin', return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = smd.cmd_doctor(types.SimpleNamespace(base=str(self.base), fix=True))
+        self.assertEqual(rc, 0)
+
     def test_readonly_never_repairs_ownership(self):
         # collect_findings() has no --fix concept at all: it must never
         # invoke chown, even when it detects a foreign-owned path.
