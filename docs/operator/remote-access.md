@@ -24,6 +24,28 @@ recognise are in the [glossary](glossary.md).
 
 **RAC** stands for *Remote Access Channel*.
 
+> **Installed on your own Linux machine (bare metal)?**  Most of this page describes the USB-image
+> station, which is two machines in one box: a Proxmox `[host]` and a decoder `[VM]`.  Your machine
+> has no such split, and these differences follow:
+>
+> - **Bring-up sets it up.**  At the end of a complete `smd bringup`, sigmond runs
+>   `sigmond-rac activate`, which registers the machine with the gateway and starts its tunnel.  If
+>   registration fails, bring-up still finishes and a retry timer keeps trying.
+> - **The tunnel and the switch both live on your machine.**  Type `smd remote status`,
+>   `smd remote off` and `smd remote on` as yourself, never with `sudo`; smd asks for root through
+>   sudo on its own and may ask for your password.
+> - **It carries four channels, not six:** ssh (port 22), the ka9q-web page (8081), the station
+>   pages (8000) and the magnetometer page (8082), all on your machine.  The host's ssh and the
+>   Proxmox UI do not exist here.
+> - **Its name** joins your callsign and hostname in upper case, as in `AC0G-SIGMA`; once
+>   registered, the name sticks.
+> - **A machine that runs only radiod** never runs bring-up.  Activate it once by hand:
+>   `sudo /opt/git/sigmond/sigmond/scripts/rac/sigmond-rac activate --site AC0G-B1`.
+>
+> The rest of this page applies with "your machine" wherever it says `[host]` or `[VM]`, except
+> §8, which concerns old image stations only.  The installation steps are in
+> [install-bare-metal.md](../install-bare-metal.md).
+
 A station installed before v3.71 needs its host brought to v3.71 before
 `smd remote` works there, and a station with the old layout cannot use it. The
 old layout puts the VM on your own network, with no private link to its host.

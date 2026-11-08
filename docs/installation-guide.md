@@ -2,6 +2,13 @@
 
 Tested on: **Debian 13 (trixie)**, kernel 6.12.74, April 2026.
 
+> **Start elsewhere (2026-11-08).**  For a station on your own Linux machine, follow
+> [install-bare-metal.md](install-bare-metal.md); `smd bringup` now does most of what this guide
+> describes, and it leaves your kernel command line (`isolcpus`) alone unless you opt in.  For a
+> dedicated mini-PC from the USB image, follow
+> [sigmond-appliance INSTALL.md](https://github.com/HamSCI/sigmond-appliance/blob/main/INSTALL.md).
+> This guide stays as the reference for running a step by hand.
+
 ---
 
 ## Overview
